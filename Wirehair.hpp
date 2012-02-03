@@ -29,13 +29,6 @@
 #ifndef CAT_WIREHAIR_HPP
 #define CAT_WIREHAIR_HPP
 
-#include "WirehairDetails.hpp"
-
-namespace cat {
-
-namespace wirehair {
-
-
 /*
 	Wirehair Streaming Forward Error Correction
 
@@ -44,10 +37,62 @@ namespace wirehair {
 	The data to transmit over the BEC is encoded into equal-sized blocks.
 	When enough blocks are received at the other end of the channel, then
 	the original data can be recovered.
+
+	See WirehairDetails.hpp for more information.
 */
 
+#include "WirehairDetails.hpp"
+
+namespace cat {
+
+namespace wirehair {
+
+
+/*
+	Wirehair Encoder
+
+	Encodes message blocks for transmission over the network.
+	The initialization function takes a while (say 10 milliseconds), so I
+	recommend performing initialization in a separate thread to take advantage
+	of modern multicore processors.
+
+	(Block bytes) / (Milliseconds to initialize) = Throughput in MB/s (approx)
+
+	Example usage pseudocode:
+
+		cat::wirehair::Encoder encoder;
+
+		encoder.Initialize(file_data, file_bytes, 1500);
+
+		while (file not received)
+		{
+			u8 buffer[1500];
+
+			encoder.Generate(buffer);
+
+			udp_send(buffer);
+		}
+*/
 class Encoder
 {
+	// Check block state
+	int _block_bytes;	// Number of bytes in a block
+	int _final_bytes;	// Number of bytes in final block
+	int _block_count;	// Number of blocks in the message
+	int _added_count;	// Number of check blocks added
+	u8 *_check_blocks;	// Pointer to start of check blocks
+	u32 _g_seed;		// Seed for nonsingular generator matrix
+
+	// Encoder state
+	const u8 *_message_blocks;	// Original message data (final block is partial)
+	u32 _next_block_id;			// Next block identifier to transmit
+	MatrixGenerator _generator;	// Matrix generator
+	u16 _block_next_prime;		// Next prime number including or higher than block count
+	u16 _added_next_prime;		// Next prime number including or higher than added count
+
+	// Generate check blocks from message blocks
+	bool GenerateCheckBlocks();
+
 public:
 	// Attempt to initialize the encoder for a given message
 	// Returns false on initialization failure
@@ -57,6 +102,27 @@ public:
 	void Generate(void *block);
 };
 
+/*
+	Wirehair Decoder
+
+	Decodes messages encoded by the Encoder above.
+	The Initialize() function does not take much run time.
+	The Decode() function will return true when decoding has completed.
+
+	Example usage pseudocode:
+
+		cat::wirehair::Decoder decoder;
+
+		decoder.Initialize(out_file_buffer, file_bytes, 1500);
+
+		do
+		{
+			u8 buffer[1500];
+
+			udp_recv(buffer);
+
+		} while (!decoder.Decode(buffer));
+*/
 class Decoder
 {
 public:

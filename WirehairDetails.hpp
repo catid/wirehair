@@ -29,13 +29,6 @@
 #ifndef CAT_WIREHAIR_DETAILS_HPP
 #define CAT_WIREHAIR_DETAILS_HPP
 
-#include "Platform.hpp"
-
-namespace cat {
-
-namespace wirehair {
-
-
 /*
 	Wirehair Streaming Forward Error Correction
 
@@ -140,7 +133,7 @@ namespace wirehair {
 		Columns have 3 states:
 
 		(1) Peeled - Solved by a row during peeling process.
-		(2) For GE - Will be solved by a row during Gaussian Elimination.
+		(2) Deferred - Will be solved by a row during Gaussian Elimination.
 		(3) Unmarked - Still deciding.
 
 		Initially all columns are unmarked.
@@ -151,13 +144,13 @@ namespace wirehair {
 	that peeled column, reducing their count by 1, potentially causing other
 	columns to be marked as Peeled.  This "peeling avalanche" is desired.
 
-		After N rows, an unmarked column is marked For GE and the count of all
+		After N rows, an unmarked column is marked Deferred and the count of all
 	rows that reference that column are decremented by 1.  Peeling avalanche may
 	occur as a result.  This process is repeated until all columns are marked.
 
 	A comment on the matrix state after peeling:
 
-		After the peeling solver has completed, only For GE columns remain to be
+		After the peeling solver has completed, only Deferred columns remain to be
 	solved.  Conceptually the matrix can be re-ordered in the order of solution
 	so that the matrix resembles this example:
 
@@ -167,12 +160,12 @@ namespace wirehair {
 		| 1   | 1   1   | 934 | <-- Peeled row 3
 		|   1 | 1   1 1 | 275 | <-- Peeled row 4
 		+-----+---------+-----+
-		| 1   | 1 1   1 | 123 | <-- For GE rows
-		|   1 |   1 1 1 | 207 | <-- For GE rows
+		| 1   | 1 1   1 | 123 | <-- Deferred rows
+		|   1 |   1 1 1 | 207 | <-- Deferred rows
 		+-----+---------+-----+
 		   ^       ^       ^---- Row value (unmodified so far, ie. 1500 bytes)
 		   |       \------------ Peeled columns
-		   \-------------------- For GE columns
+		   \-------------------- Deferred columns
 
 		Re-ordering the actual matrix is not required, but the lower-triangular
 	form of the peeled matrix is apparent in the diagram above.
@@ -296,7 +289,7 @@ namespace wirehair {
 
 				Reducing weight of rows referencing this column : O(k)
 					If other row weight is reduced to 2,
-						Regenerate columns and mark potential For GE : O(k)
+						Regenerate columns and mark potential Deferred : O(k)
 					End
 			End
 
@@ -382,30 +375,41 @@ namespace wirehair {
 		any blocks that were not received from the original N blocks, and the
 		original data is received.
 */
+
+#include "Platform.hpp"
+
+namespace cat {
+
+namespace wirehair {
+
+
+struct PeelGenerator
+{
+	u16 weight, a, x, modulus;
+
+	CAT_INLINE void Next()
+	{
+		x = (x + a) % modulus;
+	}
+};
+
+struct MixGenerator
+{
+	u16 weight, a, x, modulus;
+
+	CAT_INLINE void Next()
+	{
+		x = (x + a) % modulus;
+	}
+};
+
 class MatrixGenerator
 {
 public:
-	void Initialize(u32 N);
-};
+	void Make(u32 seed, u32 row, PeelGenerator &peeler, MixGenerator &mixer);
 
-struct PeelGenState
-{
-	u16 a, x, modulus;
-};
-
-struct MixGenState
-{
-	u16 a, x, modulus;
-};
-
-class PeelingMatrixGenerator
-{
-public:
-	// Starts generating a row of the peeling matrix, returning the weight of the row
-	u16 StartWeight(u32 seed, u32 row);
-
-	// Next column on current row
-	u16 NextColumn();
+	void MakePeeler(u32 seed, u32 row, PeelGenerator &peeler);
+	void MakeMixer(u32 seed, u32 row, MixGenerator &mixer);
 };
 
 
