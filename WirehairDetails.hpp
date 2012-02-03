@@ -84,25 +84,30 @@ namespace wirehair {
 				B has E rows of encoded blocks.
 
 			G is the ExE binary matrix on the left.
-				P is the NxN peeling matrix optimized for success of the peeling solver.
-				M is the NxH mixing matrix used to mix the H dense rows into the N peeling rows.
-				D is the HxN dense matrix used to improve recovery properties.
+				P is the NxN peeling matrix
+					- Optimized for success of the peeling solver.
+				M is the NxH mixing matrix
+					- Used to mix the H dense rows into the N peeling rows.
+				D is the HxN dense matrix
+					- Used to improve recovery properties.
 				I is the HxH identity matrix.
 
-			G matrices for each value of N are precomputed offline and used based on the length
-			of the input data, which guarantees that G is invertible.
+			G matrices for each value of N are precomputed offline and used
+			based on the length of the input data, which guarantees that G
+			is invertible.
 
 		(2) Generating Matrix P
 
-			The Hamming weight of each row of P is a random variable with a distribution chosen to
-			optimize the operation of the peeling decoder (see below).
-			For each row of the matrix, this weight is determined and 1 bits are then uniformly
-			distributed over the N columns.
+			The Hamming weight of each row of P is a random variable with a
+			distribution chosen to optimize the operation of the peeling
+			solver (see below).
+			For each row of the matrix, this weight is determined and 1 bits
+			are then uniformly distributed over the N columns.
 
 		(3) Generating Matrix M
 
-			Rows of M are generated with a constant weight of 2 and 1 bits are uniformly distributed
-			over the H columns.
+			Rows of M are generated with a constant weight of 2 and 1 bits are
+			uniformly distributed over the H columns.
 
 		(4) Generating Matrix D
 
@@ -147,8 +152,8 @@ namespace wirehair {
 	columns to be marked as Peeled.  This "peeling avalanche" is desired.
 
 		After N rows, an unmarked column is marked For GE and the count of all
-	rows that reference that column are decremented by 1.  Peeling avalanche
-	may occur as a result.  This process is repeated until all columns are marked.
+	rows that reference that column are decremented by 1.  Peeling avalanche may
+	occur as a result.  This process is repeated until all columns are marked.
 
 	A comment on the matrix state after peeling:
 
@@ -169,8 +174,8 @@ namespace wirehair {
 		   |       \------------ Peeled columns
 		   \-------------------- For GE columns
 
-		Re-ordering the actual matrix is not required, but the lower-triangular form
-	of the peeled matrix is apparent in the diagram above.
+		Re-ordering the actual matrix is not required, but the lower-triangular
+	form of the peeled matrix is apparent in the diagram above.
 
 	(2) Compression:
 
@@ -356,7 +361,7 @@ namespace wirehair {
 	Encoding:
 
 			The first N output blocks of the encoder are the same as the
-		original data. After that the encoder will start producing random-
+		original data.  After that the encoder will start producing random-
 		looking M-byte blocks by generating new rows for P and M and
 		multiplying them by B.
 
