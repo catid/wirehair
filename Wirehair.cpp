@@ -43,18 +43,25 @@ static const u32 WEIGHT_DIST[] = {
 	1016370, 1017662, 1048576
 };
 
-static u16 GenerateWeight(u32 rv)
+static u16 GenerateWeight(u32 rv, u16 max_weight)
 {
-	return 3;
+	rv &= 0xfffff;
+
+	u16 ii;
+	for (ii = 1; rv >= WEIGHT_DIST[ii]; ++ii);
+
+	return ii > max_weight ? max_weight : ii;
 }
 
 static u32 GetGeneratorSeed(int block_count)
 {
+	// TODO: Needs to be simulated (2)
 	return 0;
 }
 
 static int GetCheckBlockCount(int block_count)
 {
+	// TODO: Needs to be simulated (1)
 	return 8;
 }
 
@@ -63,7 +70,7 @@ static int GetCheckBlockCount(int block_count)
 
 #pragma pack(push)
 #pragma pack(1)
-struct PeelRow
+struct Encoder::PeelRow
 {
 	// Peeling matrix: Column generator
 	u16 peel_weight, peel_a, peel_x0;
@@ -79,46 +86,109 @@ struct PeelRow
 };
 #pragma pack(pop)
 
-// During generator matrix precomputation, tune this to be as small as possible and still succeed
+// During generator matrix pre-computation, tune this to be as small as possible and still succeed
 static const int ENCODER_REF_LIST_MAX = 8;
 
 #pragma pack(push)
 #pragma pack(1)
-struct PeelColumn
+struct Encoder::PeelColumn
 {
 	u16 w2_refs;	// Number of weight-2 rows containing this column
 	u16 row_count;	// Number of rows containing this column
 	u16 rows[ENCODER_REF_LIST_MAX];
 
-	u16 next;	// Linkage in column list
+	u16 next;		// Linkage in column list
 };
 #pragma pack(pop)
 
-bool Encoder::GenerateCheckBlocks()
+void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
+{
+	// Remember which column it solves
+	row->unmarked[0] = column_i;
+
+	// Link to front of the peeled list
+	row->next = _peel_head;
+	_peel_head = row_i;
+
+	// Walk list of peeled rows referenced by this newly solved column
+	PeelColumn *col = &_peel_cols[column_i];
+	u16 ref_count = col->row_count;
+	u16 *ref_rows = col->rows;
+	while (ref_count--)
+	{
+		// Update unmarked row count for this referenced row
+		u16 ref_row_i = *ref_rows++;
+		PeelRow *ref_row = &_peel_rows[ref_row_i];
+		u16 unmarked_count = --row->unmarked_count;
+
+		// If row may be solving a column now,
+		if (unmarked_count == 1)
+		{
+			// Find other column
+			u16 new_column_i = ref_row->unmarked[0];
+			if (new_column_i == column_i)
+				new_column_i = ref_row->unmarked[1];
+
+			// If column is already solved,
+			if (_peel_cols[new_column_i].w2_refs == LIST_TERM)
+			{
+				// TODO: Mark row as deferred
+			}
+			else
+			{
+				// TODO: Peel!
+			}
+		}
+		else if (unmarked_count == 2)
+		{
+			// Regenerate the row columns to discover which are unmarked
+			u16 ref_weight = ref_row->peel_weight;
+			u16 ref_column_i = ref_row->peel_x0;
+			u16 ref_a = ref_row->mix_a;
+			u16 unmarked_count = 0;
+			while (ref_weight--)
+			{
+				PeelColumn *ref_col = &_peel_cols[ref_column_i];
+
+				// Generate next column
+				do ref_column_i = (ref_column_i + ref_a) % _block_next_prime;
+				while (ref_column_i >= _block_count);
+
+				// If column is unmarked,
+				if (col->w2_refs != LIST_TERM)
+				{
+					// Store the two unmarked columns in the row
+					ref_row->unmarked[unmarked_count++] = ref_column_i;
+				}
+			}
+		}
+	}
+}
+
+bool Encoder::PeelSetup()
 {
 	// Allocate space for row data
-	PeelRow *rows = new PeelRow[_block_count];
-	if (!rows) return false;
+	_peel_rows = new PeelRow[_block_count];
+	if (!_peel_rows) return false;
 
 	// Allocate space for column data
-	PeelColumn *cols = new PeelColumn[_block_count];
-	if (!cols) return false;
+	_peel_cols = new PeelColumn[_block_count];
+	if (!_peel_cols) return false;
 
 	// Initialize columns
 	for (int ii = 0; ii < _block_count; ++ii)
 	{
-		cols[ii].row_count = 0;
-		cols[ii].w2_refs = 0;
+		_peel_cols[ii].row_count = 0;
+		_peel_cols[ii].w2_refs = 0;
 	}
 
 	// Declare a list of peeled rows in reverse-solution order
-	static const u16 LIST_TERM = 0xffff;
-	u16 peeled_head = LIST_TERM;
+	_peel_head = LIST_TERM;
 
 	// Generate peeling row data
 	for (u16 row_i = 0; row_i < _block_count; ++row_i)
 	{
-		PeelRow *row = &rows[row_i];
+		PeelRow *row = &_peel_rows[row_i];
 
 		// Initialize PRNG
 		CatsChoice prng;
@@ -144,7 +214,7 @@ bool Encoder::GenerateCheckBlocks()
 		u16 unmarked[2];
 		while (weight--)
 		{
-			PeelColumn *col = &cols[column_i];
+			PeelColumn *col = &_peel_cols[column_i];
 
 			// Add row reference to column
 			col->rows[col->row_count++] = row_i;
@@ -164,7 +234,7 @@ bool Encoder::GenerateCheckBlocks()
 		// If this row solves a column,
 		if (unmarked_count == 1)
 		{
-			// TODO: Peel!
+			Peel(row_i, row, unmarked[0]);
 		}
 		else if (unmarked_count == 2)
 		{
@@ -173,22 +243,54 @@ bool Encoder::GenerateCheckBlocks()
 			row->unmarked[1] = unmarked[1];
 
 			// Increment weight-2 reference count for unmarked columns
-			cols[unmarked[0]].w2_refs++;
-			cols[unmarked[1]].w2_refs++;
+			_peel_cols[unmarked[0]].w2_refs++;
+			_peel_cols[unmarked[1]].w2_refs++;
 		}
 	}
+}
 
-	// TODO: Peel remaining rows
+void Encoder::GreedyPeeling()
+{
 
-	// TODO: Compress
+}
 
-	// TODO: Triangle
+void Encoder::Compress()
+{
 
-	// TODO: Diagonal
+}
 
-	// TODO: Substitute
+bool Encoder::Triangle()
+{
 
-	return false;
+}
+
+void Encoder::Diagonal()
+{
+
+}
+
+void Encoder::Substitute()
+{
+
+}
+
+bool Encoder::GenerateCheckBlocks()
+{
+	if (!PeelSetup())
+		return false;
+
+	GreedyPeeling();
+
+	Compress();
+
+	if (!Triangle())
+		return false;
+
+	Diagonal();
+
+	Substitute();
+
+	return true;
 }
 
 bool Encoder::Initialize(const void *message_in, int message_bytes, int block_bytes)

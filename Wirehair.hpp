@@ -90,6 +90,37 @@ class Encoder
 	u16 _block_next_prime;		// Next prime number including or higher than block count
 	u16 _added_next_prime;		// Next prime number including or higher than added count
 
+	// Peeling state
+	struct PeelRow;
+	struct PeelColumn;
+	PeelRow *_peel_rows;		// Array of N peeling matrix rows
+	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
+
+	// List of peeled rows
+	static const u16 LIST_TERM = 0xffff;
+	u16 _peel_head;				// Head of peeling solved rows list
+
+	// Peel a row using the given column
+	void Peel(u16 row_i, PeelRow *row, u16 column_i);
+
+	// Walk forward through rows and solve as many as possible before deferring any
+	bool PeelSetup();
+
+	// Greedy algorithm to select columns to defer and resume peeling until all columns are marked
+	void GreedyPeeling();
+
+	// Compress peeled columns into GE matrix
+	void Compress();
+
+	// Triangularize the GE matrix (may fail if pivot cannot be found)
+	bool Triangle();
+
+	// Diagonalize the GE matrix to complete solving for the GE blocks
+	void Diagonal();
+
+	// Substitute and solve for all of the peeled columns
+	void Substitute();
+
 	// Generate check blocks from message blocks
 	bool GenerateCheckBlocks();
 
