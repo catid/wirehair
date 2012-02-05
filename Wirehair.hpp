@@ -76,17 +76,16 @@ namespace wirehair {
 class Encoder
 {
 	// Check block state
-	int _block_bytes;	// Number of bytes in a block
-	int _final_bytes;	// Number of bytes in final block
-	int _block_count;	// Number of blocks in the message
-	int _added_count;	// Number of check blocks added
+	u32 _block_bytes;	// Number of bytes in a block
+	u32 _final_bytes;	// Number of bytes in final block
+	u16 _block_count;	// Number of blocks in the message
+	u16 _added_count;	// Number of check blocks added
 	u8 *_check_blocks;	// Pointer to start of check blocks
 	u32 _g_seed;		// Seed for nonsingular generator matrix
 
 	// Encoder state
 	const u8 *_message_blocks;	// Original message data (final block is partial)
 	u32 _next_block_id;			// Next block identifier to transmit
-	MatrixGenerator _generator;	// Matrix generator
 	u16 _block_next_prime;		// Next prime number including or higher than block count
 	u16 _added_next_prime;		// Next prime number including or higher than added count
 
@@ -99,6 +98,10 @@ class Encoder
 	// List of peeled rows
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head;				// Head of peeling solved rows list
+	u16 _defer_head;			// Head of peeling deferred rows list
+
+	// Avalanche peeling from the newly solved column to others
+	void PeelAvalanche(u16 column_i, PeelColumn *column);
 
 	// Peel a row using the given column
 	void Peel(u16 row_i, PeelRow *row, u16 column_i);

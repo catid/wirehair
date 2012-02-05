@@ -888,18 +888,39 @@ typedef CSmootch<u32, MaxSafeMWC, DJonesMWC2> Catid32S_4b;
 
 	Its period is about 2^^126 and passes all BigCrush tests.
 	It is the fastest generator I could find that passes all tests.
+
+	Furthermore, the input seeds are hashed to avoid linear
+	relationships between the input seeds and the low bits of
+	the first few outputs.
 */
 class CAT_EXPORT CatsChoice
 {
 	u64 _x, _y;
 
 public:
-	CAT_INLINE void Initialize(u32 seed1, u32 seed2)
+	CAT_INLINE void Initialize(u32 seed_x, u32 seed_y)
 	{
-		_x = 0x1A702E014F813BULL ^ seed1;
-		_y = 0x63D77102937BA4ULL ^ seed2;
+		// Based on the final mixing function of MurmurHash3
+		static const u64 MURMUR_FMIX_K1 = 0xff51afd7ed558ccdULL;
+		static const u64 MURMUR_FMIX_K2 = 0xc4ceb9fe1a85ec53ULL;
 
-		Next(); // Warm up the generator
+		// Mix bits of seed x
+		u64 x = 0x9368e53c2f6af274ULL ^ seed_x;
+		x ^= x >> 33;
+		x *= MURMUR_FMIX_K1;
+		x ^= x >> 33;
+		x *= MURMUR_FMIX_K2;
+		x ^= x >> 33;
+		_x = x;
+
+		// Mix bits of seed y
+		u64 y = 0x586dcd208f7cd3fdULL ^ seed_y;
+		y ^= y >> 33;
+		y *= MURMUR_FMIX_K1;
+		y ^= y >> 33;
+		y *= MURMUR_FMIX_K2;
+		y ^= y >> 33;
+		_y = y;
 	}
 
 	CAT_INLINE void Initialize(u32 seed)
@@ -909,8 +930,8 @@ public:
 
 	CAT_INLINE u32 Next()
 	{
-		_x = (u64)4294967118 * (u32)_x + (u32)(_x >> 32);
-		_y = (u64)4294584393 * (u32)_y + (u32)(_y >> 32);
+		_x = (u64)0xfffd21a7 * (u32)_x + (u32)(_x >> 32);
+		_y = (u64)0xfffd1361 * (u32)_y + (u32)(_y >> 32);
 		return (u32)_x + (u32)_y;
 	}
 };

@@ -383,34 +383,6 @@ namespace cat {
 namespace wirehair {
 
 
-struct PeelGenerator
-{
-	u16 weight, a, x, modulus;
-
-	CAT_INLINE void Next()
-	{
-		x = (x + a) % modulus;
-	}
-};
-
-struct MixGenerator
-{
-	u16 weight, a, x, modulus;
-
-	CAT_INLINE void Next()
-	{
-		x = (x + a) % modulus;
-	}
-};
-
-class MatrixGenerator
-{
-public:
-	void Make(u32 seed, u32 row, PeelGenerator &peeler, MixGenerator &mixer);
-
-	void MakePeeler(u32 seed, u32 row, PeelGenerator &peeler);
-	void MakeMixer(u32 seed, u32 row, MixGenerator &mixer);
-};
 
 
 } // namespace wirehair
