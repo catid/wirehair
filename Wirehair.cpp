@@ -91,8 +91,15 @@ struct Encoder::PeelRow
 };
 #pragma pack(pop)
 
-// During generator matrix pre-computation, tune this to be as small as possible and still succeed
-static const int ENCODER_REF_LIST_MAX = 8;
+// During generator matrix precomputation, tune this to be as small as possible and still succeed
+static const int ENCODER_REF_LIST_MAX = 64;
+
+enum MarkTypes
+{
+	MARK_TODO,
+	MARK_PEEL,
+	MARK_DEFER
+};
 
 #pragma pack(push)
 #pragma pack(1)
@@ -101,6 +108,7 @@ struct Encoder::PeelColumn
 	u16 w2_refs;	// Number of weight-2 rows containing this column
 	u16 row_count;	// Number of rows containing this column
 	u16 rows[ENCODER_REF_LIST_MAX];
+	u8 mark;		// One of the MarkTypes enumeration
 
 	u16 next;		// Linkage in column list
 };
@@ -133,13 +141,13 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 			*/
 
 			// If column is already solved,
-			if (_peel_cols[new_column_i].w2_refs == LIST_TERM)
+			if (_peel_cols[new_column_i].mark != MARK_TODO)
 			{
-				cout << "Peel: Deferred(1) with column " << column_i << " at row " << ref_row_i << endl;
+				cout << "PeelAvalanche: Deferred(1) with column " << column_i << " at row " << ref_row_i << endl;
 
 				// Link at head of defer list
-				ref_row->next = _defer_head;
-				_defer_head = ref_row_i;
+				ref_row->next = _defer_head_rows;
+				_defer_head_rows = ref_row_i;
 			}
 			else
 			{
@@ -158,7 +166,7 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 				PeelColumn *ref_col = &_peel_cols[ref_column_i];
 
 				// If column is unmarked,
-				if (ref_col->w2_refs != LIST_TERM)
+				if (ref_col->mark == MARK_TODO)
 				{
 					// Store the two unmarked columns in the row
 					ref_row->unmarked[unmarked_count++] = ref_column_i;
@@ -187,11 +195,11 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 				// If row is to be deferred,
 				if (unmarked_count == 0)
 				{
-					cout << "Peel: Deferred(2) with column " << column_i << " at row " << ref_row_i << endl;
+					cout << "PeelAvalanche: Deferred(2) with column " << column_i << " at row " << ref_row_i << endl;
 
 					// Link at head of defer list
-					ref_row->next = _defer_head;
-					_defer_head = ref_row_i;
+					ref_row->next = _defer_head_rows;
+					_defer_head_rows = ref_row_i;
 				}
 				else
 				{
@@ -209,14 +217,14 @@ void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 	PeelColumn *column = &_peel_cols[column_i];
 
 	// Mark this column as solved
-	column->w2_refs = LIST_TERM;
+	column->mark = MARK_PEEL;
 
 	// Remember which column it solves
 	row->unmarked[0] = column_i;
 
 	// Link to front of the peeled list
-	row->next = _peel_head;
-	_peel_head = row_i;
+	row->next = _peel_head_rows;
+	_peel_head_rows = row_i;
 
 	// Attempt to avalanche and solve other columns
 	PeelAvalanche(column_i, column);
@@ -224,7 +232,9 @@ void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 
 bool Encoder::PeelSetup()
 {
-	cout << "PeelSetup : Block Count = " << _block_count << endl;
+	cout << endl << "---- PeelSetup ----" << endl << endl;
+
+	cout << "Block Count = " << _block_count << endl;
 
 	// Allocate space for row data
 	_peel_rows = new PeelRow[_block_count];
@@ -239,11 +249,12 @@ bool Encoder::PeelSetup()
 	{
 		_peel_cols[ii].row_count = 0;
 		_peel_cols[ii].w2_refs = 0;
+		_peel_cols[ii].mark = MARK_TODO;
 	}
 
-	// Declare a list of peeled rows in reverse-solution order
-	_peel_head = LIST_TERM;
-	_defer_head = LIST_TERM;
+	// Initialize lists
+	_peel_head_rows = LIST_TERM;
+	_defer_head_rows = LIST_TERM;
 
 	// Generate peeling row data
 	for (u16 row_i = 0; row_i < _block_count; ++row_i)
@@ -281,10 +292,15 @@ bool Encoder::PeelSetup()
 			PeelColumn *col = &_peel_cols[column_i];
 
 			// Add row reference to column
+			if (col->row_count >= ENCODER_REF_LIST_MAX)
+			{
+				cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;
+				return false;
+			}
 			col->rows[col->row_count++] = row_i;
 
-			// If column is peeled,
-			if (col->w2_refs != LIST_TERM)
+			// If column is unmarked,
+			if (col->mark == MARK_TODO)
 				unmarked[unmarked_count++ & 1] = column_i;
 
 			if (--weight <= 0) break;
@@ -300,9 +316,7 @@ bool Encoder::PeelSetup()
 
 		// If this row solves a column,
 		if (unmarked_count == 1)
-		{
 			Peel(row_i, row, unmarked[0]);
-		}
 		else if (unmarked_count == 2)
 		{
 			// Remember which two columns were unmarked
@@ -320,7 +334,58 @@ bool Encoder::PeelSetup()
 
 void Encoder::GreedyPeeling()
 {
+	cout << endl << "---- GreedyPeeling ----" << endl << endl;
 
+	// Initialize list
+	_defer_head_columns = LIST_TERM;
+
+	// Until all columns are marked,
+	for (;;)
+	{
+		u16 best_column_i = LIST_TERM;
+		u16 best_w2_refs = 0, best_row_count = 0;
+
+		// For each column,
+		for (u16 column_i = 0; column_i < _block_count; ++column_i)
+		{
+			PeelColumn *column = &_peel_cols[column_i];
+			u16 w2_refs = column->w2_refs;
+
+			// If column is not marked yet,
+			if (column->mark == MARK_TODO)
+			{
+				// And if it may have the most weight-2 references
+				if (w2_refs >= best_w2_refs)
+				{
+					// Or if it has the largest row references overall,
+					if (w2_refs > best_w2_refs || column->row_count >= best_row_count)
+					{
+						// Use that one
+						best_column_i = column_i;
+						best_w2_refs = w2_refs;
+						best_row_count = column->row_count;
+					}
+				}
+			}
+		}
+
+		// If done peeling,
+		if (best_column_i == LIST_TERM)
+			break;
+
+		// Mark column as deferred
+		PeelColumn *best_column = &_peel_cols[best_column_i];
+		best_column->mark = MARK_DEFER;
+
+		// Add at head of deferred list
+		best_column->next = _defer_head_columns;
+		_defer_head_columns = best_column_i;
+
+		cout << "Deferred column " << best_column_i << " for Gaussian elimination, which had " << best_column->w2_refs << " weight-2 row references" << endl;
+
+		// Peel resuming from where this column left off
+		PeelAvalanche(best_column_i, best_column);
+	}
 }
 
 void Encoder::Compress()
@@ -352,7 +417,7 @@ bool Encoder::GenerateCheckBlocks()
 
 	{
 		cout << "After PeelSetup, contents of peeled list (last to first):" << endl;
-		u16 row_i = _peel_head;
+		u16 row_i = _peel_head_rows;
 		while (row_i != LIST_TERM)
 		{
 			PeelRow *row = &_peel_rows[row_i];
@@ -364,8 +429,8 @@ bool Encoder::GenerateCheckBlocks()
 	}
 
 	{
-		cout << "After PeelSetup, contents of deferred list (last to first):" << endl;
-		u16 row_i = _defer_head;
+		cout << "After PeelSetup, contents of deferred rows list:" << endl;
+		u16 row_i = _defer_head_rows;
 		while (row_i != LIST_TERM)
 		{
 			PeelRow *row = &_peel_rows[row_i];
@@ -377,6 +442,45 @@ bool Encoder::GenerateCheckBlocks()
 	}
 
 	GreedyPeeling();
+
+	{
+		cout << "After GreedyPeeling, contents of deferred columns list:" << endl;
+		u16 column_i = _defer_head_columns;
+		while (column_i != LIST_TERM)
+		{
+			PeelColumn *column = &_peel_cols[column_i];
+
+			cout << "  Column " << column_i << " is deferred." << endl;
+
+			column_i = column->next;
+		}
+	}
+
+	{
+		cout << "After GreedyPeeling, contents of peeled list (last to first):" << endl;
+		u16 row_i = _peel_head_rows;
+		while (row_i != LIST_TERM)
+		{
+			PeelRow *row = &_peel_rows[row_i];
+
+			cout << "  Row " << row_i << " solves column " << row->unmarked[0] << endl;
+
+			row_i = row->next;
+		}
+	}
+
+	{
+		cout << "After GreedyPeeling, contents of deferred rows list:" << endl;
+		u16 row_i = _defer_head_rows;
+		while (row_i != LIST_TERM)
+		{
+			PeelRow *row = &_peel_rows[row_i];
+
+			cout << "  Row " << row_i << " is deferred." << endl;
+
+			row_i = row->next;
+		}
+	}
 
 	Compress();
 

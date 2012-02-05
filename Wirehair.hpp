@@ -95,10 +95,11 @@ class Encoder
 	PeelRow *_peel_rows;		// Array of N peeling matrix rows
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
 
-	// List of peeled rows
+	// Lists
 	static const u16 LIST_TERM = 0xffff;
-	u16 _peel_head;				// Head of peeling solved rows list
-	u16 _defer_head;			// Head of peeling deferred rows list
+	u16 _peel_head_rows;			// Head of peeling solved rows list
+	u16 _defer_head_columns;		// Head of peeling deferred columns list
+	u16 _defer_head_rows;			// Head of peeling deferred rows list
 
 	// Avalanche peeling from the newly solved column to others
 	void PeelAvalanche(u16 column_i, PeelColumn *column);
