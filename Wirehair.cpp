@@ -114,6 +114,29 @@ struct Encoder::PeelColumn
 };
 #pragma pack(pop)
 
+/*
+	Peel() and PeelAvalanche() are split up into two functions because I found
+	that the PeelAvalanche() function can be reused later during GreedyPeeling().
+
+	(1) Peeling:
+
+		Until N rows are received, the peeling algorithm is executed:
+
+		Columns have 3 states:
+
+		(1) Peeled - Solved by a row during peeling process.
+		(2) Deferred - Will be solved by a row during Gaussian Elimination.
+		(3) Unmarked - Still deciding.
+
+		Initially all columns are unmarked.
+
+		As a row comes in, the count of columns that are Unmarked is calculated.
+	If that count is 1, then the column is marked as Peeled and is solved by
+	the received row.  Peeling then goes through all other rows that reference
+	that peeled column, reducing their count by 1, potentially causing other
+	columns to be marked as Peeled.  This "peeling avalanche" is desired.
+*/
+
 void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 {
 	// Walk list of peeled rows referenced by this newly solved column
@@ -148,6 +171,7 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 				// Link at head of defer list
 				ref_row->next = _defer_head_rows;
 				_defer_head_rows = ref_row_i;
+				++_defer_row_count;
 			}
 			else
 			{
@@ -200,6 +224,7 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 					// Link at head of defer list
 					ref_row->next = _defer_head_rows;
 					_defer_head_rows = ref_row_i;
+					++_defer_row_count;
 				}
 				else
 				{
@@ -332,12 +357,29 @@ bool Encoder::PeelSetup()
 	return true;
 }
 
+/*
+		After the opportunistic peeling solver has completed, no columns have
+	been deferred to Gaussian elimination yet.  Greedy peeling will then take
+	over and start choosing columns to defer.  It is greedy in that the selection
+	of which columns to defer is based on a greedy initial approximation of the
+	best column to choose, rather than the best one that could be chosen.
+
+		In this algorithm, the column that will cause the largest immediate
+	avalanche of peeling solutions is the one that is selected.  If there is
+	a tie between two or more columns based on just that criterion then, of the
+	columns that tied, the one that affects the most rows is selected.
+
+		In practice with a well designed peeling matrix, only about sqrt(N)
+	columns must be deferred to Gaussian elimination using this greedy approach.
+*/
+
 void Encoder::GreedyPeeling()
 {
 	cout << endl << "---- GreedyPeeling ----" << endl << endl;
 
 	// Initialize list
 	_defer_head_columns = LIST_TERM;
+	_defer_row_count = 0;
 
 	// Until all columns are marked,
 	for (;;)
@@ -388,53 +430,133 @@ void Encoder::GreedyPeeling()
 	}
 }
 
-void Encoder::Compress()
+/*
+		After the peeling solver has completed, only Deferred columns remain
+	to be solved.  Conceptually the matrix can be re-ordered in the order of
+	solution so that the matrix resembles this example:
+
+		+-----+---------+-----+
+		|   1 | 1       | 721 | <-- Peeled row 1
+		| 1   |   1     | 518 | <-- Peeled row 2
+		| 1   | 1   1   | 934 | <-- Peeled row 3
+		|   1 | 1   1 1 | 275 | <-- Peeled row 4
+		+-----+---------+-----+
+		| 1   | 1 1   1 | 123 | <-- Deferred rows
+		|   1 |   1 1 1 | 207 | <-- Deferred rows
+		+-----+---------+-----+
+			^       ^       ^---- Row value (unmodified so far, ie. 1500 bytes)
+			|       \------------ Peeled columns
+			\-------------------- Deferred columns
+
+		Re-ordering the actual matrix is not required, but the lower-triangular
+	form of the peeled matrix is apparent in the diagram above.
+
+	(2) Compression:
+
+	At this point the generator matrix has been
+	re-organized into peeled and deferred rows
+	and columns:
+
+		+-----------------------+
+		| p p p p p | B B | C C |
+		+-----------------------+
+					X
+		+-----------+-----+-----+
+		| 5 2 6 1 3 | 4 0 | x y |
+		+-----------+-----+-----+---+   +---+
+		| 1         | 0 0 | 1 0 | 0 |   | p |
+		| 0 1       | 0 0 | 0 1 | 5 |   | p |
+		| 1 0 1     | 1 0 | 1 0 | 3 |   | p |
+		| 0 1 0 1   | 0 0 | 0 1 | 4 |   | p |
+		| 0 1 0 1 1 | 1 1 | 1 0 | 1 |   | p |
+		+-----------+-----+-----+---| = |---|
+		| 0 1 0 1 1 | 1 1 | 0 1 | 2 |   | A |
+		| 0 1 0 1 0 | 0 1 | 1 0 | 6 |   | A |
+		+-----------+-----+-----+---|   |---|
+		| 1 1 0 1 1 | 1 1 | 1 0 | x |   | 0 |
+		| 1 0 1 1 0 | 1 0 | 0 1 | y |   | 0 |
+		+-----------+-----+-----+---+   +---+
+
+		P = Peeled rows/columns (re-ordered)
+		B = Columns deferred for GE
+		C = Mixing columns always deferred for GE
+		A = Sparse rows from peeling matrix deferred for GE
+		0 = Dense rows from dense matrix deferred for GE
+
+		The first step of compression is to generate the
+	lower matrix in a bitfield in memory.
+
+		+-----------+---------+
+		| 0 1 0 1 1 | 1 1 0 1 |
+		| 0 1 0 1 0 | 0 1 1 0 |
+		| 1 1 0 1 1 | 1 1 1 0 |
+		| 1 0 1 1 0 | 1 0 0 1 |
+		+-----------+---------+
+
+		This is a conceptual splitting of the lower matrix
+	into two parts: A peeled matrix on the left that will
+	be zero at the end of compression, and a GE matrix on
+	the right that will be used during Triangularization.
+
+		The second step of compression is to zero the left
+	matrix and generate temporary block values:
+
+		For each column in the left matrix from right to left,
+			Regenerate the peeled row that solves that column,
+			generating bitfield T.
+
+			For each row with a bit set in that column,
+				Add T to that row, adding the input block for
+				the peeled row to the column output block.
+			Next
+		Next
+
+		It is clear that at the end of this process that the
+	left conceptual matrix will be zero, and each row will have
+	a block value associated with it.  In practice, these
+	zero bits are mixed across the whole bitfield and the block
+	values are stored in the output blocks for the columns that
+	will be solved by those rows.
+
+			        +---------+
+		Temp Values:| a b c d |
+		+-----------+---------+
+		| 0 0 0 0 0 | 0 1 1 1 |
+		| 0 0 0 0 0 | 0 1 1 0 |
+		| 0 0 0 0 0 | 1 0 0 1 |
+		| 0 0 0 0 0 | 0 1 0 1 |
+		+-----------+---------+
+
+		Gaussian elimination will be applied to the right
+	square conceptual matrix in the Triangularization step.
+*/
+
+bool Encoder::Compress()
 {
-	/*
-		At this point the generator matrix has been
-		re-organized into peeled and deferred rows
-		and columns:
+	u64 *ge_rows = new u64[_defer_row_count + _added_count];
 
-			+-----------------------+
-			| p p p p p | B B | C C |
-			+-----------------------+
-						X
-			+-----------+-----+-----+
-			| 5 2 6 1 3 | 4 0 | x y |
-			+-----------+-----+-----+---+   +---+
-			| 1         | 0 0 | 1 0 | 0 |   | p |
-			| 0 1       | 0 0 | 0 1 | 5 |   | p |
-			| 1 0 1     | 1 0 | 1 0 | 3 |   | p |
-			| 0 1 0 1   | 0 0 | 0 1 | 4 |   | p |
-			| 0 1 0 1 1 | 1 1 | 1 0 | 1 |   | p |
-			+-----------+-----+-----+---| = |---|
-			| 0 1 0 1 1 | 1 1 | 0 1 | 2 |   | A |
-			| 0 1 0 1 0 | 0 1 | 1 0 | 6 |   | A |
-			+-----------+-----+-----+---|   |---|
-			| 1 1 0 1 1 | 1 1 | 1 0 | x |   | 0 |
-			| 1 0 1 1 0 | 1 0 | 0 1 | y |   | 0 |
-			+-----------+-----+-----+---+   +---+
+	u16 ge_row_i = 0;
+	u16 row_i = _defer_head_rows;
+	while (row_i != LIST_TERM)
+	{
+		PeelRow *row = &_peel_rows[row_i];
 
-			P = Peeled rows/columns (re-ordered)
-			B = Columns deferred for GE
-			C = Mixing columns always deferred for GE
-			A = Sparse rows from peeling matrix deferred for GE
-			0 = Dense rows from dense matrix deferred for GE
+		ge_rows[ge_row_i++] = row;
 
-			The Compression step will convert this matrix into
-		the following form:
+		row_i = row->next;
+	}
 
-			+-----------+---------+
-			| 0 0 0 0 0 | 1 0 1 1 |
-			| 0 1 0 1 0 | 1 1 0 1 |
-			| 1 1 0 1 1 | 1 1 1 0 |
-			| 1 0 1 1 0 | 1 0 0 1 |
-			+---------------------+
+	u16 row_i = _peel_head_rows;
+	while (row_i != LIST_TERM)
+	{
+		PeelRow *row = &_peel_rows[row_i];
 
-			Gaussian elimination will be applied to the right
-		square matrix, and the left matrix will be used to
-		solve columns during the Triangle step.
-	*/
+		
+
+		row_i = row->next;
+	}
+
+	delete []ge_rows;
 }
 
 bool Encoder::Triangle()
@@ -526,7 +648,8 @@ bool Encoder::GenerateCheckBlocks()
 		}
 	}
 
-	Compress();
+	if (!Compress())
+		return false;
 
 	if (!Triangle())
 		return false;
@@ -538,8 +661,36 @@ bool Encoder::GenerateCheckBlocks()
 	return true;
 }
 
+void Encoder::Cleanup()
+{
+	if (_peel_rows)
+	{
+		delete []_peel_rows;
+		_peel_rows = 0;
+	}
+
+	if (_peel_cols)
+	{
+		delete []_peel_cols;
+		_peel_cols = 0;
+	}
+}
+
+Encoder::Encoder()
+{
+	_peel_rows = 0;
+	_peel_cols = 0;
+}
+
+Encoder::~Encoder()
+{
+	Cleanup();
+}
+
 bool Encoder::Initialize(const void *message_in, int message_bytes, int block_bytes)
 {
+	Cleanup();
+
 	CAT_IF_DEBUG( if (block_bytes < 16) return false; )
 
 	// Calculate message block count

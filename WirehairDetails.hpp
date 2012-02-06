@@ -172,6 +172,8 @@
 
 	(2) Compression:
 
+	TODO: This needs to be updated with how I actually do it.
+
 		The next step is to compress the GE rows and columns into a smaller GE
 	matrix that GE will be applied to.  Note that at this point, no row operations
 	have been performed.  So, a record of row operations must be stored during

@@ -100,6 +100,12 @@ class Encoder
 	u16 _peel_head_rows;			// Head of peeling solved rows list
 	u16 _defer_head_columns;		// Head of peeling deferred columns list
 	u16 _defer_head_rows;			// Head of peeling deferred rows list
+	u16 _defer_row_count;			// Count of deferred rows
+
+	// Gaussian elimination state
+	u16 _ge_row_count;		// Number of rows for Gaussian elimination
+	u16 _ge_column_count;	// Number of columns to perform Gaussian elimination on
+	u64 *ge_rows;
 
 	// Avalanche peeling from the newly solved column to others
 	void PeelAvalanche(u16 column_i, PeelColumn *column);
@@ -114,7 +120,7 @@ class Encoder
 	void GreedyPeeling();
 
 	// Compress peeled columns into GE matrix
-	void Compress();
+	bool Compress();
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
@@ -128,7 +134,13 @@ class Encoder
 	// Generate check blocks from message blocks
 	bool GenerateCheckBlocks();
 
+	// Free allocated memory
+	void Cleanup();
+
 public:
+	Encoder();
+	~Encoder();
+
 	// Attempt to initialize the encoder for a given message
 	// Returns false on initialization failure
 	bool Initialize(const void *message_in, int message_bytes, int block_bytes);
