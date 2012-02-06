@@ -390,7 +390,51 @@ void Encoder::GreedyPeeling()
 
 void Encoder::Compress()
 {
+	/*
+		At this point the generator matrix has been
+		re-organized into peeled and deferred rows
+		and columns:
 
+			+-----------------------+
+			| p p p p p | B B | C C |
+			+-----------------------+
+						X
+			+-----------+-----+-----+
+			| 5 2 6 1 3 | 4 0 | x y |
+			+-----------+-----+-----+---+   +---+
+			| 1         | 0 0 | 1 0 | 0 |   | p |
+			| 0 1       | 0 0 | 0 1 | 5 |   | p |
+			| 1 0 1     | 1 0 | 1 0 | 3 |   | p |
+			| 0 1 0 1   | 0 0 | 0 1 | 4 |   | p |
+			| 0 1 0 1 1 | 1 1 | 1 0 | 1 |   | p |
+			+-----------+-----+-----+---| = |---|
+			| 0 1 0 1 1 | 1 1 | 0 1 | 2 |   | A |
+			| 0 1 0 1 0 | 0 1 | 1 0 | 6 |   | A |
+			+-----------+-----+-----+---|   |---|
+			| 1 1 0 1 1 | 1 1 | 1 0 | x |   | 0 |
+			| 1 0 1 1 0 | 1 0 | 0 1 | y |   | 0 |
+			+-----------+-----+-----+---+   +---+
+
+			P = Peeled rows/columns (re-ordered)
+			B = Columns deferred for GE
+			C = Mixing columns always deferred for GE
+			A = Sparse rows from peeling matrix deferred for GE
+			0 = Dense rows from dense matrix deferred for GE
+
+			The Compression step will convert this matrix into
+		the following form:
+
+			+-----------+---------+
+			| 0 0 0 0 0 | 1 0 1 1 |
+			| 0 1 0 1 0 | 1 1 0 1 |
+			| 1 1 0 1 1 | 1 1 1 0 |
+			| 1 0 1 1 0 | 1 0 0 1 |
+			+---------------------+
+
+			Gaussian elimination will be applied to the right
+		square matrix, and the left matrix will be used to
+		solve columns during the Triangle step.
+	*/
 }
 
 bool Encoder::Triangle()
