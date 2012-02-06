@@ -113,17 +113,15 @@
 	---------------------------------------------------------------------------
 	Sparse Matrix Inversion:
 
-		There are 5 phases to this sparse inversion:
+		There are 4 phases to this sparse inversion:
 
 		(1) Peeling
 			- Opportunistic fast solution for first N rows.
 		(2) Compression
 			- Setup for Gaussian elimination on a wide rectangular matrix
-		(3) Triangularization
+		(3) Gaussian Elimination
 			- Gaussian elimination on a (hopefully) small square matrix
-		(4) Diagonalization
-			- Solves for rows of small square matrix
-		(5) Substitution
+		(4) Substitution
 			- Solves for remaining rows from initial peeling
 
 	(1) Peeling:
@@ -172,38 +170,33 @@
 
 	(2) Compression:
 
-	TODO: This needs to be updated with how I actually do it.
-
 		The next step is to compress the GE rows and columns into a smaller GE
-	matrix that GE will be applied to.  Note that at this point, no row operations
-	have been performed.  So, a record of row operations must be stored during
-	compression so that the GE row values can be computed later on.
+	matrix that GE will be applied to.  Note that up to this point, no row ops
+	have been performed.  GE row values will be calculated in this step for use
+	during GE.
 
 		For each peeled column from the last to the first,
 			For each GE row that contains that column,
-				Add the corresponding peeled row to it, preserving the column bit.
+				Add the corresponding peeled row to it.
 			Next
 		Next
 
-		The resultant matrix may resemble this example:
+		The resultant conceptual matrix may resemble this example:
 
 		+-----+---------+-----+
-		|   1 | 1     1 | 123 | <- Low Density Row
-		| 1 1 |   1 1 1 | 207 | <- High Density Row
+		|   1 | 0 0 0 0 | 285 |
+		| 1 1 | 0 0 0 0 | 712 |
 		+-----+---------+-----+
-		   ^       ^       ^---- Row value (unmodified so far, ie. 1500 bytes)
+		   ^       ^       ^---- Row values
 		   |       \------------ Peeled matrix (rectangular)
 		   \-------------------- GE square matrix
 
-		By preserving the column bit, the peeled rows summed to generate the
-	GE rows are recorded and will be used later to compute the GE row values.
-
 		The density of the rows is indicated in the example because it is worth
 	considering.  Some of the rows may be low density, so mixing them before
-	calculating the new row value is undesirable.  The triangularization
-	algorithm avoids mixing rows together until absolutely necessary.
+	calculating the new row value is undesirable.  By calculating the row values
+	at this point, row operations may be saved.
 
-	(3) Triangularization:
+	(3) Gaussian Elimination:
 
 		In this step the GE square matrix is put in upper-triangular form and
 	initial GE square matrix row values are calculated.  Back-substitution
@@ -214,14 +207,9 @@
 				If GE matrix bit is set,
 					Set this row as the pivot for this column.
 
-					Sum the row value by each peeling column specified
-						by the Peeled matrix (see above example).
-					Sum the row value by each earlier GE pivot column
-						specified by the GE square matrix.
-
 					For each remaining GE matrix row containing this column,
 						Sum other GE square matrix rows with the pivot row,
-							which preserves earlier columns.
+							including the row values.
 					Next
 				End
 			Next
@@ -232,17 +220,7 @@
 		Next
 
 		At successful completion of this process, all pivots have been found.
-	The GE square matrix is now in upper triangular form, though the lower
-	triangular bits are dirty since there is no need to zero them.
-
-		Note that the Peeled matrix is no longer needed.  Example result:
-
-		+-----+-----+
-		| 1 1 | 123 | <- Pivot 1
-		|   1 | 002 | <- Pivot 2
-		+-----+-----+
-
-	(4) Diagonalization:
+	The GE square matrix is now in upper triangular form.
 
 		To complete solving for the GE row values, the upper triangular part
 	of the GE square matrix must be eliminated.  This process will diagonalize
@@ -264,7 +242,7 @@
 		| 002 | <- Pivot 2
 		+-----+
 
-	(5) Substitution:
+	(4) Substitution:
 
 		Finally the peeled row values may be determined by regenerating the
 	whole matrix and summing up columns in the original order of peeling.
@@ -309,7 +287,9 @@
 			XOR operations) so this non-linear asymptotic performance is
 			not a problem.
 
-		(3) Triangularization
+			Summing to produce the row values : O(S*N) = O(N^1.5) row ops
+
+		(3) Gaussian Elimination
 			- Gaussian elimination on a (hopefully) small square matrix
 
 			Assume the GE square matrix is SxS, and S = sqrt(N) on
@@ -320,15 +300,6 @@
 			This algorithm is not bad because the matrix is small and
 			it really doesn't contribute much to the run time.
 
-			Summing to produce the row values : O(S*N) = O(N^1.5) row ops
-
-			This step and the next are where most of the performance
-			overhead is incurred as compared with matrix multiplication
-			because these steps are not shared with matrix multiplication
-			and involve many row operations.  This step is heavy only
-			because the rows are dense even if there are few rows.
-
-		(4) Diagonalization
 			- Solves for rows of small square matrix
 
 			Assume the GE square matrix is SxS, and S = sqrt(N) on
@@ -336,7 +307,7 @@
 
 			Back-substitute inside the GE matrix : O(S^2) = O(N) row ops
 
-		(5) Substitution
+		(4) Substitution
 			- Solves for remaining rows from initial peeling
 
 			Regenerate peeled matrix rows and substitute : O(N*k) row ops

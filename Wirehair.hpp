@@ -103,9 +103,12 @@ class Encoder
 	u16 _defer_row_count;			// Count of deferred rows
 
 	// Gaussian elimination state
-	u16 _ge_row_count;		// Number of rows for Gaussian elimination
-	u16 _ge_column_count;	// Number of columns to perform Gaussian elimination on
-	u64 *ge_rows;
+	u64 *_ge_matrix;	// Gaussian elimination matrix
+	int _ge_pitch;		// Pitch in words of GE matrix
+	u16 *_ge_pivots;	// Pivots for each column of the GE matrix
+
+
+	//// (1) Peeling
 
 	// Avalanche peeling from the newly solved column to others
 	void PeelAvalanche(u16 column_i, PeelColumn *column);
@@ -119,8 +122,14 @@ class Encoder
 	// Greedy algorithm to select columns to defer and resume peeling until all columns are marked
 	void GreedyPeeling();
 
-	// Compress peeled columns into GE matrix
-	bool Compress();
+
+	//// (2) Compression
+
+	// Build GE matrix for compression
+	bool CompressSetup();
+
+	// Compress rectangular matrix into conceptual square matrix
+	void Compress();
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();

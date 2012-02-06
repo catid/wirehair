@@ -171,7 +171,6 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 				// Link at head of defer list
 				ref_row->next = _defer_head_rows;
 				_defer_head_rows = ref_row_i;
-				++_defer_row_count;
 			}
 			else
 			{
@@ -224,7 +223,6 @@ void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
 					// Link at head of defer list
 					ref_row->next = _defer_head_rows;
 					_defer_head_rows = ref_row_i;
-					++_defer_row_count;
 				}
 				else
 				{
@@ -418,6 +416,7 @@ void Encoder::GreedyPeeling()
 		// Mark column as deferred
 		PeelColumn *best_column = &_peel_cols[best_column_i];
 		best_column->mark = MARK_DEFER;
+		++_defer_row_count;
 
 		// Add at head of deferred list
 		best_column->next = _defer_head_columns;
@@ -453,9 +452,8 @@ void Encoder::GreedyPeeling()
 
 	(2) Compression:
 
-	At this point the generator matrix has been
-	re-organized into peeled and deferred rows
-	and columns:
+	At this point the generator matrix has been re-organized
+	into peeled and deferred rows and columns:
 
 		+-----------------------+
 		| p p p p p | B B | C C |
@@ -506,34 +504,55 @@ void Encoder::GreedyPeeling()
 			generating bitfield T.
 
 			For each row with a bit set in that column,
-				Add T to that row, adding the input block for
-				the peeled row to the column output block.
+				Add T to that row, including the row values.
 			Next
 		Next
 
 		It is clear that at the end of this process that the
 	left conceptual matrix will be zero, and each row will have
-	a block value associated with it.  In practice, these
-	zero bits are mixed across the whole bitfield and the block
-	values are stored in the output blocks for the columns that
-	will be solved by those rows.
+	a block value associated with it.
 
-			        +---------+
-		Temp Values:| a b c d |
-		+-----------+---------+
-		| 0 0 0 0 0 | 0 1 1 1 |
-		| 0 0 0 0 0 | 0 1 1 0 |
-		| 0 0 0 0 0 | 1 0 0 1 |
-		| 0 0 0 0 0 | 0 1 0 1 |
-		+-----------+---------+
+		+-----------+---------+---+
+		| 0 0 0 0 0 | 0 1 1 1 | a |
+		| 0 0 0 0 0 | 0 1 1 0 | b |
+		| 0 0 0 0 0 | 1 0 0 1 | c |
+		| 0 0 0 0 0 | 0 1 0 1 | d |
+		+-----------+---------+---+
 
-		Gaussian elimination will be applied to the right
-	square conceptual matrix in the Triangularization step.
+		In practice, these zero bits are mixed across the whole
+	bitfield and the block values for each of the rows are set.
+	Gaussian elimination will be applied to the right square
+	conceptual matrix in the Triangularization step.
 */
 
-bool Encoder::Compress()
+bool Encoder::CompressSetup()
 {
-	u64 *ge_rows = new u64[_defer_row_count + _added_count];
+	// Calculate GE matrix dimensions
+	int ge_columns = _block_count + _added_count;
+	int ge_pitch = (ge_columns + 63) / 64;
+	int ge_rows = _defer_row_count + _added_count;
+
+	// Allocate the matrix
+	int matrix_words = ge_rows * ge_pitch;
+	_ge_matrix = new u64[matrix_words];
+	if (!_ge_matrix) return false;
+	_ge_pitch = ge_pitch;
+
+	// Clear the matrix
+	memset(_ge_matrix, 0, matrix_words * sizeof(u64));
+
+	// TODO: Generate matrix here
+
+	// Allocate the pivots
+	_ge_pivots = new u16[ge_rows];
+	if (!_ge_pivots) return false;
+
+	return true;
+}
+
+void Encoder::Compress()
+{
+	// TODO
 
 	u16 ge_row_i = 0;
 	u16 row_i = _defer_head_rows;
@@ -561,22 +580,25 @@ bool Encoder::Compress()
 
 bool Encoder::Triangle()
 {
+	// TODO
 	return true;
 }
 
 void Encoder::Diagonal()
 {
-
+	// TODO
 }
 
 void Encoder::Substitute()
 {
-
+	// TODO
 }
 
 bool Encoder::GenerateCheckBlocks()
 {
 	cout << "GenerateCheckBlocks : Seed = " << _g_seed << endl;
+
+	// (1) Peeling
 
 	if (!PeelSetup())
 		return false;
@@ -648,13 +670,20 @@ bool Encoder::GenerateCheckBlocks()
 		}
 	}
 
-	if (!Compress())
+	// (2) Compression
+
+	if (!CompressSetup())
 		return false;
 
-	if (!Triangle())
-		return false;
+	Compress();
+
+	// (3) Gaussian Elimination
+
+	Triangle();
 
 	Diagonal();
+
+	// (4) Back-Substitution
 
 	Substitute();
 
@@ -674,12 +703,26 @@ void Encoder::Cleanup()
 		delete []_peel_cols;
 		_peel_cols = 0;
 	}
+
+	if (_ge_matrix)
+	{
+		delete []_ge_matrix;
+		_ge_matrix = 0;
+	}
+
+	if (_ge_pivots)
+	{
+		delete []_ge_pivots;
+		_ge_pivots = 0;
+	}
 }
 
 Encoder::Encoder()
 {
 	_peel_rows = 0;
 	_peel_cols = 0;
+	_ge_matrix = 0;
+	_ge_pivots = 0;
 }
 
 Encoder::~Encoder()
