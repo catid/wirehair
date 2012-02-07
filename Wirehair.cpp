@@ -61,13 +61,13 @@ static u16 GenerateWeight(u32 rv, u16 max_weight)
 static u32 GetGeneratorSeed(int block_count)
 {
 	// TODO: Needs to be simulated (2)
-	return 0;
+	return 1;
 }
 
 static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 10;
+	return 8;
 }
 
 
@@ -602,9 +602,12 @@ bool Encoder::CompressSetup()
 
 	// Set the final mixing bits to the identity matrix:
 
-	CAT_IF_DEBUG( if (_added_count > 64) return false; )
-
 	CAT_IF_DEBUG(
+	if (_added_count > 64)
+	{
+		cout << "Cannot have added count > 64 right now" << endl;
+		return false;
+	}
 	if (ge_row != _ge_matrix + ge_rows * ge_pitch)
 	{
 		cout << "Second loop fail!" << endl;
