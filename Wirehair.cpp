@@ -61,13 +61,13 @@ static u16 GenerateWeight(u32 rv, u16 max_weight)
 static u32 GetGeneratorSeed(int block_count)
 {
 	// TODO: Needs to be simulated (2)
-	return 1;
+	return 0;
 }
 
 static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 8;
+	return 10;
 }
 
 
@@ -337,11 +337,20 @@ bool Encoder::PeelSetup()
 		// Initialize row state
 		row->unmarked_count = unmarked_count;
 
-		// If this row solves a column,
-		if (unmarked_count == 1)
-			Peel(row_i, row, unmarked[0]);
-		else if (unmarked_count == 2)
+		switch (unmarked_count)
 		{
+		case 0:
+			// Link at head of defer list
+			row->next = _defer_head_rows;
+			_defer_head_rows = row_i;
+			break;
+
+		case 1:
+			// Solve only unmarked column with this row
+			Peel(row_i, row, unmarked[0]);
+			break;
+
+		case 2:
 			// Remember which two columns were unmarked
 			row->unmarked[0] = unmarked[0];
 			row->unmarked[1] = unmarked[1];
@@ -349,6 +358,7 @@ bool Encoder::PeelSetup()
 			// Increment weight-2 reference count for unmarked columns
 			_peel_cols[unmarked[0]].w2_refs++;
 			_peel_cols[unmarked[1]].w2_refs++;
+			break;
 		}
 	}
 
@@ -1084,7 +1094,8 @@ bool Encoder::GenerateCheckBlocks()
 
 	// (3) Gaussian Elimination
 
-	Triangle();
+	if (!Triangle())
+		return false;
 
 	cout << "After Triangle:" << endl;
 	PrintGEMatrix();

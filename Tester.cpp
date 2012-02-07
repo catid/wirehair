@@ -9,13 +9,17 @@ int main()
 {
 	cat::wirehair::Encoder encoder;
 
-	int block_count = 85;
+	int block_count = 100;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 
 	if (!encoder.Initialize(message, message_bytes, 3 + block_bytes))
 	{
+		cout << "main: Failure on encoder initialization" << endl;
+
+		cin.get();
+
 		return -1;
 	}
 
