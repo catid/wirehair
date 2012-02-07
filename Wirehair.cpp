@@ -61,7 +61,7 @@ static u16 GenerateWeight(u32 rv, u16 max_weight)
 static u32 GetGeneratorSeed(int block_count)
 {
 	// TODO: Needs to be simulated (2)
-	return 0;
+	return 1;
 }
 
 static int GetCheckBlockCount(int block_count)
