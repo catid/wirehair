@@ -67,7 +67,7 @@ static u32 GetGeneratorSeed(int block_count)
 static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 32;
+	return 8;
 }
 
 
@@ -775,13 +775,230 @@ void Encoder::Compress()
 
 bool Encoder::Triangle()
 {
-	// TODO
+	cout << endl << "---- Triangle ----" << endl << endl;
+
+	u16 ge_rows = _defer_row_count + _added_count;
+	u16 *pivots = _ge_pivots;
+
+	// Initialize pivot array
+	for (u16 pivot_i = 0; pivot_i < ge_rows; ++pivot_i)
+		pivots[pivot_i] = pivot_i;
+
+	// Relink defer list backwards
+	u16 defer_head_columns = LIST_TERM;
+
+	// For columns in the peeling matrix:
+	u16 column_i = _defer_head_columns;
+	u16 pivot_i = 0;
+	while (column_i != LIST_TERM)
+	{
+		// Generate mask
+		int word_offset = column_i >> 6;
+		u64 *ge_row = _ge_matrix + word_offset;
+		u64 ge_mask = (u64)1 << (column_i & 63);
+
+		// For each remaining row,
+		bool found = false;
+		for (u16 pivot_row_i = pivot_i; pivot_row_i < ge_rows; ++pivot_row_i)
+		{
+			u16 ge_row_i = pivots[pivot_row_i];
+			u64 *row = &ge_row[ge_row_i * _ge_pitch];
+
+			// If the bit was found,
+			if (*row & ge_mask)
+			{
+				found = true;
+				cout << "Peel pivot " << pivot_i << " found on row " << ge_row_i << endl;
+
+				// Swap out the pivot index for this one
+				u16 temp = pivots[pivot_i];
+				pivots[pivot_i] = pivots[pivot_row_i];
+				pivots[pivot_row_i] = temp;
+
+				// For each remaining row,
+				++pivot_row_i;
+				for (; pivot_row_i < ge_rows; ++pivot_row_i)
+				{
+					// Determine if the row contains the bit we want
+					u16 rem_ge_row_i = pivots[pivot_row_i];
+					u64 *rem_row = &ge_row[rem_ge_row_i * _ge_pitch];
+
+					// If the bit was found,
+					if (*rem_row & ge_mask)
+					{
+						// Add the pivot row to eliminate the bit from this row
+						for (int ii = 0 - word_offset; ii < _ge_pitch - word_offset; ++ii)
+							rem_row[ii] ^= row[ii];
+					}
+				}
+
+				break;
+			}
+		}
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;
+			return false;
+		}
+
+		u16 last_column_i = column_i;
+
+		// Iterate next column
+		PeelColumn *column = &_peel_cols[column_i];
+		++pivot_i;
+		column_i = column->next;
+
+		// Relink defer list backwards
+		column->next = defer_head_columns;
+		defer_head_columns = last_column_i;
+	}
+
+	// Relink defer list backwards
+	_defer_head_columns = defer_head_columns;
+
+	// For each pivot to determine,
+	column_i = _block_count;
+	u64 ge_mask = (u64)1 << (column_i & 63);
+	for (; pivot_i < ge_rows; ++pivot_i)
+	{
+		int word_offset = column_i >> 6;
+		u64 *ge_row = _ge_matrix + word_offset;
+
+		// For each remaining row,
+		bool found = false;
+		for (u16 pivot_row_i = pivot_i; pivot_row_i < ge_rows; ++pivot_row_i)
+		{
+			// Determine if the row contains the bit we want
+			u16 ge_row_i = pivots[pivot_row_i];
+			u64 *row = &ge_row[ge_row_i * _ge_pitch];
+
+			// If the bit was found,
+			if (*row & ge_mask)
+			{
+				found = true;
+				cout << "Mixing pivot " << pivot_i << " found on row " << ge_row_i << endl;
+
+				// Swap out the pivot index for this one
+				u16 temp = pivots[pivot_i];
+				pivots[pivot_i] = pivots[pivot_row_i];
+				pivots[pivot_row_i] = temp;
+
+				// For each remaining row,
+				++pivot_row_i;
+				for (; pivot_row_i < ge_rows; ++pivot_row_i)
+				{
+					// Determine if the row contains the bit we want
+					u16 ge_row_i = pivots[pivot_row_i];
+					u64 *rem_row = &ge_row[ge_row_i * _ge_pitch];
+
+					// If the bit was found,
+					if (*rem_row & ge_mask)
+					{
+						// Add the pivot row to eliminate the bit from this row
+						for (int ii = 0 - word_offset; ii < _ge_pitch - word_offset; ++ii)
+							rem_row[ii] ^= row[ii];
+					}
+				}
+
+				break;
+			}
+		}
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;
+			return false;
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROL64(ge_mask, 1);
+	}
+
 	return true;
 }
 
 void Encoder::Diagonal()
 {
-	// TODO
+	cout << endl << "---- Diagonal ----" << endl << endl;
+
+	u16 ge_rows = _defer_row_count + _added_count;
+	u16 *pivots = _ge_pivots;
+
+	// From final pivot to start of peeling matrix pivots,
+	u16 column_i = _block_count + _added_count - 1;
+	u64 ge_mask = (u64)1 << (column_i & 63);
+	u16 pivot_i = ge_rows - 1;
+	for (; column_i >= _block_count; --column_i, --pivot_i)
+	{
+		int word_offset = column_i >> 6;
+		u64 *ge_row = _ge_matrix + word_offset;
+
+		// For each remaining row,
+		for (int pivot_row_i = pivot_i - 1; pivot_row_i >= 0; --pivot_row_i)
+		{
+			// Determine if the row contains the bit we want
+			u16 ge_row_i = pivots[pivot_row_i];
+			u64 *row = &ge_row[ge_row_i * _ge_pitch];
+
+			// If the bit was found,
+			if (*row & ge_mask)
+			{
+				cout << "Mixing pivot " << pivot_i << " eliminated on row " << ge_row_i << endl;
+
+				// TODO : Not needed, just for testing purposes
+
+				// Add the pivot row to eliminate the bit from this row
+				u64 *pivot_row = &ge_row[pivots[pivot_i] * _ge_pitch];
+				for (int ii = 0 - word_offset; ii < _ge_pitch - word_offset; ++ii)
+					row[ii] ^= pivot_row[ii];
+
+				//PrintGEMatrix();
+			}
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROR64(ge_mask, 1);
+	}
+
+	// For columns in the peeling matrix (now from right to left):
+	column_i = _defer_head_columns;
+	while (column_i != LIST_TERM)
+	{
+		// Generate mask
+		int word_offset = column_i >> 6;
+		u64 *ge_row = _ge_matrix + word_offset;
+		u64 ge_mask = (u64)1 << (column_i & 63);
+
+		// For each remaining row,
+		for (int pivot_row_i = pivot_i - 1; pivot_row_i >= 0; --pivot_row_i)
+		{
+			u16 ge_row_i = pivots[pivot_row_i];
+			u64 *row = &ge_row[ge_row_i * _ge_pitch];
+
+			// If the bit was found,
+			if (*row & ge_mask)
+			{
+				cout << "Peel pivot " << pivot_i << " eliminated on row " << ge_row_i << endl;
+
+				// TODO : Not needed, just for testing purposes
+
+				// Add the pivot row to eliminate the bit from this row
+				u64 *pivot_row = &ge_row[pivots[pivot_i] * _ge_pitch];
+				for (int ii = 0 - word_offset; ii < _ge_pitch - word_offset; ++ii)
+					row[ii] ^= pivot_row[ii];
+
+				//PrintGEMatrix();
+			}
+		}
+
+		// Iterate next column
+		--pivot_i;
+		PeelColumn *column = &_peel_cols[column_i];
+		column_i = column->next;
+	}
 }
 
 void Encoder::Substitute()
@@ -792,7 +1009,6 @@ void Encoder::Substitute()
 bool Encoder::GenerateCheckBlocks()
 {
 	cout << endl << "---- GenerateCheckBlocks ----" << endl << endl;
-	cout << "Seed = " << _g_seed << endl;
 
 	// (1) Peeling
 
@@ -815,19 +1031,6 @@ bool Encoder::GenerateCheckBlocks()
 	GreedyPeeling();
 
 	{
-		cout << "After GreedyPeeling, contents of deferred columns list:" << endl;
-		u16 column_i = _defer_head_columns;
-		while (column_i != LIST_TERM)
-		{
-			PeelColumn *column = &_peel_cols[column_i];
-
-			cout << "  Column " << column_i << " is deferred." << endl;
-
-			column_i = column->next;
-		}
-	}
-
-	{
 		cout << "After GreedyPeeling, contents of peeled list (last to first):" << endl;
 		u16 row_i = _peel_head_rows;
 		while (row_i != LIST_TERM)
@@ -837,6 +1040,19 @@ bool Encoder::GenerateCheckBlocks()
 			cout << "  Row " << row_i << " solves column " << row->unmarked[0] << endl;
 
 			row_i = row->next;
+		}
+	}
+
+	{
+		cout << "After GreedyPeeling, contents of deferred columns list:" << endl;
+		u16 column_i = _defer_head_columns;
+		while (column_i != LIST_TERM)
+		{
+			PeelColumn *column = &_peel_cols[column_i];
+
+			cout << "  Column " << column_i << " is deferred." << endl;
+
+			column_i = column->next;
 		}
 	}
 
@@ -870,7 +1086,13 @@ bool Encoder::GenerateCheckBlocks()
 
 	Triangle();
 
+	cout << "After Triangle:" << endl;
+	PrintGEMatrix();
+
 	Diagonal();
+
+	cout << "After Diagonal:" << endl;
+	PrintGEMatrix();
 
 	// (4) Back-Substitution
 
@@ -1004,6 +1226,7 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_block_next_prime = NextHighestPrime(_block_count);
 	_added_next_prime = NextHighestPrime(_added_count);
 
+	cout << "Total message = " << message_bytes << " bytes" << endl;
 	cout << "Block bytes = " << block_bytes << ".  Final bytes = " << _final_bytes << endl;
 	cout << "Block count = " << block_count << " +Prime=" << _block_next_prime << endl;
 	cout << "Added count = " << _added_count << " +Prime=" << _added_next_prime << endl;

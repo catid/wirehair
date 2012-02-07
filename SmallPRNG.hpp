@@ -919,6 +919,9 @@ public:
 
 		seed_x += seed_y;
 		seed_y += seed_x;
+
+		_x = seed_x;
+		_y = seed_y;
 	}
 
 	CAT_INLINE void Initialize(u32 seed)
