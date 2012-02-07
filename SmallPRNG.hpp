@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2011 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2012 Christopher A. Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are :
@@ -898,29 +898,27 @@ class CAT_EXPORT CatsChoice
 	u64 _x, _y;
 
 public:
-	CAT_INLINE void Initialize(u32 seed_x, u32 seed_y)
+	CAT_INLINE void Initialize(u32 x, u32 y)
 	{
-		// Based on the final mixing function of MurmurHash3
-		static const u64 MURMUR_FMIX_K1 = 0xff51afd7ed558ccdULL;
-		static const u64 MURMUR_FMIX_K2 = 0xc4ceb9fe1a85ec53ULL;
+		// Based on the mixing functions of MurmurHash3
+		static const u64 C1 = 0x87c37b91114253d5ULL;
+		static const u64 C2 = 0x4cf5ad432745937fULL;
 
-		// Mix bits of seed x
-		u64 x = 0x9368e53c2f6af274ULL ^ seed_x;
-		x ^= x >> 33;
-		x *= MURMUR_FMIX_K1;
-		x ^= x >> 33;
-		x *= MURMUR_FMIX_K2;
-		x ^= x >> 33;
-		_x = x;
+		u64 seed_x = 0x9368e53c2f6af274ULL ^ x;
+		u64 seed_y = 0x586dcd208f7cd3fdULL ^ y;
 
-		// Mix bits of seed y
-		u64 y = 0x586dcd208f7cd3fdULL ^ seed_y;
-		y ^= y >> 33;
-		y *= MURMUR_FMIX_K1;
-		y ^= y >> 33;
-		y *= MURMUR_FMIX_K2;
-		y ^= y >> 33;
-		_y = y;
+		seed_x *= C1;
+		seed_x = CAT_ROL64(seed_x, 31);
+		seed_x *= C2;
+		seed_x = CAT_ROL64(seed_x, 27);
+
+		seed_y *= C2;
+		seed_y = CAT_ROL64(seed_y, 33);
+		seed_y *= C1;
+		seed_y = CAT_ROL64(seed_y, 31);
+
+		seed_x += seed_y;
+		seed_y += seed_x;
 	}
 
 	CAT_INLINE void Initialize(u32 seed)

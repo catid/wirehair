@@ -107,6 +107,8 @@ class Encoder
 	int _ge_pitch;		// Pitch in words of GE matrix
 	u16 *_ge_pivots;	// Pivots for each column of the GE matrix
 
+	void PrintGEMatrix();
+
 
 	//// (1) Peeling
 

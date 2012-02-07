@@ -67,7 +67,7 @@ static u32 GetGeneratorSeed(int block_count)
 static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 8;
+	return 32;
 }
 
 
@@ -300,7 +300,7 @@ bool Encoder::PeelSetup()
 		row->mix_a = ((u16)rv % (_added_count - 1)) + 1;
 		row->mix_x0 = (u16)(rv >> 16) % _added_count;
 
-		cout << "   Row " << row_i << " of weight " << row->peel_weight << " : ";
+		cout << "   Row " << row_i << " of weight " << row->peel_weight << " [a=" << row->peel_a << "] : ";
 
 		// Iterate columns in peeling matrix
 		u16 weight = row->peel_weight;
@@ -495,7 +495,166 @@ void Encoder::GreedyPeeling()
 	into two parts: A peeled matrix on the left that will
 	be zero at the end of compression, and a GE matrix on
 	the right that will be used during Triangularization.
+*/
 
+bool Encoder::CompressSetup()
+{
+	cout << endl << "---- CompressSetup ----" << endl << endl;
+
+	// Calculate GE matrix dimensions
+	int ge_columns = _block_count + _added_count;
+	int ge_pitch = (ge_columns + 63) / 64;
+	int ge_rows = _defer_row_count + _added_count;
+
+	// Allocate the matrix
+	int matrix_words = ge_rows * ge_pitch;
+	_ge_matrix = new u64[matrix_words];
+	if (!_ge_matrix) return false;
+	_ge_pitch = ge_pitch;
+
+	cout << "GE matrix is " << ge_rows << " x " << ge_columns << " with pitch " << ge_pitch << " consuming " << matrix_words * sizeof(u64) << " bytes" << endl;
+
+	// Allocate the pivots
+	_ge_pivots = new u16[ge_rows];
+	if (!_ge_pivots) return false;
+
+	// Initialize the deferred rows to zero
+	memset(_ge_matrix, 0, _defer_row_count * ge_pitch * sizeof(u64));
+
+	// Fill the deferred rows from the peel+mix matrices
+	u16 ge_row_i = 0;
+	u16 row_i = _defer_head_rows;
+	u64 *ge_row = _ge_matrix;
+	while (row_i != LIST_TERM)
+	{
+		PeelRow *row = &_peel_rows[row_i];
+
+		// For each peeling column in the row,
+		u16 weight = row->peel_weight;
+		u16 a = row->peel_a;
+		u16 column_i = row->peel_x0;
+		for (;;)
+		{
+			// Set bit for that column
+			ge_row[column_i >> 6] |= (u64)1 << (column_i & 63);
+
+			if (--weight <= 0) break;
+
+			// Generate next column
+			do column_i = (column_i + a) % _block_next_prime;
+			while (column_i >= _block_count);
+		}
+
+		// For each mixing column in the row,
+		weight = row->mix_weight;
+		a = row->mix_a;
+		u16 x = row->mix_x0;
+		for (;;)
+		{
+			// Set bit for that column
+			u16 column_i = x + _block_count;
+			ge_row[column_i >> 6] |= (u64)1 << (column_i & 63);
+
+			if (--weight <= 0) break;
+
+			// Generate next column
+			do x = (x + a) % _added_next_prime;
+			while (x >= _added_count);
+		}
+
+		// Next row
+		row_i = row->next;
+		++ge_row_i;
+		ge_row += ge_pitch;
+	}
+
+	// Fill the final few rows from the dense matrix:
+
+	CAT_IF_DEBUG(
+	if (ge_row != _ge_matrix + _defer_row_count * ge_pitch)
+	{
+		cout << "First loop fail!" << endl;
+		return false;
+	})
+
+	// Initialize PRNG
+	CatsChoice prng;
+	prng.Initialize(_g_seed);
+
+	// Fill the dense matrix with random bits
+	int fill_count = ge_pitch * _added_count;
+	while (fill_count--)
+	{
+		u32 rv1 = prng.Next();
+		u32 rv2 = prng.Next();
+		*ge_row++ = ((u64)rv1 << 32) | rv2;
+	}
+
+	// Set the final mixing bits to the identity matrix:
+
+	CAT_IF_DEBUG( if (_added_count > 64) return false; )
+
+	CAT_IF_DEBUG(
+	if (ge_row != _ge_matrix + ge_rows * ge_pitch)
+	{
+		cout << "Second loop fail!" << endl;
+		return false;
+	})
+
+	// Generate a bit mask to clear all the bits from the identity matrix
+	// The mask will have 1 bits for peel columns and 0's for others
+	u64 clear_mask = ((u64)1 << (_block_count & 63)) - 1;
+
+	// For each mixing column from the last to the first,
+	int first_word = _block_count >> 6;
+	u16 column_i = _block_count + _added_count - 1;
+	int second_word = column_i >> 6;
+	u16 count = _added_count;
+	while (count--)
+	{
+		ge_row -= ge_pitch;
+
+		// Clear the lower word
+		ge_row[first_word] &= clear_mask;
+
+		// If there is an upper word for the mixing columns,
+		if (first_word != second_word)
+		{
+			// Clear that one too
+			ge_row[second_word] = 0;
+		}
+
+		// Set the diagonal bit
+		ge_row[column_i >> 6] |= (u64)1 << (column_i & 63);
+		--column_i;
+	}
+
+	return true;
+}
+
+void Encoder::PrintGEMatrix()
+{
+	int rows = _defer_row_count + _added_count;
+	int cols = _block_count + _added_count;
+
+	cout << endl << "GE matrix is " << rows << " x " << cols << ":" << endl;
+
+	for (int ii = 0; ii < rows; ++ii)
+	{
+		for (int jj = 0; jj < cols; ++jj)
+		{
+			if (_ge_matrix[ii * _ge_pitch + (jj >> 6)] & ((u64)1 << (jj & 63)))
+				cout << '1';
+			else
+				cout << '0';
+		}
+		cout << endl;
+	}
+
+	cout << endl;
+}
+
+/*
 		The second step of compression is to zero the left
 	matrix and generate temporary block values:
 
@@ -525,57 +684,93 @@ void Encoder::GreedyPeeling()
 	conceptual matrix in the Triangularization step.
 */
 
-bool Encoder::CompressSetup()
-{
-	// Calculate GE matrix dimensions
-	int ge_columns = _block_count + _added_count;
-	int ge_pitch = (ge_columns + 63) / 64;
-	int ge_rows = _defer_row_count + _added_count;
-
-	// Allocate the matrix
-	int matrix_words = ge_rows * ge_pitch;
-	_ge_matrix = new u64[matrix_words];
-	if (!_ge_matrix) return false;
-	_ge_pitch = ge_pitch;
-
-	// Clear the matrix
-	memset(_ge_matrix, 0, matrix_words * sizeof(u64));
-
-	// TODO: Generate matrix here
-
-	// Allocate the pivots
-	_ge_pivots = new u16[ge_rows];
-	if (!_ge_pivots) return false;
-
-	return true;
-}
-
 void Encoder::Compress()
 {
-	// TODO
+	cout << endl << "---- Compress ----" << endl << endl;
 
-	u16 ge_row_i = 0;
-	u16 row_i = _defer_head_rows;
-	while (row_i != LIST_TERM)
-	{
-		PeelRow *row = &_peel_rows[row_i];
-
-		ge_rows[ge_row_i++] = row;
-
-		row_i = row->next;
-	}
-
+	// For each column that has been peeled,
 	u16 row_i = _peel_head_rows;
+	u16 ge_rows = _defer_row_count + _added_count;
+	u16 *pivots = _ge_pivots;
 	while (row_i != LIST_TERM)
 	{
 		PeelRow *row = &_peel_rows[row_i];
+		u16 column_i = row->unmarked[0];
 
-		
+		cout << "For peeled row " << row_i << " solved by column " << column_i << ":";
+
+		// Generate a list of rows that have this bit set
+		u16 count = 0;
+		u64 *ge_row = _ge_matrix + (column_i >> 6);
+		u64 ge_mask = (u64)1 << (column_i & 63);
+		u16 prev = 0;
+		for (u16 ge_row_i = 0; ge_row_i < ge_rows; ++ge_row_i)
+		{
+			if (*ge_row & ge_mask)
+			{
+				cout << " " << ge_row_i;
+
+				pivots[count++] = (ge_row_i - prev) * _ge_pitch;
+				prev = ge_row_i;
+			}
+
+			ge_row += _ge_pitch;
+		}
+		cout << endl;
+
+		// If any of the rows contain it,
+		if (count > 0)
+		{
+			// For each peeling column in the row,
+			u16 weight = row->peel_weight;
+			u16 a = row->peel_a;
+			u16 column_i = row->peel_x0;
+			for (;;)
+			{
+				// Set bit for that column in each row
+				u64 *ge_row = _ge_matrix + (column_i >> 6);
+				u64 ge_mask = (u64)1 << (column_i & 63);
+				for (u16 ii = 0; ii < count; ++ii)
+				{
+					ge_row += pivots[ii];
+					*ge_row ^= ge_mask;
+				}
+
+				if (--weight <= 0) break;
+
+				// Generate next column
+				do column_i = (column_i + a) % _block_next_prime;
+				while (column_i >= _block_count);
+			}
+
+			// For each mixing column in the row,
+			weight = row->mix_weight;
+			a = row->mix_a;
+			u16 x = row->mix_x0;
+			for (;;)
+			{
+				// Set bit for that column
+				u16 column_i = x + _block_count;
+
+				// Set bit for that column in each row
+				u64 *ge_row = _ge_matrix + (column_i >> 6);
+				u64 ge_mask = (u64)1 << (column_i & 63);
+				for (u16 ii = 0; ii < count; ++ii)
+				{
+					ge_row += pivots[ii];
+					*ge_row ^= ge_mask;
+				}
+
+				if (--weight <= 0) break;
+
+				// Generate next column
+				do x = (x + a) % _added_next_prime;
+				while (x >= _added_count);
+			}
+		}
 
 		row_i = row->next;
 	}
-
-	delete []ge_rows;
 }
 
 bool Encoder::Triangle()
@@ -596,7 +791,8 @@ void Encoder::Substitute()
 
 bool Encoder::GenerateCheckBlocks()
 {
-	cout << "GenerateCheckBlocks : Seed = " << _g_seed << endl;
+	cout << endl << "---- GenerateCheckBlocks ----" << endl << endl;
+	cout << "Seed = " << _g_seed << endl;
 
 	// (1) Peeling
 
@@ -611,19 +807,6 @@ bool Encoder::GenerateCheckBlocks()
 			PeelRow *row = &_peel_rows[row_i];
 
 			cout << "  Row " << row_i << " solves column " << row->unmarked[0] << endl;
-
-			row_i = row->next;
-		}
-	}
-
-	{
-		cout << "After PeelSetup, contents of deferred rows list:" << endl;
-		u16 row_i = _defer_head_rows;
-		while (row_i != LIST_TERM)
-		{
-			PeelRow *row = &_peel_rows[row_i];
-
-			cout << "  Row " << row_i << " is deferred." << endl;
 
 			row_i = row->next;
 		}
@@ -675,7 +858,13 @@ bool Encoder::GenerateCheckBlocks()
 	if (!CompressSetup())
 		return false;
 
+	cout << "After CompressSetup:" << endl;
+	PrintGEMatrix();
+
 	Compress();
+
+	cout << "After Compress:" << endl;
+	PrintGEMatrix();
 
 	// (3) Gaussian Elimination
 
@@ -730,8 +919,62 @@ Encoder::~Encoder()
 	Cleanup();
 }
 
+static const u16 PRIMES[] = {
+	3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
+	59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109,
+	113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173,
+	179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233,
+	239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293,
+	307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367,
+	373, 379, 383, 389, 397, 401, 409, 419, 421, 431, 433,
+	439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499,
+	503, 509, 521, 523, 541, 547, 557, 563, 569, 571, 577,
+	587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643,
+	647, 653, 659, 661, 673, 677, 683, 691, 701, 709, 719,
+	727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
+	809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863,
+	877, 881, 883, 887, 907, 911, 919, 929, 937, 941, 947,
+	953, 967, 971, 977, 983, 991, 997, 1009, 1013, 1019,
+	1021, 1031, 1033, 1039, 1049, 1051, 1061, 1063, 1069,
+	1087, 1091, 1093, 1097,
+};
+
+static int NextHighestPrime(int n)
+{
+	n |= 1;
+
+	int p_max = (int)sqrt((float)n);
+
+	for (;;)
+	{
+		const u16 *prime = PRIMES;
+
+		for (;;)
+		{
+			int p = *prime;
+
+			if (p > p_max)
+				return n;
+
+			if (n % p == 0)
+				break;
+
+			++prime;
+		}
+
+		n += 2;
+
+		if (p_max * p_max < n)
+			++p_max;
+	}
+
+	return n;
+}
+
 bool Encoder::Initialize(const void *message_in, int message_bytes, int block_bytes)
 {
+	cout << endl << "---- Initialize ----" << endl << endl;
+
 	Cleanup();
 
 	CAT_IF_DEBUG( if (block_bytes < 16) return false; )
@@ -756,6 +999,16 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_block_count = block_count;
 	_message_blocks = reinterpret_cast<const u8*>( message_in );
 	_next_block_id = 0;
+
+	// Calculate next primes after column counts for pseudo-random generation of peeling rows
+	_block_next_prime = NextHighestPrime(_block_count);
+	_added_next_prime = NextHighestPrime(_added_count);
+
+	cout << "Block bytes = " << block_bytes << ".  Final bytes = " << _final_bytes << endl;
+	cout << "Block count = " << block_count << " +Prime=" << _block_next_prime << endl;
+	cout << "Added count = " << _added_count << " +Prime=" << _added_next_prime << endl;
+	cout << "Generator seed = " << _g_seed << endl;
+	cout << "Memory overhead for check blocks = " << check_size << " bytes" << endl;
 
 	// Generate check blocks
 	return GenerateCheckBlocks();
