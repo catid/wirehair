@@ -919,10 +919,10 @@ public:
 		seed_y += seed_x;
 
 		seed_x *= C3;
-		seed_x = CAT_ROL64(seed_x, 27);
+		seed_x ^= CAT_ROL64(seed_x, 27);
 
 		seed_y *= C4;
-		seed_y = CAT_ROL64(seed_y, 31);
+		seed_y ^= CAT_ROL64(seed_y, 31);
 
 		_x = seed_x;
 		_y = seed_y;
