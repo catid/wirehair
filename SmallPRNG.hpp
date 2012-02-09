@@ -909,20 +909,18 @@ public:
 		u64 seed_x = 0x9368e53c2f6af274ULL ^ x;
 		u64 seed_y = 0x586dcd208f7cd3fdULL ^ y;
 
-		seed_x *= C1;
-		seed_x = CAT_ROL64(seed_x, 31);
-
-		seed_y *= C2;
-		seed_y = CAT_ROL64(seed_y, 33);
-
 		seed_x += seed_y;
 		seed_y += seed_x;
 
 		seed_x *= C3;
-		seed_x ^= CAT_ROL64(seed_x, 27);
+		seed_x = CAT_ROL64(seed_x, 31);
+		seed_x *= C1;
+		seed_x = CAT_ROL64(seed_x, 27);
 
 		seed_y *= C4;
-		seed_y ^= CAT_ROL64(seed_y, 31);
+		seed_y = CAT_ROL64(seed_y, 33);
+		seed_y *= C2;
+		seed_y = CAT_ROL64(seed_y, 31);
 
 		_x = seed_x;
 		_y = seed_y;

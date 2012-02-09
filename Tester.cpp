@@ -9,8 +9,13 @@ int main()
 {
 	cat::wirehair::Encoder encoder;
 
+<<<<<<< HEAD
 	int block_count = 8;
 	int block_bytes = 1;
+=======
+	int block_count = 64;
+	int block_bytes = 1500;
+>>>>>>> 79d3c673d612dd6ed9648aea23d6f1ef26976ad9
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 
