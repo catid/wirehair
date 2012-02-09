@@ -62,7 +62,7 @@ namespace cat {
 	Generator Catid32S_1d operates at 334 million numbers / second
 	Generator Catid32S_4 operates at 426 million numbers / second
 
-	CatsChoice is an implementation of Catid32S_4
+	CatsChoice is an implementation of Catid32S_5, based on Catid32S_4.
 */
 
 /*
@@ -203,6 +203,45 @@ typedef MWC<4294967220, 21987643, 1732654> MaximalMWC;
 */
 typedef MWC<4294584393, 43219876, 6543217> DJonesMWC1;
 typedef MWC<4246477509, 21987643, 1732654> DJonesMWC2;
+/*
+	These are parameters that I generated:
+
+	I want to find the largest few values of A that satisfy
+	this requirements.  Furthermore, I want A to have a minimal
+	number of prime factors; if this is the case, then the
+	output will look random in addition to having a large period.
+
+	So I set out to devise a fast 64-bit primality tester.
+	The best approach I know of for these small sizes is the
+	probabilistic Rabin-Miller primality test.  After a few
+	iterations I can conclude the number is probably prime
+	and then look at the prime factorization of A to select
+	candidates that may go well together.  Wolfram Alpha was
+	used to check that the values are really prime.
+
+	I came up with these results with one big factor:
+
+	-- Candidate 0xffffbe17.  Factors = 3, 1431650141
+	-- Candidate 0xffff4b9f.  Factors = 3, 1431640373
+	-- Candidate 0xffff0207.  Factors = 3, 1431634093
+	-- Candidate 0xfffe1495.  Factors = 3, 1431613831
+	-- Candidate 0xfffd8b79.  Factors = 3, 1431602131
+	-- Candidate 0xfffd6389.  Factors = 3, 1431598723
+	-- Candidate 0xfffd21a7.  Factors = 3, 1431593101
+	-- Candidate 0xfffd1361.  Factors = 3, 1431591883
+	...
+
+	So I guess that 3 is always a factor of A...
+	I then produced CatsChoice-like generators using pairs
+	of these A values and tested them with BigCrush:
+
+		A1 = 0xffffbe17, A2 = 0xffff4b9f <- Failed test 48
+		A1 = 0xffff0207, A2 = 0xfffe1495 <- Passed all tests
+		A1 = 0xfffd8b79, A2 = 0xfffd6389 <- Passed all tests
+		A1 = 0xfffd21a7, A2 = 0xfffd1361 <- Passed all tests (chosen)
+*/
+typedef MWC<0xfffd21a7, 43219876, 6543217> CatMWC1;
+typedef MWC<0xfffd1361, 21987643, 1732654> CatMWC2;
 
 
 /*
@@ -880,6 +919,12 @@ typedef CSmootch<u32, MaxSafeMWC, MaximalMWC> Catid32S_4a;
 		11  CollisionOver, t = 21          6.7e-05
 */
 typedef CSmootch<u32, MaxSafeMWC, DJonesMWC2> Catid32S_4b;
+/*
+	Period of ~2^^126
+
+	Passes all BigCrush tests.
+*/
+typedef CSmootch<u32, CatMWC1, CatMWC2> Catid32S_5;
 
 
 /*
@@ -906,7 +951,7 @@ public:
 
 		x += y;
 		y += x;
-		
+
 		u64 seed_x = 0x9368e53c2f6af274ULL ^ x;
 		u64 seed_y = 0x586dcd208f7cd3fdULL ^ y;
 
