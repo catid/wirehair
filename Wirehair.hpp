@@ -103,10 +103,13 @@ class Encoder
 	u16 _defer_row_count;			// Count of deferred rows
 
 	// Gaussian elimination state
-	u64 *_ge_matrix;	// Gaussian elimination matrix
-	int _ge_pitch;		// Pitch in words of GE matrix
-	u16 *_ge_pivots;	// Pivots for each column of the GE matrix
+	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
+	int _ge_compress_pitch;		// Pitch in words of GE compression matrix
+	u64 *_ge_matrix;			// Gaussian elimination matrix
+	int _ge_pitch;				// Pitch in words of GE matrix
+	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
 
+	void PrintGECompressMatrix();
 	void PrintGEMatrix();
 
 
