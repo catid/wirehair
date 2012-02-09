@@ -903,27 +903,27 @@ public:
 		// Based on the mixing functions of MurmurHash3
 		static const u64 C1 = 0xff51afd7ed558ccdULL;
 		static const u64 C2 = 0xc4ceb9fe1a85ec53ULL;
-		static const u64 C3 = 0x87c37b91114253d5ULL;
-		static const u64 C4 = 0x4cf5ad432745937fULL;
 
+		x += y;
+		y += x;
+		
 		u64 seed_x = 0x9368e53c2f6af274ULL ^ x;
 		u64 seed_y = 0x586dcd208f7cd3fdULL ^ y;
 
-		seed_x += seed_y;
-		seed_y += seed_x;
-
-		seed_x *= C3;
-		seed_x = CAT_ROL64(seed_x, 31);
 		seed_x *= C1;
-		seed_x = CAT_ROL64(seed_x, 27);
+		seed_x ^= seed_x >> 33;
+		seed_x *= C2;
+		seed_x ^= seed_x >> 33;
 
-		seed_y *= C4;
-		seed_y = CAT_ROL64(seed_y, 33);
+		seed_y *= C1;
+		seed_y ^= seed_y >> 33;
 		seed_y *= C2;
-		seed_y = CAT_ROL64(seed_y, 31);
+		seed_y ^= seed_y >> 33;
 
 		_x = seed_x;
 		_y = seed_y;
+
+		Next();
 	}
 
 	CAT_INLINE void Initialize(u32 seed)
