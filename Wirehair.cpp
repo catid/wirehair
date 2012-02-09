@@ -898,6 +898,8 @@ bool Encoder::Triangle()
 				pivots[pivot_i] = pivots[pivot_row_i];
 				pivots[pivot_row_i] = temp;
 
+				GeneratePivotColumn();
+
 				// For each remaining row,
 				++pivot_row_i;
 				for (; pivot_row_i < ge_rows; ++pivot_row_i)
@@ -1001,6 +1003,11 @@ bool Encoder::Triangle()
 	}
 
 	return true;
+}
+
+void Encoder::GeneratePivotColumn()
+{
+	// TODO
 }
 
 void Encoder::Diagonal()
@@ -1180,7 +1187,7 @@ bool Encoder::GenerateCheckBlocks()
 	cout << "After Diagonal:" << endl;
 	PrintGEMatrix();
 
-	// (4) Back-Substitution
+	// (4) Substitution
 
 	Substitute();
 
