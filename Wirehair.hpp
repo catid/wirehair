@@ -130,8 +130,26 @@ class Encoder
 
 	//// (2) Compression
 
+	// Allocate matrices for compression operation and GE
+	bool CompressAllocate();
+
+	// Fill deferred rows of compress matrix
+	void FillCompressDeferred();
+
+	// Fill dense rows of compress matrix
+	void FillCompressDense();
+
+	// Fill deferred rows of GE matrix
+	void FillGEDeferred();
+
+	// Fill dense rows of GE matrix
+	void FillGEDense();
+
 	// Build GE matrix for compression
 	bool CompressSetup();
+
+	// Copy deferred columns to the GE matrix
+	void CopyDeferredColumns();
 
 	// Compress rectangular matrix into conceptual square matrix
 	void Compress();
