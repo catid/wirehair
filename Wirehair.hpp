@@ -160,6 +160,9 @@ class Encoder
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
 
+	// Solve one column based on compress matrix and GE matrix
+	void SolveTriangleColumn(u16 ge_row_i, u16 column_i, u16 pivot_i);
+
 	// Solve pivot column values from the row op schedule from Triangle
 	void SolveTriangleColumns();
 

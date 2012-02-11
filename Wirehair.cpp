@@ -1039,13 +1039,94 @@ bool Encoder::Triangle()
 	return true;
 }
 
+void Encoder::SolveTriangleColumn(u16 ge_row_i, u16 column_i, u16 pivot_i)
+{
+	u8 *dest = _check_blocks + _block_bytes * column_i;
+
+	// TODO: Optimize this
+	memset(dest, 0, _block_bytes);
+
+	cout << "For compress row " << ge_row_i << " solved by column " << column_i << ":";
+
+	// For each bit of the compress row,
+	u64 *ge_compress_row = _ge_compress_matrix + _ge_compress_pitch * ge_row_i;
+	for (u16 peel_column_i = 0; peel_column_i < _block_count; ++peel_column_i)
+	{
+		// If bit is set,
+		int word = peel_column_i >> 6;
+		u64 mask = (u64)1 << (peel_column_i & 63);
+		if (ge_compress_row[word] & mask)
+		{
+			cout << " " << peel_column_i;
+
+			// Look up which peeled row solves this column
+			PeelColumn *column = &_peel_cols[peel_column_i];
+			u16 peel_row_i = column->rows[0];
+
+			// Look up source data
+			const u8 *src = _message_blocks + peel_row_i * _block_bytes;
+			int block_bytes = (peel_row_i == _block_count - 1) ? _final_bytes : _block_bytes;
+
+			// TODO: Optimize this
+			memxor(dest, src, block_bytes);
+		}
+	}
+
+	cout << endl << "For GE row " << ge_row_i << " solved by pivot " << pivot_i << ":";
+
+	// For each bit of the GE matrix up to the diagonal,
+	u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
+	u16 ge_column_i;
+	for (ge_column_i = 0; ge_column_i < _added_count && ge_column_i < pivot_i; ++ge_column_i)
+	{
+		// If bit is set,
+		int word = ge_column_i >> 6;
+		u64 mask = (u64)1 << (ge_column_i & 63);
+		if (ge_row[word] & mask)
+		{
+			cout << " " << ge_column_i;
+
+			u16 ge_pivot_i = _ge_pivots[ge_column_i];
+			u16 ge_pivot_column_i = _block_count + ge_pivot_i;
+
+			// Look up source data
+			const u8 *src = _message_blocks + ge_pivot_column_i * _block_bytes;
+
+			// TODO: Optimize this
+			memxor(dest, src, _block_bytes);
+		}
+	}
+
+	// For deferred columns up to the diagonal,
+	u16 ge_pivot_column_i = _defer_head_columns;
+	while (ge_pivot_column_i != LIST_TERM && ge_column_i < pivot_i)
+	{
+		// If bit is set,
+		int word = ge_column_i >> 6;
+		u64 mask = (u64)1 << (ge_column_i & 63);
+		if (ge_row[word] & mask)
+		{
+			cout << " " << ge_column_i;
+
+			// Look up source data
+			const u8 *src = _message_blocks + ge_pivot_column_i * _block_bytes;
+
+			// TODO: Optimize this
+			memxor(dest, src, _block_bytes);
+		}
+
+		// Iterate next column
+		++ge_column_i;
+		PeelColumn *column = &_peel_cols[ge_pivot_column_i];
+		ge_pivot_column_i = column->next;
+	}
+
+	cout << endl;
+}
+
 void Encoder::SolveTriangleColumns()
 {
 	cout << endl << "---- SolveTriangleColumns ----" << endl << endl;
-
-	// TODO
-
-	u32 xors = 0;
 
 	// For each mix matrix pivot column,
 	u16 pivot_i;
@@ -1053,46 +1134,22 @@ void Encoder::SolveTriangleColumns()
 	{
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u16 column_i = _block_count + pivot_i;
-		u8 *dest = _check_blocks + _block_bytes * column_i;
 
-		// For each word of the compress row,
-		u64 *ge_compress_row = _ge_compress_matrix + _ge_compress_pitch * ge_row_i;
-		u16 peel_column_i = 0;
-		for (; peel_column_i < _block_count; ++peel_column_i)
-		{
-			// If bit is set,
-			if (ge_compress_row[peel_column_i >> 6] & ((u64)1 << (peel_column_i & 63)))
-			{
-				// Look up which peeled row solves this column
-				PeelColumn *column = &_peel_cols[peel_column_i];
-				u16 peel_row_i = column->rows[0];
-
-				// Look up source data
-				const u8 *src = _message_blocks + peel_row_i * _block_bytes;
-				int block_bytes = (peel_row_i == _block_count - 1) ? _final_bytes : _block_bytes;
-
-				for (; peel_column_i < _block_count; ++peel_column_i)
-				{
-					if (ge_compress_row[peel_column_i >> 6] & ((u64)1 << (peel_column_i & 63)))
-					{
-						break;
-					}
-				}
-
-				break;
-			}
-		}
+		SolveTriangleColumn(ge_row_i, column_i, pivot_i);
 	}
 
 	// For each peel matrix deferred pivot column,
-	u16 row_i = _defer_head_rows;
-	while (row_i != LIST_TERM)
+	u16 column_i = _defer_head_columns;
+	while (column_i != LIST_TERM)
 	{
-		PeelRow *row = &_peel_rows[row_i];
-		u16 ge_row_i = _ge_pivots[pivot_i++];
+		PeelColumn *column = &_peel_cols[column_i];
+		u16 ge_row_i = _ge_pivots[pivot_i];
 
-		// Next row
-		row_i = row->next;
+		SolveTriangleColumn(ge_row_i, column_i, pivot_i);
+
+		// Next column
+		column_i = column->next;
+		++pivot_i;
 	}
 }
 
