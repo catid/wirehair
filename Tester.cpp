@@ -255,14 +255,28 @@ int main()
 
 	cat::wirehair::Encoder encoder;
 
-	int block_count = 8;
+	int block_count = 4;
 	int block_bytes = 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 
+	for (int ii = 0; ii < message_bytes; ++ii)
+	{
+		message[ii] = ii;
+	}
+
 	if (!encoder.Initialize(message, message_bytes, 3 + block_bytes))
 	{
 		cout << "main: Failure on encoder initialization" << endl;
+	}
+
+	u8 *block = new u8[3 + message_bytes];
+
+	for (int ii = 0; ii < message_bytes; ++ii)
+	{
+		encoder.Generate(block);
+
+		cout << (int)block[3] << endl;
 	}
 
 	cin.get();
