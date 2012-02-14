@@ -97,10 +97,10 @@ class Encoder
 
 	// Lists
 	static const u16 LIST_TERM = 0xffff;
-	u16 _peel_head_rows;			// Head of peeling solved rows list
-	u16 _defer_head_columns;		// Head of peeling deferred columns list
-	u16 _defer_head_rows;			// Head of peeling deferred rows list
-	u16 _defer_row_count;			// Count of deferred rows
+	u16 _peel_head_rows;		// Head of peeling solved rows list
+	u16 _defer_head_columns;	// Head of peeling deferred columns list
+	u16 _defer_head_rows;		// Head of peeling deferred rows list
+	u16 _defer_count;			// Count of deferred rows
 
 	// Gaussian elimination state
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
@@ -193,6 +193,8 @@ public:
 	// Attempt to initialize the encoder for a given message
 	// Returns false on initialization failure
 	bool Initialize(const void *message_in, int message_bytes, int block_bytes);
+
+	CAT_INLINE u32 GetSeed() { return _g_seed; }
 
 	// Generate a block of size block_bytes specified during initialization
 	void Generate(void *block);
