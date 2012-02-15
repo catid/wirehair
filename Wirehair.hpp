@@ -118,7 +118,6 @@ class Encoder
 
 	CAT_INLINE void GenerateWindowTable16(const u8 **window_table, u16 active, u16 peel_column_i);
 
-	void PrintGECompressMatrix();
 	void PrintGEMatrix();
 
 
@@ -137,43 +136,62 @@ class Encoder
 	void GreedyPeeling();
 
 
-	//// (2) Compression
+	//// (2) Matrix Inverse-Based Compression
 
-	// Allocate matrices for compression operation and GE
-	bool CompressAllocate();
-
-	// Fill deferred rows of compress matrix
-	void FillCompressDeferred();
-
-	// Fill dense rows of compress matrix
-	void FillCompressDense();
-
-	// Fill deferred rows of GE matrix
-	void FillGEDeferred();
-
-	// Fill dense rows of GE matrix
-	void FillGEDense();
+	void InvPrintGECompressMatrix();
 
 	// Build GE matrix for compression
-	bool CompressSetup();
+	bool InvCompressSetup();
 
-	// Copy deferred columns to the GE matrix
-	void CopyDeferredColumns();
+	// Allocate matrices for compression operation and GE
+	bool InvCompressAllocate();
 
 	// Compress rectangular matrix into conceptual square matrix
-	void Compress();
+	void InvCompress();
+
+	// Solve pivot column values from the row op schedule from Triangle
+	void InvSolveTriangleColumns();
+
+
+	//// (2) Matrix Multiply-Based Compression
+
+	void MulPrintGECompressMatrix();
+
+	// Allocate matrices for compression operation and GE
+	bool MulCompressAllocate();
+
+	// Fill deferred rows of compress matrix
+	void MulFillCompressDeferred();
+
+	// Fill dense rows of compress matrix
+	void MulFillCompressDense();
+
+	// Fill deferred rows of GE matrix
+	void MulFillGEDeferred();
+
+	// Fill dense rows of GE matrix
+	void MulFillGEDense();
+
+	// Build GE matrix for compression
+	bool MulCompressSetup();
+
+	// Copy deferred columns to the GE matrix
+	void MulCopyDeferredColumns();
+
+	// Compress rectangular matrix into conceptual square matrix
+	void MulCompress();
+
+	// Use a 4-bit window to optimize the solution
+	bool MulSolveTriangleColumnsWindowed();
+
+	// Solve pivot column values from the row op schedule from Triangle
+	void MulSolveTriangleColumns();
 
 
 	//// (3) Gaussian Elimination
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
-
-	// Use a 4-bit window to optimize the solution
-	bool SolveTriangleColumnsWindowed();
-
-	// Solve pivot column values from the row op schedule from Triangle
-	void SolveTriangleColumns();
 
 	// Diagonalize the GE matrix to complete solving for the GE blocks
 	void Diagonal();

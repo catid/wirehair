@@ -32,15 +32,182 @@
 using namespace cat;
 using namespace wirehair;
 
-#include <iostream>
-#include <iomanip>
-#include <fstream>
-using namespace std;
-
 
 // Switches:
 #define CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR
 //#define CAT_DUMP_ROWOP_COUNTERS
+
+
+#if defined(CAT_DEBUG) || defined(CAT_DUMP_ROWOP_COUNTERS)
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+using namespace std;
+#endif // CAT_DEBUG
+
+
+//// Utility: 16-bit Integer Square Root function
+
+/*
+	Based on code from http://www.azillionmonkeys.com/qed/sqroot.html
+
+		Contributors include Arne Steinarson for the basic approximation idea, 
+		Dann Corbit and Mathew Hendry for the first cut at the algorithm, 
+		Lawrence Kirby for the rearrangement, improvments and range optimization
+		and Paul Hsieh for the round-then-adjust idea.
+
+	I tried this out, stdlib sqrt() and a few variations on Newton-Raphson
+	and determined this one is, by far, the fastest.  I adapted it to 16-bit
+	input for additional performance and tweaked the operations to work best
+	with the MSVC optimizer, which turned out to be very sensitive to the
+	way that the code is written.
+*/
+static const u8 SQQ_TABLE[] = {
+	0,  16,  22,  27,  32,  35,  39,  42,  45,  48,  50,  53,  55,  57,
+	59,  61,  64,  65,  67,  69,  71,  73,  75,  76,  78,  80,  81,  83,
+	84,  86,  87,  89,  90,  91,  93,  94,  96,  97,  98,  99, 101, 102,
+	103, 104, 106, 107, 108, 109, 110, 112, 113, 114, 115, 116, 117, 118,
+	119, 120, 121, 122, 123, 124, 125, 126, 128, 128, 129, 130, 131, 132,
+	133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 144, 145,
+	146, 147, 148, 149, 150, 150, 151, 152, 153, 154, 155, 155, 156, 157,
+	158, 159, 160, 160, 161, 162, 163, 163, 164, 165, 166, 167, 167, 168,
+	169, 170, 170, 171, 172, 173, 173, 174, 175, 176, 176, 177, 178, 178,
+	179, 180, 181, 181, 182, 183, 183, 184, 185, 185, 186, 187, 187, 188,
+	189, 189, 190, 191, 192, 192, 193, 193, 194, 195, 195, 196, 197, 197,
+	198, 199, 199, 200, 201, 201, 202, 203, 203, 204, 204, 205, 206, 206,
+	207, 208, 208, 209, 209, 210, 211, 211, 212, 212, 213, 214, 214, 215,
+	215, 216, 217, 217, 218, 218, 219, 219, 220, 221, 221, 222, 222, 223,
+	224, 224, 225, 225, 226, 226, 227, 227, 228, 229, 229, 230, 230, 231,
+	231, 232, 232, 233, 234, 234, 235, 235, 236, 236, 237, 237, 238, 238,
+	239, 240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246,
+	246, 247, 247, 248, 248, 249, 249, 250, 250, 251, 251, 252, 252, 253,
+	253, 254, 254, 255
+};
+
+static u16 cat_fred_sqrt16(u16 x)
+{
+	u16 r;
+
+	if (x >= 0x100)
+	{
+		if (x >= 0x1000)
+		{
+			if (x >= 0x4000)
+				r = SQQ_TABLE[x >> 8] + 1;
+			else
+				r = (SQQ_TABLE[x >> 6] >> 1) + 1;
+		}
+		else
+		{
+			if (x >= 0x400)
+				r = (SQQ_TABLE[x >> 4] >> 2) + 1;
+			else
+				r = (SQQ_TABLE[x >> 2] >> 3) + 1;
+		}
+	}
+	else
+	{
+		return SQQ_TABLE[x] >> 4;
+	}
+
+	// Correct rounding if necessary (compiler optimizes this form better)
+	r -= (r * r > x);
+
+	return r;
+}
+
+
+//// Utility: 16-bit Hybrid Sieve of Eratosthenes Next Prime function
+
+/*
+	It uses trial division up to the square root of the number to test.
+	Uses a truncated sieve table to pick the next number to try, which
+	avoids small factors 2, 3, 5, 7.  This can be considered a more
+	involved version of incrementing by 2 instead of 1.
+
+	Because of the tabular increment this is a hybrid approach.  The sieve
+	would just use a very large table, but I wanted to limit the size of
+	the table to something fairly small and reasonable.  210 bytes for the
+	sieve table.  102 bytes for the primes list.
+
+	It also calculates the integer square root faster than cmath sqrt()
+	and uses multiplication to update the square root instead for speed.
+*/
+const int SIEVE_TABLE_SIZE = 2*3*5*7;
+static const u8 SIEVE_TABLE[SIEVE_TABLE_SIZE] = {
+	1, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
+	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
+	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
+	7, 6, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2,
+	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
+	1, 0, 5, 4, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
+	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+};
+
+static const u16 PRIMES_UNDER_256[] = {
+	11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61,
+	67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127,
+	131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191,
+	193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 0x7fff
+};
+
+static u16 NextPrime16(u16 n)
+{
+	// Handle small n
+	switch (n)
+	{
+	case 0:
+	case 1:	return 1;
+	case 2:	return 2;
+	case 3:	return 3;
+	case 4:
+	case 5:	return 5;
+	case 6:
+	case 7:	return 7;
+	}
+
+	// Choose first n from table
+	int offset = n % SIEVE_TABLE_SIZE;
+	u32 next = SIEVE_TABLE[offset];
+	offset += next + 1;
+	n += next;
+
+	// Initialize p_max to sqrt(n)
+	int p_max = cat_fred_sqrt16(n);
+
+	// For each number to try,
+	for (;;)
+	{
+		// For each prime to test up to square root,
+		const u16 *prime = PRIMES_UNDER_256;
+		for (;;)
+		{
+			// If the next prime is above p_max we are done!
+			int p = *prime;
+			if (p > p_max)
+				return n;
+
+			// If composite, try next n
+			if (n % p == 0)
+				break;
+
+			// Try next prime
+			++prime;
+		}
+
+		// Use table to choose next trial number
+		if (offset >= SIEVE_TABLE_SIZE) offset -= SIEVE_TABLE_SIZE;
+		u32 next = SIEVE_TABLE[offset];
+		offset += next + 1;
+		n += next + 1;
+
+		// Derivative square root iteration of p_max
+		if (p_max * p_max < n)
+			++p_max;
+	}
+
+	return n;
+}
 
 
 //// MatrixGenerator
@@ -74,7 +241,7 @@ static u32 GetGeneratorSeed(int block_count)
 static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return (int)sqrt((float)block_count) / 2 + 1;
+	return cat_fred_sqrt16(block_count) / 2 + 1;
 }
 
 #if defined(CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR)
@@ -361,7 +528,7 @@ bool Encoder::PeelSetup()
 			// Add row reference to column
 			if (col->row_count >= ENCODER_REF_LIST_MAX)
 			{
-				cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;
+				CAT_IF_DEBUG(cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;)
 				return false;
 			}
 			col->rows[col->row_count++] = row_i;
@@ -564,6 +731,41 @@ void Encoder::GreedyPeeling()
 
 	Both approaches require repeating matrix multiplication after GE Triangle
 	finishes, so that no temporary space is needed for block values.
+
+	Both approaches cost about the same for the dense rows of the matrix, because
+	about half of the bits are set in both cases.  The multiplication approach,
+	however, destroys structure in the dense rows if it was there, so it may be
+	better to use the inversion approach if the dense rows have structure at lower
+	n values than if the dense rows have no structure.
+
+	Multiplication is faster than Inversion for small sizes because it uses much
+	less memory and because the row op count is comparable or lower.
+*/
+
+/*
+	One more subtle optimization.  Depending on how the GE matrix
+	is constructed, it can be put in a roughly upper-triangular form
+	from the start so it looks like this:
+
+		+---------+---------+
+		| D D D D | D D D 1 |
+		| D D D D | D D 1 M |
+		| D D D D | D 1 M M |
+		| D D D D | 1 M M M |
+		+---------+---------+
+		| 0 1 0 1 | M M M M |
+		| 0 0 1 0 | M M M M |
+		| 0 0 0 1 | M M M M |
+		| 0 0 0 0 | M M M M |
+		+---------+---------+
+
+	In the example above, the top 4 rows are dense matrix rows.
+	The last 4 columns are mixing columns and are also dense.
+	The lower left sub-matrix is sparse and roughly upper triangular
+	because it is the intersection of sparse rows in the generator
+	matrix.  This form is achieved by adding deferred rows starting
+	from last deferred to first, and adding deferred columns starting
+	from last deferred to first.
 */
 
 /*
@@ -571,13 +773,57 @@ void Encoder::GreedyPeeling()
 
 		Since the re-ordered matrix above is in lower triangular form,
 	and since the weight of each row is limited to a constant, the cost
-	of inverting the peeled matrix is O(n).
+	of inverting the peeled matrix is O(n).  Inverting the peeled matrix
+	will cause the mix and deferred columns to add up and become dense.
+	These columns are stored in the same order as in the GE matrix, in
+	a long vertical matrix with N rows.
 
 		After inverting the peeling matrix, causing the mixing columns
 	to become dense, the peeling matrix will be the identity matrix.
-	It then becomes easy to eliminate the peeled columns of the deferred
-	rows, as the
+	Peeled column output blocks can be used to store the temporary blocks
+	generated by this inversion.  These temporary blocks will be overwritten
+	later during Substitution.  It then becomes easy to eliminate the
+	peeled columns of the deferred rows.  These are then eliminated in
+	O(sqrt(n)) time since there are k*sqrt(n) of them and each is sparse.
+
+		Initially, only the dense mix and deferred columns are useful for
+	forming the GE matrix.  After the GE matrix is inverted, the steps used
+	to eliminate the peeled columns of the deferred rows can be followed again
+	to generate the columns solved by GE in the correct output block locations.
+	Note that it would be possible to generate these columns earlier but the
+	output block locations are not known until GE Triangle() completes, so they
+	would need to be shuffled into the right locations, which would require
+	more memory and/or memcopies.
 */
+
+bool Encoder::InvCompressSetup()
+{
+	CAT_IF_DEBUG(cout << endl << "---- CompressSetup ----" << endl << endl;)
+
+	if (!InvCompressAllocate())
+		return false;
+
+	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+
+	return true;
+}
+
+// Allocate matrices for compression operation and GE
+bool Encoder::InvCompressAllocate()
+{
+	return true;
+}
+
+// Compress rectangular matrix into conceptual square matrix
+void Encoder::InvCompress()
+{
+}
+
+// Solve pivot column values from the row op schedule from Triangle
+void Encoder::InvSolveTriangleColumns()
+{
+}
+
 
 /*
 	Multiplication-Based Matrix Compression:
@@ -679,61 +925,35 @@ void Encoder::GreedyPeeling()
 	final block values for each of the GE columns.
 */
 
-/*
-	One more subtle optimization.  Depending on how the GE matrix
-	is constructed, it can be put in a roughly upper-triangular form
-	from the start so it looks like this:
-
-		+---------+---------+
-		| D D D D | D D D 1 |
-		| D D D D | D D 1 M |
-		| D D D D | D 1 M M |
-		| D D D D | 1 M M M |
-		+---------+---------+
-		| 0 1 0 1 | M M M M |
-		| 0 0 1 0 | M M M M |
-		| 0 0 0 1 | M M M M |
-		| 0 0 0 0 | M M M M |
-		+---------+---------+
-
-	In the example above, the top 4 rows are dense matrix rows.
-	The last 4 columns are mixing columns and are also dense.
-	The lower left sub-matrix is sparse and roughly upper triangular
-	because it is the intersection of sparse rows in the generator
-	matrix.  This form is achieved by adding deferred rows starting
-	from last deferred to first, and adding deferred columns starting
-	from last deferred to first.
-*/
-
-bool Encoder::CompressSetup()
+bool Encoder::MulCompressSetup()
 {
 	CAT_IF_DEBUG(cout << endl << "---- CompressSetup ----" << endl << endl;)
 
-	if (!CompressAllocate())
+	if (!MulCompressAllocate())
 		return false;
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	FillCompressDeferred();
+	MulFillCompressDeferred();
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	FillCompressDense();
+	MulFillCompressDense();
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	FillGEDeferred();
+	MulFillGEDeferred();
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	FillGEDense();
+	MulFillGEDense();
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
 	return true;
 }
 
-bool Encoder::CompressAllocate()
+bool Encoder::MulCompressAllocate()
 {
 	CAT_IF_DEBUG(cout << endl << "---- CompressAllocate ----" << endl << endl;)
 
@@ -772,7 +992,7 @@ bool Encoder::CompressAllocate()
 	return true;
 }
 
-void Encoder::FillCompressDeferred()
+void Encoder::MulFillCompressDeferred()
 {
 	CAT_IF_DEBUG(cout << endl << "---- FillCompressDeferred ----" << endl << endl;)
 
@@ -804,7 +1024,7 @@ void Encoder::FillCompressDeferred()
 	}
 }
 
-void Encoder::FillCompressDense()
+void Encoder::MulFillCompressDense()
 {
 	CAT_IF_DEBUG(cout << endl << "---- FillCompressDense ----" << endl << endl;)
 
@@ -826,7 +1046,7 @@ void Encoder::FillCompressDense()
 	)
 }
 
-void Encoder::FillGEDeferred()
+void Encoder::MulFillGEDeferred()
 {
 	CAT_IF_DEBUG(cout << endl << "---- FillGEDeferred ----" << endl << endl;)
 
@@ -860,7 +1080,7 @@ void Encoder::FillGEDeferred()
 	}
 }
 
-void Encoder::FillGEDense()
+void Encoder::MulFillGEDense()
 {
 	CAT_IF_DEBUG(cout << endl << "---- FillGEDense ----" << endl << endl;)
 
@@ -878,7 +1098,7 @@ void Encoder::FillGEDense()
 	}
 }
 
-void Encoder::CopyDeferredColumns()
+void Encoder::MulCopyDeferredColumns()
 {
 	CAT_IF_DEBUG(cout << endl << "---- CopyDeferredColumns ----" << endl << endl;)
 
@@ -915,6 +1135,8 @@ void Encoder::CopyDeferredColumns()
 	}
 }
 
+#if defined(CAT_DEBUG)
+
 void Encoder::PrintGEMatrix()
 {
 	int rows = _defer_count + _added_count;
@@ -937,12 +1159,12 @@ void Encoder::PrintGEMatrix()
 	cout << endl;
 }
 
-void Encoder::PrintGECompressMatrix()
+void Encoder::MulPrintGECompressMatrix()
 {
 	int rows = _defer_count + _added_count;
 	int cols = _block_count;
 
-	cout << endl << "GE Compress matrix is " << rows << " x " << cols << ":" << endl;
+	cout << endl << "GE (Mul) Compress matrix is " << rows << " x " << cols << ":" << endl;
 
 	for (int ii = 0; ii < rows; ++ii)
 	{
@@ -958,6 +1180,30 @@ void Encoder::PrintGECompressMatrix()
 
 	cout << endl;
 }
+
+void Encoder::InvPrintGECompressMatrix()
+{
+	int rows = _block_count;
+	int cols = _defer_count + _added_count;
+
+	cout << endl << "GE (Inv) Compress matrix is " << rows << " x " << cols << ":" << endl;
+
+	for (int ii = 0; ii < rows; ++ii)
+	{
+		for (int jj = 0; jj < cols; ++jj)
+		{
+			if (_ge_compress_matrix[_ge_compress_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
+				cout << '1';
+			else
+				cout << '0';
+		}
+		cout << endl;
+	}
+
+	cout << endl;
+}
+
+#endif // CAT_DEBUG
 
 /*
 		The second step of compression is to zero the left
@@ -990,7 +1236,7 @@ void Encoder::PrintGECompressMatrix()
 	without additional temporary storage space.
 */
 
-void Encoder::Compress()
+void Encoder::MulCompress()
 {
 	CAT_IF_DEBUG(cout << endl << "---- Compress ----" << endl << endl;)
 
@@ -1085,7 +1331,7 @@ void Encoder::Compress()
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	CopyDeferredColumns();
+	MulCopyDeferredColumns();
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 }
@@ -1343,7 +1589,7 @@ CAT_INLINE void Encoder::GenerateWindowTable16(const u8 **window_table, u16 acti
 	}
 }
 
-bool Encoder::SolveTriangleColumnsWindowed()
+bool Encoder::MulSolveTriangleColumnsWindowed()
 {
 	CAT_IF_DEBUG(cout << endl << "---- SolveTriangleColumnsWindowed ----" << endl << endl;)
 
@@ -1550,12 +1796,12 @@ bool Encoder::SolveTriangleColumnsWindowed()
 	return true;
 }
 
-void Encoder::SolveTriangleColumns()
+void Encoder::MulSolveTriangleColumns()
 {
 	u16 ge_rows = _defer_count + _added_count;
 
 	// Attempt to solve using window optimization
-	if (ge_rows > 16 && SolveTriangleColumnsWindowed())
+	if (ge_rows > 16 && MulSolveTriangleColumnsWindowed())
 		return;
 
 	CAT_IF_DEBUG(cout << endl << "---- SolveTriangleColumns ----" << endl << endl;)
@@ -1870,22 +2116,44 @@ bool Encoder::GenerateCheckBlocks()
 
 	// (2) Compression
 
-	if (!CompressSetup())
-		return false;
+	if (_block_count > 2048)
+	{
+		if (!InvCompressSetup())
+			return false;
 
-	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	CAT_IF_DEBUG(cout << "After CompressSetup:" << endl;)
-	CAT_IF_DEBUG(PrintGEMatrix();)
-	CAT_IF_DEBUG(PrintGECompressMatrix();)
+		CAT_IF_DEBUG(cout << "After InvCompressSetup:" << endl;)
+		CAT_IF_DEBUG(PrintGEMatrix();)
+		CAT_IF_DEBUG(InvPrintGECompressMatrix();)
 
-	Compress();
+		InvCompress();
 
-	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
-	CAT_IF_DEBUG(cout << "After Compress:" << endl;)
-	CAT_IF_DEBUG(PrintGEMatrix();)
-	CAT_IF_DEBUG(PrintGECompressMatrix();)
+		CAT_IF_DEBUG(cout << "After Compress:" << endl;)
+		CAT_IF_DEBUG(PrintGEMatrix();)
+		CAT_IF_DEBUG(InvPrintGECompressMatrix();)
+	}
+	else
+	{
+		if (!MulCompressSetup())
+			return false;
+
+		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+
+		CAT_IF_DEBUG(cout << "After CompressSetup:" << endl;)
+		CAT_IF_DEBUG(PrintGEMatrix();)
+		CAT_IF_DEBUG(MulPrintGECompressMatrix();)
+
+		MulCompress();
+
+		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+
+		CAT_IF_DEBUG(cout << "After Compress:" << endl;)
+		CAT_IF_DEBUG(PrintGEMatrix();)
+		CAT_IF_DEBUG(MulPrintGECompressMatrix();)
+	}
 
 	// (3) Gaussian Elimination
 
@@ -1897,7 +2165,14 @@ bool Encoder::GenerateCheckBlocks()
 	CAT_IF_DEBUG(cout << "After Triangle:" << endl;)
 	CAT_IF_DEBUG(PrintGEMatrix();)
 
-	SolveTriangleColumns();
+	if (_block_count > 2048)
+	{
+		InvSolveTriangleColumns();
+	}
+	else
+	{
+		MulSolveTriangleColumns();
+	}
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
@@ -1961,57 +2236,6 @@ Encoder::~Encoder()
 	Cleanup();
 }
 
-static const u16 PRIMES[] = {
-	3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53,
-	59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109,
-	113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173,
-	179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233,
-	239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293,
-	307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367,
-	373, 379, 383, 389, 397, 401, 409, 419, 421, 431, 433,
-	439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499,
-	503, 509, 521, 523, 541, 547, 557, 563, 569, 571, 577,
-	587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643,
-	647, 653, 659, 661, 673, 677, 683, 691, 701, 709, 719,
-	727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
-	809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863,
-	877, 881, 883, 887, 907, 911, 919, 929, 937, 941, 947,
-	953, 967, 971, 977, 983, 991, 997, 1009, 1013, 1019,
-	1021, 1031, 1033, 1039, 1049, 1051, 1061, 1063, 1069,
-	1087, 1091, 1093, 1097,
-};
-
-static int NextHighestPrime(int n)
-{
-	n |= 1;
-
-	int p_max = (int)sqrt((float)n);
-
-	for (;;)
-	{
-		const u16 *prime = PRIMES;
-
-		for (;;)
-		{
-			int p = *prime;
-
-			if (p > p_max)
-				return n;
-
-			if (n % p == 0)
-				break;
-
-			++prime;
-		}
-
-		n += 2;
-
-		if (p_max * p_max < n)
-			++p_max;
-	}
-
-	return n;
-}
 
 bool Encoder::Initialize(const void *message_in, int message_bytes, int block_bytes)
 {
@@ -2041,8 +2265,8 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_next_block_id = 0;
 
 	// Calculate next primes after column counts for pseudo-random generation of peeling rows
-	_block_next_prime = NextHighestPrime(_block_count);
-	_added_next_prime = NextHighestPrime(_added_count);
+	_block_next_prime = NextPrime16(_block_count);
+	_added_next_prime = NextPrime16(_added_count);
 
 	CAT_IF_DEBUG(cout << "Total message = " << message_bytes << " bytes" << endl;)
 	CAT_IF_DEBUG(cout << "Block bytes = " << block_bytes << ".  Final bytes = " << _final_bytes << endl;)
