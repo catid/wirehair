@@ -117,13 +117,14 @@ static u16 cat_fred_sqrt16(u16 x)
 }
 
 
-//// Utility: 16-bit Hybrid Sieve of Eratosthenes Next Prime function
+//// Utility: 16-bit Truncated Sieve of Eratosthenes Next Prime function
 
 /*
 	It uses trial division up to the square root of the number to test.
 	Uses a truncated sieve table to pick the next number to try, which
 	avoids small factors 2, 3, 5, 7.  This can be considered a more
-	involved version of incrementing by 2 instead of 1.
+	involved version of incrementing by 2 instead of 1.  It takes about
+	25% less time on average than the approach that just increments by 2.
 
 	Because of the tabular increment this is a hybrid approach.  The sieve
 	would just use a very large table, but I wanted to limit the size of
@@ -141,7 +142,7 @@ static const u8 SIEVE_TABLE[SIEVE_TABLE_SIZE] = {
 	7, 6, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2,
 	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
 	1, 0, 5, 4, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
-	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+	1, 0, 5, 4, 3, 2, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
 };
 
 static const u16 PRIMES_UNDER_256[] = {
