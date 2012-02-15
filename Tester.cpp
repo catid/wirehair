@@ -23,8 +23,8 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 1800;
-	block_bytes = 1281;
+	int block_count = 256;
+	block_bytes = 1024 + 512 + 1;
 	message_bytes = block_bytes * block_count;
 	message = new u8[message_bytes];
 
@@ -36,13 +36,15 @@ int main()
 	for (;;)
 	{
 		//u32 clocks = m_clock.MeasureClocks(1, &TestLoop);
+		double start = m_clock.usec();
 		u32 clocks = m_clock.cycles();
 		TestLoop();
 		clocks = m_clock.cycles() - clocks;
+		double end = m_clock.usec();
 
 		if (success)
 		{
-			cout << "main: encoder.Initialize in " << clocks << " clocks with seed " << encoder.GetSeed() << endl;
+			cout << "main: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with seed " << encoder.GetSeed() << endl;
 
 			u8 *block = new u8[3 + message_bytes];
 
@@ -54,12 +56,11 @@ int main()
 				if (block[3] != (u8)ii)
 				{
 					success = false;
-					cout << "Block " << ii << " doesn't match: " << (int)block[3] << endl;
-					//cin.get();
+					//cout << "Block " << ii << " doesn't match: " << (int)block[3] << endl;
 				}
 			}
 
-			//cin.get();
+			cin.get();
 		}
 		else
 		{

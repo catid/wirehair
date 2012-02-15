@@ -111,6 +111,8 @@ class Encoder
 	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
 	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
 
+	CAT_INLINE void GenerateWindowTable16(const u8 **window_table, u16 active, u16 peel_column_i);
+
 	void PrintGECompressMatrix();
 	void PrintGEMatrix();
 
@@ -162,8 +164,8 @@ class Encoder
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
 
-	// Solve one column based on compress matrix and GE matrix
-	void SolveTriangleColumn(u16 ge_row_i, u16 column_i, u16 pivot_i);
+	// Use a 4-bit window to optimize the solution
+	bool SolveTriangleColumnsWindowed();
 
 	// Solve pivot column values from the row op schedule from Triangle
 	void SolveTriangleColumns();
