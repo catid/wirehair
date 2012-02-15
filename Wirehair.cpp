@@ -246,6 +246,11 @@ static int GetCheckBlockCount(int block_count)
 }
 
 #if defined(CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR)
+/*
+	This is Stewart Platt's excellent loop-less iterator optimization.
+	His common cases all require no additional modulus operation, which
+	makes it faster than the rare case that I designed.
+*/
 CAT_INLINE static void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 {
 	x = (x + a) % p;
@@ -256,7 +261,7 @@ CAT_INLINE static void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 
 		if (a >= distance)
 			x = a - distance;
-		else // my contribution, the rare case:
+		else // the rare case:
 			x = (((u32)a << 16) - distance) % a;
 	}
 }
@@ -324,11 +329,12 @@ struct Encoder::PeelColumn
 };
 #pragma pack(pop)
 
+
+//// (1) Peeling:
+
 /*
 	Peel() and PeelAvalanche() are split up into two functions because I found
 	that the PeelAvalanche() function can be reused later during GreedyPeeling().
-
-	(1) Peeling:
 
 		Until N rows are received, the peeling algorithm is executed:
 
@@ -671,8 +677,11 @@ void Encoder::GreedyPeeling()
 	form of the peeled matrix is apparent in the diagram above.
 */
 
+
+//// (2) Compression:
+
 /*
-	(2) Compression:
+	Surprisingly, this is by far the most complex step of the algorithm.
 
 	At this point the generator matrix has been re-organized
 	into peeled and deferred rows and columns:
@@ -741,32 +750,6 @@ void Encoder::GreedyPeeling()
 
 	Multiplication is faster than Inversion for small sizes because it uses much
 	less memory and because the row op count is comparable or lower.
-*/
-
-/*
-	One more subtle optimization.  Depending on how the GE matrix
-	is constructed, it can be put in a roughly upper-triangular form
-	from the start so it looks like this:
-
-		+---------+---------+
-		| D D D D | D D D 1 |
-		| D D D D | D D 1 M |
-		| D D D D | D 1 M M |
-		| D D D D | 1 M M M |
-		+---------+---------+
-		| 0 1 0 1 | M M M M |
-		| 0 0 1 0 | M M M M |
-		| 0 0 0 1 | M M M M |
-		| 0 0 0 0 | M M M M |
-		+---------+---------+
-
-	In the example above, the top 4 rows are dense matrix rows.
-	The last 4 columns are mixing columns and are also dense.
-	The lower left sub-matrix is sparse and roughly upper triangular
-	because it is the intersection of sparse rows in the generator
-	matrix.  This form is achieved by adding deferred rows starting
-	from last deferred to first, and adding deferred columns starting
-	from last deferred to first.
 */
 
 /*
@@ -1337,82 +1320,6 @@ void Encoder::MulCompress()
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 }
 
-bool Encoder::Triangle()
-{
-	CAT_IF_DEBUG(cout << endl << "---- Triangle ----" << endl << endl;)
-
-	u16 pivot_count = _defer_count + _added_count;
-
-	// Initialize pivot array
-	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
-		_ge_pivots[pivot_i] = pivot_i;
-
-	// For each pivot to determine,
-	u16 ge_column_i = 0;
-	u64 ge_mask = (u64)1 << (ge_column_i & 63);
-	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
-	{
-		int word_offset = ge_column_i >> 6;
-		u64 *ge_matrix_offset = _ge_matrix + word_offset;
-
-		// Find pivot
-		bool found = false;
-		for (u16 pivot_j = pivot_i; pivot_j < pivot_count; ++pivot_j)
-		{
-			// Determine if the row contains the bit we want
-			u16 ge_row_j = _ge_pivots[pivot_j];
-			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
-
-			// If the bit was found,
-			if (*ge_row & ge_mask)
-			{
-				found = true;
-				CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
-
-				// Swap out the pivot index for this one
-				u16 temp = _ge_pivots[pivot_i];
-				_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
-				_ge_pivots[pivot_j] = temp;
-
-				// Prepare masked first word
-				u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
-
-				// For each remaining unused row,
-				for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
-				{
-					// Determine if the row contains the bit we want
-					u16 ge_row_k = _ge_pivots[pivot_k];
-					u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
-
-					// If the bit was found,
-					if (*rem_row & ge_mask)
-					{
-						// Add the pivot row to eliminate the bit from this row, preserving previous bits
-						*rem_row ^= row0;
-
-						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
-							rem_row[ii] ^= ge_row[ii];
-					}
-				}
-
-				break;
-			}
-		}
-
-		// If pivot could not be found,
-		if (!found)
-		{
-			CAT_IF_DEBUG(cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;)
-			return false;
-		}
-
-		// Generate next mask
-		ge_mask = CAT_ROL64(ge_mask, 1);
-	}
-
-	return true;
-}
-
 CAT_INLINE void Encoder::GenerateWindowTable16(const u8 **window_table, u16 active, u16 peel_column_i)
 {
 	// Generate single bit window values
@@ -1904,6 +1811,112 @@ void Encoder::MulSolveTriangleColumns()
 	CAT_IF_ROWOP(cout << "SolveTriangleColumns used " << rowops << " row ops" << endl;)
 }
 
+
+/*
+	One more subtle optimization.  Depending on how the GE matrix
+	is constructed, it can be put in a roughly upper-triangular form
+	from the start so it looks like this:
+
+		+---------+---------+
+		| D D D D | D D D 1 |
+		| D D D D | D D 1 M |
+		| D D D D | D 1 M M |
+		| D D D D | 1 M M M |
+		+---------+---------+
+		| 0 1 0 1 | M M M M |
+		| 0 0 1 0 | M M M M |
+		| 0 0 0 1 | M M M M |
+		| 0 0 0 0 | M M M M |
+		+---------+---------+
+
+	In the example above, the top 4 rows are dense matrix rows.
+	The last 4 columns are mixing columns and are also dense.
+	The lower left sub-matrix is sparse and roughly upper triangular
+	because it is the intersection of sparse rows in the generator
+	matrix.  This form is achieved by adding deferred rows starting
+	from last deferred to first, and adding deferred columns starting
+	from last deferred to first.
+*/
+
+
+//// (3) Gaussian Elimination
+
+bool Encoder::Triangle()
+{
+	CAT_IF_DEBUG(cout << endl << "---- Triangle ----" << endl << endl;)
+
+	u16 pivot_count = _defer_count + _added_count;
+
+	// Initialize pivot array
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+		_ge_pivots[pivot_i] = pivot_i;
+
+	// For each pivot to determine,
+	u16 ge_column_i = 0;
+	u64 ge_mask = (u64)1 << (ge_column_i & 63);
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	{
+		int word_offset = ge_column_i >> 6;
+		u64 *ge_matrix_offset = _ge_matrix + word_offset;
+
+		// Find pivot
+		bool found = false;
+		for (u16 pivot_j = pivot_i; pivot_j < pivot_count; ++pivot_j)
+		{
+			// Determine if the row contains the bit we want
+			u16 ge_row_j = _ge_pivots[pivot_j];
+			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
+
+			// If the bit was found,
+			if (*ge_row & ge_mask)
+			{
+				found = true;
+				CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+
+				// Swap out the pivot index for this one
+				u16 temp = _ge_pivots[pivot_i];
+				_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+				_ge_pivots[pivot_j] = temp;
+
+				// Prepare masked first word
+				u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
+
+				// For each remaining unused row,
+				for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
+				{
+					// Determine if the row contains the bit we want
+					u16 ge_row_k = _ge_pivots[pivot_k];
+					u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
+
+					// If the bit was found,
+					if (*rem_row & ge_mask)
+					{
+						// Add the pivot row to eliminate the bit from this row, preserving previous bits
+						*rem_row ^= row0;
+
+						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
+							rem_row[ii] ^= ge_row[ii];
+					}
+				}
+
+				break;
+			}
+		}
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			CAT_IF_DEBUG(cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;)
+			return false;
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROL64(ge_mask, 1);
+	}
+
+	return true;
+}
+
 void Encoder::Diagonal()
 {
 	CAT_IF_DEBUG(cout << endl << "---- Diagonal ----" << endl << endl;)
@@ -1952,6 +1965,9 @@ void Encoder::Diagonal()
 
 	CAT_IF_ROWOP(cout << "Diagonal used " << rowops << " row ops" << endl;)
 }
+
+
+//// (4) Substitute
 
 void Encoder::Substitute()
 {
@@ -2043,6 +2059,9 @@ void Encoder::Substitute()
 
 	CAT_IF_ROWOP(cout << "Substitute used " << rowops << " row ops" << endl;)
 }
+
+
+//// Main Driver
 
 bool Encoder::GenerateCheckBlocks()
 {
