@@ -102,13 +102,18 @@ class Encoder
 	u16 _defer_head_rows;		// Head of peeling deferred rows list
 	u16 _defer_count;			// Count of deferred rows
 
+	// Inversion Compression approach
+	u16 _peel_tail_rows;		// Tail of peeling solved rows list, so it can be in order of solution
+
 	// Gaussian elimination state
-	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
-	int _ge_compress_pitch;		// Pitch in words of GE compression matrix
 	u64 *_ge_matrix;			// Gaussian elimination matrix
 	int _ge_pitch;				// Pitch in words of GE matrix
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
 	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
+
+	// Multiplication Compression approach
+	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
+	int _ge_compress_pitch;		// Pitch in words of GE compression matrix
 	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
 
 	CAT_INLINE void GenerateWindowTable16(const u8 **window_table, u16 active, u16 peel_column_i);

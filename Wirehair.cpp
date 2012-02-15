@@ -501,7 +501,9 @@ void Encoder::GreedyPeeling()
 
 		Re-ordering the actual matrix is not required, but the lower-triangular
 	form of the peeled matrix is apparent in the diagram above.
+*/
 
+/*
 	(2) Compression:
 
 	At this point the generator matrix has been re-organized
@@ -527,11 +529,58 @@ void Encoder::GreedyPeeling()
 		| 1 0 1 1 0 | 1 0 | 0 1 | y |   | 0 |
 		+-----------+-----+-----+---+   +---+
 
-		P = Peeled rows/columns (re-ordered)
-		B = Columns deferred for GE
-		C = Mixing columns always deferred for GE
-		A = Sparse rows from peeling matrix deferred for GE
-		0 = Dense rows from dense matrix deferred for GE
+	P = Peeled rows/columns (re-ordered)
+	B = Columns deferred for GE
+	C = Mixing columns always deferred for GE
+	A = Sparse rows from peeling matrix deferred for GE
+	0 = Dense rows from dense matrix deferred for GE
+*/
+
+/*
+	Compression step objective:
+
+		The goal of compression is to eliminate the peeled columns from
+	the deferred rows of the matrix, so that Gaussian elimination can be
+	applied to the deferred columns of the matrix.  The GE matrix will
+	be a small square matrix with dimensions proportional to SQRT(N),
+	which is already roughly upper triangular (see notes below).
+
+		I see two ways to do this step:
+
+	(1) Multiply the peeled matrix into the deferred rows to eliminate them.
+
+		This approach is called Multiplication-Based Matrix Compression here.
+		The multiplication step is O(n^^1.5) for all rows, but doesn't
+			require the peeled matrix inversion.
+		Matrix uses less memory because the longer dimension is bitwise.
+		Can use a windowed approach to multiplication for better performance.
+
+	(2) Invert the peeled matrix and then multiply into deferred rows.
+
+		This approach is called Inversion-Based Matrix Compression here.
+		The peeled matrix inversion scales O(n).
+		The multiplication step is O(sqrt(n)) for deferred rows, and
+			O(n^^1.5) for dense rows.  Windowing helps for dense rows.
+
+	Both approaches require repeating matrix multiplication after GE Triangle
+	finishes, so that no temporary space is needed for block values.
+*/
+
+/*
+	Inversion-Based Matrix Compression:
+
+		Since the re-ordered matrix above is in lower triangular form,
+	and since the weight of each row is limited to a constant, the cost
+	of inverting the peeled matrix is O(n).
+
+		After inverting the peeling matrix, causing the mixing columns
+	to become dense, the peeling matrix will be the identity matrix.
+	It then becomes easy to eliminate the peeled columns of the deferred
+	rows, as the
+*/
+
+/*
+	Multiplication-Based Matrix Compression:
 
 		The first step of compression is to generate the
 	lower matrix in a bitfield in memory.
