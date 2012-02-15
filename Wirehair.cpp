@@ -33,9 +33,32 @@ using namespace cat;
 using namespace wirehair;
 
 
+/*
+	TODO:
+
+	1. Implement peeling matrix inverse compression algorithm
+	2. Fix bugs in non-windowed multiplication compression algorithm
+	3. Fix bugs in windowed multiplication compression algorithm
+	4. Implement decoder
+	5. Simulate and tune the added check block count for each N
+	6. Tune the dense matrix rows for faster multiplication
+	7. Implement implicit zeroed data blocks so that table won't be huge
+	8. Create a table to store the seed values for each N
+	9. Simulate and tune the generator seed for each N
+	10. Implement an asymmetric version too
+
+	Benchmark it!
+	Document it!
+	Ship it!
+	???
+	Profit!
+*/
+
+
 // Switches:
 #define CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR
 //#define CAT_DUMP_ROWOP_COUNTERS
+//#define CAT_ENCODER_COPY_FIRST_N
 
 
 #if defined(CAT_DEBUG) || defined(CAT_DUMP_ROWOP_COUNTERS)
@@ -2308,7 +2331,8 @@ void Encoder::Generate(void *block)
 	buffer[1] = (u8)(id >> 8);
 	buffer[2] = (u8)(id >> 16);
 	buffer += 3;
-/*
+
+#if defined(CAT_ENCODER_COPY_FIRST_N)
 	// For the message blocks,
 	if (id < _block_count)
 	{
@@ -2330,7 +2354,8 @@ void Encoder::Generate(void *block)
 
 		return;
 	}
-*/
+#endif // CAT_ENCODER_COPY_FIRST_N
+
 	CAT_IF_DEBUG(cout << "Generating row " << id << ":";)
 
 	// Initialize PRNG
