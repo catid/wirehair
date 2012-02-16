@@ -267,7 +267,7 @@ static u16 GenerateWeight(u32 rv, u16 max_weight)
 CAT_INLINE static int GetCheckBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return cat_fred_sqrt16(block_count) / 2 + 1;
+	return cat_fred_sqrt16(block_count) + 1;
 }
 
 #if defined(CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR)
@@ -2409,11 +2409,10 @@ bool Encoder::Triangle()
 		_ge_pivots[pivot_i] = pivot_i;
 
 	// For each pivot to determine,
-	u16 ge_column_i = 0;
-	u64 ge_mask = (u64)1 << (ge_column_i & 63);
+	u64 ge_mask = 1;
 	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 	{
-		int word_offset = ge_column_i >> 6;
+		int word_offset = pivot_i >> 6;
 		u64 *ge_matrix_offset = _ge_matrix + word_offset;
 
 		// Find pivot
@@ -2710,12 +2709,6 @@ bool Encoder::GenerateCheckBlocks()
 		CAT_IF_DEBUG(InvPrintGECompressMatrix();)
 
 		InvCompress();
-
-		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
-
-		CAT_IF_DEBUG(cout << "After Compress:" << endl;)
-		CAT_IF_DEBUG(PrintGEMatrix();)
-		CAT_IF_DEBUG(InvPrintGECompressMatrix();)
 	}
 	else
 	{
@@ -2729,18 +2722,24 @@ bool Encoder::GenerateCheckBlocks()
 		CAT_IF_DEBUG(MulPrintGECompressMatrix();)
 
 		MulCompress();
-
-		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
-
-		CAT_IF_DEBUG(cout << "After Compress:" << endl;)
-		CAT_IF_DEBUG(PrintGEMatrix();)
-		CAT_IF_DEBUG(MulPrintGECompressMatrix();)
 	}
+
+	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+
+	CAT_IF_DEBUG(cout << "After Compress:" << endl;)
+	CAT_IF_DEBUG(PrintGEMatrix();)
 
 	// (3) Gaussian Elimination
 
 	if (!Triangle())
+	{
+		CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
+
+		CAT_IF_DEBUG(cout << "After Triangle FAILED:" << endl;)
+		CAT_IF_DEBUG(PrintGEMatrix();)
+
 		return false;
+	}
 
 	CAT_IF_DEBUG( _ASSERTE( _CrtCheckMemory( ) ); )
 
