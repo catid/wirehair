@@ -1086,7 +1086,7 @@ void Encoder::InvMultiplyDenseRows()
 	{
 		CAT_IF_DEBUG(cout << "GE row " << ge_row_i << ":";)
 
-		// Initialize the row to zeros
+		// Initialize the row to zeroes
 		for (int ii = 0; ii < _ge_pitch; ++ii)
 			ge_dest_row[ii] = 0;
 
@@ -2361,6 +2361,15 @@ void Encoder::InvPrintGECompressMatrix()
 	matrix.  This form is achieved by adding deferred rows starting
 	from last deferred to first, and adding deferred columns starting
 	from last deferred to first.
+
+	Gaussian elimination will proceed from left to right on the matrix.
+	So, having an upper triangular form will prevent left-most zeroes
+	from being eaten up when a row is eliminated by one above it.  This
+	reduces row operations.  For example, GE on a 64x64 matrix will do
+	on average 100 fewer row operations on this form rather than its
+	transpose (where the sparse part is put in the upper right).
+
+	This is not a huge improvement but every little bit helps.
 */
 
 
@@ -2525,6 +2534,11 @@ void Encoder::Substitute()
 			combo = 0;
 		}
 		CAT_IF_ROWOP(++rowops;)
+
+		// NOTE: Doing mixing columns first because mixing weight >= 1 so
+		// the combo is guaranteed to be used up, and the average weight
+		// of mixing columns is less than the peeling columns so the inner
+		// loop of the peeling columns should be less complex.
 
 		// For each mixing column in the row,
 		u16 a = row->mix_a;
@@ -2850,7 +2864,7 @@ void Encoder::Generate(void *block)
 			// For the final block, copy partial block
 			memcpy(buffer, _message_blocks, _final_bytes);
 
-			// Pad with zeros
+			// Pad with zeroes
 			memset(buffer + _final_bytes, 0, _block_bytes - _final_bytes);
 		}
 
