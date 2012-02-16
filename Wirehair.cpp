@@ -32,7 +32,7 @@
 using namespace cat;
 using namespace wirehair;
 
-static int seed = 0;
+static int seed = 28;
 
 CAT_INLINE static u32 GetGeneratorSeed(int block_count)
 {
@@ -879,7 +879,7 @@ void Encoder::InvPeelDiagonal()
 	{
 		column = &_peel_cols[defer_i];
 
-		CAT_IF_DEBUG(cout << "  GE column " << ge_column_i << " mapped to matrix column " << defer_i << endl;)
+		CAT_IF_DEBUG(cout << "  GE column " << ge_column_i << " mapped to matrix column " << defer_i << " :";)
 
 		// Set bit for each row affected by this deferred column
 		u64 *matrix_row_offset = _ge_compress_matrix + (ge_column_i >> 6);
@@ -887,7 +887,15 @@ void Encoder::InvPeelDiagonal()
 		u16 count = column->row_count;
 		u16 *ref_row = column->rows;
 		while (count--)
-			matrix_row_offset[*ref_row++ * _ge_compress_pitch] |= ge_mask;
+		{
+			u16 row_i = *ref_row++;
+
+			CAT_IF_DEBUG(cout << " " << row_i;)
+
+			matrix_row_offset[_ge_compress_pitch * row_i] |= ge_mask;
+		}
+
+		CAT_IF_DEBUG(cout << endl;)
 
 		// Set column map for this GE column
 		_ge_col_map[ge_column_i] = defer_i;
@@ -920,7 +928,7 @@ void Encoder::InvPeelDiagonal()
 	{
 		row = &_peel_rows[defer_row_i];
 
-		CAT_IF_DEBUG(cout << "  Deferred row " << defer_row_i << " set mix columns" << endl;)
+		CAT_IF_DEBUG(cout << "  Deferred row " << defer_row_i << " set mix columns :";)
 
 		// Mark it as deferred for the following loop
 		row->peel_column = LIST_TERM;
@@ -937,10 +945,14 @@ void Encoder::InvPeelDiagonal()
 			u64 ge_mask = (u64)1 << (ge_column_i & 63);
 			ge_row[ge_column_i >> 6] ^= ge_mask;
 
+			CAT_IF_DEBUG(cout << " " << ge_column_i;)
+
 			if (--weight <= 0) break;
 
 			IterateNextColumn(x, _added_count, _added_next_prime, a);
 		}
+
+		CAT_IF_DEBUG(cout << endl;)
 	}
 
 	CAT_IF_DEBUG(cout << "After filling in mixing columns for deferred rows:" << endl;)
@@ -959,7 +971,7 @@ void Encoder::InvPeelDiagonal()
 		u16 peel_column_i = row->peel_column;
 		u64 *ge_row = _ge_compress_matrix + _ge_compress_pitch * peel_row_i;
 
-		CAT_IF_DEBUG(cout << "  Peeled row " << peel_row_i << " for peeled column " << peel_column_i << endl;)
+		CAT_IF_DEBUG(cout << "  Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
 
 		// Generate mixing columns for this row
 		u16 weight = row->mix_weight;
@@ -972,10 +984,14 @@ void Encoder::InvPeelDiagonal()
 			u64 ge_mask = (u64)1 << (ge_column_i & 63);
 			ge_row[ge_column_i >> 6] ^= ge_mask;
 
+			CAT_IF_DEBUG(cout << " " << ge_column_i;)
+
 			if (--weight <= 0) break;
 
 			IterateNextColumn(x, _added_count, _added_next_prime, a);
 		}
+
+		CAT_IF_DEBUG(cout << endl;)
 
 		// Lookup output block
 		u8 *temp_block_src = _check_blocks + _block_bytes * peel_column_i;
@@ -993,6 +1009,8 @@ void Encoder::InvPeelDiagonal()
 				memset(temp_block_src + _final_bytes, 0, _block_bytes - _final_bytes);
 			}
 
+			CAT_IF_DEBUG(cout << "  -- Copied from " << peel_row_i << " because has not been copied yet.  Output block = " << (int)temp_block_src[0] << endl;)
+
 			// NOTE: Do not need to set is_copied here because no further rows reference this one
 		}
 
@@ -1003,6 +1021,11 @@ void Encoder::InvPeelDiagonal()
 		while (count--)
 		{
 			u16 ref_row_i = *ref_row++;
+
+			// Skip this row
+			if (ref_row_i == peel_row_i) continue;
+
+			CAT_IF_DEBUG(cout << "  ++ Adding to referencing row " << ref_row_i << endl;)
 
 			// Add GE row to referencing GE row
 			u64 *ge_ref_row = _ge_compress_matrix + _ge_compress_pitch * ref_row_i;
