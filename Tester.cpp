@@ -256,7 +256,7 @@ int main()
 	}
 	cout << b << endl;
 */
-	int block_count = 1024;
+	int block_count = 5;
 	block_bytes = 1024 + 512 + 1;
 	message_bytes = block_bytes * block_count;
 	message = new u8[message_bytes];
@@ -289,7 +289,7 @@ int main()
 				if (block[3] != (u8)ii)
 				{
 					success = false;
-					//cout << "Block " << ii << " doesn't match: " << (int)block[3] << endl;
+					cout << "Block " << ii << " doesn't match: " << (int)block[3] << endl;
 				}
 			}
 

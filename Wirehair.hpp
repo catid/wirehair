@@ -104,6 +104,7 @@ class Encoder
 
 	// Inversion Compression approach
 	u16 _peel_tail_rows;		// Tail of peeling solved rows list, so it can be in order of solution
+	bool _use_inverse_method;	// Flag indicating whether or not inverse method is used for compression
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
@@ -142,6 +143,15 @@ class Encoder
 
 	// Build GE matrix for compression
 	bool InvCompressSetup();
+
+	// Diagonalize the peeling matrix, generating deferred columns for each row, including peeled values
+	void InvPeelDiagonal();
+
+	// Copy deferred rows from the compress matrix to the GE matrix
+	void InvCopyDeferredRows();
+
+	// Multiply dense rows by peeling matrix to generate GE rows, but no row values yet
+	void InvMultiplyDenseRows();
 
 	// Allocate matrices for compression operation and GE
 	bool InvCompressAllocate();
