@@ -980,7 +980,7 @@ public:
 	{
 		_x = (u64)0xfffd21a7 * (u32)_x + (u32)(_x >> 32);
 		_y = (u64)0xfffd1361 * (u32)_y + (u32)(_y >> 32);
-		return CAT_ROL32((u32)_x, 7) + CAT_ROL32((u32)_y, 13);
+		return CAT_ROL32((u32)_x, 7) + (u32)_y;
 	}
 };
 

@@ -293,7 +293,7 @@ int main()
 				}
 			}
 
-			cin.get();
+			//cin.get();
 		}
 		else
 		{
