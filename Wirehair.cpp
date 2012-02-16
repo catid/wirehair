@@ -1026,7 +1026,7 @@ void Encoder::InvPeelDiagonal()
 				else
 				{
 					// Add this row block value with message block to it (optimization)
-					const u8 *block_src = _message_blocks + _block_bytes * peel_row_i;
+					const u8 *block_src = _message_blocks + _block_bytes * ref_row_i;
 					if (ref_row_i != _block_count - 1)
 						memxor(temp_block_dest, temp_block_src, block_src, _block_bytes);
 					else
@@ -1050,12 +1050,10 @@ void Encoder::InvCopyDeferredRows()
 	CAT_IF_DEBUG(cout << endl << "---- InvCopyDeferredRows ----" << endl << endl;)
 
 	// For each deferred row,
-	PeelRow *row;
 	u64 *ge_row = _ge_matrix + _ge_pitch * _added_count;
-	for (u16 ge_row_i = 0, defer_row_i = _defer_head_rows; defer_row_i != LIST_TERM; defer_row_i = row->next, ge_row += _ge_pitch, ++ge_row_i)
+	for (u16 ge_row_i = 0, defer_row_i = _defer_head_rows; defer_row_i != LIST_TERM;
+		defer_row_i = _peel_rows[defer_row_i].next, ge_row += _ge_pitch, ++ge_row_i)
 	{
-		row = &_peel_rows[defer_row_i];
-
 		CAT_IF_DEBUG(cout << "Peeled row " << defer_row_i << " for GE row " << ge_row_i << endl;)
 
 		// Copy compress row to GE row
