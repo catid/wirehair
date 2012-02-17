@@ -32,12 +32,12 @@
 using namespace cat;
 using namespace wirehair;
 
-static int seed = 28;
+static int seed = 31;
 
 CAT_INLINE static u32 GetGeneratorSeed(int block_count)
 {
 	// TODO: Needs to be simulated (2)
-	return seed++;
+	return seed;//++;
 }
 
 
@@ -67,8 +67,8 @@ CAT_INLINE static u32 GetGeneratorSeed(int block_count)
 #define CAT_STEW_HYPERDYNAMIC_PLATTONIC_ITERATOR /* Use Stew's more efficient column iterator */
 //#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
-#define CAT_INVERSE_THRESHOLD 1 /* Block count where peeling inverse version starts getting used */
-#define CAT_WINDOW_THRESHOLD 16 /* Compression row count when 4-bit window is employed */
+#define CAT_INVERSE_THRESHOLD 10000 /* Block count where peeling inverse version starts getting used */
+#define CAT_WINDOW_THRESHOLD 10000 /* Compression row count when 4-bit window is employed */
 
 
 #if defined(CAT_DEBUG) || defined(CAT_DUMP_ROWOP_COUNTERS)
@@ -1118,7 +1118,7 @@ void Encoder::InvMultiplyDenseRows()
 
 		// Initialize PRNG
 		CatsChoice prng;
-		prng.Initialize(_g_seed, ~ge_row_i);
+		prng.Initialize(_g_seed, ge_row_i | (_block_count << 16));
 
 		// For each peeling column,
 		u32 row_bits;
@@ -1303,7 +1303,7 @@ void Encoder::InvSolveTriangleColumns()
 
 			// Initialize PRNG
 			CatsChoice prng;
-			prng.Initialize(_g_seed, ~ge_row_i);
+			prng.Initialize(_g_seed, ge_row_i | (_block_count << 16));
 
 			// For each peeling column,
 			u32 row_bits;
@@ -1486,6 +1486,14 @@ bool Encoder::MulCompressAllocate()
 {
 	CAT_IF_DEBUG(cout << endl << "---- MulCompressAllocate ----" << endl << endl;)
 
+	CAT_IF_DEBUG(
+		if (_added_count > 64)
+		{
+			cout << "Cannot have added count > 64 right now" << endl;
+			return false;
+		}
+	)
+
 	// Allocate GE matrix
 	int ge_rows = _defer_count + _added_count;
 	int ge_pitch = (ge_rows + 63) / 64;
@@ -1567,12 +1575,23 @@ void Encoder::MulFillCompressDense()
 	u64 *ge_compress_row = _ge_compress_matrix;
 	while (fill_count--) *ge_compress_row++ = ((u64)prng.Next() << 32) | prng.Next();
 
-	CAT_IF_DEBUG(
-		if (_added_count > 64)
+#if 0
+	u64 *ge_compress_row = _ge_compress_matrix;
+	for (u16 ge_row_i = 0; ge_row_i < _added_count; ++ge_row_i)
+	{
+		// Initialize PRNG
+		CatsChoice prng;
+		prng.Initialize(_g_seed, ge_row_i | (_block_count << 16));
+
+		// For each word in the row,
+		for (int ii = 0; ii < _ge_compress_pitch; ++ii)
 		{
-			cout << "Cannot have added count > 64 right now" << endl;
+			u32 rv1 = prng.Next(), rv2 = prng.Next();
+			u64 bits = ((u64)rv2 << 32) | rv1;
+			*ge_compress_row++ = bits;
 		}
-	)
+	}
+#endif
 }
 
 void Encoder::MulFillGEDeferred()
