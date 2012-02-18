@@ -122,6 +122,7 @@
     <ClInclude Include="Clock.hpp" />
     <ClInclude Include="Config.hpp" />
     <ClInclude Include="EndianNeutral.hpp" />
+    <ClInclude Include="GF2Matrix.hpp" />
     <ClInclude Include="memxor.hpp" />
     <ClInclude Include="Platform.hpp" />
     <ClInclude Include="SmallPRNG.hpp" />
@@ -130,6 +131,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Clock.cpp" />
+    <ClCompile Include="GF2Matrix.cpp" />
     <ClCompile Include="memxor.cpp" />
     <ClCompile Include="Tester.cpp" />
     <ClCompile Include="Wirehair.cpp" />

@@ -43,6 +43,8 @@
 
 #include "WirehairDetails.hpp"
 
+extern int g_check_block_count;
+
 namespace cat {
 
 namespace wirehair {

@@ -1,9 +1,11 @@
 #include "Wirehair.hpp"
 #include "SmallPRNG.hpp"
 #include "Clock.hpp"
+#include "GF2Matrix.hpp"
 using namespace cat;
 
 #include <iostream>
+#include <fstream>
 using namespace std;	
 
 static Clock m_clock;
@@ -241,9 +243,141 @@ void TestSqrt2()
 	}
 }
 
+
+static ofstream file;
+
+double BenchmarkOverhead(int trials)
+{
+	u64 success_counter = 0;
+	u64 trials_counter = 0;
+	double clock_sum = 0;
+	u32 clock_count = 0;
+
+	for (;;)
+	{
+		++trials_counter;
+
+		double start = m_clock.usec();
+		TestLoop();
+		double end = m_clock.usec();
+
+		if (success)
+		{
+			++success_counter;
+			//cout << "main: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with seed " << encoder.GetSeed() << endl;
+
+			clock_sum += end - start;
+			++clock_count;
+		}
+
+		if (trials_counter % trials == 0)
+		{
+			double success_rate = success_counter / (double)trials_counter;
+			double speed = clock_sum / (double)clock_count;
+			cout << "Check Blocks = " << g_check_block_count << ".  Success rate at 0 overhead: " << success_rate << " average " << speed << " usec" << endl;
+			file << g_check_block_count << "\t" << success_rate << "\t" << speed << endl;
+			clock_count = 0;
+			clock_sum = 0;
+			return success_rate;
+		}
+	}
+}
+
+
+static const u8 INVERTIBLE_MATRIX_SEEDS[512] = {
+	0,1,2,1,5,2,3,0,0,0,7,3,3,2,0,1,1,1,2,0,0,1,1,2,5,5,4,7,4,4,6,0,
+	0,0,0,1,2,4,4,4,7,0,0,3,8,1,1,0,0,0,0,0,0,6,9,2,4,4,5,4,4,8,5,1,
+	3,1,0,3,1,2,0,7,0,2,5,5,0,4,1,4,4,0,0,2,0,0,8,2,4,4,1,1,2,0,4,7,
+	1,1,1,2,10,12,7,3,5,3,3,0,1,1,1,4,4,3,3,2,3,3,3,0,0,0,0,4,2,11,1,0,
+	1,5,2,7,3,1,1,3,1,0,1,0,0,0,1,1,1,0,2,0,0,0,0,0,3,3,2,2,1,1,0,2,
+	2,1,0,0,7,4,2,2,1,0,0,0,0,0,0,0,0,2,0,0,2,6,1,1,1,3,2,1,0,0,6,0,
+	0,5,3,5,0,5,3,2,1,4,1,1,1,0,3,4,4,2,0,7,7,7,2,0,0,8,1,1,6,2,0,0,
+	0,3,6,3,3,3,2,7,1,1,0,2,2,1,6,0,0,0,0,2,0,0,4,2,5,0,2,3,0,2,2,5,
+	3,0,1,1,1,1,1,1,1,2,0,2,2,1,1,4,9,5,2,4,4,3,0,0,4,5,2,2,5,7,1,7,
+	0,4,1,2,1,3,1,10,0,0,0,1,1,0,0,0,0,2,3,1,16,3,2,0,1,2,3,0,2,3,1,7,
+	7,3,7,2,2,1,1,1,1,1,0,1,2,2,0,0,4,2,6,4,8,1,2,2,7,4,1,1,2,8,0,0,
+	7,4,5,4,4,1,0,0,2,1,2,2,2,1,1,1,0,1,3,1,4,4,3,5,2,2,3,3,9,0,6,11,
+	0,1,4,1,1,2,2,1,1,0,2,2,6,8,5,1,1,1,4,2,2,1,6,9,0,0,7,6,6,2,2,2,
+	3,4,1,3,3,3,5,7,0,4,4,1,1,1,2,3,3,3,6,2,0,0,0,3,2,6,1,2,1,1,1,4,
+	1,6,1,3,4,4,4,0,0,4,8,1,4,3,3,3,1,0,0,0,1,1,1,2,2,2,2,1,6,7,2,0,
+	2,3,0,0,0,0,3,1,4,0,0,5,0,0,0,0,1,12,7,0,0,0,0,0,0,0,0,4,0,0,0,0,
+};
+
+void TestGF2()
+{
+	wirehair::GF2Matrix gf2m;
+
+	u8 seeds[512];
+
+	for (int n = 1; n < 512; ++n)
+	{
+		if (!gf2m.Initialize(n))
+		{
+			cout << "FAIL INIT" << endl;
+			cin.get();
+		}
+
+		u64 success_count = 0;
+		u64 trial_count = 0;
+
+		cout << "Testing with n = " << n << endl;
+
+		for (;;)
+		{
+			++trial_count;
+			gf2m.Fill();
+			//gf2m.Print();
+			if (!gf2m.Triangle())
+			{
+				//cout << "--> Fail... next!" << endl;
+				//continue;
+				cout << "Not invertible with seed " << gf2m.GetSeed() << endl;
+				gf2m.NextSeed();
+			}
+			else
+			{
+				//gf2m.Print();
+				++success_count;
+				u32 seed = gf2m.GetSeed();
+				cout << "--> Invertible with seed " << gf2m.GetSeed() << endl;
+				seeds[n] = seed;
+				if (seed > 255)
+				{
+					cout << "FAIL" << endl;
+					cin.get();
+				}
+				break;
+			}
+			u32 seed = gf2m.GetSeed();
+			//gf2m.Print();
+			//gf2m.Diagonal();
+			//gf2m.Print();
+			//cout << "--> Success!" << endl;
+			//cin.get();
+
+			if (trial_count % 10000 == 0)
+			{
+				double success_rate = success_count / (double)trial_count;
+				cout << "Success rate = " << success_rate << endl;
+			}
+		}
+	}
+
+	cout << "static const u8 INVERTIBLE_MATRIX_SEEDS[512] = {";
+	for (int ii = 0; ii < 512; ++ii)
+	{
+		if (ii % 32 == 0) cout << endl;
+		cout << (int)seeds[ii] << ",";
+	}
+	cout << endl << "};" << endl;
+}
+
 int main()
 {
 	m_clock.OnInitialize();
+
+	//TestGF2();
+
 /*
 	TestSqrt();
 	for (;;)
@@ -256,7 +390,7 @@ int main()
 	}
 	cout << b << endl;
 */
-	int block_count = 4;
+	int block_count = 2048;
 	block_bytes = 1024 + 512 + 1;
 	message_bytes = block_bytes * block_count;
 	message = new u8[message_bytes];
@@ -265,6 +399,20 @@ int main()
 	{
 		message[ii] = ii;
 	}
+
+	file.open("tuning.txt");
+	if (!file) cout << "FAIL";
+	for (g_check_block_count = 6; g_check_block_count < 64; ++g_check_block_count)
+	{
+		for (int ii = 0; ii < 10; ++ii)
+		{
+			BenchmarkOverhead(100);
+		}
+	}
+
+	file.close();
+	cout << "DONE!" << endl;
+	cin.get();
 
 	for (;;)
 	{
@@ -293,7 +441,7 @@ int main()
 				}
 			}
 
-			//cin.get();
+			cin.get();
 		}
 		else
 		{
