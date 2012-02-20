@@ -372,6 +372,28 @@ void TestGF2()
 	cout << endl << "};" << endl;
 }
 
+void RunBenchmarkOverhead()
+{
+	file.open("tuning.txt");
+	if (!file) cout << "FAIL";
+	for (g_check_block_count = 20; g_check_block_count < 100; ++g_check_block_count)
+	{
+		for (int ii = 0; ii < 40; ++ii)
+		{
+			BenchmarkOverhead(200);
+		}
+	}
+
+	file.close();
+	cout << "DONE!" << endl;
+	cin.get();
+}
+
+void RunHistogram()
+{
+
+}
+
 int main()
 {
 	m_clock.OnInitialize();
@@ -390,7 +412,7 @@ int main()
 	}
 	cout << b << endl;
 */
-	int block_count = 2048;
+	int block_count = 4096;
 	block_bytes = 1024 + 512 + 1;
 	message_bytes = block_bytes * block_count;
 	message = new u8[message_bytes];
@@ -400,19 +422,8 @@ int main()
 		message[ii] = ii;
 	}
 
-	file.open("tuning.txt");
-	if (!file) cout << "FAIL";
-	for (g_check_block_count = 6; g_check_block_count < 64; ++g_check_block_count)
-	{
-		for (int ii = 0; ii < 10; ++ii)
-		{
-			BenchmarkOverhead(100);
-		}
-	}
-
-	file.close();
-	cout << "DONE!" << endl;
-	cin.get();
+	//RunBenchmarkOverhead();
+	//RunHistogram();
 
 	for (;;)
 	{

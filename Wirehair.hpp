@@ -44,6 +44,7 @@
 #include "WirehairDetails.hpp"
 
 extern int g_check_block_count;
+extern int g_dense_block_count;
 
 namespace cat {
 
@@ -56,7 +57,7 @@ namespace wirehair {
 	Encodes message blocks for transmission over the network.
 	The initialization function takes a while (say 10 milliseconds), so I
 	recommend performing initialization in a separate thread to take advantage
-	of modern multicore processors.
+	of modern multi-core processors.
 
 	(Block bytes) / (Milliseconds to initialize) = Throughput in MB/s (approx)
 
@@ -81,7 +82,9 @@ class Encoder
 	u32 _block_bytes;	// Number of bytes in a block
 	u32 _final_bytes;	// Number of bytes in final block
 	u16 _block_count;	// Number of blocks in the message
-	u16 _added_count;	// Number of check blocks added
+	u16 _light_count;	// Number of check rows that are light
+	u16 _dense_count;	// Number of check rows that are dense
+	u16 _added_count;	// Number of check blocks added overall
 	u8 *_check_blocks;	// Pointer to start of check blocks
 	u32 _g_seed;		// Seed for nonsingular generator matrix
 
@@ -90,6 +93,7 @@ class Encoder
 	u32 _next_block_id;			// Next block identifier to transmit
 	u16 _block_next_prime;		// Next prime number including or higher than block count
 	u16 _added_next_prime;		// Next prime number including or higher than added count
+	u16 _light_next_prime;		// Next prime number including or higher than light count
 
 	// Peeling state
 	struct PeelRow;
