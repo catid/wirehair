@@ -62,7 +62,10 @@ public:
 	// Initializes an NxN random matrix and tries to invert it, returns false on error
 	bool Initialize(int n);
 
-	void NextSeed() { _seed++; }
+	CAT_INLINE void NextSeed() { _seed++; }
+
+	void Zero();
+	void Identity();
 	void Fill();
 	bool Triangle();
 	void Diagonal();

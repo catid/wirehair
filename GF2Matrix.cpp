@@ -59,6 +59,25 @@ void GF2Matrix::Cleanup()
 	}
 }
 
+void GF2Matrix::Zero()
+{
+	memset(_matrix, 0, _pitch * _n * sizeof(u64));
+}
+
+void GF2Matrix::Identity()
+{
+	Zero();
+
+	// For each row,
+	u64 *row = _matrix;
+	for (int column_i = 0; column_i < _n; ++column_i, row += _pitch)
+	{
+		// Flip diagonal bit
+		u64 mask = (u64)1 << (column_i & 63);
+		row[column_i >> 6] |= mask;
+	}
+}
+
 void GF2Matrix::Fill()
 {
 	CatsChoice prng;
