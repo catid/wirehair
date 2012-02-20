@@ -45,7 +45,7 @@ int g_check_block_count = 40;
 CAT_INLINE static int GetLightBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 64;
+	return 40;
 	return g_check_block_count - g_dense_block_count;
 }
 
@@ -53,7 +53,7 @@ int g_dense_block_count = 10;
 
 CAT_INLINE static int GetDenseBlockCount(int block_count)
 {
-	return 12;
+	return 14;
 	return g_dense_block_count;
 }
 
@@ -61,7 +61,6 @@ CAT_INLINE static int GetDenseBlockCount(int block_count)
 /*
 	TODO:
 
-	1. Fix bugs in the new matrix structure
 	2. Implement new matrix structure for multiplication version
 	3. Fix bugs in windowed multiplication compression algorithm
 	4. Implement decoder
@@ -1243,7 +1242,7 @@ void Encoder::InvMultiplyDenseRows()
 		the multiply-compression algorithm generates because both the
 		encoder and decoder will make the same choice on which to use.
 
-		TODO: Use 4-bit window optimization here also
+		TODO: Use 2-bit window optimization here also
 	*/
 
 	// Initialize PRNG
@@ -1269,15 +1268,20 @@ void Encoder::InvMultiplyDenseRows()
 			u64 *ge_source_row = _ge_compress_matrix + _ge_compress_pitch * source_row_i;
 			u64 *ge_dest_row;
 
+			CAT_IF_DEBUG(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
+
 			// Light rows:
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			CAT_IF_DEBUG(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			CAT_IF_DEBUG(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			CAT_IF_DEBUG(cout << " " << x << ",";)
 
 			// Dense rows:
 			ge_dest_row = _ge_matrix + _ge_pitch * _light_count;
@@ -1286,6 +1290,7 @@ void Encoder::InvMultiplyDenseRows()
 				if (dense_rv & 1)
 				{
 					for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+					CAT_IF_DEBUG(cout << " " << dense_i + _light_count;)
 				}
 			}
 		}
@@ -1296,12 +1301,17 @@ void Encoder::InvMultiplyDenseRows()
 			u64 *ge_row = _ge_matrix + (ge_column_i >> 6);
 			u64 ge_mask = (u64)1 << (ge_column_i & 63);
 
+			CAT_IF_DEBUG(cout << "For deferred column " << column_i << " at GE column " << ge_column_i << " :";)
+
 			// Light rows:
 			ge_row[_ge_pitch * x] ^= ge_mask;
+			CAT_IF_DEBUG(cout << " " << x;)
 			IterateNextColumn(x, _light_count , _light_next_prime, a);
 			ge_row[_ge_pitch * x] ^= ge_mask;
+			CAT_IF_DEBUG(cout << " " << x;)
 			IterateNextColumn(x, _light_count , _light_next_prime, a);
 			ge_row[_ge_pitch * x] ^= ge_mask;
+			CAT_IF_DEBUG(cout << " " << x << ",";)
 
 			// Dense rows:
 			ge_row += _ge_pitch * _light_count;
@@ -1310,13 +1320,13 @@ void Encoder::InvMultiplyDenseRows()
 				if (dense_rv & 1)
 				{
 					*ge_row ^= ge_mask;
+					CAT_IF_DEBUG(cout << " " << dense_i + _light_count;)
 				}
 			}
 		}
-	}
 
-	CAT_IF_DEBUG(cout << "After multiplying dense rows:" << endl;)
-	CAT_IF_DEBUG(PrintGEMatrix();)
+		CAT_IF_DEBUG(cout << endl;)
+	}
 }
 
 bool Encoder::InvCompressAllocate()
@@ -1401,7 +1411,7 @@ void Encoder::InvSolveTriangleColumns()
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _check_blocks + _block_bytes * column_i;
 
-		CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " solving column " << column_i << " with GE row " << ge_row_i << endl;)
+		CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " solving column " << column_i << " with GE row " << ge_row_i << " : ";)
 
 		if (ge_row_i < _added_count)
 		{
@@ -1409,6 +1419,9 @@ void Encoder::InvSolveTriangleColumns()
 
 			// Store which column solves the dense row
 			_ge_row_map[ge_row_i] = column_i;
+
+			CAT_IF_DEBUG(cout << "[0]";)
+			CAT_IF_ROWOP(++rowops;)
 		}
 		else
 		{
@@ -1425,11 +1438,34 @@ void Encoder::InvSolveTriangleColumns()
 			{
 				memcpy(buffer_dest, buffer_src, _block_bytes);
 			}
+			CAT_IF_ROWOP(++rowops;)
+
+			CAT_IF_DEBUG(cout << "[" << (int)buffer_src[0] << "]";)
+
+			// Eliminate peeled columns:
+			PeelRow *row = &_peel_rows[pivot_row_i];
+			u16 column_i = row->peel_x0;
+			u16 a = row->peel_a;
+			u16 weight = row->peel_weight;
+			for (;;)
+			{
+				PeelColumn *column = &_peel_cols[column_i];
+				if (column->mark == MARK_PEEL)
+				{
+					memxor(buffer_dest, _check_blocks + _block_bytes * column_i, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+
+				if (--weight <= 0) break;
+
+				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+			}
 		}
-		CAT_IF_ROWOP(++rowops;)
+		CAT_IF_DEBUG(cout << endl;)
 	}
 
 	// (2) Add dense rows
+	// TODO: Use 2-bit window optimization here also
 
 	// Initialize PRNG
 	CatsChoice prng;
@@ -1446,7 +1482,7 @@ void Encoder::InvSolveTriangleColumns()
 		// If the column is peeled,
 		if (column->mark == MARK_PEEL)
 		{
-			CAT_IF_DEBUG(cout << "Peeled column " << column_i << " :";)
+			CAT_IF_DEBUG(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
 
 			// Light rows:
 			u16 x = column_i % _light_count;
@@ -1491,7 +1527,7 @@ void Encoder::InvSolveTriangleColumns()
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _check_blocks + _block_bytes * pivot_column_i;
 
-		CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << " with GE row " << ge_row_i << endl;)
+		CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
 
 		// For each GE matrix bit in the row,
 		u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
