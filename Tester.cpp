@@ -412,7 +412,7 @@ int main()
 	}
 	cout << b << endl;
 */
-	int block_count = 4096;
+	int block_count = 64;
 	block_bytes = 1024 + 512 + 1;
 	message_bytes = block_bytes * block_count;
 	message = new u8[message_bytes];

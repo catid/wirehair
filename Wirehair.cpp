@@ -45,7 +45,7 @@ int g_check_block_count = 40;
 CAT_INLINE static int GetLightBlockCount(int block_count)
 {
 	// TODO: Needs to be simulated (1)
-	return 40;
+	return 16;
 	return g_check_block_count - g_dense_block_count;
 }
 
@@ -53,7 +53,7 @@ int g_dense_block_count = 10;
 
 CAT_INLINE static int GetDenseBlockCount(int block_count)
 {
-	return 14;
+	return 8;
 	return g_dense_block_count;
 }
 
@@ -84,7 +84,7 @@ CAT_INLINE static int GetDenseBlockCount(int block_count)
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
 #define CAT_INVERSE_THRESHOLD 1 /* Block count where peeling inverse version starts getting used */
-#define CAT_WINDOW_THRESHOLD 100000 /* Compression row count when 4-bit window is employed */
+#define CAT_WINDOW_THRESHOLD 1 /* Compression row count when 4-bit window is employed */
 #define CAT_USE_RANDOM_DENSE_MIXER /* Use a random dense invertible mixing matrix, reducing variance of overhead */
 
 
@@ -1716,6 +1716,9 @@ bool Encoder::MulCompressAllocate()
 	if (!_ge_compress_matrix) return false;
 	_ge_compress_pitch = ge_compress_pitch;
 
+	// Initialize the entire GE compress matrix to zero
+	memset(_ge_compress_matrix, 0, ge_compress_matrix_words * sizeof(u64));
+
 	CAT_IF_DEBUG(cout << "GE compress matrix is " << ge_rows << " x " << ge_compress_columns << " with pitch " << ge_compress_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
 
 	// Allocate the pivots
@@ -1734,11 +1737,8 @@ void Encoder::MulFillCompressDeferred()
 {
 	CAT_IF_DEBUG(cout << endl << "---- MulFillCompressDeferred ----" << endl << endl;)
 
-	// Initialize the deferred rows to zero
-	u64 *ge_compress_row = _ge_compress_matrix + _ge_compress_pitch * _added_count;
-	memset(ge_compress_row, 0, _defer_count * _ge_compress_pitch * sizeof(u64));
-
 	// Fill the deferred rows from the peel matrix
+	u64 *ge_compress_row = _ge_compress_matrix + _ge_compress_pitch * _added_count;
 	PeelRow *row;
 	for (u16 row_i = _defer_head_rows; row_i != LIST_TERM; row_i = row->next, ge_compress_row += _ge_compress_pitch)
 	{
@@ -1765,62 +1765,59 @@ void Encoder::MulFillCompressDeferred()
 void Encoder::MulFillCompressDense()
 {
 	CAT_IF_DEBUG(cout << endl << "---- MulFillCompressDense ----" << endl << endl;)
-/*
+
+	/*
+		NOTE: This does not need to generate the same dense rows that
+		the multiply-compression algorithm generates because both the
+		encoder and decoder will make the same choice on which to use.
+
+		TODO: Use 2-bit window optimization here also
+	*/
+
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_g_seed, ~_block_count);
+	prng.Initialize(_g_seed, _block_count);
 
-	// Fill the dense matrix with random bits
-	// TODO: Optimize this for efficient compression
-	int fill_count = _ge_compress_pitch * _added_count;
-	u64 *ge_compress_row = _ge_compress_matrix;
-	while (fill_count--) *ge_compress_row++ = ((u64)prng.Next() << 32) | prng.Next();
-*/
-
-	u64 *ge_compress_row = _ge_compress_matrix;
-	for (u16 ge_row_i = 0; ge_row_i < _added_count; ++ge_row_i)
+	// For each column,
+	PeelColumn *column = _peel_cols;
+	for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column)
 	{
-		// Initialize PRNG
-		CatsChoice prng;
-		prng.Initialize(_g_seed, ge_row_i | (_block_count << 16));
+		// Generate dense column
+		u32 dense_rv = prng.Next();
 
-#if defined(CAT_USE_LDPC)
-		if (ge_row_i < _added_count - _dense_count) {
-			u16 weight = _block_count * CAT_LDPC_COLUMN_WEIGHT / _added_count + 1;
-#else
-		if (0) {
-			u16 weight = 1;
-#endif
+		// Set up for light column generation
+		u16 x = column_i % _light_count;
+		u16 a = 1 + (column_i / _light_count) % (_light_count - 1);
 
-			// Zero out the row
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii)
-				ge_compress_row[ii] = 0;
+		// Lookup GE compress matrix source row
+		u16 source_row_i = column->peel_row;
+		u64 *ge_row = _ge_compress_matrix + (column_i >> 6);
+		u64 ge_mask = (u64)1 << (column_i & 63);
 
-			u32 rv = prng.Next();
-			u16 a = ((u16)rv % (_block_count - 1)) + 1;
-			u16 column_i = (u16)(rv >> 16) % _block_count;
-			for (;;)
-			{
-				u64 ge_mask = (u64)1 << (column_i & 63);
-				ge_compress_row[column_i >> 6] ^= ge_mask;
+		CAT_IF_DEBUG(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
 
-				if (--weight <= 0) break;
+		// Light rows:
+		ge_row[_ge_compress_pitch * x] ^= ge_mask;
+		CAT_IF_DEBUG(cout << " " << x;)
+		IterateNextColumn(x, _light_count, _light_next_prime, a);
+		ge_row[_ge_compress_pitch * x] ^= ge_mask;
+		CAT_IF_DEBUG(cout << " " << x;)
+		IterateNextColumn(x, _light_count, _light_next_prime, a);
+		ge_row[_ge_compress_pitch * x] ^= ge_mask;
+		CAT_IF_DEBUG(cout << " " << x << ",";)
 
-				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
-			}
-
-			ge_compress_row += _ge_compress_pitch;
-		}
-		else
+		// Dense rows:
+		ge_row += _ge_compress_pitch * _light_count;
+		for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_row += _ge_compress_pitch, dense_rv >>= 1)
 		{
-			// For each word in the row,
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii)
+			if (dense_rv & 1)
 			{
-				u32 rv1 = prng.Next(), rv2 = prng.Next();
-				u64 bits = ((u64)rv2 << 32) | rv1;
-				*ge_compress_row++ = bits;
+				*ge_row ^= ge_mask;
+				CAT_IF_DEBUG(cout << " " << dense_i + _light_count;)
 			}
 		}
+
+		CAT_IF_DEBUG(cout << endl;)
 	}
 }
 
