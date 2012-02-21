@@ -104,13 +104,10 @@ class Encoder
 	// Lists
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head_rows;		// Head of peeling solved rows list
+	u16 _peel_tail_rows;		// Tail of peeling solved rows list, so it can be in order of solution
 	u16 _defer_head_columns;	// Head of peeling deferred columns list
 	u16 _defer_head_rows;		// Head of peeling deferred rows list
 	u16 _defer_count;			// Count of deferred rows
-
-	// Inversion Compression approach
-	u16 _peel_tail_rows;		// Tail of peeling solved rows list, so it can be in order of solution
-	bool _use_inverse_method;	// Flag indicating whether or not inverse method is used for compression
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
@@ -169,41 +166,6 @@ class Encoder
 	void InvSolveTriangleColumns();
 
 
-	//// (2) Matrix Multiply-Based Compression
-
-	void MulPrintGECompressMatrix();
-
-	// Allocate matrices for compression operation and GE
-	bool MulCompressAllocate();
-
-	// Fill deferred rows of compress matrix
-	void MulFillCompressDeferred();
-
-	// Fill dense rows of compress matrix
-	void MulFillCompressDense();
-
-	// Fill deferred rows of GE matrix
-	void MulFillGEDeferred();
-
-	// Fill dense rows of GE matrix
-	void MulFillGEDense();
-
-	// Build GE matrix for compression
-	bool MulCompressSetup();
-
-	// Copy deferred columns to the GE matrix
-	void MulCopyDeferredColumns();
-
-	// Compress rectangular matrix into conceptual square matrix
-	void MulCompress();
-
-	// Use a 4-bit window to optimize the solution
-	bool MulSolveTriangleColumnsWindowed();
-
-	// Solve pivot column values from the row op schedule from Triangle
-	void MulSolveTriangleColumns();
-
-
 	//// (3) Gaussian Elimination
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
@@ -238,7 +200,8 @@ public:
 	CAT_INLINE u32 GetSeed() { return _g_seed; }
 
 	// Generate a block of size block_bytes specified during initialization
-	void Generate(void *block);
+	// id = Which block to generate, first N are same as original input
+	void Generate(u32 id, void *block);
 };
 
 

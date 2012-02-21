@@ -199,7 +199,7 @@ static u16 NextHighestPrime2(u16 n)
 
 void TestLoop()
 {
-	success = encoder.Initialize(message, message_bytes, 3 + block_bytes);
+	success = encoder.Initialize(message, message_bytes, block_bytes);
 }
 
 void TestSqrt()
@@ -438,17 +438,17 @@ int main()
 		{
 			cout << "main: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with seed " << encoder.GetSeed() << endl;
 
-			u8 *block = new u8[3 + message_bytes];
+			u8 *block = new u8[message_bytes];
 
 			bool success = true;
 			for (int ii = 0; ii < block_count; ++ii)
 			{
-				encoder.Generate(block);
+				encoder.Generate(ii, block);
 
-				if (block[3] != (u8)ii)
+				if (block[0] != (u8)ii)
 				{
 					success = false;
-					cout << "Block " << ii << " doesn't match: " << (int)block[3] << endl;
+					cout << "Block " << ii << " doesn't match: " << (int)block[0] << endl;
 				}
 			}
 
