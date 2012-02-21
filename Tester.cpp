@@ -10,9 +10,56 @@ using namespace std;
 
 static Clock m_clock;
 
+
+
+
+#include "WirehairUtil.hpp"
+void TestInc()
+{
+	for (u16 b = 4; b < 256; ++b)
+	{
+		u16 p = cat::wirehair::NextPrime16(b);
+		//cout << "p = " << p << endl;
+		u16 smallest = b;
+
+		for (u16 x = 0; x < b; ++x)
+		{
+			for (u16 a = 1; a < b; ++a)
+			{
+				u16 y = x;
+				u16 y1 = y;
+				cat::wirehair::IterateNextColumn(y, b, p, a);
+				u16 y2 = y;
+
+				for (u16 am = 1; am < b - 1; ++am)
+				{
+					u16 ap = (am * a) % p;
+					if (ap >= b) ap = (((u32)a << 16) + ap - p) % a;
+
+					u16 y3 = y;
+					cat::wirehair::IterateNextColumn(y3, b, p, ap);
+
+					if (y1 == y3 || y1 == y2 || y2 == y3)
+					{
+						if (am < smallest)
+							smallest = am;
+						//cout << "FAIL for x = " << x << ", a = " << a << ", am = " << am << endl;
+					}
+				}
+			}
+		}
+
+		cout << b << " -> " << smallest << " for " << b * (b - 1) * (smallest - 1) << endl;
+	}
+}
+
+
+
 int main()
 {
 	m_clock.OnInitialize();
+
+	//TestInc();
 
 	int block_count = 4096;
 	int block_bytes = 1024 + 512 + 1;
@@ -28,8 +75,12 @@ int main()
 
 	//for (;;) encoder.Initialize(message, message_bytes, block_bytes);
 
+	g_seed = 0;
+
 	for (;;)
 	{
+		g_seed++;
+
 		double start = m_clock.usec();
 		u32 clocks = m_clock.cycles();
 		bool success = encoder.Initialize(message, message_bytes, block_bytes);

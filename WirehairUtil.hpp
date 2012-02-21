@@ -31,6 +31,8 @@
 
 #include "Platform.hpp"
 
+extern int g_seed;
+
 namespace cat {
 
 namespace wirehair {

@@ -793,17 +793,149 @@ void Encoder::CopyDeferredRows()
 	CAT_IF_DUMP(PrintGEMatrix();)
 }
 
+/*
+	Important Optimization: Check Row Structure
+
+	(1) Light Check Rows
+
+		For the added check rows it is possible to get away with a lot
+	less than full dense rows.  In fact, most of the check rows can be
+	fairly sparse.  To understand why let's look at how compression works
+	again with a focus on the final form of the GE matrix.
+
+		After compression, the GE matrix looks like this:
+
+		+-----------------+----------------+--------------+
+		|  Light Deferred | Dense Deferred | Dense Mixing | <- About half the matrix
+		|                 |                |              |
+		+-----------------+----------------+--------------+
+		|  Dense Deferred | Dense Deferred | Dense Mixing | <- Just a few rows
+		+-----------------+----------------+--------------+
+		|                 | Dense Deferred | Dense Mixing | <- About half the matrix
+		|        0        |                |              |
+		|                 |----------------+--------------+
+		|                 | Sparse Deferred| Dense Mixing | <- Just the last few rows
+		+-----------------+----------------+--------------+
+		         ^                  ^---- Middle third of the columns
+				 \------ Left third of the columns
+
+		The added check rows are what add the top half of the GE matrix,
+	and are what allow pivots to be found during GE for the first few
+	deferred columns.  Note that without these rows, the first third of
+	the columns would all be zeroes.
+
+		The Light Check Rows are responsible for adding the sparse light
+	columns in the upper left.  Each Light Check Column has 3 bits set, so
+	in the upper left there are 3 bits per column also.  I determined that
+	3 is a good number experimentally for N=1024 and then used it for all
+	N but it may be advantageous to use 2 or 4 for some values of N.  The
+	selection of which 3 bits to set is done efficiently with some caveats
+	that for the following values of N, the number of light check rows is
+	not greater than:
+
+		Max N	Light Check Row Count
+		---		-----------------------------
+		12		4
+		80		5
+		30		6
+		252		7
+		168		8
+		216		9
+		270		10
+		1100	11
+		528		12
+		1872	13
+		546		14
+		1260	15
+		1440	16
+		4352	17
+		2142	18
+		6156	19
+		3420	20
+		3780	21
+		4158	22
+		11132	23
+		3312	24
+		7200	25
+		3900	26
+
+		If Light Row Count is used beyond the N in the above table,
+	then it will cause a degradation in code performance.  The advantage
+	of using this approach, however, is that no columns are repeated in
+	the light check matrix when it is used correctly.  Note that prime
+	values of light count are pretty safe, so a good way to get around
+	this issue is to use prime values of light count for smaller N.  In
+	fact the whole generation process becomes faster for light counts
+	that are prime, so rounding up to the next prime is probably good.
+
+		Since a pivot must be found for each column in the GE matrix in
+	the upper left, and there are 3 chances in each column to find a pivot,
+	often times that is good enough to find pivots through that section of
+	the matrix.  However, a stronger, dense, check code is also added to
+	the middle of the matrix to fill in where needed.  Since these rows
+	are fairly random, each one adds a 50-50 shot at finding the pivot.
+	As the GE matrix grows as N gets larger, the number of dense rows must
+	grow in proportion to the fail rate of the light top code.  This is
+	great because the light top code row count is already just a fraction
+	of N, and the dense row count is just a fraction of that.  Simulation
+	determines what row counts to use for each one.
+
+		Because the weight of each light column is 3, it takes 3*N memxor
+	operations to compress.  This is great because overall this step in
+	compression is O(N) in terms of row operations and will not reduce
+	the throughput of the codec at higher N.
+
+	(2) Dense Check Rows
+
+		Dense check rows need to look completely random.  This means that
+	on average each row needs to have N/2 set bits before compression.
+	However, we can achieve this goal in a way that greatly reduces the
+	number of row operations.  By making each row or column differ from
+	the next by just 2 bits, and keeping the number of set bits the same,
+	each row after the first in a windowed set of columns can be generated
+	by 3 memxors() instead of WindowSize/2.  So we would want the window
+	size to be greater than 6 columns.  For example:
+
+		Row 1 = 1 0 1 0 1 0 1 0 = 4 XORs
+		Row 2 = 1 0 0 1 1 0 1 0 = XOR (Row 1) + 2 XORs
+		Row 3 = 1 0 0 1 1 0 0 1 = XOR (Row 2) + 2 XORs
+		Row 4 = ... and so on.
+
+		For a window of 8 bits, it is saving 1 XOR per row.  N grows very
+	fast in comparison to the number of dense rows, so large windows are a
+	good idea.  We also want the window size to be a power of 2 so that it
+	will be easier to do bitwise operations.  I would say WS = 16 at a minimum.
+	On the other side of the coin, we don't want WS to be too big or it will
+	prevent the rows from being very different overall.  So let's say 32*WS < N
+	and so this optimization starts becoming interesting at N = 512.  And I think
+	that WS should not exceed 32 or 64 bits to make calculations easier.
+
+		Since 16 <= WS <= 64 bits, it seems like a good idea to use the Gray code
+	rather than the Weyl generator that has been used for other pseudo-random
+	column generation so far.  The basic Gray code has the undesirable
+	property, however, that the number of set bits will wander around 16 bits
+	rather than staying at 16 bits.
+
+	TODO: How do we generate this sort of code?
+	An LCG with a multiplier might be a good option?
+		Choose WS = prime and generate WS / 2 + 1 outputs.
+		Iterate the head forward to add one set bit.
+		Iterate the tail forward to eliminate one set bit.
+	To guarantee at least one bit flip in each column, WS <= D.  Problem.
+
+		While this makes the dense check rows less random and less useful, it
+	also makes them amazingly easier to calculate.  For N=4096 with D=14 rows,
+	and WS=32, this saves 21,632 memxor() which is fully 75% of the cost of
+	the "SolveTriangleColumns add dense rows" step, and 25% of the overall cost
+	of matrix inversion.  It is certainly an easy choice to add a few more rows
+	if these kinds of performance improvements are possible.
+*/
+
 void Encoder::MultiplyDenseRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
 
-	/*
-		NOTE: This does not need to generate the same dense rows that
-		the multiply-compression algorithm generates because both the
-		encoder and decoder will make the same choice on which to use.
-
-		TODO: Use 2-bit window optimization here also
-	*/
+	// TODO: Use window optimization here also
 
 	// Initialize PRNG
 	CatsChoice prng;
@@ -818,7 +950,12 @@ void Encoder::MultiplyDenseRows()
 
 		// Set up for light column generation
 		u16 x = column_i % _light_count;
-		u16 a = 1 + (column_i / _light_count) % (_light_count - 1);
+		u16 adiv = column_i / _light_count;
+		u16 a = 1 + adiv % (_light_count - 1);
+		u16 adiv2 = 1 + adiv / (_light_count - 1);
+		u16 b = (adiv2 * a) % _light_next_prime;
+		if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
+		CAT_IF_ROWOP(u16 x1 = x;)
 
 		// If the column is peeled,
 		if (column->mark == MARK_PEEL)
@@ -838,7 +975,7 @@ void Encoder::MultiplyDenseRows()
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x;)
-			IterateNextColumn(x, _light_count, _light_next_prime, a);
+			IterateNextColumn(x, _light_count, _light_next_prime, b);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x << ",";)
@@ -869,7 +1006,7 @@ void Encoder::MultiplyDenseRows()
 			IterateNextColumn(x, _light_count , _light_next_prime, a);
 			ge_row[_ge_pitch * x] ^= ge_mask;
 			CAT_IF_DUMP(cout << " " << x;)
-			IterateNextColumn(x, _light_count , _light_next_prime, a);
+			IterateNextColumn(x, _light_count , _light_next_prime, b);
 			ge_row[_ge_pitch * x] ^= ge_mask;
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
@@ -884,6 +1021,8 @@ void Encoder::MultiplyDenseRows()
 				}
 			}
 		}
+
+		CAT_IF_ROWOP( if (x == x1) cout << "FAIL for x0 = " << x1 << ", a = " << a << ", b = " << b << " cnt = " << _light_count << " prime = " << _light_next_prime << endl; )
 
 		CAT_IF_DUMP(cout << endl;)
 	}
@@ -974,6 +1113,8 @@ void Encoder::SolveTriangleColumns()
 
 			CAT_IF_DUMP(cout << "[" << (int)buffer_src[0] << "]";)
 
+			// TODO: Combine first row op here
+
 			// Eliminate peeled columns:
 			PeelRow *row = &_peel_rows[pivot_row_i];
 			u16 column_i = row->peel_x0;
@@ -1016,9 +1157,13 @@ void Encoder::SolveTriangleColumns()
 		{
 			CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
 
-			// Light rows:
+			// Set up for light column generation
 			u16 x = column_i % _light_count;
-			u16 a = 1 + (column_i / _light_count) % (_light_count - 1);
+			u16 adiv = column_i / _light_count;
+			u16 a = 1 + adiv % (_light_count - 1);
+			u16 adiv2 = 1 + adiv / (_light_count - 1);
+			u16 b = (adiv2 * a) % _light_next_prime;
+			if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
 
 			CAT_IF_DUMP(cout << " " << x;)
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
@@ -1027,7 +1172,7 @@ void Encoder::SolveTriangleColumns()
 			CAT_IF_DUMP(cout << " " << x;)
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
 			CAT_IF_ROWOP(++rowops;)
-			IterateNextColumn(x, _light_count, _light_next_prime, a);
+			IterateNextColumn(x, _light_count, _light_next_prime, b);
 			CAT_IF_DUMP(cout << " " << x;)
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
 			CAT_IF_ROWOP(++rowops;)

@@ -337,11 +337,13 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 
 //// Utility: Matrix Parameter Generator function
 
+int g_seed;
+
 bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &light_count, u16 &dense_count)
 {
 	if (block_count == 4096)
 	{
-		seed = 1;
+		seed = g_seed;
 		light_count = 40;
 		dense_count = 14;
 		return true;
