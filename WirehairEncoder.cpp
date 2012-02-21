@@ -163,7 +163,8 @@ bool Encoder::PeelSetup()
 	}
 
 	// Initialize lists
-	_peel_head_rows = _peel_tail_rows = LIST_TERM;
+	_peel_head_rows = LIST_TERM;
+	_peel_tail_rows= 0;
 	_defer_head_rows = LIST_TERM;
 
 	// Calculate default mix weight
@@ -358,12 +359,12 @@ void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 	row->peel_column = column_i;
 
 	// Link to back of the peeled list
-	if (_peel_tail_rows != LIST_TERM)
-		_peel_rows[_peel_tail_rows].next = row_i;
+	if (_peel_tail_rows)
+		_peel_tail_rows->next = row_i;
 	else
 		_peel_head_rows = row_i;
 	row->next = LIST_TERM;
-	_peel_tail_rows = row_i;
+	_peel_tail_rows = row;
 
 	// Indicate that this row hasn't been copied yet
 	row->is_copied = 0;
@@ -406,15 +407,14 @@ void Encoder::GreedyPeeling()
 		u16 best_w2_refs = 0, best_row_count = 0;
 
 		// For each column,
-		for (u16 column_i = 0; column_i < _block_count; ++column_i)
+		PeelColumn *column = _peel_cols;
+		for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column)
 		{
-			PeelColumn *column = &_peel_cols[column_i];
-			u16 w2_refs = column->w2_refs;
-
 			// If column is not marked yet,
 			if (column->mark == MARK_TODO)
 			{
 				// And if it may have the most weight-2 references
+				u16 w2_refs = column->w2_refs;
 				if (w2_refs >= best_w2_refs)
 				{
 					// Or if it has the largest row references overall,

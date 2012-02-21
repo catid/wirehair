@@ -1092,7 +1092,7 @@ void Decoder::SolveTriangleColumns()
 
 //// Diagnostic functions for compression algorithms
 
-#if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
+#if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 
 void Decoder::PrintGEMatrix()
 {
@@ -1730,4 +1730,6 @@ bool Decoder::Decode(u32 id, void *block)
 	}
 
 	CAT_IF_DUMP(cout << endl;)
+
+	return true;
 }

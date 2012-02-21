@@ -36,18 +36,15 @@
     <ClInclude Include="SmallPRNG.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="WirehairDetails.hpp">
+    <ClInclude Include="GF2Matrix.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="GF2Matrix.hpp">
+    <ClInclude Include="WirehairUtil.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Clock.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Wirehair.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="memxor.cpp">
@@ -57,6 +54,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GF2Matrix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="WirehairEncoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="WirehairDecoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="WirehairUtil.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
