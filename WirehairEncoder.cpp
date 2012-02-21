@@ -72,10 +72,7 @@ struct Encoder::PeelRow
 	union
 	{
 		// During peeling:
-		struct
-		{
-			u16 unmarked[2];	// Final two unmarked column indices
-		};
+		u16 unmarked[2];	// Final two unmarked column indices
 
 		// After peeling:
 		struct

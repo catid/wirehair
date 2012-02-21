@@ -547,6 +547,8 @@ class Decoder
 	u32 _block_bytes;	// Number of bytes in a block
 	u32 _final_bytes;	// Number of bytes in final block
 	u16 _block_count;	// Number of blocks in the message
+	u16 _used_count;	// Number of blocks used
+	u16 _alloc_count;	// Number of blocks allocated above block count
 	u16 _light_count;	// Number of check rows that are light
 	u16 _dense_count;	// Number of check rows that are dense
 	u16 _added_count;	// Number of check blocks added overall
@@ -554,22 +556,22 @@ class Decoder
 	u32 _g_seed;		// Seed for nonsingular generator matrix
 
 	// Encoder state
-	const u8 *_message_blocks;	// Original message data (final block is partial)
-	u32 _next_block_id;			// Next block identifier to transmit
-	u16 _block_next_prime;		// Next prime number including or higher than block count
-	u16 _added_next_prime;		// Next prime number including or higher than added count
-	u16 _light_next_prime;		// Next prime number including or higher than light count
+	u8 *_message_blocks;	// Original message data (final block is partial)
+	u32 _next_block_id;		// Next block identifier to transmit
+	u16 _block_next_prime;	// Next prime number including or higher than block count
+	u16 _added_next_prime;	// Next prime number including or higher than added count
+	u16 _light_next_prime;	// Next prime number including or higher than light count
 
 	// Peeling state
 	struct PeelRow;
 	struct PeelColumn;
 	PeelRow *_peel_rows;		// Array of N peeling matrix rows
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
+	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
 
 	// Lists
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head_rows;		// Head of peeling solved rows list
-	u16 _peel_tail_rows;		// Tail of peeling solved rows list, so it can be in order of solution
 	u16 _defer_head_columns;	// Head of peeling deferred columns list
 	u16 _defer_head_rows;		// Head of peeling deferred rows list
 	u16 _defer_count;			// Count of deferred rows
@@ -653,6 +655,12 @@ class Decoder
 	// Main driver: Generate check blocks from message blocks
 	bool GenerateCheckBlocks();
 
+	// Recreate message with the received blocks and the check blocks
+	void RecreateMessage();
+
+	// Resume GE with latest information
+	bool GEResume(u32 id, const u8 *buffer);
+
 	// Free allocated memory
 	void Cleanup();
 
@@ -670,7 +678,7 @@ public:
 
 	// Decode the provided block of size block_bytes specified during initialization
 	// id = ID of provided block, first N are same as original message
-	bool Decode(u32 id, void *block);
+	bool Decode(u32 id, const void *block);
 };
 
 

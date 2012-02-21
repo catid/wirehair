@@ -72,10 +72,7 @@ struct Decoder::PeelRow
 	union
 	{
 		// During peeling:
-		struct
-		{
-			u16 unmarked[2];	// Final two unmarked column indices
-		};
+		u16 unmarked[2];	// Final two unmarked column indices
 
 		// After peeling:
 		struct
@@ -88,7 +85,9 @@ struct Decoder::PeelRow
 #pragma pack(pop)
 
 // During generator matrix precomputation, tune this to be as small as possible and still succeed
-static const int ENCODER_REF_LIST_MAX = 64;
+static const int DECODER_PREALLOC_REFS = 64;
+static const u16 DECODER_EXCEEDED = 0x7fff;
+static const u16 PREALLOC_EXTRA_BLOCKS = 16;
 
 enum MarkTypes
 {
@@ -99,6 +98,16 @@ enum MarkTypes
 
 #pragma pack(push)
 #pragma pack(1)
+struct ReferenceList
+{
+	u16 count;		// Size of reference list
+	u16 alloc;		// Size of allocated list
+	union
+	{
+		u16 refs[1];	// List of references, or pointer to the list
+	};
+};
+
 struct Decoder::PeelColumn
 {
 	u16 next;			// Linkage in column list
@@ -111,7 +120,11 @@ struct Decoder::PeelColumn
 	};
 
 	u16 row_count;		// Number of rows containing this column
-	u16 rows[ENCODER_REF_LIST_MAX];
+	union
+	{
+		u16 rows[DECODER_PREALLOC_REFS];
+		ReferenceList *ext;
+	};
 	u8 mark;			// One of the MarkTypes enumeration
 };
 #pragma pack(pop)
@@ -147,7 +160,7 @@ bool Decoder::PeelSetup()
 	CAT_IF_DUMP(cout << "Block Count = " << _block_count << endl;)
 
 	// Allocate space for row data
-	_peel_rows = new PeelRow[_block_count];
+	_peel_rows = new PeelRow[_alloc_count];
 	if (!_peel_rows) return false;
 
 	// Allocate space for column data
@@ -163,7 +176,8 @@ bool Decoder::PeelSetup()
 	}
 
 	// Initialize lists
-	_peel_head_rows = _peel_tail_rows = LIST_TERM;
+	_peel_head_rows = LIST_TERM;
+	_peel_tail_rows = 0;
 	_defer_head_rows = LIST_TERM;
 
 	// Calculate default mix weight
@@ -206,13 +220,57 @@ bool Decoder::PeelSetup()
 
 			PeelColumn *col = &_peel_cols[column_i];
 
+			// TODO: This is too complicated to do inline, need to make this a function...
+
 			// Add row reference to column
-			if (col->row_count >= ENCODER_REF_LIST_MAX)
+			u16 row_count = col->row_count;
+			u16 *refs;
+			if (row_count < DECODER_PREALLOC_REFS)
 			{
-				CAT_IF_DUMP(cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;)
-				return false;
+				refs[row_count++] = row_i;
+				col->row_count = row_count;
 			}
-			col->rows[col->row_count++] = row_i;
+			else
+			{
+				// If row is exceeded already,
+				if (row_count == DECODER_EXCEEDED)
+				{
+					ReferenceList *ext = col->ext;
+					row_count = ext->count;
+
+					// If row count exceeds allocation size,
+					if (row_count >= ext->alloc)
+					{
+						u16 *old_refs = reinterpret_cast<u16*>( ext );
+
+						u16 new_row_count = row_count * 2;
+						u16 *new_refs = new u16[2 + new_row_count];
+						ext = reinterpret_cast<ReferenceList*>( new_refs );
+
+						memcpy(ext->refs, old_refs + 2, row_count * 2);
+						delete []old_refs;
+
+						col->ext = ext;
+						ext->alloc = new_row_count;
+					}
+
+					ext->count = row_count + 1;
+					refs = ext->refs;
+				}
+				else
+				{
+					u16 new_row_count = row_count * 2;
+
+					u16 *new_refs = new u16[2 + new_row_count];
+					ReferenceList *ext = reinterpret_cast<ReferenceList*>( new_refs );
+
+					memcpy(ext->refs, refs, row_count * 2);
+					ext->refs[row_count] = row_i;
+					ext->alloc = new_row_count;
+					ext->count = row_count + 1;
+					col->ext = ext;
+				}
+			}
 
 			// If column is unmarked,
 			if (col->mark == MARK_TODO)
@@ -358,12 +416,12 @@ void Decoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 	row->peel_column = column_i;
 
 	// Link to back of the peeled list
-	if (_peel_tail_rows != LIST_TERM)
-		_peel_rows[_peel_tail_rows].next = row_i;
+	if (_peel_tail_rows)
+		_peel_tail_rows->next = row_i;
 	else
 		_peel_head_rows = row_i;
 	row->next = LIST_TERM;
-	_peel_tail_rows = row_i;
+	_peel_tail_rows = row;
 
 	// Indicate that this row hasn't been copied yet
 	row->is_copied = 0;
@@ -406,15 +464,14 @@ void Decoder::GreedyPeeling()
 		u16 best_w2_refs = 0, best_row_count = 0;
 
 		// For each column,
-		for (u16 column_i = 0; column_i < _block_count; ++column_i)
+		PeelColumn *column = _peel_cols;
+		for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column)
 		{
-			PeelColumn *column = &_peel_cols[column_i];
-			u16 w2_refs = column->w2_refs;
-
 			// If column is not marked yet,
 			if (column->mark == MARK_TODO)
 			{
 				// And if it may have the most weight-2 references
+				u16 w2_refs = column->w2_refs;
 				if (w2_refs >= best_w2_refs)
 				{
 					// Or if it has the largest row references overall,
@@ -1612,7 +1669,7 @@ bool Decoder::Initialize(void *message_out, int message_bytes, int block_bytes)
 	// Initialize encoder
 	_block_bytes = block_bytes;
 	_block_count = block_count;
-	//_message_blocks = reinterpret_cast<const u8*>( message_in );
+	_message_blocks = reinterpret_cast<u8*>( message_out );
 	_next_block_id = 0;
 
 	// Calculate next primes after column counts for pseudo-random generation of peeling rows
@@ -1627,109 +1684,58 @@ bool Decoder::Initialize(void *message_out, int message_bytes, int block_bytes)
 	CAT_IF_DUMP(cout << "Generator seed = " << _g_seed << endl;)
 	CAT_IF_DUMP(cout << "Memory overhead for check blocks = " << check_size << " bytes" << endl;)
 
-	// Generate check blocks
-	return GenerateCheckBlocks();
+	// Calculate number of blocks to allocate
+	_alloc_count = block_count + PREALLOC_EXTRA_BLOCKS;
+	_used_count = 0;
+	return true;
 }
 
-bool Decoder::Decode(u32 id, void *block)
+bool Decoder::GEResume(u32 id, const u8 *buffer)
 {
-	u8 *buffer = reinterpret_cast<u8*>( block );
-
-#if defined(CAT_ENCODER_COPY_FIRST_N)
-	// For the message blocks,
-	if (id < _block_count)
+	// If not used all blocks yet,
+	if (_used_count < _alloc_count)
 	{
-		// Until the final block in message blocks,
-		if (id < _block_count - 1)
-		{
-			// Copy from the original file data
-			memcpy(buffer, _message_blocks, _block_bytes);
-			_message_blocks += _block_bytes;
-		}
-		else
-		{
-			// For the final block, copy partial block
-			memcpy(buffer, _message_blocks, _final_bytes);
-
-			// Pad with zeroes
-			memset(buffer + _final_bytes, 0, _block_bytes - _final_bytes);
-		}
-
-		return;
-	}
-#endif // CAT_ENCODER_COPY_FIRST_N
-
-	CAT_IF_DUMP(cout << "Generating row " << id << ":";)
-
-	// Initialize PRNG
-	CatsChoice prng;
-	prng.Initialize(id, _g_seed);
-
-	// Generate peeling matrix row parameters
-	u16 peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
-	u32 rv = prng.Next();
-	u16 peel_a = ((u16)rv % (_block_count - 1)) + 1;
-	u16 peel_x = (u16)(rv >> 16) % _block_count;
-
-	// Generate mixing matrix row parameters
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
-	rv = prng.Next();
-	u16 mix_a = ((u16)rv % (_added_count - 1)) + 1;
-	u16 mix_x = (u16)(rv >> 16) % _added_count;
-
-	// Remember first column (there is always at least one)
-	u8 *first = _check_blocks + _block_bytes * peel_x;
-
-	CAT_IF_DUMP(cout << " " << peel_x;)
-
-	// If peeler has multiple columns,
-	if (peel_weight > 1)
-	{
-		--peel_weight;
-
-		IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
-
-		CAT_IF_DUMP(cout << " " << peel_x;)
-
-		// Combine first two columns into output buffer (faster than memcpy + memxor)
-		memxor(buffer, first, _check_blocks + _block_bytes * peel_x, _block_bytes);
-
-		// For each remaining peeler column,
-		while (--peel_weight > 0)
-		{
-			IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
-
-			CAT_IF_DUMP(cout << " " << peel_x;)
-
-			// Mix in each column
-			memxor(buffer, _check_blocks + _block_bytes * peel_x, _block_bytes);
-		}
-
-		// Mix first mixer block in directly
-		memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		memcpy(_message_blocks + _block_bytes * _used_count, buffer, _block_bytes);
+		++_used_count;
 	}
 	else
 	{
-		// Mix first with first mixer block (faster than memcpy + memxor)
-		memxor(buffer, first, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		// TODO: Reuse
 	}
 
-	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+	// TODO: Resume
 
-	// For each remaining mixer column,
-	while (--mix_weight > 0)
+	// TODO: RecreateMessage()
+}
+
+bool Decoder::Decode(u32 id, const void *block)
+{
+	const u8 *buffer = reinterpret_cast<const u8*>( block );
+
+	CAT_IF_DUMP(cout << "Decoding row " << id << endl;)
+
+	// If used count has not reached the block count yet,
+	if (_used_count < _block_count)
 	{
-		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
+		memcpy(_message_blocks + _block_bytes * _used_count, block, _block_bytes);
 
-		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
-
-		// Mix in each column
-		memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		// If received block count,
+		if (++_used_count == _block_count)
+		{
+			if (GenerateCheckBlocks())
+			{
+				RecreateMessage();
+				return true;
+			}
+		}
 	}
+	else
+		return GEResume(id, buffer);
 
-	CAT_IF_DUMP(cout << endl;)
+	return false;
+}
 
-	return true;
+void Decoder::RecreateMessage()
+{
+	// TODO
 }
