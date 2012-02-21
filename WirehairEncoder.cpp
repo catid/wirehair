@@ -884,51 +884,6 @@ void Encoder::CopyDeferredRows()
 	operations to compress.  This is great because overall this step in
 	compression is O(N) in terms of row operations and will not reduce
 	the throughput of the codec at higher N.
-
-	(2) Dense Check Rows
-
-		Dense check rows need to look completely random.  This means that
-	on average each row needs to have N/2 set bits before compression.
-	However, we can achieve this goal in a way that greatly reduces the
-	number of row operations.  By making each row or column differ from
-	the next by just 2 bits, and keeping the number of set bits the same,
-	each row after the first in a windowed set of columns can be generated
-	by 3 memxors() instead of WindowSize/2.  So we would want the window
-	size to be greater than 6 columns.  For example:
-
-		Row 1 = 1 0 1 0 1 0 1 0 = 4 XORs
-		Row 2 = 1 0 0 1 1 0 1 0 = XOR (Row 1) + 2 XORs
-		Row 3 = 1 0 0 1 1 0 0 1 = XOR (Row 2) + 2 XORs
-		Row 4 = ... and so on.
-
-		For a window of 8 bits, it is saving 1 XOR per row.  N grows very
-	fast in comparison to the number of dense rows, so large windows are a
-	good idea.  We also want the window size to be a power of 2 so that it
-	will be easier to do bitwise operations.  I would say WS = 16 at a minimum.
-	On the other side of the coin, we don't want WS to be too big or it will
-	prevent the rows from being very different overall.  So let's say 32*WS < N
-	and so this optimization starts becoming interesting at N = 512.  And I think
-	that WS should not exceed 32 or 64 bits to make calculations easier.
-
-		Since 16 <= WS <= 64 bits, it seems like a good idea to use the Gray code
-	rather than the Weyl generator that has been used for other pseudo-random
-	column generation so far.  The basic Gray code has the undesirable
-	property, however, that the number of set bits will wander around 16 bits
-	rather than staying at 16 bits.
-
-	TODO: How do we generate this sort of code?
-	An LCG with a multiplier might be a good option?
-		Choose WS = prime and generate WS / 2 + 1 outputs.
-		Iterate the head forward to add one set bit.
-		Iterate the tail forward to eliminate one set bit.
-	To guarantee at least one bit flip in each column, WS <= D.  Problem.
-
-		While this makes the dense check rows less random and less useful, it
-	also makes them amazingly easier to calculate.  For N=4096 with D=14 rows,
-	and WS=32, this saves 21,632 memxor() which is fully 75% of the cost of
-	the "SolveTriangleColumns add dense rows" step, and 25% of the overall cost
-	of matrix inversion.  It is certainly an easy choice to add a few more rows
-	if these kinds of performance improvements are possible.
 */
 
 void Encoder::MultiplyDenseRows()
@@ -1097,23 +1052,18 @@ void Encoder::SolveTriangleColumns()
 		else
 		{
 			u16 pivot_row_i = _ge_row_map[ge_row_i];
-			const u8 *buffer_src = _message_blocks + _block_bytes * pivot_row_i;
+			const u8 *combo = _message_blocks + _block_bytes * pivot_row_i;
 
-			// If copying from final block,
+			// If not copying from final block,
 			if (pivot_row_i == _block_count - 1)
 			{
-				memcpy(buffer_dest, buffer_src, _final_bytes);
+				memcpy(buffer_dest, combo, _final_bytes);
 				memset(buffer_dest + _final_bytes, 0, _block_bytes - _final_bytes);
+				CAT_IF_ROWOP(++rowops;)
+				combo = 0;
 			}
-			else
-			{
-				memcpy(buffer_dest, buffer_src, _block_bytes);
-			}
-			CAT_IF_ROWOP(++rowops;)
 
 			CAT_IF_DUMP(cout << "[" << (int)buffer_src[0] << "]";)
-
-			// TODO: Combine first row op here
 
 			// Eliminate peeled columns:
 			PeelRow *row = &_peel_rows[pivot_row_i];
@@ -1122,10 +1072,19 @@ void Encoder::SolveTriangleColumns()
 			u16 weight = row->peel_weight;
 			for (;;)
 			{
+				// If column is peeled,
 				PeelColumn *column = &_peel_cols[column_i];
 				if (column->mark == MARK_PEEL)
 				{
-					memxor(buffer_dest, _check_blocks + _block_bytes * column_i, _block_bytes);
+					// If combo unused,
+					if (!combo)
+						memxor(buffer_dest, _check_blocks + _block_bytes * column_i, _block_bytes);
+					else
+					{
+						// Use combo
+						memxor(buffer_dest, combo, _check_blocks + _block_bytes * column_i, _block_bytes);
+						combo = 0;
+					}
 					CAT_IF_ROWOP(++rowops;)
 				}
 
@@ -1133,12 +1092,14 @@ void Encoder::SolveTriangleColumns()
 
 				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
 			}
+
+			// If combo still unused,
+			if (combo) memcpy(buffer_dest, combo, _block_bytes);
 		}
 		CAT_IF_DUMP(cout << endl;)
 	}
 
 	// (2) Add dense rows
-	// TODO: Use 2-bit window optimization here also
 
 	// Initialize PRNG
 	CatsChoice prng;
@@ -1152,44 +1113,44 @@ void Encoder::SolveTriangleColumns()
 		// Generate dense column
 		u32 dense_rv = prng.Next();
 
-		// If the column is peeled,
-		if (column->mark == MARK_PEEL)
+		// If the column is not peeled,
+		if (column->mark != MARK_PEEL)
+			continue; // Skip
+
+		CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
+
+		// Set up for light column generation
+		u16 x = column_i % _light_count;
+		u16 adiv = column_i / _light_count;
+		u16 a = 1 + adiv % (_light_count - 1);
+		u16 adiv2 = 1 + adiv / (_light_count - 1);
+		u16 b = (adiv2 * a) % _light_next_prime;
+		if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
+
+		CAT_IF_DUMP(cout << " " << x;)
+		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+		CAT_IF_ROWOP(++rowops;)
+		IterateNextColumn(x, _light_count, _light_next_prime, a);
+		CAT_IF_DUMP(cout << " " << x;)
+		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+		CAT_IF_ROWOP(++rowops;)
+		IterateNextColumn(x, _light_count, _light_next_prime, b);
+		CAT_IF_DUMP(cout << " " << x;)
+		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+		CAT_IF_ROWOP(++rowops;)
+
+		// Dense rows:
+		for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
 		{
-			CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
-
-			// Set up for light column generation
-			u16 x = column_i % _light_count;
-			u16 adiv = column_i / _light_count;
-			u16 a = 1 + adiv % (_light_count - 1);
-			u16 adiv2 = 1 + adiv / (_light_count - 1);
-			u16 b = (adiv2 * a) % _light_next_prime;
-			if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
-
-			CAT_IF_DUMP(cout << " " << x;)
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
-			IterateNextColumn(x, _light_count, _light_next_prime, a);
-			CAT_IF_DUMP(cout << " " << x;)
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
-			IterateNextColumn(x, _light_count, _light_next_prime, b);
-			CAT_IF_DUMP(cout << " " << x;)
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
-
-			// Dense rows:
-			for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
+			if (dense_rv & 1)
 			{
-				if (dense_rv & 1)
-				{
-					CAT_IF_DUMP(cout << " " << ii;)
-					memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-				}
+				CAT_IF_DUMP(cout << " " << ii;)
+				memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
 			}
+		}
 
-			CAT_IF_DUMP(cout << endl;)
-		} // end if peeled
+		CAT_IF_DUMP(cout << endl;)
 	}
 
 	// (3) For each GE matrix bit up to the diagonal, add deferred and mixed:
