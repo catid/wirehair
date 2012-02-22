@@ -372,8 +372,6 @@ namespace wirehair {
 	recommend performing initialization in a separate thread to take advantage
 	of modern multi-core processors.
 
-	(Block bytes) / (Milliseconds to initialize) = Throughput in MB/s (approx)
-
 	Example usage pseudocode:
 
 		cat::wirehair::Encoder encoder;

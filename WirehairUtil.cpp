@@ -399,18 +399,57 @@ int g_seed;
 
 bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &light_count, u16 &dense_count)
 {
-	if (block_count == 4096)
+	seed = g_seed;
+
+	switch (block_count)
 	{
-		seed = g_seed;
-		light_count = 40;
+	case 256:
+		light_count = 16;
+		dense_count = 4;
+		return true;
+	case 512:
+		light_count = 22;
+		dense_count = 5;
+		return true;
+	case 1024:
+		light_count = 32;
+		dense_count = 7;
+		return true;
+	case 2048:
+		light_count = 45;
+		dense_count = 8;
+		return true;
+	case 4096:
+		light_count = 64;
+		dense_count = 10;
+		return true;
+	case 8192:
+		light_count = 90;
 		dense_count = 14;
 		return true;
-	}
-	else if (block_count == 10000)
-	{
-		seed = g_seed;
-		light_count = 110;
-		dense_count = 18;
+	case 10000:
+		light_count = 120;
+		dense_count = 20;
+		return true;
+	case 16384:
+		light_count = 180;
+		dense_count = 26;
+		return true;
+	case 32768:
+		light_count = 400;
+		dense_count = 28;
+		return true;
+	case 40000:
+		light_count = 460;
+		dense_count = 29;
+		return true;
+	case 50000:
+		light_count = 600;
+		dense_count = 34;
+		return true;
+	case 64000:
+		light_count = 750;
+		dense_count = 36;
 		return true;
 	}
 

@@ -217,8 +217,8 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 4096;
-	int block_bytes = 1024 + 512 + 1;
+	int block_count = 64000;
+	int block_bytes = 4096 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 
@@ -229,7 +229,7 @@ int main()
 
 	wirehair::Encoder encoder;
 
-	g_seed = 5;
+	g_seed = 1;
 	//for (;;) encoder.Initialize(message, message_bytes, block_bytes);
 
 	g_seed = 0;

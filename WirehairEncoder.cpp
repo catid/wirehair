@@ -53,6 +53,13 @@ using namespace std;
 #endif // CAT_DUMP_ENCODER_DEBUG
 
 
+//// Internal constants
+
+// During generator matrix precomputation, tune these to be as small as possible and still succeed
+static const int ENCODER_REF_LIST_MAX = 64;
+static const int MAX_DENSE_ROWS = 64;
+
+
 //// Encoder
 
 #pragma pack(push)
@@ -83,9 +90,6 @@ struct Encoder::PeelRow
 	};
 };
 #pragma pack(pop)
-
-// During generator matrix precomputation, tune this to be as small as possible and still succeed
-static const int ENCODER_REF_LIST_MAX = 64;
 
 enum MarkTypes
 {
@@ -892,8 +896,8 @@ void Encoder::CopyDeferredRows()
 	using Gray codes or more Weyl generators but they both are
 	restricted to a subset of the total possibilities.  Instead, the
 	standard in-place shuffle algorithm is used to shuffle row and
-	column orders to make it look random.  This code is able to
-	generate nearly all possible combinations with approximately
+	column orders to make it look random.  This new algorithm is able
+	to generate nearly all possible combinations with approximately
 	uniform likelihood, and the generated matrix can be addressed by
 	a 32-bit seed, so it is easy to regenerate the same matrix again,
 	or generate many new random matrices without reseeding.
@@ -903,7 +907,7 @@ void Encoder::CopyDeferredRows()
 	The order of XOR pairs is decided by the initial shuffling.  The
 	order of the generated rows is shuffled separately.
 
-	Example output:
+	Example output: A random 17x17 matrix
 
 		10000001111010011
 		00111110100101100
@@ -923,18 +927,11 @@ void Encoder::CopyDeferredRows()
 		11010111000101100
 		11000011010001011
 
-		A 17x17 output matrix for input seed 1.
-
-	Why ? 
-
-		In practice I am going to use values of D up to 25 or so, tops.
-	The advantage of using this type of system can be tremendous.
-	For example, all of the XOR operations in the above snippet are very
-	expensive when used in a check code, so minimizing them is the goal.
-	Instead of using W/2 average XORs per row, it only needs to use 2.
-	So for W of 20, I am saving about 8 XORs per row * 19 rows = 152 XORs
-	out of a total 200 XORs that would normally be done for one dense
-	matrix.  That makes the overall computation take 75% less time.  Wow!
+		This one optimization cuts the row operations by -4*N, which
+	makes a big difference for N above 1024.  Most of the execution
+	time is now spent in the code that implements the algorithm rather
+	than the memxor() function, which will allow for more traditional
+	optimization to be done to further improve performance.
 */
 
 void Encoder::MultiplyDenseRows()
@@ -979,7 +976,7 @@ void Encoder::MultiplyDenseRows()
 					next_dense_submatrix = 0; // Make sure the submatrix code doesn't trigger again
 
 				// Generate shuffled decks for the rows and bits
-				u8 rows[32], bits[32];
+				u8 rows[MAX_DENSE_ROWS], bits[MAX_DENSE_ROWS];
 				ShuffleDeck(prng, rows, _dense_count);
 				ShuffleDeck(prng, bits, _dense_count);
 
@@ -1320,7 +1317,7 @@ void Encoder::SolveTriangleColumns()
 				combo = 0;
 			}
 
-			CAT_IF_DUMP(cout << "[" << (int)buffer_src[0] << "]";)
+			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
 
 			// Eliminate peeled columns:
 			PeelRow *row = &_peel_rows[pivot_row_i];
@@ -1397,7 +1394,7 @@ void Encoder::SolveTriangleColumns()
 					next_dense_submatrix = 0; // Make sure the submatrix code doesn't trigger again
 
 				// Generate shuffled decks for the rows and bits
-				u8 rows[32], bits[32];
+				u8 rows[MAX_DENSE_ROWS], bits[MAX_DENSE_ROWS];
 				ShuffleDeck(prng, rows, _dense_count);
 				ShuffleDeck(prng, bits, _dense_count);
 
