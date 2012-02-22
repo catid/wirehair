@@ -424,13 +424,10 @@ class Encoder
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
-	int _ge_pitch;				// Pitch in words of GE matrix
+	int _ge_pitch;				// Pitch in words of GE matrix and compression matrix
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
 	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
-
-	// Multiplication Compression approach
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
-	int _ge_compress_pitch;		// Pitch in words of GE compression matrix
 	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
 
 #if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
@@ -579,13 +576,10 @@ class Decoder
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
-	int _ge_pitch;				// Pitch in words of GE matrix
+	int _ge_pitch;				// Pitch in words of GE matrix and compression matrix
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
 	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
-
-	// Multiplication Compression approach
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
-	int _ge_compress_pitch;		// Pitch in words of GE compression matrix
 	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
 
 #if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)

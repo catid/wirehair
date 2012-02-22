@@ -220,8 +220,6 @@ bool Decoder::PeelSetup()
 
 			PeelColumn *col = &_peel_cols[column_i];
 
-			// TODO: This is too complicated to do inline, need to make this a function...
-
 			// Add row reference to column
 			u16 row_count = col->row_count;
 			u16 *refs;
@@ -612,7 +610,7 @@ bool Decoder::CompressSetup()
 	int ge_compress_matrix_words = ge_compress_rows * ge_compress_pitch;
 	_ge_compress_matrix = new u64[ge_compress_matrix_words];
 	if (!_ge_compress_matrix) return false;
-	_ge_compress_pitch = ge_compress_pitch;
+	_ge_pitch = ge_compress_pitch;
 
 	// Clear entire GE compress matrix
 	memset(_ge_compress_matrix, 0, ge_compress_matrix_words * sizeof(u64));
@@ -656,7 +654,7 @@ void Decoder::SetDeferredColumns()
 
 			CAT_IF_DUMP(cout << " " << row_i;)
 
-			matrix_row_offset[_ge_compress_pitch * row_i] |= ge_mask;
+			matrix_row_offset[_ge_pitch * row_i] |= ge_mask;
 		}
 
 		CAT_IF_DUMP(cout << endl;)
@@ -699,7 +697,7 @@ void Decoder::SetMixingColumnsForDeferredRows()
 		u16 weight = row->mix_weight;
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
-		u64 *ge_row = _ge_compress_matrix + _ge_compress_pitch * defer_row_i;
+		u64 *ge_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
 		for (;;)
 		{
 			// Flip bit for each mixing column
@@ -734,7 +732,7 @@ void Decoder::PeelDiagonal()
 
 		// Lookup peeling results
 		u16 peel_column_i = row->peel_column;
-		u64 *ge_row = _ge_compress_matrix + _ge_compress_pitch * peel_row_i;
+		u64 *ge_row = _ge_compress_matrix + _ge_pitch * peel_row_i;
 
 		CAT_IF_DUMP(cout << "  Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
 
@@ -793,8 +791,8 @@ void Decoder::PeelDiagonal()
 			CAT_IF_DUMP(cout << "  ++ Adding to referencing row " << ref_row_i << endl;)
 
 			// Add GE row to referencing GE row
-			u64 *ge_ref_row = _ge_compress_matrix + _ge_compress_pitch * ref_row_i;
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii)
+			u64 *ge_ref_row = _ge_compress_matrix + _ge_pitch * ref_row_i;
+			for (int ii = 0; ii < _ge_pitch; ++ii)
 				ge_ref_row[ii] ^= ge_row[ii];
 
 			// If row is peeled,
@@ -842,8 +840,8 @@ void Decoder::CopyDeferredRows()
 		CAT_IF_DUMP(cout << "Peeled row " << defer_row_i << " for GE row " << ge_row_i << endl;)
 
 		// Copy compress row to GE row
-		u64 *compress_row = _ge_compress_matrix + _ge_compress_pitch * defer_row_i;
-		memcpy(ge_row, compress_row, _ge_compress_pitch * sizeof(u64));
+		u64 *compress_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
+		memcpy(ge_row, compress_row, _ge_pitch * sizeof(u64));
 
 		// Set row map for this deferred row
 		_ge_row_map[ge_row_i] = defer_row_i;
@@ -856,14 +854,6 @@ void Decoder::CopyDeferredRows()
 void Decoder::MultiplyDenseRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
-
-	/*
-		NOTE: This does not need to generate the same dense rows that
-		the multiply-compression algorithm generates because both the
-		encoder and decoder will make the same choice on which to use.
-
-		TODO: Use 2-bit window optimization here also
-	*/
 
 	// Initialize PRNG
 	CatsChoice prng;
@@ -885,22 +875,22 @@ void Decoder::MultiplyDenseRows()
 		{
 			// Lookup GE compress matrix source row
 			u16 source_row_i = column->peel_row;
-			u64 *ge_source_row = _ge_compress_matrix + _ge_compress_pitch * source_row_i;
+			u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * source_row_i;
 			u64 *ge_dest_row;
 
 			CAT_IF_DUMP(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
 
 			// Light rows:
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
-			for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
 			// Dense rows:
@@ -909,7 +899,7 @@ void Decoder::MultiplyDenseRows()
 			{
 				if (dense_rv & 1)
 				{
-					for (int ii = 0; ii < _ge_compress_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
+					for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
@@ -1057,7 +1047,6 @@ void Decoder::SolveTriangleColumns()
 	}
 
 	// (2) Add dense rows
-	// TODO: Use 2-bit window optimization here also
 
 	// Initialize PRNG
 	CatsChoice prng;
@@ -1184,7 +1173,7 @@ void Decoder::PrintGECompressMatrix()
 	{
 		for (int jj = 0; jj < cols; ++jj)
 		{
-			if (_ge_compress_matrix[_ge_compress_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
+			if (_ge_compress_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
 				cout << '1';
 			else
 				cout << '0';

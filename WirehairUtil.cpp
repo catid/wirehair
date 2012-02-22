@@ -406,6 +406,13 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &li
 		dense_count = 14;
 		return true;
 	}
+	else if (block_count == 10000)
+	{
+		seed = g_seed;
+		light_count = 110;
+		dense_count = 18;
+		return true;
+	}
 
 	return false;
 }
