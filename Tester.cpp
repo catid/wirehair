@@ -226,7 +226,7 @@ u32 GenerateGoodCheckSeed(int block_count)
 	u32 best_seed = 0;
 	for (u32 seed = 0; seed < 10; ++seed)
 	{
-		const int TRIALS = 1000;
+		const int TRIALS = 100;
 		u32 worked = 0;
 		g_p_seed = m_clock.cycles();
 		for (int ii = 0; ii < TRIALS; ++ii)
@@ -258,7 +258,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 4096;
+	int block_count = 32768;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -278,7 +278,7 @@ int main()
 
 	g_p_seed = m_clock.cycles();
 	u64 trials = 0, worked = 0;
-	while (++trials < 1000)
+	while (++trials < 100)
 	{
 		++g_p_seed;
 		if (encoder.Initialize(message, message_bytes, block_bytes))

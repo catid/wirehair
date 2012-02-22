@@ -57,7 +57,6 @@ bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
 bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &light_count, u16 &dense_count);
 
 // Deck Shuffling function
-void ShuffleDeck8(CatsChoice &prng, u8 *deck, u32 count);
 void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
 
 

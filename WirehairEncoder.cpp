@@ -879,7 +879,7 @@ void Encoder::MultiplyDenseRows()
 	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
 	for (; column_i + check_count <= _block_count; column_i += check_count, column += check_count)
 	{
-		// Generate shuffled decks for the rows and bits
+		// Shuffle row and bit order
 		ShuffleDeck16(prng, rows, check_count);
 		ShuffleDeck16(prng, bits, check_count);
 
@@ -898,7 +898,7 @@ void Encoder::MultiplyDenseRows()
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -914,7 +914,7 @@ void Encoder::MultiplyDenseRows()
 
 		// Store first row
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
-		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 
 		// Generate first half of rows
 		for (int ii = 0; ii < loop_count; ++ii)
@@ -926,7 +926,7 @@ void Encoder::MultiplyDenseRows()
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -939,7 +939,7 @@ void Encoder::MultiplyDenseRows()
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -950,19 +950,23 @@ void Encoder::MultiplyDenseRows()
 
 			// Store in row
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
-			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 		}
 
-		// Handle odd window sizes
-		if (check_count & 1)
-		{
-			int bit_i = set_bits[loop_count];
+		// Shuffle bit order
+		ShuffleDeck16(prng, bits, check_count);
 
+		// Generate half-way row
+		memset(temp_row, 0, _ge_pitch * sizeof(u64));
+		for (int ii = 0; ii < set_count; ++ii)
+		{
+			// If bit is peeled,
+			int bit_i = set_bits[ii];
 			if (column[bit_i].mark == MARK_PEEL)
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -970,14 +974,15 @@ void Encoder::MultiplyDenseRows()
 				u16 ge_column_i = column[bit_i].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
-
-			// Store in row
-			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
-			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
 		}
 
+		// Store in row
+		ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+
 		// Generate second half of rows
-		for (int ii = 0; ii < loop_count - 1; ++ii)
+		const int second_loop_count = loop_count - 2 + (check_count & 1);
+		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 
@@ -986,7 +991,7 @@ void Encoder::MultiplyDenseRows()
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -999,7 +1004,7 @@ void Encoder::MultiplyDenseRows()
 			{
 				// Add temp row value
 				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
-				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 			}
 			else
 			{
@@ -1010,7 +1015,7 @@ void Encoder::MultiplyDenseRows()
 
 			// Store in row
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
-			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 		}
 	} // next column
 
@@ -1341,7 +1346,7 @@ void Encoder::AddCheckValues()
 	for (; column_i + check_count <= _block_count; column_i += check_count,
 		column += check_count, source_block += _block_bytes * check_count)
 	{
-		// Generate shuffled decks for the rows and bits
+		// Shuffle row and bit order
 		ShuffleDeck16(prng, rows, check_count);
 		ShuffleDeck16(prng, bits, check_count);
 
@@ -1426,24 +1431,59 @@ void Encoder::AddCheckValues()
 			CAT_IF_ROWOP(++rowops;)
 		}
 
-		// Handle odd window sizes
-		if (check_count & 1)
-		{
-			int bit_i = set_bits[loop_count];
+		// Shuffle bit order
+		ShuffleDeck16(prng, bits, check_count);
 
+		// Generate middle row
+		combo = 0;
+		CAT_IF_ROWOP(++rowops;)
+		for (int ii = 0; ii < set_count; ++ii)
+		{
+			// If bit is peeled,
+			int bit_i = set_bits[ii];
 			if (column[bit_i].mark == MARK_PEEL)
 			{
-				memxor(temp_block, source_block + _block_bytes * bit_i, _block_bytes);
+				const u8 *src = source_block + _block_bytes * bit_i;
+
+				// If no combo used yet,
+				if (!combo)
+					combo = src;
+				else if (combo == temp_block)
+				{
+					// Else if combo has been used: XOR it in
+					memxor(temp_block, src, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+				else
+				{
+					// Else if combo needs to be used: Combine into block
+					memxor_set(temp_block, combo, src, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+					combo = temp_block;
+				}
+			}
+		}
+
+		// If no combo ever triggered,
+		if (!combo)
+			memset(temp_block, 0, _block_bytes);
+		else
+		{
+			if (combo != temp_block)
+			{
+				// Else if never combined two: Just copy it
+				memcpy(temp_block, combo, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
-			// Store in row
+			// Store first row
 			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
 			CAT_IF_ROWOP(++rowops;)
 		}
 
 		// Generate second half of rows
-		for (int ii = 0; ii < loop_count - 1; ++ii)
+		const int second_loop_count = loop_count - 2 + (check_count & 1);
+		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 
@@ -1517,7 +1557,7 @@ void Encoder::AddCheckValues()
 		}
 	} // next column
 
-	CAT_IF_ROWOP(cout << "SolveTriangleColumns add dense rows used " << rowops << " row ops" << endl;)
+	CAT_IF_ROWOP(cout << "AddCheckValues used " << rowops << " row ops" << endl;)
 }
 
 void Encoder::AddSubdiagonalValues()

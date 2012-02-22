@@ -342,55 +342,6 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 	The deck will contain elements with values between 0 and count - 1.
 */
 
-void cat::wirehair::ShuffleDeck8(CatsChoice &prng, u8 *deck, u32 count)
-{
-	deck[0] = 0;
-	for (u32 ii = 1;;)
-	{
-		u32 jj, rv = prng.Next();
-
-		// Unroll to use fewer calls to prng.Next()
-		switch (count - ii)
-		{
-		default:
-			jj = (u8)rv % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-			jj = (u8)(rv >> 8) % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-			jj = (u8)(rv >> 16) % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-			jj = (u8)(rv >> 24) % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-			break;
-
-		case 3:
-			jj = (u8)rv % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-		case 2:
-			jj = (u8)(rv >> 8) % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-			++ii;
-		case 1:
-			jj = (u8)(rv >> 16) % ii;
-			deck[ii] = deck[jj];
-			deck[jj] = ii;
-		case 0:
-			return;
-		}
-	}
-}
-
 void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 {
 	deck[0] = 0;
@@ -471,8 +422,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		dense_count = 8;
 		return true;
 	case 4096:
-		light_count = 60;
-		dense_count = 12;
+		light_count = 50;
+		dense_count = 14;
 		return true;
 	case 8192:
 		light_count = 90;
@@ -487,7 +438,7 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		dense_count = 26;
 		return true;
 	case 32768:
-		light_count = 410;
+		light_count = 400;
 		dense_count = 30;
 		return true;
 	case 40000:
