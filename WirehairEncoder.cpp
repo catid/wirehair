@@ -756,10 +756,10 @@ void Encoder::PeelDiagonal()
 					// Add this row block value with message block to it (optimization)
 					const u8 *block_src = _message_blocks + _block_bytes * ref_row_i;
 					if (ref_row_i != _block_count - 1)
-						memxor(temp_block_dest, temp_block_src, block_src, _block_bytes);
+						memxor_set(temp_block_dest, temp_block_src, block_src, _block_bytes);
 					else
 					{
-						memxor(temp_block_dest, temp_block_src, block_src, _final_bytes);
+						memxor_set(temp_block_dest, temp_block_src, block_src, _final_bytes);
 						memcpy(temp_block_dest + _final_bytes, temp_block_src, _block_bytes - _final_bytes);
 					}
 
@@ -1082,7 +1082,7 @@ void Encoder::SolveTriangleColumns()
 					else
 					{
 						// Use combo
-						memxor(buffer_dest, combo, _check_blocks + _block_bytes * column_i, _block_bytes);
+						memxor_set(buffer_dest, combo, _check_blocks + _block_bytes * column_i, _block_bytes);
 						combo = 0;
 					}
 					CAT_IF_ROWOP(++rowops;)
@@ -1105,52 +1105,231 @@ void Encoder::SolveTriangleColumns()
 	CatsChoice prng;
 	prng.Initialize(_g_seed, _block_count);
 
+#if defined(CAT_SHUFFLE_DENSE_ROWS)
+	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
+
+	// If special dense processing is not possible,
+	if (_dense_count < 8 || _dense_count > _block_count)
+	{
+		// Disable shuffling by setting submatrix trigger past end
+		// NOTE: This will still process dense rows by column
+		next_dense_submatrix = _block_count;
+	}
+#endif
+
 	// For each column,
 	const u8 *source_block = _check_blocks;
 	PeelColumn *column = _peel_cols;
+
 	for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column, source_block += _block_bytes)
 	{
-		// Generate dense column
-		u32 dense_rv = prng.Next();
 
-		// If the column is not peeled,
-		if (column->mark != MARK_PEEL)
-			continue; // Skip
-
-		CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
-
-		// Set up for light column generation
-		u16 x = column_i % _light_count;
-		u16 adiv = column_i / _light_count;
-		u16 a = 1 + adiv % (_light_count - 1);
-		u16 adiv2 = 1 + adiv / (_light_count - 1);
-		u16 b = (adiv2 * a) % _light_next_prime;
-		if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
-
-		CAT_IF_DUMP(cout << " " << x;)
-		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-		CAT_IF_ROWOP(++rowops;)
-		IterateNextColumn(x, _light_count, _light_next_prime, a);
-		CAT_IF_DUMP(cout << " " << x;)
-		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-		CAT_IF_ROWOP(++rowops;)
-		IterateNextColumn(x, _light_count, _light_next_prime, b);
-		CAT_IF_DUMP(cout << " " << x;)
-		memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-		CAT_IF_ROWOP(++rowops;)
-
-		// Dense rows:
-		for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
+#if defined(CAT_SHUFFLE_DENSE_ROWS)
+		// If it is time to do dense processing,
+		if (column_i >= next_dense_trigger)
 		{
-			if (dense_rv & 1)
+			// If it is time to generate a submatrix,
+			if (column_i == next_dense_submatrix)
 			{
-				CAT_IF_DUMP(cout << " " << ii;)
-				memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
+				// Calculate next trigger point
+				next_dense_trigger += _dense_count;
+				next_dense_submatrix = next_dense_trigger;
+
+				// If next trigger point submatrix would go beyond the matrix end, start using column approach
+				if (next_dense_trigger + _dense_count >= _block_count)
+					next_dense_submatrix = 0; // Make sure the submatrix code doesn't trigger again
+
+				// Generate shuffled decks for the rows and bits
+				u8 rows[32], bits[32];
+				ShuffleDeck(prng, rows, _dense_count);
+				ShuffleDeck(prng, bits, _dense_count);
+
+				// Initialize counters
+				u8 set_count = (_dense_count + 1) >> 1;
+				u8 *set_bits = bits;
+				u8 *clr_bits = set_bits + set_count;
+
+				// Generate first row
+				u8 *temp_block = _check_blocks + _block_bytes * (_block_count + _added_count);
+				const u8 *combo = 0;
 				CAT_IF_ROWOP(++rowops;)
+				for (int ii = 0; ii < set_count; ++ii)
+				{
+					// If bit is peeled,
+					int bit_i = set_bits[ii];
+					if (column[bit_i].mark == MARK_PEEL)
+					{
+						const u8 *src = source_block + _block_bytes * bit_i;
+
+						// If no combo used yet,
+						if (!combo)
+							combo = src;
+						else if (combo == temp_block)
+						{
+							// Else if combo has been used: XOR it in
+							memxor(temp_block, src, _block_bytes);
+							CAT_IF_ROWOP(++rowops;)
+						}
+						else
+						{
+							// Else if combo needs to be used: Combine into block
+							memxor_set(temp_block, combo, src, _block_bytes);
+							CAT_IF_ROWOP(++rowops;)
+							combo = temp_block;
+						}
+					}
+				}
+
+				// Set up generator
+				const u8 *row = rows;
+				int loop_count = _dense_count >> 1;
+
+				// If no combo ever triggered,
+				if (!combo)
+					memset(temp_block, 0, _block_bytes);
+				else
+				{
+					if (combo != temp_block)
+					{
+						// Else if never combined two: Just copy it
+						memcpy(temp_block, combo, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+
+					// Store first row
+					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+
+				// Generate first half of rows
+				for (int ii = 0; ii < loop_count; ++ii)
+				{
+					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+					// Add in peeled columns
+					if (column[bit0].mark == MARK_PEEL)
+					{
+						if (column[bit1].mark == MARK_PEEL)
+							memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+						else
+							memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+					else if (column[bit1].mark == MARK_PEEL)
+					{
+						memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+
+					// Store in row
+					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+
+				// Handle odd window sizes
+				if (_dense_count & 1)
+				{
+					int bit_i = set_bits[loop_count];
+
+					if (column[bit_i].mark == MARK_PEEL)
+					{
+						memxor(temp_block, source_block + _block_bytes * bit_i, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+
+					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+
+				// Generate second half of rows
+				for (int ii = 0; ii < loop_count - 1; ++ii)
+				{
+					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+					// Add in peeled columns
+					if (column[bit0].mark == MARK_PEEL)
+					{
+						if (column[bit1].mark == MARK_PEEL)
+							memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+						else
+							memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+					else if (column[bit1].mark == MARK_PEEL)
+					{
+						memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+
+					// Store in row
+					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
+			}
+			else
+			{
+				u32 dense_rv = prng.Next();
+
+				// If the column is peeled,
+				if (column->mark == MARK_PEEL)
+				{
+					// Dense rows:
+					for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
+					{
+						if (dense_rv & 1)
+						{
+							memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
+							CAT_IF_ROWOP(++rowops;)
+						}
+					}
+				}
 			}
 		}
+#else
+		u32 dense_rv = prng.Next();
+#endif
 
-		CAT_IF_DUMP(cout << endl;)
+		// If the column is peeled,
+		if (column->mark == MARK_PEEL)
+		{
+			CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
+
+			// Set up for light column generation
+			u16 x = column_i % _light_count;
+			u16 adiv = column_i / _light_count;
+			u16 a = 1 + adiv % (_light_count - 1);
+			u16 adiv2 = 1 + adiv / (_light_count - 1);
+			u16 b = (adiv2 * a) % _light_next_prime;
+			if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
+
+			CAT_IF_DUMP(cout << " " << x;)
+			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+			IterateNextColumn(x, _light_count, _light_next_prime, a);
+			CAT_IF_DUMP(cout << " " << x;)
+			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+			IterateNextColumn(x, _light_count, _light_next_prime, b);
+			CAT_IF_DUMP(cout << " " << x;)
+			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+
+#if !defined(CAT_SHUFFLE_DENSE_ROWS)
+			// If the column is peeled,
+			if (column->mark == MARK_PEEL)
+			{
+				// Dense rows:
+				for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
+				{
+					if (dense_rv & 1)
+					{
+						memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+				}
+			}
+#endif
+		}
 	}
 
 	// (3) For each GE matrix bit up to the diagonal, add deferred and mixed:
@@ -1470,7 +1649,7 @@ void Encoder::Substitute()
 				memxor(dest, src, _block_bytes);
 			else
 			{
-				memxor(dest, src, combo, _block_bytes);
+				memxor_set(dest, src, combo, _block_bytes);
 				combo = 0;
 			}
 			CAT_IF_DUMP(cout << "[" << (int)src[0] << "]";)
@@ -1708,7 +1887,7 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_added_count = _light_count + _dense_count;
 
 	// Allocate check blocks
-	int check_size = (block_count + _added_count) * block_bytes;
+	int check_size = (block_count + _added_count + 1) * block_bytes; // +1 for temporary space
 	_check_blocks = new u8[check_size];
 	if (!_check_blocks) return false;
 
@@ -1797,7 +1976,7 @@ void Encoder::Generate(u32 id, void *block)
 		CAT_IF_DUMP(cout << " " << peel_x;)
 
 		// Combine first two columns into output buffer (faster than memcpy + memxor)
-		memxor(buffer, first, _check_blocks + _block_bytes * peel_x, _block_bytes);
+		memxor_set(buffer, first, _check_blocks + _block_bytes * peel_x, _block_bytes);
 
 		// For each remaining peeler column,
 		while (--peel_weight > 0)
@@ -1816,7 +1995,7 @@ void Encoder::Generate(u32 id, void *block)
 	else
 	{
 		// Mix first with first mixer block (faster than memcpy + memxor)
-		memxor(buffer, first, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		memxor_set(buffer, first, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
 	}
 
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)

@@ -38,7 +38,10 @@ namespace cat {
 void memxor(void *voutput, const void *vinput, int bytes);
 
 // XOR of two buffers stored in voutput buffer
-void memxor(void *voutput, const void *va, const void *vb, int bytes);
+void memxor_set(void *voutput, const void *va, const void *vb, int bytes);
+
+// XOR of two buffers XORed into voutput buffer
+void memxor_add(void *voutput, const void *va, const void *vb, int bytes);
 
 
 } // namespace cat

@@ -29,7 +29,7 @@
 #ifndef CAT_WIREHAIR_UTIL_HPP
 #define CAT_WIREHAIR_UTIL_HPP
 
-#include "Platform.hpp"
+#include "SmallPRNG.hpp"
 
 extern int g_seed;
 
@@ -54,6 +54,9 @@ bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
 
 // Matrix Parameter Generator function
 bool GenerateMatrixParameters(int block_count, u32 &seed, u16 &light_count, u16 &dense_count);
+
+// Deck Shuffling function
+void ShuffleDeck(CatsChoice &prng, u8 *deck, int count);
 
 
 //// Utility: Column iterator function

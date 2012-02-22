@@ -335,6 +335,64 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 }
 
 
+//// Utility: Deck Shuffling function
+
+/*
+	Given a PRNG, generate a deck of cards in a random order.
+	The deck will contain elements with values between 0 and count - 1.
+	Supports count under 256.
+*/
+
+void cat::wirehair::ShuffleDeck(CatsChoice &prng, u8 *deck, int count)
+{
+	deck[0] = 0;
+	for (int ii = 1;;)
+	{
+		u32 jj, rv = prng.Next();
+
+		// Unroll to use fewer calls to prng.Next()
+		switch (count - ii)
+		{
+		default:
+			jj = (u8)rv % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 8) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 16) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 24) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			break;
+
+		case 3:
+			jj = (u8)rv % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+		case 2:
+			jj = (u8)(rv >> 8) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+		case 1:
+			jj = (u8)(rv >> 16) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+		case 0:
+			return;
+		}
+	}
+}
+
+
 //// Utility: Matrix Parameter Generator function
 
 int g_seed;

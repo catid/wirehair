@@ -816,10 +816,10 @@ void Decoder::PeelDiagonal()
 					// Add this row block value with message block to it (optimization)
 					const u8 *block_src = _message_blocks + _block_bytes * ref_row_i;
 					if (ref_row_i != _block_count - 1)
-						memxor(temp_block_dest, temp_block_src, block_src, _block_bytes);
+						memxor_set(temp_block_dest, temp_block_src, block_src, _block_bytes);
 					else
 					{
-						memxor(temp_block_dest, temp_block_src, block_src, _final_bytes);
+						memxor_set(temp_block_dest, temp_block_src, block_src, _final_bytes);
 						memcpy(temp_block_dest + _final_bytes, temp_block_src, _block_bytes - _final_bytes);
 					}
 
@@ -1424,7 +1424,7 @@ void Decoder::Substitute()
 				memxor(dest, src, _block_bytes);
 			else
 			{
-				memxor(dest, src, combo, _block_bytes);
+				memxor_set(dest, src, combo, _block_bytes);
 				combo = 0;
 			}
 			CAT_IF_DUMP(cout << "[" << (int)src[0] << "]";)
@@ -1706,6 +1706,7 @@ bool Decoder::GEResume(u32 id, const u8 *buffer)
 	// TODO: Resume
 
 	// TODO: RecreateMessage()
+	return false;
 }
 
 bool Decoder::Decode(u32 id, const void *block)
