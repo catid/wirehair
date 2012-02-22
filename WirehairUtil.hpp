@@ -31,7 +31,8 @@
 
 #include "SmallPRNG.hpp"
 
-extern int g_seed;
+// TODO: Remove this
+extern int g_p_seed, g_c_seed;
 
 namespace cat {
 
@@ -53,10 +54,11 @@ u16 GeneratePeelRowWeight(u32 rv, u16 max_weight);
 bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
 
 // Matrix Parameter Generator function
-bool GenerateMatrixParameters(int block_count, u32 &seed, u16 &light_count, u16 &dense_count);
+bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &light_count, u16 &dense_count);
 
 // Deck Shuffling function
-void ShuffleDeck(CatsChoice &prng, u8 *deck, int count);
+void ShuffleDeck8(CatsChoice &prng, u8 *deck, u32 count);
+void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
 
 
 //// Utility: Column iterator function

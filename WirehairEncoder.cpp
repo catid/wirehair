@@ -57,7 +57,7 @@ using namespace std;
 
 // During generator matrix precomputation, tune these to be as small as possible and still succeed
 static const int ENCODER_REF_LIST_MAX = 64;
-static const int MAX_DENSE_ROWS = 64;
+static const int MAX_CHECK_ROWS = 512;
 
 
 //// Encoder
@@ -180,7 +180,7 @@ bool Encoder::PeelSetup()
 
 		// Initialize PRNG
 		CatsChoice prng;
-		prng.Initialize(row_i, _g_seed);
+		prng.Initialize(row_i, _p_seed);
 
 		// Generate peeling matrix row parameters
 		row->peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
@@ -476,8 +476,8 @@ void Encoder::GreedyPeeling()
 //// (2) Compression:
 
 /*
-	Surprisingly, this is by far the most complex step of the algorithm.
-
+	If using a naive approach, this is by far the most complex step of
+	the matrix inversion.  The approach outlined here makes it minor.
 	At this point the generator matrix has been re-organized
 	into peeled and deferred rows and columns:
 
@@ -505,7 +505,7 @@ void Encoder::GreedyPeeling()
 	B = Columns deferred for GE
 	C = Mixing columns always deferred for GE
 	A = Sparse rows from peeling matrix deferred for GE
-	0 = Dense rows from dense matrix deferred for GE
+	0 = Dense rows from check matrix deferred for GE
 
 		Since the re-ordered matrix above is in lower triangular form,
 	and since the weight of each row is limited to a constant, the cost
@@ -667,6 +667,8 @@ void Encoder::PeelDiagonal()
 		using the is_copied row member.
 	*/
 
+	CAT_IF_ROWOP(int rowops = 0;)
+
 	// For each peeled row in forward solution order,
 	PeelRow *row;
 	for (u16 peel_row_i = _peel_head_rows; peel_row_i != LIST_TERM; peel_row_i = row->next)
@@ -714,6 +716,7 @@ void Encoder::PeelDiagonal()
 				memcpy(temp_block_src, block_src, _final_bytes);
 				memset(temp_block_src + _final_bytes, 0, _block_bytes - _final_bytes);
 			}
+			CAT_IF_ROWOP(++rowops;)
 
 			CAT_IF_DUMP(cout << "  -- Copied from " << peel_row_i << " because has not been copied yet.  Output block = " << (int)temp_block_src[0] << endl;)
 
@@ -766,9 +769,12 @@ void Encoder::PeelDiagonal()
 
 					ref_row->is_copied = 1;
 				}
+				CAT_IF_ROWOP(++rowops;)
 			} // end if referencing row is peeled
 		} // next referencing row
 	} // next peeled row
+
+	CAT_IF_ROWOP(cout << "PeelDiagonal used " << rowops << " row ops" << endl;)
 }
 
 void Encoder::CopyDeferredRows()
@@ -795,22 +801,13 @@ void Encoder::CopyDeferredRows()
 }
 
 /*
-	Important Optimization: Check Row Structure
-
-	(1) Light Check Rows
-
-		For the added check rows it is possible to get away with a lot
-	less than full dense rows.  In fact, most of the check rows can be
-	fairly sparse.  To understand why let's look at how compression works
-	again with a focus on the final form of the GE matrix.
+	Important Optimization: Check Matrix Structure
 
 		After compression, the GE matrix looks like this:
 
 		+-----------------+----------------+--------------+
-		|  Light Deferred | Dense Deferred | Dense Mixing | <- About half the matrix
+		|  Dense Deferred | Dense Deferred | Dense Mixing | <- About half the matrix
 		|                 |                |              |
-		+-----------------+----------------+--------------+
-		|  Dense Deferred | Dense Deferred | Dense Mixing | <- Just a few rows
 		+-----------------+----------------+--------------+
 		|                 | Dense Deferred | Dense Mixing | <- About half the matrix
 		|        0        |                |              |
@@ -820,80 +817,12 @@ void Encoder::CopyDeferredRows()
 		         ^                  ^---- Middle third of the columns
 				 \------ Left third of the columns
 
-		The added check rows are what add the top half of the GE matrix,
-	and are what allow pivots to be found during GE for the first few
-	deferred columns.  Note that without these rows, the first third of
-	the columns would all be zeroes.
-
-		The Light Check Rows are responsible for adding the sparse light
-	columns in the upper left.  Each Light Check Column has 3 bits set, so
-	in the upper left there are 3 bits per column also.  I determined that
-	3 is a good number experimentally for N=1024 and then used it for all
-	N but it may be advantageous to use 2 or 4 for some values of N.  The
-	selection of which 3 bits to set is done efficiently with some caveats
-	that for the following values of N, the number of light check rows is
-	not greater than:
-
-		Max N	Light Check Row Count
-		---		-----------------------------
-		12		4
-		80		5
-		30		6
-		252		7
-		168		8
-		216		9
-		270		10
-		1100	11
-		528		12
-		1872	13
-		546		14
-		1260	15
-		1440	16
-		4352	17
-		2142	18
-		6156	19
-		3420	20
-		3780	21
-		4158	22
-		11132	23
-		3312	24
-		7200	25
-		3900	26
-
-		If Light Row Count is used beyond the N in the above table,
-	then it will cause a degradation in code performance.  The advantage
-	of using this approach, however, is that no columns are repeated in
-	the light check matrix when it is used correctly.  Note that prime
-	values of light count are pretty safe, so a good way to get around
-	this issue is to use prime values of light count for smaller N.  In
-	fact the whole generation process becomes faster for light counts
-	that are prime, so rounding up to the next prime is probably good.
-
-		Since a pivot must be found for each column in the GE matrix in
-	the upper left, and there are 3 chances in each column to find a pivot,
-	often times that is good enough to find pivots through that section of
-	the matrix.  However, a stronger, dense, check code is also added to
-	the middle of the matrix to fill in where needed.  Since these rows
-	are fairly random, each one adds a 50-50 shot at finding the pivot.
-	As the GE matrix grows as N gets larger, the number of dense rows must
-	grow in proportion to the fail rate of the light top code.  This is
-	great because the light top code row count is already just a fraction
-	of N, and the dense row count is just a fraction of that.  Simulation
-	determines what row counts to use for each one.
-
-		Because the weight of each light column is 3, it takes 3*N memxor
-	operations to compress.  This is great because overall this step in
-	compression is O(N) in terms of row operations and will not reduce
-	the throughput of the codec at higher N.
-
-	(2) Dense Matrix Rows
-
 		The dense check rows are generated so that they can quickly be
 	eliminated with as few row operations as possible.
 
 		I needed to find a way to generate a binary matrix that LOOKS
 	random but actually only differs by 2 bits per row.  I looked at
-	using Gray codes or more Weyl generators but they both are
+	using normal Gray codes or more Weyl generators but they both are
 	restricted to a subset of the total possibilities.  Instead, the
 	standard in-place shuffle algorithm is used to shuffle row and
 	column orders to make it look random.  This new algorithm is able
@@ -926,12 +855,6 @@ void Encoder::CopyDeferredRows()
 		11010111000001101
 		11010111000101100
 		11000011010001011
-
-		This one optimization cuts the row operations by -4*N, which
-	makes a big difference for N above 1024.  Most of the execution
-	time is now spent in the code that implements the algorithm rather
-	than the memxor() function, which will allow for more traditional
-	optimization to be done to further improve performance.
 */
 
 void Encoder::MultiplyDenseRows()
@@ -940,227 +863,170 @@ void Encoder::MultiplyDenseRows()
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_g_seed, _block_count);
+	prng.Initialize(_c_seed);
 
-#if defined(CAT_SHUFFLE_DENSE_ROWS)
 	u64 *temp_row = _ge_matrix + _ge_pitch * (_added_count + _defer_count);
 	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
+	const int check_count = _added_count;
 
-	// If special dense processing is not possible,
-	if (_dense_count < 8 || _dense_count > _block_count)
-	{
-		// Disable shuffling by setting submatrix trigger past end
-		// NOTE: This will still process dense rows by column
-		next_dense_submatrix = _block_count;
-	}
-#endif
+	// For columns that we can put a DxD square matrix in:
 
-	// For each column,
 	PeelColumn *column = _peel_cols;
-	for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column)
+	u16 column_i = 0;
+
+#if !defined(CAT_LIGHT_ROWS)
+
+	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
+	for (; column_i + check_count <= _block_count; column_i += check_count, column += check_count)
 	{
+		// Generate shuffled decks for the rows and bits
+		ShuffleDeck16(prng, rows, check_count);
+		ShuffleDeck16(prng, bits, check_count);
 
-#if defined(CAT_SHUFFLE_DENSE_ROWS)
-		// If it is time to do dense processing,
-		if (column_i >= next_dense_trigger)
+		// Initialize counters
+		u16 set_count = (check_count + 1) >> 1;
+		u16 *set_bits = bits;
+		u16 *clr_bits = set_bits + set_count;
+
+		// Generate first row
+		memset(temp_row, 0, _ge_pitch * sizeof(u64));
+		for (int ii = 0; ii < set_count; ++ii)
 		{
-			// If it is time to generate a submatrix,
-			if (column_i == next_dense_submatrix)
+			// If bit is peeled,
+			int bit_i = set_bits[ii];
+			if (column[bit_i].mark == MARK_PEEL)
 			{
-				// Calculate next trigger point
-				next_dense_trigger += _dense_count;
-				next_dense_submatrix = next_dense_trigger;
-
-				// If next trigger point submatrix would go beyond the matrix end, start using column approach
-				if (next_dense_trigger + _dense_count >= _block_count)
-					next_dense_submatrix = 0; // Make sure the submatrix code doesn't trigger again
-
-				// Generate shuffled decks for the rows and bits
-				u8 rows[MAX_DENSE_ROWS], bits[MAX_DENSE_ROWS];
-				ShuffleDeck(prng, rows, _dense_count);
-				ShuffleDeck(prng, bits, _dense_count);
-
-				// Initialize counters
-				u8 set_count = (_dense_count + 1) >> 1;
-				u8 *set_bits = bits;
-				u8 *clr_bits = set_bits + set_count;
-
-				// Generate first row
-				memset(temp_row, 0, _ge_pitch * sizeof(u64));
-				for (int ii = 0; ii < set_count; ++ii)
-				{
-					// If bit is peeled,
-					int bit_i = set_bits[ii];
-					if (column[bit_i].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit_i].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-				}
-
-				// Set up generator
-				const u8 *row = rows;
-				int loop_count = _dense_count >> 1;
-
-				// Store first row
-				u64 *ge_dest_row = _ge_matrix + _ge_pitch * (_light_count + *row++);
-				for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
-
-				// Generate first half of rows
-				for (int ii = 0; ii < loop_count; ++ii)
-				{
-					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
-					// Add in peeled columns
-					if (column[bit0].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit0].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-
-					if (column[bit1].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit1].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-
-					// Store in row
-					ge_dest_row = _ge_matrix + _ge_pitch * (_light_count + *row++);
-					for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
-				}
-
-				// Handle odd window sizes
-				if (_dense_count & 1)
-				{
-					int bit_i = set_bits[loop_count];
-
-					if (column[bit_i].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit_i].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-
-					// Store in row
-					ge_dest_row = _ge_matrix + _ge_pitch * (_light_count + *row++);
-					for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
-				}
-
-				// Generate second half of rows
-				for (int ii = 0; ii < loop_count - 1; ++ii)
-				{
-					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
-					// Add in peeled columns
-					if (column[bit0].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit0].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-
-					if (column[bit1].mark == MARK_PEEL)
-					{
-						// Add temp row value
-						u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
-						for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
-					}
-					else
-					{
-						// Set GE bit for deferred column
-						u16 ge_column_i = column[bit1].ge_column;
-						temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-					}
-
-					// Store in row
-					ge_dest_row = _ge_matrix + _ge_pitch * (_light_count + *row++);
-					for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
-				}
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
 			}
 			else
 			{
-				u32 dense_rv = prng.Next();
-
-				// If the column is peeled,
-				if (column->mark == MARK_PEEL)
-				{
-					// Lookup GE compress matrix source row
-					u16 source_row_i = column->peel_row;
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * source_row_i;
-					u64 *ge_dest_row = _ge_matrix + _ge_pitch * _light_count;
-
-					// For each row,
-					for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
-					{
-						if (dense_rv & 1)
-						{
-							for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
-						}
-					}
-				}
-				else
-				{
-					// Set up bit mask
-					u16 ge_column_i = column->ge_column;
-					u64 *ge_row = _ge_matrix + (ge_column_i >> 6) + _ge_pitch * _light_count;
-					u64 ge_mask = (u64)1 << (ge_column_i & 63);
-
-					// For each row,
-					for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_row += _ge_pitch, dense_rv >>= 1)
-					{
-						if (dense_rv & 1)
-						{
-							*ge_row ^= ge_mask;
-						}
-					}
-				}
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit_i].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
 		}
-#else
-		u32 dense_rv = prng.Next();
-#endif
 
-		// Set up for light column generation
+		// Set up generator
+		const u16 *row = rows;
+		const int loop_count = check_count >> 1;
+
+		// Store first row
+		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+
+		// Generate first half of rows
+		for (int ii = 0; ii < loop_count; ++ii)
+		{
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit0].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			if (column[bit1].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit1].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			// Store in row
+			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+		}
+
+		// Handle odd window sizes
+		if (check_count & 1)
+		{
+			int bit_i = set_bits[loop_count];
+
+			if (column[bit_i].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit_i].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			// Store in row
+			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+		}
+
+		// Generate second half of rows
+		for (int ii = 0; ii < loop_count - 1; ++ii)
+		{
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit0].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			if (column[bit1].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
+				for (int ii = 0; ii < _ge_pitch; ++ii) temp_row[ii] ^= ge_source_row[ii];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit1].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			// Store in row
+			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+		}
+	} // next column
+
+#endif // !CAT_LIGHT_ROWS
+
+	// For remaining columns:
+
+	for (; column_i < _block_count; ++column_i, ++column)
+	{
+		// Set up for dense rows
+		u32 dense_rv = prng.Next();
+
+		// Set up for light rows
 		u16 x = column_i % _light_count;
 		u16 adiv = column_i / _light_count;
 		u16 a = 1 + adiv % (_light_count - 1);
-		u16 adiv2 = 1 + adiv / (_light_count - 1);
-		u16 b = (adiv2 * a) % _light_next_prime;
-		if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
-		CAT_IF_ROWOP(u16 x1 = x;)
 
 		// If the column is peeled,
 		if (column->mark == MARK_PEEL)
@@ -1180,12 +1046,11 @@ void Encoder::MultiplyDenseRows()
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x;)
-			IterateNextColumn(x, _light_count, _light_next_prime, b);
+			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= ge_source_row[ii];
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
-#if !defined(CAT_SHUFFLE_DENSE_ROWS)
 			// Dense rows:
 			ge_dest_row = _ge_matrix + _ge_pitch * _light_count;
 			for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_dest_row += _ge_pitch, dense_rv >>= 1)
@@ -1196,7 +1061,6 @@ void Encoder::MultiplyDenseRows()
 					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
-#endif
 		}
 		else
 		{
@@ -1213,11 +1077,10 @@ void Encoder::MultiplyDenseRows()
 			IterateNextColumn(x, _light_count , _light_next_prime, a);
 			ge_row[_ge_pitch * x] ^= ge_mask;
 			CAT_IF_DUMP(cout << " " << x;)
-			IterateNextColumn(x, _light_count , _light_next_prime, b);
+			IterateNextColumn(x, _light_count , _light_next_prime, a);
 			ge_row[_ge_pitch * x] ^= ge_mask;
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
-#if !defined(CAT_SHUFFLE_DENSE_ROWS)
 			// Dense rows:
 			ge_row += _ge_pitch * _light_count;
 			for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_row += _ge_pitch, dense_rv >>= 1)
@@ -1228,28 +1091,12 @@ void Encoder::MultiplyDenseRows()
 					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
-#endif
 		}
-
-		CAT_IF_ROWOP( if (x == x1) cout << "FAIL for x0 = " << x1 << ", a = " << a << ", b = " << b << " cnt = " << _light_count << " prime = " << _light_next_prime << endl; )
-
-		CAT_IF_DUMP(cout << endl;)
-	}
+	} // next column
 }
 
 void Encoder::Compress()
 {
-	CAT_IF_DUMP(cout << endl << "---- Compress ----" << endl << endl;)
-
-	/*
-		(1) Peeling matrix inversion -> [ Defer | Mix ] rows + row values in peeling columns, check if rows are deferred
-			(1) Set deferred column bits
-			(2) Set mixing columns for each deferred row and mark them as deferred
-			(3) Diagonalize the peeled rows
-		(2) Copy lower deferred rows to GE matrix
-		(3) Perform peeling matrix multiplication and generate GE rows, but no row values yet
-	*/
-
 	SetDeferredColumns();
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
@@ -1270,18 +1117,130 @@ void Encoder::Compress()
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 
+	// Generate mixing columns for check rows
 	AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _added_count);
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 }
 
-void Encoder::SolveTriangleColumns()
+
+/*
+	One more subtle optimization.  Depending on how the GE matrix
+	is constructed, it can be put in a roughly upper-triangular form
+	from the start so it looks like this:
+
+		+---------+---------+
+		| D D D D | D D D 1 |
+		| D D D D | D D 1 M |
+		| D D D D | D 1 M M |
+		| D D D D | 1 M M M |
+		+---------+---------+
+		| 0 0 0 1 | M M M M |
+		| 0 0 0 0 | M M M M |
+		| 0 0 0 1 | M M M M |
+		| 0 0 0 0 | M M M M |
+		+---------+---------+
+
+	In the example above, the top 4 rows are dense matrix rows.
+	The last 4 columns are mixing columns and are also dense.
+	The lower left sub-matrix is sparse and roughly upper triangular
+	because it is the intersection of sparse rows in the generator
+	matrix.  This form is achieved by adding deferred rows starting
+	from last deferred to first, and adding deferred columns starting
+	from last deferred to first.
+
+	Gaussian elimination will proceed from left to right on the matrix.
+	So, having an upper triangular form will prevent left-most zeroes
+	from being eaten up when a row is eliminated by one above it.  This
+	reduces row operations.  For example, GE on a 64x64 matrix will do
+	on average 100 fewer row operations on this form rather than its
+	transpose (where the sparse part is put in the upper right).
+*/
+
+
+//// (3) Gaussian Elimination
+
+bool Encoder::Triangle()
 {
-	CAT_IF_DUMP(cout << endl << "---- SolveTriangleColumns ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
+
+	u16 pivot_count = _defer_count + _added_count;
+
+	// Initialize pivot array
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+		_ge_pivots[pivot_i] = pivot_i;
+
+	// For each pivot to determine,
+	u64 ge_mask = 1;
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	{
+		int word_offset = pivot_i >> 6;
+		u64 *ge_matrix_offset = _ge_matrix + word_offset;
+
+		// Find pivot
+		bool found = false;
+		for (u16 pivot_j = pivot_i; pivot_j < pivot_count; ++pivot_j)
+		{
+			// Determine if the row contains the bit we want
+			u16 ge_row_j = _ge_pivots[pivot_j];
+			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
+
+			// If the bit was found,
+			if (*ge_row & ge_mask)
+			{
+				found = true;
+				CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+
+				// Swap out the pivot index for this one
+				u16 temp = _ge_pivots[pivot_i];
+				_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+				_ge_pivots[pivot_j] = temp;
+
+				// Prepare masked first word
+				u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
+
+				// For each remaining unused row,
+				for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
+				{
+					// Determine if the row contains the bit we want
+					u16 ge_row_k = _ge_pivots[pivot_k];
+					u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
+
+					// If the bit was found,
+					if (*rem_row & ge_mask)
+					{
+						// Add the pivot row to eliminate the bit from this row, preserving previous bits
+						*rem_row ^= row0;
+
+						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
+							rem_row[ii] ^= ge_row[ii];
+					}
+				}
+
+				break;
+			}
+		}
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			return false;
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROL64(ge_mask, 1);
+	}
+
+	return true;
+}
+
+void Encoder::InitializeColumnValues()
+{
+	CAT_IF_DUMP(cout << endl << "---- InitializeColumnValues ----" << endl << endl;)
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
-
-	// (1) Initialize each check block value to the solution row value
 
 	// For each pivot,
 	const u16 ge_rows = _defer_count + _added_count;
@@ -1353,244 +1312,222 @@ void Encoder::SolveTriangleColumns()
 		CAT_IF_DUMP(cout << endl;)
 	}
 
-	// (2) Add dense rows
+	CAT_IF_ROWOP(cout << "InitializeColumnValues used " << rowops << " row ops" << endl;)
+}
+
+void Encoder::AddCheckValues()
+{
+	CAT_IF_DUMP(cout << endl << "---- AddCheckValues ----" << endl << endl;)
+
+	CAT_IF_ROWOP(u32 rowops = 0;)
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_g_seed, _block_count);
+	prng.Initialize(_c_seed);
 
-#if defined(CAT_SHUFFLE_DENSE_ROWS)
 	u8 *temp_block = _check_blocks + _block_bytes * (_block_count + _added_count);
 	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
+	const int check_count = _added_count;
 
-	// If special dense processing is not possible,
-	if (_dense_count < 8 || _dense_count > _block_count)
-	{
-		// Disable shuffling by setting submatrix trigger past end
-		// NOTE: This will still process dense rows by column
-		next_dense_submatrix = _block_count;
-	}
-#endif
+	// For columns that we can put a DxD square matrix in:
 
-	// For each column,
 	const u8 *source_block = _check_blocks;
 	PeelColumn *column = _peel_cols;
-	for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column, source_block += _block_bytes)
+	u16 column_i = 0;
+
+#if !defined(CAT_LIGHT_ROWS)
+
+	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
+	for (; column_i + check_count <= _block_count; column_i += check_count,
+		column += check_count, source_block += _block_bytes * check_count)
 	{
+		// Generate shuffled decks for the rows and bits
+		ShuffleDeck16(prng, rows, check_count);
+		ShuffleDeck16(prng, bits, check_count);
 
-#if defined(CAT_SHUFFLE_DENSE_ROWS)
-		// If it is time to do dense processing,
-		if (column_i >= next_dense_trigger)
+		// Initialize counters
+		u16 set_count = (check_count + 1) >> 1;
+		u16 *set_bits = bits;
+		u16 *clr_bits = set_bits + set_count;
+
+		// Generate first row
+		const u8 *combo = 0;
+		CAT_IF_ROWOP(++rowops;)
+		for (int ii = 0; ii < set_count; ++ii)
 		{
-			// If it is time to generate a submatrix,
-			if (column_i == next_dense_submatrix)
+			// If bit is peeled,
+			int bit_i = set_bits[ii];
+			if (column[bit_i].mark == MARK_PEEL)
 			{
-				// Calculate next trigger point
-				next_dense_trigger += _dense_count;
-				next_dense_submatrix = next_dense_trigger;
+				const u8 *src = source_block + _block_bytes * bit_i;
 
-				// If next trigger point submatrix would go beyond the matrix end, start using column approach
-				if (next_dense_trigger + _dense_count >= _block_count)
-					next_dense_submatrix = 0; // Make sure the submatrix code doesn't trigger again
-
-				// Generate shuffled decks for the rows and bits
-				u8 rows[MAX_DENSE_ROWS], bits[MAX_DENSE_ROWS];
-				ShuffleDeck(prng, rows, _dense_count);
-				ShuffleDeck(prng, bits, _dense_count);
-
-				// Initialize counters
-				u8 set_count = (_dense_count + 1) >> 1;
-				u8 *set_bits = bits;
-				u8 *clr_bits = set_bits + set_count;
-
-				// Generate first row
-				const u8 *combo = 0;
-				CAT_IF_ROWOP(++rowops;)
-				for (int ii = 0; ii < set_count; ++ii)
-				{
-					// If bit is peeled,
-					int bit_i = set_bits[ii];
-					if (column[bit_i].mark == MARK_PEEL)
-					{
-						const u8 *src = source_block + _block_bytes * bit_i;
-
-						// If no combo used yet,
-						if (!combo)
-							combo = src;
-						else if (combo == temp_block)
-						{
-							// Else if combo has been used: XOR it in
-							memxor(temp_block, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-						}
-						else
-						{
-							// Else if combo needs to be used: Combine into block
-							memxor_set(temp_block, combo, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-							combo = temp_block;
-						}
-					}
-				}
-
-				// Set up generator
-				const u8 *row = rows;
-				int loop_count = _dense_count >> 1;
-
-				// If no combo ever triggered,
+				// If no combo used yet,
 				if (!combo)
-					memset(temp_block, 0, _block_bytes);
+					combo = src;
+				else if (combo == temp_block)
+				{
+					// Else if combo has been used: XOR it in
+					memxor(temp_block, src, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+				}
 				else
 				{
-					if (combo != temp_block)
-					{
-						// Else if never combined two: Just copy it
-						memcpy(temp_block, combo, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-
-					// Store first row
-					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
+					// Else if combo needs to be used: Combine into block
+					memxor_set(temp_block, combo, src, _block_bytes);
 					CAT_IF_ROWOP(++rowops;)
-				}
-
-				// Generate first half of rows
-				for (int ii = 0; ii < loop_count; ++ii)
-				{
-					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
-					// Add in peeled columns
-					if (column[bit0].mark == MARK_PEEL)
-					{
-						if (column[bit1].mark == MARK_PEEL)
-							memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
-						else
-							memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-					else if (column[bit1].mark == MARK_PEEL)
-					{
-						memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-
-					// Store in row
-					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-				}
-
-				// Handle odd window sizes
-				if (_dense_count & 1)
-				{
-					int bit_i = set_bits[loop_count];
-
-					if (column[bit_i].mark == MARK_PEEL)
-					{
-						memxor(temp_block, source_block + _block_bytes * bit_i, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-
-					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-				}
-
-				// Generate second half of rows
-				for (int ii = 0; ii < loop_count - 1; ++ii)
-				{
-					int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
-					// Add in peeled columns
-					if (column[bit0].mark == MARK_PEEL)
-					{
-						if (column[bit1].mark == MARK_PEEL)
-							memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
-						else
-							memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-					else if (column[bit1].mark == MARK_PEEL)
-					{
-						memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
-
-					// Store in row
-					memxor(_check_blocks + _block_bytes * _ge_row_map[_light_count + *row++], temp_block, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-				}
-			}
-			else
-			{
-				u32 dense_rv = prng.Next();
-
-				// If the column is peeled,
-				if (column->mark == MARK_PEEL)
-				{
-					// Dense rows:
-					for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
-					{
-						if (dense_rv & 1)
-						{
-							memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-						}
-					}
+					combo = temp_block;
 				}
 			}
 		}
-#else
+
+		// Set up generator
+		const u16 *row = rows;
+		const int loop_count = check_count >> 1;
+
+		// If no combo ever triggered,
+		if (!combo)
+			memset(temp_block, 0, _block_bytes);
+		else
+		{
+			if (combo != temp_block)
+			{
+				// Else if never combined two: Just copy it
+				memcpy(temp_block, combo, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+
+			// Store first row
+			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+		}
+
+		// Generate first half of rows
+		for (int ii = 0; ii < loop_count; ++ii)
+		{
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				if (column[bit1].mark == MARK_PEEL)
+					memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+				else
+					memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+			else if (column[bit1].mark == MARK_PEEL)
+			{
+				memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+
+			// Store in row
+			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+		}
+
+		// Handle odd window sizes
+		if (check_count & 1)
+		{
+			int bit_i = set_bits[loop_count];
+
+			if (column[bit_i].mark == MARK_PEEL)
+			{
+				memxor(temp_block, source_block + _block_bytes * bit_i, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+
+			// Store in row
+			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+		}
+
+		// Generate second half of rows
+		for (int ii = 0; ii < loop_count - 1; ++ii)
+		{
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				if (column[bit1].mark == MARK_PEEL)
+					memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+				else
+					memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+			else if (column[bit1].mark == MARK_PEEL)
+			{
+				memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+
+			// Store in row
+			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+		}
+	} // next column
+
+#endif // !CAT_LIGHT_ROWS
+
+	// For remaining columns:
+
+	for (; column_i < _block_count; ++column_i, ++column, source_block += _block_bytes)
+	{
+		// Set up for dense rows
 		u32 dense_rv = prng.Next();
-#endif
+
+		// Set up for light rows
+		u16 x = column_i % _light_count;
+		u16 adiv = column_i / _light_count;
+		u16 a = 1 + adiv % (_light_count - 1);
 
 		// If the column is peeled,
 		if (column->mark == MARK_PEEL)
 		{
-			CAT_IF_DUMP(cout << "Peeled column " << column_i << "[" << (int)source_block[0] << "] :";)
+			// Lookup GE compress matrix source row
+			u16 source_row_i = column->peel_row;
+			u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * source_row_i;
+			u64 *ge_dest_row;
 
-			// Set up for light column generation
-			u16 x = column_i % _light_count;
-			u16 adiv = column_i / _light_count;
-			u16 a = 1 + adiv % (_light_count - 1);
-			u16 adiv2 = 1 + adiv / (_light_count - 1);
-			u16 b = (adiv2 * a) % _light_next_prime;
-			if (b >= _light_count) b = (((u32)a << 16) + b - _light_next_prime) % a;
+			CAT_IF_DUMP(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
 
-			CAT_IF_DUMP(cout << " " << x;)
+			// Light rows:
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
+			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
-			CAT_IF_DUMP(cout << " " << x;)
+			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
-			IterateNextColumn(x, _light_count, _light_next_prime, b);
 			CAT_IF_DUMP(cout << " " << x;)
+			IterateNextColumn(x, _light_count, _light_next_prime, a);
+			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
-			CAT_IF_ROWOP(++rowops;)
+			CAT_IF_DUMP(cout << " " << x << ",";)
 
-#if !defined(CAT_SHUFFLE_DENSE_ROWS)
-			// If the column is peeled,
-			if (column->mark == MARK_PEEL)
+			// Dense rows:
+			ge_dest_row = _ge_matrix + _ge_pitch * _light_count;
+			for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_dest_row += _ge_pitch, dense_rv >>= 1)
 			{
-				// Dense rows:
-				for (u16 ii = _light_count; ii < _added_count; ++ii, dense_rv >>= 1)
+				if (dense_rv & 1)
 				{
-					if (dense_rv & 1)
-					{
-						memxor(_check_blocks + _block_bytes * _ge_row_map[ii], source_block, _block_bytes);
-						CAT_IF_ROWOP(++rowops;)
-					}
+					memxor(_check_blocks + _block_bytes * _ge_row_map[dense_i], source_block, _block_bytes);
+					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
-#endif
 		}
-	}
-
-	// (3) For each GE matrix bit up to the diagonal, add deferred and mixed:
+	} // next column
 
 	CAT_IF_ROWOP(cout << "SolveTriangleColumns add dense rows used " << rowops << " row ops" << endl;)
-	CAT_IF_ROWOP(rowops = 0;)
+}
+
+void Encoder::AddSubdiagonalValues()
+{
+	CAT_IF_DUMP(cout << endl << "---- AddSubdiagonalValues ----" << endl << endl;)
+
+	CAT_IF_ROWOP(int rowops = 0;)
 
 	// For each pivot,
+	const u16 ge_rows = _defer_count + _added_count;
 	for (u16 pivot_i = 0; pivot_i < ge_rows; ++pivot_i)
 	{
 		u16 pivot_column_i = _ge_col_map[pivot_i];
@@ -1621,186 +1558,12 @@ void Encoder::SolveTriangleColumns()
 		CAT_IF_DUMP(cout << endl;)
 	}
 
-	CAT_IF_ROWOP(cout << "SolveTriangleColumns under diagonal adding used " << rowops << " row ops" << endl;)
+	CAT_IF_ROWOP(cout << "AddSubdiagonalValues used " << rowops << " row ops" << endl;)
 }
 
-
-//// Diagnostic functions for compression algorithms
-
-#if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
-
-void Encoder::PrintGEMatrix()
+void Encoder::BackSubstituteAboveDiagonal()
 {
-	int rows = _defer_count + _added_count;
-	int cols = rows;
-
-	cout << endl << "GE matrix is " << rows << " x " << cols << ":" << endl;
-
-	for (int ii = 0; ii < rows; ++ii)
-	{
-		for (int jj = 0; jj < cols; ++jj)
-		{
-			if (_ge_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
-				cout << '1';
-			else
-				cout << '0';
-		}
-		cout << endl;
-	}
-
-	cout << endl;
-}
-
-void Encoder::PrintGECompressMatrix()
-{
-	int rows = _block_count;
-	int cols = _defer_count + _added_count;
-
-	cout << endl << "GE (Inv) Compress matrix is " << rows << " x " << cols << ":" << endl;
-
-	for (int ii = 0; ii < rows; ++ii)
-	{
-		for (int jj = 0; jj < cols; ++jj)
-		{
-			if (_ge_compress_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
-				cout << '1';
-			else
-				cout << '0';
-		}
-		cout << endl;
-	}
-
-	cout << endl;
-}
-
-#endif // CAT_DUMP_ENCODER_DEBUG
-
-
-/*
-	One more subtle optimization.  Depending on how the GE matrix
-	is constructed, it can be put in a roughly upper-triangular form
-	from the start so it looks like this:
-
-		+---------+---------+
-		| D D D D | D D D 1 |
-		| D D D D | D D 1 M |
-		| d d d d | D 1 M M |
-		| d d d d | 1 M M M |
-		+---------+---------+
-		| 0 1 0 1 | M M M M |
-		| 0 0 1 0 | M M M M |
-		| 0 0 0 1 | M M M M |
-		| 0 0 0 0 | M M M M |
-		+---------+---------+
-
-	In the example above, the top 4 rows are dense matrix rows.
-	The last 4 columns are mixing columns and are also dense.
-	The lower left sub-matrix is sparse and roughly upper triangular
-	because it is the intersection of sparse rows in the generator
-	matrix.  This form is achieved by adding deferred rows starting
-	from last deferred to first, and adding deferred columns starting
-	from last deferred to first.
-
-	Gaussian elimination will proceed from left to right on the matrix.
-	So, having an upper triangular form will prevent left-most zeroes
-	from being eaten up when a row is eliminated by one above it.  This
-	reduces row operations.  For example, GE on a 64x64 matrix will do
-	on average 100 fewer row operations on this form rather than its
-	transpose (where the sparse part is put in the upper right).
-
-	Since some of the added check rows are light rows and others are
-	dense rows, which appear first in the matrix must also be decided.
-	In the above diagram, the lowercase 'd' rows represent the dense
-	rows and the uppercase 'D' rows represent the light rows.  This
-	way GE will prefer to select light rows, which will cause less
-	mixing down the added rows, leading to fewer row ops.  I haven't
-	quantified this optimization but it is clear from looking at the
-	GE matrix after Triangle() that this row order is preferable.
-
-	This is not a huge improvement but every little bit helps.
-*/
-
-
-//// (3) Gaussian Elimination
-
-bool Encoder::Triangle()
-{
-	CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
-
-	u16 pivot_count = _defer_count + _added_count;
-
-	// Initialize pivot array
-	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
-		_ge_pivots[pivot_i] = pivot_i;
-
-	// For each pivot to determine,
-	u64 ge_mask = 1;
-	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
-	{
-		int word_offset = pivot_i >> 6;
-		u64 *ge_matrix_offset = _ge_matrix + word_offset;
-
-		// Find pivot
-		bool found = false;
-		for (u16 pivot_j = pivot_i; pivot_j < pivot_count; ++pivot_j)
-		{
-			// Determine if the row contains the bit we want
-			u16 ge_row_j = _ge_pivots[pivot_j];
-			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
-
-			// If the bit was found,
-			if (*ge_row & ge_mask)
-			{
-				found = true;
-				CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
-
-				// Swap out the pivot index for this one
-				u16 temp = _ge_pivots[pivot_i];
-				_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
-				_ge_pivots[pivot_j] = temp;
-
-				// Prepare masked first word
-				u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
-
-				// For each remaining unused row,
-				for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
-				{
-					// Determine if the row contains the bit we want
-					u16 ge_row_k = _ge_pivots[pivot_k];
-					u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
-
-					// If the bit was found,
-					if (*rem_row & ge_mask)
-					{
-						// Add the pivot row to eliminate the bit from this row, preserving previous bits
-						*rem_row ^= row0;
-
-						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
-							rem_row[ii] ^= ge_row[ii];
-					}
-				}
-
-				break;
-			}
-		}
-
-		// If pivot could not be found,
-		if (!found)
-		{
-			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;)
-			return false;
-		}
-
-		// Generate next mask
-		ge_mask = CAT_ROL64(ge_mask, 1);
-	}
-
-	return true;
-}
-
-void Encoder::Diagonal()
-{
-	CAT_IF_DUMP(cout << endl << "---- Diagonal ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- BackSubstituteAboveDiagonal ----" << endl << endl;)
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
@@ -1844,7 +1607,26 @@ void Encoder::Diagonal()
 		ge_mask = CAT_ROR64(ge_mask, 1);
 	}
 
-	CAT_IF_ROWOP(cout << "Diagonal used " << rowops << " row ops" << endl;)
+	CAT_IF_ROWOP(cout << "BackSubstituteAboveDiagonal used " << rowops << " row ops" << endl;)
+}
+
+void Encoder::GenerateGEValues()
+{
+	InitializeColumnValues();
+
+	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
+
+	AddCheckValues();
+
+	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
+
+	AddSubdiagonalValues();
+
+	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
+
+	BackSubstituteAboveDiagonal();
+
+	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 }
 
 
@@ -1951,8 +1733,6 @@ void Encoder::Substitute()
 
 bool Encoder::GenerateCheckBlocks()
 {
-	CAT_IF_DUMP(cout << endl << "---- GenerateCheckBlocks ----" << endl << endl;)
-
 	// (1) Peeling
 
 	if (!PeelSetup())
@@ -2059,11 +1839,7 @@ bool Encoder::GenerateCheckBlocks()
 	PrintGEMatrix();
 #endif
 
-	SolveTriangleColumns();
-
-	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
-
-	Diagonal();
+	GenerateGEValues();
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 
@@ -2135,7 +1911,7 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	if (_final_bytes <= 0) _final_bytes = block_bytes;
 
 	// Lookup generator matrix parameters
-	if (!GenerateMatrixParameters(block_count, _g_seed, _light_count, _dense_count))
+	if (!GenerateMatrixParameters(block_count, _p_seed, _c_seed, _light_count, _dense_count))
 		return false;
 	_added_count = _light_count + _dense_count;
 
@@ -2198,7 +1974,7 @@ void Encoder::Generate(u32 id, void *block)
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(id, _g_seed);
+	prng.Initialize(id, _p_seed);
 
 	// Generate peeling matrix row parameters
 	u16 peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
@@ -2266,3 +2042,54 @@ void Encoder::Generate(u32 id, void *block)
 
 	CAT_IF_DUMP(cout << endl;)
 }
+
+
+//// Diagnostic functions for compression algorithms
+
+#if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
+
+void Encoder::PrintGEMatrix()
+{
+	int rows = _defer_count + _added_count;
+	int cols = rows;
+
+	cout << endl << "GE matrix is " << rows << " x " << cols << ":" << endl;
+
+	for (int ii = 0; ii < rows; ++ii)
+	{
+		for (int jj = 0; jj < cols; ++jj)
+		{
+			if (_ge_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
+				cout << '1';
+			else
+				cout << '0';
+		}
+		cout << endl;
+	}
+
+	cout << endl;
+}
+
+void Encoder::PrintGECompressMatrix()
+{
+	int rows = _block_count;
+	int cols = _defer_count + _added_count;
+
+	cout << endl << "GE (Inv) Compress matrix is " << rows << " x " << cols << ":" << endl;
+
+	for (int ii = 0; ii < rows; ++ii)
+	{
+		for (int jj = 0; jj < cols; ++jj)
+		{
+			if (_ge_compress_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
+				cout << '1';
+			else
+				cout << '0';
+		}
+		cout << endl;
+	}
+
+	cout << endl;
+}
+
+#endif // CAT_DUMP_ENCODER_DEBUG

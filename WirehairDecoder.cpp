@@ -192,7 +192,7 @@ bool Decoder::PeelSetup()
 
 		// Initialize PRNG
 		CatsChoice prng;
-		prng.Initialize(row_i, _g_seed);
+		prng.Initialize(row_i, _p_seed);
 
 		// Generate peeling matrix row parameters
 		row->peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
@@ -857,7 +857,7 @@ void Decoder::MultiplyDenseRows()
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_g_seed, _block_count);
+	prng.Initialize(_c_seed);
 
 	// For each column,
 	PeelColumn *column = _peel_cols;
@@ -1050,7 +1050,7 @@ void Decoder::SolveTriangleColumns()
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_g_seed, _block_count);
+	prng.Initialize(_c_seed);
 
 	// For each column,
 	const u8 *source_block = _check_blocks;
@@ -1646,7 +1646,7 @@ bool Decoder::Initialize(void *message_out, int message_bytes, int block_bytes)
 	if (_final_bytes <= 0) _final_bytes = block_bytes;
 
 	// Lookup generator matrix parameters
-	if (!GenerateMatrixParameters(block_count, _g_seed, _light_count, _dense_count))
+	if (!GenerateMatrixParameters(block_count, _p_seed, _c_seed, _light_count, _dense_count))
 		return false;
 	_added_count = _light_count + _dense_count;
 

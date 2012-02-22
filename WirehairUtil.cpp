@@ -340,13 +340,61 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 /*
 	Given a PRNG, generate a deck of cards in a random order.
 	The deck will contain elements with values between 0 and count - 1.
-	Supports count under 256.
 */
 
-void cat::wirehair::ShuffleDeck(CatsChoice &prng, u8 *deck, int count)
+void cat::wirehair::ShuffleDeck8(CatsChoice &prng, u8 *deck, u32 count)
 {
 	deck[0] = 0;
-	for (int ii = 1;;)
+	for (u32 ii = 1;;)
+	{
+		u32 jj, rv = prng.Next();
+
+		// Unroll to use fewer calls to prng.Next()
+		switch (count - ii)
+		{
+		default:
+			jj = (u8)rv % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 8) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 16) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			jj = (u8)(rv >> 24) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+			break;
+
+		case 3:
+			jj = (u8)rv % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+		case 2:
+			jj = (u8)(rv >> 8) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+			++ii;
+		case 1:
+			jj = (u8)(rv >> 16) % ii;
+			deck[ii] = deck[jj];
+			deck[jj] = ii;
+		case 0:
+			return;
+		}
+	}
+}
+
+void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
+{
+	deck[0] = 0;
+	for (u32 ii = 1;;)
 	{
 		u32 jj, rv = prng.Next();
 
@@ -395,33 +443,36 @@ void cat::wirehair::ShuffleDeck(CatsChoice &prng, u8 *deck, int count)
 
 //// Utility: Matrix Parameter Generator function
 
-int g_seed;
+int g_p_seed, g_c_seed; // TODO: Remove these
 
-bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &light_count, u16 &dense_count)
+bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &light_count, u16 &dense_count)
 {
-	seed = g_seed;
+	p_seed = g_p_seed;// TODO: Remove these
+	c_seed = g_c_seed;
 
 	switch (block_count)
 	{
+	case 16:
+		light_count = 6; dense_count = 0;
+		return true;
 	case 256:
-		light_count = 16;
-		dense_count = 4;
+		light_count = 16; dense_count = 4;
 		return true;
 	case 512:
-		light_count = 22;
+		light_count = 14;
 		dense_count = 5;
 		return true;
 	case 1024:
-		light_count = 32;
-		dense_count = 7;
+		light_count = 18;
+		dense_count = 12;
 		return true;
 	case 2048:
 		light_count = 45;
 		dense_count = 8;
 		return true;
 	case 4096:
-		light_count = 64;
-		dense_count = 10;
+		light_count = 60;
+		dense_count = 12;
 		return true;
 	case 8192:
 		light_count = 90;
@@ -436,8 +487,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &li
 		dense_count = 26;
 		return true;
 	case 32768:
-		light_count = 400;
-		dense_count = 28;
+		light_count = 410;
+		dense_count = 30;
 		return true;
 	case 40000:
 		light_count = 460;
@@ -448,8 +499,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &seed, u16 &li
 		dense_count = 34;
 		return true;
 	case 64000:
-		light_count = 750;
-		dense_count = 36;
+		light_count = 6;
+		dense_count = 750;
 		return true;
 	}
 

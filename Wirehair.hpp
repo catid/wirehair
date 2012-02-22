@@ -38,6 +38,8 @@
 	When enough blocks are received at the other end of the channel, then
 	the original data can be recovered.
 
+	TODO: Update this
+
 	Block format:
 
 		M = Count of bytes per transmission over the unreliable channel.
@@ -357,7 +359,7 @@
 //#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
-#define CAT_SHUFFLE_DENSE_ROWS /* Use shuffle function to add dense rows (much faster) */
+//#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 
 namespace cat {
 
@@ -397,7 +399,8 @@ class Encoder
 	u16 _dense_count;	// Number of check rows that are dense
 	u16 _added_count;	// Number of check blocks added overall
 	u8 *_check_blocks;	// Pointer to start of check blocks
-	u32 _g_seed;		// Seed for nonsingular generator matrix
+	u32 _p_seed;		// Seed for peeled rows of generator matrix
+	u32 _c_seed;		// Seed for check rows of generator matrix
 
 	// Encoder state
 	const u8 *_message_blocks;	// Original message data (final block is partial)
@@ -472,17 +475,26 @@ class Encoder
 	// Compress rectangular matrix into conceptual square matrix
 	void Compress();
 
-	// Solve pivot column values from the row op schedule from Triangle
-	void SolveTriangleColumns();
-
 
 	//// (3) Gaussian Elimination
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
 
+	// Initialize column values for GE matrix
+	void InitializeColumnValues();
+
+	// Add check matrix to triangle columns
+	void AddCheckValues();
+
+	// Add values for GE matrix positions under the diagonal
+	void AddSubdiagonalValues();
+
 	// Diagonalize the GE matrix to complete solving for the GE blocks
-	void Diagonal();
+	void BackSubstituteAboveDiagonal();
+
+	// Solve pivot column values
+	void GenerateGEValues();
 
 
 	//// (4) Substitution
@@ -503,7 +515,8 @@ public:
 	Encoder();
 	~Encoder();
 
-	CAT_INLINE u32 GetSeed() { return _g_seed; }
+	CAT_INLINE u32 GetPSeed() { return _p_seed; }
+	CAT_INLINE u32 GetCSeed() { return _c_seed; }
 	CAT_INLINE u32 GetBlockCount() { return _block_count; }
 
 	// Attempt to initialize the encoder for a given message
@@ -549,7 +562,8 @@ class Decoder
 	u16 _dense_count;	// Number of check rows that are dense
 	u16 _added_count;	// Number of check blocks added overall
 	u8 *_check_blocks;	// Pointer to start of check blocks
-	u32 _g_seed;		// Seed for nonsingular generator matrix
+	u32 _p_seed;		// Seed for peeled rows of generator matrix
+	u32 _c_seed;		// Seed for check rows of generator matrix
 
 	// Encoder state
 	u8 *_message_blocks;	// Original message data (final block is partial)
@@ -661,7 +675,8 @@ public:
 	Decoder();
 	~Decoder();
 
-	CAT_INLINE u32 GetSeed() { return _g_seed; }
+	CAT_INLINE u32 GetPSeed() { return _p_seed; }
+	CAT_INLINE u32 GetCSeed() { return _c_seed; }
 	CAT_INLINE u32 GetBlockCount() { return _block_count; }
 
 	// Attempt to initialize the decoder

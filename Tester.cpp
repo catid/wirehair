@@ -209,6 +209,47 @@ void TestDense()
 }
 
 
+u32 GenerateGoodCheckSeed(int block_count)
+{
+	const int BLOCK_BYTES = 1;
+	const int message_bytes = BLOCK_BYTES * block_count;
+	u8 *message = new u8[message_bytes];
+
+	for (int ii = 0; ii < message_bytes; ++ii)
+		message[ii] = ii;
+
+	wirehair::Encoder encoder;
+
+	cout << "Finding best check seed for " << block_count << "..." << endl;
+
+	u32 best_work = 0;
+	u32 best_seed = 0;
+	for (u32 seed = 0; seed < 10; ++seed)
+	{
+		const int TRIALS = 1000;
+		u32 worked = 0;
+		g_p_seed = m_clock.cycles();
+		for (int ii = 0; ii < TRIALS; ++ii)
+		{
+			++g_p_seed;
+			if (encoder.Initialize(message, message_bytes, BLOCK_BYTES))
+			{
+				++worked;
+			}
+		}
+
+		if (worked > best_work)
+		{
+			best_work = worked;
+			best_seed = seed;
+			cout << "New best: " << best_work << " of " << TRIALS << " with seed " << seed << endl;
+		}
+	}
+
+	return best_seed;
+}
+
+
 
 int main()
 {
@@ -217,8 +258,8 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 64000;
-	int block_bytes = 4096 + 1;
+	int block_count = 4096;
+	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 
@@ -227,16 +268,32 @@ int main()
 		message[ii] = ii;
 	}
 
+	g_c_seed = GenerateGoodCheckSeed(block_count);
+	cout << "Using CSeed : " << g_c_seed << endl;
+
 	wirehair::Encoder encoder;
 
-	g_seed = 1;
+	g_p_seed = 1;
 	//for (;;) encoder.Initialize(message, message_bytes, block_bytes);
 
-	g_seed = 0;
+	g_p_seed = m_clock.cycles();
+	u64 trials = 0, worked = 0;
+	while (++trials < 1000)
+	{
+		++g_p_seed;
+		if (encoder.Initialize(message, message_bytes, block_bytes))
+		{
+			++worked;
+		}
+	}
+
+	cout << "Success rate = " << worked / (double)trials << endl;
+
+	g_p_seed = 0;
 
 	for (;;)
 	{
-		g_seed++;
+		g_p_seed++;
 
 		double start = m_clock.usec();
 		u32 clocks = m_clock.cycles();
@@ -246,7 +303,7 @@ int main()
 
 		if (success)
 		{
-			cout << "main: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with seed " << encoder.GetSeed() << endl;
+			cout << ">> OKAY! encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
 
 			u8 *block = new u8[message_bytes];
 
@@ -266,7 +323,7 @@ int main()
 		}
 		else
 		{
-			cout << "main: encoder.Initialize FAIL in " << clocks << " clocks with seed " << encoder.GetSeed() << endl;
+			cout << "-- FAIL: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
 		}
 	}
 
