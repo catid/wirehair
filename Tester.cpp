@@ -62,7 +62,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 32768;
+	int block_count = 256;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
