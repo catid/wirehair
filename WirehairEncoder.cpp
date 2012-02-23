@@ -912,13 +912,13 @@ void Encoder::MultiplyDenseRows()
 
 		// Set up generator
 		const u16 *row = rows;
-		const int loop_count = check_count >> 1;
 
 		// Store first row
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 
 		// Generate first half of rows
+		const int loop_count = (check_count >> 1) - 1;
 		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -983,7 +983,7 @@ void Encoder::MultiplyDenseRows()
 		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
 
 		// Generate second half of rows
-		const int second_loop_count = loop_count - 2 + (check_count & 1);
+		const int second_loop_count = loop_count + (check_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -1274,6 +1274,8 @@ void Encoder::InitializeColumnValues()
 			u16 pivot_row_i = _ge_row_map[ge_row_i];
 			const u8 *combo = _message_blocks + _block_bytes * pivot_row_i;
 
+			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
+
 			// If not copying from final block,
 			if (pivot_row_i == _block_count - 1)
 			{
@@ -1282,8 +1284,6 @@ void Encoder::InitializeColumnValues()
 				CAT_IF_ROWOP(++rowops;)
 				combo = 0;
 			}
-
-			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
 
 			// Eliminate peeled columns:
 			PeelRow *row = &_peel_rows[pivot_row_i];
@@ -1359,7 +1359,6 @@ void Encoder::AddCheckValues()
 		u16 *set_bits = bits;
 		u16 *clr_bits = set_bits + set_count;
 		const u16 *row = rows;
-		const int loop_count = check_count >> 1;
 
 		CAT_IF_DUMP(cout << "Generating first row " << _ge_row_map[*row] << ":";)
 
@@ -1415,7 +1414,8 @@ void Encoder::AddCheckValues()
 		}
 
 		// Generate first half of rows
-		for (int ii = 0; ii < loop_count - 1; ++ii)
+		const int loop_count = (check_count >> 1) - 1;
+		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
 
@@ -1507,7 +1507,7 @@ void Encoder::AddCheckValues()
 		}
 
 		// Generate second half of rows
-		const int second_loop_count = loop_count - 1 + (check_count & 1);
+		const int second_loop_count = loop_count + (check_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -1650,7 +1650,9 @@ void Encoder::AddSubdiagonalValues()
 
 		w = CEIL[0.85 + 0.85*ln(r)]
 
-		The matrix may look something like:
+		But in practice, the window size is selected from simple heuristic
+	rules based on testing.  For this function, the window size stays between
+	3 and 6 so it is fine to use heuristics.  The matrix may look something like:
 
 		+---+---+---+---+
 		| A | 1 | 1 | 0 |
@@ -1699,13 +1701,7 @@ void Encoder::AddSubdiagonalValues()
 
 		This operation is performed until the windowing method is no
 	longer worthwhile, and the normal back-substitution is used on the
-	remaining matrix.
-
-		Since the GE matrix sizes do not get beyond about 900x900, the
-	optimal window size is always between 3 and 6.  Since 4 is easy to
-	implement as it is a power of two, I just implemented w=4 and abort
-	as soon as it is no longer advantageous.  Even very small matrices
-	benefit from some windowing.
+	remaining matrix pivots.
 */
 
 void Encoder::BackSubstituteAboveDiagonal()
@@ -1717,8 +1713,8 @@ void Encoder::BackSubstituteAboveDiagonal()
 	const int ge_rows = _defer_count + _added_count;
 	int pivot_i = ge_rows - 1;
 
-#if defined(CAT_WINDOW_BACKSUB)
-	static const int WINDOW_THRESHOLD_3 = 10;
+#if defined(CAT_WINDOWED_BACKSUB)
+	static const int WINDOW_THRESHOLD_3 = 8;
 	static const int WINDOW_THRESHOLD_4 = 40;
 	static const int WINDOW_THRESHOLD_5 = 80;
 	static const int WINDOW_THRESHOLD_6 = 160;
@@ -1768,7 +1764,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				// Reuse the block value temporarily as window table space
 				win_table[jj] = column_src;
 
-				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column for peeled row " << column->peel_row << endl;)
+				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
 
 				// If done,
 				if (++jj >= win_lim) break;
@@ -1793,7 +1789,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				const u64 *ge_row = _ge_matrix + (src_column_i >> 6);
 				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_column_i];
 
-				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_column_i << " :";)
+				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_column_i << "[" << (int)src[0] << "] :";)
 
 				// For each upper triangular bit,
 				for (int dest_column_i = backsub_i; dest_column_i < src_column_i; ++dest_column_i)
@@ -1858,10 +1854,11 @@ void Encoder::BackSubstituteAboveDiagonal()
 			u32 shift0 = backsub_i & 63, shift1 = 64 - shift0;
 
 			// For each row up to the diagonalized pivots,
-			u64 *ge_row = _ge_matrix + first_ge_col;
-			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i, ge_row += _ge_pitch)
+			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
 			{
 				// Calculate window bits
+				u16 ge_row_i = _ge_pivots[above_pivot_i];
+				u64 *ge_row = _ge_matrix + first_ge_col + _ge_pitch * ge_row_i;
 				u32 win_bits = (u32)(ge_row[0] >> shift0);
 				win_bits |= ge_row[last_ge_col - first_ge_col] << shift1;
 				win_bits &= win_lim - 1;
@@ -1900,7 +1897,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 			}
 		}
 	}
-#endif // CAT_WINDOW_BACKSUB
+#endif // CAT_WINDOWED_BACKSUB
 
 	// For each remaining pivot,
 	u64 ge_mask = (u64)1 << (pivot_i & 63);
@@ -1909,7 +1906,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		// Calculate source
 		const u8 *src = _check_blocks + _block_bytes * _ge_col_map[pivot_i];
 
-		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << _ge_col_map[pivot_i] << ":";)
+		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
 
 		// For each pivot row above it,
 		u64 *ge_row = _ge_matrix + (pivot_i >> 6);
@@ -1922,7 +1919,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				memxor(_check_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_DUMP(cout << " " << _ge_col_map[above_i] << "[" << (int)src[0] << "]";)
+				CAT_IF_DUMP(cout << " " << above_i;)
 			}
 		}
 
