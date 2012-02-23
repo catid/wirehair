@@ -1704,6 +1704,11 @@ void Encoder::AddSubdiagonalValues()
 	remaining matrix pivots.
 */
 
+#define WINDOW_THRESHOLD_3 30
+#define WINDOW_THRESHOLD_4 30
+#define WINDOW_THRESHOLD_5 50
+#define WINDOW_THRESHOLD_6 100
+
 void Encoder::BackSubstituteAboveDiagonal()
 {
 	CAT_IF_DUMP(cout << endl << "---- BackSubstituteAboveDiagonal ----" << endl << endl;)
@@ -1714,11 +1719,6 @@ void Encoder::BackSubstituteAboveDiagonal()
 	int pivot_i = ge_rows - 1;
 
 #if defined(CAT_WINDOWED_BACKSUB)
-	static const int WINDOW_THRESHOLD_3 = 20;
-	static const int WINDOW_THRESHOLD_4 = 20;
-	static const int WINDOW_THRESHOLD_5 = 1000;
-	static const int WINDOW_THRESHOLD_6 = 1000;
-
 	// Build temporary storage space if windowing is to be used
 	if (pivot_i >= WINDOW_THRESHOLD_3)
 	{
@@ -1778,11 +1778,11 @@ void Encoder::BackSubstituteAboveDiagonal()
 		{
 			// Eliminate upper triangular part above windowed bits
 			u16 backsub_i = pivot_i - w + 1;
-			u64 ge_mask = (u64)1 << (pivot_i & 63);
 
 			CAT_IF_ROWOP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
 
 			// For each column,
+			u64 ge_mask = (u64)1 << (pivot_i & 63);
 			for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i; --src_pivot_i)
 			{
 				// Set up for iteration
@@ -1856,17 +1856,14 @@ void Encoder::BackSubstituteAboveDiagonal()
 			default: break;
 			}
 
-			// Pre-compute window masks
+			// For each row up to the diagonalized pivots,
 			u32 first_ge_col = backsub_i >> 6;
 			u32 last_ge_col = pivot_i >> 6;
 			u32 shift0 = backsub_i & 63, shift1 = 64 - shift0;
-
-			// For each row up to the diagonalized pivots,
 			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
 			{
 				// Calculate window bits
-				u16 ge_row_i = _ge_pivots[above_pivot_i];
-				u64 *ge_row = _ge_matrix + first_ge_col + _ge_pitch * ge_row_i;
+				u64 *ge_row = _ge_matrix + first_ge_col + _ge_pitch * _ge_pivots[above_pivot_i];
 				u32 win_bits = (u32)(ge_row[0] >> shift0);
 				win_bits |= ge_row[last_ge_col - first_ge_col] << shift1;
 				win_bits &= win_lim - 1;

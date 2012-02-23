@@ -11,6 +11,8 @@ using namespace std;
 
 static Clock m_clock;
 
+#define TRIALS 100
+
 u32 GenerateGoodCheckSeed(int block_count)
 {
 	const int BLOCK_BYTES = 1;
@@ -28,7 +30,6 @@ u32 GenerateGoodCheckSeed(int block_count)
 	u32 best_seed = 0;
 	for (u32 seed = 0; seed < 10; ++seed)
 	{
-		const int TRIALS = 100;
 		u32 worked = 0;
 		//g_p_seed = m_clock.cycles();
 		g_p_seed = 0;
@@ -61,7 +62,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 256;
+	int block_count = 32768;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -73,10 +74,8 @@ int main()
 
 	wirehair::Encoder encoder;
 
-	g_c_seed = 0;
-	//g_p_seed = 149;
-	g_p_seed = 1;
-/*
+#if 1
+
 	g_c_seed = GenerateGoodCheckSeed(block_count);
 	cout << "Using CSeed : " << g_c_seed << endl;
 
@@ -85,7 +84,7 @@ int main()
 
 	g_p_seed = m_clock.cycles();
 	u64 trials = 0, worked = 0;
-	while (++trials < 100)
+	while (++trials < TRIALS)
 	{
 		++g_p_seed;
 		if (encoder.Initialize(message, message_bytes, block_bytes))
@@ -96,8 +95,11 @@ int main()
 
 	cout << "Success rate = " << worked / (double)trials << endl;
 
+#endif
+
+	//g_c_seed = 0;
 	g_p_seed = 0;
-*/
+
 	for (;;)
 	{
 		double start = m_clock.usec();

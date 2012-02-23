@@ -356,8 +356,8 @@
 // Switches:
 //#define CAT_DUMP_ENCODER_DEBUG /* Turn on debug output for encoder */
 //#define CAT_DUMP_DECODER_DEBUG /* Turn on debug output for decoder */
-#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
-#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
+//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+//#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (much faster) */
