@@ -74,7 +74,9 @@ int main()
 
 	wirehair::Encoder encoder;
 
-#if 1
+	g_c_seed = 0;
+
+#if 0
 
 	g_c_seed = GenerateGoodCheckSeed(block_count);
 	cout << "Using CSeed : " << g_c_seed << endl;
@@ -97,8 +99,7 @@ int main()
 
 #endif
 
-	//g_c_seed = 0;
-	g_p_seed = 0;
+	g_p_seed = 6;
 
 	for (;;)
 	{
