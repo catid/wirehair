@@ -1714,10 +1714,10 @@ void Encoder::BackSubstituteAboveDiagonal()
 	int pivot_i = ge_rows - 1;
 
 #if defined(CAT_WINDOWED_BACKSUB)
-	static const int WINDOW_THRESHOLD_3 = 8;
-	static const int WINDOW_THRESHOLD_4 = 40;
-	static const int WINDOW_THRESHOLD_5 = 80;
-	static const int WINDOW_THRESHOLD_6 = 160;
+	static const int WINDOW_THRESHOLD_3 = 20;
+	static const int WINDOW_THRESHOLD_4 = 20;
+	static const int WINDOW_THRESHOLD_5 = 1000;
+	static const int WINDOW_THRESHOLD_6 = 1000;
 
 	// Build temporary storage space if windowing is to be used
 	if (pivot_i >= WINDOW_THRESHOLD_3)
@@ -1747,7 +1747,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		}
 		u32 win_lim = 1 << w;
 
-		CAT_IF_DUMP(cout << "Activating windowed back-substitution with initial window " << w << endl;)
+		CAT_IF_ROWOP(cout << "Activating windowed back-substitution with initial window " << w << endl;)
 
 		// Use the first few peel column values as window table space
 		// NOTE: The peeled column values were previously used up until this point,
@@ -1764,14 +1764,14 @@ void Encoder::BackSubstituteAboveDiagonal()
 				// Reuse the block value temporarily as window table space
 				win_table[jj] = column_src;
 
-				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
+				CAT_IF_ROWOP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
 
 				// If done,
 				if (++jj >= win_lim) break;
 			}
 		}
 
-		CAT_IF_DUMP(if (jj < win_lim) cout << "!! Not enough space in peeled columns to generate a table.  Going back to normal back-substitute." << endl;)
+		CAT_IF_ROWOP(if (jj < win_lim) cout << "!! Not enough space in peeled columns to generate a table.  Going back to normal back-substitute." << endl;)
 
 		// If enough space was found,
 		if (jj >= win_lim) for (;;)
@@ -1780,72 +1780,80 @@ void Encoder::BackSubstituteAboveDiagonal()
 			u16 backsub_i = pivot_i - w + 1;
 			u64 ge_mask = (u64)1 << (pivot_i & 63);
 
-			CAT_IF_DUMP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
+			CAT_IF_ROWOP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
 
 			// For each column,
-			for (int src_column_i = pivot_i; src_column_i > backsub_i; --src_column_i)
+			for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i; --src_pivot_i)
 			{
 				// Set up for iteration
-				const u64 *ge_row = _ge_matrix + (src_column_i >> 6);
-				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_column_i];
+				u16 ge_row_i = _ge_pivots[src_pivot_i];
+				const u64 *ge_row = _ge_matrix + (ge_row_i >> 6);
+				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_pivot_i];
 
-				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_column_i << "[" << (int)src[0] << "] :";)
+				CAT_IF_ROWOP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
 				// For each upper triangular bit,
-				for (int dest_column_i = backsub_i; dest_column_i < src_column_i; ++dest_column_i)
+				for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
 				{
 					// If bit is set,
-					if (ge_row[_ge_pitch * _ge_pivots[dest_column_i]] & ge_mask)
+					if (ge_row[_ge_pitch * _ge_pivots[dest_pivot_i]] & ge_mask)
 					{
-						CAT_IF_DUMP(cout << " " << dest_column_i;)
+						CAT_IF_ROWOP(cout << " " << dest_pivot_i;)
 
 						// Back-substitute
 						// NOTE: Because the values exist on the diagonal, the row is also the column index
-						memxor(_check_blocks + _block_bytes * _ge_col_map[dest_column_i], src, _block_bytes);
+						memxor(_check_blocks + _block_bytes * _ge_col_map[dest_pivot_i], src, _block_bytes);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
 
-				CAT_IF_DUMP(cout << endl;)
+				CAT_IF_ROWOP(cout << endl;)
 
 				// Generate next mask
 				ge_mask = CAT_ROR64(ge_mask, 1);
 			}
 
-			// Insert power-of-two values (Just point to column values)
-			int bit = 1;
-			for (int jj = backsub_i; jj <= pivot_i; ++jj, bit <<= 1)
+			CAT_IF_ROWOP(cout << "-- Generating window table with " << w << " bits" << endl;)
+
+			// Generate window table: 2 bits
+			win_table[1] = _check_blocks + _block_bytes * _ge_col_map[backsub_i];
+			win_table[2] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 1];
+			memxor_set(win_table[3], win_table[1], win_table[2], _block_bytes);
+
+			// Generate window table: 3 bits
+			win_table[4] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 2];
+			memxor_set(win_table[5], win_table[1], win_table[4], _block_bytes);
+			memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
+			memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
+
+			// Generate window table: 4+ bits
+			switch (w)
 			{
-				win_table[bit] = _check_blocks + _block_bytes * _ge_col_map[jj];
-
-				CAT_IF_DUMP(cout << "Generated power of two window position " << bit << " from pivot " << _ge_col_map[jj] << endl;)
-			}
-
-			// Generate remaining block values
-			u32 prev_gray = 1;
-			u32 next_pow2 = 2;
-			for (u32 jj = 2; jj < win_lim; ++jj)
-			{
-				u32 gray = jj ^ (jj >> 1);
-				u32 diff = gray ^ prev_gray;
-
-				// Skip powers of 2 (already set above)
-				if (gray == next_pow2)
+			case 6:
+				win_table[32] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
+				for (int ii = 0; ii < 32 - 2; ii += 2)
 				{
-					CAT_IF_DUMP(cout << "Skipping precomputed window bin " << setbase(2) << gray << " which is based on diff " << diff << setbase(10) << endl;)
-
-					next_pow2 <<= 1;
+					memxor_set(win_table[32 + 1 + ii], win_table[1], win_table[32 + ii], _block_bytes);
+					memxor_set(win_table[32 + 2 + ii], win_table[2], win_table[32 + ii], _block_bytes);
 				}
-				else
+				memxor_set(win_table[32 * 2 - 1], win_table[1], win_table[32 * 2 - 2], _block_bytes);
+			case 5:
+				win_table[16] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
+				for (int ii = 0; ii < 16 - 2; ii += 2)
 				{
-					CAT_IF_DUMP(cout << "Generating window bin " << setbase(2) << gray << " which is based on diff " << diff << " and prev " << prev_gray << setbase(10) << endl;)
-
-					// Calculate this entry
-					memxor_set(win_table[gray], win_table[prev_gray], win_table[diff], _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
+					memxor_set(win_table[16 + 1 + ii], win_table[1], win_table[16 + ii], _block_bytes);
+					memxor_set(win_table[16 + 2 + ii], win_table[2], win_table[16 + ii], _block_bytes);
 				}
-
-				prev_gray = gray;
+				memxor_set(win_table[16 * 2 - 1], win_table[1], win_table[16 * 2 - 2], _block_bytes);
+			case 4:
+				win_table[8] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
+				for (int ii = 0; ii < 8 - 2; ii += 2)
+				{
+					memxor_set(win_table[8 + 1 + ii], win_table[1], win_table[8 + ii], _block_bytes);
+					memxor_set(win_table[8 + 2 + ii], win_table[2], win_table[8 + ii], _block_bytes);
+				}
+				memxor_set(win_table[8 * 2 - 1], win_table[1], win_table[8 * 2 - 2], _block_bytes);
+			default: break;
 			}
 
 			// Pre-compute window masks
@@ -1866,7 +1874,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				// If any XOR needs to be performed,
 				if (win_bits != 0)
 				{
-					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
+					CAT_IF_ROWOP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 					// Back-substitute
 					memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
@@ -1906,7 +1914,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		// Calculate source
 		const u8 *src = _check_blocks + _block_bytes * _ge_col_map[pivot_i];
 
-		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
+		CAT_IF_ROWOP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
 
 		// For each pivot row above it,
 		u64 *ge_row = _ge_matrix + (pivot_i >> 6);
@@ -1919,11 +1927,11 @@ void Encoder::BackSubstituteAboveDiagonal()
 				memxor(_check_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_DUMP(cout << " " << above_i;)
+				CAT_IF_ROWOP(cout << " " << above_i;)
 			}
 		}
 
-		CAT_IF_DUMP(cout << endl;)
+		CAT_IF_ROWOP(cout << endl;)
 
 		// Generate next mask
 		ge_mask = CAT_ROR64(ge_mask, 1);

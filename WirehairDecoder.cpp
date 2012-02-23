@@ -1545,7 +1545,7 @@ bool Decoder::GenerateCheckBlocks()
 	Compress();
 
 	CAT_IF_DUMP(cout << "After Compress:" << endl;)
-#if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
+#if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	cout << "After Compress:" << endl;
 	PrintGEMatrix();
 #endif
@@ -1565,7 +1565,7 @@ bool Decoder::GenerateCheckBlocks()
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 
-#if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
+#if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	cout << "After Triangle:" << endl;
 	PrintGEMatrix();
 #endif

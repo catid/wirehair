@@ -61,7 +61,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 4096;
+	int block_count = 256;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -71,10 +71,14 @@ int main()
 		message[ii] = ii;
 	}
 
+	wirehair::Encoder encoder;
+
+	g_c_seed = 0;
+	//g_p_seed = 149;
+	g_p_seed = 1;
+/*
 	g_c_seed = GenerateGoodCheckSeed(block_count);
 	cout << "Using CSeed : " << g_c_seed << endl;
-
-	wirehair::Encoder encoder;
 
 	g_p_seed = 1;
 	//for (;;) encoder.Initialize(message, message_bytes, block_bytes);
@@ -93,11 +97,9 @@ int main()
 	cout << "Success rate = " << worked / (double)trials << endl;
 
 	g_p_seed = 0;
-
+*/
 	for (;;)
 	{
-		g_p_seed++;
-
 		double start = m_clock.usec();
 		u32 clocks = m_clock.cycles();
 		bool success = encoder.Initialize(message, message_bytes, block_bytes);
@@ -128,6 +130,8 @@ int main()
 		{
 			cout << "-- FAIL: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
 		}
+
+		g_p_seed++;
 	}
 
 	m_clock.OnFinalize();
