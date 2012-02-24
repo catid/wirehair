@@ -39,6 +39,12 @@ using namespace wirehair;
 #define CAT_BLOCK_BYTES _block_bytes
 #endif
 
+#if defined(CAT_FIXED_BLOCK_COUNT)
+#define CAT_BLOCK_COUNT CAT_FIXED_BLOCK_COUNT
+#else
+#define CAT_BLOCK_COUNT _block_count
+#endif
+
 #if defined(CAT_DUMP_ENCODER_DEBUG)
 #define CAT_IF_DUMP(x) x
 #else
@@ -151,10 +157,10 @@ bool Encoder::PeelSetup()
 {
 	CAT_IF_DUMP(cout << endl << "---- PeelSetup ----" << endl << endl;)
 
-	CAT_IF_DUMP(cout << "Block Count = " << _block_count << endl;)
+	CAT_IF_DUMP(cout << "Block Count = " << CAT_BLOCK_COUNT << endl;)
 
 	// Generate peeling row data
-	for (u16 row_i = 0; row_i < _block_count; ++row_i)
+	for (u16 row_i = 0; row_i < CAT_BLOCK_COUNT; ++row_i)
 	{
 		PeelRow *row = &_peel_rows[row_i];
 
@@ -163,10 +169,10 @@ bool Encoder::PeelSetup()
 		prng.Initialize(row_i, _p_seed);
 
 		// Generate peeling matrix row parameters
-		row->peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
+		row->peel_weight = GeneratePeelRowWeight(prng.Next(), CAT_BLOCK_COUNT - 1);
 		u32 rv = prng.Next();
-		row->peel_a = ((u16)rv % (_block_count - 1)) + 1;
-		row->peel_x0 = (u16)(rv >> 16) % _block_count;
+		row->peel_a = ((u16)rv % (CAT_BLOCK_COUNT - 1)) + 1;
+		row->peel_x0 = (u16)(rv >> 16) % CAT_BLOCK_COUNT;
 
 		// Generate mixing matrix row parameters
 		rv = prng.Next();
@@ -202,7 +208,7 @@ bool Encoder::PeelSetup()
 
 			if (--weight <= 0) break;
 
-			IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+			IterateNextColumn(column_i, CAT_BLOCK_COUNT, _block_next_prime, a);
 		}
 		CAT_IF_DUMP(cout << endl;)
 
@@ -299,7 +305,7 @@ void Encoder::PeelAvalanche(u16 column_i)
 
 				if (--ref_weight <= 0) break;
 
-				IterateNextColumn(ref_column_i, _block_count, _block_next_prime, ref_a);
+				IterateNextColumn(ref_column_i, CAT_BLOCK_COUNT, _block_next_prime, ref_a);
 			}
 
 			/*
@@ -390,7 +396,7 @@ void Encoder::GreedyPeeling()
 
 		// For each column,
 		PeelColumn *column = _peel_cols;
-		for (u16 column_i = 0; column_i < _block_count; ++column_i, ++column)
+		for (u16 column_i = 0; column_i < CAT_BLOCK_COUNT; ++column_i, ++column)
 		{
 			// If column is not marked yet,
 			if (column->mark == MARK_TODO)
@@ -532,7 +538,7 @@ bool Encoder::CompressSetup()
 	CAT_IF_DUMP(cout << "GE matrix is " << ge_rows << " x " << ge_rows << " with pitch " << ge_pitch << " consuming " << ge_matrix_words * sizeof(u64) << " bytes" << endl;)
 
 	// Allocate GE compress matrix
-	int ge_compress_rows = _block_count;
+	int ge_compress_rows = CAT_BLOCK_COUNT;
 	int ge_compress_matrix_words = ge_compress_rows * ge_pitch;
 	_ge_compress_matrix = new u64[ge_compress_matrix_words];
 	if (!_ge_compress_matrix) return false;
@@ -596,7 +602,7 @@ void Encoder::SetDeferredColumns()
 	for (u16 added_i = 0; added_i < _added_count; ++added_i)
 	{
 		u16 ge_column_i = _defer_count + added_i;
-		u16 column_i = _block_count + added_i;
+		u16 column_i = CAT_BLOCK_COUNT + added_i;
 
 		CAT_IF_DUMP(cout << "GE column(mix) " << ge_column_i << " mapped to matrix column " << column_i << endl;)
 
@@ -693,7 +699,7 @@ void Encoder::PeelDiagonal()
 #if defined(CAT_EVEN_MULTIPLE_BYTES)
 			memcpy(temp_block_src, block_src, CAT_BLOCK_BYTES);
 #else
-			if (peel_row_i != _block_count - 1)
+			if (peel_row_i != CAT_BLOCK_COUNT - 1)
 				memcpy(temp_block_src, block_src, CAT_BLOCK_BYTES);
 			else
 			{
@@ -746,7 +752,7 @@ void Encoder::PeelDiagonal()
 #if defined(CAT_EVEN_MULTIPLE_BYTES)
 					memxor_set(temp_block_dest, temp_block_src, block_src, CAT_BLOCK_BYTES);
 #else
-					if (ref_row_i != _block_count - 1)
+					if (ref_row_i != CAT_BLOCK_COUNT - 1)
 						memxor_set(temp_block_dest, temp_block_src, block_src, CAT_BLOCK_BYTES);
 					else
 					{
@@ -872,7 +878,7 @@ void Encoder::MultiplyDenseRows()
 #if !defined(CAT_LIGHT_ROWS)
 
 	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
-	for (; column_i + check_count <= _block_count; column_i += check_count, column += check_count)
+	for (; column_i + check_count <= CAT_BLOCK_COUNT; column_i += check_count, column += check_count)
 	{
 		CAT_IF_DUMP(cout << "Shuffled check matrix starting at column " << column_i << ":" << endl;)
 
@@ -1065,7 +1071,7 @@ void Encoder::MultiplyDenseRows()
 
 	// For remaining columns:
 
-	for (; column_i < _block_count; ++column_i, ++column)
+	for (; column_i < CAT_BLOCK_COUNT; ++column_i, ++column)
 	{
 		// Set up for dense rows
 		u32 dense_rv = prng.Next();
@@ -1290,7 +1296,7 @@ void Encoder::InitializeColumnValues()
 
 #if !defined(CAT_EVEN_MULTIPLE_BYTES)
 			// If not copying from final block,
-			if (pivot_row_i == _block_count - 1)
+			if (pivot_row_i == CAT_BLOCK_COUNT - 1)
 			{
 				memcpy(buffer_dest, combo, _final_bytes);
 				memset(buffer_dest + _final_bytes, 0, CAT_BLOCK_BYTES - _final_bytes);
@@ -1324,7 +1330,7 @@ void Encoder::InitializeColumnValues()
 
 				if (--weight <= 0) break;
 
-				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+				IterateNextColumn(column_i, CAT_BLOCK_COUNT, _block_next_prime, a);
 			}
 
 			// If combo still unused,
@@ -1346,7 +1352,7 @@ void Encoder::AddCheckValues()
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
 
-	u8 *temp_block = _check_blocks + CAT_BLOCK_BYTES * (_block_count + _added_count);
+	u8 *temp_block = _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + _added_count);
 	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
 	const int check_count = _added_count;
 
@@ -1359,7 +1365,7 @@ void Encoder::AddCheckValues()
 #if !defined(CAT_LIGHT_ROWS)
 
 	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
-	for (; column_i + check_count <= _block_count; column_i += check_count,
+	for (; column_i + check_count <= CAT_BLOCK_COUNT; column_i += check_count,
 		column += check_count, source_block += CAT_BLOCK_BYTES * check_count)
 	{
 		CAT_IF_DUMP(cout << endl << "For window of columns between " << column_i << " and " << column_i + check_count - 1 << " (inclusive):" << endl;)
@@ -1593,7 +1599,7 @@ void Encoder::AddCheckValues()
 
 	// For remaining columns:
 
-	for (; column_i < _block_count; ++column_i, ++column, source_block += CAT_BLOCK_BYTES)
+	for (; column_i < CAT_BLOCK_COUNT; ++column_i, ++column, source_block += CAT_BLOCK_BYTES)
 	{
 		// Set up for dense rows
 		u32 dense_rv = prng.Next();
@@ -1804,7 +1810,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		PeelColumn *column = _peel_cols;
 		u8 *column_src = _check_blocks;
 		u32 jj = 1;
-		for (u32 count = _block_count; count > 0; --count, ++column, column_src += CAT_BLOCK_BYTES)
+		for (u32 count = CAT_BLOCK_COUNT; count > 0; --count, ++column, column_src += CAT_BLOCK_BYTES)
 		{
 			// If column is peeled,
 			if (column->mark == MARK_PEEL)
@@ -1812,7 +1818,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				// Reuse the block value temporarily as window table space
 				win_table[jj] = column_src;
 
-				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
+				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << CAT_BLOCK_COUNT - count << endl;)
 
 				// If done,
 				if (++jj >= win_lim) break;
@@ -2038,13 +2044,13 @@ void Encoder::Substitute()
 		// Set up mixing column generator
 		u16 mix_a = row->mix_a;
 		u16 mix_x = row->mix_x0;
-		const u8 *src = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
+		const u8 *src = _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x);
 
 #if defined(CAT_EVEN_MULTIPLE_BYTES)
 		memxor_set(dest, src, msg_src, CAT_BLOCK_BYTES);
 #else
 		// If copying from final block,
-		if (row_i != _block_count - 1)
+		if (row_i != CAT_BLOCK_COUNT - 1)
 			memxor_set(dest, src, msg_src, CAT_BLOCK_BYTES);
 		else
 		{
@@ -2056,9 +2062,9 @@ void Encoder::Substitute()
 
 		// Add next two mixing columns in
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-		const u8 *src0 = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
+		const u8 *src0 = _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x);
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-		const u8 *src1 = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
+		const u8 *src1 = _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x);
 		memxor_add(dest, src0, src1, CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(++rowops;)
 
@@ -2071,7 +2077,7 @@ void Encoder::Substitute()
 			--weight;
 
 			u16 column_i = column0;
-			IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+			IterateNextColumn(column_i, CAT_BLOCK_COUNT, _block_next_prime, a);
 
 			// Common case:
 			if (column0 != dest_column_i)
@@ -2100,7 +2106,7 @@ void Encoder::Substitute()
 			// For each remaining column,
 			while (--weight > 0)
 			{
-				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+				IterateNextColumn(column_i, CAT_BLOCK_COUNT, _block_next_prime, a);
 				const u8 *src = _check_blocks + CAT_BLOCK_BYTES * column_i;
 
 				CAT_IF_DUMP(cout << " " << column_i;)
@@ -2162,7 +2168,7 @@ void Encoder::CompressionBasedSubstitute()
 
 	// Calculate initial window size
 	int w;
-	if (_block_count >= CAT_COMP_WINDOW_THRESHOLD_7)
+	if (CAT_BLOCK_COUNT >= CAT_COMP_WINDOW_THRESHOLD_7)
 		w = 7;
 	else
 		w = 6;
@@ -2290,7 +2296,7 @@ void Encoder::CompressionBasedSubstitute()
 			// For each row of the compression matrix,
 			PeelRow *row = _peel_rows;
 			u64 *ge_row = _ge_compress_matrix + first_word;
-			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
+			for (u16 row_i = 0; row_i < CAT_BLOCK_COUNT; ++row_i, ge_row += _ge_pitch, ++row)
 			{
 				// If row is not peeled,
 				if (row->peel_column == LIST_TERM)
@@ -2337,7 +2343,7 @@ void Encoder::CompressionBasedSubstitute()
 			// For each row of the compression matrix,
 			PeelRow *row = _peel_rows;
 			u64 *ge_row = _ge_compress_matrix + first_word;
-			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
+			for (u16 row_i = 0; row_i < CAT_BLOCK_COUNT; ++row_i, ge_row += _ge_pitch, ++row)
 			{
 				// If row is not peeled,
 				if (row->peel_column == LIST_TERM)
@@ -2404,7 +2410,7 @@ void Encoder::CompressionBasedSubstitute()
 	// For each row of the compression matrix,
 	PeelRow *row = _peel_rows;
 	u64 *ge_row = _ge_compress_matrix;
-	for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
+	for (u16 row_i = 0; row_i < CAT_BLOCK_COUNT; ++row_i, ge_row += _ge_pitch, ++row)
 	{
 		// If row is not peeled,
 		if (row->peel_column == LIST_TERM)
@@ -2586,7 +2592,7 @@ bool Encoder::GenerateCheckBlocks()
 #if defined(CAT_REUSE_COMPRESS)
 
 	// If block count is within re-use range for compression matrix,
-	if (_block_count >= CAT_DISCARD_COMPRESS_MIN && _block_count <= CAT_DISCARD_COMPRESS_MAX)
+	if (CAT_BLOCK_COUNT >= CAT_DISCARD_COMPRESS_MIN && CAT_BLOCK_COUNT <= CAT_DISCARD_COMPRESS_MAX)
 	{
 		// Reuse the compression matrix to speed up subsitution
 		CompressionBasedSubstitute();
@@ -2699,28 +2705,30 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	if (!_check_blocks) return false;
 
 	// Initialize encoder
-	_block_count = block_count;
+#if !defined(CAT_FIXED_BLOCK_COUNT)
+	CAT_BLOCK_COUNT = block_count;
+#endif
 	_message_blocks = reinterpret_cast<const u8*>( message_in );
 
 	// Calculate next primes after column counts for pseudo-random generation of peeling rows
-	_block_next_prime = NextPrime16(_block_count);
+	_block_next_prime = NextPrime16(CAT_BLOCK_COUNT);
 	_added_next_prime = NextPrime16(_added_count);
 	_light_next_prime = NextPrime16(_light_count);
 
 	// Allocate space for row data
-	_peel_rows = new PeelRow[_block_count];
+	_peel_rows = new PeelRow[CAT_BLOCK_COUNT];
 	if (!_peel_rows) return false;
 
 	// Allocate space for column data
-	_peel_cols = new PeelColumn[_block_count];
+	_peel_cols = new PeelColumn[CAT_BLOCK_COUNT];
 	if (!_peel_cols) return false;
 
 	// Allocate space for column refs
-	_peel_col_refs = new PeelRefs[_block_count];
+	_peel_col_refs = new PeelRefs[CAT_BLOCK_COUNT];
 	if (!_peel_col_refs) return false;
 
 	// Initialize columns
-	for (int ii = 0; ii < _block_count; ++ii)
+	for (int ii = 0; ii < CAT_BLOCK_COUNT; ++ii)
 	{
 		_peel_col_refs[ii].row_count = 0;
 		_peel_cols[ii].w2_refs = 0;
@@ -2750,10 +2758,10 @@ void Encoder::Generate(u32 id, void *block)
 
 #if defined(CAT_ENCODER_COPY_FIRST_N)
 	// For the message blocks,
-	if (id < _block_count)
+	if (id < CAT_BLOCK_COUNT)
 	{
 		// Until the final block in message blocks,
-		if (id < _block_count - 1)
+		if (id < CAT_BLOCK_COUNT - 1)
 		{
 			// Copy from the original file data
 			memcpy(buffer, _message_blocks, CAT_BLOCK_BYTES);
@@ -2779,10 +2787,10 @@ void Encoder::Generate(u32 id, void *block)
 	prng.Initialize(id, _p_seed);
 
 	// Generate peeling matrix row parameters
-	u16 peel_weight = GeneratePeelRowWeight(prng.Next(), _block_count - 1);
+	u16 peel_weight = GeneratePeelRowWeight(prng.Next(), CAT_BLOCK_COUNT - 1);
 	u32 rv = prng.Next();
-	u16 peel_a = ((u16)rv % (_block_count - 1)) + 1;
-	u16 peel_x = (u16)(rv >> 16) % _block_count;
+	u16 peel_a = ((u16)rv % (CAT_BLOCK_COUNT - 1)) + 1;
+	u16 peel_x = (u16)(rv >> 16) % CAT_BLOCK_COUNT;
 
 	// Generate mixing matrix row parameters
 	rv = prng.Next();
@@ -2799,7 +2807,7 @@ void Encoder::Generate(u32 id, void *block)
 	{
 		--peel_weight;
 
-		IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
+		IterateNextColumn(peel_x, CAT_BLOCK_COUNT, _block_next_prime, peel_a);
 
 		CAT_IF_DUMP(cout << " " << peel_x;)
 
@@ -2809,7 +2817,7 @@ void Encoder::Generate(u32 id, void *block)
 		// For each remaining peeler column,
 		while (--peel_weight > 0)
 		{
-			IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
+			IterateNextColumn(peel_x, CAT_BLOCK_COUNT, _block_next_prime, peel_a);
 
 			CAT_IF_DUMP(cout << " " << peel_x;)
 
@@ -2818,24 +2826,24 @@ void Encoder::Generate(u32 id, void *block)
 		}
 
 		// Mix first mixer block in directly
-		memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
+		memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x), CAT_BLOCK_BYTES);
 	}
 	else
 	{
 		// Mix first with first mixer block (faster than memcpy + memxor)
-		memxor_set(buffer, first, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
+		memxor_set(buffer, first, _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x), CAT_BLOCK_BYTES);
 	}
 
-	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+	CAT_IF_DUMP(cout << " " << (CAT_BLOCK_COUNT + mix_x);)
 
 	// For each remaining mixer column,
 	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
-	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x), CAT_BLOCK_BYTES);
+	CAT_IF_DUMP(cout << " " << (CAT_BLOCK_COUNT + mix_x);)
 
 	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
-	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (CAT_BLOCK_COUNT + mix_x), CAT_BLOCK_BYTES);
+	CAT_IF_DUMP(cout << " " << (CAT_BLOCK_COUNT + mix_x);)
 
 	CAT_IF_DUMP(cout << endl;)
 }
@@ -2869,7 +2877,7 @@ void Encoder::PrintGEMatrix()
 
 void Encoder::PrintGECompressMatrix()
 {
-	int rows = _block_count;
+	int rows = CAT_BLOCK_COUNT;
 	int cols = _defer_count + _added_count;
 
 	cout << endl << "GE (Inv) Compress matrix is " << rows << " x " << cols << ":" << endl;

@@ -11,7 +11,7 @@ using namespace std;
 
 static Clock m_clock;
 
-#define TRIALS 1000
+#define TRIALS 100
 
 u32 GenerateGoodCheckSeed(int block_count)
 {
@@ -75,7 +75,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 4096;
+	int block_count = 8192;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -112,15 +112,32 @@ int main()
 
 #endif
 
-	g_p_seed = 16;
+	g_p_seed = 19;
 
-#if 0
+#if 1
+
+	for (;;)
+	{
+		if (!encoder.Initialize(message, message_bytes, block_bytes))
+		{
+			++g_p_seed;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	cout << "Measuring average execution time of encoder initialization with seed " << g_p_seed << " over " << TRIALS << " trials..." << endl;
 
 	double start = m_clock.usec();
-	for (int ii = 0; ii < 1000; ++ii)
+	for (int ii = 0; ii < TRIALS; ++ii)
+	{
 		encoder.Initialize(message, message_bytes, block_bytes);
+	}
 	double end = m_clock.usec();
-	cout << "Average time = " << (end - start) / 1000. << endl;
+	double avg_time = (end - start) / (double)TRIALS;
+	cout << "Average time = " << avg_time << " usec, " << message_bytes / avg_time << " MB/s" << endl;
 
 #endif
 
@@ -134,7 +151,7 @@ int main()
 
 		if (success)
 		{
-			cout << ">> OKAY! encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
+			cout << ">> OKAY! encoder.Initialize in " << clocks << " clocks and " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
 
 			u8 *block = new u8[message_bytes];
 

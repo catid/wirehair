@@ -363,6 +363,7 @@
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (slower) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_FIXED_BLOCK_COUNT 8192 /* Optimize for a fixed number of blocks (faster) */
 //#define CAT_FIXED_BLOCK_BYTES 1537 /* Optimize for a fixed block size (faster) - Consider editing memxor.cpp */
 //#define CAT_EVEN_MULTIPLE_BYTES /* Overall message is a multiple of the block size (faster) */
 #define CAT_ENCODER_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed for precomputed matrices */
@@ -405,7 +406,9 @@ class Encoder
 #if !defined(CAT_EVEN_MULTIPLE_BYTES)
 	u32 _final_bytes;	// Number of bytes in final block
 #endif
+#if !defined(CAT_FIXED_BLOCK_COUNT)
 	u16 _block_count;	// Number of blocks in the message
+#endif
 	u16 _light_count;	// Number of check rows that are light
 	u16 _dense_count;	// Number of check rows that are dense
 	u16 _added_count;	// Sum of light and dense row counts
@@ -531,7 +534,9 @@ public:
 
 	CAT_INLINE u32 GetPSeed() { return _p_seed; }
 	CAT_INLINE u32 GetCSeed() { return _c_seed; }
+#if !defined(CAT_FIXED_BLOCK_COUNT)
 	CAT_INLINE u32 GetBlockCount() { return _block_count; }
+#endif
 
 	// Attempt to initialize the encoder for a given message
 	// Returns false on initialization failure
