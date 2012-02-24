@@ -112,7 +112,7 @@ int main()
 
 #endif
 
-	g_p_seed = 74;
+	g_p_seed = 6;
 
 	for (;;)
 	{

@@ -360,6 +360,7 @@
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
+#define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (much faster) */
 
 namespace cat {

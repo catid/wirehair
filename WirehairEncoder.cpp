@@ -397,6 +397,8 @@ void Encoder::GreedyPeeling()
 {
 	CAT_IF_DUMP(cout << endl << "---- GreedyPeeling ----" << endl << endl;)
 
+	// TODO: Optimize for large N
+
 	// Initialize list
 	_defer_head_columns = LIST_TERM;
 	_defer_count = 0;
@@ -861,8 +863,6 @@ void Encoder::MultiplyDenseRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
 
-	// TODO: Fix debug output
-
 	// Initialize PRNG
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
@@ -881,6 +881,8 @@ void Encoder::MultiplyDenseRows()
 	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
 	for (; column_i + check_count <= _block_count; column_i += check_count, column += check_count)
 	{
+		CAT_IF_DUMP(cout << "Shuffled check matrix starting at column " << column_i << ":" << endl;)
+
 		// Shuffle row and bit order
 		ShuffleDeck16(prng, rows, check_count);
 		ShuffleDeck16(prng, bits, check_count);
@@ -889,6 +891,8 @@ void Encoder::MultiplyDenseRows()
 		u16 set_count = (check_count + 1) >> 1;
 		u16 *set_bits = bits;
 		u16 *clr_bits = set_bits + set_count;
+
+		CAT_IF_DUMP(cout << "-- First half:" << endl;)
 
 		// Generate first row
 		memset(temp_row, 0, _ge_pitch * sizeof(u64));
@@ -916,9 +920,14 @@ void Encoder::MultiplyDenseRows()
 		// Store first row
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
+		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 
 		// Generate first half of rows
+#if defined(CAT_SHUFFLE_HALF)
 		const int loop_count = (check_count >> 1) - 1;
+#else
+		const int loop_count = (check_count >> 1);
+#endif
 		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -953,8 +962,12 @@ void Encoder::MultiplyDenseRows()
 			// Store in row
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 		}
 
+		CAT_IF_DUMP(cout << "-- Second half:" << endl;)
+
+#if defined(CAT_SHUFFLE_HALF)
 		// Shuffle bit order
 		ShuffleDeck16(prng, bits, check_count);
 
@@ -981,9 +994,40 @@ void Encoder::MultiplyDenseRows()
 		// Store in row
 		ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
+		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
+
+		const int second_loop_count = loop_count + (check_count & 1);
+#else
+		// If check count is odd,
+		if (check_count & 1)
+		{
+			// Generate middle row
+			int bit0 = set_bits[loop_count];
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				// Add temp row value
+				u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
+				for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
+			}
+			else
+			{
+				// Set GE bit for deferred column
+				u16 ge_column_i = column[bit0].ge_column;
+				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+			}
+
+			// Store in row
+			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
+			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
+		}
+
+		const int second_loop_count = loop_count - 1;
+#endif
 
 		// Generate second half of rows
-		const int second_loop_count = loop_count + (check_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -1018,7 +1062,10 @@ void Encoder::MultiplyDenseRows()
 			// Store in row
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 		}
+
+		CAT_IF_DUMP(cout << endl;)
 	} // next column
 
 #endif // !CAT_LIGHT_ROWS
@@ -1414,7 +1461,11 @@ void Encoder::AddCheckValues()
 		}
 
 		// Generate first half of rows
+#if defined(CAT_SHUFFLE_HALF)
 		const int loop_count = (check_count >> 1) - 1;
+#else
+		const int loop_count = (check_count >> 1);
+#endif
 		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
@@ -1450,6 +1501,7 @@ void Encoder::AddCheckValues()
 			CAT_IF_ROWOP(++rowops;)
 		}
 
+#if defined(CAT_SHUFFLE_HALF)
 		// Shuffle bit order
 		ShuffleDeck16(prng, bits, check_count);
 
@@ -1506,8 +1558,34 @@ void Encoder::AddCheckValues()
 			CAT_IF_ROWOP(++rowops;)
 		}
 
-		// Generate second half of rows
 		const int second_loop_count = loop_count + (check_count & 1);
+#else
+		// If odd check count,
+		if (check_count & 1)
+		{
+			int bit0 = set_bits[loop_count];
+
+			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
+
+			// Add in peeled columns
+			if (column[bit0].mark == MARK_PEEL)
+			{
+				CAT_IF_DUMP(cout << " " << column_i + bit0;)
+				memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+				CAT_IF_ROWOP(++rowops;)
+			}
+
+			CAT_IF_DUMP(cout << endl;)
+
+			// Store in row
+			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+		}
+
+		const int second_loop_count = loop_count - 1;
+#endif
+
+		// Generate second half of rows
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
