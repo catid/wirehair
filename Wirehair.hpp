@@ -362,6 +362,7 @@
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 #define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (better) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
 
 namespace cat {
 
@@ -433,6 +434,11 @@ class Encoder
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
 	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
 
+	// Substitution state
+#if defined(CAT_REUSE_COMPRESS)
+	u8 *_win_table_data;		// Values of temporary symbols for substitution table
+#endif
+
 #if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
 	void PrintGECompressMatrix();
@@ -474,9 +480,6 @@ class Encoder
 	// Multiply dense rows by peeling matrix to generate GE rows, but no row values yet
 	void MultiplyDenseRows();
 
-	// Compress rectangular matrix into conceptual square matrix
-	void Compress();
-
 
 	//// (3) Gaussian Elimination
 
@@ -492,16 +495,18 @@ class Encoder
 	// Add values for GE matrix positions under the diagonal
 	void AddSubdiagonalValues();
 
-	// Diagonalize the GE matrix to complete solving for the GE blocks
-	void BackSubstituteAboveDiagonal();
-
-	// Solve pivot column values
-	void GenerateGEValues();
-
 
 	//// (4) Substitution
 
-	// Substitute and solve for all of the peeled columns
+#if defined(CAT_REUSE_COMPRESS)
+	// Reuse compression matrix to substitute values (best for small N)
+	void CompressionBasedSubstitute();
+#endif
+
+	// Back-substitute to diagonalize the GE matrix
+	void BackSubstituteAboveDiagonal();
+
+	// Regenerate all of the sparse peeled rows to diagonalize them
 	void Substitute();
 
 

@@ -11,7 +11,7 @@ using namespace std;
 
 static Clock m_clock;
 
-#define TRIALS 100
+#define TRIALS 1000
 
 u32 GenerateGoodCheckSeed(int block_count)
 {
@@ -75,7 +75,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 8192;
+	int block_count = 64;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -112,13 +112,17 @@ int main()
 
 #endif
 
-	g_p_seed = 59;
+	g_p_seed = 6;
+
+#if 0
 
 	double start = m_clock.usec();
-	for (int ii = 0; ii < 100; ++ii)
+	for (int ii = 0; ii < 1000; ++ii)
 		encoder.Initialize(message, message_bytes, block_bytes);
 	double end = m_clock.usec();
-	cout << "Average time = " << (end - start) / 100. << endl;
+	cout << "Average time = " << (end - start) / 1000. << endl;
+
+#endif
 
 	for (;;)
 	{
