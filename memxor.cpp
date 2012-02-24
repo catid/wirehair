@@ -27,11 +27,18 @@
 */
 
 #include "memxor.hpp"
+#include "Wirehair.hpp"
 using namespace cat;
 
 
+#if defined(CAT_FIXED_BLOCK_BYTES)
+void cat::memxor(void *voutput, const void *vinput, int /*bytes*/)
+{
+	int bytes = CAT_FIXED_BLOCK_BYTES;
+#else
 void cat::memxor(void *voutput, const void *vinput, int bytes)
 {
+#endif
 	/*
 		Often times the output is XOR'd in-place so this version is
 		faster than the one below with two inputs.
@@ -97,8 +104,14 @@ void cat::memxor(void *voutput, const void *vinput, int bytes)
 	}
 }
 
+#if defined(CAT_FIXED_BLOCK_BYTES)
+void cat::memxor_set(void *voutput, const void *va, const void *vb, int /*bytes*/)
+{
+	int bytes = CAT_FIXED_BLOCK_BYTES;
+#else
 void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
 {
+#endif
 	/*
 		This version exists to avoid an expensive memory copy operation when
 		an input block is being calculated from a row and some other blocks.
@@ -161,8 +174,14 @@ void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
 	}
 }
 
+#if defined(CAT_FIXED_BLOCK_BYTES)
+void cat::memxor_add(void *voutput, const void *va, const void *vb, int /*bytes*/)
+{
+	int bytes = CAT_FIXED_BLOCK_BYTES;
+#else
 void cat::memxor_add(void *voutput, const void *va, const void *vb, int bytes)
 {
+#endif
 	/*
 		This version adds to the output instead of overwriting it.
 	*/

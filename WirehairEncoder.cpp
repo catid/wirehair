@@ -33,6 +33,12 @@
 using namespace cat;
 using namespace wirehair;
 
+#if defined(CAT_FIXED_BLOCK_BYTES)
+#define CAT_BLOCK_BYTES CAT_FIXED_BLOCK_BYTES
+#else
+#define CAT_BLOCK_BYTES _block_bytes
+#endif
+
 #if defined(CAT_DUMP_ENCODER_DEBUG)
 #define CAT_IF_DUMP(x) x
 #else
@@ -694,20 +700,24 @@ void Encoder::PeelDiagonal()
 		CAT_IF_DUMP(cout << " " << ge_column_i << endl;)
 
 		// Lookup output block
-		u8 *temp_block_src = _check_blocks + _block_bytes * peel_column_i;
+		u8 *temp_block_src = _check_blocks + CAT_BLOCK_BYTES * peel_column_i;
 
 		// If row has not been copied yet,
 		if (!row->is_copied)
 		{
 			// Copy it directly to the output symbol
-			const u8 *block_src = _message_blocks + _block_bytes * peel_row_i;
+			const u8 *block_src = _message_blocks + CAT_BLOCK_BYTES * peel_row_i;
+#if defined(CAT_EVEN_MULTIPLE_BYTES)
+			memcpy(temp_block_src, block_src, CAT_BLOCK_BYTES);
+#else
 			if (peel_row_i != _block_count - 1)
-				memcpy(temp_block_src, block_src, _block_bytes);
+				memcpy(temp_block_src, block_src, CAT_BLOCK_BYTES);
 			else
 			{
 				memcpy(temp_block_src, block_src, _final_bytes);
-				memset(temp_block_src + _final_bytes, 0, _block_bytes - _final_bytes);
+				memset(temp_block_src + _final_bytes, 0, CAT_BLOCK_BYTES - _final_bytes);
 			}
+#endif
 			CAT_IF_ROWOP(++rowops;)
 
 			CAT_IF_DUMP(cout << "  -- Copied from " << peel_row_i << " because has not been copied yet.  Output block = " << (int)temp_block_src[0] << endl;)
@@ -738,25 +748,29 @@ void Encoder::PeelDiagonal()
 			if (ref_column_i != LIST_TERM)
 			{
 				// Generate temporary row block value:
-				u8 *temp_block_dest = _check_blocks + _block_bytes * ref_column_i;
+				u8 *temp_block_dest = _check_blocks + CAT_BLOCK_BYTES * ref_column_i;
 
 				// If referencing row is already copied to the check blocks,
 				if (ref_row->is_copied)
 				{
 					// Add this row block value to it
-					memxor(temp_block_dest, temp_block_src, _block_bytes);
+					memxor(temp_block_dest, temp_block_src, CAT_BLOCK_BYTES);
 				}
 				else
 				{
 					// Add this row block value with message block to it (optimization)
-					const u8 *block_src = _message_blocks + _block_bytes * ref_row_i;
+					const u8 *block_src = _message_blocks + CAT_BLOCK_BYTES * ref_row_i;
+#if defined(CAT_EVEN_MULTIPLE_BYTES)
+					memxor_set(temp_block_dest, temp_block_src, block_src, CAT_BLOCK_BYTES);
+#else
 					if (ref_row_i != _block_count - 1)
-						memxor_set(temp_block_dest, temp_block_src, block_src, _block_bytes);
+						memxor_set(temp_block_dest, temp_block_src, block_src, CAT_BLOCK_BYTES);
 					else
 					{
 						memxor_set(temp_block_dest, temp_block_src, block_src, _final_bytes);
-						memcpy(temp_block_dest + _final_bytes, temp_block_src, _block_bytes - _final_bytes);
+						memcpy(temp_block_dest + _final_bytes, temp_block_src, CAT_BLOCK_BYTES - _final_bytes);
 					}
+#endif
 
 					ref_row->is_copied = 1;
 				}
@@ -1263,13 +1277,13 @@ void Encoder::InitializeColumnValues()
 	{
 		u16 column_i = _ge_col_map[pivot_i];
 		u16 ge_row_i = _ge_pivots[pivot_i];
-		u8 *buffer_dest = _check_blocks + _block_bytes * column_i;
+		u8 *buffer_dest = _check_blocks + CAT_BLOCK_BYTES * column_i;
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << column_i << " with GE row " << ge_row_i << " : ";)
 
 		if (ge_row_i < _added_count)
 		{
-			memset(buffer_dest, 0, _block_bytes);
+			memset(buffer_dest, 0, CAT_BLOCK_BYTES);
 
 			// Store which column solves the dense row
 			_ge_row_map[ge_row_i] = column_i;
@@ -1280,18 +1294,20 @@ void Encoder::InitializeColumnValues()
 		else
 		{
 			u16 pivot_row_i = _ge_row_map[ge_row_i];
-			const u8 *combo = _message_blocks + _block_bytes * pivot_row_i;
+			const u8 *combo = _message_blocks + CAT_BLOCK_BYTES * pivot_row_i;
 
 			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
 
+#if !defined(CAT_EVEN_MULTIPLE_BYTES)
 			// If not copying from final block,
 			if (pivot_row_i == _block_count - 1)
 			{
 				memcpy(buffer_dest, combo, _final_bytes);
-				memset(buffer_dest + _final_bytes, 0, _block_bytes - _final_bytes);
+				memset(buffer_dest + _final_bytes, 0, CAT_BLOCK_BYTES - _final_bytes);
 				CAT_IF_ROWOP(++rowops;)
 				combo = 0;
 			}
+#endif
 
 			// Eliminate peeled columns:
 			PeelRow *row = &_peel_rows[pivot_row_i];
@@ -1306,11 +1322,11 @@ void Encoder::InitializeColumnValues()
 				{
 					// If combo unused,
 					if (!combo)
-						memxor(buffer_dest, _check_blocks + _block_bytes * column_i, _block_bytes);
+						memxor(buffer_dest, _check_blocks + CAT_BLOCK_BYTES * column_i, CAT_BLOCK_BYTES);
 					else
 					{
 						// Use combo
-						memxor_set(buffer_dest, combo, _check_blocks + _block_bytes * column_i, _block_bytes);
+						memxor_set(buffer_dest, combo, _check_blocks + CAT_BLOCK_BYTES * column_i, CAT_BLOCK_BYTES);
 						combo = 0;
 					}
 					CAT_IF_ROWOP(++rowops;)
@@ -1322,7 +1338,7 @@ void Encoder::InitializeColumnValues()
 			}
 
 			// If combo still unused,
-			if (combo) memcpy(buffer_dest, combo, _block_bytes);
+			if (combo) memcpy(buffer_dest, combo, CAT_BLOCK_BYTES);
 		}
 		CAT_IF_DUMP(cout << endl;)
 	}
@@ -1340,7 +1356,7 @@ void Encoder::AddCheckValues()
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
 
-	u8 *temp_block = _check_blocks + _block_bytes * (_block_count + _added_count);
+	u8 *temp_block = _check_blocks + CAT_BLOCK_BYTES * (_block_count + _added_count);
 	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
 	const int check_count = _added_count;
 
@@ -1354,7 +1370,7 @@ void Encoder::AddCheckValues()
 
 	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
 	for (; column_i + check_count <= _block_count; column_i += check_count,
-		column += check_count, source_block += _block_bytes * check_count)
+		column += check_count, source_block += CAT_BLOCK_BYTES * check_count)
 	{
 		CAT_IF_DUMP(cout << endl << "For window of columns between " << column_i << " and " << column_i + check_count - 1 << " (inclusive):" << endl;)
 
@@ -1379,7 +1395,7 @@ void Encoder::AddCheckValues()
 			int bit_i = set_bits[ii];
 			if (column[bit_i].mark == MARK_PEEL)
 			{
-				const u8 *src = source_block + _block_bytes * bit_i;
+				const u8 *src = source_block + CAT_BLOCK_BYTES * bit_i;
 
 				CAT_IF_DUMP(cout << " " << column_i + bit_i;)
 
@@ -1389,13 +1405,13 @@ void Encoder::AddCheckValues()
 				else if (combo == temp_block)
 				{
 					// Else if combo has been used: XOR it in
-					memxor(temp_block, src, _block_bytes);
+					memxor(temp_block, src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++rowops;)
 				}
 				else
 				{
 					// Else if combo needs to be used: Combine into block
-					memxor_set(temp_block, combo, src, _block_bytes);
+					memxor_set(temp_block, combo, src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++rowops;)
 					combo = temp_block;
 				}
@@ -1406,18 +1422,18 @@ void Encoder::AddCheckValues()
 
 		// If no combo ever triggered,
 		if (!combo)
-			memset(temp_block, 0, _block_bytes);
+			memset(temp_block, 0, CAT_BLOCK_BYTES);
 		else
 		{
 			if (combo != temp_block)
 			{
 				// Else if never combined two: Just copy it
-				memcpy(temp_block, combo, _block_bytes);
+				memcpy(temp_block, combo, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
 			// Store first row
-			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[*row++], temp_block, CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 		}
 
@@ -1439,26 +1455,26 @@ void Encoder::AddCheckValues()
 				if (column[bit1].mark == MARK_PEEL)
 				{
 					CAT_IF_DUMP(cout << " " << column_i + bit0 << "+" << column_i + bit1;)
-					memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+					memxor_add(temp_block, source_block + CAT_BLOCK_BYTES * bit0, source_block + CAT_BLOCK_BYTES * bit1, CAT_BLOCK_BYTES);
 				}
 				else
 				{
 					CAT_IF_DUMP(cout << " " << column_i + bit0;)
-					memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+					memxor(temp_block, source_block + CAT_BLOCK_BYTES * bit0, CAT_BLOCK_BYTES);
 				}
 				CAT_IF_ROWOP(++rowops;)
 			}
 			else if (column[bit1].mark == MARK_PEEL)
 			{
 				CAT_IF_DUMP(cout << " " << column_i + bit1;)
-				memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+				memxor(temp_block, source_block + CAT_BLOCK_BYTES * bit1, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
 			CAT_IF_DUMP(cout << endl;)
 
 			// Store in row
-			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[*row++], temp_block, CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 		}
 
@@ -1477,7 +1493,7 @@ void Encoder::AddCheckValues()
 			int bit_i = set_bits[ii];
 			if (column[bit_i].mark == MARK_PEEL)
 			{
-				const u8 *src = source_block + _block_bytes * bit_i;
+				const u8 *src = source_block + CAT_BLOCK_BYTES * bit_i;
 
 				CAT_IF_DUMP(cout << " " << column_i + bit_i;)
 
@@ -1487,13 +1503,13 @@ void Encoder::AddCheckValues()
 				else if (combo == temp_block)
 				{
 					// Else if combo has been used: XOR it in
-					memxor(temp_block, src, _block_bytes);
+					memxor(temp_block, src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++rowops;)
 				}
 				else
 				{
 					// Else if combo needs to be used: Combine into block
-					memxor_set(temp_block, combo, src, _block_bytes);
+					memxor_set(temp_block, combo, src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++rowops;)
 					combo = temp_block;
 				}
@@ -1504,18 +1520,18 @@ void Encoder::AddCheckValues()
 
 		// If no combo ever triggered,
 		if (!combo)
-			memset(temp_block, 0, _block_bytes);
+			memset(temp_block, 0, CAT_BLOCK_BYTES);
 		else
 		{
 			if (combo != temp_block)
 			{
 				// Else if never combined two: Just copy it
-				memcpy(temp_block, combo, _block_bytes);
+				memcpy(temp_block, combo, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
 			// Store first row
-			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[*row++], temp_block, CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 		}
 
@@ -1532,14 +1548,14 @@ void Encoder::AddCheckValues()
 			if (column[bit0].mark == MARK_PEEL)
 			{
 				CAT_IF_DUMP(cout << " " << column_i + bit0;)
-				memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+				memxor(temp_block, source_block + CAT_BLOCK_BYTES * bit0, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
 			CAT_IF_DUMP(cout << endl;)
 
 			// Store in row
-			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[*row++], temp_block, CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 		}
 
@@ -1559,26 +1575,26 @@ void Encoder::AddCheckValues()
 				if (column[bit1].mark == MARK_PEEL)
 				{
 					CAT_IF_DUMP(cout << " " << column_i + bit0 << "+" << column_i + bit1;)
-					memxor_add(temp_block, source_block + _block_bytes * bit0, source_block + _block_bytes * bit1, _block_bytes);
+					memxor_add(temp_block, source_block + CAT_BLOCK_BYTES * bit0, source_block + CAT_BLOCK_BYTES * bit1, CAT_BLOCK_BYTES);
 				}
 				else
 				{
 					CAT_IF_DUMP(cout << " " << column_i + bit0;)
-					memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
+					memxor(temp_block, source_block + CAT_BLOCK_BYTES * bit0, CAT_BLOCK_BYTES);
 				}
 				CAT_IF_ROWOP(++rowops;)
 			}
 			else if (column[bit1].mark == MARK_PEEL)
 			{
 				CAT_IF_DUMP(cout << " " << column_i + bit1;)
-				memxor(temp_block, source_block + _block_bytes * bit1, _block_bytes);
+				memxor(temp_block, source_block + CAT_BLOCK_BYTES * bit1, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
 			CAT_IF_DUMP(cout << endl;)
 
 			// Store in row
-			memxor(_check_blocks + _block_bytes * _ge_row_map[*row++], temp_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[*row++], temp_block, CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 		}
 	} // next column
@@ -1587,7 +1603,7 @@ void Encoder::AddCheckValues()
 
 	// For remaining columns:
 
-	for (; column_i < _block_count; ++column_i, ++column, source_block += _block_bytes)
+	for (; column_i < _block_count; ++column_i, ++column, source_block += CAT_BLOCK_BYTES)
 	{
 		// Set up for dense rows
 		u32 dense_rv = prng.Next();
@@ -1608,15 +1624,15 @@ void Encoder::AddCheckValues()
 			CAT_IF_DUMP(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
 
 			// Light rows:
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
 			ge_dest_row = _ge_matrix + _ge_pitch * x;
-			memxor(_check_blocks + _block_bytes * _ge_row_map[x], source_block, _block_bytes);
+			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
 			// Dense rows:
@@ -1625,7 +1641,7 @@ void Encoder::AddCheckValues()
 			{
 				if (dense_rv & 1)
 				{
-					memxor(_check_blocks + _block_bytes * _ge_row_map[dense_i], source_block, _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[dense_i], source_block, CAT_BLOCK_BYTES);
 					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
@@ -1649,7 +1665,7 @@ void Encoder::AddSubdiagonalValues()
 	{
 		u16 pivot_column_i = _ge_col_map[pivot_i];
 		u16 ge_row_i = _ge_pivots[pivot_i];
-		u8 *buffer_dest = _check_blocks + _block_bytes * pivot_column_i;
+		u8 *buffer_dest = _check_blocks + CAT_BLOCK_BYTES * pivot_column_i;
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
 
@@ -1662,8 +1678,8 @@ void Encoder::AddSubdiagonalValues()
 			if (ge_row[ge_column_i >> 6] & ge_mask)
 			{
 				u16 column_i = _ge_col_map[ge_column_i];
-				const u8 *peel_src = _check_blocks + _block_bytes * column_i;
-				memxor(buffer_dest, peel_src, _block_bytes);
+				const u8 *peel_src = _check_blocks + CAT_BLOCK_BYTES * column_i;
+				memxor(buffer_dest, peel_src, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 
 				CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "]";)
@@ -1798,7 +1814,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		PeelColumn *column = _peel_cols;
 		u8 *column_src = _check_blocks;
 		u32 jj = 1;
-		for (u32 count = _block_count; count > 0; --count, ++column, column_src += _block_bytes)
+		for (u32 count = _block_count; count > 0; --count, ++column, column_src += CAT_BLOCK_BYTES)
 		{
 			// If column is peeled,
 			if (column->mark == MARK_PEEL)
@@ -1829,7 +1845,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 			{
 				// Set up for iteration
 				const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
-				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_pivot_i];
+				const u8 *src = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[src_pivot_i];
 
 				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
@@ -1843,7 +1859,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 
 						// Back-substitute
 						// NOTE: Because the values exist on the diagonal, the row is also the column index
-						memxor(_check_blocks + _block_bytes * _ge_col_map[dest_pivot_i], src, _block_bytes);
+						memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[dest_pivot_i], src, CAT_BLOCK_BYTES);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
@@ -1857,44 +1873,44 @@ void Encoder::BackSubstituteAboveDiagonal()
 			CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
 
 			// Generate window table: 2 bits
-			win_table[1] = _check_blocks + _block_bytes * _ge_col_map[backsub_i];
-			win_table[2] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 1];
-			memxor_set(win_table[3], win_table[1], win_table[2], _block_bytes);
+			win_table[1] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i];
+			win_table[2] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 1];
+			memxor_set(win_table[3], win_table[1], win_table[2], CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(++rowops;)
 
 			// Generate window table: 3 bits
-			win_table[4] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 2];
-			memxor_set(win_table[5], win_table[1], win_table[4], _block_bytes);
-			memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
-			memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
+			win_table[4] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 2];
+			memxor_set(win_table[5], win_table[1], win_table[4], CAT_BLOCK_BYTES);
+			memxor_set(win_table[6], win_table[2], win_table[4], CAT_BLOCK_BYTES);
+			memxor_set(win_table[7], win_table[1], win_table[6], CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(rowops += 3;)
 
 			// Generate window table: 4 bits
-			win_table[8] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
+			win_table[8] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 3];
 			for (int ii = 1; ii < 8; ++ii)
-				memxor_set(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+				memxor_set(win_table[8 + ii], win_table[ii], win_table[8], CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(rowops += 7;)
 
 			// Generate window table: 5+ bits
 			if (w >= 5)
 			{
-				win_table[16] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
+				win_table[16] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 4];
 				for (int ii = 1; ii < 16; ++ii)
-					memxor_set(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+					memxor_set(win_table[16 + ii], win_table[ii], win_table[16], CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(rowops += 15;)
 
 				if (w >= 6)
 				{
-					win_table[32] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
+					win_table[32] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 5];
 					for (int ii = 1; ii < 32; ++ii)
-						memxor_set(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+						memxor_set(win_table[32 + ii], win_table[ii], win_table[32], CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(rowops += 31;)
 
 					if (w >= 7)
 					{
-						win_table[64] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 6];
+						win_table[64] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 6];
 						for (int ii = 1; ii < 64; ++ii)
-							memxor_set(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+							memxor_set(win_table[64 + ii], win_table[ii], win_table[64], CAT_BLOCK_BYTES);
 						CAT_IF_ROWOP(rowops += 63;)
 					}
 				}
@@ -1919,7 +1935,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 						// Back-substitute
-						memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_pivot_i], win_table[win_bits], CAT_BLOCK_BYTES);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
@@ -1941,7 +1957,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 						// Back-substitute
-						memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_pivot_i], win_table[win_bits], CAT_BLOCK_BYTES);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
@@ -1980,7 +1996,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 	for (; pivot_i >= 0; --pivot_i)
 	{
 		// Calculate source
-		const u8 *src = _check_blocks + _block_bytes * _ge_col_map[pivot_i];
+		const u8 *src = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[pivot_i];
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
 
@@ -1992,7 +2008,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 			if (ge_row[_ge_pitch * _ge_pivots[above_i]] & ge_mask)
 			{
 				// Back-substitute
-				memxor(_check_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
+				memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_i], src, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 
 				CAT_IF_DUMP(cout << " " << above_i;)
@@ -2021,35 +2037,39 @@ void Encoder::Substitute()
 	{
 		row = &_peel_rows[row_i];
 		u16 dest_column_i = row->peel_column;
-		u8 *dest = _check_blocks + _block_bytes * dest_column_i;
+		u8 *dest = _check_blocks + CAT_BLOCK_BYTES * dest_column_i;
 
 		CAT_IF_DUMP(cout << "Generating column " << dest_column_i << ":";)
 
-		const u8 *msg_src = _message_blocks + _block_bytes * row_i;
+		const u8 *msg_src = _message_blocks + CAT_BLOCK_BYTES * row_i;
 
 		CAT_IF_DUMP(cout << " " << row_i << ":[" << (int)src[0] << "]";)
 
 		// Set up mixing column generator
 		u16 mix_a = row->mix_a;
 		u16 mix_x = row->mix_x0;
-		const u8 *src = _check_blocks + _block_bytes * (_block_count + mix_x);
+		const u8 *src = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
 
+#if defined(CAT_EVEN_MULTIPLE_BYTES)
+		memxor_set(dest, src, msg_src, CAT_BLOCK_BYTES);
+#else
 		// If copying from final block,
 		if (row_i != _block_count - 1)
-			memxor_set(dest, src, msg_src, _block_bytes);
+			memxor_set(dest, src, msg_src, CAT_BLOCK_BYTES);
 		else
 		{
 			memxor_set(dest, src, msg_src, _final_bytes);
-			memcpy(dest + _final_bytes, src, _block_bytes - _final_bytes);
+			memcpy(dest + _final_bytes, src, CAT_BLOCK_BYTES - _final_bytes);
 		}
+#endif
 		CAT_IF_ROWOP(++rowops;)
 
 		// Add next two mixing columns in
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-		const u8 *src0 = _check_blocks + _block_bytes * (_block_count + mix_x);
+		const u8 *src0 = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-		const u8 *src1 = _check_blocks + _block_bytes * (_block_count + mix_x);
-		memxor_add(dest, src0, src1, _block_bytes);
+		const u8 *src1 = _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x);
+		memxor_add(dest, src0, src1, CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(++rowops;)
 
 		// If at least two peeling columns are set,
@@ -2066,24 +2086,24 @@ void Encoder::Substitute()
 			// Common case:
 			if (column0 != dest_column_i)
 			{
-				const u8 *peel0 = _check_blocks + _block_bytes * column0;
+				const u8 *peel0 = _check_blocks + CAT_BLOCK_BYTES * column0;
 
 				// Common case:
 				if (column_i != dest_column_i)
 				{
-					const u8 *peel1 = _check_blocks + _block_bytes * column_i;
-					memxor_add(dest, peel0, peel1, _block_bytes);
+					const u8 *peel1 = _check_blocks + CAT_BLOCK_BYTES * column_i;
+					memxor_add(dest, peel0, peel1, CAT_BLOCK_BYTES);
 				}
 				else // rare:
 				{
-					memxor(dest, peel0, _block_bytes);
+					memxor(dest, peel0, CAT_BLOCK_BYTES);
 				}
 				CAT_IF_ROWOP(++rowops;)
 			}
 			else // rare:
 			{
-				const u8 *peel1 = _check_blocks + _block_bytes * column_i;
-				memxor(dest, peel1, _block_bytes);
+				const u8 *peel1 = _check_blocks + CAT_BLOCK_BYTES * column_i;
+				memxor(dest, peel1, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
@@ -2091,14 +2111,14 @@ void Encoder::Substitute()
 			while (--weight > 0)
 			{
 				IterateNextColumn(column_i, _block_count, _block_next_prime, a);
-				const u8 *src = _check_blocks + _block_bytes * column_i;
+				const u8 *src = _check_blocks + CAT_BLOCK_BYTES * column_i;
 
 				CAT_IF_DUMP(cout << " " << column_i;)
 
 				// If column is not the solved one,
 				if (column_i != dest_column_i)
 				{
-					memxor(dest, src, _block_bytes);
+					memxor(dest, src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++rowops;)
 					CAT_IF_DUMP(cout << "[" << (int)src[0] << "]";)
 				}
@@ -2162,13 +2182,13 @@ void Encoder::CompressionBasedSubstitute()
 
 	// Allocate memory for window table
 	u8 *win_table[128];
-	int win_table_bytes = _block_bytes * win_lim;
+	int win_table_bytes = CAT_BLOCK_BYTES * win_lim;
 	_win_table_data = new u8[win_table_bytes];
 	if (_win_table_data)
 	{
 		// Initialize window table
 		u8 *ptr = _win_table_data;
-		for (u32 ii = 0; ii < win_lim; ++ii, ptr += _block_bytes)
+		for (u32 ii = 0; ii < win_lim; ++ii, ptr += CAT_BLOCK_BYTES)
 			win_table[ii] = ptr;
 	}
 
@@ -2185,7 +2205,7 @@ void Encoder::CompressionBasedSubstitute()
 		{
 			// Set up for iteration
 			const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
-			const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_pivot_i];
+			const u8 *src = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[src_pivot_i];
 
 			CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
@@ -2199,7 +2219,7 @@ void Encoder::CompressionBasedSubstitute()
 
 					// Back-substitute
 					// NOTE: Because the values exist on the diagonal, the row is also the column index
-					memxor(_check_blocks + _block_bytes * _ge_col_map[dest_pivot_i], src, _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[dest_pivot_i], src, CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++window_rowops;)
 				}
 			}
@@ -2213,42 +2233,42 @@ void Encoder::CompressionBasedSubstitute()
 		CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
 
 		// Generate window table: 2 bits
-		win_table[1] = _check_blocks + _block_bytes * _ge_col_map[backsub_i];
-		win_table[2] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 1];
-		memxor_set(win_table[3], win_table[1], win_table[2], _block_bytes);
+		win_table[1] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i];
+		win_table[2] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 1];
+		memxor_set(win_table[3], win_table[1], win_table[2], CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(++window_rowops;)
 
 		// Generate window table: 3 bits
-		win_table[4] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 2];
-		memxor_set(win_table[5], win_table[1], win_table[4], _block_bytes);
-		memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
-		memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
+		win_table[4] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 2];
+		memxor_set(win_table[5], win_table[1], win_table[4], CAT_BLOCK_BYTES);
+		memxor_set(win_table[6], win_table[2], win_table[4], CAT_BLOCK_BYTES);
+		memxor_set(win_table[7], win_table[1], win_table[6], CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(window_rowops += 3;)
 
 		// Generate window table: 4 bits
-		win_table[8] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
+		win_table[8] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 3];
 		for (int ii = 1; ii < 8; ++ii)
-			memxor_set(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+			memxor_set(win_table[8 + ii], win_table[ii], win_table[8], CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(window_rowops += 7;)
 
 		// Generate window table: 5 bits
-		win_table[16] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
+		win_table[16] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 4];
 		for (int ii = 1; ii < 16; ++ii)
-			memxor_set(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+			memxor_set(win_table[16 + ii], win_table[ii], win_table[16], CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(window_rowops += 15;)
 
 		// Generate window table: 6 bits
-		win_table[32] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
+		win_table[32] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 5];
 		for (int ii = 1; ii < 32; ++ii)
-			memxor_set(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+			memxor_set(win_table[32 + ii], win_table[ii], win_table[32], CAT_BLOCK_BYTES);
 		CAT_IF_ROWOP(window_rowops += 31;)
 
 		// Generate window table: 7+ bits
 		if (w >= 7)
 		{
-			win_table[64] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 6];
+			win_table[64] = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[backsub_i + 6];
 			for (int ii = 1; ii < 64; ++ii)
-				memxor_set(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+				memxor_set(win_table[64 + ii], win_table[ii], win_table[64], CAT_BLOCK_BYTES);
 			CAT_IF_ROWOP(window_rowops += 63;)
 		}
 
@@ -2272,7 +2292,7 @@ void Encoder::CompressionBasedSubstitute()
 					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 					// Back-substitute
-					memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_pivot_i], win_table[win_bits], CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++window_rowops;)
 				}
 			}
@@ -2295,7 +2315,7 @@ void Encoder::CompressionBasedSubstitute()
 					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to peel column " << row->peel_column << endl;)
 
 					// Back-substitute
-					memxor(_check_blocks + _block_bytes * row->peel_column, win_table[win_bits], _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * row->peel_column, win_table[win_bits], CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++window_rowops;)
 
 					++flip_count;
@@ -2319,7 +2339,7 @@ void Encoder::CompressionBasedSubstitute()
 					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 					// Back-substitute
-					memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_pivot_i], win_table[win_bits], CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++window_rowops;)
 				}
 			}
@@ -2342,7 +2362,7 @@ void Encoder::CompressionBasedSubstitute()
 					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to peel column " << row->peel_column << endl;)
 
 					// Back-substitute
-					memxor(_check_blocks + _block_bytes * row->peel_column, win_table[win_bits], _block_bytes);
+					memxor(_check_blocks + CAT_BLOCK_BYTES * row->peel_column, win_table[win_bits], CAT_BLOCK_BYTES);
 					CAT_IF_ROWOP(++window_rowops;)
 
 					++flip_count;
@@ -2366,7 +2386,7 @@ void Encoder::CompressionBasedSubstitute()
 	for (; pivot_i >= 0; --pivot_i)
 	{
 		// Calculate source
-		const u8 *src = _check_blocks + _block_bytes * _ge_col_map[pivot_i];
+		const u8 *src = _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[pivot_i];
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
 
@@ -2378,7 +2398,7 @@ void Encoder::CompressionBasedSubstitute()
 			if (ge_row[_ge_pitch * _ge_pivots[above_i]] & ge_mask)
 			{
 				// Back-substitute
-				memxor(_check_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
+				memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_col_map[above_i], src, CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++remain_rowops;)
 
 				CAT_IF_DUMP(cout << " " << above_i;)
@@ -2402,7 +2422,7 @@ void Encoder::CompressionBasedSubstitute()
 
 		// Lookup peeling results
 		u16 peel_column_i = row->peel_column;
-		u8 *dest = _check_blocks + _block_bytes * peel_column_i;
+		u8 *dest = _check_blocks + CAT_BLOCK_BYTES * peel_column_i;
 
 		// For each column,
 		u64 ge_mask = 1;
@@ -2411,7 +2431,7 @@ void Encoder::CompressionBasedSubstitute()
 			// If bit is set,
 			if (ge_row[ge_column_i >> 6] & ge_mask)
 			{
-				memxor(dest, _check_blocks + _block_bytes * _ge_col_map[ge_column_i], _block_bytes);
+				memxor(dest, _check_blocks + CAT_BLOCK_BYTES * _ge_col_map[ge_column_i], CAT_BLOCK_BYTES);
 				CAT_IF_ROWOP(++remain_rowops;)
 			}
 
@@ -2660,10 +2680,16 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 
 	Cleanup();
 
+#if !defined(CAT_FIXED_BLOCK_BYTES)
+	CAT_BLOCK_BYTES = block_bytes;
+#endif
+
 	// Calculate message block count
-	int block_count = (message_bytes + block_bytes - 1) / block_bytes;
-	_final_bytes = message_bytes % block_bytes;
-	if (_final_bytes <= 0) _final_bytes = block_bytes;
+	int block_count = (message_bytes + CAT_BLOCK_BYTES - 1) / CAT_BLOCK_BYTES;
+#if !defined(CAT_EVEN_MULTIPLE_BYTES)
+	_final_bytes = message_bytes % CAT_BLOCK_BYTES;
+	if (_final_bytes <= 0) _final_bytes = CAT_BLOCK_BYTES;
+#endif
 
 	// Lookup generator matrix parameters
 	if (!GenerateMatrixParameters(block_count, _p_seed, _c_seed, _light_count, _dense_count))
@@ -2676,7 +2702,6 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	if (!_check_blocks) return false;
 
 	// Initialize encoder
-	_block_bytes = block_bytes;
 	_block_count = block_count;
 	_message_blocks = reinterpret_cast<const u8*>( message_in );
 	_next_block_id = 0;
@@ -2687,7 +2712,7 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_light_next_prime = NextPrime16(_light_count);
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes" << endl;)
-	CAT_IF_DUMP(cout << "Block bytes = " << block_bytes << ".  Final bytes = " << _final_bytes << endl;)
+	CAT_IF_DUMP(cout << "Block bytes = " << CAT_BLOCK_BYTES << ".  Final bytes = " << _final_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << block_count << " +Prime=" << _block_next_prime << endl;)
 	CAT_IF_DUMP(cout << "Added count = " << _added_count << " +Prime=" << _added_next_prime << endl;)
 	CAT_IF_DUMP(cout << "Generator peel seed = " << _p_seed << endl;)
@@ -2710,8 +2735,8 @@ void Encoder::Generate(u32 id, void *block)
 		if (id < _block_count - 1)
 		{
 			// Copy from the original file data
-			memcpy(buffer, _message_blocks, _block_bytes);
-			_message_blocks += _block_bytes;
+			memcpy(buffer, _message_blocks, CAT_BLOCK_BYTES);
+			_message_blocks += CAT_BLOCK_BYTES;
 		}
 		else
 		{
@@ -2719,7 +2744,7 @@ void Encoder::Generate(u32 id, void *block)
 			memcpy(buffer, _message_blocks, _final_bytes);
 
 			// Pad with zeroes
-			memset(buffer + _final_bytes, 0, _block_bytes - _final_bytes);
+			memset(buffer + _final_bytes, 0, CAT_BLOCK_BYTES - _final_bytes);
 		}
 
 		return;
@@ -2744,7 +2769,7 @@ void Encoder::Generate(u32 id, void *block)
 	u16 mix_x = (u16)(rv >> 16) % _added_count;
 
 	// Remember first column (there is always at least one)
-	u8 *first = _check_blocks + _block_bytes * peel_x;
+	u8 *first = _check_blocks + CAT_BLOCK_BYTES * peel_x;
 
 	CAT_IF_DUMP(cout << " " << peel_x;)
 
@@ -2758,7 +2783,7 @@ void Encoder::Generate(u32 id, void *block)
 		CAT_IF_DUMP(cout << " " << peel_x;)
 
 		// Combine first two columns into output buffer (faster than memcpy + memxor)
-		memxor_set(buffer, first, _check_blocks + _block_bytes * peel_x, _block_bytes);
+		memxor_set(buffer, first, _check_blocks + CAT_BLOCK_BYTES * peel_x, CAT_BLOCK_BYTES);
 
 		// For each remaining peeler column,
 		while (--peel_weight > 0)
@@ -2768,27 +2793,27 @@ void Encoder::Generate(u32 id, void *block)
 			CAT_IF_DUMP(cout << " " << peel_x;)
 
 			// Mix in each column
-			memxor(buffer, _check_blocks + _block_bytes * peel_x, _block_bytes);
+			memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * peel_x, CAT_BLOCK_BYTES);
 		}
 
 		// Mix first mixer block in directly
-		memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
 	}
 	else
 	{
 		// Mix first with first mixer block (faster than memcpy + memxor)
-		memxor_set(buffer, first, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		memxor_set(buffer, first, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
 	}
 
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	// For each remaining mixer column,
 	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-	memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-	memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+	memxor(buffer, _check_blocks + CAT_BLOCK_BYTES * (_block_count + mix_x), CAT_BLOCK_BYTES);
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	CAT_IF_DUMP(cout << endl;)

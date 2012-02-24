@@ -363,6 +363,8 @@
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (better) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_FIXED_BLOCK_BYTES 1537 /* Optimize for a fixed block size (faster) */
+//#define CAT_EVEN_MULTIPLE_BYTES /* Overall message is a multiple of the block size (faster) */
 
 namespace cat {
 
@@ -395,8 +397,12 @@ namespace wirehair {
 class Encoder
 {
 	// Check block state
+#if !defined(CAT_FIXED_BLOCK_BYTES)
 	u32 _block_bytes;	// Number of bytes in a block
+#endif
+#if !defined(CAT_EVEN_MULTIPLE_BYTES)
 	u32 _final_bytes;	// Number of bytes in final block
+#endif
 	u16 _block_count;	// Number of blocks in the message
 	u16 _light_count;	// Number of check rows that are light
 	u16 _dense_count;	// Number of check rows that are dense
