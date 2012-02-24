@@ -358,11 +358,11 @@
 //#define CAT_DUMP_DECODER_DEBUG /* Turn on debug output for decoder */
 //#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
-//#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (much faster) */
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
+//#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
+//#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (better) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
-//#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
 
 namespace cat {
 

@@ -75,7 +75,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 64;
+	int block_count = 4096;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -112,7 +112,7 @@ int main()
 
 #endif
 
-	g_p_seed = 6;
+	g_p_seed = 2;
 
 #if 0
 
