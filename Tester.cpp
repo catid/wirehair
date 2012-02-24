@@ -75,7 +75,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 256;
+	int block_count = 8192;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -112,7 +112,13 @@ int main()
 
 #endif
 
-	g_p_seed = 6;
+	g_p_seed = 59;
+
+	double start = m_clock.usec();
+	for (int ii = 0; ii < 100; ++ii)
+		encoder.Initialize(message, message_bytes, block_bytes);
+	double end = m_clock.usec();
+	cout << "Average time = " << (end - start) / 100. << endl;
 
 	for (;;)
 	{

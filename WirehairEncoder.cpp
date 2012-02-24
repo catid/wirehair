@@ -1782,10 +1782,11 @@ void Encoder::AddSubdiagonalValues()
 	remaining matrix pivots.
 */
 
-#define WINDOW_THRESHOLD_3 30
-#define WINDOW_THRESHOLD_4 30
-#define WINDOW_THRESHOLD_5 50
-#define WINDOW_THRESHOLD_6 100
+// These are heuristic values.  Choosing better values has little effect on performance.
+#define WINDOW_THRESHOLD_4 (20 + 4)
+#define WINDOW_THRESHOLD_5 (40 + 5)
+#define WINDOW_THRESHOLD_6 (64 + 6)
+#define WINDOW_THRESHOLD_7 (128 + 7)
 
 void Encoder::BackSubstituteAboveDiagonal()
 {
@@ -1798,12 +1799,16 @@ void Encoder::BackSubstituteAboveDiagonal()
 
 #if defined(CAT_WINDOWED_BACKSUB)
 	// Build temporary storage space if windowing is to be used
-	if (pivot_i >= WINDOW_THRESHOLD_3)
+	if (pivot_i >= WINDOW_THRESHOLD_5)
 	{
 		// Calculate initial window size
-		int w;
-		int next_check_i;
-		if (pivot_i >= WINDOW_THRESHOLD_6)
+		int w, next_check_i;
+		if (pivot_i >= WINDOW_THRESHOLD_7)
+		{
+			w = 7;
+			next_check_i = WINDOW_THRESHOLD_7;
+		}
+		else if (pivot_i >= WINDOW_THRESHOLD_6)
 		{
 			w = 6;
 			next_check_i = WINDOW_THRESHOLD_6;
@@ -1813,28 +1818,23 @@ void Encoder::BackSubstituteAboveDiagonal()
 			w = 5;
 			next_check_i = WINDOW_THRESHOLD_5;
 		}
-		else if (pivot_i >= WINDOW_THRESHOLD_4)
+		else
 		{
 			w = 4;
 			next_check_i = WINDOW_THRESHOLD_4;
 		}
-		else
-		{
-			w = 3;
-			next_check_i = WINDOW_THRESHOLD_3;
-		}
 		u32 win_lim = 1 << w;
 
-		CAT_IF_ROWOP(cout << "Activating windowed back-substitution with initial window " << w << endl;)
+		CAT_IF_DUMP(cout << "Activating windowed back-substitution with initial window " << w << endl;)
 
 		// Use the first few peel column values as window table space
 		// NOTE: The peeled column values were previously used up until this point,
 		// but now they are unused, and so they can be reused for temporary space.
-		u8 *win_table[64];
-		u32 jj = 0, count;
+		u8 *win_table[128];
 		PeelColumn *column = _peel_cols;
 		u8 *column_src = _check_blocks;
-		for (count = _block_count; count > 0; --count, ++column, column_src += _block_bytes)
+		u32 jj = 1;
+		for (u32 count = _block_count; count > 0; --count, ++column, column_src += _block_bytes)
 		{
 			// If column is peeled,
 			if (column->mark == MARK_PEEL)
@@ -1842,14 +1842,14 @@ void Encoder::BackSubstituteAboveDiagonal()
 				// Reuse the block value temporarily as window table space
 				win_table[jj] = column_src;
 
-				CAT_IF_ROWOP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
+				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
 
 				// If done,
 				if (++jj >= win_lim) break;
 			}
 		}
 
-		CAT_IF_ROWOP(if (jj < win_lim) cout << "!! Not enough space in peeled columns to generate a table.  Going back to normal back-substitute." << endl;)
+		CAT_IF_DUMP(if (jj < win_lim) cout << "!! Not enough space in peeled columns to generate a table.  Going back to normal back-substitute." << endl;)
 
 		// If enough space was found,
 		if (jj >= win_lim) for (;;)
@@ -1857,7 +1857,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 			// Eliminate upper triangular part above windowed bits
 			u16 backsub_i = pivot_i - w + 1;
 
-			CAT_IF_ROWOP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
+			CAT_IF_DUMP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
 
 			// For each column,
 			u64 ge_mask = (u64)1 << (pivot_i & 63);
@@ -1867,7 +1867,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 				const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
 				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_pivot_i];
 
-				CAT_IF_ROWOP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
+				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
 				// For each upper triangular bit,
 				for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
@@ -1875,7 +1875,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 					// If bit is set,
 					if (ge_row[_ge_pitch * _ge_pivots[dest_pivot_i]] & ge_mask)
 					{
-						CAT_IF_ROWOP(cout << " " << dest_pivot_i;)
+						CAT_IF_DUMP(cout << " " << dest_pivot_i;)
 
 						// Back-substitute
 						// NOTE: Because the values exist on the diagonal, the row is also the column index
@@ -1884,13 +1884,13 @@ void Encoder::BackSubstituteAboveDiagonal()
 					}
 				}
 
-				CAT_IF_ROWOP(cout << endl;)
+				CAT_IF_DUMP(cout << endl;)
 
 				// Generate next mask
 				ge_mask = CAT_ROR64(ge_mask, 1);
 			}
 
-			CAT_IF_ROWOP(cout << "-- Generating window table with " << w << " bits" << endl;)
+			CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
 
 			// Generate window table: 2 bits
 			win_table[1] = _check_blocks + _block_bytes * _ge_col_map[backsub_i];
@@ -1903,56 +1903,79 @@ void Encoder::BackSubstituteAboveDiagonal()
 			memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
 			memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
 
-			// Generate window table: 4+ bits
-			switch (w)
+			// Generate window table: 4 bits
+			win_table[8] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
+			for (int ii = 1; ii < 8; ++ii)
+				memxor_set(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+
+			// Generate window table: 5+ bits
+			if (w >= 5)
 			{
-			case 6:
-				win_table[32] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
-				for (int ii = 0; ii < 32 - 2; ii += 2)
-				{
-					memxor_set(win_table[32 + 1 + ii], win_table[1], win_table[32 + ii], _block_bytes);
-					memxor_set(win_table[32 + 2 + ii], win_table[2], win_table[32 + ii], _block_bytes);
-				}
-				memxor_set(win_table[32 * 2 - 1], win_table[1], win_table[32 * 2 - 2], _block_bytes);
-			case 5:
 				win_table[16] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
-				for (int ii = 0; ii < 16 - 2; ii += 2)
+				for (int ii = 1; ii < 16; ++ii)
+					memxor_set(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+
+				if (w >= 6)
 				{
-					memxor_set(win_table[16 + 1 + ii], win_table[1], win_table[16 + ii], _block_bytes);
-					memxor_set(win_table[16 + 2 + ii], win_table[2], win_table[16 + ii], _block_bytes);
+					win_table[32] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
+					for (int ii = 1; ii < 32; ++ii)
+						memxor_set(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+
+					if (w >= 7)
+					{
+						win_table[64] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 6];
+						for (int ii = 1; ii < 64; ++ii)
+							memxor_set(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+					}
 				}
-				memxor_set(win_table[16 * 2 - 1], win_table[1], win_table[16 * 2 - 2], _block_bytes);
-			case 4:
-				win_table[8] = _check_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
-				for (int ii = 0; ii < 8 - 2; ii += 2)
-				{
-					memxor_set(win_table[8 + 1 + ii], win_table[1], win_table[8 + ii], _block_bytes);
-					memxor_set(win_table[8 + 2 + ii], win_table[2], win_table[8 + ii], _block_bytes);
-				}
-				memxor_set(win_table[8 * 2 - 1], win_table[1], win_table[8 * 2 - 2], _block_bytes);
-			default: break;
 			}
 
-			// For each row up to the diagonalized pivots,
-			u32 first_ge_col = backsub_i >> 6;
-			u32 last_ge_col = pivot_i >> 6;
-			u32 shift0 = backsub_i & 63, shift1 = 64 - shift0;
-			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
+			// If not straddling words,
+			u32 first_word = backsub_i >> 6;
+			u32 shift0 = backsub_i & 63;
+			u32 last_word = pivot_i >> 6;
+			if (first_word == last_word)
 			{
-				// Calculate window bits
-				u64 *ge_row = _ge_matrix + first_ge_col + _ge_pitch * _ge_pivots[above_pivot_i];
-				u32 win_bits = (u32)(ge_row[0] >> shift0);
-				win_bits |= ge_row[last_ge_col - first_ge_col] << shift1;
-				win_bits &= win_lim - 1;
-
-				// If any XOR needs to be performed,
-				if (win_bits != 0)
+				// For each pivot row,
+				for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
 				{
-					CAT_IF_ROWOP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
+					// Calculate window bits
+					u64 *ge_row = _ge_matrix + first_word + _ge_pitch * _ge_pivots[above_pivot_i];
+					u32 win_bits = (u32)(ge_row[0] >> shift0) & (win_lim - 1);
 
-					// Back-substitute
-					memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
+					// If any XOR needs to be performed,
+					if (win_bits != 0)
+					{
+						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
+
+						// Back-substitute
+						memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+				}
+			}
+			else // Rare: Straddling case
+			{
+				u32 shift1 = 64 - shift0;
+
+				// For each pivot row,
+				for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
+				{
+					// Calculate window bits
+					u64 *ge_row = _ge_matrix + first_word + _ge_pitch * _ge_pivots[above_pivot_i];
+					u32 win_bits = (u32)(ge_row[0] >> shift0);
+					win_bits |= ge_row[last_word - first_word] << shift1;
+					win_bits &= win_lim - 1;
+
+					// If any XOR needs to be performed,
+					if (win_bits != 0)
+					{
+						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
+
+						// Back-substitute
+						memxor(_check_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
 				}
 			}
 
@@ -1960,7 +1983,12 @@ void Encoder::BackSubstituteAboveDiagonal()
 			pivot_i -= w;
 			if (pivot_i < next_check_i)
 			{
-				if (pivot_i >= WINDOW_THRESHOLD_5)
+				if (pivot_i >= WINDOW_THRESHOLD_6)
+				{
+					w = 6;
+					next_check_i = WINDOW_THRESHOLD_6;
+				}
+				else if (pivot_i >= WINDOW_THRESHOLD_5)
 				{
 					w = 5;
 					next_check_i = WINDOW_THRESHOLD_5;
@@ -1969,11 +1997,6 @@ void Encoder::BackSubstituteAboveDiagonal()
 				{
 					w = 4;
 					next_check_i = WINDOW_THRESHOLD_4;
-				}
-				else if (pivot_i >= WINDOW_THRESHOLD_3)
-				{
-					w = 3;
-					next_check_i = WINDOW_THRESHOLD_3;
 				}
 				else break;
 
@@ -1991,7 +2014,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 		// Calculate source
 		const u8 *src = _check_blocks + _block_bytes * _ge_col_map[pivot_i];
 
-		CAT_IF_ROWOP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
+		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
 
 		// For each pivot row above it,
 		u64 *ge_row = _ge_matrix + (pivot_i >> 6);
@@ -2004,11 +2027,11 @@ void Encoder::BackSubstituteAboveDiagonal()
 				memxor(_check_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_ROWOP(cout << " " << above_i;)
+				CAT_IF_DUMP(cout << " " << above_i;)
 			}
 		}
 
-		CAT_IF_ROWOP(cout << endl;)
+		CAT_IF_DUMP(cout << endl;)
 
 		// Generate next mask
 		ge_mask = CAT_ROR64(ge_mask, 1);
