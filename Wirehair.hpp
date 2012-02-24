@@ -408,17 +408,16 @@ class Encoder
 	u16 _block_count;	// Number of blocks in the message
 	u16 _light_count;	// Number of check rows that are light
 	u16 _dense_count;	// Number of check rows that are dense
-	u16 _added_count;	// Number of check blocks added overall
+	u16 _added_count;	// Sum of light and dense row counts
 	u8 *_check_blocks;	// Pointer to start of check blocks
 	u32 _p_seed;		// Seed for peeled rows of generator matrix
 	u32 _c_seed;		// Seed for check rows of generator matrix
 
 	// Encoder state
 	const u8 *_message_blocks;	// Original message data (final block is partial)
-	u32 _next_block_id;			// Next block identifier to transmit
-	u16 _block_next_prime;		// Next prime number including or higher than block count
-	u16 _added_next_prime;		// Next prime number including or higher than added count
-	u16 _light_next_prime;		// Next prime number including or higher than light count
+	u16 _block_next_prime;		// Next prime number at or above block count
+	u16 _added_next_prime;		// Next prime number at or above added count
+	u16 _light_next_prime;		// Next prime number at or above light count
 
 	// Peeling state
 	struct PeelRow;
@@ -428,8 +427,6 @@ class Encoder
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
 	PeelRefs *_peel_col_refs;	// List of column references
 	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
-
-	// Lists
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head_rows;		// Head of peeling solved rows list
 	u16 _defer_head_columns;	// Head of peeling deferred columns list
@@ -438,11 +435,11 @@ class Encoder
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
-	int _ge_pitch;				// Pitch in words of GE matrix and compression matrix
-	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
-	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
-	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
+	int _ge_pitch;				// Words per row of GE matrix and compression matrix
+	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
+	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
+	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
 
 	// Substitution state
 #if defined(CAT_REUSE_COMPRESS)

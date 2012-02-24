@@ -2694,7 +2694,6 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	// Initialize encoder
 	_block_count = block_count;
 	_message_blocks = reinterpret_cast<const u8*>( message_in );
-	_next_block_id = 0;
 
 	// Calculate next primes after column counts for pseudo-random generation of peeling rows
 	_block_next_prime = NextPrime16(_block_count);
