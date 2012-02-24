@@ -75,7 +75,7 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 4096;
+	int block_count = 32768;
 	int block_bytes = 1024 + 512 + 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -112,9 +112,9 @@ int main()
 
 #endif
 
-	g_p_seed = 2;
+	g_p_seed = 13;
 
-#if 0
+#if 1
 
 	double start = m_clock.usec();
 	for (int ii = 0; ii < 1000; ++ii)

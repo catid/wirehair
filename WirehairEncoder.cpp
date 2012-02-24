@@ -56,8 +56,8 @@ using namespace std;
 //// Internal constants
 
 // During generator matrix precomputation, tune these to be as small as possible and still succeed
-static const int ENCODER_REF_LIST_MAX = 64;
-static const int MAX_CHECK_ROWS = 512;
+#define ENCODER_REF_LIST_MAX 64
+#define MAX_CHECK_ROWS 512
 
 
 //// Encoder
@@ -167,11 +167,6 @@ bool Encoder::PeelSetup()
 	_peel_head_rows = LIST_TERM;
 	_peel_tail_rows= 0;
 	_defer_head_rows = LIST_TERM;
-
-	// Calculate default mix weight
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
 
 	// Generate peeling row data
 	for (u16 row_i = 0; row_i < _block_count; ++row_i)
@@ -395,8 +390,6 @@ void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 void Encoder::GreedyPeeling()
 {
 	CAT_IF_DUMP(cout << endl << "---- GreedyPeeling ----" << endl << endl;)
-
-	// TODO: Optimize for large N
 
 	// Initialize list
 	_defer_head_columns = LIST_TERM;
@@ -626,11 +619,6 @@ void Encoder::SetMixingColumnsForDeferredRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetMixingColumnsForDeferredRows ----" << endl << endl;)
 
-	// Calculate default mix weight
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
-
 	// For each deferred row,
 	PeelRow *row;
 	for (u16 defer_row_i = _defer_head_rows; defer_row_i != LIST_TERM; defer_row_i = row->next)
@@ -643,23 +631,23 @@ void Encoder::SetMixingColumnsForDeferredRows()
 		row->peel_column = LIST_TERM;
 
 		// Generate mixing columns for this row
-		u16 weight = mix_weight;
+		u64 *ge_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
-		u64 *ge_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
-		for (;;)
-		{
-			// Flip bit for each mixing column
-			u16 ge_column_i = _defer_count + x;
-			u64 ge_mask = (u64)1 << (ge_column_i & 63);
-			ge_row[ge_column_i >> 6] ^= ge_mask;
 
-			CAT_IF_DUMP(cout << " " << ge_column_i;)
+		u16 ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i;)
+		IterateNextColumn(x, _added_count, _added_next_prime, a);
 
-			if (--weight <= 0) break;
+		ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i;)
+		IterateNextColumn(x, _added_count, _added_next_prime, a);
 
-			IterateNextColumn(x, _added_count, _added_next_prime, a);
-		}
+		ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i;)
 
 		CAT_IF_DUMP(cout << endl;)
 	}
@@ -674,11 +662,6 @@ void Encoder::PeelDiagonal()
 	*/
 
 	CAT_IF_ROWOP(int rowops = 0;)
-
-	// Calculate default mix weight
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
 
 	// For each peeled row in forward solution order,
 	PeelRow *row;
@@ -695,24 +678,20 @@ void Encoder::PeelDiagonal()
 		// Generate mixing columns for this row
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
-		u16 ge_column_i = _defer_count + x;
-		switch (mix_weight)
-		{
-		case 3:
-			ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-			CAT_IF_DUMP(cout << " " << ge_column_i;)
-			IterateNextColumn(x, _added_count, _added_next_prime, a);
-			ge_column_i = _defer_count + x;
-		case 2:
-			ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-			CAT_IF_DUMP(cout << " " << ge_column_i;)
-			IterateNextColumn(x, _added_count, _added_next_prime, a);
-			ge_column_i = _defer_count + x;
-			ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-			CAT_IF_DUMP(cout << " " << ge_column_i;)
-		}
 
-		CAT_IF_DUMP(cout << endl;)
+		u16 ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i;)
+		IterateNextColumn(x, _added_count, _added_next_prime, a);
+
+		ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i;)
+		IterateNextColumn(x, _added_count, _added_next_prime, a);
+
+		ge_column_i = _defer_count + x;
+		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
+		CAT_IF_DUMP(cout << " " << ge_column_i << endl;)
 
 		// Lookup output block
 		u8 *temp_block_src = _check_blocks + _block_bytes * peel_column_i;
@@ -2035,11 +2014,6 @@ void Encoder::Substitute()
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
-	// Calculate default mix weight
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
-
 	// For each column that has been peeled,
 	u16 ge_rows = _defer_count + _added_count;
 	PeelRow *row;
@@ -2071,20 +2045,10 @@ void Encoder::Substitute()
 		CAT_IF_ROWOP(++rowops;)
 
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-
 		const u8 *src0 = _check_blocks + _block_bytes * (_block_count + mix_x);
 
-		// If common case mix weight,
-		if (mix_weight == 3)
-		{
-			IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-
-			memxor_add(dest, src0, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
-		}
-		else // rare:
-		{
-			memxor(dest, src0, _block_bytes);
-		}
+		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
+		memxor_add(dest, src0, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
 		CAT_IF_ROWOP(++rowops;)
 
 		// If at least two peeling columns are set,
@@ -2774,9 +2738,6 @@ void Encoder::Generate(u32 id, void *block)
 	u16 peel_x = (u16)(rv >> 16) % _block_count;
 
 	// Generate mixing matrix row parameters
-	u16 mix_weight = 3;
-	if (mix_weight >= _added_count)
-		mix_weight = _added_count - 1;
 	rv = prng.Next();
 	u16 mix_a = ((u16)rv % (_added_count - 1)) + 1;
 	u16 mix_x = (u16)(rv >> 16) % _added_count;
@@ -2821,15 +2782,13 @@ void Encoder::Generate(u32 id, void *block)
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	// For each remaining mixer column,
-	while (--mix_weight > 0)
-	{
-		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
+	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
+	memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
-		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
-
-		// Mix in each column
-		memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
-	}
+	IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
+	memxor(buffer, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	CAT_IF_DUMP(cout << endl;)
 }
