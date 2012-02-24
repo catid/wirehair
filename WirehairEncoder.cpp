@@ -1898,6 +1898,9 @@ void Encoder::BackSubstituteAboveDiagonal()
 					next_check_i = WINDOW_THRESHOLD_3;
 				}
 				else break;
+
+				// Update window limit
+				win_lim = 1 << w;
 			}
 		}
 	}
