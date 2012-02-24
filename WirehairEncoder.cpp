@@ -59,13 +59,6 @@ using namespace std;
 #endif // CAT_DUMP_ENCODER_DEBUG
 
 
-//// Internal constants
-
-// During generator matrix precomputation, tune these to be as small as possible and still succeed
-#define ENCODER_REF_LIST_MAX 64
-#define MAX_CHECK_ROWS 512
-
-
 //// Encoder
 
 #pragma pack(push)
@@ -117,9 +110,16 @@ struct Encoder::PeelColumn
 		u16 ge_column;	// Column that a deferred column is mapped to
 	};
 
-	u16 row_count;		// Number of rows containing this column
-	u16 rows[ENCODER_REF_LIST_MAX];
 	u8 mark;			// One of the MarkTypes enumeration
+};
+#pragma pack(pop)
+
+#pragma pack(push)
+#pragma pack(1)
+struct Encoder::PeelRefs
+{
+	u16 row_count;		// Number of rows containing this column
+	u16 rows[CAT_ENCODER_REF_LIST_MAX];
 };
 #pragma pack(pop)
 
@@ -152,27 +152,6 @@ bool Encoder::PeelSetup()
 	CAT_IF_DUMP(cout << endl << "---- PeelSetup ----" << endl << endl;)
 
 	CAT_IF_DUMP(cout << "Block Count = " << _block_count << endl;)
-
-	// Allocate space for row data
-	_peel_rows = new PeelRow[_block_count];
-	if (!_peel_rows) return false;
-
-	// Allocate space for column data
-	_peel_cols = new PeelColumn[_block_count];
-	if (!_peel_cols) return false;
-
-	// Initialize columns
-	for (int ii = 0; ii < _block_count; ++ii)
-	{
-		_peel_cols[ii].row_count = 0;
-		_peel_cols[ii].w2_refs = 0;
-		_peel_cols[ii].mark = MARK_TODO;
-	}
-
-	// Initialize lists
-	_peel_head_rows = LIST_TERM;
-	_peel_tail_rows= 0;
-	_defer_head_rows = LIST_TERM;
 
 	// Generate peeling row data
 	for (u16 row_i = 0; row_i < _block_count; ++row_i)
@@ -207,14 +186,15 @@ bool Encoder::PeelSetup()
 			CAT_IF_DUMP(cout << column_i << " ";)
 
 			PeelColumn *col = &_peel_cols[column_i];
+			PeelRefs *refs = &_peel_col_refs[column_i];
 
 			// Add row reference to column
-			if (col->row_count >= ENCODER_REF_LIST_MAX)
+			if (refs->row_count >= CAT_ENCODER_REF_LIST_MAX)
 			{
 				CAT_IF_DUMP(cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;)
 				return false;
 			}
-			col->rows[col->row_count++] = row_i;
+			refs->rows[refs->row_count++] = row_i;
 
 			// If column is unmarked,
 			if (col->mark == MARK_TODO)
@@ -257,11 +237,12 @@ bool Encoder::PeelSetup()
 	return true;
 }
 
-void Encoder::PeelAvalanche(u16 column_i, PeelColumn *column)
+void Encoder::PeelAvalanche(u16 column_i)
 {
 	// Walk list of peeled rows referenced by this newly solved column
-	u16 ref_row_count = column->row_count;
-	u16 *ref_rows = column->rows;
+	PeelRefs *refs = &_peel_col_refs[column_i];
+	u16 ref_row_count = refs->row_count;
+	u16 *ref_rows = refs->rows;
 	while (ref_row_count--)
 	{
 		// Update unmarked row count for this referenced row
@@ -371,7 +352,7 @@ void Encoder::Peel(u16 row_i, PeelRow *row, u16 column_i)
 	row->is_copied = 0;
 
 	// Attempt to avalanche and solve other columns
-	PeelAvalanche(column_i, column);
+	PeelAvalanche(column_i);
 
 	// Remember which row solves the column, after done with rows list
 	column->peel_row = row_i;
@@ -419,12 +400,13 @@ void Encoder::GreedyPeeling()
 				if (w2_refs >= best_w2_refs)
 				{
 					// Or if it has the largest row references overall,
-					if (w2_refs > best_w2_refs || column->row_count >= best_row_count)
+					u16 row_count = _peel_col_refs[column_i].row_count;
+					if (w2_refs > best_w2_refs || row_count >= best_row_count)
 					{
 						// Use that one
 						best_column_i = column_i;
 						best_w2_refs = w2_refs;
-						best_row_count = column->row_count;
+						best_row_count = row_count;
 					}
 				}
 			}
@@ -446,7 +428,7 @@ void Encoder::GreedyPeeling()
 		CAT_IF_DUMP(cout << "Deferred column " << best_column_i << " for Gaussian elimination, which had " << best_column->w2_refs << " weight-2 row references" << endl;)
 
 		// Peel resuming from where this column left off
-		PeelAvalanche(best_column_i, best_column);
+		PeelAvalanche(best_column_i);
 	}
 }
 
@@ -589,8 +571,9 @@ void Encoder::SetDeferredColumns()
 		// Set bit for each row affected by this deferred column
 		u64 *matrix_row_offset = _ge_compress_matrix + (ge_column_i >> 6);
 		u64 ge_mask = (u64)1 << (ge_column_i & 63);
-		u16 count = column->row_count;
-		u16 *ref_row = column->rows;
+		PeelRefs *refs = &_peel_col_refs[defer_i];
+		u16 count = refs->row_count;
+		u16 *ref_row = refs->rows;
 		while (count--)
 		{
 			u16 row_i = *ref_row++;
@@ -726,9 +709,9 @@ void Encoder::PeelDiagonal()
 		}
 
 		// For each row that references this one,
-		PeelColumn *column = &_peel_cols[peel_column_i];
-		u16 count = column->row_count;
-		u16 *ref_row = column->rows;
+		PeelRefs *refs = &_peel_col_refs[peel_column_i];
+		u16 count = refs->row_count;
+		u16 *ref_row = refs->rows;
 		while (count--)
 		{
 			u16 ref_row_i = *ref_row++;
@@ -881,7 +864,7 @@ void Encoder::MultiplyDenseRows()
 
 #if !defined(CAT_LIGHT_ROWS)
 
-	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
+	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
 	for (; column_i + check_count <= _block_count; column_i += check_count, column += check_count)
 	{
 		CAT_IF_DUMP(cout << "Shuffled check matrix starting at column " << column_i << ":" << endl;)
@@ -1368,7 +1351,7 @@ void Encoder::AddCheckValues()
 
 #if !defined(CAT_LIGHT_ROWS)
 
-	u16 rows[MAX_CHECK_ROWS], bits[MAX_CHECK_ROWS];
+	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
 	for (; column_i + check_count <= _block_count; column_i += check_count,
 		column += check_count, source_block += CAT_BLOCK_BYTES * check_count)
 	{
@@ -2648,6 +2631,12 @@ void Encoder::Cleanup()
 		_ge_pivots = 0;
 	}
 
+	if (_peel_col_refs)
+	{
+		delete []_peel_col_refs;
+		_peel_col_refs = 0;
+	}
+
 #if defined(CAT_REUSE_COMPRESS)
 	if (_win_table_data)
 	{
@@ -2664,6 +2653,7 @@ Encoder::Encoder()
 	_peel_cols = 0;
 	_ge_matrix = 0;
 	_ge_pivots = 0;
+	_peel_col_refs = 0;
 #if defined(CAT_REUSE_COMPRESS)
 	_win_table_data = 0;
 #endif
@@ -2710,6 +2700,31 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 	_block_next_prime = NextPrime16(_block_count);
 	_added_next_prime = NextPrime16(_added_count);
 	_light_next_prime = NextPrime16(_light_count);
+
+	// Allocate space for row data
+	_peel_rows = new PeelRow[_block_count];
+	if (!_peel_rows) return false;
+
+	// Allocate space for column data
+	_peel_cols = new PeelColumn[_block_count];
+	if (!_peel_cols) return false;
+
+	// Allocate space for column refs
+	_peel_col_refs = new PeelRefs[_block_count];
+	if (!_peel_col_refs) return false;
+
+	// Initialize columns
+	for (int ii = 0; ii < _block_count; ++ii)
+	{
+		_peel_col_refs[ii].row_count = 0;
+		_peel_cols[ii].w2_refs = 0;
+		_peel_cols[ii].mark = MARK_TODO;
+	}
+
+	// Initialize lists
+	_peel_head_rows = LIST_TERM;
+	_peel_tail_rows= 0;
+	_defer_head_rows = LIST_TERM;
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes" << endl;)
 	CAT_IF_DUMP(cout << "Block bytes = " << CAT_BLOCK_BYTES << ".  Final bytes = " << _final_bytes << endl;)

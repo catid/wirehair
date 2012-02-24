@@ -365,6 +365,8 @@
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_FIXED_BLOCK_BYTES 1537 /* Optimize for a fixed block size (faster) - Consider editing memxor.cpp */
 //#define CAT_EVEN_MULTIPLE_BYTES /* Overall message is a multiple of the block size (faster) */
+#define CAT_ENCODER_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed for precomputed matrices */
+#define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
 
 namespace cat {
 
@@ -421,8 +423,10 @@ class Encoder
 	// Peeling state
 	struct PeelRow;
 	struct PeelColumn;
+	struct PeelRefs;
 	PeelRow *_peel_rows;		// Array of N peeling matrix rows
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
+	PeelRefs *_peel_col_refs;	// List of column references
 	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
 
 	// Lists
@@ -454,7 +458,7 @@ class Encoder
 	//// (1) Peeling
 
 	// Avalanche peeling from the newly solved column to others
-	void PeelAvalanche(u16 column_i, PeelColumn *column);
+	void PeelAvalanche(u16 column_i);
 
 	// Peel a row using the given column
 	void Peel(u16 row_i, PeelRow *row, u16 column_i);
