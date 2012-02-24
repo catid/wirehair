@@ -2044,11 +2044,12 @@ void Encoder::Substitute()
 		}
 		CAT_IF_ROWOP(++rowops;)
 
+		// Add next two mixing columns in
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
 		const u8 *src0 = _check_blocks + _block_bytes * (_block_count + mix_x);
-
 		IterateNextColumn(mix_x, _added_count, _added_next_prime, mix_a);
-		memxor_add(dest, src0, _check_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+		const u8 *src1 = _check_blocks + _block_bytes * (_block_count + mix_x);
+		memxor_add(dest, src0, src1, _block_bytes);
 		CAT_IF_ROWOP(++rowops;)
 
 		// If at least two peeling columns are set,
