@@ -58,7 +58,20 @@ u32 GenerateGoodCheckSeed(int block_count)
 int main()
 {
 	m_clock.OnInitialize();
-
+/*
+	cat::wirehair::GF2Matrix m;
+	m.Initialize(4096);
+	u32 seed = 0;
+	for (;;)
+	{
+		m.SetSeed(seed++);
+		m.Fill();
+		if (m.Triangle())
+			cout << "Invertible!" << endl;
+		else
+			cout << "Not invertible!" << endl;
+	}
+*/
 	//TestInc();
 	//TestDense();
 
@@ -74,7 +87,9 @@ int main()
 
 	wirehair::Encoder encoder;
 
-#if 1
+	g_c_seed = 0;
+
+#if 0
 
 	g_c_seed = GenerateGoodCheckSeed(block_count);
 	cout << "Using CSeed : " << g_c_seed << endl;
@@ -97,8 +112,7 @@ int main()
 
 #endif
 
-	//g_c_seed = 0;
-	g_p_seed = 0;
+	g_p_seed = 74;
 
 	for (;;)
 	{

@@ -1786,8 +1786,7 @@ void Encoder::BackSubstituteAboveDiagonal()
 			for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i; --src_pivot_i)
 			{
 				// Set up for iteration
-				u16 ge_row_i = _ge_pivots[src_pivot_i];
-				const u64 *ge_row = _ge_matrix + (ge_row_i >> 6);
+				const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
 				const u8 *src = _check_blocks + _block_bytes * _ge_col_map[src_pivot_i];
 
 				CAT_IF_ROWOP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
@@ -1962,6 +1961,19 @@ void Encoder::GenerateGEValues()
 void Encoder::Substitute()
 {
 	CAT_IF_DUMP(cout << endl << "---- Substitute ----" << endl << endl;)
+
+	/*
+		TODO: For smaller N, combine with BackSubstituteAboveDiagonal and
+		use temporary space to window and back-substitute through
+		compression matrix.  For N = 256, substitute takes 1895 row ops.
+		15 are deferred, so about 240 rows need to be back-subbed.
+		Assuming 15 columns non-zero, and window of 6 bits (windowing is
+		free) it would take at least 240 * 3 = 720 row ops to substitute,
+		so it would be at least twice as fast.
+
+		As N gets larger, this optimization is no longer worthwhile,
+		because the size of the compression matrix increases quickly.
+	*/
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
