@@ -361,7 +361,7 @@
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
 //#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-#define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (better) */
+#define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (slower) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_FIXED_BLOCK_BYTES 1537 /* Optimize for a fixed block size (faster) - Consider editing memxor.cpp */
 //#define CAT_EVEN_MULTIPLE_BYTES /* Overall message is a multiple of the block size (faster) */

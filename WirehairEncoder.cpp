@@ -843,6 +843,13 @@ void Encoder::CopyDeferredRows()
 		11010111000001101
 		11010111000101100
 		11000011010001011
+
+	If CAT_SHUFFLE_HALF is specified, then half way through the row is
+	regenerated from scratch.  This helps improve the error correcting
+	performance of the check code by adding more randomness.  When this
+	is not specified, it starts becoming a problem at larger N.  For
+	smaller N it doesn't affect much any may be worth turning off for
+	additional performance.
 */
 
 void Encoder::MultiplyDenseRows()
