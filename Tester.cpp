@@ -11,7 +11,7 @@ using namespace std;
 
 static Clock m_clock;
 
-#define TRIALS 1000
+#define TRIALS 100
 
 u32 GenerateGoodCheckSeed(int block_count)
 {
@@ -174,6 +174,12 @@ int main()
 				end = m_clock.usec();
 				//cout << ">> OKAY! decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << decoder.GetPSeed() << " and CSeed " << decoder.GetCSeed() << endl;
 				break;
+			}
+			end = m_clock.usec();
+
+			if (blocks_needed == decoder.GetBlockCount())
+			{
+				//cout << ">> Invert setup in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << decoder.GetPSeed() << " and CSeed " << decoder.GetCSeed() << endl;
 			}
 		}
 

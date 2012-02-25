@@ -2851,8 +2851,9 @@ bool Decoder::Resume(u32 id, const void *block)
 	u16 row_i, ge_row_i;
 	if (_store_count >= CAT_BLOCK_COUNT + CAT_DECODER_MAX_EXTRA_ROWS)
 	{
-		// Reuse whatever is in the resume spot
-		ge_row_i = _ge_pivots[_ge_resume_pivot];
+		// Find a non-check row to reuse
+		for (u16 pivot_i = _ge_resume_pivot; pivot_i < _ge_rows; ++pivot_i)
+			ge_row_i = _ge_pivots[pivot_i];
 		row_i = _ge_row_map[ge_row_i];
 	}
 	else
