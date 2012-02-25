@@ -360,14 +360,17 @@
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
-//#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+#define CAT_ENCODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+#define CAT_DECODER_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (slower) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_FIXED_BLOCK_COUNT 8192 /* Optimize for a fixed number of blocks (faster) */
 //#define CAT_FIXED_BLOCK_BYTES 1537 /* Optimize for a fixed block size (faster) - Consider editing memxor.cpp */
 //#define CAT_EVEN_MULTIPLE_BYTES /* Overall message is a multiple of the block size (faster) */
 #define CAT_ENCODER_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed for precomputed matrices */
+#define CAT_DECODER_REF_LIST_MAX 64 /* Tune to be as small as possible and still succeed for precomputed matrices */
 #define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
+#define CAT_DECODER_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
 
 namespace cat {
 
@@ -451,7 +454,7 @@ class Encoder
 
 #if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
-	void PrintGECompressMatrix();
+	void PrintCompressMatrix();
 #endif
 
 
@@ -464,7 +467,7 @@ class Encoder
 	void Peel(u16 row_i, PeelRow *row, u16 column_i);
 
 	// Walk forward through rows and solve as many as possible before deferring any
-	bool PeelSetup();
+	bool OpportunisticPeeling();
 
 	// Greedy algorithm to select columns to defer and resume peeling until all columns are marked
 	void GreedyPeeling();
@@ -551,9 +554,9 @@ public:
 /*
 	Wirehair Decoder
 
-	Decodes messages encoded by the Encoder above.
 	The Initialize() function does not take much run time.
-	The Decode() function will return true when decoding has completed.
+	The Decode() function will return true when decoding has completed,
+	and it may take a significant amount of time to run.
 
 	Example usage pseudocode:
 
@@ -572,33 +575,38 @@ public:
 class Decoder
 {
 	// Check block state
+#if !defined(CAT_FIXED_BLOCK_BYTES)
 	u32 _block_bytes;	// Number of bytes in a block
+#endif
+#if !defined(CAT_EVEN_MULTIPLE_BYTES)
 	u32 _final_bytes;	// Number of bytes in final block
+#endif
+#if !defined(CAT_FIXED_BLOCK_COUNT)
 	u16 _block_count;	// Number of blocks in the message
-	u16 _used_count;	// Number of blocks used
-	u16 _alloc_count;	// Number of blocks allocated above block count
+#endif
+	u16 _store_count;	// Number of stored rows
 	u16 _light_count;	// Number of check rows that are light
 	u16 _dense_count;	// Number of check rows that are dense
-	u16 _added_count;	// Number of check blocks added overall
+	u16 _added_count;	// Sum of light and dense row counts
 	u8 *_check_blocks;	// Pointer to start of check blocks
 	u32 _p_seed;		// Seed for peeled rows of generator matrix
 	u32 _c_seed;		// Seed for check rows of generator matrix
 
 	// Encoder state
-	u8 *_message_blocks;	// Original message data (final block is partial)
-	u32 _next_block_id;		// Next block identifier to transmit
-	u16 _block_next_prime;	// Next prime number including or higher than block count
-	u16 _added_next_prime;	// Next prime number including or higher than added count
-	u16 _light_next_prime;	// Next prime number including or higher than light count
+	u8 *_input_blocks;			// Input message blocks
+	u8 *_message_out;			// Output message data (final block is partial)
+	u16 _block_next_prime;		// Next prime number at or above block count
+	u16 _added_next_prime;		// Next prime number at or above added count
+	u16 _light_next_prime;		// Next prime number at or above light count
 
 	// Peeling state
 	struct PeelRow;
 	struct PeelColumn;
+	struct PeelRefs;
 	PeelRow *_peel_rows;		// Array of N peeling matrix rows
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
+	PeelRefs *_peel_col_refs;	// List of column references
 	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
-
-	// Lists
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head_rows;		// Head of peeling solved rows list
 	u16 _defer_head_columns;	// Head of peeling deferred columns list
@@ -607,28 +615,35 @@ class Decoder
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
-	int _ge_pitch;				// Pitch in words of GE matrix and compression matrix
-	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
-	u16 *_ge_col_map;			// Map of GE columns to check matrix columns
 	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
-	u16 *_ge_row_map;			// Map of GE rows to check matrix rows
+	int _ge_pitch;				// Words per row of GE matrix and compression matrix
+	u16 _ge_rows;				// Number of rows in GE matrix, since this grows
+	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
+	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
+	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
+	u16 _ge_resume_pivot;		// Pivot to resume Triangle() on after it fails
+
+	// Substitution state
+#if defined(CAT_REUSE_COMPRESS)
+	u8 *_win_table_data;		// Values of temporary symbols for substitution table
+#endif
 
 #if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
-	void PrintGECompressMatrix();
+	void PrintCompressMatrix();
 #endif
 
 
 	//// (1) Peeling
 
 	// Avalanche peeling from the newly solved column to others
-	void PeelAvalanche(u16 column_i, PeelColumn *column);
+	void PeelAvalanche(u16 column_i);
 
 	// Peel a row using the given column
 	void Peel(u16 row_i, PeelRow *row, u16 column_i);
 
 	// Walk forward through rows and solve as many as possible before deferring any
-	bool PeelSetup();
+	bool OpportunisticPeeling(u32 row_i, u32 id);
 
 	// Greedy algorithm to select columns to defer and resume peeling until all columns are marked
 	void GreedyPeeling();
@@ -654,25 +669,33 @@ class Decoder
 	// Multiply dense rows by peeling matrix to generate GE rows, but no row values yet
 	void MultiplyDenseRows();
 
-	// Compress rectangular matrix into conceptual square matrix
-	void Compress();
-
-	// Solve pivot column values from the row op schedule from Triangle
-	void SolveTriangleColumns();
-
 
 	//// (3) Gaussian Elimination
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
 
-	// Diagonalize the GE matrix to complete solving for the GE blocks
-	void Diagonal();
+	// Initialize column values for GE matrix
+	void InitializeColumnValues();
+
+	// Add check matrix to triangle columns
+	void AddCheckValues();
+
+	// Add values for GE matrix positions under the diagonal
+	void AddSubdiagonalValues();
 
 
 	//// (4) Substitution
 
-	// Substitute and solve for all of the peeled columns
+#if defined(CAT_REUSE_COMPRESS)
+	// Reuse compression matrix to substitute values (best for small N)
+	void CompressionBasedSubstitute();
+#endif
+
+	// Back-substitute to diagonalize the GE matrix
+	void BackSubstituteAboveDiagonal();
+
+	// Regenerate all of the sparse peeled rows to diagonalize them
 	void Substitute();
 
 
@@ -681,11 +704,14 @@ class Decoder
 	// Main driver: Generate check blocks from message blocks
 	bool GenerateCheckBlocks();
 
-	// Recreate message with the received blocks and the check blocks
-	void RecreateMessage();
+	// Generate output blocks from the recovered check blocks
+	void GenerateOutputBlocks();
 
-	// Resume GE with latest information
-	bool GEResume(u32 id, const u8 *buffer);
+	// Resume Gaussian elimination from where it left off
+	bool Resume(u32 id, const void *block);
+
+	// Process result of Triangle to generate check blocks
+	void PostTriangleProcesses();
 
 	// Free allocated memory
 	void Cleanup();
@@ -696,7 +722,9 @@ public:
 
 	CAT_INLINE u32 GetPSeed() { return _p_seed; }
 	CAT_INLINE u32 GetCSeed() { return _c_seed; }
+#if !defined(CAT_FIXED_BLOCK_COUNT)
 	CAT_INLINE u32 GetBlockCount() { return _block_count; }
+#endif
 
 	// Attempt to initialize the decoder
 	// Decoder will write to the given buffer once decoding completes

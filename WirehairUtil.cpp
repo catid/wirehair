@@ -427,6 +427,28 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 }
 
 
+//// Utility: Peel Matrix Row Generator function
+
+void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
+	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0)
+{
+	// Initialize PRNG
+	CatsChoice prng;
+	prng.Initialize(id, p_seed);
+
+	// Generate peeling matrix column parameters
+	peel_weight = GeneratePeelRowWeight(prng.Next(), peel_column_count - 1);
+	u32 rv = prng.Next();
+	peel_a = ((u16)rv % (peel_column_count - 1)) + 1;
+	peel_x0 = (u16)(rv >> 16) % peel_column_count;
+
+	// Generate mixing matrix column parameters
+	rv = prng.Next();
+	mix_a = ((u16)rv % (mix_column_count - 1)) + 1;
+	mix_x0 = (u16)(rv >> 16) % mix_column_count;
+}
+
+
 //// Utility: Matrix Parameter Generator function
 
 int g_p_seed, g_c_seed; // TODO: Remove these
@@ -448,7 +470,7 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		light_count = 11; dense_count = 2;
 		return true;
 	case 256:
-		light_count = 12; dense_count = 4;
+		light_count = 14; dense_count = 5;
 		return true;
 	case 512:
 		light_count = 14;

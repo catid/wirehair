@@ -153,9 +153,9 @@ struct Encoder::PeelRefs
 	columns to be marked as Peeled.  This "peeling avalanche" is desired.
 */
 
-bool Encoder::PeelSetup()
+bool Encoder::OpportunisticPeeling()
 {
-	CAT_IF_DUMP(cout << endl << "---- PeelSetup ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- OpportunisticPeeling ----" << endl << endl;)
 
 	CAT_IF_DUMP(cout << "Block Count = " << CAT_BLOCK_COUNT << endl;)
 
@@ -164,20 +164,8 @@ bool Encoder::PeelSetup()
 	{
 		PeelRow *row = &_peel_rows[row_i];
 
-		// Initialize PRNG
-		CatsChoice prng;
-		prng.Initialize(row_i, _p_seed);
-
-		// Generate peeling matrix row parameters
-		row->peel_weight = GeneratePeelRowWeight(prng.Next(), CAT_BLOCK_COUNT - 1);
-		u32 rv = prng.Next();
-		row->peel_a = ((u16)rv % (CAT_BLOCK_COUNT - 1)) + 1;
-		row->peel_x0 = (u16)(rv >> 16) % CAT_BLOCK_COUNT;
-
-		// Generate mixing matrix row parameters
-		rv = prng.Next();
-		row->mix_a = ((u16)rv % (_added_count - 1)) + 1;
-		row->mix_x0 = (u16)(rv >> 16) % _added_count;
+		GeneratePeelRow(row_i, _p_seed, CAT_BLOCK_COUNT, _added_count,
+			row->peel_weight, row->peel_a, row->peel_x0, row->mix_a, row->mix_x0);
 
 		CAT_IF_DUMP(cout << "   Row " << row_i << " of weight " << row->peel_weight << " [a=" << row->peel_a << "] : ";)
 
@@ -197,7 +185,7 @@ bool Encoder::PeelSetup()
 			// Add row reference to column
 			if (refs->row_count >= CAT_ENCODER_REF_LIST_MAX)
 			{
-				CAT_IF_DUMP(cout << "PeelSetup: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;)
+				CAT_IF_DUMP(cout << "OpportunisticPeeling: Failure!  Ran out of space for row references.  ENCODER_REF_LIST_MAX must be increased!" << endl;)
 				return false;
 			}
 			refs->rows[refs->row_count++] = row_i;
@@ -866,17 +854,14 @@ void Encoder::MultiplyDenseRows()
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
 
-	u64 *temp_row = _ge_matrix + _ge_pitch * (_added_count + _defer_count);
-	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
-	const int check_count = _added_count;
-
-	// For columns that we can put a DxD square matrix in:
-
 	PeelColumn *column = _peel_cols;
 	u16 column_i = 0;
 
 #if !defined(CAT_LIGHT_ROWS)
 
+	// For columns that we can put a DxD square matrix in:
+	u64 *temp_row = _ge_matrix + _ge_pitch * (_added_count + _defer_count);
+	const int check_count = _added_count;
 	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
 	for (; column_i + check_count <= CAT_BLOCK_COUNT; column_i += check_count, column += check_count)
 	{
@@ -996,7 +981,7 @@ void Encoder::MultiplyDenseRows()
 		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 
 		const int second_loop_count = loop_count + (check_count & 1);
-#else
+#else // CAT_SHUFFLE_HALF
 		// If check count is odd,
 		if (check_count & 1)
 		{
@@ -1024,7 +1009,7 @@ void Encoder::MultiplyDenseRows()
 		}
 
 		const int second_loop_count = loop_count - 1;
-#endif
+#endif // CAT_SHUFFLE_HALF
 
 		// Generate second half of rows
 		for (int ii = 0; ii < second_loop_count; ++ii)
@@ -1614,8 +1599,6 @@ void Encoder::AddCheckValues()
 		{
 			// Lookup GE compress matrix source row
 			u16 source_row_i = column->peel_row;
-			u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * source_row_i;
-			u64 *ge_dest_row;
 
 			CAT_IF_DUMP(cout << "For peeled column " << column_i << " solved by peel row " << source_row_i << " :";)
 
@@ -1623,21 +1606,19 @@ void Encoder::AddCheckValues()
 			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
-			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x;)
 			IterateNextColumn(x, _light_count, _light_next_prime, a);
-			ge_dest_row = _ge_matrix + _ge_pitch * x;
 			memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[x], source_block, CAT_BLOCK_BYTES);
 			CAT_IF_DUMP(cout << " " << x << ",";)
 
 			// Dense rows:
-			ge_dest_row = _ge_matrix + _ge_pitch * _light_count;
-			for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, ge_dest_row += _ge_pitch, dense_rv >>= 1)
+			for (u16 dense_i = 0; dense_i < _dense_count; ++dense_i, dense_rv >>= 1)
 			{
 				if (dense_rv & 1)
 				{
-					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[dense_i], source_block, CAT_BLOCK_BYTES);
+					u16 ge_row_i = dense_i + _light_count;
+					memxor(_check_blocks + CAT_BLOCK_BYTES * _ge_row_map[ge_row_i], source_block, CAT_BLOCK_BYTES);
 					CAT_IF_DUMP(cout << " " << dense_i + _light_count;)
 				}
 			}
@@ -2038,8 +2019,7 @@ void Encoder::Substitute()
 		CAT_IF_DUMP(cout << "Generating column " << dest_column_i << ":";)
 
 		const u8 *msg_src = _message_blocks + CAT_BLOCK_BYTES * row_i;
-
-		CAT_IF_DUMP(cout << " " << row_i << ":[" << (int)src[0] << "]";)
+		CAT_IF_DUMP(cout << " " << row_i << ":[" << (int)msg_src[0] << "]";)
 
 		// Set up mixing column generator
 		u16 mix_a = row->mix_a;
@@ -2448,14 +2428,14 @@ bool Encoder::GenerateCheckBlocks()
 {
 	// (1) Peeling
 
-	if (!PeelSetup())
+	if (!OpportunisticPeeling())
 		return false;
 
 	CAT_IF_DUMP( _ASSERTE( _CrtCheckMemory( ) ); )
 
 	CAT_IF_DUMP(
 	{
-		cout << "After PeelSetup, contents of peeled list:" << endl;
+		cout << "After OpportunisticPeeling, contents of peeled list:" << endl;
 		u16 row_i = _peel_head_rows;
 		while (row_i != LIST_TERM)
 		{
@@ -2522,7 +2502,7 @@ bool Encoder::GenerateCheckBlocks()
 
 	CAT_IF_DUMP(cout << "After CompressSetup:" << endl;)
 	CAT_IF_DUMP(PrintGEMatrix();)
-	CAT_IF_DUMP(PrintGECompressMatrix();)
+	CAT_IF_DUMP(PrintCompressMatrix();)
 
 	SetDeferredColumns();
 
@@ -2554,7 +2534,7 @@ bool Encoder::GenerateCheckBlocks()
 	cout << "After Compress:" << endl;
 	PrintGEMatrix();
 #endif
-	CAT_IF_DUMP(PrintGECompressMatrix();)
+	CAT_IF_DUMP(PrintCompressMatrix();)
 
 	// (3) Gaussian Elimination
 
@@ -2594,7 +2574,7 @@ bool Encoder::GenerateCheckBlocks()
 	// If block count is within re-use range for compression matrix,
 	if (CAT_BLOCK_COUNT >= CAT_DISCARD_COMPRESS_MIN && CAT_BLOCK_COUNT <= CAT_DISCARD_COMPRESS_MAX)
 	{
-		// Reuse the compression matrix to speed up subsitution
+		// Reuse the compression matrix to speed up substitution
 		CompressionBasedSubstitute();
 	}
 	else
@@ -2686,29 +2666,26 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 #if !defined(CAT_FIXED_BLOCK_BYTES)
 	CAT_BLOCK_BYTES = block_bytes;
 #endif
+	_message_blocks = reinterpret_cast<const u8*>( message_in );
 
+#if !defined(CAT_FIXED_BLOCK_COUNT)
 	// Calculate message block count
-	int block_count = (message_bytes + CAT_BLOCK_BYTES - 1) / CAT_BLOCK_BYTES;
+	CAT_BLOCK_COUNT = (message_bytes + CAT_BLOCK_BYTES - 1) / CAT_BLOCK_BYTES;
 #if !defined(CAT_EVEN_MULTIPLE_BYTES)
 	_final_bytes = message_bytes % CAT_BLOCK_BYTES;
 	if (_final_bytes <= 0) _final_bytes = CAT_BLOCK_BYTES;
 #endif
+#endif
 
 	// Lookup generator matrix parameters
-	if (!GenerateMatrixParameters(block_count, _p_seed, _c_seed, _light_count, _dense_count))
+	if (!GenerateMatrixParameters(CAT_BLOCK_COUNT, _p_seed, _c_seed, _light_count, _dense_count))
 		return false;
 	_added_count = _light_count + _dense_count;
 
 	// Allocate check blocks
-	int check_size = (block_count + _added_count + 1) * block_bytes; // +1 for temporary space
+	int check_size = (CAT_BLOCK_COUNT + _added_count + 1) * CAT_BLOCK_BYTES; // +1 for temporary space
 	_check_blocks = new u8[check_size];
 	if (!_check_blocks) return false;
-
-	// Initialize encoder
-#if !defined(CAT_FIXED_BLOCK_COUNT)
-	CAT_BLOCK_COUNT = block_count;
-#endif
-	_message_blocks = reinterpret_cast<const u8*>( message_in );
 
 	// Calculate next primes after column counts for pseudo-random generation of peeling rows
 	_block_next_prime = NextPrime16(CAT_BLOCK_COUNT);
@@ -2737,13 +2714,14 @@ bool Encoder::Initialize(const void *message_in, int message_bytes, int block_by
 
 	// Initialize lists
 	_peel_head_rows = LIST_TERM;
-	_peel_tail_rows= 0;
+	_peel_tail_rows = 0;
 	_defer_head_rows = LIST_TERM;
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes" << endl;)
 	CAT_IF_DUMP(cout << "Block bytes = " << CAT_BLOCK_BYTES << ".  Final bytes = " << _final_bytes << endl;)
-	CAT_IF_DUMP(cout << "Block count = " << block_count << " +Prime=" << _block_next_prime << endl;)
-	CAT_IF_DUMP(cout << "Added count = " << _added_count << " +Prime=" << _added_next_prime << endl;)
+	CAT_IF_DUMP(cout << "Block count = " << CAT_BLOCK_COUNT << " +Prime=" << _block_next_prime << endl;)
+	CAT_IF_DUMP(cout << "Light count = " << _light_count << " +Prime=" << _light_next_prime << endl;)
+	CAT_IF_DUMP(cout << " + Dense count = " << _dense_count << " = Total added count = " << _added_count << " +Prime=" << _added_next_prime << endl;)
 	CAT_IF_DUMP(cout << "Generator peel seed = " << _p_seed << endl;)
 	CAT_IF_DUMP(cout << "Generator check seed = " << _c_seed << endl;)
 	CAT_IF_DUMP(cout << "Memory overhead for check blocks = " << check_size << " bytes" << endl;)
@@ -2761,16 +2739,16 @@ void Encoder::Generate(u32 id, void *block)
 	if (id < CAT_BLOCK_COUNT)
 	{
 		// Until the final block in message blocks,
-		if (id < CAT_BLOCK_COUNT - 1)
+		const u8 *src = _message_blocks + CAT_BLOCK_BYTES * id;
+		if ((int)id < CAT_BLOCK_COUNT - 1)
 		{
 			// Copy from the original file data
-			memcpy(buffer, _message_blocks, CAT_BLOCK_BYTES);
-			_message_blocks += CAT_BLOCK_BYTES;
+			memcpy(buffer, src, CAT_BLOCK_BYTES);
 		}
 		else
 		{
 			// For the final block, copy partial block
-			memcpy(buffer, _message_blocks, _final_bytes);
+			memcpy(buffer, src, _final_bytes);
 
 			// Pad with zeroes
 			memset(buffer + _final_bytes, 0, CAT_BLOCK_BYTES - _final_bytes);
@@ -2782,20 +2760,9 @@ void Encoder::Generate(u32 id, void *block)
 
 	CAT_IF_DUMP(cout << "Generating row " << id << ":";)
 
-	// Initialize PRNG
-	CatsChoice prng;
-	prng.Initialize(id, _p_seed);
-
-	// Generate peeling matrix row parameters
-	u16 peel_weight = GeneratePeelRowWeight(prng.Next(), CAT_BLOCK_COUNT - 1);
-	u32 rv = prng.Next();
-	u16 peel_a = ((u16)rv % (CAT_BLOCK_COUNT - 1)) + 1;
-	u16 peel_x = (u16)(rv >> 16) % CAT_BLOCK_COUNT;
-
-	// Generate mixing matrix row parameters
-	rv = prng.Next();
-	u16 mix_a = ((u16)rv % (_added_count - 1)) + 1;
-	u16 mix_x = (u16)(rv >> 16) % _added_count;
+	u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
+	GeneratePeelRow(id, _p_seed, CAT_BLOCK_COUNT, _added_count,
+		peel_weight, peel_a, peel_x, mix_a, mix_x);
 
 	// Remember first column (there is always at least one)
 	u8 *first = _check_blocks + CAT_BLOCK_BYTES * peel_x;
@@ -2875,12 +2842,12 @@ void Encoder::PrintGEMatrix()
 	cout << endl;
 }
 
-void Encoder::PrintGECompressMatrix()
+void Encoder::PrintCompressMatrix()
 {
 	int rows = CAT_BLOCK_COUNT;
 	int cols = _defer_count + _added_count;
 
-	cout << endl << "GE (Inv) Compress matrix is " << rows << " x " << cols << ":" << endl;
+	cout << endl << "Compress matrix is " << rows << " x " << cols << ":" << endl;
 
 	for (int ii = 0; ii < rows; ++ii)
 	{

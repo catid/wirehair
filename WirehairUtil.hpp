@@ -59,6 +59,10 @@ bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &li
 // Deck Shuffling function
 void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
 
+// Peel Matrix Row Generator function
+void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
+	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0);
+
 
 //// Utility: Column iterator function
 

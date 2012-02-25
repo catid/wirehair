@@ -11,7 +11,7 @@ using namespace std;
 
 static Clock m_clock;
 
-#define TRIALS 100
+#define TRIALS 1000
 
 u32 GenerateGoodCheckSeed(int block_count)
 {
@@ -75,10 +75,12 @@ int main()
 	//TestInc();
 	//TestDense();
 
-	int block_count = 8192;
-	int block_bytes = 1024 + 512 + 1;
+	int block_count = 1024;
+	int block_bytes = 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
+	u8 *message_out = new u8[message_bytes];
+	u8 *block = new u8[block_bytes];
 
 	for (int ii = 0; ii < message_bytes; ++ii)
 	{
@@ -89,7 +91,7 @@ int main()
 
 	g_c_seed = 0;
 
-#if 0
+#if 1
 
 	g_c_seed = GenerateGoodCheckSeed(block_count);
 	cout << "Using CSeed : " << g_c_seed << endl;
@@ -112,7 +114,7 @@ int main()
 
 #endif
 
-	g_p_seed = 19;
+	g_p_seed = 22;
 
 #if 1
 
@@ -141,40 +143,57 @@ int main()
 
 #endif
 
+	start = m_clock.usec();
+	encoder.Initialize(message, message_bytes, block_bytes);
+	end = m_clock.usec();
+	cout << ">> OKAY! encoder.Initialize in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
+
+	CatsChoice prng;
+	prng.Initialize(0);
+
 	for (;;)
 	{
-		double start = m_clock.usec();
-		u32 clocks = m_clock.cycles();
-		bool success = encoder.Initialize(message, message_bytes, block_bytes);
-		clocks = m_clock.cycles() - clocks;
-		double end = m_clock.usec();
+		int blocks_needed = 0;
 
-		if (success)
+		cat::wirehair::Decoder decoder;
+		if (!decoder.Initialize(message_out, message_bytes, block_bytes))
 		{
-			cout << ">> OKAY! encoder.Initialize in " << clocks << " clocks and " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
+			cout << "Decoder initialization failed!" << endl;
+			cin.get();
+		}
 
-			u8 *block = new u8[message_bytes];
+		for (u32 row_id = 0;; ++row_id)
+		{
+			if (prng.Next() & 1) continue;
+			encoder.Generate(row_id, block);
 
-			bool success = true;
-			for (int ii = 0; ii < block_count; ++ii)
+			++blocks_needed;
+			start = m_clock.usec();
+			if (decoder.Decode(row_id, block))
 			{
-				encoder.Generate(ii, block);
+				end = m_clock.usec();
+				//cout << ">> OKAY! decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with PSeed " << decoder.GetPSeed() << " and CSeed " << decoder.GetCSeed() << endl;
+				break;
+			}
+		}
 
-				if (block[0] != (u8)ii)
-				{
-					success = false;
-					cout << "Block " << ii << " doesn't match: " << (int)block[0] << endl;
-				}
+		cout << "Overhead = " << blocks_needed - decoder.GetBlockCount() << endl;
+
+		if (!memcmp(message, message_out, message_bytes))
+		{
+			//cout << "Match!" << endl;
+		}
+		else
+		{
+			cout << "FAAAAAIL!" << endl;
+
+			for (int ii = 0; ii < message_bytes; ++ii)
+			{
+				cout << (int)message_out[ii] << endl;
 			}
 
 			cin.get();
 		}
-		else
-		{
-			cout << "-- FAIL: encoder.Initialize in " << clocks << " clocks and " << end - start << " usec with PSeed " << encoder.GetPSeed() << " and CSeed " << encoder.GetCSeed() << endl;
-		}
-
-		g_p_seed++;
 	}
 
 	m_clock.OnFinalize();
