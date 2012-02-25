@@ -477,8 +477,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		dense_count = 5;
 		return true;
 	case 1024:
-		light_count = 30;
-		dense_count = 0;
+		light_count = 18;
+		dense_count = 12;
 		return true;
 	case 2048:
 		light_count = 45;

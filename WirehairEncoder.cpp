@@ -534,7 +534,7 @@ bool Encoder::CompressSetup()
 	// Clear entire GE compress matrix
 	memset(_ge_compress_matrix, 0, ge_compress_matrix_words * sizeof(u64));
 
-	CAT_IF_DUMP(cout << "GE compress matrix is " << ge_compress_rows << " x " << ge_rows << " with pitch " << ge_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
+	CAT_IF_DUMP(cout << "Compress matrix is " << ge_compress_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
 
 	// Allocate the pivots
 	int pivot_words = ge_rows * 3;
@@ -2531,7 +2531,6 @@ bool Encoder::GenerateCheckBlocks()
 
 	CAT_IF_DUMP(cout << "After Compress:" << endl;)
 #if defined(CAT_DUMP_ENCODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
-	cout << "After Compress:" << endl;
 	PrintGEMatrix();
 #endif
 	CAT_IF_DUMP(PrintCompressMatrix();)

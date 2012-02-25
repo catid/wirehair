@@ -530,7 +530,7 @@ bool Decoder::CompressSetup()
 	// Clear entire GE compress matrix
 	memset(_ge_compress_matrix, 0, ge_compress_matrix_words * sizeof(u64));
 
-	CAT_IF_DUMP(cout << "GE compress matrix is " << ge_compress_rows << " x " << ge_rows << " with pitch " << ge_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
+	CAT_IF_DUMP(cout << "Compress matrix is " << ge_compress_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
 
 	// Allocate the pivots
 	const int pivot_count = ge_cols + CAT_DECODER_MAX_EXTRA_ROWS;
@@ -2521,7 +2521,6 @@ bool Decoder::GenerateCheckBlocks()
 
 	CAT_IF_DUMP(cout << "After Compress:" << endl;)
 #if defined(CAT_DUMP_DECODER_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
-	cout << "After Compress:" << endl;
 	PrintGEMatrix();
 #endif
 	CAT_IF_DUMP(PrintCompressMatrix();)
@@ -2934,7 +2933,7 @@ bool Decoder::Resume(u32 id, const void *block)
 		if (*rem_row & ge_mask)
 		{
 			u16 ge_pivot_j = _ge_pivots[pivot_j];
-			u64 *ge_pivot_row = _ge_matrix + _ge_pitch * ge_pivot_j;
+			u64 *ge_pivot_row = _ge_matrix + word_offset + _ge_pitch * ge_pivot_j;
 
 			u64 row0 = (*ge_pivot_row & ~(ge_mask - 1)) ^ ge_mask;
 			*rem_row ^= row0;

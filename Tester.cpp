@@ -76,7 +76,7 @@ int main()
 	//TestDense();
 
 	int block_count = 1024;
-	int block_bytes = 1;
+	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 	u8 *message_out = new u8[message_bytes];
@@ -193,10 +193,8 @@ int main()
 		{
 			cout << "FAAAAAIL!" << endl;
 
-			for (int ii = 0; ii < message_bytes; ++ii)
-			{
-				cout << (int)message_out[ii] << endl;
-			}
+	//		for (int ii = 0; ii < message_bytes; ++ii)
+//				cout << (int)message_out[ii] << endl;
 
 			cin.get();
 		}
