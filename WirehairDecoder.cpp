@@ -2852,7 +2852,11 @@ bool Decoder::Resume(u32 id, const void *block)
 	{
 		// Find a non-check row to reuse
 		for (u16 pivot_i = _ge_resume_pivot; pivot_i < _ge_rows; ++pivot_i)
+		{
 			ge_row_i = _ge_pivots[pivot_i];
+			if (ge_row_i >= _added_count) break;
+		}
+
 		row_i = _ge_row_map[ge_row_i];
 	}
 	else
