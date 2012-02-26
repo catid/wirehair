@@ -29,7 +29,7 @@
 #ifndef CAT_CLOCK_HPP
 #define CAT_CLOCK_HPP
 
-#include "Platform.hpp"
+#include "codec_source/Platform.hpp"
 #include <string>
 
 namespace cat {

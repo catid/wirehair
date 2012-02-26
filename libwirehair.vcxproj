@@ -18,6 +18,20 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Clock.cpp" />
+    <ClCompile Include="codec_source\memxor.cpp" />
+    <ClCompile Include="codec_source\Wirehair.cpp" />
+    <ClCompile Include="Tester.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Clock.hpp" />
+    <ClInclude Include="codec_source\memxor.hpp" />
+    <ClInclude Include="codec_source\Platform.hpp" />
+    <ClInclude Include="codec_source\SmallPRNG.hpp" />
+    <ClInclude Include="codec_source\Wirehair.hpp" />
+    <ClInclude Include="codec_source\WirehairDetails.hpp" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{22CED8E7-00AC-423E-8438-0828A1C2895E}</ProjectGuid>
     <RootNamespace>libwirehair</RootNamespace>
@@ -122,26 +136,6 @@
       <Profile>true</Profile>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClInclude Include="Clock.hpp" />
-    <ClInclude Include="Config.hpp" />
-    <ClInclude Include="EndianNeutral.hpp" />
-    <ClInclude Include="GF2Matrix.hpp" />
-    <ClInclude Include="memxor.hpp" />
-    <ClInclude Include="Platform.hpp" />
-    <ClInclude Include="SmallPRNG.hpp" />
-    <ClInclude Include="Wirehair.hpp" />
-    <ClInclude Include="WirehairUtil.hpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="Clock.cpp" />
-    <ClCompile Include="GF2Matrix.cpp" />
-    <ClCompile Include="memxor.cpp" />
-    <ClCompile Include="Tester.cpp" />
-    <ClCompile Include="WirehairDecoder.cpp" />
-    <ClCompile Include="WirehairEncoder.cpp" />
-    <ClCompile Include="WirehairUtil.cpp" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
