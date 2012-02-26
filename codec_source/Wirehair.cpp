@@ -3270,11 +3270,11 @@ Result Codec::SolveMatrix()
 
 void Codec::GenerateRecoveryBlocks()
 {
+	// (4) Substitution
+
 	InitializeColumnValues();
 	AddCheckValues();
 	AddSubdiagonalValues();
-
-	// (4) Substitution
 
 #if defined(CAT_REUSE_COMPRESS)
 
@@ -3294,7 +3294,7 @@ void Codec::GenerateRecoveryBlocks()
 
 bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
-	CAT_IF_DUMP(cout << endl << "---- ResumeDecode ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
 	// If there is no room for it,
 	u16 row_i, ge_row_i;
@@ -3316,6 +3316,8 @@ bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 		row_i = _used_count++;
 		_ge_row_map[ge_row_i] = row_i;
 	}
+
+	cout << "Resuming using row slot " << row_i << " and GE row " << ge_row_i << endl;
 
 	// Update row data needed at this point
 	PeelRow *row = &_peel_rows[row_i];

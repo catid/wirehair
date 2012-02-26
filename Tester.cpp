@@ -14,8 +14,8 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 1024;
-	int block_bytes = 1500;
+	int block_count = 16;
+	int block_bytes = 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 	u8 *message_out = new u8[message_bytes];
@@ -26,8 +26,8 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 0;
-	g_p_seed = 2;
+	g_c_seed = 7;
+	g_p_seed = 0;
 
 	wirehair::Encoder encoder;
 
