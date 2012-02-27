@@ -50,6 +50,32 @@ namespace wirehair {
 
 /*
 	Wirehair FEC Encoder
+
+	Example usage:
+
+		int message_bytes = 1500000, block_bytes = 1500;
+		u8 *message = new u8[message_bytes];
+		u8 *block = new u8[block_bytes];
+
+		g_c_seed = 5; g_p_seed = 1; // ONLY NEEDED FOR NOW - STILL WORKING ON THIS
+
+		wirehair::Encoder encoder;
+		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
+		if (r)
+		{
+			cout << "-- FAIL! encoder.BeginEncode error " << wirehair::GetResultString(r) << endl;
+			cin.get();
+			return 1;
+		}
+
+		for (u32 id = 0;; ++id)
+		{
+			encoder.Encode(id, block);
+
+			// Transmit block and ID here to decoder.
+
+			...
+		}
 */
 class Encoder : protected Codec
 {
@@ -77,6 +103,43 @@ public:
 
 /*
 	Wirehair FEC Decoder
+
+	Example usage:
+
+		int message_bytes = 1500000, block_bytes = 1500;
+		u8 *message_out = new u8[message_bytes];
+		u8 *block = new u8[block_bytes];
+
+		g_c_seed = 5; g_p_seed = 1; // ONLY NEEDED FOR NOW - STILL WORKING ON THIS
+
+		wirehair::Decoder decoder;
+		wirehair::Result r = decoder.BeginDecode(message_out, message_bytes, block_bytes);
+		if (r)
+		{
+			cout << "-- FAIL! decoder.BeginDecode error " << wirehair::GetResultString(r) << endl;
+			cin.get();
+			return 1;
+		}
+
+		for (;;)
+		{
+			// Receive block and ID here from encoder.
+
+			wirehair::Result r = decoder.Decode(id, block);
+			if (!r)
+			{
+				cout << ">> OKAY! decoder.Decode succeeded, message now recovered!" << endl;
+				break;
+			}
+			else if (r != wirehair::R_MORE_BLOCKS)
+			{
+				cout << "-- FAIL! decoder.Decode error " << wirehair::GetResultString(r) << endl;
+				cin.get();
+				return 2;
+			}
+
+			...
+		}
 */
 class Decoder : protected Codec
 {
