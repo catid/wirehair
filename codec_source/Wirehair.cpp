@@ -375,6 +375,7 @@ const char *cat::wirehair::GetResultString(Result r)
 	{
 	case R_WIN:				return "R_WIN";
 	case R_MORE_BLOCKS:		return "R_MORE_BLOCKS";
+	case R_BAD_CHECK_SEED:	return "R_BAD_CHECK_SEED";
 	case R_BAD_INPUT:		return "R_BAD_INPUT";
 	case R_OUT_OF_MEMORY:	return "R_OUT_OF_MEMORY";
 	default:				return "UnrecognizedResultCode";
@@ -833,7 +834,7 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		dense_count = 8;
 		return true;
 	case 4096:
-		light_count = 55;
+		light_count = 62;
 		dense_count = 14;
 		return true;
 	case 8192:
@@ -1395,6 +1396,8 @@ void Codec::SetMixingColumnsForDeferredRows()
 
 void Codec::PeelDiagonal()
 {
+	CAT_IF_DUMP(cout << endl << "---- PeelDiagonal ----" << endl << endl;)
+
 	/*
 		This function optimizes the block value generation by combining the first
 		memcpy and memxor operations together into a three-way memxor if possible,
@@ -1413,7 +1416,7 @@ void Codec::PeelDiagonal()
 		u16 peel_column_i = row->peel_column;
 		u64 *ge_row = _ge_compress_matrix + _ge_pitch * peel_row_i;
 
-		CAT_IF_DUMP(cout << "  Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
+		CAT_IF_DUMP(cout << "Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
 
 		// Generate mixing columns for this row
 		u16 a = row->mix_a;
@@ -1450,7 +1453,7 @@ void Codec::PeelDiagonal()
 			}
 			CAT_IF_ROWOP(++rowops;)
 
-			CAT_IF_DUMP(cout << "  -- Copied from " << peel_row_i << " because has not been copied yet.  Output block = " << (int)temp_block_src[0] << endl;)
+			CAT_IF_DUMP(cout << "-- Copied from " << peel_row_i << " because has not been copied yet.  Output block = " << (int)temp_block_src[0] << endl;)
 
 			// NOTE: Do not need to set is_copied here because no further rows reference this one
 		}
@@ -1466,7 +1469,7 @@ void Codec::PeelDiagonal()
 			// Skip this row
 			if (ref_row_i == peel_row_i) continue;
 
-			CAT_IF_DUMP(cout << "  ++ Adding to referencing row " << ref_row_i << endl;)
+			CAT_IF_DUMP(cout << "++ Adding to referencing row " << ref_row_i << endl;)
 
 			// Add GE row to referencing GE row
 			u64 *ge_ref_row = _ge_compress_matrix + _ge_pitch * ref_row_i;
@@ -1625,7 +1628,7 @@ void Codec::MultiplyDenseRows()
 		u16 *set_bits = bits;
 		u16 *clr_bits = set_bits + set_count;
 
-		CAT_IF_DUMP(cout << "-- First half:" << endl;)
+		CAT_IF_DUMP( u64 disp_row[(CAT_MAX_CHECK_ROWS+63)/64]; CAT_OBJCLR(disp_row); )
 
 		// Generate first row
 		memset(temp_row, 0, _ge_pitch * sizeof(u64));
@@ -1645,15 +1648,16 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit_i].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit_i >> 6] ^= (u64)1 << (bit_i & 63);)
 		}
 
 		// Set up generator
 		const u16 *row = rows;
 
 		// Store first row
+		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 
 		// Generate first half of rows
 #if defined(CAT_SHUFFLE_HALF)
@@ -1678,6 +1682,7 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit0].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
 
 			if (column[bit1].mark == MARK_PEEL)
 			{
@@ -1691,14 +1696,13 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit1].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit1 >> 6] ^= (u64)1 << (bit1 & 63);)
 
 			// Store in row
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 		}
-
-		CAT_IF_DUMP(cout << "-- Second half:" << endl;)
 
 #if defined(CAT_SHUFFLE_HALF)
 		// Shuffle bit order
@@ -1722,12 +1726,13 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit_i].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit_i >> 6] ^= (u64)1 << (bit_i & 63);)
 		}
 
 		// Store in row
+		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << " (RESHUFFLED)" << endl;)
 		ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int ii = 0; ii < _ge_pitch; ++ii) ge_dest_row[ii] ^= temp_row[ii];
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 
 		const int second_loop_count = loop_count + (check_count & 1);
 #else // CAT_SHUFFLE_HALF
@@ -1750,11 +1755,12 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit0].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
 
 			// Store in row
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 		}
 
 		const int second_loop_count = loop_count - 1;
@@ -1778,6 +1784,7 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit0].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
 
 			if (column[bit1].mark == MARK_PEEL)
 			{
@@ -1791,11 +1798,12 @@ void Codec::MultiplyDenseRows()
 				u16 ge_column_i = column[bit1].ge_column;
 				temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 			}
+			CAT_IF_DUMP(disp_row[bit1 >> 6] ^= (u64)1 << (bit1 & 63);)
 
 			// Store in row
+			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << endl;)
 		}
 
 		CAT_IF_DUMP(cout << endl;)
@@ -1879,6 +1887,7 @@ void Codec::MultiplyDenseRows()
 				}
 			}
 		}
+		CAT_IF_DUMP(cout << endl;)
 	} // next column
 }
 
@@ -2167,13 +2176,14 @@ void Codec::AddCheckValues()
 			}
 
 			// Store first row
-			u16 check_column_i = _ge_row_map[*row++];
+			u16 check_column_i = _ge_row_map[*row];
 			if (check_column_i != LIST_TERM)
 			{
 				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 		}
+		++row;
 
 		// Generate first half of rows
 #if defined(CAT_SHUFFLE_HALF)
@@ -2273,13 +2283,14 @@ void Codec::AddCheckValues()
 			}
 
 			// Store middle row
-			u16 check_column_i = _ge_row_map[*row++];
+			u16 check_column_i = _ge_row_map[*row];
 			if (check_column_i != LIST_TERM)
 			{
 				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 		}
+		++row;
 
 		const int second_loop_count = loop_count + (check_count & 1);
 #else
@@ -3988,6 +3999,8 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 
 Result Codec::EncodeFeed(const void *message_in)
 {
+	CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
+
 	SetInput(message_in);
 
 	// For each input row,
@@ -4000,6 +4013,7 @@ Result Codec::EncodeFeed(const void *message_in)
 	// Solve matrix and generate recovery blocks
 	Result r = SolveMatrix();
 	if (r == R_WIN) GenerateRecoveryBlocks();
+	else if (r == R_MORE_BLOCKS) r = R_BAD_CHECK_SEED;
 
 	return r;
 }

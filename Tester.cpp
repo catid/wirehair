@@ -14,7 +14,7 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 1024;
+	int block_count = 4096;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -26,8 +26,8 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 0;
-	g_p_seed = 0;
+	g_c_seed = 5;
+	g_p_seed = 1;
 
 	wirehair::Encoder encoder;
 
@@ -45,7 +45,7 @@ int main()
 
 	CatsChoice prng;
 
-	u32 drop_seed = 0;
+	u32 drop_seed = 33273;
 	for (;;)
 	{
 		int blocks_needed = 0;

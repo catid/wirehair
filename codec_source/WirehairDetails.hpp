@@ -45,7 +45,7 @@ extern int g_p_seed, g_c_seed;
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
 #define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
-#define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
+#define CAT_MAX_EXTRA_ROWS 16 /* Maximum number of extra rows to support before reusing existing rows */
 
 namespace cat {
 
@@ -58,6 +58,7 @@ enum Result
 {
 	R_WIN,				// Operation: Success!
 	R_MORE_BLOCKS,		// Codec wants more blocks
+	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
 
 	R_ERROR,			// Return codes higher than this one are errors:
 
