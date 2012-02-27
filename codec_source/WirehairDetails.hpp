@@ -58,12 +58,14 @@ enum Result
 {
 	R_WIN,				// Operation: Success!
 	R_MORE_BLOCKS,		// Codec wants more blocks
-	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
 
 	R_ERROR,			// Return codes higher than this one are errors:
 
+	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
+	R_BAD_PEEL_SEED,	// Encoder needs a better peel seed
 	R_BAD_INPUT,		// Input parameters were incorrect
-	R_OUT_OF_MEMORY,	// Out of memory
+	R_TOO_SMALL,		// message_bytes / block_size is too small.  Try reducing block_size or use a larger message
+	R_OUT_OF_MEMORY,	// Out of memory, try reducing the message size
 };
 
 // Get Result String function

@@ -376,9 +376,11 @@ const char *cat::wirehair::GetResultString(Result r)
 	case R_WIN:				return "R_WIN";
 	case R_MORE_BLOCKS:		return "R_MORE_BLOCKS";
 	case R_BAD_CHECK_SEED:	return "R_BAD_CHECK_SEED";
+	case R_BAD_PEEL_SEED:	return "R_BAD_PEEL_SEED";
+	case R_TOO_SMALL:		return "R_TOO_SMALL";
 	case R_BAD_INPUT:		return "R_BAD_INPUT";
 	case R_OUT_OF_MEMORY:	return "R_OUT_OF_MEMORY";
-	default:				return "UnrecognizedResultCode";
+	default:				return "R_UNKNOWN";
 	}
 }
 
@@ -3202,10 +3204,17 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 {
 	CAT_IF_DUMP(cout << endl << "---- ChooseMatrix ----" << endl << endl;)
 
+	// Validate input
+	if (message_bytes < 1 || block_bytes < 1)
+		return R_BAD_INPUT;
+
 	// Calculate message block count
 	_block_bytes = block_bytes;
 	_block_count = (message_bytes + _block_bytes - 1) / _block_bytes;
 	_block_next_prime = NextPrime16(_block_count);
+
+	if (_block_count < 4)
+		return R_TOO_SMALL;
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
@@ -3306,6 +3315,8 @@ void Codec::GenerateRecoveryBlocks()
 bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
+
+	if (!block) return false;
 
 	// If there is no room for it,
 	u16 row_i, ge_row_i;
@@ -3501,6 +3512,7 @@ void Codec::ReconstructOutput(void *message_out)
 {
 	CAT_IF_DUMP(cout << endl << "---- ReconstructOutput ----" << endl << endl;)
 
+	if (!message_out) return;
 	u8 *output_blocks = reinterpret_cast<u8 *>( message_out );
 
 #if defined(CAT_COPY_FIRST_N)
@@ -3962,6 +3974,9 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 
 Result Codec::DecodeFeed(u32 id, const void *block_in)
 {
+	// Validate input
+	if (block_in == 0) return R_BAD_INPUT;
+
 	// If less than N rows stored,
 	u16 row_i = _used_count;
 	if (row_i < _block_count)
@@ -4001,13 +4016,16 @@ Result Codec::EncodeFeed(const void *message_in)
 {
 	CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
 
+	// Validate input
+	if (message_in == 0) return R_BAD_INPUT;
+
 	SetInput(message_in);
 
 	// For each input row,
 	for (u16 id = 0; id < _block_count; ++id)
 	{
 		if (!OpportunisticPeeling(id, id))
-			return R_BAD_INPUT;
+			return R_BAD_PEEL_SEED;
 	}
 
 	// Solve matrix and generate recovery blocks
@@ -4020,6 +4038,7 @@ Result Codec::EncodeFeed(const void *message_in)
 
 void Codec::Encode(u32 id, void *block_out)
 {
+	if (!block_out) return;
 	u8 *block = reinterpret_cast<u8*>( block_out );
 
 #if defined(CAT_COPY_FIRST_N)
