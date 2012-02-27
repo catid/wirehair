@@ -29,10 +29,10 @@
 /*
 	TODO:
 
-	2. Add diagnostic messages to all functions
 	3. Update documentation for all functions
 
 	4. Tune the matrix for larger sizes:
+		+ Try Soliton distribution
 		+ Try higher-weight peeling codes
 		+ Try different dense codes
 
@@ -3126,7 +3126,7 @@ void Codec::CompressionBasedSubstitute()
 		pivot_i -= w;
 
 		// Stop using window optimization if matrix is zeroish
-		if (flip_count < win_lim / 2) break;
+		if ((u32)flip_count < win_lim / 2) break;
 
 	} while (pivot_i > w);
 
@@ -3925,7 +3925,7 @@ void Codec::PrintDeferredColumns()
 #endif // CAT_DUMP_CODEC_DEBUG
 
 
-//// Setup
+//// Encoder Mode
 
 Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 {
@@ -3946,71 +3946,6 @@ Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 
 	return r;
 }
-
-Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
-{
-	Result r = ChooseMatrix(message_bytes, block_bytes);
-	if (r == R_WIN)
-	{
-		// Calculate partial final bytes
-		u32 partial_final_bytes = message_bytes % _block_bytes;
-		if (partial_final_bytes <= 0) partial_final_bytes = _block_bytes;
-
-		// Decoder-specific
-		_used_count = 0;
-		_output_final_bytes = partial_final_bytes;
-		_input_final_bytes = _block_bytes;
-		_extra_count = CAT_MAX_EXTRA_ROWS;
-
-		if (!AllocateInput() || !AllocateWorkspace())
-			return R_OUT_OF_MEMORY;
-	}
-
-	return r;
-}
-
-
-//// Decoder
-
-Result Codec::DecodeFeed(u32 id, const void *block_in)
-{
-	// Validate input
-	if (block_in == 0) return R_BAD_INPUT;
-
-	// If less than N rows stored,
-	u16 row_i = _used_count;
-	if (row_i < _block_count)
-	{
-		// If opportunistic peeling did not fail,
-		if (OpportunisticPeeling(row_i, id))
-		{
-			// Copy the new row data into the input block area
-			memcpy(_input_blocks + _block_bytes * row_i, block_in, _block_bytes);
-
-			// If just acquired N blocks,
-			if (++_used_count == _block_count)
-			{
-				// Attempt to solve the matrix and generate recovery blocks
-				Result r = SolveMatrix();
-				if (r == R_WIN) GenerateRecoveryBlocks();
-				return r;
-			}
-		} // end if opportunistic peeling succeeded
-
-		return R_MORE_BLOCKS;
-	}
-
-	// Resume GE from this row
-	if (!ResumeSolveMatrix(id, block_in))
-		return R_MORE_BLOCKS;
-
-	// Success!  Now generate the output blocks
-	GenerateRecoveryBlocks();
-	return R_WIN;
-}
-
-
-//// Encoder
 
 Result Codec::EncodeFeed(const void *message_in)
 {
@@ -4120,4 +4055,66 @@ void Codec::Encode(u32 id, void *block_out)
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	CAT_IF_DUMP(cout << endl;)
+}
+
+
+//// Decoder Mode
+
+Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
+{
+	Result r = ChooseMatrix(message_bytes, block_bytes);
+	if (r == R_WIN)
+	{
+		// Calculate partial final bytes
+		u32 partial_final_bytes = message_bytes % _block_bytes;
+		if (partial_final_bytes <= 0) partial_final_bytes = _block_bytes;
+
+		// Decoder-specific
+		_used_count = 0;
+		_output_final_bytes = partial_final_bytes;
+		_input_final_bytes = _block_bytes;
+		_extra_count = CAT_MAX_EXTRA_ROWS;
+
+		if (!AllocateInput() || !AllocateWorkspace())
+			return R_OUT_OF_MEMORY;
+	}
+
+	return r;
+}
+
+Result Codec::DecodeFeed(u32 id, const void *block_in)
+{
+	// Validate input
+	if (block_in == 0) return R_BAD_INPUT;
+
+	// If less than N rows stored,
+	u16 row_i = _used_count;
+	if (row_i < _block_count)
+	{
+		// If opportunistic peeling did not fail,
+		if (OpportunisticPeeling(row_i, id))
+		{
+			// Copy the new row data into the input block area
+			memcpy(_input_blocks + _block_bytes * row_i, block_in, _block_bytes);
+
+			// If just acquired N blocks,
+			if (++_used_count == _block_count)
+			{
+				// Attempt to solve the matrix and generate recovery blocks
+				Result r = SolveMatrix();
+				if (r == R_WIN) GenerateRecoveryBlocks();
+				return r;
+			}
+		} // end if opportunistic peeling succeeded
+
+		return R_MORE_BLOCKS;
+	}
+
+	// Resume GE from this row
+	if (!ResumeSolveMatrix(id, block_in))
+		return R_MORE_BLOCKS;
+
+	// Success!  Now generate the output blocks
+	GenerateRecoveryBlocks();
+	return R_WIN;
 }

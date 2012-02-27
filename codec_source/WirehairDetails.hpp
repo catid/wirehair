@@ -60,7 +60,6 @@ enum Result
 	R_MORE_BLOCKS,		// Codec wants more blocks
 
 	R_ERROR,			// Return codes higher than this one are errors:
-
 	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
 	R_BAD_PEEL_SEED,	// Encoder needs a better peel seed
 	R_BAD_INPUT,		// Input parameters were incorrect
@@ -123,6 +122,8 @@ CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 	}
 }
 
+
+//// Encoder/Decoder Combined Implementation
 
 class Codec
 {
@@ -274,12 +275,29 @@ public:
 	Codec();
 	~Codec();
 
+
+	//// Accessors
+
 	CAT_INLINE u32 PSeed() { return _p_seed; }
 	CAT_INLINE u32 CSeed() { return _c_seed; }
 	CAT_INLINE u32 BlockCount() { return _block_count; }
 
-	// Initialize encoder or decoder mode
+
+	//// Encoder Mode
+
+	// Initialize encoder mode
 	Result InitializeEncoder(int message_bytes, int block_bytes);
+
+	// Feed encoder a message
+	Result EncodeFeed(const void *message_in);
+
+	// Encode a block
+	void Encode(u32 id, void *block_out);
+
+
+	//// Decoder Mode
+
+	// Initialize decoder mode
 	Result InitializeDecoder(int message_bytes, int block_bytes);
 
 	// Feed decoder a block
@@ -287,12 +305,6 @@ public:
 
 	// Generate output blocks from the recovered check blocks
 	void ReconstructOutput(void *message_out);
-
-	// Feed encoder a message
-	Result EncodeFeed(const void *message_in);
-
-	// Encode a block
-	void Encode(u32 id, void *block_out);
 };
 
 
