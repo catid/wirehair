@@ -14,8 +14,8 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 16;
-	int block_bytes = 1;
+	int block_count = 1024;
+	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 	u8 *message_out = new u8[message_bytes];
@@ -26,7 +26,7 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 7;
+	g_c_seed = 0;
 	g_p_seed = 0;
 
 	wirehair::Encoder encoder;
@@ -44,8 +44,8 @@ int main()
 	cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s" << endl;
 
 	CatsChoice prng;
-	prng.Initialize(0);
 
+	u32 drop_seed = 0;
 	for (;;)
 	{
 		int blocks_needed = 0;
@@ -59,6 +59,7 @@ int main()
 			return 1;
 		}
 
+		prng.Initialize(drop_seed);
 		for (u32 id = 0;; ++id)
 		{
 			if (prng.Next() & 1) continue;
@@ -81,6 +82,7 @@ int main()
 					}
 					else
 					{
+						cout << "Seed = " << drop_seed << endl;
 						cout << "FAAAAAIL!" << endl;
 
 						for (int ii = 0; ii < message_bytes; ++ii)
@@ -92,12 +94,16 @@ int main()
 				else
 				{
 					cout << "-- FAIL! decoder.Decode error " << wirehair::GetResultString(r) << endl;
+
+					cin.get();
 				}
 
-				cin.get();
+				//cin.get();
 				break;
 			}
 		}
+
+		++drop_seed;
 	}
 
 	m_clock.OnFinalize();

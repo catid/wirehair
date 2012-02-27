@@ -3317,7 +3317,7 @@ bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 		_ge_row_map[ge_row_i] = row_i;
 	}
 
-	cout << "Resuming using row slot " << row_i << " and GE row " << ge_row_i << endl;
+	CAT_IF_DUMP(cout << "Resuming using row slot " << row_i << " and GE row " << ge_row_i << endl;)
 
 	// Update row data needed at this point
 	PeelRow *row = &_peel_rows[row_i];
@@ -3867,7 +3867,7 @@ void Codec::PrintPeeled()
 
 void Codec::PrintDeferredRows()
 {
-	cout << "Deferred rows :" << endl;
+	cout << "Deferred rows :";
 
 	u16 row_i = _defer_head_rows;
 	while (row_i != LIST_TERM)

@@ -36,7 +36,7 @@ extern int g_p_seed, g_c_seed;
 
 // Switches:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 //#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
@@ -45,7 +45,7 @@ extern int g_p_seed, g_c_seed;
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
 #define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
-#define CAT_MAX_EXTRA_ROWS 2 /* Maximum number of extra rows to support before reusing existing rows */
+#define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
 
 namespace cat {
 
