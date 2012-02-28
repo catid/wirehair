@@ -26,7 +26,7 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 5;
+	g_c_seed = 1;
 	g_p_seed = 1;
 
 	wirehair::Encoder encoder;
@@ -45,7 +45,7 @@ int main()
 
 	CatsChoice prng;
 
-	u32 drop_seed = 33273;
+	u32 drop_seed = 0;
 	for (;;)
 	{
 		int blocks_needed = 0;
@@ -74,6 +74,7 @@ int main()
 			{
 				if (r == wirehair::R_WIN)
 				{
+					cout << "Seed = " << drop_seed << endl;
 					cout << ">> OKAY! decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << blocks_needed - decoder.BlockCount() << " extra blocks" << endl;
 
 					if (!memcmp(message, message_out, message_bytes))
@@ -82,11 +83,10 @@ int main()
 					}
 					else
 					{
-						cout << "Seed = " << drop_seed << endl;
 						cout << "FAAAAAIL!" << endl;
 
-						for (int ii = 0; ii < message_bytes; ++ii)
-							cout << (int)message_out[ii] << endl;
+						//for (int ii = 0; ii < message_bytes; ++ii)
+//							cout << (int)message_out[ii] << endl;
 
 						cin.get();
 					}

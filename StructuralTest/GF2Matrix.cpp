@@ -27,7 +27,7 @@
 */
 
 #include "GF2Matrix.hpp"
-#include "SmallPRNG.hpp"
+#include "../codec_source/SmallPRNG.hpp"
 using namespace cat;
 using namespace wirehair;
 

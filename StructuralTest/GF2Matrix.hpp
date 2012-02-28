@@ -29,7 +29,7 @@
 #ifndef CAT_WIREHAIR_GF2_MATRIX_HPP
 #define CAT_WIREHAIR_GF2_MATRIX_HPP
 
-#include "Platform.hpp"
+#include "../codec_source/Platform.hpp"
 
 namespace cat {
 
@@ -55,6 +55,9 @@ class GF2Matrix
 public:
 	GF2Matrix();
 	~GF2Matrix();
+
+	CAT_INLINE u64 *GetFront() { return _matrix; }
+	CAT_INLINE int GetPitch() { return _pitch; }
 
 	CAT_INLINE void SetSeed(u32 seed) { _seed = seed; }
 	CAT_INLINE u32 GetSeed() { return _seed; }

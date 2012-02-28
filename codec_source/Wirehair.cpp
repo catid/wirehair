@@ -378,9 +378,11 @@ const char *cat::wirehair::GetResultString(Result r)
 	case R_BAD_CHECK_SEED:	return "R_BAD_CHECK_SEED";
 	case R_BAD_PEEL_SEED:	return "R_BAD_PEEL_SEED";
 	case R_TOO_SMALL:		return "R_TOO_SMALL";
+	case R_NEED_MORE_EXTRA:	return "R_NEED_MORE_EXTRA";
 	case R_BAD_INPUT:		return "R_BAD_INPUT";
 	case R_OUT_OF_MEMORY:	return "R_OUT_OF_MEMORY";
-	default:				return "R_UNKNOWN";
+	default:				if (r >= R_ERROR) return "R_UNKNOWN_ERROR";
+							else return "R_UNKNOWN";
 	}
 }
 
@@ -2085,6 +2087,12 @@ void Codec::InitializeColumnValues()
 		{
 			// Mark it for skipping
 			_ge_row_map[ge_row_i] = LIST_TERM;
+
+			CAT_IF_ROWOP(cout << "Did not use GE row " << ge_row_i << ", which is a check row." << endl;)
+		}
+		else
+		{
+			CAT_IF_ROWOP(cout << "Did not use deferred row " << ge_row_i << ", which is not a check row." << endl;)
 		}
 	}
 
@@ -3312,31 +3320,35 @@ void Codec::GenerateRecoveryBlocks()
 	}
 }
 
-bool Codec::ResumeSolveMatrix(u32 id, const void *block)
+Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
-	if (!block) return false;
+	if (!block) return R_BAD_INPUT;
 
 	// If there is no room for it,
-	u16 row_i, ge_row_i;
+	u16 row_i, ge_row_i, new_pivot_i;
 	if (_used_count >= _block_count + _extra_count)
 	{
 		// Find a non-check row to reuse
-		for (u16 pivot_i = _ge_resume_pivot; pivot_i < _ge_rows; ++pivot_i)
+		for (new_pivot_i = _ge_resume_pivot; new_pivot_i < _ge_rows; ++new_pivot_i)
 		{
-			ge_row_i = _ge_pivots[pivot_i];
+			ge_row_i = _ge_pivots[new_pivot_i];
 			if (ge_row_i >= _added_count) break;
 		}
+
+		if (ge_row_i < _added_count)
+			return R_NEED_MORE_EXTRA;
 
 		row_i = _ge_row_map[ge_row_i];
 	}
 	else
 	{
 		// Look up storage space
-		ge_row_i = _ge_rows++;
+		new_pivot_i = ge_row_i = _ge_rows++;
 		row_i = _used_count++;
 		_ge_row_map[ge_row_i] = row_i;
+		_ge_pivots[ge_row_i] = ge_row_i;
 	}
 
 	CAT_IF_DUMP(cout << "Resuming using row slot " << row_i << " and GE row " << ge_row_i << endl;)
@@ -3426,15 +3438,10 @@ bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 
 	// If the next pivot was not found on this row,
 	if ((ge_new_row[pivot_i >> 6] & ge_mask) == 0)
-	{
-		// Initialize new pivot element
-		_ge_pivots[ge_row_i] = ge_row_i;
-
-		return false; // Maybe next time...
-	}
+		return R_MORE_BLOCKS; // Maybe next time...
 
 	// Swap out the pivot index for this one
-	_ge_pivots[ge_row_i] = _ge_pivots[pivot_i];
+	_ge_pivots[new_pivot_i] = _ge_pivots[pivot_i];
 	_ge_pivots[pivot_i] = ge_row_i;
 
 	// NOTE: Pivot was found and is definitely not set anywhere else
@@ -3498,14 +3505,14 @@ bool Codec::ResumeSolveMatrix(u32 id, const void *block)
 			_ge_resume_pivot = pivot_i;
 			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
 			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
-			return false;
+			return R_MORE_BLOCKS;
 		}
 
 		// Generate next mask
 		ge_mask = CAT_ROL64(ge_mask, 1);
 	}
 
-	return true;
+	return R_WIN;
 }
 
 void Codec::ReconstructOutput(void *message_out)
@@ -4102,7 +4109,7 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 			{
 				// Attempt to solve the matrix and generate recovery blocks
 				Result r = SolveMatrix();
-				if (r == R_WIN) GenerateRecoveryBlocks();
+				if (!r) GenerateRecoveryBlocks();
 				return r;
 			}
 		} // end if opportunistic peeling succeeded
@@ -4111,10 +4118,7 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 	}
 
 	// Resume GE from this row
-	if (!ResumeSolveMatrix(id, block_in))
-		return R_MORE_BLOCKS;
-
-	// Success!  Now generate the output blocks
-	GenerateRecoveryBlocks();
-	return R_WIN;
+	Result r = ResumeSolveMatrix(id, block_in);
+	if (!r) GenerateRecoveryBlocks();
+	return r;
 }
