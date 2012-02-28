@@ -1663,6 +1663,10 @@ void Codec::MultiplyDenseRows()
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 
+#if defined(CAT_DESTROY_PERFECTION)
+		ShuffleDeck16(prng, bits, check_count);
+#endif
+
 		// Generate first half of rows
 #if defined(CAT_SHUFFLE_HALF)
 		const int loop_count = (check_count >> 1) - 1;
@@ -1769,6 +1773,10 @@ void Codec::MultiplyDenseRows()
 
 		const int second_loop_count = loop_count - 1;
 #endif // CAT_SHUFFLE_HALF
+
+#if defined(CAT_DESTROY_PERFECTION)
+		ShuffleDeck16(prng, bits, check_count);
+#endif
 
 		// Generate second half of rows
 		for (int ii = 0; ii < second_loop_count; ++ii)
@@ -2195,6 +2203,10 @@ void Codec::AddCheckValues()
 		}
 		++row;
 
+#if defined(CAT_DESTROY_PERFECTION)
+		ShuffleDeck16(prng, bits, check_count);
+#endif
+
 		// Generate first half of rows
 #if defined(CAT_SHUFFLE_HALF)
 		const int loop_count = (check_count >> 1) - 1;
@@ -2331,6 +2343,10 @@ void Codec::AddCheckValues()
 		}
 
 		const int second_loop_count = loop_count - 1;
+#endif
+
+#if defined(CAT_DESTROY_PERFECTION)
+		ShuffleDeck16(prng, bits, check_count);
 #endif
 
 		// Generate second half of rows

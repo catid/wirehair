@@ -62,6 +62,8 @@ public:
 	CAT_INLINE void SetSeed(u32 seed) { _seed = seed; }
 	CAT_INLINE u32 GetSeed() { return _seed; }
 
+	CAT_INLINE int Size() { return _n; }
+
 	// Initializes an NxN random matrix and tries to invert it, returns false on error
 	bool Initialize(int n);
 

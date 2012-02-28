@@ -26,22 +26,33 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 1;
-	g_p_seed = 1;
+	g_c_seed = 7;
+	g_p_seed = 0;
 
 	wirehair::Encoder encoder;
+	u64 successes = 0, trials = 0;
 
-	double start = m_clock.usec();
-	wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
-	double end = m_clock.usec();
-	if (r)
+	for (;; ++g_p_seed)
 	{
-		cout << "-- FAIL! encoder.BeginEncode error " << wirehair::GetResultString(r) << endl;
-		cin.get();
-		return 1;
-	}
+		++trials;
 
-	cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s" << endl;
+		double start = m_clock.usec();
+		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
+		double end = m_clock.usec();
+		if (r)
+		{
+			cout << "-- FAIL! encoder.BeginEncode error " << wirehair::GetResultString(r) << ".  Success rate = " << successes / (double)trials << endl;
+			//cin.get();
+			//return 1;
+		}
+		else
+		{
+			++successes;
+			cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with seeds " << g_c_seed << " and " << g_p_seed << ".  Success rate = " << successes / (double)trials << endl;
+			//cin.get();
+			break;
+		}
+	}
 
 	CatsChoice prng;
 
@@ -66,9 +77,9 @@ int main()
 			encoder.Encode(id, block);
 
 			++blocks_needed;
-			start = m_clock.usec();
+			double start = m_clock.usec();
 			wirehair::Result r = decoder.Decode(id, block);
-			end = m_clock.usec();
+			double end = m_clock.usec();
 
 			if (r != wirehair::R_MORE_BLOCKS)
 			{
