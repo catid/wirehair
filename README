@@ -12,6 +12,12 @@
 	needed is random, though the number of additional blocks is low and
 	does not vary based on the size of the data.
 
+		Wirehair is released under the BSD license, which means that I ask
+	only that if you use my software that in the binary distribution of your
+	software you include the copyright notice in WIREHAIR.LICENSE and maybe
+	it would be nice to say thank you in an Email. =)
+
+-Christopher A Taylor (chris@slycog.com) http://slycog.com
 
 News Update: 3/1/2012
 	
