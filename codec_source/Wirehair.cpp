@@ -29,7 +29,6 @@
 /*
 	TODO:
 
-	3. Update documentation for all functions
 	5. Implement partial input message
 	6. Implement lookup table for codec parameters
 	7. Generate lookup table
@@ -40,28 +39,29 @@
 /*
 	Encoding Setup:
 
-		T = Size of original data in bytes.
-		N = ceil(T / M) = Count of blocks in the original data.
+		S = Size of original data in bytes.
+		N = ceil(S / M) = Count of blocks in the original data.
 
 		(1) Generator Matrix Construction
 
 			A = Original data blocks, N blocks long.
-			H = Count of dense matrix rows (see below), chosen based on N.
-			E = N + H blocks = Count of encoded data blocks.
-			B = Encoded data blocks, E blocks long.
+			D = Count of dense matrix rows (see below), chosen based on N.
+			E = N + D blocks = Count of encoded data blocks.
+			R = Recovery blocks, E blocks long.
 			G = Generator matrix, with E rows and E columns.
+			0 = Dense rows sum to zero.
 
 			+---------+---+   +---+   +---+
 			|         |   |   |   |   |   |
 			|    P    | M |   |   |   | A |
-			|         |   | x | B | = |   |
+			|         |   | x | R | = |   |
 			+---------+---+   |   |   +---+
 			|    D    | I |   |   |   | 0 |
 			+---------+---+   +---+   +---+
 
 			A and B are Ex1 vectors of blocks.
 				A has N rows of the original data padded by H zeroes.
-				B has E rows of encoded blocks.
+				R has E rows of encoded blocks.
 
 			G is the ExE binary matrix on the left.
 				P is the NxN peeling matrix
@@ -70,11 +70,11 @@
 					- Used to mix the H dense rows into the N peeling rows.
 				D is the HxN dense matrix
 					- Used to improve recovery properties.
-				I is the HxH identity matrix.
+				I is an HxH random-looking invertible matrix.
 
 			G matrices for each value of N are precomputed offline and used
 			based on the length of the input data, which guarantees that G
-			is invertible.
+			is invertible.  The I matrix is also selected based on its size.
 
 		(2) Generating Matrix P
 
@@ -86,16 +86,16 @@
 
 		(3) Generating Matrix M
 
-			Rows of M are generated with a constant weight of 2 and 1 bits are
+			Rows of M are generated with a constant weight of 3 and 1 bits are
 			uniformly distributed over the H columns.
 
 		(4) Generating Matrix D
 
-			Each bit has a 50% chance of being set.
+			Each bit has about a 50% chance of being set.
 
 		(5) Generator Matrix Inversion
 
-			An optimized sparse inversion technique is used to solve for B.
+			An optimized sparse technique is used to solve the recovery blocks.
 
 	---------------------------------------------------------------------------
 	Sparse Matrix Inversion:
@@ -111,136 +111,7 @@
 		(4) Substitution
 			- Solves for remaining rows from initial peeling
 
-	(1) Peeling:
-
-		Until N rows are received, the peeling algorithm is executed:
-
-		Columns have 3 states:
-
-		(1) Peeled - Solved by a row during peeling process.
-		(2) Deferred - Will be solved by a row during Gaussian Elimination.
-		(3) Unmarked - Still deciding.
-
-		Initially all columns are unmarked.
-
-		As a row comes in, the count of columns that are Unmarked is calculated.
-	If that count is 1, then the column is marked as Peeled and is solved by
-	the received row.  Peeling then goes through all other rows that reference
-	that peeled column, reducing their count by 1, potentially causing other
-	columns to be marked as Peeled.  This "peeling avalanche" is desired.
-
-		After N rows, an unmarked column is marked Deferred and the count of all
-	rows that reference that column are decremented by 1.  Peeling avalanche may
-	occur as a result.  This process is repeated until all columns are marked.
-
-	A comment on the matrix state after peeling:
-
-		After the peeling solver has completed, only Deferred columns remain to be
-	solved.  Conceptually the matrix can be re-ordered in the order of solution
-	so that the matrix resembles this example:
-
-		+-----+---------+-----+
-		|   1 | 1       | 721 | <-- Peeled row 1
-		| 1   |   1     | 518 | <-- Peeled row 2
-		| 1   | 1   1   | 934 | <-- Peeled row 3
-		|   1 | 1   1 1 | 275 | <-- Peeled row 4
-		+-----+---------+-----+
-		| 1   | 1 1   1 | 123 | <-- Deferred rows
-		|   1 |   1 1 1 | 207 | <-- Deferred rows
-		+-----+---------+-----+
-		   ^       ^       ^---- Row value (unmodified so far, ie. 1500 bytes)
-		   |       \------------ Peeled columns
-		   \-------------------- Deferred columns
-
-		Re-ordering the actual matrix is not required, but the lower-triangular
-	form of the peeled matrix is apparent in the diagram above.
-
-	(2) Compression:
-
-		The next step is to compress the GE rows and columns into a smaller GE
-	matrix that GE will be applied to.  Note that up to this point, no row ops
-	have been performed.  GE row values will be calculated in this step for use
-	during GE.
-
-		For each peeled column from the last to the first,
-			For each GE row that contains that column,
-				Add the corresponding peeled row to it.
-			Next
-		Next
-
-		The resultant conceptual matrix may resemble this example:
-
-		+-----+---------+-----+
-		|   1 | 0 0 0 0 | 285 |
-		| 1 1 | 0 0 0 0 | 712 |
-		+-----+---------+-----+
-		   ^       ^       ^---- Row values
-		   |       \------------ Peeled matrix (rectangular)
-		   \-------------------- GE square matrix
-
-		The density of the rows is indicated in the example because it is worth
-	considering.  Some of the rows may be low density, so mixing them before
-	calculating the new row value is undesirable.  By calculating the row values
-	at this point, row operations may be saved.
-
-	(3) Gaussian Elimination:
-
-		In this step the GE square matrix is put in upper-triangular form and
-	initial GE square matrix row values are calculated.  Back-substitution
-	will be performed afterwards to complete solving for the row values.
-
-		For each GE matrix column from left to right,
-			For each GE matrix row from top to bottom,
-				If GE matrix bit is set,
-					Set this row as the pivot for this column.
-
-					For each remaining GE matrix row containing this column,
-						Sum other GE square matrix rows with the pivot row,
-							including the row values.
-					Next
-				End
-			Next
-
-			If no pivot was found for this column,
-				The process fails and needs to resume on the next block.
-			End
-		Next
-
-		At successful completion of this process, all pivots have been found.
-	The GE square matrix is now in upper triangular form.
-
-		To complete solving for the GE row values, the upper triangular part
-	of the GE square matrix must be eliminated.  This process will diagonalize
-	the GE square matrix, conceptually leaving it as an identity matrix.
-
-		For each pivot column from last to first,
-			For each pivot row above it,
-				If the pivot row contains the column,
-					Add the pivot column value to the pivot row value
-				End
-			Next
-		Next
-
-		Note that the GE square matrix is no longer needed and the pivot row
-	values are entirely determined.  Example result:
-
-		+-----+
-		| 001 | <- Pivot 1
-		| 002 | <- Pivot 2
-		+-----+
-
-	(4) Substitution:
-
-		Finally the peeled row values may be determined by regenerating the
-	whole matrix and summing up columns in the original order of peeling.
-
-		For each peeled row from first to last,
-			For each active column in the row,
-				Add corresponding row value to peeled row.
-			Next
-		Next
-
-	Review:
+		See the code comments in Wirehair.cpp for documentation of each step.
 
 		After all of these steps, the row values have been determined and the
 	matrix inversion is complete.  Let's analyze the complexity of each step:
@@ -265,16 +136,9 @@
 		(2) Compression
 			- Setup for Gaussian elimination on a wide rectangular matrix
 
-			Summing peeled rows into GE rows : O(k*N*N) bit operations
-
-			This algorithm is fairly complex in terms of real-world time
-			spent calculating it.  I expect about 10% of the run time to
-			be spent executing this code.  However the total execution
-			time is dominated by the number of row sum operations (large
-			XOR operations) so this non-linear asymptotic performance is
-			not a problem.
-
-			Summing to produce the row values : O(S*N) = O(N^1.5) row ops
+			The dense row multiplication takes O(N / 2 + ceil(N / D) * 2 * (D - 1))
+			where D is approximately SQRT(N), so dense row multiplication takes:
+			O(N / 2 + ceil(SQRT(N)) * SQRT(N)) = O(1.5N).
 
 		(3) Gaussian Elimination
 			- Gaussian elimination on a (hopefully) small square matrix
@@ -292,22 +156,14 @@
 			Assume the GE square matrix is SxS, and S = sqrt(N) on
 			average thanks to the peeling solver above.
 
-			Back-substitute inside the GE matrix : O(S^2) = O(N) row ops
+			Solving inside the GE matrix : O(S^2) = O(N) row ops
 
 		(4) Substitution
 			- Solves for remaining rows from initial peeling
 
 			Regenerate peeled matrix rows and substitute : O(N*k) row ops
 
-		As compared with matrix multiplication, this algorithm has:
-
-		+ Memory overhead for the peeling solver state.
-		+ O(N^2) bit operations for Compression.
-		+ O(N + N^1.5) heavy row ops for GE.
-
-		It gains back a little because it is not spending additional row ops
-		to solve row values involved in GE.  The final substitution step is
-		the same as matrix multiplication for those rows (same as the encoder).
+		So overall, the operation is roughly linear in row operations.
 
 	---------------------------------------------------------------------------
 
@@ -330,10 +186,10 @@
 			New rows are received and submitted directly to the GE solver,
 		hopefully providing the missing pivot.  Once enough rows have been
 		received, back-substitution reconstructs matrix B.
-		
+
 			The first N rows of the original matrix G are then used to fill in
 		any blocks that were not received from the original N blocks, and the
-		original data is received.
+		original data is recovered.
 */
 
 #include "Wirehair.hpp"
@@ -778,7 +634,8 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 
 		I also tried different probabilities for weight 1 rows, and
 	settled on 1/128 as having the best performance in a few select
-	tests.
+	tests.  Setting it too high or too low (or even to zero) tends
+	to reduce the performance of the codec.
 
 		The truncation point and the weight-1 row probability might
 	be best selected based on the block count N.  This needs to be
@@ -798,7 +655,7 @@ static const u32 WEIGHT_DIST[] = {
 
 u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
 {
-	// Select probability of weight-1 row here:
+	// Select probability of weight-1 rows here:
 	static const u32 P1 = (u32)((1./128) * 0xffffffff);
 	static const u32 P2 = WEIGHT_DIST[1];
 	static const u32 P3 = WEIGHT_DIST[2];
@@ -828,7 +685,7 @@ void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u
 
 	// Generate peeling matrix row weight
 	u16 weight = GeneratePeelRowWeight(prng.Next());
-	u16 max_weight = peel_column_count / 2;
+	u16 max_weight = peel_column_count / 2; // Do not set more than N/2 at a time
 	peel_weight = (weight > max_weight) ? max_weight : weight;
 
 	// Generate peeling matrix column selection parameters for row
@@ -852,6 +709,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 	p_seed = g_p_seed;// TODO: Remove these
 	c_seed = g_c_seed;
 
+	// This choice of dense count is based on tuning manually at a bunch of different block counts and
+	// picking what seemed like a good trend line.  It really needs to be simulated.
 	dense_count = SquareRoot16(block_count) + (block_count / 150) + 2;
 	return true;
 }
@@ -889,11 +748,12 @@ struct Codec::PeelRow
 };
 #pragma pack(pop)
 
+// Marks for PeelColumn
 enum MarkTypes
 {
-	MARK_TODO,
-	MARK_PEEL,
-	MARK_DEFER
+	MARK_TODO,	// Unmarked
+	MARK_PEEL,	// Was solved by peeling
+	MARK_DEFER	// Deferred to Gaussian elimination
 };
 
 #pragma pack(push)
@@ -962,7 +822,6 @@ bool Codec::OpportunisticPeeling(u32 row_i, u32 id)
 	u16 a = row->peel_a;
 	u16 unmarked_count = 0;
 	u16 unmarked[2];
-
 	for (;;)
 	{
 		CAT_IF_DUMP(cout << column_i << " ";)
@@ -1150,7 +1009,7 @@ void Codec::Peel(u16 row_i, PeelRow *row, u16 column_i)
 	a tie between two or more columns based on just that criterion then, of the
 	columns that tied, the one that affects the most rows is selected.
 
-		In practice with a well designed peeling matrix, only about sqrt(N)
+		In practice with a well designed peeling matrix, about sqrt(N) + N/150
 	columns must be deferred to Gaussian elimination using this greedy approach.
 */
 
@@ -1239,61 +1098,80 @@ void Codec::GreedyPeeling()
 
 /*
 	If using a naive approach, this is by far the most complex step of
-	the matrix inversion.  The approach outlined here makes it minor.
-	At this point the generator matrix has been re-organized
+	the matrix inversion.  The approach outlined here makes it much
+	easier.  At this point the generator matrix has been re-organized
 	into peeled and deferred rows and columns:
 
 		+-----------------------+
-		| p p p p p | B B | C C |
+		| P P P P P | D D | M M |
 		+-----------------------+
 					X
 		+-----------+-----+-----+
-		| 5 2 6 1 3 | 4 0 | x y |
+		| 5 2 6 1 3 | 4 0 | 7 8 |
 		+-----------+-----+-----+---+   +---+
-		| 1         | 0 0 | 1 0 | 0 |   | p |
-		| 0 1       | 0 0 | 0 1 | 5 |   | p |
-		| 1 0 1     | 1 0 | 1 0 | 3 |   | p |
-		| 0 1 0 1   | 0 0 | 0 1 | 4 |   | p |
-		| 0 1 0 1 1 | 1 1 | 1 0 | 1 |   | p |
+		| 1         | 0 0 | 1 0 | 0 |   | P |
+		| 0 1       | 0 0 | 0 1 | 5 |   | P |
+		| 1 0 1     | 1 0 | 1 0 | 3 |   | P |
+		| 0 1 0 1   | 0 0 | 0 1 | 4 |   | P |
+		| 0 1 0 1 1 | 1 1 | 1 0 | 1 |   | P |
 		+-----------+-----+-----+---| = |---|
-		| 0 1 0 1 1 | 1 1 | 0 1 | 2 |   | A |
-		| 0 1 0 1 0 | 0 1 | 1 0 | 6 |   | A |
-		+-----------+-----+-----+---|   |---|
-		| 1 1 0 1 1 | 1 1 | 1 0 | x |   | 0 |
-		| 1 0 1 1 0 | 1 0 | 0 1 | y |   | 0 |
+		| 1 1 0 1 1 | 1 1 | 1 0 | 7 |   | 0 |
+		| 1 0 1 1 0 | 1 0 | 0 1 | 8 |   | 0 |
 		+-----------+-----+-----+---+   +---+
+		| 0 1 1 0 0 | 1 1 | 0 1 | 2 |   | D |
+		| 0 1 0 1 0 | 0 1 | 1 0 | 6 |   | D |
+		+-----------+-----+-----+---|   |---|
+		      ^          ^     ^- Mixing columns
+		      |          \------- Deferred columns
+		      \------------------ Peeled columns intersections with deferred rows
 
 	P = Peeled rows/columns (re-ordered)
-	B = Columns deferred for GE
-	C = Mixing columns always deferred for GE
-	A = Sparse rows from peeling matrix deferred for GE
-	0 = Dense rows from check matrix deferred for GE
+	D = Deferred rows/columns (order of deferment)
+	M = Mixing columns always deferred for GE
+	0 = Dense rows from check matrix always deferred for GE, that sum to 0
 
 		Since the re-ordered matrix above is in lower triangular form,
 	and since the weight of each row is limited to a constant, the cost
-	of inverting the peeled matrix is O(n).  Inverting the peeled matrix
-	will cause the mix and deferred columns to add up and become dense.
-	These columns are stored in the same order as in the GE matrix, in
-	a long vertical matrix with N rows.
+	of diagonalizing the peeled matrix is O(n).  Diagonalizing the peeled
+	matrix will cause the mix and deferred columns to add up and become
+	dense.  These columns are stored in the same order as in the GE matrix,
+	in a long vertical matrix with N rows, called the Compression matrix.
 
-		After inverting the peeling matrix, causing the mixing columns
-	to become dense, the peeling matrix will be the identity matrix.
-	Peeled column output blocks can be used to store the temporary blocks
-	generated by this inversion.  These temporary blocks will be overwritten
-	later during Substitution.  It then becomes easy to eliminate the
-	peeled columns of the deferred rows.  These are then eliminated in
-	O(sqrt(n)) time since there are k*sqrt(n) of them and each is sparse.
+		After diagonalizing the peeling matrix, the peeling matrix will be
+	the identity matrix.  Peeled column output blocks can be used to store
+	the temporary block values generated by this process.  These temporary
+	blocks will be overwritten and lost later during Substitution.
 
-		Initially, only the dense mix and deferred columns are useful for
-	forming the GE matrix.  After the GE matrix is inverted, the steps used
-	to eliminate the peeled columns of the deferred rows can be followed again
-	to generate the columns solved by GE in the correct output block locations.
-	Note that it would be possible to generate these columns earlier but the
-	output block locations are not known until GE Triangle() completes, so they
-	would need to be shuffled into the right locations, which would require
-	more memory and/or memcopies.
+		To finish compressing the matrix into a form for Gaussian elimination,
+	all of the peeled columns of the deferred/dense rows must be zeroed.
+	Wherever a column is set to 1 in a deferred/dense row, the Compression
+	matrix row that solves that peeled column is added to the deferred row.
+	Essentially the peeled column intersection with the deferred rows are
+	multiplied by the peeled matrix to produce initial row values and matrix
+	rows for the GE matrix in the lower right.
+
+		This process does not actually produce any final column values because
+	at this point it is not certain where those values will end up.  Instead,
+	a record of what operations were performed needs to be stored and followed
+	later after the destination columns are determined by Gaussian elimination.
 */
 
+/*
+	SetDeferredColumns
+
+		This function initializes some mappings between GE columns and
+	column values, and it sets bits in the Compression matrix in rows
+	that reference the deferred columns.  These bits will get mixed
+	throughout the Compression matrix and will make it very dense.
+
+	For each deferred column,
+		Set bit for each row affected by this column.
+		Map GE column to this column.
+		Map this column to the GE column.
+
+	For each mixing column,
+		Map GE column to this column.
+*/
 void Codec::SetDeferredColumns()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetDeferredColumns ----" << endl << endl;)
@@ -1342,6 +1220,14 @@ void Codec::SetDeferredColumns()
 	}
 }
 
+/*
+	SetMixingColumnsForDeferredRows
+
+		This function generates the mixing column bits
+	for each deferred row in the GE matrix.  It also
+	marks the row's peel_column with LIST_TERM so that
+	later it will be easy to check if it was deferred.
+*/
 void Codec::SetMixingColumnsForDeferredRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetMixingColumnsForDeferredRows ----" << endl << endl;)
@@ -1357,21 +1243,24 @@ void Codec::SetMixingColumnsForDeferredRows()
 		// Mark it as deferred for the following loop
 		row->peel_column = LIST_TERM;
 
-		// Generate mixing columns for this row
+		// Set up mixing column generator
 		u64 *ge_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
 
+		// Generate mixing column 1
 		u16 ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
 		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
 
+		// Generate mixing column 2
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
 		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
 
+		// Generate mixing column 3
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
@@ -1380,6 +1269,27 @@ void Codec::SetMixingColumnsForDeferredRows()
 	}
 }
 
+/*
+	PeelDiagonal
+
+		This function diagonalizes the peeled rows and columns of the
+	generator matrix.  The result is that the peeled submatrix is the
+	identity matrix, and that the other columns of the peeled rows are
+	very dense and have temporary block values assigned.  These dense
+	columns are used to efficiently zero out the peeled columns of the
+	other rows.
+
+		This function is one of the most expensive in the whole codec,
+	because its memory access patterns are not cache-friendly.
+
+	For each peeled row in forward solution order,
+		Set mixing column bits for the row in the Compression matrix.
+		Generate row block value.
+		For each row that references this row in the peeling matrix,
+			Add Compression matrix row to referencing row.
+			If row is peeled,
+				Add row block value.
+*/
 void Codec::PeelDiagonal()
 {
 	CAT_IF_DUMP(cout << endl << "---- PeelDiagonal ----" << endl << endl;)
@@ -1404,20 +1314,23 @@ void Codec::PeelDiagonal()
 
 		CAT_IF_DUMP(cout << "Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
 
-		// Generate mixing columns for this row
+		// Set up mixing column generator
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
 
+		// Generate mixing column 1
 		u16 ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
 		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
 
+		// Generate mixing column 2
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
 		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
 
+		// Generate mixing column 3
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i << endl;)
@@ -1497,6 +1410,13 @@ void Codec::PeelDiagonal()
 	CAT_IF_ROWOP(cout << "PeelDiagonal used " << rowops << " row ops" << endl;)
 }
 
+/*
+	CopyDeferredRows
+
+		This function copies deferred rows from the Compression matrix
+	into their final location in the GE matrix.  It also maps the GE rows
+	to the deferred rows.
+*/
 void Codec::CopyDeferredRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- CopyDeferredRows ----" << endl << endl;)
@@ -1515,30 +1435,31 @@ void Codec::CopyDeferredRows()
 		// Set row map for this deferred row
 		_ge_row_map[ge_row_i] = defer_row_i;
 	}
-
-	CAT_IF_DUMP(cout << "After copying deferred rows:" << endl;)
-	CAT_IF_DUMP(PrintGEMatrix();)
 }
 
 /*
-	Important Optimization: Check Matrix Structure
+	Important Optimization: Dense Row Structure
 
-		After compression, the GE matrix looks like this:
+		After compression, the GE matrix is a square matrix that
+	looks like this:
 
 		+-----------------+----------------+--------------+
-		|  Dense Deferred | Dense Deferred | Dense Mixing | <- About half the matrix
+		|  Dense Deferred | Dense Deferred | Dense Mixing | <- About half
 		|                 |                |              |
 		+-----------------+----------------+--------------+
-		|                 | Dense Deferred | Dense Mixing | <- About half the matrix
+		|                 | Dense Deferred | Dense Mixing | <- About half
 		|        0        |                |              |
 		|                 |----------------+--------------+
-		|                 | Sparse Deferred| Dense Mixing | <- Just the last few rows
+		|                 | Sparse Deferred| Dense Mixing | <- Last few rows
 		+-----------------+----------------+--------------+
 		         ^                  ^---- Middle third of the columns
 				 \------ Left third of the columns
 
 		The dense check rows are generated so that they can quickly be
-	eliminated with as few row operations as possible.
+	eliminated with as few row operations as possible.  This elimination
+	can be visualized as a matrix-matrix multiplication between the
+	peeling submatrix and the deferred/dense submatrix intersection with
+	the peeled columns.
 
 		I needed to find a way to generate a binary matrix that LOOKS
 	random but actually only differs by 2 bits per row.  I looked at
@@ -1581,8 +1502,29 @@ void Codec::CopyDeferredRows()
 	that this type of matrix is NEVER invertible, so the perfect
 	structure must be destroyed in order to get a good code for
 	error correction.
-*/
 
+		Here is the MultiplyDenseRows() process:
+
+	Split the check matrix into squares.
+	For each square,
+		Shuffle the destination row order.
+		Shuffle the bit flip order.
+		Generate a random bit string with weight D/2 for the first output row.
+		Reshuffle the bit flip order. <- Helps recovery properties a lot!
+		Flip two bits for each row of the first half of the outputs.
+		Reshuffle the bit flip order. <- Helps recovery properties a lot!
+		Flip two bits for each row of the last half of the outputs.
+
+		This effectively destroys the perfection of the code, and makes
+	the square matrices invertible about as often as a random GF2 code,
+	so that using these easily generated square matrices does not hurt
+	the error correction properties of the code.
+
+		MultiplyDenseRows() does not actually use memxor() to generate
+	any row block values because it is not certain where the values
+	will end up, yet.  So instead this multiplication is done again
+	in the MultiplyDenseValues() function after Triangle() succeeds.
+*/
 void Codec::MultiplyDenseRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
@@ -1591,29 +1533,28 @@ void Codec::MultiplyDenseRows()
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
 
+	// For each block of columns,
 	PeelColumn *column = _peel_cols;
-	u16 column_i = 0;
-
-	// For columns that we can put a DxD square matrix in:
 	u64 *temp_row = _ge_matrix + _ge_pitch * _ge_rows;
-	const int check_count = _dense_count;
+	const int dense_count = _dense_count;
 	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
-	for (; column_i < _block_count; column_i += check_count, column += check_count)
+	for (u16 column_i = 0; column_i < _block_count; column_i += dense_count, column += dense_count)
 	{
 		CAT_IF_DUMP(cout << "Shuffled check matrix starting at column " << column_i << ":" << endl;)
 
-		int max_x = check_count;
-		if (column_i + check_count > _block_count)
+		// Handle final columns
+		int max_x = dense_count;
+		if (column_i + dense_count > _block_count)
 			max_x = _block_count - column_i;
 
 		// Shuffle row and bit order
-		ShuffleDeck16(prng, rows, check_count);
-		ShuffleDeck16(prng, bits, check_count);
+		ShuffleDeck16(prng, rows, dense_count);
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Initialize counters
-		u16 set_count = (check_count + 1) >> 1;
-		u16 *set_bits = bits;
-		u16 *clr_bits = set_bits + set_count;
+		const u16 set_count = (dense_count + 1) >> 1;
+		const u16 *set_bits = bits;
+		const u16 *clr_bits = set_bits + set_count;
 
 		CAT_IF_DUMP( u64 disp_row[(CAT_MAX_CHECK_ROWS+63)/64]; CAT_OBJCLR(disp_row); )
 
@@ -1639,25 +1580,26 @@ void Codec::MultiplyDenseRows()
 				}
 			}
 			CAT_IF_DUMP(disp_row[bit_i >> 6] ^= (u64)1 << (bit_i & 63);)
-		}
+		} // next bit
 
 		// Set up generator
 		const u16 *row = rows;
 
 		// Store first row
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
+		CAT_IF_DUMP(for (int ii = 0; ii < dense_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 
-		ShuffleDeck16(prng, bits, check_count);
+		// Reshuffle bit order
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate first half of rows
-		const int loop_count = (check_count >> 1);
+		const int loop_count = (dense_count >> 1);
 		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 
-			// Add in peeled columns
+			// Flip bit 1
 			if (bit0 < max_x)
 			{
 				if (column[bit0].mark == MARK_PEEL)
@@ -1675,6 +1617,7 @@ void Codec::MultiplyDenseRows()
 			}
 			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
 
+			// Flip bit 2
 			if (bit1 < max_x)
 			{
 				if (column[bit1].mark == MARK_PEEL)
@@ -1693,21 +1636,21 @@ void Codec::MultiplyDenseRows()
 			CAT_IF_DUMP(disp_row[bit1 >> 6] ^= (u64)1 << (bit1 & 63);)
 
 			// Store in row
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
+			CAT_IF_DUMP(for (int ii = 0; ii < dense_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-		}
+		} // next row
 
-		const int second_loop_count = loop_count - 1 + (check_count & 1);
-
-		ShuffleDeck16(prng, bits, check_count);
+		// Reshuffle bit order
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate second half of rows
+		const int second_loop_count = loop_count - 1 + (dense_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 
-			// Add in peeled columns
+			// Flip bit 1
 			if (bit0 < max_x)
 			{
 				if (column[bit0].mark == MARK_PEEL)
@@ -1725,6 +1668,7 @@ void Codec::MultiplyDenseRows()
 			}
 			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
 
+			// Flip bit 2
 			if (bit1 < max_x)
 			{
 				if (column[bit1].mark == MARK_PEEL)
@@ -1743,10 +1687,10 @@ void Codec::MultiplyDenseRows()
 			CAT_IF_DUMP(disp_row[bit1 >> 6] ^= (u64)1 << (bit1 & 63);)
 
 			// Store in row
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
+			CAT_IF_DUMP(for (int ii = 0; ii < dense_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
 			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-		}
+		} // next row
 
 		CAT_IF_DUMP(cout << endl;)
 	} // next column
@@ -1754,23 +1698,23 @@ void Codec::MultiplyDenseRows()
 
 
 /*
-	One more subtle optimization.  Depending on how the GE matrix
-	is constructed, it can be put in a roughly upper-triangular form
-	from the start so it looks like this:
+		One more subtle optimization.  Why not.  Depending on how the GE
+	matrix is constructed, it can be put in a roughly upper-triangular
+	form from the start so it looks like this:
 
-		+---------+---------+
-		| D D D D | D D D 1 |
-		| D D D D | D D 1 M |
-		| D D D D | D 1 M M |
-		| D D D D | 1 M M M |
-		+---------+---------+
-		| 0 0 0 1 | M M M M |
-		| 0 0 0 0 | M M M M |
-		| 0 0 0 1 | M M M M |
-		| 0 0 0 0 | M M M M |
-		+---------+---------+
+		+-------+-------+
+		| D D D | D D 1 |
+		| D D D | D 1 M | <- Dense rows
+		| D D D | 1 M M |
+		+-------+-------+
+		| 0 0 1 | M M M |
+		| 0 0 0 | M M M | <- Sparse deferred rows
+		| 0 0 0 | M M M |
+		+-------+-------+
+		    ^       ^------- Mixing columns
+		    \--------------- Deferred columns
 
-	In the example above, the top 4 rows are dense matrix rows.
+		In the example above, the top 4 rows are dense matrix rows.
 	The last 4 columns are mixing columns and are also dense.
 	The lower left sub-matrix is sparse and roughly upper triangular
 	because it is the intersection of sparse rows in the generator
@@ -1778,17 +1722,32 @@ void Codec::MultiplyDenseRows()
 	from last deferred to first, and adding deferred columns starting
 	from last deferred to first.
 
-	Gaussian elimination will proceed from left to right on the matrix.
-	So, having an upper triangular form will prevent left-most zeroes
-	from being eaten up when a row is eliminated by one above it.  This
-	reduces row operations.  For example, GE on a 64x64 matrix will do
-	on average 100 fewer row operations on this form rather than its
+		Gaussian elimination will proceed from left to right on the
+	matrix.  So, having an upper triangular form will prevent left-most
+	zeroes from being eaten up when a row is eliminated by one above it.
+	This reduces row operations.  For example, GE on a 64x64 matrix will
+	do on average 100 fewer row operations on this form rather than its
 	transpose (where the sparse part is put in the upper right).
 */
 
 
 //// (3) Gaussian Elimination
 
+/*
+	Triangle
+
+		This function performs normal Gaussian elimination on the GE
+	matrix in order to put it in upper triangular form, which would
+	solve the system of linear equations represented by the matrix.
+	The only wrinkle here is that instead of zeroing the columns as
+	it goes, this algorithm will keep a record of which columns were
+	added together so that these steps can be followed later to
+	produce the column values.  Note that memxor() is not used here.
+
+		It uses a pivot array that it swaps row pointers around in, as
+	opposed to actually swapping rows in the matrix, which would be
+	more expensive.
+*/
 bool Codec::Triangle()
 {
 	CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
@@ -1803,10 +1762,9 @@ bool Codec::Triangle()
 	u64 ge_mask = 1;
 	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 	{
+		// For each remaining GE row that might be the pivot,
 		int word_offset = pivot_i >> 6;
 		u64 *ge_matrix_offset = _ge_matrix + word_offset;
-
-		// Find pivot
 		bool found = false;
 		for (u16 pivot_j = pivot_i; pivot_j < pivot_count; ++pivot_j)
 		{
@@ -1838,9 +1796,10 @@ bool Codec::Triangle()
 					// If the bit was found,
 					if (*rem_row & ge_mask)
 					{
-						// Add the pivot row to eliminate the bit from this row, preserving previous bits
+						// Unroll first word to handle masked word and for speed
 						*rem_row ^= row0;
 
+						// Add the pivot row to eliminate the bit from this row, preserving previous bits
 						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
 							rem_row[ii] ^= ge_row[ii];
 					}
@@ -1866,6 +1825,26 @@ bool Codec::Triangle()
 	return true;
 }
 
+/*
+	InitializeColumnValues
+
+		This function initializes the output block value for each column
+	that was solved by Gaussian elimination.  For deferred rows it follows
+	the same steps performed earlier in PeelDiagonal() just for those rows.
+	The row values were not formed at that point because the destination
+	was uncertain.
+
+	For each pivot that solves the GE matrix,
+		If GE row is from a dense row,
+			Initialize row value to 0.
+		Else it is from a deferred row,
+			For each peeled column that it references,
+				Add in that peeled column's row value from Compression.
+
+	For each remaining unused row, (happens in the decoder for extra rows)
+		If the unused row is a dense row,
+			Set the GE row map entry to LIST_TERM so it can be ignored later.
+*/
 void Codec::InitializeColumnValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- InitializeColumnValues ----" << endl << endl;)
@@ -1877,14 +1856,17 @@ void Codec::InitializeColumnValues()
 	u16 pivot_i;
 	for (pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 	{
+		// Lookup pivot column, GE row, and destination buffer
 		u16 column_i = _ge_col_map[pivot_i];
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _recovery_blocks + _block_bytes * column_i;
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << column_i << " with GE row " << ge_row_i << " : ";)
 
+		// If GE row is from a dense row,
 		if (ge_row_i < _dense_count)
 		{
+			// Dense rows sum to zero
 			memset(buffer_dest, 0, _block_bytes);
 
 			// Store which column solves the dense row
@@ -1893,15 +1875,25 @@ void Codec::InitializeColumnValues()
 			CAT_IF_DUMP(cout << "[0]";)
 			CAT_IF_ROWOP(++rowops;)
 		}
-		else
+		else // GE row is from a deferred row:
 		{
+			// Look up row and input value for GE row
 			u16 pivot_row_i = _ge_row_map[ge_row_i];
 			const u8 *combo = _input_blocks + _block_bytes * pivot_row_i;
+			PeelRow *row = &_peel_rows[pivot_row_i];
+
+			// If copying from final input block,
+			if (pivot_row_i == _block_count - 1)
+			{
+				memcpy(buffer_dest, combo, _input_final_bytes);
+				memset(buffer_dest + _input_final_bytes, 0, _block_count - _input_final_bytes);
+				CAT_IF_ROWOP(++rowops;)
+				combo = 0;
+			}
 
 			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
 
 			// Eliminate peeled columns:
-			PeelRow *row = &_peel_rows[pivot_row_i];
 			u16 column_i = row->peel_x0;
 			u16 a = row->peel_a;
 			u16 weight = row->peel_weight;
@@ -1939,7 +1931,7 @@ void Codec::InitializeColumnValues()
 	{
 		u16 ge_row_i = _ge_pivots[pivot_i];
 
-		// If row is a check row,
+		// If row is a dense row,
 		if (ge_row_i < _dense_count)
 		{
 			// Mark it for skipping
@@ -1956,9 +1948,20 @@ void Codec::InitializeColumnValues()
 	CAT_IF_ROWOP(cout << "InitializeColumnValues used " << rowops << " row ops" << endl;)
 }
 
-void Codec::AddCheckValues()
+/*
+	MultiplyDenseValues
+
+		This function follows the same order of operations as the
+	MultiplyDenseRows() function to add in peeling column values
+	to the dense rows.  Deferred rows are handled above in the
+	InitializeColumnValues() function.
+
+		See MultiplyDenseRows() comments for justification of the
+	design of the dense row structure.
+*/
+void Codec::MultiplyDenseValues()
 {
-	CAT_IF_DUMP(cout << endl << "---- AddCheckValues ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseValues ----" << endl << endl;)
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
@@ -1966,33 +1969,28 @@ void Codec::AddCheckValues()
 	CatsChoice prng;
 	prng.Initialize(_c_seed);
 
-	u8 *temp_block = _recovery_blocks + _block_bytes * (_block_count + _dense_count);
-	u16 next_dense_trigger = 0, next_dense_submatrix = 0;
-	const int check_count = _dense_count;
-
-	// For columns that we can put a DxD square matrix in:
-
+	// For each block of columns,
+	const int dense_count = _dense_count;
+	u8 *temp_block = _recovery_blocks + _block_bytes * (_block_count + dense_count);
 	const u8 *source_block = _recovery_blocks;
 	PeelColumn *column = _peel_cols;
-	u16 column_i = 0;
-
 	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
-	for (; column_i < _block_count; column_i += check_count,
-		column += check_count, source_block += _block_bytes * check_count)
+	for (u16 column_i = 0; column_i < _block_count; column_i += dense_count,
+		column += dense_count, source_block += _block_bytes * dense_count)
 	{
 		// Handle final columns
-		int max_x = check_count;
-		if (column_i + check_count > _block_count)
+		int max_x = dense_count;
+		if (column_i + dense_count > _block_count)
 			max_x = _block_count - column_i;
 
-		CAT_IF_DUMP(cout << endl << "For window of columns between " << column_i << " and " << column_i + check_count - 1 << " (inclusive):" << endl;)
+		CAT_IF_DUMP(cout << endl << "For window of columns between " << column_i << " and " << column_i + dense_count - 1 << " (inclusive):" << endl;)
 
 		// Shuffle row and bit order
-		ShuffleDeck16(prng, rows, check_count);
-		ShuffleDeck16(prng, bits, check_count);
+		ShuffleDeck16(prng, rows, dense_count);
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Initialize counters
-		u16 set_count = (check_count + 1) >> 1;
+		u16 set_count = (dense_count + 1) >> 1;
 		u16 *set_bits = bits;
 		u16 *clr_bits = set_bits + set_count;
 		const u16 *row = rows;
@@ -2055,10 +2053,11 @@ void Codec::AddCheckValues()
 		}
 		++row;
 
-		ShuffleDeck16(prng, bits, check_count);
+		// Reshuffle bit order
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate first half of rows
-		const int loop_count = (check_count >> 1);
+		const int loop_count = (dense_count >> 1);
 		for (int ii = 0; ii < loop_count; ++ii)
 		{
 			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
@@ -2098,11 +2097,11 @@ void Codec::AddCheckValues()
 			}
 		}
 
-		const int second_loop_count = loop_count - 1 + (check_count & 1);
-
-		ShuffleDeck16(prng, bits, check_count);
+		// Reshuffle bit order
+		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate second half of rows
+		const int second_loop_count = loop_count - 1 + (dense_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
 			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
@@ -2143,9 +2142,18 @@ void Codec::AddCheckValues()
 		}
 	} // next column
 
-	CAT_IF_ROWOP(cout << "AddCheckValues used " << rowops << " row ops" << endl;)
+	CAT_IF_ROWOP(cout << "MultiplyDenseValues used " << rowops << " row ops" << endl;)
 }
 
+/*
+	AddSubdiagonalValues
+
+		This function uses the bits that were left behind by the
+	Triangle() function to follow the same order of operations
+	to generate the row values for both deferred and dense rows.
+	It is aided by the already roughly upper-triangular form
+	of the GE matrix, making this function very cheap to execute.
+*/
 void Codec::AddSubdiagonalValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- AddSubdiagonalValues ----" << endl << endl;)
@@ -2156,6 +2164,7 @@ void Codec::AddSubdiagonalValues()
 	const u16 ge_rows = _defer_count + _dense_count;
 	for (u16 pivot_i = 0; pivot_i < ge_rows; ++pivot_i)
 	{
+		// Lookup pivot column, GE row, and destination buffer
 		u16 pivot_column_i = _ge_col_map[pivot_i];
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _recovery_blocks + _block_bytes * pivot_column_i;
@@ -2203,7 +2212,7 @@ void Codec::AddSubdiagonalValues()
 
 		But in practice, the window size is selected from simple heuristic
 	rules based on testing.  For this function, the window size stays between
-	3 and 6 so it is fine to use heuristics.  The matrix may look something like:
+	3 and 6 so it is fine to use heuristics.  The matrix may look like:
 
 		+---+---+---+---+
 		| A | 1 | 1 | 0 |
@@ -2261,6 +2270,13 @@ void Codec::AddSubdiagonalValues()
 #define CAT_WINDOW_THRESHOLD_6 (64 + 6)
 #define CAT_WINDOW_THRESHOLD_7 (128 + 7)
 
+/*
+	BackSubstituteAboveDiagonal
+
+		This function uses the windowed approach outlined above
+	to eliminate all of the bits in the upper triangular half,
+	completing solving for these columns.
+*/
 void Codec::BackSubstituteAboveDiagonal()
 {
 	CAT_IF_DUMP(cout << endl << "---- BackSubstituteAboveDiagonal ----" << endl << endl;)
@@ -2456,7 +2472,7 @@ void Codec::BackSubstituteAboveDiagonal()
 				}
 			}
 
-			// Calculate next window size
+			// If column index falls below window size,
 			pivot_i -= w;
 			if (pivot_i < next_check_i)
 			{
@@ -2480,8 +2496,8 @@ void Codec::BackSubstituteAboveDiagonal()
 				// Update window limit
 				win_lim = 1 << w;
 			}
-		}
-	}
+		} // next window
+	} // end if windowed
 #endif // CAT_WINDOWED_BACKSUB
 
 	// For each remaining pivot,
@@ -2517,6 +2533,23 @@ void Codec::BackSubstituteAboveDiagonal()
 	CAT_IF_ROWOP(cout << "BackSubstituteAboveDiagonal used " << rowops << " row ops" << endl;)
 }
 
+/*
+	Substitute
+
+		This function generates all of the remaining column values.
+	At the point this function is called, the GE columns were solved
+	by BackSubstituteAboveDiagonal().  The remaining column values
+	are solved by regenerating rows in forward order of peeling.
+
+		Note that as each row is generated, that all of the columns
+	active in that row have already been solved.  So long as the
+	substitution follows in forward solution order, this is guaranteed.
+
+		It is also possible to start from the Compression matrix values
+	and substitute into that matrix.  However, because the mixing columns
+	are so dense, it is actually faster in every case to just regenerate
+	the rows from scratch and throw away those results.
+*/
 void Codec::Substitute()
 {
 	CAT_IF_DUMP(cout << endl << "---- Substitute ----" << endl << endl;)
@@ -2617,23 +2650,18 @@ void Codec::Substitute()
 
 //// Compression-based Substitute
 
+#if defined(CAT_REUSE_COMPRESS)
+
 /*
 		Instead of throwing away the compression matrix, this approach reuses
 	the temporary values calculated during compression, and eliminates the
-	dense compression matrix with windowed back-substitution.  It is only best
+	dense compression matrix with windowed back-substitution.  It is only good
 	to use this approach for smaller N, because it scales as O(N^^1.4).  The
 	reason why you would want to use it at all is because it can reuse the
 	work from compression which had diagonalized the peeling matrix.
 
-		The thing is that in practice the codec is already so fast that the
-	added complexity kills the advantage of reducing the row operation count.
-	This might become useful at some point if I find a way to simplify the
-	inner loops.  Especially because it needs to allocate more memory for
-	temporary space it is pretty unlikely it will ever be better.  This is
-	tested and working though, so I'm leaving it in just in case.
+	In practice this approach is slower for all values of N and is unused.
 */
-
-#if defined(CAT_REUSE_COMPRESS)
 
 #define CAT_DISCARD_COMPRESS_MIN 32
 #define CAT_DISCARD_COMPRESS_MAX 1024
@@ -2646,7 +2674,7 @@ void Codec::CompressionBasedSubstitute()
 
 	CAT_IF_ROWOP(u32 window_rowops = 0;)
 
-	const int ge_rows = _defer_count + _added_count;
+	const int ge_rows = _defer_count + _dense_count;
 	int pivot_i = ge_rows - 1;
 
 	// Calculate initial window size
@@ -2927,6 +2955,12 @@ void Codec::CompressionBasedSubstitute()
 
 //// Main Driver
 
+/*
+	ChooseMatrix
+
+		This function determines the generator matrix to use based on the
+	given message bytes and bytes per block.
+*/
 Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 {
 	CAT_IF_DUMP(cout << endl << "---- ChooseMatrix ----" << endl << endl;)
@@ -2963,6 +2997,39 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	return R_WIN;
 }
 
+/*
+	SolveMatrix
+
+		This function attempts to solve the matrix, given that the
+	matrix is currently square and may be solvable at this point
+	without any additional blocks.
+
+		It performs the peeling, compression, and GE steps:
+
+	(1) Peeling:
+		GreedyPeeling()
+
+	(2) Compression:
+
+		Allocate GE and Compression matrix now that the size is known:
+
+			AllocateMatrix()
+
+		Produce the Compression matrix:
+
+			SetDeferredColumns()
+			SetMixingColumnsForDeferredRows()
+			PeelDiagonal()
+
+		Produce the GE matrix:
+
+			CopyDeferredRows()
+			MultiplyDenseRows()
+			AddInvertibleGF2Matrix()
+
+	(3) Gaussian Elimination
+		Triangle()
+*/
 Result Codec::SolveMatrix()
 {
 	// (1) Peeling
@@ -2982,6 +3049,10 @@ Result Codec::SolveMatrix()
 	SetMixingColumnsForDeferredRows();
 	PeelDiagonal();
 	CopyDeferredRows();
+
+	CAT_IF_DUMP(cout << "After copying deferred rows:" << endl;)
+	CAT_IF_DUMP(PrintGEMatrix();)
+
 	MultiplyDenseRows();
 
 	if (!AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count))
@@ -3011,12 +3082,36 @@ Result Codec::SolveMatrix()
 	return R_WIN;
 }
 
+/*
+	GenerateRecoveryBlocks
+
+		This function generates the recovery blocks after the
+	Triangle() function succeeds in solving the matrix.
+
+		It performs the final Substitution step:
+
+	(4) Substitution:
+
+		Solves across GE matrix rows:
+
+			InitializeColumnValues()
+			MultiplyDenseValues()
+			AddSubdiagonalValues()
+
+		Solves up GE matrix columns:
+
+			BackSubstituteAboveDiagonal()
+
+		Solves remaining columns:
+
+			Substitute()
+*/
 void Codec::GenerateRecoveryBlocks()
 {
 	// (4) Substitution
 
 	InitializeColumnValues();
-	AddCheckValues();
+	MultiplyDenseValues();
 	AddSubdiagonalValues();
 
 #if defined(CAT_REUSE_COMPRESS)
@@ -3131,10 +3226,9 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	u64 ge_mask = 1;
 	for (u16 pivot_j = 0; pivot_j < pivot_i; ++pivot_j)
 	{
+		// If bit is set,
 		int word_offset = pivot_j >> 6;
 		u64 *rem_row = &ge_new_row[word_offset];
-
-		// If bit is set,
 		if (*rem_row & ge_mask)
 		{
 			u16 ge_pivot_j = _ge_pivots[pivot_j];
@@ -3230,11 +3324,19 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	return R_WIN;
 }
 
-void Codec::ReconstructOutput(void *message_out)
+/*
+	ReconstructOutput
+
+		This function reconstructs the output by copying inputs
+	that were from the first N blocks, and regenerating the rest.
+	This is only done during decoding.
+*/
+Result Codec::ReconstructOutput(void *message_out)
 {
 	CAT_IF_DUMP(cout << endl << "---- ReconstructOutput ----" << endl << endl;)
 
-	if (!message_out) return;
+	// Validate input
+	if (!message_out) return R_BAD_INPUT;
 	u8 *output_blocks = reinterpret_cast<u8 *>( message_out );
 
 #if defined(CAT_COPY_FIRST_N)
@@ -3337,6 +3439,8 @@ void Codec::ReconstructOutput(void *message_out)
 
 		CAT_IF_DUMP(cout << endl;)
 	} // next row
+
+	return R_WIN;
 }
 
 
@@ -3652,7 +3756,7 @@ void Codec::PrintDeferredColumns()
 Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 {
 	Result r = ChooseMatrix(message_bytes, block_bytes);
-	if (r == R_WIN)
+	if (!r)
 	{
 		// Calculate partial final bytes
 		u32 partial_final_bytes = message_bytes % _block_bytes;
@@ -3663,12 +3767,24 @@ Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 		_extra_count = 0;
 
 		if (!AllocateWorkspace())
-			return R_OUT_OF_MEMORY;
+			r = R_OUT_OF_MEMORY;
 	}
 
 	return r;
 }
 
+/*
+	EncodeFeed
+
+		This function breaks the input message up into blocks
+	and opportunistically peels with each one.  After processing
+	all of the blocks from the input, it runs the matrix solver
+	and if the solver succeeds, it generates the recovery blocks.
+
+		In practice, the solver should always succeed because the
+	encoder should be looking up its generator matrix parameters
+	from a table, which guarantees the matrix is invertible.
+*/
 Result Codec::EncodeFeed(const void *message_in)
 {
 	CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
@@ -3687,12 +3803,19 @@ Result Codec::EncodeFeed(const void *message_in)
 
 	// Solve matrix and generate recovery blocks
 	Result r = SolveMatrix();
-	if (r == R_WIN) GenerateRecoveryBlocks();
+	if (!r) GenerateRecoveryBlocks();
 	else if (r == R_MORE_BLOCKS) r = R_BAD_CHECK_SEED;
-
 	return r;
 }
 
+/*
+	Encode
+
+		This function encodes a block.  For the first N blocks
+	it simply copies the input to the output block.  For other
+	block identifiers, it will generate a new random row and
+	sum together recovery blocks to produce the new block.
+*/
 void Codec::Encode(u32 id, void *block_out)
 {
 	if (!block_out) return;
@@ -3804,10 +3927,18 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 	return r;
 }
 
+/*
+	DecodeFeed
+
+		This function accumulates the new block in a large input
+	buffer.  As soon as N blocks are collected, the matrix solver
+	is attempted.  After N blocks, ResumeSolveMatrix() is used.
+*/
 Result Codec::DecodeFeed(u32 id, const void *block_in)
 {
 	// Validate input
-	if (block_in == 0) return R_BAD_INPUT;
+	if (block_in == 0)
+		return R_BAD_INPUT;
 
 	// If less than N rows stored,
 	u16 row_i = _used_count;
@@ -3823,9 +3954,7 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 			if (++_used_count == _block_count)
 			{
 				// Attempt to solve the matrix and generate recovery blocks
-				Result r = SolveMatrix();
-				if (!r) GenerateRecoveryBlocks();
-				return r;
+				return SolveMatrix();
 			}
 		} // end if opportunistic peeling succeeded
 
@@ -3833,7 +3962,5 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 	}
 
 	// Resume GE from this row
-	Result r = ResumeSolveMatrix(id, block_in);
-	if (!r) GenerateRecoveryBlocks();
-	return r;
+	return ResumeSolveMatrix(id, block_in);
 }

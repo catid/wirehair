@@ -87,7 +87,7 @@ public:
 	CAT_INLINE Result BeginEncode(const void *message_in, int message_bytes, int block_bytes)
 	{
 		Result r = Codec::InitializeEncoder(message_bytes, block_bytes);
-		if (r == R_WIN) r = Codec::EncodeFeed(message_in);
+		if (!r) r = Codec::EncodeFeed(message_in);
 		return r;
 	}
 
@@ -163,7 +163,11 @@ public:
 	CAT_INLINE Result Decode(u32 id, const void *block_in)
 	{
 		Result r = Codec::DecodeFeed(id, block_in);
-		if (r == R_WIN) ReconstructOutput(_message_out);
+		if (!r)
+		{
+			Codec::GenerateRecoveryBlocks();
+			r = Codec::ReconstructOutput(_message_out);
+		}
 		return r; // Return R_WIN when message has been reconstructed
 	}
 };

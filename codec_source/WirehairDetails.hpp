@@ -59,7 +59,7 @@ namespace wirehair {
 enum Result
 {
 	R_WIN,				// Operation: Success!
-	R_MORE_BLOCKS,		// Codec wants more blocks
+	R_MORE_BLOCKS,		// Codec wants more blocks.  Om nom nom.
 
 	R_ERROR,			// Return codes higher than this one are errors:
 	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
@@ -224,7 +224,7 @@ class Codec
 	void InitializeColumnValues();
 
 	// Add check matrix to triangle columns
-	void AddCheckValues();
+	void MultiplyDenseValues();
 
 	// Add values for GE matrix positions under the diagonal
 	void AddSubdiagonalValues();
@@ -254,9 +254,6 @@ class Codec
 
 	// Resume solver with a new block
 	Result ResumeSolveMatrix(u32 id, const void *block);
-
-	// Use matrix solution to generate recovery blocks
-	void GenerateRecoveryBlocks();
 
 
 	//// Memory Management
@@ -304,7 +301,10 @@ public:
 	Result DecodeFeed(u32 id, const void *block_in);
 
 	// Generate output blocks from the recovered check blocks
-	void ReconstructOutput(void *message_out);
+	Result ReconstructOutput(void *message_out);
+
+	// Use matrix solution to generate recovery blocks
+	void GenerateRecoveryBlocks();
 };
 
 
