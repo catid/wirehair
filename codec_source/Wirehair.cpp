@@ -1886,7 +1886,7 @@ void Codec::InitializeColumnValues()
 			if (pivot_row_i == _block_count - 1)
 			{
 				memcpy(buffer_dest, combo, _input_final_bytes);
-				memset(buffer_dest + _input_final_bytes, 0, _block_count - _input_final_bytes);
+				memset(buffer_dest + _input_final_bytes, 0, _block_bytes - _input_final_bytes);
 				CAT_IF_ROWOP(++rowops;)
 				combo = 0;
 			}

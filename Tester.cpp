@@ -45,7 +45,7 @@ int main()
 	//GenerateWeightTable();
 	//cin.get();
 
-	int block_count = 10000;
+	int block_count = 1024;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
