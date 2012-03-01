@@ -1,0 +1,37 @@
+I'm not aware of any bugs in the codec.  I still need to add in a precomputed table of seeds for all of the different values of N, but that won't stop someone from using it.
+
+Benchmark results (before tuning):
+
+Average extra blocks per transmission = 1.7 regardless of message size for high loss rates.  Pick a larger message to achieve lower overhead.
+
+Single-threaded performance on an Intel Xeon @ 3.07 GHz.
+Test software compiled in 64-bit Release mode in MSVC.
+3/1/2012, before tuning for different values of N.
+
+Loss rate = 50%
+Block size = 1500 Bytes
+
+N      Size (MB)  Enc. Dec. (MB/s)
+64,000   96       185  170  <- This is the largest supported N
+32,768   49       220  190
+16,384   24       266  235
+ 8,192   12       310  275
+ 4,096    6       345  290
+ 2,048    3       400  370
+ 1,024  1.5       400  370
+   512  .768      400  430
+   256  .384      450  500
+   128  .192      430  385
+    64  .096      440  530
+    32  .048      455  550
+    16  .027      400  600
+     8  .012      500  600
+     6  .009      420  650  <- This is the smallest supported N
+
+I also tried N = 2048 for block size = 1 MB, or >2 GB of data and it was able to encode and decode at over 300 MB/s.  Protecting 2 GB of data at that level of performance with just a few MB of overhead is not bad.
+
+What this tells me is that for maximum performance the block size should be kept around 3000.  This gives the lowest overhead percentage (1.7/3000 = 0.057%) before performance starts to trail off.  A larger transfer can be broken up into 4 MB pieces and each piece can be sent with a separate run of the codec.  This matches pretty well with an asyncio file server that reads 4 MB blocks at a time from the source file.  Each time the file is read, the codec can be run in the reader thread so that by the time that piece of the file is needed, the encoder has already had a chance to work on it.
+
+How to do the network protocol that interleaves runs of the codec is another challenge entirely.
+
+I'm also working on a new version of the codec that incorporates GF(256) rows in the matrix so that the average overhead will be less than one block.  It seems that if the average overhead now is 1.7 blocks, then adding two GF(256) rows should greatly help reduce the overhead.  Implementing this type of code is pretty easy, but incorporating it into my codec in a way that is fast and efficient is a challenge.  The hardest thing to do is close out a software project.  It's never finished.  I'm going to finish the GF(2) code first and then work on this excellent enhancement after it is done.
