@@ -835,7 +835,7 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 		dense_count = 13;
 		return true;
 	case 256:
-		dense_count = 23;
+		dense_count = 24;
 		return true;
 	case 512:
 		dense_count = 27;
@@ -1717,37 +1717,7 @@ void Codec::MultiplyDenseRows()
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 		}
 
-		// If check count is odd,
-		if (check_count & 1)
-		{
-			// Generate middle row
-			int bit0 = set_bits[loop_count];
-
-			// Add in peeled columns
-			if (bit0 < max_x)
-			{
-				if (column[bit0].mark == MARK_PEEL)
-				{
-					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
-					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
-				}
-				else
-				{
-					// Set GE bit for deferred column
-					u16 ge_column_i = column[bit0].ge_column;
-					temp_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-				}
-			}
-			CAT_IF_DUMP(disp_row[bit0 >> 6] ^= (u64)1 << (bit0 & 63);)
-
-			// Store in row
-			CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((disp_row[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row << endl;)
-			ge_dest_row = _ge_matrix + _ge_pitch * *row++;
-			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
-		}
-
-		const int second_loop_count = loop_count - 1;
+		const int second_loop_count = loop_count - 1 + (check_count & 1);
 
 		ShuffleDeck16(prng, bits, check_count);
 
@@ -2146,33 +2116,7 @@ void Codec::AddCheckValues()
 			}
 		}
 
-		// If odd check count,
-		if (check_count & 1)
-		{
-			int bit0 = set_bits[loop_count];
-
-			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
-
-			// Add in peeled columns
-			if (bit0 < max_x && column[bit0].mark == MARK_PEEL)
-			{
-				CAT_IF_DUMP(cout << " " << column_i + bit0;)
-				memxor(temp_block, source_block + _block_bytes * bit0, _block_bytes);
-				CAT_IF_ROWOP(++rowops;)
-			}
-
-			CAT_IF_DUMP(cout << endl;)
-
-			// Store in row
-			u16 check_column_i = _ge_row_map[*row++];
-			if (check_column_i != LIST_TERM)
-			{
-				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
-				CAT_IF_ROWOP(++rowops;)
-			}
-		}
-
-		const int second_loop_count = loop_count - 1;
+		const int second_loop_count = loop_count - 1 + (check_count & 1);
 
 		ShuffleDeck16(prng, bits, check_count);
 

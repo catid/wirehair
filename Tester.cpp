@@ -45,7 +45,7 @@ int main()
 	//GenerateWeightTable();
 	//cin.get();
 
-	int block_count = 64000;
+	int block_count = 4096;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -94,6 +94,7 @@ int main()
 
 	CatsChoice prng;
 
+	u32 overhead_sum = 0, overhead_trials = 0;
 	u32 drop_seed = 354;
 	for (;;)
 	{
@@ -123,12 +124,15 @@ int main()
 			{
 				if (r == wirehair::R_WIN)
 				{
-					cout << "Seed = " << drop_seed << endl;
-					cout << ">> OKAY! decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << blocks_needed - decoder.BlockCount() << " extra blocks" << endl;
+					u32 overhead = blocks_needed - decoder.BlockCount();
+					overhead_sum += overhead;
+					++overhead_trials;
+
+					cout << ">> OKAY! decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
 
 					if (!memcmp(message, message_out, message_bytes))
 					{
-						cout << "Match!" << endl;
+						//cout << "Match!" << endl;
 					}
 					else
 					{
