@@ -29,6 +29,8 @@
 #ifndef CAT_WIREHAIR_HPP
 #define CAT_WIREHAIR_HPP
 
+#define CAT_WIREHAIR_VERSION 1 /* Wirehair FEC codec version; different versions are incompatible */
+
 /*
 	Wirehair Streaming Forward Error Correction
 

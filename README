@@ -1,3 +1,20 @@
+	Wirehair Streaming Forward Error Correction (FEC)
+
+		Wirehair FEC produces a stream of error correction blocks from a
+	data source.  When enough of these blocks are received, the original
+	data can be recovered.
+
+		Wirehair is an FEC codec used to improve reliability of data sent
+	over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
+	The data to transmit over the BEC is encoded into equal-sized blocks.
+	When enough blocks are received at the other end of the channel, then
+	the original data can be recovered.  How many additional blocks are
+	needed is random, though the number of additional blocks is low and
+	does not vary based on the size of the data.
+
+
+News Update: 3/1/2012
+	
 I'm not aware of any bugs in the codec.  I still need to add in a precomputed table of seeds for all of the different values of N, but that won't stop someone from using it.
 
 Benchmark results (before tuning):
