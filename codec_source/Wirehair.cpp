@@ -341,6 +341,9 @@
 using namespace cat;
 using namespace wirehair;
 
+
+//// Precompiler-conditional console output
+
 #if defined(CAT_DUMP_CODEC_DEBUG)
 #define CAT_IF_DUMP(x) x
 #else
@@ -375,6 +378,7 @@ const char *cat::wirehair::GetResultString(Result r)
 	case R_NEED_MORE_EXTRA:	return "R_NEED_MORE_EXTRA";
 	case R_BAD_INPUT:		return "R_BAD_INPUT";
 	case R_OUT_OF_MEMORY:	return "R_OUT_OF_MEMORY";
+
 	default:				if (r >= R_ERROR) return "R_UNKNOWN_ERROR";
 							else return "R_UNKNOWN";
 	}
@@ -386,10 +390,10 @@ const char *cat::wirehair::GetResultString(Result r)
 /*
 	Based on code from http://www.azillionmonkeys.com/qed/sqroot.html
 
-		Contributors include Arne Steinarson for the basic approximation idea, 
+		"Contributors include Arne Steinarson for the basic approximation idea, 
 		Dann Corbit and Mathew Hendry for the first cut at the algorithm, 
 		Lawrence Kirby for the rearrangement, improvments and range optimization
-		and Paul Hsieh for the round-then-adjust idea.
+		and Paul Hsieh for the round-then-adjust idea."
 
 	I tried this out, stdlib sqrt() and a few variations on Newton-Raphson
 	and determined this one is, by far, the fastest.  I adapted it to 16-bit
@@ -753,6 +757,66 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 }
 
 
+//// Utility: Peeling Row Weight Generator function
+
+/*
+		The weight distribution selected for use in this codec is
+	the ideal Soliton distribution.  The PMF for weights 2 and higher
+	is 1 / (k*(k - 1)).  Accumulating these yields the WEIGHT_DIST
+	table below up to weight 64.  I stuck ~0 at the end of the
+	table to make sure the while loop in the function terminates.
+
+		To produce a good code, the probability of weight 1 should be
+	added into each element of the WEIGHT_DIST table.  Instead, I add
+	it programmatically in the function to allow it to be easily tuned.
+
+		I played around with where to truncate this table, and found
+	that for higher block counts, the number of deferred rows after
+	greedy peeling is much lower for 64 weights than 32.  And after
+	tuning the codec for weight 64, the performance was slightly
+	better than with 32.
+
+		I also tried different probabilities for weight 1 rows, and
+	settled on 1/128 as having the best performance in a few select
+	tests.
+
+		The truncation point and the weight-1 row probability might
+	be best selected based on the block count N.  This needs to be
+	simulated and determined.
+*/
+
+static const u32 WEIGHT_DIST[] = {
+	0x00000000, 0x80000000, 0xaaaaaaaa, 0xc0000000, 0xcccccccc, 0xd5555555, 0xdb6db6db, 0xe0000000,
+	0xe38e38e3, 0xe6666666, 0xe8ba2e8b, 0xeaaaaaaa, 0xec4ec4ec, 0xedb6db6d, 0xeeeeeeee, 0xefffffff,
+	0xf0f0f0f0, 0xf1c71c71, 0xf286bca1, 0xf3333333, 0xf3cf3cf3, 0xf45d1745, 0xf4de9bd3, 0xf5555555,
+	0xf5c28f5c, 0xf6276276, 0xf684bda1, 0xf6db6db6, 0xf72c234f, 0xf7777777, 0xf7bdef7b, 0xf7ffffff,
+	0xf83e0f83, 0xf8787878, 0xf8af8af8, 0xf8e38e38, 0xf914c1ba, 0xf9435e50, 0xf96f96f9, 0xf9999999,
+	0xf9c18f9c, 0xf9e79e79, 0xfa0be82f, 0xfa2e8ba2, 0xfa4fa4fa, 0xfa6f4de9, 0xfa8d9df5, 0xfaaaaaaa,
+	0xfac687d6, 0xfae147ae, 0xfafafafa, 0xfb13b13b, 0xfb2b78c1, 0xfb425ed0, 0xfb586fb5, 0xfb6db6db,
+	0xfb823ee0, 0xfb9611a7, 0xfba93868, 0xfbbbbbbb, 0xfbcda3ac, 0xfbdef7bd, 0xfbefbefb, 0xffffffff
+};
+
+u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
+{
+	// Select probability of weight-1 row here:
+	static const u32 P1 = (u32)((1./128) * 0xffffffff);
+	static const u32 P2 = WEIGHT_DIST[1];
+	static const u32 P3 = WEIGHT_DIST[2];
+
+	// Unroll first 3 for speed (common case)
+	if (rv < P1) return 1;
+
+	rv -= P1;
+	if (rv <= P2) return 2;
+	if (rv <= P3) return 3;
+
+	// Find first table entry containing a number smaller than or equal to rv
+	u16 weight = 3;
+	while (rv > WEIGHT_DIST[weight++]);
+	return weight;
+}
+
+
 //// Utility: Peel Matrix Row Generator function
 
 void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
@@ -779,41 +843,6 @@ void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u
 }
 
 
-//// Utility: Peeling Row Weight Generator function
-
-// Soliton distribution
-static const u32 WEIGHT_DIST[] = {
-	0x00000000, 0x80000000, 0xaaaaaaaa, 0xc0000000, 0xcccccccc, 0xd5555555, 0xdb6db6db, 0xe0000000,
-	0xe38e38e3, 0xe6666666, 0xe8ba2e8b, 0xeaaaaaaa, 0xec4ec4ec, 0xedb6db6d, 0xeeeeeeee, 0xefffffff,
-	0xf0f0f0f0, 0xf1c71c71, 0xf286bca1, 0xf3333333, 0xf3cf3cf3, 0xf45d1745, 0xf4de9bd3, 0xf5555555,
-	0xf5c28f5c, 0xf6276276, 0xf684bda1, 0xf6db6db6, 0xf72c234f, 0xf7777777, 0xf7bdef7b, 0xf7ffffff,
-	0xf83e0f83, 0xf8787878, 0xf8af8af8, 0xf8e38e38, 0xf914c1ba, 0xf9435e50, 0xf96f96f9, 0xf9999999,
-	0xf9c18f9c, 0xf9e79e79, 0xfa0be82f, 0xfa2e8ba2, 0xfa4fa4fa, 0xfa6f4de9, 0xfa8d9df5, 0xfaaaaaaa,
-	0xfac687d6, 0xfae147ae, 0xfafafafa, 0xfb13b13b, 0xfb2b78c1, 0xfb425ed0, 0xfb586fb5, 0xfb6db6db,
-	0xfb823ee0, 0xfb9611a7, 0xfba93868, 0xfbbbbbbb, 0xfbcda3ac, 0xfbdef7bd, 0xfbefbefb, 0xffffffff
-};
-
-u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
-{
-	// Select probability of weight-1 row here:
-	static const u32 P1 = (u32)((1./128) * 0xffffffff);
-	static const u32 P2 = WEIGHT_DIST[1];
-	static const u32 P3 = WEIGHT_DIST[2];
-
-	// Unroll first 3 for speed
-	if (rv < P1) return 1;
-
-	rv -= P1;
-	if (rv <= P2) return 2;
-	if (rv <= P3) return 3;
-
-	// Find first table entry containing a number smaller than or equal to rv
-	u16 weight = 3;
-	while (rv > WEIGHT_DIST[weight++]);
-	return weight;
-}
-
-
 //// Utility: Matrix Parameter Generator function
 
 int g_p_seed, g_c_seed; // TODO: Remove these
@@ -823,56 +852,8 @@ bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &
 	p_seed = g_p_seed;// TODO: Remove these
 	c_seed = g_c_seed;
 
-	switch (block_count)
-	{
-	case 16:
-		dense_count = 6;
-		return true;
-	case 64:
-		dense_count = 10;
-		return true;
-	case 128:
-		dense_count = 13;
-		return true;
-	case 256:
-		dense_count = 24;
-		return true;
-	case 512:
-		dense_count = 27;
-		return true;
-	case 1024:
-		dense_count = 30;
-		return true;
-	case 2048:
-		dense_count = 53;
-		return true;
-	case 4096:
-		dense_count = 76;
-		return true;
-	case 8192:
-		dense_count = 116;
-		return true;
-	case 10000:
-		dense_count = 142;
-		return true;
-	case 16384:
-		dense_count = 206;
-		return true;
-	case 32768:
-		dense_count = 340;
-		return true;
-	case 40000:
-		dense_count = 489;
-		return true;
-	case 50000:
-		dense_count = 632;
-		return true;
-	case 64000:
-		dense_count = 672;
-		return true;
-	}
-
-	return false;
+	dense_count = SquareRoot16(block_count) + (block_count / 150) + 2;
+	return true;
 }
 
 
@@ -1999,6 +1980,7 @@ void Codec::AddCheckValues()
 	for (; column_i < _block_count; column_i += check_count,
 		column += check_count, source_block += _block_bytes * check_count)
 	{
+		// Handle final columns
 		int max_x = check_count;
 		if (column_i + check_count > _block_count)
 			max_x = _block_count - column_i;
@@ -3001,7 +2983,9 @@ Result Codec::SolveMatrix()
 	PeelDiagonal();
 	CopyDeferredRows();
 	MultiplyDenseRows();
-	AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count);
+
+	if (!AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count))
+		return R_TOO_SMALL;
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	cout << "After Compress:" << endl;
