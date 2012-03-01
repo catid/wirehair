@@ -49,11 +49,6 @@ extern int g_p_seed, g_c_seed;
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
 
-// Check matrix structure:
-#define CAT_DESTROY_PERFECTION /* Reshuffle and destroy perfect codes (faster) */
-//#define CAT_SHUFFLE_HALF /* Reshuffle second half of check rows from a new starting point (slower) */
-//#define CAT_LIGHT_ROWS /* Use light rows for all check columns (slower) */
-
 namespace cat {
 
 namespace wirehair {
@@ -88,13 +83,13 @@ u16 SquareRoot16(u16 x);
 u16 NextPrime16(u16 n);
 
 // Peeling Row Weight Generator function
-u16 GeneratePeelRowWeight(u32 rv, u16 max_weight);
+u16 GeneratePeelRowWeight(u32 rv);
 
 // GF(2) Invertible Matrix Generator function
 bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
 
 // Matrix Parameter Generator function
-bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &light_count, u16 &dense_count);
+bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &dense_count);
 
 // Deck Shuffling function
 void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
@@ -138,16 +133,13 @@ class Codec
 	// Parameters
 	u32 _block_bytes;			// Number of bytes in a block
 	u16 _block_count;			// Number of blocks in the message
+	u16 _block_next_prime;		// Next prime number at or above block count
 	u16 _extra_count;			// Number of extra rows to allocate
 	u32 _p_seed;				// Seed for peeled rows of generator matrix
 	u32 _c_seed;				// Seed for check rows of generator matrix
-	u16 _block_next_prime;		// Next prime number at or above block count
-	u16 _added_next_prime;		// Next prime number at or above added count
-	u16 _light_next_prime;		// Next prime number at or above light count
 	u16 _used_count;			// Number of stored rows
-	u16 _light_count;			// Number of code rows that are light
-	u16 _dense_count;			// Number of code rows that are dense
-	u16 _added_count;			// Sum of light and dense row counts
+	u16 _dense_count;			// Number of added dense code rows
+	u16 _dense_next_prime;		// Next prime number at or above dense count
 	u8 *_recovery_blocks;		// Recovery blocks
 	u8 *_input_blocks;			// Input message blocks
 	u32 _input_final_bytes;		// Number of bytes in final block of input
