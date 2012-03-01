@@ -3381,12 +3381,16 @@ Result Codec::ReconstructOutput(void *message_out)
 
 	// For each row,
 	u8 *dest = output_blocks;
+#if defined(CAT_COPY_FIRST_N)
+	u8 *copied_row = copied_rows;
+	for (u16 row_i = 0; row_i < _block_count; ++row_i, dest += _block_bytes, ++copied_row)
+	{
+		// If already copied, skip it
+		if (*copied_row)
+			continue;
+#else
 	for (u16 row_i = 0; row_i < _block_count; ++row_i, dest += _block_bytes)
 	{
-#if defined(CAT_COPY_FIRST_N)
-		// If already copied, skip it
-		if (copied_rows[row_i])
-			continue;
 #endif
 
 		CAT_IF_DUMP(cout << "Regenerating row " << row_i << ":";)
