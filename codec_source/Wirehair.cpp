@@ -224,6 +224,10 @@ using namespace std;
 
 const char *cat::wirehair::GetResultString(Result r)
 {
+	/*
+		See comments in Result enumeration in WirehairDetails.hpp
+		for suggestions on how to overcome these errors.
+	*/
 	switch (r)
 	{
 	case R_WIN:				return "R_WIN";
@@ -231,6 +235,7 @@ const char *cat::wirehair::GetResultString(Result r)
 	case R_BAD_CHECK_SEED:	return "R_BAD_CHECK_SEED";
 	case R_BAD_PEEL_SEED:	return "R_BAD_PEEL_SEED";
 	case R_TOO_SMALL:		return "R_TOO_SMALL";
+	case R_TOO_LARGE:		return "R_TOO_LARGE";
 	case R_NEED_MORE_EXTRA:	return "R_NEED_MORE_EXTRA";
 	case R_BAD_INPUT:		return "R_BAD_INPUT";
 	case R_OUT_OF_MEMORY:	return "R_OUT_OF_MEMORY";
@@ -2974,8 +2979,11 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	_block_count = (message_bytes + _block_bytes - 1) / _block_bytes;
 	_block_next_prime = NextPrime16(_block_count);
 
-	if (_block_count < 4)
+	if (_block_count < CAT_WIREHAIR_MIN_N)
 		return R_TOO_SMALL;
+
+	if (_block_count > CAT_WIREHAIR_MAX_N)
+		return R_TOO_LARGE;
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)

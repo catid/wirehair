@@ -43,6 +43,8 @@ extern int g_p_seed, g_c_seed;
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
 #define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
 #define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
+#define CAT_WIREHAIR_MAX_N 64000 /* Largest N value to allow */
+#define CAT_WIREHAIR_MIN_N 6 /* Smallest N value to allow */
 
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
@@ -66,6 +68,7 @@ enum Result
 	R_BAD_PEEL_SEED,	// Encoder needs a better peel seed
 	R_BAD_INPUT,		// Input parameters were incorrect
 	R_TOO_SMALL,		// message_bytes / block_size is too small.  Try reducing block_size or use a larger message
+	R_TOO_LARGE,		// message_bytes / block_size is too large.  Try increasing block_size or use a smaller message
 	R_NEED_MORE_EXTRA,	// Not enough extra rows to solve it, must give up
 	R_OUT_OF_MEMORY,	// Out of memory, try reducing the message size
 };
