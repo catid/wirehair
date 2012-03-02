@@ -712,12 +712,12 @@ static const u8 EXP_TABLE[512*2+1] = {
 	211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1, 0,
 };
 
-CAT_INLINE u8 MultiplyGF256(u8 x, u8 y)
+static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
 {
 	return EXP_TABLE[LOG_TABLE[x] + LOG_TABLE[y]];
 }
 
-CAT_INLINE u8 DivideGF256(u8 x, u8 y)
+static CAT_INLINE u8 GF256Divide(u8 x, u8 y)
 {
 	// Precondition: y != 0
 	return EXP_TABLE[LOG_TABLE[x] + 255 - LOG_TABLE[y]];
@@ -735,7 +735,7 @@ CAT_INLINE u8 DivideGF256(u8 x, u8 y)
 	makes it faster than the rare case that I designed.
 */
 
-CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
+static CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 {
 	x = (x + a) % p;
 
@@ -3119,9 +3119,9 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	_block_count = (message_bytes + _block_bytes - 1) / _block_bytes;
 	_block_next_prime = NextPrime16(_block_count);
 
+	// Validate block count
 	if (_block_count < CAT_WIREHAIR_MIN_N)
 		return R_TOO_SMALL;
-
 	if (_block_count > CAT_WIREHAIR_MAX_N)
 		return R_TOO_LARGE;
 
