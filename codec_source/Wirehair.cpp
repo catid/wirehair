@@ -618,11 +618,129 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 }
 
 
+//// Utility: GF(256) Multiply and Divide functions
+
+/*
+	Branchless multiply and divide construction from
+	"Fast Software Implementations of Finite Field Operations (Extended Abstract)"
+	by Cheng Huang and Lihao Xu
+
+	Small corrections made to paper (Q = 255):
+		+ The ALOG_TABLE needs to have 512*2+1 elements to handle 0*0 = 0 case.
+		+ Element 255*2 should be set to 1.
+
+	After these corrections it works properly and reduces the execution time
+	to 58% of the usual version that uses branches to handle zero input.
+
+	This table was generated using polynomial 0x15F.  Maybe it's voodoo but
+	random GF(256) matrices with this polynomial tended to be more invertible.
+	There are 16 generator polynomials for GF(256), and 0x1F5 was a close second
+	in terms of rate of invertibility, which makes me wonder if it is more than
+	just voodoo.
+*/
+
+static const u16 LOG_TABLE[256] = {
+	512, 255, 1, 122, 2, 244, 123, 181, 3, 48, 245, 224, 124, 84, 182, 111,
+	4, 233, 49, 19, 246, 107, 225, 206, 125, 56, 85, 170, 183, 91, 112, 250,
+	5, 117, 234, 10, 50, 156, 20, 213, 247, 203, 108, 178, 226, 37, 207, 210,
+	126, 150, 57, 100, 86, 141, 171, 40, 184, 73, 92, 164, 113, 146, 251, 229,
+	6, 96, 118, 15, 235, 193, 11, 13, 51, 68, 157, 195, 21, 31, 214, 237,
+	248, 168, 204, 17, 109, 222, 179, 120, 227, 162, 38, 98, 208, 176, 211, 8,
+	127, 188, 151, 239, 58, 132, 101, 216, 87, 80, 142, 33, 172, 27, 41, 23,
+	185, 77, 74, 197, 93, 65, 165, 159, 114, 200, 147, 70, 252, 45, 230, 53,
+	7, 175, 97, 161, 119, 221, 16, 167, 236, 30, 194, 67, 12, 192, 14, 95,
+	52, 44, 69, 199, 158, 64, 196, 76, 22, 26, 32, 79, 215, 131, 238, 187,
+	249, 90, 169, 55, 205, 106, 18, 232, 110, 83, 223, 47, 180, 243, 121, 254,
+	228, 145, 163, 72, 39, 140, 99, 149, 209, 36, 177, 202, 212, 155, 9, 116,
+	128, 61, 189, 218, 152, 137, 240, 103, 59, 135, 133, 134, 102, 136, 217, 60,
+	88, 104, 81, 241, 143, 138, 34, 153, 173, 219, 28, 190, 42, 62, 24, 129,
+	186, 130, 78, 25, 75, 63, 198, 43, 94, 191, 66, 29, 166, 220, 160, 174,
+	115, 154, 201, 35, 148, 139, 71, 144, 253, 242, 46, 82, 231, 105, 54, 89,
+};
+
+static const u8 EXP_TABLE[512*2+1] = {
+	1, 2, 4, 8, 16, 32, 64, 128, 95, 190, 35, 70, 140, 71, 142, 67,
+	134, 83, 166, 19, 38, 76, 152, 111, 222, 227, 153, 109, 218, 235, 137, 77,
+	154, 107, 214, 243, 185, 45, 90, 180, 55, 110, 220, 231, 145, 125, 250, 171,
+	9, 18, 36, 72, 144, 127, 254, 163, 25, 50, 100, 200, 207, 193, 221, 229,
+	149, 117, 234, 139, 73, 146, 123, 246, 179, 57, 114, 228, 151, 113, 226, 155,
+	105, 210, 251, 169, 13, 26, 52, 104, 208, 255, 161, 29, 58, 116, 232, 143,
+	65, 130, 91, 182, 51, 102, 204, 199, 209, 253, 165, 21, 42, 84, 168, 15,
+	30, 60, 120, 240, 191, 33, 66, 132, 87, 174, 3, 6, 12, 24, 48, 96,
+	192, 223, 225, 157, 101, 202, 203, 201, 205, 197, 213, 245, 181, 53, 106, 212,
+	247, 177, 61, 122, 244, 183, 49, 98, 196, 215, 241, 189, 37, 74, 148, 119,
+	238, 131, 89, 178, 59, 118, 236, 135, 81, 162, 27, 54, 108, 216, 239, 129,
+	93, 186, 43, 86, 172, 7, 14, 28, 56, 112, 224, 159, 97, 194, 219, 233,
+	141, 69, 138, 75, 150, 115, 230, 147, 121, 242, 187, 41, 82, 164, 23, 46,
+	92, 184, 47, 94, 188, 39, 78, 156, 103, 206, 195, 217, 237, 133, 85, 170,
+	11, 22, 44, 88, 176, 63, 126, 252, 167, 17, 34, 68, 136, 79, 158, 99,
+	198, 211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1,
+	2, 4, 8, 16, 32, 64, 128, 95, 190, 35, 70, 140, 71, 142, 67, 134,
+	83, 166, 19, 38, 76, 152, 111, 222, 227, 153, 109, 218, 235, 137, 77, 154,
+	107, 214, 243, 185, 45, 90, 180, 55, 110, 220, 231, 145, 125, 250, 171, 9,
+	18, 36, 72, 144, 127, 254, 163, 25, 50, 100, 200, 207, 193, 221, 229, 149,
+	117, 234, 139, 73, 146, 123, 246, 179, 57, 114, 228, 151, 113, 226, 155, 105,
+	210, 251, 169, 13, 26, 52, 104, 208, 255, 161, 29, 58, 116, 232, 143, 65,
+	130, 91, 182, 51, 102, 204, 199, 209, 253, 165, 21, 42, 84, 168, 15, 30,
+	60, 120, 240, 191, 33, 66, 132, 87, 174, 3, 6, 12, 24, 48, 96, 192,
+	223, 225, 157, 101, 202, 203, 201, 205, 197, 213, 245, 181, 53, 106, 212, 247,
+	177, 61, 122, 244, 183, 49, 98, 196, 215, 241, 189, 37, 74, 148, 119, 238,
+	131, 89, 178, 59, 118, 236, 135, 81, 162, 27, 54, 108, 216, 239, 129, 93,
+	186, 43, 86, 172, 7, 14, 28, 56, 112, 224, 159, 97, 194, 219, 233, 141,
+	69, 138, 75, 150, 115, 230, 147, 121, 242, 187, 41, 82, 164, 23, 46, 92,
+	184, 47, 94, 188, 39, 78, 156, 103, 206, 195, 217, 237, 133, 85, 170, 11,
+	22, 44, 88, 176, 63, 126, 252, 167, 17, 34, 68, 136, 79, 158, 99, 198,
+	211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1, 0,
+};
+
+CAT_INLINE u8 MultiplyGF256(u8 x, u8 y)
+{
+	return EXP_TABLE[LOG_TABLE[x] + LOG_TABLE[y]];
+}
+
+CAT_INLINE u8 DivideGF256(u8 x, u8 y)
+{
+	// Precondition: y != 0
+	return EXP_TABLE[LOG_TABLE[x] + 255 - LOG_TABLE[y]];
+}
+
+
+//// Utility: Column iterator function
+
+/*
+	This implements a very light PRNG (Weyl function) to quickly generate
+	a set of random-looking columns without replacement.
+
+	This is Stewart Platt's excellent loop-less iterator optimization.
+	His common cases all require no additional modulus operation, which
+	makes it faster than the rare case that I designed.
+*/
+
+CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
+{
+	x = (x + a) % p;
+
+	if (x >= b)
+	{
+		u16 distance = p - x;
+
+		if (a >= distance)
+			x = a - distance;
+		else // the rare case:
+			x = (((u32)a << 16) - distance) % a;
+	}
+}
+
+
 //// Utility: Peeling Row Weight Generator function
 
 /*
+	Ideal Soliton weight distribution from
+	"LT Codes" (2002)
+	by Michael Luby
+
 		The weight distribution selected for use in this codec is
-	the ideal Soliton distribution.  The PMF for weights 2 and higher
+	the Ideal Soliton distribution.  The PMF for weights 2 and higher
 	is 1 / (k*(k - 1)).  Accumulating these yields the WEIGHT_DIST
 	table below up to weight 64.  I stuck ~0 at the end of the
 	table to make sure the while loop in the function terminates.
@@ -1521,9 +1639,12 @@ void Codec::CopyDeferredRows()
 		Flip two bits for each row of the last half of the outputs.
 
 		This effectively destroys the perfection of the code, and makes
-	the square matrices invertible about as often as a random GF2 code,
+	the square matrices invertible about as often as a random GF(2) code,
 	so that using these easily generated square matrices does not hurt
-	the error correction properties of the code.
+	the error correction properties of the code.  Random GF(2) matrices
+	are invertible about 30% of the time, and these rows are invertible
+	about 20% of the time.  So care must be taken to seed these dense
+	row generators to improve invertibility.
 
 		MultiplyDenseRows() does not actually use memxor() to generate
 	any row block values because it is not certain where the values

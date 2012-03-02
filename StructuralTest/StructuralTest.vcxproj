@@ -117,9 +117,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="GF256Matrix.hpp" />
     <ClInclude Include="GF2Matrix.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\Clock.cpp" />
+    <ClCompile Include="GF256Matrix.cpp" />
     <ClCompile Include="GF2Matrix.cpp" />
     <ClCompile Include="StructuralTest.cpp" />
   </ItemGroup>

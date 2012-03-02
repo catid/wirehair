@@ -102,33 +102,6 @@ void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_c
 	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0);
 
 
-//// Utility: Column iterator function
-
-/*
-	This implements a very light PRNG (Weyl function) to quickly generate
-	a set of random-looking columns without replacement.
-
-	This is Stewart Platt's excellent loop-less iterator optimization.
-	His common cases all require no additional modulus operation, which
-	makes it faster than the rare case that I designed.
-*/
-
-CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
-{
-	x = (x + a) % p;
-
-	if (x >= b)
-	{
-		u16 distance = p - x;
-
-		if (a >= distance)
-			x = a - distance;
-		else // the rare case:
-			x = (((u32)a << 16) - distance) % a;
-	}
-}
-
-
 //// Encoder/Decoder Combined Implementation
 
 class Codec
