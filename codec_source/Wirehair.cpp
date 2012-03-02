@@ -626,7 +626,7 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 	by Cheng Huang and Lihao Xu
 
 	Small corrections made to paper (Q = 255):
-		+ The ALOG_TABLE needs to have 512*2+1 elements to handle 0*0 = 0 case.
+		+ The EXP_TABLE needs to have 512*2+1 elements to handle 0*0 = 0 case.
 		+ Element 255*2 should be set to 1.
 
 	After these corrections it works properly and reduces the execution time
