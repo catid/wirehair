@@ -93,6 +93,7 @@ int main()
 	}
 
 	CatsChoice prng;
+	cat::wirehair::Decoder decoder;
 
 	u32 overhead_sum = 0, overhead_trials = 0;
 	u32 drop_seed = 354;
@@ -100,7 +101,6 @@ int main()
 	{
 		int blocks_needed = 0;
 
-		cat::wirehair::Decoder decoder;
 		wirehair::Result s = decoder.BeginDecode(message_out, message_bytes, block_bytes);
 		if (s)
 		{
