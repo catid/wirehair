@@ -120,7 +120,7 @@ class Codec
 	u8 *_input_blocks;			// Input message blocks
 	u32 _input_final_bytes;		// Number of bytes in final block of input
 	u32 _output_final_bytes;	// Number of bytes in final block of output
-	bool _input_allocated;		// Flag indicating that the input buffer was allocated
+	u32 _input_allocated;		// Number of bytes allocated for input, or 0 if referenced
 
 	// Peeling state
 	struct PeelRow;
@@ -130,6 +130,7 @@ class Codec
 	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
 	PeelRefs *_peel_col_refs;	// List of column references
 	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
+	u32 _workspace_allocated;	// Number of bytes allocated for workspace
 	static const u16 LIST_TERM = 0xffff;
 	u16 _peel_head_rows;		// Head of peeling solved rows list
 	u16 _defer_head_columns;	// Head of peeling deferred columns list
@@ -138,7 +139,8 @@ class Codec
 
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
-	u64 *_ge_compress_matrix;	// Gaussian elimination compression matrix
+	u32 _ge_allocated;			// Number of bytes allocated to GE matrix
+	u64 *_compress_matrix;	// Gaussian elimination compression matrix
 	int _ge_pitch;				// Words per row of GE matrix and compression matrix
 	u16 _ge_rows;				// Number of rows in GE matrix, since this grows
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix

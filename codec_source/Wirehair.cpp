@@ -30,9 +30,6 @@
 	TODO:
 
 	Future improvements:
-		Prevent reallocation if already enough room
-		Allocate GE matrix from end of compression matrix to avoid more allocation calls
-		Allocate pivots from end of GE matrix to avoid more allocation calls
 		GF(256)
 		Conjugate gradient method?
 		Add alignment for memory allocations
@@ -1330,7 +1327,7 @@ void Codec::SetDeferredColumns()
 		CAT_IF_DUMP(cout << "GE column " << ge_column_i << " mapped to matrix column " << defer_i << " :";)
 
 		// Set bit for each row affected by this deferred column
-		u64 *matrix_row_offset = _ge_compress_matrix + (ge_column_i >> 6);
+		u64 *matrix_row_offset = _compress_matrix + (ge_column_i >> 6);
 		u64 ge_mask = (u64)1 << (ge_column_i & 63);
 		PeelRefs *refs = &_peel_col_refs[defer_i];
 		u16 count = refs->row_count;
@@ -1389,7 +1386,7 @@ void Codec::SetMixingColumnsForDeferredRows()
 		row->peel_column = LIST_TERM;
 
 		// Set up mixing column generator
-		u64 *ge_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
+		u64 *ge_row = _compress_matrix + _ge_pitch * defer_row_i;
 		u16 a = row->mix_a;
 		u16 x = row->mix_x0;
 
@@ -1455,7 +1452,7 @@ void Codec::PeelDiagonal()
 
 		// Lookup peeling results
 		u16 peel_column_i = row->peel_column;
-		u64 *ge_row = _ge_compress_matrix + _ge_pitch * peel_row_i;
+		u64 *ge_row = _compress_matrix + _ge_pitch * peel_row_i;
 
 		CAT_IF_DUMP(cout << "Peeled row " << peel_row_i << " for peeled column " << peel_column_i << " :";)
 
@@ -1516,7 +1513,7 @@ void Codec::PeelDiagonal()
 			CAT_IF_DUMP(cout << "++ Adding to referencing row " << ref_row_i << endl;)
 
 			// Add GE row to referencing GE row
-			u64 *ge_ref_row = _ge_compress_matrix + _ge_pitch * ref_row_i;
+			u64 *ge_ref_row = _compress_matrix + _ge_pitch * ref_row_i;
 			for (int ii = 0; ii < _ge_pitch; ++ii) ge_ref_row[ii] ^= ge_row[ii];
 
 			// If row is peeled,
@@ -1574,7 +1571,7 @@ void Codec::CopyDeferredRows()
 		CAT_IF_DUMP(cout << "Peeled row " << defer_row_i << " for GE row " << ge_row_i << endl;)
 
 		// Copy compress row to GE row
-		u64 *compress_row = _ge_compress_matrix + _ge_pitch * defer_row_i;
+		u64 *compress_row = _compress_matrix + _ge_pitch * defer_row_i;
 		memcpy(ge_row, compress_row, _ge_pitch * sizeof(u64));
 
 		// Set row map for this deferred row
@@ -1717,7 +1714,7 @@ void Codec::MultiplyDenseRows()
 				if (column[bit_i].mark == MARK_PEEL)
 				{
 					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit_i].peel_row;
+					u64 *ge_source_row = _compress_matrix + _ge_pitch * column[bit_i].peel_row;
 					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 				}
 				else
@@ -1753,7 +1750,7 @@ void Codec::MultiplyDenseRows()
 				if (column[bit0].mark == MARK_PEEL)
 				{
 					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
+					u64 *ge_source_row = _compress_matrix + _ge_pitch * column[bit0].peel_row;
 					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 				}
 				else
@@ -1771,7 +1768,7 @@ void Codec::MultiplyDenseRows()
 				if (column[bit1].mark == MARK_PEEL)
 				{
 					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
+					u64 *ge_source_row = _compress_matrix + _ge_pitch * column[bit1].peel_row;
 					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 				}
 				else
@@ -1804,7 +1801,7 @@ void Codec::MultiplyDenseRows()
 				if (column[bit0].mark == MARK_PEEL)
 				{
 					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit0].peel_row;
+					u64 *ge_source_row = _compress_matrix + _ge_pitch * column[bit0].peel_row;
 					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 				}
 				else
@@ -1822,7 +1819,7 @@ void Codec::MultiplyDenseRows()
 				if (column[bit1].mark == MARK_PEEL)
 				{
 					// Add temp row value
-					u64 *ge_source_row = _ge_compress_matrix + _ge_pitch * column[bit1].peel_row;
+					u64 *ge_source_row = _compress_matrix + _ge_pitch * column[bit1].peel_row;
 					for (int jj = 0; jj < _ge_pitch; ++jj) temp_row[jj] ^= ge_source_row[jj];
 				}
 				else
@@ -2954,7 +2951,7 @@ void Codec::CompressionBasedSubstitute()
 
 			// For each row of the compression matrix,
 			PeelRow *row = _peel_rows;
-			u64 *ge_row = _ge_compress_matrix + first_word;
+			u64 *ge_row = _compress_matrix + first_word;
 			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
 			{
 				// If row is not peeled,
@@ -3001,7 +2998,7 @@ void Codec::CompressionBasedSubstitute()
 
 			// For each row of the compression matrix,
 			PeelRow *row = _peel_rows;
-			u64 *ge_row = _ge_compress_matrix + first_word;
+			u64 *ge_row = _compress_matrix + first_word;
 			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
 			{
 				// If row is not peeled,
@@ -3068,7 +3065,7 @@ void Codec::CompressionBasedSubstitute()
 
 	// For each row of the compression matrix,
 	PeelRow *row = _peel_rows;
-	u64 *ge_row = _ge_compress_matrix;
+	u64 *ge_row = _compress_matrix;
 	for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
 	{
 		// If row is not peeled,
@@ -3357,7 +3354,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		{
 			// Add compress row to the new GE row
 			u16 row_i = ref_col->peel_row;
-			const u64 *ge_src_row = _ge_compress_matrix + _ge_pitch * row_i;
+			const u64 *ge_src_row = _compress_matrix + _ge_pitch * row_i;
 			for (int ii = 0; ii < _ge_pitch; ++ii) ge_new_row[ii] ^= ge_src_row[ii];
 		}
 		else
@@ -3611,15 +3608,17 @@ Codec::Codec()
 #if defined(CAT_REUSE_COMPRESS)
 	_win_table_data = 0;
 #endif
+	_workspace_allocated = 0;
 
 	// Matrix
-	_ge_compress_matrix = 0;
+	_compress_matrix = 0;
 	_ge_matrix = 0;
 	_ge_pivots = 0;
+	_ge_allocated = 0;
 
 	// Input
 	_input_blocks = 0;
-	_input_allocated = false;
+	_input_allocated = 0;
 }
 
 Codec::~Codec()
@@ -3635,75 +3634,85 @@ void Codec::SetInput(const void *message_in)
 
 	// Set input blocks to the input message
 	_input_blocks = (u8*)message_in;
-	_input_allocated = false;
+	_input_allocated = 0;
 }
 
 bool Codec::AllocateInput()
 {
 	CAT_IF_DUMP(cout << endl << "---- AllocateInput ----" << endl << endl;)
 
-	FreeInput();
+	// If need to allocate more,
+	u32 size = (_block_count + _extra_count) * _block_bytes;
+	if (_input_allocated < size)
+	{
+		FreeInput();
 
-	// Allocate input blocks
-	_input_allocated = true;
-	int input_size = (_block_count + _extra_count) * _block_bytes;
-	_input_blocks = new u8[input_size];
-	if (!_input_blocks) return false;
+		// Allocate input blocks
+		_input_blocks = new u8[size];
+		if (!_input_blocks) return false;
+		_input_allocated = size;
+	}
 
 	return true;
 }
 
 void Codec::FreeInput()
 {
-	if (_input_allocated && _input_blocks)
+	if (_input_allocated > 0 && _input_blocks)
 	{
 		delete []_input_blocks;
 		_input_blocks = 0;
 	}
 
-	_input_allocated = false;
+	_input_allocated = 0;
 }
 
 bool Codec::AllocateMatrix()
 {
 	CAT_IF_DUMP(cout << endl << "---- AllocateMatrix ----" << endl << endl;)
 
-	FreeMatrix();
-
-	// Allocate GE matrix
+	// GE matrix
 	const int ge_cols = _defer_count + _dense_count;
 	const int ge_rows = ge_cols + _extra_count + 1; // One extra for workspace
 	const int ge_pitch = (ge_cols + 63) / 64;
-	const int ge_matrix_words = ge_rows * ge_pitch;
-	_ge_matrix = new u64[ge_matrix_words];
-	if (!_ge_matrix) return false;
+	const u32 ge_matrix_words = ge_rows * ge_pitch;
+
+	// Compression matrix
+	const int compress_rows = _block_count;
+	const u32 compress_matrix_words = compress_rows * ge_pitch;
+
+	// Pivots
+	const int pivot_count = ge_cols + _extra_count;
+	const int pivot_words = pivot_count * 2 + ge_cols;
+
+	// If need to allocate more,
+	const u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16);
+	if (_ge_allocated < size)
+	{
+		FreeMatrix();
+
+		u8 *matrix = new u8[size];
+		if (!matrix) return false;
+		_ge_allocated = size;
+		_ge_matrix = reinterpret_cast<u64*>( matrix );
+	}
+
+	// Store pointers
 	_ge_pitch = ge_pitch;
 	_ge_rows = ge_cols;
+	_compress_matrix = _ge_matrix + ge_matrix_words;
+	_ge_pivots = reinterpret_cast<u16*>( _compress_matrix + compress_matrix_words );
+	_ge_row_map = _ge_pivots + pivot_count;
+	_ge_col_map = _ge_row_map + pivot_count;
 
 	// Clear entire GE matrix
 	memset(_ge_matrix, 0, ge_cols * ge_pitch * sizeof(u64));
 
+	// Clear entire Compression matrix
+	memset(_compress_matrix, 0, compress_matrix_words * sizeof(u64));
+
 	CAT_IF_DUMP(cout << "GE matrix is " << ge_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << ge_matrix_words * sizeof(u64) << " bytes" << endl;)
-
-	// Allocate GE compress matrix
-	const int ge_compress_rows = _block_count;
-	const int ge_compress_matrix_words = ge_compress_rows * ge_pitch;
-	_ge_compress_matrix = new u64[ge_compress_matrix_words];
-	if (!_ge_compress_matrix) return false;
-
-	// Clear entire GE compress matrix
-	memset(_ge_compress_matrix, 0, ge_compress_matrix_words * sizeof(u64));
-
-	CAT_IF_DUMP(cout << "Compress matrix is " << ge_compress_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << ge_compress_matrix_words * sizeof(u64) << " bytes" << endl;)
-
-	// Allocate the pivots
-	const int pivot_count = ge_cols + _extra_count;
-	const int pivot_words = pivot_count * 2 + ge_cols;
-	_ge_pivots = new u16[pivot_words];
-	if (!_ge_pivots) return false;
-	_ge_row_map = _ge_pivots + pivot_count;
-	_ge_col_map = _ge_row_map + pivot_count;
-
+	CAT_IF_DUMP(cout << "Compress matrix is " << compress_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << compress_matrix_words * sizeof(u64) << " bytes" << endl;)
 	CAT_IF_DUMP(cout << "Allocated " << pivot_count << " pivots, consuming " << pivot_words*2 << " bytes" << endl;)
 
 	return true;
@@ -3713,49 +3722,42 @@ void Codec::FreeMatrix()
 {
 	if (_ge_matrix)
 	{
-		delete []_ge_matrix;
-		_ge_matrix= 0;
+		u8 *matrix = reinterpret_cast<u8*>( _ge_matrix );
+		delete []matrix;
+		_ge_matrix = 0;
 	}
 
-	if (_ge_compress_matrix)
-	{
-		delete []_ge_compress_matrix;
-		_ge_compress_matrix = 0;
-	}
-
-	if (_ge_pivots)
-	{
-		delete []_ge_pivots;
-		_ge_pivots = 0;
-	}
+	_ge_allocated = 0;
 }
 
 bool Codec::AllocateWorkspace()
 {
 	CAT_IF_DUMP(cout << endl << "---- AllocateWorkspace ----" << endl << endl;)
 
-	FreeWorkspace();
+	// Count needed rows and columns
+	const u32 check_size = (_block_count + _dense_count + 1) * _block_bytes; // +1 for temporary space
+	const u32 row_count = _block_count + _extra_count;
+	const u32 column_count = _block_count;
 
-	// Allocate check blocks
-	int check_size = (_block_count + _dense_count + 1) * _block_bytes; // +1 for temporary space
-	_recovery_blocks = new u8[check_size];
-	if (!_recovery_blocks) return false;
+	// Calculate size
+	u32 size = check_size + sizeof(PeelRow) * row_count
+		+ sizeof(PeelColumn) * column_count + sizeof(PeelRefs) * column_count;
+	if (_workspace_allocated < size)
+	{
+		FreeWorkspace();
 
-	// Allocate space for row data
-	_peel_rows = new PeelRow[_block_count + _extra_count];
-	if (!_peel_rows) return false;
+		// Allocate check blocks
+		_recovery_blocks = new u8[size];
+		if (!_recovery_blocks) return false;
+		_workspace_allocated = size;
+	}
 
-	// Allocate space for column data
-	_peel_cols = new PeelColumn[_block_count];
-	if (!_peel_cols) return false;
+	// Set pointers
+	_peel_rows = reinterpret_cast<PeelRow*>( _recovery_blocks + check_size );
+	_peel_cols = reinterpret_cast<PeelColumn*>( _peel_rows + row_count );
+	_peel_col_refs = reinterpret_cast<PeelRefs*>( _peel_cols + column_count );
 
-	// Allocate space for column refs
-	_peel_col_refs = new PeelRefs[_block_count];
-	if (!_peel_col_refs) return false;
-
-	CAT_IF_DUMP(cout << "Memory overhead for workspace = " <<
-		check_size + sizeof(PeelRow) * (_block_count + _extra_count)
-		+ sizeof(PeelColumn) * _block_count + sizeof(PeelRefs) * _block_count << " bytes" << endl;)
+	CAT_IF_DUMP(cout << "Memory overhead for workspace = " << size << " bytes" << endl;)
 
 	// Initialize columns
 	for (int ii = 0; ii < _block_count; ++ii)
@@ -3776,31 +3778,7 @@ void Codec::FreeWorkspace()
 		_recovery_blocks = 0;
 	}
 
-	if (_peel_rows)
-	{
-		delete []_peel_rows;
-		_peel_rows = 0;
-	}
-
-	if (_peel_cols)
-	{
-		delete []_peel_cols;
-		_peel_cols = 0;
-	}
-
-	if (_peel_col_refs)
-	{
-		delete []_peel_col_refs;
-		_peel_col_refs = 0;
-	}
-
-#if defined(CAT_REUSE_COMPRESS)
-	if (_win_table_data)
-	{
-		delete []_win_table_data;
-		_win_table_data = 0;
-	}
-#endif
+	_workspace_allocated = 0;
 }
 
 
@@ -3841,7 +3819,7 @@ void Codec::PrintCompressMatrix()
 	{
 		for (int jj = 0; jj < cols; ++jj)
 		{
-			if (_ge_compress_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
+			if (_compress_matrix[_ge_pitch * ii + (jj >> 6)] & ((u64)1 << (jj & 63)))
 				cout << '1';
 			else
 				cout << '0';
