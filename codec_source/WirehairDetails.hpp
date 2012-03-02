@@ -30,7 +30,7 @@
 #define CAT_WIREHAIR_DETAILS_HPP
 
 // TODO: Remove this
-extern int g_p_seed, g_c_seed;
+extern int g_p_seed, g_d_seed;
 
 #include "SmallPRNG.hpp"
 
@@ -41,7 +41,7 @@ extern int g_p_seed, g_c_seed;
 
 // Limits:
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
-#define CAT_MAX_CHECK_ROWS 1024 /* Maximum check row count */
+#define CAT_MAX_DENSE_ROWS 1024 /* Maximum check row count */
 #define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
 #define CAT_WIREHAIR_MAX_N 64000 /* Largest N value to allow */
 #define CAT_WIREHAIR_MIN_N 6 /* Smallest N value to allow */
@@ -50,6 +50,7 @@ extern int g_p_seed, g_c_seed;
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
+#define CAT_USE_GF256 /* Add GF(256) rows to the end of the matrix */
 
 namespace cat {
 
@@ -64,7 +65,7 @@ enum Result
 	R_MORE_BLOCKS,		// Codec wants more blocks.  Om nom nom.
 
 	R_ERROR,			// Return codes higher than this one are errors:
-	R_BAD_CHECK_SEED,	// Encoder needs a better check seed
+	R_BAD_DENSE_SEED,	// Encoder needs a better dense seed
 	R_BAD_PEEL_SEED,	// Encoder needs a better peel seed
 	R_BAD_INPUT,		// Input parameters were incorrect
 	R_TOO_SMALL,		// message_bytes / block_size is too small.  Try reducing block_size or use a larger message
@@ -111,8 +112,8 @@ class Codec
 	u16 _block_count;			// Number of blocks in the message
 	u16 _block_next_prime;		// Next prime number at or above block count
 	u16 _extra_count;			// Number of extra rows to allocate
-	u32 _p_seed;				// Seed for peeled rows of generator matrix
-	u32 _c_seed;				// Seed for check rows of generator matrix
+	u32 _p_seed;				// Seed for peeled rows of check matrix
+	u32 _d_seed;				// Seed for dense rows of check matrix
 	u16 _used_count;			// Number of stored rows
 	u16 _dense_count;			// Number of added dense code rows
 	u16 _dense_next_prime;		// Next prime number at or above dense count
@@ -201,7 +202,7 @@ class Codec
 	// Initialize column values for GE matrix
 	void InitializeColumnValues();
 
-	// Add check matrix to triangle columns
+	// Multiply diagonalized peeling column values into dense rows
 	void MultiplyDenseValues();
 
 	// Add values for GE matrix positions under the diagonal
@@ -254,7 +255,7 @@ public:
 	//// Accessors
 
 	CAT_INLINE u32 PSeed() { return _p_seed; }
-	CAT_INLINE u32 CSeed() { return _c_seed; }
+	CAT_INLINE u32 CSeed() { return _d_seed; }
 	CAT_INLINE u32 BlockCount() { return _block_count; }
 
 
@@ -278,11 +279,11 @@ public:
 	// Feed decoder a block
 	Result DecodeFeed(u32 id, const void *block_in);
 
-	// Generate output blocks from the recovered check blocks
-	Result ReconstructOutput(void *message_out);
-
 	// Use matrix solution to generate recovery blocks
 	void GenerateRecoveryBlocks();
+
+	// Generate output blocks from the recovery blocks
+	Result ReconstructOutput(void *message_out);
 };
 
 

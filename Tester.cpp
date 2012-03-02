@@ -57,7 +57,7 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_c_seed = 7;
+	g_d_seed = 7;
 	g_p_seed = 5;
 
 	wirehair::Encoder encoder;
@@ -86,7 +86,7 @@ int main()
 
 			++successes;
 			//if (trials % 10000 == 0)
-			cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with seeds " << g_c_seed << " and " << g_p_seed << ".  Success rate = " << successes / (double)trials << endl;
+			cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with seeds " << g_d_seed << " and " << g_p_seed << ".  Success rate = " << successes / (double)trials << endl;
 			//cin.get();
 			break;
 		}

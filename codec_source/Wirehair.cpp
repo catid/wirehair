@@ -61,13 +61,13 @@
 		S = Size of original data in bytes.
 		N = ceil(S / M) = Count of blocks in the original data.
 
-		(1) Generator Matrix Construction
+		(1) Check Matrix Construction
 
 			A = Original data blocks, N blocks long.
 			D = Count of dense matrix rows (see below), chosen based on N.
 			E = N + D blocks = Count of encoded data blocks.
 			R = Recovery blocks, E blocks long.
-			G = Generator matrix, with E rows and E columns.
+			C = Check matrix, with E rows and E columns.
 			0 = Dense rows sum to zero.
 
 			+---------+---+   +---+   +---+
@@ -82,7 +82,7 @@
 				A has N rows of the original data padded by H zeroes.
 				R has E rows of encoded blocks.
 
-			G is the ExE binary matrix on the left.
+			C is the ExE binary matrix on the left.
 				P is the NxN peeling matrix
 					- Optimized for success of the peeling solver.
 				M is the NxH mixing matrix
@@ -91,8 +91,8 @@
 					- Used to improve recovery properties.
 				I is an HxH random-looking invertible matrix.
 
-			G matrices for each value of N are precomputed offline and used
-			based on the length of the input data, which guarantees that G
+			C matrices for each value of N are precomputed offline and used
+			based on the length of the input data, which guarantees that C
 			is invertible.  The I matrix is also selected based on its size.
 
 		(2) Generating Matrix P
@@ -112,7 +112,7 @@
 
 			Each bit has about a 50% chance of being set.
 
-		(5) Generator Matrix Inversion
+		(5) Check Matrix Inversion
 
 			An optimized sparse technique is used to solve the recovery blocks.
 
@@ -198,9 +198,9 @@
 			Decoding begins by collecting N blocks from the transmitter.  Once
 		N blocks are received, the matrix G' (differing in the first N rows
 		from the above matrix G) is generated with the rows of P|M that were
-		received.  Generator matrix inversion is attempted, failing at the
-		Gaussian elimination step if a pivot cannot be found for one of the GE
-		matrix columns (see above).
+		received.  Matrix solving is attempted, failing at the Gaussian
+		elimination step if a pivot cannot be found for one of the GE matrix
+		columns (see above).
 
 			New rows are received and submitted directly to the GE solver,
 		hopefully providing the missing pivot.  Once enough rows have been
@@ -251,7 +251,7 @@ const char *cat::wirehair::GetResultString(Result r)
 	{
 	case R_WIN:				return "R_WIN";
 	case R_MORE_BLOCKS:		return "R_MORE_BLOCKS";
-	case R_BAD_CHECK_SEED:	return "R_BAD_CHECK_SEED";
+	case R_BAD_DENSE_SEED:	return "R_BAD_DENSE_SEED";
 	case R_BAD_PEEL_SEED:	return "R_BAD_PEEL_SEED";
 	case R_TOO_SMALL:		return "R_TOO_SMALL";
 	case R_TOO_LARGE:		return "R_TOO_LARGE";
@@ -844,12 +844,12 @@ void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u
 
 //// Utility: Matrix Parameter Generator function
 
-int g_p_seed, g_c_seed; // TODO: Remove these
+int g_p_seed, g_d_seed; // TODO: Remove these
 
 bool cat::wirehair::GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &dense_count)
 {
 	p_seed = g_p_seed;// TODO: Remove these
-	c_seed = g_c_seed;
+	c_seed = g_d_seed;
 
 	// This choice of dense count is based on tuning manually at a bunch of different block counts and
 	// picking what seemed like a good trend line.  It really needs to be simulated.
@@ -1241,7 +1241,7 @@ void Codec::GreedyPeeling()
 /*
 	If using a naive approach, this is by far the most complex step of
 	the matrix inversion.  The approach outlined here makes it much
-	easier.  At this point the generator matrix has been re-organized
+	easier.  At this point the check matrix has been re-organized
 	into peeled and deferred rows and columns:
 
 		+-----------------------+
@@ -1270,7 +1270,7 @@ void Codec::GreedyPeeling()
 	P = Peeled rows/columns (re-ordered)
 	D = Deferred rows/columns (order of deferment)
 	M = Mixing columns always deferred for GE
-	0 = Dense rows from check matrix always deferred for GE, that sum to 0
+	0 = Dense rows always deferred for GE; they sum to 0
 
 		Since the re-ordered matrix above is in lower triangular form,
 	and since the weight of each row is limited to a constant, the cost
@@ -1415,7 +1415,7 @@ void Codec::SetMixingColumnsForDeferredRows()
 	PeelDiagonal
 
 		This function diagonalizes the peeled rows and columns of the
-	generator matrix.  The result is that the peeled submatrix is the
+	check matrix.  The result is that the peeled submatrix is the
 	identity matrix, and that the other columns of the peeled rows are
 	very dense and have temporary block values assigned.  These dense
 	columns are used to efficiently zero out the peeled columns of the
@@ -1524,7 +1524,7 @@ void Codec::PeelDiagonal()
 				// Generate temporary row block value:
 				u8 *temp_block_dest = _recovery_blocks + _block_bytes * ref_column_i;
 
-				// If referencing row is already copied to the check blocks,
+				// If referencing row is already copied to the recovery blocks,
 				if (ref_row->is_copied)
 				{
 					// Add this row block value to it
@@ -1597,11 +1597,11 @@ void Codec::CopyDeferredRows()
 		         ^                  ^---- Middle third of the columns
 				 \------ Left third of the columns
 
-		The dense check rows are generated so that they can quickly be
-	eliminated with as few row operations as possible.  This elimination
-	can be visualized as a matrix-matrix multiplication between the
-	peeling submatrix and the deferred/dense submatrix intersection with
-	the peeled columns.
+		The dense rows are generated so that they can quickly be
+	eliminated with as few row operations as possible.
+	This elimination can be visualized as a matrix-matrix multiplication
+	between the peeling submatrix and the deferred/dense submatrix
+	intersection with the peeled columns.
 
 		I needed to find a way to generate a binary matrix that LOOKS
 	random but actually only differs by 2 bits per row.  I looked at
@@ -1647,7 +1647,7 @@ void Codec::CopyDeferredRows()
 
 		Here is the MultiplyDenseRows() process:
 
-	Split the check matrix into squares.
+	Split the dense submatrix of the check matrix into squares.
 	For each square,
 		Shuffle the destination row order.
 		Shuffle the bit flip order.
@@ -1676,16 +1676,16 @@ void Codec::MultiplyDenseRows()
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_c_seed);
+	prng.Initialize(_d_seed);
 
 	// For each block of columns,
 	PeelColumn *column = _peel_cols;
 	u64 *temp_row = _ge_matrix + _ge_pitch * _ge_rows;
 	const int dense_count = _dense_count;
-	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
+	u16 rows[CAT_MAX_DENSE_ROWS], bits[CAT_MAX_DENSE_ROWS];
 	for (u16 column_i = 0; column_i < _block_count; column_i += dense_count, column += dense_count)
 	{
-		CAT_IF_DUMP(cout << "Shuffled check matrix starting at column " << column_i << ":" << endl;)
+		CAT_IF_DUMP(cout << "Shuffled dense matrix starting at column " << column_i << ":" << endl;)
 
 		// Handle final columns
 		int max_x = dense_count;
@@ -1701,7 +1701,7 @@ void Codec::MultiplyDenseRows()
 		const u16 *set_bits = bits;
 		const u16 *clr_bits = set_bits + set_count;
 
-		CAT_IF_DUMP( u64 disp_row[(CAT_MAX_CHECK_ROWS+63)/64]; CAT_OBJCLR(disp_row); )
+		CAT_IF_DUMP( u64 disp_row[(CAT_MAX_DENSE_ROWS+63)/64]; CAT_OBJCLR(disp_row); )
 
 		// Generate first row
 		memset(temp_row, 0, _ge_pitch * sizeof(u64));
@@ -2082,11 +2082,11 @@ void Codec::InitializeColumnValues()
 			// Mark it for skipping
 			_ge_row_map[ge_row_i] = LIST_TERM;
 
-			CAT_IF_DUMP(cout << "Did not use GE row " << ge_row_i << ", which is a check row." << endl;)
+			CAT_IF_DUMP(cout << "Did not use GE row " << ge_row_i << ", which is a dense row." << endl;)
 		}
 		else
 		{
-			CAT_IF_DUMP(cout << "Did not use deferred row " << ge_row_i << ", which is not a check row." << endl;)
+			CAT_IF_DUMP(cout << "Did not use deferred row " << ge_row_i << ", which is not a dense row." << endl;)
 		}
 	}
 
@@ -2112,14 +2112,14 @@ void Codec::MultiplyDenseValues()
 
 	// Initialize PRNG
 	CatsChoice prng;
-	prng.Initialize(_c_seed);
+	prng.Initialize(_d_seed);
 
 	// For each block of columns,
 	const int dense_count = _dense_count;
 	u8 *temp_block = _recovery_blocks + _block_bytes * (_block_count + dense_count);
 	const u8 *source_block = _recovery_blocks;
 	PeelColumn *column = _peel_cols;
-	u16 rows[CAT_MAX_CHECK_ROWS], bits[CAT_MAX_CHECK_ROWS];
+	u16 rows[CAT_MAX_DENSE_ROWS], bits[CAT_MAX_DENSE_ROWS];
 	for (u16 column_i = 0; column_i < _block_count; column_i += dense_count,
 		column += dense_count, source_block += _block_bytes * dense_count)
 	{
@@ -2181,18 +2181,18 @@ void Codec::MultiplyDenseValues()
 			memset(temp_block, 0, _block_bytes);
 		else
 		{
+			// Else if never combined two: Just copy it
 			if (combo != temp_block)
 			{
-				// Else if never combined two: Just copy it
 				memcpy(temp_block, combo, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 
-			// Store first row
-			u16 check_column_i = _ge_row_map[*row];
-			if (check_column_i != LIST_TERM)
+			// Store in destination column in recovery blocks
+			u16 dest_column_i = _ge_row_map[*row];
+			if (dest_column_i != LIST_TERM)
 			{
-				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
+				memxor(_recovery_blocks + _block_bytes * dest_column_i, temp_block, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 		}
@@ -2233,11 +2233,11 @@ void Codec::MultiplyDenseValues()
 
 			CAT_IF_DUMP(cout << endl;)
 
-			// Store in row
-			u16 check_column_i = _ge_row_map[*row++];
-			if (check_column_i != LIST_TERM)
+			// Store in destination column in recovery blocks
+			u16 dest_column_i = _ge_row_map[*row++];
+			if (dest_column_i != LIST_TERM)
 			{
-				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
+				memxor(_recovery_blocks + _block_bytes * dest_column_i, temp_block, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 		}
@@ -2277,11 +2277,11 @@ void Codec::MultiplyDenseValues()
 
 			CAT_IF_DUMP(cout << endl;)
 
-			// Store in row
-			u16 check_column_i = _ge_row_map[*row++];
-			if (check_column_i != LIST_TERM)
+			// Store in destination column in recovery blocks
+			u16 dest_column_i = _ge_row_map[*row++];
+			if (dest_column_i != LIST_TERM)
 			{
-				memxor(_recovery_blocks + _block_bytes * check_column_i, temp_block, _block_bytes);
+				memxor(_recovery_blocks + _block_bytes * dest_column_i, temp_block, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 			}
 		}
@@ -3103,7 +3103,7 @@ void Codec::CompressionBasedSubstitute()
 /*
 	ChooseMatrix
 
-		This function determines the generator matrix to use based on the
+		This function determines the check matrix to use based on the
 	given message bytes and bytes per block.
 */
 Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
@@ -3128,13 +3128,13 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
 
-	// Lookup generator matrix parameters
-	if (!GenerateMatrixParameters(_block_count, _p_seed, _c_seed, _dense_count))
+	// Lookup check matrix parameters
+	if (!GenerateMatrixParameters(_block_count, _p_seed, _d_seed, _dense_count))
 		return R_BAD_INPUT;
 
 	_dense_next_prime = NextPrime16(_dense_count);
 
-	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Check seed = " << _c_seed << endl;)
+	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
 	CAT_IF_DUMP(cout << " + Dense count = " << _dense_count << " +Prime=" << _dense_next_prime << endl;)
 
 	// Initialize lists
@@ -3288,13 +3288,14 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	u16 row_i, ge_row_i, new_pivot_i;
 	if (_used_count >= _block_count + _extra_count)
 	{
-		// Find a non-check row to reuse
+		// Find a non-dense row to reuse
 		for (new_pivot_i = _ge_resume_pivot; new_pivot_i < _ge_rows; ++new_pivot_i)
 		{
 			ge_row_i = _ge_pivots[new_pivot_i];
 			if (ge_row_i >= _dense_count) break;
 		}
 
+		// If no non-dense row could be found,
 		if (ge_row_i < _dense_count)
 			return R_NEED_MORE_EXTRA;
 
@@ -3735,25 +3736,25 @@ bool Codec::AllocateWorkspace()
 	CAT_IF_DUMP(cout << endl << "---- AllocateWorkspace ----" << endl << endl;)
 
 	// Count needed rows and columns
-	const u32 check_size = (_block_count + _dense_count + 1) * _block_bytes; // +1 for temporary space
+	const u32 recovery_size = (_block_count + _dense_count + 1) * _block_bytes; // +1 for temporary space
 	const u32 row_count = _block_count + _extra_count;
 	const u32 column_count = _block_count;
 
 	// Calculate size
-	u32 size = check_size + sizeof(PeelRow) * row_count
+	u32 size = recovery_size + sizeof(PeelRow) * row_count
 		+ sizeof(PeelColumn) * column_count + sizeof(PeelRefs) * column_count;
 	if (_workspace_allocated < size)
 	{
 		FreeWorkspace();
 
-		// Allocate check blocks
+		// Allocate workspace
 		_recovery_blocks = new u8[size];
 		if (!_recovery_blocks) return false;
 		_workspace_allocated = size;
 	}
 
 	// Set pointers
-	_peel_rows = reinterpret_cast<PeelRow*>( _recovery_blocks + check_size );
+	_peel_rows = reinterpret_cast<PeelRow*>( _recovery_blocks + recovery_size );
 	_peel_cols = reinterpret_cast<PeelColumn*>( _peel_rows + row_count );
 	_peel_col_refs = reinterpret_cast<PeelRefs*>( _peel_cols + column_count );
 
@@ -3915,8 +3916,8 @@ Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 	and if the solver succeeds, it generates the recovery blocks.
 
 		In practice, the solver should always succeed because the
-	encoder should be looking up its generator matrix parameters
-	from a table, which guarantees the matrix is invertible.
+	encoder should be looking up its check matrix parameters from
+	a table, which guarantees the matrix is invertible.
 */
 Result Codec::EncodeFeed(const void *message_in)
 {
@@ -3937,7 +3938,7 @@ Result Codec::EncodeFeed(const void *message_in)
 	// Solve matrix and generate recovery blocks
 	Result r = SolveMatrix();
 	if (!r) GenerateRecoveryBlocks();
-	else if (r == R_MORE_BLOCKS) r = R_BAD_CHECK_SEED;
+	else if (r == R_MORE_BLOCKS) r = R_BAD_DENSE_SEED;
 	return r;
 }
 
