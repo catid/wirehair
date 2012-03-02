@@ -20,12 +20,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Clock.cpp" />
+    <ClCompile Include="codec_source\EndianNeutral.cpp" />
     <ClCompile Include="codec_source\memxor.cpp" />
     <ClCompile Include="codec_source\Wirehair.cpp" />
     <ClCompile Include="Tester.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Clock.hpp" />
+    <ClInclude Include="codec_source\EndianNeutral.hpp" />
     <ClInclude Include="codec_source\memxor.hpp" />
     <ClInclude Include="codec_source\Platform.hpp" />
     <ClInclude Include="codec_source\SmallPRNG.hpp" />

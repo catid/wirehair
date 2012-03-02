@@ -50,7 +50,8 @@ extern int g_p_seed, g_d_seed;
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
-#define CAT_USE_GF256 /* Add GF(256) rows to the end of the matrix */
+//#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
+#define CAT_HEAVY_ROWS 2 /* Number of heavy rows to add */
 
 namespace cat {
 
@@ -141,7 +142,7 @@ class Codec
 	// Gaussian elimination state
 	u64 *_ge_matrix;			// Gaussian elimination matrix
 	u32 _ge_allocated;			// Number of bytes allocated to GE matrix
-	u64 *_compress_matrix;	// Gaussian elimination compression matrix
+	u64 *_compress_matrix;		// Gaussian elimination compression matrix
 	int _ge_pitch;				// Words per row of GE matrix and compression matrix
 	u16 _ge_rows;				// Number of rows in GE matrix, since this grows
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
@@ -150,6 +151,10 @@ class Codec
 	u16 _ge_resume_pivot;		// Pivot to resume Triangle() on after it fails
 #if defined(CAT_REUSE_COMPRESS)
 	u8 *_win_table_data;		// Values of temporary symbols for substitution table
+#endif
+#if defined(CAT_USE_HEAVY)
+	u8 *_heavy_matrix;			// Heavy rows of GE matrix
+	int _heavy_pitch;			// Bytes per heavy matrix row
 #endif
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
@@ -193,6 +198,11 @@ class Codec
 	// Multiply dense rows by peeling matrix to generate GE rows, but no row values yet
 	void MultiplyDenseRows();
 
+#if defined(CAT_USE_HEAVY)
+	// Multiply heavy rows by peeling matrix to generate GE rows, but no row values yet
+	void MultiplyHeavyRows();
+#endif
+
 
 	//// (3) Gaussian Elimination
 
@@ -204,6 +214,11 @@ class Codec
 
 	// Multiply diagonalized peeling column values into dense rows
 	void MultiplyDenseValues();
+
+#if defined(CAT_USE_HEAVY)
+	// Multiply diagonalized peeling column values into heavy rows
+	void MultiplyHeavyValues();
+#endif
 
 	// Add values for GE matrix positions under the diagonal
 	void AddSubdiagonalValues();

@@ -213,6 +213,7 @@
 
 #include "Wirehair.hpp"
 #include "memxor.hpp"
+#include "EndianNeutral.hpp"
 using namespace cat;
 using namespace wirehair;
 
@@ -639,6 +640,8 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 
 //// Utility: GF(256) Multiply and Divide functions
 
+#if defined(CAT_USE_HEAVY)
+
 /*
 	Branchless multiply and divide construction from
 	"Fast Software Implementations of Finite Field Operations (Extended Abstract)"
@@ -722,6 +725,8 @@ static CAT_INLINE u8 GF256Divide(u8 x, u8 y)
 	// Precondition: y != 0
 	return EXP_TABLE[LOG_TABLE[x] + 255 - LOG_TABLE[y]];
 }
+
+#endif // CAT_USE_HEAVY
 
 
 //// Utility: Column iterator function
@@ -1842,6 +1847,174 @@ void Codec::MultiplyDenseRows()
 }
 
 
+#if defined(CAT_USE_HEAVY)
+
+// Flip endianness at compile time if possible
+#if defined(CAT_ENDIAN_BIG)
+static u32 GF256_MULT_LOOKUP[16] = {
+	0x00000000, 0x01000000, 0x00010000, 0x01010000, 
+	0x00000100, 0x01000100, 0x00010100, 0x01010100, 
+	0x00000001, 0x01000001, 0x00010001, 0x01010001, 
+	0x00000101, 0x01000101, 0x00010101, 0x01010101, 
+};
+#else // Little-endian or unknown bit order:
+static u32 GF256_MULT_LOOKUP[16] = {
+	0x00000000, 0x00000001, 0x00000100, 0x00000101, 
+	0x00010000, 0x00010001, 0x00010100, 0x00010101, 
+	0x01000000, 0x01000001, 0x01000100, 0x01000101, 
+	0x01010000, 0x01010001, 0x01010100, 0x01010101, 
+};
+#endif
+
+/*
+*/
+void Codec::MultiplyHeavyRows()
+{
+	CAT_IF_DUMP(cout << endl << "---- MultiplyHeavyRows ----" << endl << endl;)
+
+	// For each deferred column,
+	PeelColumn *column;
+	for (u16 column_i = _defer_head_columns; column_i != LIST_TERM; column_i = column->next)
+	{
+		column = &_peel_cols[column_i];
+		u16 ge_column_i = column->ge_column;
+
+		CAT_IF_DUMP(cout << "Filling deferred column " << column_i << " at GE column " << ge_column_i << ":" << endl;)
+
+		// For each heavy row,
+		u8 *heavy_row = _heavy_matrix + ge_column_i;
+		u32 lut_x = column_i % 255; // Perform modulus for first x
+		*heavy_row = EXP_TABLE[lut_x]; // Unroll first lookup
+		CAT_IF_DUMP(cout << " -- Row 0 = EXP[" << lut_x << "]" << endl;)
+		for (u16 heavy_i = 1; heavy_i < CAT_HEAVY_ROWS; ++heavy_i)
+		{
+			// Simplified iteration mod 255
+			++lut_x;
+			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
+
+			// Look up next code value
+			heavy_row += _heavy_pitch;
+			*heavy_row = EXP_TABLE[lut_x];
+			CAT_IF_DUMP(cout << " -- Row " << heavy_i << " = EXP[" << lut_x << "]" << endl;)
+		}
+	}
+
+	CAT_IF_DUMP(cout << "After fill deferred:" << endl;)
+	CAT_IF_DUMP(PrintGEMatrix();)
+
+	// Fill dense columns:
+	u32 dense_lut_x = _block_count % 255; // Perform modulus for first x
+	u8 *heavy_row = _heavy_matrix + _defer_count;
+	for (u16 heavy_i = 0; heavy_i < CAT_HEAVY_ROWS; ++heavy_i, heavy_row += _heavy_pitch)
+	{
+		CAT_IF_DUMP(cout << "Filling dense columns for heavy row " << heavy_i << ":" << endl;)
+
+		// Unroll first lookup
+		u32 lut_x = dense_lut_x;
+		u8 *row = heavy_row;
+		*row++ = EXP_TABLE[lut_x];
+		CAT_IF_DUMP(cout << " -- Column 0 = EXP[" << lut_x << "]" << endl;)
+
+		// Simplified iteration mod 255
+		++lut_x;
+		lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
+
+		// Store x for start of next row
+		dense_lut_x = lut_x;
+
+		// For each remaining column,
+		for (u16 dense_i = 1, lim = _dense_count - 1; dense_i < lim; ++dense_i)
+		{
+			// Look up next code value
+			*row++ = EXP_TABLE[lut_x];
+			CAT_IF_DUMP(cout << " -- Column " << dense_i << " = EXP[" << lut_x << "]" << endl;)
+
+			// Simplified iteration mod 255
+			++lut_x;
+			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
+		}
+
+		// Look up final code value
+		*row = EXP_TABLE[lut_x];
+		CAT_IF_DUMP(cout << " -- Column " << _dense_count - 1 << " = EXP[" << lut_x << "]" << endl;)
+	}
+
+	CAT_IF_DUMP(cout << "After fill dense:" << endl;)
+	CAT_IF_DUMP(PrintGEMatrix();)
+
+	// Set identity matrix in the lower right
+	u8 *lower_right = _heavy_matrix + _defer_count + _dense_count;
+	for (int ii = 0; ii < CAT_HEAVY_ROWS; ++ii, lower_right += _heavy_pitch)
+		for (int jj = 0; jj < CAT_HEAVY_ROWS; ++jj)
+			lower_right[jj] = (ii == jj) ? 1 : 0;
+
+	CAT_IF_DUMP(cout << "After set identity:" << endl;)
+	CAT_IF_DUMP(PrintGEMatrix();)
+
+	// For each row,
+	const int ge_cols = _defer_count + _dense_count + CAT_HEAVY_ROWS;
+	u64 *compress_row = _compress_matrix;
+	PeelRow *row = _peel_rows;
+	for (u16 row_i = 0; row_i < _block_count; ++row_i, ++row, compress_row += _ge_pitch)
+	{
+		// Skip deferred rows
+		u16 column_i = row->peel_column;
+		if (column_i == LIST_TERM) continue;
+
+		CAT_IF_DUMP(cout << "Adding peeled column " << column_i << " solved by row " << row_i << ":" << endl;)
+
+		// Generate code values for each row in this column
+		u8 code_values[CAT_HEAVY_ROWS];
+		u32 lut_x = column_i % 255; // Perform modulus for first x
+		code_values[0] = EXP_TABLE[lut_x]; // Unroll first lookup
+		CAT_IF_DUMP(cout << " -- Precompute codes for rows = EXP[" << lut_x << "] ";)
+		for (u16 heavy_i = 1; heavy_i < CAT_HEAVY_ROWS; ++heavy_i)
+		{
+			// Simplified iteration mod 255
+			++lut_x;
+			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
+
+			// Look up next code value
+			code_values[heavy_i] = EXP_TABLE[lut_x];
+			CAT_IF_DUMP(cout << "EXP[" << lut_x << "] ";)
+		}
+		CAT_IF_DUMP(cout << endl;)
+
+		CAT_IF_DUMP(cout << "Column x Window = ";)
+
+		// Multiply compress row by code value and add to heavy GE row
+		for (int ge_column_i = 0; ge_column_i < ge_cols; ge_column_i += 4)
+		{
+			// Look up 4 bit window
+			u32 bits = (u32)(compress_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
+#if defined(CAT_ENDIAN_UNKNOWN)
+			u32 window = getLE(GF256_MULT_LOOKUP[bits]);
+#else
+			u32 window = GF256_MULT_LOOKUP[bits];
+#endif
+
+			CAT_IF_DUMP(cout << ge_column_i << "x" << hex << window << dec << " ";)
+
+			// For each heavy row,
+			u8 *heavy_row = _heavy_matrix + ge_column_i;
+			for (u16 heavy_i = 0; heavy_i < CAT_HEAVY_ROWS; ++heavy_i, heavy_row += _heavy_pitch)
+			{
+				// Add 4 bytes at a time
+				u32 *word = reinterpret_cast<u32*>( heavy_row );
+				*word ^= window * code_values[heavy_i];
+			}
+		}
+
+		CAT_IF_DUMP(cout << endl;)
+	} // next row
+
+	CAT_IF_DUMP(cout << "After multiplication:" << endl;)
+	CAT_IF_DUMP(PrintGEMatrix();)
+}
+
+#endif // CAT_USE_HEAVY
+
+
 /*
 		One more subtle optimization.  Why not.  Depending on how the GE
 	matrix is constructed, it can be put in a roughly upper-triangular
@@ -2027,6 +2200,8 @@ void Codec::InitializeColumnValues()
 			const u8 *combo = _input_blocks + _block_bytes * pivot_row_i;
 			PeelRow *row = &_peel_rows[pivot_row_i];
 
+			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
+
 			// If copying from final input block,
 			if (pivot_row_i == _block_count - 1)
 			{
@@ -2035,8 +2210,6 @@ void Codec::InitializeColumnValues()
 				CAT_IF_ROWOP(++rowops;)
 				combo = 0;
 			}
-
-			CAT_IF_DUMP(cout << "[" << (int)combo[0] << "]";)
 
 			// Eliminate peeled columns:
 			u16 column_i = row->peel_x0;
@@ -2289,6 +2462,20 @@ void Codec::MultiplyDenseValues()
 
 	CAT_IF_ROWOP(cout << "MultiplyDenseValues used " << rowops << " row ops" << endl;)
 }
+
+
+#if defined(CAT_USE_HEAVY)
+
+/*
+*/
+void Codec::MultiplyHeavyValues()
+{
+	CAT_IF_DUMP(cout << endl << "---- MultiplyHeavyValues ----" << endl << endl;)
+
+}
+
+#endif // CAT_USE_HEAVY
+
 
 /*
 	AddSubdiagonalValues
@@ -3202,6 +3389,9 @@ Result Codec::SolveMatrix()
 	CAT_IF_DUMP(PrintGEMatrix();)
 
 	MultiplyDenseRows();
+#if defined(CAT_USE_HEAVY)
+	MultiplyHeavyRows();
+#endif
 
 	if (!AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count))
 		return R_TOO_SMALL;
@@ -3260,6 +3450,9 @@ void Codec::GenerateRecoveryBlocks()
 
 	InitializeColumnValues();
 	MultiplyDenseValues();
+#if defined(CAT_USE_HEAVY)
+	MultiplyHeavyValues();
+#endif
 	AddSubdiagonalValues();
 
 #if defined(CAT_REUSE_COMPRESS)
@@ -3603,9 +3796,6 @@ Codec::Codec()
 {
 	// Workspace
 	_recovery_blocks = 0;
-	_peel_rows = 0;
-	_peel_cols = 0;
-	_peel_col_refs = 0;
 #if defined(CAT_REUSE_COMPRESS)
 	_win_table_data = 0;
 #endif
@@ -3613,8 +3803,6 @@ Codec::Codec()
 
 	// Matrix
 	_compress_matrix = 0;
-	_ge_matrix = 0;
-	_ge_pivots = 0;
 	_ge_allocated = 0;
 
 	// Input
@@ -3686,8 +3874,18 @@ bool Codec::AllocateMatrix()
 	const int pivot_count = ge_cols + _extra_count;
 	const int pivot_words = pivot_count * 2 + ge_cols;
 
+#if defined(CAT_USE_HEAVY)
+	// Heavy
+	const int heavy_count = CAT_HEAVY_ROWS;
+	const int heavy_pitch = (_defer_count + _dense_count + CAT_HEAVY_ROWS + 3) & ~3; // Round up to next multiple of 4
+	const int heavy_bytes = heavy_pitch * heavy_count;
+#endif
+
 	// If need to allocate more,
-	const u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16);
+	u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16);
+#if defined(CAT_USE_HEAVY)
+	size += heavy_bytes;
+#endif
 	if (_ge_allocated < size)
 	{
 		FreeMatrix();
@@ -3695,37 +3893,47 @@ bool Codec::AllocateMatrix()
 		u8 *matrix = new u8[size];
 		if (!matrix) return false;
 		_ge_allocated = size;
-		_ge_matrix = reinterpret_cast<u64*>( matrix );
+		_compress_matrix = reinterpret_cast<u64*>( matrix );
 	}
 
 	// Store pointers
 	_ge_pitch = ge_pitch;
 	_ge_rows = ge_cols;
-	_compress_matrix = _ge_matrix + ge_matrix_words;
-	_ge_pivots = reinterpret_cast<u16*>( _compress_matrix + compress_matrix_words );
+	_ge_matrix = _compress_matrix + compress_matrix_words;
+#if defined(CAT_USE_HEAVY)
+	_heavy_pitch = heavy_pitch;
+	_heavy_matrix = reinterpret_cast<u8*>( _ge_matrix + ge_matrix_words );
+	_ge_pivots = reinterpret_cast<u16*>( _heavy_matrix + heavy_bytes );
+#else
+	_ge_pivots = reinterpret_cast<u16*>( _ge_matrix + ge_matrix_words );
+#endif
 	_ge_row_map = _ge_pivots + pivot_count;
 	_ge_col_map = _ge_row_map + pivot_count;
-
-	// Clear entire GE matrix
-	memset(_ge_matrix, 0, ge_cols * ge_pitch * sizeof(u64));
-
-	// Clear entire Compression matrix
-	memset(_compress_matrix, 0, compress_matrix_words * sizeof(u64));
 
 	CAT_IF_DUMP(cout << "GE matrix is " << ge_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << ge_matrix_words * sizeof(u64) << " bytes" << endl;)
 	CAT_IF_DUMP(cout << "Compress matrix is " << compress_rows << " x " << ge_cols << " with pitch " << ge_pitch << " consuming " << compress_matrix_words * sizeof(u64) << " bytes" << endl;)
 	CAT_IF_DUMP(cout << "Allocated " << pivot_count << " pivots, consuming " << pivot_words*2 << " bytes" << endl;)
+
+	// Clear entire Compression matrix
+	memset(_compress_matrix, 0, compress_matrix_words * sizeof(u64));
+
+	// Clear entire GE matrix
+	memset(_ge_matrix, 0, ge_cols * ge_pitch * sizeof(u64));
+
+#if defined(CAT_USE_HEAVY)
+	CAT_IF_DUMP(cout << "Allocated " << CAT_HEAVY_ROWS << " heavy rows, consuming " << heavy_bytes << " bytes" << endl;)
+#endif
 
 	return true;
 }
 
 void Codec::FreeMatrix()
 {
-	if (_ge_matrix)
+	if (_compress_matrix)
 	{
-		u8 *matrix = reinterpret_cast<u8*>( _ge_matrix );
+		u8 *matrix = reinterpret_cast<u8*>( _compress_matrix );
 		delete []matrix;
-		_ge_matrix = 0;
+		_compress_matrix = 0;
 	}
 
 	_ge_allocated = 0;
@@ -3779,6 +3987,14 @@ void Codec::FreeWorkspace()
 		_recovery_blocks = 0;
 	}
 
+#if defined(CAT_REUSE_COMPRESS)
+	if (_win_table_data)
+	{
+		delete []_win_table_data;
+		_win_table_data = 0;
+	}
+#endif
+
 	_workspace_allocated = 0;
 }
 
@@ -3805,8 +4021,23 @@ void Codec::PrintGEMatrix()
 		}
 		cout << endl;
 	}
-
 	cout << endl;
+
+#if defined(CAT_USE_HEAVY)
+	const int heavy_rows = CAT_HEAVY_ROWS;
+	const int heavy_cols = _defer_count + _dense_count + CAT_HEAVY_ROWS;
+	cout << "Heavy submatrix is " << heavy_rows << " x " << heavy_cols << ":" << endl;
+
+	for (int ii = 0; ii < heavy_rows; ++ii)
+	{
+		for (int jj = 0; jj < heavy_cols; ++jj)
+		{
+			cout << hex << setw(2) << setfill('0') << (int)_heavy_matrix[_heavy_pitch * ii + jj] << dec << " ";
+		}
+		cout << endl;
+	}
+	cout << endl;
+#endif
 }
 
 void Codec::PrintCompressMatrix()

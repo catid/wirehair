@@ -27,6 +27,9 @@
     <ClCompile Include="codec_source\Wirehair.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="codec_source\EndianNeutral.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Clock.hpp">
@@ -45,6 +48,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="codec_source\SmallPRNG.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="codec_source\EndianNeutral.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
