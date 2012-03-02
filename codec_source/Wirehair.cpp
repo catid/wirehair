@@ -29,6 +29,28 @@
 /*
 	TODO:
 
+	Future improvements:
+		Prevent reallocation if already enough room
+		Allocate GE matrix from end of compression matrix to avoid more allocation calls
+		Allocate pivots from end of GE matrix to avoid more allocation calls
+		GF(256)
+		Conjugate gradient method?
+		Add alignment for memory allocations
+		SSE version of memxor()
+		SSE version of row xors
+		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
+		Multi-threading
+
+	GF(256) ideas:
+		Row values chosen as a^((r+c)%255) so they are all nonzero and uniformly dist
+		Go down columns for compression
+		And use 4-bit lookup table and multiplication instead of single steps
+		Same for Triangle during GE
+		Allocate byte rows for extra blocks instead of bit rows
+		Allocate byte rows from end of bit rows to avoid a second allocation call
+		On back-sub, can still do windowed approach just treat those rows differently
+			while they are above, and divide diagonal when preparing for below
+
 	5. Implement partial input message
 	6. Implement lookup table for codec parameters
 	7. Generate lookup table
