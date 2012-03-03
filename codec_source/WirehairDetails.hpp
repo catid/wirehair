@@ -47,10 +47,10 @@ extern int g_p_seed, g_d_seed;
 #define CAT_WIREHAIR_MIN_N 6 /* Smallest N value to allow */
 
 // Optimization options:
-#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 //#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
-#define CAT_HEAVY_ROWS 8 /* Number of heavy rows to add, max 8 */
+#define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 
 namespace cat {
 
