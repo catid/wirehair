@@ -49,9 +49,8 @@ extern int g_p_seed, g_d_seed;
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
-//#define CAT_REUSE_COMPRESS /* Reuse the compression matrix for back-substitution (slower) */
 //#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
-#define CAT_HEAVY_ROWS 2 /* Number of heavy rows to add */
+#define CAT_HEAVY_ROWS 8 /* Number of heavy rows to add, max 8 */
 
 namespace cat {
 
@@ -116,8 +115,9 @@ class Codec
 	u32 _p_seed;				// Seed for peeled rows of check matrix
 	u32 _d_seed;				// Seed for dense rows of check matrix
 	u16 _used_count;			// Number of stored rows
+	u16 _mix_count;				// Number of mix columns
+	u16 _mix_next_prime;		// Next prime number at or above dense count
 	u16 _dense_count;			// Number of added dense code rows
-	u16 _dense_next_prime;		// Next prime number at or above dense count
 	u8 *_recovery_blocks;		// Recovery blocks
 	u8 *_input_blocks;			// Input message blocks
 	u32 _input_final_bytes;		// Number of bytes in final block of input

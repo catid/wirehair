@@ -10,40 +10,9 @@ static Clock m_clock;
 
 #define TRIALS 10
 
-void GenerateWeightTable()
-{
-	static const int N = 64;
-	double table[N] = {0};
-
-	double p1 = 0;
-	table[1] = p1;
-
-	for (int k = 2; k < N; ++k)
-	{
-		double p = 1. / (k * (k - 1));
-
-		table[k] = table[k - 1] + p;
-	}
-
-	cout << "static const u32 WEIGHT_DIST[] = {" << endl;
-	for (int k = 1; k < N; ++k)
-	{
-		double p = table[k];
-
-		cout << "0x" << hex;
-		cout << (u32)((u64)0x100000000 * p) << dec << ", ";
-
-		if ((k & 7) == 0) cout << endl;
-	}
-	cout << "0xffffffff" << endl << "};" << endl;
-}
-
 int main()
 {
 	m_clock.OnInitialize();
-
-	//GenerateWeightTable();
-	//cin.get();
 
 	int block_count = 16;
 	int block_bytes = 1500;

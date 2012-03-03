@@ -575,9 +575,476 @@ void TestInvertibleRate()
 	}
 }
 
+
+void GenerateWeightTable()
+{
+	static const int N = 64;
+	double table[N] = {0};
+
+	double p1 = 0;
+	table[1] = p1;
+
+	for (int k = 2; k < N; ++k)
+	{
+		double p = 1. / (k * (k - 1));
+
+		table[k] = table[k - 1] + p;
+	}
+
+	cout << "static const u32 WEIGHT_DIST[] = {" << endl;
+	for (int k = 1; k < N; ++k)
+	{
+		double p = table[k];
+
+		cout << "0x" << hex;
+		cout << (u32)((u64)0x100000000 * p) << dec << ", ";
+
+		if ((k & 7) == 0) cout << endl;
+	}
+	cout << "0xffffffff" << endl << "};" << endl;
+}
+
+u8 LUT[] = {
+	1,
+	2,
+	4,
+	7,
+	8,
+	11,
+	13,
+	14,
+	16,
+	19,
+	22,
+	23,
+	26,
+	28,
+	29,
+	31,
+	32,
+	37,
+	38,
+	41,
+	43,
+	44,
+	46,
+	47,
+	49,
+	52,
+	53,
+	56,
+	58,
+	59,
+	61,
+	62,
+	64,
+	67,
+	71,
+	73,
+	74,
+	76,
+	77,
+	79,
+	82,
+	83,
+	86,
+	88,
+	89,
+	91,
+	92,
+	94,
+	97,
+	98,
+	101,
+	103,
+	104,
+	106,
+	107,
+	109,
+	112,
+	113,
+	116,
+	118,
+	121,
+	122,
+	124,
+	127,
+	128,
+	131,
+	133,
+	134,
+	137,
+	139,
+	142,
+	143,
+	146,
+	148,
+	149,
+	151,
+	152,
+	154,
+	157,
+	158,
+	161,
+	163,
+	164,
+	166,
+	167,
+	169,
+	172,
+	173,
+	176,
+	178,
+	179,
+	181,
+	182,
+	184,
+	188,
+	191,
+	193,
+	194,
+	196,
+	197,
+	199,
+	202,
+	203,
+	206,
+	208,
+	209,
+	211,
+	212,
+	214,
+	217,
+	218,
+	223,
+	224,
+	226,
+	227,
+	229,
+	232,
+	233,
+	236,
+	239,
+	241,
+	242,
+	244,
+	247,
+	248,
+	251,
+	253,
+};
+
+void TestOpt2()
+{
+	const int size = 127;
+	int matrix[size][255];
+
+	for (int ii = 0; ii < size; ++ii)
+	{
+		for (int jj = 0; jj < 255; ++jj)
+		{
+			matrix[ii][jj] = (ii + LUT[ii] * jj) % 255;
+		}
+	}
+
+	bool match[255][255];
+	CAT_OBJCLR(match);
+
+	for (int ii = 0; ii < size; ++ii)
+	{
+		for (int kk = ii + 1; kk < size; ++kk)
+		{
+			//cout << ii << " x " << kk << ":" << endl;
+			int zero_count = 0;
+			for (int jj = 0; jj < 255; ++jj)
+			{
+				int delta = matrix[ii][jj] - matrix[kk][jj];
+				//cout << delta << " ";
+				if (delta == 0)
+					++zero_count;
+			}
+			if (zero_count == 1)
+			{
+				match[LUT[ii]][LUT[kk]] = true;
+				match[LUT[kk]][LUT[ii]] = true;
+
+				if (CAT_IS_POWER_OF_2(LUT[ii]) && CAT_IS_POWER_OF_2(LUT[kk]))
+				cout << (int)LUT[ii] << " x " << (int)LUT[kk] << " zero = " << zero_count << endl;
+/*				for (int jj = 0; jj < 255; ++jj)
+				{
+					int delta = matrix[ii][jj] - matrix[kk][jj];
+					cout << delta << " ";
+					if (delta == 0)
+						++zero_count;
+				}
+				cout << endl;*/
+			}
+		}
+	}
+
+	int selected[255];
+	int count = 0;
+
+	int best_count = 0;
+
+	for (int ii = 0; ii < size; ++ii)
+	{
+		selected[0] = LUT[ii];
+		count = 1;
+
+		for (int jj = 0; jj < size; ++jj)
+		{
+			if (ii != jj)
+			{
+				int kk;
+				for (kk = 0; kk < count; ++kk)
+				{
+					if (!match[LUT[jj]][selected[kk]])
+					{
+						break;
+					}
+				}
+
+				if (kk == count)
+					selected[count++] = LUT[jj];
+			}
+		}
+
+		if (count > best_count)
+		{
+			best_count = count;
+
+			cout << "Best ring: " << endl;
+			for (int kk = 0; kk < count; ++kk)
+			{
+				cout << selected[kk] << ", ";
+			}
+			cout << endl;
+		}
+	}
+}
+
+int TABLE[127] = {
+	1,
+	2,
+	4,
+	7,
+	8,
+	11,
+	13,
+	14,
+	16,
+	19,
+	22,
+	23,
+	26,
+	28,
+	29,
+	31,
+	32,
+	37,
+	38,
+	41,
+	43,
+	44,
+	46,
+	47,
+	49,
+	52,
+	53,
+	56,
+	58,
+	59,
+	61,
+	62,
+	64,
+	67,
+	71,
+	73,
+	74,
+	76,
+	77,
+	79,
+	82,
+	83,
+	86,
+	88,
+	89,
+	91,
+	92,
+	94,
+	97,
+	98,
+	101,
+	103,
+	104,
+	106,
+	107,
+	109,
+	112,
+	113,
+	116,
+	118,
+	121,
+	122,
+	124,
+	127,
+	128,
+	131,
+	133,
+	134,
+	137,
+	139,
+	142,
+	143,
+	146,
+	148,
+	149,
+	151,
+	152,
+	154,
+	157,
+	158,
+	161,
+	163,
+	164,
+	166,
+	167,
+	169,
+	172,
+	173,
+	176,
+	178,
+	179,
+	181,
+	182,
+	184,
+	188,
+	191,
+	193,
+	194,
+	196,
+	197,
+	199,
+	202,
+	203,
+	206,
+	208,
+	209,
+	211,
+	212,
+	214,
+	217,
+	218,
+	223,
+	224,
+	226,
+	227,
+	229,
+	232,
+	233,
+	236,
+	239,
+	241,
+	242,
+	244,
+	247,
+	248,
+	251,
+	253,
+};
+
+bool IsInTable(int delta)
+{
+	for (int ii = 0; ii < 52; ++ii)
+	{
+		if (abs(TABLE[ii]) == delta)
+			return true;
+	}
+
+	return false;
+}
+
+void GenerateGoodTable()
+{
+	const int size = 127;
+	int selected[size];
+	int count = 0;
+
+	int best_count = 0;
+
+	for (int ii = 0; ii < size; ++ii)
+	{
+		selected[0] = TABLE[ii];
+		count = 1;
+
+		for (int jj = 0; jj < size; ++jj)
+		{
+			if (ii != jj)
+			{
+				int kk;
+				for (kk = 0; kk < count; ++kk)
+				{
+					if (!IsInTable(selected[kk] - TABLE[jj]))
+					{
+						break;
+					}
+				}
+
+				if (kk == count)
+					selected[count++] = TABLE[jj];
+			}
+		}
+
+		if (count > best_count)
+		{
+			best_count = count;
+
+			for (int kk = 0; kk < count; ++kk)
+			{
+				cout << selected[kk] << ", ";
+			}
+			cout << endl;
+		}
+	}
+}
+
+
+void TestOpt()
+{
+	u32 j = 0;
+
+	for (u32 k = 1; k < 254; ++k)
+	{
+		j = 0;
+		int zero_count = 0;
+		for (u32 i = 0; i < 255; ++i)
+		{
+			if (j == 0) ++zero_count;
+
+			j += k;
+			j %= 255;
+		}
+
+		if (zero_count == 1)
+		{
+			//if (wirehair::NextPrime16(k) == k)
+			{
+				cout << k << " -> " << zero_count << endl;
+			}
+		}
+	}
+}
+
 int main()
 {
 	m_clock.OnInitialize();
+
+	//GenerateGoodTable();
+	//TestOpt2();
+	//TestOpt();
+	//GenerateWeightTable();
+	//cin.get();
 
 	TestInvertibleRate();
 	//FindGF256GeneratorPolynomials();

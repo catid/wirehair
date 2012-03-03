@@ -39,9 +39,6 @@
 		Multi-threading
 
 	GF(256) ideas:
-		Row values chosen as a^((r+c)%255) so they are all nonzero and uniformly dist
-		Go down columns for compression
-		And use 4-bit lookup table and multiplication instead of single steps
 		Same for Triangle during GE
 		Allocate byte rows for extra blocks instead of bit rows
 		Allocate byte rows from end of bit rows to avoid a second allocation call
@@ -1356,7 +1353,7 @@ void Codec::SetDeferredColumns()
 	}
 
 	// Set column map for each mix column
-	for (u16 added_i = 0; added_i < _dense_count; ++added_i)
+	for (u16 added_i = 0; added_i < _mix_count; ++added_i)
 	{
 		u16 ge_column_i = _defer_count + added_i;
 		u16 column_i = _block_count + added_i;
@@ -1399,13 +1396,13 @@ void Codec::SetMixingColumnsForDeferredRows()
 		u16 ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
-		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
+		IterateNextColumn(x, _mix_count, _mix_next_prime, a);
 
 		// Generate mixing column 2
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
-		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
+		IterateNextColumn(x, _mix_count, _mix_next_prime, a);
 
 		// Generate mixing column 3
 		ge_column_i = _defer_count + x;
@@ -1469,13 +1466,13 @@ void Codec::PeelDiagonal()
 		u16 ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
-		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
+		IterateNextColumn(x, _mix_count, _mix_next_prime, a);
 
 		// Generate mixing column 2
 		ge_column_i = _defer_count + x;
 		ge_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 		CAT_IF_DUMP(cout << " " << ge_column_i;)
-		IterateNextColumn(x, _dense_count, _dense_next_prime, a);
+		IterateNextColumn(x, _mix_count, _mix_next_prime, a);
 
 		// Generate mixing column 3
 		ge_column_i = _defer_count + x;
@@ -1867,7 +1864,49 @@ static u32 GF256_MULT_LOOKUP[16] = {
 #endif
 
 /*
+	Heavy Row Structure
+
+		The heavy rows are made up of bytes instead of bits.  Each byte
+	represents a number in the prime extension field GF(2^^8) defined by
+	the generator polynomial 0x15F.
+
+		The rows have a regular structure so that looking up the value
+	of each column is fast.  It is necessary to have a roughly uniform
+	distribution of column values so that the values appear at random
+	in the deferred columns of the GE matrix.  Using a PRNG is overkill
+	for these rows because randomness is provided by the loss pattern.
+	This simple structure achieves the deferred column constraint:
+
+		H(i,j) = 2^^(j - i)  <-- This one isn't used.
+
+		A second constraint on this structure comes from the dense mixing
+	columns.  These columns end up being consecutive values of H(i,j).
+	Since these are column values in the GE matrix, and GE chooses pivots
+	preferring the first heavy row, the values for subsequent rows should
+	be annihilated behind the pivot column instead of ahead.  This avoids
+	zeroes from being generated ahead of GE, which would cause GE to fail.
+	This is a stronger requirement than linear independence and is actually
+	impossible to achieve after 2 rows as far as i can tell.
+
+		So instead, a table of generator coefficients is used.  These are
+	coefficients that create a full period Lehmer PRNG modulo 255.  The
+	second constraint indicates that the difference between any two rows
+	of the matrix should be unique.  This is *only* achieved by:
+
+		H(0,j) = 2^^(a+j % 255)
+		H(1,j) = 2^^(b+2*j % 255)
+
+		And cannot be achieved for more rows.  So instead, I picked several
+	additional coefficients that ALMOST work, meaning the row differences
+	hit zero less often than if the coefficients were chosen at random:
+
+		H(i,j) = 2^^( ((j+1)<<i) % 255 )
+
+		Since rows are rarely unmodified by the time GE begins, this is
+	probably good enough for practical purposes.  There may be better,
+	faster codes but this one was easy to construct.
 */
+
 void Codec::MultiplyHeavyRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyHeavyRows ----" << endl << endl;)
@@ -1883,19 +1922,11 @@ void Codec::MultiplyHeavyRows()
 
 		// For each heavy row,
 		u8 *heavy_row = _heavy_matrix + ge_column_i;
-		u32 lut_x = column_i % 255; // Perform modulus for first x
-		*heavy_row = EXP_TABLE[lut_x]; // Unroll first lookup
-		CAT_IF_DUMP(cout << " -- Row 0 = EXP[" << lut_x << "]" << endl;)
-		for (u16 heavy_i = 1; heavy_i < CAT_HEAVY_ROWS; ++heavy_i)
+		for (u16 heavy_row_i = 0; heavy_row_i < CAT_HEAVY_ROWS; ++heavy_row_i, heavy_row += _heavy_pitch)
 		{
-			// Simplified iteration mod 255
-			++lut_x;
-			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
-
-			// Look up next code value
-			heavy_row += _heavy_pitch;
+			u32 lut_x = ((column_i + 1) << heavy_row_i) % 255;
 			*heavy_row = EXP_TABLE[lut_x];
-			CAT_IF_DUMP(cout << " -- Row " << heavy_i << " = EXP[" << lut_x << "]" << endl;)
+			CAT_IF_DUMP(cout << " -- Row " << heavy_row_i << " = EXP[" << lut_x << "]" << endl;)
 		}
 	}
 
@@ -1903,40 +1934,21 @@ void Codec::MultiplyHeavyRows()
 	CAT_IF_DUMP(PrintGEMatrix();)
 
 	// Fill dense columns:
-	u32 dense_lut_x = _block_count % 255; // Perform modulus for first x
 	u8 *heavy_row = _heavy_matrix + _defer_count;
-	for (u16 heavy_i = 0; heavy_i < CAT_HEAVY_ROWS; ++heavy_i, heavy_row += _heavy_pitch)
+	for (u16 heavy_row_i = 0; heavy_row_i < CAT_HEAVY_ROWS; ++heavy_row_i, heavy_row += _heavy_pitch)
 	{
-		CAT_IF_DUMP(cout << "Filling dense columns for heavy row " << heavy_i << ":" << endl;)
-
-		// Unroll first lookup
-		u32 lut_x = dense_lut_x;
-		u8 *row = heavy_row;
-		*row++ = EXP_TABLE[lut_x];
-		CAT_IF_DUMP(cout << " -- Column 0 = EXP[" << lut_x << "]" << endl;)
-
-		// Simplified iteration mod 255
-		++lut_x;
-		lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
-
-		// Store x for start of next row
-		dense_lut_x = lut_x;
+		CAT_IF_DUMP(cout << "Filling dense columns for heavy row " << heavy_row_i << ":" << endl;)
 
 		// For each remaining column,
-		for (u16 dense_i = 1, lim = _dense_count - 1; dense_i < lim; ++dense_i)
+		u8 *row = heavy_row;
+		for (u16 dense_i = 0, lim = _dense_count; dense_i < lim; ++dense_i)
 		{
 			// Look up next code value
+			u16 column_i = _block_count + dense_i;
+			u32 lut_x = ((column_i + 1) << heavy_row_i) % 255;
 			*row++ = EXP_TABLE[lut_x];
-			CAT_IF_DUMP(cout << " -- Column " << dense_i << " = EXP[" << lut_x << "]" << endl;)
-
-			// Simplified iteration mod 255
-			++lut_x;
-			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
+			CAT_IF_DUMP(cout << " -- Column " << column_i << " = EXP[" << lut_x << "]" << endl;)
 		}
-
-		// Look up final code value
-		*row = EXP_TABLE[lut_x];
-		CAT_IF_DUMP(cout << " -- Column " << _dense_count - 1 << " = EXP[" << lut_x << "]" << endl;)
 	}
 
 	CAT_IF_DUMP(cout << "After fill dense:" << endl;)
@@ -1952,7 +1964,7 @@ void Codec::MultiplyHeavyRows()
 	CAT_IF_DUMP(PrintGEMatrix();)
 
 	// For each row,
-	const int ge_cols = _defer_count + _dense_count + CAT_HEAVY_ROWS;
+	const int ge_cols = _defer_count + _mix_count;
 	u64 *compress_row = _compress_matrix;
 	PeelRow *row = _peel_rows;
 	for (u16 row_i = 0; row_i < _block_count; ++row_i, ++row, compress_row += _ge_pitch)
@@ -1965,17 +1977,11 @@ void Codec::MultiplyHeavyRows()
 
 		// Generate code values for each row in this column
 		u8 code_values[CAT_HEAVY_ROWS];
-		u32 lut_x = column_i % 255; // Perform modulus for first x
-		code_values[0] = EXP_TABLE[lut_x]; // Unroll first lookup
-		CAT_IF_DUMP(cout << " -- Precompute codes for rows = EXP[" << lut_x << "] ";)
-		for (u16 heavy_i = 1; heavy_i < CAT_HEAVY_ROWS; ++heavy_i)
+		for (u16 heavy_row_i = 0; heavy_row_i < CAT_HEAVY_ROWS; ++heavy_row_i)
 		{
-			// Simplified iteration mod 255
-			++lut_x;
-			lut_x = (u8)(lut_x + ((lut_x + 1) >> 8));
-
 			// Look up next code value
-			code_values[heavy_i] = EXP_TABLE[lut_x];
+			u32 lut_x = ((column_i + 1) << heavy_row_i) % 255;
+			code_values[heavy_row_i] = EXP_TABLE[lut_x];
 			CAT_IF_DUMP(cout << "EXP[" << lut_x << "] ";)
 		}
 		CAT_IF_DUMP(cout << endl;)
@@ -1993,15 +1999,15 @@ void Codec::MultiplyHeavyRows()
 			u32 window = GF256_MULT_LOOKUP[bits];
 #endif
 
-			CAT_IF_DUMP(cout << ge_column_i << "x" << hex << window << dec << " ";)
+			CAT_IF_DUMP(cout << ge_column_i << "x" << hex << setw(8) << setfill('0') << window << dec << " ";)
 
 			// For each heavy row,
 			u8 *heavy_row = _heavy_matrix + ge_column_i;
-			for (u16 heavy_i = 0; heavy_i < CAT_HEAVY_ROWS; ++heavy_i, heavy_row += _heavy_pitch)
+			for (u16 heavy_row_i = 0; heavy_row_i < CAT_HEAVY_ROWS; ++heavy_row_i, heavy_row += _heavy_pitch)
 			{
 				// Add 4 bytes at a time
 				u32 *word = reinterpret_cast<u32*>( heavy_row );
-				*word ^= window * code_values[heavy_i];
+				*word ^= window * code_values[heavy_row_i];
 			}
 		}
 
@@ -2010,6 +2016,8 @@ void Codec::MultiplyHeavyRows()
 
 	CAT_IF_DUMP(cout << "After multiplication:" << endl;)
 	CAT_IF_DUMP(PrintGEMatrix();)
+
+	cin.get();
 }
 
 #endif // CAT_USE_HEAVY
@@ -2066,13 +2074,214 @@ void Codec::MultiplyHeavyRows()
 	opposed to actually swapping rows in the matrix, which would be
 	more expensive.
 */
+
+#if defined(CAT_USE_HEAVY)
+
 bool Codec::Triangle()
 {
 	CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
 
-	u16 pivot_count = _defer_count + _dense_count;
+	// Initialize pivot array
+	const u16 pivot_count = _defer_count + _mix_count;
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+		_ge_pivots[pivot_i] = pivot_i;
+
+	// For each pivot to determine,
+	u16 first_heavy_pivot = pivot_count - CAT_HEAVY_ROWS;
+	u64 ge_mask = 1;
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	{
+		// For each remaining GE row that might be the pivot,
+		int word_offset = pivot_i >> 6;
+		u64 *ge_matrix_offset = _ge_matrix + word_offset;
+		bool found = false;
+		for (u16 pivot_j = pivot_i; pivot_j < first_heavy_pivot; ++pivot_j)
+		{
+			// If the bit was not found,
+			u16 ge_row_j = _ge_pivots[pivot_j];
+			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
+			if ((*ge_row & ge_mask) == 0)
+				continue; // Skip to next
+
+			// Found it!
+			found = true;
+			CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+
+			// Swap out the pivot index for this one
+			u16 temp = _ge_pivots[pivot_i];
+			_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+			_ge_pivots[pivot_j] = temp;
+
+			// Prepare masked first word
+			u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
+
+			// For each remaining light row,
+			u16 pivot_k = pivot_j + 1;
+			for (; pivot_k < first_heavy_pivot; ++pivot_k)
+			{
+				// Determine if the row contains the bit we want
+				u16 ge_row_k = _ge_pivots[pivot_k];
+				u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
+
+				// If the bit was found,
+				if (*rem_row & ge_mask)
+				{
+					// Unroll first word to handle masked word and for speed
+					*rem_row ^= row0;
+
+					// Add the pivot row to eliminate the bit from this row, preserving previous bits
+					for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
+						rem_row[ii] ^= ge_row[ii];
+				}
+			} // next remaining row
+
+			// For each remaining heavy row,
+			for (; pivot_k < pivot_count; ++pivot_k)
+			{
+				// If the column is non-zero,
+				u16 heavy_row_k = _ge_pivots[pivot_k] - (pivot_count - CAT_HEAVY_ROWS);
+				CAT_IF_DUMP(cout << "Eliminating from heavy row " << heavy_row_k << " :";)
+				u8 *rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
+				u8 code_value = rem_row[pivot_i];
+				if (code_value)
+				{
+					// For each set bit in the binary pivot row, add rem[i] to rem[i+]:
+					u64 *pivot_row = &_ge_matrix[_ge_pitch * ge_row_j];
+
+					// Unroll odd columns:
+					u16 odd_count = pivot_i & 3, ge_column_i = pivot_i + 1;
+					u64 temp_mask = ge_mask;
+					switch (odd_count)
+					{
+					case 0:	temp_mask = CAT_ROL64(temp_mask, 1);
+							if (pivot_row[ge_column_i >> 6] & temp_mask)
+							{
+								rem_row[ge_column_i] ^= code_value;
+								CAT_IF_DUMP(cout << " " << ge_column_i;)
+							}
+							++ge_column_i;
+
+							PrintGEMatrix();
+
+					case 1: temp_mask = CAT_ROL64(temp_mask, 1);
+							if (pivot_row[ge_column_i >> 6] & temp_mask)
+							{
+								rem_row[ge_column_i] ^= code_value;
+								CAT_IF_DUMP(cout << " " << ge_column_i;)
+							}
+							++ge_column_i;
+
+							PrintGEMatrix();
+
+					case 2:	temp_mask = CAT_ROL64(temp_mask, 1);
+							if (pivot_row[ge_column_i >> 6] & temp_mask)
+							{
+								rem_row[ge_column_i] ^= code_value;
+								CAT_IF_DUMP(cout << " " << ge_column_i;)
+							}
+
+							PrintGEMatrix();
+
+							// Set GE column to next even column
+							ge_column_i = pivot_i + (4 - odd_count);
+					}
+
+					// For remaining aligned columns,
+					for (; ge_column_i < pivot_count; ge_column_i += 4)
+					{
+						// Look up 4 bit window
+						u32 bits = (u32)(pivot_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
+#if defined(CAT_ENDIAN_UNKNOWN)
+						u32 window = getLE(GF256_MULT_LOOKUP[bits]);
+#else
+						u32 window = GF256_MULT_LOOKUP[bits];
+#endif
+
+						CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(8) << setfill('0') << window << dec;)
+
+						u32 *word = reinterpret_cast<u32*>( rem_row + ge_column_i );
+						*word ^= window * code_value;
+
+						PrintGEMatrix();
+					}
+				}
+
+				CAT_IF_DUMP(cout << endl;)
+			} // next remaining row
+
+			break;
+		}
+
+		// If not found, then for each remaining heavy pivot,
+		// NOTE: The pivot array maintains the heavy rows at the end so that they are always tried last for efficiency.
+		if (!found) for (u16 pivot_j = first_heavy_pivot; pivot_j < pivot_count; ++pivot_j)
+		{
+			// If heavy row doesn't have the pivot,
+			u16 ge_row_j = _ge_pivots[pivot_j];
+			u16 heavy_row_j = ge_row_j - (pivot_count - CAT_HEAVY_ROWS);
+			u8 *pivot_row = &_heavy_matrix[_heavy_pitch * heavy_row_j];
+			if (!pivot_row[pivot_i])
+				continue; // Skip to next
+
+			// Found it!
+			found = true;
+			CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on heavy row " << ge_row_j << endl;)
+
+			// Swap out the pivot index for this one, maintaining heavy rows at the end
+			u16 replace_i = _ge_pivots[pivot_i], heavy_swap = _ge_pivots[first_heavy_pivot];
+			_ge_pivots[pivot_i] = ge_row_j;
+			_ge_pivots[pivot_j] = heavy_swap;
+			_ge_pivots[first_heavy_pivot] = replace_i;
+			++first_heavy_pivot;
+
+			// For each remaining unused row,
+			// NOTE: All remaining rows are heavy rows by pivot array organization
+			for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
+			{
+				// If the column is non-zero,
+				u16 heavy_row_k = _ge_pivots[pivot_k] - (pivot_count - CAT_HEAVY_ROWS);
+				u8 *rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
+				if (rem_row[pivot_i])
+				{
+					// Compute rem[i] / pivot[i], multiply it by pivot[i+] and add it to rem[i+]
+					u8 eliminator = GF256Divide(rem_row[pivot_i], pivot_row[pivot_i]);
+					u16 log_elim = LOG_TABLE[eliminator];
+					rem_row[pivot_i] = eliminator; // Store eliminator for later use
+					for (int ii = pivot_i + 1; ii < pivot_count; ++ii)
+					{
+						// NOTE: Broke open GF256Multiply() here to avoid a table lookup in this inner loop
+						rem_row[ii] ^= EXP_TABLE[LOG_TABLE[pivot_row[ii]] + log_elim];
+					}
+				}
+			} // next remaining row
+
+			break;
+		} // next heavy row
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			_ge_resume_pivot = pivot_i;
+			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			return false;
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROL64(ge_mask, 1);
+	}
+
+	return true;
+}
+
+#else // CAT_USE_HEAVY
+
+bool Codec::Triangle()
+{
+	CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
 
 	// Initialize pivot array
+	const u16 pivot_count = _defer_count + _mix_count;
 	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 		_ge_pivots[pivot_i] = pivot_i;
 
@@ -2088,43 +2297,44 @@ bool Codec::Triangle()
 		{
 			// Determine if the row contains the bit we want
 			u16 ge_row_j = _ge_pivots[pivot_j];
+
+			// If the bit was not found,
 			u64 *ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
+			if ((*ge_row & ge_mask) == 0)
+				continue; // Skip to next
 
-			// If the bit was found,
-			if (*ge_row & ge_mask)
+			// Found it!
+			found = true;
+			CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+
+			// Swap out the pivot index for this one
+			u16 temp = _ge_pivots[pivot_i];
+			_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+			_ge_pivots[pivot_j] = temp;
+
+			// Prepare masked first word
+			u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
+
+			// For each remaining unused row,
+			for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
 			{
-				found = true;
-				CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+				// Determine if the row contains the bit we want
+				u16 ge_row_k = _ge_pivots[pivot_k];
+				u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
 
-				// Swap out the pivot index for this one
-				u16 temp = _ge_pivots[pivot_i];
-				_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
-				_ge_pivots[pivot_j] = temp;
-
-				// Prepare masked first word
-				u64 row0 = (*ge_row & ~(ge_mask - 1)) ^ ge_mask;
-
-				// For each remaining unused row,
-				for (u16 pivot_k = pivot_j + 1; pivot_k < pivot_count; ++pivot_k)
+				// If the bit was found,
+				if (*rem_row & ge_mask)
 				{
-					// Determine if the row contains the bit we want
-					u16 ge_row_k = _ge_pivots[pivot_k];
-					u64 *rem_row = &ge_matrix_offset[_ge_pitch * ge_row_k];
+					// Unroll first word to handle masked word and for speed
+					*rem_row ^= row0;
 
-					// If the bit was found,
-					if (*rem_row & ge_mask)
-					{
-						// Unroll first word to handle masked word and for speed
-						*rem_row ^= row0;
-
-						// Add the pivot row to eliminate the bit from this row, preserving previous bits
-						for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
-							rem_row[ii] ^= ge_row[ii];
-					}
+					// Add the pivot row to eliminate the bit from this row, preserving previous bits
+					for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
+						rem_row[ii] ^= ge_row[ii];
 				}
+			} // next remaining row
 
-				break;
-			}
+			break;
 		}
 
 		// If pivot could not be found,
@@ -2142,6 +2352,8 @@ bool Codec::Triangle()
 
 	return true;
 }
+
+#endif // CAT_USE_HEAVY
 
 /*
 	InitializeColumnValues
@@ -2170,7 +2382,7 @@ void Codec::InitializeColumnValues()
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
 	// For each pivot,
-	const u16 pivot_count = _defer_count + _dense_count;
+	const u16 pivot_count = _defer_count + _mix_count;
 	u16 pivot_i;
 	for (pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 	{
@@ -2194,7 +2406,7 @@ void Codec::InitializeColumnValues()
 			CAT_IF_ROWOP(++rowops;)
 		}
 		else // GE row is from a deferred row:
-		{
+		{	// TODO: Handle heavy rows here
 			// Look up row and input value for GE row
 			u16 pivot_row_i = _ge_row_map[ge_row_i];
 			const u8 *combo = _input_blocks + _block_bytes * pivot_row_i;
@@ -2255,6 +2467,7 @@ void Codec::InitializeColumnValues()
 			// Mark it for skipping
 			_ge_row_map[ge_row_i] = LIST_TERM;
 
+			// TODO: Handle heavy rows here
 			CAT_IF_DUMP(cout << "Did not use GE row " << ge_row_i << ", which is a dense row." << endl;)
 		}
 		else
@@ -2289,7 +2502,7 @@ void Codec::MultiplyDenseValues()
 
 	// For each block of columns,
 	const int dense_count = _dense_count;
-	u8 *temp_block = _recovery_blocks + _block_bytes * (_block_count + dense_count);
+	u8 *temp_block = _recovery_blocks + _block_bytes * (_block_count + _mix_count);
 	const u8 *source_block = _recovery_blocks;
 	PeelColumn *column = _peel_cols;
 	u16 rows[CAT_MAX_DENSE_ROWS], bits[CAT_MAX_DENSE_ROWS];
@@ -2324,11 +2537,10 @@ void Codec::MultiplyDenseValues()
 			int bit_i = set_bits[ii];
 			if (bit_i < max_x && column[bit_i].mark == MARK_PEEL)
 			{
-				const u8 *src = source_block + _block_bytes * bit_i;
-
 				CAT_IF_DUMP(cout << " " << column_i + bit_i;)
 
 				// If no combo used yet,
+				const u8 *src = source_block + _block_bytes * bit_i;
 				if (!combo)
 					combo = src;
 				else if (combo == temp_block)
@@ -2380,9 +2592,8 @@ void Codec::MultiplyDenseValues()
 		{
 			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
 
-			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
 			// Add in peeled columns
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 			if (bit0 < max_x && column[bit0].mark == MARK_PEEL)
 			{
 				if (bit1 < max_x && column[bit1].mark == MARK_PEEL)
@@ -2422,11 +2633,10 @@ void Codec::MultiplyDenseValues()
 		const int second_loop_count = loop_count - 1 + (dense_count & 1);
 		for (int ii = 0; ii < second_loop_count; ++ii)
 		{
-			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
-
 			CAT_IF_DUMP(cout << "Flipping bits for derivative row " << _ge_row_map[*row] << ":";)
 
 			// Add in peeled columns
+			int bit0 = set_bits[ii], bit1 = clr_bits[ii];
 			if (bit0 < max_x && column[bit0].mark == MARK_PEEL)
 			{
 				if (bit1 < max_x && column[bit1].mark == MARK_PEEL)
@@ -2472,6 +2682,7 @@ void Codec::MultiplyHeavyValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyHeavyValues ----" << endl << endl;)
 
+	// TODO: Heavy value multiplication
 }
 
 #endif // CAT_USE_HEAVY
@@ -2493,13 +2704,15 @@ void Codec::AddSubdiagonalValues()
 	CAT_IF_ROWOP(int rowops = 0;)
 
 	// For each pivot,
-	const u16 ge_rows = _defer_count + _dense_count;
-	for (u16 pivot_i = 0; pivot_i < ge_rows; ++pivot_i)
+	const u16 pivot_count = _defer_count + _mix_count;
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 	{
 		// Lookup pivot column, GE row, and destination buffer
 		u16 pivot_column_i = _ge_col_map[pivot_i];
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _recovery_blocks + _block_bytes * pivot_column_i;
+
+		// TODO: Handle heavy rows
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
 
@@ -2615,8 +2828,10 @@ void Codec::BackSubstituteAboveDiagonal()
 
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
-	const int ge_rows = _defer_count + _dense_count;
-	int pivot_i = ge_rows - 1;
+	// TODO: Handle heavy rows
+
+	const int pivot_count = _defer_count + _mix_count;
+	int pivot_i = pivot_count - 1;
 
 #if defined(CAT_WINDOWED_BACKSUB)
 	// Build temporary storage space if windowing is to be used
@@ -2889,7 +3104,6 @@ void Codec::Substitute()
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
 	// For each column that has been peeled,
-	u16 ge_rows = _defer_count + _dense_count;
 	PeelRow *row;
 	for (u16 row_i = _peel_head_rows; row_i != LIST_TERM; row_i = row->next)
 	{
@@ -2918,9 +3132,9 @@ void Codec::Substitute()
 		CAT_IF_ROWOP(++rowops;)
 
 		// Add next two mixing columns in
-		IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+		IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 		const u8 *src0 = _recovery_blocks + _block_bytes * (_block_count + mix_x);
-		IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+		IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 		const u8 *src1 = _recovery_blocks + _block_bytes * (_block_count + mix_x);
 		memxor_add(dest, src0, src1, _block_bytes);
 		CAT_IF_ROWOP(++rowops;)
@@ -2980,311 +3194,6 @@ void Codec::Substitute()
 }
 
 
-//// Compression-based Substitute
-
-#if defined(CAT_REUSE_COMPRESS)
-
-/*
-		Instead of throwing away the compression matrix, this approach reuses
-	the temporary values calculated during compression, and eliminates the
-	dense compression matrix with windowed back-substitution.  It is only good
-	to use this approach for smaller N, because it scales as O(N^^1.4).  The
-	reason why you would want to use it at all is because it can reuse the
-	work from compression which had diagonalized the peeling matrix.
-
-	In practice this approach is slower for all values of N and is unused.
-*/
-
-#define CAT_DISCARD_COMPRESS_MIN 32
-#define CAT_DISCARD_COMPRESS_MAX 1024
-
-#define CAT_COMP_WINDOW_THRESHOLD_7 512
-
-void Codec::CompressionBasedSubstitute()
-{
-	CAT_IF_DUMP(cout << endl << "---- CompressionBasedSubstitute ----" << endl << endl;)
-
-	CAT_IF_ROWOP(u32 window_rowops = 0;)
-
-	const int ge_rows = _defer_count + _dense_count;
-	int pivot_i = ge_rows - 1;
-
-	// Calculate initial window size
-	int w;
-	if (_block_count >= CAT_COMP_WINDOW_THRESHOLD_7)
-		w = 7;
-	else
-		w = 6;
-	const u32 win_lim = 1 << w;
-
-	CAT_IF_DUMP(cout << "Activating windowed back-substitution with window " << w << endl;)
-
-	// Allocate memory for window table
-	u8 *win_table[128];
-	int win_table_bytes = _block_bytes * win_lim;
-	_win_table_data = new u8[win_table_bytes];
-	if (_win_table_data)
-	{
-		// Initialize window table
-		u8 *ptr = _win_table_data;
-		for (u32 ii = 0; ii < win_lim; ++ii, ptr += _block_bytes)
-			win_table[ii] = ptr;
-	}
-
-	if (_win_table_data) do
-	{
-		// Eliminate upper triangular part above windowed bits
-		u16 backsub_i = pivot_i - w + 1;
-
-		CAT_IF_DUMP(cout << "-- Windowing from " << backsub_i << " to " << pivot_i << " (inclusive)" << endl;)
-
-		// For each column,
-		u64 ge_mask = (u64)1 << (pivot_i & 63);
-		for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i; --src_pivot_i)
-		{
-			// Set up for iteration
-			const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
-			const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[src_pivot_i];
-
-			CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
-
-			// For each upper triangular bit,
-			for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
-			{
-				// If bit is set,
-				if (ge_row[_ge_pitch * _ge_pivots[dest_pivot_i]] & ge_mask)
-				{
-					CAT_IF_DUMP(cout << " " << dest_pivot_i;)
-
-					// Back-substitute
-					// NOTE: Because the values exist on the diagonal, the row is also the column index
-					memxor(_recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i], src, _block_bytes);
-					CAT_IF_ROWOP(++window_rowops;)
-				}
-			}
-
-			CAT_IF_DUMP(cout << endl;)
-
-			// Generate next mask
-			ge_mask = CAT_ROR64(ge_mask, 1);
-		}
-
-		CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
-
-		// Generate window table: 2 bits
-		win_table[1] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
-		win_table[2] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 1];
-		memxor_set(win_table[3], win_table[1], win_table[2], _block_bytes);
-		CAT_IF_ROWOP(++window_rowops;)
-
-		// Generate window table: 3 bits
-		win_table[4] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 2];
-		memxor_set(win_table[5], win_table[1], win_table[4], _block_bytes);
-		memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
-		memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
-		CAT_IF_ROWOP(window_rowops += 3;)
-
-		// Generate window table: 4 bits
-		win_table[8] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
-		for (int ii = 1; ii < 8; ++ii)
-			memxor_set(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
-		CAT_IF_ROWOP(window_rowops += 7;)
-
-		// Generate window table: 5 bits
-		win_table[16] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
-		for (int ii = 1; ii < 16; ++ii)
-			memxor_set(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
-		CAT_IF_ROWOP(window_rowops += 15;)
-
-		// Generate window table: 6 bits
-		win_table[32] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
-		for (int ii = 1; ii < 32; ++ii)
-			memxor_set(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
-		CAT_IF_ROWOP(window_rowops += 31;)
-
-		// Generate window table: 7+ bits
-		if (w >= 7)
-		{
-			win_table[64] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 6];
-			for (int ii = 1; ii < 64; ++ii)
-				memxor_set(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
-			CAT_IF_ROWOP(window_rowops += 63;)
-		}
-
-		// If not straddling words,
-		u32 first_word = backsub_i >> 6;
-		u32 shift0 = backsub_i & 63;
-		u32 last_word = pivot_i >> 6;
-		int flip_count = 0;
-		if (first_word == last_word)
-		{
-			// For each pivot row,
-			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
-			{
-				// Calculate window bits
-				u64 *ge_row = _ge_matrix + first_word + _ge_pitch * _ge_pivots[above_pivot_i];
-				u32 win_bits = (u32)(ge_row[0] >> shift0) & (win_lim - 1);
-
-				// If any XOR needs to be performed,
-				if (win_bits != 0)
-				{
-					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
-
-					// Back-substitute
-					memxor(_recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
-					CAT_IF_ROWOP(++window_rowops;)
-				}
-			}
-
-			// For each row of the compression matrix,
-			PeelRow *row = _peel_rows;
-			u64 *ge_row = _compress_matrix + first_word;
-			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
-			{
-				// If row is not peeled,
-				if (row->peel_column == LIST_TERM)
-					continue;
-
-				// Calculate window bits
-				u32 win_bits = (u32)(ge_row[0] >> shift0) & (win_lim - 1);
-
-				// If any XOR needs to be performed,
-				if (win_bits != 0)
-				{
-					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to peel column " << row->peel_column << endl;)
-
-					// Back-substitute
-					memxor(_recovery_blocks + _block_bytes * row->peel_column, win_table[win_bits], _block_bytes);
-					CAT_IF_ROWOP(++window_rowops;)
-
-					++flip_count;
-				}
-			}
-		}
-		else // Rare: Straddling case
-		{
-			u32 shift1 = 64 - shift0;
-
-			// For each pivot row,
-			for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
-			{
-				// Calculate window bits
-				u64 *ge_row = _ge_matrix + first_word + _ge_pitch * _ge_pivots[above_pivot_i];
-				u32 win_bits = ( (u32)(ge_row[0] >> shift0) | (u32)(ge_row[1] << shift1) ) & (win_lim - 1);
-
-				// If any XOR needs to be performed,
-				if (win_bits != 0)
-				{
-					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
-
-					// Back-substitute
-					memxor(_recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
-					CAT_IF_ROWOP(++window_rowops;)
-				}
-			}
-
-			// For each row of the compression matrix,
-			PeelRow *row = _peel_rows;
-			u64 *ge_row = _compress_matrix + first_word;
-			for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
-			{
-				// If row is not peeled,
-				if (row->peel_column == LIST_TERM)
-					continue;
-
-				// Calculate window bits
-				u32 win_bits = ( (u32)(ge_row[0] >> shift0) | (u32)(ge_row[1] << shift1) ) & (win_lim - 1);
-
-				// If any XOR needs to be performed,
-				if (win_bits != 0)
-				{
-					CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to peel column " << row->peel_column << endl;)
-
-					// Back-substitute
-					memxor(_recovery_blocks + _block_bytes * row->peel_column, win_table[win_bits], _block_bytes);
-					CAT_IF_ROWOP(++window_rowops;)
-
-					++flip_count;
-				}
-			}
-		} // end if straddle
-
-		// Calculate next window size
-		pivot_i -= w;
-
-		// Stop using window optimization if matrix is zeroish
-		if ((u32)flip_count < win_lim / 2) break;
-
-	} while (pivot_i > w);
-
-	CAT_IF_ROWOP(int remain_rowops = 0;)
-
-	// For each remaining pivot,
-	int final_pivot_i = pivot_i;
-	u64 ge_mask = (u64)1 << (pivot_i & 63);
-	for (; pivot_i >= 0; --pivot_i)
-	{
-		// Calculate source
-		const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i];
-
-		CAT_IF_DUMP(cout << "Pivot " << pivot_i << "[" << (int)src[0] << "]:";)
-
-		// For each pivot row above it,
-		u64 *ge_row = _ge_matrix + (pivot_i >> 6);
-		for (int above_i = 0; above_i < pivot_i; ++above_i)
-		{
-			// If bit is set in that row,
-			if (ge_row[_ge_pitch * _ge_pivots[above_i]] & ge_mask)
-			{
-				// Back-substitute
-				memxor(_recovery_blocks + _block_bytes * _ge_col_map[above_i], src, _block_bytes);
-				CAT_IF_ROWOP(++remain_rowops;)
-
-				CAT_IF_DUMP(cout << " " << above_i;)
-			}
-		}
-
-		CAT_IF_DUMP(cout << endl;)
-
-		// Generate next mask
-		ge_mask = CAT_ROR64(ge_mask, 1);
-	}
-
-	// For each row of the compression matrix,
-	PeelRow *row = _peel_rows;
-	u64 *ge_row = _compress_matrix;
-	for (u16 row_i = 0; row_i < _block_count; ++row_i, ge_row += _ge_pitch, ++row)
-	{
-		// If row is not peeled,
-		if (row->peel_column == LIST_TERM)
-			continue;
-
-		// Lookup peeling results
-		u16 peel_column_i = row->peel_column;
-		u8 *dest = _recovery_blocks + _block_bytes * peel_column_i;
-
-		// For each column,
-		u64 ge_mask = 1;
-		for (u16 ge_column_i = 0; ge_column_i <= final_pivot_i; ++ge_column_i)
-		{
-			// If bit is set,
-			if (ge_row[ge_column_i >> 6] & ge_mask)
-			{
-				memxor(dest, _recovery_blocks + _block_bytes * _ge_col_map[ge_column_i], _block_bytes);
-				CAT_IF_ROWOP(++remain_rowops;)
-			}
-
-			// Generate next mask
-			ge_mask = CAT_ROL64(ge_mask, 1);
-		}
-	}
-
-	CAT_IF_ROWOP(cout << "CompressionBasedSubstitute used " << window_rowops << " + " << remain_rowops << " = " << window_rowops + remain_rowops << " row ops" << endl;)
-}
-
-#endif // CAT_REUSE_COMPRESS
-
-
 //// Main Driver
 
 /*
@@ -3319,10 +3228,16 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	if (!GenerateMatrixParameters(_block_count, _p_seed, _d_seed, _dense_count))
 		return R_BAD_INPUT;
 
-	_dense_next_prime = NextPrime16(_dense_count);
-
 	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
-	CAT_IF_DUMP(cout << " + Dense count = " << _dense_count << " +Prime=" << _dense_next_prime << endl;)
+
+#if defined(CAT_USE_HEAVY)
+	_mix_count = _dense_count + CAT_HEAVY_ROWS;
+#else
+	_mix_count = _dense_count;
+#endif
+	_mix_next_prime = NextPrime16(_mix_count);
+
+	CAT_IF_DUMP(cout << "Mix count = " << _mix_count << " +Prime=" << _mix_next_prime << endl;)
 
 	// Initialize lists
 	_peel_head_rows = LIST_TERM;
@@ -3475,6 +3390,8 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
+	// TODO: Handle heavy rows
+
 	if (!block) return R_BAD_INPUT;
 
 	// If there is no room for it,
@@ -3531,10 +3448,10 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	// Generate mixing bits in GE row
 	u16 ge_column_i = mix_x + _defer_count;
 	ge_new_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-	IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 	ge_column_i = mix_x + _defer_count;
 	ge_new_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
-	IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 	ge_column_i = mix_x + _defer_count;
 	ge_new_row[ge_column_i >> 6] ^= (u64)1 << (ge_column_i & 63);
 
@@ -3773,11 +3690,11 @@ Result Codec::ReconstructOutput(void *message_out)
 		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 		// Combine remaining two mixer columns together:
-		IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+		IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 		const u8 *mix0_src = _recovery_blocks + _block_bytes * (_block_count + mix_x);
 		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
-		IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+		IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 		const u8 *mix1_src = _recovery_blocks + _block_bytes * (_block_count + mix_x);
 		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
@@ -3861,8 +3778,8 @@ bool Codec::AllocateMatrix()
 	CAT_IF_DUMP(cout << endl << "---- AllocateMatrix ----" << endl << endl;)
 
 	// GE matrix
-	const int ge_cols = _defer_count + _dense_count;
-	const int ge_rows = ge_cols + _extra_count + 1; // One extra for workspace
+	const int ge_cols = _defer_count + _mix_count;
+	const int ge_rows = _defer_count + _dense_count + _extra_count + 1; // One extra for workspace
 	const int ge_pitch = (ge_cols + 63) / 64;
 	const u32 ge_matrix_words = ge_rows * ge_pitch;
 
@@ -3874,18 +3791,19 @@ bool Codec::AllocateMatrix()
 	const int pivot_count = ge_cols + _extra_count;
 	const int pivot_words = pivot_count * 2 + ge_cols;
 
+	// Calculate buffer size
+	u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16);
+
 #if defined(CAT_USE_HEAVY)
 	// Heavy
 	const int heavy_count = CAT_HEAVY_ROWS;
-	const int heavy_pitch = (_defer_count + _dense_count + CAT_HEAVY_ROWS + 3) & ~3; // Round up to next multiple of 4
+	const int heavy_pitch = (_defer_count + _mix_count + 3) & ~3; // Round up to next multiple of 4
 	const int heavy_bytes = heavy_pitch * heavy_count;
+
+	size += heavy_bytes;
 #endif
 
 	// If need to allocate more,
-	u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16);
-#if defined(CAT_USE_HEAVY)
-	size += heavy_bytes;
-#endif
 	if (_ge_allocated < size)
 	{
 		FreeMatrix();
@@ -3898,7 +3816,7 @@ bool Codec::AllocateMatrix()
 
 	// Store pointers
 	_ge_pitch = ge_pitch;
-	_ge_rows = ge_cols;
+	_ge_rows = _defer_count + _dense_count;
 	_ge_matrix = _compress_matrix + compress_matrix_words;
 #if defined(CAT_USE_HEAVY)
 	_heavy_pitch = heavy_pitch;
@@ -4006,7 +3924,7 @@ void Codec::FreeWorkspace()
 void Codec::PrintGEMatrix()
 {
 	const int rows = _ge_rows;
-	const int cols = _defer_count + _dense_count;
+	const int cols = _defer_count + _mix_count;
 
 	cout << endl << "GE matrix is " << rows << " x " << cols << ":" << endl;
 
@@ -4043,7 +3961,7 @@ void Codec::PrintGEMatrix()
 void Codec::PrintCompressMatrix()
 {
 	const int rows = _block_count;
-	const int cols = _defer_count + _dense_count;
+	const int cols = _defer_count + _mix_count;
 
 	cout << endl << "Compress matrix is " << rows << " x " << cols << ":" << endl;
 
@@ -4256,11 +4174,11 @@ void Codec::Encode(u32 id, void *block_out)
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	// For each remaining mixer column,
-	IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 	memxor(block, _recovery_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
-	IterateNextColumn(mix_x, _dense_count, _dense_next_prime, mix_a);
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
 	memxor(block, _recovery_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
