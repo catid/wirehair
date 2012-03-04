@@ -47,10 +47,11 @@ extern int g_p_seed, g_d_seed;
 #define CAT_WIREHAIR_MIN_N 6 /* Smallest N value to allow */
 
 // Optimization options:
-//#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 //#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
-//#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
+#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
+#define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 
 namespace cat {
 
@@ -155,6 +156,8 @@ class Codec
 #if defined(CAT_USE_HEAVY)
 	u8 *_heavy_matrix;			// Heavy rows of GE matrix
 	int _heavy_pitch;			// Bytes per heavy matrix row
+	u16 _heavy_columns;			// Number of heavy matrix columns
+	u16 _ge_first_heavy;		// First heavy column that is non-zero
 #endif
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
@@ -199,8 +202,8 @@ class Codec
 	void MultiplyDenseRows();
 
 #if defined(CAT_USE_HEAVY)
-	// Multiply heavy rows by peeling matrix to generate GE rows, but no row values yet
-	void MultiplyHeavyRows();
+	// Initialize heavy submatrix
+	void SetHeavyRows();
 #endif
 
 
@@ -214,11 +217,6 @@ class Codec
 
 	// Multiply diagonalized peeling column values into dense rows
 	void MultiplyDenseValues();
-
-#if defined(CAT_USE_HEAVY)
-	// Multiply diagonalized peeling column values into heavy rows
-	void MultiplyHeavyValues();
-#endif
 
 	// Add values for GE matrix positions under the diagonal
 	void AddSubdiagonalValues();

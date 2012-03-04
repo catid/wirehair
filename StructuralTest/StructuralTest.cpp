@@ -545,7 +545,7 @@ void TestInvertibleRate()
 {
 	wirehair::GF256Matrix m;
 
-	int check_count = 8;
+	int check_count = 5;
 
 	m.Initialize(check_count);
 	u64 worked = 0;
