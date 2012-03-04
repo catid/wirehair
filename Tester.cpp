@@ -65,7 +65,7 @@ int main()
 	cat::wirehair::Decoder decoder;
 
 	u32 overhead_sum = 0, overhead_trials = 0;
-	u32 drop_seed = 65;
+	u32 drop_seed = 66;
 	for (;;)
 	{
 		int blocks_needed = 0;

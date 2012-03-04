@@ -36,7 +36,7 @@ extern int g_p_seed, g_d_seed;
 
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
@@ -48,7 +48,7 @@ extern int g_p_seed, g_d_seed;
 
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
@@ -92,9 +92,6 @@ u16 GeneratePeelRowWeight(u32 rv);
 
 // GF(2) Invertible Matrix Generator function
 bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
-
-// Matrix Parameter Generator function
-bool GenerateMatrixParameters(int block_count, u32 &p_seed, u32 &c_seed, u16 &dense_count);
 
 // Deck Shuffling function
 void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
