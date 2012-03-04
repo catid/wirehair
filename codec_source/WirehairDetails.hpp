@@ -36,7 +36,7 @@ extern int g_p_seed, g_d_seed;
 
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
@@ -49,7 +49,10 @@ extern int g_p_seed, g_d_seed;
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+
+// Heavy rows:
 #define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
+#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 

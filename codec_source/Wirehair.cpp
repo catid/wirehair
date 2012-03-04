@@ -29,6 +29,8 @@
 /*
 	TODO:
 
+		Fix bug with N=1024 when using heavy rows
+
 	Future improvements:
 		Window the add subdiagonal function too
 		GF(256)
@@ -208,7 +210,9 @@
 
 #include "Wirehair.hpp"
 #include "memxor.hpp"
+#if defined(CAT_HEAVY_WIN_MULT)
 #include "EndianNeutral.hpp"
+#endif
 using namespace cat;
 using namespace wirehair;
 
@@ -1857,23 +1861,6 @@ void Codec::MultiplyDenseRows()
 
 #if defined(CAT_USE_HEAVY)
 
-// Flip endianness at compile time if possible
-#if defined(CAT_ENDIAN_BIG)
-static u32 GF256_MULT_LOOKUP[16] = {
-	0x00000000, 0x01000000, 0x00010000, 0x01010000, 
-	0x00000100, 0x01000100, 0x00010100, 0x01010100, 
-	0x00000001, 0x01000001, 0x00010001, 0x01010001, 
-	0x00000101, 0x01000101, 0x00010101, 0x01010101, 
-};
-#else // Little-endian or unknown bit order:
-static u32 GF256_MULT_LOOKUP[16] = {
-	0x00000000, 0x00000001, 0x00000100, 0x00000101, 
-	0x00010000, 0x00010001, 0x00010100, 0x00010101, 
-	0x01000000, 0x01000001, 0x01000100, 0x01000101, 
-	0x01010000, 0x01010001, 0x01010100, 0x01010101, 
-};
-#endif
-
 /*
 	Important Optimization: Heavy Row Structure
 
@@ -2015,6 +2002,27 @@ void Codec::SetHeavyRows()
 		When heavy rows are used, it keeps them at the end of the pivot
 	array so that they are always selected last.
 */
+
+#if defined(CAT_HEAVY_WIN_MULT)
+
+// Flip endianness at compile time if possible
+#if defined(CAT_ENDIAN_BIG)
+static u32 GF256_MULT_LOOKUP[16] = {
+	0x00000000, 0x01000000, 0x00010000, 0x01010000, 
+	0x00000100, 0x01000100, 0x00010100, 0x01010100, 
+	0x00000001, 0x01000001, 0x00010001, 0x01010001, 
+	0x00000101, 0x01000101, 0x00010101, 0x01010101, 
+};
+#else // Little-endian or unknown bit order:
+static u32 GF256_MULT_LOOKUP[16] = {
+	0x00000000, 0x00000001, 0x00000100, 0x00000101, 
+	0x00010000, 0x00010001, 0x00010100, 0x00010101, 
+	0x01000000, 0x01000001, 0x01000100, 0x01000101, 
+	0x01010000, 0x01010001, 0x01010100, 0x01010101, 
+};
+#endif
+
+#endif // CAT_USE_HEAVY
 
 bool Codec::Triangle()
 {
@@ -2159,6 +2167,15 @@ bool Codec::Triangle()
 				// For each set bit in the binary pivot row, add rem[i] to rem[i+]:
 				u64 *pivot_row = &_ge_matrix[_ge_pitch * ge_row_j];
 
+#if !defined(CAT_HEAVY_WIN_MULT)
+				for (int ge_column_i = pivot_i + 1; ge_column_i < pivot_count; ++ge_column_i)
+				{
+					if (pivot_row[ge_column_i >> 6] & ((u64)1 << (ge_column_i & 63)))
+					{
+						rem_row[ge_column_i - _ge_first_heavy] ^= code_value;
+					}
+				}
+#else // CAT_HEAVY_WIN_MULT
 				// Unroll odd columns:
 				u16 odd_count = pivot_i & 3, ge_column_i = pivot_i + 1;
 				u64 temp_mask = ge_mask;
@@ -2207,7 +2224,7 @@ bool Codec::Triangle()
 
 					*word ^= window * code_value;
 				}
-
+#endif // CAT_HEAVY_WIN_MULT
 				CAT_IF_DUMP(cout << endl;)
 			} // next heavy row
 
