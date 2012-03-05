@@ -1961,7 +1961,7 @@ void Codec::SetHeavyRows()
 		// NOTE: Each heavy row is a multiple of 4 bytes in size
 		u32 *words = reinterpret_cast<u32*>( heavy_row );
 		for (int col_i = 0; col_i < _heavy_columns; col_i += 4)
-			*words++ = prng.Next() & 0x01010101; // TODO: Remove
+			*words++ = prng.Next();
 	}
 
 	// Write identity matrix to the right

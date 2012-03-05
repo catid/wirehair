@@ -14,8 +14,8 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 1024;
-	int block_bytes = 1;
+	int block_count = 4096;
+	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 	u8 *message_out = new u8[message_bytes];
@@ -57,7 +57,7 @@ int main()
 			//if (trials % 10000 == 0)
 			cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with seeds " << g_d_seed << " and " << g_p_seed << ".  Success rate = " << successes / (double)trials << endl;
 			//cin.get();
-			break;
+			//break;
 		}
 	}
 
