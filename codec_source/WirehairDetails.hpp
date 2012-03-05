@@ -150,9 +150,6 @@ class Codec
 	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
 	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
 	u16 _ge_resume_pivot;		// Pivot to resume Triangle() on after it fails
-#if defined(CAT_REUSE_COMPRESS)
-	u8 *_win_table_data;		// Values of temporary symbols for substitution table
-#endif
 #if defined(CAT_USE_HEAVY)
 	u8 *_heavy_matrix;			// Heavy rows of GE matrix
 	int _heavy_pitch;			// Bytes per heavy matrix row
@@ -223,11 +220,6 @@ class Codec
 
 
 	//// (4) Substitution
-
-#if defined(CAT_REUSE_COMPRESS)
-	// Reuse compression matrix to substitute values (best for small N)
-	void CompressionBasedSubstitute();
-#endif
 
 	// Back-substitute to diagonalize the GE matrix
 	void BackSubstituteAboveDiagonal();

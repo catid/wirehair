@@ -29,11 +29,11 @@
 /*
 	TODO:
 
-		Fix bug with N=1024 when using heavy rows
+	GF(256):
+		Resume solver
 
 	Future improvements:
 		Window the add subdiagonal function too
-		GF(256)
 		Conjugate gradient method?
 		Add alignment for memory allocations
 		SSE version of memxor()
@@ -41,10 +41,7 @@
 		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
 		Multi-threading
 
-	GF(256) ideas:
-		On back-sub, can still do windowed approach just treat those rows differently
-			while they are above, and divide diagonal when preparing for below
-
+	4. Document the new heavy row structure
 	5. Implement partial input message
 	6. Implement lookup table for codec parameters
 	7. Generate lookup table
@@ -3525,29 +3522,26 @@ void Codec::GenerateRecoveryBlocks()
 	InitializeColumnValues();
 	MultiplyDenseValues();
 	AddSubdiagonalValues();
-
-#if defined(CAT_REUSE_COMPRESS)
-
-	// If block count is within re-use range for compression matrix,
-	if (_block_count >= CAT_DISCARD_COMPRESS_MIN && _block_count <= CAT_DISCARD_COMPRESS_MAX)
-	{
-		// Reuse the compression matrix to speed up substitution
-		CompressionBasedSubstitute();
-	}
-	else
-#endif // CAT_REUSE_COMPRESS
-	{
-		BackSubstituteAboveDiagonal();
-		Substitute();
-	}
+	BackSubstituteAboveDiagonal();
+	Substitute();
 }
 
+/*
+	ResumeSolveMatrix
+
+		This function resumes solving the matrix if the initial SolveMatrix()
+	failed at finding a pivot.  With heavy rows added this is pretty rare, so
+	in theory this function could be written inefficiently and it would not
+	affect the average run time much.  But that just wouldn't be right.
+
+		Extra rows have been added to both the GE matrix and the heavy matrix.
+	Since the heavy matrix does not cover all the columns of the GE matrix,
+	the new rows are staged in the GE matrix and then copied into the heavy
+	matrix after they get into range of the heavy columns.
+*/
 Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
-
-	// TODO: Handle heavy rows
-	return R_BAD_INPUT;
 
 	if (!block) return R_BAD_INPUT;
 
@@ -3640,15 +3634,27 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	// Flip GE row bits up to the pivot resume point
 	u16 pivot_i = _ge_resume_pivot;
 	u64 ge_mask = 1;
-	for (u16 pivot_j = 0; pivot_j < pivot_i; ++pivot_j)
+	for (u16 pivot_j = 0; pivot_j < pivot_i; ++pivot_j, ge_mask = CAT_ROL64(ge_mask, 1))
 	{
+		u16 ge_row_j = _ge_pivots[pivot_j];
+
+#if defined(CAT_USE_HEAVY)
+		// If pivot row is heavy,
+		const u16 first_heavy_row = _defer_count + _dense_count;
+		if (ge_row_j >= first_heavy_row)
+		{
+			// New row must be promoted to GF(256) (common case)
+
+			break;
+		}
+#endif
+
 		// If bit is set,
 		int word_offset = pivot_j >> 6;
 		u64 *rem_row = &ge_new_row[word_offset];
 		if (*rem_row & ge_mask)
 		{
-			u16 ge_pivot_j = _ge_pivots[pivot_j];
-			u64 *ge_pivot_row = _ge_matrix + word_offset + _ge_pitch * ge_pivot_j;
+			u64 *ge_pivot_row = _ge_matrix + word_offset + _ge_pitch * ge_row_j;
 
 			u64 row0 = (*ge_pivot_row & ~(ge_mask - 1)) ^ ge_mask;
 			*rem_row ^= row0;
@@ -3656,9 +3662,6 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 			for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
 				rem_row[ii] ^= ge_pivot_row[ii];
 		}
-
-		// Generate next mask
-		ge_mask = CAT_ROL64(ge_mask, 1);
 	}
 
 	// If the next pivot was not found on this row,
@@ -3728,8 +3731,8 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		if (!found)
 		{
 			_ge_resume_pivot = pivot_i;
-			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
-			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_DUMP(cout << "Inversion *still* impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_ROWOP(cout << ">>>>> Inversion *still* impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
 			return R_MORE_BLOCKS;
 		}
 
@@ -3870,9 +3873,6 @@ Codec::Codec()
 {
 	// Workspace
 	_recovery_blocks = 0;
-#if defined(CAT_REUSE_COMPRESS)
-	_win_table_data = 0;
-#endif
 	_workspace_allocated = 0;
 
 	// Matrix
@@ -3953,7 +3953,7 @@ bool Codec::AllocateMatrix()
 
 #if defined(CAT_USE_HEAVY)
 	// Heavy
-	const int heavy_rows = CAT_HEAVY_ROWS;
+	const int heavy_rows = CAT_HEAVY_ROWS + _extra_count;
 	const int heavy_cols = _mix_count < CAT_HEAVY_MAX_COLS ? _mix_count : CAT_HEAVY_MAX_COLS;
 	const int heavy_pitch = (heavy_cols + 3 + 3) & ~3; // Round up columns+3 to next multiple of 4
 	const int heavy_bytes = heavy_pitch * heavy_rows;
@@ -4061,14 +4061,6 @@ void Codec::FreeWorkspace()
 		delete []_recovery_blocks;
 		_recovery_blocks = 0;
 	}
-
-#if defined(CAT_REUSE_COMPRESS)
-	if (_win_table_data)
-	{
-		delete []_win_table_data;
-		_win_table_data = 0;
-	}
-#endif
 
 	_workspace_allocated = 0;
 }
