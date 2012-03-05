@@ -14,8 +14,8 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	int block_count = 16;
-	int block_bytes = 1500;
+	int block_count = 1024;
+	int block_bytes = 1;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
 	u8 *message_out = new u8[message_bytes];
@@ -65,7 +65,7 @@ int main()
 	cat::wirehair::Decoder decoder;
 
 	u32 overhead_sum = 0, overhead_trials = 0;
-	u32 drop_seed = 66;
+	u32 drop_seed = 345;
 	for (;;)
 	{
 		int blocks_needed = 0;
@@ -107,8 +107,7 @@ int main()
 					{
 						cout << "FAAAAAIL!" << endl;
 
-						for (int ii = 0; ii < message_bytes; ++ii)
-							cout << (int)message_out[ii] << endl;
+						//for (int ii = 0; ii < message_bytes; ++ii) cout << (int)message_out[ii] << endl;
 
 						cin.get();
 					}
@@ -117,7 +116,7 @@ int main()
 				{
 					cout << "-- FAIL! decoder.Decode error " << wirehair::GetResultString(r) << endl;
 
-					cin.get();
+					//cin.get();
 				}
 
 				//cin.get();

@@ -443,11 +443,6 @@ u16 cat::wirehair::NextPrime16(u16 n)
 	And for larger values of N it will just add the identity matrix.
 
 	It will add the generated matrix rather than overwrite what was there.
-
-	It's a little messy (will write random bits past the end of the
-	matrix padded out to the end of the last word).  But the way I
-	am using it, this is acceptable.  If you want to use it too be
-	sure to verify this is not a problem for you...
 */
 
 static const u8 INVERTIBLE_MATRIX_SEEDS[512] = {
@@ -491,7 +486,7 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 				// For each word in the row,
 				int add_pitch = (n + 63) / 64;
 				u64 prev = 0;
-				for (int ii = 0; ii < add_pitch; ++ii)
+				for (int ii = 0; ii < add_pitch - 1; ++ii)
 				{
 					// Generate next word
 					u32 rv1 = prng.Next();
@@ -504,10 +499,31 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 					prev = word;
 				}
 
+				// Generate next word
+				u32 rv1 = prng.Next();
+				u32 rv2 = prng.Next();
+				u64 word = ((u64)rv2 << 32) | rv1;
+
 				// Add last word if needed
 				int last_bit = (shift + n + 63) / 64;
 				if (last_bit > add_pitch)
-					row[add_pitch] ^= prev >> (64 - shift);
+				{
+					// Add it in
+					row[add_pitch - 1] ^= (prev >> (64 - shift)) | (word << shift);
+					prev = word;
+
+					// Add it in preserving trailing bits
+					int write_count = (shift + n) & 63;
+					word = prev >> (64 - shift);
+					row[add_pitch] ^= (write_count == 0) ? word : (word & (((u64)1 << write_count) - 1));
+				}
+				else
+				{
+					// Add it in preserving trailing bits
+					int write_count = (shift + n) & 63;
+					word = (prev >> (64 - shift)) | (word << shift);
+					row[add_pitch - 1] ^= (write_count == 0) ? word : (word & (((u64)1 << write_count) - 1));
+				}
 			}
 		}
 		else // Rare aligned case:
@@ -516,7 +532,8 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 			for (int row_i = 0; row_i < n; ++row_i, row += pitch)
 			{
 				// For each word in the row,
-				for (int add_pitch = (n + 63) / 64, ii = 0; ii < add_pitch; ++ii)
+				int add_pitch = (n + 63) / 64;
+				for (int ii = 0; ii < add_pitch - 1; ++ii)
 				{
 					// Generate next word
 					u32 rv1 = prng.Next();
@@ -526,6 +543,15 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 					// Add it in
 					row[ii] ^= word;
 				}
+
+				// Generate next word
+				u32 rv1 = prng.Next();
+				u32 rv2 = prng.Next();
+				u64 word = ((u64)rv2 << 32) | rv1;
+
+				// Add it in preserving trailing bits
+				int write_count = n & 63;
+				row[add_pitch - 1] ^= (write_count == 0) ? word : (word & (((u64)1 << write_count) - 1));
 			}
 		}
 	}
@@ -970,7 +996,7 @@ bool Codec::OpportunisticPeeling(u32 row_i, u32 id)
 	PeelRow *row = &_peel_rows[row_i];
 
 	row->id = id;
-	GeneratePeelRow(id, _p_seed, _block_count, _dense_count,
+	GeneratePeelRow(id, _p_seed, _block_count, _mix_count,
 		row->peel_weight, row->peel_a, row->peel_x0, row->mix_a, row->mix_x0);
 
 	CAT_IF_DUMP(cout << "Row " << id << " in slot " << row_i << " of weight " << row->peel_weight << " [a=" << row->peel_a << "] : ";)
@@ -1922,7 +1948,7 @@ void Codec::MultiplyDenseRows()
 
 void Codec::SetHeavyRows()
 {
-	CAT_IF_DUMP(cout << endl << "---- MultiplyHeavyRows ----" << endl << endl;)
+	CAT_IF_DUMP(cout << endl << "---- SetHeavyRows ----" << endl << endl;)
 
 	CatsChoice prng;
 	prng.Initialize(_p_seed);
@@ -1935,7 +1961,7 @@ void Codec::SetHeavyRows()
 		// NOTE: Each heavy row is a multiple of 4 bytes in size
 		u32 *words = reinterpret_cast<u32*>( heavy_row );
 		for (int col_i = 0; col_i < _heavy_columns; col_i += 4)
-			*words++ = prng.Next();
+			*words++ = prng.Next() & 0x01010101; // TODO: Remove
 	}
 
 	// Write identity matrix to the right
@@ -2035,12 +2061,10 @@ bool Codec::Triangle()
 
 	// For the columns that are not protected by heavy rows,
 	u64 ge_mask = 1;
-	u16 pivot_i;
 #if defined(CAT_USE_HEAVY)
-	u16 first_heavy_pivot = pivot_count - CAT_HEAVY_ROWS;
-	for (pivot_i = 0; pivot_i < _ge_first_heavy; ++pivot_i)
+	for (u16 pivot_i = 0; pivot_i < _ge_first_heavy; ++pivot_i)
 #else
-	for (pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
 #endif
 	{
 		// For each remaining GE row that might be the pivot,
@@ -2107,14 +2131,15 @@ bool Codec::Triangle()
 #if defined(CAT_USE_HEAVY)
 
 	// For each remaining pivot to determine,
-	for (; pivot_i < pivot_count; ++pivot_i)
+	u16 first_heavy_pivot = pivot_count - CAT_HEAVY_ROWS;
+	for (u16 pivot_m = _ge_first_heavy; pivot_m < pivot_count; ++pivot_m)
 	{
 		// For each remaining GE row that might be the pivot,
-		int word_offset = pivot_i >> 6;
+		int word_offset = pivot_m >> 6;
 		u64 *ge_matrix_offset = _ge_matrix + word_offset;
 		bool found = false;
 		u16 pivot_j;
-		for (pivot_j = pivot_i; pivot_j < first_heavy_pivot; ++pivot_j)
+		for (pivot_j = pivot_m; pivot_j < first_heavy_pivot; ++pivot_j)
 		{
 			// If the bit was not found,
 			u16 ge_row_j = _ge_pivots[pivot_j];
@@ -2123,11 +2148,12 @@ bool Codec::Triangle()
 
 			// Found it!
 			found = true;
-			CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+			CAT_IF_DUMP(cout << "Pivot " << pivot_m << " found on row " << ge_row_j << endl;)
+			CAT_IF_ROWOP(cout << ">>>>>> Pivot " << pivot_m << " found on row " << ge_row_j << endl;)
 
 			// Swap out the pivot index for this one
-			u16 temp = _ge_pivots[pivot_i];
-			_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+			u16 temp = _ge_pivots[pivot_m];
+			_ge_pivots[pivot_m] = _ge_pivots[pivot_j];
 			_ge_pivots[pivot_j] = temp;
 
 			// Prepare masked first word
@@ -2154,21 +2180,21 @@ bool Codec::Triangle()
 			} // next remaining row
 
 			// For each remaining heavy row,
+			u16 heavy_col_i = pivot_m - _ge_first_heavy;
 			for (; pivot_k < pivot_count; ++pivot_k)
 			{
 				// If the column is non-zero,
 				u16 heavy_row_k = _ge_pivots[pivot_k] - (pivot_count - CAT_HEAVY_ROWS);
-				u16 heavy_col_k = pivot_i - _ge_first_heavy;
 				CAT_IF_DUMP(cout << "Eliminating from heavy row " << heavy_row_k << " :";)
 				u8 *rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
-				u8 code_value = rem_row[heavy_col_k];
+				u8 code_value = rem_row[heavy_col_i];
 				if (!code_value) continue;
 
 				// For each set bit in the binary pivot row, add rem[i] to rem[i+]:
 				u64 *pivot_row = &_ge_matrix[_ge_pitch * ge_row_j];
 
 #if !defined(CAT_HEAVY_WIN_MULT)
-				for (int ge_column_i = pivot_i + 1; ge_column_i < pivot_count; ++ge_column_i)
+				for (int ge_column_i = pivot_m + 1; ge_column_i < pivot_count; ++ge_column_i)
 				{
 					if (pivot_row[ge_column_i >> 6] & ((u64)1 << (ge_column_i & 63)))
 					{
@@ -2177,7 +2203,7 @@ bool Codec::Triangle()
 				}
 #else // CAT_HEAVY_WIN_MULT
 				// Unroll odd columns:
-				u16 odd_count = pivot_i & 3, ge_column_i = pivot_i + 1;
+				u16 odd_count = pivot_m & 3, ge_column_i = pivot_m + 1;
 				u64 temp_mask = ge_mask;
 				switch (odd_count)
 				{
@@ -2205,7 +2231,7 @@ bool Codec::Triangle()
 						}
 
 						// Set GE column to next even column
-						ge_column_i = pivot_i + (4 - odd_count);
+						ge_column_i = pivot_m + (4 - odd_count);
 				}
 
 				// For remaining aligned columns,
@@ -2233,27 +2259,28 @@ bool Codec::Triangle()
 
 		// If not found, then for each remaining heavy pivot,
 		// NOTE: The pivot array maintains the heavy rows at the end so that they are always tried last for efficiency.
+		u16 heavy_col_i = pivot_m - _ge_first_heavy;
 		if (!found) for (; pivot_j < pivot_count; ++pivot_j)
 		{
 			// If heavy row doesn't have the pivot,
 			u16 ge_row_j = _ge_pivots[pivot_j];
 			u16 heavy_row_j = ge_row_j - (pivot_count - CAT_HEAVY_ROWS);
-			u16 heavy_col_i = pivot_i - _ge_first_heavy;
 			u8 *pivot_row = &_heavy_matrix[_heavy_pitch * heavy_row_j];
 			u8 code_value = pivot_row[heavy_col_i];
 			if (!code_value) continue; // Skip to next
 
 			// Found it!
 			found = true;
-			CAT_IF_DUMP(cout << "Pivot " << pivot_i << " found on heavy row " << ge_row_j << endl;)
+			CAT_IF_DUMP(cout << "Pivot " << pivot_m << " found on heavy row " << ge_row_j << endl;)
+			CAT_IF_ROWOP(cout << ">>>>>> Pivot " << pivot_m << " found on heavy row " << ge_row_j << endl;)
 
 			// Swap pivot i and j
-			u16 temp = _ge_pivots[pivot_i];
-			_ge_pivots[pivot_i] = _ge_pivots[pivot_j];
+			u16 temp = _ge_pivots[pivot_m];
+			_ge_pivots[pivot_m] = _ge_pivots[pivot_j];
 			_ge_pivots[pivot_j] = temp;
 
 			// If a non-heavy pivot just got moved into heavy pivot list,
-			if (pivot_i < first_heavy_pivot)
+			if (pivot_m < first_heavy_pivot)
 			{
 				// Swap pivot j with first heavy pivot
 				u16 temp2 = _ge_pivots[first_heavy_pivot];
@@ -2292,9 +2319,9 @@ bool Codec::Triangle()
 		// If pivot could not be found,
 		if (!found)
 		{
-			_ge_resume_pivot = pivot_i;
-			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
-			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			_ge_resume_pivot = pivot_m;
+			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_m << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_m << " of " << pivot_count << " not found!" << endl;)
 			return false;
 		}
 
@@ -2308,6 +2335,9 @@ bool Codec::Triangle()
 
 	return true;
 }
+
+
+//// (4) Substitute
 
 /*
 	InitializeColumnValues
@@ -2658,6 +2688,8 @@ void Codec::AddSubdiagonalValues()
 		u16 ge_row_i = _ge_pivots[pivot_i];
 		u8 *buffer_dest = _recovery_blocks + _block_bytes * pivot_column_i;
 
+		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
+
 #if defined(CAT_USE_HEAVY)
 		// If row is heavy,
 		const u16 first_heavy_row = _defer_count + _dense_count;
@@ -2677,14 +2709,16 @@ void Codec::AddSubdiagonalValues()
 
 					GF256MemMulAdd(buffer_dest, code_value, peel_src, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
+
+					CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "x" << (int)code_value << "]";)
 				}
 			}
+
+			CAT_IF_DUMP(cout << endl;)
 
 			continue;
 		}
 #endif
-
-		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
 
 		// For each GE matrix bit in the row,
 		u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
@@ -2710,9 +2744,6 @@ void Codec::AddSubdiagonalValues()
 
 	CAT_IF_ROWOP(cout << "AddSubdiagonalValues used " << rowops << " row ops = " << rowops / (double)_block_count << "*N and " << heavyops << " heavy ops" << endl;)
 }
-
-
-//// (4) Substitute
 
 /*
 	Windowed Back-Substitution
@@ -2884,7 +2915,7 @@ void Codec::BackSubstituteAboveDiagonal()
 					u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 					// Divide by this code value (implicitly nonzero)
-					GF256MemDivide(src, code_value, _block_bytes);
+					if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
 				}
 #endif
@@ -2951,7 +2982,7 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				// Divide by this code value (implicitly nonzero)
 				u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
-				GF256MemDivide(src, code_value, _block_bytes);
+				if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
 				CAT_IF_ROWOP(++heavyops;)
 			}
 #endif
@@ -3147,7 +3178,7 @@ void Codec::BackSubstituteAboveDiagonal()
 			u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 			// Divide by this code value (implicitly nonzero)
-			GF256MemDivide(src, code_value, _block_bytes);
+			if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
 			CAT_IF_ROWOP(++heavyops;)
 		}
 #endif
@@ -3194,7 +3225,7 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				CAT_IF_DUMP(cout << " " << above_i;)
 			}
-		}
+		} // next pivot above
 
 		CAT_IF_DUMP(cout << endl;)
 
@@ -3561,7 +3592,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	memset(ge_new_row, 0, _ge_pitch * sizeof(u64));
 
 	u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
-	GeneratePeelRow(id, _p_seed, _block_count, _dense_count,
+	GeneratePeelRow(id, _p_seed, _block_count, _mix_count,
 		peel_weight, peel_a, peel_x, mix_a, mix_x);
 
 	// Store row parameters
@@ -3773,7 +3804,7 @@ Result Codec::ReconstructOutput(void *message_out)
 		CAT_IF_DUMP(cout << "Regenerating row " << row_i << ":";)
 
 		u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
-		GeneratePeelRow(row_i, _p_seed, _block_count, _dense_count,
+		GeneratePeelRow(row_i, _p_seed, _block_count, _mix_count,
 			peel_weight, peel_a, peel_x, mix_a, mix_x);
 
 		// Remember first column (there is always at least one)
@@ -4257,7 +4288,7 @@ void Codec::Encode(u32 id, void *block_out)
 	CAT_IF_DUMP(cout << "Generating row " << id << ":";)
 
 	u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
-	GeneratePeelRow(id, _p_seed, _block_count, _dense_count,
+	GeneratePeelRow(id, _p_seed, _block_count, _mix_count,
 		peel_weight, peel_a, peel_x, mix_a, mix_x);
 
 	// Remember first column (there is always at least one)
