@@ -41,7 +41,6 @@
 		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
 		Multi-threading
 
-	4. Document the new heavy row structure
 	5. Implement partial input message
 	6. Implement lookup table for codec parameters
 	7. Generate lookup table
@@ -50,7 +49,7 @@
 */
 
 /*
-	Encoding Setup:
+	Mathematical Overview:
 
 		S = Size of original data in bytes.
 		N = ceil(S / M) = Count of blocks in the original data.
@@ -58,34 +57,39 @@
 		(1) Check Matrix Construction
 
 			A = Original data blocks, N blocks long.
-			D = Count of dense matrix rows (see below), chosen based on N.
+			D = Count of dense/heavy matrix rows (see below), chosen based on N.
 			E = N + D blocks = Count of encoded data blocks.
 			R = Recovery blocks, E blocks long.
 			C = Check matrix, with E rows and E columns.
-			0 = Dense rows sum to zero.
+			0 = Dense/heavy rows sum to zero.
 
-			+---------+---+   +---+   +---+
-			|         |   |   |   |   |   |
-			|    P    | M |   |   |   | A |
-			|         |   | x | R | = |   |
-			+---------+---+   |   |   +---+
-			|    D    | I |   |   |   | 0 |
-			+---------+---+   +---+   +---+
+			+---------+-------+   +---+   +---+
+			|         |       |   |   |   |   |
+			|    P    |   M   |   |   |   | A |
+			|         |       |   |   |   |   |
+			+---------+---+---+ x | R | = +---+
+			|    D    | J | 0 |   |   |   | 0 |
+			+---------+---+---+   |   |   +---+
+			|    0    | H | I |   |   |   | 0 |
+			+---------+---+---+   +---+   +---+
 
 			A and B are Ex1 vectors of blocks.
 				A has N rows of the original data padded by H zeroes.
 				R has E rows of encoded blocks.
 
 			C is the ExE binary matrix on the left.
-				P is the NxN peeling matrix
+				P is the NxN peeling binary matrix
 					- Optimized for success of the peeling solver.
-				M is the NxH mixing matrix
-					- Used to mix the H dense rows into the N peeling rows.
-				D is the HxN dense matrix
-					- Used to improve recovery properties.
-				I is an HxH random-looking invertible matrix.
+				M is the NxD mixing binary matrix
+					- Used to mix the D dense/heavy rows into the peeling rows.
+				D is the DxN dense binary matrix
+					- Used to improve on recovery properties of peeling code.
+				J is a DxD random-looking invertible matrix.
+				H is the 6x12 heavy byte matrix
+					- Used to improve on recovery properties of dense code.
+				I is a 6x6 identity byte matrix.
 
-			C matrices for each value of N are precomputed offline and used
+			C matrices for each value of N are precomputed off-line and used
 			based on the length of the input data, which guarantees that C
 			is invertible.  The I matrix is also selected based on its size.
 
@@ -104,11 +108,23 @@
 
 		(4) Generating Matrix D
 
-			Each bit has about a 50% chance of being set.
+			Matrix D is generated with a Shuffle Code, a novel invention.
+			Shuffle codes produce random matrices that offer probably the fastest
+			matrix-matrix multiplication algorithm useful for this purpose.
+			Each bit has a 50% chance of being set.
 
-		(5) Check Matrix Inversion
+		(5) Generating Matrix H
 
-			An optimized sparse technique is used to solve the recovery blocks.
+			The heavy matrix H is also a novel invention in this context.
+			Adding these rows greatly improves invertibility of C while providing
+			a constant-time algorithm to solve them.
+			H is a 6x12 random byte matrix.
+			Each element of H is a byte instead of a bit, representing a number
+			in GF(256) with generator polynomial 0x15F.
+
+		(6) Check Matrix Inversion
+
+			An optimized sparse technique is used to solve the recovery blocks:
 
 	---------------------------------------------------------------------------
 	Sparse Matrix Inversion:
@@ -118,9 +134,9 @@
 		(1) Peeling
 			- Opportunistic fast solution for first N rows.
 		(2) Compression
-			- Setup for Gaussian elimination on a wide rectangular matrix
+			- Setup for Gaussian elimination
 		(3) Gaussian Elimination
-			- Gaussian elimination on a (hopefully) small square matrix
+			- Gaussian elimination on a small square matrix
 		(4) Substitution
 			- Solves for remaining rows from initial peeling
 
@@ -182,27 +198,27 @@
 
 	Encoding:
 
-			The first N output blocks of the encoder are the same as the
-		original data.  After that the encoder will start producing random-
-		looking M-byte blocks by generating new rows for P and M and
-		multiplying them by B.
+		The first N output blocks of the encoder are the same as the
+	original data.  After that the encoder will start producing random-
+	looking M-byte blocks by generating new rows for P and M and
+	multiplying them by B.
 
 	Decoding:
 
-			Decoding begins by collecting N blocks from the transmitter.  Once
-		N blocks are received, the matrix G' (differing in the first N rows
-		from the above matrix G) is generated with the rows of P|M that were
-		received.  Matrix solving is attempted, failing at the Gaussian
-		elimination step if a pivot cannot be found for one of the GE matrix
-		columns (see above).
+		Decoding begins by collecting N blocks from the transmitter.  Once
+	N blocks are received, the matrix C' (differing in the first N rows
+	from the above matrix C) is generated with the rows of P|M that were
+	received.  Matrix solving is attempted, failing at the Gaussian
+	elimination step if a pivot cannot be found for one of the GE matrix
+	columns (see above).
 
-			New rows are received and submitted directly to the GE solver,
-		hopefully providing the missing pivot.  Once enough rows have been
-		received, back-substitution reconstructs matrix B.
+		New rows are received and submitted directly to the GE solver,
+	hopefully providing the missing pivot.  Once enough rows have been
+	received, back-substitution reconstructs matrix B.
 
-			The first N rows of the original matrix G are then used to fill in
-		any blocks that were not received from the original N blocks, and the
-		original data is recovered.
+		The first N rows of the original matrix G are then used to fill in
+	any blocks that were not received from the original N blocks, and the
+	original data is recovered.
 */
 
 #include "Wirehair.hpp"
@@ -1927,9 +1943,9 @@ void Codec::MultiplyDenseRows()
 		|           |           |                     |
 		+-----------+-----------+---------------------+
 					|           |                     |
-					|  Deferred |    Deferred Mixing  |
-			Zero    |  Mixing   |    Heavy Overlap    |
-			-ish	|           |                     |
+			Zero	|  Deferred |    Deferred Mixing  |
+			-ish    |  Mixing   |    Heavy Overlap    |
+					|           |                     |
 					+-----------+-------------+-------+
 								|             |       |
 			Implicitly Zero     |      H      |   I   | <-- 6x6 Identity matrix
@@ -1961,7 +1977,7 @@ void Codec::SetHeavyRows()
 			*words++ = prng.Next();
 	}
 
-	// Write identity matrix to the right
+	// Add identity matrix to tie heavy rows to heavy mixing columns
 	u8 *lower_right = _heavy_matrix + _heavy_columns - CAT_HEAVY_ROWS;
 	for (int ii = 0; ii < CAT_HEAVY_ROWS; ++ii, lower_right += _heavy_pitch)
 		for (int jj = 0; jj < CAT_HEAVY_ROWS; ++jj)
@@ -3464,6 +3480,7 @@ Result Codec::SolveMatrix()
 	SetHeavyRows();
 #endif
 
+	// Add invertible matrix to mathematically tie dense rows to dense mixing columns
 	if (!AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count))
 		return R_TOO_SMALL;
 
