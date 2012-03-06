@@ -491,6 +491,24 @@ CAT_INLINE u8 Divide(u8 a, u8 b)
 	return ALOG_TABLE[LOG_TABLE[a] + 255 - LOG_TABLE[b]];
 }
 
+static CAT_INLINE u8 GF256Inverse(u8 x)
+{
+	// Returns 1 / x
+	return Divide(1, x);
+}
+
+void GenerateInverseTable()
+{
+	cout << "static const u8 INV_TABLE[256] = {";
+	for (int jj = 0; jj < 256; ++jj)
+	{
+		if ((jj & 15) == 0) cout << endl;
+		if (jj == 0) cout << 0 << ", ";
+		else cout << (int)GF256Inverse(jj) << ", ";
+	}
+	cout << endl << "};" << endl << endl;
+}
+
 u32 rf = 0;
 
 void TestMultDiv()
@@ -1046,6 +1064,7 @@ int main()
 	//GenerateWeightTable();
 	//cin.get();
 
+	GenerateInverseTable();
 	TestInvertibleRate();
 	//FindGF256GeneratorPolynomials();
 	GenerateExpLogTables();

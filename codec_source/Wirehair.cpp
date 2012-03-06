@@ -793,6 +793,30 @@ static void GF256MemDivide(void *vdest, u8 x, int bytes)
 	}
 }
 
+static const u8 INV_TABLE[256] = {
+	0, 1, 175, 202, 248, 70, 101, 114, 124, 46, 35, 77, 157, 54, 57, 247,
+	62, 152, 23, 136, 190, 244, 137, 18, 225, 147, 27, 26, 179, 59, 212, 32,
+	31, 213, 76, 10, 164, 182, 68, 220, 95, 144, 122, 113, 235, 195, 9, 125,
+	223, 253, 230, 189, 162, 120, 13, 156, 246, 14, 178, 29, 106, 84, 16, 153,
+	160, 119, 197, 198, 38, 221, 5, 249, 82, 159, 91, 207, 34, 11, 110, 166,
+	128, 104, 72, 158, 61, 107, 151, 201, 218, 116, 206, 74, 171, 155, 145, 40,
+	192, 139, 209, 134, 115, 6, 241, 180, 81, 129, 60, 85, 169, 176, 78, 167,
+	123, 43, 7, 100, 89, 219, 161, 65, 53, 163, 42, 112, 8, 47, 227, 187,
+	80, 105, 148, 232, 205, 214, 99, 208, 19, 22, 193, 97, 173, 229, 211, 238,
+	41, 94, 224, 25, 130, 233, 200, 86, 17, 63, 170, 93, 55, 12, 83, 73,
+	64, 118, 52, 121, 36, 183, 79, 111, 177, 108, 154, 92, 228, 140, 203, 2,
+	109, 168, 58, 28, 103, 240, 37, 165, 250, 217, 226, 127, 231, 51, 20, 245,
+	96, 138, 234, 45, 199, 66, 67, 196, 150, 87, 3, 174, 215, 132, 90, 75,
+	135, 98, 239, 142, 30, 33, 133, 204, 251, 185, 88, 117, 39, 69, 252, 48,
+	146, 24, 186, 126, 172, 141, 50, 188, 131, 149, 194, 44, 255, 243, 143, 210,
+	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236,
+};
+
+static CAT_INLINE u8 GF256Inverse(u8 x)
+{
+	return INV_TABLE[x];
+}
+
 #endif // CAT_USE_HEAVY
 
 
@@ -940,7 +964,7 @@ struct Codec::PeelRow
 		struct
 		{
 			u16 peel_column;	// Peeling column that is solved by this row
-			u8 is_copied;		// Row value is copied yet?
+			u8 is_copied;		// Row value is copied yet?  Reused for heavy row resuming
 		};
 	};
 };
@@ -3648,29 +3672,108 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
 	}
 
+#if defined(CAT_USE_HEAVY)
+	const u16 first_heavy_row = _defer_count + _dense_count;
+
+	// Mark as not copied yet
+	// TODO: Set to 1 for existing code
+	row->is_copied = 0;
+#endif
+
 	// Flip GE row bits up to the pivot resume point
 	u16 pivot_i = _ge_resume_pivot;
 	u64 ge_mask = 1;
 	for (u16 pivot_j = 0; pivot_j < pivot_i; ++pivot_j, ge_mask = CAT_ROL64(ge_mask, 1))
 	{
-		u16 ge_row_j = _ge_pivots[pivot_j];
-
-#if defined(CAT_USE_HEAVY)
-		// If pivot row is heavy,
-		const u16 first_heavy_row = _defer_count + _dense_count;
-		if (ge_row_j >= first_heavy_row)
-		{
-			// New row must be promoted to GF(256) (common case)
-
-			break;
-		}
-#endif
-
 		// If bit is set,
 		int word_offset = pivot_j >> 6;
 		u64 *rem_row = &ge_new_row[word_offset];
 		if (*rem_row & ge_mask)
 		{
+			u16 ge_row_j = _ge_pivots[pivot_j];
+
+#if defined(CAT_USE_HEAVY)
+			// If pivot row is heavy,
+			if (ge_row_j >= first_heavy_row)
+			{
+				// New row must be promoted to GF(256) (common case)
+
+				// Mark as copied
+				row->is_copied = 1;
+
+				// Lookup heavy row
+				u16 heavy_row_i = ge_row_i - first_heavy_row;
+				u8 *heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
+				u16 heavy_row_j = ge_row_j - first_heavy_row;
+				u8 *exist_row = _heavy_matrix + _heavy_pitch * heavy_row_j;
+
+				// Zero all the heavy columns up to this point
+				int lim = pivot_j - _ge_first_heavy;
+				for (int heavy_column_i = 0; heavy_column_i < lim; ++heavy_column_i)
+					heavy_row[heavy_column_i] = 0;
+
+				// Set heavy_row[pivot_j] = 1 / exist_row[pivot_j]
+				// NOTE: Existing heavy column is implicitly non-zero
+				u16 heavy_col_j = pivot_j - _ge_first_heavy;
+				u8 inv_exist_value = GF256Inverse(exist_row[heavy_col_j]);
+
+				// Store inverse value for later
+				heavy_row[lim] = inv_exist_value;
+
+				// For each set bit in the binary pivot row, add rem[i] to rem[i+]:
+				const u16 pivot_count = _defer_count + _dense_count;
+				for (int ge_column_i = pivot_j + 1; ge_column_i < pivot_count; ++ge_column_i)
+				{
+					u8 bit = (ge_new_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 1;
+					u16 heavy_col_i = ge_column_i - _ge_first_heavy;
+					u8 product_value = GF256Multiply(exist_row[heavy_col_i], inv_exist_value);
+
+					heavy_row[heavy_col_i] = bit ^ product_value;
+				}
+
+				// For each remaining row after converting to GF(256),
+				for (u16 pivot_m = pivot_j + 1; pivot_m < pivot_i; ++pivot_m)
+				{
+					// If column is zero,
+					u8 heavy_col_m = pivot_m - _ge_first_heavy;
+					u8 code_value = heavy_row[heavy_col_m];
+					if (!code_value) continue; // Skip it
+
+					// If previous row is heavy,
+					u16 ge_row_m = _ge_pivots[pivot_m];
+					if (ge_row_m >= first_heavy_row)
+					{
+						// Calculate coefficient of elimination
+						u16 heavy_row_m = ge_row_m - first_heavy_row;
+						exist_row = _heavy_matrix + _heavy_pitch * heavy_row_m;
+						u8 eliminator = GF256Divide(code_value, exist_row[heavy_col_m]);
+
+						// Store eliminator for later
+						heavy_row[heavy_col_m] = eliminator;
+
+						// heavy[m+] += exist[m+] * eliminator
+						GF256MemMulAdd(heavy_row + heavy_col_m + 1, eliminator, exist_row + heavy_col_m + 1, pivot_count - (pivot_m + 1));
+					}
+					else
+					{
+						// For each remaining column,
+						u64 *other_row = _ge_matrix + _ge_pitch * ge_row_m;
+						for (u16 ge_column_k = pivot_m + 1; ge_column_k < pivot_count; ++ge_column_k)
+						{
+							// If bit is set,
+							if (other_row[ge_column_k >> 6] & ((u64)1 << (ge_column_k & 63)))
+							{
+								// Add in the code value for this column
+								u16 heavy_col_k = ge_column_k - _ge_first_heavy;
+								heavy_row[heavy_col_k] ^= code_value;
+							}
+						}
+					}
+				}
+
+				break;
+			}
+#endif // CAT_USE_HEAVY
 			u64 *ge_pivot_row = _ge_matrix + word_offset + _ge_pitch * ge_row_j;
 
 			u64 row0 = (*ge_pivot_row & ~(ge_mask - 1)) ^ ge_mask;
@@ -3681,16 +3784,56 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		}
 	}
 
+#if defined(CAT_USE_HEAVY)
+
+	// If new row is now heavy,
+	if (row->is_copied)
+	{
+		// If the next pivot was not found on this heavy row,
+		u16 heavy_row_i = ge_row_i - first_heavy_row;
+		u8 *heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
+		u16 heavy_col_i = pivot_i - _ge_first_heavy;
+		if (!heavy_row[heavy_col_i])
+			return R_MORE_BLOCKS; // Maybe next time...
+
+		// Swap out the pivot index for this one
+		_ge_pivots[new_pivot_i] = _ge_pivots[pivot_i];
+		_ge_pivots[pivot_i] = ge_row_i;
+	}
+	else
+	{
+		// Swap resume row with new row
+		u16 temp = _ge_pivots[_ge_resume_heavy_row];
+		_ge_pivots[_ge_resume_heavy_row] = _ge_pivots[new_pivot_i];
+		_ge_pivots[new_pivot_i] = temp;
+
+		// TODO: Handle abort case here properly, must keep heavy rows at end
+
+		// If the next pivot was not found on this row,
+		if (!(ge_new_row[pivot_i >> 6] & ((u64)1 << (pivot_i & 63))))
+			return R_MORE_BLOCKS; // Maybe next time...
+
+		// pivot_i = ge_row_i
+
+		// TODO
+	}
+
+#else // CAT_USE_HEAVY
+
 	// If the next pivot was not found on this row,
-	if ((ge_new_row[pivot_i >> 6] & ge_mask) == 0)
+	if (!(ge_new_row[pivot_i >> 6] & ge_mask))
 		return R_MORE_BLOCKS; // Maybe next time...
 
 	// Swap out the pivot index for this one
 	_ge_pivots[new_pivot_i] = _ge_pivots[pivot_i];
 	_ge_pivots[pivot_i] = ge_row_i;
 
+#endif // CAT_USE_HEAVY
+
 	// NOTE: Pivot was found and is definitely not set anywhere else
 	// so it doesn't need to be cleared from any other GE rows.
+
+	// TODO: Handle remaining rows properly
 
 	// For each pivot to determine,
 	const u16 pivot_count = _defer_count + _dense_count;
@@ -4353,7 +4496,7 @@ void Codec::Encode(u32 id, void *block_out)
 
 
 //// Decoder Mode
-
+ 
 Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 {
 	Result r = ChooseMatrix(message_bytes, block_bytes);

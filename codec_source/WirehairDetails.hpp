@@ -52,7 +52,7 @@ extern int g_p_seed, g_d_seed;
 
 // Heavy rows:
 #define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
-#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
+//#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 
@@ -155,6 +155,7 @@ class Codec
 	int _heavy_pitch;			// Bytes per heavy matrix row
 	u16 _heavy_columns;			// Number of heavy matrix columns
 	u16 _ge_first_heavy;		// First heavy column that is non-zero
+	u16 _ge_resume_heavy_row;	// First heavy row
 #endif
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
