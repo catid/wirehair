@@ -30,7 +30,7 @@
 #define CAT_WIREHAIR_DETAILS_HPP
 
 // TODO: Remove this
-extern int g_p_seed, g_d_seed;
+extern int g_p_seed, g_d_seed, g_count;
 
 #include "SmallPRNG.hpp"
 
@@ -44,7 +44,7 @@ extern int g_p_seed, g_d_seed;
 #define CAT_MAX_DENSE_ROWS 1024 /* Maximum check row count */
 #define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
 #define CAT_WIREHAIR_MAX_N 64000 /* Largest N value to allow */
-#define CAT_WIREHAIR_MIN_N 6 /* Smallest N value to allow */
+#define CAT_WIREHAIR_MIN_N 2 /* Smallest N value to allow */
 
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */

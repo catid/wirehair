@@ -692,11 +692,12 @@ void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 	After these corrections it works properly and reduces the execution time
 	to 58% of the usual version that uses branches to handle zero input.
 
-	This table was generated using polynomial 0x15F.  Maybe it's voodoo but
+	These tables were generated using polynomial 0x15F.  Maybe it's voodoo but
 	random GF(256) matrices with this polynomial tended to be more invertible.
 	There are 16 generator polynomials for GF(256), and 0x1F5 was a close second
-	in terms of rate of invertibility, which makes me wonder if it is more than
-	just voodoo.
+	in terms of rate of invertibility.
+
+	INV_TABLE[x] was also generated to accelerate GF256Divide(1, x).
 */
 
 static const u16 LOG_TABLE[256] = {
@@ -753,6 +754,25 @@ static const u8 EXP_TABLE[512*2+1] = {
 	211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1, 0,
 };
 
+static const u8 INV_TABLE[256] = {
+	0, 1, 175, 202, 248, 70, 101, 114, 124, 46, 35, 77, 157, 54, 57, 247,
+	62, 152, 23, 136, 190, 244, 137, 18, 225, 147, 27, 26, 179, 59, 212, 32,
+	31, 213, 76, 10, 164, 182, 68, 220, 95, 144, 122, 113, 235, 195, 9, 125,
+	223, 253, 230, 189, 162, 120, 13, 156, 246, 14, 178, 29, 106, 84, 16, 153,
+	160, 119, 197, 198, 38, 221, 5, 249, 82, 159, 91, 207, 34, 11, 110, 166,
+	128, 104, 72, 158, 61, 107, 151, 201, 218, 116, 206, 74, 171, 155, 145, 40,
+	192, 139, 209, 134, 115, 6, 241, 180, 81, 129, 60, 85, 169, 176, 78, 167,
+	123, 43, 7, 100, 89, 219, 161, 65, 53, 163, 42, 112, 8, 47, 227, 187,
+	80, 105, 148, 232, 205, 214, 99, 208, 19, 22, 193, 97, 173, 229, 211, 238,
+	41, 94, 224, 25, 130, 233, 200, 86, 17, 63, 170, 93, 55, 12, 83, 73,
+	64, 118, 52, 121, 36, 183, 79, 111, 177, 108, 154, 92, 228, 140, 203, 2,
+	109, 168, 58, 28, 103, 240, 37, 165, 250, 217, 226, 127, 231, 51, 20, 245,
+	96, 138, 234, 45, 199, 66, 67, 196, 150, 87, 3, 174, 215, 132, 90, 75,
+	135, 98, 239, 142, 30, 33, 133, 204, 251, 185, 88, 117, 39, 69, 252, 48,
+	146, 24, 186, 126, 172, 141, 50, 188, 131, 149, 194, 44, 255, 243, 143, 210,
+	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236,
+};
+
 static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
 {
 	return EXP_TABLE[LOG_TABLE[x] + LOG_TABLE[y]];
@@ -791,30 +811,6 @@ static void GF256MemDivide(void *vdest, u8 x, int bytes)
 		// Divide source byte by x and add it to destination byte
 		dest[ii] = EXP_TABLE[LOG_TABLE[dest[ii]] + log_x];
 	}
-}
-
-static const u8 INV_TABLE[256] = {
-	0, 1, 175, 202, 248, 70, 101, 114, 124, 46, 35, 77, 157, 54, 57, 247,
-	62, 152, 23, 136, 190, 244, 137, 18, 225, 147, 27, 26, 179, 59, 212, 32,
-	31, 213, 76, 10, 164, 182, 68, 220, 95, 144, 122, 113, 235, 195, 9, 125,
-	223, 253, 230, 189, 162, 120, 13, 156, 246, 14, 178, 29, 106, 84, 16, 153,
-	160, 119, 197, 198, 38, 221, 5, 249, 82, 159, 91, 207, 34, 11, 110, 166,
-	128, 104, 72, 158, 61, 107, 151, 201, 218, 116, 206, 74, 171, 155, 145, 40,
-	192, 139, 209, 134, 115, 6, 241, 180, 81, 129, 60, 85, 169, 176, 78, 167,
-	123, 43, 7, 100, 89, 219, 161, 65, 53, 163, 42, 112, 8, 47, 227, 187,
-	80, 105, 148, 232, 205, 214, 99, 208, 19, 22, 193, 97, 173, 229, 211, 238,
-	41, 94, 224, 25, 130, 233, 200, 86, 17, 63, 170, 93, 55, 12, 83, 73,
-	64, 118, 52, 121, 36, 183, 79, 111, 177, 108, 154, 92, 228, 140, 203, 2,
-	109, 168, 58, 28, 103, 240, 37, 165, 250, 217, 226, 127, 231, 51, 20, 245,
-	96, 138, 234, 45, 199, 66, 67, 196, 150, 87, 3, 174, 215, 132, 90, 75,
-	135, 98, 239, 142, 30, 33, 133, 204, 251, 185, 88, 117, 39, 69, 252, 48,
-	146, 24, 186, 126, 172, 141, 50, 188, 131, 149, 194, 44, 255, 243, 143, 210,
-	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236,
-};
-
-static CAT_INLINE u8 GF256Inverse(u8 x)
-{
-	return INV_TABLE[x];
 }
 
 #endif // CAT_USE_HEAVY
@@ -860,7 +856,7 @@ static CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 	table below up to weight 64.  I stuck ~0 at the end of the
 	table to make sure the while loop in the function terminates.
 
-		To produce a good code, the probability of weight 1 should be
+		To produce a good code, the probability of weight-1 should be
 	added into each element of the WEIGHT_DIST table.  Instead, I add
 	it programmatically in the function to allow it to be easily tuned.
 
@@ -870,15 +866,21 @@ static CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 	tuning the codec for weight 64, the performance was slightly
 	better than with 32.
 
-		I also tried different probabilities for weight 1 rows, and
+		I also tried different probabilities for weight-1 rows, and
 	settled on 1/128 as having the best performance in a few select
 	tests.  Setting it too high or too low (or even to zero) tends
 	to reduce the performance of the codec.
 
-		The truncation point and the weight-1 row probability might
-	be best selected based on the block count N.  This needs to be
-	simulated and determined.
+		The number of dense rows is directly related to the weight-1
+	probability (P1) as follows for N > 256:
+
+		Dense rows required = 13 + sqrt(N)/2 + N * P1
+
+		So a smaller P1 will make the codec faster for larger N, but
+	it will also reduce the recovery capabilities of the code.
 */
+
+static const float Weight1Probability = 1. / 128; // P1
 
 static const u32 WEIGHT_DIST[] = {
 	0x00000000, 0x80000000, 0xaaaaaaaa, 0xc0000000, 0xcccccccc, 0xd5555555, 0xdb6db6db, 0xe0000000,
@@ -894,7 +896,7 @@ static const u32 WEIGHT_DIST[] = {
 u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
 {
 	// Select probability of weight-1 rows here:
-	static const u32 P1 = (u32)((1./128) * 0xffffffff);
+	static const u32 P1 = (u32)(Weight1Probability * 0xffffffff);
 	static const u32 P2 = WEIGHT_DIST[1];
 	static const u32 P3 = WEIGHT_DIST[2];
 
@@ -1988,7 +1990,7 @@ void Codec::SetHeavyRows()
 	CAT_IF_DUMP(cout << endl << "---- SetHeavyRows ----" << endl << endl;)
 
 	CatsChoice prng;
-	prng.Initialize(_p_seed);
+	prng.Initialize(_d_seed);
 
 	// For each heavy matrix word,
 	u8 *heavy_row = _heavy_matrix;
@@ -3390,13 +3392,89 @@ void Codec::Substitute()
 //// Main Driver
 
 /*
+	SMALL_DENSE_SEEDS
+
+		This table was generated for small N up to 255, choosing the seeds
+	with the best recovery properties for single losses.
+*/
+static const u8 SMALL_DENSE_SEEDS[256] = {
+	0, 0, 0, 67, 192, 102, 31, 237, 155, 136, 253, 122, 60, 224, 29, 34, 
+	33, 67, 0, 96, 146, 63, 196, 146, 251, 254, 168, 2, 171, 197, 235, 102, 
+	118, 245, 19, 176, 165, 198, 53, 127, 132, 151, 50, 243, 224, 124, 87, 114, 
+	145, 30, 39, 249, 150, 3, 57, 185, 109, 141, 30, 26, 201, 3, 112, 83, 
+	225, 2, 238, 160, 110, 119, 195, 20, 46, 50, 107, 133, 160, 58, 67, 92, 
+	14, 23, 34, 23, 59, 16, 206, 100, 230, 193, 56, 193, 130, 23, 18, 183, 
+	31, 53, 41, 147, 219, 17, 86, 254, 155, 194, 163, 226, 78, 8, 154, 105, 
+	33, 180, 210, 198, 147, 236, 197, 80, 138, 201, 13, 207, 84, 17, 200, 80, 
+	139, 144, 60, 188, 74, 170, 143, 42, 31, 127, 207, 93, 34, 201, 49, 200, 
+	240, 45, 114, 246, 63, 49, 101, 7, 55, 26, 39, 155, 61, 65, 183, 52, 
+	193, 134, 19, 159, 19, 101, 88, 193, 225, 163, 181, 68, 37, 79, 65, 211, 
+	251, 205, 206, 111, 81, 59, 1, 105, 15, 220, 125, 15, 157, 227, 90, 198, 
+	166, 221, 95, 139, 252, 56, 78, 244, 196, 30, 223, 199, 182, 75, 175, 61, 
+	47, 100, 118, 119, 201, 1, 165, 234, 67, 210, 98, 93, 60, 204, 64, 149, 
+	197, 232, 220, 85, 219, 118, 45, 66, 47, 60, 18, 229, 57, 134, 201, 192, 
+	152, 50, 71, 39, 78, 0, 199, 7, 97, 197, 122, 22, 94, 184, 108, 167, 
+};
+
+/*
+	SMALL_PEEL_SEEDS
+
+		This table was generated for small N up to 192, choosing the seeds
+	with the best recovery properties for 10% loss rate.
+*/
+static const u8 SMALL_PEEL_SEEDS[] = {
+	0, 0, 70, 170, 111, 111, 23, 80, 226, 238, 241, 52, 238, 22, 81, 5,
+	28, 125, 202, 80, 254, 111, 18, 42, 12, 184, 128, 117, 217, 153, 58, 166,
+	31, 18, 15, 42, 205, 253, 211, 118, 16, 228, 145, 30, 84, 219, 243, 154,
+	198, 200, 150, 170, 149, 203, 55, 118, 131, 244, 36, 191, 68, 102, 248, 234,
+	82, 110, 224, 231, 38, 196, 234, 158, 78, 251, 114, 15, 6, 116, 12, 71,
+	55, 143, 77, 20, 123, 98, 45, 145, 11, 179, 144, 60, 9, 149, 37, 117,
+	54, 76, 151, 32, 65, 191, 225, 237, 177, 28, 0, 253, 28, 111, 8, 67,
+	235, 210, 176, 209, 58, 48, 158, 69, 127, 219, 142, 168, 46, 217, 23, 214,
+	133, 5, 7, 174, 204, 238, 19, 83, 86, 99, 114, 50, 94, 220, 226, 125,
+	192, 149, 115, 118, 221, 136, 212, 30, 102, 0, 166, 41, 99, 212, 231, 243,
+	188, 155, 69, 221, 199, 35, 105, 204, 161, 36, 101, 219, 254, 57, 98, 13,
+	161, 20, 127, 72, 106, 203, 140, 18, 122, 191, 11, 233, 16, 74, 168, 11,
+};
+
+#if defined(CAT_USE_HEAVY)
+
+/*
+	SMALL_HEAVY_SEEDS
+
+		This table was generated by hand for small N under 255, choosing a
+	different seed whenever it didn't work.
+*/
+static const u8 SMALL_HEAVY_SEEDS[256] = {
+	0, 0, 0, 2, 0, 8, 31, 237, 155, 136, 253, 122, 60, 224, 29, 34, 
+	33, 67, 0, 96, 146, 63, 196, 146, 251, 254, 168, 2, 171, 197, 235, 102, 
+	118, 245, 19, 176, 165, 198, 53, 127, 132, 151, 50, 243, 224, 124, 87, 114, 
+	145, 30, 39, 249, 150, 3, 57, 185, 109, 141, 30, 26, 201, 3, 112, 83, 
+	225, 2, 238, 160, 110, 119, 195, 20, 46, 50, 107, 133, 160, 58, 67, 92, 
+	14, 23, 34, 23, 59, 16, 206, 100, 230, 193, 56, 193, 130, 23, 18, 183, 
+	31, 53, 41, 147, 219, 17, 86, 254, 155, 194, 163, 226, 78, 8, 154, 105, 
+	33, 180, 210, 198, 147, 236, 197, 80, 138, 201, 13, 207, 84, 17, 200, 80, 
+	139, 144, 60, 188, 74, 170, 143, 42, 31, 127, 207, 93, 34, 201, 49, 200, 
+	240, 45, 114, 246, 63, 49, 101, 7, 55, 26, 39, 155, 61, 65, 183, 52, 
+	193, 134, 19, 159, 19, 101, 88, 193, 225, 163, 181, 68, 37, 79, 65, 211, 
+	251, 205, 206, 111, 81, 59, 1, 105, 15, 220, 125, 15, 157, 227, 90, 198, 
+	166, 221, 95, 139, 252, 56, 78, 244, 196, 30, 223, 199, 182, 75, 175, 61, 
+	47, 100, 118, 119, 201, 1, 165, 234, 67, 210, 98, 93, 60, 204, 64, 149, 
+	197, 232, 220, 85, 219, 118, 45, 66, 47, 60, 18, 229, 57, 134, 201, 192, 
+	152, 50, 71, 39, 78, 0, 199, 7, 97, 197, 122, 22, 94, 184, 108, 167, 
+};
+
+#endif // CAT_USE_HEAVY
+
+int g_p_seed, g_d_seed, g_count; // TODO: Remove these
+
+
+/*
 	ChooseMatrix
 
 		This function determines the check matrix to use based on the
 	given message bytes and bytes per block.
 */
-
-int g_p_seed, g_d_seed; // TODO: Remove these
 
 Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 {
@@ -3420,13 +3498,44 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
 
+	// If N is small,
+	if (_block_count < 256)
+	{
+		// Lookup dense seed from table
+#if defined(CAT_USE_HEAVY)
+		_d_seed = SMALL_HEAVY_SEEDS[_block_count];
+#else
+		_d_seed = SMALL_DENSE_SEEDS[_block_count];
+#endif
+
+		if (_block_count < 192)
+			_p_seed = SMALL_PEEL_SEEDS[_block_count];
+		else
+			_p_seed = _block_count;
+
+		// Calculate dense count from math expression
+		if (_block_count == 2) _dense_count = 2;
+		else if (_block_count == 3) _dense_count = 6;
+		else _dense_count = 8 + SquareRoot16(_block_count) / 2 + (_block_count / 50);
+	}
+	else if (_block_count <= 4096) // Medium N:
+	{
+		// TODO: Need to generate a better fit curve
+		_dense_count = 16 + SquareRoot16(_block_count) / 2 + (u16)(_block_count * Weight1Probability);
+
+		_p_seed = _d_seed = _block_count;
+	}
+	else
+	{
+		// TODO: Need to generate a better fit curve
+		_dense_count = 8 + 2*SquareRoot16(_block_count) + (_block_count / 100);
+
+		_p_seed = _d_seed = _block_count;
+	}
+
 	// Lookup check matrix parameters
 	_p_seed = g_p_seed;// TODO: Remove these
 	_d_seed = g_d_seed;
-
-	// This choice of dense count is based on tuning manually at a bunch of different block counts and
-	// picking what seemed like a good trend line.  It really needs to be simulated.
-	_dense_count = SquareRoot16(_block_count) + (_block_count / 150) + 2;
 
 	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
 
@@ -3584,6 +3693,10 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
+#if defined(CAT_USE_HEAVY)
+	return R_BAD_INPUT;
+#endif
+
 	if (!block) return R_BAD_INPUT;
 
 	// If there is no room for it,
@@ -3693,6 +3806,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 			u16 ge_row_j = _ge_pivots[pivot_j];
 
 #if defined(CAT_USE_HEAVY)
+
 			// If pivot row is heavy,
 			if (ge_row_j >= first_heavy_row)
 			{
@@ -3715,18 +3829,19 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 				// Set heavy_row[pivot_j] = 1 / exist_row[pivot_j]
 				// NOTE: Existing heavy column is implicitly non-zero
 				u16 heavy_col_j = pivot_j - _ge_first_heavy;
-				u8 inv_exist_value = GF256Inverse(exist_row[heavy_col_j]);
+				u8 inv_exist_value = INV_TABLE[exist_row[heavy_col_j]];
 
-				// Store inverse value for later
+				// Store inverse value as multiplier
 				heavy_row[lim] = inv_exist_value;
 
 				// For each set bit in the binary pivot row, add rem[i] to rem[i+]:
 				const u16 pivot_count = _defer_count + _dense_count;
+				u16 log_inv_exist_value = LOG_TABLE[inv_exist_value];
 				for (int ge_column_i = pivot_j + 1; ge_column_i < pivot_count; ++ge_column_i)
 				{
 					u8 bit = (ge_new_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 1;
 					u16 heavy_col_i = ge_column_i - _ge_first_heavy;
-					u8 product_value = GF256Multiply(exist_row[heavy_col_i], inv_exist_value);
+					u8 product_value = EXP_TABLE[LOG_TABLE[exist_row[heavy_col_i]] + log_inv_exist_value];
 
 					heavy_row[heavy_col_i] = bit ^ product_value;
 				}
@@ -3764,21 +3879,21 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 							if (other_row[ge_column_k >> 6] & ((u64)1 << (ge_column_k & 63)))
 							{
 								// Add in the code value for this column
-								u16 heavy_col_k = ge_column_k - _ge_first_heavy;
-								heavy_row[heavy_col_k] ^= code_value;
+								heavy_row[ge_column_k - _ge_first_heavy] ^= code_value;
 							}
 						}
 					}
-				}
+				} // next row
 
 				break;
 			}
+
 #endif // CAT_USE_HEAVY
+
 			u64 *ge_pivot_row = _ge_matrix + word_offset + _ge_pitch * ge_row_j;
-
 			u64 row0 = (*ge_pivot_row & ~(ge_mask - 1)) ^ ge_mask;
-			*rem_row ^= row0;
 
+			*rem_row ^= row0;
 			for (int ii = 1; ii < _ge_pitch - word_offset; ++ii)
 				rem_row[ii] ^= ge_pivot_row[ii];
 		}
