@@ -1959,13 +1959,13 @@ void Codec::MultiplyDenseRows()
 	Important Optimization: Heavy Row Structure
 
 		The heavy rows are made up of bytes instead of bits.  Each byte
-	represents a number in the prime extension field GF(2^^8) defined by
-	the generator polynomial 0x15F.
+	represents a number in the Galois field GF(2^^8) defined by the
+	generator polynomial 0x15F.
 
 		The heavy rows are designed to make it easier to find pivots in
 	just the last few columns of the GE matrix.  This design choice was
 	made because it allows a constant time algorithm to be employed that
-	will reduce the fail rate from 30% to 3%.  It is true that with
+	will reduce the fail rate from >70% to <3%.  It is true that with
 	heavy loss rates, the earlier columns can be where the pivot is
 	needed.  However in my estimation it would be better to increase the
 	number of dense rows instead to handle this problem than to increase
@@ -1984,7 +1984,7 @@ void Codec::MultiplyDenseRows()
 
 		Furthermore assume that almost all of the missing pivots occur within
 	the last M columns of the GE matrix, even for large matrices.  So, the
-	heavy matrix is always 6xM, where M is around 18.  Since the heavy matrix
+	heavy matrix is always 6xM, where M is around 12.  Since the heavy matrix
 	never gets any larger, the execution time doesn't vary based on N, and
 	for large enough N it only lowers throughput imperceptibly while still
 	providing a huge reduction in fail rate.
@@ -2011,7 +2011,7 @@ void Codec::MultiplyDenseRows()
 	To synchronize it between the encoder and decoder, a PRNG is seeded
 	based on the block count and H is generated from the PRNG output.
 	I toyed with giving these rows more structure but I have not found
-	anything worth using.  Maybe a Vandermonde-like matrix or something.
+	anything worth using yet.
 */
 
 void Codec::SetHeavyRows()
@@ -2019,7 +2019,7 @@ void Codec::SetHeavyRows()
 	CAT_IF_DUMP(cout << endl << "---- SetHeavyRows ----" << endl << endl;)
 
 	CatsChoice prng;
-	prng.Initialize(_d_seed);
+	prng.Initialize(_p_seed);
 
 	// For each heavy matrix word,
 	u8 *heavy_row = _heavy_matrix;
