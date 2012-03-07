@@ -103,7 +103,7 @@ int main()
 
 	//GenerateLookupTable();
 
-	int block_count = 200;
+	int block_count = 64000;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
