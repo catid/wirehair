@@ -1,4 +1,4 @@
-	Wirehair Streaming Forward Error Correction (FEC)
+	Wirehair FEC - Fast Forward Error Correction Codec
 
 		Wirehair FEC produces a stream of error correction blocks from a
 	data source.  When enough of these blocks are received, the original
@@ -8,9 +8,12 @@
 	over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
 	The data to transmit over the BEC is encoded into equal-sized blocks.
 	When enough blocks are received at the other end of the channel, then
-	the original data can be recovered.  How many additional blocks are
-	needed is random, though the number of additional blocks is low and
-	does not vary based on the size of the data.
+	the original data can be recovered.
+
+		How many additional blocks are needed is random, though the number
+	of additional blocks is low and does not vary based on the size of the
+	data.  Typically one additional block is needed just 3% of the time.
+	And two blocks are needed 0.1% of the time.
 
 		Wirehair is released under the BSD license, which means that I ask
 	only that if you use my software that in the binary distribution of your
@@ -19,13 +22,32 @@
 
 -Christopher A Taylor (chris@slycog.com) http://slycog.com
 
-News Update: 3/1/2012
-	
-I'm not aware of any bugs in the codec.  I still need to add in a precomputed table of seeds for all of the different values of N, but that won't stop someone from using it.
+
+News Update: 3/6/2012
++ Added heavy rows to improve code performance.
++ Completed most of the tuning.
+
+Release TODO:
++ (!!) Resuming after an extra block is needed is currently broken.
++ First 256 elements need tables for tuning that are cooking right now.
++ Other elements need a small exception list so they will work every time.
+
+After Release TODO:
++ Also optimize GE subdiagonal evaluation with a window for larger N.
++ Conjugate gradient method is being worked on by myself and Noah, maybe(?)
++ Provisional patent to keep it free for everyone and safe from evil corporations.
++ Formal documentation, white papers, conference abstract.
++ Java version is being worked on by Steve Sheppard.
++ SIMD memxor() and prefetch is being worked on by Nate Tinkler.
++ Multi-threading is being worked on by Brandon McKune.
+
 
 Benchmark results (before tuning):
 
-Average extra blocks per transmission = 1.7 regardless of message size for high loss rates.  Pick a larger message or smaller block size to achieve lower overhead.
+These are out of date.  Right now, the smaller sizes have much less
+throughput than before, due to the much stronger code being used.
+The larger sizes are about the same as listed below because the
+stronger code is a constant-time algorithm and scales very well.
 
 Single-threaded performance on an Intel Xeon @ 3.07 GHz.
 Test software compiled in 64-bit Release mode in MSVC.
@@ -52,9 +74,3 @@ N      Size (MB)  Enc. Dec. (MB/s)
      6  .009      420  650  <- This is the smallest supported N
 
 I also tried N = 2048 for block size = 1 MB, or >2 GB of data and it was able to encode and decode at over 300 MB/s.  Protecting 2 GB of data at that level of performance with just a few MB of overhead is not bad.
-
-What this tells me is that for maximum performance the block size should be kept around 3000.  This gives the lowest overhead percentage (1.7/3000 = 0.057%) before performance starts to trail off.  A larger transfer can be broken up into 4 MB pieces and each piece can be sent with a separate run of the codec.  This matches pretty well with an asyncio file server that reads 4 MB blocks at a time from the source file.  Each time the file is read, the codec can be run in the reader thread so that by the time that piece of the file is needed, the encoder has already had a chance to work on it.
-
-How to do the network protocol that interleaves runs of the codec is another challenge entirely.
-
-I'm also working on a new version of the codec that incorporates GF(256) rows in the matrix so that the average overhead will be less than one block.  It seems that if the average overhead now is 1.7 blocks, then adding two GF(256) rows should greatly help reduce the overhead.  Implementing this type of code is pretty easy, but incorporating it into my codec in a way that is fast and efficient is a challenge.  The hardest thing to do is close out a software project.  It's never finished.  I'm going to finish the GF(2) code first and then work on this excellent enhancement after it is done.
