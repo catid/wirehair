@@ -1260,7 +1260,9 @@ void Codec::Peel(u16 row_i, PeelRow *row, u16 column_i)
 		In this algorithm, the column that will cause the largest immediate
 	avalanche of peeling solutions is the one that is selected.  If there is
 	a tie between two or more columns based on just that criterion then, of the
-	columns that tied, the one that affects the most rows is selected.
+	columns that tied, the one that affects the most rows is selected.  This is
+	a better way to choose which columns to defer than just selecting the one
+	referenced by the most rows.
 
 		In practice with a well designed peeling matrix, about sqrt(N) + N/150
 	columns must be deferred to Gaussian elimination using this greedy approach.
@@ -1691,7 +1693,7 @@ void Codec::CopyDeferredRows()
 }
 
 /*
-	Important Optimization: Dense Row Structure
+	Important Optimization: Shuffle-2 Codes
 
 		After compression, the GE matrix is a square matrix that
 	looks like this:
@@ -1715,7 +1717,7 @@ void Codec::CopyDeferredRows()
 	intersection with the peeled columns.
 
 		I needed to find a way to generate a binary matrix that LOOKS
-	random but actually only differs by 2 bits per row.  I looked at
+	random but actually only differs by ~2 bits per row.  I looked at
 	using normal Gray codes or more Weyl generators but they both are
 	restricted to a subset of the total possibilities.  Instead, the
 	standard in-place shuffle algorithm is used to shuffle row and
@@ -1750,13 +1752,17 @@ void Codec::CopyDeferredRows()
 		11010111000101100
 		11000011010001011
 
+		This code I am calling a Perfect Shuffle-2 Code.
+
 		These are "perfect" matrices in that they have the same
 	Hamming weight in each row and each column.  The problem is
 	that this type of matrix is NEVER invertible, so the perfect
 	structure must be destroyed in order to get a good code for
 	error correction.
 
-		Here is the MultiplyDenseRows() process:
+		The resulting code is called a Shuffle-2 code.
+
+		Here is the Shuffle-2 process:
 
 	Split the dense submatrix of the check matrix into squares.
 	For each square,
@@ -1775,6 +1781,15 @@ void Codec::CopyDeferredRows()
 	are invertible about 30% of the time, and these rows are invertible
 	about 20% of the time.  So care must be taken to seed these dense
 	row generators to improve invertibility.
+
+		A Shuffle-3 Code would reshuffle 3 times and flip 3 bits per row,
+	and a Shuffle-4 Code would reshuffle 4 times and flip 4 bits per row.
+	This is probably not the first time that someone has invented this.
+	I believe that Moon Ho Lee has come up with something similar and more
+	mathematically rigorous, though I believe he was using Shuffle-4 for
+	quantum cryptography.  Shuffle-2 is much faster and works for this
+	application because columns from different DxD matrices are randomly
+	selected for use in the GE matrix.
 
 		MultiplyDenseRows() does not actually use memxor() to generate
 	any row block values because it is not certain where the values
@@ -1846,7 +1861,7 @@ void Codec::MultiplyDenseRows()
 		u64 *ge_dest_row = _ge_matrix + _ge_pitch * *row++;
 		for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 
-		// Reshuffle bit order
+		// Reshuffle bit order: Shuffle-2 Code
 		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate first half of rows
@@ -1897,7 +1912,7 @@ void Codec::MultiplyDenseRows()
 			for (int jj = 0; jj < _ge_pitch; ++jj) ge_dest_row[jj] ^= temp_row[jj];
 		} // next row
 
-		// Reshuffle bit order
+		// Reshuffle bit order: Shuffle-2 Code
 		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate second half of rows
@@ -1982,11 +1997,11 @@ void Codec::MultiplyDenseRows()
 	invertibility.  After 5 heavy rows, less likely problems can be overcome,
 	so 6 heavy rows were chosen for the baseline version.
 
-		Furthermore assume that almost all of the missing pivots occur within
-	the last M columns of the GE matrix, even for large matrices.  So, the
-	heavy matrix is always 6xM, where M is around 12.  Since the heavy matrix
-	never gets any larger, the execution time doesn't vary based on N, and
-	for large enough N it only lowers throughput imperceptibly while still
+		An important realization is that almost all of the missing pivots
+	occur within the last M columns of the GE matrix, even for large matrices.
+	So, the heavy matrix is always 6xM, where M is around 12.  Since the heavy
+	matrix never gets any larger, the execution time doesn't vary based on N,
+	and for large enough N it only lowers throughput imperceptibly while still
 	providing a huge reduction in fail rate.
 
 		The overall check matrix structure can be visualized as:
@@ -2043,7 +2058,7 @@ void Codec::SetHeavyRows()
 
 
 /*
-		One more subtle optimization.  Why not.  Depending on how the GE
+		One more subtle optimization.  Why not?  Depending on how the GE
 	matrix is constructed, it can be put in a roughly upper-triangular
 	form from the start so it looks like this:
 
@@ -2640,7 +2655,7 @@ void Codec::MultiplyDenseValues()
 		}
 		++row;
 
-		// Reshuffle bit order
+		// Reshuffle bit order: Shuffle-2 Code
 		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate first half of rows
@@ -2683,7 +2698,7 @@ void Codec::MultiplyDenseValues()
 			}
 		}
 
-		// Reshuffle bit order
+		// Reshuffle bit order: Shuffle-2 Code
 		ShuffleDeck16(prng, bits, dense_count);
 
 		// Generate second half of rows
