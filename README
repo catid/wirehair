@@ -37,10 +37,12 @@ After Release TODO:
 + Conjugate gradient method is being worked on by myself and Noah, maybe(?)
 + Provisional patent to keep it free for everyone and safe from evil corporations.
 + Formal documentation, white papers, conference abstract.
-+ Java version is being worked on by Steve Sheppard.
 + SIMD memxor() and prefetch is being worked on by Nate Tinkler.
 + Multi-threading is being worked on by Brandon McKune.
-
++ Java port is being worked on by Steve Sheppard.
++ C and Objective-C ports are being worked on by me.
++ C# port?
++ R port?
 
 Benchmark results (before tuning):
 
