@@ -29,9 +29,6 @@
 #ifndef CAT_WIREHAIR_DETAILS_HPP
 #define CAT_WIREHAIR_DETAILS_HPP
 
-// TODO: Remove this
-extern int g_p_seed, g_d_seed, g_count;
-
 #include "SmallPRNG.hpp"
 
 // Debugging:
