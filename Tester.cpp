@@ -12,10 +12,10 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	for (int ii = 89; ii < 64000; ++ii)
+	for (int ii = 2; ii < 64000; ++ii)
 	{
 		int block_count = ii;
-		int block_bytes = 1500;
+		int block_bytes = 1450;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
@@ -48,9 +48,9 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 1315;
+		u32 drop_seed = 0;
 		double time_sum = 0;
-		for (int jj = 0; jj < 2000; ++jj)
+		for (int jj = 0; jj < 4000; ++jj)
 		{
 			int blocks_needed = 0;
 

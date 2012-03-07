@@ -110,9 +110,9 @@
 
 		(4) Generating Matrix D
 
-			Matrix D is generated with a Shuffle Code, a novel invention.
-			Shuffle codes produce random matrices that offer probably the fastest
-			matrix-matrix multiplication algorithm useful for this purpose.
+			Matrix D is generated with a Shuffle-2 Code, a novel invention.
+			Shuffle-2 codes produce random matrices that offer possibly the
+			fastest matrix-matrix multiplication algorithm for this purpose.
 			Each bit has a 50% chance of being set.
 
 		(5) Generating Matrix H
@@ -122,7 +122,7 @@
 			a constant-time algorithm to solve them.
 			H is a 6x12 random byte matrix.
 			Each element of H is a byte instead of a bit, representing a number
-			in GF(256) with generator polynomial 0x15F.
+			in GF(2^^8) with generator polynomial 0x15F.
 
 		(6) Check Matrix Inversion
 
@@ -131,70 +131,71 @@
 	---------------------------------------------------------------------------
 	Sparse Matrix Inversion:
 
-		There are 4 phases to this sparse inversion:
+	There are 4 phases to this sparse inversion:
 
-		(1) Peeling
-			- Opportunistic fast solution for first N rows.
-		(2) Compression
-			- Setup for Gaussian elimination
-		(3) Gaussian Elimination
-			- Gaussian elimination on a small square matrix
-		(4) Substitution
-			- Solves for remaining rows from initial peeling
+	(1) Peeling
+		- Opportunistic fast solution for first N rows.
+	(2) Compression
+		- Setup for Gaussian elimination
+	(3) Gaussian Elimination
+		- Gaussian elimination on a small square matrix
+	(4) Substitution
+		- Solves for remaining rows from initial peeling
 
-		See the code comments in Wirehair.cpp for documentation of each step.
+	See the code comments in Wirehair.cpp for documentation of each step.
 
 		After all of these steps, the row values have been determined and the
 	matrix inversion is complete.  Let's analyze the complexity of each step:
 
-		(1) Peeling
-			- Opportunistic fast solution for first N rows.
+	(1) Peeling
+		- Opportunistic fast solution for first N rows.
 
-			Weight determination : O(k) average
-				Column reference update : Amortized O(1) for each column
+		Weight determination : O(k) average
+			Column reference update : Amortized O(1) for each column
 
-			If peeling activates,
-				Marking as peeled : O(1)
+		If peeling activates,
+			Marking as peeled : O(1)
 
-				Reducing weight of rows referencing this column : O(k)
-					If other row weight is reduced to 2,
-						Regenerate columns and mark potential Deferred : O(k)
-					End
-			End
+			Reducing weight of rows referencing this column : O(k)
+				If other row weight is reduced to 2,
+					Regenerate columns and mark potential Deferred : O(k)
+				End
+		End
 
-			So peeling is O(1) for each row, and O(N) overall.
+		So peeling is O(1) for each row, and O(N) overall.
 
-		(2) Compression
-			- Setup for Gaussian elimination on a wide rectangular matrix
+	(2) Compression
+		- Setup for Gaussian elimination on a wide rectangular matrix
 
-			The dense row multiplication takes O(N / 2 + ceil(N / D) * 2 * (D - 1))
-			where D is approximately SQRT(N), so dense row multiplication takes:
-			O(N / 2 + ceil(SQRT(N)) * SQRT(N)) = O(1.5N).
+		The dense row multiplication takes O(N / 2 + ceil(N / D) * 2 * (D - 1))
+		where D is approximately SQRT(N), so dense row multiplication takes:
+		O(N / 2 + ceil(SQRT(N)) * SQRT(N)) = O(1.5*N).
 
-		(3) Gaussian Elimination
-			- Gaussian elimination on a (hopefully) small square matrix
+	(3) Gaussian Elimination
+		- Gaussian elimination on a (hopefully) small square matrix
 
-			Assume the GE square matrix is SxS, and S = sqrt(N) on
-			average thanks to the peeling solver above.
+		Assume the GE square matrix is SxS, and S = sqrt(N) on
+		average thanks to the peeling solver above.
 
-			Gaussian elimination : O(S^3) = O(N^1.5) bit operations
+		Gaussian elimination : O(S^3) = O(N^1.5) bit operations
 
-			This algorithm is not bad because the matrix is small and
-			it really doesn't contribute much to the run time.
+		This algorithm is not bad because the matrix is small and
+		it really doesn't contribute much to the run time.
 
-			- Solves for rows of small square matrix
+		- Solves for rows of small square matrix
 
-			Assume the GE square matrix is SxS, and S = sqrt(N) on
-			average thanks to the peeling solver above.
+		Assume the GE square matrix is SxS, and S = sqrt(N) on
+		average thanks to the peeling solver above.
 
-			Solving inside the GE matrix : O(S^2) = O(N) row ops
+		Solving inside the GE matrix : O(S^2) = O(N) row ops
 
-		(4) Substitution
-			- Solves for remaining rows from initial peeling
+	(4) Substitution
+		- Solves for remaining rows from initial peeling
 
-			Regenerate peeled matrix rows and substitute : O(N*k) row ops
+		Regenerate peeled matrix rows and substitute : O(N*k) row ops
 
-		So overall, the operation is roughly linear in row operations.
+		So overall, the codec scales roughly linearly in row operations,
+	meaning that the throughput is somewhat stable over a wide number of N.
 
 	---------------------------------------------------------------------------
 
@@ -3440,48 +3441,56 @@ void Codec::Substitute()
 
 	SMALL_DENSE_SEEDS
 
-		This table was generated for small N up to 233, choosing the seeds
-	with the best recovery properties for single losses.
+		This table was generated for small N up to 256, choosing the seeds
+	with the best recovery properties for single losses.  And then tuned by
+	hand to fail towards the right of the matrix.
+
+		For small N, the recovery properties are very sensitive to the choice
+	of dense seed.  This is because for smaller N the dense matrix is roughly
+	square and the Shuffle-2 Code has to be finely tuned.
 
 	SMALL_PEEL_SEEDS
 
-		This table was generated for small N up to 233, choosing the seeds
-	with the best recovery properties for 10% loss rate.
+		This table was generated for small N up to 256, choosing the seeds
+	with the best recovery properties for 10% loss rate.  And then tuned by
+	hand to fail towards the right of the matrix.
 */
-static const u8 SMALL_DENSE_SEEDS[234] = {
-	/*   0 */ 0, 0, 0, 67, 192, 102, 31, 237, 155, 136, 253, 10, 60, 224, 29, 35, 
-	/*  16 */ 35, 67, 0, 96, 148, 63, 196, 147, 251, 255, 169, 9, 171, 221, 235, 102, 
-	/*  32 */ 119, 249, 21, 176, 165, 198, 53, 127, 132, 151, 50, 243, 227, 124, 89, 114, 
-	/*  48 */ 145, 30, 39, 249, 150, 3, 57, 185, 109, 141, 30, 26, 201, 3, 112, 83, 
-	/*  64 */ 225, 2, 239, 160, 110, 119, 195, 20, 46, 53, 107, 133, 160, 58, 67, 92, 
-	/*  80 */ 14, 23, 34, 27, 59, 41, 206, 102, 230, 195, 56, 193, 130, 23, 18, 183, 
-	/*  96 */ 31, 53, 41, 147, 219, 17, 86, 254, 155, 194, 163, 226, 78, 8, 154, 105, 
-	/* 112 */ 33, 180, 210, 198, 147, 238, 197, 84, 147, 202, 13, 207, 84, 17, 200, 85, 
+static const u8 SMALL_DENSE_SEEDS[256] = {
+	/*   0 */ 0, 0, 0, 67, 192, 102, 31, 237, 155, 136, 253, 110, 60, 224, 31, 35, 
+	/*  16 */ 35, 67, 0, 96, 148, 64, 196, 148, 20, 255, 170, 9, 171, 221, 245, 139, 
+	/*  32 */ 121, 249, 24, 221, 166, 198, 53, 130, 156, 151, 50, 243, 227, 143, 89, 123, 
+	/*  48 */ 145, 30, 40, 236, 157, 3, 57, 185, 109, 146, 30, 32, 201, 3, 112, 83, 
+	/*  64 */ 225, 2, 239, 160, 110, 119, 195, 66, 46, 53, 107, 133, 160, 58, 67, 92, 
+	/*  80 */ 15, 23, 34, 27, 59, 41, 206, 102, 230, 195, 56, 204, 130, 34, 28, 184, 
+	/*  96 */ 31, 56, 41, 147, 244, 17, 86, 254, 156, 194, 163, 226, 78, 8, 165, 105, 
+	/* 112 */ 38, 183, 210, 200, 147, 238, 197, 84, 147, 202, 13, 207, 84, 17, 200, 85, 
 	/* 128 */ 139, 145, 63, 190, 78, 170, 143, 42, 39, 134, 213, 95, 35, 201, 49, 200,
 	/* 144 */ 240, 45, 114, 246, 63, 49, 101, 7, 55, 26, 39, 155, 61, 65, 183, 52, 
 	/* 160 */ 193, 134, 19, 159, 19, 101, 88, 193, 225, 163, 181, 68, 37, 79, 65, 211, 
 	/* 176 */ 251, 205, 206, 111, 81, 59, 1, 105, 15, 220, 125, 15, 157, 227, 90, 198, 
 	/* 192 */ 166, 221, 95, 139, 252, 56, 78, 244, 196, 30, 223, 199, 182, 75, 175, 61, 
 	/* 208 */ 47, 100, 118, 119, 201, 1, 165, 234, 67, 210, 98, 93, 60, 204, 64, 149, 
-	/* 224 */ 197, 232, 220, 85, 219, 118, 45, 66, 47, 60
+	/* 224 */ 197, 232, 222, 85, 219, 118, 45, 66, 48, 60, 0, 0, 0, 1, 10, 0,
+	/* 240 */ 1, 3, 0, 3, 0, 3, 0, 6, 1, 0, 0, 0, 4, 1, 0, 0
 };
 
-static const u8 SMALL_PEEL_SEEDS[234] = {
+static const u8 SMALL_PEEL_SEEDS[256] = {
 	/*   0 */ 0, 0, 0, 0, 1, 1, 1, 14, 3, 44, 48, 75, 93, 31, 47, 88,
 	/*  16 */ 126, 89, 56, 31, 88, 235, 229, 86, 87, 152, 74, 204, 62, 40, 127, 111,
-	/*  32 */ 130, 23, 178, 21, 45, 255, 252, 87, 175, 13, 243, 52, 82, 142, 29, 157,
-	/*  48 */ 202, 201, 194, 53, 50, 146, 31, 180, 130, 4, 237, 29, 41, 252, 47, 244,
-	/*  64 */ 31, 78, 68, 80, 123, 234, 149, 30, 38, 104, 139, 36, 160, 202, 192, 98,
-	/*  80 */ 163, 72, 6, 82, 162, 14, 210, 226, 70, 19, 20, 201, 87, 59, 15, 211,
+	/*  32 */ 130, 23, 178, 21, 45, 255, 252, 87, 175, 13, 243, 52, 82, 142, 29, 158,
+	/*  48 */ 202, 201, 194, 55, 55, 146, 31, 180, 130, 6, 237, 29, 41, 252, 47, 244,
+	/*  64 */ 31, 78, 68, 80, 123, 234, 149, 30+1, 38, 104, 139, 36, 160, 202, 192, 98,
+	/*  80 */ 163, 72, 6, 82, 162, 14, 210, 226, 70, 19, 20, 205, 87, 59, 15, 211,
 	/*  96 */ 70, 189, 180, 10, 215, 72, 93, 86, 64, 227, 168, 59, 157, 161, 128, 94,
-	/* 112 */ 101, 189, 28, 66, 118, 131, 161, 120, 145, 139, 43, 50, 102, 62, 178, 6,
+	/* 112 */ 102, 192, 28, 66, 118, 131, 161, 120, 145, 139, 43, 50, 102, 62, 178, 6,
 	/* 128 */ 124, 173, 102, 217, 240, 15, 104, 2, 59, 202, 55, 168, 53, 153, 154, 225,
 	/* 144 */ 112, 137, 76, 70, 86, 31, 145, 27, 138, 80, 131, 103, 37, 125, 69, 98,
 	/* 160 */ 172, 3, 145, 22, 127, 47, 78, 159, 8, 9, 130, 121, 173, 136, 6, 0,
 	/* 176 */ 240, 5, 189, 142, 185, 48, 235, 141, 228, 86, 29, 130, 198, 65, 37, 141,
 	/* 192 */ 114, 238, 78, 226, 250, 249, 175, 223, 8, 3, 150, 108, 161, 65, 235, 56,
 	/* 208 */ 72, 45, 40, 147, 147, 131, 251, 32, 190, 16, 0, 69, 235, 33, 202, 106,
-	/* 224 */ 136, 217, 104, 119, 113, 127, 197, 130, 173, 238
+	/* 224 */ 136, 217, 104, 119, 113, 127, 197, 130, 173, 238, 0, 0, 0, 0, 1, 1,
+	/* 240 */ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
 /*
@@ -3513,13 +3522,26 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
 
-	// If N is small,
-	if (_block_count <= 233)
-	{
-		// Lookup seeds from table
-		_d_seed = SMALL_DENSE_SEEDS[_block_count];
-		_p_seed = SMALL_PEEL_SEEDS[_block_count];
+	/*
+		Calculate the number of dense rows
 
+			The choice of dense row count affects the seeding, so
+		this had to be determined before picking seeds.  Similarly,
+		the peeling matrix parameters greatly affect the best dense
+		row count.
+
+			I simulated without heavy rows added for selected
+		values of N and determined the best dense row count to
+		use to achieve 30% invertibility.
+
+			Then I plugged the data into MATLAB's cftool to do curve
+		fitting.  For different ranges of N there are different
+		dominant effects and that is reflected below:
+	*/
+
+	// If N is small,
+	if (_block_count < 256)
+	{
 		// Calculate dense count from math expression
 		if (_block_count == 2) _dense_count = 2;
 		else if (_block_count == 3) _dense_count = 6;
@@ -3529,35 +3551,37 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	{
 		// Square root-dominant region
 		_dense_count = 10 + SquareRoot16(_block_count) + (u16)(_block_count / 300);
-
-		_p_seed = _d_seed = _block_count;
 	}
 	else if (_block_count <= 32768)
 	{
 		// Linear-dominant region
 		_dense_count = 22 + (_block_count / 100);
-
-		_p_seed = _d_seed = _block_count;
 	}
 	else if (_block_count <= 44000)
 	{
 		// Quadratic-dominant region
 		_dense_count = 1825 + (_block_count / 800) * (_block_count / 800) - (_block_count / 10);
-
-		_p_seed = _d_seed = _block_count;
 	}
 	else if (_block_count <= 52500)
 	{
 		// High linear-dominant region
 		_dense_count = (_block_count / 128) + 74;
-
-		_p_seed = _d_seed = _block_count;
 	}
 	else
 	{
 		// Avalanche-dominant region
 		_dense_count = 880 - (_block_count / 128);
+	}
 
+	// If N is small,
+	if (_block_count < 256)
+	{
+		// Lookup seeds from table
+		_d_seed = SMALL_DENSE_SEEDS[_block_count];
+		_p_seed = SMALL_PEEL_SEEDS[_block_count];
+	}
+	else
+	{
 		_p_seed = _d_seed = _block_count;
 	}
 
