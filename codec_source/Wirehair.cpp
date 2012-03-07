@@ -1971,7 +1971,7 @@ void Codec::MultiplyDenseRows()
 #if defined(CAT_USE_HEAVY)
 
 /*
-	Important Optimization: Heavy Row Structure
+	Important Optimization: O(1) Heavy Row Structure
 
 		The heavy rows are made up of bytes instead of bits.  Each byte
 	represents a number in the Galois field GF(2^^8) defined by the
@@ -1979,7 +1979,7 @@ void Codec::MultiplyDenseRows()
 
 		The heavy rows are designed to make it easier to find pivots in
 	just the last few columns of the GE matrix.  This design choice was
-	made because it allows a constant time algorithm to be employed that
+	made because it allows a constant-time algorithm to be employed that
 	will reduce the fail rate from >70% to <3%.  It is true that with
 	heavy loss rates, the earlier columns can be where the pivot is
 	needed.  However in my estimation it would be better to increase the
