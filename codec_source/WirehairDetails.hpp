@@ -37,6 +37,7 @@ extern int g_p_seed, g_d_seed, g_count;
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
 //#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
@@ -52,7 +53,7 @@ extern int g_p_seed, g_d_seed, g_count;
 
 // Heavy rows:
 #define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
-//#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
+#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 
@@ -80,28 +81,6 @@ enum Result
 
 // Get Result String function
 const char *GetResultString(Result r);
-
-
-//// Utilities
-
-// 16-bit Integer Square Root function
-u16 SquareRoot16(u16 x);
-
-// 16-bit Truncated Sieve of Eratosthenes Next Prime function
-u16 NextPrime16(u16 n);
-
-// Peeling Row Weight Generator function
-u16 GeneratePeelRowWeight(u32 rv);
-
-// GF(2) Invertible Matrix Generator function
-bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
-
-// Deck Shuffling function
-void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
-
-// Peel Matrix Row Generator function
-void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
-	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0);
 
 
 //// Encoder/Decoder Combined Implementation

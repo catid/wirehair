@@ -101,9 +101,9 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	GenerateLookupTable();
+	//GenerateLookupTable();
 
-	int block_count = 5;
+	int block_count = 200;
 	int block_bytes = 1500;
 	int message_bytes = block_bytes * block_count;
 	u8 *message = new u8[message_bytes];
@@ -115,7 +115,7 @@ int main()
 		message[ii] = ii;
 	}
 
-	g_d_seed = 8;
+	g_d_seed = 6;
 	g_p_seed = 41;
 
 	wirehair::Encoder encoder;
@@ -124,6 +124,7 @@ int main()
 
 	for (;; ++g_p_seed)
 	{
+		g_d_seed = g_p_seed;
 		++trials;
 
 		double start = m_clock.usec();
@@ -146,7 +147,7 @@ int main()
 			//if (trials % 10000 == 0)
 			cout << ">> OKAY! encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s with seeds " << g_d_seed << " and " << g_p_seed << ".  Success rate = " << successes / (double)trials << endl;
 			//cin.get();
-			break;
+			//break;
 		}
 	}
 

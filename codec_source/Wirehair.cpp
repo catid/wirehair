@@ -232,6 +232,12 @@ using namespace wirehair;
 
 //// Precompiler-conditional console output
 
+#if defined(CAT_DUMP_PIVOT_FAIL)
+#define CAT_IF_PIVOT(x) x
+#else
+#define CAT_IF_PIVOT(x)
+#endif
+
 #if defined(CAT_DUMP_CODEC_DEBUG)
 #define CAT_IF_DUMP(x) x
 #else
@@ -244,7 +250,8 @@ using namespace wirehair;
 #define CAT_IF_ROWOP(x)
 #endif
 
-#if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_ROWOP_COUNTERS) || defined(CAT_DUMP_GE_MATRIX)
+#if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_PIVOT_FAIL) || \
+	defined(CAT_DUMP_ROWOP_COUNTERS) || defined(CAT_DUMP_GE_MATRIX)
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -276,6 +283,28 @@ const char *cat::wirehair::GetResultString(Result r)
 							else return "R_UNKNOWN";
 	}
 }
+
+
+//// Utilities
+
+// 16-bit Integer Square Root function
+static u16 SquareRoot16(u16 x);
+
+// 16-bit Truncated Sieve of Eratosthenes Next Prime function
+static u16 NextPrime16(u16 n);
+
+// Peeling Row Weight Generator function
+static u16 GeneratePeelRowWeight(u32 rv, u16 peel_column_count);
+
+// GF(2) Invertible Matrix Generator function
+static bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
+
+// Deck Shuffling function
+static void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
+
+// Peel Matrix Row Generator function
+static void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
+	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0);
 
 
 //// Utility: 16-bit Integer Square Root function
@@ -316,7 +345,7 @@ static const u8 SQQ_TABLE[] = {
 	253, 254, 254, 255
 };
 
-u16 cat::wirehair::SquareRoot16(u16 x)
+u16 SquareRoot16(u16 x)
 {
 	u16 r;
 
@@ -384,7 +413,7 @@ static const u16 PRIMES_UNDER_256[] = {
 	193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 0x7fff
 };
 
-u16 cat::wirehair::NextPrime16(u16 n)
+static u16 NextPrime16(u16 n)
 {
 	// Handle small n
 	switch (n)
@@ -477,7 +506,7 @@ static const u8 INVERTIBLE_MATRIX_SEEDS[512] = {
 	1,6,3,3,5,2,2,9,5,1,2,2,1,1,1,1,1,1,2,2,1,3,1,0,0,4,1,7,0,0,0,0,
 };
 
-bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n)
+static bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n)
 {
 	if (n <= 0) return false;
 
@@ -591,7 +620,7 @@ bool cat::wirehair::AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, i
 	The deck will contain elements with values between 0 and count - 1.
 */
 
-void cat::wirehair::ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
+static void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
 {
 	deck[0] = 0;
 
@@ -871,16 +900,11 @@ static CAT_INLINE void IterateNextColumn(u16 &x, u16 b, u16 p, u16 a)
 	tests.  Setting it too high or too low (or even to zero) tends
 	to reduce the performance of the codec.
 
-		The number of dense rows is directly related to the weight-1
-	probability (P1) as follows for N > 256:
-
-		Dense rows required = 13 + sqrt(N)/2 + N * P1
-
-		So a smaller P1 will make the codec faster for larger N, but
-	it will also reduce the recovery capabilities of the code.
+		However, once N gets much much larger, it is actually very
+	beneficial to switch over to weight-2 as a minimum.
 */
 
-static const float Weight1Probability = 1. / 128; // P1
+static const u32 MAX_WEIGHT_1 = 4096; // Stop using weight-1 after this
 
 static const u32 WEIGHT_DIST[] = {
 	0x00000000, 0x80000000, 0xaaaaaaaa, 0xc0000000, 0xcccccccc, 0xd5555555, 0xdb6db6db, 0xe0000000,
@@ -893,17 +917,22 @@ static const u32 WEIGHT_DIST[] = {
 	0xfb823ee0, 0xfb9611a7, 0xfba93868, 0xfbbbbbbb, 0xfbcda3ac, 0xfbdef7bd, 0xfbefbefb, 0xffffffff
 };
 
-u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
+static u16 GeneratePeelRowWeight(u32 rv, u16 peel_column_count)
 {
-	// Select probability of weight-1 rows here:
-	static const u32 P1 = (u32)(Weight1Probability * 0xffffffff);
-	static const u32 P2 = WEIGHT_DIST[1];
-	static const u32 P3 = WEIGHT_DIST[2];
+	// If peel columns get too large, then switch to zero weight-1 probability for lower defer count
+	if (peel_column_count <= MAX_WEIGHT_1)
+	{
+		// Select probability of weight-1 rows here:
+		static const u32 P1 = (u32)((1./128) * 0xffffffff);
+
+		if (rv < P1) return 1;
+
+		rv -= P1;
+	}
 
 	// Unroll first 3 for speed (common case)
-	if (rv < P1) return 1;
-
-	rv -= P1;
+	static const u32 P2 = WEIGHT_DIST[1];
+	static const u32 P3 = WEIGHT_DIST[2];
 	if (rv <= P2) return 2;
 	if (rv <= P3) return 3;
 
@@ -916,7 +945,7 @@ u16 cat::wirehair::GeneratePeelRowWeight(u32 rv)
 
 //// Utility: Peel Matrix Row Generator function
 
-void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
+static void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
 	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0)
 {
 	// Initialize PRNG
@@ -924,7 +953,7 @@ void cat::wirehair::GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u
 	prng.Initialize(id, p_seed);
 
 	// Generate peeling matrix row weight
-	u16 weight = GeneratePeelRowWeight(prng.Next());
+	u16 weight = GeneratePeelRowWeight(prng.Next(), peel_column_count);
 	u16 max_weight = peel_column_count / 2; // Do not set more than N/2 at a time
 	peel_weight = (weight > max_weight) ? max_weight : weight;
 
@@ -2159,7 +2188,7 @@ bool Codec::Triangle()
 		{
 			_ge_resume_pivot = pivot_i;
 			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
-			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_PIVOT(if (pivot_i + 16 < pivot_count) cout << ">>>>> Inversion impossible: Pivot " << pivot_i << " of " << pivot_count << " not found!" << endl << endl;)
 			return false;
 		}
 
@@ -2188,7 +2217,6 @@ bool Codec::Triangle()
 			// Found it!
 			found = true;
 			CAT_IF_DUMP(cout << "Pivot " << pivot_m << " found on row " << ge_row_j << endl;)
-			CAT_IF_ROWOP(cout << ">>>>>> Pivot " << pivot_m << " found on row " << ge_row_j << endl;)
 
 			// Swap out the pivot index for this one
 			u16 temp = _ge_pivots[pivot_m];
@@ -2311,7 +2339,6 @@ bool Codec::Triangle()
 			// Found it!
 			found = true;
 			CAT_IF_DUMP(cout << "Pivot " << pivot_m << " found on heavy row " << ge_row_j << endl;)
-			CAT_IF_ROWOP(cout << ">>>>>> Pivot " << pivot_m << " found on heavy row " << ge_row_j << endl;)
 
 			// Swap pivot i and j
 			u16 temp = _ge_pivots[pivot_m];
@@ -2360,7 +2387,7 @@ bool Codec::Triangle()
 		{
 			_ge_resume_pivot = pivot_m;
 			CAT_IF_DUMP(cout << "Inversion impossible: Pivot " << pivot_m << " of " << pivot_count << " not found!" << endl;)
-			CAT_IF_ROWOP(cout << ">>>>> Inversion impossible: Pivot " << pivot_m << " of " << pivot_count << " not found!" << endl;)
+			CAT_IF_PIVOT(if (pivot_m + 16 < pivot_count) cout << ">>>>> Inversion impossible: Pivot " << pivot_m << " of " << pivot_count << " not found!" << endl << endl;)
 			return false;
 		}
 
@@ -3516,26 +3543,43 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 		// Calculate dense count from math expression
 		if (_block_count == 2) _dense_count = 2;
 		else if (_block_count == 3) _dense_count = 6;
-		else _dense_count = 8 + SquareRoot16(_block_count) / 2 + (_block_count / 50);
+		else _dense_count = 10 + SquareRoot16(_block_count) / 2 + (_block_count / 50);
 	}
 	else if (_block_count <= 4096) // Medium N:
 	{
-		// TODO: Need to generate a better fit curve
-		_dense_count = 16 + SquareRoot16(_block_count) / 2 + (u16)(_block_count * Weight1Probability);
+		// Square root-dominant region
+		_dense_count = 10 + SquareRoot16(_block_count) + (u16)(_block_count / 300);
+
+		_p_seed = _d_seed = _block_count;
+	}
+	else if (_block_count <= 32768)
+	{
+		// Linear-dominant region
+		_dense_count = 22 + (_block_count / 100);
+
+		_p_seed = _d_seed = _block_count;
+	}
+	else if (_block_count <= 44000)
+	{
+		// Quadratic-dominant region
+		_dense_count = 1825 + (_block_count / 800) * (_block_count / 800) - (_block_count / 10);
+
+		_p_seed = _d_seed = _block_count;
+	}
+	else if (_block_count <= 52500)
+	{
+		// High linear-dominant region
+		_dense_count = (_block_count / 128) + 74;
 
 		_p_seed = _d_seed = _block_count;
 	}
 	else
 	{
-		// TODO: Need to generate a better fit curve
-		_dense_count = 8 + 2*SquareRoot16(_block_count) + (_block_count / 100);
+		// Avalanche-dominant region
+		_dense_count = 880 - (_block_count / 128);
 
 		_p_seed = _d_seed = _block_count;
 	}
-
-	// Lookup check matrix parameters
-	_p_seed = g_p_seed;// TODO: Remove these
-	_d_seed = g_d_seed;
 
 	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
 
