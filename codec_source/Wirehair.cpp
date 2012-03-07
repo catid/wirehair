@@ -1594,7 +1594,7 @@ void Codec::PeelDiagonal()
 		// If row has not been copied yet,
 		if (!row->is_copied)
 		{
-			// Copy it directly to the output symbol
+			// Copy it directly to the output block
 			const u8 *block_src = _input_blocks + _block_bytes * peel_row_i;
 			if (peel_row_i != _block_count - 1)
 				memcpy(temp_block_src, block_src, _block_bytes);
