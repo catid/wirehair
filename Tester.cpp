@@ -48,7 +48,7 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 0;
+		u32 drop_seed = 10000;
 		double time_sum = 0;
 		for (int jj = 0; jj < 4000; ++jj)
 		{
@@ -81,7 +81,7 @@ int main()
 						overhead_sum += overhead;
 						++overhead_trials;
 
-						//cout << ">> OKAY! N=" << decoder.BlockCount() << " decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
+						cout << ">> OKAY! N=" << decoder.BlockCount() << " decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
 						time_sum += end - start;
 
 						if (!memcmp(message, message_out, message_bytes))
@@ -99,7 +99,7 @@ int main()
 					}
 					else
 					{
-						//cout << "-- FAIL!  N=" << decoder.BlockCount() << " decoder.Decode error " << wirehair::GetResultString(r) << " from drop seed " << drop_seed << endl;
+						cout << "-- FAIL!  N=" << decoder.BlockCount() << " decoder.Decode error " << wirehair::GetResultString(r) << " from drop seed " << drop_seed << endl;
 
 						overhead_sum += 1;
 						++overhead_trials;

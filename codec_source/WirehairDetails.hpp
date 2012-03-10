@@ -34,7 +34,7 @@
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
 //#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
-#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
+//#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
@@ -45,12 +45,11 @@
 #define CAT_WIREHAIR_MIN_N 2 /* Smallest N value to allow */
 
 // Optimization options:
-#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 
 // Heavy rows:
-#define CAT_USE_HEAVY /* Add GF(256) rows to the end of the matrix (slower) */
-#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
+//#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 
@@ -126,13 +125,13 @@ class Codec
 	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
 	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
 	u16 _ge_resume_pivot;		// Pivot to resume Triangle() on after it fails
-#if defined(CAT_USE_HEAVY)
+
+	// Heavy rows
 	u8 *_heavy_matrix;			// Heavy rows of GE matrix
 	int _heavy_pitch;			// Bytes per heavy matrix row
 	u16 _heavy_columns;			// Number of heavy matrix columns
-	u16 _ge_first_heavy;		// First heavy column that is non-zero
-	u16 _ge_resume_heavy_row;	// First heavy row
-#endif
+	u16 _ge_first_heavy_column;	// First heavy column that is non-zero
+	u16 _ge_first_heavy_pivot;	// First heavy pivot index
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
@@ -175,13 +174,14 @@ class Codec
 	// Multiply dense rows by peeling matrix to generate GE rows, but no row values yet
 	void MultiplyDenseRows();
 
-#if defined(CAT_USE_HEAVY)
 	// Initialize heavy submatrix
 	void SetHeavyRows();
-#endif
 
 
 	//// (3) Gaussian Elimination
+
+	// Initialize for triangularization routine
+	void SetupTriangle();
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
