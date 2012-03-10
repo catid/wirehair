@@ -120,18 +120,18 @@ class Codec
 	u32 _ge_allocated;			// Number of bytes allocated to GE matrix
 	u64 *_compress_matrix;		// Gaussian elimination compression matrix
 	int _ge_pitch;				// Words per row of GE matrix and compression matrix
-	u16 _ge_rows;				// Number of rows in GE matrix, since this grows
 	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
+	u16 _pivot_count;			// Number of pivots in the pivot list
 	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
 	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
-	u16 _ge_resume_pivot;		// Pivot to resume Triangle() on after it fails
+	u16 _resume_pivot;			// Pivot to resume Triangle() on after it fails
 
 	// Heavy rows
 	u8 *_heavy_matrix;			// Heavy rows of GE matrix
 	int _heavy_pitch;			// Bytes per heavy matrix row
 	u16 _heavy_columns;			// Number of heavy matrix columns
-	u16 _ge_first_heavy_column;	// First heavy column that is non-zero
-	u16 _ge_first_heavy_pivot;	// First heavy pivot index
+	u16 _first_heavy_column;	// First heavy column that is non-zero
+	u16 _first_heavy_pivot;		// First heavy pivot index
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
