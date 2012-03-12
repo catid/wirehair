@@ -32,10 +32,10 @@
 #include "SmallPRNG.hpp"
 
 // Debugging:
-//#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
-//#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
-//#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
+#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
+#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
+#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
@@ -90,7 +90,7 @@ class Codec
 	u16 _extra_count;			// Number of extra rows to allocate
 	u32 _p_seed;				// Seed for peeled rows of check matrix
 	u32 _d_seed;				// Seed for dense rows of check matrix
-	u16 _used_count;			// Number of stored rows
+	u16 _row_count;			// Number of stored rows
 	u16 _mix_count;				// Number of mix columns
 	u16 _mix_next_prime;		// Next prime number at or above dense count
 	u16 _dense_count;			// Number of added dense code rows
@@ -120,18 +120,18 @@ class Codec
 	u32 _ge_allocated;			// Number of bytes allocated to GE matrix
 	u64 *_compress_matrix;		// Gaussian elimination compression matrix
 	int _ge_pitch;				// Words per row of GE matrix and compression matrix
-	u16 *_ge_pivots;			// Pivots for each column of the GE matrix
+	u16 *_pivots;				// Pivots for each column of the GE matrix
 	u16 _pivot_count;			// Number of pivots in the pivot list
 	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
 	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
-	u16 _resume_pivot;			// Pivot to resume Triangle() on after it fails
+	u16 _next_pivot;			// Pivot to resume Triangle() on after it fails
 
 	// Heavy rows
 	u8 *_heavy_matrix;			// Heavy rows of GE matrix
 	int _heavy_pitch;			// Bytes per heavy matrix row
 	u16 _heavy_columns;			// Number of heavy matrix columns
 	u16 _first_heavy_column;	// First heavy column that is non-zero
-	u16 _first_heavy_pivot;		// First heavy pivot index
+	u16 _first_heavy_pivot;		// First heavy pivot in the list
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
@@ -182,6 +182,12 @@ class Codec
 
 	// Initialize for triangularization routine
 	void SetupTriangle();
+
+	// Insert heavy rows into pivot list
+	void InsertHeavyRows();
+
+	// Handle non-heavy pivot finding
+	bool TriangleNonHeavy();
 
 	// Triangularize the GE matrix (may fail if pivot cannot be found)
 	bool Triangle();
