@@ -2104,7 +2104,7 @@ void Codec::SetupTriangle()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetupTriangle ----" << endl << endl;)
 
-	// Initialize pivot array
+	// Initialize pivot array to just non-heavy rows
 	_pivot_count = _defer_count + _dense_count;
 	for (u16 pivot_i = 0; pivot_i < _pivot_count; ++pivot_i)
 		_pivots[pivot_i] = pivot_i;
@@ -2113,7 +2113,7 @@ void Codec::SetupTriangle()
 	_next_pivot = 0;
 
 	// If heavy rows are used right from the start,
-	if (_first_heavy_column > 0)
+	if (_first_heavy_column <= 0)
 		InsertHeavyRows();
 }
 
@@ -2188,7 +2188,7 @@ bool Codec::TriangleNonHeavy()
 	// For the columns that are not protected by heavy rows,
 	u16 pivot_i = _next_pivot;
 	u64 ge_mask = (u64)1 << (pivot_i & 63);
-	for (; pivot_i < _pivot_count; ++pivot_i)
+	for (; pivot_i < _first_heavy_column; ++pivot_i)
 	{
 		// For each remaining GE row that might be the pivot,
 		int word_offset = pivot_i >> 6;
@@ -2302,9 +2302,11 @@ bool Codec::Triangle()
 	if (_next_pivot < _first_heavy_column && !TriangleNonHeavy())
 		return false;
 
+	const u16 column_count = _defer_count + _mix_count;
+
 	// For each heavy pivot to determine,
 	u64 ge_mask = (u64)1 << (_next_pivot & 63);
-	for (u16 pivot_i = _next_pivot; pivot_i < _pivot_count;
+	for (u16 pivot_i = _next_pivot; pivot_i < column_count;
 		++pivot_i, ge_mask = CAT_ROL64(ge_mask, 1))
 	{
 		// For each remaining GE row that might be the pivot,
@@ -2366,7 +2368,7 @@ bool Codec::Triangle()
 				u64 *pivot_row = &_ge_matrix[_ge_pitch * ge_row_j];
 
 #if !defined(CAT_HEAVY_WIN_MULT)
-				for (int ge_column_i = pivot_i + 1; ge_column_i < _pivot_count; ++ge_column_i)
+				for (int ge_column_i = pivot_i + 1; ge_column_i < column_count; ++ge_column_i)
 				{
 					if (pivot_row[ge_column_i >> 6] & ((u64)1 << (ge_column_i & 63)))
 					{
@@ -2375,7 +2377,7 @@ bool Codec::Triangle()
 				}
 #else // CAT_HEAVY_WIN_MULT
 				// Unroll odd columns:
-				u16 odd_count = pivot_m & 3, ge_column_i = pivot_m + 1;
+				u16 odd_count = pivot_i & 3, ge_column_i = pivot_i + 1;
 				u64 temp_mask = ge_mask;
 				switch (odd_count)
 				{
@@ -2403,12 +2405,12 @@ bool Codec::Triangle()
 						}
 
 						// Set GE column to next even column
-						ge_column_i = pivot_m + (4 - odd_count);
+						ge_column_i = pivot_i + (4 - odd_count);
 				}
 
 				// For remaining aligned columns,
 				u32 *word = reinterpret_cast<u32*>( rem_row + ge_column_i - _first_heavy_column );
-				for (; ge_column_i < pivot_count; ge_column_i += 4, ++word)
+				for (; ge_column_i < column_count; ge_column_i += 4, ++word)
 				{
 					// Look up 4 bit window
 					u32 bits = (u32)(pivot_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
@@ -2532,9 +2534,9 @@ void Codec::InitializeColumnValues()
 
 	// For each pivot,
 	const u16 first_heavy = _defer_count + _dense_count;
-	const u16 pivot_count = _defer_count + _mix_count;
+	const u16 column_count = _defer_count + _mix_count;
 	u16 pivot_i;
-	for (pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	for (pivot_i = 0; pivot_i < column_count; ++pivot_i)
 	{
 		// Lookup pivot column, GE row, and destination buffer
 		u16 dest_column_i = _ge_col_map[pivot_i];
@@ -2545,8 +2547,7 @@ void Codec::InitializeColumnValues()
 
 		// If GE row is from a dense/heavy row,
 		if (ge_row_i < _dense_count ||
-			(ge_row_i >= first_heavy &&
-			ge_row_i < pivot_count))
+			(ge_row_i >= first_heavy && ge_row_i < column_count))
 		{
 			// Dense/heavy rows sum to zero
 			memset(buffer_dest, 0, _block_bytes);
@@ -2615,8 +2616,7 @@ void Codec::InitializeColumnValues()
 
 		// If row is a dense row,
 		if (ge_row_i < _dense_count ||
-			(ge_row_i >= first_heavy &&
-			ge_row_i < pivot_count))
+			(ge_row_i >= first_heavy && ge_row_i < column_count))
 		{
 			// Mark it for skipping
 			_ge_row_map[ge_row_i] = LIST_TERM;
@@ -2841,9 +2841,12 @@ void Codec::AddSubdiagonalValues()
 
 	CAT_IF_ROWOP(int rowops = 0; int heavyops = 0;)
 
+	const u16 first_heavy_row = _defer_count + _dense_count;
+	const u16 first_extra_row = _defer_count + _mix_count;
+	const u16 column_count = first_extra_row;
+
 	// For each pivot,
-	const u16 pivot_count = _defer_count + _mix_count;
-	for (u16 pivot_i = 0; pivot_i < pivot_count; ++pivot_i)
+	for (u16 pivot_i = 0; pivot_i < column_count; ++pivot_i)
 	{
 		// Lookup pivot column, GE row, and destination buffer
 		u16 pivot_column_i = _ge_col_map[pivot_i];
@@ -2852,16 +2855,29 @@ void Codec::AddSubdiagonalValues()
 
 		CAT_IF_DUMP(cout << "Pivot " << pivot_i << " solving column " << pivot_column_i << "[" << (int)buffer_dest[0] << "] with GE row " << ge_row_i << " :";)
 
-		// If row is heavy,
-		const u16 first_heavy_row = _defer_count + _dense_count;
-		const u16 first_extra_row = _defer_count + _mix_count;
+		// If row is heavy or extra,
 		if (ge_row_i >= first_heavy_row)
 		{
 			// If row is extra,
-			if (ge_row_i >= pivot_count)
+			if (ge_row_i >= first_extra_row)
 			{
-				// Eliminate the 
-				// TODO
+				// For each GE matrix bit in the row,
+				u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
+				u64 ge_mask = 1;
+				for (u16 ge_column_i = 0; ge_column_i < pivot_i && ge_column_i < _first_heavy_column; ++ge_column_i, ge_mask = CAT_ROL64(ge_mask, 1))
+				{
+					// If bit is non-zero,
+					if (ge_row[ge_column_i >> 6] & ge_mask)
+					{
+						// Add pivot for non-zero bit to destination row value
+						u16 column_i = _ge_col_map[ge_column_i];
+						const u8 *peel_src = _recovery_blocks + _block_bytes * column_i;
+						memxor(buffer_dest, peel_src, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+
+							CAT_IF_DUMP(cout << " e" << column_i << "=[" << (int)peel_src[0] << "]";)
+					}
+				}
 			}
 
 			// For each column up to the diagonal,
@@ -2879,32 +2895,29 @@ void Codec::AddSubdiagonalValues()
 					GF256MemMulAdd(buffer_dest, code_value, peel_src, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
 
-					CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "x" << (int)code_value << "]";)
+					CAT_IF_DUMP(cout << " h" << column_i << "=[" << (int)peel_src[0] << "x" << (int)code_value << "]";)
 				}
 			}
-
-			CAT_IF_DUMP(cout << endl;)
-
-			continue;
 		}
-
-		// For each GE matrix bit in the row,
-		u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
-		u64 ge_mask = 1;
-		for (u16 ge_column_i = 0; ge_column_i < pivot_i; ++ge_column_i)
+		else // Deferred or dense rows:
 		{
-			// If bit is set,
-			if (ge_row[ge_column_i >> 6] & ge_mask)
+			// For each GE matrix bit in the row,
+			u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
+			u64 ge_mask = 1;
+			for (u16 ge_column_i = 0; ge_column_i < pivot_i; ++ge_column_i, ge_mask = CAT_ROL64(ge_mask, 1))
 			{
-				u16 column_i = _ge_col_map[ge_column_i];
-				const u8 *peel_src = _recovery_blocks + _block_bytes * column_i;
-				memxor(buffer_dest, peel_src, _block_bytes);
-				CAT_IF_ROWOP(++rowops;)
+				// If bit is non-zero,
+				if (ge_row[ge_column_i >> 6] & ge_mask)
+				{
+					// Add pivot for non-zero bit to destination row value
+					u16 column_i = _ge_col_map[ge_column_i];
+					const u8 *peel_src = _recovery_blocks + _block_bytes * column_i;
+					memxor(buffer_dest, peel_src, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "]";)
+					CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "]";)
+				}
 			}
-
-			ge_mask = CAT_ROL64(ge_mask, 1);
 		}
 
 		CAT_IF_DUMP(cout << endl;)
@@ -3320,16 +3333,16 @@ void Codec::BackSubstituteAboveDiagonal()
 		// Calculate source
 		u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i];
 
-		// If pivot row is heavy,
+		// If diagonal element is heavy,
 		u16 ge_row_i = _pivots[pivot_i];
-		if (ge_row_i >= first_heavy_row)
+		if (ge_row_i >= first_heavy_row && pivot_i >= _first_heavy_column)
 		{
 			// Look up row value
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
 			u16 heavy_col_i = pivot_i - _first_heavy_column;
 			u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
-			// Divide by this code value (implicitly nonzero)
+			// Normalize code value, setting it to 1 (implicitly nonzero)
 			if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
 			CAT_IF_ROWOP(++heavyops;)
 		}
@@ -3340,10 +3353,9 @@ void Codec::BackSubstituteAboveDiagonal()
 		u64 *ge_row = _ge_matrix + (pivot_i >> 6);
 		for (int above_i = 0; above_i < pivot_i; ++above_i)
 		{
+			// If pivot row is heavy and column is heavy,
 			u16 ge_above_i = _pivots[above_i];
-
-			// If pivot row is heavy,
-			if (ge_above_i >= first_heavy_row)
+			if (ge_above_i >= first_heavy_row && pivot_i >= _first_heavy_column)
 			{
 				// Look up row value
 				u16 heavy_row_i = ge_above_i - first_heavy_row;
