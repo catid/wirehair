@@ -12,10 +12,10 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	for (int ii = 3; ii <= 64000; ++ii)
+	for (int ii = 12; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
-		int block_bytes = 1500;
+		int block_bytes = 1;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
@@ -48,9 +48,9 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 10000;
+		u32 drop_seed = 26605;
 		double time_sum = 0;
-		for (int jj = 0; jj < 4000; ++jj)
+		for (int jj = 0; jj < 100000; ++jj)
 		{
 			int blocks_needed = 0;
 
@@ -81,7 +81,7 @@ int main()
 						overhead_sum += overhead;
 						++overhead_trials;
 
-						cout << ">> OKAY! N=" << decoder.BlockCount() << " decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
+						//cout << ">> OKAY! N=" << decoder.BlockCount() << " decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
 						time_sum += end - start;
 
 						if (!memcmp(message, message_out, message_bytes))
@@ -90,7 +90,7 @@ int main()
 						}
 						else
 						{
-							cout << "FAAAAAIL!" << endl;
+							cout << "FAAAAAIL! Seed = " << drop_seed << endl;
 
 							//for (int ii = 0; ii < message_bytes; ++ii) cout << (int)message_out[ii] << endl;
 

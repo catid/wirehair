@@ -135,6 +135,7 @@ class Codec
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
+	void PrintExtraMatrix();
 	void PrintCompressMatrix();
 	void PrintPeeled();
 	void PrintDeferredRows();
