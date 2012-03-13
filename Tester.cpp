@@ -12,10 +12,10 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	for (int ii = 12; ii <= 64000; ++ii)
+	for (int ii = 2; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
-		int block_bytes = 1;
+		int block_bytes = 1500;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
@@ -50,7 +50,8 @@ int main()
 		u32 overhead_sum = 0, overhead_trials = 0;
 		u32 drop_seed = 26605;
 		double time_sum = 0;
-		for (int jj = 0; jj < 500000; ++jj)
+		const int trials = 100000;
+		for (int jj = 0; jj < trials; ++jj)
 		{
 			int blocks_needed = 0;
 
@@ -115,7 +116,7 @@ int main()
 			++drop_seed;
 		}
 
-		double avg_time = time_sum/1000;
+		double avg_time = time_sum/trials;
 		cout << "N=" << decoder.BlockCount() << " decoder.Decode in " << avg_time << " usec, " << message_bytes / avg_time << " MB/s.  Average overhead = " << overhead_sum / (double)overhead_trials << endl;
 	}
 

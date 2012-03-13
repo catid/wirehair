@@ -746,7 +746,7 @@ static const u16 LOG_TABLE[256] = {
 	128, 61, 189, 218, 152, 137, 240, 103, 59, 135, 133, 134, 102, 136, 217, 60,
 	88, 104, 81, 241, 143, 138, 34, 153, 173, 219, 28, 190, 42, 62, 24, 129,
 	186, 130, 78, 25, 75, 63, 198, 43, 94, 191, 66, 29, 166, 220, 160, 174,
-	115, 154, 201, 35, 148, 139, 71, 144, 253, 242, 46, 82, 231, 105, 54, 89,
+	115, 154, 201, 35, 148, 139, 71, 144, 253, 242, 46, 82, 231, 105, 54, 89
 };
 
 static const u8 EXP_TABLE[512*2+1] = {
@@ -800,7 +800,7 @@ static const u8 INV_TABLE[256] = {
 	96, 138, 234, 45, 199, 66, 67, 196, 150, 87, 3, 174, 215, 132, 90, 75,
 	135, 98, 239, 142, 30, 33, 133, 204, 251, 185, 88, 117, 39, 69, 252, 48,
 	146, 24, 186, 126, 172, 141, 50, 188, 131, 149, 194, 44, 255, 243, 143, 210,
-	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236,
+	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236
 };
 
 static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
@@ -820,12 +820,35 @@ static void GF256MemMulAdd(void *vdest, u8 x, const void *vsrc, int bytes)
 	u8 *dest = reinterpret_cast<u8*>( vdest );
 	const u8 *src = reinterpret_cast<const u8*>( vsrc );
 
-	// For each byte,
 	u16 log_x = LOG_TABLE[x];
-	for (int ii = 0; ii < bytes; ++ii)
+
+	// For each block of 8 bytes,
+	while (bytes >= 8)
+	{
+		/*
+			For smaller messages, this function takes
+			up 50% of execution time.  Unfortunately I
+			do not see a way to make it run any faster.
+		*/
+		dest[0] ^= EXP_TABLE[LOG_TABLE[src[0]] + log_x];
+		dest[1] ^= EXP_TABLE[LOG_TABLE[src[1]] + log_x];
+		dest[2] ^= EXP_TABLE[LOG_TABLE[src[2]] + log_x];
+		dest[3] ^= EXP_TABLE[LOG_TABLE[src[3]] + log_x];
+		dest[4] ^= EXP_TABLE[LOG_TABLE[src[4]] + log_x];
+		dest[5] ^= EXP_TABLE[LOG_TABLE[src[5]] + log_x];
+		dest[6] ^= EXP_TABLE[LOG_TABLE[src[6]] + log_x];
+		dest[7] ^= EXP_TABLE[LOG_TABLE[src[7]] + log_x];
+
+		src += 8;
+		dest += 8;
+		bytes -= 8;
+	}
+
+	// For each byte,
+	while (bytes-- > 0)
 	{
 		// Multiply source byte by x and add it to destination byte
-		dest[ii] ^= EXP_TABLE[LOG_TABLE[src[ii]] + log_x];
+		*dest++ ^= EXP_TABLE[LOG_TABLE[*src++] + log_x];
 	}
 }
 
