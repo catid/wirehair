@@ -3095,38 +3095,43 @@ void Codec::BackSubstituteAboveDiagonal()
 
 			// For each column,
 			u64 ge_mask = (u64)1 << (pivot_i & 63);
-			for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i; --src_pivot_i)
+			for (int src_pivot_i = pivot_i; src_pivot_i > backsub_i;
+				--src_pivot_i, ge_mask = CAT_ROR64(ge_mask, 1))
 			{
 				u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[src_pivot_i];
 
-				// If pivot row is heavy,
+				// If diagonal element is heavy,
 				u16 ge_row_i = _pivots[src_pivot_i];
-				if (ge_row_i >= first_heavy_row)
+				if (ge_row_i >= first_heavy_row && src_pivot_i >= _first_heavy_column)
 				{
 					// Look up row value
 					u16 heavy_row_i = ge_row_i - first_heavy_row;
-					u16 heavy_col_i = src_pivot_i - _first_heavy_column;
+					u16 heavy_col_i = pivot_i - _first_heavy_column;
 					u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
-					// Divide by this code value (implicitly nonzero)
-					if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
-					CAT_IF_ROWOP(++heavyops;)
+					// Normalize code value, setting it to 1 (implicitly nonzero)
+					if (code_value != 1)
+					{
+						GF256MemDivide(src, code_value, _block_bytes);
+						CAT_IF_ROWOP(++heavyops;)
+					}
+
+					CAT_IF_DUMP(cout << "Normalized diagonal for heavy pivot " << pivot_i << endl;)
 				}
 
 				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
 				// For each upper triangular bit,
-				const u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
+				u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
 				for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
 				{
+					// If pivot row is heavy and column is heavy,
 					u16 dest_row_i = _pivots[dest_pivot_i];
-
-					// If pivot row is heavy,
-					if (dest_row_i >= first_heavy_row)
+					if (dest_row_i >= first_heavy_row && dest_pivot_i >= _first_heavy_column)
 					{
 						// Look up row value
 						u16 heavy_row_i = dest_row_i - first_heavy_row;
-						u16 heavy_col_i = src_pivot_i - _first_heavy_column;
+						u16 heavy_col_i = dest_pivot_i - _first_heavy_column;
 						u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 						// If nonzero,
@@ -3134,36 +3139,43 @@ void Codec::BackSubstituteAboveDiagonal()
 						{
 							// Back-substitute
 							u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
-							GF256MemMulAdd(dest, code_value, src, _block_bytes);
-							CAT_IF_ROWOP(++heavyops;)
-						}
+							if (code_value == 1)
+							{
+								memxor(dest, src, _block_bytes);
+								CAT_IF_ROWOP(++rowops;)
 
-						CAT_IF_DUMP(cout << " " << dest_row_i;)
+								CAT_IF_DUMP(cout << " *" << dest_pivot_i;)
+							}
+							else
+							{
+								GF256MemMulAdd(dest, code_value, src, _block_bytes);
+								CAT_IF_ROWOP(++heavyops;)
+
+								CAT_IF_DUMP(cout << " h" << dest_pivot_i;)
+							}
+						}
 
 						continue;
 					}
 
-					// If bit is set,
+					// If bit is set in that row,
 					if (ge_row[_ge_pitch * dest_row_i] & ge_mask)
 					{
-						CAT_IF_DUMP(cout << " " << dest_pivot_i;)
-
 						// Back-substitute
-						// NOTE: Because the values exist on the diagonal, the row is also the column index
-						memxor(_recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i], src, _block_bytes);
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
+						memxor(dest, src, _block_bytes);
 						CAT_IF_ROWOP(++rowops;)
+
+						CAT_IF_DUMP(cout << " " << dest_pivot_i;)
 					}
-				}
+				} // next pivot above
 
 				CAT_IF_DUMP(cout << endl;)
-
-				// Generate next mask
-				ge_mask = CAT_ROR64(ge_mask, 1);
-			}
+			} // next pivot
 
 			// If pivot row is heavy,
 			u16 ge_row_i = _pivots[backsub_i];
-			if (ge_row_i >= first_heavy_row)
+			if (ge_row_i >= first_heavy_row && backsub_i >= _first_heavy_column)
 			{
 				// Look up row value
 				u16 heavy_row_i = ge_row_i - first_heavy_row;
@@ -3172,8 +3184,11 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				// Divide by this code value (implicitly nonzero)
 				u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
-				if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
-				CAT_IF_ROWOP(++heavyops;)
+				if (code_value != 1)
+				{
+					GF256MemDivide(src, code_value, _block_bytes);
+					CAT_IF_ROWOP(++heavyops;)
+				}
 			}
 
 			CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
@@ -3248,8 +3263,16 @@ void Codec::BackSubstituteAboveDiagonal()
 						{
 							// Back-substitute
 							const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
-							GF256MemMulAdd(dest, code_value, src, _block_bytes);
-							CAT_IF_ROWOP(++heavyops;)
+							if (code_value != 1)
+							{
+								GF256MemMulAdd(dest, code_value, src, _block_bytes);
+								CAT_IF_ROWOP(++heavyops;)
+							}
+							else
+							{
+								memxor(dest, src, _block_bytes);
+								CAT_IF_ROWOP(++rowops;)
+							}
 						}
 					} // next column in row
 				} // next pivot in window
@@ -3268,7 +3291,7 @@ void Codec::BackSubstituteAboveDiagonal()
 					u16 ge_row_i = *pivot_row++;
 
 					// If pivot row is heavy,
-					if (ge_row_i >= first_heavy_row)
+					if (ge_row_i >= first_heavy_row && above_pivot_i >= _first_heavy_column)
 						continue; // Skip it
 
 					// Calculate window bits
@@ -3296,7 +3319,7 @@ void Codec::BackSubstituteAboveDiagonal()
 					u16 ge_row_i = *pivot_row++;
 
 					// If pivot row is heavy,
-					if (ge_row_i >= first_heavy_row)
+					if (ge_row_i >= first_heavy_row && above_pivot_i >= _first_heavy_column)
 						continue; // Skip it
 
 					// Calculate window bits
@@ -3360,8 +3383,11 @@ void Codec::BackSubstituteAboveDiagonal()
 			u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 			// Normalize code value, setting it to 1 (implicitly nonzero)
-			if (code_value != 1) GF256MemDivide(src, code_value, _block_bytes);
-			CAT_IF_ROWOP(++heavyops;)
+			if (code_value != 1)
+			{
+				GF256MemDivide(src, code_value, _block_bytes);
+				CAT_IF_ROWOP(++heavyops;)
+			}
 
 			CAT_IF_DUMP(cout << "Normalized diagonal for heavy pivot " << pivot_i << endl;)
 		}
@@ -4043,13 +4069,31 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 				// Calculate coefficient of elimination
 				u16 heavy_row_j = ge_row_j - first_heavy_row;
 				u8 *pivot_row = _heavy_matrix + _heavy_pitch * heavy_row_j;
-				u8 eliminator = GF256Divide(code_value, pivot_row[heavy_col_j]);
+				u8 pivot_code = pivot_row[heavy_col_j];
+				const u16 start_column = heavy_col_j + 1;
+				if (pivot_code == 1)
+				{
+					if (code_value != 1)
+					{
+						// heavy[m+] += exist[m+] * code_value
+						GF256MemMulAdd(heavy_row + start_column, code_value, pivot_row + start_column, _heavy_columns - start_column);
+					}
+					else
+					{
+						// heavy[m+] += exist[m+]
+						memxor(heavy_row + start_column, pivot_row + start_column, _heavy_columns - start_column);
+					}
+				}
+				else
+				{
+					u8 eliminator = (code_value == 1) ? INV_TABLE[pivot_code] : GF256Divide(code_value, pivot_code);
 
-				// Store eliminator for later
-				heavy_row[heavy_col_j] = eliminator;
+					// Store eliminator for later
+					heavy_row[heavy_col_j] = eliminator;
 
-				// heavy[m+] += exist[m+] * eliminator
-				GF256MemMulAdd(heavy_row + heavy_col_j + 1, eliminator, pivot_row + heavy_col_j + 1, column_count - (pivot_j + 1));
+					// heavy[m+] += exist[m+] * eliminator
+					GF256MemMulAdd(heavy_row + start_column, eliminator, pivot_row + start_column, _heavy_columns - start_column);
+				}
 			}
 			else
 			{
