@@ -12,7 +12,7 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	for (int ii = 2; ii <= 64000; ++ii)
+	for (int ii = 1024; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
 		int block_bytes = 1;
@@ -48,7 +48,7 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 26605;
+		u32 drop_seed = 44519;
 		double time_sum = 0;
 		const int trials = 100000;
 		for (int jj = 0; jj < trials; ++jj)

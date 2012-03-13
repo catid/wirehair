@@ -4001,7 +4001,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		// Add extra rows to the end of the pivot list
 		new_pivot_i = _pivot_count++;
 		row_i = _row_count++;
-		ge_row_i = _defer_count + _mix_count + row_i - _block_count;
+		ge_row_i = _defer_count + _dense_count + row_i - _block_count;
 		_ge_row_map[ge_row_i] = row_i;
 		_pivots[new_pivot_i] = ge_row_i;
 
