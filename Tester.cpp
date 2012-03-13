@@ -15,7 +15,7 @@ int main()
 	for (int ii = 2; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
-		int block_bytes = 1500;
+		int block_bytes = 1;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
