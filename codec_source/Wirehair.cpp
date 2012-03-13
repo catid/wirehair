@@ -3971,8 +3971,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	u16 row_i, ge_row_i, new_pivot_i;
 	if (_row_count >= _block_count + _extra_count)
 	{
-		const u16 first_heavy_row = _defer_count + _mix_count;
-		const u16 first_extra_row = _defer_count + _dense_count;
+		const u16 first_heavy_row = _defer_count + _dense_count;
 
 		new_pivot_i = 0;
 
@@ -3981,7 +3980,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		{
 			// If unused row is extra,
 			u16 ge_row_i = _pivots[pivot_i];
-			if (ge_row_i >= first_extra_row && ge_row_i < first_heavy_row)
+			if (ge_row_i >= first_heavy_row && ge_row_i < (first_heavy_row + _extra_count))
 			{
 				// Re-use it
 				new_pivot_i = pivot_i;
