@@ -94,6 +94,78 @@ void GF2Matrix::Fill()
 	}
 }
 
+int GF2Matrix::FindRank()
+{
+	// Initialize pivot array
+	for (u16 pivot_i = 0; pivot_i < _n; ++pivot_i)
+		_pivot[pivot_i] = pivot_i;
+
+	// For each pivot to determine,
+	u64 ge_mask = 1;
+	u16 pivot_i = 0;
+	for (; pivot_i < _n; ++pivot_i)
+	{
+		int word_offset = pivot_i >> 6;
+		u64 *ge_matrix_offset = _matrix + word_offset;
+
+		// Find pivot
+		bool found = false;
+		for (u16 pivot_j = pivot_i; pivot_j < _n; ++pivot_j)
+		{
+			// Determine if the row contains the bit we want
+			u16 ge_row_j = _pivot[pivot_j];
+			u64 *ge_row = &ge_matrix_offset[_pitch * ge_row_j];
+
+			// If the bit was found,
+			if (*ge_row & ge_mask)
+			{
+				found = true;
+				CAT_IF_DEBUG(cout << "Pivot " << pivot_i << " found on row " << ge_row_j << endl;)
+
+				// Swap out the pivot index for this one
+				u16 temp = _pivot[pivot_i];
+				_pivot[pivot_i] = _pivot[pivot_j];
+				_pivot[pivot_j] = temp;
+
+				// Unroll first word
+				u64 row0 = *ge_row;
+
+				// For each remaining unused row,
+				for (u16 pivot_k = pivot_j + 1; pivot_k < _n; ++pivot_k)
+				{
+					// Determine if the row contains the bit we want
+					u16 ge_row_k = _pivot[pivot_k];
+					u64 *rem_row = &ge_matrix_offset[_pitch * ge_row_k];
+
+					// If the bit was found,
+					if (*rem_row & ge_mask)
+					{
+						// Add the pivot row to eliminate the bit from this row, preserving previous bits
+						*rem_row ^= row0;
+
+						for (int ii = 1; ii < _pitch - word_offset; ++ii)
+							rem_row[ii] ^= ge_row[ii];
+					}
+				}
+
+				break;
+			}
+		}
+
+		// If pivot could not be found,
+		if (!found)
+		{
+			CAT_IF_DEBUG(cout << "Inversion impossible: Pivot " << pivot_i << " not found!" << endl;)
+			break;
+		}
+
+		// Generate next mask
+		ge_mask = CAT_ROL64(ge_mask, 1);
+	}
+
+	return pivot_i;
+}
+
 bool GF2Matrix::Triangle()
 {
 	CAT_IF_DEBUG(cout << endl << "---- Triangle ----" << endl << endl;)
@@ -202,7 +274,7 @@ bool GF2Matrix::Initialize(int n)
 {
 	Cleanup();
 
-	CAT_IF_DEBUG(cout << endl << "GF2Matrix.Initialize: Seed = " << _seed << " n = " << n << endl << endl;)
+	//CAT_IF_DEBUG(cout << endl << "GF2Matrix.Initialize: Seed = " << _seed << " n = " << n << endl << endl;)
 
 	_n = n;
 	_pitch = (n + 63) / 64;

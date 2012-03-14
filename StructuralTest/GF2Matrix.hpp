@@ -73,6 +73,7 @@ public:
 	void Identity();
 	void Fill();
 	bool Triangle();
+	int FindRank();
 	void Diagonal();
 
 	void Print();

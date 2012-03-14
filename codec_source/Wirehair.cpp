@@ -3162,11 +3162,11 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
-				// For each upper triangular bit,
+				// For each row in the upper triangle,
 				u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
 				for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
 				{
-					// If column is heavy,
+					// If row is heavy,
 					u16 dest_row_i = _pivots[dest_pivot_i];
 					if (dest_row_i >= first_heavy_row && dest_pivot_i >= _first_heavy_column)
 					{
@@ -3236,14 +3236,14 @@ void Codec::BackSubstituteAboveDiagonal()
 			{
 				// For each pivot in the window,
 				u16 *pivot_row = _pivots;
-				for (u16 ge_column_i = 0; ge_column_i < backsub_i; ++ge_column_i)
+				for (u16 ge_above_i = 0; ge_above_i < backsub_i; ++ge_above_i)
 				{
 					// If row is not heavy,
 					u16 ge_row_i = *pivot_row++;
 					if (ge_row_i < first_heavy_row)
 						continue; // Skip it
 
-					u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_i];
+					u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_above_i];
 
 					// If the first column of window is not heavy,
 					u16 ge_column_j = backsub_i;
@@ -3337,7 +3337,7 @@ void Codec::BackSubstituteAboveDiagonal()
 			}
 
 			// Only add window table entries for rows under this limit
-			u16 window_row_limit = (pivot_i >= first_heavy_column) ? first_heavy_row : 32000;
+			u16 window_row_limit = (pivot_i >= first_heavy_column) ? first_heavy_row : 0x7fff;
 
 			// If not straddling words,
 			u32 first_word = backsub_i >> 6;
@@ -3349,9 +3349,8 @@ void Codec::BackSubstituteAboveDiagonal()
 				// For each pivot row,
 				for (u16 above_pivot_i = 0; above_pivot_i < backsub_i; ++above_pivot_i)
 				{
-					u16 ge_row_i = *pivot_row++;
-
 					// If pivot row is heavy,
+					u16 ge_row_i = *pivot_row++;
 					if (ge_row_i >= window_row_limit)
 						continue; // Skip it
 

@@ -46,7 +46,7 @@
 
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 
 // Heavy rows:
 #define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */

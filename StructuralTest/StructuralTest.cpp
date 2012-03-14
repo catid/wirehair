@@ -189,15 +189,12 @@ void FillMatrixColumnShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 	}
 }
 
-void FillMatrixShuffleCode(wirehair::GF2Matrix &m, u32 seed)
+void FillMatrixShuffleCode(wirehair::GF2Matrix &m, CatsChoice &prng)
 {
 	int check_count = m.Size();
 	int pitch = m.GetPitch();
 	u64 *matrix = m.GetFront();
 	u64 temp_row1[100];
-
-	CatsChoice prng;
-	prng.Initialize(seed);
 
 	u16 rows1[1000], bits1[1000];
 
@@ -223,9 +220,11 @@ void FillMatrixShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 	const u16 *row1 = rows1;
 
 	// Store first row
-	CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
+	//CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
 	u64 *ge_dest_row = matrix + pitch * *row1++;
 	for (int jj = 0; jj < pitch; ++jj) ge_dest_row[jj] ^= temp_row1[jj];
+
+	ShuffleDeck16(prng, bits1, check_count);
 
 	// Generate first half of rows
 	const int loop_count = (check_count >> 1);
@@ -238,7 +237,7 @@ void FillMatrixShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 		temp_row1[bit11 >> 6] ^= (u64)1 << (bit11 & 63);
 
 		// Store in row
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
+		//CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
 		u64 *ge_dest_row = matrix + pitch * *row1++;
 		for (int jj = 0; jj < pitch; ++jj) ge_dest_row[jj] ^= temp_row1[jj];
 	}
@@ -251,10 +250,12 @@ void FillMatrixShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 		temp_row1[bit01 >> 6] ^= (u64)1 << (bit01 & 63);
 
 		// Store in row
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
+		//CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
 		u64 *ge_dest_row = matrix + pitch * *row1++;
 		for (int jj = 0; jj < pitch; ++jj) ge_dest_row[jj] ^= temp_row1[jj];
 	}
+
+	ShuffleDeck16(prng, bits1, check_count);
 
 	const int second_loop_count = loop_count - 1;
 
@@ -266,7 +267,7 @@ void FillMatrixShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 		temp_row1[bit11 >> 6] ^= (u64)1 << (bit11 & 63);
 
 		// Store in row
-		CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
+		//CAT_IF_DUMP(for (int ii = 0; ii < check_count; ++ii) cout << ((temp_row1[ii >> 6] & ((u64)1 << (ii & 63))) ? '1' : '0'); cout << " <- going to row " << *row1 << endl;)
 		u64 *ge_dest_row = matrix + pitch * *row1++;
 		for (int jj = 0; jj < pitch; ++jj) ge_dest_row[jj] ^= temp_row1[jj];
 	}
@@ -559,37 +560,209 @@ void TestMultDiv()
 	}
 }
 
-void TestInvertibleRate()
+// Returns rate of invertibility
+double RandomColumnsInvertibleRate(wirehair::GF2Matrix *matrices, int matrix_count, int column_count)
 {
-	wirehair::GF256Matrix m;
+	CatsChoice prng;
+	prng.Initialize(0);
 
-	int check_count = 5;
+	int pitch = matrices[0].GetPitch();
+	int size = matrices[0].Size();
 
-	m.Initialize(check_count);
-	u64 worked = 0;
+	wirehair::GF2Matrix m;
+	m.Initialize(size);
 
-	for (int seed = 0; seed < 1000000; ++seed)
+	u64 *bb = m.GetFront();
+
+	u32 full_rank_count = 0;
+	const int trials = 1000;
+	for (int ii = 0; ii < trials; ++ii)
 	{
 		m.Zero();
 
-		//FillMatrixShuffleCodeRand(m, seed);
-
-		m.SetSeed(seed);m.Fill();
-
-		//m.Print();
-
-		cout << worked / (double)seed << endl;
-
-		if (m.Triangle())
+		for (int jj = 0; jj < column_count; ++jj)
 		{
-			++worked;
-			//cout << "Invertible!" << endl;
-			//cin.get();
+			int column = prng.Next() % (matrix_count * size);
+			u64 *aa = matrices[column / size].GetFront();
+			int aa_column = column % size;
+			u64 *aa_word = aa + (aa_column >> 6);
+			u64 aa_mask = (u64)1 << (aa_column & 63);
+
+			for (int kk = 0; kk < size; ++kk)
+			{
+				if (aa_word[pitch * kk] & aa_mask)
+				{
+					bb[pitch * kk + (jj >> 6)] ^= (u64)1 << (jj & 63);
+				}
+			}
 		}
-		else
+
+		if (m.FindRank() >= column_count)
 		{
-			//cout << "Not invertible!" << endl;
+			++full_rank_count;
 		}
+	}
+
+	return full_rank_count / (double)trials;
+}
+
+void TestInvertibleRate()
+{
+	ofstream file("seeds_output.txt");
+	if (!file)
+	{
+		cout << "Error opening file " << endl;
+		return;
+	}
+
+	for (int check_count = 14; check_count <= 486; check_count += 4)
+	{
+		int matrix_count = check_count;
+		int start_time = m_clock.sec();
+
+		if (matrix_count * check_count >= 64000)
+		{
+			matrix_count = 64000 / check_count;
+		}
+
+		wirehair::GF2Matrix *matrices = new wirehair::GF2Matrix[matrix_count];
+
+		for (int ii = 0; ii < matrix_count; ++ii)
+		{
+			matrices[ii].Initialize(check_count);
+		}
+
+		const int trials = 65535;
+
+		u32 best_seed = 0;
+		double best_avg_dist = 0;
+		double best_inv_rate = 0;
+
+		u32 sec_seed = 0;
+		double sec_avg_dist = 0;
+		double sec_inv_rate = 0;
+
+		u64 worked = 0;
+		for (int seed = 0; seed < trials; ++seed)
+		{
+			// Give up after 4 minutes
+			int time_now = m_clock.sec();
+			if (time_now - start_time >= 4 * 60)
+				break;
+
+			CatsChoice prng;
+			prng.Initialize(seed);
+
+			//cout << "For seed " << seed << ":" << endl;
+
+			for (int ii = 0; ii < matrix_count; ++ii)
+			{
+				matrices[ii].Zero();
+
+				FillMatrixShuffleCode(matrices[ii], prng);
+			}
+
+			int pitch = matrices[0].GetPitch();
+			int min_distance = 65535;
+			int min_weight = 65535;
+			u64 sum_dist = 0;
+			u32 num_dist = 0;
+
+			// Compare each column to each other column
+			for (int ii = 0; ii < matrix_count * check_count; ++ii)
+			{
+				u64 *aa = matrices[ii / check_count].GetFront();
+				int aa_column = ii % check_count;
+				u64 *aa_word = aa + (aa_column >> 6);
+				u64 aa_mask = (u64)1 << (aa_column & 63);
+
+				int hamming_weight = 0;
+				for (int kk = 0; kk < check_count; ++kk)
+				{
+					int aa_bit = (aa_word[pitch * kk] & aa_mask) ? 1 : 0;
+
+					hamming_weight += aa_bit;
+				}
+
+				if (hamming_weight < min_weight)
+				{
+					min_weight = hamming_weight;
+				}
+
+				for (int jj = ii + 1; jj < matrix_count * check_count; ++jj)
+				{
+					u64 *bb = matrices[jj / check_count].GetFront();
+					int bb_column = jj % check_count;
+					u64 *bb_word = bb + (bb_column >> 6);
+					u64 bb_mask = (u64)1 << (bb_column & 63);
+
+					int hamming_distance = 0;
+					for (int kk = 0; kk < check_count; ++kk)
+					{
+						int aa_bit = (aa_word[pitch * kk] & aa_mask) ? 1 : 0;
+						int bb_bit = (bb_word[pitch * kk] & bb_mask) ? 1 : 0;
+
+						int delta = aa_bit ^ bb_bit;
+
+						hamming_distance += delta;
+					}
+
+					if (hamming_distance < min_distance)
+					{
+						min_distance = hamming_distance;
+					}
+
+					sum_dist += hamming_distance;
+					num_dist++;
+
+					if (hamming_distance < 2)
+					{
+						ii = 0x7ffffffe;
+						break;
+					}
+				}
+			}
+
+			if (min_distance >= 1 && min_weight >= 3)
+			{
+				double avg_dist = sum_dist / (double)num_dist;
+
+				if (avg_dist > best_avg_dist)
+				{
+					sec_seed = best_seed;
+					sec_avg_dist = best_avg_dist;
+					sec_inv_rate = best_inv_rate;
+
+					best_seed = seed;
+					best_avg_dist = avg_dist;
+
+					cout << "Seed " << seed << " minimum Hamming distance of " << min_distance << " and average = " << avg_dist << " and minimum Hamming weight of " << min_weight << endl;
+
+					double sum = 0;
+					for (int columns = check_count - 4; columns <= check_count - 2; ++columns)
+					{
+						sum += RandomColumnsInvertibleRate(matrices, matrix_count, columns);
+
+						//cout << "Rank " << columns << " at " << rate << endl;
+					}
+					best_inv_rate = sum;
+				}
+			}
+		}
+
+		// Choose second best if it is more likely to be invertible
+		if (best_inv_rate < sec_inv_rate)
+		{
+			best_seed = sec_seed;
+			best_avg_dist = sec_avg_dist;
+			best_inv_rate = sec_inv_rate;
+		}
+
+		cout << ">> Best seed for " << check_count << "x" << check_count << " matrix is " << best_seed << " with average Hamming distance of " << best_avg_dist << " average hard invertible rate = " << best_inv_rate / 3. << endl;
+		file << best_seed << endl;
+		//cout << check_count << "x" << check_count << " matrix : Shuffle-2 invertible rate = " << worked / (double)trials << ". Random invertible rate = " << worked2 / (double)trials << endl;
+
+		delete []matrices;
 	}
 }
 
@@ -1064,7 +1237,7 @@ int main()
 	//GenerateWeightTable();
 	//cin.get();
 
-	GenerateInverseTable();
+	//GenerateInverseTable();
 	TestInvertibleRate();
 	//FindGF256GeneratorPolynomials();
 	GenerateExpLogTables();

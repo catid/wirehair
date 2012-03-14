@@ -13,7 +13,7 @@
 		How many additional blocks are needed is random, though the number
 	of additional blocks is low and does not vary based on the size of the
 	data.  Typically one additional block is needed just 3% of the time.
-	And two blocks are needed 0.009% of the time.  This may seem appalling
+	And two blocks are needed 0.09% of the time.  This may seem appalling
 	to you, but think of it this way: The channel is already lossy, so this
 	is just like adding 3/N percent loss - a very very small amount of
 	additional loss (e.g. 0.003%) - to the channel, down in the noise.
