@@ -643,11 +643,11 @@ void TestInvertibleRate()
 		double sec_inv_rate = 0;
 
 		u64 worked = 0;
-		for (int seed = 0; seed < trials; ++seed)
+		for (int seed = 4181; seed < trials; ++seed)
 		{
 			// Give up after 4 minutes
 			int time_now = m_clock.sec();
-			if (time_now - start_time >= 4 * 60)
+			if (time_now - start_time >= 30 * 60)
 				break;
 
 			CatsChoice prng;
@@ -660,6 +660,9 @@ void TestInvertibleRate()
 				matrices[ii].Zero();
 
 				FillMatrixShuffleCode(matrices[ii], prng);
+
+				cout << "Matrix " << ii << endl;
+				matrices[ii].Print();
 			}
 
 			int pitch = matrices[0].GetPitch();

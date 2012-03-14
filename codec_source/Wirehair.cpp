@@ -1801,8 +1801,7 @@ void Codec::CopyDeferredRows()
 	so that using these easily generated square matrices does not hurt
 	the error correction properties of the code.  Random GF(2) matrices
 	are invertible about 30% of the time, and these are invertible about
-	20% of the time.  So care must be taken to seed these dense row
-	generators to improve invertibility.
+	15% of the time when D Mod 4 = 2.  Other choices of D are not so good.
 
 		A Shuffle-3 Code would reshuffle 3 times and flip 3 bits per row,
 	and a Shuffle-4 Code would reshuffle 4 times and flip 4 bits per row.
@@ -1811,7 +1810,8 @@ void Codec::CopyDeferredRows()
 	mathematically rigorous, though I believe he was using Shuffle-4 for
 	quantum cryptography.  Shuffle-2 is much faster and works for this
 	application because columns from different DxD matrices are randomly
-	selected for use in the GE matrix.
+	selected for use in the GE matrix.  And furthermore the rank needed
+	from the selected columns is usually much less than the row count.
 
 		MultiplyDenseRows() does not actually use memxor() to generate
 	any row block values because it is not certain where the values
@@ -2037,9 +2037,9 @@ void Codec::MultiplyDenseRows()
 			-ish    |  Mixing   |    Heavy Overlap    |
 					|           |                     |
 		+-----------+-----------+---------------------+
-		|                                             |
-		|      Extra Rows for Resuming Triangle()     | <-- Heavy, uninitialized
-		|                                             |
+		|                       |                     |
+		|   Extra Binary Rows   |   Extra Heavy Rows  | <-- Uninitialized
+		|                       |                     |
 		+-----------------------+-------------+-------+
 								|             |       |
 			Implicitly Zero     |      H      |   I   | <-- 6x6 Identity matrix
@@ -2972,7 +2972,7 @@ void Codec::AddSubdiagonalValues()
 				memxor(dest, src, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)peel_src[0] << "]";)
+				CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)src[0] << "]";)
 			}
 		}
 
@@ -3475,14 +3475,14 @@ void Codec::BackSubstituteAboveDiagonal()
 					memxor(dest, src, _block_bytes);
 					CAT_IF_ROWOP(++rowops;)
 
-					CAT_IF_DUMP(cout << " *" << above_i;)
+					CAT_IF_DUMP(cout << " *" << up_row_i;)
 				}
 				else
 				{
 					GF256MemMulAdd(dest, code_value, src, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
 
-					CAT_IF_DUMP(cout << " h" << above_i;)
+					CAT_IF_DUMP(cout << " h" << up_row_i;)
 				}
 			}
 			else
@@ -3495,7 +3495,7 @@ void Codec::BackSubstituteAboveDiagonal()
 					memxor(dest, src, _block_bytes);
 					CAT_IF_ROWOP(++rowops;)
 
-					CAT_IF_DUMP(cout << " " << above_i;)
+					CAT_IF_DUMP(cout << " " << up_row_i;)
 				}
 			}
 		} // next pivot above
@@ -3773,39 +3773,21 @@ static const u16 DENSE_SEEDS[119] = {
 	These tables were lovingly hand-crafted by hard-working indigenous peoples.
 */
 
-static const u8 SMALL_PEEL_SEEDS[512] = {
-	/*   0 */ 0, 0, 0, 0, 1, 1, 1, 14, 3, 44, 48, 75, 93, 31, 47, 88,
-	/*  16 */ 126, 89, 56, 31, 88, 235, 229, 86, 87, 152, 74, 204, 62, 40, 127, 111,
-	/*  32 */ 130, 23, 178, 21, 45, 255, 252, 87, 175, 13, 243, 52, 82, 142, 29, 158,
-	/*  48 */ 202, 201, 194, 55, 55, 146, 31, 180, 130, 6, 237, 29, 41, 252, 47, 244,
-	/*  64 */ 31, 78, 68, 80, 123, 234, 149, 31, 38, 104, 139, 36, 160, 202, 192, 98,
-	/*  80 */ 163, 72, 6, 82, 163, 14, 210, 226, 70, 19, 20, 205, 87, 59, 15, 211,
-	/*  96 */ 70, 189, 180, 10, 215, 72, 93, 86, 64, 227, 168, 63, 157, 165, 128, 97,
-	/* 112 */ 102, 192, 28, 66, 118, 131, 161, 120, 145, 139, 43, 50, 102, 62, 178, 6,
-	/* 128 */ 124, 173, 102, 217, 240, 15, 104, 2, 59, 202, 55, 168, 53, 153, 154, 225,
-	/* 144 */ 112, 137, 76, 70, 86, 31, 145, 27, 138, 80, 131, 103, 37, 125, 69, 98,
-	/* 160 */ 172, 3, 145, 22, 127, 47, 78, 159, 8, 9, 130, 121, 173, 136, 6, 0,
-	/* 176 */ 240, 5, 189, 142, 185, 48, 235, 141, 228, 86, 29, 130, 198, 65, 37, 0,
-	/* 192 */ 114, 238, 78, 226, 250, 249, 175, 223, 8, 3, 150, 108, 161, 65, 235, 56,
-	/* 208 */ 72, 45, 40, 147, 147, 131, 251, 32, 190, 16, 0, 69, 235, 33, 202, 106,
-	/* 224 */ 136, 217, 104, 119, 113, 127, 197, 130, 173, 238, 0, 0, 0, 0, 1, 1,
-	/* 240 */ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
-	/* 256 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 272 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 288 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
-	/* 304 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 320 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 336 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 352 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 368 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 384 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 400 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 416 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 432 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 448 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 464 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 480 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	/* 496 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+const int SMALL_SEED_MAX = 261;
+static const u16 SMALL_PEEL_SEEDS[262] = {
+	0, 0, 6, 2, 116, 275, 593, 620, 431, 539, 134, 103, 157, 410, 33, 198, 94, 116,
+	207, 227, 34, 34, 2, 174, 23, 198, 159, 97, 265, 89, 31, 41, 113, 89, 126, 29,
+	70, 33, 56, 140, 163, 109, 124, 161, 135, 163, 19, 6, 158, 27, 107, 22, 122, 129,
+	142, 27, 8, 125, 0, 63, 108, 16, 104, 114, 40, 32, 105, 122, 63, 54, 29, 98, 95,
+	40, 14, 12, 60, 17, 79, 72, 95, 78, 14, 88, 0, 23, 95, 42, 14, 73, 1, 33, 10, 17,
+	80, 26, 8, 16, 2, 66, 17, 80, 30, 69, 4, 5, 29, 12, 71, 38, 14, 55, 22, 72, 2,
+	43, 67, 41, 44, 6, 37, 1, 50, 32, 44, 38, 29, 20, 48, 58, 38, 52, 27, 59, 27, 38,
+	42, 27, 43, 38, 36, 0, 15, 63, 57, 11, 23, 41, 36, 57, 18, 59, 2, 11, 34, 8, 28,
+	0, 9, 42, 26, 3, 55, 6, 55, 22, 18, 17, 8, 29, 31, 43, 29, 20, 25, 15, 23, 31, 0,
+	6, 0, 33, 47, 49, 37, 2, 29, 41, 33, 27, 22, 39, 25, 6, 29, 24, 10, 45, 18, 45, 19,
+	17, 3, 30, 3, 18, 8, 44, 43, 4, 30, 38, 28, 2, 40, 26, 19, 4, 37, 45, 22, 40, 6,
+	1, 24, 7, 24, 38, 20, 38, 1, 17, 22, 38, 5, 6, 30, 32, 0, 2, 39, 32, 18, 38, 3, 4,
+	2, 4, 39, 6, 22, 7, 12, 6, 14, 0, 5, 12, 15, 5, 19, 1
 };
 
 /*
@@ -3889,12 +3871,6 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 		dense_count = 880 - (_block_count / 128);
 	}
 
-	// Put within table limits
-	if (dense_count < 14)
-		dense_count = 14;
-	else if (dense_count > 486)
-		dense_count = 486;
-
 	// Round up to the next D s.t. D Mod 4 = 2 (see above)
 	switch (dense_count & 3)
 	{
@@ -3904,12 +3880,29 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	case 3: dense_count += 3; break;
 	}
 
-	// Lookup dense seed given D
+	if (dense_count < 14)
+	{
+		switch (dense_count)
+		{
+		case 2: _d_seed = 0; break; // Seed doesn't matter
+		case 6: _d_seed = 67; break;
+		case 10: _d_seed = 192; break;
+		default: return R_BAD_DENSE_SEED;
+		}
+	}
+	else
+	{
+		if (dense_count > 486)
+			return R_BAD_DENSE_SEED;
+
+		// Lookup dense seed given D
+		_d_seed = DENSE_SEEDS[(dense_count - 14) / 4];
+	}
+
 	_dense_count = dense_count;
-	_d_seed = DENSE_SEEDS[(dense_count - 14) / 4];
 
 	// If N is small,
-	if (_block_count < 512)
+	if (_block_count <= SMALL_SEED_MAX)
 	{
 		// Lookup seeds from table
 		_p_seed = SMALL_PEEL_SEEDS[_block_count];
@@ -4861,7 +4854,7 @@ Result Codec::EncodeFeed(const void *message_in)
 	// Solve matrix and generate recovery blocks
 	Result r = SolveMatrix();
 	if (!r) GenerateRecoveryBlocks();
-	else if (r == R_MORE_BLOCKS) r = R_BAD_DENSE_SEED;
+	else if (r == R_MORE_BLOCKS) r = R_BAD_PEEL_SEED;
 	return r;
 }
 

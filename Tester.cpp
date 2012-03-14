@@ -48,9 +48,9 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 0;
+		u32 drop_seed = 100000;
 		double time_sum = 0;
-		const int trials = 1000;
+		const int trials = 10000;
 		for (int jj = 0; jj < trials; ++jj)
 		{
 			int blocks_needed = 0;
@@ -58,7 +58,7 @@ int main()
 			wirehair::Result s = decoder.BeginDecode(message_out, message_bytes, block_bytes);
 			if (s)
 			{
-				cout << "-- FAIL! N=" << decoder.BlockCount() << " decoder.BeginEncode error " << wirehair::GetResultString(s) << endl;
+				cout << "-- FAIL! N=" << decoder.BlockCount() << " decoder.BeginDecode error " << wirehair::GetResultString(s) << endl;
 				cin.get();
 				return 1;
 			}
