@@ -12,7 +12,7 @@ int main()
 {
 	m_clock.OnInitialize();
 
-	for (int ii = 256; ii <= 64000; ++ii)
+	for (int ii = 2; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
 		int block_bytes = 1500;

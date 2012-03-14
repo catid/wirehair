@@ -3623,58 +3623,155 @@ void Codec::Substitute()
 //// Main Driver
 
 /*
-	These tables were lovingly hand-crafted by hard-working indigeous peoples.
+	Each element of the DENSE_SEEDS table represents
+	the best CatsChoice PRNG seed to use to generate
+	a Shuffle-2 Code for the dense rows that has
+	"good" properties.
 
-	SMALL_DENSE_SEEDS
+	Element 0 is for D = 14,
+	Element 1 is for D = 18,
+	Element 2 is for D = 22,
+	and so on.
 
-		This table was generated for small N up to 512, choosing the seeds
-	with the best recovery properties for single losses.  And then tuned by
-	hand to fail towards the right of the matrix.
+	If the dense matrix size is DxD, that when D Mod 4 = 0,
+	a Shuffle-2 Code matrix is not invertible.  And when
+	D Mod 4 = 2, then it is better than the random matrix
+	for small D.  However for D > 22, even the best sizes
+	are not as often invertible as the random matrix.
 
-		For small N, the recovery properties are very sensitive to the choice
-	of dense seed.  This is because for smaller N the dense matrix is roughly
-	square and the Shuffle-2 Code has to be finely tuned.
+	However this is not a huge issue.  Skipping over a lot
+	of details out of scope of this article, the way that
+	the Shuffle-2 Codes are used is as follows:
 
-	SMALL_PEEL_SEEDS
+	How the codes are actually used:
 
-		This table was generated for small N up to 512, choosing the seeds
-	with the best recovery properties for 10% loss rate.  And then tuned by
-	hand to fail towards the right of the matrix.
+	(1) Several DxD random matrices are produced with
+	Shuffle-2 Codes.  Call these matrices {R0, R1, R2, R3...}.
+
+	(2) Only a few columns (M) are selected at random from
+	these matrices to form a new matrix, called the GE matrix.
+	M is slightly larger than the square root of the total
+	number of columns across all random R# matrices.
+
+	(3) The resulting matrix must be rank M or it leads to
+	lower error correcting performance in Wirehair.
+
+	(4) Furthermore, due to the other things going on around
+	this algorithm, the bits in the GE matrix are somewhat
+	randomly flipped after the first third of them.
+	This makes it easier for the matrix to be full rank, but
+	is also a challenge because it means that if the columns
+	have low Hamming weight that they are in danger of all
+	being flipped off.
+
+	(5) I want to be able to use the same random-looking R#
+	matrices for any given D and I want it to behave well.
+	This allows me to use a short table of PRNG seeds for
+	each value of D to generate a best-performing set of
+	R# matrices.
+
+	From the way the Shuffle-2 Code is used,
+	some requirements are apparent:
+
+	Wirehair Shuffle-2 Code requirements:
+
+	(1) Should be able to generate the R# matrices from a seed.
+
+	(2) The average rank of randomly-selected columns should
+	be high to satisfy the primary goal of the code.
+
+	(2a) To achieve (2), the average Hamming distance between
+	columns should be maximized.
+
+	(2b) The minimum Hamming distance between columns is 2.
+
+	(2c) Based on the empirical data from before, D is chosen
+	so that D Mod 4 = 2.
+	In practice D will be rounded up to the next "good" one.
+
+	(3) The minimum Hamming weight of each column should be 3
+	to avoid being flipped into oblivion.
+
+	To find the best matrices, I tried all seeds from 0..65535
+	(time permitting) and generated D of the DxD matrices.
+	Then, I verified requirement (2b) and (3).  Of the remaining
+	options, the one with the highest average rank was chosen.
+	I am only interested in values of D between 14 and 486 for
+	practical use.  Smaller D are special cases that do not need
+	to be in the table, and larger D are unused.
+
+	I found that (2b) is not possible to satisfy.
+	The minimum Hamming distance will always be 1.
+
+	Here's some example data for 22x22:
+
+	Seed 4504 minimum Hamming distance of 1 and
+	average = 14.4 and minimum Hamming weight of 13
+		Rank 2 at 0.999
+		Rank 4 at 0.986
+		Rank 6 at 0.96
+		Rank 8 at 0.92
+		Rank 10 at 0.887
+		Rank 12 at 0.84
+		Rank 14 at 0.804
+		Rank 16 at 0.722
+		Rank 18 at 0.648
+		Rank 20 at 0.504
+		Rank 21 at 0.36
+		Rank 22 at 0.174
+
+	I revised the seed search to look at the best two seeds
+	in terms of average Hamming distance, and picked the one
+	that is more often invertible for rank D-4 through D-2.
+	This comes from the fact that often times the average
+	Hamming distance being higher doesn't always mean it is
+	a better choice.
+	The real test is how often it is full rank.
+
+	I set a 4 minute timeout for the best seed search and let
+	it run overnight.  The result is a small 118-element table
+	that determines all of the unchanging dense rows in the
+	Wirehair check matrix for N=2 up to N=64000, providing
+	best performance for a given number of dense rows.
+
+	Some other random thoughts:
+
+	+ Since D is always even, it is not necessary to handle
+	the odd case in the algorithm.
+
+	+ The average rank of randomly selected columns drops off
+	pretty sharply near D.  To achieve 90% average invertibility,
+	the number of rows needs to roughly double and add one.
+	Adding just one row puts it above normal random matrices for
+	invertibility rate.
+
+	+ The seeds are not necessarily the best that could be found,
+	since for each D, a range of N use that value of D, and this
+	is much less than D*D -- it is up to 64,000 tops.
 */
-static const u8 SMALL_DENSE_SEEDS[512] = {
-	/*   0 */ 0, 0, 0, 67, 192, 102, 31, 237, 155, 136, 253, 110, 60, 224, 31, 35, 
-	/*  16 */ 35, 67, 0, 96, 148, 70, 196, 148, 20, 255, 170, 9, 171, 221, 245, 139, 
-	/*  32 */ 121, 249, 24, 221, 166, 198, 53, 130, 156, 151, 50, 243, 227, 143, 89, 123, 
-	/*  48 */ 145, 30, 40, 236, 157, 3, 57, 185, 109, 146, 45, 32, 201, 3, 112, 84, 
-	/*  64 */ 225, 19, 239, 160, 110, 119, 196, 66, 51, 53, 107, 133, 190, 62, 67, 92, 
-	/*  80 */ 15, 47, 37, 27, 84, 41, 206, 102, 230, 195, 56, 204, 130, 34, 28, 184, 
-	/*  96 */ 31, 56, 41, 147, 244, 22, 94, 254, 156, 194, 164, 226, 78, 12, 165, 105, 
-	/* 112 */ 38, 183, 210, 200, 147, 238, 197, 84, 152, 202, 13, 211, 84, 19, 200, 85, 
-	/* 128 */ 142, 145, 63, 190, 78, 170, 143, 43, 50, 134, 213, 95, 35, 203, 50, 200,
-	/* 144 */ 245, 45, 115, 246, 63, 51, 101, 7, 55, 26, 43, 156, 61, 65, 183, 52, 
-	/* 160 */ 193, 134, 36, 159, 19, 101, 89, 193, 226, 169, 187, 71, 37, 80, 66, 211, 
-	/* 176 */ 0, 205, 206, 1, 1, 59, 0, 1, 17, 220, 125, 15, 157, 228, 93, 2, 
-	/* 192 */ 167, 221, 98, 142, 252, 56, 78, 247, 196, 30, 223, 199, 183, 75, 176, 61, 
-	/* 208 */ 48, 100, 118, 119, 204, 3, 165, 235, 68, 210, 101, 94, 60, 204, 64, 149, 
-	/* 224 */ 197, 233, 222, 85, 219, 118, 45, 66, 48, 60, 0, 0, 0, 10, 10, 0,
-	/* 240 */ 1, 4, 0, 3, 0, 3, 0, 6, 3, 0, 0, 18, 4, 1, 0, 1,
-	/* 256 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0,
-	/* 272 */ 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 1, 0, 0, 0,
-	/* 288 */ 2, 0, 0, 0, 2, 0, 0, 0, 1, 3, 0, 0, 0, 0, 0, 3,
-	/* 304 */ 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 2, 0, 2,
-	/* 320 */ 1, 0, 0, 1, 2, 0, 1, 0, 0, 0, 1, 1, 2, 0, 0, 0,
-	/* 336 */ 0, 0, 0, 0, 0, 0, 1, 1, 2, 1, 1, 0, 1, 2, 0, 0,
-	/* 352 */ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
-	/* 368 */ 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 0, 0,
-	/* 384 */ 0, 2, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0,
-	/* 400 */ 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0,
-	/* 416 */ 0, 0, 0, 1, 0, 0, 2, 0, 1, 0, 1, 0, 0, 0, 1, 0,
-	/* 432 */ 0, 2, 1, 1, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0,
-	/* 448 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0,
-	/* 464 */ 0, 0, 1, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0,
-	/* 480 */ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
-	/* 496 */ 0, 0, 1, 1, 0, 0, 2, 0, 1, 1, 0, 0, 0, 0, 0, 0
+
+static const u16 DENSE_SEEDS[119] = {
+	4181, 26667, 4504, 11009, 3438, 14320, 15822, 50870,
+	4234, 1376, 25290, 1177, 8576, 3099, 2449, 2691,
+	773, 3053, 1626, 222, 1005, 1568, 102, 118,
+	289, 2, 651, 507, 481, 94, 291, 166,
+	0, 448, 188, 224, 15, 144, 78, 87,
+	134, 90, 22, 149, 27, 58, 31, 14,
+	84, 41, 6, 70, 28, 16, 17, 39,
+	20, 5, 34, 15, 22, 37, 24, 23,
+	18, 0, 30, 25, 4, 19, 9, 13,
+	16, 2, 3, 21, 4, 1, 4, 29,
+	5, 30, 12, 6, 21, 6, 19, 6,
+	21, 0, 16, 17, 12, 16, 0, 0,
+	4, 13, 10, 15, 4, 2, 1, 2,
+	3, 15, 0, 0, 1, 3, 1, 0,
+	0, 4, 3, 5, 5, 2, 0
 };
+
+
+/*
+	These tables were lovingly hand-crafted by hard-working indigenous peoples.
+*/
 
 static const u8 SMALL_PEEL_SEEDS[512] = {
 	/*   0 */ 0, 0, 0, 0, 1, 1, 1, 14, 3, 44, 48, 75, 93, 31, 47, 88,
@@ -3758,49 +3855,68 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	*/
 
 	// If N is small,
+	u16 dense_count;
 	if (_block_count < 256)
 	{
 		// Calculate dense count from math expression
-		if (_block_count == 2) _dense_count = 2;
-		else if (_block_count == 3) _dense_count = 6;
-		else _dense_count = 10 + SquareRoot16(_block_count) / 2 + (_block_count / 50);
+		if (_block_count == 2) dense_count = 2;
+		else if (_block_count == 3) dense_count = 6;
+		else dense_count = 10 + SquareRoot16(_block_count) / 2 + (_block_count / 50);
 	}
 	else if (_block_count <= 4096) // Medium N:
 	{
 		// Square root-dominant region
-		_dense_count = 11 + SquareRoot16(_block_count) + (u16)(_block_count / 300);
+		dense_count = 11 + SquareRoot16(_block_count) + (u16)(_block_count / 300);
 	}
 	else if (_block_count <= 32768)
 	{
 		// Linear-dominant region
-		_dense_count = 22 + (_block_count / 100);
+		dense_count = 22 + (_block_count / 100);
 	}
 	else if (_block_count <= 44000)
 	{
 		// Quadratic-dominant region
-		_dense_count = 1825 + (_block_count / 800) * (_block_count / 800) - (_block_count / 10);
+		dense_count = 1825 + (_block_count / 800) * (_block_count / 800) - (_block_count / 10);
 	}
 	else if (_block_count <= 52500)
 	{
 		// High linear-dominant region
-		_dense_count = (_block_count / 128) + 74;
+		dense_count = (_block_count / 128) + 74;
 	}
 	else
 	{
 		// Avalanche-dominant region
-		_dense_count = 880 - (_block_count / 128);
+		dense_count = 880 - (_block_count / 128);
 	}
+
+	// Put within table limits
+	if (dense_count < 14)
+		dense_count = 14;
+	else if (dense_count > 486)
+		dense_count = 486;
+
+	// Round up to the next D s.t. D Mod 4 = 2 (see above)
+	switch (dense_count & 3)
+	{
+	case 0: dense_count += 2; break;
+	case 1: dense_count += 1; break;
+	case 2: break;
+	case 3: dense_count += 3; break;
+	}
+
+	// Lookup dense seed given D
+	_dense_count = dense_count;
+	_d_seed = DENSE_SEEDS[(dense_count - 14) / 4];
 
 	// If N is small,
 	if (_block_count < 512)
 	{
 		// Lookup seeds from table
-		_d_seed = SMALL_DENSE_SEEDS[_block_count];
 		_p_seed = SMALL_PEEL_SEEDS[_block_count];
 	}
 	else
 	{
-		_p_seed = _d_seed = _block_count;
+		_p_seed = _block_count;
 	}
 
 	CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
