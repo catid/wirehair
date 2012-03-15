@@ -124,12 +124,12 @@
 			Each element of H is a byte instead of a bit, representing a number
 			in GF(2^^8) with generator polynomial 0x15F.
 
-		(6) Check Matrix Inversion
+		(6) Check Matrix Solver
 
 			An optimized sparse technique is used to solve the recovery blocks:
 
 	---------------------------------------------------------------------------
-	Sparse Matrix Inversion:
+	Sparse Matrix Solver:
 
 	There are 4 phases to this sparse inversion:
 
@@ -145,7 +145,7 @@
 	See the code comments in Wirehair.cpp for documentation of each step.
 
 		After all of these steps, the row values have been determined and the
-	matrix inversion is complete.  Let's analyze the complexity of each step:
+	matrix solver is complete.  Let's analyze the complexity of each step:
 
 	(1) Peeling
 		- Opportunistic fast solution for first N rows.
@@ -1375,7 +1375,7 @@ void Codec::GreedyPeeling()
 
 /*
 	If using a naive approach, this is by far the most complex step of
-	the matrix inversion.  The approach outlined here makes it much
+	the matrix solver.  The approach outlined here makes it much
 	easier.  At this point the check matrix has been re-organized
 	into peeled and deferred rows and columns:
 
@@ -1634,6 +1634,8 @@ void Codec::PeelDiagonal()
 			// NOTE: Do not need to set is_copied here because no further rows reference this one
 		}
 
+		CAT_IF_DUMP(cout << "++ Adding to referencing rows:";)
+
 		// For each row that references this one,
 		PeelRefs *refs = &_peel_col_refs[peel_column_i];
 		u16 count = refs->row_count;
@@ -1645,7 +1647,7 @@ void Codec::PeelDiagonal()
 			// Skip this row
 			if (ref_row_i == peel_row_i) continue;
 
-			CAT_IF_DUMP(cout << "++ Adding to referencing row " << ref_row_i << endl;)
+			CAT_IF_DUMP(cout << " " << ref_row_i;)
 
 			// Add GE row to referencing GE row
 			u64 *ge_ref_row = _compress_matrix + _ge_pitch * ref_row_i;
@@ -1682,6 +1684,8 @@ void Codec::PeelDiagonal()
 				CAT_IF_ROWOP(++rowops;)
 			} // end if referencing row is peeled
 		} // next referencing row
+
+		CAT_IF_DUMP(cout << endl;)
 	} // next peeled row
 
 	CAT_IF_ROWOP(cout << "PeelDiagonal used " << rowops << " row ops = " << rowops / (double)_block_count << "*N" << endl;)
@@ -2949,7 +2953,10 @@ void Codec::AddSubdiagonalValues()
 
 			// If row is not extra,
 			if (heavy_row_i >= _extra_count)
+			{
+				CAT_IF_DUMP(cout << endl;)
 				continue; // Skip binary matrix elimination
+			}
 
 			// Limit the binary matrix elimination to non-heavy columns
 			if (ge_limit > _first_heavy_column)
@@ -3622,10 +3629,9 @@ void Codec::Substitute()
 //// Main Driver
 
 /*
-	Each element of the DENSE_SEEDS table represents
-	the best CatsChoice PRNG seed to use to generate
-	a Shuffle-2 Code for the dense rows that has
-	"good" properties.
+	Each element of the DENSE_SEEDS table represents the best
+	CatsChoice PRNG seed to use to generate a Shuffle-2 Code
+	for the dense rows that has "good" properties.
 
 	Element 0 is for D = 14,
 	Element 1 is for D = 18,
@@ -3644,52 +3650,50 @@ void Codec::Substitute()
 
 	How the codes are actually used:
 
-	(1) Several DxD random matrices are produced with
-	Shuffle-2 Codes.  Call these matrices {R0, R1, R2, R3...}.
+		(1) Several DxD random matrices are produced with
+		Shuffle-2 Codes.  Call these matrices {R0, R1, R2, R3...}.
 
-	(2) Only a few columns (M) are selected at random from
-	these matrices to form a new matrix, called the GE matrix.
-	M is slightly larger than the square root of the total
-	number of columns across all random R# matrices.
+		(2) Only a few columns (M) are selected at random from
+		these matrices to form a new matrix, called the GE matrix.
+		M is slightly larger than the square root of the total
+		number of columns across all random R# matrices.
 
-	(3) The resulting matrix must be rank M or it leads to
-	lower error correcting performance in Wirehair.
+		(3) The resulting matrix must be rank M or it leads to
+		lower error correcting performance in Wirehair.
 
-	(4) Furthermore, due to the other things going on around
-	this algorithm, the bits in the GE matrix are somewhat
-	randomly flipped after the first third of them.
-	This makes it easier for the matrix to be full rank, but
-	is also a challenge because it means that if the columns
-	have low Hamming weight that they are in danger of all
-	being flipped off.
+		(4) Furthermore, due to the other things going on around
+		this algorithm, the bits in the GE matrix are somewhat
+		randomly flipped after the first third of them.
+		This makes it easier for the matrix to be full rank, but
+		is also a challenge because it means that if the columns
+		have low Hamming weight that they are in danger of all
+		being flipped off.
 
-	(5) I want to be able to use the same random-looking R#
-	matrices for any given D and I want it to behave well.
-	This allows me to use a short table of PRNG seeds for
-	each value of D to generate a best-performing set of
-	R# matrices.
+		(5) I want to be able to use the same random-looking R#
+		matrices for any given D and I want it to behave well.
+		This allows me to use a short table of PRNG seeds for
+		each value of D to generate a best-performing set of
+		R# matrices.
 
 	From the way the Shuffle-2 Code is used,
 	some requirements are apparent:
 
-	Wirehair Shuffle-2 Code requirements:
+		(1) Should be able to generate the R# matrices from a seed.
 
-	(1) Should be able to generate the R# matrices from a seed.
+		(2) The average rank of randomly-selected columns should
+		be high to satisfy the primary goal of the code.
 
-	(2) The average rank of randomly-selected columns should
-	be high to satisfy the primary goal of the code.
+		(2a) To achieve (2), the average Hamming distance between
+		columns should be maximized.
 
-	(2a) To achieve (2), the average Hamming distance between
-	columns should be maximized.
+		(2b) The minimum Hamming distance between columns is 2.
 
-	(2b) The minimum Hamming distance between columns is 2.
+		(2c) Based on the empirical data from before, D is chosen
+		so that D Mod 4 = 2.
+		In practice D will be rounded up to the next "good" one.
 
-	(2c) Based on the empirical data from before, D is chosen
-	so that D Mod 4 = 2.
-	In practice D will be rounded up to the next "good" one.
-
-	(3) The minimum Hamming weight of each column should be 3
-	to avoid being flipped into oblivion.
+		(3) The minimum Hamming weight of each column should be 3
+		to avoid being flipped into oblivion.
 
 	To find the best matrices, I tried all seeds from 0..65535
 	(time permitting) and generated D of the DxD matrices.
@@ -3724,8 +3728,7 @@ void Codec::Substitute()
 	that is more often invertible for rank D-4 through D-2.
 	This comes from the fact that often times the average
 	Hamming distance being higher doesn't always mean it is
-	a better choice.
-	The real test is how often it is full rank.
+	better.  The real test is how often it is full rank.
 
 	I set a 4 minute timeout for the best seed search and let
 	it run overnight.  The result is a small 118-element table
@@ -3734,9 +3737,6 @@ void Codec::Substitute()
 	best performance for a given number of dense rows.
 
 	Some other random thoughts:
-
-	+ Since D is always even, it is not necessary to handle
-	the odd case in the algorithm.
 
 	+ The average rank of randomly selected columns drops off
 	pretty sharply near D.  To achieve 90% average invertibility,
@@ -3751,25 +3751,24 @@ void Codec::Substitute()
 
 static const u16 DENSE_SEEDS[119] = {
 	4181, 26667, 4504, 11009, 3438, 14320, 15822, 50870,
-	4234, 1376, 25290, 1177, 8576, 3099, 2449, 2691,
-	773, 3053, 1626, 222, 1005, 1568, 102, 118,
-	289, 2, 651, 507, 481, 94, 291, 166,
-	0, 448, 188, 224, 15, 144, 78, 87,
-	134, 90, 22, 149, 27, 58, 31, 14,
-	84, 41, 6, 70, 28, 16, 17, 39,
+	4234, 1376, 30232, 1177, 8576, 3099, 8178, 52837,
+	773, 5032, 10746, 11964, 1005, 1568, 12581, 2820,
+	289, 2, 4322, 4097, 481, 1383, 3765, 166,
+	3286, 2605, 3101, 851, 465, 1127, 1548, 1771,
+	793, 1170, 361, 1151, 27, 159, 460, 14,
+	267, 478, 109, 70, 279, 427, /* resume from here*/ 17, 39,
 	20, 5, 34, 15, 22, 37, 24, 23,
 	18, 0, 30, 25, 4, 19, 9, 13,
-	16, 2, 3, 21, 4, 1, 4, 29,
-	5, 30, 12, 6, 21, 6, 19, 6,
-	21, 0, 16, 17, 12, 16, 0, 0,
-	4, 13, 10, 15, 4, 2, 1, 2,
-	3, 15, 0, 0, 1, 3, 1, 0,
-	0, 4, 3, 5, 5, 2, 0
+	16, 2, 3, 21, 4, 1, /*end here*/ 161,
+	29, 127, 30, 21, 30, 24, 86, 37,
+	6, 43, 0, 48, 35, 12, 16, 1,
+	82, 94, 25, 64, 15, 27, 58, 70,
+	2, 26, 15, 31, 27, 7, 53, 56,
+	30, 54, 18, 79, 31, 5, 41, 12
 };
 
-
 /*
-	These tables were lovingly hand-crafted by hard-working indigenous peoples.
+	These tables were lovingly hand-crafted by hard-working indigenous peoples:
 */
 
 const int SMALL_SEED_MAX = 261;
@@ -3789,6 +3788,7 @@ static const u16 SMALL_PEEL_SEEDS[262] = {
 	2, 4, 39, 6, 22, 7, 12, 6, 14, 0, 5, 12, 15, 5, 19, 1
 };
 
+// 8KB bitfield table for seeds that cause the encoder to choke
 static const u64 EXCEPT_SEEDS[1000] = {
 0x100010002133fULL, 0x810000010001ULL, 0x10000000000ULL, 0x100000000010000ULL, 0x400200100000000ULL, 0x200000100000000ULL, 0x1000000009000ULL, 0x440000000000004ULL,
 0x100100000001ULL, 0x1000100010000ULL, 0x2ULL, 0x8020000ULL, 0x404080000200000ULL, 0x200ULL, 0x82000000000000ULL, 0x800800000200ULL,
@@ -3916,6 +3916,7 @@ static const u64 EXCEPT_SEEDS[1000] = {
 0x40000ULL, 0x10000000000ULL, 0x200000000ULL, 0x0ULL, 0x0ULL, 0x80000000000ULL, 0x100000000008ULL, 0x0ULL,
 0x0ULL, 0x81000500ULL, 0x100000000ULL, 0x40000001000000ULL, 0x10000000ULL, 0x8ULL, 0x400010001000000ULL, 0x400000000ULL,
 };
+
 /*
 void GenTable()
 {
@@ -4036,7 +4037,6 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 		{
 		case 2: _d_seed = 0; break; // Seed doesn't matter
 		case 6: _d_seed = 67; break;
-		case 10: _d_seed = 192; break;
 		default: return R_BAD_DENSE_SEED;
 		}
 	}
@@ -4864,7 +4864,7 @@ void Codec::PrintGEMatrix()
 	{
 		for (int jj = 0; jj < heavy_cols; ++jj)
 		{
-			cout << hex << setw(2) << setfill('0') << (int)_heavy_matrix[_heavy_pitch * ii + jj] << dec << " ";
+			cout << hex << setw(2) << setfill('0') << (int)_heavy_matrix[_heavy_pitch * (ii + _extra_count) + jj] << dec << " ";
 		}
 		cout << endl;
 	}
@@ -4878,13 +4878,12 @@ void Codec::PrintExtraMatrix()
 	// For each pivot,
 	int extra_count = 0;
 	const u16 column_count = _defer_count + _mix_count;
-	const u16 first_extra_row = column_count;
 	const u16 first_heavy_row = _defer_count + _dense_count;
 	for (u16 pivot_i = 0; pivot_i < _pivot_count; ++pivot_i)
 	{
 		// If row is extra,
 		u16 ge_row_i = _pivots[pivot_i];
-		if (ge_row_i >= first_extra_row)
+		if (ge_row_i >= first_heavy_row && ge_row_i < first_heavy_row + _extra_count)
 		{
 			u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
@@ -5097,7 +5096,7 @@ void Codec::Encode(u32 id, void *block_out)
 	}
 #endif // CAT_COPY_FIRST_N
 
-	CAT_IF_DUMP(cout << "Generating row " << id << ":";)
+	CAT_IF_DUMP(cout << "Encode: Generating row " << id << ":";)
 
 	u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
 	GeneratePeelRow(id, _p_seed, _block_count, _mix_count,

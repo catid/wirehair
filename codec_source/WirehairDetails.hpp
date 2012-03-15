@@ -39,18 +39,18 @@
 
 // Limits:
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
-#define CAT_MAX_DENSE_ROWS 1024 /* Maximum check row count */
+#define CAT_MAX_DENSE_ROWS 500 /* Maximum check row count */
 #define CAT_MAX_EXTRA_ROWS 32 /* Maximum number of extra rows to support before reusing existing rows */
 #define CAT_WIREHAIR_MAX_N 64000 /* Largest N value to allow */
 #define CAT_WIREHAIR_MIN_N 2 /* Smallest N value to allow */
 
 // Optimization options:
 #define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 //#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 
 // Heavy rows:
-#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
-#define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add */
+#define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
 #define CAT_HEAVY_MAX_COLS (3 * CAT_HEAVY_ROWS) /* Number of heavy columns that are non-zero */
 
 namespace cat {
