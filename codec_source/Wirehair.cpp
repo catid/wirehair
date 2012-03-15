@@ -29,25 +29,16 @@
 /*
 	TODO:
 
-	GF(256):
-		Resume solver
-		N = 11 seems to have some kind of bug, where the dense matrix structure causes first two columns to be the same regardless of seed
-		- This might be a bug because everything is prime and square and somewhat exceptional case
+	(1) Fix bug in windowed back-substitution
+	(2) Finish generating dense seeds
+	(3) Generate new small peeling seeds matrix
+	(4) Generate new large peeling seeds exceptions list
 
 	Future improvements:
-		Window the add subdiagonal function too
-		Conjugate gradient method?
-		Add alignment for memory allocations
-		SSE version of memxor()
-		SSE version of row xors
+		Window the add subdiagonal function too to help that function scale better
+		SSE version of memxor() and add alignment for memory allocations
 		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
 		Multi-threading
-
-	5. Implement partial input message
-	6. Implement lookup table for codec parameters
-	7. Generate lookup table
-
-	8. Release party!
 */
 
 /*
@@ -3641,7 +3632,7 @@ void Codec::Substitute()
 	Element 2 is for D = 22,
 	and so on.
 
-	If the dense matrix size is DxD, that when D Mod 4 = 0,
+	If the dense matrix size is DxD, then when D Mod 4 = 0,
 	a Shuffle-2 Code matrix is not invertible.  And when
 	D Mod 4 = 2, then it is better than the random matrix
 	for small D.  However for D > 22, even the best sizes

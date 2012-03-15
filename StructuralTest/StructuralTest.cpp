@@ -615,7 +615,7 @@ void TestInvertibleRate()
 		return;
 	}
 
-	for (int check_count = 14; check_count <= 486; check_count += 4)
+	for (int check_count = 286; check_count <= 326; check_count += 4)
 	{
 		int matrix_count = check_count;
 		int start_time = m_clock.sec();
@@ -643,7 +643,7 @@ void TestInvertibleRate()
 		double sec_inv_rate = 0;
 
 		u64 worked = 0;
-		for (int seed = 4181; seed < trials; ++seed)
+		for (int seed = 0; seed < trials; ++seed)
 		{
 			// Give up after 4 minutes
 			int time_now = m_clock.sec();
@@ -661,8 +661,8 @@ void TestInvertibleRate()
 
 				FillMatrixShuffleCode(matrices[ii], prng);
 
-				cout << "Matrix " << ii << endl;
-				matrices[ii].Print();
+				//cout << "Matrix " << ii << endl;
+				//matrices[ii].Print();
 			}
 
 			int pitch = matrices[0].GetPitch();
