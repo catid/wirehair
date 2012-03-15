@@ -1740,7 +1740,10 @@ void Codec::CopyDeferredRows()
 	eliminated with as few row operations as possible.
 	This elimination can be visualized as a matrix-matrix multiplication
 	between the peeling submatrix and the deferred/dense submatrix
-	intersection with the peeled columns.
+	intersection with the peeled columns.  Using Shuffle-2 Codes, I
+	have been able to achieve this matrix-matrix multiplication in
+	just 2.5*N row operations, which is better than any other approach
+	I have seen so far.
 
 		I needed to find a way to generate a binary matrix that LOOKS
 	random but actually only differs by ~2 bits per row.  I looked at
