@@ -8,14 +8,70 @@ using namespace std;
 
 static Clock m_clock;
 
+void FindBadDenseSeeds()
+{
+	int block_bytes = 1;
+	int max_blocks = 64000;
+	int max_message_bytes = block_bytes * max_blocks;
+	u8 *message = new u8[max_message_bytes];
+	u8 *message_out = new u8[max_message_bytes];
+	u8 *block = new u8[block_bytes];
+
+	for (int ii = 0; ii < max_message_bytes; ++ii)
+	{
+		message[ii] = ii;
+	}
+
+	ofstream file("exception_list.txt");
+	if (!file) return;
+
+	file << "struct SeedException { u16 n, seed; };" << endl;
+	file << "static const SeedException EXCEPTIONS[] = {" << endl;
+
+	int fails = 0;
+	int seen = 0;
+	for (int ii = 2; ii <= 64000; ++ii)
+	{
+		++seen;
+		int block_count = ii;
+		int message_bytes = block_bytes * block_count;
+
+		wirehair::Encoder encoder;
+
+		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
+
+		if (r)
+		{
+			++fails;
+			cout << "-- FAIL! N=" << encoder.BlockCount() << " encoder.BeginEncode error " << wirehair::GetResultString(r) << " at " << fails/(double)seen << endl;
+
+			file << " {" << ii << "," << 0 << "},";
+
+			if (fails % 16 == 0) file << endl;
+
+			cin.get();
+		}
+
+		if (ii % 1000 == 0) cout << ii << endl;
+	}
+
+	file << "};" << endl;
+
+	file << "static const int EXCEPTION_COUNT = " << fails << ";" << endl;
+
+	cin.get();
+}
+
 int main()
 {
 	m_clock.OnInitialize();
 
+	FindBadDenseSeeds();
+
 	for (int ii = 2; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
-		int block_bytes = 1500;
+		int block_bytes = 1;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
@@ -48,9 +104,9 @@ int main()
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 100000;
+		u32 drop_seed = 10000;
 		double time_sum = 0;
-		const int trials = 10000;
+		const int trials = 1000;
 		for (int jj = 0; jj < trials; ++jj)
 		{
 			int blocks_needed = 0;
