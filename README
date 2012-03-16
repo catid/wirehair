@@ -45,22 +45,22 @@ Test software compiled in 64-bit Release mode in MSVC.
 Running on my laptop with a Core i7 @ 2.67 GHz.
 
 >> OKAY! N=64(0.096 MB) encoder.BeginEncode in 445.777 usec, 215.355 MB/s
-N=64 decoder.Decode in 426.823 usec, 224.918 MB/s.  Average overhead = 0.016 (24 bytes)
+N=64 decoder.Decode in 426.823 usec, 224.918 MB/s.  Avg overhead = 0.016 (24 bytes)
 >> OKAY! N=1064(1.596 MB) encoder.BeginEncode in 4301.47 usec, 371.036 MB/s
-N=1064 decoder.Decode in 4697.76 usec, 339.736 MB/s.  Average overhead = 0.017 (25.5 bytes)
+N=1064 decoder.Decode in 4697.76 usec, 339.736 MB/s.  Avg overhead = 0.017 (25.5 bytes)
 >> OKAY! N=2064(3.096 MB) encoder.BeginEncode in 9464.09 usec, 327.131 MB/s
-N=2064 decoder.Decode in 11165 usec, 277.296 MB/s.  Average overhead = 0.016 (24 bytes)
+N=2064 decoder.Decode in 11165 usec, 277.296 MB/s.  Avg overhead = 0.016 (24 bytes)
 >> OKAY! N=3064(4.596 MB) encoder.BeginEncode in 17301.4 usec, 265.644 MB/s
-N=3064 decoder.Decode in 18475.5 usec, 248.762 MB/s.  Average overhead = 0.027 (40.5 bytes)
+N=3064 decoder.Decode in 18475.5 usec, 248.762 MB/s.  Avg overhead = 0.027 (40.5 bytes)
 >> OKAY! N=4064(6.096 MB) encoder.BeginEncode in 23452.5 usec, 259.929 MB/s
-N=4064 decoder.Decode in 26123.7 usec, 233.352 MB/s.  Average overhead = 0.02 (30 bytes)
+N=4064 decoder.Decode in 26123.7 usec, 233.352 MB/s.  Avg overhead = 0.02 (30 bytes)
 >> OKAY! N=5064(7.596 MB) encoder.BeginEncode in 30726.6 usec, 247.212 MB/s
-N=5064 decoder.Decode in 35306.1 usec, 215.147 MB/s.  Average overhead = 0.015 (22.5 bytes)
+N=5064 decoder.Decode in 35306.1 usec, 215.147 MB/s.  Avg overhead = 0.015 (22.5 bytes)
 >> OKAY! N=6064(9.096 MB) encoder.BeginEncode in 39403.9 usec, 230.84 MB/s
-N=6064 decoder.Decode in 44974.7 usec, 202.247 MB/s.  Average overhead = 0.029 (43.5 bytes)
+N=6064 decoder.Decode in 44974.7 usec, 202.247 MB/s.  Avg overhead = 0.029 (43.5 bytes)
 >> OKAY! N=7064(10.596 MB) encoder.BeginEncode in 45753.7 usec, 231.588 MB/s
-N=7064 decoder.Decode in 53796.4 usec, 196.965 MB/s.  Average overhead = 0.022 (33 bytes)
+N=7064 decoder.Decode in 53796.4 usec, 196.965 MB/s.  Avg overhead = 0.022 (33 bytes)
 >> OKAY! N=8064(12.096 MB) encoder.BeginEncode in 54760.5 usec, 220.889 MB/s
-N=8064 decoder.Decode in 66865.6 usec, 180.9 MB/s.  Average overhead = 0.02 (30 bytes)
+N=8064 decoder.Decode in 66865.6 usec, 180.9 MB/s.  Avg overhead = 0.02 (30 bytes)
 >> OKAY! N=9064(13.596 MB) encoder.BeginEncode in 65359.4 usec, 208.019 MB/s
-N=9064 decoder.Decode in 76243.7 usec, 178.323 MB/s.  Average overhead = 0.022 (33 bytes)
+N=9064 decoder.Decode in 76243.7 usec, 178.323 MB/s.  Avg overhead = 0.022 (33 bytes)
