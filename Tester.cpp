@@ -8,7 +8,6 @@ using namespace std;
 
 static Clock m_clock;
 
-/*
 void FindBadDenseSeeds()
 {
 	int block_bytes = 1;
@@ -41,7 +40,7 @@ void FindBadDenseSeeds()
 
 		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
 
-		if (r)
+		if (r == wirehair::R_BAD_PEEL_SEED)
 		{
 			++fails;
 			cout << "-- FAIL! N=" << encoder.BlockCount() << " encoder.BeginEncode error " << wirehair::GetResultString(r) << " at " << fails/(double)seen << endl;
@@ -50,7 +49,7 @@ void FindBadDenseSeeds()
 
 			if (fails % 16 == 0) file << endl;
 
-			cin.get();
+			//cin.get();
 		}
 
 		if (ii % 1000 == 0) cout << ii << endl;
@@ -62,7 +61,6 @@ void FindBadDenseSeeds()
 
 	cin.get();
 }
-*/
 
 int main()
 {
@@ -70,7 +68,7 @@ int main()
 
 	//FindBadDenseSeeds();
 
-	for (int ii = 1024; ii <= 64000; ++ii)
+	for (int ii = 2; ii <= 64000; ++ii)
 	{
 		int block_count = ii;
 		int block_bytes = 1500;
