@@ -176,8 +176,10 @@ int main()
 			++drop_seed;
 		}
 
-		double avg_time = time_sum/trials;
-		cout << "N=" << decoder.BlockCount() << " decoder.Decode in " << avg_time << " usec, " << message_bytes / avg_time << " MB/s.  Average overhead = " << overhead_sum / (double)overhead_trials << endl;
+		double avg_time = time_sum / trials;
+		double avg_overhead = overhead_sum / (double)overhead_trials;
+		double avg_bytes = message_bytes * (decoder.BlockCount() + avg_overhead) / (double)decoder.BlockCount() - message_bytes;
+		cout << "N=" << decoder.BlockCount() << " decoder.Decode in " << avg_time << " usec, " << message_bytes / avg_time << " MB/s.  Average overhead = " << avg_overhead << " (" << avg_bytes << " bytes)" << endl;
 	}
 
 	m_clock.OnFinalize();

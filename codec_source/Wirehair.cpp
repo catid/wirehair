@@ -3070,6 +3070,7 @@ void Codec::BackSubstituteAboveDiagonal()
 	const int pivot_count = _defer_count + _mix_count;
 	int pivot_i = pivot_count - 1;
 	const u16 first_heavy_row = _defer_count + _dense_count;
+	const u16 first_heavy_column = _first_heavy_column;
 
 #if defined(CAT_WINDOWED_BACKSUB)
 	// Build temporary storage space if windowing is to be used
@@ -3144,11 +3145,11 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				// If diagonal element is heavy,
 				u16 ge_row_i = _pivots[src_pivot_i];
-				if (ge_row_i >= first_heavy_row && src_pivot_i >= _first_heavy_column)
+				if (ge_row_i >= first_heavy_row && src_pivot_i >= first_heavy_column)
 				{
 					// Look up row value
 					u16 heavy_row_i = ge_row_i - first_heavy_row;
-					u16 heavy_col_i = src_pivot_i - _first_heavy_column;
+					u16 heavy_col_i = src_pivot_i - first_heavy_column;
 					u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 					// Normalize code value, setting it to 1 (implicitly nonzero)
@@ -3163,35 +3164,35 @@ void Codec::BackSubstituteAboveDiagonal()
 
 				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
 
-				// For each row in the upper triangle,
+				// For each row above the diagonal,
 				u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
 				for (int dest_pivot_i = backsub_i; dest_pivot_i < src_pivot_i; ++dest_pivot_i)
 				{
 					// If row is heavy,
 					u16 dest_row_i = _pivots[dest_pivot_i];
-					if (dest_row_i >= first_heavy_row && dest_pivot_i >= _first_heavy_column)
+					if (dest_row_i >= first_heavy_row && src_pivot_i >= first_heavy_column)
 					{
 						// If column is zero,
 						u16 heavy_row_i = dest_row_i - first_heavy_row;
-						u16 heavy_col_i = dest_pivot_i - _first_heavy_column;
+						u16 heavy_col_i = src_pivot_i - first_heavy_column;
 						u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 						if (!code_value) continue; // Skip it
 
 						// Back-substitute
 						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
-						if (code_value == 1)
-						{
-							memxor(dest, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-
-							CAT_IF_DUMP(cout << " *" << dest_pivot_i;)
-						}
-						else
+						if (code_value != 1)
 						{
 							GF256MemMulAdd(dest, code_value, src, _block_bytes);
 							CAT_IF_ROWOP(++heavyops;)
 
 							CAT_IF_DUMP(cout << " h" << dest_pivot_i;)
+						}
+						else
+						{
+							memxor(dest, src, _block_bytes);
+							CAT_IF_ROWOP(++rowops;)
+
+							CAT_IF_DUMP(cout << " *" << dest_pivot_i;)
 						}
 					}
 					else
@@ -3212,13 +3213,13 @@ void Codec::BackSubstituteAboveDiagonal()
 				CAT_IF_DUMP(cout << endl;)
 			} // next pivot
 
-			// If pivot row is heavy,
+			// Normalize the final diagonal element
 			u16 ge_row_i = _pivots[backsub_i];
-			if (ge_row_i >= first_heavy_row && backsub_i >= _first_heavy_column)
+			if (ge_row_i >= first_heavy_row && backsub_i >= first_heavy_column)
 			{
 				// Look up row value
 				u16 heavy_row_i = ge_row_i - first_heavy_row;
-				u16 heavy_col_i = backsub_i - _first_heavy_column;
+				u16 heavy_col_i = backsub_i - first_heavy_column;
 				u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 				// Divide by this code value (implicitly nonzero)
@@ -3229,67 +3230,6 @@ void Codec::BackSubstituteAboveDiagonal()
 					CAT_IF_ROWOP(++heavyops;)
 				}
 			}
-
-			const u16 first_heavy_column = _first_heavy_column;
-
-			// If a row above the window may be heavy,
-			if (pivot_i >= first_heavy_column)
-			{
-				// For each pivot in the window,
-				u16 *pivot_row = _pivots;
-				for (u16 ge_above_i = 0; ge_above_i < backsub_i; ++ge_above_i)
-				{
-					// If row is not heavy,
-					u16 ge_row_i = *pivot_row++;
-					if (ge_row_i < first_heavy_row)
-						continue; // Skip it
-
-					u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_above_i];
-
-					// If the first column of window is not heavy,
-					u16 ge_column_j = backsub_i;
-					if (ge_column_j < first_heavy_column)
-					{
-						// For each non-heavy column in the extra row,
-						u64 ge_mask = (u64)1 << (ge_column_j & 63);
-						u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
-						for (; ge_column_j < first_heavy_column && ge_column_j <= pivot_i; ++ge_column_j, ge_mask = CAT_ROL64(ge_mask, 1))
-						{
-							// If column is non-zero,
-							if (ge_row[ge_column_j >> 6] & ge_mask)
-							{
-								const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
-								memxor(dest, src, _block_bytes);
-								CAT_IF_ROWOP(++rowops;)
-							}
-						}
-					}
-
-					// For each heavy column,
-					u16 heavy_col_j = ge_column_j - first_heavy_column;
-					u16 heavy_row_i = ge_row_i - first_heavy_row;
-					u8 *heavy_row = &_heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_j];
-					for (; ge_column_j <= pivot_i; ++ge_column_j)
-					{
-						// If zero,
-						u8 code_value = *heavy_row++;
-						if (!code_value) continue; // Skip it
-
-						// Back-substitute
-						const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
-						if (code_value != 1)
-						{
-							GF256MemMulAdd(dest, code_value, src, _block_bytes);
-							CAT_IF_ROWOP(++heavyops;)
-						}
-						else
-						{
-							memxor(dest, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-						}
-					} // next column in row
-				} // next pivot in window
-			} // end if contains heavy
 
 			CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
 
@@ -3337,6 +3277,65 @@ void Codec::BackSubstituteAboveDiagonal()
 				}
 			}
 
+			// If a row above the window may be heavy,
+			if (pivot_i >= first_heavy_column)
+			{
+				// For each pivot in the window,
+				u16 *pivot_row = _pivots;
+				for (u16 ge_above_i = 0; ge_above_i < backsub_i; ++ge_above_i)
+				{
+					// If row is not heavy,
+					u16 ge_row_i = *pivot_row++;
+					if (ge_row_i < first_heavy_row)
+						continue; // Skip it
+
+					u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_above_i];
+
+					// If the first column of window is not heavy,
+					u16 ge_column_j = backsub_i;
+					if (ge_column_j < first_heavy_column)
+					{
+						// For each non-heavy column in the extra row,
+						u64 ge_mask = (u64)1 << (ge_column_j & 63);
+						u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
+						for (; ge_column_j < first_heavy_column && ge_column_j <= pivot_i; ++ge_column_j, ge_mask = CAT_ROL64(ge_mask, 1))
+						{
+							// If column is non-zero,
+							if (ge_row[ge_column_j >> 6] & ge_mask)
+							{
+								const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
+								memxor(dest, src, _block_bytes);
+								CAT_IF_ROWOP(++rowops;)
+							}
+						}
+					}
+
+					// For each heavy column,
+					u16 heavy_row_i = ge_row_i - first_heavy_row;
+					u16 heavy_col_j = ge_column_j - first_heavy_column;
+					u8 *heavy_row = &_heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_j];
+					for (; ge_column_j <= pivot_i; ++ge_column_j)
+					{
+						// If zero,
+						u8 code_value = *heavy_row++;
+						if (!code_value) continue; // Skip it
+
+						// Back-substitute
+						const u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
+						if (code_value != 1)
+						{
+							GF256MemMulAdd(dest, code_value, src, _block_bytes);
+							CAT_IF_ROWOP(++heavyops;)
+						}
+						else
+						{
+							memxor(dest, src, _block_bytes);
+							CAT_IF_ROWOP(++rowops;)
+						}
+					} // next column in row
+				} // next pivot in window
+			} // end if contains heavy
+
 			// Only add window table entries for rows under this limit
 			u16 window_row_limit = (pivot_i >= first_heavy_column) ? first_heavy_row : 0x7fff;
 
@@ -3365,7 +3364,8 @@ void Codec::BackSubstituteAboveDiagonal()
 						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 						// Back-substitute
-						memxor(_recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i];
+						memxor(dest, win_table[win_bits], _block_bytes);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
@@ -3392,7 +3392,8 @@ void Codec::BackSubstituteAboveDiagonal()
 						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
 						// Back-substitute
-						memxor(_recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i], win_table[win_bits], _block_bytes);
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i];
+						memxor(dest, win_table[win_bits], _block_bytes);
 						CAT_IF_ROWOP(++rowops;)
 					}
 				}
@@ -3435,11 +3436,11 @@ void Codec::BackSubstituteAboveDiagonal()
 
 		// If diagonal element is heavy,
 		u16 ge_row_i = _pivots[pivot_i];
-		if (ge_row_i >= first_heavy_row && pivot_i >= _first_heavy_column)
+		if (ge_row_i >= first_heavy_row && pivot_i >= first_heavy_column)
 		{
 			// Look up row value
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
-			u16 heavy_col_i = pivot_i - _first_heavy_column;
+			u16 heavy_col_i = pivot_i - first_heavy_column;
 			u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 			// Normalize code value, setting it to 1 (implicitly nonzero)
@@ -3460,29 +3461,29 @@ void Codec::BackSubstituteAboveDiagonal()
 		{
 			// If element is heavy,
 			u16 up_row_i = _pivots[ge_up_i];
-			if (up_row_i >= first_heavy_row && ge_up_i >= _first_heavy_column)
+			if (up_row_i >= first_heavy_row && ge_up_i >= first_heavy_column)
 			{
 				// If column is zero,
 				u16 heavy_row_i = up_row_i - first_heavy_row;
-				u16 heavy_col_i = pivot_i - _first_heavy_column;
+				u16 heavy_col_i = pivot_i - first_heavy_column;
 				u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 				if (!code_value) continue; // Skip it
 
 				// Back-substitute
 				u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_up_i];
-				if (code_value == 1)
-				{
-					memxor(dest, src, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-
-					CAT_IF_DUMP(cout << " *" << up_row_i;)
-				}
-				else
+				if (code_value != 1)
 				{
 					GF256MemMulAdd(dest, code_value, src, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
 
 					CAT_IF_DUMP(cout << " h" << up_row_i;)
+				}
+				else
+				{
+					memxor(dest, src, _block_bytes);
+					CAT_IF_ROWOP(++rowops;)
+
+					CAT_IF_DUMP(cout << " *" << up_row_i;)
 				}
 			}
 			else
