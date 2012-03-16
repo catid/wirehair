@@ -4102,7 +4102,6 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 		}
 		else
 		{
-			return R_BAD_DENSE_SEED;
 			// Use default seed
 			_p_seed = _block_count;
 		}
