@@ -68,7 +68,7 @@ int main()
 
 	//FindBadDenseSeeds();
 
-	for (int ii = 64; ii <= 64000; ii += 1000)
+	for (int ii = 64; ii <= 64000; ii += 1024)
 	{
 		int block_count = ii;
 		int block_bytes = 1500;
