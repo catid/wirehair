@@ -33,7 +33,7 @@
 
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
 //#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
 //#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
