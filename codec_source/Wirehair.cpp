@@ -2892,17 +2892,257 @@ void Codec::MultiplyDenseValues()
 	It is aided by the already roughly upper-triangular form
 	of the GE matrix, making this function very cheap to execute.
 */
+
+// These are heuristic values.  Choosing better values has little effect on performance.
+#define CAT_UNDER_WIN_THRESH_4 (45 + 4) /* Note: Assumes this is higher than CAT_HEAVY_MAX_COLS */
+#define CAT_UNDER_WIN_THRESH_5 (65 + 5)
+#define CAT_UNDER_WIN_THRESH_6 (85 + 6)
+#define CAT_UNDER_WIN_THRESH_7 (138 + 7)
+
 void Codec::AddSubdiagonalValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- AddSubdiagonalValues ----" << endl << endl;)
 
-	CAT_IF_ROWOP(int rowops = 0; int heavyops = 0;)
+	CAT_IF_ROWOP(u32 rowops = 0; int heavyops = 0;)
 
-	const u16 column_count = _defer_count + _mix_count;
+	const int column_count = _defer_count + _mix_count;
+	int pivot_i = 0;
 	const u16 first_heavy_row = _defer_count + _dense_count;
+	const u16 first_heavy_column = _first_heavy_column;
 
-	// For each column,
-	for (u16 ge_column_i = 1; ge_column_i < column_count; ++ge_column_i)
+#if defined(CAT_WINDOWED_LOWERTRI)
+	const u16 first_non_binary_row = first_heavy_row + _extra_count;
+
+	// Build temporary storage space if windowing is to be used
+	if (column_count >= CAT_UNDER_WIN_THRESH_5)
+	{
+		// Calculate initial window size
+		int w, next_check_i;
+		if (column_count >= CAT_UNDER_WIN_THRESH_7)
+		{
+			w = 7;
+			next_check_i = column_count - CAT_UNDER_WIN_THRESH_7;
+		}
+		else if (column_count >= CAT_UNDER_WIN_THRESH_6)
+		{
+			w = 6;
+			next_check_i = column_count - CAT_UNDER_WIN_THRESH_6;
+		}
+		else if (column_count >= CAT_UNDER_WIN_THRESH_5)
+		{
+			w = 5;
+			next_check_i = column_count - CAT_UNDER_WIN_THRESH_5;
+		}
+		else
+		{
+			w = 4;
+			next_check_i = CAT_UNDER_WIN_THRESH_4;
+		}
+		u32 win_lim = 1 << w;
+
+		CAT_IF_DUMP(cout << "Activating windowed lower triangular elimination with initial window " << w << endl;)
+
+		// Use the first few peel column values as window table space
+		// NOTE: The peeled column values were previously used up until this point,
+		// but now they are unused, and so they can be reused for temporary space.
+		u8 *win_table[128];
+		PeelColumn *column = _peel_cols;
+		u8 *column_src = _recovery_blocks;
+		u32 jj = 1;
+		for (u32 count = _block_count; count > 0; --count, ++column, column_src += _block_bytes)
+		{
+			// If column is peeled,
+			if (column->mark == MARK_PEEL)
+			{
+				// Reuse the block value temporarily as window table space
+				win_table[jj] = column_src;
+
+				CAT_IF_DUMP(cout << "-- Window table entry " << jj << " set to column " << _block_count - count << endl;)
+
+				// If done,
+				if (++jj >= win_lim) break;
+			}
+		}
+
+		CAT_IF_DUMP(if (jj < win_lim) cout << "!! Not enough space in peeled columns to generate a table.  Going back to normal lower triangular elimination." << endl;)
+
+		// If enough space was found,
+		if (jj >= win_lim) for (;;)
+		{
+			// Calculate first column in window
+			u16 final_i = pivot_i + w - 1;
+
+			CAT_IF_DUMP(cout << "-- Windowing from " << pivot_i << " to " << final_i << " (inclusive)" << endl;)
+
+			// Eliminate lower triangular part below windowed bits:
+
+			// For each column,
+			u64 ge_mask = (u64)1 << (pivot_i & 63);
+			for (int src_pivot_i = pivot_i; src_pivot_i < final_i;
+				++src_pivot_i, ge_mask = CAT_ROL64(ge_mask, 1))
+			{
+				u8 *src = _recovery_blocks + _block_bytes * _ge_col_map[src_pivot_i];
+
+				CAT_IF_DUMP(cout << "Back-substituting small triangle from pivot " << src_pivot_i << "[" << (int)src[0] << "] :";)
+
+				// For each row above the diagonal,
+				u64 *ge_row = _ge_matrix + (src_pivot_i >> 6);
+				for (int dest_pivot_i = src_pivot_i + 1; dest_pivot_i <= final_i; ++dest_pivot_i)
+				{
+					// If row is heavy,
+					u16 dest_row_i = _pivots[dest_pivot_i];
+
+					// If bit is set in that row,
+					if (ge_row[_ge_pitch * dest_row_i] & ge_mask)
+					{
+						// Back-substitute
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
+						memxor(dest, src, _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+
+						CAT_IF_DUMP(cout << " " << dest_pivot_i;)
+					}
+				} // next pivot above
+
+				CAT_IF_DUMP(cout << endl;)
+			} // next pivot
+
+			CAT_IF_DUMP(cout << "-- Generating window table with " << w << " bits" << endl;)
+
+			// Generate window table: 2 bits
+			win_table[1] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i];
+			win_table[2] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 1];
+			memxor_set(win_table[3], win_table[1], win_table[2], _block_bytes);
+			CAT_IF_ROWOP(++rowops;)
+
+			// Generate window table: 3 bits
+			win_table[4] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 2];
+			memxor_set(win_table[5], win_table[1], win_table[4], _block_bytes);
+			memxor_set(win_table[6], win_table[2], win_table[4], _block_bytes);
+			memxor_set(win_table[7], win_table[1], win_table[6], _block_bytes);
+			CAT_IF_ROWOP(rowops += 3;)
+
+			// Generate window table: 4 bits
+			win_table[8] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 3];
+			for (int ii = 1; ii < 8; ++ii)
+				memxor_set(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+			CAT_IF_ROWOP(rowops += 7;)
+
+			// Generate window table: 5+ bits
+			if (w >= 5)
+			{
+				win_table[16] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 4];
+				for (int ii = 1; ii < 16; ++ii)
+					memxor_set(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+				CAT_IF_ROWOP(rowops += 15;)
+
+				if (w >= 6)
+				{
+					win_table[32] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 5];
+					for (int ii = 1; ii < 32; ++ii)
+						memxor_set(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+					CAT_IF_ROWOP(rowops += 31;)
+
+					if (w >= 7)
+					{
+						win_table[64] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 6];
+						for (int ii = 1; ii < 64; ++ii)
+							memxor_set(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+						CAT_IF_ROWOP(rowops += 63;)
+					}
+				}
+			}
+
+			// If not straddling words,
+			u32 first_word = pivot_i >> 6;
+			u32 shift0 = pivot_i & 63;
+			u32 last_word = final_i >> 6;
+			u16 *pivot_row = _pivots + final_i + 1;
+			if (first_word == last_word)
+			{
+				// For each pivot row,
+				for (u16 ge_below_i = final_i + 1; ge_below_i < column_count; ++ge_below_i)
+				{
+					// If pivot row is heavy,
+					u16 ge_row_i = *pivot_row++;
+					if (ge_row_i >= first_non_binary_row) continue;
+
+					// Calculate window bits
+					u64 *ge_row = _ge_matrix + first_word + _ge_pitch * ge_row_i;
+					u32 win_bits = (u32)(ge_row[0] >> shift0) & (win_lim - 1);
+
+					// If any XOR needs to be performed,
+					if (win_bits != 0)
+					{
+						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << ge_below_i << endl;)
+
+						// Back-substitute
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_below_i];
+						memxor(dest, win_table[win_bits], _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+				}
+			}
+			else // Rare: Straddling case
+			{
+				u32 shift1 = 64 - shift0;
+
+				// For each pivot row,
+				for (u16 ge_below_i = final_i + 1; ge_below_i < column_count; ++ge_below_i)
+				{
+					// If pivot row is heavy,
+					u16 ge_row_i = *pivot_row++;
+					if (ge_row_i >= first_non_binary_row) continue;
+
+					// Calculate window bits
+					u64 *ge_row = _ge_matrix + first_word + _ge_pitch * ge_row_i;
+					u32 win_bits = ( (u32)(ge_row[0] >> shift0) | (u32)(ge_row[1] << shift1) ) & (win_lim - 1);
+
+					// If any XOR needs to be performed,
+					if (win_bits != 0)
+					{
+						CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << ge_below_i << endl;)
+
+						// Back-substitute
+						u8 *dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_below_i];
+						memxor(dest, win_table[win_bits], _block_bytes);
+						CAT_IF_ROWOP(++rowops;)
+					}
+				}
+			}
+
+			// If column index falls below window size,
+			pivot_i += w;
+			if (pivot_i >= next_check_i)
+			{
+				int remaining_columns = column_count - pivot_i;
+
+				if (remaining_columns >= CAT_UNDER_WIN_THRESH_6)
+				{
+					w = 6;
+					next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_6;
+				}
+				else if (remaining_columns >= CAT_UNDER_WIN_THRESH_5)
+				{
+					w = 5;
+					next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_5;
+				}
+				else if (remaining_columns >= CAT_UNDER_WIN_THRESH_4)
+				{
+					w = 4;
+					next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_4;
+				}
+				else break;
+
+				// Update window limit
+				win_lim = 1 << w;
+			}
+		} // next window
+	} // end if windowed
+#endif // CAT_WINDOWED_LOWERTRI
+
+	// For each row to eliminate,
+	for (u16 ge_column_i = pivot_i + 1; ge_column_i < column_count; ++ge_column_i)
 	{
 		// Lookup pivot column, GE row, and destination buffer
 		u16 column_i = _ge_col_map[ge_column_i];
@@ -2934,14 +3174,14 @@ void Codec::AddSubdiagonalValues()
 					memxor(dest, src, _block_bytes);
 					CAT_IF_ROWOP(++rowops;)
 
-					CAT_IF_DUMP(cout << " *" << column_i << "=[" << (int)src[0] << "]";)
+					CAT_IF_DUMP(cout << " *" << ge_column_i << "=[" << (int)src[0] << "]";)
 				}
 				else
 				{
 					GF256MemMulAdd(dest, code_value, src, _block_bytes);
 					CAT_IF_ROWOP(++heavyops;)
 
-					CAT_IF_DUMP(cout << " h" << column_i << "=[" << (int)src[0] << "*" << (int)code_value << "]";)
+					CAT_IF_DUMP(cout << " h" << ge_column_i << "=[" << (int)src[0] << "*" << (int)code_value << "]";)
 				}
 			}
 
@@ -2961,8 +3201,8 @@ void Codec::AddSubdiagonalValues()
 
 		// For each GE matrix bit in the row,
 		u64 *ge_row = _ge_matrix + _ge_pitch * ge_row_i;
-		u64 ge_mask = 1;
-		for (u16 ge_sub_i = 0; ge_sub_i < ge_limit; ++ge_sub_i, ge_mask = CAT_ROL64(ge_mask, 1))
+		u64 ge_mask = (u64)1 << (pivot_i & 63);
+		for (u16 ge_sub_i = pivot_i; ge_sub_i < ge_limit; ++ge_sub_i, ge_mask = CAT_ROL64(ge_mask, 1))
 		{
 			// If bit is non-zero,
 			if (ge_row[ge_sub_i >> 6] & ge_mask)
@@ -2973,7 +3213,7 @@ void Codec::AddSubdiagonalValues()
 				memxor(dest, src, _block_bytes);
 				CAT_IF_ROWOP(++rowops;)
 
-				CAT_IF_DUMP(cout << " " << column_i << "=[" << (int)src[0] << "]";)
+				CAT_IF_DUMP(cout << " " << ge_sub_i << "=[" << (int)src[0] << "]";)
 			}
 		}
 
@@ -3049,10 +3289,10 @@ void Codec::AddSubdiagonalValues()
 */
 
 // These are heuristic values.  Choosing better values has little effect on performance.
-#define CAT_WINDOW_THRESHOLD_4 (20 + 4)
-#define CAT_WINDOW_THRESHOLD_5 (40 + 5)
-#define CAT_WINDOW_THRESHOLD_6 (64 + 6)
-#define CAT_WINDOW_THRESHOLD_7 (128 + 7)
+#define CAT_ABOVE_WIN_THRESH_4 (20 + 4)
+#define CAT_ABOVE_WIN_THRESH_5 (40 + 5)
+#define CAT_ABOVE_WIN_THRESH_6 (64 + 6)
+#define CAT_ABOVE_WIN_THRESH_7 (128 + 7)
 
 /*
 	BackSubstituteAboveDiagonal
@@ -3074,29 +3314,29 @@ void Codec::BackSubstituteAboveDiagonal()
 
 #if defined(CAT_WINDOWED_BACKSUB)
 	// Build temporary storage space if windowing is to be used
-	if (pivot_i >= CAT_WINDOW_THRESHOLD_5)
+	if (pivot_i >= CAT_ABOVE_WIN_THRESH_5)
 	{
 		// Calculate initial window size
 		int w, next_check_i;
-		if (pivot_i >= CAT_WINDOW_THRESHOLD_7)
+		if (pivot_i >= CAT_ABOVE_WIN_THRESH_7)
 		{
 			w = 7;
-			next_check_i = CAT_WINDOW_THRESHOLD_7;
+			next_check_i = CAT_ABOVE_WIN_THRESH_7;
 		}
-		else if (pivot_i >= CAT_WINDOW_THRESHOLD_6)
+		else if (pivot_i >= CAT_ABOVE_WIN_THRESH_6)
 		{
 			w = 6;
-			next_check_i = CAT_WINDOW_THRESHOLD_6;
+			next_check_i = CAT_ABOVE_WIN_THRESH_6;
 		}
-		else if (pivot_i >= CAT_WINDOW_THRESHOLD_5)
+		else if (pivot_i >= CAT_ABOVE_WIN_THRESH_5)
 		{
 			w = 5;
-			next_check_i = CAT_WINDOW_THRESHOLD_5;
+			next_check_i = CAT_ABOVE_WIN_THRESH_5;
 		}
 		else
 		{
 			w = 4;
-			next_check_i = CAT_WINDOW_THRESHOLD_4;
+			next_check_i = CAT_ABOVE_WIN_THRESH_4;
 		}
 		u32 win_lim = 1 << w;
 
@@ -3403,20 +3643,20 @@ void Codec::BackSubstituteAboveDiagonal()
 			pivot_i -= w;
 			if (pivot_i < next_check_i)
 			{
-				if (pivot_i >= CAT_WINDOW_THRESHOLD_6)
+				if (pivot_i >= CAT_ABOVE_WIN_THRESH_6)
 				{
 					w = 6;
-					next_check_i = CAT_WINDOW_THRESHOLD_6;
+					next_check_i = CAT_ABOVE_WIN_THRESH_6;
 				}
-				else if (pivot_i >= CAT_WINDOW_THRESHOLD_5)
+				else if (pivot_i >= CAT_ABOVE_WIN_THRESH_5)
 				{
 					w = 5;
-					next_check_i = CAT_WINDOW_THRESHOLD_5;
+					next_check_i = CAT_ABOVE_WIN_THRESH_5;
 				}
-				else if (pivot_i >= CAT_WINDOW_THRESHOLD_4)
+				else if (pivot_i >= CAT_ABOVE_WIN_THRESH_4)
 				{
 					w = 4;
-					next_check_i = CAT_WINDOW_THRESHOLD_4;
+					next_check_i = CAT_ABOVE_WIN_THRESH_4;
 				}
 				else break;
 

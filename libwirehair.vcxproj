@@ -34,6 +34,9 @@
     <ClInclude Include="codec_source\Wirehair.hpp" />
     <ClInclude Include="codec_source\WirehairDetails.hpp" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="README" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{22CED8E7-00AC-423E-8438-0828A1C2895E}</ProjectGuid>
     <RootNamespace>libwirehair</RootNamespace>
