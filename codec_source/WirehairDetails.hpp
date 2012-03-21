@@ -91,7 +91,7 @@ class Codec
 	u16 _extra_count;			// Number of extra rows to allocate
 	u32 _p_seed;				// Seed for peeled rows of check matrix
 	u32 _d_seed;				// Seed for dense rows of check matrix
-	u16 _row_count;			// Number of stored rows
+	u16 _row_count;				// Number of stored rows
 	u16 _mix_count;				// Number of mix columns
 	u16 _mix_next_prime;		// Next prime number at or above dense count
 	u16 _dense_count;			// Number of added dense code rows
