@@ -302,6 +302,7 @@ static void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_c
 	with the MSVC optimizer, which turned out to be very sensitive to the
 	way that the code is written.
 */
+
 static const u8 SQQ_TABLE[] = {
 	0,  16,  22,  27,  32,  35,  39,  42,  45,  48,  50,  53,  55,  57,
 	59,  61,  64,  65,  67,  69,  71,  73,  75,  76,  78,  80,  81,  83,
@@ -374,6 +375,7 @@ u16 SquareRoot16(u16 x)
 	It also calculates the integer square root faster than cmath sqrt()
 	and uses multiplication to update the square root instead for speed.
 */
+
 const int SIEVE_TABLE_SIZE = 2*3*5*7;
 static const u8 SIEVE_TABLE[SIEVE_TABLE_SIZE] = {
 	1, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 1, 0, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0,
@@ -1443,6 +1445,7 @@ void Codec::GreedyPeeling()
 	For each mixing column,
 		Map GE column to this column.
 */
+
 void Codec::SetDeferredColumns()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetDeferredColumns ----" << endl << endl;)
@@ -1499,6 +1502,7 @@ void Codec::SetDeferredColumns()
 	marks the row's peel_column with LIST_TERM so that
 	later it will be easy to check if it was deferred.
 */
+
 void Codec::SetMixingColumnsForDeferredRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetMixingColumnsForDeferredRows ----" << endl << endl;)
@@ -1561,6 +1565,7 @@ void Codec::SetMixingColumnsForDeferredRows()
 			If row is peeled,
 				Add row block value.
 */
+
 void Codec::PeelDiagonal()
 {
 	CAT_IF_DUMP(cout << endl << "---- PeelDiagonal ----" << endl << endl;)
@@ -1692,6 +1697,7 @@ void Codec::PeelDiagonal()
 	into their final location in the GE matrix.  It also maps the GE rows
 	to the deferred rows.
 */
+
 void Codec::CopyDeferredRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- CopyDeferredRows ----" << endl << endl;)
@@ -1819,6 +1825,7 @@ void Codec::CopyDeferredRows()
 	will end up, yet.  So instead this multiplication is done again
 	in the MultiplyDenseValues() function after Triangle() succeeds.
 */
+
 void Codec::MultiplyDenseRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
@@ -1990,7 +1997,6 @@ void Codec::MultiplyDenseRows()
 	} // next column
 }
 
-
 /*
 	Important Optimization: O(1) Heavy Row Structure
 
@@ -2082,7 +2088,6 @@ void Codec::SetHeavyRows()
 			lower_right[jj] = (ii == jj) ? 1 : 0;
 }
 
-
 /*
 		One more subtle optimization.  Why not?  Depending on how the GE
 	matrix is constructed, it can be put in a roughly upper-triangular
@@ -2131,6 +2136,7 @@ void Codec::SetHeavyRows()
 	that it will be useful for keeping track of extra overhead blocks.
 	Initially it only contains non-heavy rows.
 */
+
 void Codec::SetupTriangle()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetupTriangle ----" << endl << endl;)
@@ -2584,6 +2590,7 @@ bool Codec::Triangle()
 		If the unused row is a dense row,
 			Set the GE row map entry to LIST_TERM so it can be ignored later.
 */
+
 void Codec::InitializeColumnValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- InitializeColumnValues ----" << endl << endl;)
@@ -2702,6 +2709,7 @@ void Codec::InitializeColumnValues()
 		See MultiplyDenseRows() comments for justification of the
 	design of the dense row structure.
 */
+
 void Codec::MultiplyDenseValues()
 {
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseValues ----" << endl << endl;)
@@ -3304,6 +3312,7 @@ void Codec::AddSubdiagonalValues()
 	to eliminate all of the bits in the upper triangular half,
 	completing solving for these columns.
 */
+
 void Codec::BackSubstituteAboveDiagonal()
 {
 	CAT_IF_DUMP(cout << endl << "---- BackSubstituteAboveDiagonal ----" << endl << endl;)
@@ -3767,6 +3776,7 @@ void Codec::BackSubstituteAboveDiagonal()
 	are so dense, it is actually faster in every case to just regenerate
 	the rows from scratch and throw away those results.
 */
+
 void Codec::Substitute()
 {
 	CAT_IF_DUMP(cout << endl << "---- Substitute ----" << endl << endl;)
@@ -4398,6 +4408,7 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	(3) Gaussian Elimination
 		Triangle()
 */
+
 Result Codec::SolveMatrix()
 {
 	// (1) Peeling
@@ -4475,6 +4486,7 @@ Result Codec::SolveMatrix()
 
 			Substitute()
 */
+
 void Codec::GenerateRecoveryBlocks()
 {
 	// (4) Substitution
@@ -4499,6 +4511,7 @@ void Codec::GenerateRecoveryBlocks()
 	the new rows are staged in the GE matrix and then copied into the heavy
 	matrix after they get into range of the heavy columns.
 */
+
 Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 {
 	CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
@@ -4802,6 +4815,7 @@ bool Codec::IsAllOriginalData()
 	that were from the first N blocks, and regenerating the rest.
 	This is only done during decoding.
 */
+
 Result Codec::ReconstructOutput(void *message_out)
 {
 	CAT_IF_DUMP(cout << endl << "---- ReconstructOutput ----" << endl << endl;)
@@ -5311,6 +5325,7 @@ Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 	encoder should be looking up its check matrix parameters from
 	a table, which guarantees the matrix is invertible.
 */
+
 Result Codec::EncodeFeed(const void *message_in)
 {
 	CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
@@ -5342,6 +5357,7 @@ Result Codec::EncodeFeed(const void *message_in)
 	block identifiers, it will generate a new random row and
 	sum together recovery blocks to produce the new block.
 */
+
 void Codec::Encode(u32 id, void *block_out)
 {
 	if (!block_out) return;
@@ -5463,6 +5479,7 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 	buffer.  As soon as N blocks are collected, the matrix solver
 	is attempted.  After N blocks, ResumeSolveMatrix() is used.
 */
+
 Result Codec::DecodeFeed(u32 id, const void *block_in)
 {
 	// Validate input
