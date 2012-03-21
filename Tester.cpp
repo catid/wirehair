@@ -27,7 +27,7 @@ static Clock m_clock;
 	to cause zero columns.
 
 	This means that any XOR combination of bytes to the left cannot be equal to
-	a byte to the right.  This is totally doable.
+	a byte to the right.  This is totally doable.  2^^18 or so
 
 	Finally, for the last 6 columns it is important that adding the heavy rows
 	together cannot cause zeroes.  This can be measured by simulation.

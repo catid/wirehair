@@ -810,8 +810,7 @@ static void GF256MemMulAdd(void *vdest, u8 x, const void *vsrc, int bytes)
 {
 	u8 *dest = reinterpret_cast<u8*>( vdest );
 	const u8 *src = reinterpret_cast<const u8*>( vsrc );
-
-	u16 log_x = LOG_TABLE[x];
+	int log_x = LOG_TABLE[x];
 
 	// For each block of 8 bytes,
 	while (bytes >= 8)
@@ -847,13 +846,30 @@ static void GF256MemMulAdd(void *vdest, u8 x, const void *vsrc, int bytes)
 static void GF256MemDivide(void *vdest, u8 x, int bytes)
 {
 	u8 *dest = reinterpret_cast<u8*>( vdest );
+	int log_x = 255 - LOG_TABLE[x];
+
+	// For each block of 8 bytes,
+	while (bytes >= 8)
+	{
+		dest[0] = EXP_TABLE[LOG_TABLE[dest[0]] + log_x];
+		dest[1] = EXP_TABLE[LOG_TABLE[dest[1]] + log_x];
+		dest[2] = EXP_TABLE[LOG_TABLE[dest[2]] + log_x];
+		dest[3] = EXP_TABLE[LOG_TABLE[dest[3]] + log_x];
+		dest[4] = EXP_TABLE[LOG_TABLE[dest[4]] + log_x];
+		dest[5] = EXP_TABLE[LOG_TABLE[dest[5]] + log_x];
+		dest[6] = EXP_TABLE[LOG_TABLE[dest[6]] + log_x];
+		dest[7] = EXP_TABLE[LOG_TABLE[dest[7]] + log_x];
+
+		dest += 8;
+		bytes -= 8;
+	}
 
 	// For each byte,
-	u16 log_x = 255 - LOG_TABLE[x];
-	for (int ii = 0; ii < bytes; ++ii)
+	while (bytes-- > 0)
 	{
-		// Divide source byte by x and add it to destination byte
-		dest[ii] = EXP_TABLE[LOG_TABLE[dest[ii]] + log_x];
+		// Multiply source byte by x and add it to destination byte
+		*dest = EXP_TABLE[LOG_TABLE[*dest] + log_x];
+		++dest;
 	}
 }
 
@@ -5427,7 +5443,7 @@ void Codec::Encode(u32 id, void *block_out)
 
 
 //// Decoder Mode
- 
+
 Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 {
 	Result r = ChooseMatrix(message_bytes, block_bytes);
