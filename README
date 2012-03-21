@@ -1,4 +1,4 @@
-	Wirehair FEC - Fast Forward Error Correction Codec
+	Wirehair FEC - Fast Forward Error Correction (FEC) Codec
 
 	Wirehair FEC produces a stream of error correction blocks from a
 data source.  When enough of these blocks are received, the original

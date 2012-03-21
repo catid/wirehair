@@ -27,15 +27,6 @@
 */
 
 /*
-	Future improvements:
-		SSE version of memxor() and add alignment for memory allocations
-		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
-		Multi-threading
-		C port
-		Objective-C port
-*/
-
-/*
 	Mathematical Overview:
 
 		S = Size of original data in bytes.
@@ -56,9 +47,9 @@
 			|         |       |   |   |   |   |
 			+---------+---+---+ x | R | = +---+
 			|    D    | J | 0 |   |   |   | 0 |
-			+---------+---+---+   |   |   +---+
-			|    0    | H | I |   |   |   | 0 |
-			+---------+---+---+   +---+   +---+
+			+---------+-+-+-+-+   |   |   +---+
+			|    0      | H |I|   |   |   | 0 |
+			+-----------+---+-+   +---+   +---+
 
 			A and B are Ex1 vectors of blocks.
 				A has N rows of the original data padded by H zeroes.
