@@ -47,10 +47,10 @@
     <ClInclude Include="codec_source\WirehairDetails.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="codec_source\SmallPRNG.hpp">
+    <ClInclude Include="codec_source\EndianNeutral.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="codec_source\EndianNeutral.hpp">
+    <ClInclude Include="codec_source\CatsChoice.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

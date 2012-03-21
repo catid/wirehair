@@ -27,10 +27,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Clock.hpp" />
+    <ClInclude Include="codec_source\CatsChoice.hpp" />
     <ClInclude Include="codec_source\EndianNeutral.hpp" />
     <ClInclude Include="codec_source\memxor.hpp" />
     <ClInclude Include="codec_source\Platform.hpp" />
-    <ClInclude Include="codec_source\SmallPRNG.hpp" />
     <ClInclude Include="codec_source\Wirehair.hpp" />
     <ClInclude Include="codec_source\WirehairDetails.hpp" />
   </ItemGroup>

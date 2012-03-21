@@ -27,18 +27,12 @@
 */
 
 /*
-	TODO:
-
-	(1) Fix bug in windowed back-substitution
-	(2) Finish generating dense seeds
-	(3) Generate new small peeling seeds matrix
-	(4) Generate new large peeling seeds exceptions list
-
 	Future improvements:
-		Window the add subdiagonal function too to help that function scale better
 		SSE version of memxor() and add alignment for memory allocations
 		Prefetch hints for next memxor() to help with Substitute and PeelDiagonal
 		Multi-threading
+		C port
+		Objective-C port
 */
 
 /*
@@ -874,7 +868,7 @@ static void GF256MemDivide(void *vdest, u8 x, int bytes)
 }
 
 
-//// Utility: Column iterator function
+//// Utility: Column Iterator function
 
 /*
 	This implements a very light PRNG (Weyl function) to quickly generate
@@ -948,21 +942,23 @@ static const u32 WEIGHT_DIST[] = {
 
 static u16 GeneratePeelRowWeight(u32 rv, u16 peel_column_count)
 {
-	// If peel columns get too large, then switch to zero weight-1 probability for lower defer count
+	// Unroll first 3 for speed (common case):
+
+	// If peel column count is small,
 	if (peel_column_count <= MAX_WEIGHT_1)
 	{
 		// Select probability of weight-1 rows here:
 		static const u32 P1 = (u32)((1./128) * 0xffffffff);
-
 		if (rv < P1) return 1;
 
+		// Rescale to match table values
 		rv -= P1;
 	}
 
-	// Unroll first 3 for speed (common case)
 	static const u32 P2 = WEIGHT_DIST[1];
-	static const u32 P3 = WEIGHT_DIST[2];
 	if (rv <= P2) return 2;
+
+	static const u32 P3 = WEIGHT_DIST[2];
 	if (rv <= P3) return 3;
 
 	// Find first table entry containing a number smaller than or equal to rv
@@ -4007,10 +4003,10 @@ static const u16 DENSE_SEEDS[119] = {
 	289, 2, 4322, 4097, 481, 1383, 3765, 166,
 	3286, 2605, 3101, 851, 465, 1127, 1548, 1771,
 	793, 1170, 361, 1151, 27, 159, 460, 14,
-	267, 478, 109, 70, 279, 427, /* resume from here*/ 17, 39,
+	267, 478, 109, 70, 279, 427, 17, 39,
 	20, 5, 34, 15, 22, 37, 24, 23,
 	18, 0, 30, 25, 4, 19, 9, 13,
-	16, 2, 3, 21, 4, 1, /*end here*/ 161,
+	16, 2, 3, 21, 4, 1, 161,
 	29, 127, 30, 21, 30, 24, 86, 37,
 	6, 43, 0, 48, 35, 12, 16, 1,
 	82, 94, 25, 64, 15, 27, 58, 70,
@@ -4806,7 +4802,7 @@ bool Codec::IsAllOriginalData()
 	return seen_rows >= _block_count;
 }
 
-#endif
+#endif // CAT_ALL_ORIGINAL
 
 /*
 	ReconstructOutput

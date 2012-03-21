@@ -29,7 +29,7 @@
 #ifndef CAT_WIREHAIR_DETAILS_HPP
 #define CAT_WIREHAIR_DETAILS_HPP
 
-#include "SmallPRNG.hpp"
+#include "CatsChoice.hpp"
 
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
@@ -83,7 +83,7 @@ const char *GetResultString(Result r);
 
 //// Encoder/Decoder Combined Implementation
 
-class Codec
+class CAT_EXPORT Codec
 {
 	// Parameters
 	u32 _block_bytes;			// Number of bytes in a block

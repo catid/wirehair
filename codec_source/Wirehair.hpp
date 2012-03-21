@@ -79,7 +79,7 @@ namespace wirehair {
 			...
 		}
 */
-class Encoder : protected Codec
+class CAT_EXPORT Encoder : protected Codec
 {
 public:
 	CAT_INLINE u32 BlockCount() { return Codec::BlockCount(); }
@@ -143,7 +143,7 @@ public:
 			...
 		}
 */
-class Decoder : protected Codec
+class CAT_EXPORT Decoder : protected Codec
 {
 	void *_message_out;
 
