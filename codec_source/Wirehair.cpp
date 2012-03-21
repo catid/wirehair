@@ -4751,6 +4751,47 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 	return Triangle() ? R_WIN : R_MORE_BLOCKS;
 }
 
+#if defined(CAT_ALL_ORIGINAL)
+
+/*
+	IsAllOriginalData
+
+		This function verifies that all of the original N data blocks
+	have been received.
+*/
+
+bool Codec::IsAllOriginalData()
+{
+	// Re-purpose and initialize an array to store whether or not each row id needs to be regenerated
+	u8 *copied_rows = reinterpret_cast<u8*>( _recovery_blocks );
+	memset(copied_rows, 0, _block_count);
+
+	// Copy any original message rows that were received:
+	// For each row,
+	PeelRow *row = _peel_rows;
+	u32 seen_rows = 0;
+	for (u16 row_i = 0; row_i < _row_count; ++row_i, ++row)
+	{
+		u32 id = row->id;
+
+		// If the row identifier indicates it is part of the original message data,
+		if (id < _block_count)
+		{
+			// If not already marked copied,
+			if (!copied_rows[id])
+			{
+				copied_rows[id] = 1;
+				++seen_rows;
+			}
+		}
+	}
+
+	// If all rows were seen,
+	return seen_rows >= _block_count;
+}
+
+#endif
+
 /*
 	ReconstructOutput
 
@@ -4782,15 +4823,13 @@ Result Codec::ReconstructOutput(void *message_out)
 		// If the row identifier indicates it is part of the original message data,
 		if (id < _block_count)
 		{
-			u8 *dest = output_blocks + _block_bytes * id;
-
 			CAT_IF_DUMP(cout << "Copying received row " << id << endl;)
 
-			// If not at the final block,
-			if (id != _block_count - 1)
-				memcpy(dest, src, _block_bytes);
-			else
-				memcpy(dest, src, _output_final_bytes);
+			u8 *dest = output_blocks + _block_bytes * id;
+			int bytes = (id != _block_count - 1) ? _block_bytes : _output_final_bytes;
+
+			memcpy(dest, src, bytes);
+
 			copied_rows[id] = 1;
 		}
 	}
@@ -5403,6 +5442,9 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 		_output_final_bytes = partial_final_bytes;
 		_input_final_bytes = _block_bytes;
 		_extra_count = CAT_MAX_EXTRA_ROWS;
+#if defined(CAT_ALL_ORIGINAL)
+		_all_original = true;
+#endif
 
 		if (!AllocateInput() || !AllocateWorkspace())
 			return R_OUT_OF_MEMORY;
@@ -5428,6 +5470,12 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 	u16 row_i = _row_count;
 	if (row_i < _block_count)
 	{
+#if defined(CAT_ALL_ORIGINAL)
+		// If original data,
+		if (id >= _block_count)
+			_all_original = false;
+#endif
+
 		// If opportunistic peeling did not fail,
 		if (OpportunisticPeeling(row_i, id))
 		{
@@ -5437,8 +5485,16 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 			// If just acquired N blocks,
 			if (++_row_count == _block_count)
 			{
+#if defined(CAT_ALL_ORIGINAL)
+				// If all original data,
+				if (_all_original && IsAllOriginalData())
+					return R_WIN;
+#endif
+
 				// Attempt to solve the matrix and generate recovery blocks
-				return SolveMatrix();
+				Result r = SolveMatrix();
+				if (!r) Codec::GenerateRecoveryBlocks();
+				return r;
 			}
 		} // end if opportunistic peeling succeeded
 
@@ -5446,5 +5502,7 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 	}
 
 	// Resume GE from this row
-	return ResumeSolveMatrix(id, block_in);
+	Result r = ResumeSolveMatrix(id, block_in);
+	if (!r) Codec::GenerateRecoveryBlocks();
+	return r;
 }

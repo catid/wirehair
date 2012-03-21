@@ -165,11 +165,7 @@ public:
 	CAT_INLINE Result Decode(u32 id, const void *block_in)
 	{
 		Result r = Codec::DecodeFeed(id, block_in);
-		if (!r)
-		{
-			Codec::GenerateRecoveryBlocks();
-			r = Codec::ReconstructOutput(_message_out);
-		}
+		if (!r) r = Codec::ReconstructOutput(_message_out);
 		return r; // Return R_WIN when message has been reconstructed
 	}
 };

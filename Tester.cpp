@@ -8,6 +8,31 @@ using namespace std;
 
 static Clock m_clock;
 
+/*
+	Process for selecting better heavy seeds:
+
+	12x18 binary rows above -- too many bits to try all of them (216 bits)
+	6x18 heavy rows below
+
+	we want to choose a single set of heavy row values to maximize the
+	likelihood that the matrix is invertible for all binary rows.
+
+	If missing more than 6 columns it is not possible, so ignore that case.
+
+	For now assume that binary rows are full rank:
+
+	Heavy rows are eliminated left to right by XORing the left-most byte across.
+
+	We want to reduce or eliminate the chance that doing this selectively is able
+	to cause zero columns.
+
+	This means that any XOR combination of bytes to the left cannot be equal to
+	a byte to the right.  This is totally doable.
+
+	Finally, for the last 6 columns it is important that adding the heavy rows
+	together cannot cause zeroes.  This can be measured by simulation.
+*/
+
 void FindBadDenseSeeds()
 {
 	int block_bytes = 1;

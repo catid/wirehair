@@ -49,6 +49,7 @@
 #define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
+#define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
 
 // Heavy rows:
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
@@ -100,6 +101,9 @@ class Codec
 	u32 _input_final_bytes;		// Number of bytes in final block of input
 	u32 _output_final_bytes;	// Number of bytes in final block of output
 	u32 _input_allocated;		// Number of bytes allocated for input, or 0 if referenced
+#if defined(CAT_ALL_ORIGINAL)
+	bool _all_original;			// Boolean: Only seen original data block identifiers
+#endif
 
 	// Peeling state
 	struct PeelRow;
@@ -223,6 +227,11 @@ class Codec
 
 	// Resume solver with a new block
 	Result ResumeSolveMatrix(u32 id, const void *block);
+
+#if defined(CAT_ALL_ORIGINAL)
+	// Verify that all data is from the original N, meaning no computations are needed
+	bool IsAllOriginalData();
+#endif
 
 
 	//// Memory Management
