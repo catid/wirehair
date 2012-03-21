@@ -1,47 +1,57 @@
 	Wirehair FEC - Fast Forward Error Correction Codec
 
-		Wirehair FEC produces a stream of error correction blocks from a
-	data source.  When enough of these blocks are received, the original
-	data can be recovered.
+	Wirehair FEC produces a stream of error correction blocks from a
+data source.  When enough of these blocks are received, the original
+data can be recovered.
 
-		Wirehair is an FEC codec used to improve reliability of data sent
-	over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
-	The data to transmit over the BEC is encoded into equal-sized blocks.
-	When enough blocks are received at the other end of the channel, then
-	the original data can be recovered.
+	Wirehair is an FEC codec used to improve reliability of data sent
+over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
+The data to transmit over the BEC is encoded into equal-sized blocks.
+When enough blocks are received at the other end of the channel, then
+the original data can be recovered.
 
-		How many additional blocks are needed is random, though the number
-	of additional blocks is low and does not vary based on the size of the
-	data.  Typically one additional block is needed just 3% of the time.
-	And two blocks are needed 0.09% of the time.  This may seem appalling
-	to you, but think of it this way: The channel is already lossy, so this
-	is just like adding 3/N percent loss - a very very small amount of
-	additional loss (e.g. 0.003%) - to the channel, down in the noise.
+	How many additional blocks are needed is random, though the number
+of additional blocks is low and does not vary based on the size of the
+data.  Typically one additional block is needed just 3% of the time.
+And two blocks are needed 0.09% of the time.  This may seem appalling
+to you, but think of it this way: The channel is already lossy, so this
+is just like adding 3/N percent loss - a very very small amount of
+additional loss (e.g. 0.003%) - to the channel, down in the noise.
 
-		Wirehair is released under the BSD license, which means that I ask
-	only that if you use my software that in the binary distribution of your
-	software you include the copyright notice in WIREHAIR.LICENSE and maybe
-	it would be nice to say thank you in an Email. =)
+	Wirehair is released under the BSD license, which means that I ask
+only that if you use my software that in the binary distribution of your
+software you include the copyright notice in WIREHAIR.LICENSE and maybe
+it would be nice to say thank you in an Email. =)
 
 -Christopher A Taylor (chris@slycog.com) http://slycog.com
 
 
-News Update: 3/15/2012
-It's done!
+News Update: 3/21/2012
+
++ Added more optimizations and code cleanup.
+
+
+Priority improvements:
+
++ Choose a really good structured heavy matrix rather than a random one.
++ Fix any seeds that have >3% overhead.
++ C and Objective-C ports.
+
 
 Further improvements on the horizon:
-+ Sweep across all the values of N and fix any broken seeds.
-+ Also optimize GE subdiagonal evaluation with a window for larger N.
+
 + SIMD memxor() and prefetch is being worked on by Nate Tinkler.
 + Multi-threading is being worked on by Brandon McKune.
 + Java port is being worked on by Steve Sheppard.
-+ C and Objective-C ports are being worked on by me.
 + C# port?
 + R port?
+
 
 Benchmarks:
 
 Test software compiled in 64-bit Release mode in MSVC.
+Message block size set to 1500 bytes, total message size varies.
+Simulated packet loss rate is 50%.
 Running on my laptop with a Core i7 @ 2.67 GHz.
 
 >> OKAY! N=64(0.096 MB) encoder.BeginEncode in 445.777 usec, 215.355 MB/s
