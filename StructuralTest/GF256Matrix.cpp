@@ -27,7 +27,7 @@
 */
 
 #include "GF256Matrix.hpp"
-#include "../codec_source/SmallPRNG.hpp"
+#include "../codec_source/CatsChoice.hpp"
 using namespace cat;
 using namespace wirehair;
 

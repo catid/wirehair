@@ -1,6 +1,6 @@
 #include "GF2Matrix.hpp"
 #include "GF256Matrix.hpp"
-#include "../codec_source/SmallPRNG.hpp"
+#include "../codec_source/CatsChoice.hpp"
 #include "../Clock.hpp"
 using namespace cat;
 
