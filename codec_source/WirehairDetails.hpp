@@ -156,6 +156,9 @@ class CAT_EXPORT Codec
 	// Peel a row using the given column
 	void Peel(u16 row_i, PeelRow *row, u16 column_i);
 
+	// If a peel reference list overflows at fail_column_i, this function will unreference the row for previous columns
+	void FixPeelFailure(PeelRow *row, u16 fail_column_i);
+
 	// Walk forward through rows and solve as many as possible before deferring any
 	bool OpportunisticPeeling(u32 row_i, u32 id);
 

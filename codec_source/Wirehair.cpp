@@ -1057,24 +1057,34 @@ struct Codec::PeelRefs
 //// (1) Peeling:
 
 /*
-	Peel() and PeelAvalanche() are split up into two functions because I found
-	that the PeelAvalanche() function can be reused later during GreedyPeeling().
+	Until N rows are received, the peeling algorithm is executed:
 
-		Until N rows are received, the peeling algorithm is executed:
+	Columns have 3 states:
 
-		Columns have 3 states:
+	(1) Peeled - Solved by a row during peeling process.
+	(2) Deferred - Will be solved by a row during Gaussian Elimination.
+	(3) Unmarked - Still deciding.
 
-		(1) Peeled - Solved by a row during peeling process.
-		(2) Deferred - Will be solved by a row during Gaussian Elimination.
-		(3) Unmarked - Still deciding.
-
-		Initially all columns are unmarked.
+	Initially all columns are unmarked.
 
 		As a row comes in, the count of columns that are Unmarked is calculated.
 	If that count is 1, then the column is marked as Peeled and is solved by
 	the received row.  Peeling then goes through all other rows that reference
 	that peeled column, reducing their count by 1, potentially causing other
 	columns to be marked as Peeled.  This "peeling avalanche" is desired.
+*/
+
+/*
+	OpportunisticPeeling
+
+		This function accepts a new row from the codec input and
+	immediately attempts to solve a column opportunistically using
+	the graph-based peeling decoding process.
+
+		The row value is assumed to already be present in the
+	_input_blocks data, but this function does take care of
+	initializing everything else for a new row, including the
+	row ID number and the peeling column generator parameters.
 */
 
 bool Codec::OpportunisticPeeling(u32 row_i, u32 id)
@@ -1103,6 +1113,7 @@ bool Codec::OpportunisticPeeling(u32 row_i, u32 id)
 		if (refs->row_count >= CAT_REF_LIST_MAX)
 		{
 			CAT_IF_DUMP(cout << "OpportunisticPeeling: Failure!  Ran out of space for row references.  CAT_REF_LIST_MAX must be increased!" << endl;)
+			FixPeelFailure(row, column_i);
 			return false;
 		}
 		refs->rows[refs->row_count++] = row_i;
@@ -1146,6 +1157,51 @@ bool Codec::OpportunisticPeeling(u32 row_i, u32 id)
 
 	return true;
 }
+
+/*
+	FixPeelFailure
+
+		This function unreferences previous columns for a row where,
+	in one of the columns, the reference list overflowed.  This avoids
+	potential data corruption or more severe problems in case of
+	unusually distributed peeling matrices.
+*/
+
+void Codec::FixPeelFailure(PeelRow *row, u16 fail_column_i)
+{
+	CAT_IF_DUMP(cout << "!!Fixing Peel Failure!! Unreferencing columns, ending at " << fail_column_i << " :";)
+
+	// Iterate columns in peeling matrix
+	u16 weight = row->peel_weight;
+	u16 column_i = row->peel_x0;
+	u16 a = row->peel_a;
+	while (column_i != fail_column_i)
+	{
+		CAT_IF_DUMP(cout << " " << column_i;)
+
+		PeelRefs *refs = &_peel_col_refs[column_i];
+
+		// Subtract off row count - Invalidates row number that was written earlier
+		refs->row_count--;
+
+		// NOTE: Does not need to validate weight here since fail_column_i is guaranteed to come around
+
+		IterateNextColumn(column_i, _block_count, _block_next_prime, a);
+	}
+	CAT_IF_DUMP(cout << endl;)
+}
+
+/*
+	PeelAvalanche
+
+		This function is called after a column is solved by a row during
+	peeling.  It attempts to find other rows that reference this column
+	and resumes opportunistic peeling in an avalanche of solutions.
+
+		OpportunisticPeeling() and PeelAvalanche() are split up into two
+	functions because I found that the PeelAvalanche() function can be
+	reused later during GreedyPeeling().
+*/
 
 void Codec::PeelAvalanche(u16 column_i)
 {
@@ -1237,6 +1293,14 @@ void Codec::PeelAvalanche(u16 column_i)
 		}
 	}
 }
+
+/*
+	Peel
+
+		This function is called exclusively by OpportunisticPeeling()
+	to take care of marking columns solved when a row is able to solve
+	a column during the peeling process.
+*/
 
 void Codec::Peel(u16 row_i, PeelRow *row, u16 column_i)
 {
