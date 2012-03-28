@@ -12,11 +12,11 @@ the original data can be recovered.
 
 	How many additional blocks are needed is random, though the number
 of additional blocks is low and does not vary based on the size of the
-data.  Typically one additional block is needed just 3% of the time.
-And two blocks are needed 0.09% of the time.  This may seem appalling
-to you, but think of it this way: The channel is already lossy, so this
-is just like adding 3/N percent loss - a very very small amount of
-additional loss (e.g. 0.003%) - to the channel, down in the noise.
+data.  Typical overhead is between 0.015 and 0.03 additional blocks.
+This may seem appalling to you, but think of it this way: The channel
+is already lossy, so this is just like adding < 3% / N loss - a very
+very small amount of additional loss (e.g. 0.003%) - to the channel,
+down in the noise.
 
 	Wirehair is released under the BSD license, which means that I ask
 only that if you use my software that in the binary distribution of your
@@ -26,15 +26,12 @@ it would be nice to say thank you in an Email. :}
 -Christopher A Taylor (chris@slycog.com) http://slycog.com
 
 
-News Update: 3/21/2012
-
-+ Added more optimizations and code cleanup.
+News Update: 3/28/2012
 
 
-Priority improvements:
+TODO:
 
-+ Choose a really good structured heavy matrix rather than a random one.
-+ Fix any seeds that have >3% overhead.
++ Fix any seeds that have >3% overhead by extending the exception list.
 + C and Objective-C ports.
 + Optimizations for very large files > 1GB.
 
@@ -44,8 +41,7 @@ Further improvements on the horizon:
 + SIMD memxor() and prefetch is being worked on by Nate Tinkler.
 + Multi-threading is being worked on by Brandon McKune.
 + Java port is being worked on by Steve Sheppard.
-+ C# port?
-+ R port?
++ C# / R port
 
 
 Network File Transfer Benchmarks:
@@ -80,16 +76,16 @@ N=9064 Decode in 76243.7 usec, 178.323 MB/s.  Avg overhead = 0.022 (33 bytes)
 2.0 GB Large File Benchmarks:
 
 Message block size set at ~2 MB.  Simulated packet loss rate is 50%.
-Running on a desktop with an Intel Xeon @ 3.07 GHz:
+Running on a desktop with an Intel processor @ 3.07 GHz:
 
->> OKAY! N=1024(2000 MB) encoder.BeginEncode in 7.07867e+006 usec, 282.539 MB/s
->> OKAY! N=1024 decoder.Decode in 9.18552e+006 usec, 217.734 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.14699e+006 usec, 245.49 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.02977e+006 usec, 249.073 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 7.75099e+006 usec, 258.032 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.09046e+006 usec, 247.205 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.15586e+006 usec, 245.223 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.32388e+006 usec, 240.273 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.21208e+006 usec, 243.544 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.22731e+006 usec, 243.093 MB/s after 0 extra blocks.
->> OKAY! N=1024 decoder.Decode in 8.28486e+006 usec, 241.404 MB/s after 0 extra blocks.
+>> OKAY! N=1024(2000 MB) encoder.BeginEncode in 7.079e+006 usec, 282.539 MB/s
+>> OKAY! N=1024 decoder.Decode in 9.18e+006 usec, 217.734 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.14e+006 usec, 245.49 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.03e+006 usec, 249.073 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 7.75+006 usec, 258.032 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.09e+006 usec, 247.205 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.15e+006 usec, 245.223 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.32e+006 usec, 240.273 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.21e+006 usec, 243.544 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.23e+006 usec, 243.093 MB/s after 0 extra.
+>> OKAY! N=1024 decoder.Decode in 8.28e+006 usec, 241.404 MB/s after 0 extra.
