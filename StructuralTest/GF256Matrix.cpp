@@ -27,7 +27,7 @@
 */
 
 #include "GF256Matrix.hpp"
-#include "../codec_source/CatsChoice.hpp"
+#include "../codec_source/AbyssinianPRNG.hpp"
 using namespace cat;
 using namespace wirehair;
 
@@ -162,7 +162,7 @@ void GF256Matrix::Identity()
 
 void GF256Matrix::Fill()
 {
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(_seed);
 
 	u8 *row = _matrix;

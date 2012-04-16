@@ -26,8 +26,8 @@
 	POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef CAT_CHOICE_HPP
-#define CAT_CHOICE_HPP
+#ifndef CAT_ABYSSINIAN_PRNG_HPP
+#define CAT_ABYSSINIAN_PRNG_HPP
 
 #include "Platform.hpp"
 
@@ -45,7 +45,7 @@ namespace cat {
 	relationships between the input seeds and the low bits of
 	the first few outputs.
 */
-class CAT_EXPORT CatsChoice
+class CAT_EXPORT Abyssinian
 {
 	u64 _x, _y;
 
@@ -97,4 +97,4 @@ public:
 
 } // namespace cat
 
-#endif // CAT_CHOICE_HPP
+#endif // CAT_ABYSSINIAN_PRNG_HPP

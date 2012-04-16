@@ -27,7 +27,7 @@
 */
 
 #include "GF2Matrix.hpp"
-#include "../codec_source/CatsChoice.hpp"
+#include "../codec_source/AbyssinianPRNG.hpp"
 using namespace cat;
 using namespace wirehair;
 
@@ -80,7 +80,7 @@ void GF2Matrix::Identity()
 
 void GF2Matrix::Fill()
 {
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(_seed);
 
 	u64 *row = _matrix;

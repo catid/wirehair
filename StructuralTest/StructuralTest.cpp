@@ -1,6 +1,6 @@
 #include "GF2Matrix.hpp"
 #include "GF256Matrix.hpp"
-#include "../codec_source/CatsChoice.hpp"
+#include "../codec_source/AbyssinianPRNG.hpp"
 #include "../Clock.hpp"
 using namespace cat;
 
@@ -18,7 +18,7 @@ using namespace std;
 
 //#define CAT_SHUFFLE_HALF
 
-void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
+void ShuffleDeck16(Abyssinian &prng, u16 *deck, u32 count)
 {
 	deck[0] = 0;
 
@@ -109,7 +109,7 @@ void FillMatrixColumnShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 	u64 *matrix = m.GetFront();
 	u32 temp_col1[100];
 
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(seed);
 
 	u16 cols1[1000], bits1[1000];
@@ -189,7 +189,7 @@ void FillMatrixColumnShuffleCode(wirehair::GF2Matrix &m, u32 seed)
 	}
 }
 
-void FillMatrixShuffleCode(wirehair::GF2Matrix &m, CatsChoice &prng)
+void FillMatrixShuffleCode(wirehair::GF2Matrix &m, Abyssinian &prng)
 {
 	int check_count = m.Size();
 	int pitch = m.GetPitch();
@@ -280,7 +280,7 @@ void FillMatrixShuffleCodeRand(wirehair::GF2Matrix &m, u32 seed)
 	u64 *matrix = m.GetFront();
 	u64 temp_row1[100];
 
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(seed);
 
 	u16 rows1[1000], bits1[1000];
@@ -563,7 +563,7 @@ void TestMultDiv()
 // Returns rate of invertibility
 double RandomColumnsInvertibleRate(wirehair::GF2Matrix *matrices, int matrix_count, int column_count)
 {
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(0);
 
 	int pitch = matrices[0].GetPitch();
@@ -650,7 +650,7 @@ void TestInvertibleRate()
 			if (time_now - start_time >= 30 * 60)
 				break;
 
-			CatsChoice prng;
+			Abyssinian prng;
 			prng.Initialize(seed);
 
 			//cout << "For seed " << seed << ":" << endl;

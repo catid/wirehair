@@ -201,7 +201,7 @@
 */
 
 #include "Wirehair.hpp"
-#include "memxor.hpp"
+#include "MemXOR.hpp"
 #if defined(CAT_HEAVY_WIN_MULT)
 #include "EndianNeutral.hpp"
 #endif
@@ -279,7 +279,7 @@ static u16 GeneratePeelRowWeight(u32 rv, u16 peel_column_count);
 static bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n);
 
 // Deck Shuffling function
-static void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count);
+static void ShuffleDeck16(Abyssinian &prng, u16 *deck, u32 count);
 
 // Peel Matrix Row Generator function
 static void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_column_count,
@@ -495,7 +495,7 @@ static bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n)
 	if (n < 512)
 	{
 		// Pull a random matrix out of the lookup table
-		CatsChoice prng;
+		Abyssinian prng;
 		prng.Initialize(INVERTIBLE_MATRIX_SEEDS[n]);
 
 		// If shift is friendly,
@@ -601,7 +601,7 @@ static bool AddInvertibleGF2Matrix(u64 *matrix, int offset, int pitch, int n)
 	The deck will contain elements with values between 0 and count - 1.
 */
 
-static void ShuffleDeck16(CatsChoice &prng, u16 *deck, u32 count)
+static void ShuffleDeck16(Abyssinian &prng, u16 *deck, u32 count)
 {
 	deck[0] = 0;
 
@@ -967,7 +967,7 @@ static void GeneratePeelRow(u32 id, u32 p_seed, u16 peel_column_count, u16 mix_c
 	u16 &peel_weight, u16 &peel_a, u16 &peel_x0, u16 &mix_a, u16 &mix_x0)
 {
 	// Initialize PRNG
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(id, p_seed);
 
 	// Generate peeling matrix row weight
@@ -1739,7 +1739,7 @@ void Codec::PeelDiagonal()
 					else
 					{
 						memxor_set(temp_block_dest, temp_block_src, block_src, _input_final_bytes);
-						memcpy(temp_block_dest + _input_final_bytes, temp_block_src, _block_bytes - _input_final_bytes);
+						memcpy(temp_block_dest + _input_final_bytes, temp_block_src + _input_final_bytes, _block_bytes - _input_final_bytes);
 					}
 
 					ref_row->is_copied = 1;
@@ -1895,7 +1895,7 @@ void Codec::MultiplyDenseRows()
 	CAT_IF_DUMP(cout << endl << "---- MultiplyDenseRows ----" << endl << endl;)
 
 	// Initialize PRNG
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(_d_seed);
 
 	// For each block of columns,
@@ -2128,7 +2128,7 @@ void Codec::SetHeavyRows()
 {
 	CAT_IF_DUMP(cout << endl << "---- SetHeavyRows ----" << endl << endl;)
 
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(_p_seed);
 
 	// Skip extra rows
@@ -2781,7 +2781,7 @@ void Codec::MultiplyDenseValues()
 	CAT_IF_ROWOP(u32 rowops = 0;)
 
 	// Initialize PRNG
-	CatsChoice prng;
+	Abyssinian prng;
 	prng.Initialize(_d_seed);
 
 	// For each block of columns,
@@ -3871,7 +3871,7 @@ void Codec::Substitute()
 		else
 		{
 			memxor_set(dest, src, input_src, _input_final_bytes);
-			memcpy(dest + _input_final_bytes, src, _block_bytes - _input_final_bytes);
+			memcpy(dest + _input_final_bytes, src + _input_final_bytes, _block_bytes - _input_final_bytes);
 		}
 		CAT_IF_ROWOP(++rowops;)
 
@@ -3942,7 +3942,7 @@ void Codec::Substitute()
 
 /*
 	Each element of the DENSE_SEEDS table represents the best
-	CatsChoice PRNG seed to use to generate a Shuffle-2 Code
+	Abyssinian PRNG seed to use to generate a Shuffle-2 Code
 	for the dense rows that has "good" properties.
 
 	Element 0 is for D = 14,
@@ -4638,7 +4638,13 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 
 	// Copy new block to input blocks
 	u8 *block_store_dest = _input_blocks + _block_bytes * row_i;
-	memcpy(block_store_dest, block, _block_bytes);
+	if (id != _block_count - 1)
+		memcpy(block_store_dest, block, _block_bytes);
+	else
+	{
+		memcpy(block_store_dest, block, _output_final_bytes);
+		memset(block_store_dest + _output_final_bytes, 0, _block_bytes - _output_final_bytes);
+	}
 
 	// Generate new GE row
 	u64 *ge_new_row = _ge_matrix + _ge_pitch * ge_row_i;
@@ -4908,7 +4914,6 @@ Result Codec::ReconstructOutput(void *message_out)
 
 			u8 *dest = output_blocks + _block_bytes * id;
 			int bytes = (id != _block_count - 1) ? _block_bytes : _output_final_bytes;
-
 			memcpy(dest, src, bytes);
 
 			copied_rows[id] = 1;
@@ -4920,6 +4925,7 @@ Result Codec::ReconstructOutput(void *message_out)
 
 	// For each row,
 	u8 *dest = output_blocks;
+	u32 block_bytes = _block_bytes;
 #if defined(CAT_COPY_FIRST_N)
 	u8 *copied_row = copied_rows;
 	for (u16 row_i = 0; row_i < _block_count; ++row_i, dest += _block_bytes, ++copied_row)
@@ -4931,6 +4937,9 @@ Result Codec::ReconstructOutput(void *message_out)
 	for (u16 row_i = 0; row_i < _block_count; ++row_i, dest += _block_bytes)
 	{
 #endif
+		// For last row, use final byte count
+		if (row_i == _block_count - 1)
+			block_bytes = _output_final_bytes;
 
 		CAT_IF_DUMP(cout << "Regenerating row " << row_i << ":";)
 
@@ -4953,7 +4962,7 @@ Result Codec::ReconstructOutput(void *message_out)
 			CAT_IF_DUMP(cout << " " << peel_x;)
 
 			// Combine first two columns into output buffer (faster than memcpy + memxor)
-			memxor_set(dest, first, _recovery_blocks + _block_bytes * peel_x, _block_bytes);
+			memxor_set(dest, first, _recovery_blocks + _block_bytes * peel_x, block_bytes);
 
 			// For each remaining peeler column,
 			while (--peel_weight > 0)
@@ -4963,16 +4972,16 @@ Result Codec::ReconstructOutput(void *message_out)
 				CAT_IF_DUMP(cout << " " << peel_x;)
 
 				// Mix in each column
-				memxor(dest, _recovery_blocks + _block_bytes * peel_x, _block_bytes);
+				memxor(dest, _recovery_blocks + _block_bytes * peel_x, block_bytes);
 			}
 
 			// Mix first mixer block in directly
-			memxor(dest, _recovery_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+			memxor(dest, _recovery_blocks + _block_bytes * (_block_count + mix_x), block_bytes);
 		}
 		else
 		{
 			// Mix first with first mixer block (faster than memcpy + memxor)
-			memxor_set(dest, first, _recovery_blocks + _block_bytes * (_block_count + mix_x), _block_bytes);
+			memxor_set(dest, first, _recovery_blocks + _block_bytes * (_block_count + mix_x), block_bytes);
 		}
 
 		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
@@ -4986,7 +4995,7 @@ Result Codec::ReconstructOutput(void *message_out)
 		const u8 *mix1_src = _recovery_blocks + _block_bytes * (_block_count + mix_x);
 		CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
-		memxor_add(dest, mix0_src, mix1_src, _block_bytes);
+		memxor_add(dest, mix0_src, mix1_src, block_bytes);
 
 		CAT_IF_DUMP(cout << endl;)
 	} // next row
@@ -5367,7 +5376,8 @@ Result Codec::InitializeEncoder(int message_bytes, int block_bytes)
 		if (partial_final_bytes <= 0) partial_final_bytes = _block_bytes;
 
 		// Encoder-specific
-		_input_final_bytes = partial_final_bytes;                                               
+		_input_final_bytes = partial_final_bytes;
+		_output_final_bytes = _block_bytes;
 		_extra_count = 0;
 
 		if (!AllocateWorkspace())
@@ -5422,9 +5432,9 @@ Result Codec::EncodeFeed(const void *message_in)
 	sum together recovery blocks to produce the new block.
 */
 
-void Codec::Encode(u32 id, void *block_out)
+u32 Codec::Encode(u32 id, void *block_out)
 {
-	if (!block_out) return;
+	if (!block_out) return 0;
 	u8 *block = reinterpret_cast<u8*>( block_out );
 
 #if defined(CAT_COPY_FIRST_N)
@@ -5433,21 +5443,16 @@ void Codec::Encode(u32 id, void *block_out)
 	{
 		// Until the final block in message blocks,
 		const u8 *src = _input_blocks + _block_bytes * id;
-		if ((int)id != _block_count - 1)
-		{
-			// Copy from the original file data
-			memcpy(block, src, _block_bytes);
-		}
-		else
+		if ((int)id == _block_count - 1)
 		{
 			// For the final block, copy partial block
 			memcpy(block, src, _input_final_bytes);
-
-			// Pad with zeroes
-			memset(block + _input_final_bytes, 0, _block_bytes - _input_final_bytes);
+			return _input_final_bytes;
 		}
 
-		return;
+		// Copy from the original file data
+		memcpy(block, src, _block_bytes);
+		return _block_bytes;
 	}
 #endif // CAT_COPY_FIRST_N
 
@@ -5506,6 +5511,8 @@ void Codec::Encode(u32 id, void *block_out)
 	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
 
 	CAT_IF_DUMP(cout << endl;)
+
+	return _block_bytes;
 }
 
 
@@ -5523,7 +5530,11 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 		// Decoder-specific
 		_row_count = 0;
 		_output_final_bytes = partial_final_bytes;
+
+		// Hack: Prevents row-based ids from causing partial copies when they happen to be the last block id
+		// This is only an issue because the shared codec source code happens to be built with more encoder-like semantics
 		_input_final_bytes = _block_bytes;
+
 		_extra_count = CAT_MAX_EXTRA_ROWS;
 #if defined(CAT_ALL_ORIGINAL)
 		_all_original = true;
@@ -5563,8 +5574,24 @@ Result Codec::DecodeFeed(u32 id, const void *block_in)
 		// If opportunistic peeling did not fail,
 		if (OpportunisticPeeling(row_i, id))
 		{
-			// Copy the new row data into the input block area
-			memcpy(_input_blocks + _block_bytes * row_i, block_in, _block_bytes);
+			u8 *block_store = _input_blocks + _block_bytes * row_i;
+
+			// If this is the last block id,
+			if (id == _block_count - 1)
+			{
+				u32 final_bytes = _output_final_bytes;
+
+				// Copy the new row data into the input block area
+				memcpy(block_store, block_in, final_bytes);
+
+				// Pad with zeroes
+				memset(block_store + final_bytes, 0, _block_bytes - final_bytes);
+			}
+			else
+			{
+				// Copy the new row data into the input block area
+				memcpy(block_store, block_in, _block_bytes);
+			}
 
 			// If just acquired N blocks,
 			if (++_row_count == _block_count)

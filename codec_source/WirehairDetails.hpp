@@ -29,7 +29,7 @@
 #ifndef CAT_WIREHAIR_DETAILS_HPP
 #define CAT_WIREHAIR_DETAILS_HPP
 
-#include "CatsChoice.hpp"
+#include "AbyssinianPRNG.hpp"
 
 // Debugging:
 //#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
@@ -269,8 +269,8 @@ public:
 	// Feed encoder a message
 	Result EncodeFeed(const void *message_in);
 
-	// Encode a block
-	void Encode(u32 id, void *block_out);
+	// Encode a block, returning number of bytes written
+	u32 Encode(u32 id, void *block_out);
 
 
 	//// Decoder Mode

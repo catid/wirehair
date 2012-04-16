@@ -73,7 +73,7 @@ int main()
 	{
 		int block_count = ii;
 		int block_bytes = 1500;
-		int message_bytes = block_bytes * block_count;
+		int message_bytes = block_bytes * block_count + 1280;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
 		u8 *block = new u8[block_bytes];
@@ -103,11 +103,11 @@ int main()
 			//cin.get();
 		}
 
-		CatsChoice prng;
+		Abyssinian prng;
 		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 50000;
+		u32 drop_seed = 50002;
 		double time_sum = 0;
 		const int trials = 1000;
 		for (int jj = 0; jj < trials; ++jj)
@@ -152,7 +152,11 @@ int main()
 						{
 							cout << "FAAAAAIL! Seed = " << drop_seed << endl;
 
-							//for (int ii = 0; ii < message_bytes; ++ii) cout << (int)message_out[ii] << endl;
+							for (int ii = 0; ii < message_bytes; ++ii)
+							{
+								if (message_out[ii] != message[ii])
+									cout << ii << " : " << (int)message_out[ii] << endl;
+							}
 
 							cin.get();
 						}

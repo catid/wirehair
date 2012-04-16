@@ -96,7 +96,8 @@ public:
 	// Generate an encoded block
 	// id : Block number, id < BlockCount are same as original message
 	// block_out : Has block_bytes
-	CAT_INLINE void Encode(u32 id, void *block_out)
+	// Returns number of bytes written
+	CAT_INLINE u32 Encode(u32 id, void *block_out)
 	{
 		return Codec::Encode(id, block_out);
 	}
