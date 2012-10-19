@@ -73,7 +73,7 @@ int main()
 	{
 		int block_count = ii;
 		int block_bytes = 1500;
-		int message_bytes = block_bytes * block_count + 1280;
+		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
 		u8 *block = new u8[block_bytes];
