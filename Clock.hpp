@@ -50,7 +50,7 @@ public:
 	void OnFinalize();
 
 	static u32 sec();			// Timestamp in seconds
-    static u32 msec_fast();		// Timestamp in milliseconds, less accurate than msec() but faster
+    u32 msec_fast();			// Timestamp in milliseconds, less accurate than msec() but faster
     u32 msec();					// Timestamp in milliseconds
 	double usec();				// Timestamp in microseconds
 	static u32 cycles();		// Timestamp in cycles
