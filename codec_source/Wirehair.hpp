@@ -59,8 +59,6 @@ namespace wirehair {
 		u8 *message = new u8[message_bytes];
 		u8 *block = new u8[block_bytes];
 
-		g_d_seed = 5; g_p_seed = 1; // ONLY NEEDED FOR NOW - STILL WORKING ON THIS
-
 		wirehair::Encoder encoder;
 		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
 		if (r)
@@ -112,8 +110,6 @@ public:
 		int message_bytes = 1500000, block_bytes = 1500;
 		u8 *message_out = new u8[message_bytes];
 		u8 *block = new u8[block_bytes];
-
-		g_d_seed = 5; g_p_seed = 1; // ONLY NEEDED FOR NOW - STILL WORKING ON THIS
 
 		wirehair::Decoder decoder;
 		wirehair::Result r = decoder.BeginDecode(message_out, message_bytes, block_bytes);

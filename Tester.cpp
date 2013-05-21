@@ -67,10 +67,10 @@ int main()
 
 	//FindBadDenseSeeds();
 
-	for (int ii = 64; ii <= 64000; ii += 1000)
+	for (int ii = 43; ii <= 64000; ii += 1000)
 	{
 		int block_count = ii;
-		int block_bytes = 1500;
+		int block_bytes = 1300;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
