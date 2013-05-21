@@ -86,57 +86,57 @@ const char *GetResultString(Result r);
 class CAT_EXPORT Codec
 {
 	// Parameters
-	u32 _block_bytes;			// Number of bytes in a block
-	u16 _block_count;			// Number of blocks in the message
-	u16 _block_next_prime;		// Next prime number at or above block count
-	u16 _extra_count;			// Number of extra rows to allocate
-	u32 _p_seed;				// Seed for peeled rows of check matrix
-	u32 _d_seed;				// Seed for dense rows of check matrix
-	u16 _row_count;				// Number of stored rows
-	u16 _mix_count;				// Number of mix columns
-	u16 _mix_next_prime;		// Next prime number at or above dense count
-	u16 _dense_count;			// Number of added dense code rows
-	u8 *_recovery_blocks;		// Recovery blocks
-	u8 *_input_blocks;			// Input message blocks
-	u32 _input_final_bytes;		// Number of bytes in final block of input
-	u32 _output_final_bytes;	// Number of bytes in final block of output
-	u32 _input_allocated;		// Number of bytes allocated for input, or 0 if referenced
+	u32 _block_bytes;					// Number of bytes in a block
+	u16 _block_count;					// Number of blocks in the message
+	u16 _block_next_prime;				// Next prime number at or above block count
+	u16 _extra_count;					// Number of extra rows to allocate
+	u32 _p_seed;						// Seed for peeled rows of check matrix
+	u32 _d_seed;						// Seed for dense rows of check matrix
+	u16 _row_count;						// Number of stored rows
+	u16 _mix_count;						// Number of mix columns
+	u16 _mix_next_prime;				// Next prime number at or above dense count
+	u16 _dense_count;					// Number of added dense code rows
+	u8 * CAT_RESTRICT _recovery_blocks;	// Recovery blocks
+	u8 * CAT_RESTRICT _input_blocks;	// Input message blocks
+	u32 _input_final_bytes;				// Number of bytes in final block of input
+	u32 _output_final_bytes;			// Number of bytes in final block of output
+	u32 _input_allocated;				// Number of bytes allocated for input, or 0 if referenced
 #if defined(CAT_ALL_ORIGINAL)
-	bool _all_original;			// Boolean: Only seen original data block identifiers
+	bool _all_original;					// Boolean: Only seen original data block identifiers
 #endif
 
 	// Peeling state
 	struct PeelRow;
 	struct PeelColumn;
 	struct PeelRefs;
-	PeelRow *_peel_rows;		// Array of N peeling matrix rows
-	PeelColumn *_peel_cols;		// Array of N peeling matrix columns
-	PeelRefs *_peel_col_refs;	// List of column references
-	PeelRow *_peel_tail_rows;	// Tail of peeling solved rows list
-	u32 _workspace_allocated;	// Number of bytes allocated for workspace
+	PeelRow * CAT_RESTRICT _peel_rows;		// Array of N peeling matrix rows
+	PeelColumn * CAT_RESTRICT _peel_cols;	// Array of N peeling matrix columns
+	PeelRefs * CAT_RESTRICT _peel_col_refs;	// List of column references
+	PeelRow * CAT_RESTRICT _peel_tail_rows;	// Tail of peeling solved rows list
+	u32 _workspace_allocated;				// Number of bytes allocated for workspace
 	static const u16 LIST_TERM = 0xffff;
-	u16 _peel_head_rows;		// Head of peeling solved rows list
-	u16 _defer_head_columns;	// Head of peeling deferred columns list
-	u16 _defer_head_rows;		// Head of peeling deferred rows list
-	u16 _defer_count;			// Count of deferred rows
+	u16 _peel_head_rows;					// Head of peeling solved rows list
+	u16 _defer_head_columns;				// Head of peeling deferred columns list
+	u16 _defer_head_rows;					// Head of peeling deferred rows list
+	u16 _defer_count;						// Count of deferred rows
 
 	// Gaussian elimination state
-	u64 *_ge_matrix;			// Gaussian elimination matrix
-	u32 _ge_allocated;			// Number of bytes allocated to GE matrix
-	u64 *_compress_matrix;		// Gaussian elimination compression matrix
-	int _ge_pitch;				// Words per row of GE matrix and compression matrix
-	u16 *_pivots;				// Pivots for each column of the GE matrix
-	u16 _pivot_count;			// Number of pivots in the pivot list
-	u16 *_ge_col_map;			// Map of GE columns to conceptual matrix columns
-	u16 *_ge_row_map;			// Map of GE rows to conceptual matrix rows
-	u16 _next_pivot;			// Pivot to resume Triangle() on after it fails
+	u64 * CAT_RESTRICT _ge_matrix;			// Gaussian elimination matrix
+	u32 _ge_allocated;						// Number of bytes allocated to GE matrix
+	u64 * CAT_RESTRICT _compress_matrix;	// Gaussian elimination compression matrix
+	int _ge_pitch;							// Words per row of GE matrix and compression matrix
+	u16 * CAT_RESTRICT _pivots;				// Pivots for each column of the GE matrix
+	u16 _pivot_count;						// Number of pivots in the pivot list
+	u16 * CAT_RESTRICT _ge_col_map;			// Map of GE columns to conceptual matrix columns
+	u16 * CAT_RESTRICT _ge_row_map;			// Map of GE rows to conceptual matrix rows
+	u16 _next_pivot;						// Pivot to resume Triangle() on after it fails
 
 	// Heavy rows
-	u8 *_heavy_matrix;			// Heavy rows of GE matrix
-	int _heavy_pitch;			// Bytes per heavy matrix row
-	u16 _heavy_columns;			// Number of heavy matrix columns
-	u16 _first_heavy_column;	// First heavy column that is non-zero
-	u16 _first_heavy_pivot;		// First heavy pivot in the list
+	u8 * CAT_RESTRICT _heavy_matrix;		// Heavy rows of GE matrix
+	int _heavy_pitch;						// Bytes per heavy matrix row
+	u16 _heavy_columns;						// Number of heavy matrix columns
+	u16 _first_heavy_column;				// First heavy column that is non-zero
+	u16 _first_heavy_pivot;					// First heavy pivot in the list
 
 #if defined(CAT_DUMP_CODEC_DEBUG) || defined(CAT_DUMP_GE_MATRIX)
 	void PrintGEMatrix();
@@ -154,10 +154,10 @@ class CAT_EXPORT Codec
 	void PeelAvalanche(u16 column_i);
 
 	// Peel a row using the given column
-	void Peel(u16 row_i, PeelRow *row, u16 column_i);
+	void Peel(u16 row_i, PeelRow * CAT_RESTRICT row, u16 column_i);
 
 	// If a peel reference list overflows at fail_column_i, this function will unreference the row for previous columns
-	void FixPeelFailure(PeelRow *row, u16 fail_column_i);
+	void FixPeelFailure(PeelRow * CAT_RESTRICT row, u16 fail_column_i);
 
 	// Walk forward through rows and solve as many as possible before deferring any
 	bool OpportunisticPeeling(u32 row_i, u32 id);
@@ -229,7 +229,7 @@ class CAT_EXPORT Codec
 	Result SolveMatrix();
 
 	// Resume solver with a new block
-	Result ResumeSolveMatrix(u32 id, const void *block);
+	Result ResumeSolveMatrix(u32 id, const void * CAT_RESTRICT block);
 
 #if defined(CAT_ALL_ORIGINAL)
 	// Verify that all data is from the original N, meaning no computations are needed
@@ -239,7 +239,7 @@ class CAT_EXPORT Codec
 
 	//// Memory Management
 
-	void SetInput(const void *message_in);
+	void SetInput(const void * CAT_RESTRICT message_in);
 	bool AllocateInput();
 	void FreeInput();
 
@@ -267,10 +267,10 @@ public:
 	Result InitializeEncoder(int message_bytes, int block_bytes);
 
 	// Feed encoder a message
-	Result EncodeFeed(const void *message_in);
+	Result EncodeFeed(const void * CAT_RESTRICT message_in);
 
 	// Encode a block, returning number of bytes written
-	u32 Encode(u32 id, void *block_out);
+	u32 Encode(u32 id, void * CAT_RESTRICT block_out);
 
 
 	//// Decoder Mode
@@ -279,13 +279,13 @@ public:
 	Result InitializeDecoder(int message_bytes, int block_bytes);
 
 	// Feed decoder a block
-	Result DecodeFeed(u32 id, const void *block_in);
+	Result DecodeFeed(u32 id, const void * CAT_RESTRICT block_in);
 
 	// Use matrix solution to generate recovery blocks
 	void GenerateRecoveryBlocks();
 
 	// Generate output blocks from the recovery blocks
-	Result ReconstructOutput(void *message_out);
+	Result ReconstructOutput(void * CAT_RESTRICT message_out);
 };
 
 

@@ -1,7 +1,7 @@
 codec_objects = Wirehair.o EndianNeutral.o memxor.o
 tester_objects = Tester.o Clock.o $(codec_objects)
 
-CFLAGS = -O4
+CFLAGS = -O4 -Wall -fstrict-aliasing
 
 tester : $(tester_objects)
 	clang++ -o tester $(tester_objects)

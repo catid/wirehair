@@ -35,13 +35,13 @@ namespace cat {
 
 
 // In-place XOR of voutput buffer by vinput buffer
-void memxor(void *voutput, const void *vinput, int bytes);
+void memxor(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT vinput, int bytes);
 
 // XOR of two buffers stored in voutput buffer
-void memxor_set(void *voutput, const void *va, const void *vb, int bytes);
+void memxor_set(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT va, const void * CAT_RESTRICT vb, int bytes);
 
 // XOR of two buffers XORed into voutput buffer
-void memxor_add(void *voutput, const void *va, const void *vb, int bytes);
+void memxor_add(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT va, const void * CAT_RESTRICT vb, int bytes);
 
 
 } // namespace cat

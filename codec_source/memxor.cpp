@@ -30,7 +30,7 @@
 using namespace cat;
 
 
-void cat::memxor(void *voutput, const void *vinput, int bytes)
+void cat::memxor(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT vinput, int bytes)
 {
 	/*
 		Often times the output is XOR'd in-place so this version is
@@ -44,8 +44,8 @@ void cat::memxor(void *voutput, const void *vinput, int bytes)
 	*/
 
 	// Primary engine
-	u64 *output64 = reinterpret_cast<u64*>( voutput );
-	const u64 *input64 = reinterpret_cast<const u64*>( vinput );
+	u64 * CAT_RESTRICT output64 = reinterpret_cast<u64 *>( voutput );
+	const u64 * CAT_RESTRICT input64 = reinterpret_cast<const u64 *>( vinput );
 
 	while (bytes >= 128)
 	{
@@ -78,8 +78,8 @@ void cat::memxor(void *voutput, const void *vinput, int bytes)
 	}
 
 	// Handle final <8 bytes
-	u8 *output = reinterpret_cast<u8*>( output64 );
-	const u8 *input = reinterpret_cast<const u8*>( input64 );
+	u8 * CAT_RESTRICT output = reinterpret_cast<u8 *>( output64 );
+	const u8 * CAT_RESTRICT input = reinterpret_cast<const u8 *>( input64 );
 
 	switch (bytes)
 	{
@@ -97,7 +97,7 @@ void cat::memxor(void *voutput, const void *vinput, int bytes)
 	}
 }
 
-void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
+void cat::memxor_set(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT va, const void * CAT_RESTRICT vb, int bytes)
 {
 	/*
 		This version exists to avoid an expensive memory copy operation when
@@ -105,9 +105,9 @@ void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
 	*/
 
 	// Primary engine
-	u64 *output64 = reinterpret_cast<u64*>( voutput );
-	const u64 *a64 = reinterpret_cast<const u64*>( va );
-	const u64 *b64 = reinterpret_cast<const u64*>( vb );
+	u64 * CAT_RESTRICT output64 = reinterpret_cast<u64 *>( voutput );
+	const u64 * CAT_RESTRICT a64 = reinterpret_cast<const u64 *>( va );
+	const u64 * CAT_RESTRICT b64 = reinterpret_cast<const u64 *>( vb );
 
 	while (bytes >= 128)
 	{
@@ -141,9 +141,9 @@ void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
 	}
 
 	// Handle final <8 bytes
-	u8 *output = reinterpret_cast<u8*>( output64 );
-	const u8 *a = reinterpret_cast<const u8*>( a64 );
-	const u8 *b = reinterpret_cast<const u8*>( b64 );
+	u8 * CAT_RESTRICT output = reinterpret_cast<u8 *>( output64 );
+	const u8 * CAT_RESTRICT a = reinterpret_cast<const u8 *>( a64 );
+	const u8 * CAT_RESTRICT b = reinterpret_cast<const u8 *>( b64 );
 
 	switch (bytes)
 	{
@@ -161,16 +161,16 @@ void cat::memxor_set(void *voutput, const void *va, const void *vb, int bytes)
 	}
 }
 
-void cat::memxor_add(void *voutput, const void *va, const void *vb, int bytes)
+void cat::memxor_add(void * CAT_RESTRICT voutput, const void * CAT_RESTRICT va, const void * CAT_RESTRICT vb, int bytes)
 {
 	/*
 		This version adds to the output instead of overwriting it.
 	*/
 
 	// Primary engine
-	u64 *output64 = reinterpret_cast<u64*>( voutput );
-	const u64 *a64 = reinterpret_cast<const u64*>( va );
-	const u64 *b64 = reinterpret_cast<const u64*>( vb );
+	u64 * CAT_RESTRICT output64 = reinterpret_cast<u64 *>( voutput );
+	const u64 * CAT_RESTRICT a64 = reinterpret_cast<const u64 *>( va );
+	const u64 * CAT_RESTRICT b64 = reinterpret_cast<const u64 *>( vb );
 
 	while (bytes >= 128)
 	{
@@ -204,9 +204,9 @@ void cat::memxor_add(void *voutput, const void *va, const void *vb, int bytes)
 	}
 
 	// Handle final <8 bytes
-	u8 *output = reinterpret_cast<u8*>( output64 );
-	const u8 *a = reinterpret_cast<const u8*>( a64 );
-	const u8 *b = reinterpret_cast<const u8*>( b64 );
+	u8 * CAT_RESTRICT output = reinterpret_cast<u8 *>( output64 );
+	const u8 * CAT_RESTRICT a = reinterpret_cast<const u8 *>( a64 );
+	const u8 * CAT_RESTRICT b = reinterpret_cast<const u8 *>( b64 );
 
 	switch (bytes)
 	{

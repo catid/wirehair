@@ -15,8 +15,6 @@ void FindBadDenseSeeds()
 	int max_blocks = 64000;
 	int max_message_bytes = block_bytes * max_blocks;
 	u8 *message = new u8[max_message_bytes];
-	u8 *message_out = new u8[max_message_bytes];
-	u8 *block = new u8[block_bytes];
 
 	for (int ii = 0; ii < max_message_bytes; ++ii)
 	{
