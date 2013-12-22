@@ -28,7 +28,6 @@ Future improvements:
 
 + Fix any seeds that have >3% overhead by extending the exception list.
 + C port.
-+ Vectorize memxor.
 + Optimizations for very large files > 1GB.
 
 

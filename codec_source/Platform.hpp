@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2009-2012 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2013 Chris Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are met:
@@ -9,8 +9,8 @@
 	* Redistributions in binary form must reproduce the above copyright notice,
 	  this list of conditions and the following disclaimer in the documentation
 	  and/or other materials provided with the distribution.
-	* Neither the name of WirehairFEC nor the names of its contributors may be
-	  used to endorse or promote products derived from this software without
+	* Neither the name of WirehairFEC nor the names of its contributors may be used
+	  to endorse or promote products derived from this software without
 	  specific prior written permission.
 
 	THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
@@ -29,18 +29,12 @@
 #ifndef CAT_PLATFORM_HPP
 #define CAT_PLATFORM_HPP
 
-// This definition overrides CAT_BUILD_DLL below.  Neuters CAT_EXPORT macro so symbols are
-// neither exported or imported.
-#define CAT_NEUTER_EXPORT
-
-// This definition changes the meaning of the CAT_EXPORT macro on Windows.  When defined,
-// the CAT_EXPORT macro will export the associated symbol.  When undefined, it will import it.
-#define CAT_BUILD_DLL
+#include "Config.hpp"
 
 namespace cat {
 
 
-// Used to detect whether or not WirehairFEC is included
+// Used to detect whether or not libcat is included
 #define CAT_HAS_TOYS
 
 
@@ -109,12 +103,13 @@ namespace cat {
 # define CAT_COMPILER_COMPAT_MSVC
 # define CAT_INLINE inline
 # define CAT_ASM_BEGIN _asm {
+# define CAT_ASM_BEGIN_VOLATILE _asm {
 # define CAT_ASM_EMIT __emit__
 
 //-----------------------------------------------------------------------------
 // GNU C++ Compiler
 // SN Systems ProDG C++ Compiler : Compatible with GCC
-#elif defined(__GNUC__) || defined(__APPLE_CC__) || defined(__SNC__)
+#elif defined(__GNUC__) || defined(__APPLE_CC__) || defined(__SNC__) || defined(__clang__)
 # define CAT_COMPILER_GCC
 # define CAT_COMPILER_COMPAT_GCC
 # define CAT_FASTCALL __attribute__ ((fastcall))
@@ -131,8 +126,11 @@ namespace cat {
 # endif
 
 } // namespace cat
-# include <cstdlib> // Intrinsics
-# include <intrin.h> // Intrinsics
+
+// Intrinsics:
+# include <cstdlib>
+# include <intrin.h>
+# include <mmintrin.h>
 namespace cat {
 
 //-----------------------------------------------------------------------------
@@ -171,6 +169,7 @@ namespace cat {
 #endif
 #if !defined(CAT_ASM_BEGIN)
 # define CAT_ASM_BEGIN __asm {
+# define CAT_ASM_BEGIN_VOLATILE __asm {
 #endif
 #if !defined(CAT_ASM_EMIT)
 # define CAT_ASM_EMIT _emit
@@ -180,6 +179,9 @@ namespace cat {
 #endif
 #if !defined(CAT_TLS)
 # define CAT_TLS __declspec( thread )
+#endif
+#if defined(CAT_COMPILER_MSVC)
+# pragma warning(disable: 4227) // Squelch annoying warning from MSVC when using __restrict
 #endif
 #if !defined(CAT_RESTRICT)
 # define CAT_RESTRICT __restrict
@@ -199,6 +201,12 @@ namespace cat {
 #if !defined(CAT_FUNCTION)
 # define CAT_FUNCTION "???"
 #endif
+#if !defined(CAT_LIKELY)
+# define CAT_LIKELY(expr) ( (expr) != 0 )
+#endif
+#if !defined(CAT_UNLIKELY)
+# define CAT_UNLIKELY(expr) ( (expr) != 0 )
+#endif
 
 // GCC-compatible compilers
 #elif defined(CAT_COMPILER_COMPAT_GCC)
@@ -216,7 +224,8 @@ namespace cat {
 # define CAT_ASM_ATT
 #endif
 #if !defined(CAT_ASM_BEGIN)
-# define CAT_ASM_BEGIN __asm__ __volatile__ (
+# define CAT_ASM_BEGIN __asm__ (
+# define CAT_ASM_BEGIN_VOLATILE __asm__ __volatile__ (
 #endif
 #if !defined(CAT_ASM_EMIT)
 # define CAT_ASM_EMIT .byte
@@ -242,48 +251,73 @@ namespace cat {
 #if !defined(CAT_FUNCTION)
 # define CAT_FUNCTION "???"
 #endif
+#if !defined(CAT_LIKELY)
+# define CAT_LIKELY(expr) ( __builtin_expect (( (expr) != 0 ), 1) )
+#endif
+#if !defined(CAT_UNLIKELY)
+# define CAT_UNLIKELY(expr) ( __builtin_expect (( (expr) != 0 ), 0) )
+#endif
 
 #endif // CAT_COMPILER_COMPAT_*
 
 
 //// Debug Flag ////
 
-#if defined(CAT_COMPILER_MSVC)
-
-# if defined(_DEBUG)
+# if defined(_DEBUG) || defined(DEBUG)
 #  define CAT_DEBUG
 # endif
-
-#else
-
-# if !defined(NDEBUG)
-#  define CAT_DEBUG
-# endif
-
-#endif
-
-
-#if defined(CAT_DEBUG)
-#define CAT_IF_DEBUG(x) x
-#else
-#define CAT_IF_DEBUG(x)
-#endif
 
 
 //// Instruction Set Architecture ////
 
-#if defined(__powerpc__) || defined(__ppc__) || defined(_POWER) || defined(_M_PPC) || \
+#if defined(__powerpc__) || defined(__ppc__) || defined(_M_PPC) || \
 	defined(_M_MPPC) || defined(__POWERPC) || defined(powerpc) || defined(__ppc64__) || \
 	defined(_PS3) || defined(__PS3__) || defined(SN_TARGET_PS3) || defined(__POWERPC__)
 # define CAT_ISA_PPC
+
+#elif defined(_POWER)
+# define CAT_ISA_PPC
+# define CAT_ISA_IBM_POWER /* Define IBM Power in addition to PowerPC */
 
 #elif defined(__i386__) || defined(i386) || defined(intel) || defined(_M_IX86) || \
 	  defined(__ia64) || defined(__ia64__) || defined(__x86_64) || defined(_M_IA64) || \
 	  defined(_M_X64) || defined(_M_I86) || defined(sun386) || defined(__OS2__)
 # define CAT_ISA_X86
 
-#elif defined(TARGET_CPU_ARM)
+#elif defined(TARGET_CPU_ARM) || defined(__ARMEL__) || defined(__ARM__) || \
+	  defined(__arm__)
 # define CAT_ISA_ARM
+
+#ifdef __ANDROID__
+
+#if (__ARM_ARCH >= 6)
+# define CAT_ISA_ARMV6
+#endif
+
+#if (__ARM_ARCH >= 7)
+# define CAT_ISA_ARMV7
+#endif
+
+#else // Assumes iOS
+
+#include <arm/arch.h>
+
+#ifdef _ARM_ARCH_8
+# define CAT_ISA_ARMV8
+# define CAT_ISA_ARMV7
+# define CAT_ISA_ARMV6
+#endif
+
+#ifdef _ARM_ARCH_7
+# define CAT_ISA_ARMV7
+# define CAT_ISA_ARMV6
+#endif
+
+#ifdef _ARM_ARCH_6
+# define CAT_ISA_ARMV6
+#endif
+
+#endif
 
 #elif defined(__mips__)
 # define CAT_ISA_MIPS
@@ -394,7 +428,7 @@ namespace cat {
 #if defined(_LP64) || defined(__LP64__) || defined(__arch64__) || \
 	defined(_WIN64) || defined(_M_X64) || defined(__ia64) || \
 	defined(__ia64__) || defined(__x86_64) || defined(_M_IA64) || \
-	defined(__mips64)
+	defined(__mips64) || defined(__amd64__)
 
 # define CAT_WORD_64
 
@@ -423,19 +457,23 @@ namespace cat {
 #if defined(__SVR4) && defined(__sun)
 # define CAT_OS_SOLARIS
 
-#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE)
-# define CAT_OS_IPHONE
-# define CAT_OS_APPLE
-
 #elif defined(__APPLE__) && (defined(__MACH__) || defined(__DARWIN__))
 # define CAT_OS_OSX
+# define CAT_OS_APPLE
+
+#elif defined(__APPLE__) && defined(TARGET_OS_IPHONE)
+# define CAT_OS_IPHONE
 # define CAT_OS_APPLE
 
 #elif defined(__OpenBSD__) || defined(__NetBSD__) || defined(__FreeBSD__)
 # define CAT_OS_BSD
 
-#elif defined(__linux__) || defined(__unix__)
+#elif defined(__linux__) || defined(__unix__) || defined(__unix)
 # define CAT_OS_LINUX
+
+#ifdef __ANDROID__
+# define CAT_OS_ANDROID
+#endif
 
 #elif defined(_WIN32_WCE)
 # define CAT_OS_WINDOWS_CE
@@ -449,6 +487,9 @@ namespace cat {
 
 #elif defined(_PS3) || defined(__PS3__) || defined(SN_TARGET_PS3)
 # define CAT_OS_PS3
+
+#elif defined(_PS4) || defined(__PS4__) || defined(SN_TARGET_PS4)
+# define CAT_OS_PS4
 
 #elif defined(__OS2__)
 # define CAT_OS_OS2
@@ -544,13 +585,21 @@ namespace cat {
 
 #endif
 
+
+//// 128-bit types ////
+
 #if defined(CAT_COMPILER_GCC) && defined(CAT_WORD_64)
+
+# define CAT_HAS_U128
 
 	// GCC also adds 128-bit types :D
 	typedef __uint128_t u128;
 	typedef __int128_t  s128;
 
 #endif
+
+
+//// Floating-point types ////
 
 typedef float f32;
 typedef double f64;
@@ -592,27 +641,6 @@ namespace cat {
 // Works for arrays, also
 #define CAT_OBJCLR(obj) CAT_CLR((void*)&(obj), sizeof(obj))
 
-// More secure memory clearing
-#if defined(CAT_OS_WINDOWS) && !defined(CAT_OS_WINDOWS_CE) && !defined(CAT_COMPILER_MINGW)
-# define CAT_SECURE_CLR(dest, size) SecureZeroMemory(dest, size)
-#else
-
-	// From https://www.securecoding.cert.org/confluence/display/cplusplus/MSC06-CPP.+Be+aware+of+compiler+optimization+when+dealing+with+sensitive+data
-	CAT_INLINE void *cat_memset_s(void *v, int c, unsigned int n)
-	{
-		volatile unsigned char *p = (volatile unsigned char *)v;
-
-		while (n--)
-			*p++ = c;
-
-		return v;
-	}
-
-# define CAT_SECURE_CLR(dest, size) cat_memset_s(dest, 0, size)
-#endif
-
-#define CAT_SECURE_OBJCLR(obj) CAT_SECURE_CLR((void*)&(obj), sizeof(obj))
-
 // Stringize
 #define CAT_STRINGIZE(X) DO_CAT_STRINGIZE(X)
 #define DO_CAT_STRINGIZE(X) #X
@@ -642,6 +670,13 @@ template<typename T> CAT_INLINE T Bound(const T &minimum, const T &maximum, cons
 	if (x > maximum) return maximum;
 	return x;
 }
+
+// Absolute Value
+template<typename T> CAT_INLINE T AbsVal(const T &x)
+{
+	return x < 0 ? -x : x;
+}
+
 
 
 //// Miscellaneous bitwise macros ////
@@ -699,7 +734,6 @@ template<typename T> CAT_INLINE T Bound(const T &minimum, const T &maximum, cons
 
 #undef CAT_ROL32
 #undef CAT_ROR32
-
 #define CAT_ROL32(n, r) _lrotl(n, r)
 #define CAT_ROR32(n, r) _lrotr(n, r)
 
@@ -712,10 +746,12 @@ template<typename T> CAT_INLINE T Bound(const T &minimum, const T &maximum, cons
 #pragma intrinsic(_InterlockedExchange)
 #pragma intrinsic(_interlockedbittestandset)
 #pragma intrinsic(_interlockedbittestandreset)
+#pragma intrinsic(_mm_sfence, _mm_lfence, _mm_mfence)
 
 #if defined(CAT_WORD_64)
 #pragma intrinsic(__rdtsc)
 #pragma intrinsic(_umul128)
+#pragma intrinsic(__shiftleft128, __shiftright128)
 #pragma intrinsic(_BitScanForward64, _BitScanReverse64, _bittestandset64)
 #pragma intrinsic(_InterlockedCompareExchange128)
 #else
@@ -748,21 +784,42 @@ private: \
 	CAT_INLINE T(const T&) {} \
 	CAT_INLINE T& operator=(const T&) { return *this; }
 
-
 } // namespace cat
 
 
 //// Memory Leaks ////
 
+#define CAT_DEBUG_MEM_FLAGS()
 #define CAT_DEBUG_LEAKS_DUMP()
+#define CAT_DEBUG_CHECK_MEMORY()
+
+#if defined(CAT_DEBUG)
+
 #if defined(CAT_DEBUG_LEAKS)
 # if defined(CAT_COMPILER_MSVC)
 #  define _CRTDBG_MAP_ALLOC
 #  include <stdlib.h>
 #  include <crtdbg.h>
+#  undef CAT_DEBUG_MEM_FLAGS
 #  undef CAT_DEBUG_LEAKS_DUMP
-#  define CAT_DEBUG_LEAKS_DUMP() _CrtDumpMemoryLeaks()
+#  undef CAT_DEBUG_CHECK_MEMORY
+#  define CAT_DEBUG_MEM_FLAGS() _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_CHECK_EVERY_128_DF | _CRTDBG_CHECK_CRT_DF | _CRTDBG_DELAY_FREE_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+#  define CAT_DEBUG_LEAKS_DUMP() _CrtDumpMemoryLeaks();
+#  define CAT_DEBUG_CHECK_MEMORY() CAT_ENFORCE(_CrtCheckMemory() != 0) << "Memory check failed!";
 # endif
+#endif
+
+#endif
+
+
+//// Vector Extensions ////
+
+#if !defined __has_extension
+# define __has_extension(x) 0
+#endif
+
+#if (defined __GNUC__ && __GNUC_MINOR__ >= 7) || (defined __clang__ && __has_extension(attribute_ext_vector_type))
+#define CAT_HAS_VECTOR_EXTENSIONS
 #endif
 
 #endif // CAT_PLATFORM_HPP
