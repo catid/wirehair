@@ -23,25 +23,13 @@ only that if you use my software that in the binary distribution of your
 software you include the copyright notice in WIREHAIR.LICENSE and maybe
 it would be nice to say thank you in an Email. :}
 
--Christopher A Taylor (chris@gameclosure.com) http://catid.org
 
-
-News Update: 3/28/2012
-
-
-TODO:
+Future improvements:
 
 + Fix any seeds that have >3% overhead by extending the exception list.
-+ C and Objective-C ports.
++ C port.
++ Vectorize memxor.
 + Optimizations for very large files > 1GB.
-
-
-Further improvements on the horizon:
-
-+ SIMD memxor() and prefetch is being worked on by Nate Tinkler.
-+ Multi-threading is being worked on by Brandon McKune.
-+ Java port is being worked on by Steve Sheppard.
-+ C# / R port
 
 
 Network File Transfer Benchmarks:
@@ -89,3 +77,10 @@ Running on a desktop with an Intel processor @ 3.07 GHz:
 >> OKAY! N=1024 decoder.Decode in 8.21e+006 usec, 243.544 MB/s after 0 extra.
 >> OKAY! N=1024 decoder.Decode in 8.23e+006 usec, 243.093 MB/s after 0 extra.
 >> OKAY! N=1024 decoder.Decode in 8.28e+006 usec, 241.404 MB/s after 0 extra.
+
+
+#### Credits
+
+This software was written entirely by myself ( Christopher A. Taylor <mrcatid@gmail.com> ).  If you
+find it useful and would like to buy me a coffee, consider [tipping](https://www.gittip.com/catid/).
+

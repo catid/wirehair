@@ -286,6 +286,9 @@ public:
 
 	// Generate output blocks from the recovery blocks
 	Result ReconstructOutput(void * CAT_RESTRICT message_out);
+
+	// Reconstruct a single original block from the recovery blocks
+	Result ReconstructBlock(u16 id, void * CAT_RESTRICT block_out);
 };
 
 

@@ -4267,7 +4267,7 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	//GenTable();
 
 	// Validate input
-	if (message_bytes < 1 || block_bytes < 1)
+	if CAT_UNLIKELY(message_bytes < 1 || block_bytes < 1)
 		return R_BAD_INPUT;
 
 	// Calculate message block count
@@ -4276,9 +4276,9 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	_block_next_prime = NextPrime16(_block_count);
 
 	// Validate block count
-	if (_block_count < CAT_WIREHAIR_MIN_N)
+	if CAT_UNLIKELY(_block_count < CAT_WIREHAIR_MIN_N)
 		return R_TOO_SMALL;
-	if (_block_count > CAT_WIREHAIR_MAX_N)
+	if CAT_UNLIKELY(_block_count > CAT_WIREHAIR_MAX_N)
 		return R_TOO_LARGE;
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
@@ -4881,11 +4881,99 @@ bool Codec::IsAllOriginalData()
 #endif // CAT_ALL_ORIGINAL
 
 /*
+	ReconstructBlock
+
+		This function reconstructs an original block from the recovery
+	blocks, which is much slower than copying from the input data, so
+	should be done selectively.  This is only done during decoding.
+
+	Precondition: DecodeFeed() has returned success
+*/
+
+Result Codec::ReconstructBlock(u16 row_i, void * CAT_RESTRICT dest) {
+	CAT_IF_DUMP(cout << endl << "---- ReconstructBlock ----" << endl << endl;)
+
+	// Validate input
+	if CAT_UNLIKELY(!dest) return R_BAD_INPUT;
+
+	// Regenerate any single row that got lost:
+
+	u32 block_bytes = _block_bytes;
+
+	// For last row, use final byte count
+	if (row_i == _block_count - 1)
+		block_bytes = _output_final_bytes;
+
+	CAT_IF_DUMP(cout << "Regenerating row " << row_i << ":";)
+
+	u16 peel_weight, peel_a, peel_x, mix_a, mix_x;
+	GeneratePeelRow(row_i, _p_seed, _block_count, _mix_count,
+		peel_weight, peel_a, peel_x, mix_a, mix_x);
+
+	// Remember first column (there is always at least one)
+	u8 * CAT_RESTRICT first = _recovery_blocks + _block_bytes * peel_x;
+
+	CAT_IF_DUMP(cout << " " << peel_x;)
+
+	// If peeler has multiple columns,
+	if (peel_weight > 1)
+	{
+		--peel_weight;
+
+		IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
+
+		CAT_IF_DUMP(cout << " " << peel_x;)
+
+		// Combine first two columns into output buffer (faster than memcpy + memxor)
+		memxor_set(dest, first, _recovery_blocks + _block_bytes * peel_x, block_bytes);
+
+		// For each remaining peeler column,
+		while (--peel_weight > 0)
+		{
+			IterateNextColumn(peel_x, _block_count, _block_next_prime, peel_a);
+
+			CAT_IF_DUMP(cout << " " << peel_x;)
+
+			// Mix in each column
+			memxor(dest, _recovery_blocks + _block_bytes * peel_x, block_bytes);
+		}
+
+		// Mix first mixer block in directly
+		memxor(dest, _recovery_blocks + _block_bytes * (_block_count + mix_x), block_bytes);
+	}
+	else
+	{
+		// Mix first with first mixer block (faster than memcpy + memxor)
+		memxor_set(dest, first, _recovery_blocks + _block_bytes * (_block_count + mix_x), block_bytes);
+	}
+
+	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+
+	// Combine remaining two mixer columns together:
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
+	const u8 *mix0_src = _recovery_blocks + _block_bytes * (_block_count + mix_x);
+	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+
+	IterateNextColumn(mix_x, _mix_count, _mix_next_prime, mix_a);
+	const u8 *mix1_src = _recovery_blocks + _block_bytes * (_block_count + mix_x);
+	CAT_IF_DUMP(cout << " " << (_block_count + mix_x);)
+
+	memxor_add(dest, mix0_src, mix1_src, block_bytes);
+
+	CAT_IF_DUMP(cout << endl;)
+
+	return R_WIN;
+}
+
+
+/*
 	ReconstructOutput
 
 		This function reconstructs the output by copying inputs
 	that were from the first N blocks, and regenerating the rest.
 	This is only done during decoding.
+
+	Precondition: DecodeFeed() has returned success
 */
 
 Result Codec::ReconstructOutput(void * CAT_RESTRICT message_out)
@@ -4893,7 +4981,7 @@ Result Codec::ReconstructOutput(void * CAT_RESTRICT message_out)
 	CAT_IF_DUMP(cout << endl << "---- ReconstructOutput ----" << endl << endl;)
 
 	// Validate input
-	if (!message_out) return R_BAD_INPUT;
+	if CAT_UNLIKELY(!message_out) return R_BAD_INPUT;
 	u8 * CAT_RESTRICT output_blocks = reinterpret_cast<u8 *>( message_out );
 
 #if defined(CAT_COPY_FIRST_N)
@@ -5407,7 +5495,7 @@ Result Codec::EncodeFeed(const void *message_in)
 	CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
 
 	// Validate input
-	if (message_in == 0) return R_BAD_INPUT;
+	if CAT_UNLIKELY(message_in == 0) return R_BAD_INPUT;
 
 	SetInput(message_in);
 
@@ -5560,7 +5648,7 @@ Result Codec::InitializeDecoder(int message_bytes, int block_bytes)
 Result Codec::DecodeFeed(u32 id, const void *block_in)
 {
 	// Validate input
-	if (block_in == 0)
+	if CAT_UNLIKELY(block_in == 0)
 		return R_BAD_INPUT;
 
 	// If less than N rows stored,
