@@ -46,30 +46,38 @@ Turbo Boost is turned on for these computations.  The block size is 1300 bytes
 simulating a file transfer protocol over UDP.
 
 ~~~
->> OKAY! N=3(0.0039 MB) encoder.BeginEncode in 77 usec, 50.6494 MB/s
-N=3 decoder.Decode in 48.343 usec, 80.6735 MB/s.  Average overhead = 0 (0 bytes)
+>> OKAY! N=3(0.0039 MB) encoder.BeginEncode in 60 usec, 65 MB/s
+N=3 decoder.Decode in 39.787 usec, 98.022 MB/s.  Average overhead = 0 (0 bytes)
 
->> OKAY! N=10(0.013 MB) encoder.BeginEncode in 153 usec, 84.9673 MB/s
-N=10 decoder.Decode in 112.664 usec, 115.387 MB/s.  Average overhead = 0.008 (10.4 bytes)
->> OKAY! N=11(0.0143 MB) encoder.BeginEncode in 160 usec, 89.375 MB/s
-N=11 decoder.Decode in 115.56 usec, 123.745 MB/s.  Average overhead = 0.006 (7.8 bytes)
->> OKAY! N=12(0.0156 MB) encoder.BeginEncode in 163 usec, 95.7055 MB/s
-N=12 decoder.Decode in 116.312 usec, 134.122 MB/s.  Average overhead = 0.015 (19.5 bytes)
->> OKAY! N=13(0.0169 MB) encoder.BeginEncode in 159 usec, 106.289 MB/s
-N=13 decoder.Decode in 116.456 usec, 145.119 MB/s.  Average overhead = 0.009 (11.7 bytes)
+>> OKAY! N=10(0.013 MB) encoder.BeginEncode in 138 usec, 94.2029 MB/s
+N=10 decoder.Decode in 100.812 usec, 128.953 MB/s.  Average overhead = 0.008 (10.4 bytes)
+>> OKAY! N=11(0.0143 MB) encoder.BeginEncode in 137 usec, 104.38 MB/s
+N=11 decoder.Decode in 97.625 usec, 146.479 MB/s.  Average overhead = 0.006 (7.8 bytes)
+>> OKAY! N=12(0.0156 MB) encoder.BeginEncode in 130 usec, 120 MB/s
+N=12 decoder.Decode in 98.945 usec, 157.663 MB/s.  Average overhead = 0.015 (19.5 bytes)
+>> OKAY! N=13(0.0169 MB) encoder.BeginEncode in 124 usec, 136.29 MB/s
+N=13 decoder.Decode in 98.696 usec, 171.233 MB/s.  Average overhead = 0.009 (11.7 bytes)
 
->> OKAY! N=110(0.143 MB) encoder.BeginEncode in 391 usec, 365.729 MB/s
-N=110 decoder.Decode in 301.612 usec, 474.119 MB/s.  Average overhead = 0.02 (26 bytes)
->> OKAY! N=111(0.1443 MB) encoder.BeginEncode in 344 usec, 419.477 MB/s
-N=111 decoder.Decode in 318.903 usec, 452.489 MB/s.  Average overhead = 0.015 (19.5 bytes)
+>> OKAY! N=110(0.143 MB) encoder.BeginEncode in 348 usec, 410.92 MB/s
+N=110 decoder.Decode in 289.96 usec, 493.171 MB/s.  Average overhead = 0.02 (26 bytes)
+>> OKAY! N=111(0.1443 MB) encoder.BeginEncode in 326 usec, 442.638 MB/s
+N=111 decoder.Decode in 304.357 usec, 474.114 MB/s.  Average overhead = 0.015 (19.5 bytes)
+>> OKAY! N=112(0.1456 MB) encoder.BeginEncode in 419 usec, 347.494 MB/s
+N=112 decoder.Decode in 312.172 usec, 466.41 MB/s.  Average overhead = 0.022 (28.6 bytes)
+>> OKAY! N=113(0.1469 MB) encoder.BeginEncode in 322 usec, 456.211 MB/s
+N=113 decoder.Decode in 302.759 usec, 485.204 MB/s.  Average overhead = 0.016 (20.8 bytes)
 
->> OKAY! N=1110(1.443 MB) encoder.BeginEncode in 2744 usec, 525.875 MB/s
-N=1110 decoder.Decode in 2524.68 usec, 571.558 MB/s.  Average overhead = 0.018 (23.4 bytes)
->> OKAY! N=1111(1.4443 MB) encoder.BeginEncode in 2133 usec, 677.121 MB/s
-N=1111 decoder.Decode in 2507.08 usec, 576.089 MB/s.  Average overhead = 0.022 (28.6 bytes)
+>> OKAY! N=1110(1.443 MB) encoder.BeginEncode in 2873 usec, 502.262 MB/s
+N=1110 decoder.Decode in 2482.65 usec, 581.233 MB/s.  Average overhead = 0.018 (23.4 bytes)
+>> OKAY! N=1111(1.4443 MB) encoder.BeginEncode in 2151 usec, 671.455 MB/s
+N=1111 decoder.Decode in 2480.74 usec, 582.206 MB/s.  Average overhead = 0.022 (28.6 bytes)
+>> OKAY! N=1112(1.4456 MB) encoder.BeginEncode in 2905 usec, 497.625 MB/s
+N=1112 decoder.Decode in 2559.12 usec, 564.881 MB/s.  Average overhead = 0.018 (23.4 bytes)
+>> OKAY! N=1113(1.4469 MB) encoder.BeginEncode in 2203 usec, 656.786 MB/s
+N=1113 decoder.Decode in 2455.72 usec, 589.195 MB/s.  Average overhead = 0.021 (27.3 bytes)
 
->> OKAY! N=11111(14.4443 MB) encoder.BeginEncode in 44457 usec, 324.905 MB/s
-N=11111 decoder.Decode in 46875.5 usec, 308.142 MB/s.  Average overhead = 0.02 (26 bytes)
+>> OKAY! N=11111(14.4443 MB) encoder.BeginEncode in 42666 usec, 338.544 MB/s
+N=11111 decoder.Decode in 46541.7 usec, 310.352 MB/s.  Average overhead = 0.02 (26 bytes)
 ~~~
 
 

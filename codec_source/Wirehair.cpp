@@ -842,11 +842,19 @@ static void GF256MemMulAdd(void * CAT_RESTRICT vdest, u8 x, const void * CAT_RES
 	// For each block of 8 bytes,
 	while (bytes >= 8)
 	{
-		/*
-			For smaller messages, this function takes
-			up 50% of execution time.  Unfortunately I
-			do not see a way to make it run any faster.
-		*/
+#ifdef CAT_ENDIAN_LITTLE
+		// This optimization works because it reduces the number of memory
+		// accesses on desktops by almost half.
+		u64 x = table[src[0]];
+		x |= (u64)table[src[1]] << 8;
+		x |= (u64)table[src[2]] << 16;
+		x |= (u64)table[src[3]] << 24;
+		x |= (u64)table[src[4]] << 32;
+		x |= (u64)table[src[5]] << 40;
+		x |= (u64)table[src[6]] << 48;
+		x |= (u64)table[src[7]] << 56;
+		*(u64*)dest ^= x;
+#else
 		dest[0] ^= table[src[0]];
 		dest[1] ^= table[src[1]];
 		dest[2] ^= table[src[2]];
@@ -855,6 +863,7 @@ static void GF256MemMulAdd(void * CAT_RESTRICT vdest, u8 x, const void * CAT_RES
 		dest[5] ^= table[src[5]];
 		dest[6] ^= table[src[6]];
 		dest[7] ^= table[src[7]];
+#endif // CAT_ENDIAN_LITTLE
 
 		src += 8;
 		dest += 8;
@@ -878,6 +887,19 @@ static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
 	// For each block of 8 bytes,
 	while (bytes >= 8)
 	{
+#ifdef CAT_ENDIAN_LITTLE
+		// This optimization works because it reduces the number of memory
+		// accesses on desktops by almost half.
+		u64 x = table[dest[0]];
+		x |= (u64)table[dest[1]] << 8;
+		x |= (u64)table[dest[2]] << 16;
+		x |= (u64)table[dest[3]] << 24;
+		x |= (u64)table[dest[4]] << 32;
+		x |= (u64)table[dest[5]] << 40;
+		x |= (u64)table[dest[6]] << 48;
+		x |= (u64)table[dest[7]] << 56;
+		*(u64*)dest = x;
+#else
 		dest[0] = table[dest[0]];
 		dest[1] = table[dest[1]];
 		dest[2] = table[dest[2]];
@@ -886,6 +908,7 @@ static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
 		dest[5] = table[dest[5]];
 		dest[6] = table[dest[6]];
 		dest[7] = table[dest[7]];
+#endif // CAT_ENDIAN_LITTLE
 
 		dest += 8;
 		bytes -= 8;
