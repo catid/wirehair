@@ -1,16 +1,17 @@
-	Wirehair FEC - Fast Forward Error Correction (FEC) Codec
+# Wirehair FEC
+## Fast Forward Error Correction (FEC) Codec
 
-	Wirehair FEC produces a stream of error correction blocks from a
+Wirehair FEC produces a stream of error correction blocks from a
 data source.  When enough of these blocks are received, the original
 data can be recovered.
 
-	Wirehair is an FEC codec used to improve reliability of data sent
+Wirehair is an FEC codec used to improve reliability of data sent
 over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
 The data to transmit over the BEC is encoded into equal-sized blocks.
 When enough blocks are received at the other end of the channel, then
 the original data can be recovered.
 
-	How many additional blocks are needed is random, though the number
+How many additional blocks are needed is random, though the number
 of additional blocks is low and does not vary based on the size of the
 data.  Typical overhead is between 0.015 and 0.03 additional blocks.
 This may seem appalling to you, but think of it this way: The channel
@@ -18,13 +19,13 @@ is already lossy, so this is just like adding < 3% / N loss - a very
 very small amount of additional loss (e.g. 0.003%) - to the channel,
 down in the noise.
 
-	Wirehair is released under the BSD license, which means that I ask
+Wirehair is released under the BSD license, which means that I ask
 only that if you use my software that in the binary distribution of your
 software you include the copyright notice in WIREHAIR.LICENSE and maybe
 it would be nice to say thank you in an Email. :}
 
 
-Future improvements:
+##### Future improvements:
 
 + Fix any seeds that have >3% overhead by extending the exception list.
 + C port.
