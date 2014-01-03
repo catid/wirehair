@@ -800,18 +800,22 @@ static void GF256Init() {
 		// For each subtable,
 		u8 *ptr = GF_MUL_TABLE;
 		for (int ii = 0; ii < 256; ++ii) {
+			const u8 log_ii = LOG_TABLE[ii];
+
 			// Calculate ii * jj
 			for (int jj = 0; jj < 256; ++jj) {
-				*ptr++ = EXP_TABLE[LOG_TABLE[ii] + LOG_TABLE[jj]];
+				*ptr++ = EXP_TABLE[log_ii + LOG_TABLE[jj]];
 			}
 		}
 
 		// For each subtable,
 		ptr = GF_DIV_TABLE;
 		for (int ii = 0; ii < 256; ++ii) {
+			const u8 log_ii = 255 - LOG_TABLE[ii];
+
 			// Calculate ii * jj
 			for (int jj = 0; jj < 256; ++jj) {
-				*ptr++ = EXP_TABLE[LOG_TABLE[jj] + 255 - LOG_TABLE[ii]];
+				*ptr++ = EXP_TABLE[LOG_TABLE[jj] + log_ii];
 			}
 		}
 	}
