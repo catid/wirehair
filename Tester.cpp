@@ -67,9 +67,20 @@ int main()
 
 	//FindBadDenseSeeds();
 
-	for (int ii = 1; ii <= 64000; ii += 1)
+	wirehair::Encoder encoder;
+	cat::wirehair::Decoder decoder;
+	Abyssinian prng;
+
+	for (int N = 1; N <= 64000;)
 	{
-		int block_count = ii;
+		int block_count = N;
+
+		if (N % 10 <= 2) {
+			++N;
+		} else {
+			N = (N - 2) * 10;
+		}
+
 		int block_bytes = 1300;
 		int message_bytes = block_bytes * block_count;
 		u8 *message = new u8[message_bytes];
@@ -80,8 +91,6 @@ int main()
 		{
 			message[ii] = ii;
 		}
-
-		wirehair::Encoder encoder;
 
 		double start = m_clock.usec();
 		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
@@ -100,9 +109,6 @@ int main()
 			cout << ">> OKAY! N=" << encoder.BlockCount() << "(" << mbytes << " MB) encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s" << endl;
 			//cin.get();
 		}
-
-		Abyssinian prng;
-		cat::wirehair::Decoder decoder;
 
 		u32 overhead_sum = 0, overhead_trials = 0;
 		u32 drop_seed = 50002;
