@@ -782,6 +782,122 @@ static const u8 INV_TABLE[256] = {
 	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236
 };
 
+#ifdef CAT_EXP_BIG_TABLES
+
+#include <stdlib.h> // malloc
+
+static u8 * CAT_RESTRICT GF_MUL_TABLE = 0;
+static u8 * CAT_RESTRICT GF_DIV_TABLE = 0;
+
+// Unpack 256x256 multiplication tables
+static void GF256Init() {
+	// If not initialized yet,
+	if (!GF_MUL_TABLE) {
+		// Allocate table memory 65KB
+		GF_MUL_TABLE = (u8 *)malloc(256 * 256);
+		GF_DIV_TABLE = (u8 *)malloc(256 * 256);
+
+		// For each subtable,
+		u8 *ptr = GF_MUL_TABLE;
+		for (int ii = 0; ii < 256; ++ii) {
+			// Calculate ii * jj
+			for (int jj = 0; jj < 256; ++jj) {
+				*ptr++ = EXP_TABLE[LOG_TABLE[ii] + LOG_TABLE[jj]];
+			}
+		}
+
+		// For each subtable,
+		ptr = GF_DIV_TABLE;
+		for (int ii = 0; ii < 256; ++ii) {
+			// Calculate ii * jj
+			for (int jj = 0; jj < 256; ++jj) {
+				*ptr++ = EXP_TABLE[LOG_TABLE[jj] + 255 - LOG_TABLE[ii]];
+			}
+		}
+	}
+}
+
+static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
+{
+	return GF_MUL_TABLE[((u32)x << 8) + y];
+}
+
+static CAT_INLINE u8 GF256Divide(u8 x, u8 y)
+{
+	// x /= y
+	return GF_DIV_TABLE[((u32)y << 8) + x];
+}
+
+// Performs "dest[] += src[] * x" operation in GF(256)
+static void GF256MemMulAdd(void * CAT_RESTRICT vdest, u8 x, const void * CAT_RESTRICT vsrc, int bytes)
+{
+	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
+	const u8 * CAT_RESTRICT src = reinterpret_cast<const u8*>( vsrc );
+	const u8 * CAT_RESTRICT table = GF_MUL_TABLE + ((u32)x << 8);
+
+	// For each block of 8 bytes,
+	while (bytes >= 8)
+	{
+		/*
+			For smaller messages, this function takes
+			up 50% of execution time.  Unfortunately I
+			do not see a way to make it run any faster.
+		*/
+		dest[0] ^= table[src[0]];
+		dest[1] ^= table[src[1]];
+		dest[2] ^= table[src[2]];
+		dest[3] ^= table[src[3]];
+		dest[4] ^= table[src[4]];
+		dest[5] ^= table[src[5]];
+		dest[6] ^= table[src[6]];
+		dest[7] ^= table[src[7]];
+
+		src += 8;
+		dest += 8;
+		bytes -= 8;
+	}
+
+	// For each byte,
+	while (bytes-- > 0)
+	{
+		// Multiply source byte by x and add it to destination byte
+		*dest++ ^= table[*src++];
+	}
+}
+
+// Performs "dest[] /= x" operation in GF(256)
+static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
+{
+	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
+	const u8 * CAT_RESTRICT table = GF_DIV_TABLE + ((u32)x << 8);
+
+	// For each block of 8 bytes,
+	while (bytes >= 8)
+	{
+		dest[0] = table[dest[0]];
+		dest[1] = table[dest[1]];
+		dest[2] = table[dest[2]];
+		dest[3] = table[dest[3]];
+		dest[4] = table[dest[4]];
+		dest[5] = table[dest[5]];
+		dest[6] = table[dest[6]];
+		dest[7] = table[dest[7]];
+
+		dest += 8;
+		bytes -= 8;
+	}
+
+	// For each byte,
+	while (bytes-- > 0)
+	{
+		// Multiply source byte by x and add it to destination byte
+		*dest = table[*dest];
+		++dest;
+	}
+}
+
+#else // CAT_EXP_BIG_TABLES
+
 static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
 {
 	return EXP_TABLE[LOG_TABLE[x] + LOG_TABLE[y]];
@@ -860,6 +976,8 @@ static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
 		++dest;
 	}
 }
+
+#endif // CAT_EXP_BIG_TABLES
 
 
 //// Utility: Column Iterator function
@@ -5234,6 +5352,10 @@ void Codec::FreeMatrix()
 
 bool Codec::AllocateWorkspace()
 {
+#ifdef CAT_EXP_BIG_TABLES
+	GF256Init();
+#endif
+
 	CAT_IF_DUMP(cout << endl << "---- AllocateWorkspace ----" << endl << endl;)
 
 	// Count needed rows and columns
