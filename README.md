@@ -19,6 +19,14 @@ is already lossy, so this is just like adding < 3% / N loss - a very
 very small amount of additional loss (e.g. 0.003%) - to the channel,
 down in the noise.
 
+It is designed to be competitive in performance with FEC based on
+Vandermonde matrices such as zfec, while allowing far more than 256
+file blocks (it works best at N=1024 blocks).  Furthermore, it can
+generate a stream of output that goes on forever, which has good
+recovery properties for any part of that stream that is received,
+rather than a fixed number of output blocks, making it far more
+useful than zfec for file transfer or audio/video streaming.
+
 Wirehair is released under the BSD license, which means that I ask
 only that if you use my software that in the binary distribution of your
 software you include the copyright notice in WIREHAIR.LICENSE and maybe
