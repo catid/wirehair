@@ -690,10 +690,51 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 //// Utility: GF(256) Multiply and Divide functions
 
 
-// Based on gf_w16_split_4_16_lazy_multiply_region from GF-Complete 1.0 (2014)
+// Based on GF-Complete 1.0
+// Requires that the data is a multiple of 2 bytes
 
-static void GF256MemMulAdd(
-	gf_t *gf,
+static u16 gf_w16_euclid(u16 b)
+{
+  gf_val_32_t e_i, e_im1, e_ip1;
+  gf_val_32_t d_i, d_im1, d_ip1;
+  gf_val_32_t y_i, y_im1, y_ip1;
+  gf_val_32_t c_i;
+
+  if (b == 0) return -1;
+  e_im1 = ((gf_internal_t *) (gf->scratch))->prim_poly;
+  e_i = b;
+  d_im1 = 16;
+  for (d_i = d_im1; ((1 << d_i) & e_i) == 0; d_i--) ;
+  y_i = 1;
+  y_im1 = 0;
+
+  while (e_i != 1) {
+
+    e_ip1 = e_im1;
+    d_ip1 = d_im1;
+    c_i = 0;
+
+    while (d_ip1 >= d_i) {
+      c_i ^= (1 << (d_ip1 - d_i));
+      e_ip1 ^= (e_i << (d_ip1 - d_i));
+      if (e_ip1 == 0) return 0;
+      while ((e_ip1 & (1 << d_ip1)) == 0) d_ip1--;
+    }
+
+    y_ip1 = y_im1 ^ gf->multiply.w32(gf, c_i, y_i);
+    y_im1 = y_i;
+    y_i = y_ip1;
+
+    e_im1 = e_i;
+    d_im1 = d_i;
+    e_i = e_ip1;
+    d_i = d_ip1;
+  }
+
+  return y_i;
+}
+
+static void gf_w16_split_4_16_lazy_multiply_region(
 	void * CAT_RESTRICT src, void * CAT_RESTRICT dest,
 	u16 val, int bytes)
 {
@@ -707,40 +748,31 @@ static void GF256MemMulAdd(
 		memxor(dest, src, bytes);
 	}
 
-	// TODO
-
-	uint64_t i, j, a, c, prod;
-	uint16_t *s16, *d16, *top;
-	gf_region_data rd;
-
-	gf_set_region_data(&rd, gf, src, dest, bytes, val, xor, 2);
-	gf_do_initial_region_alignment(&rd);    
-
 	// Construct multiplication table
-	u64 table[4][16];
+	u16 table[4][16];
 	for (int j = 0; j < 16; j++) {
 		for (int i = 0; i < 4; i++) {
-			u64 c = (j << (i*4));
+			u16 c = (j << (i*4));
 
 			table[i][j] = gf->multiply.w32(gf, c, val);
 		}
 	}
 
 	// Fast evaluation loop
-	const u16 *s16 = (const u16 *) rd.s_start;
-	u16 *d16 = (u16 *) rd.d_start;
-	const u16 *top = (const u16 *) rd.d_top;
+	const u16 * CAT_RESTRICT s16 = (const u16 * CAT_RESTRICT)src;
+	u16 * CAT_RESTRICT d16 = (u16 * CAT_RESTRICT)dest;
 
-	while (d16 < top) {
-		u16 a = *s16++;
-		u16 prod = *d16;
+	int words = bytes / 2;
+	for (int ii = 0; ii < words; ++ii) {
+		u16 a = s16[ii];
+		u16 prod = d16[ii];
 
 		prod ^= table[0][a & 15];
 		prod ^= table[1][(a >> 4) & 15];
 		prod ^= table[2][(a >> 8) & 15];
 		prod ^= table[3][a >> 12];
 
-		*d16++ = prod;
+		d16[ii] = prod;
 	}
 }
 
