@@ -689,6 +689,63 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 
 //// Utility: GF(256) Multiply and Divide functions
 
+
+// Based on gf_w16_split_4_16_lazy_multiply_region from GF-Complete 1.0 (2014)
+
+static void GF256MemMulAdd(
+	gf_t *gf,
+	void * CAT_RESTRICT src, void * CAT_RESTRICT dest,
+	u16 val, int bytes)
+{
+	// If degenerate case of multiplying by 0,
+	if (val == 0) {
+		return;
+	}
+
+	// If degenerate case of multiplying by 1,
+	if (val == 1) {
+		memxor(dest, src, bytes);
+	}
+
+	// TODO
+
+	uint64_t i, j, a, c, prod;
+	uint16_t *s16, *d16, *top;
+	gf_region_data rd;
+
+	gf_set_region_data(&rd, gf, src, dest, bytes, val, xor, 2);
+	gf_do_initial_region_alignment(&rd);    
+
+	// Construct multiplication table
+	u64 table[4][16];
+	for (int j = 0; j < 16; j++) {
+		for (int i = 0; i < 4; i++) {
+			u64 c = (j << (i*4));
+
+			table[i][j] = gf->multiply.w32(gf, c, val);
+		}
+	}
+
+	// Fast evaluation loop
+	const u16 *s16 = (const u16 *) rd.s_start;
+	u16 *d16 = (u16 *) rd.d_start;
+	const u16 *top = (const u16 *) rd.d_top;
+
+	while (d16 < top) {
+		u16 a = *s16++;
+		u16 prod = *d16;
+
+		prod ^= table[0][a & 15];
+		prod ^= table[1][(a >> 4) & 15];
+		prod ^= table[2][(a >> 8) & 15];
+		prod ^= table[3][a >> 12];
+
+		*d16++ = prod;
+	}
+}
+
+
+
 /*
 	Branchless multiply and divide construction from
 	"Fast Software Implementations of Finite Field Operations (Extended Abstract)"
