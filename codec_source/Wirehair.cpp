@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2012 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2012-2014 Christopher A. Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are met:
@@ -689,49 +689,80 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 
 //// Utility: GF(256) Multiply and Divide functions
 
+#define GF_FIELD_WIDTH 16
+#define GF_FIELD_SIZE (1 << GF_FIELD_WIDTH)
+#define GF_MULT_GROUP_SIZE (GF_FIELD_SIZE - 1)
+
+static const u16 *GF_LOG_TABLE = 0;
+static const u16 *GF_EXP_TABLE = 0;
+static const u32 GF_POLY = 0x1100B;
 
 // Based on GF-Complete 1.0
-// Requires that the data is a multiple of 2 bytes
 
-static u16 gf_w16_euclid(u16 b)
-{
-  gf_val_32_t e_i, e_im1, e_ip1;
-  gf_val_32_t d_i, d_im1, d_ip1;
-  gf_val_32_t y_i, y_im1, y_ip1;
-  gf_val_32_t c_i;
+static void gf_w16_init() {
+	// If already initialized,
+	if (GF_LOG_TABLE) {
+		return;
+	}
 
-  if (b == 0) return -1;
-  e_im1 = ((gf_internal_t *) (gf->scratch))->prim_poly;
-  e_i = b;
-  d_im1 = 16;
-  for (d_i = d_im1; ((1 << d_i) & e_i) == 0; d_i--) ;
-  y_i = 1;
-  y_im1 = 0;
+	// Allocate space for tables
+	GF_LOG_TABLE = new u16[GF_FIELD_SIZE];
+	GF_EXP_TABLE = new u16[GF_FIELD_SIZE];
+}
 
-  while (e_i != 1) {
+static int gf_w16_log_init() {
+  struct gf_w16_logtable_data *ltd;
+  int i, b;
+  int check = 0;
 
-    e_ip1 = e_im1;
-    d_ip1 = d_im1;
-    c_i = 0;
+  h = (gf_internal_t *) gf->scratch;
+  ltd = h->private;
+  
+  for (i = 0; i < GF_MULT_GROUP_SIZE+1; i++)
+    ltd->log_tbl[i] = 0;
+  ltd->d_antilog = ltd->antilog_tbl + GF_MULT_GROUP_SIZE;
 
-    while (d_ip1 >= d_i) {
-      c_i ^= (1 << (d_ip1 - d_i));
-      e_ip1 ^= (e_i << (d_ip1 - d_i));
-      if (e_ip1 == 0) return 0;
-      while ((e_ip1 & (1 << d_ip1)) == 0) d_ip1--;
-    }
-
-    y_ip1 = y_im1 ^ gf->multiply.w32(gf, c_i, y_i);
-    y_im1 = y_i;
-    y_i = y_ip1;
-
-    e_im1 = e_i;
-    d_im1 = d_i;
-    e_i = e_ip1;
-    d_i = d_ip1;
+  b = 1;
+  for (i = 0; i < GF_MULT_GROUP_SIZE; i++) {
+      if (ltd->log_tbl[b] != 0) check = 1;
+      ltd->log_tbl[b] = i;
+      ltd->antilog_tbl[i] = b;
+      ltd->antilog_tbl[i+GF_MULT_GROUP_SIZE] = b;
+      b <<= 1;
+      if (b & GF_FIELD_SIZE) {
+          b = b ^ h->prim_poly;
+      }
   }
 
-  return y_i;
+  /* If you can't construct the log table, there's a problem.  This code is used for
+     some other implementations (e.g. in SPLIT), so if the log table doesn't work in 
+     that instance, use CARRY_FREE / SHIFT instead. */
+
+  if (check) {
+    if (h->mult_type != GF_MULT_LOG_TABLE) {
+
+#if defined(INTEL_SSE4_PCLMUL)
+      return gf_w16_cfm_init(gf);
+#endif
+      return gf_w16_shift_init(gf);
+    } else {
+      _gf_errno = GF_E_LOGPOLY;
+      return 0;
+    }
+  }
+
+  ltd->inv_tbl[0] = 0;  /* Not really, but we need to fill it with something  */
+  ltd->inv_tbl[1] = 1;
+  for (i = 2; i < GF_FIELD_SIZE; i++) {
+    ltd->inv_tbl[i] = ltd->antilog_tbl[GF_MULT_GROUP_SIZE-ltd->log_tbl[i]];
+  }
+
+  gf->inverse.w32 = gf_w16_log_inverse;
+  gf->divide.w32 = gf_w16_log_divide;
+  gf->multiply.w32 = gf_w16_log_multiply;
+  gf->multiply_region.w32 = gf_w16_log_multiply_region;
+
+  return 1;
 }
 
 static void gf_w16_split_4_16_lazy_multiply_region(
@@ -749,30 +780,99 @@ static void gf_w16_split_4_16_lazy_multiply_region(
 	}
 
 	// Construct multiplication table
-	u16 table[4][16];
+	u16 T[4][16];
 	for (int j = 0; j < 16; j++) {
 		for (int i = 0; i < 4; i++) {
 			u16 c = (j << (i*4));
 
-			table[i][j] = gf->multiply.w32(gf, c, val);
+			T[i][j] = gf_w16_euclid(c, val);
 		}
 	}
 
-	// Fast evaluation loop
+	// Set up multiplicaton loop
 	const u16 * CAT_RESTRICT s16 = (const u16 * CAT_RESTRICT)src;
 	u16 * CAT_RESTRICT d16 = (u16 * CAT_RESTRICT)dest;
-
 	int words = bytes / 2;
-	for (int ii = 0; ii < words; ++ii) {
-		u16 a = s16[ii];
-		u16 prod = d16[ii];
 
-		prod ^= table[0][a & 15];
+	// Multiply bulk of data
+	while (words >= 4) {
+		--words;
+
+#ifdef CAT_ENDIAN_LITTLE
+		u64 x = *(const u64 *)s16;
+		s16 += 4;
+
+		u16 pa = T[0][x & 15];
+		u16 pb = T[0][(x >> 16) & 15];
+		u16 pc = T[0][(x >> 32) & 15];
+		u16 pd = T[0][(x >> 48) & 15];
+
+		pa ^= T[1][(x >> 4) & 15];
+		pb ^= T[1][(x >> 20) & 15];
+		pc ^= T[1][(x >> 36) & 15];
+		pd ^= T[1][(x >> 52) & 15];
+
+		pa ^= T[2][(x >> 8) & 15];
+		pb ^= T[2][(x >> 24) & 15];
+		pc ^= T[2][(x >> 40) & 15];
+		pd ^= T[2][(x >> 56) & 15];
+
+		pa ^= T[3][(x >> 12) & 15];
+		pb ^= T[3][(x >> 28) & 15];
+		pc ^= T[3][(x >> 44) & 15];
+		pd ^= T[3][x >> 60];
+
+		u64 r = pa | ((u32)pb << 16) | ((u64)pc << 32) | ((u64)pd << 48);
+
+		*(u64 *)d16 ^= r;
+		d16 += 4;
+#else // CAT_ENDIAN_LITTLE
+		u16 a = s16[0];
+		u16 b = s16[1];
+		u16 c = s16[2];
+		u16 d = s16[3];
+		s16 += 4;
+
+		u16 pa = T[0][a & 15];
+		u16 pb = T[0][b & 15];
+		u16 pc = T[0][c & 15];
+		u16 pd = T[0][d & 15];
+
+		pa ^= T[1][(a >> 4) & 15];
+		pb ^= T[1][(b >> 4) & 15];
+		pc ^= T[1][(c >> 4) & 15];
+		pd ^= T[1][(d >> 4) & 15];
+
+		pa ^= T[2][(a >> 8) & 15];
+		pb ^= T[2][(b >> 8) & 15];
+		pc ^= T[2][(c >> 8) & 15];
+		pd ^= T[2][(d >> 8) & 15];
+
+		pa ^= T[3][a >> 12];
+		pb ^= T[3][b >> 12];
+		pc ^= T[3][c >> 12];
+		pd ^= T[3][d >> 12];
+
+		d16[0] ^= pa;
+		d16[1] ^= pb;
+		d16[2] ^= pc;
+		d16[3] ^= pd;
+		d16 += 4;
+#endif // CAT_ENDIAN_LITTLE
+	}
+
+	// Multiply remaining words
+	while (words > 0) {
+		--words;
+
+		u16 a = *s16++;
+
+		u16 prod = table[0][a & 15];
 		prod ^= table[1][(a >> 4) & 15];
 		prod ^= table[2][(a >> 8) & 15];
 		prod ^= table[3][a >> 12];
 
-		d16[ii] = prod;
+		*d16++ ^= prod;
 	}
 }
 
