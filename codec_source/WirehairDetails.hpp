@@ -50,7 +50,6 @@
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
 #define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
-#define CAT_EXP_BIG_TABLES /* Unpack 65KB of tables for faster GF(256) multiplication */
 
 // Heavy rows:
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
@@ -133,7 +132,7 @@ class CAT_EXPORT Codec
 	u16 _next_pivot;						// Pivot to resume Triangle() on after it fails
 
 	// Heavy rows
-	u8 * CAT_RESTRICT _heavy_matrix;		// Heavy rows of GE matrix
+	u16 * CAT_RESTRICT _heavy_matrix;		// Heavy rows of GE matrix
 	int _heavy_pitch;						// Bytes per heavy matrix row
 	u16 _heavy_columns;						// Number of heavy matrix columns
 	u16 _first_heavy_column;				// First heavy column that is non-zero

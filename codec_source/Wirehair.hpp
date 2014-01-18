@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2012 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2012-2014 Christopher A. Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are met:
@@ -29,7 +29,7 @@
 #ifndef CAT_WIREHAIR_HPP
 #define CAT_WIREHAIR_HPP
 
-#define CAT_WIREHAIR_VERSION 1 /* Wirehair FEC codec version; different versions are incompatible */
+#define CAT_WIREHAIR_VERSION 2 /* Wirehair FEC codec version; different versions are incompatible */
 
 /*
 	Wirehair Streaming Forward Error Correction
@@ -84,6 +84,7 @@ public:
 
 	// Attempt to initialize with the given message size and number of bytes per block
 	// message_in: Has message_bytes
+	// block_bytes: Must be a multiple of 2
 	CAT_INLINE Result BeginEncode(const void *message_in, int message_bytes, int block_bytes)
 	{
 		Result r = Codec::InitializeEncoder(message_bytes, block_bytes);
@@ -148,6 +149,7 @@ public:
 	CAT_INLINE u32 BlockCount() { return Codec::BlockCount(); }
 
 	// Attempt to initialize the codec with the given message size and block bytes
+	// block_bytes: Must be a multiple of 2
 	CAT_INLINE Result BeginDecode(void *message_out, int message_bytes, int block_bytes)
 	{
 		// Remember output message location

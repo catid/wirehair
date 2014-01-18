@@ -202,9 +202,16 @@
 
 #include "Wirehair.hpp"
 #include "MemXOR.hpp"
+
 #if defined(CAT_HEAVY_WIN_MULT)
-#include "EndianNeutral.hpp"
+# include "EndianNeutral.hpp"
+
+// If not little-endian, do not use this
+# ifndef CAT_ENDIAN_LITTLE
+#  undef CAT_HEAVY_WIN_MULT
+# endif
 #endif
+
 using namespace cat;
 using namespace wirehair;
 
@@ -689,118 +696,81 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 
 //// Utility: GF(256) Multiply and Divide functions
 
-#define GF_FIELD_WIDTH 16
-#define GF_FIELD_SIZE (1 << GF_FIELD_WIDTH)
-#define GF_MULT_GROUP_SIZE (GF_FIELD_SIZE - 1)
+#define GF_BITS 16
+#define GF_SIZE (1 << GF_BITS)
 
-static const u16 *GF_LOG_TABLE = 0;
-static const u16 *GF_EXP_TABLE = 0;
+static const u16 *GF_LOG = 0;
+static const u16 *GF_EXP = 0;
 static const u32 GF_POLY = 0x1100B;
 
 // Based on GF-Complete 1.0
 
-static void gf_w16_init() {
+static void gf_init() {
 	// If already initialized,
-	if (GF_LOG_TABLE) {
+	if (GF_LOG) {
 		return;
 	}
 
 	// Allocate space for tables
-	GF_LOG_TABLE = new u16[GF_FIELD_SIZE];
-	GF_EXP_TABLE = new u16[GF_FIELD_SIZE];
+	GF_LOG = new u16[GF_SIZE];
+	GF_EXP = new u16[2*GF_SIZE - 1];
+
+	// Fill tables
+	u32 bits = 1;
+	for (int ii = 0; ii < GF_SIZE; ++ii) {
+		const u32 n = bits;
+
+		// Insert table entry
+		GF_LOG[n] = (u16)ii;
+		GF_EXP[ii] = n;
+		GF_EXP[ii + GF_SIZE - 1] = n;
+
+		// LFSR iteration
+		bits <<= 1;
+		bits ^= GF_POLY & -(s32)(bits >> 16);
+	}
 }
 
-static int gf_w16_log_init() {
-  struct gf_w16_logtable_data *ltd;
-  int i, b;
-  int check = 0;
-
-  h = (gf_internal_t *) gf->scratch;
-  ltd = h->private;
-  
-  for (i = 0; i < GF_MULT_GROUP_SIZE+1; i++)
-    ltd->log_tbl[i] = 0;
-  ltd->d_antilog = ltd->antilog_tbl + GF_MULT_GROUP_SIZE;
-
-  b = 1;
-  for (i = 0; i < GF_MULT_GROUP_SIZE; i++) {
-      if (ltd->log_tbl[b] != 0) check = 1;
-      ltd->log_tbl[b] = i;
-      ltd->antilog_tbl[i] = b;
-      ltd->antilog_tbl[i+GF_MULT_GROUP_SIZE] = b;
-      b <<= 1;
-      if (b & GF_FIELD_SIZE) {
-          b = b ^ h->prim_poly;
-      }
-  }
-
-  /* If you can't construct the log table, there's a problem.  This code is used for
-     some other implementations (e.g. in SPLIT), so if the log table doesn't work in 
-     that instance, use CARRY_FREE / SHIFT instead. */
-
-  if (check) {
-    if (h->mult_type != GF_MULT_LOG_TABLE) {
-
-#if defined(INTEL_SSE4_PCLMUL)
-      return gf_w16_cfm_init(gf);
-#endif
-      return gf_w16_shift_init(gf);
-    } else {
-      _gf_errno = GF_E_LOGPOLY;
-      return 0;
-    }
-  }
-
-  ltd->inv_tbl[0] = 0;  /* Not really, but we need to fill it with something  */
-  ltd->inv_tbl[1] = 1;
-  for (i = 2; i < GF_FIELD_SIZE; i++) {
-    ltd->inv_tbl[i] = ltd->antilog_tbl[GF_MULT_GROUP_SIZE-ltd->log_tbl[i]];
-  }
-
-  gf->inverse.w32 = gf_w16_log_inverse;
-  gf->divide.w32 = gf_w16_log_divide;
-  gf->multiply.w32 = gf_w16_log_multiply;
-  gf->multiply_region.w32 = gf_w16_log_multiply_region;
-
-  return 1;
+// x * y
+static u16 gf_mul(u16 x, u16 y) {
+	return GF_EXP[GF_LOG[x] + GF_LOG[y]];
 }
 
-static void gf_w16_split_4_16_lazy_multiply_region(
-	void * CAT_RESTRICT src, void * CAT_RESTRICT dest,
-	u16 val, int bytes)
+// x / y
+static u16 gf_div(u16 x, u16 y) {
+	return GF_EXP[GF_LOG[x] + GF_SIZE-1 - GF_LOG[y]];
+}
+
+// dest += src * n
+static void gf_muladd(u16 * CAT_RESTRICT dest, u16 n,
+					  const u16 * CAT_RESTRICT src, int words)
 {
 	// If degenerate case of multiplying by 0,
-	if (val == 0) {
+	if (n == 0) {
 		return;
 	}
 
 	// If degenerate case of multiplying by 1,
-	if (val == 1) {
+	if (n == 1) {
 		memxor(dest, src, bytes);
 	}
 
 	// Construct multiplication table
+	u16 log_n = GF_LOG[n];
 	u16 T[4][16];
-	for (int j = 0; j < 16; j++) {
-		for (int i = 0; i < 4; i++) {
-			u16 c = (j << (i*4));
-
-			T[i][j] = gf_w16_euclid(c, val);
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 16; j++) {
+			T[i][j] = GF_EXP[GF_LOG[j << (i*4)] + log_n];
 		}
 	}
 
-	// Set up multiplicaton loop
-	const u16 * CAT_RESTRICT s16 = (const u16 * CAT_RESTRICT)src;
-	u16 * CAT_RESTRICT d16 = (u16 * CAT_RESTRICT)dest;
-	int words = bytes / 2;
-
+#ifdef CAT_ENDIAN_LITTLE
 	// Multiply bulk of data
 	while (words >= 4) {
 		--words;
 
-#ifdef CAT_ENDIAN_LITTLE
-		u64 x = *(const u64 *)s16;
-		s16 += 4;
+		u64 x = *(const u64 *)src;
+		src += 4;
 
 		u16 pa = T[0][x & 15];
 		u16 pb = T[0][(x >> 16) & 15];
@@ -824,376 +794,91 @@ static void gf_w16_split_4_16_lazy_multiply_region(
 
 		u64 r = pa | ((u32)pb << 16) | ((u64)pc << 32) | ((u64)pd << 48);
 
-		*(u64 *)d16 ^= r;
-		d16 += 4;
-#else // CAT_ENDIAN_LITTLE
-		u16 a = s16[0];
-		u16 b = s16[1];
-		u16 c = s16[2];
-		u16 d = s16[3];
-		s16 += 4;
-
-		u16 pa = T[0][a & 15];
-		u16 pb = T[0][b & 15];
-		u16 pc = T[0][c & 15];
-		u16 pd = T[0][d & 15];
-
-		pa ^= T[1][(a >> 4) & 15];
-		pb ^= T[1][(b >> 4) & 15];
-		pc ^= T[1][(c >> 4) & 15];
-		pd ^= T[1][(d >> 4) & 15];
-
-		pa ^= T[2][(a >> 8) & 15];
-		pb ^= T[2][(b >> 8) & 15];
-		pc ^= T[2][(c >> 8) & 15];
-		pd ^= T[2][(d >> 8) & 15];
-
-		pa ^= T[3][a >> 12];
-		pb ^= T[3][b >> 12];
-		pc ^= T[3][c >> 12];
-		pd ^= T[3][d >> 12];
-
-		d16[0] ^= pa;
-		d16[1] ^= pb;
-		d16[2] ^= pc;
-		d16[3] ^= pd;
-		d16 += 4;
-#endif // CAT_ENDIAN_LITTLE
+		*(u64 *)dest ^= r;
+		dest += 4;
 	}
+#endif // CAT_ENDIAN_LITTLE
 
 	// Multiply remaining words
 	while (words > 0) {
 		--words;
 
-		u16 a = *s16++;
+		u16 a = *src++;
 
 		u16 prod = table[0][a & 15];
 		prod ^= table[1][(a >> 4) & 15];
 		prod ^= table[2][(a >> 8) & 15];
 		prod ^= table[3][a >> 12];
 
-		*d16++ ^= prod;
+		*dest++ ^= prod;
 	}
 }
 
+// dest /= n
+static void gf_div(u16 n, u16 * CAT_RESTRICT data, int words)
+{
+	// If degenerate cases of dividing by 0 or 1,
+	if (n <= 1) {
+		return;
+	}
 
-
-/*
-	Branchless multiply and divide construction from
-	"Fast Software Implementations of Finite Field Operations (Extended Abstract)"
-	by Cheng Huang and Lihao Xu
-
-	Small corrections made to paper (Q = 255):
-		+ The EXP_TABLE needs to have 512*2+1 elements to handle 0*0 = 0 case.
-		+ Element 255*2 should be set to 1.
-
-	After these corrections it works properly and reduces the execution time
-	to 58% of the usual version that uses branches to handle zero input.
-
-	These tables were generated using polynomial 0x15F.  Maybe it's voodoo but
-	random GF(256) matrices with this polynomial tended to be more invertible.
-	There are 16 generator polynomials for GF(256), and 0x1F5 was a close second
-	in terms of rate of invertibility.
-
-	INV_TABLE[x] was also generated to accelerate GF256Divide(1, x).
-*/
-
-static const u16 LOG_TABLE[256] = {
-	512, 255, 1, 122, 2, 244, 123, 181, 3, 48, 245, 224, 124, 84, 182, 111,
-	4, 233, 49, 19, 246, 107, 225, 206, 125, 56, 85, 170, 183, 91, 112, 250,
-	5, 117, 234, 10, 50, 156, 20, 213, 247, 203, 108, 178, 226, 37, 207, 210,
-	126, 150, 57, 100, 86, 141, 171, 40, 184, 73, 92, 164, 113, 146, 251, 229,
-	6, 96, 118, 15, 235, 193, 11, 13, 51, 68, 157, 195, 21, 31, 214, 237,
-	248, 168, 204, 17, 109, 222, 179, 120, 227, 162, 38, 98, 208, 176, 211, 8,
-	127, 188, 151, 239, 58, 132, 101, 216, 87, 80, 142, 33, 172, 27, 41, 23,
-	185, 77, 74, 197, 93, 65, 165, 159, 114, 200, 147, 70, 252, 45, 230, 53,
-	7, 175, 97, 161, 119, 221, 16, 167, 236, 30, 194, 67, 12, 192, 14, 95,
-	52, 44, 69, 199, 158, 64, 196, 76, 22, 26, 32, 79, 215, 131, 238, 187,
-	249, 90, 169, 55, 205, 106, 18, 232, 110, 83, 223, 47, 180, 243, 121, 254,
-	228, 145, 163, 72, 39, 140, 99, 149, 209, 36, 177, 202, 212, 155, 9, 116,
-	128, 61, 189, 218, 152, 137, 240, 103, 59, 135, 133, 134, 102, 136, 217, 60,
-	88, 104, 81, 241, 143, 138, 34, 153, 173, 219, 28, 190, 42, 62, 24, 129,
-	186, 130, 78, 25, 75, 63, 198, 43, 94, 191, 66, 29, 166, 220, 160, 174,
-	115, 154, 201, 35, 148, 139, 71, 144, 253, 242, 46, 82, 231, 105, 54, 89
-};
-
-static const u8 EXP_TABLE[512*2+1] = {
-	1, 2, 4, 8, 16, 32, 64, 128, 95, 190, 35, 70, 140, 71, 142, 67,
-	134, 83, 166, 19, 38, 76, 152, 111, 222, 227, 153, 109, 218, 235, 137, 77,
-	154, 107, 214, 243, 185, 45, 90, 180, 55, 110, 220, 231, 145, 125, 250, 171,
-	9, 18, 36, 72, 144, 127, 254, 163, 25, 50, 100, 200, 207, 193, 221, 229,
-	149, 117, 234, 139, 73, 146, 123, 246, 179, 57, 114, 228, 151, 113, 226, 155,
-	105, 210, 251, 169, 13, 26, 52, 104, 208, 255, 161, 29, 58, 116, 232, 143,
-	65, 130, 91, 182, 51, 102, 204, 199, 209, 253, 165, 21, 42, 84, 168, 15,
-	30, 60, 120, 240, 191, 33, 66, 132, 87, 174, 3, 6, 12, 24, 48, 96,
-	192, 223, 225, 157, 101, 202, 203, 201, 205, 197, 213, 245, 181, 53, 106, 212,
-	247, 177, 61, 122, 244, 183, 49, 98, 196, 215, 241, 189, 37, 74, 148, 119,
-	238, 131, 89, 178, 59, 118, 236, 135, 81, 162, 27, 54, 108, 216, 239, 129,
-	93, 186, 43, 86, 172, 7, 14, 28, 56, 112, 224, 159, 97, 194, 219, 233,
-	141, 69, 138, 75, 150, 115, 230, 147, 121, 242, 187, 41, 82, 164, 23, 46,
-	92, 184, 47, 94, 188, 39, 78, 156, 103, 206, 195, 217, 237, 133, 85, 170,
-	11, 22, 44, 88, 176, 63, 126, 252, 167, 17, 34, 68, 136, 79, 158, 99,
-	198, 211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1,
-	2, 4, 8, 16, 32, 64, 128, 95, 190, 35, 70, 140, 71, 142, 67, 134,
-	83, 166, 19, 38, 76, 152, 111, 222, 227, 153, 109, 218, 235, 137, 77, 154,
-	107, 214, 243, 185, 45, 90, 180, 55, 110, 220, 231, 145, 125, 250, 171, 9,
-	18, 36, 72, 144, 127, 254, 163, 25, 50, 100, 200, 207, 193, 221, 229, 149,
-	117, 234, 139, 73, 146, 123, 246, 179, 57, 114, 228, 151, 113, 226, 155, 105,
-	210, 251, 169, 13, 26, 52, 104, 208, 255, 161, 29, 58, 116, 232, 143, 65,
-	130, 91, 182, 51, 102, 204, 199, 209, 253, 165, 21, 42, 84, 168, 15, 30,
-	60, 120, 240, 191, 33, 66, 132, 87, 174, 3, 6, 12, 24, 48, 96, 192,
-	223, 225, 157, 101, 202, 203, 201, 205, 197, 213, 245, 181, 53, 106, 212, 247,
-	177, 61, 122, 244, 183, 49, 98, 196, 215, 241, 189, 37, 74, 148, 119, 238,
-	131, 89, 178, 59, 118, 236, 135, 81, 162, 27, 54, 108, 216, 239, 129, 93,
-	186, 43, 86, 172, 7, 14, 28, 56, 112, 224, 159, 97, 194, 219, 233, 141,
-	69, 138, 75, 150, 115, 230, 147, 121, 242, 187, 41, 82, 164, 23, 46, 92,
-	184, 47, 94, 188, 39, 78, 156, 103, 206, 195, 217, 237, 133, 85, 170, 11,
-	22, 44, 88, 176, 63, 126, 252, 167, 17, 34, 68, 136, 79, 158, 99, 198,
-	211, 249, 173, 5, 10, 20, 40, 80, 160, 31, 62, 124, 248, 175, 1, 0,
-};
-
-static const u8 INV_TABLE[256] = {
-	0, 1, 175, 202, 248, 70, 101, 114, 124, 46, 35, 77, 157, 54, 57, 247,
-	62, 152, 23, 136, 190, 244, 137, 18, 225, 147, 27, 26, 179, 59, 212, 32,
-	31, 213, 76, 10, 164, 182, 68, 220, 95, 144, 122, 113, 235, 195, 9, 125,
-	223, 253, 230, 189, 162, 120, 13, 156, 246, 14, 178, 29, 106, 84, 16, 153,
-	160, 119, 197, 198, 38, 221, 5, 249, 82, 159, 91, 207, 34, 11, 110, 166,
-	128, 104, 72, 158, 61, 107, 151, 201, 218, 116, 206, 74, 171, 155, 145, 40,
-	192, 139, 209, 134, 115, 6, 241, 180, 81, 129, 60, 85, 169, 176, 78, 167,
-	123, 43, 7, 100, 89, 219, 161, 65, 53, 163, 42, 112, 8, 47, 227, 187,
-	80, 105, 148, 232, 205, 214, 99, 208, 19, 22, 193, 97, 173, 229, 211, 238,
-	41, 94, 224, 25, 130, 233, 200, 86, 17, 63, 170, 93, 55, 12, 83, 73,
-	64, 118, 52, 121, 36, 183, 79, 111, 177, 108, 154, 92, 228, 140, 203, 2,
-	109, 168, 58, 28, 103, 240, 37, 165, 250, 217, 226, 127, 231, 51, 20, 245,
-	96, 138, 234, 45, 199, 66, 67, 196, 150, 87, 3, 174, 215, 132, 90, 75,
-	135, 98, 239, 142, 30, 33, 133, 204, 251, 185, 88, 117, 39, 69, 252, 48,
-	146, 24, 186, 126, 172, 141, 50, 188, 131, 149, 194, 44, 255, 243, 143, 210,
-	181, 102, 254, 237, 21, 191, 56, 15, 4, 71, 184, 216, 222, 49, 242, 236
-};
-
-#ifdef CAT_EXP_BIG_TABLES
-
-#include <stdlib.h> // malloc
-
-static u8 * CAT_RESTRICT GF_MUL_TABLE = 0;
-static u8 * CAT_RESTRICT GF_DIV_TABLE = 0;
-
-// Unpack 256x256 multiplication tables
-static void GF256Init() {
-	// If not initialized yet,
-	if (!GF_MUL_TABLE) {
-		// Allocate table memory 65KB
-		GF_MUL_TABLE = (u8 *)malloc(256 * 256);
-		GF_DIV_TABLE = (u8 *)malloc(256 * 256);
-
-		// For each subtable,
-		u8 *ptr = GF_MUL_TABLE;
-		for (int ii = 0; ii < 256; ++ii) {
-			const u8 log_ii = LOG_TABLE[ii];
-
-			// Calculate ii * jj
-			for (int jj = 0; jj < 256; ++jj) {
-				*ptr++ = EXP_TABLE[log_ii + LOG_TABLE[jj]];
-			}
-		}
-
-		// For each subtable,
-		ptr = GF_DIV_TABLE;
-		for (int ii = 0; ii < 256; ++ii) {
-			const u8 log_ii = 255 - LOG_TABLE[ii];
-
-			// Calculate ii * jj
-			for (int jj = 0; jj < 256; ++jj) {
-				*ptr++ = EXP_TABLE[LOG_TABLE[jj] + log_ii];
-			}
+	// Construct multiplication table
+	u16 log_n = GF_SIZE-1 + GF_LOG[n];
+	u16 T[4][16];
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 16; j++) {
+			T[i][j] = GF_EXP[GF_LOG[j << (i*4)] + log_n];
 		}
 	}
-}
 
-static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
-{
-	return GF_MUL_TABLE[((u32)x << 8) + y];
-}
-
-static CAT_INLINE u8 GF256Divide(u8 x, u8 y)
-{
-	// x /= y
-	return GF_DIV_TABLE[((u32)y << 8) + x];
-}
-
-// Performs "dest[] += src[] * x" operation in GF(256)
-static void GF256MemMulAdd(void * CAT_RESTRICT vdest, u8 x, const void * CAT_RESTRICT vsrc, int bytes)
-{
-	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
-	const u8 * CAT_RESTRICT src = reinterpret_cast<const u8*>( vsrc );
-	const u8 * CAT_RESTRICT table = GF_MUL_TABLE + ((u32)x << 8);
-
-	// For each block of 8 bytes,
-	while (bytes >= 8)
-	{
 #ifdef CAT_ENDIAN_LITTLE
-		// This optimization works because it reduces the number of memory
-		// accesses on desktops by almost half.
-		u64 x = table[src[0]];
-		x |= (u64)table[src[1]] << 8;
-		x |= (u64)table[src[2]] << 16;
-		x |= (u64)table[src[3]] << 24;
-		x |= (u64)table[src[4]] << 32;
-		x |= (u64)table[src[5]] << 40;
-		x |= (u64)table[src[6]] << 48;
-		x |= (u64)table[src[7]] << 56;
-		*(u64*)dest ^= x;
-#else
-		dest[0] ^= table[src[0]];
-		dest[1] ^= table[src[1]];
-		dest[2] ^= table[src[2]];
-		dest[3] ^= table[src[3]];
-		dest[4] ^= table[src[4]];
-		dest[5] ^= table[src[5]];
-		dest[6] ^= table[src[6]];
-		dest[7] ^= table[src[7]];
+	// Multiply bulk of data
+	while (words >= 4) {
+		--words;
+
+		u64 x = *(const u64 *)data;
+
+		u16 pa = T[0][x & 15];
+		u16 pb = T[0][(x >> 16) & 15];
+		u16 pc = T[0][(x >> 32) & 15];
+		u16 pd = T[0][(x >> 48) & 15];
+
+		pa ^= T[1][(x >> 4) & 15];
+		pb ^= T[1][(x >> 20) & 15];
+		pc ^= T[1][(x >> 36) & 15];
+		pd ^= T[1][(x >> 52) & 15];
+
+		pa ^= T[2][(x >> 8) & 15];
+		pb ^= T[2][(x >> 24) & 15];
+		pc ^= T[2][(x >> 40) & 15];
+		pd ^= T[2][(x >> 56) & 15];
+
+		pa ^= T[3][(x >> 12) & 15];
+		pb ^= T[3][(x >> 28) & 15];
+		pc ^= T[3][(x >> 44) & 15];
+		pd ^= T[3][x >> 60];
+
+		u64 r = pa | ((u32)pb << 16) | ((u64)pc << 32) | ((u64)pd << 48);
+
+		*(u64 *)data = r;
+		data += 4;
+	}
 #endif // CAT_ENDIAN_LITTLE
 
-		src += 8;
-		dest += 8;
-		bytes -= 8;
-	}
+	// Multiply remaining words
+	while (words > 0) {
+		--words;
 
-	// For each byte,
-	while (bytes-- > 0)
-	{
-		// Multiply source byte by x and add it to destination byte
-		*dest++ ^= table[*src++];
-	}
-}
+		u16 a = *data;
 
-// Performs "dest[] /= x" operation in GF(256)
-static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
-{
-	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
-	const u8 * CAT_RESTRICT table = GF_DIV_TABLE + ((u32)x << 8);
+		u16 p = table[0][a & 15];
+		p ^= table[1][(a >> 4) & 15];
+		p ^= table[2][(a >> 8) & 15];
+		p ^= table[3][a >> 12];
 
-	// For each block of 8 bytes,
-	while (bytes >= 8)
-	{
-#ifdef CAT_ENDIAN_LITTLE
-		// This optimization works because it reduces the number of memory
-		// accesses on desktops by almost half.
-		u64 x = table[dest[0]];
-		x |= (u64)table[dest[1]] << 8;
-		x |= (u64)table[dest[2]] << 16;
-		x |= (u64)table[dest[3]] << 24;
-		x |= (u64)table[dest[4]] << 32;
-		x |= (u64)table[dest[5]] << 40;
-		x |= (u64)table[dest[6]] << 48;
-		x |= (u64)table[dest[7]] << 56;
-		*(u64*)dest = x;
-#else
-		dest[0] = table[dest[0]];
-		dest[1] = table[dest[1]];
-		dest[2] = table[dest[2]];
-		dest[3] = table[dest[3]];
-		dest[4] = table[dest[4]];
-		dest[5] = table[dest[5]];
-		dest[6] = table[dest[6]];
-		dest[7] = table[dest[7]];
-#endif // CAT_ENDIAN_LITTLE
-
-		dest += 8;
-		bytes -= 8;
-	}
-
-	// For each byte,
-	while (bytes-- > 0)
-	{
-		// Multiply source byte by x and add it to destination byte
-		*dest = table[*dest];
-		++dest;
+		*data++ = p;
 	}
 }
-
-#else // CAT_EXP_BIG_TABLES
-
-static CAT_INLINE u8 GF256Multiply(u8 x, u8 y)
-{
-	return EXP_TABLE[LOG_TABLE[x] + LOG_TABLE[y]];
-}
-
-static CAT_INLINE u8 GF256Divide(u8 x, u8 y)
-{
-	// Precondition: y != 0
-	return EXP_TABLE[LOG_TABLE[x] + 255 - LOG_TABLE[y]];
-}
-
-// Performs "dest[] += src[] * x" operation in GF(256)
-static void GF256MemMulAdd(void * CAT_RESTRICT vdest, u8 x, const void * CAT_RESTRICT vsrc, int bytes)
-{
-	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
-	const u8 * CAT_RESTRICT src = reinterpret_cast<const u8*>( vsrc );
-	int log_x = LOG_TABLE[x];
-
-	// For each block of 8 bytes,
-	while (bytes >= 8)
-	{
-		/*
-			For smaller messages, this function takes
-			up 50% of execution time.  Unfortunately I
-			do not see a way to make it run any faster.
-		*/
-		dest[0] ^= EXP_TABLE[LOG_TABLE[src[0]] + log_x];
-		dest[1] ^= EXP_TABLE[LOG_TABLE[src[1]] + log_x];
-		dest[2] ^= EXP_TABLE[LOG_TABLE[src[2]] + log_x];
-		dest[3] ^= EXP_TABLE[LOG_TABLE[src[3]] + log_x];
-		dest[4] ^= EXP_TABLE[LOG_TABLE[src[4]] + log_x];
-		dest[5] ^= EXP_TABLE[LOG_TABLE[src[5]] + log_x];
-		dest[6] ^= EXP_TABLE[LOG_TABLE[src[6]] + log_x];
-		dest[7] ^= EXP_TABLE[LOG_TABLE[src[7]] + log_x];
-
-		src += 8;
-		dest += 8;
-		bytes -= 8;
-	}
-
-	// For each byte,
-	while (bytes-- > 0)
-	{
-		// Multiply source byte by x and add it to destination byte
-		*dest++ ^= EXP_TABLE[LOG_TABLE[*src++] + log_x];
-	}
-}
-
-// Performs "dest[] /= x" operation in GF(256)
-static void GF256MemDivide(void * CAT_RESTRICT vdest, u8 x, int bytes)
-{
-	u8 * CAT_RESTRICT dest = reinterpret_cast<u8*>( vdest );
-	int log_x = 255 - LOG_TABLE[x];
-
-	// For each block of 8 bytes,
-	while (bytes >= 8)
-	{
-		dest[0] = EXP_TABLE[LOG_TABLE[dest[0]] + log_x];
-		dest[1] = EXP_TABLE[LOG_TABLE[dest[1]] + log_x];
-		dest[2] = EXP_TABLE[LOG_TABLE[dest[2]] + log_x];
-		dest[3] = EXP_TABLE[LOG_TABLE[dest[3]] + log_x];
-		dest[4] = EXP_TABLE[LOG_TABLE[dest[4]] + log_x];
-		dest[5] = EXP_TABLE[LOG_TABLE[dest[5]] + log_x];
-		dest[6] = EXP_TABLE[LOG_TABLE[dest[6]] + log_x];
-		dest[7] = EXP_TABLE[LOG_TABLE[dest[7]] + log_x];
-
-		dest += 8;
-		bytes -= 8;
-	}
-
-	// For each byte,
-	while (bytes-- > 0)
-	{
-		// Multiply source byte by x and add it to destination byte
-		*dest = EXP_TABLE[LOG_TABLE[*dest] + log_x];
-		++dest;
-	}
-}
-
-#endif // CAT_EXP_BIG_TABLES
 
 
 //// Utility: Column Iterator function
@@ -2468,24 +2153,30 @@ void Codec::SetHeavyRows()
 	prng.Initialize(_p_seed);
 
 	// Skip extra rows
-	u8 * CAT_RESTRICT heavy_offset = _heavy_matrix + _heavy_pitch * _extra_count;
+	u16 * CAT_RESTRICT heavy_offset = _heavy_matrix + _heavy_pitch * _extra_count;
 
 	// For each heavy matrix word,
-	u8 * CAT_RESTRICT heavy_row = heavy_offset;
+	u16 * CAT_RESTRICT heavy_row = heavy_offset;
 	//u32 words = CAT_HEAVY_ROWS * (_heavy_pitch / sizeof(u32));
 	for (int row_i = 0; row_i < CAT_HEAVY_ROWS; ++row_i, heavy_row += _heavy_pitch)
 	{
 		// NOTE: Each heavy row is a multiple of 4 bytes in size
 		u32 * CAT_RESTRICT words = reinterpret_cast<u32*>( heavy_row );
-		for (int col_i = 0; col_i < _heavy_columns; col_i += 4)
-			*words++ = prng.Next();
+		for (int col_i = 0; col_i < _heavy_columns; col_i += 4) {
+			// FIXME: Endian issue here
+			words[0] = prng.Next();
+			words[1] = prng.Next();
+			words += 2;
+		}
 	}
 
 	// Add identity matrix to tie heavy rows to heavy mixing columns
-	u8 * CAT_RESTRICT lower_right = heavy_offset + _heavy_columns - CAT_HEAVY_ROWS;
-	for (int ii = 0; ii < CAT_HEAVY_ROWS; ++ii, lower_right += _heavy_pitch)
-		for (int jj = 0; jj < CAT_HEAVY_ROWS; ++jj)
+	u16 * CAT_RESTRICT lower_right = heavy_offset + _heavy_columns - CAT_HEAVY_ROWS;
+	for (int ii = 0; ii < CAT_HEAVY_ROWS; ++ii, lower_right += _heavy_pitch) {
+		for (int jj = 0; jj < CAT_HEAVY_ROWS; ++jj) {
 			lower_right[jj] = (ii == jj) ? 1 : 0;
+		}
+	}
 }
 
 /*
@@ -2591,8 +2282,8 @@ void Codec::InsertHeavyRows()
 
 		CAT_IF_DUMP(cout << " row=" << ge_row_j << ", pivot=" << pivot_j;)
 
-		// Copy heavy columns to heavy matrix row
-		u8 * CAT_RESTRICT extra_row = _heavy_matrix + _heavy_pitch * (ge_row_j - first_heavy_row);
+		// Copy binary extra columns to heavy matrix
+		u16 * CAT_RESTRICT extra_row = _heavy_matrix + _heavy_pitch * (ge_row_j - first_heavy_row);
 		u64 * CAT_RESTRICT ge_extra_row = _ge_matrix + _ge_pitch * ge_row_j;
 		for (u16 ge_column_j = _first_heavy_column; ge_column_j < column_count; ++ge_column_j)
 		{
@@ -2724,22 +2415,12 @@ bool Codec::TriangleNonHeavy()
 
 #if defined(CAT_HEAVY_WIN_MULT)
 
-// Flip endianness at compile time if possible
-#if defined(CAT_ENDIAN_BIG)
-static u32 GF256_MULT_LOOKUP[16] = {
-	0x00000000, 0x01000000, 0x00010000, 0x01010000, 
-	0x00000100, 0x01000100, 0x00010100, 0x01010100, 
-	0x00000001, 0x01000001, 0x00010001, 0x01010001, 
-	0x00000101, 0x01000101, 0x00010101, 0x01010101, 
+static u64 GF256_MULT_LOOKUP[16] = {
+	0x0000000000000000ULL, 0x0000000000000001ULL, 0x0000000000010000ULL, 0x0000000000010001ULL,
+	0x0000000100000000ULL, 0x0000000100000001ULL, 0x0000000100010000ULL, 0x0000000100010001ULL,
+	0x0001000000000000ULL, 0x0001000000000001ULL, 0x0001000000010000ULL, 0x0001000000010001ULL,
+	0x0001000100000000ULL, 0x0001000100000001ULL, 0x0001000100010000ULL, 0x0001000100010001ULL
 };
-#else // Little-endian or unknown bit order:
-static u32 GF256_MULT_LOOKUP[16] = {
-	0x00000000, 0x00000001, 0x00000100, 0x00000101, 
-	0x00010000, 0x00010001, 0x00010100, 0x00010101, 
-	0x01000000, 0x01000001, 0x01000100, 0x01000101, 
-	0x01010000, 0x01010001, 0x01010100, 0x01010101, 
-};
-#endif
 
 #endif // CAT_HEAVY_WIN_MULT
 
@@ -2813,8 +2494,8 @@ bool Codec::Triangle()
 			{
 				// If the column is non-zero,
 				u16 heavy_row_k = _pivots[pivot_k] - first_heavy_row;
-				u8 * CAT_RESTRICT rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
-				u8 code_value = rem_row[heavy_col_i];
+				u16 * CAT_RESTRICT rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
+				u16 code_value = rem_row[heavy_col_i];
 				if (!code_value) continue;
 
 				CAT_IF_DUMP(cout << "Eliminating from heavy row " << heavy_row_k << " :";)
@@ -2864,18 +2545,14 @@ bool Codec::Triangle()
 				}
 
 				// For remaining aligned columns,
-				u32 * CAT_RESTRICT word = reinterpret_cast<u32*>( rem_row + ge_column_i - first_heavy_column );
+				u64 * CAT_RESTRICT word = reinterpret_cast<u64 *>( rem_row + ge_column_i - first_heavy_column );
 				for (; ge_column_i < column_count; ge_column_i += 4, ++word)
 				{
 					// Look up 4 bit window
 					u32 bits = (u32)(pivot_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
-#if defined(CAT_ENDIAN_UNKNOWN)
-					u32 window = getLE(GF256_MULT_LOOKUP[bits]);
-#else
-					u32 window = GF256_MULT_LOOKUP[bits];
-#endif
+					u64 window = GF256_MULT_LOOKUP[bits];
 
-					CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(8) << setfill('0') << window << dec;)
+					CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(16) << setfill('0') << window << dec;)
 
 					*word ^= window * code_value;
 				}
@@ -2893,8 +2570,8 @@ bool Codec::Triangle()
 			// If heavy row doesn't have the pivot,
 			u16 ge_row_j = _pivots[pivot_j];
 			u16 heavy_row_j = ge_row_j - first_heavy_row;
-			u8 * CAT_RESTRICT pivot_row = &_heavy_matrix[_heavy_pitch * heavy_row_j];
-			u8 code_value = pivot_row[heavy_col_i];
+			u16 * CAT_RESTRICT pivot_row = &_heavy_matrix[_heavy_pitch * heavy_row_j];
+			u16 code_value = pivot_row[heavy_col_i];
 			if (!code_value) continue; // Skip to next
 
 			// Found it! (common case)
@@ -2922,7 +2599,7 @@ bool Codec::Triangle()
 			if (pivot_k < pivot_count)
 			{
 				// Precompute denominator
-				int denominator = 255 - LOG_TABLE[code_value];
+				u16 denominator = GF_SIZE - 1 - GF_LOG[code_value];
 
 				// For each remaining unused row,
 				// NOTE: All remaining rows are heavy rows by pivot array organization
@@ -2931,19 +2608,19 @@ bool Codec::Triangle()
 					// If the column is zero,
 					u16 ge_row_k = _pivots[pivot_k];
 					u16 heavy_row_k = ge_row_k - first_heavy_row;
-					u8 * CAT_RESTRICT rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
-					u8 rem_value = rem_row[heavy_col_i];
+					u16 * CAT_RESTRICT rem_row = &_heavy_matrix[_heavy_pitch * heavy_row_k];
+					u16 rem_value = rem_row[heavy_col_i];
 					if (!rem_value) continue; // Skip it
 
 					// x = rem_value / code_value
-					u8 x = EXP_TABLE[LOG_TABLE[rem_value] + denominator];
+					u16 x = EXP_TABLE[LOG_TABLE[rem_value] + denominator];
 
 					// Store value for later
 					rem_row[heavy_col_i] = x;
 
 					// rem[i+] += x * pivot[i+]
 					const int offset = heavy_col_i + 1;
-					GF256MemMulAdd(rem_row + offset, x, pivot_row + offset, _heavy_columns - offset);
+					gf_muladd(rem_row + offset, x, pivot_row + offset, _heavy_columns - offset);
 				} // next remaining row
 			}
 
@@ -4601,7 +4278,8 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	//GenTable();
 
 	// Validate input
-	if CAT_UNLIKELY(message_bytes < 1 || block_bytes < 1)
+	if CAT_UNLIKELY(message_bytes < 1 || block_bytes < 1 ||
+			(block_bytes % 2) != 0)
 		return R_BAD_INPUT;
 
 	// Calculate message block count
@@ -5513,7 +5191,7 @@ bool Codec::AllocateMatrix()
 	const int heavy_rows = CAT_HEAVY_ROWS + _extra_count;
 	const int heavy_cols = _mix_count < CAT_HEAVY_MAX_COLS ? _mix_count : CAT_HEAVY_MAX_COLS;
 	const int heavy_pitch = (heavy_cols + 3 + 3) & ~3; // Round up columns+3 to next multiple of 4
-	const int heavy_bytes = heavy_pitch * heavy_rows;
+	const int heavy_bytes = heavy_pitch * heavy_rows * 2; // 16 bits per heavy value
 
 	// Calculate buffer size
 	u32 size = ge_matrix_words * sizeof(u64) + compress_matrix_words * sizeof(u64) + pivot_words * sizeof(u16) + heavy_bytes;
