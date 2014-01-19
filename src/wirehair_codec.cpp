@@ -714,8 +714,8 @@ static void gf_init() {
 	}
 
 	// Allocate space for tables
-	GF_LOG = new u16[GF_SIZE];
-	GF_EXP = new u16[2*GF_SIZE - 1];
+	GF_LOG = new u16[3 * GF_SIZE];
+	GF_EXP = GF_LOG + GF_SIZE;
 
 	// Define log(0) and log(Ord(GF)) as 0
 	GF_LOG[0] = 0;
@@ -739,11 +739,17 @@ static void gf_init() {
 
 // x * y
 static CAT_INLINE u16 gf_mul(u16 x, u16 y) {
+	if (x == 0 || y == 0) {
+		return 0;
+	}
 	return GF_EXP[GF_LOG[x] + GF_LOG[y]];
 }
 
 // x / y
 static CAT_INLINE u16 gf_div(u16 x, u16 y) {
+	if (x == 0 || y == 0) {
+		return 0;
+	}
 	return GF_EXP[GF_LOG[x] + GF_ORDER - GF_LOG[y]];
 }
 
@@ -766,7 +772,8 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 	u16 log_n = GF_LOG[n];
 	u16 T[4][16];
 	for (int i = 0; i < 4; ++i) {
-		for (int j = 0; j < 16; ++j) {
+		T[i][0] = 0;
+		for (int j = 1; j < 16; ++j) {
 			T[i][j] = GF_EXP[GF_LOG[j << i*4] + log_n];
 		}
 	}
@@ -833,7 +840,8 @@ static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 	u16 log_n = GF_ORDER - GF_LOG[n];
 	u16 T[4][16];
 	for (int i = 0; i < 4; i++) {
-		for (int j = 0; j < 16; j++) {
+		T[i][0] = 0;
+		for (int j = 1; j < 16; j++) {
 			T[i][j] = GF_EXP[GF_LOG[j << i*4] + log_n];
 		}
 	}
@@ -2627,6 +2635,7 @@ bool Codec::Triangle()
 					if (!rem_value) continue; // Skip it
 
 					// x = rem_value / code_value
+					// NOTE: Zero inputs are checked above so this is exception-free
 					u16 x = GF_EXP[GF_LOG[rem_value] + denominator];
 
 					// Store value for later
@@ -3515,7 +3524,7 @@ void Codec::BackSubstituteAboveDiagonal()
 						u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT>(
 								_recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i] );
 
-						gf_muladd_mem(dest, code_value, src, _block_bytes / 2);
+						gf_muladd_mem(dest, code_value, (u16*)src, _block_bytes / 2);
 
 						CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 
@@ -3650,7 +3659,7 @@ void Codec::BackSubstituteAboveDiagonal()
 						// Back-substitute
 						const u16 * CAT_RESTRICT src = reinterpret_cast<const u16 * CAT_RESTRICT> (
 								_recovery_blocks + _block_bytes * _ge_col_map[ge_column_j] );
-						gf_muladd_mem(dest, code_value, src, _block_bytes/2);
+						gf_muladd_mem((u16*)dest, code_value, src, _block_bytes/2);
 						CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 					} // next column in row
 				} // next pivot in window
@@ -3792,7 +3801,7 @@ void Codec::BackSubstituteAboveDiagonal()
 				// Back-substitute
 				u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT> (
 						_recovery_blocks + _block_bytes * _ge_col_map[ge_up_i] );
-				gf_muladd_mem(dest, code_value, (u16 * CAT_RESTRICT)src, _block_bytes/2);
+				gf_muladd_mem(dest, code_value, (u16*)src, _block_bytes/2);
 				CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 				CAT_IF_DUMP(cout << " h" << up_row_i;)
 			}

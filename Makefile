@@ -18,6 +18,7 @@ DBGLIBNAME = bin/libwirehair_debug.a
 library_o = wirehair.o wirehair_codec.o MemXOR.o EndianNeutral.o
 
 test_o = wirehair_test.o Clock.o
+gf_test_o = gf_test.o Clock.o MemXOR.o
 
 
 # Release target (default)
@@ -53,6 +54,14 @@ test-debug : clean $(test_o) debug
 	./test
 
 
+# gf-test executable
+
+gf-test : CFLAGS += -DUNIT_TEST $(OPTFLAGS)
+gf-test : clean $(gf_test_o)
+	$(CCPP) $(gf_test_o) -o gf_test
+	./gf_test
+
+
 # test executable for mobile version
 
 test-mobile : CFLAGS += -DUNIT_TEST $(OPTFLAGS)
@@ -86,6 +95,9 @@ wirehair_codec.o : src/wirehair_codec.cpp
 
 wirehair_test.o : tests/wirehair_test.cpp
 	$(CCPP) $(CFLAGS) -c tests/wirehair_test.cpp
+
+gf_test.o : tests/gf_test.cpp
+	$(CCPP) $(CFLAGS) -c tests/gf_test.cpp
 
 
 # Cleanup
