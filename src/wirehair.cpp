@@ -30,7 +30,13 @@
 using namespace std;
 
 #include "wirehair.h"
-#include "wirehair_codec.hpp"
+
+#ifdef WIREHAIR_GF_W16
+#include "wirehair_codec_16.hpp"
+#else
+#include "wirehair_codec_8.hpp"
+#endif
+
 using namespace cat;
 using namespace wirehair;
 

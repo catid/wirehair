@@ -200,7 +200,7 @@
 	original data is recovered.
 */
 
-#include "wirehair_codec.hpp"
+#include "wirehair_codec_16.hpp"
 #include "MemXOR.hpp"
 #include "EndianNeutral.hpp"
 

@@ -200,7 +200,7 @@
 	original data is recovered.
 */
 
-#include "Wirehair.hpp"
+#include "wirehair_codec_8.hpp"
 #include "MemXOR.hpp"
 #if defined(CAT_HEAVY_WIN_MULT)
 #include "EndianNeutral.hpp"
@@ -814,7 +814,8 @@ static void GF256Init() {
 			const u8 log_ii = 255 - LOG_TABLE[ii];
 
 			// Calculate ii * jj
-			for (int jj = 0; jj < 256; ++jj) {
+			*ptr++ = 0;
+			for (int jj = 1; jj < 256; ++jj) {
 				*ptr++ = EXP_TABLE[LOG_TABLE[jj] + log_ii];
 			}
 		}

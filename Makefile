@@ -15,7 +15,7 @@ DBGLIBNAME = bin/libwirehair_debug.a
 
 # Object files
 
-library_o = wirehair.o wirehair_codec.o MemXOR.o EndianNeutral.o
+library_o = wirehair.o MemXOR.o EndianNeutral.o
 
 test_o = wirehair_test.o Clock.o
 gf_test_o = gf_test.o Clock.o MemXOR.o
@@ -25,14 +25,26 @@ gf_test_o = gf_test.o Clock.o MemXOR.o
 
 release : CFLAGS += $(OPTFLAGS)
 release : LIBNAME = $(OPTLIBNAME)
-release : library
+release : library_o += wirehair_codec_8.o
+release : wirehair_codec_8.o library
+
+release-16 : CFLAGS += $(OPTFLAGS)
+release-16 : LIBNAME = $(OPTLIBNAME)
+release-16 : library_o += wirehair_codec_16.o
+release-16 : wirehair_codec_16.o library
 
 
 # Debug target
 
 debug : CFLAGS += $(DBGFLAGS)
 debug : LIBNAME = $(DBGLIBNAME)
-debug : library
+debug : library_o += wirehair_codec_8.o
+debug : wirehair_codec_8.o library
+
+debug-16 : CFLAGS += $(DBGFLAGS)
+debug-16 : LIBNAME = $(DBGLIBNAME)
+debug-16 : library_o += wirehair_codec_16.o
+debug-16 : wirehair_codec_16.o library
 
 
 # Library target
@@ -44,12 +56,12 @@ library : $(library_o)
 # test executable
 
 test : CFLAGS += -DUNIT_TEST $(OPTFLAGS)
-test : clean $(test_o) release
+test : $(test_o)
 	$(CCPP) $(test_o) -L./bin -lwirehair -o test
 	./test
 
 test-debug : CFLAGS += -DUNIT_TEST $(DBGFLAGS)
-test-debug : clean $(test_o) debug
+test-debug : clean $(test_o)
 	$(CCPP) $(test_o) -L./bin -lwirehair_debug -o test
 	./test
 
@@ -87,8 +99,11 @@ MemXOR.o : libcat/MemXOR.cpp
 wirehair.o : src/wirehair.cpp
 	$(CCPP) $(CFLAGS) -c src/wirehair.cpp
 
-wirehair_codec.o : src/wirehair_codec.cpp
-	$(CCPP) $(CFLAGS) -c src/wirehair_codec.cpp
+wirehair_codec_8.o : src/wirehair_codec_8.cpp
+	$(CCPP) $(CFLAGS) -c src/wirehair_codec_8.cpp
+
+wirehair_codec_16.o : src/wirehair_codec_16.cpp
+	$(CCPP) $(CFLAGS) -c src/wirehair_codec_16.cpp
 
 
 # Executable objects
@@ -106,5 +121,5 @@ gf_test.o : tests/gf_test.cpp
 
 clean :
 	git submodule update --init
-	-rm *.o test bin/*.a
+	-rm *.o
 
