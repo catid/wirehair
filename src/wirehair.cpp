@@ -60,11 +60,11 @@ int wirehair_encode(wirehair_state *E, const void *message, int bytes, int block
 	}
 
 	// Initialize codec
-	Result r = Codec::InitializeEncoder(bytes, block_bytes);
+	Result r = codec->InitializeEncoder(bytes, block_bytes);
 
 	if (!r) {
 		// Feed message to codec
-		r = Codec::EncodeFeed(message);
+		r = codec->EncodeFeed(message);
 	}
 
 	return r;

@@ -55,7 +55,15 @@ typedef void *wirehair_state;
  *
  * The number of blocks in the message N = CEIL(bytes / block_bytes).
  *
+ * If N is too high or too low this function will fail.  In particular if N = 1, then
+ * using this type of error correction does not make sense: Sending the same message
+ * over and over is just as good.  And if N > 64000 then some internal variables will
+ * start to overflow, so too many blocks is unsupported.  The most efficient values
+ * for N are around 1000.
+ *
  * Preconditions:
+ * 	N >= 2
+ * 	N <= 64000
  *	block_bytes is a multiple of 2
  *
  * Returns 0 on success.

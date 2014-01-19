@@ -200,11 +200,11 @@
 	original data is recovered.
 */
 
-#include "Wirehair.hpp"
+#include "wirehair_codec.hpp"
 #include "MemXOR.hpp"
+#include "EndianNeutral.hpp"
 
 #if defined(CAT_HEAVY_WIN_MULT)
-# include "EndianNeutral.hpp"
 
 // If not little-endian, do not use this
 # ifndef CAT_ENDIAN_LITTLE
@@ -4277,8 +4277,9 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 
 	// Validate input
 	if CAT_UNLIKELY(message_bytes < 1 || block_bytes < 1 ||
-			(block_bytes % 2) != 0)
+			(block_bytes % 2) != 0) {
 		return R_BAD_INPUT;
+	}
 
 	// Calculate message block count
 	_block_bytes = block_bytes;
@@ -4286,10 +4287,12 @@ Result Codec::ChooseMatrix(int message_bytes, int block_bytes)
 	_block_next_prime = NextPrime16(_block_count);
 
 	// Validate block count
-	if CAT_UNLIKELY(_block_count < CAT_WIREHAIR_MIN_N)
+	if CAT_UNLIKELY(_block_count < CAT_WIREHAIR_MIN_N) {
 		return R_TOO_SMALL;
-	if CAT_UNLIKELY(_block_count > CAT_WIREHAIR_MAX_N)
+	}
+	if CAT_UNLIKELY(_block_count > CAT_WIREHAIR_MAX_N) {
 		return R_TOO_LARGE;
+	}
 
 	CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
 	CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)

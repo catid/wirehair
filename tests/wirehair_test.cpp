@@ -1,193 +1,114 @@
-#include "codec_source/Wirehair.hpp"
+#include "wirehair.hpp"
 #include "Clock.hpp"
+#include "AbyssinianPRNG.hpp"
 using namespace cat;
 
 #include <iostream>
 #include <iomanip>
 #include <fstream>
-using namespace std;	
+#include <cassert>
+using namespace std;
 
 static Clock m_clock;
 
-void FindBadDenseSeeds()
-{
-	int block_bytes = 1;
-	int max_blocks = 64000;
-	int max_message_bytes = block_bytes * max_blocks;
-	u8 *message = new u8[max_message_bytes];
 
-	for (int ii = 0; ii < max_message_bytes; ++ii)
-	{
-		message[ii] = ii;
-	}
+// Simulation seed
+const u32 SEED = 0;
 
-	ofstream file("exception_list.txt");
-	if (!file) return;
+// Number of trials to run
+const int TRIALS = 1000;
 
-	file << "struct SeedException { u16 n, seed; };" << endl;
-	file << "static const SeedException EXCEPTIONS[] = {" << endl;
 
-	int fails = 0;
-	int seen = 0;
-	for (int ii = 2; ii <= 64000; ++ii)
-	{
-		++seen;
-		int block_count = ii;
-		int message_bytes = block_bytes * block_count;
-
-		wirehair::Encoder encoder;
-
-		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
-
-		if (r == wirehair::R_BAD_PEEL_SEED)
-		{
-			++fails;
-			cout << "-- FAIL! N=" << encoder.BlockCount() << " encoder.BeginEncode error " << wirehair::GetResultString(r) << " at " << fails/(double)seen << endl;
-
-			file << " {" << ii << "," << 0 << "},";
-
-			if (fails % 16 == 0) file << endl;
-
-			//cin.get();
-		}
-
-		if (ii % 1000 == 0) cout << ii << endl;
-	}
-
-	file << "};" << endl;
-
-	file << "static const int EXCEPTION_COUNT = " << fails << ";" << endl;
-
-	cin.get();
-}
+//// Entrypoint
 
 int main()
 {
+	assert(!wirehair_init());
+
 	m_clock.OnInitialize();
 
-	//FindBadDenseSeeds();
-
-	wirehair::Encoder encoder;
-	cat::wirehair::Decoder decoder;
+	wirehair_state encoder, decoder;
 	Abyssinian prng;
 
-	for (int N = 1; N <= 64000;)
+	// Simulate file transfers over UDP/IP
+	const int block_bytes = 1300;
+	u8 block[block_bytes];
+
+	// Try each value for N
+	for (int N = 2; N <= 64000; ++N)
 	{
-		int block_count = N;
+		int bytes = block_bytes * N;
 
-		if (N % 10 <= 2) {
-			++N;
-		} else {
-			N = (N - 2) * 10;
-		}
-
-		int block_bytes = 1300;
-		int message_bytes = block_bytes * block_count;
-		u8 *message = new u8[message_bytes];
+		u8 *message_in = new u8[message_bytes];
 		u8 *message_out = new u8[message_bytes];
-		u8 *block = new u8[block_bytes];
 
-		for (int ii = 0; ii < message_bytes; ++ii)
-		{
-			message[ii] = ii;
+		prng.Initialize(SEED);
+
+		// Fill input message with random data
+		for (int ii = 0; ii < message_bytes; ++ii) {
+			message_in[ii] = (u8)prng.Next();
 		}
 
-		double start = m_clock.usec();
-		wirehair::Result r = encoder.BeginEncode(message, message_bytes, block_bytes);
-		double end = m_clock.usec();
+		double t0 = m_clock.usec();
 
-		if (r)
-		{
-			cout << "-- FAIL! N=" << encoder.BlockCount() << " encoder.BeginEncode error " << wirehair::GetResultString(r) << endl;
-			cin.get();
-			continue;
-		}
-		else
-		{
-			double mbytes = message_bytes / 1000000.;
+		// Initialize encoder
+		assert(!wirehair_encode(&encoder, message, bytes, block_bytes));
 
-			cout << ">> OKAY! N=" << encoder.BlockCount() << "(" << mbytes << " MB) encoder.BeginEncode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s" << endl;
-			//cin.get();
-		}
+		double t1 = m_clock.usec();
 
-		u32 overhead_sum = 0, overhead_trials = 0;
-		u32 drop_seed = 50002;
-		double time_sum = 0;
-		const int trials = 1000;
-		for (int jj = 0; jj < trials; ++jj)
-		{
+		assert(N == wirehair_count(encoder));
+
+		double encode_time = t1 - t0;
+		cout << "wirehair_encode(N = " << N << ") in " << encode_time << " usec" << endl;
+
+		// For each trial,
+		u32 overhead = 0;
+		double reconstruct_time = 0;
+		for (int ii = 0; ii < TRIALS; ++ii) {
+			// Initialize decoder
+			assert(!wirehair_decode(&decoder, bytes, block_bytes));
+
+			assert(N == wirehair_count(decoder));
+
+			// Simulate transmission
 			int blocks_needed = 0;
-
-			wirehair::Result s = decoder.BeginDecode(message_out, message_bytes, block_bytes);
-			if (s)
-			{
-				cout << "-- FAIL! N=" << decoder.BlockCount() << " decoder.BeginDecode error " << wirehair::GetResultString(s) << endl;
-				cin.get();
-				return 1;
-			}
-
-			prng.Initialize(drop_seed);
 			for (u32 id = 0;; ++id)
 			{
+				// 50% packetloss to randomize received message IDs
 				if (prng.Next() & 1) continue;
-				encoder.Encode(id, block);
 
+				// Add a block
 				++blocks_needed;
-				double start = m_clock.usec();
-				wirehair::Result r = decoder.Decode(id, block);
-				double end = m_clock.usec();
 
-				if (r != wirehair::R_MORE_BLOCKS)
-				{
-					if (r == wirehair::R_WIN)
-					{
-						u32 overhead = blocks_needed - decoder.BlockCount();
-						overhead_sum += overhead;
-						++overhead_trials;
+				// Write a block
+				assert(!wirehair_write(encoder, id, block));
 
-						//cout << ">> OKAY! N=" << decoder.BlockCount() << " decoder.Decode in " << end - start << " usec, " << message_bytes / (end - start) << " MB/s after " << overhead << " extra blocks.  Average extra = " << overhead_sum / (double)overhead_trials << ". Seed = " << drop_seed << endl;
-						time_sum += end - start;
+				// If decoder is ready,
+				if (!wirehair_read(decoder, id, block)) {
+					// If message is decoded,
+					t0 = m_clock.usec();
+					if (!wirehair_reconstruct(decoder, message_out)) {
+						t1 = m_clock.usec();
 
-						if (!memcmp(message, message_out, message_bytes))
-						{
-							//cout << "Match!" << endl;
-						}
-						else
-						{
-							cout << "FAAAAAIL! Seed = " << drop_seed << endl;
+						// Verify successful decode
+						assert(!memcmp(message_in, message_out, bytes));
 
-							for (int ii = 0; ii < message_bytes; ++ii)
-							{
-								if (message_out[ii] != message[ii])
-									cout << ii << " : " << (int)message_out[ii] << endl;
-							}
-
-							cin.get();
-						}
+						// Done with transmission simulation
+						break;
 					}
-					else
-					{
-						cout << "-- FAIL!  N=" << decoder.BlockCount() << " decoder.Decode error " << wirehair::GetResultString(r) << " from drop seed " << drop_seed << endl;
-
-						overhead_sum += 1;
-						++overhead_trials;
-
-						//cin.get();
-					}
-
-					//cin.get();
-					break;
 				}
 			}
-
-			++drop_seed;
+			overhead += blocks_needed - N;
+			reconstruct_time += t1 - t0;
 		}
 
-		double avg_time = time_sum / trials;
-		double avg_overhead = overhead_sum / (double)overhead_trials;
-		double avg_bytes = message_bytes * (decoder.BlockCount() + avg_overhead) / (double)decoder.BlockCount() - message_bytes;
-		cout << "N=" << decoder.BlockCount() << " decoder.Decode in " << avg_time << " usec, " << message_bytes / avg_time << " MB/s.  Average overhead = " << avg_overhead << " (" << avg_bytes << " bytes)" << endl;
+		cout << "wirehair_decode(N = " << N << ") average overhead = " << overhead / (double)TRIALS << " blocks, average reconstruct time = " << reconstruct_time / TRIALS << endl;
+
+		cout << endl;
 	}
+
+	wirehair_free(encoder);
+	wirehair_free(decoder);
 
 	m_clock.OnFinalize();
 
