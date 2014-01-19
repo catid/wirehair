@@ -98,7 +98,7 @@
 			a constant-time algorithm to solve them.
 			H is a 6x12 random byte matrix.
 			Each element of H is a byte instead of a bit, representing a number
-			in GF(2^^8) with generator polynomial 0x15F.
+			in GF(2^^16) with generator polynomial 0x1100B.
 
 		(6) Check Matrix Solver
 
@@ -694,7 +694,7 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 }
 
 
-//// Utility: GF(256) Multiply and Divide functions
+//// Utility: GF(2^16) Math functions
 
 #define GF_BITS 16
 #define GF_SIZE (1 << GF_BITS)
@@ -703,7 +703,8 @@ static const u16 *GF_LOG = 0;
 static const u16 *GF_EXP = 0;
 static const u32 GF_POLY = 0x1100B;
 
-// Based on GF-Complete 1.0
+// Based on GF-Complete 1.02 by James S. Plank (University of Tennessee)
+// This optimized version was written from scratch
 
 static void gf_init() {
 	// If already initialized,
@@ -2085,14 +2086,14 @@ void Codec::MultiplyDenseRows()
 /*
 	Important Optimization: O(1) Heavy Row Structure
 
-		The heavy rows are made up of bytes instead of bits.  Each byte
-	represents a number in the Galois field GF(2^^8) defined by the
-	generator polynomial 0x15F.
+		The heavy rows are made up of 16-bit words instead of bits.
+	Each word represents a number in the Galois field GF(2^^16) defined
+	by the generator polynomial 0x1100B.
 
 		The heavy rows are designed to make it easier to find pivots in
 	just the last few columns of the GE matrix.  This design choice was
 	made because it allows a constant-time algorithm to be employed that
-	will reduce the fail rate from >70% to <3%.  It is true that with
+	will reduce the fail rate from >70% to <0.1%.  It is true that with
 	heavy loss rates, the earlier columns can be where the pivot is
 	needed.  However in my estimation it would be better to increase the
 	number of dense rows instead to handle this problem than to increase
@@ -2101,13 +2102,10 @@ void Codec::MultiplyDenseRows()
 
 		The number of heavy rows required is at least 5.  This is because
 	the heavy rows are used to fill in for missing pivots in the GE matrix
-	and the miss rate is about 1/2 because it's random and binary.  The odds
-	of the last 5 columns all being zero in the binary rows is 1/32.
-	And the odds of a random GF(256) matrix not being invertible is also
-	around 1/32, therefore it needs at least 5 heavy rows.  With less than 5
-	rows, the binary matrix fail rate would dominate the overall rate of
-	invertibility.  After 5 heavy rows, less likely problems can be overcome,
-	so 6 heavy rows were chosen for the baseline version.
+	and the miss rate is about 1/2 because it's random and binary.  With
+	fewer than 5 rows, the binary matrix fail rate would dominate the overall
+	rate of invertibility.  6 heavy rows were chosen to err on the side of
+	caution.
 
 		An important realization is that almost all of the missing pivots
 	occur within the last M columns of the GE matrix, even for large matrices.
@@ -5246,9 +5244,8 @@ void Codec::FreeMatrix()
 
 bool Codec::AllocateWorkspace()
 {
-#ifdef CAT_EXP_BIG_TABLES
-	GF256Init();
-#endif
+	// Initialize GF(2^16) tables
+	gf_init();
 
 	CAT_IF_DUMP(cout << endl << "---- AllocateWorkspace ----" << endl << endl;)
 

@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2012 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2012-2014 Christopher A. Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are met:
@@ -64,7 +64,7 @@ namespace wirehair {
 
 enum Result
 {
-	R_WIN,				// Operation: Success!
+	R_WIN = 0,			// Operation: Success!
 	R_MORE_BLOCKS,		// Codec wants more blocks.  Om nom nom.
 
 	R_ERROR,			// Return codes higher than this one are errors:
