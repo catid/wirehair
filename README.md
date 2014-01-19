@@ -61,7 +61,7 @@ starting from 0 and incremented by one each time:
 	char block[1300];
 	int ID = 0;
 
-	if (wirehair_write(encoder, ID, block)) {
+	if (!wirehair_write(encoder, ID, block)) {
 		exit(1);
 	}
 ~~~
@@ -112,9 +112,12 @@ To decode a message one received block at a time:
 
 	// If there is a chance of decoding the message now,
 	if (wirehair_read(decoder, ID, block)) {
+
 		// If message can be reconstructed,
 		if (wirehair_reconstruct(decoder, message)) {
+
 			// Decoding message complete
+
 		}
 	}
 ~~~
