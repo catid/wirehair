@@ -52,8 +52,8 @@
 #define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
 
 // Heavy rows:
-#define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
-#define CAT_HEAVY_MAX_COLS 18 /* Number of heavy columns that are non-zero */
+#define CAT_HEAVY_ROWS 9 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
+#define CAT_HEAVY_MAX_COLS 20 /* Number of heavy columns that are non-zero */
 
 namespace cat {
 
