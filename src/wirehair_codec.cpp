@@ -2522,6 +2522,7 @@ bool Codec::Triangle()
 					if (pivot_row[ge_column_i >> 6] & ((u64)1 << (ge_column_i & 63)))
 					{
 						rem_row[ge_column_i - first_heavy_column] ^= code_value;
+						CAT_IF_DUMP(cout << " " << ge_column_i;)
 					}
 				}
 #else // CAT_HEAVY_WIN_MULT
