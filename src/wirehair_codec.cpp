@@ -3279,7 +3279,7 @@ void Codec::AddSubdiagonalValues()
 				const u16 * CAT_RESTRICT src = reinterpret_cast<const u16 * CAT_RESTRICT>(
 						_recovery_blocks + _block_bytes * _ge_col_map[sub_i] );
 
-				gf_muladd_mem((u16 * CAT_RESTRICT)dest, code_value, src, _block_bytes);
+				gf_muladd_mem((u16*)dest, code_value, src, _block_bytes/2);
 
 				CAT_IF_DUMP(cout << " h" << ge_column_i << "=[" << (int)src[0] << "*" << (int)code_value << "]";)
 
@@ -3497,7 +3497,7 @@ void Codec::BackSubstituteAboveDiagonal()
 					// Normalize code value, setting it to 1 (implicitly nonzero)
 					if (code_value != 1)
 					{
-						gf_div_mem((u16 * CAT_RESTRICT)src, code_value, _block_bytes / 2);
+						gf_div_mem((u16*)src, code_value, _block_bytes/2);
 						CAT_IF_ROWOP(++heavyops;)
 					}
 
@@ -3524,7 +3524,7 @@ void Codec::BackSubstituteAboveDiagonal()
 						u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT>(
 								_recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i] );
 
-						gf_muladd_mem(dest, code_value, (u16*)src, _block_bytes / 2);
+						gf_muladd_mem(dest, code_value, (u16*)src, _block_bytes/2);
 
 						CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 
@@ -3562,7 +3562,7 @@ void Codec::BackSubstituteAboveDiagonal()
 				{
 					u16 * CAT_RESTRICT src = reinterpret_cast<u16 * CAT_RESTRICT> (
 							_recovery_blocks + _block_bytes * _ge_col_map[backsub_i] );
-					gf_div_mem(src, code_value, _block_bytes / 2);
+					gf_div_mem(src, code_value, _block_bytes/2);
 					CAT_IF_ROWOP(++heavyops;)
 				}
 			}
@@ -3775,7 +3775,7 @@ void Codec::BackSubstituteAboveDiagonal()
 			// Normalize code value, setting it to 1 (implicitly nonzero)
 			if (code_value != 1)
 			{
-				gf_div_mem((u16 * CAT_RESTRICT)src, code_value, _block_bytes/2);
+				gf_div_mem((u16*)src, code_value, _block_bytes/2);
 				CAT_IF_ROWOP(++heavyops;)
 			}
 
