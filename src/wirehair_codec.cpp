@@ -700,8 +700,8 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 #define GF_SIZE ((u32)1 << GF_BITS)
 #define GF_ORDER (u16)(GF_SIZE - 1)
 
-static const u16 *GF_LOG = 0;
-static const u16 *GF_EXP = 0;
+static u16 *GF_LOG = 0;
+static u16 *GF_EXP = 0;
 static const u32 GF_POLY = 0x1100B;
 
 // Based on GF-Complete 1.02 by James S. Plank (University of Tennessee)
@@ -807,10 +807,10 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 
 		u16 a = *src++;
 
-		u16 prod = table[0][a & 15];
-		prod ^= table[1][(a >> 4) & 15];
-		prod ^= table[2][(a >> 8) & 15];
-		prod ^= table[3][a >> 12];
+		u16 prod = T[0][a & 15];
+		prod ^= T[1][(a >> 4) & 15];
+		prod ^= T[2][(a >> 8) & 15];
+		prod ^= T[3][a >> 12];
 
 		*dest++ ^= prod;
 	}
@@ -873,10 +873,10 @@ static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 
 		u16 a = *data;
 
-		u16 p = table[0][a & 15];
-		p ^= table[1][(a >> 4) & 15];
-		p ^= table[2][(a >> 8) & 15];
-		p ^= table[3][a >> 12];
+		u16 p = T[0][a & 15];
+		p ^= T[1][(a >> 4) & 15];
+		p ^= T[2][(a >> 8) & 15];
+		p ^= T[3][a >> 12];
 
 		*data++ = p;
 	}
@@ -2620,7 +2620,7 @@ bool Codec::Triangle()
 					if (!rem_value) continue; // Skip it
 
 					// x = rem_value / code_value
-					u16 x = EXP_TABLE[LOG_TABLE[rem_value] + denominator];
+					u16 x = GF_EXP[GF_LOG[rem_value] + denominator];
 
 					// Store value for later
 					rem_row[heavy_col_i] = x;
@@ -3785,7 +3785,7 @@ void Codec::BackSubstituteAboveDiagonal()
 				// Back-substitute
 				u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT> (
 						_recovery_blocks + _block_bytes * _ge_col_map[ge_up_i] );
-				gf_muladd_mem(dest, code_value, src, _block_bytes/2);
+				gf_muladd_mem(dest, code_value, (u16 * CAT_RESTRICT)src, _block_bytes/2);
 				CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 				CAT_IF_DUMP(cout << " h" << up_row_i;)
 			}
