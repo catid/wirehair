@@ -1,5 +1,5 @@
 /*
-	Copyright (c) 2012 Christopher A. Taylor.  All rights reserved.
+	Copyright (c) 2012-2014 Christopher A. Taylor.  All rights reserved.
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are met:
@@ -50,11 +50,10 @@
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
 #define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
-#define CAT_EXP_BIG_TABLES /* Unpack 65KB of tables for faster GF(256) multiplication */
 
 // Heavy rows:
-#define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
-#define CAT_HEAVY_MAX_COLS 18 /* Number of heavy columns that are non-zero */
+#define CAT_HEAVY_ROWS 9 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
+#define CAT_HEAVY_MAX_COLS 20 /* Number of heavy columns that are non-zero */
 
 namespace cat {
 
@@ -65,7 +64,7 @@ namespace wirehair {
 
 enum Result
 {
-	R_WIN,				// Operation: Success!
+	R_WIN = 0,			// Operation: Success!
 	R_MORE_BLOCKS,		// Codec wants more blocks.  Om nom nom.
 
 	R_ERROR,			// Return codes higher than this one are errors:
@@ -133,7 +132,7 @@ class CAT_EXPORT Codec
 	u16 _next_pivot;						// Pivot to resume Triangle() on after it fails
 
 	// Heavy rows
-	u8 * CAT_RESTRICT _heavy_matrix;		// Heavy rows of GE matrix
+	u16 * CAT_RESTRICT _heavy_matrix;		// Heavy rows of GE matrix
 	int _heavy_pitch;						// Bytes per heavy matrix row
 	u16 _heavy_columns;						// Number of heavy matrix columns
 	u16 _first_heavy_column;				// First heavy column that is non-zero
@@ -251,14 +250,15 @@ class CAT_EXPORT Codec
 	void FreeWorkspace();
 
 public:
+	// Ctors
 	Codec();
 	~Codec();
 
 
 	//// Accessors
 
-	CAT_INLINE u32 PSeed() { return _p_seed; }
-	CAT_INLINE u32 CSeed() { return _d_seed; }
+	CAT_INLINE u32 PSeed() { return _p_seed; } // Seed for peeled matrix rows
+	CAT_INLINE u32 DSeed() { return _d_seed; } // Seed for dense matrix rows
 	CAT_INLINE u32 BlockCount() { return _block_count; }
 
 
