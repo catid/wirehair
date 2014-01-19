@@ -47,6 +47,11 @@ test : clean $(test_o) release
 	$(CCPP) $(test_o) -L./bin -lwirehair -o test
 	./test
 
+test-debug : CFLAGS += -DUNIT_TEST $(DBGFLAGS)
+test-debug : clean $(test_o) debug
+	$(CCPP) $(test_o) -L./bin -lwirehair_debug -o test
+	./test
+
 
 # test executable for mobile version
 
