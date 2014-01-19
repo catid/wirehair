@@ -196,11 +196,13 @@ and found that it is roughly twice as slow for small block counts,
 but similar in performance for N >= 1000, since the GF(2^16) matrix
 does not grow larger.
 
-For maximum MTU UDP file transfer of roughly 1300 bytes, the average
-extra bytes needing to be transmitted due to the <3% failure rate is
-under 40 bytes.  Paying a steep performance penalty to reduce this
-overhead to 4 bytes seems like it is not worth it.  For moderately
-sized messages, 40 bytes is dwarfed by other sources of overhead.
+For worst-case file transfer UDP payloads of roughly 1300 bytes,
+the average extra bytes needing to be transmitted due to the <3%
+failure rate is under 40 bytes.  Paying a steep performance penalty
+to reduce this overhead to 4 bytes seems like it is not worth it.
+For moderately sized messages, 40 bytes is dwarfed by other sources
+of overhead.  If your application needs it, the 16-bit version is
+available in the source code though it has not been fully tuned.
 
 
 #### Credits
