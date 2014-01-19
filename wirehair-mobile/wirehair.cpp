@@ -163,6 +163,21 @@ int wirehair_reconstruct(wirehair_state E, void *message) {
 	return -1;
 }
 
+int wirehair_reconstruct_block(wirehair_state E, unsigned int id, void *block) {
+	// If input is invalid,
+	if CAT_UNLIKELY(!E || !block) {
+		return -1;
+	}
+
+	Codec *codec = reinterpret_cast<Codec *>( E );
+
+	if (R_WIN != codec->ReconstructBlock(id, block)) {
+		return 0;
+	}
+
+	return -1;
+}
+
 void wirehair_free(wirehair_state E) {
 	Codec *codec = reinterpret_cast<Codec *>( E );
 

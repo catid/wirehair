@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define WIREHAIR_VERSION 2
+#define WIREHAIR_VERSION 3
 
 /*
  * Verify binary compatibility with the Wirehair API on startup.
@@ -105,28 +105,34 @@ extern wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int blo
 /*
  * Feed a block to the decoder.
  *
- * This function will return 0 when decoding is possible.
+ * This function will return non-zero when reading is complete.
  *
  * Preconditions:
  *	block pointer has block_bytes of space available to store data
  *
- * Returns non-zero when decoding is likely to be possible.
- * Returns 0 on invalid input or not enough data received.
+ * Returns non-zero when decoding is complete.
+ * Returns 0 on invalid input or not enough data received yet.
  */
 extern int wirehair_read(wirehair_state E, unsigned int id, const void *block);
 
 /*
- * Attempt to reconstruct the message.
- *
- * This function will return 0 when decoding succeeds.
+ * Reconstruct the message after reading is complete.
  *
  * Preconditions:
  *	message contains enough space to store the entire decoded message
- *
- * Returns non-zero when decoding is complete.
- * Returns 0 on invalid input or not enough data received.
  */
 extern int wirehair_reconstruct(wirehair_state E, void *message);
+
+/*
+ * Reconstruct a single block of the message after reading is complete.
+ *
+ * This version is more suitable for a packet error correction scheme
+ * rather than for file transfer.
+ *
+ * Preconditions:
+ *	block ptr buffer contains enough space to hold the block
+ */
+extern int wirehair_reconstruct_block(wirehair_state E, unsigned int id, void *block);
 
 /*
  * Free memory associated with a state object
