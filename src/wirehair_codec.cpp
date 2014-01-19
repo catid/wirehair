@@ -97,8 +97,8 @@
 			Adding these rows greatly improves invertibility of C while providing
 			a constant-time algorithm to solve them.
 			H is a 6x12 random byte matrix.
-			Each element of H is a byte instead of a bit, representing a number
-			in GF(2^^16) with generator polynomial 0x1100B.
+			Each element of H is a 16-bit word instead of a bit, representing a
+			number in GF(2^16) with generator polynomial 0x1100B.
 
 		(6) Check Matrix Solver
 

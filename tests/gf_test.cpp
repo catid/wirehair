@@ -8,6 +8,10 @@ using namespace std;
 #include "Clock.hpp"
 using namespace cat;
 
+
+
+
+
 //// Utility: GF(2^16) Math functions
 
 #define GF_BITS 16
@@ -51,24 +55,6 @@ static void gf_init() {
 	}
 }
 
-static u16 gf_mul_ref(u16 x, u16 y) {
-	u32 p = 0;
-
-	for (int i = 0; i < GF_BITS; i++) { 
-		if (x & (1 << i)) {
-			p ^= (y << i);
-		}
-	}
-
-	for (int i = GF_BITS*2-2; i >= GF_BITS; i--) {
-		if (p & (1 << i)) {
-			p ^= GF_POLY << (i - GF_BITS);
-		}
-	}
-
-	return p;
-}
-
 // x * y
 static CAT_INLINE u16 gf_mul(u16 x, u16 y) {
 	if (x == 0 || y == 0) {
@@ -83,24 +69,6 @@ static CAT_INLINE u16 gf_div(u16 x, u16 y) {
 		return 0;
 	}
 	return GF_EXP[GF_LOG[x] + GF_ORDER - GF_LOG[y]];
-}
-
-static void gf_muladd_mem_ref(u16 * CAT_RESTRICT dest, u16 n,
-					  const u16 * CAT_RESTRICT src, int words)
-{
-	// If degenerate case of multiplying by 0,
-	if (n == 0) {
-		return;
-	}
-
-	// Multiply remaining words
-	while (words > 0) {
-		--words;
-
-		u16 a = *src++;
-
-		*dest++ ^= gf_mul(a, n);
-	}
 }
 
 // dest += src * n
@@ -178,24 +146,6 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 	}
 }
 
-static void gf_div_mem_ref(u16 * CAT_RESTRICT data, u16 n,
-					 		int words)
-{
-	// If degenerate case of multiplying by 0,
-	if (n == 0) {
-		return;
-	}
-
-	// Multiply remaining words
-	while (words > 0) {
-		--words;
-
-		u16 a = *data;
-
-		*data++ = gf_div(a, n);
-	}
-}
-
 // dest /= n
 static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 {
@@ -260,6 +210,72 @@ static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 		p ^= T[3][a >> 12];
 
 		*data++ = p;
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+static u16 gf_mul_ref(u16 x, u16 y) {
+	u32 p = 0;
+
+	for (int i = 0; i < GF_BITS; i++) { 
+		if (x & (1 << i)) {
+			p ^= (y << i);
+		}
+	}
+
+	for (int i = GF_BITS*2-2; i >= GF_BITS; i--) {
+		if (p & (1 << i)) {
+			p ^= GF_POLY << (i - GF_BITS);
+		}
+	}
+
+	return p;
+}
+
+static void gf_muladd_mem_ref(u16 * CAT_RESTRICT dest, u16 n,
+					  const u16 * CAT_RESTRICT src, int words)
+{
+	// If degenerate case of multiplying by 0,
+	if (n == 0) {
+		return;
+	}
+
+	// Multiply remaining words
+	while (words > 0) {
+		--words;
+
+		u16 a = *src++;
+
+		*dest++ ^= gf_mul(a, n);
+	}
+}
+
+static void gf_div_mem_ref(u16 * CAT_RESTRICT data, u16 n,
+					 		int words)
+{
+	// If degenerate case of multiplying by 0,
+	if (n == 0) {
+		return;
+	}
+
+	// Multiply remaining words
+	while (words > 0) {
+		--words;
+
+		u16 a = *data;
+
+		*data++ = gf_div(a, n);
 	}
 }
 
