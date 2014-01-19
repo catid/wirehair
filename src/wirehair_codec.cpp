@@ -26,9 +26,6 @@
 	POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <iostream>
-using namespace std;
-
 /*
 	Mathematical Overview:
 
@@ -767,14 +764,9 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 
 	// Construct multiplication table
 	u16 log_n = GF_LOG[n];
-	cout << log_n << endl;
 	u16 T[4][16];
 	for (int i = 0; i < 4; ++i) {
 		for (int j = 0; j < 16; ++j) {
-			cout << (j << i*4) << endl;
-			cout << GF_LOG[j << i*4] << endl;
-			cout << (GF_LOG[j << i*4] + log_n) << endl;
-			cout << GF_EXP[(GF_LOG[j << i*4] + log_n)] << endl;
 			T[i][j] = GF_EXP[GF_LOG[j << i*4] + log_n];
 		}
 	}
@@ -782,7 +774,7 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 #ifdef CAT_ENDIAN_LITTLE
 	// Multiply bulk of data
 	while (words >= 4) {
-		--words;
+		words -= 4;
 
 		u64 x = *(const u64 *)src;
 		src += 4;
@@ -842,14 +834,14 @@ static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 	u16 T[4][16];
 	for (int i = 0; i < 4; i++) {
 		for (int j = 0; j < 16; j++) {
-			T[i][j] = GF_EXP[GF_LOG[j << (i*4)] + log_n];
+			T[i][j] = GF_EXP[GF_LOG[j << i*4] + log_n];
 		}
 	}
 
 #ifdef CAT_ENDIAN_LITTLE
 	// Multiply bulk of data
 	while (words >= 4) {
-		--words;
+		words -= 4;
 
 		u64 x = *(const u64 *)data;
 
@@ -2476,6 +2468,7 @@ bool Codec::Triangle()
 			// If the bit was not found,
 			u16 ge_row_j = _pivots[pivot_j];
 			u64 * CAT_RESTRICT ge_row = &ge_matrix_offset[_ge_pitch * ge_row_j];
+			// FIXME: valgrind complains here
 			if (!(*ge_row & ge_mask)) continue; // Skip to next
 
 			// Found it!

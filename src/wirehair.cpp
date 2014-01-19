@@ -97,7 +97,9 @@ int wirehair_write(wirehair_state E, unsigned int id, void *block) {
 
 	Codec *codec = reinterpret_cast<Codec *>( E );
 
-	return codec->Encode(id, block);
+	codec->Encode(id, block); // Returns bytes written
+
+	return 0;
 }
 
 wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_bytes) {
