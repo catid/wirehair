@@ -697,7 +697,8 @@ static void ShuffleDeck16(Abyssinian &prng, u16 * CAT_RESTRICT deck, u32 count)
 //// Utility: GF(2^16) Math functions
 
 #define GF_BITS 16
-#define GF_SIZE (1 << GF_BITS)
+#define GF_SIZE ((u32)1 << GF_BITS)
+#define GF_ORDER (u16)(GF_SIZE - 1)
 
 static const u16 *GF_LOG = 0;
 static const u16 *GF_EXP = 0;
@@ -724,7 +725,7 @@ static void gf_init() {
 		// Insert table entry
 		GF_LOG[n] = (u16)ii;
 		GF_EXP[ii] = n;
-		GF_EXP[ii + GF_SIZE - 1] = n;
+		GF_EXP[ii + GF_ORDER] = n;
 
 		// LFSR iteration
 		bits <<= 1;
@@ -733,17 +734,17 @@ static void gf_init() {
 }
 
 // x * y
-static u16 gf_mul(u16 x, u16 y) {
+static CAT_INLINE u16 gf_mul(u16 x, u16 y) {
 	return GF_EXP[GF_LOG[x] + GF_LOG[y]];
 }
 
 // x / y
-static u16 gf_div(u16 x, u16 y) {
-	return GF_EXP[GF_LOG[x] + GF_SIZE-1 - GF_LOG[y]];
+static CAT_INLINE u16 gf_div(u16 x, u16 y) {
+	return GF_EXP[GF_LOG[x] + GF_ORDER - GF_LOG[y]];
 }
 
 // dest += src * n
-static void gf_muladd(u16 * CAT_RESTRICT dest, u16 n,
+static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 					  const u16 * CAT_RESTRICT src, int words)
 {
 	// If degenerate case of multiplying by 0,
@@ -753,7 +754,7 @@ static void gf_muladd(u16 * CAT_RESTRICT dest, u16 n,
 
 	// If degenerate case of multiplying by 1,
 	if (n == 1) {
-		memxor(dest, src, bytes);
+		memxor(dest, src, words*2);
 	}
 
 	// Construct multiplication table
@@ -816,7 +817,7 @@ static void gf_muladd(u16 * CAT_RESTRICT dest, u16 n,
 }
 
 // dest /= n
-static void gf_div(u16 n, u16 * CAT_RESTRICT data, int words)
+static void gf_div_mem(u16 * CAT_RESTRICT data, u16 n, int words)
 {
 	// If degenerate cases of dividing by 0 or 1,
 	if (n <= 1) {
@@ -824,7 +825,7 @@ static void gf_div(u16 n, u16 * CAT_RESTRICT data, int words)
 	}
 
 	// Construct multiplication table
-	u16 log_n = GF_SIZE-1 + GF_LOG[n];
+	u16 log_n = GF_ORDER - GF_LOG[n];
 	u16 T[4][16];
 	for (int i = 0; i < 4; i++) {
 		for (int j = 0; j < 16; j++) {
@@ -2087,8 +2088,16 @@ void Codec::MultiplyDenseRows()
 	Important Optimization: O(1) Heavy Row Structure
 
 		The heavy rows are made up of 16-bit words instead of bits.
-	Each word represents a number in the Galois field GF(2^^16) defined
+	Each word represents a number in the Galois field GF(2^16) defined
 	by the generator polynomial 0x1100B.
+
+		For reference, GF(2) matrices are invertible about 30% of the
+	time.  GF(2^8) matrices are invertible about 97% of the time, and
+	GF(2^16) matrices are expected to be invertible about 99.91% of
+	the time.  An older version of the Wirehair software used GF(2^8),
+	and had 97% success rate decoding with N blocks.  It turns out that
+	efficient GF(2^16) implementations are roughly as fast as GF(2^8)
+	and offer much better success rates.
 
 		The heavy rows are designed to make it easier to find pivots in
 	just the last few columns of the GE matrix.  This design choice was
@@ -2548,11 +2557,11 @@ bool Codec::Triangle()
 				{
 					// Look up 4 bit window
 					u32 bits = (u32)(pivot_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
-					u64 window = GF256_MULT_LOOKUP[bits];
+					u64 frame = GF256_MULT_LOOKUP[bits];
 
-					CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(16) << setfill('0') << window << dec;)
+					CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(16) << setfill('0') << frame << dec;)
 
-					*word ^= window * code_value;
+					*word ^= frame * code_value;
 				}
 #endif // CAT_HEAVY_WIN_MULT
 				CAT_IF_DUMP(cout << endl;)
@@ -2565,7 +2574,7 @@ bool Codec::Triangle()
 		// NOTE: The pivot array maintains the heavy rows at the end so that they are always tried last
 		if (!found) for (; pivot_j < _pivot_count; ++pivot_j)
 		{
-			// If heavy row doesn't have the pivot,
+			// If heavy row doesn't have the pivot (very rare),
 			u16 ge_row_j = _pivots[pivot_j];
 			u16 heavy_row_j = ge_row_j - first_heavy_row;
 			u16 * CAT_RESTRICT pivot_row = &_heavy_matrix[_heavy_pitch * heavy_row_j];
@@ -2597,7 +2606,7 @@ bool Codec::Triangle()
 			if (pivot_k < pivot_count)
 			{
 				// Precompute denominator
-				u16 denominator = GF_SIZE - 1 - GF_LOG[code_value];
+				u16 denominator = GF_ORDER - GF_LOG[code_value];
 
 				// For each remaining unused row,
 				// NOTE: All remaining rows are heavy rows by pivot array organization
@@ -2618,7 +2627,7 @@ bool Codec::Triangle()
 
 					// rem[i+] += x * pivot[i+]
 					const int offset = heavy_col_i + 1;
-					gf_muladd(rem_row + offset, x, pivot_row + offset, _heavy_columns - offset);
+					gf_muladd_mem(rem_row + offset, x, pivot_row + offset, _heavy_columns - offset);
 				} // next remaining row
 			}
 
@@ -3074,7 +3083,6 @@ void Codec::AddSubdiagonalValues()
 				u64 * CAT_RESTRICT ge_row = _ge_matrix + (src_pivot_i >> 6);
 				for (int dest_pivot_i = src_pivot_i + 1; dest_pivot_i <= final_i; ++dest_pivot_i)
 				{
-					// If row is heavy,
 					u16 dest_row_i = _pivots[dest_pivot_i];
 
 					// If bit is set in that row,
@@ -3244,30 +3252,22 @@ void Codec::AddSubdiagonalValues()
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
 
 			// For each column up to the diagonal,
-			u8 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
+			u16 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
 			for (u16 sub_i = _first_heavy_column; sub_i < ge_limit; ++sub_i)
 			{
 				// If column is zero,
-				u8 code_value = heavy_row[sub_i - _first_heavy_column];
+				u16 code_value = heavy_row[sub_i - _first_heavy_column];
 				if (!code_value) continue; // Skip it
 
 				// Look up data source
-				const u8 * CAT_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[sub_i];
+				const u16 * CAT_RESTRICT src = reinterpret_cast<const u16 * CAT_RESTRICT>(
+						_recovery_blocks + _block_bytes * _ge_col_map[sub_i] );
 
-				if (code_value == 1)
-				{
-					memxor(dest, src, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
+				gf_muladd_mem((u16 * CAT_RESTRICT)dest, code_value, src, _block_bytes);
 
-					CAT_IF_DUMP(cout << " *" << ge_column_i << "=[" << (int)src[0] << "]";)
-				}
-				else
-				{
-					GF256MemMulAdd(dest, code_value, src, _block_bytes);
-					CAT_IF_ROWOP(++heavyops;)
+				CAT_IF_DUMP(cout << " h" << ge_column_i << "=[" << (int)src[0] << "*" << (int)code_value << "]";)
 
-					CAT_IF_DUMP(cout << " h" << ge_column_i << "=[" << (int)src[0] << "*" << (int)code_value << "]";)
-				}
+				CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 			}
 
 			// If row is not extra,
@@ -3476,12 +3476,12 @@ void Codec::BackSubstituteAboveDiagonal()
 					// Look up row value
 					u16 heavy_row_i = ge_row_i - first_heavy_row;
 					u16 heavy_col_i = src_pivot_i - first_heavy_column;
-					u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
+					u16 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 					// Normalize code value, setting it to 1 (implicitly nonzero)
 					if (code_value != 1)
 					{
-						GF256MemDivide(src, code_value, _block_bytes);
+						gf_div_mem((u16 * CAT_RESTRICT)src, code_value, _block_bytes / 2);
 						CAT_IF_ROWOP(++heavyops;)
 					}
 
@@ -3501,25 +3501,18 @@ void Codec::BackSubstituteAboveDiagonal()
 						// If column is zero,
 						u16 heavy_row_i = dest_row_i - first_heavy_row;
 						u16 heavy_col_i = src_pivot_i - first_heavy_column;
-						u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
+						u16 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 						if (!code_value) continue; // Skip it
 
 						// Back-substitute
-						u8 * CAT_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
-						if (code_value != 1)
-						{
-							GF256MemMulAdd(dest, code_value, src, _block_bytes);
-							CAT_IF_ROWOP(++heavyops;)
+						u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT>(
+								_recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i] );
 
-							CAT_IF_DUMP(cout << " h" << dest_pivot_i;)
-						}
-						else
-						{
-							memxor(dest, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
+						gf_muladd_mem(dest, code_value, src, _block_bytes / 2);
 
-							CAT_IF_DUMP(cout << " *" << dest_pivot_i;)
-						}
+						CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
+
+						CAT_IF_DUMP(cout << " h" << dest_pivot_i;)
 					}
 					else
 					{
@@ -3546,13 +3539,14 @@ void Codec::BackSubstituteAboveDiagonal()
 				// Look up row value
 				u16 heavy_row_i = ge_row_i - first_heavy_row;
 				u16 heavy_col_i = backsub_i - first_heavy_column;
-				u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
+				u16 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 				// Divide by this code value (implicitly nonzero)
 				if (code_value != 1)
 				{
-					u8 * CAT_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
-					GF256MemDivide(src, code_value, _block_bytes);
+					u16 * CAT_RESTRICT src = reinterpret_cast<u16 * CAT_RESTRICT> (
+							_recovery_blocks + _block_bytes * _ge_col_map[backsub_i] );
+					gf_div_mem(src, code_value, _block_bytes / 2);
 					CAT_IF_ROWOP(++heavyops;)
 				}
 			}
@@ -3639,25 +3633,18 @@ void Codec::BackSubstituteAboveDiagonal()
 					// For each heavy column,
 					u16 heavy_row_i = ge_row_i - first_heavy_row;
 					u16 heavy_col_j = ge_column_j - first_heavy_column;
-					u8 * CAT_RESTRICT heavy_row = &_heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_j];
+					u16 * CAT_RESTRICT heavy_row = &_heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_j];
 					for (; ge_column_j <= pivot_i; ++ge_column_j)
 					{
 						// If zero,
-						u8 code_value = *heavy_row++;
+						u16 code_value = *heavy_row++;
 						if (!code_value) continue; // Skip it
 
 						// Back-substitute
-						const u8 * CAT_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
-						if (code_value != 1)
-						{
-							GF256MemMulAdd(dest, code_value, src, _block_bytes);
-							CAT_IF_ROWOP(++heavyops;)
-						}
-						else
-						{
-							memxor(dest, src, _block_bytes);
-							CAT_IF_ROWOP(++rowops;)
-						}
+						const u16 * CAT_RESTRICT src = reinterpret_cast<const u16 * CAT_RESTRICT> (
+								_recovery_blocks + _block_bytes * _ge_col_map[ge_column_j] );
+						gf_muladd_mem(dest, code_value, src, _block_bytes/2);
+						CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
 					} // next column in row
 				} // next pivot in window
 			} // end if contains heavy
@@ -3767,12 +3754,12 @@ void Codec::BackSubstituteAboveDiagonal()
 			// Look up row value
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
 			u16 heavy_col_i = pivot_i - first_heavy_column;
-			u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
+			u16 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
 			// Normalize code value, setting it to 1 (implicitly nonzero)
 			if (code_value != 1)
 			{
-				GF256MemDivide(src, code_value, _block_bytes);
+				gf_div_mem((u16 * CAT_RESTRICT)src, code_value, _block_bytes/2);
 				CAT_IF_ROWOP(++heavyops;)
 			}
 
@@ -3792,25 +3779,15 @@ void Codec::BackSubstituteAboveDiagonal()
 				// If column is zero,
 				u16 heavy_row_i = up_row_i - first_heavy_row;
 				u16 heavy_col_i = pivot_i - first_heavy_column;
-				u8 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
+				u16 code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 				if (!code_value) continue; // Skip it
 
 				// Back-substitute
-				u8 * CAT_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_up_i];
-				if (code_value != 1)
-				{
-					GF256MemMulAdd(dest, code_value, src, _block_bytes);
-					CAT_IF_ROWOP(++heavyops;)
-
-					CAT_IF_DUMP(cout << " h" << up_row_i;)
-				}
-				else
-				{
-					memxor(dest, src, _block_bytes);
-					CAT_IF_ROWOP(++rowops;)
-
-					CAT_IF_DUMP(cout << " *" << up_row_i;)
-				}
+				u16 * CAT_RESTRICT dest = reinterpret_cast<u16 * CAT_RESTRICT> (
+						_recovery_blocks + _block_bytes * _ge_col_map[ge_up_i] );
+				gf_muladd_mem(dest, code_value, src, _block_bytes/2);
+				CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
+				CAT_IF_DUMP(cout << " h" << up_row_i;)
 			}
 			else
 			{
@@ -4748,13 +4725,17 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		const u16 column_count = _defer_count + _mix_count;
 		const u16 first_heavy_row = _dense_count + _defer_count;
 		u16 heavy_row_i = ge_row_i - first_heavy_row;
-		u8 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
+		u16 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
 		for (u16 ge_column_j = _first_heavy_column; ge_column_j < column_count; ++ge_column_j)
 		{
 			u16 heavy_col_j = ge_column_j - _first_heavy_column;
 			u8 bit_j = (u8)(ge_new_row[ge_column_j >> 6] >> (ge_column_j & 63)) & 1;
 
-			// Copy bit into column byte
+			// Copy bit into heavy column word
+			// NOTE: This is a bit of a hack but the idea is that we can extend the GE matrix
+			// into the heavy rows.  Should be roughly the same performance level because the
+			// GF(2^16) code has fast special cases for 0 and 1.  And often times these matrix
+			// entries will be written from the heavy rows, so they need to be word-valued.
 			heavy_row[heavy_col_j] = bit_j;
 		}
 
@@ -4763,7 +4744,7 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 		{
 			// If column is zero,
 			u16 heavy_col_j = pivot_j - _first_heavy_column;
-			u8 code_value = heavy_row[heavy_col_j];
+			u16 code_value = heavy_row[heavy_col_j];
 			if (!code_value) continue; // Skip it
 
 			// If previous row is heavy,
@@ -4772,31 +4753,24 @@ Result Codec::ResumeSolveMatrix(u32 id, const void *block)
 			{
 				// Calculate coefficient of elimination
 				u16 heavy_row_j = ge_row_j - first_heavy_row;
-				u8 * CAT_RESTRICT pivot_row = _heavy_matrix + _heavy_pitch * heavy_row_j;
-				u8 pivot_code = pivot_row[heavy_col_j];
+				u16 * CAT_RESTRICT pivot_row = _heavy_matrix + _heavy_pitch * heavy_row_j;
+				u16 pivot_code = pivot_row[heavy_col_j];
 				const u16 start_column = heavy_col_j + 1;
 				if (pivot_code == 1)
 				{
-					if (code_value != 1)
-					{
-						// heavy[m+] += exist[m+] * code_value
-						GF256MemMulAdd(heavy_row + start_column, code_value, pivot_row + start_column, _heavy_columns - start_column);
-					}
-					else
-					{
-						// heavy[m+] += exist[m+]
-						memxor(heavy_row + start_column, pivot_row + start_column, _heavy_columns - start_column);
-					}
+					// heavy[m+] += exist[m+] * code_value
+					gf_muladd_mem(heavy_row + start_column, code_value, pivot_row + start_column, _heavy_columns - start_column);
 				}
 				else
 				{
-					u8 eliminator = (code_value == 1) ? INV_TABLE[pivot_code] : GF256Divide(code_value, pivot_code);
+					// eliminator = code_value / pivot_code
+					u16 eliminator = gf_div(code_value, pivot_code);
 
 					// Store eliminator for later
 					heavy_row[heavy_col_j] = eliminator;
 
 					// heavy[m+] += exist[m+] * eliminator
-					GF256MemMulAdd(heavy_row + start_column, eliminator, pivot_row + start_column, _heavy_columns - start_column);
+					gf_muladd_mem(heavy_row + start_column, eliminator, pivot_row + start_column, _heavy_columns - start_column);
 				}
 			}
 			else
@@ -5214,8 +5188,8 @@ bool Codec::AllocateMatrix()
 	_heavy_pitch = heavy_pitch;
 	_heavy_columns = heavy_cols;
 	_first_heavy_column = _defer_count + _mix_count - heavy_cols;
-	_heavy_matrix = reinterpret_cast<u8 *>( _ge_matrix + ge_matrix_words );
-	_pivots = reinterpret_cast<u16 *>( _heavy_matrix + heavy_bytes );
+	_heavy_matrix = reinterpret_cast<u16 *>( _ge_matrix + ge_matrix_words );
+	_pivots = _heavy_matrix + (heavy_bytes / 2);
 	_ge_row_map = _pivots + pivot_count;
 	_ge_col_map = _ge_row_map + pivot_count;
 
@@ -5332,7 +5306,7 @@ void Codec::PrintGEMatrix()
 	{
 		for (int jj = 0; jj < heavy_cols; ++jj)
 		{
-			cout << hex << setw(2) << setfill('0') << (int)_heavy_matrix[_heavy_pitch * (ii + _extra_count) + jj] << dec << " ";
+			cout << hex << setw(4) << setfill('0') << (int)_heavy_matrix[_heavy_pitch * (ii + _extra_count) + jj] << dec << " ";
 		}
 		cout << endl;
 	}
@@ -5355,7 +5329,7 @@ void Codec::PrintExtraMatrix()
 		{
 			u64 * CAT_RESTRICT ge_row = _ge_matrix + _ge_pitch * ge_row_i;
 			u16 heavy_row_i = ge_row_i - first_heavy_row;
-			u8 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
+			u16 * CAT_RESTRICT heavy_row = _heavy_matrix + _heavy_pitch * heavy_row_i;
 
 			cout << "row=" << ge_row_i << " : light={ ";
 
@@ -5380,9 +5354,9 @@ void Codec::PrintExtraMatrix()
 			for (u16 ge_column_i = _first_heavy_column; ge_column_i < column_count; ++ge_column_i)
 			{
 				u16 heavy_col_i = ge_column_i - _first_heavy_column;
-				u8 code_value = heavy_row[heavy_col_i];
+				u16 code_value = heavy_row[heavy_col_i];
 
-				cout << " " << hex << setfill('0') << setw(2) << (int)code_value << dec;
+				cout << " " << hex << setfill('0') << setw(4) << (int)code_value << dec;
 			}
 
 			cout << " )" << endl;

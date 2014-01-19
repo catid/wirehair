@@ -45,11 +45,11 @@
 #define CAT_WIREHAIR_MIN_N 2 /* Smallest N value to allow */
 
 // Optimization options:
-#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
-#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
-#define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
-#define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
+//#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+//#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
+//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+//#define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
+//#define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
 
 // Heavy rows:
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
@@ -250,14 +250,15 @@ class CAT_EXPORT Codec
 	void FreeWorkspace();
 
 public:
+	// Ctors
 	Codec();
 	~Codec();
 
 
 	//// Accessors
 
-	CAT_INLINE u32 PSeed() { return _p_seed; }
-	CAT_INLINE u32 CSeed() { return _d_seed; }
+	CAT_INLINE u32 PSeed() { return _p_seed; } // Seed for peeled matrix rows
+	CAT_INLINE u32 DSeed() { return _d_seed; } // Seed for dense matrix rows
 	CAT_INLINE u32 BlockCount() { return _block_count; }
 
 
