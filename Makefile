@@ -36,7 +36,6 @@ debug : library
 
 # Library target
 
-library : CFLAGS += $(OPTFLAGS)
 library : $(library_o)
 	ar rcs $(LIBNAME) $(library_o)
 
