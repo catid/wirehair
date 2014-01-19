@@ -85,9 +85,9 @@ int main()
 				assert(!wirehair_write(encoder, id, block));
 
 				// If decoder is ready,
+				t0 = m_clock.usec();
 				if (!wirehair_read(decoder, id, block)) {
 					// If message is decoded,
-					t0 = m_clock.usec();
 					if (!wirehair_reconstruct(decoder, message_out)) {
 						t1 = m_clock.usec();
 
