@@ -1,5 +1,5 @@
 ## Wirehair Portable Build
-#### Fast and Portable Erasure Code
+#### Fast and Portable Erasure Codes in C
 
 See the full documentation at [https://github.com/catid/wirehair](https://github.com/catid/wirehair).
 

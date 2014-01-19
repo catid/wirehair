@@ -11,6 +11,13 @@ A simple C API is provided to make it easy to incorporate into existing
 projects.
 
 
+##### Building: Quick Setup
+
+The [wirehair-mobile](https://github.com/catid/wirehair/tree/master/wirehair-mobile)
+directory contains an easy-to-import set of C code that also
+builds properly for mobile devices.
+
+
 #### Usage: Encoder
 
 On startup, verify that the Wirehair library is linked correctly:
