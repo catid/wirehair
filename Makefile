@@ -121,5 +121,5 @@ gf_test.o : tests/gf_test.cpp
 
 clean :
 	git submodule update --init
-	-rm *.o
+	-rm bin/*.a test *.o
 

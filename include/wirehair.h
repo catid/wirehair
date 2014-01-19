@@ -39,10 +39,10 @@ extern "C" {
  * Verify binary compatibility with the Wirehair API on startup.
  *
  * Example:
- * 	if (wirehair_init()) throw "Update wirehair static library";
+ * 	if (!wirehair_init()) exit(1);
  *
- * Returns 0 on success.
- * Returns non-zero if the API level does not match.
+ * Returns non-zero on success.
+ * Returns 0 if the API level does not match.
  */
 extern int _wirehair_init(int expected_version);
 #define wirehair_init() _wirehair_init(WIREHAIR_VERSION)
@@ -66,10 +66,9 @@ typedef void *wirehair_state;
  * Preconditions:
  * 	N >= 2
  * 	N <= 64000
- *	block_bytes is a multiple of 2
  *
- * Returns 0 on failure.
  * Returns a valid state object on success.
+ * Returns 0 on failure.
  */
 extern wirehair_state wirehair_encode(wirehair_state reuse_E, const void *message, int bytes, int block_bytes);
 
@@ -87,8 +86,8 @@ extern int wirehair_count(wirehair_state E);
  * Preconditions:
  *	block pointer has block_bytes of space available to store data
  *
- * Returns 0 on success.
- * Returns non-zero on invalid input.
+ * Returns non-zero on success.
+ * Returns 0 on invalid input.
  */
 extern int wirehair_write(wirehair_state E, unsigned int id, void *block);
 
@@ -98,8 +97,8 @@ extern int wirehair_write(wirehair_state E, unsigned int id, void *block);
  *
  * Pass 0 for reuse_E if you do not want to reuse a state object.
  *
- * Returns 0 on failure.
  * Returns a valid state object on success.
+ * Returns 0 on failure.
  */
 extern wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_bytes);
 
@@ -111,8 +110,8 @@ extern wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int blo
  * Preconditions:
  *	block pointer has block_bytes of space available to store data
  *
- * Returns 0 when decoding is likely to be possible.
- * Returns non-zero on invalid input or not enough data received.
+ * Returns non-zero when decoding is likely to be possible.
+ * Returns 0 on invalid input or not enough data received.
  */
 extern int wirehair_read(wirehair_state E, unsigned int id, const void *block);
 
@@ -124,8 +123,8 @@ extern int wirehair_read(wirehair_state E, unsigned int id, const void *block);
  * Preconditions:
  *	message contains enough space to store the entire decoded message
  *
- * Returns 0 when decoding is complete.
- * Returns non-zero on invalid input or not enough data received.
+ * Returns non-zero when decoding is complete.
+ * Returns 0 on invalid input or not enough data received.
  */
 extern int wirehair_reconstruct(wirehair_state E, void *message);
 

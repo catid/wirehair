@@ -23,7 +23,7 @@ const int TRIALS = 1000;
 
 int main()
 {
-	assert(!wirehair_init());
+	assert(wirehair_init());
 
 	m_clock.OnInitialize();
 
@@ -35,7 +35,7 @@ int main()
 	u8 block[block_bytes];
 
 	// Try each value for N
-	for (int N = 2; N <= 64000; ++N)
+	for (int N = 1000; N <= 64000; ++N)
 	{
 		int bytes = block_bytes * N;
 		u8 *message_in = new u8[bytes];
@@ -59,7 +59,7 @@ int main()
 		assert(N == wirehair_count(encoder));
 
 		double encode_time = t1 - t0;
-		cout << "wirehair_encode(N = " << N << ") in " << encode_time << " usec" << endl;
+		cout << "wirehair_encode(N = " << N << ") in " << encode_time << " usec, " << bytes / encode_time << " MB/s" << endl;
 
 		// For each trial,
 		u32 overhead = 0;
@@ -82,13 +82,13 @@ int main()
 				++blocks_needed;
 
 				// Write a block
-				assert(!wirehair_write(encoder, id, block));
+				assert(wirehair_write(encoder, id, block));
 
 				// If decoder is ready,
 				t0 = m_clock.usec();
-				if (!wirehair_read(decoder, id, block)) {
+				if (wirehair_read(decoder, id, block)) {
 					// If message is decoded,
-					if (!wirehair_reconstruct(decoder, message_out)) {
+					if (wirehair_reconstruct(decoder, message_out)) {
 						t1 = m_clock.usec();
 
 						// Verify successful decode
@@ -103,7 +103,13 @@ int main()
 			reconstruct_time += t1 - t0;
 		}
 
-		cout << "wirehair_decode(N = " << N << ") average overhead = " << overhead / (double)TRIALS << " blocks, average reconstruct time = " << reconstruct_time / TRIALS << endl;
+		double overhead_avg = overhead / (double)TRIALS;
+		double reconstruct_avg = reconstruct_time / TRIALS;
+		cout << "wirehair_decode(N = " << N << ") average overhead = " << overhead_avg << " blocks, average reconstruct time = " << reconstruct_avg << " usec, " << bytes / reconstruct_avg << " MB/s" << endl;
+
+		if (overhead_avg > 0.03) {
+			cout << "*** SEED NEEDS TO BE FIXED FOR " << N << " ***" << endl;
+		}
 
 		cout << endl;
 

@@ -45,12 +45,12 @@ static bool m_init = false;
 int _wirehair_init(int expected_version) {
 	// If version mismatch,
 	if (expected_version != WIREHAIR_VERSION) {
-		return -1;
+		return 0;
 	}
 
 	m_init = true;
 
-	return 0;
+	return -1;
 }
 
 wirehair_state wirehair_encode(wirehair_state reuse_E, const void *message, int bytes, int block_bytes) {
@@ -98,14 +98,14 @@ int wirehair_count(wirehair_state E) {
 int wirehair_write(wirehair_state E, unsigned int id, void *block) {
 	// If input is invalid,
 	if CAT_UNLIKELY(!E || !block) {
-		return -1;
+		return 0;
 	}
 
 	Codec *codec = reinterpret_cast<Codec *>( E );
 
 	codec->Encode(id, block); // Returns bytes written
 
-	return 0;
+	return -1;
 }
 
 wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_bytes) {
@@ -136,12 +136,16 @@ wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_byte
 int wirehair_read(wirehair_state E, unsigned int id, const void *block) {
 	// If input is invalid,
 	if CAT_UNLIKELY(!E || !block) {
-		return -1;
+		return 0;
 	}
 
 	Codec *codec = reinterpret_cast<Codec *>( E );
 
-	return codec->DecodeFeed(id, block);
+	if (R_WIN != codec->DecodeFeed(id, block)) {
+		return 0;
+	}
+
+	return -1;
 }
 
 int wirehair_reconstruct(wirehair_state E, void *message) {
@@ -152,7 +156,11 @@ int wirehair_reconstruct(wirehair_state E, void *message) {
 
 	Codec *codec = reinterpret_cast<Codec *>( E );
 
-	return codec->ReconstructOutput(message);
+	if (R_WIN != codec->ReconstructOutput(message)) {
+		return 0;
+	}
+
+	return -1;
 }
 
 void wirehair_free(wirehair_state E) {
