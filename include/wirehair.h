@@ -61,15 +61,17 @@ typedef void *wirehair_state;
  * start to overflow, so too many blocks is unsupported.  The most efficient values
  * for N are around 1000.
  *
+ * Pass 0 for reuse_E if you do not want to reuse a state object.
+ *
  * Preconditions:
  * 	N >= 2
  * 	N <= 64000
  *	block_bytes is a multiple of 2
  *
- * Returns 0 on success.
- * Returns non-zero on invalid input.
+ * Returns 0 on failure.
+ * Returns a valid state object on success.
  */
-extern int wirehair_encode(wirehair_state *E, const void *message, int bytes, int block_bytes);
+extern wirehair_state wirehair_encode(wirehair_state reuse_E, const void *message, int bytes, int block_bytes);
 
 /*
  * Returns the number of blocks N in the encoded message.
@@ -94,10 +96,12 @@ extern int wirehair_write(wirehair_state E, unsigned int id, void *block);
  * Initialize a decoder for a message of size bytes with block_bytes bytes
  * per received block.
  *
- * Returns 0 on success.
- * Returns non-zero on invalid input.
+ * Pass 0 for reuse_E if you do not want to reuse a state object.
+ *
+ * Returns 0 on failure.
+ * Returns a valid state object on success.
  */
-extern int wirehair_decode(wirehair_state *E, int bytes, int block_bytes);
+extern wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_bytes);
 
 /*
  * Feed a block to the decoder.

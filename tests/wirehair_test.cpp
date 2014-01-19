@@ -27,7 +27,7 @@ int main()
 
 	m_clock.OnInitialize();
 
-	wirehair_state encoder, decoder;
+	wirehair_state encoder = 0, decoder = 0;
 	Abyssinian prng;
 
 	// Simulate file transfers over UDP/IP
@@ -51,7 +51,8 @@ int main()
 		double t0 = m_clock.usec();
 
 		// Initialize encoder
-		assert(!wirehair_encode(&encoder, message_in, bytes, block_bytes));
+		encoder = wirehair_encode(encoder, message_in, bytes, block_bytes);
+		assert(encoder);
 
 		double t1 = m_clock.usec();
 
@@ -65,7 +66,8 @@ int main()
 		double reconstruct_time = 0;
 		for (int ii = 0; ii < TRIALS; ++ii) {
 			// Initialize decoder
-			assert(!wirehair_decode(&decoder, bytes, block_bytes));
+			decoder = wirehair_decode(decoder, bytes, block_bytes);
+			assert(decoder);
 
 			assert(N == wirehair_count(decoder));
 

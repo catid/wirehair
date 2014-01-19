@@ -26,6 +26,9 @@
 	POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <iostream>
+using namespace std;
+
 /*
 	Mathematical Overview:
 
@@ -717,9 +720,13 @@ static void gf_init() {
 	GF_LOG = new u16[GF_SIZE];
 	GF_EXP = new u16[2*GF_SIZE - 1];
 
+	// Define log(0) and log(Ord(GF)) as 0
+	GF_LOG[0] = 0;
+	GF_LOG[GF_ORDER] = 0;
+
 	// Fill tables
 	u32 bits = 1;
-	for (int ii = 0; ii < GF_SIZE; ++ii) {
+	for (int ii = 0; ii < GF_ORDER; ++ii) {
 		const u32 n = bits;
 
 		// Insert table entry
@@ -755,14 +762,20 @@ static void gf_muladd_mem(u16 * CAT_RESTRICT dest, u16 n,
 	// If degenerate case of multiplying by 1,
 	if (n == 1) {
 		memxor(dest, src, words*2);
+		return;
 	}
 
 	// Construct multiplication table
 	u16 log_n = GF_LOG[n];
+	cout << log_n << endl;
 	u16 T[4][16];
-	for (int i = 0; i < 4; i++) {
-		for (int j = 0; j < 16; j++) {
-			T[i][j] = GF_EXP[GF_LOG[j << (i*4)] + log_n];
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 16; ++j) {
+			cout << (j << i*4) << endl;
+			cout << GF_LOG[j << i*4] << endl;
+			cout << (GF_LOG[j << i*4] + log_n) << endl;
+			cout << GF_EXP[(GF_LOG[j << i*4] + log_n)] << endl;
+			T[i][j] = GF_EXP[GF_LOG[j << i*4] + log_n];
 		}
 	}
 

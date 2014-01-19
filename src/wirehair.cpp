@@ -47,19 +47,18 @@ int _wirehair_init(int expected_version) {
 	return 0;
 }
 
-int wirehair_encode(wirehair_state *E, const void *message, int bytes, int block_bytes) {
+wirehair_state wirehair_encode(wirehair_state reuse_E, const void *message, int bytes, int block_bytes) {
 	// If input is invalid,
-	if CAT_UNLIKELY(!m_init || !E || !message || bytes < 1 ||
+	if CAT_UNLIKELY(!m_init || !message || bytes < 1 ||
 					block_bytes < 1 || block_bytes % 2 != 0) {
-		return -1;
+		return 0;
 	}
 
-	Codec *codec = reinterpret_cast<Codec *>( *E );
+	Codec *codec = reinterpret_cast<Codec *>( reuse_E );
 
 	// Allocate a new Codec object
 	if (!codec) {
 		codec = new Codec;
-		*E = codec;
 	}
 
 	// Initialize codec
@@ -70,7 +69,13 @@ int wirehair_encode(wirehair_state *E, const void *message, int bytes, int block
 		r = codec->EncodeFeed(message);
 	}
 
-	return r;
+	// On failure,
+	if (r) {
+		delete codec;
+		codec = 0;
+	}
+
+	return codec;
 }
 
 int wirehair_count(wirehair_state E) {
@@ -95,23 +100,29 @@ int wirehair_write(wirehair_state E, unsigned int id, void *block) {
 	return codec->Encode(id, block);
 }
 
-int wirehair_decode(wirehair_state *E, int bytes, int block_bytes) {
+wirehair_state wirehair_decode(wirehair_state reuse_E, int bytes, int block_bytes) {
 	// If input is invalid,
-	if CAT_UNLIKELY(!E || bytes < 1 || block_bytes < 1 ||
+	if CAT_UNLIKELY(bytes < 1 || block_bytes < 1 ||
 					block_bytes % 2 != 0) {
-		return -1;
+		return 0;
 	}
 
-	Codec *codec = reinterpret_cast<Codec *>( *E );
+	Codec *codec = reinterpret_cast<Codec *>( reuse_E );
 
 	// Allocate a new Codec object
 	if (!codec) {
 		codec = new Codec;
-		*E = codec;
 	}
 
 	// Allocate memory for decoding
-	return codec->InitializeDecoder(bytes, block_bytes);
+	Result r = codec->InitializeDecoder(bytes, block_bytes);
+
+	if (r) {
+		delete codec;
+		codec = 0;
+	}
+
+	return codec;
 }
 
 int wirehair_read(wirehair_state E, unsigned int id, const void *block) {
