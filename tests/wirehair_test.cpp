@@ -1,4 +1,4 @@
-#include "wirehair.hpp"
+#include "wirehair.h"
 #include "Clock.hpp"
 #include "AbyssinianPRNG.hpp"
 using namespace cat;
@@ -38,21 +38,20 @@ int main()
 	for (int N = 2; N <= 64000; ++N)
 	{
 		int bytes = block_bytes * N;
-
-		u8 *message_in = new u8[message_bytes];
-		u8 *message_out = new u8[message_bytes];
+		u8 *message_in = new u8[bytes];
+		u8 *message_out = new u8[bytes];
 
 		prng.Initialize(SEED);
 
 		// Fill input message with random data
-		for (int ii = 0; ii < message_bytes; ++ii) {
+		for (int ii = 0; ii < bytes; ++ii) {
 			message_in[ii] = (u8)prng.Next();
 		}
 
 		double t0 = m_clock.usec();
 
 		// Initialize encoder
-		assert(!wirehair_encode(&encoder, message, bytes, block_bytes));
+		assert(!wirehair_encode(&encoder, message_in, bytes, block_bytes));
 
 		double t1 = m_clock.usec();
 
@@ -105,6 +104,9 @@ int main()
 		cout << "wirehair_decode(N = " << N << ") average overhead = " << overhead / (double)TRIALS << " blocks, average reconstruct time = " << reconstruct_time / TRIALS << endl;
 
 		cout << endl;
+
+		delete []message_in;
+		delete []message_out;
 	}
 
 	wirehair_free(encoder);

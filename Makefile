@@ -43,7 +43,7 @@ library : $(library_o)
 # test executable
 
 test : CFLAGS += -DUNIT_TEST $(OPTFLAGS)
-test : clean $(test_o) library
+test : clean $(test_o) release
 	$(CCPP) $(test_o) -L./bin -lwirehair -o test
 	./test
 

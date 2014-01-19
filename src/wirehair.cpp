@@ -26,6 +26,9 @@
 	POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <iostream>
+using namespace std;
+
 #include "wirehair.h"
 #include "wirehair_codec.hpp"
 using namespace cat;
@@ -47,7 +50,7 @@ int _wirehair_init(int expected_version) {
 int wirehair_encode(wirehair_state *E, const void *message, int bytes, int block_bytes) {
 	// If input is invalid,
 	if CAT_UNLIKELY(!m_init || !E || !message || bytes < 1 ||
-					block_bytes < 1 || block_bytes % 2 == 0) {
+					block_bytes < 1 || block_bytes % 2 != 0) {
 		return -1;
 	}
 
@@ -95,7 +98,7 @@ int wirehair_write(wirehair_state E, unsigned int id, void *block) {
 int wirehair_decode(wirehair_state *E, int bytes, int block_bytes) {
 	// If input is invalid,
 	if CAT_UNLIKELY(!E || bytes < 1 || block_bytes < 1 ||
-					block_bytes % 2 == 0) {
+					block_bytes % 2 != 0) {
 		return -1;
 	}
 
