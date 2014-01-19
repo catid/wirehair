@@ -32,10 +32,10 @@
 #include "AbyssinianPRNG.hpp"
 
 // Debugging:
-#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
-#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
-#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
-#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
+//#define CAT_DUMP_CODEC_DEBUG /* Turn on debug output for decoder */
+//#define CAT_DUMP_ROWOP_COUNTERS /* Dump row operations counters to console */
+//#define CAT_DUMP_PIVOT_FAIL /* Dump pivot failure to console */
+//#define CAT_DUMP_GE_MATRIX /* Dump GE matrix to console */
 
 // Limits:
 #define CAT_REF_LIST_MAX 32 /* Tune to be as small as possible and still succeed */
@@ -45,11 +45,11 @@
 #define CAT_WIREHAIR_MIN_N 2 /* Smallest N value to allow */
 
 // Optimization options:
-//#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
-//#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
-//#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
-//#define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
-//#define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
+#define CAT_COPY_FIRST_N /* Copy the first N rows from the input (faster) */
+#define CAT_HEAVY_WIN_MULT /* Use 4-bit table and multiplication optimization (faster) */
+#define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
+#define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
+#define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
 
 // Heavy rows:
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
