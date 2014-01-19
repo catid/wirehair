@@ -59,7 +59,7 @@ starting from 0 and incremented by one each time:
 
 ~~~
 	char block[1300];
-	int ID = 0;
+	unsigned int ID = ...;
 
 	if (!wirehair_write(encoder, ID, block)) {
 		exit(1);
@@ -85,7 +85,7 @@ A decoder object should be created by providing the size of the message
 and the number of bytes per block:
 
 ~~~
-	int bytes = 1000000;
+	int bytes = 1000000..;
 	int block_bytes = 1300;
 
 	wirehair_state decoder = 0;
@@ -107,20 +107,32 @@ To check how many blocks are in the message:
 To decode a message one received block at a time:
 
 ~~~
-	char *message = new char[bytes];
-	int ID = 0;
+	unsigned int ID = ...;
 
-	// If there is a chance of decoding the message now,
+	// If reading is done,
 	if (wirehair_read(decoder, ID, block)) {
 
-		// If message can be reconstructed,
-		if (wirehair_reconstruct(decoder, message)) {
+		char *message = new char[bytes];
 
-			// Decoding message complete
-
-		}
+		// Decode message
+		wirehair_reconstruct(decoder, message);
 	}
 ~~~
+
+Note that the `wirehair_reconstruct` function is used to produce the
+decoded message.  This is suitable for file transfer applications.
+For packet error correction, a more suitable function is provided:
+
+~~~
+	char block[1300];
+	unsigned int ID = ...;
+
+	wirehair_reconstruct_block(decoder, ID, block);
+~~~
+
+The [Shorthair project](https://github.com/catid/shorthair) is designed
+to implement efficient variable-length packet error correction using
+Wirehair on the backend.
 
 Similar to the encoder, you may either free or reuse the decoder object
 in the exact same way as the encoder.

@@ -119,7 +119,9 @@ extern int wirehair_read(wirehair_state E, unsigned int id, const void *block);
  * Reconstruct the message after reading is complete.
  *
  * Preconditions:
- *	message contains enough space to store the entire decoded message
+ *	message contains enough space to store the entire decoded message (bytes)
+ *
+ * May return 0 to indicate a failure.
  */
 extern int wirehair_reconstruct(wirehair_state E, void *message);
 
@@ -130,7 +132,9 @@ extern int wirehair_reconstruct(wirehair_state E, void *message);
  * rather than for file transfer.
  *
  * Preconditions:
- *	block ptr buffer contains enough space to hold the block
+ *	block ptr buffer contains enough space to hold the block (block_bytes)
+ *
+ * May return 0 to indicate a failure.
  */
 extern int wirehair_reconstruct_block(wirehair_state E, unsigned int id, void *block);
 
