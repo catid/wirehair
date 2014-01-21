@@ -15,7 +15,7 @@ DBGLIBNAME = bin/libwirehair_debug.a
 
 # Object files
 
-library_o = wirehair.o MemXOR.o EndianNeutral.o
+library_o = wirehair.o MemXOR.o EndianNeutral.o Galois256.o
 
 test_o = wirehair_test.o Clock.o
 gf_test_o = gf_test.o Clock.o MemXOR.o
@@ -92,6 +92,9 @@ EndianNeutral.o : libcat/EndianNeutral.cpp
 
 MemXOR.o : libcat/MemXOR.cpp
 	$(CCPP) $(CFLAGS) -c libcat/MemXOR.cpp
+
+Galois256.o : libcat/Galois256.cpp
+	$(CCPP) $(CFLAGS) -c libcat/Galois256.cpp
 
 
 # Library objects
