@@ -61,7 +61,7 @@ test : $(test_o)
 	./test
 
 test-debug : CFLAGS += -DUNIT_TEST $(DBGFLAGS)
-test-debug : clean $(test_o)
+test-debug : $(test_o)
 	$(CCPP) $(test_o) -L./bin -lwirehair_debug -o test
 	./test
 

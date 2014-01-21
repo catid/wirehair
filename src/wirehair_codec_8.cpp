@@ -5011,9 +5011,7 @@ void Codec::FreeMatrix()
 
 bool Codec::AllocateWorkspace()
 {
-#ifdef CAT_EXP_BIG_TABLES
 	GF256Init();
-#endif
 
 	CAT_IF_DUMP(cout << endl << "---- AllocateWorkspace ----" << endl << endl;)
 

@@ -50,7 +50,6 @@
 #define CAT_WINDOWED_BACKSUB /* Use window optimization for back-substitution (faster) */
 #define CAT_WINDOWED_LOWERTRI /* Use window optimization for lower triangle elimination (faster) */
 #define CAT_ALL_ORIGINAL /* Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
-#define CAT_EXP_BIG_TABLES /* Unpack 65KB of tables for faster GF(256) multiplication */
 
 // Heavy rows:
 #define CAT_HEAVY_ROWS 6 /* Number of heavy rows to add - Tune for desired overhead / performance trade-off */
