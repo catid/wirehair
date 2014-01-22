@@ -35,7 +35,7 @@ int main()
 	u8 block[block_bytes];
 
 	// Try each value for N
-	for (int N = 1000; N <= 64000; ++N)
+	for (int N = 2; N <= 64000; ++N)
 	{
 		int bytes = block_bytes * N;
 		u8 *message_in = new u8[bytes];
