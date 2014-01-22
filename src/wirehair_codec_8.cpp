@@ -98,7 +98,7 @@
 			a constant-time algorithm to solve them.
 			H is a 6x12 random byte matrix.
 			Each element of H is a byte instead of a bit, representing a number
-			in GF(2^^8) with generator polynomial 0x15F.
+			in GF(256) with generator polynomial 0x15F.
 
 		(6) Check Matrix Solver
 
@@ -2413,9 +2413,6 @@ bool Codec::Triangle()
 			u16 pivot_k = pivot_j + 1;
 			if (pivot_k < pivot_count)
 			{
-				// Precompute denominator
-				int denominator = 255 - GF256_LOG_TABLE[code_value];
-
 				// For each remaining unused row,
 				// NOTE: All remaining rows are heavy rows by pivot array organization
 				for (; pivot_k < pivot_count; ++pivot_k)
@@ -2428,7 +2425,7 @@ bool Codec::Triangle()
 					if (!rem_value) continue; // Skip it
 
 					// x = rem_value / code_value
-					u8 x = GF256_EXP_TABLE[GF256_LOG_TABLE[rem_value] + denominator];
+					u8 x = GF256Divide(rem_value, code_value);
 
 					// Store value for later
 					rem_row[heavy_col_i] = x;
