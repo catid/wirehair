@@ -5,7 +5,10 @@ using namespace std;
 #include "Platform.hpp"
 #include "BitMath.hpp"
 #include "AbyssinianPRNG.hpp"
+#include "Clock.hpp"
 using namespace cat;
+
+static Clock m_clock;
 
 static const u8 GEN_POLY[] = {
 	0x8e, 0x95, 0x96, 0xa6, 0xaf, 0xb1, 0xb2, 0xb4,
@@ -149,6 +152,72 @@ void GenerateCauchyOnes() {
 	}
 }
 
+void print(int k, int m, u8 *matrix, bool cstyle = false) {
+	if (cstyle) {
+		cout << "static const u8 CAUCHY_MATRIX_" << m << "[" << (m - 1) << "][" << k << "] = {" << endl;
+		for (int y = 1; y < m; ++y) {
+			cout << "{";
+			for (int x = 0; x < k; ++x) {
+				cout << "0x" << hex << setw(2) << setfill('0') << (int)matrix[y * k + x];
+				if (x > 0 && (x & 15) == 0) {
+					cout << "," << endl;
+				} else {
+					cout << " ";
+				}
+			}
+			cout << "}," << endl;
+		}
+		cout << dec << "};" << endl;
+	} else {
+		cout << "[" << endl;
+		for (int y = 0; y < m; ++y) {
+			for (int x = 0; x < k; ++x) {
+				cout << hex << setw(2) << setfill('0') << (int)matrix[y * k + x] << " ";
+			}
+			cout << endl;
+		}
+		cout << dec << "]" << endl;
+	}
+}
+
+void SortColumns(int k, int m, u8 *matrix) {
+	int *counts = new int[k];
+
+	for (int x = 0; x < k; ++x) {
+		int ones = 0;
+		for (int y = 0; y < m; ++y) {
+			ones += CAUCHY_ONES[matrix[y*k + x]];
+		}
+		counts[x] = ones;
+	}
+
+	for (int x = 0; x < k; ++x) {
+		int smallest = counts[x], best_x = x;
+
+		for (int z = x + 1; z < k; ++z) {
+			int ones = counts[z];
+
+			if (counts[z] < smallest) {
+				smallest = ones;
+				best_x = z;
+			}
+		}
+
+		// swap counts
+		counts[best_x] = counts[x];
+		counts[x] = smallest;
+
+		// swap columns
+		for (int y = 1; y < m; ++y) {
+			u8 temp = matrix[y*k + x];
+			matrix[y*k + x] = matrix[y*k + best_x];
+			matrix[y*k + best_x] = temp;
+		}
+	}
+
+	delete []counts;
+}
+
 /*
  * Cauchy matrices are defined by two vectors X, Y s.t. X, Y share no elements
  * in common from the set GF(256).
@@ -224,16 +293,55 @@ int GenerateCauchyMatrix(int k, int m, u8 *matrix, u8 *X, u8 *Y) {
 	return ones;
 }
 
-void SolveBestMatrix(int m) {
+int ImproveMatrixRows(int k, int subk, int m, u8 *matrix) {
+	for (int y = 1; y < m; ++y) {
+		int best = 0x7fffffff, best_A;
+		for (int x = 0; x < k; ++x) {
+			u8 A = matrix[y*k + x];
+			u8 IA = GF256_INV_TABLE[A];
+
+			int ones = 0;
+			for (int z = 0; z < k; ++z) {
+				u8 B = matrix[y*k + z];
+				u8 M = GF256Multiply(B, IA);
+				ones += CAUCHY_ONES[M];
+			}
+			if (ones < best) {
+				best = ones;
+				best_A = IA;
+			}
+		}
+		for (int z = 0; z < k; ++z) {
+			u8 B = matrix[y*k + z];
+			u8 M = GF256Multiply(B, best_A);
+			matrix[y*k + z] = M;
+		}
+	}
+
+	SortColumns(k, m, matrix);
+
+	int total = 0;
+	for (int y = 0; y < m; ++y) {
+		for (int x = 0; x < subk; ++x) {
+			total += CAUCHY_ONES[matrix[y*k + x]];
+		}
+	}
+	return total;
+}
+
+void SolveBestMatrix(int m, int subk) {
 	//   A B C D E
 	// F 1 1 1 1 1
 	// G a b c d e
 	// H f g h i j
 
-
 	const int k = 256 - m;
 	u8 *matrix = new u8[k * m];
+	u8 *best_matrix = new u8[k * m];
+	int best_matrix_ones = 0x7fffffff;
 	u8 X[256], Y[256];
+
+	double t0 = m_clock.usec();
 
 	// First row is always all ones
 	for (int x = 0; x < k; ++x) {
@@ -241,9 +349,10 @@ void SolveBestMatrix(int m) {
 	}
 
 	// Choose a seed of A,F and solve the rest with a greedy algorithm
-	for (int F = 0; F < 256; ++F) {
-		for (int A = 0; A < 256; ++A) {
-			if (A != F) {
+	//for (int F = 0; F < 256; ++F) {
+		//for (int A = 0; A < 256; ++A) {
+			//if (A != F) {
+	int F = 0, A = 1; {{{
 				u8 seen[256];
 				for (int ii = 0; ii < 256; ++ii) {
 					seen[ii] = 0;
@@ -256,10 +365,12 @@ void SolveBestMatrix(int m) {
 
 				// In the order of greedy solution solve the Y values first.
 
+				int trial_ones = 8 * subk;
+
 				// Unroll the first column
 				for (int y = 1; y < m; ++y) {
 					// Pick the next worst element of GF(256) in weight
-					for (int ii = 0; ii < 256; ++ii) {
+					for (int ii = 1; ii < 256; ++ii) {
 						u8 a = MINWEIGHT_TABLE[ii];
 
 						// a * (A + G) = A + F
@@ -274,6 +385,7 @@ void SolveBestMatrix(int m) {
 						seen[G] = 1;
 						Y[y] = G;
 						matrix[y * k] = a;
+						trial_ones += CAUCHY_ONES[a];
 						break;
 					}
 				}
@@ -283,52 +395,54 @@ void SolveBestMatrix(int m) {
 
 				// For each remaining column,
 				for (int x = 1; x < k; ++x) {
-					bool nosolution = true;
+					int best_ones = 0x7fffffff, best_B;
 
-					// Pick the next worst element of GF(256) in weight
-					for (int ii = 0; ii < 256; ++ii) {
-						u8 b = MINWEIGHT_TABLE[ii];
-
-						// b = (B + F) / (B + G)
-						// b (B + G) = B + F
-						// bB + bG = B + F
-						// bB + B = F + bG
-						// B(b + 1) = F + bG
-						// B = (F + bG) / (b + 1)
-						u8 G = Y[y];
-						u8 B = GF256Divide(F ^ GF256Multiply(b, G), b ^ 1);
-
+					// Verify that a solution is possible for all column values
+					for (int B = 0; B < 256; ++B) {
 						if (seen[B]) {
 							continue;
 						}
 
-						// Verify that a solution is possible for all column values
-						bool okay = true;
+						int ones = 0;
 						for (int y = 1; y < m; ++y) {
-							// b = (B + F) / (B + G)
-							// b (B + G) = B + F
-							// bB + bG = B + F
-							// bB + B = F + bG
-							// B(b + 1) = F + bG
-							// B = (F + bG) / (b + 1)
-
-							// FIXME: under construction
-
-							u8 G = Y[y];
-							u8 B = GF256Divide(F ^ GF256Multiply(b, G), b ^ 1);
-
-							if (seen[B]) {
-								okay = false;
-								break;
-							}
+							u8 b = GF256Divide(B ^ F, B ^ Y[y]);
+							ones += CAUCHY_ONES[b];
 						}
-						if (!okay) {
-							continue;
+						if (ones < best_ones) {
+							best_ones = ones;
+							best_B = B;
 						}
-
-						seen[G] = 1;
-						Y[y] = G;
 					}
+
+					int B = best_B;
+					X[x] = B;
+					seen[B] = 1;
+
+					for (int y = 1; y < m; ++y) {
+						u8 b = GF256Divide(B ^ F, B ^ Y[y]);
+						matrix[y * k + x] = b;
+					}
+					if (x < subk) {
+						trial_ones += best_ones;
+					}
+				}
+				//print(k, m, matrix);
+
+				double t1 = m_clock.usec();
+
+				int improved_ones = ImproveMatrixRows(k, subk, m, matrix);
+
+				double t2 = m_clock.usec();
+
+				if (improved_ones < best_matrix_ones) {
+					best_matrix_ones = improved_ones;
+					memcpy(best_matrix, matrix, k * m);
+
+					cout << "Pre-improved ones = " << trial_ones << " in " << (t1 - t0) << " usec" << endl;
+					cout << "Best ones for first " << subk << " columns = " << best_matrix_ones << " in " << (t2 - t0) << " usec" << endl;
+					print(k, m, best_matrix, true);
+
+					return;
 				}
 			}
 		}
@@ -365,57 +479,6 @@ void SortMinWeightElements(u8 *elements) {
 	}
 
 	delete []counts;
-}
-
-void SortColumns(int k, int m, u8 *matrix) {
-	int *counts = new int[k];
-
-	for (int x = 0; x < k; ++x) {
-		int ones = 0;
-		for (int y = 0; y < m; ++y) {
-			ones += CAUCHY_ONES[matrix[y*k + x]];
-		}
-		counts[x] = ones;
-	}
-
-	for (int x = 0; x < k; ++x) {
-		int smallest = counts[x], best_x = x;
-
-		for (int z = x + 1; z < k; ++z) {
-			int ones = counts[z];
-
-			if (counts[z] < smallest) {
-				smallest = ones;
-				best_x = z;
-			}
-		}
-
-		cout << smallest << endl;
-
-		// swap counts
-		counts[best_x] = counts[x];
-		counts[x] = smallest;
-
-		// swap columns
-		for (int y = 1; y < m; ++y) {
-			u8 temp = matrix[y*k + x];
-			matrix[y*k + x] = matrix[y*k + best_x];
-			matrix[y*k + best_x] = temp;
-		}
-	}
-
-	delete []counts;
-}
-
-void print(int k, int m, u8 *matrix) {
-	cout << "[" << endl;
-	for (int y = 0; y < m; ++y) {
-		for (int x = 0; x < k; ++x) {
-			cout << hex << setw(2) << setfill('0') << (int)matrix[y * k + x] << " ";
-		}
-		cout << endl;
-	}
-	cout << dec << "]" << endl;
 }
 
 static void ShuffleDeck8(Abyssinian &prng, u8 * CAT_RESTRICT deck)
@@ -545,6 +608,8 @@ void Explore(int k, int m) {
 }
 
 int main() {
+	m_clock.OnInitialize();
+
 	cout << "Exploring options..." << endl;
 
 	GenerateExpLogTables(FAVORITE_POLY, GF256_LOG_TABLE, GF256_EXP_TABLE);
@@ -562,9 +627,11 @@ int main() {
 
 	print(256, 1, MINWEIGHT_TABLE);
 
-	SolveBestMatrix(3);
+	SolveBestMatrix(3, 29);
 	//PrintMinWeights();
 	//Explore(29, 3);
+
+	m_clock.OnFinalize();
 
 	return 0;
 }
