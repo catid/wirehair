@@ -21,9 +21,6 @@ using namespace cat;
  * flexible choice that does not require incredibly large tables and does not require an
  * irritating data massaging step to fit it into the field.
  *
- * For packet error correction, smaller values of w are interesting for higher speed.
- * The only good option is w = 4, which allows for up to 16 blocks.  Not bad.
- *
  * Note that m = 1 is a degenerate case where the best solution is to just XOR all of the k
  * input data blocks together.  So CRS codes are interesting for 1 < m < 32.
  *
@@ -53,9 +50,6 @@ using namespace cat;
  * [2] "Jerasure 2.0 A Library in C/C++ Facilitating Erasure Coding for Storage Applications" (2014)
  * 	http://jerasure2.googlecode.com/svn/trunk/jerasure3/documentation/paper.pdf
  */
-
-// TODO: Optimize for w = 4 as well
-// TODO: GF(16) math
 
 // TODO: Generate best Cauchy matrices for GF(256) generator polynomials
 
