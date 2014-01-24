@@ -406,51 +406,55 @@ void cauchy_init() {
 	GFC256Init();
 }
 
-bool cauchy_matrix(int k, int m, u8 *&matrix, int &stride) {
-	// If input is invalid,
-	if (k < 1 || m < 1 || !matrix ||
-		k + m > 256) {
-		return false;
-	}
-
+static u8 *cauchy_matrix(int k, int m, int &stride) {
 	switch (m) {
 	case 2:
-		matrix = CAUCHY_MATRIX_2;
 		stride = 254;
-		return true;
+		return CAUCHY_MATRIX_2;
 	case 3:
-		matrix = CAUCHY_MATRIX_3;
 		stride = 253;
-		return true;
+		return CAUCHY_MATRIX_3;
 	case 4:
-		matrix = CAUCHY_MATRIX_4;
 		stride = 252;
-		return true;
+		return CAUCHY_MATRIX_4;
 	case 5:
-		matrix = CAUCHY_MATRIX_5;
 		stride = 251;
-		return true;
+		return CAUCHY_MATRIX_5;
 	case 6:
-		matrix = CAUCHY_MATRIX_6;
 		stride = 250;
-		return true;
+		return CAUCHY_MATRIX_6;
 	}
 
 	// TODO: Fill this in
 
-	return false;
+	return 0;
 }
 
 /*
  * BitMatrix has 8*m rows and 8*k columns
+ *
+ * Each 8x8 submatrix is a transposed bit matrix as in Jerasure's implementation.
+ * First row is the GF(256) symbol, and each following symbol is the previous
+ * one multiplied by 2.
  */
 
-void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bitstride) {
+void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix,
+				   int bitstride, u16 *row_ones) {
+	++row_ones; // Offset row_ones to the first generated row
+
+	// For each row of input (excludes the first row of all ones),
 	for (int y = 1; y < m; ++y) {
 		u64 w[8];
 		u8 *row = matrix;
+		u64 *bitrow = matrix;
 		int x = k;
 
+		// Initialize count of ones for each of the 8 rows
+		for (int ii = 0; ii < 8; ++ii) {
+			row_ones[ii] = 0;
+		}
+
+		// While there are more columns to write,
 		while (x > 0) {
 			--x;
 			int limit = x;
@@ -459,6 +463,7 @@ void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bit
 			}
 			x -= limit;
 
+			// Generate low 8 bits of the word
 			int shift = limit * 8;
 			u8 slice = *row++;
 			w[0] = (u64)slice << shift;
@@ -477,6 +482,7 @@ void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bit
 			slice = GF256Multiply(slice, 2);
 			w[7] = (u64)slice << shift;
 
+			// For each remaining 8 bit chunk,
 			while (limit > 0) {
 				--limit;
 				u8 slice = *row++;
@@ -496,10 +502,33 @@ void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bit
 				slice = GF256Multiply(slice, 2);
 				w[7] = (w[7] >> 8) | ((u64)slice << shift);
 			}
+
+			// Write 64-bit column of bitmatrix
+			bitrow[0] = w[0];
+			bitrow[bitstride] = w[1];
+			bitrow[bitstride*2] = w[2];
+			bitrow[bitstride*3] = w[3];
+			bitrow[bitstride*4] = w[4];
+			bitrow[bitstride*5] = w[5];
+			bitrow[bitstride*6] = w[6];
+			bitrow[bitstride*7] = w[7];
+			++bitrow;
+
+			// Update the number of bits set in the row
+			row_ones[0] += CountBits(w[0]);
+			row_ones[1] += CountBits(w[1]);
+			row_ones[2] += CountBits(w[2]);
+			row_ones[3] += CountBits(w[3]);
+			row_ones[4] += CountBits(w[4]);
+			row_ones[5] += CountBits(w[5]);
+			row_ones[6] += CountBits(w[6]);
+			row_ones[7] += CountBits(w[7]);
 		}
 
+		// Next 8 bitmatrix rows
 		matrix += stride;
-		bitmatrix += bitstride;
+		bitmatrix += bitstride * 8;
+		row_ones += 8;
 	}
 }
 
@@ -507,7 +536,144 @@ void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bit
  * Cauchy encode
  */
 
-void cauchy_encode(int k, int m, u8 *matrix, u8 *blocks, int block_bytes) {
+bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_bytes) {
+	// If only one input block,
+	if (k <= 1) {
+		// Copy it directly to output
+		memcpy(recovery_blocks, data, block_bytes);
+	} else {
+		// XOR all input blocks together
+		memxor_add(recovery_blocks, data, data + block_bytes, block_bytes);
+		u8 *in = data + block_bytes;
+		for (int x = 2; x < k; ++x) {
+			in += block_bytes;
+			memxor(recovery_blocks, in, block_bytes);
+		}
+	}
+
+	// If only one recovery block needed,
+	if (m == 1) {
+		// We're already done!
+		return;
+	}
+
+	// Otherwise there is a restriction on what inputs we can handle
+	if ((k + m > 256) || (block_bytes % 8 != 0)) {
+		return false;
+	}
+
+	cauchy_init();
+
+	// Temporarily allocate more space if needed
+	int bitstride = (k*8 + 63) / 64;
+	u16 row_ones[256];
+	u64 static_bitmatrix[128];
+	u64 *bitmatrix;
+	if (bitstride * (m - 1) > 128) {
+		bitmatrix = new u64[bitstride * (m - 1)];
+	} else {
+		bitmatrix = static_bitmatrix;
+	}
+
+	// Generate Cauchy matrix
+	int stride;
+	u8 *matrix = cauchy_matrix(k, m, stride);
+
+	// Expand Cauchy matrix into bit matrix
+	cauchy_expand(k, m, matrix, stride, bitmatrix, bitstride, row_ones);
+
+	// The first 8 rows of the bitmatrix are always the same, 8x8 identity
+	// matrices all the way across.  So we don't even bother generating those
+	// with a bitmatrix.  In fact the initial XOR for m=1 case has already
+	// taken care of these bitmatrix rows.
+
+	// Start on the second recovery block
+	u8 *recovery_out = recovery_blocks + block_bytes;
+	u64 *bitmatrix_row = bitmatrix + bitstride * 8;
+
+	// For each remaining row to generate,
+	for (int y = 8; y < m*8; ++y) {
+		u64 *prev_row = bitmatrix;
+		int lowest_xors = row_ones[y];
+		int lowest_src_row;
+
+		// For each previous row,
+		for (int prev = 0; prev < y; ++prev, prev_row += bitstride) {
+			// Calculate the number of XORs required if we started from this row
+			int xors = BitCount(prev_row[0] ^ bitmatrix_row[0]);
+			for (int x = 1; x < bitstride; ++x) {
+				xors += BitCount(prev_row[x] ^ bitmatrix_row[x]);
+			}
+
+			// Use it if it's lower
+			if (lowest_xors > xors) {
+				lowest_xors = xors;
+				lowest_src_row = prev;
+			}
+		}
+
+		// Number of bytes per sub-block
+		int subbytes = block_bytes / 8;
+		const u8 *in = 0;
+
+		// If it's better to start with an existing recovery block,
+		if (lowest_xors < row_ones[y]) {
+			prev_row = bitmatrix + lowest_src_row * bitstride;
+
+			// Generate the combined matrix row
+			for (int x = 0; x < bitstride; ++x) {
+				bitmatrix_row[x] ^= prev_row[x];
+			}
+
+			// Copy the existing recovery block
+			in = recovery_blocks + subbytes * lowest_src_row;
+		}
+
+		// XOR sub-blocks together
+		u8 *src = data;
+		u8 *out = recovery_blocks + subbytes * y;
+		bool out_is_set = false;
+
+		// For each bit in the bitmatrix row,
+		for (int x = 0; x < bitstride; ++x) {
+			u64 word = bitmatrix_row[x];
+			for (int bit = 0; bit < 64; ++bit, data += subbytes) {
+				// If bit is set,
+				if (word & (1 << bit)) {
+					// Set up operation
+					if (!in) {
+						in = src;
+					} else {
+						// Perform dual XOR operation
+						if (!out_is_set) {
+							memxor_set(out, in, src, subbytes);
+							out_is_set = true;
+						} else {
+							memxor_add(out, in, src, subbytes);
+						}
+						in = 0;
+					}
+				}
+			}
+		}
+
+		// Write whatever is left over
+		if (in) {
+			// If out is already written,
+			if (out_is_set) {
+				// XOR the remaining stuff in
+				memxor(out, in, subbytes);
+			} else {
+				// Copy the input (there should always be at least one to copy)
+				memcpy(out, in, subbytes);
+			}
+		}
+	}
+
+	// Free temporary space
+	if (bitmatrix != static_bitmatrix) {
+		delete []bitmatrix;
+	}
 }
 
 int main() {
