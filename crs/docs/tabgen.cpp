@@ -154,18 +154,22 @@ void GenerateCauchyOnes() {
 
 void print(int k, int m, u8 *matrix, bool cstyle = false) {
 	if (cstyle) {
-		cout << "static const u8 CAUCHY_MATRIX_" << m << "[" << (m - 1) << "][" << k << "] = {" << endl;
-		for (int y = 1; y < m; ++y) {
-			cout << "{";
+		cout << "static const u8 CAUCHY_MATRIX_" << m << "[" << (m - 1) << " * " << k << "] = {" << endl;
+		for (int y = m > 1 ? 1 : 0; y < m; ++y) {
+			if (y > 1) {
+				cout << "// For row " << y << ":" << endl;
+			}
 			for (int x = 0; x < k; ++x) {
-				cout << "0x" << hex << setw(2) << setfill('0') << (int)matrix[y * k + x];
-				if (x > 0 && (x & 15) == 0) {
+				cout << dec << (int)matrix[y * k + x];
+				if (x > 0 && (x % 20) == 19) {
 					cout << "," << endl;
-				} else {
-					cout << " ";
+				} else if (x < k - 1) {
+					cout << ",";
 				}
 			}
-			cout << "}," << endl;
+			if (y < m - 1) {
+				cout << "," << endl;
+			}
 		}
 		cout << dec << "};" << endl;
 	} else {
@@ -607,6 +611,22 @@ void Explore(int k, int m) {
 	delete []XY;
 }
 
+void PrintTables() {
+	print(512*2+1, 1, GF256_EXP_TABLE, true);
+	print(256, 1, GF256_INV_TABLE, true);
+
+	cout << "static const u8 GFC256_LOG[256] = {" << endl;
+	for (int x = 0; x < 256; ++x) {
+		cout << dec << (int)GF256_LOG_TABLE[x];
+		if (x > 0 && (x % 20) == 19) {
+			cout << "," << endl;
+		} else {
+			cout << ",";
+		}
+	}
+	cout << dec << "};" << endl;
+}
+
 int main() {
 	m_clock.OnInitialize();
 
@@ -627,9 +647,11 @@ int main() {
 
 	print(256, 1, MINWEIGHT_TABLE);
 
-	SolveBestMatrix(3, 29);
+	SolveBestMatrix(6, 29);
 	//PrintMinWeights();
 	//Explore(29, 3);
+
+	PrintTables();
 
 	m_clock.OnFinalize();
 
