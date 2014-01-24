@@ -1,8 +1,14 @@
 #include <iostream>
+#include <cassert>
 using namespace std;
 
-#include "Platform.hpp"
+#include "BitMath.hpp"
+#include "MemXOR.hpp"
+#include "AbyssinianPRNG.hpp"
+#include "Clock.hpp"
 using namespace cat;
+
+static Clock m_clock;
 
 /*
  * Cauchy Reed Solomon (CRS) codes [1]
@@ -56,7 +62,7 @@ using namespace cat;
 // GF(256) math tables:
 // Generated with optimal polynomial 0x187 = 110000111
 
-static const u8 GFC256_LOG_TABLE[256] = {
+static const u16 GFC256_LOG_TABLE[256] = {
 512,255,1,99,2,198,100,106,3,205,199,188,101,126,107,42,4,141,206,78,
 200,212,189,225,102,221,127,49,108,32,43,243,5,87,142,232,207,172,79,131,
 201,217,213,65,190,148,226,180,103,39,222,240,128,177,50,53,109,69,33,18,
@@ -406,7 +412,7 @@ void cauchy_init() {
 	GFC256Init();
 }
 
-static u8 *cauchy_matrix(int k, int m, int &stride) {
+static const u8 *cauchy_matrix(int k, int m, int &stride) {
 	switch (m) {
 	case 2:
 		stride = 254;
@@ -438,68 +444,93 @@ static u8 *cauchy_matrix(int k, int m, int &stride) {
  * one multiplied by 2.
  */
 
-void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix,
+void cauchy_expand(int k, int m, const u8 *matrix, int stride, u64 *bitmatrix,
 				   int bitstride, u16 *row_ones) {
-	++row_ones; // Offset row_ones to the first generated row
+	// While there are more columns to write,
+	u64 *bitrow = bitmatrix;
+	int x = k;
+	while (x > 0) {
+		int limit = x;
+		if (limit > 8) {
+			limit = 8;
+		}
+		x -= limit;
+
+		u64 w = 0x0101010101010101ULL;
+
+		if (limit < 8) {
+			w >>= (8 - limit) * 8;
+		}
+
+		// Write 64-bit column of bitmatrix
+		bitrow[0] = w;
+		bitrow[bitstride] = w << 1;
+		bitrow[bitstride*2] = w << 2;
+		bitrow[bitstride*3] = w << 3;
+		bitrow[bitstride*4] = w << 4;
+		bitrow[bitstride*5] = w << 5;
+		bitrow[bitstride*6] = w << 6;
+		bitrow[bitstride*7] = w << 7;
+		++bitrow;
+	}
 
 	// For each row of input (excludes the first row of all ones),
-	for (int y = 1; y < m; ++y) {
-		u64 w[8];
-		u8 *row = matrix;
-		u64 *bitrow = matrix;
-		int x = k;
+	const u8 *row = matrix;
+	for (int y = 1; y < m; ++y, row += stride) {
+		bitrow += bitstride * 7;
 
 		// Initialize count of ones for each of the 8 rows
+		row_ones += 8;
 		for (int ii = 0; ii < 8; ++ii) {
 			row_ones[ii] = 0;
 		}
 
 		// While there are more columns to write,
+		x = k;
 		while (x > 0) {
-			--x;
 			int limit = x;
-			if (limit > 7) {
-				limit = 7;
+			if (limit > 8) {
+				limit = 8;
 			}
 			x -= limit;
 
 			// Generate low 8 bits of the word
 			int shift = limit * 8;
 			u8 slice = *row++;
+			u64 w[8];
 			w[0] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[1] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[2] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[3] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[4] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[5] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[6] = (u64)slice << shift;
-			slice = GF256Multiply(slice, 2);
+			slice = GFC256Multiply(slice, 2);
 			w[7] = (u64)slice << shift;
 
 			// For each remaining 8 bit chunk,
-			while (limit > 0) {
-				--limit;
+			while (--limit > 0) {
 				u8 slice = *row++;
 				w[0] = (w[0] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[1] = (w[1] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[2] = (w[2] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[3] = (w[3] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[4] = (w[4] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[5] = (w[5] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[6] = (w[6] >> 8) | ((u64)slice << shift);
-				slice = GF256Multiply(slice, 2);
+				slice = GFC256Multiply(slice, 2);
 				w[7] = (w[7] >> 8) | ((u64)slice << shift);
 			}
 
@@ -515,20 +546,15 @@ void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix,
 			++bitrow;
 
 			// Update the number of bits set in the row
-			row_ones[0] += CountBits(w[0]);
-			row_ones[1] += CountBits(w[1]);
-			row_ones[2] += CountBits(w[2]);
-			row_ones[3] += CountBits(w[3]);
-			row_ones[4] += CountBits(w[4]);
-			row_ones[5] += CountBits(w[5]);
-			row_ones[6] += CountBits(w[6]);
-			row_ones[7] += CountBits(w[7]);
+			row_ones[0] += BitCount(w[0]);
+			row_ones[1] += BitCount(w[1]);
+			row_ones[2] += BitCount(w[2]);
+			row_ones[3] += BitCount(w[3]);
+			row_ones[4] += BitCount(w[4]);
+			row_ones[5] += BitCount(w[5]);
+			row_ones[6] += BitCount(w[6]);
+			row_ones[7] += BitCount(w[7]);
 		}
-
-		// Next 8 bitmatrix rows
-		matrix += stride;
-		bitmatrix += bitstride * 8;
-		row_ones += 8;
 	}
 }
 
@@ -544,7 +570,7 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	} else {
 		// XOR all input blocks together
 		memxor_add(recovery_blocks, data, data + block_bytes, block_bytes);
-		u8 *in = data + block_bytes;
+		const u8 *in = data + block_bytes;
 		for (int x = 2; x < k; ++x) {
 			in += block_bytes;
 			memxor(recovery_blocks, in, block_bytes);
@@ -554,7 +580,7 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	// If only one recovery block needed,
 	if (m == 1) {
 		// We're already done!
-		return;
+		return true;
 	}
 
 	// Otherwise there is a restriction on what inputs we can handle
@@ -569,15 +595,15 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	u16 row_ones[256];
 	u64 static_bitmatrix[128];
 	u64 *bitmatrix;
-	if (bitstride * (m - 1) > 128) {
-		bitmatrix = new u64[bitstride * (m - 1)];
+	if (bitstride * m * 8 > 128) {
+		bitmatrix = new u64[bitstride * m * 8];
 	} else {
 		bitmatrix = static_bitmatrix;
 	}
 
 	// Generate Cauchy matrix
 	int stride;
-	u8 *matrix = cauchy_matrix(k, m, stride);
+	const u8 *matrix = cauchy_matrix(k, m, stride);
 
 	// Expand Cauchy matrix into bit matrix
 	cauchy_expand(k, m, matrix, stride, bitmatrix, bitstride, row_ones);
@@ -588,16 +614,15 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	// taken care of these bitmatrix rows.
 
 	// Start on the second recovery block
-	u8 *recovery_out = recovery_blocks + block_bytes;
+	u8 *out = recovery_blocks + block_bytes;
 	u64 *bitmatrix_row = bitmatrix + bitstride * 8;
+	int subbytes = block_bytes / 8;
 
 	// For each remaining row to generate,
-	for (int y = 8; y < m*8; ++y) {
+	for (int y = 8; y < m*8; ++y, bitmatrix_row += bitstride, out += subbytes) {
+		// Find smaller XOR count from previous rows
 		u64 *prev_row = bitmatrix;
-		int lowest_xors = row_ones[y];
-		int lowest_src_row;
-
-		// For each previous row,
+		int lowest_src_row, lowest_xors = row_ones[y];
 		for (int prev = 0; prev < y; ++prev, prev_row += bitstride) {
 			// Calculate the number of XORs required if we started from this row
 			int xors = BitCount(prev_row[0] ^ bitmatrix_row[0]);
@@ -613,7 +638,6 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 		}
 
 		// Number of bytes per sub-block
-		int subbytes = block_bytes / 8;
 		const u8 *in = 0;
 
 		// If it's better to start with an existing recovery block,
@@ -630,14 +654,13 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 		}
 
 		// XOR sub-blocks together
-		u8 *src = data;
-		u8 *out = recovery_blocks + subbytes * y;
+		const u8 *src = data;
 		bool out_is_set = false;
 
 		// For each bit in the bitmatrix row,
 		for (int x = 0; x < bitstride; ++x) {
 			u64 word = bitmatrix_row[x];
-			for (int bit = 0; bit < 64; ++bit, data += subbytes) {
+			for (int bit = 0; bit < 64; ++bit, src += subbytes) {
 				// If bit is set,
 				if (word & (1 << bit)) {
 					// Set up operation
@@ -674,15 +697,51 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	if (bitmatrix != static_bitmatrix) {
 		delete []bitmatrix;
 	}
+
+	return true;
 }
 
 int main() {
-	cout << "Cauchy matrix solver" << endl;
+	m_clock.OnInitialize();
 
 	cauchy_init();
 
-	u8 matrix[29 * 3];
-	cauchy_matrix(29, 3, matrix);
+	m_clock.usec();
+
+	cout << "Cauchy matrix solver" << endl;
+
+	int block_bytes = 8 * 162; // a multiple of 8
+	int block_count = 32;
+	int recovery_block_count = 3;
+
+	u8 *data = new u8[block_bytes * block_count];
+	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
+
+	Abyssinian prng;
+	prng.Initialize(0);
+	for (int ii = 0; ii < block_bytes * block_count; ++ii) {
+		data[ii] = (u8)prng.Next();
+	}
+
+	double t0 = m_clock.usec();
+
+	assert(cauchy_encode(block_count, recovery_block_count, data, recovery_blocks, block_bytes));
+
+	double t1 = m_clock.usec();
+
+	cout << "Cauchy encode in " << (t1 - t0) << " usec" << endl;
+
+/*
+	for (int ii = 0; ii < recovery_block_count; ++ii) {
+		cout << "For recovery block " << ii << endl;
+		for (int jj = 0; jj < block_bytes; ++jj) {
+			cout << (int)recovery_blocks[ii * block_bytes + jj] << " ";
+		}
+		cout << endl;
+	}
+*/
+
+	m_clock.OnFinalize();
 
 	return 0;
 }
