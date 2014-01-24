@@ -406,72 +406,127 @@ void cauchy_init() {
 	GFC256Init();
 }
 
-static void cauchy_prebuilt_matrix(int k, int m, u8 *matrix) {
-	// Attempt to use prebuilt matrices for best performance
-	switch (m) {
-	case 2:
-		for (int x = 0; x < k; ++x) {
-			matrix[x] = 1;
-			matrix[x + k] = CAUCHY_MATRIX_2[x];
-		}
-		return true;
-	case 3:
-		for (int x = 0; x < k; ++x) {
-			matrix[x] = 1;
-			matrix[x + k] = CAUCHY_MATRIX_3[x];
-			matrix[x + 2*k] = CAUCHY_MATRIX_3[x + 253];
-		}
-		return true;
-	case 4:
-		for (int x = 0; x < k; ++x) {
-			matrix[x] = 1;
-			matrix[x + k] = CAUCHY_MATRIX_4[x];
-			matrix[x + 2*k] = CAUCHY_MATRIX_4[x + 252];
-			matrix[x + 3*k] = CAUCHY_MATRIX_4[x + 252*2];
-		}
-		return true;
-	case 5:
-		for (int x = 0; x < k; ++x) {
-			matrix[x] = 1;
-			matrix[x + k] = CAUCHY_MATRIX_5[x];
-			matrix[x + 2*k] = CAUCHY_MATRIX_5[x + 251];
-			matrix[x + 3*k] = CAUCHY_MATRIX_5[x + 251*2];
-			matrix[x + 4*k] = CAUCHY_MATRIX_5[x + 251*3];
-		}
-		return true;
-	case 6:
-		for (int x = 0; x < k; ++x) {
-			matrix[x] = 1;
-			matrix[x + k] = CAUCHY_MATRIX_6[x];
-			matrix[x + 2*k] = CAUCHY_MATRIX_6[x + 250];
-			matrix[x + 3*k] = CAUCHY_MATRIX_6[x + 250*2];
-			matrix[x + 4*k] = CAUCHY_MATRIX_6[x + 250*3];
-			matrix[x + 5*k] = CAUCHY_MATRIX_6[x + 250*4];
-		}
-		return true;
-	default:
-		break;
-	}
-
-	// No prebuilt matrix is available
-	return false;
-}
-
-bool cauchy_matrix(int k, int m, u8 *matrix) {
+bool cauchy_matrix(int k, int m, u8 *&matrix, int &stride) {
 	// If input is invalid,
 	if (k < 1 || m < 1 || !matrix ||
 		k + m > 256) {
 		return false;
 	}
 
-	// Attempt to use prebuilt matrices for best performance
-	if (cauchy_prebuilt_matrix(k, m, matrix)) {
+	switch (m) {
+	case 2:
+		matrix = CAUCHY_MATRIX_2;
+		stride = 254;
+		return true;
+	case 3:
+		matrix = CAUCHY_MATRIX_3;
+		stride = 253;
+		return true;
+	case 4:
+		matrix = CAUCHY_MATRIX_4;
+		stride = 252;
+		return true;
+	case 5:
+		matrix = CAUCHY_MATRIX_5;
+		stride = 251;
+		return true;
+	case 6:
+		matrix = CAUCHY_MATRIX_6;
+		stride = 250;
 		return true;
 	}
 
 	// TODO: Fill this in
 
 	return false;
+}
+
+/*
+ * BitMatrix has 8*m rows and 8*k columns
+ */
+
+void cauchy_expand(int k, int m, u8 *matrix, int stride, u64 *bitmatrix, int bitstride) {
+	for (int y = 1; y < m; ++y) {
+		u64 a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+
+		for (int x = 0; x < k; ++x) {
+			u8 slice_0 = matrix[x];
+			a |= slice_0 & 1;
+			b |= (slice_0 >> 1) & 1;
+			c |= (slice_0 >> 2) & 1;
+			d |= (slice_0 >> 3) & 1;
+			e |= (slice_0 >> 4) & 1;
+			f |= (slice_0 >> 5) & 1;
+			g |= (slice_0 >> 6) & 1;
+			h |= slice_0 >> 7;
+			u8 slice_1 = GF256Multiply(slice_0, 2);
+			a |= (slice_1 << 1) & 2;
+			b |= slice_1 & 2;
+			c |= (slice_1 >> 1) & 2;
+			d |= (slice_1 >> 2) & 2;
+			e |= (slice_1 >> 3) & 2;
+			f |= (slice_1 >> 4) & 2;
+			g |= (slice_1 >> 5) & 2;
+			h |= (slice_1 >> 6) & 2;
+			u8 slice_2 = GF256Multiply(slice_1, 2);
+			a |= (slice_2 << 2) & 4;
+			b |= (slice_2 << 1) & 4;
+			c |= slice_2 & 4;
+			d |= (slice_2 >> 1) & 4;
+			e |= (slice_2 >> 2) & 4;
+			f |= (slice_2 >> 3) & 4;
+			g |= (slice_2 >> 4) & 4;
+			h |= (slice_2 >> 5) & 4;
+			u8 slice_3 = GF256Multiply(slice_2, 2);
+			a |= (slice_3 << 3) & 8;
+			b |= (slice_3 << 2) & 8;
+			c |= (slice_3 << 1) & 8;
+			d |= slice_3 & 8;
+			e |= (slice_3 >> 1) & 8;
+			f |= (slice_3 >> 2) & 8;
+			g |= (slice_3 >> 3) & 8;
+			h |= (slice_3 >> 4) & 8;
+			u8 slice_4 = GF256Multiply(slice_3, 2);
+			a |= (slice_4 << 4) & 16;
+			b |= (slice_4 << 3) & 16;
+			c |= (slice_4 << 2) & 16;
+			d |= (slice_4 << 1) & 16;
+			e |= slice_4 & 16;
+			f |= (slice_4 >> 1) & 16;
+			g |= (slice_4 >> 2) & 16;
+			h |= (slice_4 >> 3) & 16;
+			u8 slice_5 = GF256Multiply(slice_4, 2);
+			a |= (slice_5 << 5) & 32;
+			b |= (slice_5 << 4) & 32;
+			c |= (slice_5 << 3) & 32;
+			d |= (slice_5 << 2) & 32;
+			e |= (slice_5 << 1) & 32;
+			f |= slice_5 & 32;
+			g |= (slice_5 >> 1) & 32;
+			h |= (slice_5 >> 2) & 32;
+			u8 slice_6 = GF256Multiply(slice_5, 2);
+			a |= (slice_6 << 6) & 64;
+			b |= (slice_6 << 5) & 64;
+			c |= (slice_6 << 4) & 64;
+			d |= (slice_6 << 3) & 64;
+			e |= (slice_6 << 2) & 64;
+			f |= (slice_6 << 1) & 64;
+			g |= slice_6 & 64;
+			h |= (slice_6 >> 1) & 64;
+			u8 slice_7 = GF256Multiply(slice_6, 2);
+			a |= (slice_7 << 7) & 128;
+			b |= (slice_7 << 6) & 128;
+			c |= (slice_7 << 5) & 128;
+			d |= (slice_7 << 4) & 128;
+			e |= (slice_7 << 3) & 128;
+			f |= (slice_7 << 2) & 128;
+			g |= (slice_7 << 1) & 128;
+			h |= slice_7 & 128;
+		}
+
+		matrix += stride;
+		bitmatrix += bitstride;
+	}
 }
 
 /*
