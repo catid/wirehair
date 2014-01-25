@@ -710,39 +710,43 @@ struct ReceivedBlock {
 	u8 row;
 };
 
+static void cauchy_decode_m1(int k, ReceivedBlock *original_blocks, ReceivedBlock *recovery_blocks, int block_bytes) {
+	// XOR all other blocks into the recovery block
+	u8 *out = recovery_blocks[0].data;
+	const u8 *in = 0;
+	int original_block_count = k - 1;
+
+	// For each block,
+	for (int ii = 0; ii < original_block_count; ++ii) {
+		const u8 *src = original_blocks[ii].data;
+
+		if (!in) {
+			in = src;
+		} else {
+			memxor_add(out, in, src, block_bytes);
+			in = 0;
+		}
+	}
+
+	// Complete XORs
+	if (in) {
+		memxor(out, in, block_bytes);
+	}
+}
+
 bool cauchy_decode(int k, int m, ReceivedBlock *original_blocks, ReceivedBlock *recovery_blocks, int recovery_block_count, int block_bytes) {
 	// If nothing is erased,
 	if (recovery_block_count < 0) {
 		return true;
 	}
 
-	int original_block_count = k - recovery_block_count;
-
 	// For the special case of one erasure,
 	if (m == 1) {
-		// XOR all other blocks into the recovery block
-		u8 *out = recovery_blocks[0].data;
-		const u8 *in = 0;
-
-		// For each block,
-		for (int ii = 0; ii < original_block_count; ++ii) {
-			const u8 *src = original_blocks[ii].data;
-
-			if (!in) {
-				in = src;
-			} else {
-				memxor_add(out, in, src, block_bytes);
-				in = 0;
-			}
-		}
-
-		// Complete XORs
-		if (in) {
-			memxor(out, in, block_bytes);
-		}
-
+		cauchy_decode_m1(k, original_blocks, recovery_blocks, block_bytes);
 		return true;
 	}
+
+	int original_block_count = k - recovery_block_count;
 
 	// TODO
 
