@@ -734,6 +734,13 @@ static void cauchy_decode_m1(int k, ReceivedBlock *original_blocks, ReceivedBloc
 	}
 }
 
+/*
+ * Interested in recovering some rows
+ *
+ * For each of the recovery rows, perform Gaussian elimination.  Other rows can
+ * be skipped.
+ */
+
 bool cauchy_decode(int k, int m, ReceivedBlock *original_blocks, ReceivedBlock *recovery_blocks, int recovery_block_count, int block_bytes) {
 	// If nothing is erased,
 	if (recovery_block_count < 0) {
@@ -748,6 +755,38 @@ bool cauchy_decode(int k, int m, ReceivedBlock *original_blocks, ReceivedBlock *
 
 	int original_block_count = k - recovery_block_count;
 
+	// TODO: Generate bitmatrix.  We only need rows that are part of the recovery
+	// set, so that should cut down on the work of decoding.
+
+	u8 pivots[8*256];
+
+	// For solution, we can quickly set pivots for the rows that correspond to
+	// original data.  This sets regions of 8 pivots quickly.  We want to avoid
+	// actually generating bitmatrix rows for these.
+
+	// Now search across from left to right looking for pivots.  If the original
+	// data row is available, then use that data to eliminate columns of the
+	// recovery rows.
+
+	// If a pivot is not found, then search the recovery rows.  One should be
+	// found if the matrix is invertible (100% likelihood unless i messed up
+	// the matrices).  Once a pivot is found, eliminate it from all the other
+	// rows immediately.
+
+	// During forward pivot search, the source of XORs is moving forward from
+	// the front of the data in a one-to-many pattern.  This is the best you
+	// can do, so there's no reason to schedule it.
+
+	// At the end of this process, the matrix is in upper-triangular form.
+	// Note that none of the original bits need to be modified during this
+	// process.
+
+	// Finally, working from right to left:
+
+	// For recovery rows, eliminate any bits that are set unless that is the
+	// pivot row.
+
+	for (int ii 
 	// TODO
 
 	return true;
