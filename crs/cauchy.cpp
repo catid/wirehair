@@ -701,6 +701,61 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 	return true;
 }
 
+/*
+ * Received blocks are passed in.  There will always be k of them.
+ */
+
+struct ReceivedBlock {
+	u8 *data;
+	u8 row;
+};
+
+bool cauchy_decode(int k, int m, ReceivedBlock *original_blocks, ReceivedBlock *recovery_blocks, int recovery_block_count, int block_bytes) {
+	// If nothing is erased,
+	if (recovery_block_count < 0) {
+		return true;
+	}
+
+	int original_block_count = k - recovery_block_count;
+
+	// For the special case of one erasure,
+	if (m == 1) {
+		// XOR all other blocks into the recovery block
+		u8 *out = recovery_blocks[0].data;
+		const u8 *in = 0;
+
+		// For each block,
+		for (int ii = 0; ii < original_block_count; ++ii) {
+			const u8 *src = original_blocks[ii].data;
+
+			if (!in) {
+				in = src;
+			} else {
+				memxor_add(out, in, src, block_bytes);
+				in = 0;
+			}
+		}
+
+		// Complete XORs
+		if (in) {
+			memxor(out, in, block_bytes);
+		}
+
+		return true;
+	}
+
+	// TODO
+
+	return true;
+}
+
+void print(const u8 *data, int bytes) {
+	for (int ii = 0; ii < bytes; ++ii) {
+		cout << (int)data[ii] << " ";
+	}
+	cout << endl;
+}
+
 int main() {
 	m_clock.OnInitialize();
 
@@ -712,7 +767,7 @@ int main() {
 
 	int block_bytes = 8 * 162; // a multiple of 8
 	int block_count = 32;
-	int recovery_block_count = 3;
+	int recovery_block_count = 1;
 
 	u8 *data = new u8[block_bytes * block_count];
 	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
@@ -731,15 +786,28 @@ int main() {
 
 	cout << "Cauchy encode in " << (t1 - t0) << " usec" << endl;
 
-/*
-	for (int ii = 0; ii < recovery_block_count; ++ii) {
-		cout << "For recovery block " << ii << endl;
-		for (int jj = 0; jj < block_bytes; ++jj) {
-			cout << (int)recovery_blocks[ii * block_bytes + jj] << " ";
-		}
-		cout << endl;
+	ReceivedBlock *original_array = new ReceivedBlock[block_count];
+	ReceivedBlock *recovery_array = new ReceivedBlock[recovery_block_count];
+
+	for (int ii = 0; ii < block_count; ++ii) {
+		original_array[ii].data = data + ii * block_bytes;
+		original_array[ii].row = ii;
 	}
-*/
+
+	int erased = block_count - 1;
+
+	recovery_array[0].data = recovery_blocks;
+	recovery_array[0].row = 0;
+
+	t0 = m_clock.usec();
+
+	assert(cauchy_decode(block_count, recovery_block_count, original_array, recovery_array, 1, block_bytes));
+
+	t1 = m_clock.usec();
+
+	assert(!memcmp(original_array[erased].data, recovery_array[0].data, block_bytes));
+
+	cout << "Cauchy decode in " << (t1 - t0) << " usec" << endl;
 
 	m_clock.OnFinalize();
 
