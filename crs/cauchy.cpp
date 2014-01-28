@@ -959,6 +959,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 					u64 *pivot_words = bitmatrix_offset + row * bitstride;
 					if (pivot_words[0] & mask) {
 						cout << "PIVOT FOUND AT " << row << endl;
+
 						// Swap pivot with first option
 						pivots[kk] = pivots[next_bit_pivot];
 						pivots[next_bit_pivot] = row;
@@ -998,17 +999,43 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 		return false;
 	}
 
-	return true;
+	cout << "Back-substitution:" << endl;
 
 	// From last pivot to first
 	for (int ii = k - 1; ii >= 0; --ii) {
+		int word_offset = ii / 8;
+		u64 *bitmatrix_offset = bitmatrix + word_offset;
+		u64 mask = (u64)1 << ((ii % 8) * 8);
+
 		// If pivot is from original data,
-		if (original_pivots[ii]) {
+		const u8 *src = original_pivots[ii];
+		if (src) {
+			cout << "For original pivot " << ii << ":" << endl;
+
+			// Clear rows that have these bits set:
 			int offset = next_bit_pivot;
 			for (int jj = offset - 1; jj >= 0; --jj) {
-				int row = pivots[jj];
+				u16 row = pivots[jj];
+				cout << "Bitmatrix row = " << row << endl;
+				u64 word = bitmatrix_offset[row * bitstride];
+				int erasure_index = erasures[row / 8];
+				cout << "Erasure index = " << erasure_index << endl;
+				u8 *xor_dest = blocks[erasure_index].data + (row % 8) * subbytes;
+
+				// For each bit,
+				u64 bit_mask = mask;
+				const u8 *xor_src = src;
+				for (int bit = 0; bit < 8; ++bit, bit_mask <<= 1, xor_src += subbytes) {
+					if (word & bit_mask) {
+						cout << "XOR at " << jj << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;
+						memxor(xor_dest, xor_src, subbytes);
+					}
+				}
+
+				// Leave bitmatrix rows alone - it's okay if they're dirty
 			}
 		} else {
+			cout << "For recovery pivot " << ii << ":" << endl;
 		}
 	}
 
