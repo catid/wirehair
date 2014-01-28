@@ -753,24 +753,23 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 		bool out_is_set = false;
 
 		// For each bit in the bitmatrix row,
-		for (int x = 0; x < bitstride; ++x) {
-			u64 word = bitmatrix_row[x];
-			for (int bit = 0; bit < 64; ++bit, src += subbytes) {
-				// If bit is set,
-				if (word & (1 << bit)) {
-					// Set up operation
-					if (!in) {
-						in = src;
+		for (int x = 0; x < k*8; ++x, src += subbytes) {
+			u64 bit = bitmatrix_row[x / 64] & ((u64)1 << (x % 64));
+
+			// If bit is set,
+			if (bit) {
+				// Set up operation
+				if (!in) {
+					in = src;
+				} else {
+					// Perform dual XOR operation
+					if (!out_is_set) {
+						memxor_set(out, in, src, subbytes);
+						out_is_set = true;
 					} else {
-						// Perform dual XOR operation
-						if (!out_is_set) {
-							memxor_set(out, in, src, subbytes);
-							out_is_set = true;
-						} else {
-							memxor_add(out, in, src, subbytes);
-						}
-						in = 0;
+						memxor_add(out, in, src, subbytes);
 					}
+					in = 0;
 				}
 			}
 		}
@@ -959,6 +958,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 					u16 row = pivots[kk];
 					u64 *pivot_words = bitmatrix_offset + row * bitstride;
 					if (pivot_words[0] & mask) {
+						cout << "PIVOT FOUND AT " << row << endl;
 						// Swap pivot with first option
 						pivots[kk] = pivots[next_bit_pivot];
 						pivots[next_bit_pivot] = row;
