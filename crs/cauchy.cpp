@@ -10,6 +10,8 @@ using namespace cat;
 
 static Clock m_clock;
 
+#define DLOG(x)
+
 /*
  * Cauchy Reed Solomon (CRS) codes [1]
  *
@@ -436,128 +438,6 @@ static const u8 *cauchy_matrix(int k, int m, int &stride) {
 	return 0;
 }
 
-/*
- * BitMatrix has 8*m rows and 8*k columns
- *
- * Each 8x8 submatrix is a transposed bit matrix as in Jerasure's implementation.
- * First row is the GF(256) symbol, and each following symbol is the previous
- * one multiplied by 2.
- */
-
-void cauchy_expand(int k, int m, const u8 *matrix, int stride, u64 *bitmatrix,
-				   int bitstride, u16 *row_ones) {
-	// While there are more columns to write,
-	u64 *bitrow = bitmatrix;
-	int x = k;
-	while (x > 0) {
-		int limit = x;
-		if (limit > 8) {
-			limit = 8;
-		}
-		x -= limit;
-
-		u64 w = 0x0101010101010101ULL;
-
-		if (limit < 8) {
-			w >>= (8 - limit) * 8;
-		}
-
-		// Write 64-bit column of bitmatrix
-		bitrow[0] = w;
-		bitrow[bitstride] = w << 1;
-		bitrow[bitstride*2] = w << 2;
-		bitrow[bitstride*3] = w << 3;
-		bitrow[bitstride*4] = w << 4;
-		bitrow[bitstride*5] = w << 5;
-		bitrow[bitstride*6] = w << 6;
-		bitrow[bitstride*7] = w << 7;
-		++bitrow;
-	}
-
-	// For each row of input (excludes the first row of all ones),
-	const u8 *row = matrix;
-	for (int y = 1; y < m; ++y, row += stride) {
-		bitrow += bitstride * 7;
-
-		// Initialize count of ones for each of the 8 rows
-		row_ones += 8;
-		for (int ii = 0; ii < 8; ++ii) {
-			row_ones[ii] = 0;
-		}
-
-		// While there are more columns to write,
-		x = k;
-		while (x > 0) {
-			int limit = x;
-			if (limit > 8) {
-				limit = 8;
-			}
-			x -= limit;
-
-			// Generate low 8 bits of the word
-			int shift = limit * 8;
-			u8 slice = *row++;
-			u64 w[8];
-			w[0] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[1] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[2] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[3] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[4] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[5] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[6] = (u64)slice << shift;
-			slice = GFC256Multiply(slice, 2);
-			w[7] = (u64)slice << shift;
-
-			// For each remaining 8 bit chunk,
-			while (--limit > 0) {
-				u8 slice = *row++;
-				w[0] = (w[0] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[1] = (w[1] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[2] = (w[2] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[3] = (w[3] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[4] = (w[4] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[5] = (w[5] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[6] = (w[6] >> 8) | ((u64)slice << shift);
-				slice = GFC256Multiply(slice, 2);
-				w[7] = (w[7] >> 8) | ((u64)slice << shift);
-			}
-
-			// Write 64-bit column of bitmatrix
-			bitrow[0] = w[0];
-			bitrow[bitstride] = w[1];
-			bitrow[bitstride*2] = w[2];
-			bitrow[bitstride*3] = w[3];
-			bitrow[bitstride*4] = w[4];
-			bitrow[bitstride*5] = w[5];
-			bitrow[bitstride*6] = w[6];
-			bitrow[bitstride*7] = w[7];
-			++bitrow;
-
-			// Update the number of bits set in the row
-			row_ones[0] += BitCount(w[0]);
-			row_ones[1] += BitCount(w[1]);
-			row_ones[2] += BitCount(w[2]);
-			row_ones[3] += BitCount(w[3]);
-			row_ones[4] += BitCount(w[4]);
-			row_ones[5] += BitCount(w[5]);
-			row_ones[6] += BitCount(w[6]);
-			row_ones[7] += BitCount(w[7]);
-		}
-	}
-}
-
 void cauchy_expand_row(int k, int m, const u8 *matrix, int stride, int row, u64 *bitrow, int bitstride) {
 	row -= k;
 
@@ -590,6 +470,8 @@ void cauchy_expand_row(int k, int m, const u8 *matrix, int stride, int row, u64 
 		return;
 	}
 
+	DLOG(cout << "Generating " << row << " and " << stride << endl;)
+
 	matrix += (row - 1) * stride;
 
 	// While there are more columns to write,
@@ -601,7 +483,7 @@ void cauchy_expand_row(int k, int m, const u8 *matrix, int stride, int row, u64 
 		k -= limit;
 
 		// Generate low 8 bits of the word
-		int shift = limit * 8;
+		int shift = --limit * 8;
 		u8 slice = *matrix++;
 		u64 w[8];
 		w[0] = (u64)slice << shift;
@@ -621,7 +503,7 @@ void cauchy_expand_row(int k, int m, const u8 *matrix, int stride, int row, u64 
 		w[7] = (u64)slice << shift;
 
 		// For each remaining 8 bit chunk,
-		while (--limit > 0) {
+		while (limit-- > 0) {
 			u8 slice = *matrix++;
 			w[0] = (w[0] >> 8) | ((u64)slice << shift);
 			slice = GFC256Multiply(slice, 2);
@@ -685,23 +567,9 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 
 	cauchy_init();
 
-	// Temporarily allocate more space if needed
-	int bitstride = (k*8 + 63) / 64;
-	u16 row_ones[256];
-	u64 static_bitmatrix[128];
-	u64 *bitmatrix;
-	if (bitstride * m * 8 > 128) {
-		bitmatrix = new u64[bitstride * m * 8];
-	} else {
-		bitmatrix = static_bitmatrix;
-	}
-
 	// Generate Cauchy matrix
 	int stride;
 	const u8 *matrix = cauchy_matrix(k, m, stride);
-
-	// Expand Cauchy matrix into bit matrix
-	cauchy_expand(k, m, matrix, stride, bitmatrix, bitstride, row_ones);
 
 	// The first 8 rows of the bitmatrix are always the same, 8x8 identity
 	// matrices all the way across.  So we don't even bother generating those
@@ -710,95 +578,44 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 
 	// Start on the second recovery block
 	u8 *out = recovery_blocks + block_bytes;
-	u64 *bitmatrix_row = bitmatrix + bitstride * 8;
 	const int subbytes = block_bytes / 8;
 
+	// Clear output buffer
+	memset(out, 0, block_bytes * (m - 1));
+
 	// For each remaining row to generate,
-	for (int y = 8; y < m*8; ++y, bitmatrix_row += bitstride, out += subbytes) {
-		// Find smaller XOR count from previous rows
-		u64 *prev_row = bitmatrix;
-		int lowest_src_row, lowest_xors = row_ones[y];
-		for (int prev = 0; prev < y; ++prev, prev_row += bitstride) {
-			// Calculate the number of XORs required if we started from this row
-			int xors = BitCount(prev_row[0] ^ bitmatrix_row[0]);
-			for (int x = 1; x < bitstride; ++x) {
-				xors += BitCount(prev_row[x] ^ bitmatrix_row[x]);
-			}
-
-			// Use it if it's lower
-			if (lowest_xors > xors) {
-				lowest_xors = xors;
-				lowest_src_row = prev;
-			}
-		}
-
-		// Number of bytes per sub-block
-		const u8 *in = 0;
-
-		// If it's better to start with an existing recovery block,
-		if (lowest_xors < row_ones[y]) {
-			prev_row = bitmatrix + lowest_src_row * bitstride;
-
-			// Generate the combined matrix row
-			for (int x = 0; x < bitstride; ++x) {
-				bitmatrix_row[x] ^= prev_row[x];
-			}
-
-			// Copy the existing recovery block
-			in = recovery_blocks + subbytes * lowest_src_row;
-		}
-
-		// XOR sub-blocks together
+	const u8 *row = matrix;
+	for (int y = 1; y < m; ++y, row += stride, out += block_bytes) {
 		const u8 *src = data;
-		bool out_is_set = false;
 
-		// For each bit in the bitmatrix row,
-		for (int x = 0; x < k*8; ++x, src += subbytes) {
-			u64 bit = bitmatrix_row[x / 64] & ((u64)1 << (x % 64));
+		// For each symbol column,
+		for (int x = 0; x < k; ++x, ++row, src += block_bytes) {
+			u8 slice = row[0];
+			u8 *dest = out;
 
-			// If bit is set,
-			if (bit) {
-				// Set up operation
-				if (!in) {
-					in = src;
-				} else {
-					// Perform dual XOR operation
-					if (!out_is_set) {
-						memxor_set(out, in, src, subbytes);
-						out_is_set = true;
-					} else {
-						memxor_add(out, in, src, subbytes);
+			// Generate 8x8 submatrix and XOR in bits as needed
+			for (int bit_y = 0;; ++bit_y) {
+				const u8 *src_x = src;
+				for (int bit_x = 0; bit_x < 8; ++bit_x, src_x += subbytes) {
+					if (slice & (1 << bit_x)) {
+						memxor(dest, src_x, subbytes);
 					}
-					in = 0;
 				}
+
+				if (bit_y >= 7) {
+					break;
+				}
+
+				slice = GFC256Multiply(slice, 2);
+				dest += subbytes;
 			}
 		}
-
-		// Write whatever is left over
-		if (in) {
-			// If out is already written,
-			if (out_is_set) {
-				// XOR the remaining stuff in
-				memxor(out, in, subbytes);
-			} else {
-				// Copy the input (there should always be at least one to copy)
-				memcpy(out, in, subbytes);
-			}
-		}
-	}
-
-	// Free temporary space
-	if (bitmatrix != static_bitmatrix) {
-		delete []bitmatrix;
 	}
 
 	return true;
 }
 
-/*
- * Received blocks are passed in.  There will always be k of them.
- */
-
+// Descriptor for received data block
 struct ReceivedBlock {
 	u8 *data;
 	u8 row;
@@ -830,6 +647,10 @@ static void cauchy_decode_m1(int k, ReceivedBlock *blocks, int erasure, int bloc
 		memxor(out, in, block_bytes);
 	}
 }
+
+/*
+ * Cauchy decode
+ */
 
 bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int original_count, int block_bytes) {
 	const int erasure_count = k - original_count;
@@ -902,6 +723,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 	}
 
 	bitmatrix_row = bitmatrix;
+	DLOG(
 	for (int ii = 0; ii < bitrows; ++ii, bitmatrix_row += bitstride) {
 		for (int jj = 0; jj < k*8; ++jj) {
 			if (bitmatrix_row[jj / 64] & ((u64)1 << (jj % 64))) {
@@ -911,7 +733,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 			}
 		}
 		cout << endl;
-	}
+	})
 
 	// For each recovery block,
 	const int subbytes = block_bytes / 8;
@@ -919,7 +741,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 
 	// For each byte pivot,
 	for (int ii = 0; ii < k; ++ii) {
-		cout << "For symbol " << ii << ":" << endl;
+		DLOG(cout << "For symbol " << ii << ":" << endl;)
 
 		int word_offset = ii / 8;
 		u64 *bitmatrix_offset = bitmatrix + word_offset;
@@ -930,12 +752,12 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 		if (src) {
 			// For each remaining recovery row that may have these 8 bits set,
 			for (int kk = next_bit_pivot; kk < bitrows; ++kk) {
-				cout << "For remaining pivot index " << kk << endl;
+				DLOG(cout << "For remaining pivot index " << kk << endl;)
 				u16 row = pivots[kk];
-				cout << "Bitmatrix row = " << row << endl;
+				DLOG(cout << "Bitmatrix row = " << row << endl;)
 				u64 word = bitmatrix_offset[row * bitstride];
 				int erasure_index = erasures[row / 8];
-				cout << "Erasure index = " << erasure_index << endl;
+				DLOG(cout << "Erasure index = " << erasure_index << endl;)
 				u8 *xor_dest = blocks[erasure_index].data + (row % 8) * subbytes;
 
 				// For each bit,
@@ -943,7 +765,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 				const u8 *xor_src = src;
 				for (int bit = 0; bit < 8; ++bit, bit_mask <<= 1, xor_src += subbytes) {
 					if (word & bit_mask) {
-						cout << "XOR at " << kk << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;
+						DLOG(cout << "XOR at " << kk << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;)
 						memxor(xor_dest, xor_src, subbytes);
 					}
 				}
@@ -952,13 +774,13 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 			}
 		} else {
 			// For each bit pivot in the missing byte,
-			for (int jj = 0, pivot = ii * 8; jj < 8; ++jj, mask <<= 1, ++pivot) {
+			for (int jj = 0; jj < 8; ++jj, mask <<= 1) {
 				for (int kk = next_bit_pivot; kk < bitrows; ++kk) {
 					// If bit is set,
 					u16 row = pivots[kk];
 					u64 *pivot_words = bitmatrix_offset + row * bitstride;
 					if (pivot_words[0] & mask) {
-						cout << "PIVOT FOUND AT " << row << endl;
+						DLOG(cout << "PIVOT FOUND AT " << row << endl;)
 
 						// Swap pivot with first option
 						pivots[kk] = pivots[next_bit_pivot];
@@ -973,7 +795,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 						while (++kk < bitrows) {
 							// If bit is set,
 							u16 other_row = pivots[kk];
-							u64 *other_words = bitmatrix_offset + row * bitstride;
+							u64 *other_words = bitmatrix_offset + other_row * bitstride;
 							if (other_words[0] & mask) {
 								// Update bitmatrix
 								for (int z = 0; z < words_left; ++z) {
@@ -995,11 +817,11 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 
 	// Self-test
 	if (next_bit_pivot != bitrows) {
-		cout << "FAIL" << endl;
+		DLOG(cout << "FAIL" << endl;)
 		return false;
 	}
 
-	cout << "Back-substitution:" << endl;
+	DLOG(cout << "Back-substitution:" << endl;)
 
 	// From last pivot to first
 	for (int ii = k - 1; ii >= 0; --ii) {
@@ -1010,16 +832,16 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 		// If pivot is from original data,
 		const u8 *src = original_pivots[ii];
 		if (src) {
-			cout << "For original pivot " << ii << ":" << endl;
+			DLOG(cout << "For original pivot " << ii << ":" << endl;)
 
 			// Clear rows that have these bits set:
-			int offset = next_bit_pivot;
-			for (int jj = offset - 1; jj >= 0; --jj) {
+			for (int jj = next_bit_pivot - 1; jj >= 0; --jj) {
+				DLOG(cout << "+ For pivot = " << jj << endl;)
 				u16 row = pivots[jj];
-				cout << "Bitmatrix row = " << row << endl;
+				DLOG(cout << "Bitmatrix row = " << row << endl;)
 				u64 word = bitmatrix_offset[row * bitstride];
 				int erasure_index = erasures[row / 8];
-				cout << "Erasure index = " << erasure_index << endl;
+				DLOG(cout << "Erasure index = " << erasure_index << endl;)
 				u8 *xor_dest = blocks[erasure_index].data + (row % 8) * subbytes;
 
 				// For each bit,
@@ -1027,7 +849,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 				const u8 *xor_src = src;
 				for (int bit = 0; bit < 8; ++bit, bit_mask <<= 1, xor_src += subbytes) {
 					if (word & bit_mask) {
-						cout << "XOR at " << jj << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;
+						DLOG(cout << "XOR at " << jj << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;)
 						memxor(xor_dest, xor_src, subbytes);
 					}
 				}
@@ -1035,35 +857,36 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 				// Leave bitmatrix rows alone - it's okay if they're dirty
 			}
 		} else {
-			cout << "For recovery pivot " << ii << ":" << endl;
+			DLOG(cout << "For recovery pivot " << ii << ":" << endl;)
+
+			mask <<= 7;
+			for (int bit = 7; bit >= 0; --bit, mask >>= 1) {
+				--next_bit_pivot;
+				int pivot_row = pivots[next_bit_pivot];
+				const u8 *xor_src = blocks[erasures[pivot_row / 8]].data + (pivot_row % 8) * subbytes;
+
+				DLOG(cout << "+ For bit " << bit << " pivot index " << next_bit_pivot << " and pivot row " << pivot_row << endl;)
+
+				// Clear rows that have these bits set:
+				for (int jj = next_bit_pivot - 1; jj >= 0; --jj) {
+					u16 row = pivots[jj];
+					DLOG(cout << "Bitmatrix row = " << row << endl;)
+					u64 word = bitmatrix_offset[row * bitstride];
+					int erasure_index = erasures[row / 8];
+					DLOG(cout << "Erasure index = " << erasure_index << endl;)
+					u8 *xor_dest = blocks[erasure_index].data + (row % 8) * subbytes;
+
+					// For each bit,
+					if (word & mask) {
+						DLOG(cout << "XOR at " << jj << ", " << bit << " src=" << hex << (u64)xor_src << " dest=" << (u64)xor_dest << dec << endl;)
+						memxor(xor_dest, xor_src, subbytes);
+					}
+
+					// Leave bitmatrix rows alone - it's okay if they're dirty
+				}
+			}
 		}
 	}
-
-	// For solution, we can quickly set pivots for the rows that correspond to
-	// original data.  This sets regions of 8 pivots quickly.  We want to avoid
-	// actually generating bitmatrix rows for these.
-
-	// Now search across from left to right looking for pivots.  If the original
-	// data row is available, then use that data to eliminate columns of the
-	// recovery rows.
-
-	// If a pivot is not found, then search the recovery rows.  One should be
-	// found if the matrix is invertible (100% likelihood unless i messed up
-	// the matrices).  Once a pivot is found, eliminate it from all the other
-	// rows immediately.
-
-	// During forward pivot search, the source of XORs is moving forward from
-	// the front of the data in a one-to-many pattern.  This is the best you
-	// can do, so there's no reason to schedule it.
-
-	// At the end of this process, the matrix is in upper-triangular form.
-	// Note that none of the original bits need to be modified during this
-	// process.
-
-	// Finally, working from right to left:
-
-	// For recovery rows, eliminate any bits that are set unless that is the
-	// pivot row.
 
 	// Free temporary space
 	if (bitmatrix != static_bitmatrix) {
@@ -1090,8 +913,8 @@ int main() {
 	cout << "Cauchy matrix solver" << endl;
 
 	int block_bytes = 8 * 162; // a multiple of 8
-	int block_count = 5;
-	int recovery_block_count = 3;
+	int block_count = 2;
+	int recovery_block_count = 2;
 
 	u8 *data = new u8[block_bytes * block_count];
 	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
@@ -1119,11 +942,14 @@ int main() {
 
 	// Erase first block
 	const int erasures_count = 1;
+	const int replace_row = 1;
 	int original_remaining = block_count - erasures_count;
-	blocks[0].data = recovery_blocks;
-	blocks[0].row = block_count;
+	blocks[replace_row].data = recovery_blocks + block_bytes;
+	blocks[replace_row].row = block_count + 1;
+	//blocks[0].data = recovery_blocks + block_bytes;
+	//blocks[0].row = block_count + 1;
 	u8 erasures[1] = {
-		0
+		replace_row
 	};
 
 	t0 = m_clock.usec();
@@ -1141,6 +967,9 @@ int main() {
 	cout << "Cauchy decode in " << (t1 - t0) << " usec" << endl;
 
 	m_clock.OnFinalize();
+
+	delete []data;
+	delete []recovery_blocks;
 
 	return 0;
 }
