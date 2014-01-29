@@ -10,7 +10,7 @@ using namespace cat;
 
 static Clock m_clock;
 
-#define DLOG(x)
+#define DLOG(x) x
 
 /*
  * Cauchy Reed Solomon (CRS) codes [1]
