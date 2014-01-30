@@ -521,25 +521,27 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 // Descriptor for received data block
 struct ReceivedBlock {
 	u8 *data;
+	u16 next; // Terminated with BLOCK_TERM
 	u8 row;
 };
 
+static const u16 BLOCK_TERM = 0xffff;
+
 // Specialized fast decoder for m = 1
-static void cauchy_decode_m1(int k, ReceivedBlock *blocks, int erasure, int block_bytes) {
+static void cauchy_decode_m1(int k, ReceivedBlock *blocks, ReceivedBlock *erased, int block_bytes) {
 	// XOR all other blocks into the recovery block
-	u8 *out = blocks[erasure].data;
+	u8 *out = erased->data;
 	const u8 *in = 0;
 	int original_block_count = k - 1;
 
 	// For each block,
 	for (int ii = 0; ii < original_block_count; ++ii) {
-		if (ii != erasure) {
-			const u8 *src = blocks[ii].data;
-
+		ReceivedBlock *block = blocks + ii;
+		if (block != erased) {
 			if (!in) {
-				in = src;
+				in = block->data;
 			} else {
-				memxor_add(out, in, src, block_bytes);
+				memxor_add(out, in, block->data, block_bytes);
 				in = 0;
 			}
 		}
@@ -652,8 +654,105 @@ void cauchy_expand_row(int k, int m, const u8 *matrix, int stride, int row, u64 
  * Cauchy decode
  */
 
-bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int original_count, int block_bytes) {
-	const int erasure_count = k - original_count;
+// Sort blocks into original and recovery blocks
+static int sort_blocks(int k, ReceivedBlock *blocks, ReceivedBlock * heads[2]) {
+	ReceivedBlock *prev[2] = { 0 };
+	ReceivedBlock *block = blocks;
+	int erasure_count = 0;
+
+	for (int ii = 0; ii < k; ++ii, ++blocks) {
+		int row = blocks->row;
+
+		// category 0 = original, 1 = recovery
+		int category = (row >= k);
+		erasure_count += category;
+
+		if (prev[category]) {
+			prev[category]->next = ii;
+		} else {
+			heads[category] = block;
+		}
+		prev[category] = block;
+	}
+
+	if (prev[0]) {
+		prev[0]->next = BLOCK_TERM;
+	} else {
+		heads[0] = 0;
+	}
+	if (prev[1]) {
+		prev[1]->next = BLOCK_TERM;
+	}
+	// NOTE: There will always be one erasure if we use this data
+
+	return erasure_count;
+}
+
+static void eliminate_original(ReceivedBlock *heads[2], ReceivedBlock *blocks,
+							   const u8 *matrix, int stride, int subbytes) {
+	// If no original data,
+	if (!heads[0]) {
+		// Nothing to do here!
+		return;
+	}
+
+	// For each recovery block,
+	ReceivedBlock *recovery_block = heads[1];
+	for (;;) {
+		const u8 *row = matrix + stride * (recovery_block->row - 1);
+
+		// For each original block,
+		ReceivedBlock *original_block = heads[0];
+		for (;;) {
+			// If this entry is an 8x8 identity matrix,
+			if (recovery_block->row == 0 || row[original_block->row - 1] == 1) {
+				// XOR whole block at once
+				memxor(recovery_block->data, original_block->data, subbytes * 8);
+			} else {
+				// Grab the matrix entry for this row,
+				u8 slice = row[original_block->row - 1];
+				u8 *dest = recovery_block->data;
+
+				// XOR in bits set in 8x8 submatrix
+				for (int bit_y = 0;; ++bit_y) {
+					const u8 *src = original_block->data;
+
+					for (int bit_x = 0; bit_x < 8; ++bit_x, src += subbytes) {
+						if (slice & (1 << bit_x)) {
+							memxor(dest, src, subbytes);
+						}
+					}
+
+					if (bit_y >= 7) {
+						break;
+					}
+
+					slice = GFC256Multiply(slice, 2);
+					dest += subbytes;
+				}
+			}
+
+			// Iterate to next original block
+			u16 original_next = original_block->next;
+			if (original_next == BLOCK_TERM) {
+				break;
+			}
+			original_block = blocks + original_next;
+		}
+
+		// Iterate to next recovery block
+		u16 recovery_next = recovery_block->next;
+		if (recovery_next == BLOCK_TERM) {
+			break;
+		}
+		recovery_block = blocks + recovery_next;
+	}
+}
+
+bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
+	// Sort blocks into original and recovery
+	ReceivedBlock *heads[2];
+	int erasure_count = sort_blocks(k, blocks, heads);
 
 	// If nothing is erased,
 	if (erasure_count <= 0) {
@@ -662,7 +761,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 
 	// For the special case of one erasure,
 	if (m == 1) {
-		cauchy_decode_m1(k, blocks, erasures[0], block_bytes);
+		cauchy_decode_m1(k, blocks, heads[1], block_bytes);
 		return true;
 	}
 
@@ -672,6 +771,31 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 	}
 
 	cauchy_init();
+
+	// Generate Cauchy matrix
+	int stride;
+	const u8 *matrix = cauchy_matrix(k, m, stride);
+
+	// Eliminate original data from recovery rows
+	const int subbytes = block_bytes / 8;
+	eliminate_original(heads, blocks, matrix, stride, subbytes);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	// Zero all the pivots
 	u8 *original_pivots[256];
@@ -700,10 +824,6 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 	} else {
 		bitmatrix = static_bitmatrix;
 	}
-
-	// Generate Cauchy matrix
-	int stride;
-	const u8 *matrix = cauchy_matrix(k, m, stride);
 
 	// Available bit rows
 	u16 pivots[8*254]; // m >= 2
@@ -736,7 +856,6 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, u8 *erasures, int origin
 	})
 
 	// For each recovery block,
-	const int subbytes = block_bytes / 8;
 
 	// For any bitmatrix row,
 	bitmatrix_offset = bitmatrix;
