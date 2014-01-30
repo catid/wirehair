@@ -759,6 +759,24 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 
 static void upper_triangle(u64 *bitmatrix, int bitstride) {
 	// TODO: 4-bit window method
+	/*
+	 * An efficient windowed method coupled with dynamic programming
+	 * is used to move through the bitmatrix more rapidly and reduce
+	 * the number of overall XOR operations to perform.
+	 *
+	 * For example, if the first four pivots are known, and the next
+	 * two rows are 1111 and 1011, then time can be saved by computing
+	 * 1011, and then using the result to compute 1111 with one XOR,
+	 * saving four XORs.
+	 *
+	 * A window size of 4 bits was chosen because the bitmatrix is
+	 * always a multiple of 8 bits and only powers of two are even
+	 * multiples.  Fiddling with straddling windows between words
+	 * does not seem worth it.  The next smallest candidate window
+	 * size of 2 is underwhelming.  But with 11 possible bit combos
+	 * with a 4-bit window there is the danger of precomputing too
+	 * many values.  And so the table values are generated on demand.
+	 */
 }
 
 static void solve_triangle(u64 *bitmatrix, int bitstride) {
@@ -790,11 +808,26 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 		return false;
 	}
 
+	// The Cauchy matrix is selected in a way that has a small
+	// number of ones set in the binary representation used here.
+	// A combination of precomputation and heuristics provides a
+	// near-optimal matrix selection for each value of k, m.
+
 	cauchy_init();
 
 	// Generate Cauchy matrix
 	int stride;
 	const u8 *matrix = cauchy_matrix(k, m, stride);
+
+	// From the Cauchy matrix, each byte value can be expanded into
+	// an 8x8 submatrix containing a minimal number of ones.
+	// The rows that made it through from the original data provide
+	// some of the column values for the matrix, so those can be
+	// eliminated immediately.  This is useful because it conceptually
+	// zeroes out those eliminated matrix elements.  And so when it
+	// comes time to laborously generate the bitmatrix and solve it
+	// with Gaussian elimination, that bitmatrix can be smaller since
+	// it does not need to include these rows and columns.
 
 	// Eliminate original data from recovery rows
 	const int subbytes = block_bytes / 8;
@@ -804,11 +837,18 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 	u8 erasures[256];
 	find_erasures(k, erasures, erasure_count, blocks);
 
+	// Now that the columns that are missing have been identified,
+	// it is time to generate a bitmatrix to represent the original
+	// rows that have been XOR'd together to produce the recovery data.
+	// This matrix is guaranteed to be inverible as it was selected
+	// from the rows/columns of a Cauchy matrix.
+
 	// Generate square bitmatrix for erased columns from recovery rows
 	int bitstride;
 	u64 *bitmatrix = generate_bitmatrix(k, heads, blocks, matrix, stride,
 										erasures, erasure_count, bitstride);
 
+	// Finally, solving the matrix.
 	// The most efficient approach is Gaussian elimination: An alternative
 	// would be to recursively solve submatrices.  However, since the initial
 	// matrix is sparse it is undesirable to add matrix rows together.
