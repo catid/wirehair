@@ -705,66 +705,44 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 			// Otherwise read the elements of the matrix
 			const u8 *row = matrix + (recovery_row - 1) * stride;
 
-			// For each 64-bit word in the bitmatrix,
-			int x = erasure_count;
+			// Generate eight 64-bit columns of the bitmatrix at a time
+			int remaining = erasure_count;
 			const u8 *erasure = erasures;
-			while (x > 0) {
-				int limit = x;
+			while (remaining > 0) {
+				// Take up to 8 columns at a time
+				int limit = remaining;
 				if (limit > 8) {
 					limit = 8;
 				}
-				x -= limit;
+				remaining -= limit;
 
-				// Generate low 8 bits of the word
-				int shift = --limit * 8;
-				u8 slice = row[*erasure++];
 				u64 w[8];
-				w[0] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[1] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[2] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[3] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[4] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[5] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[6] = (u64)slice << shift;
-				slice = GFC256Multiply(slice, 2);
-				w[7] = (u64)slice << shift;
 
-				// For each remaining 8 bit chunk,
-				while (limit-- > 0) {
+				// Unroll first loop
+				u8 slice = row[*erasure++];
+				w[0] = (u64)slice;
+
+				for (int ii = 1; ii < 8; ++ii) {
+					slice = GFC256Multiply(slice, 2);
+					w[ii] = (u64)slice;
+				}
+
+				// For each remaining 8 bit slice,
+				for (int shift = 8; --limit > 0; shift += 8) {
 					slice = row[*erasure++];
-					w[0] = (w[0] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[1] = (w[1] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[2] = (w[2] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[3] = (w[3] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[4] = (w[4] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[5] = (w[5] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[6] = (w[6] >> 8) | ((u64)slice << shift);
-					slice = GFC256Multiply(slice, 2);
-					w[7] = (w[7] >> 8) | ((u64)slice << shift);
+					w[0] |= (u64)slice << shift;
+
+					for (int ii = 1; ii < 8; ++ii) {
+						slice = GFC256Multiply(slice, 2);
+						w[ii] |= (u64)slice << shift;
+					}
 				}
 
 				// Write 64-bit column of bitmatrix
-				bitrow[0] = w[0];
-				bitrow[bitstride] = w[1];
-				bitrow[bitstride*2] = w[2];
-				bitrow[bitstride*3] = w[3];
-				bitrow[bitstride*4] = w[4];
-				bitrow[bitstride*5] = w[5];
-				bitrow[bitstride*6] = w[6];
-				bitrow[bitstride*7] = w[7];
-				++bitrow;
+				u64 *out = bitrow;
+				for (int ii = 0; ii < 8; ++ii, out += bitstride) {
+					out[0] = w[ii];
+				}
 			}
 		}
 
