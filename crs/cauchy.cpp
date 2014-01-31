@@ -681,7 +681,8 @@ static void find_erasures(int k, u8 erasures[256], int erasure_count,
 
 static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *blocks,
 						const u8 *matrix, int stride, const u8 erasures[256],
-						int erasure_count, int &bitstride) {
+						int erasure_count, int &bitstride,
+						ReceivedBlock *recovery_blocks[256]) {
 	// Allocate the bitmatrix
 	int bitrows = erasure_count * 8;
 	bitstride = (bitrows + 63) / 64;
@@ -690,6 +691,7 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 
 	// For each recovery block,
 	ReceivedBlock *recovery_block = heads[1];
+	int recovery_block_index = 0;
 	for (;;) {
 		// If first row of matrix,
 		int recovery_row = recovery_block->row - k;
@@ -746,6 +748,9 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 			}
 		}
 
+		// Insert into recovery block array
+		recovery_blocks[recovery_block_index++] = recovery_block;
+
 		// Iterate to next recovery block
 		u16 recovery_next = recovery_block->next;
 		if (recovery_next == BLOCK_TERM) {
@@ -757,8 +762,7 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 	return bitmatrix;
 }
 
-static void upper_triangle(u64 *bitmatrix, int bitstride) {
-	// TODO: 4-bit window method
+static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *bitmatrix, int bitstride, u8 pivots[256], int subbytes) {
 	/*
 	 * An efficient windowed method coupled with dynamic programming
 	 * is used to move through the bitmatrix more rapidly and reduce
@@ -777,6 +781,58 @@ static void upper_triangle(u64 *bitmatrix, int bitstride) {
 	 * with a 4-bit window there is the danger of precomputing too
 	 * many values.  And so the table values are generated on demand.
 	 */
+
+	// Initialize the pivots array to all options
+	for (int x = 0; x < rows; ++x) {
+		pivots[x] = (u8)x;
+	}
+
+	// The front of the pivots array under next_pivot are decided pivots, and
+	// the remaining entries are remaining possibilities
+
+	u64 mask = 1;
+
+	// For each pivot to find,
+	for (int next_pivot = 0; next_pivot < rows; ++next_pivot, mask = CAT_ROL64(mask, 1)) {
+		u64 *bit_offset = bitmatrix + (next_pivot / 64);
+
+		// For each option,
+		for (int option = next_pivot; option < rows; ++option) {
+			int row = pivots[option];
+			u64 *bit_row = bit_offset + (row * bitstride);
+
+			// If bit in this row is set,
+			if (bit_row[0] & mask) {
+				// Swap option with pivot position
+				pivots[option] = pivots[next_pivot];
+				pivots[next_pivot] = (u8)row;
+
+				// Prepare to add in data
+				const u8 *src = recovery_blocks[row / 8]->data + (row % 8) * subbytes;
+
+				// For each other row,
+				while (++option < rows) {
+					int other_row = pivots[option];
+					u64 *other_bit_row = bit_offset + (other_row * bitstride);
+
+					// If that row also has the bit set,
+					if (other_bit_row[0] & mask) {
+						// For each remaining word,
+						for (int ii = 0; ii < bitstride - (next_pivot / 64); ++ii) {
+							other_bit_row[ii] ^= bit_row[ii];
+						}
+
+						// Add in the data
+						u8 *dest = recovery_blocks[other_row / 8]->data + (other_row % 8) * subbytes;
+						memxor(dest, src, subbytes);
+					}
+				}
+
+				// Stop here
+				break;
+			}
+		}
+	}
 }
 
 static void solve_triangle(u64 *bitmatrix, int bitstride) {
@@ -845,8 +901,10 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 
 	// Generate square bitmatrix for erased columns from recovery rows
 	int bitstride;
+	ReceivedBlock *recovery_blocks[256];
 	u64 *bitmatrix = generate_bitmatrix(k, heads, blocks, matrix, stride,
-										erasures, erasure_count, bitstride);
+										erasures, erasure_count, bitstride,
+										recovery_blocks);
 
 	// Finally, solving the matrix.
 	// The most efficient approach is Gaussian elimination: An alternative
@@ -857,7 +915,8 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 	// immediately found without performing more row additions.
 
 	// Gaussian elimination to put matrix in upper triangular form
-	upper_triangle(bitmatrix, bitstride);
+	u8 pivots[256];
+	upper_triangle(erasure_count, recovery_blocks, bitmatrix, bitstride, pivots, subbytes);
 
 	// The matrix is now in an upper-triangular form, and can be worked from
 	// right to left to conceptually produce an identity matrix.  The matrix
