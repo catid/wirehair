@@ -762,7 +762,74 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 	return bitmatrix;
 }
 
-static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *bitmatrix, int bitstride, u8 pivots[256], int subbytes) {
+static const u8 WIN4LUT[64][16] = {
+	{ 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 },
+	{ 0,1,3,2,4,5,7,6,8,9,11,10,12,13,15,14 },
+	{ 0,1,2,3,5,4,7,6,8,9,10,11,13,12,15,14 },
+	{ 0,1,3,2,5,4,6,7,8,9,11,10,13,12,14,15 },
+	{ 0,1,2,3,6,7,4,5,8,9,10,11,14,15,12,13 },
+	{ 0,1,3,2,7,6,4,5,8,9,11,10,15,14,12,13 },
+	{ 0,1,2,3,7,6,5,4,8,9,10,11,15,14,13,12 },
+	{ 0,1,3,2,6,7,5,4,8,9,11,10,14,15,13,12 },
+	{ 0,1,2,3,4,5,6,7,9,8,11,10,13,12,15,14 },
+	{ 0,1,3,2,4,5,7,6,9,8,10,11,13,12,14,15 },
+	{ 0,1,2,3,5,4,7,6,9,8,11,10,12,13,14,15 },
+	{ 0,1,3,2,5,4,6,7,9,8,10,11,12,13,15,14 },
+	{ 0,1,2,3,6,7,4,5,9,8,11,10,15,14,13,12 },
+	{ 0,1,3,2,7,6,4,5,9,8,10,11,14,15,13,12 },
+	{ 0,1,2,3,7,6,5,4,9,8,11,10,14,15,12,13 },
+	{ 0,1,3,2,6,7,5,4,9,8,10,11,15,14,12,13 },
+	{ 0,1,2,3,4,5,6,7,10,11,8,9,14,15,12,13 },
+	{ 0,1,3,2,4,5,7,6,11,10,8,9,15,14,12,13 },
+	{ 0,1,2,3,5,4,7,6,10,11,8,9,15,14,13,12 },
+	{ 0,1,3,2,5,4,6,7,11,10,8,9,14,15,13,12 },
+	{ 0,1,2,3,6,7,4,5,10,11,8,9,12,13,14,15 },
+	{ 0,1,3,2,7,6,4,5,11,10,8,9,12,13,15,14 },
+	{ 0,1,2,3,7,6,5,4,10,11,8,9,13,12,15,14 },
+	{ 0,1,3,2,6,7,5,4,11,10,8,9,13,12,14,15 },
+	{ 0,1,2,3,4,5,6,7,11,10,9,8,15,14,13,12 },
+	{ 0,1,3,2,4,5,7,6,10,11,9,8,14,15,13,12 },
+	{ 0,1,2,3,5,4,7,6,11,10,9,8,14,15,12,13 },
+	{ 0,1,3,2,5,4,6,7,10,11,9,8,15,14,12,13 },
+	{ 0,1,2,3,6,7,4,5,11,10,9,8,13,12,15,14 },
+	{ 0,1,3,2,7,6,4,5,10,11,9,8,13,12,14,15 },
+	{ 0,1,2,3,7,6,5,4,11,10,9,8,12,13,14,15 },
+	{ 0,1,3,2,6,7,5,4,10,11,9,8,12,13,15,14 },
+	{ 0,1,2,3,4,5,6,7,12,13,14,15,8,9,10,11 },
+	{ 0,1,3,2,4,5,7,6,12,13,15,14,8,9,11,10 },
+	{ 0,1,2,3,5,4,7,6,13,12,15,14,8,9,10,11 },
+	{ 0,1,3,2,5,4,6,7,13,12,14,15,8,9,11,10 },
+	{ 0,1,2,3,6,7,4,5,14,15,12,13,8,9,10,11 },
+	{ 0,1,3,2,7,6,4,5,15,14,12,13,8,9,11,10 },
+	{ 0,1,2,3,7,6,5,4,15,14,13,12,8,9,10,11 },
+	{ 0,1,3,2,6,7,5,4,14,15,13,12,8,9,11,10 },
+	{ 0,1,2,3,4,5,6,7,13,12,15,14,9,8,11,10 },
+	{ 0,1,3,2,4,5,7,6,13,12,14,15,9,8,10,11 },
+	{ 0,1,2,3,5,4,7,6,12,13,14,15,9,8,11,10 },
+	{ 0,1,3,2,5,4,6,7,12,13,15,14,9,8,10,11 },
+	{ 0,1,2,3,6,7,4,5,15,14,13,12,9,8,11,10 },
+	{ 0,1,3,2,7,6,4,5,14,15,13,12,9,8,10,11 },
+	{ 0,1,2,3,7,6,5,4,14,15,12,13,9,8,11,10 },
+	{ 0,1,3,2,6,7,5,4,15,14,12,13,9,8,10,11 },
+	{ 0,1,2,3,4,5,6,7,14,15,12,13,10,11,8,9 },
+	{ 0,1,3,2,4,5,7,6,15,14,12,13,11,10,8,9 },
+	{ 0,1,2,3,5,4,7,6,15,14,13,12,10,11,8,9 },
+	{ 0,1,3,2,5,4,6,7,14,15,13,12,11,10,8,9 },
+	{ 0,1,2,3,6,7,4,5,12,13,14,15,10,11,8,9 },
+	{ 0,1,3,2,7,6,4,5,12,13,15,14,11,10,8,9 },
+	{ 0,1,2,3,7,6,5,4,13,12,15,14,10,11,8,9 },
+	{ 0,1,3,2,6,7,5,4,13,12,14,15,11,10,8,9 },
+	{ 0,1,2,3,4,5,6,7,15,14,13,12,11,10,9,8 },
+	{ 0,1,3,2,4,5,7,6,14,15,13,12,10,11,9,8 },
+	{ 0,1,2,3,5,4,7,6,14,15,12,13,11,10,9,8 },
+	{ 0,1,3,2,5,4,6,7,15,14,12,13,10,11,9,8 },
+	{ 0,1,2,3,6,7,4,5,13,12,15,14,11,10,9,8 },
+	{ 0,1,3,2,7,6,4,5,13,12,14,15,10,11,9,8 },
+	{ 0,1,2,3,7,6,5,4,12,13,14,15,11,10,9,8 },
+	{ 0,1,3,2,6,7,5,4,12,13,15,14,10,11,9,8 }
+};
+
+static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], u64 *bitmatrix, int bitstride, u8 pivots[256], int subbytes) {
 	/*
 	 * An efficient windowed method coupled with dynamic programming
 	 * is used to move through the bitmatrix more rapidly and reduce
@@ -782,8 +849,10 @@ static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *b
 	 * many values.  And so the table values are generated on demand.
 	 */
 
+	const int bit_rows = rows * 8;
+
 	// Initialize the pivots array to all options
-	for (int x = 0; x < rows; ++x) {
+	for (int x = 0; x < bit_rows; ++x) {
 		pivots[x] = (u8)x;
 	}
 
@@ -793,11 +862,16 @@ static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *b
 	u64 mask = 1;
 
 	// For each pivot to find,
-	for (int next_pivot = 0; next_pivot < rows; ++next_pivot, mask = CAT_ROL64(mask, 1)) {
+	for (int next_pivot = 0; next_pivot < bit_rows; next_pivot += 4) {
 		u64 *bit_offset = bitmatrix + (next_pivot / 64);
 
+		int window_pivots[4];
+		int window_pivot = 0;
+
+		// TODO
+
 		// For each option,
-		for (int option = next_pivot; option < rows; ++option) {
+		for (int option = next_pivot; option < bit_rows; ++option) {
 			int row = pivots[option];
 			u64 *bit_row = bit_offset + (row * bitstride);
 
@@ -811,7 +885,7 @@ static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *b
 				const u8 *src = recovery_blocks[row / 8]->data + (row % 8) * subbytes;
 
 				// For each other row,
-				while (++option < rows) {
+				while (++option < bit_rows) {
 					int other_row = pivots[option];
 					u64 *other_bit_row = bit_offset + (other_row * bitstride);
 
@@ -835,7 +909,7 @@ static void upper_triangle(int rows, ReceivedBlock *recovery_blocks[256], u64 *b
 	}
 }
 
-static void solve_triangle(u64 *bitmatrix, int bitstride) {
+static void back_substitution(u64 *bitmatrix, int bitstride) {
 	// TODO: 4-bit window method
 }
 
@@ -916,14 +990,14 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 
 	// Gaussian elimination to put matrix in upper triangular form
 	u8 pivots[256];
-	upper_triangle(erasure_count, recovery_blocks, bitmatrix, bitstride, pivots, subbytes);
+	gaussian_elimination(erasure_count, recovery_blocks, bitmatrix, bitstride, pivots, subbytes);
 
 	// The matrix is now in an upper-triangular form, and can be worked from
 	// right to left to conceptually produce an identity matrix.  The matrix
 	// itself is not adjusted since the important result is the output values.
 
-	// Gaussian elimination to solve value for each column
-	solve_triangle(bitmatrix, bitstride);
+	// Use back-substitution to solve value for each column
+	back_substitution(bitmatrix, bitstride);
 
 	// Each of the original bitrows are now solved.  However, they are out of
 	// order.
