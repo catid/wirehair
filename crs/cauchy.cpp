@@ -721,13 +721,8 @@ static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 }
 
 static void gaussian_elimination(int rows, u8 *recovery_data[256], u64 *bitmatrix,
-		int bitstride, u16 pivots[2040], int subbytes) {
+		int bitstride, int subbytes) {
 	const int bit_rows = rows * 8;
-
-	// Initialize the pivots array to all options
-	for (int x = 0; x < bit_rows; ++x) {
-		pivots[x] = x;
-	}
 
 	// The front of the pivots array under next_pivot are decided pivots, and
 	// the remaining entries are remaining possibilities
@@ -735,20 +730,16 @@ static void gaussian_elimination(int rows, u8 *recovery_data[256], u64 *bitmatri
 	u64 mask = 1;
 
 	// For each pivot to find,
-	for (int next_pivot = 0; next_pivot < bit_rows; ++next_pivot, mask = CAT_ROL64(mask, 1)) {
-		u64 *bit_offset = bitmatrix + (next_pivot / 64);
+	u64 *bit_base = bitmatrix;
+	for (int next_pivot = 0; next_pivot < bit_rows; ++next_pivot, mask = CAT_ROL64(mask, 1), bit_base += bitstride) {
+		u64 *bit_offset = bit_base + (next_pivot / 64);
 
 		// For each option,
-		for (int option = next_pivot; option < bit_rows; ++option) {
-			int row = pivots[option];
-			u64 *bit_row = bit_offset + (row * bitstride);
+		for (int option = next_pivot; option < bit_rows; ++option, bit_offset += bitstride) {
+			u64 *bit_row = bit_offset;
 
 			// If bit in this row is set,
 			if (bit_row[0] & mask) {
-				// Swap option with pivot position
-				pivots[option] = pivots[next_pivot];
-				pivots[next_pivot] = row;
-
 				// Prepare to add in data
 				const u8 *src = recovery_data[row / 8] + (row % 8) * subbytes;
 
