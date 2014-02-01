@@ -523,18 +523,15 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
  */
 
 // Descriptor for received data block
-struct ReceivedBlock {
+struct Block {
 	u8 *data;
-	u16 next; // Terminated with BLOCK_TERM
 	u8 row;
 };
 
-static const u16 BLOCK_TERM = 0xffff;
-
 // Specialized fast decoder for m = 1
-static void cauchy_decode_m1(int k, ReceivedBlock *blocks, int block_bytes) {
+static void cauchy_decode_m1(int k, Block *blocks, int block_bytes) {
 	// Find erased row
-	ReceivedBlock *erased = blocks;
+	Block *erased = blocks;
 	for (int ii = 0; ii < k; ++ii, ++erased) {
 		if (erased->row >= k) {
 			break;
@@ -548,7 +545,7 @@ static void cauchy_decode_m1(int k, ReceivedBlock *blocks, int block_bytes) {
 
 	// For each block,
 	for (int ii = 0; ii < original_block_count; ++ii) {
-		ReceivedBlock *block = blocks + ii;
+		Block *block = blocks + ii;
 		if (block != erased) {
 			if (!in) {
 				in = block->data;
@@ -566,62 +563,65 @@ static void cauchy_decode_m1(int k, ReceivedBlock *blocks, int block_bytes) {
 }
 
 // Sort blocks into original and recovery blocks
-static int sort_blocks(int k, ReceivedBlock *blocks, ReceivedBlock * heads[2]) {
-	ReceivedBlock *prev[2] = { 0 };
-	ReceivedBlock *block = blocks;
-	int erasure_count = 0;
+static void sort_blocks(int k, Block *blocks,
+		Block *original[256], int &original_count,
+		Block *recovery[256], int &recovery_count, u8 erasures[256]) {
+	Block *block = blocks;
+	original_count = 0;
+	recovery_count = 0;
 
+	// Initialize erasures to zeroes
+	for (int ii = 0; ii < k; ++ii) {
+		erasures[ii] = 0;
+	}
+
+	// For each input block,
 	for (int ii = 0; ii < k; ++ii, ++blocks) {
 		int row = blocks->row;
 
-		// category 0 = original, 1 = recovery
-		int category = (row >= k);
-		erasure_count += category;
-
-		if (prev[category]) {
-			prev[category]->next = ii;
+		// If it is an original block,
+		if (row < k) {
+			original[original_count++] = block;
+			erasures[row] = 1;
 		} else {
-			heads[category] = block;
+			recovery[recovery_count++] = block;
 		}
-		prev[category] = block;
 	}
 
-	if (prev[0]) {
-		prev[0]->next = BLOCK_TERM;
-	} else {
-		heads[0] = 0;
+	// Identify erasures
+	for (int ii = 0, erasure_count = 0; erasure_count < recovery_count; ++ii) {
+		if (!erasures[ii]) {
+			erasures[erasure_count++] = ii;
+		}
 	}
-	if (prev[1]) {
-		prev[1]->next = BLOCK_TERM;
-	}
-	// NOTE: There will always be one erasure if we use this data
-
-	return erasure_count;
 }
 
-static void eliminate_original(ReceivedBlock *heads[2], ReceivedBlock *blocks,
+static void eliminate_original(Block *original[256], int original_count,
+							   Block *recovery[256], int recovery_count,
 							   const u8 *matrix, int stride, int subbytes) {
-	// If no original data,
-	if (!heads[0]) {
-		// Nothing to do here!
+	// If no original blocks,
+	if (original_count <= 0) {
+		// Nothing to do here
 		return;
 	}
 
 	// For each recovery block,
-	ReceivedBlock *recovery_block = heads[1];
-	for (;;) {
+	for (int ii = 0; ii < recovery_count; ++ii) {
+		Block *recovery_block = recovery[ii];
 		const u8 *row = matrix + stride * (recovery_block->row - 1);
 
 		// For each original block,
-		ReceivedBlock *original_block = heads[0];
-		for (;;) {
-			// If this entry is an 8x8 identity matrix,
-			if (recovery_block->row == 0 || row[original_block->row - 1] == 1) {
+		for (int jj = 0; jj < original_count; ++jj) {
+			Block *original_block = original[ii];
+			int original_row = original_block->row;
+
+			// If this matrix element is an 8x8 identity matrix,
+			if (recovery_block->row == 0 || row[original_row] == 1) {
 				// XOR whole block at once
 				memxor(recovery_block->data, original_block->data, subbytes * 8);
 			} else {
 				// Grab the matrix entry for this row,
-				u8 slice = row[original_block->row - 1];
+				u8 slice = row[original_row];
 				u8 *dest = recovery_block->data;
 
 				// XOR in bits set in 8x8 submatrix
@@ -634,65 +634,33 @@ static void eliminate_original(ReceivedBlock *heads[2], ReceivedBlock *blocks,
 						}
 					}
 
+					// Stop after 8 bits
 					if (bit_y >= 7) {
 						break;
 					}
 
+					// Calculate next slice
 					slice = GFC256Multiply(slice, 2);
 					dest += subbytes;
 				}
 			}
-
-			// Iterate to next original block
-			u16 original_next = original_block->next;
-			if (original_next == BLOCK_TERM) {
-				break;
-			}
-			original_block = blocks + original_next;
-		}
-
-		// Iterate to next recovery block
-		u16 recovery_next = recovery_block->next;
-		if (recovery_next == BLOCK_TERM) {
-			break;
-		}
-		recovery_block = blocks + recovery_next;
-	}
-}
-
-static void find_erasures(int k, u8 erasures[256], int erasure_count,
-						  ReceivedBlock *blocks) {
-	// This seems to be the fastest possible algorithm
-	u8 used[256];
-	for (int ii = 0; ii < k; ++ii) {
-		used[ii] = 0;
-	}
-	ReceivedBlock *block = blocks;
-	for (int ii = 0; ii < k; ++ii, ++block) {
-		const int row = block->row;
-		used[row] = 1;
-	}
-	for (int ii = 0, erasure_index = 0; erasure_index < erasure_count; ++ii) {
-		if (!used[ii]) {
-			erasures[erasure_index++] = ii;
 		}
 	}
 }
 
-static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *blocks,
+static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 						const u8 *matrix, int stride, const u8 erasures[256],
-						int erasure_count, int &bitstride,
-						ReceivedBlock *recovery_blocks[256]) {
+						int &bitstride) {
 	// Allocate the bitmatrix
-	int bitrows = erasure_count * 8;
+	int bitrows = recovery_count * 8;
 	bitstride = (bitrows + 63) / 64;
 	u64 *bitmatrix = new u64[bitstride * bitrows];
 	u64 *bitrow = bitmatrix;
 
 	// For each recovery block,
-	ReceivedBlock *recovery_block = heads[1];
-	int recovery_block_index = 0;
-	for (;;) {
+	for (int ii = 0; ii < recovery_count; ++ii) {
+		Block *recovery_block = recovery[ii];
+
 		// If first row of matrix,
 		int recovery_row = recovery_block->row - k;
 		if (recovery_row == 0) {
@@ -708,7 +676,7 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 			const u8 *row = matrix + (recovery_row - 1) * stride;
 
 			// Generate eight 64-bit columns of the bitmatrix at a time
-			int remaining = erasure_count;
+			int remaining = recovery_count;
 			const u8 *erasure = erasures;
 			while (remaining > 0) {
 				// Take up to 8 columns at a time
@@ -747,113 +715,18 @@ static u64 *generate_bitmatrix(int k, ReceivedBlock *heads[2], ReceivedBlock *bl
 				}
 			}
 		}
-
-		// Insert into recovery block array
-		recovery_blocks[recovery_block_index++] = recovery_block;
-
-		// Iterate to next recovery block
-		u16 recovery_next = recovery_block->next;
-		if (recovery_next == BLOCK_TERM) {
-			break;
-		}
-		recovery_block = blocks + recovery_next;
 	}
 
 	return bitmatrix;
 }
 
-static const u8 WIN4LUT[64][16] = {
-	{ 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 },
-	{ 0,1,3,2,4,5,7,6,8,9,11,10,12,13,15,14 },
-	{ 0,1,2,3,5,4,7,6,8,9,10,11,13,12,15,14 },
-	{ 0,1,3,2,5,4,6,7,8,9,11,10,13,12,14,15 },
-	{ 0,1,2,3,6,7,4,5,8,9,10,11,14,15,12,13 },
-	{ 0,1,3,2,7,6,4,5,8,9,11,10,15,14,12,13 },
-	{ 0,1,2,3,7,6,5,4,8,9,10,11,15,14,13,12 },
-	{ 0,1,3,2,6,7,5,4,8,9,11,10,14,15,13,12 },
-	{ 0,1,2,3,4,5,6,7,9,8,11,10,13,12,15,14 },
-	{ 0,1,3,2,4,5,7,6,9,8,10,11,13,12,14,15 },
-	{ 0,1,2,3,5,4,7,6,9,8,11,10,12,13,14,15 },
-	{ 0,1,3,2,5,4,6,7,9,8,10,11,12,13,15,14 },
-	{ 0,1,2,3,6,7,4,5,9,8,11,10,15,14,13,12 },
-	{ 0,1,3,2,7,6,4,5,9,8,10,11,14,15,13,12 },
-	{ 0,1,2,3,7,6,5,4,9,8,11,10,14,15,12,13 },
-	{ 0,1,3,2,6,7,5,4,9,8,10,11,15,14,12,13 },
-	{ 0,1,2,3,4,5,6,7,10,11,8,9,14,15,12,13 },
-	{ 0,1,3,2,4,5,7,6,11,10,8,9,15,14,12,13 },
-	{ 0,1,2,3,5,4,7,6,10,11,8,9,15,14,13,12 },
-	{ 0,1,3,2,5,4,6,7,11,10,8,9,14,15,13,12 },
-	{ 0,1,2,3,6,7,4,5,10,11,8,9,12,13,14,15 },
-	{ 0,1,3,2,7,6,4,5,11,10,8,9,12,13,15,14 },
-	{ 0,1,2,3,7,6,5,4,10,11,8,9,13,12,15,14 },
-	{ 0,1,3,2,6,7,5,4,11,10,8,9,13,12,14,15 },
-	{ 0,1,2,3,4,5,6,7,11,10,9,8,15,14,13,12 },
-	{ 0,1,3,2,4,5,7,6,10,11,9,8,14,15,13,12 },
-	{ 0,1,2,3,5,4,7,6,11,10,9,8,14,15,12,13 },
-	{ 0,1,3,2,5,4,6,7,10,11,9,8,15,14,12,13 },
-	{ 0,1,2,3,6,7,4,5,11,10,9,8,13,12,15,14 },
-	{ 0,1,3,2,7,6,4,5,10,11,9,8,13,12,14,15 },
-	{ 0,1,2,3,7,6,5,4,11,10,9,8,12,13,14,15 },
-	{ 0,1,3,2,6,7,5,4,10,11,9,8,12,13,15,14 },
-	{ 0,1,2,3,4,5,6,7,12,13,14,15,8,9,10,11 },
-	{ 0,1,3,2,4,5,7,6,12,13,15,14,8,9,11,10 },
-	{ 0,1,2,3,5,4,7,6,13,12,15,14,8,9,10,11 },
-	{ 0,1,3,2,5,4,6,7,13,12,14,15,8,9,11,10 },
-	{ 0,1,2,3,6,7,4,5,14,15,12,13,8,9,10,11 },
-	{ 0,1,3,2,7,6,4,5,15,14,12,13,8,9,11,10 },
-	{ 0,1,2,3,7,6,5,4,15,14,13,12,8,9,10,11 },
-	{ 0,1,3,2,6,7,5,4,14,15,13,12,8,9,11,10 },
-	{ 0,1,2,3,4,5,6,7,13,12,15,14,9,8,11,10 },
-	{ 0,1,3,2,4,5,7,6,13,12,14,15,9,8,10,11 },
-	{ 0,1,2,3,5,4,7,6,12,13,14,15,9,8,11,10 },
-	{ 0,1,3,2,5,4,6,7,12,13,15,14,9,8,10,11 },
-	{ 0,1,2,3,6,7,4,5,15,14,13,12,9,8,11,10 },
-	{ 0,1,3,2,7,6,4,5,14,15,13,12,9,8,10,11 },
-	{ 0,1,2,3,7,6,5,4,14,15,12,13,9,8,11,10 },
-	{ 0,1,3,2,6,7,5,4,15,14,12,13,9,8,10,11 },
-	{ 0,1,2,3,4,5,6,7,14,15,12,13,10,11,8,9 },
-	{ 0,1,3,2,4,5,7,6,15,14,12,13,11,10,8,9 },
-	{ 0,1,2,3,5,4,7,6,15,14,13,12,10,11,8,9 },
-	{ 0,1,3,2,5,4,6,7,14,15,13,12,11,10,8,9 },
-	{ 0,1,2,3,6,7,4,5,12,13,14,15,10,11,8,9 },
-	{ 0,1,3,2,7,6,4,5,12,13,15,14,11,10,8,9 },
-	{ 0,1,2,3,7,6,5,4,13,12,15,14,10,11,8,9 },
-	{ 0,1,3,2,6,7,5,4,13,12,14,15,11,10,8,9 },
-	{ 0,1,2,3,4,5,6,7,15,14,13,12,11,10,9,8 },
-	{ 0,1,3,2,4,5,7,6,14,15,13,12,10,11,9,8 },
-	{ 0,1,2,3,5,4,7,6,14,15,12,13,11,10,9,8 },
-	{ 0,1,3,2,5,4,6,7,15,14,12,13,10,11,9,8 },
-	{ 0,1,2,3,6,7,4,5,13,12,15,14,11,10,9,8 },
-	{ 0,1,3,2,7,6,4,5,13,12,14,15,10,11,9,8 },
-	{ 0,1,2,3,7,6,5,4,12,13,14,15,11,10,9,8 },
-	{ 0,1,3,2,6,7,5,4,12,13,15,14,10,11,9,8 }
-};
-
-static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], u64 *bitmatrix, int bitstride, u8 pivots[256], int subbytes) {
-	/*
-	 * An efficient windowed method coupled with dynamic programming
-	 * is used to move through the bitmatrix more rapidly and reduce
-	 * the number of overall XOR operations to perform.
-	 *
-	 * For example, if the first four pivots are known, and the next
-	 * two rows are 1111 and 1011, then time can be saved by computing
-	 * 1011, and then using the result to compute 1111 with one XOR,
-	 * saving four XORs.
-	 *
-	 * A window size of 4 bits was chosen because the bitmatrix is
-	 * always a multiple of 8 bits and only powers of two are even
-	 * multiples.  Fiddling with straddling windows between words
-	 * does not seem worth it.  The next smallest candidate window
-	 * size of 2 is underwhelming.  But with 11 possible bit combos
-	 * with a 4-bit window there is the danger of precomputing too
-	 * many values.  And so the table values are generated on demand.
-	 */
-
+static void gaussian_elimination(int rows, u8 *recovery_data[256], u64 *bitmatrix,
+		int bitstride, u16 pivots[2040], int subbytes) {
 	const int bit_rows = rows * 8;
 
 	// Initialize the pivots array to all options
 	for (int x = 0; x < bit_rows; ++x) {
-		pivots[x] = (u8)x;
+		pivots[x] = x;
 	}
 
 	// The front of the pivots array under next_pivot are decided pivots, and
@@ -862,13 +735,8 @@ static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], 
 	u64 mask = 1;
 
 	// For each pivot to find,
-	for (int next_pivot = 0; next_pivot < bit_rows; next_pivot += 4) {
+	for (int next_pivot = 0; next_pivot < bit_rows; ++next_pivot, mask = CAT_ROL64(mask, 1)) {
 		u64 *bit_offset = bitmatrix + (next_pivot / 64);
-
-		int window_pivots[4];
-		int window_pivot = 0;
-
-		// TODO
 
 		// For each option,
 		for (int option = next_pivot; option < bit_rows; ++option) {
@@ -879,10 +747,10 @@ static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], 
 			if (bit_row[0] & mask) {
 				// Swap option with pivot position
 				pivots[option] = pivots[next_pivot];
-				pivots[next_pivot] = (u8)row;
+				pivots[next_pivot] = row;
 
 				// Prepare to add in data
-				const u8 *src = recovery_blocks[row / 8]->data + (row % 8) * subbytes;
+				const u8 *src = recovery_data[row / 8] + (row % 8) * subbytes;
 
 				// For each other row,
 				while (++option < bit_rows) {
@@ -897,7 +765,7 @@ static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], 
 						}
 
 						// Add in the data
-						u8 *dest = recovery_blocks[other_row / 8]->data + (other_row % 8) * subbytes;
+						u8 *dest = recovery_data[other_row / 8] + (other_row % 8) * subbytes;
 						memxor(dest, src, subbytes);
 					}
 				}
@@ -909,15 +777,35 @@ static void gaussian_elimination(int rows, ReceivedBlock *recovery_blocks[256], 
 	}
 }
 
-static void back_substitution(u64 *bitmatrix, int bitstride) {
-	// TODO: 4-bit window method
+static void back_substitution(int rows, u8 *recovery_data[256],
+			u64 *bitmatrix, int bitstride, u16 pivots[2040], int subbytes) {
+	// For each found pivot starting from the last one,
+	u64 mask = (u64)1 << (((rows << 3) - 1) & 63);
+	u64 *bit_base = bitmatrix + (rows - 1) * bitstride;
+
+	// For each set of 8 rows,
+	for (int row = rows - 1; row >= 0; row -= 8) {
+		const u8 *src = recovery_data[row >> 3] + (subbytes << 3) - subbytes;
+		int word_offset = row >> 6;
+
+		// For each 8 rows,
+		for (int y = 0; y < 8; ++y, mask = CAT_ROR64(mask, 1), src -= subbytes, bit_base -= bitstride) {
+			u64 *word = bit_base + word_offset;
+
+			// For all the rows above it,
+			for (int other_row = row - y - 1; other_row >= 0; --other_row, word -= bitstride) {
+				// If the row has a bit set,
+				if (*word & mask) {
+					u8 *dest = recovery_data[other_row >> 3] + (other_row & 7) * subbytes;
+
+					memxor(dest, src, subbytes);
+				}
+			}
+		}
+	}
 }
 
-static void fix_order() {
-	// TODO
-}
-
-bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
+bool cauchy_decode(int k, int m, Block *blocks, int block_bytes) {
 	// For the special case of one erasure,
 	if (m == 1) {
 		cauchy_decode_m1(k, blocks, block_bytes);
@@ -925,11 +813,15 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 	}
 
 	// Sort blocks into original and recovery
-	ReceivedBlock *heads[2];
-	int erasure_count = sort_blocks(k, blocks, heads);
+	Block *recovery[256];
+	int recovery_count;
+	Block *original[256];
+	int original_count;
+	u8 erasures[256];
+	sort_blocks(k, blocks, original, original_count, recovery, recovery_count, erasures);
 
 	// If nothing is erased,
-	if (erasure_count <= 0) {
+	if (recovery_count <= 0) {
 		return true;
 	}
 
@@ -961,11 +853,7 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 
 	// Eliminate original data from recovery rows
 	const int subbytes = block_bytes / 8;
-	eliminate_original(heads, blocks, matrix, stride, subbytes);
-
-	// Find erased rows from sequence, in increasing order
-	u8 erasures[256];
-	find_erasures(k, erasures, erasure_count, blocks);
+	eliminate_original(original, original_count, recovery, recovery_count, matrix, stride, subbytes);
 
 	// Now that the columns that are missing have been identified,
 	// it is time to generate a bitmatrix to represent the original
@@ -975,10 +863,8 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 
 	// Generate square bitmatrix for erased columns from recovery rows
 	int bitstride;
-	ReceivedBlock *recovery_blocks[256];
-	u64 *bitmatrix = generate_bitmatrix(k, heads, blocks, matrix, stride,
-										erasures, erasure_count, bitstride,
-										recovery_blocks);
+	u64 *bitmatrix = generate_bitmatrix(k, recovery, recovery_count, matrix,
+										stride, erasures, bitstride);
 
 	// Finally, solving the matrix.
 	// The most efficient approach is Gaussian elimination: An alternative
@@ -989,21 +875,14 @@ bool cauchy_decode(int k, int m, ReceivedBlock *blocks, int block_bytes) {
 	// immediately found without performing more row additions.
 
 	// Gaussian elimination to put matrix in upper triangular form
-	u8 pivots[256];
-	gaussian_elimination(erasure_count, recovery_blocks, bitmatrix, bitstride, pivots, subbytes);
+	gaussian_elimination(erasure_count, recovery_data, bitmatrix, bitstride, subbytes);
 
 	// The matrix is now in an upper-triangular form, and can be worked from
 	// right to left to conceptually produce an identity matrix.  The matrix
 	// itself is not adjusted since the important result is the output values.
 
 	// Use back-substitution to solve value for each column
-	back_substitution(bitmatrix, bitstride);
-
-	// Each of the original bitrows are now solved.  However, they are out of
-	// order.
-
-	// Fix block order
-	fix_order();
+	back_substitution(erasure_count, recovery_data, bitmatrix, bitstride, subbytes);
 
 	// Free temporary space
 	delete []bitmatrix;
@@ -1048,7 +927,7 @@ int main() {
 
 	cout << "Cauchy encode in " << (t1 - t0) << " usec" << endl;
 
-	ReceivedBlock *blocks = new ReceivedBlock[block_count];
+	Block *blocks = new Block[block_count];
 
 	for (int ii = 0; ii < block_count; ++ii) {
 		blocks[ii].data = data + ii * block_bytes;
@@ -1063,13 +942,13 @@ int main() {
 	blocks[replace_row].row = block_count + 1;
 	//blocks[0].data = recovery_blocks + block_bytes;
 	//blocks[0].row = block_count + 1;
-	u8 erasures[1] = {
+	int erasures[1] = {
 		replace_row
 	};
 
 	t0 = m_clock.usec();
 
-	assert(cauchy_decode(block_count, recovery_block_count, blocks, erasures, original_remaining, block_bytes));
+	assert(cauchy_decode(block_count, recovery_block_count, blocks, block_bytes));
 
 	t1 = m_clock.usec();
 
