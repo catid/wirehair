@@ -11,7 +11,7 @@ using namespace cat;
 
 static Clock m_clock;
 
-#define DLOG(x) x
+#define DLOG(x)
 
 void print(const u8 *data, int bytes) {
 	int sep = bytes / 8;
@@ -958,9 +958,9 @@ int main() {
 
 	cout << "Cauchy matrix solver" << endl;
 
-	int block_bytes = 8 * 4; // a multiple of 8
-	int block_count = 3;
-	int recovery_block_count = 3;
+	int block_bytes = 8 * 162; // a multiple of 8
+	int block_count = 29;
+	int recovery_block_count = 6;
 
 	u8 *data = new u8[block_bytes * block_count];
 	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
@@ -989,10 +989,10 @@ int main() {
 	}
 
 	// Erase first block
-	const int erasures_count = 3;
+	const int erasures_count = 6;
 	int original_remaining = block_count - erasures_count;
 	int erasures[256];
-	for (int ii = 1; ii < erasures_count; ++ii) {
+	for (int ii = 0; ii < erasures_count; ++ii) {
 		blocks[ii].data = recovery_blocks + ii * block_bytes;
 		blocks[ii].row = block_count + ii;
 		erasures[ii] = ii;
