@@ -11,7 +11,7 @@ using namespace cat;
 
 static Clock m_clock;
 
-#define DLOG(x) x
+#define DLOG(x)
 
 void print(const u8 *data, int bytes) {
 	int sep = bytes / 8;
@@ -638,28 +638,30 @@ static void eliminate_original(Block *original[256], int original_count,
 		return;
 	}
 
-	cout << "Eliminating original:" << endl;
+	DLOG(cout << "Eliminating original:" << endl;)
 
 	int row_offset = original_count + recovery_count + 1;
 
 	// For each recovery block,
 	for (int ii = 0; ii < recovery_count; ++ii) {
 		Block *recovery_block = recovery[ii];
-		const u8 *row = matrix + stride * (recovery_block->row - row_offset);
+		int matrix_row = recovery_block->row - row_offset;
+		const u8 *row = matrix + stride * matrix_row;
 
-		cout << "+ From recovery block " << ii << " at row " << (int)(recovery_block->row - row_offset) << ":" << endl;
+		DLOG(cout << "+ From recovery block " << ii << " at row " << matrix_row << ":" << endl;)
 
 		// For each original block,
 		for (int jj = 0; jj < original_count; ++jj) {
-			Block *original_block = original[ii];
+			Block *original_block = original[jj];
 			int original_row = original_block->row;
 
-			cout << "++ Eliminating original column " << original_row << endl;
+			DLOG(cout << "++ Eliminating original column " << original_row << endl;)
 
 			// If this matrix element is an 8x8 identity matrix,
-			if (recovery_block->row == 0 || row[original_row] == 1) {
+			if (matrix_row < 0 || row[original_row] == 1) {
 				// XOR whole block at once
 				memxor(recovery_block->data, original_block->data, subbytes * 8);
+				DLOG(cout << "XOR" << endl;)
 			} else {
 				// Grab the matrix entry for this row,
 				u8 slice = row[original_row];
@@ -818,29 +820,16 @@ static void gaussian_elimination(int rows, Block *recovery[256], u64 *bitmatrix,
 }
 
 static void back_substitution(int rows, Block *recovery[256], u64 *bitmatrix, int bitstride, int subbytes) {
-	int bit_rows = rows << 3;
+	for (int pivot = rows * 8 - 1; pivot > 0; --pivot) {
+		const u8 *src = recovery[pivot >> 3]->data + (pivot & 7) * subbytes;
+		const u64 *offset = bitmatrix + (pivot >> 6);
+		const u64 mask = (u64)1 << (pivot & 63);
 
-	// For each found pivot starting from the last one,
-	u64 mask = (u64)1 << ((bit_rows - 1) & 63);
-	u64 *base = bitmatrix + (bit_rows - 1) * bitstride;
+		for (int other_row = pivot - 1; other_row >= 0; --other_row) {
+			if (offset[bitstride * other_row] & mask) {
+				u8 *dest = recovery[other_row >> 3]->data + (other_row & 7) * subbytes;
 
-	// For each set of 8 rows,
-	for (int row = rows - 1; row >= 0; --row) {
-		const u8 *src = recovery[row >> 3]->data + (subbytes << 3) - subbytes;
-		int word_offset = row >> 3;
-
-		// For each 8 rows,
-		for (int y = 0; y < 8; ++y, mask = CAT_ROR64(mask, 1), src -= subbytes, base -= bitstride) {
-			u64 *word = base + word_offset;
-
-			// For all the rows above it,
-			for (int other_row = row * 8 - y - 1; other_row >= 0; --other_row, word -= bitstride) {
-				// If the row has a bit set,
-				if (*word & mask) {
-					u8 *dest = recovery[other_row >> 3]->data + (other_row & 7) * subbytes;
-
-					memxor(dest, src, subbytes);
-				}
+				memxor(dest, src, subbytes);
 			}
 		}
 	}
@@ -861,7 +850,7 @@ bool cauchy_decode(int k, int m, Block *blocks, int block_bytes) {
 	u8 erasures[256];
 	sort_blocks(k, blocks, original, original_count, recovery, recovery_count, erasures);
 
-	cout << "Recovery rows(" << recovery_count << "):" << endl;
+	DLOG(cout << "Recovery rows(" << recovery_count << "):" << endl;
 	for (int ii = 0; ii < recovery_count; ++ii) {
 		cout << "+ Element " << ii << " fills in for erased row " << (int)erasures[ii] << " with recovery row " << (int)recovery[ii]->row << endl;
 	}
@@ -869,7 +858,7 @@ bool cauchy_decode(int k, int m, Block *blocks, int block_bytes) {
 	cout << "Original rows(" << original_count << "):" << endl;
 	for (int ii = 0; ii < original_count; ++ii) {
 		cout << "+ Element " << ii << " points to original row " << (int)original[ii]->row << endl;
-	}
+	})
 
 	// If nothing is erased,
 	if (recovery_count <= 0) {
@@ -917,7 +906,7 @@ bool cauchy_decode(int k, int m, Block *blocks, int block_bytes) {
 	u64 *bitmatrix = generate_bitmatrix(k, recovery, recovery_count, matrix,
 										stride, erasures, bitstride);
 
-	print_matrix(bitmatrix, bitstride, recovery_count * 8);
+	DLOG(print_matrix(bitmatrix, bitstride, recovery_count * 8);)
 
 	// Finally, solving the matrix.
 	// The most efficient approach is Gaussian elimination: An alternative
@@ -930,7 +919,7 @@ bool cauchy_decode(int k, int m, Block *blocks, int block_bytes) {
 	// Gaussian elimination to put matrix in upper triangular form
 	gaussian_elimination(recovery_count, recovery, bitmatrix, bitstride, subbytes);
 
-	print_matrix(bitmatrix, bitstride, recovery_count * 8);
+	DLOG(print_matrix(bitmatrix, bitstride, recovery_count * 8);)
 
 	// The matrix is now in an upper-triangular form, and can be worked from
 	// right to left to conceptually produce an identity matrix.  The matrix
@@ -954,9 +943,9 @@ int main() {
 
 	cout << "Cauchy matrix solver" << endl;
 
-	int block_bytes = 8 * 2; // a multiple of 8
-	int block_count = 2;
-	int recovery_block_count = 2;
+	int block_bytes = 8 * 162; // a multiple of 8
+	int block_count = 29;
+	int recovery_block_count = 6;
 
 	u8 *data = new u8[block_bytes * block_count];
 	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
@@ -977,19 +966,19 @@ int main() {
 
 	Block *blocks = new Block[block_count];
 
-	cout << "Original data:" << endl;
+	DLOG(cout << "Original data:" << endl;)
 	for (int ii = 0; ii < block_count; ++ii) {
 		blocks[ii].data = data + ii * block_bytes;
 		blocks[ii].row = ii;
-		print(blocks[ii].data, block_bytes);
+		DLOG(print(blocks[ii].data, block_bytes);)
 	}
 
 	// Erase first block
 	const int erasures_count = 1;
 	const int replace_row = 1;
 	int original_remaining = block_count - erasures_count;
-	blocks[replace_row].data = recovery_blocks + block_bytes;
-	blocks[replace_row].row = block_count + 1;
+	blocks[replace_row].data = recovery_blocks;
+	blocks[replace_row].row = block_count;
 	//blocks[0].data = recovery_blocks + block_bytes;
 	//blocks[0].row = block_count + 1;
 	int erasures[1] = {
@@ -1004,7 +993,7 @@ int main() {
 
 	for (int ii = 0; ii < erasures_count; ++ii) {
 		int erasure_index = erasures[ii];
-		print(blocks[erasure_index].data, block_bytes);
+		DLOG(print(blocks[erasure_index].data, block_bytes);)
 		assert(!memcmp(blocks[erasure_index].data, data + blocks[erasure_index].row * block_bytes, block_bytes));
 	}
 
