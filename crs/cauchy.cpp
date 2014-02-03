@@ -11,7 +11,7 @@ using namespace cat;
 
 static Clock m_clock;
 
-#define DLOG(x)
+#define DLOG(x) x
 
 void print(const u8 *data, int bytes) {
 	int sep = bytes / 8;
@@ -525,8 +525,10 @@ bool cauchy_encode(int k, int m, const u8 *data, u8 *recovery_blocks, int block_
 		const u8 *src = data;
 
 		// For each symbol column,
-		for (int x = 0; x < k; ++x, ++row, src += block_bytes) {
-			u8 slice = row[0];
+		const u8 *column = row;
+		for (int x = 0; x < k; ++x, ++column, src += block_bytes) {
+			u8 slice = column[0];
+			DLOG(cout << "ENCODE: Using " << (int)slice << " at " << x << ", " << y << endl;)
 			u8 *dest = out;
 
 			// Generate 8x8 submatrix and XOR in bits as needed
@@ -715,6 +717,7 @@ static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 				}
 			}
 		} else {
+			DLOG(cout << "For recovery row " << recovery_row << endl;)
 			// Otherwise read the elements of the matrix
 			const u8 *row = matrix + (recovery_row - 1) * stride;
 
@@ -735,6 +738,8 @@ static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 				u8 slice = row[*erasure++];
 				w[0] = (u64)slice;
 
+				DLOG(cout << "+ Generating 8x8 submatrix from slice=" << (int)slice << endl;)
+
 				for (int ii = 1; ii < 8; ++ii) {
 					slice = GFC256Multiply(slice, 2);
 					w[ii] = (u64)slice;
@@ -743,6 +748,7 @@ static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 				// For each remaining 8 bit slice,
 				for (int shift = 8; --limit > 0; shift += 8) {
 					slice = row[*erasure++];
+					DLOG(cout << "+ Generating 8x8 submatrix from slice=" << (int)slice << endl;)
 					w[0] |= (u64)slice << shift;
 
 					for (int ii = 1; ii < 8; ++ii) {
@@ -757,6 +763,8 @@ static u64 *generate_bitmatrix(int k, Block *recovery[256], int recovery_count,
 					out[0] = w[ii];
 				}
 			}
+
+			bitrow += bitstride * 8;
 		}
 
 		// Set the row to what the final recovered row will be
@@ -775,7 +783,8 @@ static void gaussian_elimination(int rows, Block *recovery[256], u64 *bitmatrix,
 	u64 *base = bitmatrix;
 	for (int pivot = 0; pivot < bit_rows - 1; ++pivot, mask = CAT_ROL64(mask, 1), base += bitstride) {
 		int pivot_word = pivot >> 6;
-		u64 *row = base + pivot_word;
+		u64 *offset = base + pivot_word;
+		u64 *row = offset;
 
 		// For each option,
 		for (int option = pivot; option < bit_rows; ++option, row += bitstride) {
@@ -783,6 +792,8 @@ static void gaussian_elimination(int rows, Block *recovery[256], u64 *bitmatrix,
 			if (row[0] & mask) {
 				// Prepare to add in data
 				u8 *src = recovery[pivot >> 3]->data + (pivot & 7) * subbytes;
+				DLOG(cout << "Found pivot " << pivot << endl;)
+				DLOG(print_matrix(bitmatrix, bitstride, bit_rows);)
 
 				// If the rows were out of order,
 				if (option != pivot) {
@@ -791,7 +802,7 @@ static void gaussian_elimination(int rows, Block *recovery[256], u64 *bitmatrix,
 					memswap(src, data, subbytes);
 
 					// Reorder matrix rows
-					memswap(row, base + pivot_word, (bitstride - pivot_word) << 3);
+					memswap(row, offset, (bitstride - pivot_word) << 3);
 				}
 
 				// For each other row,
@@ -801,9 +812,10 @@ static void gaussian_elimination(int rows, Block *recovery[256], u64 *bitmatrix,
 
 					// If that row also has the bit set,
 					if (other[0] & mask) {
+						DLOG(cout << "Eliminating from row " << option << endl;)
 						// For each remaining word,
 						for (int ii = 0; ii < bitstride - (pivot >> 6); ++ii) {
-							other[ii] ^= row[ii];
+							other[ii] ^= offset[ii];
 						}
 
 						// Add in the data
@@ -825,8 +837,11 @@ static void back_substitution(int rows, Block *recovery[256], u64 *bitmatrix, in
 		const u64 *offset = bitmatrix + (pivot >> 6);
 		const u64 mask = (u64)1 << (pivot & 63);
 
+		DLOG(cout << "BS pivot " << pivot << endl;)
+
 		for (int other_row = pivot - 1; other_row >= 0; --other_row) {
 			if (offset[bitstride * other_row] & mask) {
+				DLOG(cout << "+ Backsub to row " << other_row << endl;)
 				u8 *dest = recovery[other_row >> 3]->data + (other_row & 7) * subbytes;
 
 				memxor(dest, src, subbytes);
@@ -943,9 +958,9 @@ int main() {
 
 	cout << "Cauchy matrix solver" << endl;
 
-	int block_bytes = 8 * 162; // a multiple of 8
-	int block_count = 29;
-	int recovery_block_count = 6;
+	int block_bytes = 8 * 4; // a multiple of 8
+	int block_count = 3;
+	int recovery_block_count = 3;
 
 	u8 *data = new u8[block_bytes * block_count];
 	u8 *recovery_blocks = new u8[block_bytes * recovery_block_count];
@@ -974,16 +989,14 @@ int main() {
 	}
 
 	// Erase first block
-	const int erasures_count = 1;
-	const int replace_row = 1;
+	const int erasures_count = 3;
 	int original_remaining = block_count - erasures_count;
-	blocks[replace_row].data = recovery_blocks;
-	blocks[replace_row].row = block_count;
-	//blocks[0].data = recovery_blocks + block_bytes;
-	//blocks[0].row = block_count + 1;
-	int erasures[1] = {
-		replace_row
-	};
+	int erasures[256];
+	for (int ii = 1; ii < erasures_count; ++ii) {
+		blocks[ii].data = recovery_blocks + ii * block_bytes;
+		blocks[ii].row = block_count + ii;
+		erasures[ii] = ii;
+	}
 
 	t0 = m_clock.usec();
 
@@ -993,7 +1006,12 @@ int main() {
 
 	for (int ii = 0; ii < erasures_count; ++ii) {
 		int erasure_index = erasures[ii];
+		cout << "Data erasure " << ii << " and row=" << (int)blocks[erasure_index].row << endl;
 		DLOG(print(blocks[erasure_index].data, block_bytes);)
+	}
+	for (int ii = 0; ii < erasures_count; ++ii) {
+		int erasure_index = erasures[ii];
+		cout << "At row " << (int)blocks[erasure_index].row << endl;
 		assert(!memcmp(blocks[erasure_index].data, data + blocks[erasure_index].row * block_bytes, block_bytes));
 	}
 
