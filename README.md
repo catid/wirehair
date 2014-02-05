@@ -187,7 +187,7 @@ The rows are values of k (amount of data) and the columns are values of m (numbe
 Darker is better.  The main point of this plot is to just show that m doesn't
 factor much into the performance of the code.
 
-For comparison, CRS codes have the following type of performance graph:
+For comparison, CRS codes have the following type of performance graph (with the same color scale):
 
 ![alt text](https://github.com/catid/longhair/raw/master/docs/EncoderSpeed.png "Speed of Encoder for k, m")
 
