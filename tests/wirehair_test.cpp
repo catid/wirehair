@@ -60,7 +60,7 @@ int main()
 		}
 		double encode_time = sum / 10.;
 
-		for (u32 count = 0; count < (256 - N); ++count) {
+		for (u32 count = 0; count < 256; ++count) {
 			double t0 = m_clock.usec();
 			for (int ii = 0; ii < count; ++ii) {
 				assert(wirehair_write(encoder, ii, block));
