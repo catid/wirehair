@@ -175,6 +175,32 @@ wirehair_decode(N = 413) average overhead = 0.016 blocks, average reconstruct ti
 ~~~
 
 
+#### Discussion: Performance Comparison with Reed-Solomon Codes
+
+For values of N under 256, the Wirehair codec exhibits a different performance
+characteristic as compared to CRS codes (like those in Jerasure):
+
+![alt text](https://github.com/catid/wirehair/raw/master/docs/WirehairHeat.png "Speed of Encoder for k, m")
+
+The rows are values of k (amount of data) and the columns are values of m (number of recovery blocks added).
+
+Darker is better.  The main point of this plot is to just show that m doesn't
+factor much into the performance of the code.
+
+For comparison, CRS codes have the following type of performance graph:
+
+![alt text](https://github.com/catid/longhair/raw/master/docs/EncoderSpeed.png "Speed of Encoder for k, m")
+
+In the case of CRS codes, it is k that doesn't matter.
+
+CRS codes are much simpler, use less memory, and are deterministic, so when they
+can be used efficiently they are the better option.  My implementation of CRS
+codes is called [Longhair](https://github.com/catid/longhair).
+
+The issue is that CRS codes are very expensive to use in a lot of cases where
+Wirehair is more efficient, as shown above.
+
+
 #### Details
 
 Wirehair is an FEC codec used to improve reliability of data sent
