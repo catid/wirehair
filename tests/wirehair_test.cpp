@@ -34,6 +34,84 @@ int main()
 	const int block_bytes = 1300;
 	u8 block[block_bytes];
 
+	prng.Initialize(m_clock.msec(), Clock::cycles());
+
+	u8 heat_map[256 * 256] = { 0 };
+
+	for (int N = 2; N < 256; ++N) {
+		int bytes = block_bytes * N;
+		u8 *message_in = new u8[bytes];
+
+		// Fill input message with random data
+		for (int ii = 0; ii < bytes; ++ii) {
+			message_in[ii] = (u8)prng.Next();
+		}
+
+		double sum = 0;
+		for (int trials = 0; trials < 10; ++trials) {
+			double t0 = m_clock.usec();
+
+			// Initialize encoder
+			encoder = wirehair_encode(encoder, message_in, bytes, block_bytes);
+			assert(encoder);
+
+			double t1 = m_clock.usec();
+			sum += t1 - t0;
+		}
+		double encode_time = sum / 10.;
+
+		for (u32 count = 0; count < (256 - N); ++count) {
+			double t0 = m_clock.usec();
+			for (int ii = 0; ii < count; ++ii) {
+				assert(wirehair_write(encoder, ii, block));
+			}
+			double t1 = m_clock.usec();
+			double write_time = t1 - t0;
+
+			double overall = encode_time + write_time;
+			int speed = block_bytes * N / overall;
+
+			u8 map_value = 0;
+
+			if (speed < 10) {
+				map_value = 1;
+			} else if (speed < 50) {
+				map_value = 2;
+			} else if (speed < 100) {
+				map_value = 3;
+			} else if (speed < 200) {
+				map_value = 4;
+			} else if (speed < 300) {
+				map_value = 5;
+			} else if (speed < 400) {
+				map_value = 6;
+			} else if (speed < 500) {
+				map_value = 7;
+			} else {
+				map_value = 8;
+			}
+
+			heat_map[N * 256 + count] = map_value;
+		}
+
+		assert(N == wirehair_count(encoder));
+
+		delete []message_in;
+	}
+
+	ofstream file;
+	file.open("heatmap.txt");
+
+	for (int ii = 0; ii < 256; ++ii) {
+		file << ii << ", ";
+		for (int jj = 0; jj < 256; ++jj) {
+			u8 map_value = heat_map[ii * 256 + jj];
+
+			file << (int)map_value << ",";
+		}
+		file << endl;
+	}
+
 	// Try each value for N
 	for (int N = 2; N <= 64000; ++N)
 	{
