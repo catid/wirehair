@@ -1,5 +1,5 @@
 # Wirehair
-## Fast and Portable Erasure Codes in C
+## Fast and Portable Fountain Codes in C
 
 Wirehair produces a stream of error correction blocks from a data source
 using an erasure code.  When enough of these blocks are received,
@@ -13,132 +13,149 @@ projects.
 
 ##### Building: Quick Setup
 
-The [wirehair-mobile](https://github.com/catid/wirehair/tree/master/wirehair-mobile)
-directory contains an easy-to-import set of C code that also
-builds properly for mobile devices.
+The source code in this folder (gf256 and wirehair code) can be incorporated
+into your project without any other external dependencies.
+
+The proj folder contains Visual Studio project files for Windows builds.
+There is a CMakeLists file to build it on other platforms.
 
 
-#### Usage: Encoder
+#### Example Usage
 
-On startup, verify that the Wirehair library is linked correctly:
-
-~~~
-	if (!wirehair_init()) {
-		// Wrong wirehair static library linked
-		exit(1);
-	}
-~~~
-
-Create an encoder object, providing the message to encode, the number of
-bytes in the message, and the number of bytes in each block.  The message
-will get broken into equal-sized blocks.
+Here's an example program using Wirehair.  It's included in the UnitTest project and demonstrates both the sender and receiver, which are normally separate programs.  For example the data sender might be a file server and the data receiver might be downloading a file from the sender.
 
 ~~~
-	char *message = ...;
-	int bytes = 1000000;
-	int block_bytes = 1300;
+static bool ReadmeExample()
+{
+    // Size of packets to produce
+    static const int kPacketSize = 1400;
 
-	wirehair_state encoder = 0;
+    // Note: Does not need to be an even multiple of packet size or 16 etc
+    static const int kMessageBytes = 1000 * 1000 + 333;
 
-	encoder = wirehair_encode(0, message, bytes, block_bytes);
-	assert(encoder);
+    vector<uint8_t> message(kMessageBytes);
 
-	// The encoder object can now be used to write blocks
+    // Fill message contents
+    memset(&message[0], 1, message.size());
+
+    // Create encoder
+    WirehairCodec encoder = wirehair_encoder_create(nullptr, &message[0], kMessageBytes, kPacketSize);
+    if (!encoder)
+    {
+        cout << "!!! Failed to create encoder" << endl;
+        return false;
+    }
+
+    // Create decoder
+    WirehairCodec decoder = wirehair_decoder_create(nullptr, kMessageBytes, kPacketSize);
+    if (!decoder)
+    {
+        // Free memory for encoder
+        wirehair_free(encoder);
+
+        cout << "!!! Failed to create decoder" << endl;
+        return false;
+    }
+
+    unsigned blockId = 0, needed = 0;
+
+    for (;;)
+    {
+        // Select which block to encode.
+        // Note: First N blocks are the original data, so it's possible to start
+        // sending data while wirehair_encoder_create() is getting started.
+        blockId++;
+
+        // Simulate 10% packetloss
+        if (blockId % 10 == 0) {
+            continue;
+        }
+
+        // Keep track of how many pieces were needed
+        ++needed;
+
+        vector<uint8_t> block(kPacketSize);
+
+        // Encode a packet
+        uint32_t writeLen = 0;
+        WirehairResult encodeResult = wirehair_encode(
+            encoder, // Encoder object
+            blockId, // ID of block to generate
+            &block[0], // Output buffer
+            kPacketSize, // Output buffer size
+            &writeLen); // Returned block length
+
+        if (encodeResult != Wirehair_Success)
+        {
+            cout << "wirehair_encode failed: " << encodeResult << endl;
+            return false;
+        }
+
+        // Attempt decode
+        WirehairResult decodeResult = wirehair_decode(
+            decoder, // Decoder object
+            blockId, // ID of block that was encoded
+            &block[0], // Input block
+            writeLen); // Block length
+
+        // If decoder returns success:
+        if (decodeResult == Wirehair_Success) {
+            // Decoder has enough data to recover now
+            break;
+        }
+
+        if (decodeResult != Wirehair_NeedMore)
+        {
+            cout << "wirehair_decode failed: " << decodeResult << endl;
+            return false;
+        }
+    }
+
+    vector<uint8_t> decoded(kMessageBytes);
+
+    // Recover original data on decoder side
+    WirehairResult decodeResult = wirehair_recover(
+        decoder,
+        &decoded[0],
+        kMessageBytes);
+
+    if (decodeResult != Wirehair_Success)
+    {
+        cout << "wirehair_recover failed: " << decodeResult << endl;
+        return false;
+    }
+
+    // Free memory for encoder and decoder
+    wirehair_free(encoder);
+    wirehair_free(decoder);
+
+    return true;
+}
+
+int main()
+{
+    const WirehairResult initResult = wirehair_init();
+
+    if (initResult != Wirehair_Success)
+    {
+        SIAMESE_DEBUG_BREAK();
+        cout << "!!! Wirehair nitialization failed: " << initResult << endl;
+        return -1;
+    }
+
+    if (!ReadmeExample())
+    {
+        SIAMESE_DEBUG_BREAK();
+        cout << "!!! Example usage failed" << endl;
+        return -2;
+    }
+...
 ~~~
-
-To check how many blocks are in the message:
-
-~~~
-	int N = wirehair_count(encoder);
-
-	// N = number of blocks in message
-~~~
-
-Each time a block will be written it should be assigned a unique ID number,
-starting from 0 and incremented by one each time:
-
-~~~
-	char block[1300];
-	unsigned int ID = ...;
-
-	if (!wirehair_write(encoder, ID, block)) {
-		exit(1);
-	}
-~~~
-
-When you are done with the encoder, you can either free the encoder object
-to reclaim the memory, or reuse the encoder object again.  To reuse the
-object, pass it as the first argument to `wirehair_encode`.  To free the
-object:
-
-~~~
-	wirehair_free(encoder);
-~~~
-
-
-#### Usage: Decoder
-
-On startup, verify that the Wirehair library is linked correctly as in
-the encoder case.
-
-A decoder object should be created by providing the size of the message
-and the number of bytes per block:
-
-~~~
-	int bytes = 1000000..;
-	int block_bytes = 1300;
-
-	wirehair_state decoder = 0;
-
-	decoder = wirehair_decode(0, bytes, block_bytes);
-	assert(decoder);
-
-	// The decoder object can now be used to decode the message
-~~~
-
-To check how many blocks are in the message:
-
-~~~
-	int N = wirehair_count(decoder);
-
-	// N = number of blocks in message
-~~~
-
-To decode a message one received block at a time:
-
-~~~
-	unsigned int ID = ...;
-
-	// If reading is done,
-	if (wirehair_read(decoder, ID, block)) {
-
-		char *message = new char[bytes];
-
-		// Decode message
-		wirehair_reconstruct(decoder, message);
-	}
-~~~
-
-Note that the `wirehair_reconstruct` function is used to produce the
-decoded message.  This is suitable for file transfer applications.
-For packet error correction, a more suitable function is provided:
-
-~~~
-	char block[1300];
-	unsigned int ID = ...;
-
-	wirehair_reconstruct_block(decoder, ID, block);
-~~~
-
-The [Shorthair project](https://github.com/catid/shorthair) is designed
-to implement efficient variable-length packet error correction using
-Wirehair on the backend.
-
-Similar to the encoder, you may either free or reuse the decoder object
-in the exact same way as the encoder.
 
 
 #### Benchmarks
+
+TBD: These need to be updated.  It's about 3x faster than it used to be, and the overhead is much lower.
 
 ##### libwirehair.a on Macbook Air (1.7 GHz Core i5-2557M Sandy Bridge, July 2011):
 
@@ -175,76 +192,8 @@ wirehair_decode(N = 413) average overhead = 0.016 blocks, average reconstruct ti
 ~~~
 
 
-#### Discussion: Performance Comparison with Reed-Solomon Codes
-
-For values of N under 256, the Wirehair codec exhibits a different performance
-characteristic as compared to CRS codes (like those in Jerasure):
-
-![alt text](https://github.com/catid/wirehair/raw/master/docs/WirehairHeat.png "Speed of Encoder for k, m")
-
-The rows are values of k (amount of data) and the columns are values of m (number of recovery blocks added).
-
-Darker is better.  The main point of this plot is to just show that m doesn't
-factor much into the performance of the code.
-
-For comparison, CRS codes have the following type of performance graph (with the same color scale):
-
-![alt text](https://github.com/catid/longhair/raw/master/docs/EncoderSpeed.png "Speed of Encoder for k, m")
-
-In the case of CRS codes, it is k that doesn't matter.
-
-CRS codes are much simpler, use less memory, and are deterministic, so when they
-can be used efficiently they are the better option.  My implementation of CRS
-codes is called [Longhair](https://github.com/catid/longhair).
-
-The issue is that CRS codes are very expensive to use in a lot of cases where
-Wirehair is more efficient, as shown above.
-
-
-#### Details
-
-Wirehair is an FEC codec used to improve reliability of data sent
-over a Binary Erasure Channel (BEC) such as satellite Internet or WiFi.
-The data to transmit over the BEC is encoded into equal-sized blocks.
-When enough blocks are received at the other end of the channel, then
-the original data can be recovered.
-
-How many additional blocks are needed is random, though the number
-of additional blocks is low and does not vary based on the size of the
-data.  Typical overhead is 0.03 additional blocks.
-
-Wirehair is designed to be competitive in performance with FEC based
-on Vandermonde matrices such as zfec, while allowing far more than
-256 file blocks (it works best at N=1024 blocks).  Furthermore, it
-can generate a stream of output that goes on forever, which has good
-recovery properties for any part of that stream that is received,
-rather than a fixed number of output blocks, making it far more
-flexible than other libraries.
-
-
-##### Discussion: Overhead Reductions with GF(2^16)
-
-Wirehair uses a random 6x18 GF(256) matrix to achieve its low 3%
-recovery failure rate despite doing most of the calculations on a
-large sparse binary matrix.
-
-It is trivially possible to decrease the overhead to 0.1% or less
-by switching to a 9x20 GF(2^16) matrix.  I've explored this option
-and found that it is roughly twice as slow for small block counts,
-but similar in performance for N >= 1000, since the GF(2^16) matrix
-does not grow larger.
-
-For worst-case file transfer UDP payloads of roughly 1300 bytes,
-the average extra bytes needing to be transmitted due to the <3%
-failure rate is under 40 bytes.  Paying a steep performance penalty
-to reduce this overhead to 4 bytes seems like it is not worth it.
-For moderately sized messages, 40 bytes is dwarfed by other sources
-of overhead.  If your application needs it, the 16-bit version is
-available in the source code though it has not been fully tuned.
-
-
 #### Credits
 
-This software was written entirely by myself ( Christopher A. Taylor <mrcatid@gmail.com> ).  If you
-find it useful and would like to buy me a coffee, consider [tipping](https://www.gittip.com/catid/).
+Software by Christopher A. Taylor <mrcatid@gmail.com>
 
+Please reach out if you need support or would like to collaborate on a project.
