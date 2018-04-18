@@ -234,7 +234,9 @@ TryNext:
 
     This is generated and unit tested in TableGenerator.cpp
 */
+
 static const unsigned kMatrixSeedCount = 512;
+
 static const uint8_t kInvertibleMatrixSeeds[kMatrixSeedCount] = {
     0,1,4,2,0,12,0,1,1,0,2,2,1,4,1,1,1,9,9,1,0,0,0,0,2,2,2,4,3,4,1,1,
     0,0,0,0,7,1,6,2,5,1,0,4,0,0,10,0,11,3,3,2,10,0,0,0,0,0,0,1,0,0,1,6,
@@ -832,7 +834,7 @@ static const DensePoint kDensePoints[kDensePointCount] = {
 };
 
 /// Interpolate between two values of N and corresponding counts.
-/// It works for Count1 < Count 0.
+/// It works for Count1 < Count0
 static uint16_t LinearInterpolate(
     int N0, int N1,
     int Count0, int Count1,
@@ -870,7 +872,7 @@ uint16_t GetDenseCount(unsigned N)
             lowPoint.DenseCount = 35;
             highPoint.DenseCount = 48;
         }
-        else // if (N <= 2048)
+        else // if (N < 2048)
         {
             lowPoint.N = 1000;
             highPoint.N = 2048;
@@ -892,9 +894,9 @@ uint16_t GetDenseCount(unsigned N)
                 break;
             }
 
-            const DensePoint point = kDensePoints[mid];
+            const DensePoint midPoint = kDensePoints[mid];
 
-            if (N > point.N) {
+            if (N > midPoint.N) {
                 low = mid;
             }
             else {
