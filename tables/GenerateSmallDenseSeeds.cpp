@@ -17,7 +17,7 @@ using namespace std;
 // the ones that tend to fail too much can be put in this list and
 // refined further.
 static const int N_List[] = {
-    1045 ,
+    12 ,
 };
 // This only works up to 2047.  After that the GenerateMostDenseSeeds
 // and GeneratePeelSeeds programs take over.
@@ -179,7 +179,7 @@ static void RandomPeelLoss(
 
         uint8_t encodedData[1];
 
-        const uint32_t encodedBytes = encoder.Encode(i, encodedData);
+        const uint32_t encodedBytes = encoder.Encode(i, encodedData, 1);
 
         if (encodedBytes == 0)
         {

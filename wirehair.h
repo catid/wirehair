@@ -68,10 +68,7 @@
 
 
 #ifdef __cplusplus
-#define TONK_CPP(x) x
 extern "C" {
-#else
-#define TONK_CPP(x)
 #endif
 
 

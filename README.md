@@ -3,12 +3,21 @@
 
 Wirehair produces a stream of error correction blocks from a data source
 using an erasure code.  When enough of these blocks are received,
-the original data can be recovered.  As compared to other similar
-libraries, an unlimited number of error correction blocks can be produced,
-and much larger block counts are supported.
+the original data can be recovered.
+
+As compared to other similar libraries, an unlimited number of error
+correction blocks can be produced, and much larger block counts are supported.
+Furthermore, it gets slower as O(N) in the amount of input data rather
+than O(N Log N) like the Leopard block code or O(N^2) like the Fecal fountain code,
+so it is well-suited for large data.
+
+This is not an ideal MDS code, so sometimes it will fail to recover N
+original data packets from N symbol packets.  It may take N + 1 or N + 2 or more.
+On average it takes about N + 0.02 packets to recover.  Overall the overhead
+from the code inefficiency is low, compared to LDPC and many other fountain codes.
 
 A simple C API is provided to make it easy to incorporate into existing
-projects.
+projects.  No external dependencies are required.
 
 
 ##### Building: Quick Setup
@@ -139,7 +148,7 @@ int main()
     if (initResult != Wirehair_Success)
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "!!! Wirehair nitialization failed: " << initResult << endl;
+        cout << "!!! Wirehair initialization failed: " << initResult << endl;
         return -1;
     }
 
@@ -155,40 +164,111 @@ int main()
 
 #### Benchmarks
 
-TBD: These need to be updated.  It's about 3x faster than it used to be, and the overhead is much lower.
+Some quick comments:
 
-##### libwirehair.a on Macbook Air (1.7 GHz Core i5-2557M Sandy Bridge, July 2011):
+Benchmarks on my PC do not mean a whole lot.  Right now it's clocked at 3 GHz and has Turbo Boost on, etc.
+To run the test yourself just build and run the UnitTest project in Release mode.
 
-Turbo Boost is turned on for these computations.  The block size is 1300 bytes
-simulating a file transfer protocol over UDP.
+For small values of N < 128 or so this is a pretty inefficient codec compared to the Fecal codec.  Fecal is also a fountain code but is limited to repairing a small number of failures or small input block count.
 
 ~~~
-wirehair_encode(N = 12) in 150 usec, 104 MB/s
-wirehair_decode(N = 12) average overhead = 0.009 blocks, average reconstruct time = 134.786 usec, 115.739 MB/s
+For N = 2 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 11 usec (236.364 MBPS)
++ Average wirehair_encode() time: 0 usec (8673.84 MBPS)
++ Average wirehair_decode() time: 2 usec (482.724 MBPS)
++ Average overhead piece count beyond N = 0.015
++ Average wirehair_recover() time: 0 usec (9701.49 MBPS)
 
-wirehair_encode(N = 32) in 198 usec, 210.101 MB/s
-wirehair_decode(N = 32) average overhead = 0.027 blocks, average reconstruct time = 190.22 usec, 218.694 MB/s
+For N = 4 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 8 usec (650 MBPS)
++ Average wirehair_encode() time: 0 usec (8354.32 MBPS)
++ Average wirehair_decode() time: 1 usec (708.281 MBPS)
++ Average overhead piece count beyond N = 0.0165
++ Average wirehair_recover() time: 0 usec (10547.7 MBPS)
 
-wirehair_encode(N = 102) in 310 usec, 427.742 MB/s
-wirehair_decode(N = 102) average overhead = 0.016 blocks, average reconstruct time = 378.212 usec, 350.597 MB/s
+For N = 8 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 13 usec (800 MBPS)
++ Average wirehair_encode() time: 0 usec (8852.28 MBPS)
++ Average wirehair_decode() time: 1 usec (707.544 MBPS)
++ Average overhead piece count beyond N = 0.0045
++ Average wirehair_recover() time: 1 usec (9130.82 MBPS)
 
-wirehair_encode(N = 134) in 416 usec, 418.75 MB/s
-wirehair_decode(N = 134) average overhead = 0.023 blocks, average reconstruct time = 497.412 usec, 350.213 MB/s
+For N = 16 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 26 usec (800 MBPS)
++ Average wirehair_encode() time: 0 usec (9029.06 MBPS)
++ Average wirehair_decode() time: 1 usec (715.655 MBPS)
++ Average overhead piece count beyond N = 0.037
++ Average wirehair_recover() time: 2 usec (9363.04 MBPS)
 
-wirehair_encode(N = 169) in 525 usec, 418.476 MB/s
-wirehair_decode(N = 169) average overhead = 0.022 blocks, average reconstruct time = 712.778 usec, 308.231 MB/s
+For N = 32 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 40 usec (1040 MBPS)
++ Average wirehair_encode() time: 0 usec (8178.93 MBPS)
++ Average wirehair_decode() time: 1 usec (934.853 MBPS)
++ Average overhead piece count beyond N = 0.0205
++ Average wirehair_recover() time: 5 usec (8192.2 MBPS)
 
-wirehair_encode(N = 201) in 654 usec, 399.541 MB/s
-wirehair_decode(N = 201) average overhead = 0.019 blocks, average reconstruct time = 798.307 usec, 327.318 MB/s
+For N = 64 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 83 usec (1002.41 MBPS)
++ Average wirehair_encode() time: 0 usec (7340.91 MBPS)
++ Average wirehair_decode() time: 1 usec (1004.77 MBPS)
++ Average overhead piece count beyond N = 0.024
++ Average wirehair_recover() time: 11 usec (7409.06 MBPS)
 
-wirehair_encode(N = 294) in 852 usec, 448.592 MB/s
-wirehair_decode(N = 294) average overhead = 0.018 blocks, average reconstruct time = 1048.08 usec, 364.668 MB/s
+For N = 128 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 196 usec (848.98 MBPS)
++ Average wirehair_encode() time: 0 usec (6068.85 MBPS)
++ Average wirehair_decode() time: 1 usec (854.2 MBPS)
++ Average overhead piece count beyond N = 0.02
++ Average wirehair_recover() time: 26 usec (6275.69 MBPS)
 
-wirehair_encode(N = 359) in 1176 usec, 396.854 MB/s
-wirehair_decode(N = 359) average overhead = 0.021 blocks, average reconstruct time = 1210.73 usec, 385.471 MB/s
+For N = 256 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 330 usec (1008.48 MBPS)
++ Average wirehair_encode() time: 0 usec (6709.24 MBPS)
++ Average wirehair_decode() time: 1 usec (994.742 MBPS)
++ Average overhead piece count beyond N = 0.0245
++ Average wirehair_recover() time: 51 usec (6491.95 MBPS)
 
-wirehair_encode(N = 413) in 1128 usec, 475.975 MB/s
-wirehair_decode(N = 413) average overhead = 0.016 blocks, average reconstruct time = 1538.1 usec, 349.067 MB/s
+For N = 512 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 677 usec (983.161 MBPS)
++ Average wirehair_encode() time: 0 usec (6701.32 MBPS)
++ Average wirehair_decode() time: 1 usec (978.883 MBPS)
++ Average overhead piece count beyond N = 0.0245
++ Average wirehair_recover() time: 104 usec (6343.52 MBPS)
+
+For N = 1024 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 1723 usec (772.606 MBPS)
++ Average wirehair_encode() time: 0 usec (5463.55 MBPS)
++ Average wirehair_decode() time: 2 usec (637.944 MBPS)
++ Average overhead piece count beyond N = 0.017
++ Average wirehair_recover() time: 218 usec (6085.25 MBPS)
+
+For N = 2048 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 3307 usec (805.08 MBPS)
++ Average wirehair_encode() time: 0 usec (5199.33 MBPS)
++ Average wirehair_decode() time: 1 usec (650.556 MBPS)
++ Average overhead piece count beyond N = 0.026
++ Average wirehair_recover() time: 448 usec (5929.76 MBPS)
+
+For N = 4096 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 7836 usec (679.53 MBPS)
++ Average wirehair_encode() time: 0 usec (4447.8 MBPS)
++ Average wirehair_decode() time: 2 usec (561.758 MBPS)
++ Average overhead piece count beyond N = 0.013
++ Average wirehair_recover() time: 1239 usec (4295.54 MBPS)
+
+For N = 8192 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 17524 usec (607.715 MBPS)
++ Average wirehair_encode() time: 0 usec (3366.69 MBPS)
++ Average wirehair_decode() time: 2 usec (506.866 MBPS)
++ Average overhead piece count beyond N = 0.0165
++ Average wirehair_recover() time: 2995 usec (3555.25 MBPS)
+
+For N = 16384 packets of 1300 bytes:
++ Average wirehair_encoder_create() time: 43180 usec (493.265 MBPS)
++ Average wirehair_encode() time: 0 usec (2629.7 MBPS)
++ Average wirehair_decode() time: 3 usec (421.17 MBPS)
++ Average overhead piece count beyond N = 0.0395
++ Average wirehair_recover() time: 7608 usec (2799.48 MBPS)
 ~~~
 
 

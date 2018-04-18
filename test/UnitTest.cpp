@@ -698,6 +698,185 @@ static bool ReadmeExample()
     return true;
 }
 
+static bool Benchmark(unsigned N, unsigned packetBytes, unsigned trials)
+{
+    siamese::PCGRandom prng;
+    prng.Seed(N, 0);
+
+    const unsigned kBlockBytes = packetBytes;
+    const unsigned kMessageBytes = N * kBlockBytes;
+
+    vector<uint8_t> message(kMessageBytes);
+    vector<uint8_t> block(kBlockBytes);
+    vector<uint8_t> decoded(kMessageBytes);
+
+    memset(&message[0], 6, kMessageBytes);
+
+    uint64_t encode_create_sum = 0;
+    uint64_t runs = 0;
+    uint64_t extra_sum = 0;
+    uint64_t encode_sum = 0;
+    uint64_t decode_sum = 0;
+    uint64_t packets = 0;
+    uint64_t recover_sum = 0;
+
+    for (unsigned trial = 0; trial < trials; ++trial)
+    {
+        ++runs;
+
+        uint64_t t0 = siamese::GetTimeUsec();
+
+        WirehairCodec encoder = wirehair_encoder_create(nullptr, &message[0], kMessageBytes, kBlockBytes);
+        if (!encoder)
+        {
+            SIAMESE_DEBUG_BREAK();
+            cout << "!!! Failed to create encoder" << endl;
+            return false;
+        }
+
+        uint64_t t1 = siamese::GetTimeUsec();
+
+        WirehairCodec decoder = wirehair_decoder_create(nullptr, kMessageBytes, kBlockBytes);
+        if (!decoder)
+        {
+            SIAMESE_DEBUG_BREAK();
+            cout << "!!! Failed to create decoder" << endl;
+            return false;
+        }
+
+        encode_create_sum += t1 - t0;
+
+        unsigned blockId = 0;
+        unsigned needed = 0;
+        for (;;)
+        {
+            blockId++;
+
+            // Introduce about 30% loss to the data
+            if (prng.Next() % 100 < 30) {
+                continue;
+            }
+
+            ++needed;
+
+            uint64_t t3 = siamese::GetTimeUsec();
+
+            uint32_t writeLen = 0;
+            WirehairResult encodeResult = wirehair_encode(
+                encoder,
+                blockId,
+                &block[0],
+                kBlockBytes,
+                &writeLen);
+            if (encodeResult != Wirehair_Success)
+            {
+                SIAMESE_DEBUG_BREAK();
+                cout << "wirehair_encode failed" << endl;
+                return false;
+            }
+
+            uint64_t t4 = siamese::GetTimeUsec();
+
+            WirehairResult decodeResult = wirehair_decode(decoder, blockId, &block[0], writeLen);
+
+            uint64_t t5 = siamese::GetTimeUsec();
+
+            encode_sum += t4 - t3;
+            decode_sum += t5 - t4;
+            ++packets;
+
+            if (decodeResult != Wirehair_NeedMore)
+            {
+                if (decodeResult == Wirehair_Success) {
+                    break;
+                }
+
+                SIAMESE_DEBUG_BREAK();
+                cout << "wirehair_decode failed for " << blockId << " and N = " << N << endl;
+                return false;
+            }
+        }
+
+        SIAMESE_DEBUG_ASSERT(needed >= N);
+        extra_sum += needed - N;
+
+        uint64_t t7 = siamese::GetTimeUsec();
+
+        WirehairResult recoverResult = wirehair_recover(decoder, &decoded[0], kMessageBytes);
+
+        uint64_t t8 = siamese::GetTimeUsec();
+
+        if (recoverResult != Wirehair_Success)
+        {
+            SIAMESE_DEBUG_BREAK();
+            cout << "wirehair_recover failed" << endl;
+            return false;
+        }
+
+        recover_sum += t8 - t7;
+
+        wirehair_free(decoder);
+        wirehair_free(encoder);
+    }
+
+    cout << "For N = " << N << " packets of " << packetBytes << " bytes:" << endl;
+
+    uint64_t avg_encode_create_usec = encode_create_sum / runs;
+
+    float encode_create_MBPS = 0.f;
+    if (avg_encode_create_usec > 0) {
+        encode_create_MBPS = kMessageBytes / (float)avg_encode_create_usec;
+    }
+
+    cout << "+ Average wirehair_encoder_create() time: " << avg_encode_create_usec << " usec (" << encode_create_MBPS << " MBPS)" << endl;
+    // wirehair_decoder_create() is super fast.  So is the decoder_becomes_encoder() most of the time
+
+    uint64_t avg_encode_usec = encode_sum / packets;
+    uint64_t avg_decode_usec = decode_sum / packets;
+
+    float encode_MBPS = 0.f, decode_MBPS = 0.f;
+    if (encode_sum > 0) {
+        encode_MBPS = (packets * kBlockBytes) / (float)encode_sum;
+    }
+    if (decode_sum > 0) {
+        decode_MBPS = (packets * kBlockBytes) / (float)decode_sum;
+    }
+
+    cout << "+ Average wirehair_encode() time: " << avg_encode_usec << " usec (" << encode_MBPS << " MBPS)" << endl;
+    cout << "+ Average wirehair_decode() time: " << avg_decode_usec << " usec (" << decode_MBPS << " MBPS)" << endl;
+
+    float avg_overhead_pieces = extra_sum / (float)runs;
+
+    cout << "+ Average overhead piece count beyond N = " << avg_overhead_pieces << endl;
+
+    uint64_t avg_recover_usec = recover_sum / runs;
+
+    float recover_MBPS = 0.f;
+    if (recover_sum > 0) {
+        recover_MBPS = (runs * kMessageBytes) / (float)recover_sum;
+    }
+
+    cout << "+ Average wirehair_recover() time: " << avg_recover_usec << " usec (" << recover_MBPS << " MBPS)" << endl;
+
+    return true;
+}
+
+static const unsigned kBenchmarkNList[] = {
+    12,
+    32,
+    102,
+    134,
+    169,
+    201,
+    294,
+    359,
+    413,
+    770,
+    1000
+};
+
+#define BENCHMARK_SHORT_LIST
+
 int main()
 {
     const WirehairResult initResult = wirehair_init();
@@ -705,7 +884,7 @@ int main()
     if (initResult != Wirehair_Success)
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "!!! Wirehair nitialization failed: " << initResult << endl;
+        cout << "!!! Wirehair initialization failed: " << initResult << endl;
         return -1;
     }
 
@@ -714,6 +893,25 @@ int main()
         SIAMESE_DEBUG_BREAK();
         cout << "!!! Example usage failed" << endl;
         return -2;
+    }
+
+#ifdef BENCHMARK_SHORT_LIST
+    for (unsigned i = 0; i < sizeof(kBenchmarkNList) / sizeof(kBenchmarkNList[0]); ++i)
+    {
+        const unsigned N = kBenchmarkNList[i];
+#else
+    for (unsigned N = 2; N < 64000; N *= 2)
+    {
+#endif
+        const unsigned kPacketBytes = 1300;
+        const unsigned kBenchTrials = 2000;
+
+        if (!Benchmark(N, kPacketBytes, kBenchTrials))
+        {
+            SIAMESE_DEBUG_BREAK();
+            cout << "!!! Benchmark failed" << endl;
+            return -3;
+        }
     }
 
     cout << "Wirehair Unit Test" << endl;

@@ -190,7 +190,7 @@ static void QuickPeelTest(
 
         uint8_t encodedData[1];
 
-        const uint32_t encodedBytes = encoder.Encode(i, encodedData);
+        const uint32_t encodedBytes = encoder.Encode(i, encodedData, 1);
 
         if (encodedBytes == 0)
         {
