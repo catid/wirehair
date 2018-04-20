@@ -19,9 +19,7 @@ static const int kTrials = 3500;
 // the ones that tend to fail too much can be put in this list and
 // refined further.
 static const int N_List[] = {
-    781,
-    1000,
-    1386
+    17,
 };
 // This only works up to 2047.  After that the GenerateMostDenseSeeds
 // and GeneratePeelSeeds programs take over.

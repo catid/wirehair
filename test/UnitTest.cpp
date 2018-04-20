@@ -10,6 +10,7 @@ using namespace std;
 #define ENABLE_OMP
 #define ENABLE_PARTIAL_FINAL
 #define ENABLE_ALL_RECOVERY_FINAL_BLOCK
+#define BENCHMARK_SHORT_LIST
 
 static const unsigned kMinN = 2;
 static const unsigned kMaxN = 64000;
@@ -701,7 +702,7 @@ static bool ReadmeExample()
 static bool Benchmark(unsigned N, unsigned packetBytes, unsigned trials)
 {
     siamese::PCGRandom prng;
-    prng.Seed(N, 0);
+    prng.Seed(N, packetBytes);
 
     const unsigned kBlockBytes = packetBytes;
     const unsigned kMessageBytes = N * kBlockBytes;
@@ -874,8 +875,6 @@ static const unsigned kBenchmarkNList[] = {
     770,
     1000
 };
-
-#define BENCHMARK_SHORT_LIST
 
 int main()
 {
