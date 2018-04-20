@@ -10,6 +10,17 @@
 #include <atomic>
 using namespace std;
 
+//#define ENABLE_FULL_SEARCH
+
+#ifdef ENABLE_FULL_SEARCH
+static const unsigned kDenseMin = 2;
+static const unsigned kDenseMax = kDenseSeedCount - 1;
+#else
+static const unsigned kDenseMin = 52/4;
+static const unsigned kDenseMax = 62/4;
+#endif
+
+static const float targetMsec = 5000; // msec
 
 /**
     Wirehair seed selection methodology
@@ -204,6 +215,11 @@ static const unsigned kDenseSeedCount = 100;
 static uint8_t kDenseSeeds[kDenseSeedCount] = {
 };
 
+void FillSeeds()
+{
+    memcpy(kDenseSeeds, wirehair::kDenseSeeds, sizeof(kDenseSeeds));
+}
+
 std::vector<uint8_t> message;
 
 static std::atomic<unsigned> FailedTrials = 0;
@@ -243,6 +259,8 @@ static void RandomTrial(
 
 int main()
 {
+    FillSeeds();
+
     const int gfInitResult = gf256_init();
 
     // If gf256 init failed:
@@ -256,7 +274,7 @@ int main()
 
     uint64_t seed = siamese::GetTimeUsec();
 
-    for (unsigned i_dense_count = 2; i_dense_count < kDenseSeedCount; ++i_dense_count)
+    for (unsigned i_dense_count = kDenseMin; i_dense_count <= kDenseMax; ++i_dense_count)
     {
         int N_found = -1;
         int count_found = -1;
@@ -301,7 +319,6 @@ int main()
 
             uint64_t t1 = siamese::GetTimeUsec();
 
-            const float targetMsec = 4000; // msec
             const float actualMsec = (t1 - t0) / 1000.f; // msec
             const float mult = targetMsec / actualMsec;
             NumTrials = (int)(NumTrials * mult);

@@ -930,7 +930,8 @@ int main()
         }
 
         if (TestFailed) {
-            break;
+            cout << "A test failed for N = " << N << endl;
+            return -4;
         }
 
         //cout << "Test passed for N = " << N << endl;

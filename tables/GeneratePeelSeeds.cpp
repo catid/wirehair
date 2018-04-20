@@ -79,7 +79,7 @@ using namespace std;
 
 static bool SkipTuning = false;
 
-static const int kMaxTuningTries = 4;
+static const int kMaxTuningTries = 8;
 
 static const unsigned kPeelSeedSubdivisions = wirehair::kPeelSeedSubdivisions;
 
@@ -255,7 +255,7 @@ int main()
         Message[i] = (uint8_t)i;
     }
 
-    for (unsigned i = 0; i < kPeelSeedSubdivisions; ++i)
+    for (unsigned i = 2; i < kPeelSeedSubdivisions; ++i)
     {
         int best_peel_seed = 0;
         int best_failures = 10000;

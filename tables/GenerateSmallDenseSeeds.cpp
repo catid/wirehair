@@ -11,13 +11,17 @@ using namespace std;
 
 //#define ENABLE_FULL_SEARCH
 
+static const int kTrials = 3500;
+
 
 #if !defined(ENABLE_FULL_SEARCH)
 // This allows me to run the Unit Test to evaluate seeds, and then
 // the ones that tend to fail too much can be put in this list and
 // refined further.
 static const int N_List[] = {
-    12 ,
+    781,
+    1000,
+    1386
 };
 // This only works up to 2047.  After that the GenerateMostDenseSeeds
 // and GeneratePeelSeeds programs take over.
@@ -413,8 +417,6 @@ int main()
 
     uint64_t seed = siamese::GetTimeUsec();
 
-    static const int kTrials = 2000;
-
 #ifdef ENABLE_FULL_SEARCH
     static const int N_Min = 2;
     static const int N_Max = kTinyTableCount + kSmallTableCount - 1;
@@ -501,7 +503,7 @@ int main()
 
             FailedTrials = 0;
 
-            if (N < 128)
+            if (N < 300)
             {
 #pragma omp parallel for
                 for (int miss1 = 0; miss1 < N; ++miss1) {
@@ -569,7 +571,7 @@ int main()
         }
     }
 
-    cout << "};" << endl;
+    cout << endl << "};" << endl << endl;
 
     cout << "const uint16_t kTinyDenseSeeds[kTinyTableCount] = {" << endl;
 
@@ -586,8 +588,9 @@ int main()
         }
     }
 
-    cout << "};" << endl;
+    cout << endl << "};" << endl;
 
+    cout << endl << "// This table skips the first kTinyTableCount elements" << endl;
     cout << "const uint8_t kSmallDenseSeeds[kSmallTableCount] = {" << endl;
 
     for (unsigned i = 0; i < kSmallTableCount; ++i)

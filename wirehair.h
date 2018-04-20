@@ -44,7 +44,7 @@
     with the wirehair_decoder_becomes_encoder() function.
 */
 
-#define WIREHAIR_VERSION 1
+#define WIREHAIR_VERSION 2
 
 // Tweak if the functions are exported or statically linked
 //#define WIREHAIR_DLL /* Defined when building/linking as DLL */
@@ -163,7 +163,7 @@ typedef struct WirehairCodec_t { char impl; }* WirehairCodec;
     for N are around 1000.
 
     Preconditions:
-        N >= 1
+        N >= 2
         N <= 64000
 
     Pass 0 for reuseOpt if you do not want to reuse a WirehairCodec object.
