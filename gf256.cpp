@@ -60,58 +60,26 @@ static GF256_FORCE_INLINE uint8x16_t vqtbl1q_u8(uint8x16_t a, uint8x16_t b)
 //
 // This is executed during initialization to make sure the library is working
 
-// Compiler-specific debug break
-#if defined(_DEBUG) || defined(DEBUG)
-    #define GF256_DEBUG
-    #ifdef _WIN32
-        #define GF256_DEBUG_BREAK() __debugbreak()
-    #else
-        #define GF256_DEBUG_BREAK() __builtin_trap()
-    #endif
-    #define GF256_DEBUG_ASSERT(cond) { if (!(cond)) { GF256_DEBUG_BREAK(); } }
-#else
-    #define GF256_DEBUG_BREAK() do {} while (false);
-    #define GF256_DEBUG_ASSERT(cond) do {} while (false);
-#endif
-
-// Scan enough buffer lengths to try everything
-#if defined(ENABLE_LONG_SELFTEST)
-static const unsigned kTestBufferBytesMin = 1;
-static const unsigned kTestBufferBytesMax = 127;
-#else
-static const unsigned kTestBufferBytesMin = 63;
-static const unsigned kTestBufferBytesMax = 63;
-#endif
-
-static const unsigned kTestBufferAllocated = kTestBufferBytesMax + 1;
-
+static const unsigned kTestBufferBytes = 32 + 16 + 8 + 4 + 2 + 1;
+static const unsigned kTestBufferAllocated = 64;
 struct SelfTestBuffersT
 {
     GF256_ALIGNED uint8_t A[kTestBufferAllocated];
     GF256_ALIGNED uint8_t B[kTestBufferAllocated];
     GF256_ALIGNED uint8_t C[kTestBufferAllocated];
 };
-
 static GF256_ALIGNED SelfTestBuffersT m_SelfTestBuffers;
 
 static bool gf256_self_test()
 {
-    if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0) {
-        GF256_DEBUG_BREAK();
+    if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0)
         return false;
-    }
-    if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0) {
-        GF256_DEBUG_BREAK();
+    if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0)
         return false;
-    }
-    if ((uintptr_t)m_SelfTestBuffers.B % GF256_ALIGN_BYTES != 0) {
-        GF256_DEBUG_BREAK();
+    if ((uintptr_t)m_SelfTestBuffers.B % GF256_ALIGN_BYTES != 0)
         return false;
-    }
-    if ((uintptr_t)m_SelfTestBuffers.C % GF256_ALIGN_BYTES != 0) {
-        GF256_DEBUG_BREAK();
+    if ((uintptr_t)m_SelfTestBuffers.C % GF256_ALIGN_BYTES != 0)
         return false;
-    }
 
     // Check multiplication/division
     for (unsigned i = 0; i < 256; ++i)
@@ -122,121 +90,89 @@ static bool gf256_self_test()
             if (i != 0 && j != 0)
             {
                 uint8_t div1 = gf256_div(prod, (uint8_t)i);
-                if (div1 != j) {
-                    GF256_DEBUG_BREAK();
+                if (div1 != j)
                     return false;
-                }
                 uint8_t div2 = gf256_div(prod, (uint8_t)j);
-                if (div2 != i) {
-                    GF256_DEBUG_BREAK();
+                if (div2 != i)
                     return false;
-                }
             }
-            else if (prod != 0) {
-                GF256_DEBUG_BREAK();
+            else if (prod != 0)
                 return false;
-            }
-            if (j == 1 && prod != i) {
-                GF256_DEBUG_BREAK();
+            if (j == 1 && prod != i)
                 return false;
-            }
         }
     }
 
-    for (unsigned bytes = kTestBufferBytesMin; bytes <= kTestBufferBytesMax; ++bytes)
+    // Check for overruns
+    m_SelfTestBuffers.A[kTestBufferBytes] = 0x5a;
+    m_SelfTestBuffers.B[kTestBufferBytes] = 0x5a;
+    m_SelfTestBuffers.C[kTestBufferBytes] = 0x5a;
+
+    // Test gf256_add_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
     {
-        // Check for overruns
-        m_SelfTestBuffers.A[bytes] = 0x5a;
-        m_SelfTestBuffers.B[bytes] = 0x5a;
-        m_SelfTestBuffers.C[bytes] = 0x5a;
-
-        // Test gf256_add_mem()
-        for (unsigned i = 0; i < bytes; ++i)
-        {
-            m_SelfTestBuffers.A[i] = 0x1f;
-            m_SelfTestBuffers.B[i] = 0xf7;
-        }
-        gf256_add_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, bytes);
-        for (unsigned i = 0; i < bytes; ++i) {
-            if (m_SelfTestBuffers.A[i] != (0x1f ^ 0xf7)) {
-                GF256_DEBUG_BREAK();
-                return false;
-            }
-        }
-
-        // Test gf256_add2_mem()
-        for (unsigned i = 0; i < bytes; ++i)
-        {
-            m_SelfTestBuffers.A[i] = 0x1f;
-            m_SelfTestBuffers.B[i] = 0xf7;
-            m_SelfTestBuffers.C[i] = 0x71;
-        }
-        gf256_add2_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, m_SelfTestBuffers.C, bytes);
-        for (unsigned i = 0; i < bytes; ++i) {
-            if (m_SelfTestBuffers.A[i] != (0x1f ^ 0xf7 ^ 0x71)) {
-                GF256_DEBUG_BREAK();
-                return false;
-            }
-        }
-
-        // Test gf256_addset_mem()
-        for (unsigned i = 0; i < bytes; ++i)
-        {
-            m_SelfTestBuffers.A[i] = 0x55;
-            m_SelfTestBuffers.B[i] = 0xaa;
-            m_SelfTestBuffers.C[i] = 0x6c;
-        }
-        gf256_addset_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, m_SelfTestBuffers.C, bytes);
-        for (unsigned i = 0; i < bytes; ++i) {
-            if (m_SelfTestBuffers.A[i] != (0xaa ^ 0x6c)) {
-                GF256_DEBUG_BREAK();
-                return false;
-            }
-        }
-
-        // Test gf256_muladd_mem()
-        for (unsigned i = 0; i < bytes; ++i)
-        {
-            m_SelfTestBuffers.A[i] = 0xff;
-            m_SelfTestBuffers.B[i] = 0xaa;
-        }
-        const uint8_t expectedMulAdd = gf256_mul(0xaa, 0x6c);
-        gf256_muladd_mem(m_SelfTestBuffers.A, 0x6c, m_SelfTestBuffers.B, bytes);
-        for (unsigned i = 0; i < bytes; ++i) {
-            if (m_SelfTestBuffers.A[i] != (expectedMulAdd ^ 0xff)) {
-                GF256_DEBUG_BREAK();
-                return false;
-            }
-        }
-
-        // Test gf256_mul_mem()
-        for (unsigned i = 0; i < bytes; ++i)
-        {
-            m_SelfTestBuffers.A[i] = 0xff;
-            m_SelfTestBuffers.B[i] = 0x55;
-        }
-        const uint8_t expectedMul = gf256_mul(0xa2, 0x55);
-        gf256_mul_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, 0xa2, bytes);
-        for (unsigned i = 0; i < bytes; ++i) {
-            if (m_SelfTestBuffers.A[i] != expectedMul) {
-                GF256_DEBUG_BREAK();
-                return false;
-            }
-        }
-
-        if (m_SelfTestBuffers.A[bytes] != 0x5a) {
-            GF256_DEBUG_BREAK();
-            return false;
-        }
-        if (m_SelfTestBuffers.B[bytes] != 0x5a) {
-            GF256_DEBUG_BREAK();
-            return false;
-        }
-        if (m_SelfTestBuffers.C[bytes] != 0x5a) {
-            GF256_DEBUG_BREAK();
-            return false;
-        }
+        m_SelfTestBuffers.A[i] = 0x1f;
+        m_SelfTestBuffers.B[i] = 0xf7;
     }
+    gf256_add_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, kTestBufferBytes);
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+        if (m_SelfTestBuffers.A[i] != (0x1f ^ 0xf7))
+            return false;
+
+    // Test gf256_add2_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = 0x1f;
+        m_SelfTestBuffers.B[i] = 0xf7;
+        m_SelfTestBuffers.C[i] = 0x71;
+    }
+    gf256_add2_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, m_SelfTestBuffers.C, kTestBufferBytes);
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+        if (m_SelfTestBuffers.A[i] != (0x1f ^ 0xf7 ^ 0x71))
+            return false;
+
+    // Test gf256_addset_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = 0x55;
+        m_SelfTestBuffers.B[i] = 0xaa;
+        m_SelfTestBuffers.C[i] = 0x6c;
+    }
+    gf256_addset_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, m_SelfTestBuffers.C, kTestBufferBytes);
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+        if (m_SelfTestBuffers.A[i] != (0xaa ^ 0x6c))
+            return false;
+
+    // Test gf256_muladd_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = 0xff;
+        m_SelfTestBuffers.B[i] = 0xaa;
+    }
+    const uint8_t expectedMulAdd = gf256_mul(0xaa, 0x6c);
+    gf256_muladd_mem(m_SelfTestBuffers.A, 0x6c, m_SelfTestBuffers.B, kTestBufferBytes);
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+        if (m_SelfTestBuffers.A[i] != (expectedMulAdd ^ 0xff))
+            return false;
+
+    // Test gf256_mul_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = 0xff;
+        m_SelfTestBuffers.B[i] = 0x55;
+    }
+    const uint8_t expectedMul = gf256_mul(0xa2, 0x55);
+    gf256_mul_mem(m_SelfTestBuffers.A, m_SelfTestBuffers.B, 0xa2, kTestBufferBytes);
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+        if (m_SelfTestBuffers.A[i] != expectedMul)
+            return false;
+
+    if (m_SelfTestBuffers.A[kTestBufferBytes] != 0x5a)
+        return false;
+    if (m_SelfTestBuffers.B[kTestBufferBytes] != 0x5a)
+        return false;
+    if (m_SelfTestBuffers.C[kTestBufferBytes] != 0x5a)
+        return false;
 
     return true;
 }
@@ -915,6 +851,8 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
         z16 = reinterpret_cast<GF256_M128 *>(z8 + count);
         x16 = reinterpret_cast<const GF256_M128 *>(x8 + count);
         y16 = reinterpret_cast<const GF256_M128 *>(y8 + count);
+
+        bytes -= (count * 8);
     }
 #else // GF256_TARGET_MOBILE
 # if defined(GF256_TRY_AVX2)
