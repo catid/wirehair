@@ -92,7 +92,7 @@ void FillSeeds()
     memcpy(kPeelSeeds, wirehair::kPeelSeeds, sizeof(kPeelSeeds));
 }
 
-static std::atomic<unsigned> FailedTrials = 0;
+static std::atomic<unsigned> FailedTrials(0);
 
 uint8_t Message[64000];
 
