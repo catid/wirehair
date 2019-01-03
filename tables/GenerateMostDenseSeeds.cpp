@@ -222,7 +222,7 @@ void FillSeeds()
 
 std::vector<uint8_t> message;
 
-static std::atomic<unsigned> FailedTrials = 0;
+static std::atomic<unsigned> FailedTrials(0);
 
 static void RandomTrial(
     unsigned N,

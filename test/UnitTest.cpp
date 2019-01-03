@@ -519,7 +519,7 @@ static bool Test_DecodeRandomLosses(
     return true;
 }
 
-static atomic<bool> TestFailed = false;
+static atomic<bool> TestFailed(false);
 
 static void TestN(uint64_t seed, int N, unsigned blockBytes)
 {

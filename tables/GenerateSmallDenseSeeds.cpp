@@ -94,7 +94,7 @@ static const int N_List[] = {
 
 uint8_t Message[64000];
 
-static std::atomic<unsigned> FailedTrials = 0;
+static std::atomic<unsigned> FailedTrials(0);
 
 static void RandomTrial(
     unsigned N,
