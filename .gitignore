@@ -55,3 +55,9 @@ Temporary Items
 .apdisk
 *.db
 *.opendb
+
+# PyCharm private dir ide
+.idea
+
+#Build cmake dir
+build
