@@ -64,7 +64,7 @@
         C is the ExE hybrid matrix above:
             P is the NxN peeling binary submatrix.
                 - Optimized for success of the peeling solver.
-            M is the NxD mixing binary submatrix.
+            M is the Nx(D+6) mixing binary submatrix.
                 - Used to mix the D dense/heavy rows into the peeling rows.
             D is the DxN dense binary submatrix.
                 - Used to improve on recovery properties of peeling code.
