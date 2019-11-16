@@ -65,6 +65,10 @@ else()
     set(CMAKE_CXX_FLAGS "-Wall -Wextra")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -march=native")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+        add_definitions(-DLINUX_ARM=1)
+    endif()
 endif()
 
 include_directories(.)
