@@ -57,7 +57,7 @@
     #define GF256_TARGET_MOBILE
 #endif // ANDROID
 
-#if defined(__AVX2__) || (defined (_MSC_VER) && _MSC_VER >= 1900)
+#if defined(__AVX2__) || (defined (_MSC_VER) && _MSC_VER >= 1900) && !defined(GF256_TARGET_MOBILE)
     #define GF256_TRY_AVX2 /* 256-bit */
     #include <immintrin.h>
     #define GF256_ALIGN_BYTES 32
