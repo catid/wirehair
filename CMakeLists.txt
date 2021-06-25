@@ -3,6 +3,8 @@ project(wirehair)
 
 set(CMAKE_CXX_STANDARD 11)
 
+option(MARCH_NATIVE "Use -march=native option" ON)
+
 set(LIB_SOURCE_FILES
         wirehair.cpp
         include/wirehair/wirehair.h
@@ -57,8 +59,13 @@ set(GEN_TABLES
 if(MSVC)
 else()
     set(CMAKE_CXX_FLAGS "-Wall -Wextra")
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -march=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+endif()
+
+if(MARCH_NATIVE)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -march=native")
+    set(MAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
 endif()
 
 add_library(wirehair ${LIB_SOURCE_FILES})
