@@ -3,6 +3,12 @@ project(wirehair)
 
 set(CMAKE_CXX_STANDARD 11)
 
+set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 option(MARCH_NATIVE "Use -march=native option" ON)
 
 set(LIB_SOURCE_FILES
@@ -65,7 +71,7 @@ endif()
 
 if(MARCH_NATIVE)
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -march=native")
-    set(MAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
 endif()
 
 add_library(wirehair ${LIB_SOURCE_FILES})
