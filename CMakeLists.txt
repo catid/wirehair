@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 project(wirehair)
 
+
 set(CMAKE_CXX_STANDARD 11)
 
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
@@ -10,6 +11,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(MARCH_NATIVE "Use -march=native option" ON)
+option(BUILD_TESTS "build testsuite" ON)
 
 set(LIB_SOURCE_FILES
         wirehair.cpp
@@ -79,22 +81,24 @@ set_target_properties(wirehair PROPERTIES VERSION 2)
 set_target_properties(wirehair PROPERTIES SOVERSION 2)
 target_include_directories(wirehair PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
-add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
-target_link_libraries(unit_test wirehair)
+if (BUILD_TESTS)
+    add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
+    target_link_libraries(unit_test wirehair)
 
-add_executable(gen_small_dseeds ${GEN_SMALL_DSEEDS})
-target_link_libraries(gen_small_dseeds wirehair)
+    add_executable(gen_small_dseeds ${GEN_SMALL_DSEEDS})
+    target_link_libraries(gen_small_dseeds wirehair)
 
-add_executable(gen_peel_seeds ${GEN_PEEL_SEEDS})
-target_link_libraries(gen_peel_seeds wirehair)
+    add_executable(gen_peel_seeds ${GEN_PEEL_SEEDS})
+    target_link_libraries(gen_peel_seeds wirehair)
 
-add_executable(gen_most_dseeds ${GEN_MOST_DSEEDS})
-target_link_libraries(gen_most_dseeds wirehair)
+    add_executable(gen_most_dseeds ${GEN_MOST_DSEEDS})
+    target_link_libraries(gen_most_dseeds wirehair)
 
-add_executable(gen_dcounts ${GEN_DCOUNTS})
-target_link_libraries(gen_dcounts wirehair)
+    add_executable(gen_dcounts ${GEN_DCOUNTS})
+    target_link_libraries(gen_dcounts wirehair)
 
-add_executable(gen_tables ${GEN_TABLES})
+    add_executable(gen_tables ${GEN_TABLES})
+endif()
 
 include(GNUInstallDirs)
 
