@@ -69,11 +69,13 @@ else()
     set(CMAKE_CXX_FLAGS "-Wall -Wextra")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O3")
 endif()
 
 if(MARCH_NATIVE)
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -march=native")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -march=native")
 endif()
 
 add_library(wirehair ${LIB_SOURCE_FILES})
