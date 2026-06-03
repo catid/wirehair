@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -84,8 +85,11 @@ static int default_threads()
     return t;
 }
 
-static std::vector<int> parse_int_list(const std::string& text)
+static std::vector<int> parse_int_list(const std::string& text, bool* ok = nullptr)
 {
+    if (ok) {
+        *ok = true;
+    }
     std::vector<int> out;
     size_t start = 0;
     while (start < text.size())
@@ -94,11 +98,35 @@ static std::vector<int> parse_int_list(const std::string& text)
         const std::string part = text.substr(
             start,
             comma == std::string::npos ? std::string::npos : comma - start);
-        if (!part.empty()) {
-            out.push_back(std::atoi(part.c_str()));
+        if (part.empty())
+        {
+            if (ok) {
+                *ok = false;
+            }
+            return out;
         }
+
+        char* end = nullptr;
+        const long value = std::strtol(part.c_str(), &end, 10);
+        if (end == part.c_str() || *end != '\0' ||
+            value < INT_MIN || value > INT_MAX)
+        {
+            if (ok) {
+                *ok = false;
+            }
+            return out;
+        }
+
+        out.push_back((int)value);
         if (comma == std::string::npos) {
             break;
+        }
+        if (comma + 1 == text.size())
+        {
+            if (ok) {
+                *ok = false;
+            }
+            return out;
         }
         start = comma + 1;
     }
@@ -157,35 +185,117 @@ static Summary summarize(std::vector<unsigned> values)
     return s;
 }
 
+enum PoolKind
+{
+    kPoolLegacy = 0,
+    kPoolAll,
+    kPoolTopDefault,
+    kPoolD2Rows,
+    kPoolD2LargestComponent,
+    kPoolMinRow,
+    kPoolAllMinRows,
+};
+
+enum ScoreKind
+{
+    kScoreLegacy = 0,
+    kScoreDefault,
+    kScoreExactD2,
+    kScoreLookFill,
+    kScoreRatio,
+    kScoreMinFill,
+    kScoreMinFillSquare,
+    kScoreDuplicate,
+    kScoreD3Support,
+    kScoreLowRef,
+    kScoreLiveRefMin,
+    kScoreLiveRefMax,
+    kScoreMaxRowMin,
+    kScoreRandom,
+};
+
 struct Method
 {
     int Id;
     const char* Name;
     const char* Cost;
+    PoolKind Pool;
+    ScoreKind Score;
+    unsigned Arg;
 };
 
 static const Method kMethods[] = {
-    {0,  "default",        "O(cols) cached degree-2 refs"},
-    {1,  "exact_d2",       "O(cols*rowrefs) exact degree-2"},
-    {2,  "lookahead",      "O(cols*rowrefs) degree-2 partner potential"},
-    {3,  "weighted",       "O(cols*rowrefs) weighted exact/look/fill"},
-    {4,  "min_fill",       "O(cols*rowrefs) Markowitz-style fill"},
-    {5,  "min_fillsq",     "O(cols*rowrefs) quadratic fill"},
-    {6,  "dup_partner",    "O(cols*rowrefs) repeated degree-2 partners"},
-    {7,  "random_tie",     "O(cols) seeded randomized default ties"},
-    {8,  "rowrefs",        "O(cols) column reference count"},
-    {9,  "min_row_degree", "O(rows*degree) minimum live row"},
-    {10, "raptorq_d2cc",   "O(rows*degree + cols) largest degree-2 component"},
-    {11, "topk8_lookfill", "O(cols + 8*rowrefs) top-K look/fill"},
-    {12, "exact_ratio",    "O(cols*rowrefs) exact degree-2 per fill"},
-    {13, "min_maxrow",     "O(cols*rowrefs) minimize worst touched row"},
-    {14, "d3_support",     "O(cols*rowrefs) degree-3 support"},
-    {15, "rq_minrow",      "O(rows*degree) Raptor-style minimum row degree"},
-    {16, "topk4_lookfill", "O(cols + 4*rowrefs) top-K look/fill"},
-    {17, "topk16_lookfill","O(cols + 16*rowrefs) top-K look/fill"},
-    {18, "rqd2_default",   "O(rows*degree + cols) largest degree-2 component/default tie"},
-    {19, "rqd2_minfill",   "O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie"},
-    {20, "minrow_best",    "O(rows*degree) best column among all minimum rows"},
+    {0,  "default",        "O(cols) cached degree-2 refs", kPoolLegacy, kScoreLegacy, 0},
+    {1,  "exact_d2",       "O(cols*rowrefs) exact degree-2", kPoolLegacy, kScoreLegacy, 0},
+    {2,  "lookahead",      "O(cols*rowrefs) degree-2 partner potential", kPoolLegacy, kScoreLegacy, 0},
+    {3,  "weighted",       "O(cols*rowrefs) weighted exact/look/fill", kPoolLegacy, kScoreLegacy, 0},
+    {4,  "min_fill",       "O(cols*rowrefs) Markowitz-style fill", kPoolLegacy, kScoreLegacy, 0},
+    {5,  "min_fillsq",     "O(cols*rowrefs) quadratic fill", kPoolLegacy, kScoreLegacy, 0},
+    {6,  "dup_partner",    "O(cols*rowrefs) repeated degree-2 partners", kPoolLegacy, kScoreLegacy, 0},
+    {7,  "random_tie",     "O(cols) seeded randomized default ties", kPoolLegacy, kScoreLegacy, 0},
+    {8,  "rowrefs",        "O(cols) column reference count", kPoolLegacy, kScoreLegacy, 0},
+    {9,  "min_row_degree", "O(rows*degree) minimum live row", kPoolLegacy, kScoreLegacy, 0},
+    {10, "raptorq_d2cc",   "O(rows*degree + cols) largest degree-2 component", kPoolLegacy, kScoreLegacy, 0},
+    {11, "topk8_lookfill", "O(cols + 8*rowrefs) top-K look/fill", kPoolLegacy, kScoreLegacy, 0},
+    {12, "exact_ratio",    "O(cols*rowrefs) exact degree-2 per fill", kPoolLegacy, kScoreLegacy, 0},
+    {13, "min_maxrow",     "O(cols*rowrefs) minimize worst touched row", kPoolLegacy, kScoreLegacy, 0},
+    {14, "d3_support",     "O(cols*rowrefs) degree-3 support", kPoolLegacy, kScoreLegacy, 0},
+    {15, "rq_minrow",      "O(rows*degree) Raptor-style minimum row degree", kPoolLegacy, kScoreLegacy, 0},
+    {16, "topk4_lookfill", "O(cols + 4*rowrefs) top-K look/fill", kPoolLegacy, kScoreLegacy, 0},
+    {17, "topk16_lookfill","O(cols + 16*rowrefs) top-K look/fill", kPoolLegacy, kScoreLegacy, 0},
+    {18, "rqd2_default",   "O(rows*degree + cols) largest degree-2 component/default tie", kPoolLegacy, kScoreLegacy, 0},
+    {19, "rqd2_minfill",   "O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie", kPoolLegacy, kScoreLegacy, 0},
+    {20, "minrow_best",    "O(rows*degree) best column among all minimum rows", kPoolLegacy, kScoreLegacy, 0},
+
+    {21, "top32_lookfill", "O(cols + 32*rowrefs) top-K/default pool + look/fill score", kPoolTopDefault, kScoreLookFill, 32},
+    {22, "top64_lookfill", "O(cols + 64*rowrefs) top-K/default pool + look/fill score", kPoolTopDefault, kScoreLookFill, 64},
+    {23, "top8_ratio",     "O(cols + 8*rowrefs) top-K/default pool + d2/fill ratio", kPoolTopDefault, kScoreRatio, 8},
+    {24, "top16_ratio",    "O(cols + 16*rowrefs) top-K/default pool + d2/fill ratio", kPoolTopDefault, kScoreRatio, 16},
+    {25, "top32_ratio",    "O(cols + 32*rowrefs) top-K/default pool + d2/fill ratio", kPoolTopDefault, kScoreRatio, 32},
+    {26, "top16_dup",      "O(cols + 16*rowrefs) top-K/default pool + duplicate partners", kPoolTopDefault, kScoreDuplicate, 16},
+    {27, "top16_d3",       "O(cols + 16*rowrefs) top-K/default pool + degree-3 support", kPoolTopDefault, kScoreD3Support, 16},
+    {28, "top16_livemin",  "O(cols + 16*rowrefs) top-K/default pool + low live refs", kPoolTopDefault, kScoreLiveRefMin, 16},
+    {29, "top16_lowref",   "O(cols) top-K/default pool + low reference count", kPoolTopDefault, kScoreLowRef, 16},
+    {30, "top16_livemax",  "O(cols + 16*rowrefs) top-K/default pool + high live refs", kPoolTopDefault, kScoreLiveRefMax, 16},
+    {31, "top32_minfill",  "O(cols + 32*rowrefs) top-K/default pool + min-fill", kPoolTopDefault, kScoreMinFill, 32},
+    {32, "top32_maxrow",   "O(cols + 32*rowrefs) top-K/default pool + min max-row", kPoolTopDefault, kScoreMaxRowMin, 32},
+
+    {33, "d2pool_default", "O(rows*degree + candidates) all degree-2 endpoints + default score", kPoolD2Rows, kScoreDefault, 0},
+    {34, "d2pool_lowref",  "O(rows*degree + candidates) all degree-2 endpoints + low refs", kPoolD2Rows, kScoreLowRef, 0},
+    {35, "d2pool_lookfill","O(rows*degree + candidates*rowrefs) all degree-2 endpoints + look/fill", kPoolD2Rows, kScoreLookFill, 0},
+    {36, "d2pool_dup",     "O(rows*degree + candidates*rowrefs) all degree-2 endpoints + duplicate partners", kPoolD2Rows, kScoreDuplicate, 0},
+    {37, "d2pool_ratio",   "O(rows*degree + candidates*rowrefs) all degree-2 endpoints + d2/fill ratio", kPoolD2Rows, kScoreRatio, 0},
+    {38, "d2pool_minfill", "O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min-fill", kPoolD2Rows, kScoreMinFill, 0},
+    {39, "d2pool_maxrow",  "O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min max-row", kPoolD2Rows, kScoreMaxRowMin, 0},
+
+    {40, "rqcc_lowref",    "O(rows*degree + cols) largest degree-2 component + low refs", kPoolD2LargestComponent, kScoreLowRef, 0},
+    {41, "rqcc_lookfill",  "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill", kPoolD2LargestComponent, kScoreLookFill, 0},
+    {42, "rqcc_dup",       "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners", kPoolD2LargestComponent, kScoreDuplicate, 0},
+    {43, "rqcc_ratio",     "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio", kPoolD2LargestComponent, kScoreRatio, 0},
+    {44, "rqcc_minfill",   "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill", kPoolD2LargestComponent, kScoreMinFill, 0},
+    {45, "rqcc_livemin",   "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs", kPoolD2LargestComponent, kScoreLiveRefMin, 0},
+    {46, "rqcc_maxrow",    "O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row", kPoolD2LargestComponent, kScoreMaxRowMin, 0},
+
+    {47, "minrow_default", "O(rows*degree + row_degree) first minimum row + default score", kPoolMinRow, kScoreDefault, 0},
+    {48, "minrow_lowref",  "O(rows*degree + row_degree) first minimum row + low refs", kPoolMinRow, kScoreLowRef, 0},
+    {49, "minrow_minfill", "O(rows*degree + row_degree*rowrefs) first minimum row + min-fill", kPoolMinRow, kScoreMinFill, 0},
+    {50, "minrow_lookfill","O(rows*degree + row_degree*rowrefs) first minimum row + look/fill", kPoolMinRow, kScoreLookFill, 0},
+    {51, "minrow_ratio",   "O(rows*degree + row_degree*rowrefs) first minimum row + d2/fill ratio", kPoolMinRow, kScoreRatio, 0},
+
+    {52, "allmin_default", "O(rows*degree + candidates) all minimum rows + default score", kPoolAllMinRows, kScoreDefault, 0},
+    {53, "allmin_lowref",  "O(rows*degree + candidates) all minimum rows + low refs", kPoolAllMinRows, kScoreLowRef, 0},
+    {54, "allmin_minfill", "O(rows*degree + candidates*rowrefs) all minimum rows + min-fill", kPoolAllMinRows, kScoreMinFill, 0},
+    {55, "allmin_lookfill","O(rows*degree + candidates*rowrefs) all minimum rows + look/fill", kPoolAllMinRows, kScoreLookFill, 0},
+    {56, "allmin_ratio",   "O(rows*degree + candidates*rowrefs) all minimum rows + d2/fill ratio", kPoolAllMinRows, kScoreRatio, 0},
+
+    {57, "global_lowref",  "O(cols) all columns + low reference count", kPoolAll, kScoreLowRef, 0},
+    {58, "global_livemin", "O(cols*rowrefs) all columns + low live refs", kPoolAll, kScoreLiveRefMin, 0},
+    {59, "global_livemax", "O(cols*rowrefs) all columns + high live refs", kPoolAll, kScoreLiveRefMax, 0},
+    {60, "global_random",  "O(cols) all columns + seeded randomized tie", kPoolAll, kScoreRandom, 0},
+    {61, "top32_lowref",   "O(cols) top-K/default pool + low reference count", kPoolTopDefault, kScoreLowRef, 32},
+    {62, "top64_ratio",    "O(cols + 64*rowrefs) top-K/default pool + d2/fill ratio", kPoolTopDefault, kScoreRatio, 64},
+    {63, "top64_minfill",  "O(cols + 64*rowrefs) top-K/default pool + min-fill", kPoolTopDefault, kScoreMinFill, 64},
+    {64, "top32_d3",       "O(cols + 32*rowrefs) top-K/default pool + degree-3 support", kPoolTopDefault, kScoreD3Support, 32},
 };
 
 static const Method* find_method(int id)
@@ -223,9 +333,11 @@ struct Metrics
     unsigned DistinctPartners = 0;
     unsigned DuplicatePartners = 0;
     unsigned RowRefs = 0;
+    unsigned LiveRefs = 0;
     unsigned MinLive = 0xffffu;
     unsigned MaxLive = 0;
     unsigned Degree3Rows = 0;
+    unsigned Degree4Rows = 0;
 };
 
 struct Key
@@ -556,6 +668,7 @@ private:
             if (!row_has_column(row, column_i)) {
                 continue;
             }
+            ++m.LiveRefs;
 
             if (row.Live > 1)
             {
@@ -570,6 +683,9 @@ private:
                 }
                 if (row.Live == 3) {
                     ++m.Degree3Rows;
+                }
+                else if (row.Live == 4) {
+                    ++m.Degree4Rows;
                 }
             }
 
@@ -777,6 +893,9 @@ private:
         for (uint16_t row_i = 0; row_i < Rows.size(); ++row_i)
         {
             const Row& row = Rows[row_i];
+            if (row.Live <= 1 || row.Deferred) {
+                continue;
+            }
             if (row_i != best_row && (!all_min_rows || row.Live != best_live)) {
                 continue;
             }
@@ -834,6 +953,262 @@ private:
         }
         parent[rb] = ra;
         size[ra] = (uint16_t)(size[ra] + size[rb]);
+    }
+
+    void add_candidate(std::vector<uint16_t>& candidates,
+        std::vector<uint8_t>& seen,
+        uint16_t column_i) const
+    {
+        if (column_i == kListTerm || Columns[column_i].Mark != kMarkTodo) {
+            return;
+        }
+        if (!seen[column_i])
+        {
+            seen[column_i] = 1;
+            candidates.push_back(column_i);
+        }
+    }
+
+    std::vector<uint16_t> collect_all_candidates() const
+    {
+        std::vector<uint16_t> candidates;
+        candidates.reserve(N);
+        for (uint16_t column_i = 0; column_i < N; ++column_i)
+        {
+            if (Columns[column_i].Mark == kMarkTodo) {
+                candidates.push_back(column_i);
+            }
+        }
+        return candidates;
+    }
+
+    std::vector<uint16_t> collect_min_row_candidates(bool all_min_rows) const
+    {
+        uint16_t best_row = kListTerm;
+        unsigned best_live = 0xffffu;
+        for (uint16_t row_i = 0; row_i < Rows.size(); ++row_i)
+        {
+            const Row& row = Rows[row_i];
+            if (row.Live <= 1 || row.Deferred) {
+                continue;
+            }
+            if (row.Live < best_live)
+            {
+                best_live = row.Live;
+                best_row = row_i;
+            }
+        }
+
+        std::vector<uint16_t> candidates;
+        if (best_row == kListTerm) {
+            return candidates;
+        }
+
+        std::vector<uint8_t> seen(N, 0);
+        for (uint16_t row_i = 0; row_i < Rows.size(); ++row_i)
+        {
+            const Row& row = Rows[row_i];
+            if (row.Live <= 1 || row.Deferred) {
+                continue;
+            }
+            if (row_i != best_row && (!all_min_rows || row.Live != best_live)) {
+                continue;
+            }
+            for (uint16_t column_i : row.Columns) {
+                add_candidate(candidates, seen, column_i);
+            }
+            if (!all_min_rows) {
+                break;
+            }
+        }
+        return candidates;
+    }
+
+    std::vector<uint16_t> collect_d2_candidates(bool largest_component) const
+    {
+        std::vector<uint16_t> candidates;
+        std::vector<uint8_t> seen(N, 0);
+
+        if (!largest_component)
+        {
+            for (const Row& row : Rows)
+            {
+                if (row.Live != 2 || row.Deferred) {
+                    continue;
+                }
+                uint16_t found[2] = {kListTerm, kListTerm};
+                const unsigned count = scan_todo_columns(row, found, 2);
+                if (count == 2)
+                {
+                    add_candidate(candidates, seen, found[0]);
+                    add_candidate(candidates, seen, found[1]);
+                }
+            }
+            return candidates;
+        }
+
+        std::vector<uint16_t> parent(N);
+        std::vector<uint16_t> size(N, 1);
+        std::vector<uint8_t> active(N, 0);
+        for (uint16_t i = 0; i < N; ++i) {
+            parent[i] = i;
+        }
+
+        for (const Row& row : Rows)
+        {
+            if (row.Live != 2 || row.Deferred) {
+                continue;
+            }
+            uint16_t found[2] = {kListTerm, kListTerm};
+            const unsigned count = scan_todo_columns(row, found, 2);
+            if (count == 2)
+            {
+                active[found[0]] = 1;
+                active[found[1]] = 1;
+                union_roots(parent, size, found[0], found[1]);
+            }
+        }
+
+        uint16_t best_root = kListTerm;
+        unsigned best_size = 0;
+        for (uint16_t column_i = 0; column_i < N; ++column_i)
+        {
+            if (!active[column_i]) {
+                continue;
+            }
+            const uint16_t root = find_root(parent, column_i);
+            if (size[root] > best_size)
+            {
+                best_size = size[root];
+                best_root = root;
+            }
+        }
+        if (best_root == kListTerm) {
+            return candidates;
+        }
+
+        for (const Row& row : Rows)
+        {
+            if (row.Live != 2 || row.Deferred) {
+                continue;
+            }
+            uint16_t found[2] = {kListTerm, kListTerm};
+            const unsigned count = scan_todo_columns(row, found, 2);
+            if (count != 2 || find_root(parent, found[0]) != best_root) {
+                continue;
+            }
+            add_candidate(candidates, seen, found[0]);
+            add_candidate(candidates, seen, found[1]);
+        }
+        return candidates;
+    }
+
+    std::vector<uint16_t> collect_candidates(const Method& method, uint32_t seed) const
+    {
+        switch (method.Pool)
+        {
+        case kPoolAll:
+            return collect_all_candidates();
+        case kPoolTopDefault:
+            return top_default_candidates(method.Arg, seed);
+        case kPoolD2Rows:
+            return collect_d2_candidates(false);
+        case kPoolD2LargestComponent:
+            return collect_d2_candidates(true);
+        case kPoolMinRow:
+            return collect_min_row_candidates(false);
+        case kPoolAllMinRows:
+            return collect_min_row_candidates(true);
+        default:
+            return collect_all_candidates();
+        }
+    }
+
+    Key combo_score_key(const Method& method, uint16_t column_i, uint32_t seed) const
+    {
+        const Column& column = Columns[column_i];
+        switch (method.Score)
+        {
+        case kScoreDefault:
+            return default_key(column_i, seed);
+        case kScoreExactD2:
+            return metric_key(1, column_i, seed);
+        case kScoreLookFill:
+        {
+            const Metrics m = collect_metrics(column_i);
+            return Key((int64_t)m.ExactD2, (int64_t)m.Lookahead,
+                -(int64_t)m.Fill, (int64_t)column.Weight2Refs,
+                (int64_t)column_i);
+        }
+        case kScoreRatio:
+            return metric_key(12, column_i, seed);
+        case kScoreMinFill:
+            return metric_key(4, column_i, seed);
+        case kScoreMinFillSquare:
+            return metric_key(5, column_i, seed);
+        case kScoreDuplicate:
+            return metric_key(6, column_i, seed);
+        case kScoreD3Support:
+        {
+            const Metrics m = collect_metrics(column_i);
+            return Key((int64_t)m.ExactD2, (int64_t)m.Degree3Rows,
+                (int64_t)m.Degree4Rows, (int64_t)m.Lookahead,
+                (int64_t)column_i);
+        }
+        case kScoreLowRef:
+            return Key(-(int64_t)column.Rows.size(), (int64_t)column.Weight2Refs,
+                (int64_t)column_i, 0, 0);
+        case kScoreLiveRefMin:
+        {
+            const Metrics m = collect_metrics(column_i);
+            return Key(-(int64_t)m.LiveRefs, (int64_t)m.ExactD2,
+                -(int64_t)m.Fill, (int64_t)column.Weight2Refs,
+                (int64_t)column_i);
+        }
+        case kScoreLiveRefMax:
+        {
+            const Metrics m = collect_metrics(column_i);
+            return Key((int64_t)m.LiveRefs, (int64_t)m.ExactD2,
+                (int64_t)m.Lookahead, -(int64_t)m.Fill,
+                (int64_t)column_i);
+        }
+        case kScoreMaxRowMin:
+            return metric_key(13, column_i, seed);
+        case kScoreRandom:
+        {
+            Key key = default_key(column_i, seed);
+            key.C = (int64_t)hash32(seed ^ (uint32_t)column_i ^
+                ((uint32_t)ChoiceCount * 0x9e3779b9u));
+            key.D = column_i;
+            return key;
+        }
+        default:
+            return default_key(column_i, seed);
+        }
+    }
+
+    uint16_t select_combo(const Method& method, uint32_t seed) const
+    {
+        std::vector<uint16_t> candidates = collect_candidates(method, seed);
+        if (candidates.empty()) {
+            candidates = collect_all_candidates();
+        }
+
+        uint16_t best = kListTerm;
+        Key best_key;
+        for (uint16_t column_i : candidates)
+        {
+            if (Columns[column_i].Mark != kMarkTodo) {
+                continue;
+            }
+            const Key key = combo_score_key(method, column_i, seed);
+            if (best == kListTerm || better_key(key, best_key))
+            {
+                best = column_i;
+                best_key = key;
+            }
+        }
+        return best != kListTerm ? best : select_by_full_scan(0, seed);
     }
 
     uint16_t select_raptorq_d2_component(uint32_t seed, unsigned tie_mode) const
@@ -941,6 +1316,11 @@ private:
 
     uint16_t select_column(int method_id, uint32_t seed) const
     {
+        const Method* method = find_method(method_id);
+        if (method && method->Pool != kPoolLegacy) {
+            return select_combo(*method, seed);
+        }
+
         switch (method_id)
         {
         case 9:
@@ -1092,8 +1472,11 @@ static TrialResult run_trial(
     return result;
 }
 
-static std::vector<int> expand_methods(const std::string& spec)
+static std::vector<int> expand_methods(const std::string& spec, bool* ok = nullptr)
 {
+    if (ok) {
+        *ok = true;
+    }
     if (spec == "all")
     {
         std::vector<int> ids;
@@ -1102,7 +1485,48 @@ static std::vector<int> expand_methods(const std::string& spec)
         }
         return ids;
     }
-    return parse_int_list(spec);
+    if (spec == "legacy")
+    {
+        std::vector<int> ids;
+        for (const Method& method : kMethods)
+        {
+            if (method.Id <= 20) {
+                ids.push_back(method.Id);
+            }
+        }
+        return ids;
+    }
+    if (spec == "combo")
+    {
+        std::vector<int> ids;
+        for (const Method& method : kMethods)
+        {
+            if (method.Id > 20) {
+                ids.push_back(method.Id);
+            }
+        }
+        return ids;
+    }
+    if (spec == "fast")
+    {
+        std::vector<int> ids;
+        for (const Method& method : kMethods)
+        {
+            if (method.Id <= 20)
+            {
+                if (method.Id == 0 || method.Id == 10 || method.Id == 11 ||
+                    method.Id == 16 || method.Id == 17 || method.Id == 18 ||
+                    method.Id == 19) {
+                    ids.push_back(method.Id);
+                }
+            }
+            else if (method.Id != 58 && method.Id != 59) {
+                ids.push_back(method.Id);
+            }
+        }
+        return ids;
+    }
+    return parse_int_list(spec, ok);
 }
 
 static void print_methods()
@@ -1111,6 +1535,23 @@ static void print_methods()
     for (const Method& method : kMethods) {
         std::printf("#   %2d %-16s %s\n", method.Id, method.Name, method.Cost);
     }
+}
+
+static void print_dimensions()
+{
+    std::printf("# candidate pools:\n");
+    std::printf("#   all columns: every currently undecided column\n");
+    std::printf("#   top-K default: best cached degree-2/reference-count columns\n");
+    std::printf("#   degree-2 rows: endpoints of all current degree-2 rows\n");
+    std::printf("#   largest degree-2 component: RaptorQ/Karp-Sipser-style component pool\n");
+    std::printf("#   first minimum row: columns in the first minimum-live-degree row\n");
+    std::printf("#   all minimum rows: columns across every minimum-live-degree row\n");
+    std::printf("# score statistics:\n");
+    std::printf("#   cached degree-2 references, exact live degree-2 references\n");
+    std::printf("#   partner lookahead, fill sum, fill square, max row degree\n");
+    std::printf("#   degree-2/fill ratio, duplicate partners, distinct partners\n");
+    std::printf("#   total references, live references, degree-3/degree-4 support\n");
+    std::printf("#   seeded randomized tie-breaking\n");
 }
 
 } // namespace
@@ -1127,6 +1568,7 @@ int main(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x9a7e11a);
     bool list_methods = false;
+    bool list_dimensions = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1160,19 +1602,33 @@ int main(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--list-methods")) {
             list_methods = true;
         }
+        else if (!std::strcmp(argv[i], "--list-dimensions")) {
+            list_dimensions = true;
+        }
         else if (!std::strcmp(argv[i], "--help"))
         {
-            std::printf("usage: peel_sweep [--N csv] [--methods all|csv] [--trials n]\n");
+            std::printf("usage: peel_sweep [--N csv] [--methods all|legacy|combo|fast|csv] [--trials n]\n");
             std::printf("                  [--source loss|systematic|repair] [--loss p]\n");
             std::printf("                  [--overhead n|--rows n] [--threads n] [--seed x]\n");
             print_methods();
+            print_dimensions();
             return 0;
+        }
+        else
+        {
+            std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
+            return 1;
         }
     }
 
     if (list_methods)
     {
         print_methods();
+        return 0;
+    }
+    if (list_dimensions)
+    {
+        print_dimensions();
         return 0;
     }
 
@@ -1196,8 +1652,21 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::vector<int> Ns = parse_int_list(nlist);
-    const std::vector<int> method_ids = expand_methods(methods_spec);
+    bool nlist_ok = false;
+    bool methods_ok = false;
+    const std::vector<int> Ns = parse_int_list(nlist, &nlist_ok);
+    const std::vector<int> method_ids = expand_methods(methods_spec, &methods_ok);
+    if (!nlist_ok)
+    {
+        std::fprintf(stderr, "invalid --N list: %s\n", nlist.c_str());
+        return 1;
+    }
+    if (!methods_ok)
+    {
+        std::fprintf(stderr, "invalid --methods list: %s\n",
+            methods_spec.c_str());
+        return 1;
+    }
     if (Ns.empty() || method_ids.empty())
     {
         std::fprintf(stderr, "empty --N or --methods list\n");

@@ -1,0 +1,122 @@
+# methods:
+#    0 default          O(cols) cached degree-2 refs
+#    1 exact_d2         O(cols*rowrefs) exact degree-2
+#    2 lookahead        O(cols*rowrefs) degree-2 partner potential
+#    3 weighted         O(cols*rowrefs) weighted exact/look/fill
+#    4 min_fill         O(cols*rowrefs) Markowitz-style fill
+#    5 min_fillsq       O(cols*rowrefs) quadratic fill
+#    6 dup_partner      O(cols*rowrefs) repeated degree-2 partners
+#    7 random_tie       O(cols) seeded randomized default ties
+#    8 rowrefs          O(cols) column reference count
+#    9 min_row_degree   O(rows*degree) minimum live row
+#   10 raptorq_d2cc     O(rows*degree + cols) largest degree-2 component
+#   11 topk8_lookfill   O(cols + 8*rowrefs) top-K look/fill
+#   12 exact_ratio      O(cols*rowrefs) exact degree-2 per fill
+#   13 min_maxrow       O(cols*rowrefs) minimize worst touched row
+#   14 d3_support       O(cols*rowrefs) degree-3 support
+#   15 rq_minrow        O(rows*degree) Raptor-style minimum row degree
+#   16 topk4_lookfill   O(cols + 4*rowrefs) top-K look/fill
+#   17 topk16_lookfill  O(cols + 16*rowrefs) top-K look/fill
+#   18 rqd2_default     O(rows*degree + cols) largest degree-2 component/default tie
+#   19 rqd2_minfill     O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie
+#   20 minrow_best      O(rows*degree) best column among all minimum rows
+#   21 top32_lookfill   O(cols + 32*rowrefs) top-K/default pool + look/fill score
+#   22 top64_lookfill   O(cols + 64*rowrefs) top-K/default pool + look/fill score
+#   23 top8_ratio       O(cols + 8*rowrefs) top-K/default pool + d2/fill ratio
+#   24 top16_ratio      O(cols + 16*rowrefs) top-K/default pool + d2/fill ratio
+#   25 top32_ratio      O(cols + 32*rowrefs) top-K/default pool + d2/fill ratio
+#   26 top16_dup        O(cols + 16*rowrefs) top-K/default pool + duplicate partners
+#   27 top16_d3         O(cols + 16*rowrefs) top-K/default pool + degree-3 support
+#   28 top16_livemin    O(cols + 16*rowrefs) top-K/default pool + low live refs
+#   29 top16_lowref     O(cols) top-K/default pool + low reference count
+#   30 top16_livemax    O(cols + 16*rowrefs) top-K/default pool + high live refs
+#   31 top32_minfill    O(cols + 32*rowrefs) top-K/default pool + min-fill
+#   32 top32_maxrow     O(cols + 32*rowrefs) top-K/default pool + min max-row
+#   33 d2pool_default   O(rows*degree + candidates) all degree-2 endpoints + default score
+#   34 d2pool_lowref    O(rows*degree + candidates) all degree-2 endpoints + low refs
+#   35 d2pool_lookfill  O(rows*degree + candidates*rowrefs) all degree-2 endpoints + look/fill
+#   36 d2pool_dup       O(rows*degree + candidates*rowrefs) all degree-2 endpoints + duplicate partners
+#   37 d2pool_ratio     O(rows*degree + candidates*rowrefs) all degree-2 endpoints + d2/fill ratio
+#   38 d2pool_minfill   O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min-fill
+#   39 d2pool_maxrow    O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min max-row
+#   40 rqcc_lowref      O(rows*degree + cols) largest degree-2 component + low refs
+#   41 rqcc_lookfill    O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill
+#   42 rqcc_dup         O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners
+#   43 rqcc_ratio       O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio
+#   44 rqcc_minfill     O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill
+#   45 rqcc_livemin     O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs
+#   46 rqcc_maxrow      O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row
+#   47 minrow_default   O(rows*degree + row_degree) first minimum row + default score
+#   48 minrow_lowref    O(rows*degree + row_degree) first minimum row + low refs
+#   49 minrow_minfill   O(rows*degree + row_degree*rowrefs) first minimum row + min-fill
+#   50 minrow_lookfill  O(rows*degree + row_degree*rowrefs) first minimum row + look/fill
+#   51 minrow_ratio     O(rows*degree + row_degree*rowrefs) first minimum row + d2/fill ratio
+#   52 allmin_default   O(rows*degree + candidates) all minimum rows + default score
+#   53 allmin_lowref    O(rows*degree + candidates) all minimum rows + low refs
+#   54 allmin_minfill   O(rows*degree + candidates*rowrefs) all minimum rows + min-fill
+#   55 allmin_lookfill  O(rows*degree + candidates*rowrefs) all minimum rows + look/fill
+#   56 allmin_ratio     O(rows*degree + candidates*rowrefs) all minimum rows + d2/fill ratio
+#   57 global_lowref    O(cols) all columns + low reference count
+#   58 global_livemin   O(cols*rowrefs) all columns + low live refs
+#   59 global_livemax   O(cols*rowrefs) all columns + high live refs
+#   60 global_random    O(cols) all columns + seeded randomized tie
+#   61 top32_lowref     O(cols) top-K/default pool + low reference count
+#   62 top64_ratio      O(cols + 64*rowrefs) top-K/default pool + d2/fill ratio
+#   63 top64_minfill    O(cols + 64*rowrefs) top-K/default pool + min-fill
+#   64 top32_d3         O(cols + 32*rowrefs) top-K/default pool + degree-3 support
+# sweep: trials=80 threads=40 source=loss loss=0.100 overhead=0 rows_override=0 seed=0x6c0ffee2
+method_id,method,cost,N,rows,source,trials,cols_mu,cols_sd,c50,c95,c99,cmax,rows_mu,rows_sd,r50,r95,r99,rmax,comp_mu,maxcomp_mu,sumsq_mu,init_todo_mu,init_d2_mu,choices_mu,build_us,greedy_us,total_us
+0,default,"O(cols) cached degree-2 refs",128,128,loss,80,7.55,1.30,8,9,10,10,7.55,1.30,8,9,10,10,3.14,5.33,34.67,114.97,55.44,7.55,36.5,16.4,66.3
+0,default,"O(cols) cached degree-2 refs",2048,2048,loss,80,37.91,3.96,38,44,45,45,37.91,3.96,38,44,45,45,37.84,1.07,38.06,1593.09,820.99,37.91,532.1,209.1,789.1
+0,default,"O(cols) cached degree-2 refs",32000,32000,loss,80,208.86,14.51,208,233,242,245,208.86,14.51,208,233,242,245,208.10,1.49,210.41,32000.00,16006.46,208.86,21594.0,10359.1,32740.8
+7,random_tie,"O(cols) seeded randomized default ties",128,128,loss,80,7.47,1.46,8,10,10,11,7.47,1.46,8,10,10,11,3.02,5.34,36.02,114.00,55.26,7.47,38.1,16.1,57.3
+7,random_tie,"O(cols) seeded randomized default ties",2048,2048,loss,80,38.98,4.33,40,46,46,47,38.98,4.33,40,46,46,47,38.95,1.02,39.02,1575.19,809.33,38.98,421.8,208.6,648.1
+7,random_tie,"O(cols) seeded randomized default ties",32000,32000,loss,80,212.11,15.40,213,238,242,256,212.11,15.40,213,238,242,256,210.84,1.69,214.84,32000.00,16004.36,212.11,6088.4,11558.4,17927.0
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",128,128,loss,80,7.40,1.51,7,10,11,11,7.40,1.51,7,10,11,11,5.70,2.51,13.75,114.62,55.15,7.40,35.9,30.8,69.5
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",2048,2048,loss,80,36.54,3.79,36,44,44,47,36.54,3.79,36,44,44,47,36.54,1.00,36.54,1658.06,851.49,36.54,447.1,422.3,886.9
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",32000,32000,loss,80,194.96,12.64,193,216,222,231,194.96,12.64,193,216,222,231,194.96,1.00,194.96,32000.00,16003.49,194.96,6039.0,37824.9,44091.8
+11,topk8_lookfill,"O(cols + 8*rowrefs) top-K look/fill",128,128,loss,80,7.44,1.62,7,10,11,12,7.44,1.62,7,10,11,12,3.77,4.49,28.16,111.89,54.25,7.44,42.1,40.9,86.8
+11,topk8_lookfill,"O(cols + 8*rowrefs) top-K look/fill",2048,2048,loss,80,37.06,4.21,37,43,46,48,37.06,4.21,37,43,46,48,37.01,1.05,37.16,1558.05,801.60,37.06,465.7,262.0,746.5
+11,topk8_lookfill,"O(cols + 8*rowrefs) top-K look/fill",32000,32000,loss,80,208.91,14.52,207,234,240,242,208.91,14.52,207,234,240,242,208.05,1.60,210.74,32000.00,16001.92,208.91,6177.8,15819.2,22243.8
+16,topk4_lookfill,"O(cols + 4*rowrefs) top-K look/fill",128,128,loss,80,7.28,1.46,7,9,11,11,7.28,1.46,7,9,11,11,3.20,4.99,32.77,115.84,55.92,7.28,40.5,26.7,70.6
+16,topk4_lookfill,"O(cols + 4*rowrefs) top-K look/fill",2048,2048,loss,80,37.16,3.96,37,45,46,49,37.16,3.96,37,45,46,49,37.10,1.06,37.29,1599.74,824.77,37.16,451.2,228.7,698.2
+16,topk4_lookfill,"O(cols + 4*rowrefs) top-K look/fill",32000,32000,loss,80,211.28,12.93,210,238,239,241,211.28,12.93,210,238,239,241,210.28,1.64,213.40,32000.00,15998.05,211.28,6146.2,12810.1,19199.5
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",128,128,loss,80,7.22,1.39,7,9,10,11,7.22,1.39,7,9,10,11,4.04,4.10,24.65,115.22,55.84,7.22,36.1,43.6,82.8
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",2048,2048,loss,80,37.90,4.25,38,46,48,49,37.90,4.25,38,46,48,49,37.90,1.00,37.90,1709.96,879.50,37.90,432.1,326.2,776.1
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",32000,32000,loss,80,208.06,16.04,208,234,237,246,208.06,16.04,208,234,237,246,207.51,1.43,209.34,32000.00,15999.41,208.06,6130.8,20142.8,26510.5
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",128,128,loss,80,7.44,1.46,8,10,11,11,7.44,1.46,8,10,11,11,3.15,5.16,34.51,114.86,55.17,7.44,37.7,30.5,71.5
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",2048,2048,loss,80,36.40,3.71,36,43,45,47,36.40,3.71,36,43,45,47,36.38,1.02,36.45,1516.95,780.00,36.40,453.9,391.8,863.5
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",32000,32000,loss,80,196.68,12.99,198,218,224,235,196.68,12.99,198,218,224,235,196.07,1.50,197.93,32000.00,16010.33,196.68,6022.5,36713.9,42966.7
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",128,128,loss,80,7.41,1.36,7,10,10,11,7.41,1.36,7,10,10,11,6.78,1.59,9.01,114.89,55.26,7.41,39.6,57.8,100.7
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",2048,2048,loss,80,36.23,4.04,36,44,45,46,36.23,4.04,36,44,45,46,36.23,1.00,36.23,1664.69,856.09,36.23,429.6,574.3,1021.1
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",32000,32000,loss,80,196.11,13.73,197,220,230,230,196.11,13.73,197,220,230,230,196.11,1.00,196.11,32000.00,16003.12,196.11,6041.1,44350.6,50627.8
+21,top32_lookfill,"O(cols + 32*rowrefs) top-K/default pool + look/fill score",128,128,loss,80,7.76,1.28,8,10,11,11,7.76,1.28,8,10,11,11,3.83,4.76,30.96,115.03,55.20,7.76,38.4,65.7,107.4
+21,top32_lookfill,"O(cols + 32*rowrefs) top-K/default pool + look/fill score",2048,2048,loss,80,36.98,4.47,37,44,48,48,36.98,4.47,37,44,48,48,36.98,1.00,36.98,1548.95,798.95,36.98,455.2,391.6,864.3
+21,top32_lookfill,"O(cols + 32*rowrefs) top-K/default pool + look/fill score",32000,32000,loss,80,209.68,16.17,209,238,245,259,209.68,16.17,209,238,245,259,209.09,1.48,210.95,32000.00,16000.79,209.68,6688.4,32221.9,39174.3
+22,top64_lookfill,"O(cols + 64*rowrefs) top-K/default pool + look/fill score",128,128,loss,80,7.39,1.40,7,10,10,10,7.39,1.40,7,10,10,10,3.83,4.39,27.51,114.79,55.42,7.39,41.3,75.7,120.4
+22,top64_lookfill,"O(cols + 64*rowrefs) top-K/default pool + look/fill score",2048,2048,loss,80,37.98,3.47,38,44,46,48,37.98,3.47,38,44,46,48,37.94,1.04,38.05,1564.35,806.06,37.98,537.3,692.8,1252.5
+22,top64_lookfill,"O(cols + 64*rowrefs) top-K/default pool + look/fill score",32000,32000,loss,80,206.04,14.87,205,234,239,253,206.04,14.87,205,234,239,253,205.46,1.44,207.29,32000.00,16002.61,206.04,6634.8,38559.3,45468.0
+26,top16_dup,"O(cols + 16*rowrefs) top-K/default pool + duplicate partners",128,128,loss,80,7.28,1.43,7,10,10,10,7.28,1.43,7,10,10,10,3.20,4.95,32.98,114.25,55.02,7.28,43.9,51.6,99.3
+26,top16_dup,"O(cols + 16*rowrefs) top-K/default pool + duplicate partners",2048,2048,loss,80,37.50,4.17,37,44,48,51,37.50,4.17,37,44,48,51,37.48,1.02,37.55,1574.66,810.23,37.50,435.1,304.3,757.2
+26,top16_dup,"O(cols + 16*rowrefs) top-K/default pool + duplicate partners",32000,32000,loss,80,214.89,13.16,214,236,240,250,214.89,13.16,214,236,240,250,213.71,1.70,217.39,32000.00,16001.20,214.89,6140.9,20092.9,26482.5
+40,rqcc_lowref,"O(rows*degree + cols) largest degree-2 component + low refs",128,128,loss,80,7.53,1.44,8,10,10,11,7.53,1.44,8,10,10,11,6.16,2.27,13.50,115.40,55.49,7.53,41.5,36.2,81.1
+40,rqcc_lowref,"O(rows*degree + cols) largest degree-2 component + low refs",2048,2048,loss,80,36.08,3.89,36,42,44,45,36.08,3.89,36,42,44,45,36.08,1.00,36.08,1543.22,796.60,36.08,458.7,388.1,865.2
+40,rqcc_lowref,"O(rows*degree + cols) largest degree-2 component + low refs",32000,32000,loss,80,192.94,12.20,191,212,219,237,192.94,12.20,191,212,219,237,192.94,1.00,192.94,32000.00,16006.67,192.94,6803.2,38122.7,45177.7
+41,rqcc_lookfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill",128,128,loss,80,7.51,1.55,7,10,11,11,7.51,1.55,7,10,11,11,3.55,4.80,30.66,115.10,55.31,7.51,39.8,52.4,95.8
+41,rqcc_lookfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill",2048,2048,loss,80,36.49,3.98,36,43,44,46,36.49,3.98,36,43,44,46,36.46,1.02,36.54,1631.25,841.26,36.49,442.6,474.1,934.0
+41,rqcc_lookfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill",32000,32000,loss,80,195.55,13.40,197,218,222,226,195.55,13.40,197,218,222,226,195.19,1.26,196.28,32000.00,15998.59,195.55,6081.4,39913.1,46234.3
+42,rqcc_dup,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners",128,128,loss,80,7.19,1.39,7,9,10,10,7.19,1.39,7,9,10,10,2.89,5.26,34.54,114.51,55.41,7.19,41.3,50.5,95.2
+42,rqcc_dup,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners",2048,2048,loss,80,36.54,4.03,36,43,45,51,36.54,4.03,36,43,45,51,36.46,1.07,36.71,1593.50,821.84,36.54,446.5,474.0,937.1
+42,rqcc_dup,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners",32000,32000,loss,80,194.21,13.23,196,215,221,232,194.21,13.23,196,215,221,232,193.64,1.44,195.46,32000.00,16001.88,194.21,7958.4,42476.6,50750.8
+43,rqcc_ratio,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio",128,128,loss,80,7.11,1.36,7,9,11,12,7.11,1.36,7,9,11,12,6.04,1.98,10.24,114.42,55.15,7.11,35.9,45.2,83.9
+43,rqcc_ratio,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio",2048,2048,loss,80,36.06,3.78,36,42,45,50,36.06,3.78,36,42,45,50,36.06,1.00,36.06,1590.69,820.98,36.06,422.3,442.6,881.0
+43,rqcc_ratio,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio",32000,32000,loss,80,192.01,11.67,192,212,221,227,192.01,11.67,192,212,221,227,192.01,1.00,192.01,32000.00,15998.51,192.01,6121.5,37390.9,43735.1
+44,rqcc_minfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill",128,128,loss,80,7.62,1.55,8,10,11,11,7.62,1.55,8,10,11,11,6.83,1.71,9.68,115.40,55.49,7.62,43.3,56.8,103.8
+44,rqcc_minfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill",2048,2048,loss,80,35.74,3.73,36,41,43,46,35.74,3.73,36,41,43,46,35.74,1.00,35.74,1577.79,812.92,35.74,441.8,474.7,933.3
+44,rqcc_minfill,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill",32000,32000,loss,80,196.96,12.28,197,216,223,224,196.96,12.28,197,216,223,224,196.96,1.00,196.96,32000.00,15993.92,196.96,6119.9,40660.3,47016.4
+45,rqcc_livemin,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs",128,128,loss,80,7.31,1.44,7,10,10,10,7.31,1.44,7,10,10,10,5.89,2.17,11.66,113.61,54.94,7.31,40.9,53.2,97.3
+45,rqcc_livemin,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs",2048,2048,loss,80,36.77,3.33,37,41,43,43,36.77,3.33,37,41,43,43,36.77,1.00,36.77,1596.46,819.62,36.77,432.7,492.7,942.3
+45,rqcc_livemin,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs",32000,32000,loss,80,195.71,13.88,194,220,232,233,195.71,13.88,194,220,232,233,195.71,1.00,195.71,32000.00,16001.79,195.71,6049.9,39744.9,46018.2
+46,rqcc_maxrow,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row",128,128,loss,80,7.25,1.49,7,10,10,11,7.25,1.49,7,10,10,11,6.46,1.68,9.53,114.47,55.56,7.25,43.1,54.5,101.4
+46,rqcc_maxrow,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row",2048,2048,loss,80,36.58,4.07,37,44,45,48,36.58,4.07,37,44,45,48,36.58,1.00,36.58,1540.72,792.79,36.58,433.0,449.6,899.0
+46,rqcc_maxrow,"O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row",32000,32000,loss,80,194.55,11.97,193,217,224,226,194.55,11.97,193,217,224,226,194.55,1.00,194.55,32000.00,16005.30,194.55,6122.6,38268.0,44622.0

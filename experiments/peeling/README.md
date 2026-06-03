@@ -22,6 +22,16 @@ Example sweep:
 ./experiments/peeling/peel_sweep --N 128,2048,32000 --trials 40 --source loss --loss 0.10
 ```
 
+Useful method selectors:
+
+```bash
+./experiments/peeling/peel_sweep --list-methods
+./experiments/peeling/peel_sweep --list-dimensions
+./experiments/peeling/peel_sweep --methods legacy
+./experiments/peeling/peel_sweep --methods combo
+./experiments/peeling/peel_sweep --methods fast
+```
+
 The harness models only the peel graph. It feeds generated Wirehair peel rows
 sequentially, allows singleton rows to avalanche immediately, then applies a
 selected greedy inactivation schedule. Dense matrix success/failure is outside
