@@ -114,6 +114,15 @@
 // Compiler-specific C++11 restrict keyword
 #define GF256_RESTRICT __restrict
 
+// Compiler-specific branch prediction hints
+#if defined(__GNUC__) || defined(__clang__)
+    #define GF256_LIKELY(x)   __builtin_expect(!!(x), 1)
+    #define GF256_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+    #define GF256_LIKELY(x)   (x)
+    #define GF256_UNLIKELY(x) (x)
+#endif
+
 // Compiler-specific force inline keyword
 #ifdef _MSC_VER
     #define GF256_FORCE_INLINE inline __forceinline

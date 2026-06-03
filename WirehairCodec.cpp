@@ -99,7 +99,7 @@ bool Codec::OpportunisticPeeling(
         PeelRefs *refs = &_peel_col_refs[column_i];
 
         // If there was not enough room in the reference list:
-        if (refs->RowCount >= CAT_REF_LIST_MAX)
+        if (CAT_UNLIKELY(refs->RowCount >= CAT_REF_LIST_MAX))
         {
             CAT_IF_DUMP(cout << "OpportunisticPeeling: Failure!  " \
                 "Ran out of space for row references.  CAT_REF_LIST_MAX must be increased!" << endl;)
@@ -653,7 +653,7 @@ void Codec::PeelDiagonal()
             const uint8_t * GF256_RESTRICT block_src = _input_blocks + _block_bytes * peel_row_i;
 
             // If this is not the last block:
-            if (peel_row_i != _block_count - 1) {
+            if (CAT_LIKELY(peel_row_i != _block_count - 1)) {
                 // Copy it directly to the output block
                 memcpy(temp_block_src, block_src, _block_bytes);
             }
@@ -685,7 +685,7 @@ void Codec::PeelDiagonal()
             const uint16_t ref_row_i = referencingRows[i];
 
             // If it references the current row:
-            if (ref_row_i == peel_row_i) {
+            if (CAT_UNLIKELY(ref_row_i == peel_row_i)) {
                 // Skip this row
                 continue;
             }
@@ -703,7 +703,7 @@ void Codec::PeelDiagonal()
             const uint16_t ref_column_i = ref_row->Marks.Result.PeelColumn;
 
             // If row is peeled:
-            if (ref_column_i != LIST_TERM)
+            if (CAT_LIKELY(ref_column_i != LIST_TERM))
             {
                 // Generate temporary row block value:
                 CAT_DEBUG_ASSERT(ref_column_i < _recovery_rows);
@@ -719,7 +719,7 @@ void Codec::PeelDiagonal()
                     const uint8_t * GF256_RESTRICT block_src = _input_blocks + _block_bytes * ref_row_i;
 
                     // If this is not the last block:
-                    if (ref_row_i != _block_count - 1) {
+                    if (CAT_LIKELY(ref_row_i != _block_count - 1)) {
                         // Add this row block value with message block to it (optimization)
                         gf256_addset_mem(temp_block_dest, temp_block_src, block_src, _block_bytes);
                     }
@@ -1364,7 +1364,7 @@ bool Codec::Triangle()
                 const uint8_t code_value = rem_row[heavy_col_i];
 
                 // If the column is non-zero:
-                if (0 == code_value) {
+                if (CAT_UNLIKELY(0 == code_value)) {
                     continue;
                 }
 
@@ -1461,7 +1461,7 @@ bool Codec::Triangle()
             const uint8_t code_value = pivot_row[heavy_col_i];
 
             // If heavy row doesn't have the pivot:
-            if (0 == code_value) {
+            if (CAT_UNLIKELY(0 == code_value)) {
                 continue; // Skip to next
             }
 
@@ -1503,7 +1503,7 @@ bool Codec::Triangle()
                     const uint8_t rem_value = rem_row[heavy_col_i];
 
                     // If the column is zero:
-                    if (0 == rem_value) {
+                    if (CAT_UNLIKELY(0 == rem_value)) {
                         continue; // Skip it
                     }
 
@@ -2143,7 +2143,7 @@ void Codec::AddSubdiagonalValues()
                     const unsigned win_bits = (uint32_t)(ge_row[0] >> shift0) & (win_lim - 1);
 
                     // If any XOR needs to be performed:
-                    if (win_bits != 0)
+                    if (CAT_LIKELY(win_bits != 0))
                     {
                         CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << ge_below_i << endl;)
 
@@ -2172,7 +2172,7 @@ void Codec::AddSubdiagonalValues()
                     const uint32_t win_bits = ( (uint32_t)(ge_row[0] >> shift0) | (uint32_t)(ge_row[1] << shift1) ) & (win_lim - 1);
 
                     // If any XOR needs to be performed:
-                    if (win_bits != 0)
+                    if (CAT_LIKELY(win_bits != 0))
                     {
                         CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << ge_below_i << endl;)
 
@@ -2238,7 +2238,7 @@ void Codec::AddSubdiagonalValues()
             {
                 // If column is zero:
                 const uint8_t code_value = heavy_row[sub_i - _first_heavy_column];
-                if (0 == code_value) {
+                if (CAT_UNLIKELY(0 == code_value)) {
                     continue; // Skip it
                 }
 
@@ -2429,7 +2429,7 @@ void Codec::BackSubstituteAboveDiagonal()
                         const uint8_t code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
                         // If column is zero:
-                        if (0 == code_value) {
+                        if (CAT_UNLIKELY(0 == code_value)) {
                             continue; // Skip it
                         }
 
@@ -2610,7 +2610,7 @@ void Codec::BackSubstituteAboveDiagonal()
                         const uint8_t code_value = *heavy_row++;
 
                         // If zero:
-                        if (0 == code_value) {
+                        if (CAT_UNLIKELY(0 == code_value)) {
                             continue; // Skip it
                         }
 
@@ -2651,7 +2651,7 @@ void Codec::BackSubstituteAboveDiagonal()
                     const uint32_t win_bits = (uint32_t)(ge_row[0] >> shift0) & (win_lim - 1);
 
                     // If any XOR needs to be performed:
-                    if (win_bits != 0)
+                    if (CAT_LIKELY(win_bits != 0))
                     {
                         CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
@@ -2684,7 +2684,7 @@ void Codec::BackSubstituteAboveDiagonal()
                     const unsigned win_bits = ( (uint32_t)(ge_row[0] >> shift0) | (uint32_t)(ge_row[1] << shift1) ) & (win_lim - 1);
 
                     // If any XOR needs to be performed:
-                    if (win_bits != 0)
+                    if (CAT_LIKELY(win_bits != 0))
                     {
                         CAT_IF_DUMP(cout << "Adding window table " << win_bits << " to pivot " << above_pivot_i << endl;)
 
@@ -2777,7 +2777,7 @@ void Codec::BackSubstituteAboveDiagonal()
                 const uint8_t code_value = _heavy_matrix[_heavy_pitch * heavy_row_i + heavy_col_i];
 
                 // If column is zero:
-                if (!code_value) {
+                if (CAT_UNLIKELY(!code_value)) {
                     continue; // Skip it
                 }
 
@@ -2863,7 +2863,7 @@ void Codec::Substitute()
         const uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * (_block_count + mix.Columns[0]);
 
         // If copying from final block:
-        if (row_i != _block_count - 1) {
+        if (CAT_LIKELY(row_i != _block_count - 1)) {
             gf256_addset_mem(dest, src, input_src, _block_bytes);
         }
         else
@@ -2887,7 +2887,7 @@ void Codec::Substitute()
         CAT_IF_ROWOP(++rowops;)
 
         // If at least two peeling columns are set:
-        if (row->Params.PeelCount >= 2) // common case:
+        if (CAT_LIKELY(row->Params.PeelCount >= 2)) // common case:
         {
             PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
 
@@ -2896,13 +2896,13 @@ void Codec::Substitute()
             const uint16_t column_1 = iter.GetColumn();
 
             // Common case:
-            if (column_0 != dest_column_i)
+            if (CAT_LIKELY(column_0 != dest_column_i))
             {
                 CAT_DEBUG_ASSERT(column_0 < _recovery_rows);
                 const uint8_t * GF256_RESTRICT peel0 = _recovery_blocks + _block_bytes * column_0;
 
                 // Common case:
-                if (column_1 != dest_column_i) {
+                if (CAT_LIKELY(column_1 != dest_column_i)) {
                     CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
                     gf256_add2_mem(dest, peel0, _recovery_blocks + _block_bytes * column_1, _block_bytes);
                 }
@@ -2926,7 +2926,7 @@ void Codec::Substitute()
                 CAT_IF_DUMP(cout << " " << column_i;)
 
                 // If column is not the solved one:
-                if (column_i != dest_column_i)
+                if (CAT_LIKELY(column_i != dest_column_i))
                 {
                     gf256_add_mem(dest, peel_src, _block_bytes);
                     CAT_IF_ROWOP(++rowops;)
@@ -3330,7 +3330,7 @@ WirehairResult Codec::ResumeSolveMatrix(
             const uint8_t code_value = heavy_row[heavy_col_j];
 
             // If column is zero:
-            if (0 == code_value) {
+            if (CAT_UNLIKELY(0 == code_value)) {
                 continue; // Skip it
             }
 
@@ -3807,7 +3807,10 @@ bool Codec::AllocateMatrix()
     // GE matrix
     const unsigned ge_cols = _defer_count + _mix_count;
     const unsigned ge_rows = _defer_count + _dense_count + _extra_count + 1; // One extra for workspace
-    const unsigned ge_pitch = (ge_cols + 63) / 64;
+    unsigned ge_pitch = (ge_cols + 63) / 64;
+#if defined(WH_ALIGN64) && (WH_ALIGN64+0)
+    ge_pitch = (ge_pitch + 7) & ~7U; // 64-byte row starts for wide SIMD/cache-line alignment.
+#endif
     const unsigned ge_matrix_words = ge_rows * ge_pitch;
 
     // Compression matrix

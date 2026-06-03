@@ -1264,8 +1264,8 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
 extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx, uint8_t y, int bytes)
 {
     WH_BUMP(3, bytes);
-    // Use a single if-statement to handle special cases
-    if (y <= 1)
+    // Special cases are rare in codec hot paths.
+    if (GF256_UNLIKELY(y <= 1))
     {
         if (y == 0)
             memset(vz, 0, bytes);
@@ -1443,8 +1443,8 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                                  const void * GF256_RESTRICT vx, int bytes)
 {
     WH_BUMP(4, bytes);
-    // Use a single if-statement to handle special cases
-    if (y <= 1)
+    // Special cases are rare in codec hot paths.
+    if (GF256_UNLIKELY(y <= 1))
     {
         if (y == 1)
             gf256_add_mem(vz, vx, bytes);
@@ -1706,7 +1706,80 @@ extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy
     GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<GF256_M128 *>(vx);
     GF256_M128 * GF256_RESTRICT y16 = reinterpret_cast<GF256_M128 *>(vy);
 
-    // Handle blocks of 16 bytes
+# if defined(GF256_TRY_AVX512)
+    if (CpuHasAVX512)
+    {
+        while (bytes >= 256)
+        {
+            const __m512i x0 = _mm512_loadu_si512((const void*)(x16 + 0));
+            const __m512i x1 = _mm512_loadu_si512((const void*)(x16 + 4));
+            const __m512i x2 = _mm512_loadu_si512((const void*)(x16 + 8));
+            const __m512i x3 = _mm512_loadu_si512((const void*)(x16 + 12));
+            const __m512i y0 = _mm512_loadu_si512((const void*)(y16 + 0));
+            const __m512i y1 = _mm512_loadu_si512((const void*)(y16 + 4));
+            const __m512i y2 = _mm512_loadu_si512((const void*)(y16 + 8));
+            const __m512i y3 = _mm512_loadu_si512((const void*)(y16 + 12));
+            _mm512_storeu_si512((void*)(x16 + 0), y0);
+            _mm512_storeu_si512((void*)(x16 + 4), y1);
+            _mm512_storeu_si512((void*)(x16 + 8), y2);
+            _mm512_storeu_si512((void*)(x16 + 12), y3);
+            _mm512_storeu_si512((void*)(y16 + 0), x0);
+            _mm512_storeu_si512((void*)(y16 + 4), x1);
+            _mm512_storeu_si512((void*)(y16 + 8), x2);
+            _mm512_storeu_si512((void*)(y16 + 12), x3);
+            bytes -= 256, x16 += 16, y16 += 16;
+        }
+        while (bytes >= 64)
+        {
+            const __m512i x0 = _mm512_loadu_si512((const void*)x16);
+            const __m512i y0 = _mm512_loadu_si512((const void*)y16);
+            _mm512_storeu_si512((void*)x16, y0);
+            _mm512_storeu_si512((void*)y16, x0);
+            bytes -= 64, x16 += 4, y16 += 4;
+        }
+    }
+# endif // GF256_TRY_AVX512
+
+# if defined(GF256_TRY_AVX2)
+    if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
+    {
+        GF256_M256 * GF256_RESTRICT x32 = reinterpret_cast<GF256_M256 *>(x16);
+        GF256_M256 * GF256_RESTRICT y32 = reinterpret_cast<GF256_M256 *>(y16);
+
+        while (bytes >= 128)
+        {
+            const GF256_M256 x0 = _mm256_loadu_si256(x32 + 0);
+            const GF256_M256 x1 = _mm256_loadu_si256(x32 + 1);
+            const GF256_M256 x2 = _mm256_loadu_si256(x32 + 2);
+            const GF256_M256 x3 = _mm256_loadu_si256(x32 + 3);
+            const GF256_M256 y0 = _mm256_loadu_si256(y32 + 0);
+            const GF256_M256 y1 = _mm256_loadu_si256(y32 + 1);
+            const GF256_M256 y2 = _mm256_loadu_si256(y32 + 2);
+            const GF256_M256 y3 = _mm256_loadu_si256(y32 + 3);
+            _mm256_storeu_si256(x32 + 0, y0);
+            _mm256_storeu_si256(x32 + 1, y1);
+            _mm256_storeu_si256(x32 + 2, y2);
+            _mm256_storeu_si256(x32 + 3, y3);
+            _mm256_storeu_si256(y32 + 0, x0);
+            _mm256_storeu_si256(y32 + 1, x1);
+            _mm256_storeu_si256(y32 + 2, x2);
+            _mm256_storeu_si256(y32 + 3, x3);
+            bytes -= 128, x32 += 4, y32 += 4;
+        }
+        while (bytes >= 32)
+        {
+            const GF256_M256 x0 = _mm256_loadu_si256(x32);
+            const GF256_M256 y0 = _mm256_loadu_si256(y32);
+            _mm256_storeu_si256(x32, y0);
+            _mm256_storeu_si256(y32, x0);
+            bytes -= 32, ++x32, ++y32;
+        }
+
+        x16 = reinterpret_cast<GF256_M128 *>(x32);
+        y16 = reinterpret_cast<GF256_M128 *>(y32);
+    }
+# endif // GF256_TRY_AVX2
+
     while (bytes >= 16)
     {
         GF256_M128 x0 = _mm_loadu_si128(x16);

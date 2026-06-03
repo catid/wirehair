@@ -48,6 +48,15 @@
     #define CAT_DEBUG_ASSERT(cond) do {} while (false);
 #endif
 
+// Compiler-specific branch prediction hints
+#if defined(__GNUC__) || defined(__clang__)
+    #define CAT_LIKELY(x)   __builtin_expect(!!(x), 1)
+    #define CAT_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+    #define CAT_LIKELY(x)   (x)
+    #define CAT_UNLIKELY(x) (x)
+#endif
+
 namespace wirehair {
 
 
@@ -229,15 +238,19 @@ GF256_FORCE_INLINE void IterateNextColumn(
     const uint16_t a  ///< Number to add for Weyl generator
 )
 {
-    x = (x + a) % p;
+    uint32_t next = (uint32_t)x + a;
+    if (next >= p) {
+        next -= p;
+    }
+    x = (uint16_t)next;
 
     // If the result is in the range [b, p):
-    if (x >= b)
+    if (CAT_UNLIKELY(x >= b))
     {
         const uint16_t distanceToP = p - x;
 
         // If adding again would wrap around:
-        if (a >= distanceToP) {
+        if (CAT_LIKELY(a >= distanceToP)) {
             x = a - distanceToP;
         }
         else {

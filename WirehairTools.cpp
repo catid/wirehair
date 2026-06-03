@@ -170,8 +170,26 @@ uint16_t NextPrime16(uint16_t n)
     case 7: return 7;
     }
 
+    // Avoid the sieve and square-root setup for small common inputs.
+    if (n <= kPrimesUnder256From11[kPrimesUnder256Count - 1])
+    {
+        unsigned lo = 0;
+        unsigned hi = kPrimesUnder256Count;
+        while (lo < hi)
+        {
+            const unsigned mid = (lo + hi) >> 1;
+            if (kPrimesUnder256From11[mid] < n) {
+                lo = mid + 1;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return kPrimesUnder256From11[lo];
+    }
+
     // Handle large n
-    if (n > 65521) {
+    if (CAT_UNLIKELY(n > 65521)) {
         CAT_DEBUG_BREAK(); // Invalid input
         return 0;
     }
@@ -498,6 +516,27 @@ static const uint32_t P1 = (uint32_t)((1. / 128) * 0xffffffff);
 static const uint32_t P2 = kPeelCountDistribution[1];
 static const uint32_t P3 = kPeelCountDistribution[2];
 
+// Start index for the tail search based on rv's top byte.  The final exact
+// comparison below preserves the original distribution.
+static const uint8_t kPeelWeightFirstByTopByte[256] = {
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+     4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  5,  5,  5,
+     5,  5,  5,  5,  5,  5,  6,  6,  6,  6,  6,  6,  7,  7,  7,  7,
+     8,  8,  8,  8,  9,  9,  9, 10, 10, 11, 11, 12, 12, 13, 14, 15,
+    16, 17, 18, 19, 21, 23, 25, 28, 32, 36, 42, 51, 63, 63, 63, 63,
+};
+
 uint16_t GeneratePeelRowWeight(
     uint32_t rv, ///< 32-bit random value
     uint16_t block_count ///< Number of input blocks
@@ -524,7 +563,7 @@ uint16_t GeneratePeelRowWeight(
         return 3;
     }
 
-    uint16_t weight = 3;
+    uint16_t weight = kPeelWeightFirstByTopByte[rv >> 24];
 
     // Find first table entry containing a number smaller than or equal to rv
     while (rv > kPeelCountDistribution[weight++])
@@ -582,9 +621,17 @@ void PeelRowParameters::Initialize(
 //------------------------------------------------------------------------------
 // SIMD-Safe Aligned Memory Allocations
 
+// Experimental cache-line alignment for workspace bases (wirehair-d98.5).
+// Kept opt-in because padding/alignment has mixed end-to-end impact.
+#if defined(WH_ALIGN64) && (WH_ALIGN64+0)
+static const unsigned kSIMDSafeAlignBytes = 64;
+#else
+static const unsigned kSIMDSafeAlignBytes = GF256_ALIGN_BYTES;
+#endif
+
 uint8_t* SIMDSafeAllocate(size_t size)
 {
-    uint8_t* data = (uint8_t*)calloc(1, GF256_ALIGN_BYTES + size);
+    uint8_t* data = (uint8_t*)calloc(1, kSIMDSafeAlignBytes + size);
     if (!data) {
         return nullptr;
     }
@@ -594,15 +641,15 @@ uint8_t* SIMDSafeAllocate(size_t size)
     if (size >= (256u * 1024)) {
         const uintptr_t pg = 4096;
         const uintptr_t aligned = ((uintptr_t)data + pg - 1) & ~(pg - 1);
-        const size_t total = GF256_ALIGN_BYTES + size;
+        const size_t total = kSIMDSafeAlignBytes + size;
         const size_t len = (total - (size_t)(aligned - (uintptr_t)data)) & ~(pg - 1);
         if (len >= (2u * 1024 * 1024)) {
             madvise((void*)aligned, len, MADV_HUGEPAGE);
         }
     }
 #endif
-    unsigned offset = (unsigned)((uintptr_t)data % GF256_ALIGN_BYTES);
-    data += GF256_ALIGN_BYTES - offset;
+    unsigned offset = (unsigned)((uintptr_t)data % kSIMDSafeAlignBytes);
+    data += kSIMDSafeAlignBytes - offset;
     data[-1] = (uint8_t)offset;
     return data;
 }
@@ -614,11 +661,11 @@ void SIMDSafeFree(void* ptr)
     }
     uint8_t* data = (uint8_t*)ptr;
     unsigned offset = data[-1];
-    if (offset >= GF256_ALIGN_BYTES) {
+    if (offset >= kSIMDSafeAlignBytes) {
         CAT_DEBUG_BREAK(); // Should never happen
         return;
     }
-    data -= GF256_ALIGN_BYTES - offset;
+    data -= kSIMDSafeAlignBytes - offset;
     free(data);
 }
 

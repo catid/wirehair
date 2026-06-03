@@ -129,6 +129,12 @@ static bool micro_selfcheck() {
         gf256_muladd_mem(z, c, x, n);
         if (memcmp(z, ref, n) != 0) { fprintf(stderr, "FAIL muladd_mem n=%d c=%u\n", n, c); ok = false; }
 
+        // memswap: x <-> y
+        memcpy(ref, x, n);
+        memcpy(z, y, n);
+        gf256_memswap(x, y, n);
+        if (memcmp(x, z, n) != 0 || memcmp(y, ref, n) != 0) { fprintf(stderr, "FAIL memswap n=%d\n", n); ok = false; }
+
         free(x); free(y); free(z); free(ref);
     }
 
@@ -138,9 +144,12 @@ static bool micro_selfcheck() {
         const int n = 256;
         for (int off = 0; off < 7 && ok; ++off) {
             uint8_t* x = (uint8_t*)xaligned(n + 8);
+            uint8_t* y = (uint8_t*)xaligned(n + 8);
             uint8_t* z = (uint8_t*)xaligned(n + 8);
             uint8_t* ref = (uint8_t*)xaligned(n + 8);
+            uint8_t* yref = (uint8_t*)xaligned(n + 8);
             uint8_t* xb = x + off;
+            uint8_t* yb = y + off;
             for (int i = 0; i < n; ++i) xb[i] = (uint8_t)i;
             for (int c = 0; c < 256 && ok; ++c) {
                 uint8_t* zb = z + off;
@@ -152,7 +161,12 @@ static bool micro_selfcheck() {
                 gf256_muladd_mem(zb, (uint8_t)c, xb, n);
                 if (memcmp(zb, ref, n) != 0) { fprintf(stderr, "FAIL exhaustive muladd_mem c=%d off=%d\n", c, off); ok = false; break; }
             }
-            free(x); free(z); free(ref);
+            for (int i = 0; i < n; ++i) { xb[i] = (uint8_t)(i * 3 + 1); yb[i] = (uint8_t)(i * 5 + 7); }
+            memcpy(ref, xb, n);
+            memcpy(yref, yb, n);
+            gf256_memswap(xb, yb, n);
+            if (memcmp(xb, yref, n) != 0 || memcmp(yb, ref, n) != 0) { fprintf(stderr, "FAIL exhaustive memswap off=%d\n", off); ok = false; }
+            free(x); free(y); free(z); free(ref); free(yref);
         }
     }
     return ok;
@@ -161,9 +175,9 @@ static bool micro_selfcheck() {
 // ============================================================================
 // micro: throughput
 // ============================================================================
-enum Kernel { K_ADD, K_ADDSET, K_ADD2, K_MUL, K_MULADD };
-static const char* kname[] = {"add_mem", "addset_mem", "add2_mem", "mul_mem", "muladd_mem"};
-static const int kKernelCount = 5;
+enum Kernel { K_ADD, K_ADDSET, K_ADD2, K_MUL, K_MULADD, K_SWAP };
+static const char* kname[] = {"add_mem", "addset_mem", "add2_mem", "mul_mem", "muladd_mem", "memswap"};
+static const int kKernelCount = 6;
 
 struct MicroResult { double gbps_per_thread; double gbps_aggregate; };
 
@@ -193,6 +207,7 @@ static MicroResult micro_run(Kernel k, int bytes, int threads, double seconds) {
                     case K_ADD2:   gf256_add2_mem(z, x, y, bytes); break;
                     case K_MUL:    gf256_mul_mem(z, x, c, bytes); break;
                     case K_MULADD: gf256_muladd_mem(z, c, x, bytes); break;
+                    case K_SWAP:   gf256_memswap(x, y, bytes); break;
                 }
                 local += bytes;
                 // mutate c occasionally so mul tables aren't trivially constant-folded; cheap
