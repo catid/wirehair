@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "wirehair",
+  "project_id": "98a1c092-d7aa-428a-8375-c763dfd283f1"
+}

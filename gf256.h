@@ -71,6 +71,20 @@
     #define GF256_ALIGN_BYTES 16
 #endif // __AVX2__
 
+// Ablation S1 (wirehair-cqu): GFNI gf2p8affineqb constant-multiply for poly 0x14D.
+// Enabled when built with -DWH_GFNI=1 on a target that exposes GFNI+AVX512F/BW.
+#if defined(WH_GFNI) && (WH_GFNI+0) && defined(__GFNI__) && defined(__AVX512F__) && defined(__AVX512BW__)
+    #define GF256_TRY_GFNI /* 512-bit single-instruction GF(256) multiply */
+    #include <immintrin.h>
+#endif
+
+// Ablation S2 (wirehair-1sa): AVX-512 (ZMM) widening of the bulk XOR kernels.
+// Enabled when built with -DWH_AVX512=1 on a target that exposes AVX512F.
+#if defined(WH_AVX512) && (WH_AVX512+0) && defined(__AVX512F__)
+    #define GF256_TRY_AVX512 /* 512-bit XOR */
+    #include <immintrin.h>
+#endif
+
 #if !defined(GF256_TARGET_MOBILE)
     #include <tmmintrin.h> // SSSE3: _mm_shuffle_epi8
     #include <emmintrin.h> // SSE2
@@ -121,6 +135,17 @@ extern "C" {
 
 
 //------------------------------------------------------------------------------
+// Instrumentation (Task 6a, wirehair-6ch.1): per-op-type byte/call counters.
+// Thread-local; WH_COUNT-gated so normal builds pay nothing. Index:
+// 0=add 1=add2 2=addset 3=mul 4=muladd 5=memswap.
+#ifdef WH_COUNT
+extern uint64_t gf256_count_bytes(int op);
+extern uint64_t gf256_count_calls(int op);
+extern void     gf256_count_reset(void);
+#endif
+
+
+//------------------------------------------------------------------------------
 // Portability
 
 /// Swap two memory buffers in-place
@@ -152,6 +177,12 @@ struct gf256_ctx
         GF256_ALIGNED GF256_M256 TABLE_HI_Y[256];
     } MM256;
 #endif // GF256_TRY_AVX2
+
+#ifdef GF256_TRY_GFNI
+    /// 8x8 GF(2)-affine matrix (one qword) per constant multiplier, for vgf2p8affineqb.
+    /// GFNI_MUL_MATRIX[c] applied to byte x yields gf256_mul(x, c) under poly 0x14D.
+    GF256_ALIGNED uint64_t GFNI_MUL_MATRIX[256];
+#endif // GF256_TRY_GFNI
 
     /// Mul/Div/Inv/Sqr tables
     uint8_t GF256_MUL_TABLE[256 * 256];

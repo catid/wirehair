@@ -2735,6 +2735,15 @@ void Codec::Substitute()
     {
         row = &_peel_rows[row_i];
 
+#if defined(WH_PREFETCH) && (defined(__x86_64__) || defined(_M_X64))
+        // Task6/6e: hide the next row's scattered recovery-block misses while we process this row.
+        if (row->NextRow != LIST_TERM) {
+            const PeelRow* GF256_RESTRICT nr = &_peel_rows[row->NextRow];
+            _mm_prefetch((const char*)(_recovery_blocks + _block_bytes * nr->Marks.Result.PeelColumn), _MM_HINT_T0);
+            _mm_prefetch((const char*)(_input_blocks + _block_bytes * row->NextRow), _MM_HINT_T0);
+        }
+#endif
+
         const uint16_t dest_column_i = row->Marks.Result.PeelColumn;
         CAT_DEBUG_ASSERT(dest_column_i < _recovery_rows);
         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * dest_column_i;
@@ -2847,6 +2856,15 @@ void Codec::OverrideSeeds(
     _seed_override = true;
 }
 
+#ifdef WH_SEED_KNOBS
+// Experiment-only thread-local seed override for parallel seed search.
+// Applies in ChooseMatrix when t_ovr_N matches the codec's block count.
+thread_local int t_ovr_N = -1, t_ovr_dense = -1, t_ovr_pseed = -1, t_ovr_dseed = -1;
+extern "C" void wh_set_override(int N, int dense, int pseed, int dseed) {
+    t_ovr_N = N; t_ovr_dense = dense; t_ovr_pseed = pseed; t_ovr_dseed = dseed;
+}
+#endif
+
 WirehairResult Codec::ChooseMatrix(
     uint64_t message_bytes,
     unsigned block_bytes)
@@ -2880,6 +2898,23 @@ WirehairResult Codec::ChooseMatrix(
         _dense_count = GetDenseCount(_block_count);
         _d_seed = GetDenseSeed(_block_count, _dense_count);
         _p_seed = GetPeelSeed(_block_count);
+#ifdef WH_SEED_KNOBS
+        // Experiment-only (compile with -DWH_SEED_KNOBS). Thread-local override (for parallel
+        // seed search) takes precedence; env override is a fallback for manual single-N checks.
+        if (t_ovr_N == (int)_block_count) {
+            if (t_ovr_dense >= 0) { _dense_count = (uint16_t)t_ovr_dense; _d_seed = GetDenseSeed(_block_count, _dense_count); }
+            if (t_ovr_pseed >= 0) _p_seed = (uint32_t)t_ovr_pseed;
+            if (t_ovr_dseed >= 0) _d_seed = (uint32_t)t_ovr_dseed;
+        } else {
+            const char* ovN = ::getenv("WH_OVR_N");
+            if (!ovN || atoi(ovN) == (int)_block_count) {
+                const char* ps = ::getenv("WH_PSEED"); if (ps) _p_seed = (uint32_t)strtoul(ps, nullptr, 0);
+                const char* dd = ::getenv("WH_DENSE");
+                if (dd) { _dense_count = (uint16_t)atoi(dd); _d_seed = GetDenseSeed(_block_count, _dense_count); }
+                const char* ds = ::getenv("WH_DSEED"); if (ds) _d_seed = (uint32_t)strtoul(ds, nullptr, 0);
+            }
+        }
+#endif
     }
 
     CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)
@@ -2897,11 +2932,31 @@ WirehairResult Codec::ChooseMatrix(
     return Wirehair_Success;
 }
 
+#ifdef WH_COUNT
+// Task 6a: per-stage symbol-XOR attribution (snapshot gf256 byte total around each stage).
+#include "gf256.h"
+static thread_local uint64_t wh_t_sbytes[16];
+static thread_local const char* wh_t_sname[16];
+static thread_local int wh_t_sn = 0;
+static inline uint64_t wh_gf_total() {
+    return gf256_count_bytes(0)+gf256_count_bytes(1)+gf256_count_bytes(2)
+         + gf256_count_bytes(3)+gf256_count_bytes(4)+gf256_count_bytes(5);
+}
+extern "C" void wh_stage_reset() { wh_t_sn = 0; }
+extern "C" int wh_stage_count() { return wh_t_sn; }
+extern "C" uint64_t wh_stage_bytes(int i) { return (i>=0 && i<wh_t_sn) ? wh_t_sbytes[i] : 0; }
+extern "C" const char* wh_stage_label(int i) { return (i>=0 && i<wh_t_sn) ? wh_t_sname[i] : ""; }
+#define WH_STAGE(nm, call) do { uint64_t _b0 = wh_gf_total(); call; \
+    if (wh_t_sn < 16) { wh_t_sbytes[wh_t_sn] = wh_gf_total() - _b0; wh_t_sname[wh_t_sn] = nm; ++wh_t_sn; } } while(0)
+#else
+#define WH_STAGE(nm, call) do { call; } while(0)
+#endif
+
 WirehairResult Codec::SolveMatrix()
 {
     // (1) Peeling
 
-    GreedyPeeling();
+    WH_STAGE("GreedyPeeling", GreedyPeeling());
 
     CAT_IF_DUMP( PrintPeeled(); )
     CAT_IF_DUMP( PrintDeferredRows(); )
@@ -2915,9 +2970,9 @@ WirehairResult Codec::SolveMatrix()
 
     SetDeferredColumns();
     SetMixingColumnsForDeferredRows();
-    PeelDiagonal();
-    CopyDeferredRows();
-    MultiplyDenseRows();
+    WH_STAGE("PeelDiagonal", PeelDiagonal());
+    WH_STAGE("CopyDeferredRows", CopyDeferredRows());
+    WH_STAGE("MultiplyDenseRows", MultiplyDenseRows());
     SetHeavyRows();
 
     // Add invertible matrix to mathematically tie dense rows to dense mixing columns
@@ -2933,7 +2988,9 @@ WirehairResult Codec::SolveMatrix()
 
     SetupTriangle();
 
-    if (!Triangle())
+    bool wh_tri_ok;
+    WH_STAGE("Triangle", wh_tri_ok = Triangle());
+    if (!wh_tri_ok)
     {
         CAT_IF_DUMP( cout << "After Triangle FAILED:" << endl; )
         CAT_IF_DUMP( PrintGEMatrix(); )
@@ -2953,11 +3010,11 @@ WirehairResult Codec::SolveMatrix()
 
 void Codec::GenerateRecoveryBlocks()
 {
-    InitializeColumnValues();
-    MultiplyDenseValues();
-    AddSubdiagonalValues();
-    BackSubstituteAboveDiagonal();
-    Substitute();
+    WH_STAGE("InitializeColumnValues", InitializeColumnValues());
+    WH_STAGE("MultiplyDenseValues", MultiplyDenseValues());
+    WH_STAGE("AddSubdiagonalValues", AddSubdiagonalValues());
+    WH_STAGE("BackSubstituteAboveDiagonal", BackSubstituteAboveDiagonal());
+    WH_STAGE("Substitute", Substitute());
 }
 
 WirehairResult Codec::ResumeSolveMatrix(

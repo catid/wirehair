@@ -29,6 +29,18 @@
 
 #include "gf256.h"
 
+#ifdef WH_COUNT
+// Task 6a: thread-local per-op byte/call counters.
+static thread_local uint64_t t_gf_bytes[6] = {0,0,0,0,0,0};
+static thread_local uint64_t t_gf_calls[6] = {0,0,0,0,0,0};
+extern "C" uint64_t gf256_count_bytes(int op) { return (op>=0&&op<6) ? t_gf_bytes[op] : 0; }
+extern "C" uint64_t gf256_count_calls(int op) { return (op>=0&&op<6) ? t_gf_calls[op] : 0; }
+extern "C" void gf256_count_reset(void) { for (int i=0;i<6;++i){t_gf_bytes[i]=0;t_gf_calls[i]=0;} }
+#define WH_BUMP(op, n) do { t_gf_bytes[op] += (uint64_t)(n); t_gf_calls[op]++; } while(0)
+#else
+#define WH_BUMP(op, n) do {} while(0)
+#endif
+
 #ifdef LINUX_ARM
 #include <unistd.h>
 #include <fcntl.h>
@@ -225,6 +237,12 @@ static bool CpuHasNeon64 = false;   // And we don't have ASIMD
 #ifdef GF256_TRY_AVX2
 static bool CpuHasAVX2 = false;
 #endif
+#ifdef GF256_TRY_GFNI
+static bool CpuHasGFNI = false;
+#endif
+#ifdef GF256_TRY_AVX512
+static bool CpuHasAVX512 = false;
+#endif
 static bool CpuHasSSSE3 = false;
 
 #define CPUID_EBX_AVX2    0x00000020
@@ -331,6 +349,22 @@ static void gf256_architecture_init()
     _cpuid(cpu_info, 7);
     CpuHasAVX2 = ((cpu_info[1] & CPUID_EBX_AVX2) != 0);
 #endif // GF256_TRY_AVX2
+
+#if defined(GF256_TRY_GFNI)
+    // leaf 7, subleaf 0: EBX bit16=AVX512F, bit30=AVX512BW; ECX bit8=GFNI.
+    _cpuid(cpu_info, 7);
+    {
+        const bool has_avx512f  = (cpu_info[1] & (1u << 16)) != 0;
+        const bool has_avx512bw = (cpu_info[1] & (1u << 30)) != 0;
+        const bool has_gfni     = (cpu_info[2] & (1u << 8))  != 0;
+        CpuHasGFNI = has_avx512f && has_avx512bw && has_gfni;
+    }
+#endif // GF256_TRY_GFNI
+
+#if defined(GF256_TRY_AVX512)
+    _cpuid(cpu_info, 7);
+    CpuHasAVX512 = (cpu_info[1] & (1u << 16)) != 0; // AVX512F
+#endif // GF256_TRY_AVX512
 
     // When AVX2 and SSSE3 are unavailable, Siamese takes 4x longer to decode
     // and 2.6x longer to encode.  Encoding requires a lot more simple XOR ops
@@ -597,6 +631,39 @@ static void gf256_mul_mem_init()
 
 
 //------------------------------------------------------------------------------
+// GFNI affine matrices (Ablation S1)
+
+#ifdef GF256_TRY_GFNI
+// Build the 8x8 GF(2)-affine matrix (packed into a qword) such that, under the
+// vgf2p8affineqb convention [ out_bit j = parity(x & ((M>>(8*j))&0xff)) ], applying
+// M to byte x yields gf256_mul(x, c) in Wirehair's field (poly 0x14D).
+//
+// Intel SDM convention: out.bit[i] = parity(x AND M.byte[7-i]) XOR imm.bit[i].
+// gf256_mul(x,c) is GF(2)-linear in x: column k (image of basis bit k) is
+// p_k = gf256_mul(c, 1<<k). We need parity(x AND W_i)==out.bit[i] with W_i.bit[k]=p_k.bit[i],
+// and M.byte[7-i]==W_i, i.e. output-bit j lands in matrix byte (7-j).
+// Verified: M(c=0)=0, M(c=1)=0x0102040810204080 (the GFNI identity matrix).
+static uint64_t gf256_gfni_matrix(uint8_t c)
+{
+    uint64_t m = 0;
+    for (unsigned i = 0; i < 8; ++i) // i = input bit index k
+    {
+        const uint8_t p = gf256_mul(c, (uint8_t)(1u << i));
+        for (unsigned j = 0; j < 8; ++j) // j = output bit index
+            m |= (uint64_t)((p >> j) & 1) << (8 * (7 - j) + i);
+    }
+    return m;
+}
+
+static void gf256_gfni_init()
+{
+    for (int c = 0; c < 256; ++c)
+        GF256Ctx.GFNI_MUL_MATRIX[c] = gf256_gfni_matrix((uint8_t)c);
+}
+#endif // GF256_TRY_GFNI
+
+
+//------------------------------------------------------------------------------
 // Initialization
 
 #ifdef GF256_IS_BIG_ENDIAN
@@ -639,6 +706,9 @@ extern "C" int gf256_init_(int version)
     gf256_inv_init();
     gf256_sqr_init();
     gf256_mul_mem_init();
+#ifdef GF256_TRY_GFNI
+    gf256_gfni_init();
+#endif
 
     if (!gf256_self_test())
         return -3; // Self-test failed (perhaps untested configuration)
@@ -650,9 +720,27 @@ extern "C" int gf256_init_(int version)
 //------------------------------------------------------------------------------
 // Operations
 
+// When the GFNI path handles the 64-byte bulk, the AVX2 mul/muladd blocks (which in
+// gf256_mul_mem re-derive their pointers from the original args) must be skipped; the
+// <64-byte remainder is finished by the SSSE3 + scalar tails using the advanced pointers.
+#ifdef GF256_TRY_GFNI
+# define GF256_GFNI_ACTIVE CpuHasGFNI
+#else
+# define GF256_GFNI_ACTIVE false
+#endif
+
+// When the AVX-512 XOR path consumes the bulk, the AVX2 XOR blocks must be skipped;
+// the <64-byte remainder is finished by the SSSE3 + scalar tails (advanced pointers).
+#ifdef GF256_TRY_AVX512
+# define GF256_AVX512_ACTIVE CpuHasAVX512
+#else
+# define GF256_AVX512_ACTIVE false
+#endif
+
 extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
                               const void * GF256_RESTRICT vy, int bytes)
 {
+    WH_BUMP(0, bytes);
     GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<GF256_M128 *>(vx);
     const GF256_M128 * GF256_RESTRICT y16 = reinterpret_cast<const GF256_M128 *>(vy);
 
@@ -707,8 +795,31 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
         bytes -= (count * 8);
     }
 #else // GF256_TARGET_MOBILE
+# if defined(GF256_TRY_AVX512)
+    // Ablation S2: 64-byte ZMM XOR, 4x unrolled (256 bytes/iter).
+    if (CpuHasAVX512)
+    {
+        while (bytes >= 256)
+        {
+            __m512i a0 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 0)),  _mm512_loadu_si512((const void*)(y16 + 0)));
+            __m512i a1 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 4)),  _mm512_loadu_si512((const void*)(y16 + 4)));
+            __m512i a2 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 8)),  _mm512_loadu_si512((const void*)(y16 + 8)));
+            __m512i a3 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 12)), _mm512_loadu_si512((const void*)(y16 + 12)));
+            _mm512_storeu_si512((void*)(x16 + 0),  a0);
+            _mm512_storeu_si512((void*)(x16 + 4),  a1);
+            _mm512_storeu_si512((void*)(x16 + 8),  a2);
+            _mm512_storeu_si512((void*)(x16 + 12), a3);
+            bytes -= 256, x16 += 16, y16 += 16; // 256 = 16 * M128
+        }
+        while (bytes >= 64)
+        {
+            _mm512_storeu_si512((void*)x16, _mm512_xor_si512(_mm512_loadu_si512((const void*)x16), _mm512_loadu_si512((const void*)y16)));
+            bytes -= 64, x16 += 4, y16 += 4;
+        }
+    }
+# endif // GF256_TRY_AVX512
 # if defined(GF256_TRY_AVX2)
-    if (CpuHasAVX2)
+    if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
         GF256_M256 * GF256_RESTRICT x32 = reinterpret_cast<GF256_M256 *>(x16);
         const GF256_M256 * GF256_RESTRICT y32 = reinterpret_cast<const GF256_M256 *>(y16);
@@ -829,6 +940,7 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
 extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                                const void * GF256_RESTRICT vy, int bytes)
 {
+    WH_BUMP(1, bytes);
     GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128*>(vz);
     const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128*>(vx);
     const GF256_M128 * GF256_RESTRICT y16 = reinterpret_cast<const GF256_M128*>(vy);
@@ -870,8 +982,32 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
         bytes -= (count * 8);
     }
 #else // GF256_TARGET_MOBILE
+# if defined(GF256_TRY_AVX512)
+    // Ablation S2: z[] ^= x[] ^ y[], 64-byte ZMM, 4x unrolled (256 bytes/iter).
+    if (CpuHasAVX512)
+    {
+        while (bytes >= 256)
+        {
+            __m512i z0 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(z16 + 0)),  _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 0)),  _mm512_loadu_si512((const void*)(y16 + 0))));
+            __m512i z1 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(z16 + 4)),  _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 4)),  _mm512_loadu_si512((const void*)(y16 + 4))));
+            __m512i z2 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(z16 + 8)),  _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 8)),  _mm512_loadu_si512((const void*)(y16 + 8))));
+            __m512i z3 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(z16 + 12)), _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 12)), _mm512_loadu_si512((const void*)(y16 + 12))));
+            _mm512_storeu_si512((void*)(z16 + 0),  z0);
+            _mm512_storeu_si512((void*)(z16 + 4),  z1);
+            _mm512_storeu_si512((void*)(z16 + 8),  z2);
+            _mm512_storeu_si512((void*)(z16 + 12), z3);
+            bytes -= 256, z16 += 16, x16 += 16, y16 += 16;
+        }
+        while (bytes >= 64)
+        {
+            __m512i z0 = _mm512_xor_si512(_mm512_loadu_si512((const void*)z16), _mm512_xor_si512(_mm512_loadu_si512((const void*)x16), _mm512_loadu_si512((const void*)y16)));
+            _mm512_storeu_si512((void*)z16, z0);
+            bytes -= 64, z16 += 4, x16 += 4, y16 += 4;
+        }
+    }
+# endif // GF256_TRY_AVX512
 # if defined(GF256_TRY_AVX2)
-    if (CpuHasAVX2)
+    if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
         GF256_M256 * GF256_RESTRICT z32 = reinterpret_cast<GF256_M256 *>(z16);
         const GF256_M256 * GF256_RESTRICT x32 = reinterpret_cast<const GF256_M256 *>(x16);
@@ -949,6 +1085,7 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
 extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                                  const void * GF256_RESTRICT vy, int bytes)
 {
+    WH_BUMP(2, bytes);
     GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128*>(vz);
     const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128*>(vx);
     const GF256_M128 * GF256_RESTRICT y16 = reinterpret_cast<const GF256_M128*>(vy);
@@ -1007,8 +1144,31 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
         bytes -= (count * 8);
     }
 #else // GF256_TARGET_MOBILE
+# if defined(GF256_TRY_AVX512)
+    // Ablation S2: z[] = x[] ^ y[], 64-byte ZMM, 4x unrolled (256 bytes/iter).
+    if (CpuHasAVX512)
+    {
+        while (bytes >= 256)
+        {
+            __m512i z0 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 0)),  _mm512_loadu_si512((const void*)(y16 + 0)));
+            __m512i z1 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 4)),  _mm512_loadu_si512((const void*)(y16 + 4)));
+            __m512i z2 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 8)),  _mm512_loadu_si512((const void*)(y16 + 8)));
+            __m512i z3 = _mm512_xor_si512(_mm512_loadu_si512((const void*)(x16 + 12)), _mm512_loadu_si512((const void*)(y16 + 12)));
+            _mm512_storeu_si512((void*)(z16 + 0),  z0);
+            _mm512_storeu_si512((void*)(z16 + 4),  z1);
+            _mm512_storeu_si512((void*)(z16 + 8),  z2);
+            _mm512_storeu_si512((void*)(z16 + 12), z3);
+            bytes -= 256, z16 += 16, x16 += 16, y16 += 16;
+        }
+        while (bytes >= 64)
+        {
+            _mm512_storeu_si512((void*)z16, _mm512_xor_si512(_mm512_loadu_si512((const void*)x16), _mm512_loadu_si512((const void*)y16)));
+            bytes -= 64, z16 += 4, x16 += 4, y16 += 4;
+        }
+    }
+# endif // GF256_TRY_AVX512
 # if defined(GF256_TRY_AVX2)
-    if (CpuHasAVX2)
+    if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
         GF256_M256 * GF256_RESTRICT z32 = reinterpret_cast<GF256_M256 *>(z16);
         const GF256_M256 * GF256_RESTRICT x32 = reinterpret_cast<const GF256_M256 *>(x16);
@@ -1103,6 +1263,7 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
 
 extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx, uint8_t y, int bytes)
 {
+    WH_BUMP(3, bytes);
     // Use a single if-statement to handle special cases
     if (y <= 1)
     {
@@ -1144,8 +1305,21 @@ extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTR
     }
 #endif
 #else
+# if defined(GF256_TRY_GFNI)
+    // Ablation S1: one vgf2p8affineqb multiplies 64 bytes by the constant y under poly 0x14D.
+    if (CpuHasGFNI && bytes >= 64)
+    {
+        const __m512i A = _mm512_set1_epi64((long long)GF256Ctx.GFNI_MUL_MATRIX[y]);
+        do
+        {
+            const __m512i v = _mm512_loadu_si512((const void*)x16);
+            _mm512_storeu_si512((void*)z16, _mm512_gf2p8affine_epi64_epi8(v, A, 0));
+            bytes -= 64, x16 += 4, z16 += 4; // 64 bytes = 4 * M128
+        } while (bytes >= 64);
+    }
+# endif // GF256_TRY_GFNI
 # if defined(GF256_TRY_AVX2)
-    if (bytes >= 32 && CpuHasAVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_GFNI_ACTIVE)
     {
         // Partial product tables; see above
         const GF256_M256 table_lo_y = _mm256_loadu_si256(GF256Ctx.MM256.TABLE_LO_Y + y);
@@ -1268,6 +1442,7 @@ extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTR
 extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                                  const void * GF256_RESTRICT vx, int bytes)
 {
+    WH_BUMP(4, bytes);
     // Use a single if-statement to handle special cases
     if (y <= 1)
     {
@@ -1310,8 +1485,23 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
     }
 #endif
 #else // GF256_TARGET_MOBILE
+# if defined(GF256_TRY_GFNI)
+    // Ablation S1: z[] += x[] * y, 64 bytes per vgf2p8affineqb under poly 0x14D.
+    if (CpuHasGFNI && bytes >= 64)
+    {
+        const __m512i A = _mm512_set1_epi64((long long)GF256Ctx.GFNI_MUL_MATRIX[y]);
+        do
+        {
+            const __m512i v = _mm512_loadu_si512((const void*)x16);
+            const __m512i p = _mm512_gf2p8affine_epi64_epi8(v, A, 0);
+            const __m512i zz = _mm512_loadu_si512((const void*)z16);
+            _mm512_storeu_si512((void*)z16, _mm512_xor_si512(p, zz));
+            bytes -= 64, x16 += 4, z16 += 4; // 64 bytes = 4 * M128
+        } while (bytes >= 64);
+    }
+# endif // GF256_TRY_GFNI
 # if defined(GF256_TRY_AVX2)
-    if (bytes >= 32 && CpuHasAVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_GFNI_ACTIVE)
     {
         // Partial product tables; see above
         const GF256_M256 table_lo_y = _mm256_loadu_si256(GF256Ctx.MM256.TABLE_LO_Y + y);
@@ -1496,6 +1686,7 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
 
 extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy, int bytes)
 {
+    WH_BUMP(5, bytes);
 #if defined(GF256_TARGET_MOBILE)
     uint64_t * GF256_RESTRICT x16 = reinterpret_cast<uint64_t *>(vx);
     uint64_t * GF256_RESTRICT y16 = reinterpret_cast<uint64_t *>(vy);

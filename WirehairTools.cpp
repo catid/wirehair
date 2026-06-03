@@ -28,6 +28,9 @@
 */
 
 #include "WirehairTools.h"
+#if defined(WH_HUGEPAGE) && defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 #include <cmath>
 #include <cstdlib>
@@ -529,6 +532,12 @@ uint16_t GeneratePeelRowWeight(
         CAT_DEBUG_ASSERT(weight < kMaxPeelCount);
     }
 
+#ifdef WH_SEED_KNOBS
+    // Experiment (task6): cap peel-row weight to make rows lighter (fewer symbol XORs).
+    { static int cap = -2; if (cap == -2) { const char* e = ::getenv("WH_PEELCAP"); cap = e ? atoi(e) : -1; }
+      if (cap > 3 && weight > (uint16_t)cap) weight = (uint16_t)cap; }
+#endif
+
     return weight;
 }
 
@@ -579,6 +588,19 @@ uint8_t* SIMDSafeAllocate(size_t size)
     if (!data) {
         return nullptr;
     }
+#if defined(WH_HUGEPAGE) && defined(__linux__)
+    // Small win (wirehair-d98): request transparent huge pages for large allocations to cut
+    // dTLB misses on the scattered multi-MB recovery-block working set (~8.7% dTLB miss rate).
+    if (size >= (256u * 1024)) {
+        const uintptr_t pg = 4096;
+        const uintptr_t aligned = ((uintptr_t)data + pg - 1) & ~(pg - 1);
+        const size_t total = GF256_ALIGN_BYTES + size;
+        const size_t len = (total - (size_t)(aligned - (uintptr_t)data)) & ~(pg - 1);
+        if (len >= (2u * 1024 * 1024)) {
+            madvise((void*)aligned, len, MADV_HUGEPAGE);
+        }
+    }
+#endif
     unsigned offset = (unsigned)((uintptr_t)data % GF256_ALIGN_BYTES);
     data += GF256_ALIGN_BYTES - offset;
     data[-1] = (uint8_t)offset;
@@ -947,8 +969,30 @@ const uint8_t kDenseSeeds[kDenseSeedCount] = {
     84,112,152,0
 };
 
+// Per-N dense-seed corrections (Task5) for N where a peel-seed change alone can't fix the
+// overhead defect. Paired with WirehairPeelFixups.inc. Sorted ascending by N for binary search.
+struct DenseSeedFixup { uint16_t N; uint8_t Seed; };
+static const DenseSeedFixup kDenseSeedFixups[] = {
+#include "WirehairDenseFixups.inc"
+};
+static const unsigned kDenseSeedFixupCount =
+    (unsigned)(sizeof(kDenseSeedFixups) / sizeof(kDenseSeedFixups[0]));
+
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
 {
+    // Correction table first (binary search).
+    {
+        unsigned lo = 0, hi = kDenseSeedFixupCount;
+        while (lo < hi) {
+            const unsigned mid = (lo + hi) >> 1;
+            if (kDenseSeedFixups[mid].N < N) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo < kDenseSeedFixupCount && kDenseSeedFixups[lo].N == N) {
+            return kDenseSeedFixups[lo].Seed;
+        }
+    }
+
     if (N < kTinyTableCount) {
         // Get seed from tiny table (16-bit)
         return kTinyDenseSeeds[N];
@@ -1039,8 +1083,31 @@ const uint8_t kPeelSeeds[kPeelSeedSubdivisions] = {
     9,0,1,4,1,12,5,0,2,14,13,0,1,1,4,0,14,11,16,6,3,7,6,13,13,0,1,8,0,2,1,8,
 };
 
+// Per-N peel-seed corrections for weak-spot N where the default table seed yields
+// anomalously high decode overhead (5-150x). Each N's peel seed only affects that N,
+// so these are safe, isolated overrides. Sorted ascending by N for binary search.
+struct PeelSeedFixup { uint16_t N; uint8_t Seed; };
+static const PeelSeedFixup kPeelSeedFixups[] = {
+#include "WirehairPeelFixups.inc"
+};
+static const unsigned kPeelSeedFixupCount =
+    (unsigned)(sizeof(kPeelSeedFixups) / sizeof(kPeelSeedFixups[0]));
+
 uint16_t GetPeelSeed(unsigned N)
 {
+    // Check the correction table first (binary search).
+    {
+        unsigned lo = 0, hi = kPeelSeedFixupCount;
+        while (lo < hi) {
+            const unsigned mid = (lo + hi) >> 1;
+            if (kPeelSeedFixups[mid].N < N) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo < kPeelSeedFixupCount && kPeelSeedFixups[lo].N == N) {
+            return kPeelSeedFixups[lo].Seed;
+        }
+    }
+
     if (N < (kTinyTableCount + kSmallTableCount)) {
         return kSmallPeelSeeds[N];
     }

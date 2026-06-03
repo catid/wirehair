@@ -61,3 +61,20 @@ Temporary Items
 
 #Build cmake dir
 build
+
+# Local benchmark harness build outputs
+bench/obj/
+bench/whx
+bench/whx.*
+!bench/whx.cpp
+bench/results/*.err
+bench/results/*.out
+bench/results/*.txt
+bench/results/*.sh
+bench/results/*.md
+!bench/results/FINDINGS.md
+bench/results/Wirehair*Fixups.inc
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
