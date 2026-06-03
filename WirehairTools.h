@@ -84,10 +84,19 @@ namespace wirehair {
 #define CAT_ALL_ORIGINAL      /**< Avoid doing calculations for 0 losses -- Requires CAT_COPY_FIRST_N (faster) */
 
 /// Number of heavy rows at the bottom of the matrix
-static const unsigned kHeavyRows = 6;
+#ifndef WH_HEAVY_ROWS
+#define WH_HEAVY_ROWS 6
+#endif
+static const unsigned kHeavyRows = WH_HEAVY_ROWS;
 
 /// Number of heavy columns at the bottom right of the matrix
-static const unsigned kHeavyCols = 18;
+#ifndef WH_HEAVY_COLS
+#define WH_HEAVY_COLS 18
+#endif
+static const unsigned kHeavyCols = WH_HEAVY_COLS;
+
+static_assert(kHeavyRows >= 1 && kHeavyRows <= 6, "WH_HEAVY_ROWS must be in [1,6] unless kHeavyMatrix is regenerated");
+static_assert(kHeavyCols >= kHeavyRows && kHeavyCols <= 18, "WH_HEAVY_COLS must be in [WH_HEAVY_ROWS,18] unless kHeavyMatrix is regenerated");
 
 // If the heavy row/column count changes then we will have to regenerate a new
 // heavy matrix using HeavyRowGenerator.cpp, and all the dense/peel seeds.

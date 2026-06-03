@@ -1310,12 +1310,26 @@ extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTR
     if (CpuHasGFNI && bytes >= 64)
     {
         const __m512i A = _mm512_set1_epi64((long long)GF256Ctx.GFNI_MUL_MATRIX[y]);
-        do
+#  if defined(WH_GFNI_UNROLL4) && (WH_GFNI_UNROLL4+0)
+        while (bytes >= 256)
+        {
+            const __m512i v0 = _mm512_loadu_si512((const void*)(x16 + 0));
+            const __m512i v1 = _mm512_loadu_si512((const void*)(x16 + 4));
+            const __m512i v2 = _mm512_loadu_si512((const void*)(x16 + 8));
+            const __m512i v3 = _mm512_loadu_si512((const void*)(x16 + 12));
+            _mm512_storeu_si512((void*)(z16 + 0), _mm512_gf2p8affine_epi64_epi8(v0, A, 0));
+            _mm512_storeu_si512((void*)(z16 + 4), _mm512_gf2p8affine_epi64_epi8(v1, A, 0));
+            _mm512_storeu_si512((void*)(z16 + 8), _mm512_gf2p8affine_epi64_epi8(v2, A, 0));
+            _mm512_storeu_si512((void*)(z16 + 12), _mm512_gf2p8affine_epi64_epi8(v3, A, 0));
+            bytes -= 256, x16 += 16, z16 += 16; // 256 bytes = 16 * M128
+        }
+#  endif
+        while (bytes >= 64)
         {
             const __m512i v = _mm512_loadu_si512((const void*)x16);
             _mm512_storeu_si512((void*)z16, _mm512_gf2p8affine_epi64_epi8(v, A, 0));
             bytes -= 64, x16 += 4, z16 += 4; // 64 bytes = 4 * M128
-        } while (bytes >= 64);
+        }
     }
 # endif // GF256_TRY_GFNI
 # if defined(GF256_TRY_AVX2)
@@ -1490,14 +1504,36 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
     if (CpuHasGFNI && bytes >= 64)
     {
         const __m512i A = _mm512_set1_epi64((long long)GF256Ctx.GFNI_MUL_MATRIX[y]);
-        do
+#  if defined(WH_GFNI_UNROLL4) && (WH_GFNI_UNROLL4+0)
+        while (bytes >= 256)
+        {
+            const __m512i v0 = _mm512_loadu_si512((const void*)(x16 + 0));
+            const __m512i v1 = _mm512_loadu_si512((const void*)(x16 + 4));
+            const __m512i v2 = _mm512_loadu_si512((const void*)(x16 + 8));
+            const __m512i v3 = _mm512_loadu_si512((const void*)(x16 + 12));
+            const __m512i z0 = _mm512_loadu_si512((const void*)(z16 + 0));
+            const __m512i z1 = _mm512_loadu_si512((const void*)(z16 + 4));
+            const __m512i z2 = _mm512_loadu_si512((const void*)(z16 + 8));
+            const __m512i z3 = _mm512_loadu_si512((const void*)(z16 + 12));
+            const __m512i p0 = _mm512_gf2p8affine_epi64_epi8(v0, A, 0);
+            const __m512i p1 = _mm512_gf2p8affine_epi64_epi8(v1, A, 0);
+            const __m512i p2 = _mm512_gf2p8affine_epi64_epi8(v2, A, 0);
+            const __m512i p3 = _mm512_gf2p8affine_epi64_epi8(v3, A, 0);
+            _mm512_storeu_si512((void*)(z16 + 0), _mm512_xor_si512(p0, z0));
+            _mm512_storeu_si512((void*)(z16 + 4), _mm512_xor_si512(p1, z1));
+            _mm512_storeu_si512((void*)(z16 + 8), _mm512_xor_si512(p2, z2));
+            _mm512_storeu_si512((void*)(z16 + 12), _mm512_xor_si512(p3, z3));
+            bytes -= 256, x16 += 16, z16 += 16; // 256 bytes = 16 * M128
+        }
+#  endif
+        while (bytes >= 64)
         {
             const __m512i v = _mm512_loadu_si512((const void*)x16);
             const __m512i p = _mm512_gf2p8affine_epi64_epi8(v, A, 0);
             const __m512i zz = _mm512_loadu_si512((const void*)z16);
             _mm512_storeu_si512((void*)z16, _mm512_xor_si512(p, zz));
             bytes -= 64, x16 += 4, z16 += 4; // 64 bytes = 4 * M128
-        } while (bytes >= 64);
+        }
     }
 # endif // GF256_TRY_GFNI
 # if defined(GF256_TRY_AVX2)

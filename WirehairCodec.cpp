@@ -1017,7 +1017,7 @@ void Codec::MultiplyDenseRows()
 // It has a special property that stacked random binary matrices do not affect
 // its inversion rate.  Honestly I haven't looked into why, but it's not a
 // common property for Cauchy matrices, and I didn't know this was possible.
-static const uint8_t kHeavyMatrix[kHeavyRows][kHeavyCols] = {
+static const uint8_t kHeavyMatrix[6][18] = {
     { 0x85, 0xd3, 0x66, 0xf3, 0x38, 0x95, 0x56, 0xad, 0x57, 0xaf, 0x58, 0x48, 0xbc, 0xfa, 0x02, 0xc5, 0x43, 0xe8, },
     { 0xd3, 0x85, 0xf3, 0x66, 0x95, 0x38, 0xad, 0x56, 0xaf, 0x57, 0x48, 0x58, 0xfa, 0xbc, 0xc5, 0x02, 0xe8, 0x43, },
     { 0x82, 0x22, 0x57, 0xaf, 0x56, 0xad, 0x38, 0x95, 0x66, 0xf3, 0x43, 0xe8, 0x02, 0xc5, 0xbc, 0xfa, 0x58, 0x48, },
@@ -1934,6 +1934,13 @@ void Codec::MultiplyDenseValues()
 }
 
 // These are heuristic values.  Choosing better values has little effect on performance.
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+#define CAT_WIN_TABLE_SIZE 256
+#define CAT_UNDER_WIN_THRESH_8 (256 + 8)
+#define CAT_ABOVE_WIN_THRESH_8 (256 + 8)
+#else
+#define CAT_WIN_TABLE_SIZE 128
+#endif
 #define CAT_UNDER_WIN_THRESH_4 (45 + 4) /* Note: Assumes this is higher than CAT_HEAVY_MAX_COLS */
 #define CAT_UNDER_WIN_THRESH_5 (65 + 5)
 #define CAT_UNDER_WIN_THRESH_6 (85 + 6)
@@ -1958,6 +1965,14 @@ void Codec::AddSubdiagonalValues()
         unsigned w, next_check_i;
 
         // Calculate initial window size
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+        if (column_count >= CAT_UNDER_WIN_THRESH_8)
+        {
+            w = 8;
+            next_check_i = column_count - CAT_UNDER_WIN_THRESH_8;
+        }
+        else
+#endif
         if (column_count >= CAT_UNDER_WIN_THRESH_7)
         {
             w = 7;
@@ -1985,7 +2000,7 @@ void Codec::AddSubdiagonalValues()
         // Use the first few peel column values as window table space
         // Note that the peeled column values were previously used up until this point,
         // but now they are unused, and so they can be reused for temporary space
-        uint8_t * GF256_RESTRICT win_table[128];
+        uint8_t * GF256_RESTRICT win_table[CAT_WIN_TABLE_SIZE];
         const PeelColumn * GF256_RESTRICT column = _peel_cols;
         uint8_t * GF256_RESTRICT column_src = _recovery_blocks;
         uint32_t jj = 1;
@@ -2116,6 +2131,18 @@ void Codec::AddSubdiagonalValues()
                             gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
                         }
                         CAT_IF_ROWOP(rowops += 63;)
+
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+                        if (w >= 8)
+                        {
+                            CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 7] < _recovery_rows);
+                            win_table[128] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 7];
+                            for (unsigned ii = 1; ii < 128; ++ii) {
+                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], _block_bytes);
+                            }
+                            CAT_IF_ROWOP(rowops += 127;)
+                        }
+#endif
                     }
                 }
             }
@@ -2191,6 +2218,17 @@ void Codec::AddSubdiagonalValues()
                 CAT_DEBUG_ASSERT(pivot_i < column_count);
                 const unsigned remaining_columns = column_count - pivot_i;
 
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+                if (remaining_columns >= CAT_UNDER_WIN_THRESH_8) {
+                    w = 8;
+                    next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_8;
+                }
+                else if (remaining_columns >= CAT_UNDER_WIN_THRESH_7) {
+                    w = 7;
+                    next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_7;
+                }
+                else
+#endif
                 if (remaining_columns >= CAT_UNDER_WIN_THRESH_6) {
                     w = 6;
                     next_check_i = remaining_columns - CAT_UNDER_WIN_THRESH_6;
@@ -2246,7 +2284,11 @@ void Codec::AddSubdiagonalValues()
                 CAT_DEBUG_ASSERT(_ge_col_map[sub_i] < _recovery_rows);
                 const uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[sub_i];
 
-                gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                if (code_value == 1) {
+                    gf256_add_mem(dest, src, _block_bytes);
+                } else {
+                    gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                }
 
                 CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
                 CAT_IF_DUMP(cout << " h" << ge_column_i << "=[" << (unsigned)src[0] << "*" << (unsigned)code_value << "]";)
@@ -2318,6 +2360,13 @@ void Codec::BackSubstituteAboveDiagonal()
     {
         // Calculate initial window size
         unsigned w, next_check_i;
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+        if (pivot_i >= CAT_ABOVE_WIN_THRESH_8) {
+            w = 8;
+            next_check_i = CAT_ABOVE_WIN_THRESH_8;
+        }
+        else
+#endif
         if (pivot_i >= CAT_ABOVE_WIN_THRESH_7) {
             w = 7;
             next_check_i = CAT_ABOVE_WIN_THRESH_7;
@@ -2341,7 +2390,7 @@ void Codec::BackSubstituteAboveDiagonal()
         // Use the first few peel column values as window table space
         // NOTE: The peeled column values were previously used up until this point,
         // but now they are unused, and so they can be reused for temporary space.
-        uint8_t * GF256_RESTRICT win_table[128];
+        uint8_t * GF256_RESTRICT win_table[CAT_WIN_TABLE_SIZE];
         const PeelColumn * GF256_RESTRICT column = _peel_cols;
         uint8_t * GF256_RESTRICT column_src = _recovery_blocks;
         uint32_t jj = 1;
@@ -2437,7 +2486,11 @@ void Codec::BackSubstituteAboveDiagonal()
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
 
                         // Back-substitute
-                        gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                        if (code_value == 1) {
+                            gf256_add_mem(dest, src, _block_bytes);
+                        } else {
+                            gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                        }
 
                         CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
                         CAT_IF_DUMP(cout << " h" << dest_pivot_i;)
@@ -2545,6 +2598,18 @@ void Codec::BackSubstituteAboveDiagonal()
                             gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
                         }
                         CAT_IF_ROWOP(rowops += 63;)
+
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+                        if (w >= 8)
+                        {
+                            CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 7] < _recovery_rows);
+                            win_table[128] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 7];
+                            for (unsigned ii = 1; ii < 128; ++ii) {
+                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], _block_bytes);
+                            }
+                            CAT_IF_ROWOP(rowops += 127;)
+                        }
+#endif
                     }
                 }
             }
@@ -2618,7 +2683,11 @@ void Codec::BackSubstituteAboveDiagonal()
                         const uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
 
                         // Back-substitute
-                        gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                        if (code_value == 1) {
+                            gf256_add_mem(dest, src, _block_bytes);
+                        } else {
+                            gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                        }
 
                         CAT_IF_ROWOP(if (code_value == 1) ++rowops; else ++heavyops;)
                     } // next column in row
@@ -2703,6 +2772,17 @@ void Codec::BackSubstituteAboveDiagonal()
             pivot_i -= w;
             if (pivot_i < next_check_i)
             {
+#if defined(WH_WINDOW8) && (WH_WINDOW8+0)
+                if (pivot_i >= CAT_ABOVE_WIN_THRESH_8) {
+                    w = 8;
+                    next_check_i = CAT_ABOVE_WIN_THRESH_8;
+                }
+                else if (pivot_i >= CAT_ABOVE_WIN_THRESH_7) {
+                    w = 7;
+                    next_check_i = CAT_ABOVE_WIN_THRESH_7;
+                }
+                else
+#endif
                 if (pivot_i >= CAT_ABOVE_WIN_THRESH_6) {
                     w = 6;
                     next_check_i = CAT_ABOVE_WIN_THRESH_6;
@@ -2785,7 +2865,11 @@ void Codec::BackSubstituteAboveDiagonal()
                 uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_up_i];
 
                 // Back-substitute
-                gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                if (code_value == 1) {
+                    gf256_add_mem(dest, src, _block_bytes);
+                } else {
+                    gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                }
 
                 CAT_IF_ROWOP(if (code_value == 1) {
                     ++rowops;

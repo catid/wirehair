@@ -375,6 +375,20 @@ static int sample_blockBytes(Rng& rng) {
     return rng.range(1, 8192);
 }
 
+static vector<int> parse_int_list(const string& list) {
+    vector<int> values;
+    size_t p = 0;
+    while (p < list.size()) {
+        size_t q = list.find(',', p);
+        string tok = list.substr(p, q == string::npos ? string::npos : q - p);
+        int v = atoi(tok.c_str());
+        if (v > 0) values.push_back(v);
+        if (q == string::npos) break;
+        p = q + 1;
+    }
+    return values;
+}
+
 static int cmd_fuzz(int argc, char** argv) {
     int threads = resolve_threads();
     double seconds = 20.0;
@@ -528,21 +542,30 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
 
 static int cmd_bench(int argc, char** argv) {
     int threads = resolve_threads();
-    int blockBytes = 1300;
+    string bblist = "1300";
     double lossRate = 0.10;
     int rounds_per_N = 0; // 0 => auto by N
     string nlist = "32,128,512,1024,2048,8192,32000";
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--bb") && i + 1 < argc) blockBytes = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--bb") && i + 1 < argc) bblist = argv[++i];
+        else if (!strcmp(argv[i], "--bb-list") && i + 1 < argc) bblist = argv[++i];
         else if (!strcmp(argv[i], "--loss") && i + 1 < argc) lossRate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--N") && i + 1 < argc) nlist = argv[++i];
         else if (!strcmp(argv[i], "--rounds") && i + 1 < argc) rounds_per_N = atoi(argv[++i]);
     }
-    vector<int> Ns;
-    { size_t p = 0; while (p < nlist.size()) { size_t q = nlist.find(',', p); string tok = nlist.substr(p, q==string::npos?string::npos:q-p); if(!tok.empty()) Ns.push_back(atoi(tok.c_str())); if (q==string::npos) break; p = q+1; } }
-    printf("# bench: threads=%d bb=%d loss=%.2f\n", threads, blockBytes, lossRate);
-    printf("%-8s %14s %14s %14s %14s %10s\n", "N", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
-    for (int N : Ns) {
+    vector<int> Ns = parse_int_list(nlist);
+    vector<int> BBs = parse_int_list(bblist);
+    if (Ns.empty() || BBs.empty()) {
+        fprintf(stderr, "bench requires non-empty --N and --bb/--bb-list positive integer lists\n");
+        return 1;
+    }
+    const bool matrix = BBs.size() > 1;
+    printf("# bench: threads=%d bb=%s loss=%.2f\n", threads, bblist.c_str(), lossRate);
+    if (matrix)
+        printf("%-8s %-8s %10s %14s %14s %14s %14s %10s\n", "N", "bb", "msg_MiB", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
+    else
+        printf("%-8s %14s %14s %14s %14s %10s\n", "N", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
+    for (int blockBytes : BBs) for (int N : Ns) {
         // total rounds across all threads; scale down for large N to keep runtime bounded
         int total_rounds = rounds_per_N;
         if (total_rounds == 0) {
@@ -550,6 +573,13 @@ static int cmd_bench(int argc, char** argv) {
             else if (N <= 1024) total_rounds = threads * 16;
             else if (N <= 8192) total_rounds = threads * 4;
             else total_rounds = threads * 2;
+            const uint64_t msgBytes = (uint64_t)N * blockBytes;
+            const uint64_t roundCapBytes = 64ull * 1024 * 1024;
+            if (msgBytes > roundCapBytes && total_rounds > threads) {
+                uint64_t scaled = ((uint64_t)total_rounds * roundCapBytes) / msgBytes;
+                if (scaled < (uint64_t)threads) scaled = threads;
+                total_rounds = (int)scaled;
+            }
         }
         std::atomic<int> next{0};
         BenchAccum global; std::mutex mu;
@@ -582,7 +612,14 @@ static int cmd_bench(int argc, char** argv) {
         double recover_MBPS = global.recover_us > 0 ? (double)global.recover_bytes / global.recover_us : 0;
         double overhead = global.rounds ? (double)global.overhead_sum / global.rounds : 0;
         (void)cr;
-        printf("%-8d %14.1f %14.1f %14.1f %14.1f %10.4f\n", N, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
+        if (matrix) {
+            double msgMiB = (double)((uint64_t)N * blockBytes) / 1048576.0;
+            printf("%-8d %-8d %10.2f %14.1f %14.1f %14.1f %14.1f %10.4f\n",
+                   N, blockBytes, msgMiB, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
+        } else {
+            printf("%-8d %14.1f %14.1f %14.1f %14.1f %10.4f\n",
+                   N, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
+        }
         fflush(stdout);
     }
     return 0;
@@ -744,7 +781,8 @@ static int cmd_seedsearch(int argc, char** argv) {
         else if (!strcmp(argv[i],"--loss")&&i+1<argc) loss=atof(argv[++i]);
         else if (!strcmp(argv[i],"--startmode")&&i+1<argc) startMode=atoi(argv[++i]);
     }
-    if (nseeds < 1) nseeds = 1; if (nseeds > 256) nseeds = 256;
+    if (nseeds < 1) nseeds = 1;
+    if (nseeds > 256) nseeds = 256;
     vector<int> Ns;
     if (!nfile.empty()) { FILE* f=fopen(nfile.c_str(),"r"); if(f){ int n; while(fscanf(f,"%d",&n)==1) Ns.push_back(n); fclose(f);} }
     if (!nlist.empty()) { size_t p=0; while(p<nlist.size()){size_t q=nlist.find(',',p); int n=atoi(nlist.substr(p,q==string::npos?string::npos:q-p).c_str()); if(n>0)Ns.push_back(n); if(q==string::npos)break; p=q+1;} }
@@ -888,35 +926,46 @@ static void count_dump(const char* stage, uint64_t msgBytes) {
     }
 }
 static int cmd_count(int argc, char** argv) {
-    int N=2048, bb=1300; double loss=0.10; int startMode=0;
-    for (int i=0;i<argc;++i){ if(!strcmp(argv[i],"--N")&&i+1<argc)N=atoi(argv[++i]);
-        else if(!strcmp(argv[i],"--bb")&&i+1<argc)bb=atoi(argv[++i]);
+    string nlist = "2048", bblist = "1300";
+    double loss=0.10; int startMode=0;
+    for (int i=0;i<argc;++i){ if(!strcmp(argv[i],"--N")&&i+1<argc)nlist=argv[++i];
+        else if(!strcmp(argv[i],"--bb")&&i+1<argc)bblist=argv[++i];
+        else if(!strcmp(argv[i],"--bb-list")&&i+1<argc)bblist=argv[++i];
         else if(!strcmp(argv[i],"--loss")&&i+1<argc)loss=atof(argv[++i]);
         else if(!strcmp(argv[i],"--startmode")&&i+1<argc)startMode=atoi(argv[++i]); }
-    Rng rng(0xC007);
-    uint64_t msgBytes=(uint64_t)N*bb;
-    vector<uint8_t> msg(msgBytes), dec(msgBytes); vector<uint8_t> blk(bb);
-    for(uint64_t i=0;i<msgBytes;++i) msg[i]=(uint8_t)rng.u32();
-    printf("# count: N=%d bb=%d loss=%.2f startMode=%d\n", N,bb,loss,startMode);
-    gf256_count_reset(); wh_stage_reset();
-    WirehairCodec enc=wirehair_encoder_create(nullptr,msg.data(),msgBytes,bb);
-    count_dump("encoder_create", msgBytes);
-    { uint64_t attributed=0; for(int i=0;i<wh_stage_count();++i){ attributed+=wh_stage_bytes(i);
-        printf("      %-28s %.2fMB (%.1fx)\n", wh_stage_label(i), wh_stage_bytes(i)/1e6, msgBytes?(double)wh_stage_bytes(i)/msgBytes:0); }
-      uint64_t tot=gf256_count_bytes(0)+gf256_count_bytes(1)+gf256_count_bytes(2)+gf256_count_bytes(3)+gf256_count_bytes(4)+gf256_count_bytes(5);
-      printf("      %-28s %.2fMB (peel-during-feed + misc)\n", "[unattributed]", (tot-attributed)/1e6); }
-    WirehairCodec dcd=wirehair_decoder_create(nullptr,msgBytes,bb);
-    unsigned id=(startMode==1)?(unsigned)N:0, needed=0; uint32_t wl=0; bool ok=false;
-    gf256_count_reset();
-    for(;;){ if(needed>=(unsigned)N*2+512)break;
-        bool drop=(startMode==0)&&(rng.unit()<loss); unsigned t=id++; if(drop)continue;
-        wirehair_encode(enc,t,blk.data(),bb,&wl); needed++;
-        WirehairResult dr=wirehair_decode(dcd,t,blk.data(),wl);
-        if(dr==Wirehair_Success){ok=true;break;} if(dr!=Wirehair_NeedMore)break; }
-    count_dump("decode(feed)", msgBytes);
-    if(ok){ gf256_count_reset(); wirehair_recover(dcd,dec.data(),msgBytes); count_dump("recover", msgBytes);
-        printf("# recover correct: %s\n", memcmp(dec.data(),msg.data(),msgBytes)==0?"YES":"NO"); }
-    wirehair_free(enc); wirehair_free(dcd);
+    vector<int> Ns = parse_int_list(nlist);
+    vector<int> BBs = parse_int_list(bblist);
+    if (Ns.empty() || BBs.empty()) {
+        fprintf(stderr, "count requires non-empty --N and --bb/--bb-list positive integer lists\n");
+        return 1;
+    }
+    for (int bb : BBs) for (int N : Ns) {
+        Rng rng(0xC007 + (uint64_t)N * 131 + (uint64_t)bb * 17);
+        uint64_t msgBytes=(uint64_t)N*bb;
+        vector<uint8_t> msg(msgBytes), dec(msgBytes); vector<uint8_t> blk(bb);
+        for(uint64_t i=0;i<msgBytes;++i) msg[i]=(uint8_t)rng.u32();
+        printf("# count: N=%d bb=%d msg_MiB=%.2f loss=%.2f startMode=%d\n",
+               N, bb, (double)msgBytes / 1048576.0, loss, startMode);
+        gf256_count_reset(); wh_stage_reset();
+        WirehairCodec enc=wirehair_encoder_create(nullptr,msg.data(),msgBytes,bb);
+        count_dump("encoder_create", msgBytes);
+        { uint64_t attributed=0; for(int i=0;i<wh_stage_count();++i){ attributed+=wh_stage_bytes(i);
+            printf("      %-28s %.2fMB (%.1fx)\n", wh_stage_label(i), wh_stage_bytes(i)/1e6, msgBytes?(double)wh_stage_bytes(i)/msgBytes:0); }
+          uint64_t tot=gf256_count_bytes(0)+gf256_count_bytes(1)+gf256_count_bytes(2)+gf256_count_bytes(3)+gf256_count_bytes(4)+gf256_count_bytes(5);
+          printf("      %-28s %.2fMB (peel-during-feed + misc)\n", "[unattributed]", (tot-attributed)/1e6); }
+        WirehairCodec dcd=wirehair_decoder_create(nullptr,msgBytes,bb);
+        unsigned id=(startMode==1)?(unsigned)N:0, needed=0; uint32_t wl=0; bool ok=false;
+        gf256_count_reset();
+        for(;;){ if(needed>=(unsigned)N*2+512)break;
+            bool drop=(startMode==0)&&(rng.unit()<loss); unsigned t=id++; if(drop)continue;
+            wirehair_encode(enc,t,blk.data(),bb,&wl); needed++;
+            WirehairResult dr=wirehair_decode(dcd,t,blk.data(),wl);
+            if(dr==Wirehair_Success){ok=true;break;} if(dr!=Wirehair_NeedMore)break; }
+        count_dump("decode(feed)", msgBytes);
+        if(ok){ gf256_count_reset(); wirehair_recover(dcd,dec.data(),msgBytes); count_dump("recover", msgBytes);
+            printf("# recover correct: %s\n", memcmp(dec.data(),msg.data(),msgBytes)==0?"YES":"NO"); }
+        wirehair_free(enc); wirehair_free(dcd);
+    }
     return 0;
 }
 #endif
@@ -926,7 +975,11 @@ int main(int argc, char** argv) {
 #ifdef WH_COUNT
     if (argc>=2 && !strcmp(argv[1],"count")) { vector<char*> r(argv+2,argv+argc); return cmd_count((int)r.size(), r.data()); }
 #endif
-    if (argc < 2) { fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch] [--threads T] [opts]\n"); return 1; }
+    if (argc < 2) {
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch] [--threads T] [opts]\n");
+        fprintf(stderr, "  bench/count accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+        return 1;
+    }
     string mode = argv[1];
     // Parse the global --threads for ALL modes first (previously scan/seedsearch/repro were
     // dispatched before this, silently ignoring --threads and defaulting to ~102 threads).
