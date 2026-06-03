@@ -1,0 +1,39 @@
+# methods:
+#    0 default          O(cols) cached degree-2 refs
+#    1 exact_d2         O(cols*rowrefs) exact degree-2
+#    2 lookahead        O(cols*rowrefs) degree-2 partner potential
+#    3 weighted         O(cols*rowrefs) weighted exact/look/fill
+#    4 min_fill         O(cols*rowrefs) Markowitz-style fill
+#    5 min_fillsq       O(cols*rowrefs) quadratic fill
+#    6 dup_partner      O(cols*rowrefs) repeated degree-2 partners
+#    7 random_tie       O(cols) seeded randomized default ties
+#    8 rowrefs          O(cols) column reference count
+#    9 min_row_degree   O(rows*degree) minimum live row
+#   10 raptorq_d2cc     O(rows*degree + cols) largest degree-2 component
+#   11 topk8_lookfill   O(cols + 8*rowrefs) top-K look/fill
+#   12 exact_ratio      O(cols*rowrefs) exact degree-2 per fill
+#   13 min_maxrow       O(cols*rowrefs) minimize worst touched row
+#   14 d3_support       O(cols*rowrefs) degree-3 support
+#   15 rq_minrow        O(rows*degree) Raptor-style minimum row degree
+#   16 topk4_lookfill   O(cols + 4*rowrefs) top-K look/fill
+#   17 topk16_lookfill  O(cols + 16*rowrefs) top-K look/fill
+#   18 rqd2_default     O(rows*degree + cols) largest degree-2 component/default tie
+#   19 rqd2_minfill     O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie
+#   20 minrow_best      O(rows*degree) best column among all minimum rows
+# sweep: trials=40 threads=16 source=repair loss=0.100 overhead=0 rows_override=0 seed=0x5eed9999
+method_id,method,cost,N,rows,source,trials,cols_mu,cols_sd,c50,c95,c99,cmax,rows_mu,rows_sd,r50,r95,r99,rmax,comp_mu,maxcomp_mu,sumsq_mu,init_todo_mu,init_d2_mu,choices_mu,build_us,greedy_us,total_us
+0,default,"O(cols) cached degree-2 refs",128,128,repair,40,5.83,1.36,6,8,8,8,5.83,1.36,6,8,8,8,3.60,3.23,15.72,126.33,57.50,5.83,27.6,11.3,49.2
+0,default,"O(cols) cached degree-2 refs",2048,2048,repair,40,35.50,1.36,36,37,37,37,35.50,1.36,36,37,37,37,33.75,2.20,39.50,1387.58,704.30,35.50,436.1,232.2,689.1
+0,default,"O(cols) cached degree-2 refs",32000,32000,repair,40,233.50,3.14,235,237,237,237,233.50,3.14,235,237,237,237,231.30,2.40,238.70,32000.00,15960.58,233.50,10220.8,15792.0,26754.6
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",128,128,repair,40,5.40,1.18,5,7,7,7,5.40,1.18,5,7,7,7,4.90,1.50,6.40,126.33,57.55,5.40,31.3,25.8,59.9
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",2048,2048,repair,40,33.75,1.65,34,36,36,36,33.75,1.65,34,36,36,36,33.75,1.00,33.75,1385.12,703.23,33.75,423.8,714.9,1150.5
+10,raptorq_d2cc,"O(rows*degree + cols) largest degree-2 component",32000,32000,repair,40,211.70,2.23,211,216,216,216,211.70,2.23,211,216,216,216,211.70,1.00,211.70,32000.00,15960.52,211.70,6421.2,55751.2,62357.0
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",128,128,repair,40,5.65,1.04,6,7,7,7,5.65,1.04,6,7,7,7,3.20,3.38,15.20,126.78,57.95,5.65,37.4,42.8,84.0
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",2048,2048,repair,40,34.55,2.01,35,38,38,38,34.55,2.01,35,38,38,38,33.55,1.90,36.85,1386.78,704.42,34.55,450.3,483.9,946.6
+17,topk16_lookfill,"O(cols + 16*rowrefs) top-K look/fill",32000,32000,repair,40,226.90,5.81,228,236,238,238,226.90,5.81,228,236,238,238,226.07,1.77,228.85,32000.00,15960.23,226.90,6282.3,28690.0,35164.2
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",128,128,repair,40,4.88,0.93,5,7,7,7,4.88,0.93,5,7,7,7,3.52,2.35,9.88,126.33,57.15,4.88,32.5,24.8,60.1
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",2048,2048,repair,40,33.08,1.79,33,36,36,36,33.08,1.79,33,36,36,36,30.60,2.48,39.33,1387.30,704.88,33.08,419.9,652.3,1084.0
+18,rqd2_default,"O(rows*degree + cols) largest degree-2 component/default tie",32000,32000,repair,40,211.53,1.72,211,213,216,216,211.53,1.72,211,213,216,216,210.38,1.77,213.82,32000.00,15960.48,211.53,6344.6,55170.2,61686.1
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",128,128,repair,40,5.05,1.00,5,7,7,7,5.05,1.00,5,7,7,7,4.85,1.20,5.45,126.47,57.40,5.05,35.0,44.7,82.8
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",2048,2048,repair,40,33.35,1.70,33,36,36,36,33.35,1.70,33,36,36,36,33.35,1.00,33.35,1386.28,703.77,33.35,411.4,897.3,1320.5
+19,rqd2_minfill,"O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie",32000,32000,repair,40,212.10,2.26,211,216,216,216,212.10,2.26,211,216,216,216,212.10,1.00,212.10,32000.00,15960.35,212.10,5910.2,61077.1,67135.1
