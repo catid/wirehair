@@ -59,12 +59,46 @@
 using namespace std;
 #endif
 
+#if defined(WH_COUNT) || defined(WH_PEELOPT)
+#include <cstdlib>
+#endif
+
 #ifdef WH_COUNT
 #include <vector>
 #endif
 
 
 namespace wirehair {
+
+#ifdef WH_PEELOPT
+
+#ifndef WH_PEEL_MODE
+#define WH_PEEL_MODE 0
+#endif
+
+static unsigned GetExperimentalPeelMode()
+{
+    const char* mode = ::getenv("WH_PEEL_MODE");
+    return mode ? (unsigned)::strtoul(mode, nullptr, 0) : (unsigned)WH_PEEL_MODE;
+}
+
+static uint32_t GetExperimentalPeelSeed()
+{
+    const char* seed = ::getenv("WH_PEEL_SEED");
+    return seed ? (uint32_t)::strtoul(seed, nullptr, 0) : 0x9e3779b9u;
+}
+
+static uint32_t PeelHash32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+#endif // WH_PEELOPT
 
 
 //------------------------------------------------------------------------------
@@ -335,9 +369,11 @@ void Codec::GreedyPeeling()
 
     const unsigned block_count = _block_count;
 
-    // Until all columns are marked:
-    for (;;)
-    {
+#ifdef WH_PEELOPT
+    const unsigned peel_mode = GetExperimentalPeelMode();
+    const uint32_t peel_seed = GetExperimentalPeelSeed();
+
+    const auto select_default_column = [&]() -> uint16_t {
         uint16_t best_column_i = LIST_TERM;
         unsigned best_w2_refs = 0;
         unsigned best_row_count = 0;
@@ -368,6 +404,298 @@ void Codec::GreedyPeeling()
                 }
             }
         }
+
+        return best_column_i;
+    };
+
+    const auto get_degree2_partner = [&](const PeelRow* row, const uint16_t column_i, uint16_t& partner) -> bool {
+        if (row->UnmarkedCount != 2) {
+            return false;
+        }
+
+        const uint16_t a = row->Marks.Unmarked[0];
+        const uint16_t b = row->Marks.Unmarked[1];
+
+        if (a == column_i && _peel_cols[b].Mark == MARK_TODO) {
+            partner = b;
+            return true;
+        }
+        if (b == column_i && _peel_cols[a].Mark == MARK_TODO) {
+            partner = a;
+            return true;
+        }
+
+        return false;
+    };
+
+    const auto collect_column_metrics = [&](const uint16_t column_i,
+        unsigned& exact_w2_refs,
+        unsigned& fill_cost,
+        unsigned& fill_square_cost,
+        unsigned& lookahead_score,
+        unsigned& distinct_partners,
+        unsigned& duplicate_partners)
+    {
+        exact_w2_refs = 0;
+        fill_cost = 0;
+        fill_square_cost = 0;
+        lookahead_score = 0;
+        distinct_partners = 0;
+        duplicate_partners = 0;
+
+        uint16_t partners[CAT_REF_LIST_MAX];
+
+        const PeelRefs* GF256_RESTRICT refs = &_peel_col_refs[column_i];
+        for (uint16_t ii = 0; ii < refs->RowCount; ++ii)
+        {
+            const PeelRow* GF256_RESTRICT row = &_peel_rows[refs->Rows[ii]];
+            const unsigned unmarked_count = row->UnmarkedCount;
+
+            if (unmarked_count > 1)
+            {
+                const unsigned links = unmarked_count - 1;
+                fill_cost += links;
+                fill_square_cost += links * links;
+            }
+
+            uint16_t partner = LIST_TERM;
+            if (get_degree2_partner(row, column_i, partner))
+            {
+                ++exact_w2_refs;
+                lookahead_score += _peel_cols[partner].Weight2Refs;
+
+                bool seen = false;
+                for (unsigned jj = 0; jj < distinct_partners; ++jj)
+                {
+                    if (partners[jj] == partner)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+
+                if (seen) {
+                    ++duplicate_partners;
+                }
+                else if (distinct_partners < CAT_REF_LIST_MAX) {
+                    partners[distinct_partners++] = partner;
+                }
+            }
+        }
+    };
+
+    const auto select_raptorq_style_column = [&]() -> uint16_t {
+        uint16_t best_column_i = LIST_TERM;
+        unsigned best_row_degree = 0xffffu;
+        unsigned best_w2_refs = 0;
+        unsigned best_row_count = 0;
+
+        for (uint16_t row_i = 0; row_i < _row_count; ++row_i)
+        {
+            const PeelRow* GF256_RESTRICT row = &_peel_rows[row_i];
+            const unsigned row_degree = row->UnmarkedCount;
+            if (row_degree <= 1 || row_degree > best_row_degree) {
+                continue;
+            }
+
+            uint16_t row_best_column_i = LIST_TERM;
+            unsigned row_best_w2_refs = 0;
+            unsigned row_best_row_count = 0;
+
+            PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
+            do
+            {
+                const uint16_t column_i = iter.GetColumn();
+                const PeelColumn* GF256_RESTRICT column = &_peel_cols[column_i];
+                if (column->Mark != MARK_TODO) {
+                    continue;
+                }
+
+                const unsigned w2_refs = column->Weight2Refs;
+                const unsigned row_count = _peel_col_refs[column_i].RowCount;
+
+                if (row_best_column_i == LIST_TERM ||
+                    w2_refs > row_best_w2_refs ||
+                    (w2_refs == row_best_w2_refs && row_count >= row_best_row_count))
+                {
+                    row_best_column_i = column_i;
+                    row_best_w2_refs = w2_refs;
+                    row_best_row_count = row_count;
+                }
+            } while (iter.Iterate());
+
+            if (row_best_column_i == LIST_TERM) {
+                continue;
+            }
+
+            if (best_column_i == LIST_TERM ||
+                row_degree < best_row_degree ||
+                (row_degree == best_row_degree && row_best_w2_refs > best_w2_refs) ||
+                (row_degree == best_row_degree && row_best_w2_refs == best_w2_refs &&
+                    row_best_row_count >= best_row_count))
+            {
+                best_column_i = row_best_column_i;
+                best_row_degree = row_degree;
+                best_w2_refs = row_best_w2_refs;
+                best_row_count = row_best_row_count;
+            }
+        }
+
+        return best_column_i;
+    };
+
+    const auto select_experimental_column = [&]() -> uint16_t {
+        if (peel_mode == 0) {
+            return select_default_column();
+        }
+
+        if (peel_mode == 6) {
+            const uint16_t column_i = select_raptorq_style_column();
+            return column_i != LIST_TERM ? column_i : select_default_column();
+        }
+
+        if (peel_mode > 7) {
+            return select_default_column();
+        }
+
+        uint16_t best_column_i = LIST_TERM;
+        int64_t best_a = 0;
+        int64_t best_b = 0;
+        int64_t best_c = 0;
+        int64_t best_d = 0;
+
+        const PeelColumn *column = _peel_cols;
+
+        // For each peel column:
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i, ++column)
+        {
+            // If column is not marked yet:
+            if (column->Mark != MARK_TODO) {
+                continue;
+            }
+
+            const unsigned w2_refs = column->Weight2Refs;
+            const unsigned row_count = _peel_col_refs[column_i].RowCount;
+
+            unsigned exact_w2_refs = 0;
+            unsigned fill_cost = 0;
+            unsigned fill_square_cost = 0;
+            unsigned lookahead_score = 0;
+            unsigned distinct_partners = 0;
+            unsigned duplicate_partners = 0;
+            collect_column_metrics(column_i, exact_w2_refs, fill_cost, fill_square_cost,
+                lookahead_score, distinct_partners, duplicate_partners);
+
+            int64_t a = 0;
+            int64_t b = 0;
+            int64_t c = 0;
+            int64_t d = 0;
+
+            switch (peel_mode)
+            {
+            case 1: // Markowitz/min-fill: minimize local fill introduced by deferral.
+                a = -(int64_t)fill_cost;
+                b = (int64_t)exact_w2_refs;
+                c = (int64_t)w2_refs;
+                d = (int64_t)row_count;
+                break;
+
+            case 2: // Component-aware proxy: penalize high-degree fanout quadratically.
+                a = -(int64_t)fill_square_cost;
+                b = -(int64_t)fill_cost;
+                c = (int64_t)exact_w2_refs;
+                d = (int64_t)row_count;
+                break;
+
+            case 3: // One-step lookahead: immediate degree-2 wins plus partner potential.
+                a = (int64_t)exact_w2_refs;
+                b = (int64_t)lookahead_score;
+                c = (int64_t)w2_refs;
+                d = (int64_t)row_count;
+                break;
+
+            case 4: // Bucket-compatible exact degree-2 key.
+                a = (int64_t)exact_w2_refs;
+                b = (int64_t)w2_refs;
+                c = (int64_t)row_count;
+                d = -(int64_t)fill_cost;
+                break;
+
+            case 5: // Seeded randomized tie-breaking around the default key.
+                a = (int64_t)w2_refs;
+                b = (int64_t)row_count;
+                c = (int64_t)PeelHash32(peel_seed ^ (uint32_t)column_i ^
+                    ((uint32_t)_defer_count * 0x9e3779b9u));
+                d = (int64_t)column_i;
+                break;
+
+            case 7: // Favor repeated partners in exact degree-2 rows.
+                a = (int64_t)duplicate_partners;
+                b = (int64_t)exact_w2_refs;
+                c = -(int64_t)distinct_partners;
+                d = (int64_t)row_count;
+                break;
+
+            default:
+                return select_default_column();
+            }
+
+            if (best_column_i == LIST_TERM ||
+                a > best_a ||
+                (a == best_a && b > best_b) ||
+                (a == best_a && b == best_b && c > best_c) ||
+                (a == best_a && b == best_b && c == best_c && d > best_d) ||
+                (a == best_a && b == best_b && c == best_c && d == best_d && column_i >= best_column_i))
+            {
+                best_column_i = column_i;
+                best_a = a;
+                best_b = b;
+                best_c = c;
+                best_d = d;
+            }
+        }
+
+        return best_column_i;
+    };
+#endif // WH_PEELOPT
+
+    // Until all columns are marked:
+    for (;;)
+    {
+#ifdef WH_PEELOPT
+        uint16_t best_column_i = select_experimental_column();
+#else
+        uint16_t best_column_i = LIST_TERM;
+        unsigned best_w2_refs = 0;
+        unsigned best_row_count = 0;
+
+        const PeelColumn *column = _peel_cols;
+
+        // For each peel column:
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i, ++column)
+        {
+            // If column is not marked yet:
+            if (column->Mark == MARK_TODO)
+            {
+                const unsigned w2_refs = column->Weight2Refs;
+
+                // If it may have the most weight-2 references:
+                if (w2_refs >= best_w2_refs)
+                {
+                    const unsigned row_count = _peel_col_refs[column_i].RowCount;
+
+                    // If it has the largest row references overall:
+                    if (w2_refs > best_w2_refs || row_count >= best_row_count)
+                    {
+                        // Use that one
+                        best_column_i = column_i;
+                        best_w2_refs = w2_refs;
+                        best_row_count = row_count;
+                    }
+                }
+            }
+        }
+#endif // WH_PEELOPT
 
         // If no column was found:
         if (best_column_i == LIST_TERM) {
