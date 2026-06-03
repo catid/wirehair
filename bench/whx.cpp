@@ -905,6 +905,138 @@ void wh_stage_reset(); int wh_stage_count(); uint64_t wh_stage_bytes(int); const
 unsigned wh_graph_defer_count(); unsigned wh_graph_defer_rows(); unsigned wh_graph_component_count();
 unsigned wh_graph_max_component(); uint64_t wh_graph_component_sum_squares();
 }
+
+static unsigned percentile_value(const vector<unsigned>& sorted, double p) {
+    if (sorted.empty()) return 0;
+    size_t idx = (size_t)(p * (double)(sorted.size() - 1) + 0.5);
+    if (idx >= sorted.size()) idx = sorted.size() - 1;
+    return sorted[idx];
+}
+
+static void summarize_values(const vector<unsigned>& values, double& mean, double& sd,
+                             unsigned& minv, unsigned& p50, unsigned& p95, unsigned& p99,
+                             unsigned& maxv) {
+    if (values.empty()) {
+        mean = sd = 0.0;
+        minv = p50 = p95 = p99 = maxv = 0;
+        return;
+    }
+
+    vector<unsigned> sorted = values;
+    sort(sorted.begin(), sorted.end());
+    uint64_t sum = 0;
+    for (unsigned v : sorted) sum += v;
+    mean = (double)sum / sorted.size();
+    double var = 0.0;
+    for (unsigned v : sorted) {
+        const double d = (double)v - mean;
+        var += d * d;
+    }
+    sd = sqrt(var / sorted.size());
+    minv = sorted.front();
+    p50 = percentile_value(sorted, 0.50);
+    p95 = percentile_value(sorted, 0.95);
+    p99 = percentile_value(sorted, 0.99);
+    maxv = sorted.back();
+}
+
+static int cmd_peelstat(int argc, char** argv) {
+    int threads = resolve_threads();
+    string nlist = "128,2048,32000";
+    string bblist = "64";
+    int trials = 200;
+    double loss = 0.10;
+    int startMode = 0;
+    uint64_t baseSeed = 0x9A7E11AULL;
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--N") && i + 1 < argc) nlist = argv[++i];
+        else if (!strcmp(argv[i], "--bb") && i + 1 < argc) bblist = argv[++i];
+        else if (!strcmp(argv[i], "--bb-list") && i + 1 < argc) bblist = argv[++i];
+        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) trials = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) loss = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) startMode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) baseSeed = strtoull(argv[++i], nullptr, 0);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+            g_threads = atoi(argv[++i]);
+            threads = resolve_threads();
+        }
+    }
+    if (trials < 1) trials = 1;
+
+    vector<int> Ns = parse_int_list(nlist);
+    vector<int> BBs = parse_int_list(bblist);
+    if (Ns.empty() || BBs.empty()) {
+        fprintf(stderr, "peelstat requires non-empty --N and --bb/--bb-list positive integer lists\n");
+        return 1;
+    }
+
+    const char* mode = getenv("WH_PEEL_MODE");
+    if (!mode) mode = "0";
+    printf("# peelstat: mode=%s threads=%d trials=%d loss=%.2f startMode=%d seed=0x%llx\n",
+           mode, threads, trials, loss, startMode, (unsigned long long)baseSeed);
+    printf("%-6s %-8s %-6s %-8s %-6s %9s %8s %5s %5s %5s %5s %5s %9s %8s %5s %5s %5s %5s %5s\n",
+           "mode", "N", "bb", "trials", "fail",
+           "cols_mu", "cols_sd", "cmin", "c50", "c95", "c99", "cmax",
+           "rows_mu", "rows_sd", "rmin", "r50", "r95", "r99", "rmax");
+
+    for (int bb : BBs) for (int N : Ns) {
+        vector<unsigned> cols((size_t)trials);
+        vector<unsigned> rows((size_t)trials);
+        vector<uint8_t> ok((size_t)trials, 0);
+        std::atomic<int> next{0};
+        std::atomic<int> fails{0};
+        vector<thread> ts;
+        for (int t = 0; t < threads; ++t) {
+            ts.emplace_back([&]() {
+                char failmsg[256];
+                for (;;) {
+                    const int idx = next.fetch_add(1);
+                    if (idx >= trials) break;
+                    uint32_t extra = 0;
+                    const uint64_t seed = baseSeed + (uint64_t)N * 0x9e3779b1u +
+                        (uint64_t)bb * 0x85ebca6bu + (uint64_t)idx * 0xc2b2ae35u;
+                    failmsg[0] = 0;
+                    const int rc = roundtrip(seed, N, bb, startMode, loss, &extra, failmsg);
+                    if (rc == 0) {
+                        cols[(size_t)idx] = wh_graph_defer_count();
+                        rows[(size_t)idx] = wh_graph_defer_rows();
+                        ok[(size_t)idx] = 1;
+                    }
+                    else {
+                        fails++;
+                    }
+                }
+            });
+        }
+        for (auto& th : ts) th.join();
+
+        vector<unsigned> ok_cols;
+        vector<unsigned> ok_rows;
+        ok_cols.reserve((size_t)trials);
+        ok_rows.reserve((size_t)trials);
+        for (int i = 0; i < trials; ++i) {
+            if (ok[(size_t)i]) {
+                ok_cols.push_back(cols[(size_t)i]);
+                ok_rows.push_back(rows[(size_t)i]);
+            }
+        }
+
+        double cm = 0, cs = 0, rm = 0, rs = 0;
+        unsigned cmin = 0, c50 = 0, c95 = 0, c99 = 0, cmax = 0;
+        unsigned rmin = 0, r50 = 0, r95 = 0, r99 = 0, rmax = 0;
+        summarize_values(ok_cols, cm, cs, cmin, c50, c95, c99, cmax);
+        summarize_values(ok_rows, rm, rs, rmin, r50, r95, r99, rmax);
+
+        printf("%-6s %-8d %-6d %-8zu %-6d %9.2f %8.2f %5u %5u %5u %5u %5u %9.2f %8.2f %5u %5u %5u %5u %5u\n",
+               mode, N, bb, ok_cols.size(), fails.load(),
+               cm, cs, cmin, c50, c95, c99, cmax,
+               rm, rs, rmin, r50, r95, r99, rmax);
+        fflush(stdout);
+    }
+
+    return 0;
+}
+
 // Symbol-XOR traffic breakdown per codec stage (Task 6a). Single-threaded, one round.
 static void count_dump(const char* stage, uint64_t msgBytes) {
     static const char* nm[6] = {"add","add2","addset","mul","muladd","memswap"};
@@ -974,10 +1106,16 @@ int main(int argc, char** argv) {
     if (wirehair_init() != Wirehair_Success) { fprintf(stderr, "wirehair_init failed\n"); return 2; }
 #ifdef WH_COUNT
     if (argc>=2 && !strcmp(argv[1],"count")) { vector<char*> r(argv+2,argv+argc); return cmd_count((int)r.size(), r.data()); }
+    if (argc>=2 && !strcmp(argv[1],"peelstat")) { vector<char*> r(argv+2,argv+argc); return cmd_peelstat((int)r.size(), r.data()); }
 #endif
     if (argc < 2) {
+#ifdef WH_COUNT
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch|peelstat] [--threads T] [opts]\n");
+        fprintf(stderr, "  bench/count/peelstat accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+#else
         fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch] [--threads T] [opts]\n");
-        fprintf(stderr, "  bench/count accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+        fprintf(stderr, "  bench accepts --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+#endif
         return 1;
     }
     string mode = argv[1];

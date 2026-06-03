@@ -47,6 +47,14 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Bug Fix Passes
+
+Bug fix passes are not just running unit tests. They require actually reading
+the code thoroughly, especially newly edited areas, and looking for potential
+bugs, edge cases, and incorrect assumptions before declaring the pass complete.
+After making code edits, always do repeated bug fix passes until a full pass
+finds no bugs.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 
