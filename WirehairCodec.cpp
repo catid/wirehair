@@ -63,7 +63,11 @@ using namespace std;
 #include <cstdlib>
 #endif
 
-#ifdef WH_COUNT
+#ifdef WH_PEELOPT
+#include <algorithm>
+#endif
+
+#if defined(WH_COUNT) || defined(WH_PEELOPT)
 #include <vector>
 #endif
 
@@ -88,6 +92,18 @@ static uint32_t GetExperimentalPeelSeed()
     return seed ? (uint32_t)::strtoul(seed, nullptr, 0) : 0x9e3779b9u;
 }
 
+static unsigned GetExperimentalPeelUnsigned(const char* name, unsigned fallback)
+{
+    const char* value = ::getenv(name);
+    return value ? (unsigned)::strtoul(value, nullptr, 0) : fallback;
+}
+
+static int64_t GetExperimentalPeelSigned(const char* name, int64_t fallback)
+{
+    const char* value = ::getenv(name);
+    return value ? (int64_t)::strtoll(value, nullptr, 0) : fallback;
+}
+
 static uint32_t PeelHash32(uint32_t x)
 {
     x ^= x >> 16;
@@ -96,6 +112,24 @@ static uint32_t PeelHash32(uint32_t x)
     x *= 0x846ca68bu;
     x ^= x >> 16;
     return x;
+}
+
+static thread_local uint8_t* ExperimentalPeelDirtyFlags = nullptr;
+static thread_local uint16_t* ExperimentalPeelDirtyList = nullptr;
+static thread_local unsigned ExperimentalPeelDirtyCount = 0;
+static thread_local unsigned ExperimentalPeelDirtyCapacity = 0;
+
+static void MarkExperimentalPeelDirty(const uint16_t column_i)
+{
+    if (!ExperimentalPeelDirtyFlags || column_i >= ExperimentalPeelDirtyCapacity) {
+        return;
+    }
+
+    if (!ExperimentalPeelDirtyFlags[column_i])
+    {
+        ExperimentalPeelDirtyFlags[column_i] = 1;
+        ExperimentalPeelDirtyList[ExperimentalPeelDirtyCount++] = column_i;
+    }
 }
 
 #endif // WH_PEELOPT
@@ -227,6 +261,23 @@ void Codec::PeelAvalancheOnSolve(
     uint16_t ref_row_count = refs->RowCount;
     uint16_t * GF256_RESTRICT ref_rows = refs->Rows;
 
+#ifdef WH_PEELOPT
+    const auto mark_dirty_row = [&](const PeelRow* GF256_RESTRICT row) {
+        if (!ExperimentalPeelDirtyFlags) {
+            return;
+        }
+
+        PeelRowIterator dirty_iter(row->Params, _block_count, _block_next_prime);
+        do
+        {
+            const uint16_t dirty_column_i = dirty_iter.GetColumn();
+            if (_peel_cols[dirty_column_i].Mark == MARK_TODO) {
+                MarkExperimentalPeelDirty(dirty_column_i);
+            }
+        } while (dirty_iter.Iterate());
+    };
+#endif
+
     // Walk list of peeled rows referenced by this newly solved column
     while (ref_row_count--)
     {
@@ -234,6 +285,10 @@ void Codec::PeelAvalancheOnSolve(
         uint16_t ref_row_i = *ref_rows++;
         PeelRow * GF256_RESTRICT ref_row = &_peel_rows[ref_row_i];
         uint16_t unmarked_count = --ref_row->UnmarkedCount;
+
+#ifdef WH_PEELOPT
+        mark_dirty_row(ref_row);
+#endif
 
         // If row may be solving a column now:
         if (unmarked_count == 1)
@@ -370,8 +425,25 @@ void Codec::GreedyPeeling()
     const unsigned block_count = _block_count;
 
 #ifdef WH_PEELOPT
+    const unsigned peel_row_count = _row_count > _block_count ? _row_count : _block_count;
     const unsigned peel_mode = GetExperimentalPeelMode();
     const uint32_t peel_seed = GetExperimentalPeelSeed();
+    const unsigned peel_top_k = GetExperimentalPeelUnsigned("WH_PEEL_TOPK", 0);
+    const unsigned peel_max_d2 = GetExperimentalPeelUnsigned("WH_PEEL_MAX_D2", 0);
+    const unsigned peel_weighted = GetExperimentalPeelUnsigned("WH_PEEL_WEIGHTED", 0);
+    const int64_t peel_weight_a = GetExperimentalPeelSigned("WH_PEEL_WA", 1024);
+    const int64_t peel_weight_b = GetExperimentalPeelSigned("WH_PEEL_WB", 1);
+    const int64_t peel_weight_c = GetExperimentalPeelSigned("WH_PEEL_WC", 0);
+    const unsigned peel_hybrid_n = GetExperimentalPeelUnsigned("WH_PEEL_HYBRID_N", 0);
+    const unsigned peel_hybrid_defer_pct = GetExperimentalPeelUnsigned("WH_PEEL_HYBRID_DEFER_PCT", 0);
+    const unsigned peel_incremental = (peel_mode == 11) ||
+        GetExperimentalPeelUnsigned("WH_PEEL_INCREMENTAL", 0);
+    const bool peel_use_incremental =
+        peel_incremental && (peel_mode == 3 || peel_mode == 9 || peel_mode == 11);
+    const unsigned peel_beam_k = GetExperimentalPeelUnsigned("WH_PEEL_LOOKAHEAD_K",
+        peel_top_k ? peel_top_k : 4);
+    const unsigned peel_beam_width = GetExperimentalPeelUnsigned("WH_PEEL_LOOKAHEAD_B", 2);
+    const unsigned peel_beam_depth = GetExperimentalPeelUnsigned("WH_PEEL_LOOKAHEAD_D", 2);
 
     const auto select_default_column = [&]() -> uint16_t {
         uint16_t best_column_i = LIST_TERM;
@@ -444,6 +516,7 @@ void Codec::GreedyPeeling()
         duplicate_partners = 0;
 
         uint16_t partners[CAT_REF_LIST_MAX];
+        unsigned lookahead_refs = 0;
 
         const PeelRefs* GF256_RESTRICT refs = &_peel_col_refs[column_i];
         for (uint16_t ii = 0; ii < refs->RowCount; ++ii)
@@ -462,6 +535,12 @@ void Codec::GreedyPeeling()
             if (get_degree2_partner(row, column_i, partner))
             {
                 ++exact_w2_refs;
+
+                if (peel_max_d2 && lookahead_refs >= peel_max_d2) {
+                    continue;
+                }
+                ++lookahead_refs;
+
                 lookahead_score += _peel_cols[partner].Weight2Refs;
 
                 bool seen = false;
@@ -490,7 +569,7 @@ void Codec::GreedyPeeling()
         unsigned best_w2_refs = 0;
         unsigned best_row_count = 0;
 
-        for (uint16_t row_i = 0; row_i < _row_count; ++row_i)
+        for (uint16_t row_i = 0; row_i < peel_row_count; ++row_i)
         {
             const PeelRow* GF256_RESTRICT row = &_peel_rows[row_i];
             const unsigned row_degree = row->UnmarkedCount;
@@ -544,8 +623,404 @@ void Codec::GreedyPeeling()
         return best_column_i;
     };
 
+    const auto should_use_default_for_hybrid = [&]() -> bool {
+        if (peel_hybrid_n && block_count >= peel_hybrid_n) {
+            return true;
+        }
+        if (peel_hybrid_defer_pct &&
+            (uint64_t)_defer_count * 100 >= (uint64_t)block_count * peel_hybrid_defer_pct) {
+            return true;
+        }
+        return false;
+    };
+
+    const auto build_real_candidate_list = [&](const bool use_top_k) -> std::vector<uint16_t> {
+        std::vector<uint16_t> candidates;
+
+        if (!use_top_k || peel_top_k == 0)
+        {
+            candidates.reserve(block_count);
+            for (uint16_t column_i = 0; column_i < block_count; ++column_i)
+            {
+                if (_peel_cols[column_i].Mark == MARK_TODO) {
+                    candidates.push_back(column_i);
+                }
+            }
+            return candidates;
+        }
+
+        candidates.reserve(peel_top_k);
+        const auto better_default = [&](const uint16_t a, const uint16_t b) -> bool {
+            const unsigned aw2 = _peel_cols[a].Weight2Refs;
+            const unsigned bw2 = _peel_cols[b].Weight2Refs;
+            if (aw2 != bw2) {
+                return aw2 > bw2;
+            }
+            const unsigned ar = _peel_col_refs[a].RowCount;
+            const unsigned br = _peel_col_refs[b].RowCount;
+            if (ar != br) {
+                return ar > br;
+            }
+            return a > b;
+        };
+
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i)
+        {
+            if (_peel_cols[column_i].Mark != MARK_TODO) {
+                continue;
+            }
+
+            unsigned insert_i = 0;
+            while (insert_i < candidates.size() && !better_default(column_i, candidates[insert_i])) {
+                ++insert_i;
+            }
+
+            if (insert_i < peel_top_k)
+            {
+                candidates.insert(candidates.begin() + insert_i, column_i);
+                if (candidates.size() > peel_top_k) {
+                    candidates.pop_back();
+                }
+            }
+        }
+
+        return candidates;
+    };
+
+    std::vector<unsigned> cached_exact_w2;
+    std::vector<unsigned> cached_fill_cost;
+    std::vector<unsigned> cached_lookahead_score;
+    std::vector<uint8_t> dirty_flags;
+    std::vector<uint16_t> dirty_list;
+
+    // Mode 11 is an approximate dirty cache: columns touched by changed rows are
+    // refreshed, but partner Weight2Refs changes can affect other lookahead sums.
+    const auto recompute_cached_column = [&](const uint16_t column_i) {
+        if (_peel_cols[column_i].Mark != MARK_TODO)
+        {
+            cached_exact_w2[column_i] = 0;
+            cached_fill_cost[column_i] = 0;
+            cached_lookahead_score[column_i] = 0;
+            return;
+        }
+
+        unsigned exact_w2_refs = 0;
+        unsigned fill_cost = 0;
+        unsigned fill_square_cost = 0;
+        unsigned lookahead_score = 0;
+        unsigned distinct_partners = 0;
+        unsigned duplicate_partners = 0;
+        collect_column_metrics(column_i, exact_w2_refs, fill_cost, fill_square_cost,
+            lookahead_score, distinct_partners, duplicate_partners);
+        cached_exact_w2[column_i] = exact_w2_refs;
+        cached_fill_cost[column_i] = fill_cost;
+        cached_lookahead_score[column_i] = lookahead_score;
+    };
+
+    if (peel_use_incremental)
+    {
+        cached_exact_w2.resize(block_count);
+        cached_fill_cost.resize(block_count);
+        cached_lookahead_score.resize(block_count);
+        dirty_flags.resize(block_count);
+        dirty_list.resize(block_count);
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i) {
+            recompute_cached_column(column_i);
+        }
+
+        ExperimentalPeelDirtyFlags = dirty_flags.data();
+        ExperimentalPeelDirtyList = dirty_list.data();
+        ExperimentalPeelDirtyCount = 0;
+        ExperimentalPeelDirtyCapacity = block_count;
+    }
+
+    const auto flush_dirty_scores = [&]() {
+        if (!peel_use_incremental) {
+            return;
+        }
+
+        for (unsigned ii = 0; ii < ExperimentalPeelDirtyCount; ++ii)
+        {
+            const uint16_t column_i = dirty_list[ii];
+            dirty_flags[column_i] = 0;
+            recompute_cached_column(column_i);
+        }
+        ExperimentalPeelDirtyCount = 0;
+    };
+
+    struct SimState
+    {
+        std::vector<uint8_t> Mark;
+        std::vector<uint16_t> UnmarkedCount;
+        uint16_t FirstColumn;
+        int64_t Score;
+    };
+
+    const auto sim_find_todo_columns = [&](const SimState& state, const PeelRow* row,
+        uint16_t* found, const unsigned max_found) -> unsigned
+    {
+        unsigned count = 0;
+        PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
+        do
+        {
+            const uint16_t column_i = iter.GetColumn();
+            if (state.Mark[column_i] == MARK_TODO)
+            {
+                if (count < max_found) {
+                    found[count] = column_i;
+                }
+                ++count;
+            }
+        } while (iter.Iterate());
+        return count;
+    };
+
+    const auto sim_mark_column = [&](SimState& state, const uint16_t column_i,
+        const uint8_t mark_value, std::vector<uint16_t>& queue)
+    {
+        if (state.Mark[column_i] != MARK_TODO) {
+            return;
+        }
+
+        state.Mark[column_i] = mark_value;
+        queue.push_back(column_i);
+    };
+
+    const auto sim_defer_column = [&](SimState& state, const uint16_t column_i) {
+        std::vector<uint16_t> queue;
+        sim_mark_column(state, column_i, MARK_DEFER, queue);
+
+        for (unsigned queue_i = 0; queue_i < queue.size(); ++queue_i)
+        {
+            const uint16_t solved_column_i = queue[queue_i];
+            const PeelRefs* GF256_RESTRICT refs = &_peel_col_refs[solved_column_i];
+
+            for (uint16_t ii = 0; ii < refs->RowCount; ++ii)
+            {
+                const uint16_t row_i = refs->Rows[ii];
+                if (row_i >= peel_row_count) {
+                    continue;
+                }
+
+                uint16_t& unmarked_count = state.UnmarkedCount[row_i];
+                if (unmarked_count == 0) {
+                    continue;
+                }
+
+                --unmarked_count;
+                if (unmarked_count == 1)
+                {
+                    uint16_t found[2];
+                    const unsigned count = sim_find_todo_columns(state, &_peel_rows[row_i], found, 2);
+                    if (count == 1) {
+                        sim_mark_column(state, found[0], MARK_PEEL, queue);
+                    }
+                }
+            }
+        }
+    };
+
+    const auto sim_collect_metrics = [&](const SimState& state, const uint16_t column_i,
+        unsigned& exact_w2_refs, unsigned& fill_cost, unsigned& lookahead_score)
+    {
+        exact_w2_refs = 0;
+        fill_cost = 0;
+        lookahead_score = 0;
+
+        const PeelRefs* GF256_RESTRICT refs = &_peel_col_refs[column_i];
+        unsigned lookahead_refs = 0;
+        for (uint16_t ii = 0; ii < refs->RowCount; ++ii)
+        {
+            const uint16_t row_i = refs->Rows[ii];
+            if (row_i >= peel_row_count) {
+                continue;
+            }
+
+            const unsigned unmarked_count = state.UnmarkedCount[row_i];
+            if (unmarked_count > 1) {
+                fill_cost += unmarked_count - 1;
+            }
+            if (unmarked_count != 2) {
+                continue;
+            }
+
+            uint16_t found[3];
+            const unsigned count = sim_find_todo_columns(state, &_peel_rows[row_i], found, 3);
+            if (count != 2) {
+                continue;
+            }
+            if (found[0] != column_i && found[1] != column_i) {
+                continue;
+            }
+
+            ++exact_w2_refs;
+            if (peel_max_d2 && lookahead_refs >= peel_max_d2) {
+                continue;
+            }
+            ++lookahead_refs;
+
+            const uint16_t partner = (found[0] == column_i) ? found[1] : found[0];
+            lookahead_score += _peel_cols[partner].Weight2Refs;
+        }
+    };
+
+    const auto sim_score_state = [&](const SimState& state) -> int64_t {
+        unsigned todo_count = 0;
+        unsigned degree2_rows = 0;
+        unsigned fill_cost = 0;
+
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i)
+        {
+            if (state.Mark[column_i] == MARK_TODO) {
+                ++todo_count;
+            }
+        }
+
+        for (uint16_t row_i = 0; row_i < peel_row_count; ++row_i)
+        {
+            const unsigned unmarked_count = state.UnmarkedCount[row_i];
+            if (unmarked_count == 2) {
+                ++degree2_rows;
+            }
+            if (unmarked_count > 1) {
+                fill_cost += unmarked_count - 1;
+            }
+        }
+
+        return -(int64_t)todo_count * 1000000 + (int64_t)degree2_rows * 1000 -
+            (int64_t)fill_cost;
+    };
+
+    const auto sim_candidate_list = [&](const SimState& state, const unsigned limit) -> std::vector<uint16_t> {
+        std::vector<uint16_t> candidates;
+        const unsigned candidate_limit = limit ? limit : block_count;
+        candidates.reserve(candidate_limit < block_count ? candidate_limit : block_count);
+
+        const auto better_sim = [&](const uint16_t a, const uint16_t b) -> bool {
+            unsigned aw2 = 0, afill = 0, alook = 0;
+            unsigned bw2 = 0, bfill = 0, blook = 0;
+            sim_collect_metrics(state, a, aw2, afill, alook);
+            sim_collect_metrics(state, b, bw2, bfill, blook);
+
+            if (aw2 != bw2) {
+                return aw2 > bw2;
+            }
+            if (alook != blook) {
+                return alook > blook;
+            }
+            const unsigned ar = _peel_col_refs[a].RowCount;
+            const unsigned br = _peel_col_refs[b].RowCount;
+            if (ar != br) {
+                return ar > br;
+            }
+            return a > b;
+        };
+
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i)
+        {
+            if (state.Mark[column_i] != MARK_TODO) {
+                continue;
+            }
+
+            unsigned insert_i = 0;
+            while (insert_i < candidates.size() && !better_sim(column_i, candidates[insert_i])) {
+                ++insert_i;
+            }
+
+            if (insert_i < candidate_limit)
+            {
+                candidates.insert(candidates.begin() + insert_i, column_i);
+                if (candidates.size() > candidate_limit) {
+                    candidates.pop_back();
+                }
+            }
+        }
+
+        return candidates;
+    };
+
+    const auto select_path_lookahead_column = [&]() -> uint16_t {
+        if (peel_beam_k == 0 || peel_beam_width == 0 || peel_beam_depth == 0) {
+            return select_default_column();
+        }
+
+        SimState initial;
+        initial.Mark.resize(block_count);
+        initial.UnmarkedCount.resize(peel_row_count);
+        initial.FirstColumn = LIST_TERM;
+        initial.Score = 0;
+        for (uint16_t column_i = 0; column_i < block_count; ++column_i) {
+            initial.Mark[column_i] = _peel_cols[column_i].Mark;
+        }
+        for (uint16_t row_i = 0; row_i < peel_row_count; ++row_i) {
+            initial.UnmarkedCount[row_i] = _peel_rows[row_i].UnmarkedCount;
+        }
+
+        std::vector<SimState> beam;
+        const std::vector<uint16_t> roots = sim_candidate_list(initial, peel_beam_k);
+        for (unsigned ii = 0; ii < roots.size(); ++ii)
+        {
+            SimState next = initial;
+            next.FirstColumn = roots[ii];
+            sim_defer_column(next, roots[ii]);
+            next.Score = sim_score_state(next);
+            beam.push_back(next);
+        }
+
+        const auto better_state = [](const SimState& a, const SimState& b) {
+            if (a.Score != b.Score) {
+                return a.Score > b.Score;
+            }
+            return a.FirstColumn > b.FirstColumn;
+        };
+
+        std::sort(beam.begin(), beam.end(), better_state);
+        if (beam.size() > peel_beam_width) {
+            beam.resize(peel_beam_width);
+        }
+
+        for (unsigned depth_i = 1; depth_i < peel_beam_depth && !beam.empty(); ++depth_i)
+        {
+            std::vector<SimState> expanded;
+            for (unsigned state_i = 0; state_i < beam.size(); ++state_i)
+            {
+                const std::vector<uint16_t> candidates =
+                    sim_candidate_list(beam[state_i], peel_beam_width);
+                if (candidates.empty())
+                {
+                    expanded.push_back(beam[state_i]);
+                    continue;
+                }
+
+                for (unsigned candidate_i = 0; candidate_i < candidates.size(); ++candidate_i)
+                {
+                    SimState next = beam[state_i];
+                    sim_defer_column(next, candidates[candidate_i]);
+                    next.Score = sim_score_state(next);
+                    expanded.push_back(next);
+                }
+            }
+
+            std::sort(expanded.begin(), expanded.end(), better_state);
+            if (expanded.size() > peel_beam_width) {
+                expanded.resize(peel_beam_width);
+            }
+            beam.swap(expanded);
+        }
+
+        if (beam.empty()) {
+            return select_default_column();
+        }
+
+        return beam[0].FirstColumn;
+    };
+
     const auto select_experimental_column = [&]() -> uint16_t {
         if (peel_mode == 0) {
+            return select_default_column();
+        }
+
+        if (should_use_default_for_hybrid()) {
             return select_default_column();
         }
 
@@ -554,9 +1029,15 @@ void Codec::GreedyPeeling()
             return column_i != LIST_TERM ? column_i : select_default_column();
         }
 
-        if (peel_mode > 7) {
+        if (peel_mode == 10) {
+            return select_path_lookahead_column();
+        }
+
+        if (peel_mode > 11) {
             return select_default_column();
         }
+
+        flush_dirty_scores();
 
         uint16_t best_column_i = LIST_TERM;
         int64_t best_a = 0;
@@ -564,11 +1045,16 @@ void Codec::GreedyPeeling()
         int64_t best_c = 0;
         int64_t best_d = 0;
 
-        const PeelColumn *column = _peel_cols;
+        const bool use_top_k = (peel_mode == 3 || peel_mode == 9 || peel_mode == 11) &&
+            peel_top_k > 0;
+        const std::vector<uint16_t> candidates = build_real_candidate_list(use_top_k);
 
         // For each peel column:
-        for (uint16_t column_i = 0; column_i < block_count; ++column_i, ++column)
+        for (unsigned candidate_i = 0; candidate_i < candidates.size(); ++candidate_i)
         {
+            const uint16_t column_i = candidates[candidate_i];
+            const PeelColumn* GF256_RESTRICT column = &_peel_cols[column_i];
+
             // If column is not marked yet:
             if (column->Mark != MARK_TODO) {
                 continue;
@@ -577,14 +1063,17 @@ void Codec::GreedyPeeling()
             const unsigned w2_refs = column->Weight2Refs;
             const unsigned row_count = _peel_col_refs[column_i].RowCount;
 
-            unsigned exact_w2_refs = 0;
-            unsigned fill_cost = 0;
+            unsigned exact_w2_refs = peel_use_incremental ? cached_exact_w2[column_i] : 0;
+            unsigned fill_cost = peel_use_incremental ? cached_fill_cost[column_i] : 0;
             unsigned fill_square_cost = 0;
-            unsigned lookahead_score = 0;
+            unsigned lookahead_score = peel_use_incremental ? cached_lookahead_score[column_i] : 0;
             unsigned distinct_partners = 0;
             unsigned duplicate_partners = 0;
-            collect_column_metrics(column_i, exact_w2_refs, fill_cost, fill_square_cost,
-                lookahead_score, distinct_partners, duplicate_partners);
+            if (!peel_use_incremental)
+            {
+                collect_column_metrics(column_i, exact_w2_refs, fill_cost, fill_square_cost,
+                    lookahead_score, distinct_partners, duplicate_partners);
+            }
 
             int64_t a = 0;
             int64_t b = 0;
@@ -608,10 +1097,23 @@ void Codec::GreedyPeeling()
                 break;
 
             case 3: // One-step lookahead: immediate degree-2 wins plus partner potential.
-                a = (int64_t)exact_w2_refs;
-                b = (int64_t)lookahead_score;
-                c = (int64_t)w2_refs;
-                d = (int64_t)row_count;
+            case 11: // Approximate cached one-step lookahead.
+                if (peel_weighted)
+                {
+                    a = peel_weight_a * (int64_t)exact_w2_refs +
+                        peel_weight_b * (int64_t)lookahead_score -
+                        peel_weight_c * (int64_t)fill_cost;
+                    b = (int64_t)w2_refs;
+                    c = (int64_t)row_count;
+                    d = -(int64_t)fill_cost;
+                }
+                else
+                {
+                    a = (int64_t)exact_w2_refs;
+                    b = (int64_t)lookahead_score;
+                    c = (int64_t)w2_refs;
+                    d = (int64_t)row_count;
+                }
                 break;
 
             case 4: // Bucket-compatible exact degree-2 key.
@@ -634,6 +1136,22 @@ void Codec::GreedyPeeling()
                 b = (int64_t)exact_w2_refs;
                 c = -(int64_t)distinct_partners;
                 d = (int64_t)row_count;
+                break;
+
+            case 8: // Pure exact live degree-2 count.
+                a = (int64_t)exact_w2_refs;
+                b = (int64_t)row_count;
+                c = (int64_t)column_i;
+                d = 0;
+                break;
+
+            case 9: // Weighted lookahead score.
+                a = peel_weight_a * (int64_t)exact_w2_refs +
+                    peel_weight_b * (int64_t)lookahead_score -
+                    peel_weight_c * (int64_t)fill_cost;
+                b = (int64_t)w2_refs;
+                c = (int64_t)row_count;
+                d = -(int64_t)fill_cost;
                 break;
 
             default:
@@ -719,6 +1237,16 @@ void Codec::GreedyPeeling()
         // Peel resuming from where this column left off
         PeelAvalancheOnSolve(best_column_i);
     }
+
+#ifdef WH_PEELOPT
+    if (peel_use_incremental)
+    {
+        ExperimentalPeelDirtyFlags = nullptr;
+        ExperimentalPeelDirtyList = nullptr;
+        ExperimentalPeelDirtyCount = 0;
+        ExperimentalPeelDirtyCapacity = 0;
+    }
+#endif
 }
 
 
