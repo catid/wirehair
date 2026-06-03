@@ -152,3 +152,19 @@ that range (default-on, bug-safe).
 Before/after fuzz [2048,32000] (same seed, 0 fails): mean overhead 0.0893 -> 0.0230 (-74%),
 max 2907 -> 125 extra blocks (-96%). Near the documented ~0.02 floor.
 Remaining: [28033,32000] partial + [32000,64000] (identical scan->joint-search->regen pipeline).
+
+## 11. Algorithm exploration follow-up
+
+`wirehair-9nw`: full-output recovery already had the systematic fast path enabled by
+`CAT_COPY_FIRST_N`: `ReconstructOutput()` copies received original blocks and skips regenerating
+those rows. Added the same direct-copy path to `ReconstructBlock()`, so per-block recovery avoids
+row recomputation when the requested original block was received. Focused API test: received
+original, lost original, final partial block, and full recover all matched.
+
+`wirehair-b9h`: added `WH_COUNT` residual deferred-column component stats before the mix/dense
+separator is applied. Samples show the deferred residual graph is already almost fully split:
+N=2048 systematic decode had 46 deferred columns in 46 components; N=8192 had 75/75; N=16000 had
+123/123; repair-only N=8192 had 89 columns in 87 components with max component 3. This argues
+against a high-risk nested-dissection rewrite. The sparse deferred part is already decomposed; the
+remaining coupling is the dense/mix separator, and GE/back-sub symbol traffic is a small fraction
+of total traffic.

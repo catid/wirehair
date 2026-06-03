@@ -59,6 +59,10 @@
 using namespace std;
 #endif
 
+#ifdef WH_COUNT
+#include <vector>
+#endif
+
 
 namespace wirehair {
 
@@ -451,6 +455,105 @@ void Codec::SetDeferredColumns()
         _ge_col_map[ge_column_i] = column_i;
     }
 }
+
+#ifdef WH_COUNT
+static thread_local unsigned wh_graph_defer = 0;
+static thread_local unsigned wh_graph_rows = 0;
+static thread_local unsigned wh_graph_components = 0;
+static thread_local unsigned wh_graph_max_component_value = 0;
+static thread_local uint64_t wh_graph_sum_squares = 0;
+
+extern "C" unsigned wh_graph_defer_count() { return wh_graph_defer; }
+extern "C" unsigned wh_graph_defer_rows() { return wh_graph_rows; }
+extern "C" unsigned wh_graph_component_count() { return wh_graph_components; }
+extern "C" unsigned wh_graph_max_component() { return wh_graph_max_component_value; }
+extern "C" uint64_t wh_graph_component_sum_squares() { return wh_graph_sum_squares; }
+
+void Codec::MeasureDeferredComponents()
+{
+    wh_graph_defer = _defer_count;
+    wh_graph_rows = 0;
+    wh_graph_components = 0;
+    wh_graph_max_component_value = 0;
+    wh_graph_sum_squares = 0;
+
+    if (_defer_count == 0) {
+        return;
+    }
+
+    std::vector<uint16_t> parent(_defer_count);
+    std::vector<uint16_t> size(_defer_count, 1);
+    for (uint16_t i = 0; i < _defer_count; ++i) {
+        parent[i] = i;
+    }
+
+    const auto find_root = [&](uint16_t x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    };
+
+    const auto union_roots = [&](uint16_t a, uint16_t b) {
+        uint16_t ra = find_root(a);
+        uint16_t rb = find_root(b);
+        if (ra == rb) {
+            return;
+        }
+        if (size[ra] < size[rb]) {
+            const uint16_t temp = ra;
+            ra = rb;
+            rb = temp;
+        }
+        parent[rb] = ra;
+        size[ra] = (uint16_t)(size[ra] + size[rb]);
+    };
+
+    for (uint16_t defer_row_i = _defer_head_rows;
+        defer_row_i != LIST_TERM;
+        defer_row_i = _peel_rows[defer_row_i].NextRow)
+    {
+        ++wh_graph_rows;
+
+        const PeelRow* GF256_RESTRICT row = &_peel_rows[defer_row_i];
+        PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
+
+        uint16_t first = LIST_TERM;
+        do
+        {
+            const uint16_t column_i = iter.GetColumn();
+            const PeelColumn* GF256_RESTRICT column = &_peel_cols[column_i];
+
+            if (column->Mark != MARK_DEFER) {
+                continue;
+            }
+
+            const uint16_t ge_column_i = column->GEColumn;
+            CAT_DEBUG_ASSERT(ge_column_i < _defer_count);
+
+            if (first == LIST_TERM) {
+                first = ge_column_i;
+            }
+            else {
+                union_roots(first, ge_column_i);
+            }
+        } while (iter.Iterate());
+    }
+
+    for (uint16_t i = 0; i < _defer_count; ++i)
+    {
+        if (find_root(i) != i) {
+            continue;
+        }
+        ++wh_graph_components;
+        if (size[i] > wh_graph_max_component_value) {
+            wh_graph_max_component_value = size[i];
+        }
+        wh_graph_sum_squares += (uint64_t)size[i] * size[i];
+    }
+}
+#endif
 
 void Codec::SetMixingColumnsForDeferredRows()
 {
@@ -2969,6 +3072,9 @@ WirehairResult Codec::SolveMatrix()
     }
 
     SetDeferredColumns();
+#ifdef WH_COUNT
+    MeasureDeferredComponents();
+#endif
     SetMixingColumnsForDeferredRows();
     WH_STAGE("PeelDiagonal", PeelDiagonal());
     WH_STAGE("CopyDeferredRows", CopyDeferredRows());
@@ -3379,9 +3485,8 @@ WirehairResult Codec::ReconstructBlock(
         return Wirehair_InvalidInput;
     }
 
-#if defined(CAT_ALL_ORIGINAL)
-    // If decoder received only original data out of order:
-    if (_all_original)
+    // If this original block was received directly, copy it from the input
+    // staging area instead of regenerating it from the solved columns.
     {
         PeelRow * GF256_RESTRICT row = _peel_rows;
         const uint8_t * GF256_RESTRICT src = _input_blocks;
@@ -3405,10 +3510,7 @@ WirehairResult Codec::ReconstructBlock(
                 return Wirehair_Success;
             }
         }
-
-        return Wirehair_Error;
     }
-#endif
 
     // Regenerate any single row that got lost:
 

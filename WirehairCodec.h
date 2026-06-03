@@ -689,6 +689,11 @@ class Codec
     */
     void SetDeferredColumns();
 
+#ifdef WH_COUNT
+    /// Measure connected components in the deferred-column residual graph.
+    void MeasureDeferredComponents();
+#endif
+
     /**
         SetMixingColumnsForDeferredRows()
 

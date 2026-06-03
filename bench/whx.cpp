@@ -847,7 +847,11 @@ static int cmd_scan(int argc, char** argv) {
 }
 
 #ifdef WH_COUNT
-extern "C" { void wh_stage_reset(); int wh_stage_count(); uint64_t wh_stage_bytes(int); const char* wh_stage_label(int); }
+extern "C" {
+void wh_stage_reset(); int wh_stage_count(); uint64_t wh_stage_bytes(int); const char* wh_stage_label(int);
+unsigned wh_graph_defer_count(); unsigned wh_graph_defer_rows(); unsigned wh_graph_component_count();
+unsigned wh_graph_max_component(); uint64_t wh_graph_component_sum_squares();
+}
 // Symbol-XOR traffic breakdown per codec stage (Task 6a). Single-threaded, one round.
 static void count_dump(const char* stage, uint64_t msgBytes) {
     static const char* nm[6] = {"add","add2","addset","mul","muladd","memswap"};
@@ -860,6 +864,13 @@ static void count_dump(const char* stage, uint64_t msgBytes) {
     printf("    ");
     for (int i=0;i<6;++i) printf("%s=%.2fMB/%lluc  ", nm[i], gf256_count_bytes(i)/1e6, (unsigned long long)gf256_count_calls(i));
     printf("\n");
+    if (wh_graph_defer_count() > 0 && strcmp(stage, "recover")) {
+        printf("    deferred_graph: cols=%u rows=%u components=%u max=%u max_frac=%.3f sumsq=%llu\n",
+               wh_graph_defer_count(), wh_graph_defer_rows(), wh_graph_component_count(),
+               wh_graph_max_component(),
+               wh_graph_defer_count() ? (double)wh_graph_max_component() / wh_graph_defer_count() : 0.0,
+               (unsigned long long)wh_graph_component_sum_squares());
+    }
 }
 static int cmd_count(int argc, char** argv) {
     int N=2048, bb=1300; double loss=0.10; int startMode=0;
