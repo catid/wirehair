@@ -1,143 +1,107 @@
 # Peeling Sweep Summary
 
-These runs measure only the peel graph and inactivation schedule. They do not
-model dense solver cost or success probability after the residual matrix is
-formed.
-
-All rows report statistical residual unpeeled columns/rows, component shape,
-and peel-side runtime. `N` is the number of blocks; total payload bytes are
+These experiments measure only the sparse peel graph and inactivation schedule.
+They do not model dense solver cost or dense residual success probability.
+`N` is the number of blocks; payload bytes and memory pressure scale as
 `N * block_bytes`.
 
-## Main Loss Sweep
+## Fresh Random-Only Sweep
 
-Input: `--source loss --loss 0.10 --N 128,2048,32000 --trials 40`
+Protocol:
 
-Selected `N=32000` residual/runtime results were:
+- Binary: current `experiments/peeling/peel_sweep`.
+- Structures: all 111 random-compatible structures.
+- Methods: all 115 peeling/inactivation schedules.
+- Sizes: anchor `N=320,3200,32000`, with actual `N` sampled from
+  `anchor +/- 10` per trial.
+- Trials: 100 per aggregate row.
+- Matrix seeds: paired, so every method sees the same generated matrices for a
+  fixed structure, N anchor, row count, and trial.
+- PDFs: enabled for residual columns and rows.
+- Production deterministic Wirehair row IDs are excluded. `wirehair_rand` is
+  the fair Wirehair row-weight distribution with fully random columns.
 
-| method | mean residual cols | mean residual rows | mean total us | cost |
-| --- | ---: | ---: | ---: | --- |
-| rqd2_minfill | 193.30 | 193.30 | 49279.9 | O(rows*degree + cols + rowrefs) |
-| raptorq_d2cc | 196.55 | 196.55 | 43559.3 | O(rows*degree + cols) |
-| rqd2_default | 196.68 | 196.68 | 44287.8 | O(rows*degree + cols) |
-| topk8_lookfill | 205.80 | 205.80 | 19885.7 | O(cols + 8*rowrefs) |
-| default | 210.57 | 210.57 | 21628.8 | O(cols) |
+Result directories:
 
-Avoid the original full-scan Markowitz-style min-fill variants for this
-peel-only objective: in this sweep they were both slower and left more
-residuals than default.
+- `fresh_fixedOH_N320_3200_32000_t100`: fixed packet overhead 0, 1, and 2.
+- `fresh_pct_N320_3200_32000_t100`: percent overhead 0, 1, 2, and 5.
 
-## Focused Loss Sweep
+Validation:
 
-Input: `--source loss --loss 0.10 --N 128,2048,32000 --trials 60`
+- `bash experiments/peeling/build.sh`
+- `./experiments/peeling/peel_sweep --self-test`
+- ASan/UBSan self-test build and run.
+- Post-patch smoke over representative new structures and methods.
+- CSV integrity checks: expected file/row counts, 100 trials, paired-random
+  source, all PDFs present, and no production Wirehair structure.
+- Duplicate OH0 protocol check after fixing multistart tie-breaking:
+  percent-overhead 0 and fixed-overhead 0 match on all non-timing fields.
 
-The focused rerun favored the plain RaptorQ degree-2 component variants over
-the min-fill tie-break at large `N`:
+The bug-fix passes found one issue: multistart schedules used elapsed greedy
+time as a tie-breaker after equal residual quality. That could change secondary
+component metrics for tied child schedules. The tie-breaker is now deterministic
+and structural: residual columns, residual rows, component square sum, max
+component, component count, then choice count. Existing fresh-run residual
+means/PDFs are unaffected; do not treat the old pre-patch multistart component
+fields as deterministic evidence.
 
-| method | N=32000 mean residual cols | mean total us |
-| --- | ---: | ---: |
-| raptorq_d2cc | 194.77 | 43510.0 |
-| rqd2_default | 195.63 | 43132.3 |
-| rqd2_minfill | 196.97 | 51595.2 |
-| topk16_lookfill | 209.07 | 24545.1 |
-| default | 213.08 | 22773.9 |
+## Pure Random-Row Winners
 
-## Source Shape Checks
+This table excludes `raptorq_ldpc_*` because those variants add LDPC precode
+rows on top of the random repair rows and therefore use a different row budget.
+`Thr/s` is `1e6 / mean_total_us` from the harness timing; it is useful for
+relative comparisons, not as a stable benchmark.
 
-Input: `--N 128,2048,32000 --trials 40` with `systematic` and `repair` sources.
+| N | fixed OH | structure | method | mean cols | var | median | p95 | thr/s | cost |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 320 | 0 | lt_m2_c128 | rqcc_lowref | 11.81 | 5.15 | 12 | 16 | 2827.3 | O(rows*degree + cols) largest degree-2 component + low refs |
+| 320 | 1 | d1mix_lt_p2 | rqcc_lowref | 11.24 | 8.01 | 11 | 16 | 3786.4 | O(rows*degree + cols) largest degree-2 component + low refs |
+| 320 | 2 | lt_m2_c128 | hyb_rqbeam | 10.70 | 6.60 | 11 | 16 | 1104.9 | O(rqcc_lowref then beam near tail) |
+| 3200 | 0 | lt_m2_c256_fold | rqd2_default | 36.42 | 49.84 | 35 | 49 | 164.3 | O(rows*degree + cols) largest degree-2 component/default tie |
+| 3200 | 1 | lt_m2_c128_fold | rqcc_lowref | 35.58 | 37.33 | 35 | 47 | 218.8 | O(rows*degree + cols) largest degree-2 component + low refs |
+| 3200 | 2 | lt_m2_c256_fold | rqd2_default | 34.45 | 46.24 | 33 | 46 | 157.7 | O(rows*degree + cols) largest degree-2 component/default tie |
+| 32000 | 0 | lt_m2_c256_fold | rqd2_default | 123.26 | 481.80 | 123 | 160 | 6.0 | O(rows*degree + cols) largest degree-2 component/default tie |
+| 32000 | 1 | lt_m2_c256_fold | rqd2_default | 123.25 | 629.51 | 118 | 168 | 7.9 | O(rows*degree + cols) largest degree-2 component/default tie |
+| 32000 | 2 | lt_m2_c256_fold | rqcc_lowref | 125.52 | 365.96 | 125 | 161 | 6.9 | O(rows*degree + cols) largest degree-2 component + low refs |
 
-At `N=32000`, Raptor/RaptorQ-style degree-2 component selection improved the
-residual versus default for both source shapes:
+At large N, `lt_m2_c256_fold` is the strongest pure-random structure found.
+The fast RaptorQ-style degree-2 component schedules are effectively tied on
+residuals, with `rqd2_default` and `rqcc_lowref` the most practical winners.
 
-| source | method | mean residual cols | mean total us |
-| --- | --- | ---: | ---: |
-| systematic | default | 207.00 | 22885.2 |
-| systematic | rqd2_default | 191.00 | 41686.7 |
-| systematic | rqd2_minfill | 191.00 | 49223.8 |
-| repair | default | 233.50 | 26754.6 |
-| repair | rqd2_default | 211.53 | 61686.1 |
-| repair | rqd2_minfill | 212.10 | 67135.1 |
+## Percent Overhead At N=32000
 
-## Literature Cross-Check
+Pure random-row results, excluding LDPC-precode variants:
 
-RFC 6330's RaptorQ example decoder first chooses a row of minimum reduced
-degree. When that minimum degree is two, it builds the graph whose nodes are
-columns and whose edges are degree-2 rows, then chooses a row in a maximum-size
-component. The `raptorq_d2cc`, `rqd2_default`, and `rqd2_minfill` methods are
-peel-only column-selection approximations of that schedule:
+| percent OH | structure | method | mean cols | var | median | p95 | thr/s |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | lt_m2_c256_fold | rqcc_lowref | 123.26 | 481.80 | 123 | 160 | 7.2 |
+| 1 | lt_m2_c256_fold | rqcc_lowref | 42.20 | 182.52 | 40 | 67 | 12.8 |
+| 2 | lt_m2_c256_fold | rqcc_lowref | 31.60 | 52.27 | 32 | 44 | 11.5 |
+| 5 | lt_m2_c256_fold | rqcc_lowref | 23.54 | 34.11 | 23 | 35 | 11.7 |
 
-https://www.rfc-editor.org/rfc/rfc6330#section-5.4.2.2
+The earlier surprising small residuals at `N=32000` were due to percent
+overhead. With zero percent overhead, the pure-random best is about 123
+residual columns, close to the expected `sqrt(N)` scale.
 
-Recent LT/Raptor inactivation papers mainly analyze or optimize the output
-degree distribution and often use random inactivation as the schedule model.
-That suggests future work on Wirehair's row distribution or permanent
-inactivation/precode structure, but it did not reveal a clearly better fast
-local greedy schedule for this peel-only harness:
+## Including RaptorQ LDPC Precode Rows
 
-- https://arxiv.org/abs/1408.2660
-- https://arxiv.org/abs/1510.08364
-- https://arxiv.org/abs/1706.05814
+These are not row-budget-apples-to-apples with the pure random structures:
+`raptorq_ldpc_struct` and `raptorq_ldpc_rand` add S LDPC check rows before the
+random rows. They are useful to compare structured LDPC checks against a random
+same-degree LDPC control.
 
-## First-Pass Recommendation
+| N | fixed OH | structure | method | mean cols | var | median | p95 | matrix rows mean |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 320 | 0 | raptorq_ldpc_rand | raptorq_d2cc | 6.44 | 8.01 | 6 | 11 | 351.01 |
+| 320 | 1 | raptorq_ldpc_rand | rqd2_default | 6.95 | 11.70 | 7 | 13 | 352.01 |
+| 320 | 2 | raptorq_ldpc_struct | rqcc_lowref | 5.85 | 7.45 | 6 | 11 | 353.01 |
+| 3200 | 0 | raptorq_ldpc_struct | raptorq_d2cc | 23.54 | 73.79 | 23 | 40 | 3312.17 |
+| 3200 | 1 | raptorq_ldpc_struct | rqd2_default | 24.51 | 72.76 | 24 | 41 | 3313.17 |
+| 3200 | 2 | raptorq_ldpc_struct | rqcc_lowref | 23.38 | 78.85 | 23 | 38 | 3314.17 |
+| 32000 | 0 | raptorq_ldpc_struct | hyb_rqbeam | 61.74 | 819.68 | 57 | 114 | 32577.50 |
+| 32000 | 1 | raptorq_ldpc_struct | rqd2_default | 63.60 | 913.25 | 62 | 122 | 32578.50 |
+| 32000 | 2 | raptorq_ldpc_struct | rqcc_lowref | 63.87 | 904.20 | 60 | 117 | 32579.50 |
 
-`rqd2_default` is the strongest practical global candidate from these runs. It
-gives most of the residual reduction seen from the Raptor/RaptorQ degree-2
-component schedule without the extra min-fill tie-break cost. `raptorq_d2cc`
-is effectively tied if optimizing only residual count, while `topk8_lookfill`
-is the cheaper low-risk ablation if the component scan is considered too
-expensive.
-
-## Expanded Greedy/Statistic Matrix
-
-The second pass added method IDs 21-64, covering these dimensions:
-
-| dimension | choices |
-| --- | --- |
-| candidate pool | all columns; top-K default columns; all degree-2 endpoints; largest degree-2 component; first minimum-live row; all minimum-live rows |
-| score statistic | cached degree-2 refs; exact live degree-2 refs; partner lookahead; fill sum/square; max row degree; d2/fill ratio; duplicate/distinct partners; total refs; live refs; degree-3/4 support; randomized ties |
-
-Input: `--source loss --loss 0.10 --N 128,2048,32000 --trials 40 --methods all`
-
-At `N=32000`, the full matrix still found the best residuals inside the
-largest degree-2 component family:
-
-| method | mean residual cols | mean total us | cost |
-| --- | ---: | ---: | --- |
-| raptorq_d2cc | 190.38 | 41524.4 | O(rows*degree + cols) |
-| rqd2_minfill | 192.65 | 48148.1 | O(rows*degree + cols + rowrefs) |
-| rqd2_default | 193.18 | 42290.1 | O(rows*degree + cols) |
-| rqcc_lowref | 193.40 | 40446.6 | O(rows*degree + cols) |
-| rqcc_maxrow | 193.88 | 44367.9 | O(rows*degree + cols + cc*rowrefs) |
-| default | 213.70 | 41436.2 | O(cols) |
-
-Input: focused rerun with leading methods,
-`--source loss --loss 0.10 --N 128,2048,32000 --trials 80`
-
-| method | N=32000 mean residual cols | mean total us |
-| --- | ---: | ---: |
-| rqcc_ratio | 192.01 | 43735.1 |
-| rqcc_lowref | 192.94 | 45177.7 |
-| rqcc_dup | 194.21 | 50750.8 |
-| rqcc_maxrow | 194.55 | 44622.0 |
-| raptorq_d2cc | 194.96 | 44091.8 |
-| default | 208.86 | 32740.8 |
-
-Source-shape checks for the focused component methods:
-
-| source | method | N=32000 mean residual cols | mean total us |
-| --- | --- | ---: | ---: |
-| systematic | raptorq_d2cc | 191.00 | 52284.6 |
-| systematic | rqcc_ratio | 191.00 | 63785.7 |
-| systematic | rqcc_lowref | 191.00 | 51618.1 |
-| systematic | default | 207.00 | 51333.7 |
-| repair | raptorq_d2cc | 211.20 | 80716.2 |
-| repair | rqcc_dup | 211.35 | 77186.8 |
-| repair | rqcc_lowref | 211.45 | 70996.9 |
-| repair | default | 233.80 | 51471.6 |
-
-Updated recommendation: `rqcc_ratio` is the best residual-count candidate in
-the focused loss sweep, while `rqcc_lowref` is the simpler close variant and is
-best among the near-frontier methods in the full matrix timing. The broader
-greedy families outside the largest degree-2 component pool
-did not find a stronger fast minimum: min-row/all-min-row and Markowitz-style
-min-fill variants usually left more residuals, while top-K look/fill stayed a
-useful cheaper compromise with less residual gain.
+At medium and large N, the actual structured RaptorQ LDPC rows beat the random
+same-degree LDPC control. At N around 320, the random control is slightly better
+for fixed overhead 0 and 1.

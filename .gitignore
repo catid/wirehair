@@ -77,6 +77,7 @@ bench/results/Wirehair*Fixups.inc
 
 # Local experiment harness build outputs
 experiments/peeling/peel_sweep
+experiments/peeling/results/fresh_*/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
