@@ -442,6 +442,8 @@ enum StructureKind
     kStructureLTAlpha,
     kStructureLTExtra34,
     kStructureLTFold,
+    kStructureLTFoldScale,
+    kStructureLTHighRows,
     kStructureOverheadLT,
     kStructureRaptorQLdpcStruct,
     kStructureRaptorQLdpcRandom,
@@ -512,11 +514,15 @@ static const MatrixStructure kStructures[] = {
     {"lt_m1_c64", "LT degree distribution, min 1, cap 64", kStructureLT, 1, 64},
     {"lt_m1_c128", "LT degree distribution, min 1, cap 128", kStructureLT, 1, 128},
     {"lt_m1_c256", "LT degree distribution, min 1, cap 256", kStructureLT, 1, 256},
+    {"lt_m1_c320", "LT degree distribution, min 1, cap 320", kStructureLT, 1, 320},
     {"lt_m2_c16", "LT degree distribution, min 2, cap 16", kStructureLT, 2, 16},
     {"lt_m2_c32", "LT degree distribution, min 2, cap 32", kStructureLT, 2, 32},
     {"lt_m2_c64", "LT degree distribution, min 2, cap 64", kStructureLT, 2, 64},
+    {"lt_m2_c96", "LT degree distribution, min 2, cap 96", kStructureLT, 2, 96},
     {"lt_m2_c128", "LT degree distribution, min 2, cap 128", kStructureLT, 2, 128},
+    {"lt_m2_c192", "LT degree distribution, min 2, cap 192", kStructureLT, 2, 192},
     {"lt_m2_c256", "LT degree distribution, min 2, cap 256", kStructureLT, 2, 256},
+    {"lt_m2_c320", "LT degree distribution, min 2, cap 320", kStructureLT, 2, 320},
     {"lt_m2_c512", "LT degree distribution, min 2, cap 512", kStructureLT, 2, 512},
     {"lt_m2_c1024", "LT degree distribution, min 2, cap 1024", kStructureLT, 2, 1024},
     {"lt_m3_c16", "LT degree distribution, min 3, cap 16", kStructureLT, 3, 16},
@@ -524,7 +530,10 @@ static const MatrixStructure kStructures[] = {
     {"lt_m3_c64", "LT degree distribution, min 3, cap 64", kStructureLT, 3, 64},
     {"lt_m3_c128", "LT degree distribution, min 3, cap 128", kStructureLT, 3, 128},
     {"lt_m3_c256", "LT degree distribution, min 3, cap 256", kStructureLT, 3, 256},
+    {"lt_m3_c320", "LT degree distribution, min 3, cap 320", kStructureLT, 3, 320},
     {"d1mix_lt_p0", "0 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.00},
+    {"d1mix_lt_p005", "0.5 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.005},
+    {"d1mix_lt_p01", "1 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.01},
     {"d1mix_lt_p2", "2 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.02},
     {"d1mix_lt_p5", "5 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.05},
     {"d1mix_lt_p10", "10 percent degree-1 rows, otherwise LT min 2 cap 64", kStructureOnePlusLT, 2, 64, 0.10},
@@ -571,17 +580,47 @@ static const MatrixStructure kStructures[] = {
     {"sol_alpha075_c128", "ideal soliton weights raised to alpha=0.75, cap 128", kStructureLTAlpha, 1, 128, 0.75},
     {"sol_alpha125_c128", "ideal soliton weights raised to alpha=1.25, cap 128", kStructureLTAlpha, 1, 128, 1.25},
     {"sol_alpha150_c128", "ideal soliton weights raised to alpha=1.50, cap 128", kStructureLTAlpha, 1, 128, 1.50},
+    {"sol_m2_alpha075_c320", "LT min 2 cap 320 with weights raised to alpha=0.75", kStructureLTAlpha, 2, 320, 0.75},
+    {"sol_m2_alpha125_c320", "LT min 2 cap 320 with weights raised to alpha=1.25", kStructureLTAlpha, 2, 320, 1.25},
+    {"sol_m2_alpha150_c320", "LT min 2 cap 320 with weights raised to alpha=1.50", kStructureLTAlpha, 2, 320, 1.50},
     {"lt_m1_c64_fold", "LT min 1 cap 64 with probability mass above cap folded into cap", kStructureLTFold, 1, 64},
     {"lt_m2_c64_fold", "LT min 2 cap 64 with probability mass above cap folded into cap", kStructureLTFold, 2, 64},
+    {"lt_m2_c96_fold", "LT min 2 cap 96 with probability mass above cap folded into cap", kStructureLTFold, 2, 96},
     {"lt_m2_c128_fold", "LT min 2 cap 128 with probability mass above cap folded into cap", kStructureLTFold, 2, 128},
+    {"lt_m2_c192_fold", "LT min 2 cap 192 with probability mass above cap folded into cap", kStructureLTFold, 2, 192},
     {"lt_m2_c256_fold", "LT min 2 cap 256 with probability mass above cap folded into cap", kStructureLTFold, 2, 256},
+    {"lt_m2_c320_fold", "LT min 2 cap 320 with probability mass above cap folded into cap", kStructureLTFold, 2, 320},
     {"lt_m2_c512_fold", "LT min 2 cap 512 with probability mass above cap folded into cap", kStructureLTFold, 2, 512},
     {"lt_m2_c1024_fold", "LT min 2 cap 1024 with probability mass above cap folded into cap", kStructureLTFold, 2, 1024},
+    {"lt_m2_c256_fold0", "LT min 2 cap 256 with 0 percent folded tail mass", kStructureLTFoldScale, 2, 256, 0.0},
+    {"lt_m2_c256_fold25", "LT min 2 cap 256 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 256, 0.25},
+    {"lt_m2_c256_fold50", "LT min 2 cap 256 with 50 percent folded tail mass", kStructureLTFoldScale, 2, 256, 0.50},
+    {"lt_m2_c256_fold200", "LT min 2 cap 256 with 200 percent folded tail mass", kStructureLTFoldScale, 2, 256, 2.00},
     {"lt_d3_003_d4_003", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.03, 0.03, 0.0},
     {"lt_d3_008_d4_003", "LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.08, 0.03, 0.0},
     {"lt_d3_003_d4_008", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.08", kStructureLTExtra34, 1, 64, 0.03, 0.08, 0.0},
     {"lt_d3_008_d4_008", "LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.08", kStructureLTExtra34, 1, 64, 0.08, 0.08, 0.0},
     {"lt_d2_008_d3_003_d4_003", "LT cap64 plus degree-2 mass 0.08, degree-3 mass 0.03, degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.03, 0.03, 0.08},
+    {"lt_c320_d2_003", "LT cap320 plus independent degree-2 mass 0.03", kStructureLTExtra34, 1, 320, 0.0, 0.0, 0.03},
+    {"lt_c320_d2_008", "LT cap320 plus independent degree-2 mass 0.08", kStructureLTExtra34, 1, 320, 0.0, 0.0, 0.08},
+    {"lt_c320_d3_003", "LT cap320 plus independent degree-3 mass 0.03", kStructureLTExtra34, 1, 320, 0.03, 0.0, 0.0},
+    {"lt_c320_d4_003", "LT cap320 plus independent degree-4 mass 0.03", kStructureLTExtra34, 1, 320, 0.0, 0.03, 0.0},
+    {"lt_c320_d2_003_d3_003_d4_003", "LT cap320 plus degree-2/3/4 mass 0.03 each", kStructureLTExtra34, 1, 320, 0.03, 0.03, 0.03},
+    {"lt_c320_d2_008_d3_003_d4_003", "LT cap320 plus degree-2 mass 0.08, degree-3/4 mass 0.03", kStructureLTExtra34, 1, 320, 0.03, 0.03, 0.08},
+    {"lt_m2_c320_d2_003", "LT min 2 cap320 plus independent degree-2 mass 0.03", kStructureLTExtra34, 2, 320, 0.0, 0.0, 0.03},
+    {"lt_m2_c320_d2_008", "LT min 2 cap320 plus independent degree-2 mass 0.08", kStructureLTExtra34, 2, 320, 0.0, 0.0, 0.08},
+    {"lt_m2_c320_d3_003", "LT min 2 cap320 plus independent degree-3 mass 0.03", kStructureLTExtra34, 2, 320, 0.03, 0.0, 0.0},
+    {"lt_m2_c320_d4_003", "LT min 2 cap320 plus independent degree-4 mass 0.03", kStructureLTExtra34, 2, 320, 0.0, 0.03, 0.0},
+    {"lt_m2_c320_d2_003_d3_003_d4_003", "LT min 2 cap320 plus degree-2/3/4 mass 0.03 each", kStructureLTExtra34, 2, 320, 0.03, 0.03, 0.03},
+    {"lt_m2_c320_d2_008_d3_003_d4_003", "LT min 2 cap320 plus degree-2 mass 0.08, degree-3/4 mass 0.03", kStructureLTExtra34, 2, 320, 0.03, 0.03, 0.08},
+    {"lt_m2_c320_hi1_h160", "LT min 2 cap 320 with 1 explicit degree-N/2 row", kStructureLTHighRows, 2, 320, 1.0, 0.5},
+    {"lt_m2_c320_hi2_h160", "LT min 2 cap 320 with 2 explicit degree-N/2 rows", kStructureLTHighRows, 2, 320, 2.0, 0.5},
+    {"lt_m2_c320_hi4_h160", "LT min 2 cap 320 with 4 explicit degree-N/2 rows", kStructureLTHighRows, 2, 320, 4.0, 0.5},
+    {"lt_m2_c320_hi8_h160", "LT min 2 cap 320 with 8 explicit degree-N/2 rows", kStructureLTHighRows, 2, 320, 8.0, 0.5},
+    {"lt_m2_c320_hi1_h320", "LT min 2 cap 320 with 1 explicit degree-N row", kStructureLTHighRows, 2, 320, 1.0, 1.0},
+    {"lt_m2_c320_hi2_h320", "LT min 2 cap 320 with 2 explicit degree-N rows", kStructureLTHighRows, 2, 320, 2.0, 1.0},
+    {"lt_m2_c320_hi4_h320", "LT min 2 cap 320 with 4 explicit degree-N rows", kStructureLTHighRows, 2, 320, 4.0, 1.0},
+    {"lt_m2_c320_hi8_h320", "LT min 2 cap 320 with 8 explicit degree-N rows", kStructureLTHighRows, 2, 320, 8.0, 1.0},
     {"ohdep_lt_adapt128", "overhead-dependent LT cap128: low-degree mass adapts from +0 to +5 percent overhead", kStructureOverheadLT, 1, 128, 0.03, 0.10, 0.03},
     {"ohdep_lt_no1_128", "overhead-dependent LT cap128: suppresses degree-1 mass at zero/near-zero overhead", kStructureOverheadLT, 1, 128, 0.00, 0.12, 0.04},
     {"ohdep_lt_tail256", "overhead-dependent LT cap256: longer tail at zero overhead with stronger low-degree mass at overhead", kStructureOverheadLT, 1, 256, 0.02, 0.08, 0.02},
@@ -4221,6 +4260,14 @@ static double structure_degree_weight(
         }
         return w;
     }
+    case kStructureLTFoldScale:
+    {
+        double w = lt_weight(degree, N);
+        if (degree == max_degree) {
+            w += structure.A * lt_folded_tail_weight(max_degree, N);
+        }
+        return w;
+    }
     case kStructureOverheadLT:
         return overhead_lt_weight(structure, degree, N, row_count);
     default:
@@ -4293,6 +4340,8 @@ static unsigned choose_structure_degree(
     case kStructureLTAlpha:
     case kStructureLTExtra34:
     case kStructureLTFold:
+    case kStructureLTFoldScale:
+    case kStructureLTHighRows:
     case kStructureOverheadLT:
         return weighted_degree(structure, N, row_count, rng);
     case kStructureOnePlusUniform:
@@ -4651,6 +4700,13 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
         if (structure.Kind == kStructureBinaryP50)
         {
             row = binary_p50_row_columns(N, rng);
+        }
+        else if (structure.Kind == kStructureLTHighRows &&
+            row_i < (unsigned)(structure.A + 0.5))
+        {
+            unsigned degree = (unsigned)std::floor(
+                structure.B * (double)N + 0.5);
+            row = random_row_columns(N, clamp_degree(degree, N), rng);
         }
         else
         {
@@ -5104,14 +5160,22 @@ static bool run_new_structure_variant_tests(std::string* why)
     const MatrixStructure* fold = find_structure("lt_m2_c128_fold");
     const MatrixStructure* fold512 = find_structure("lt_m2_c512_fold");
     const MatrixStructure* fold1024 = find_structure("lt_m2_c1024_fold");
+    const MatrixStructure* fold0 = find_structure("lt_m2_c256_fold0");
+    const MatrixStructure* fold50 = find_structure("lt_m2_c256_fold50");
+    const MatrixStructure* fold200 = find_structure("lt_m2_c256_fold200");
     const MatrixStructure* extra34 = find_structure("lt_d3_008_d4_008");
+    const MatrixStructure* extra34_min2 =
+        find_structure("lt_m2_c320_d2_003_d3_003_d4_003");
+    const MatrixStructure* high_half = find_structure("lt_m2_c320_hi4_h160");
+    const MatrixStructure* high_full = find_structure("lt_m2_c320_hi4_h320");
     const MatrixStructure* overhead = find_structure("ohdep_lt_adapt128");
     const MatrixStructure* ldpc = find_structure("raptorq_ldpc_struct");
     const MatrixStructure* ldpc_random = find_structure("raptorq_ldpc_rand");
     const MatrixStructure* binary = find_structure("binary_p50");
     if (!robust || !alpha || !cap256 || !cap512 || !cap1024 || !fold ||
-        !fold512 || !fold1024 || !extra34 || !overhead || !ldpc ||
-        !ldpc_random || !binary) {
+        !fold512 || !fold1024 || !fold0 || !fold50 || !fold200 ||
+        !extra34 || !extra34_min2 || !high_half || !high_full ||
+        !overhead || !ldpc || !ldpc_random || !binary) {
         return self_fail(why, "new structure variant lookup failed");
     }
 
@@ -5120,7 +5184,8 @@ static bool run_new_structure_variant_tests(std::string* why)
     const uint64_t seed = UINT64_C(0x6e65777661726961);
     const MatrixStructure* structures[] = {
         robust, alpha, cap256, cap512, cap1024, fold, fold512, fold1024,
-        extra34, overhead, ldpc, ldpc_random, binary
+        fold0, fold50, fold200, extra34, extra34_min2, high_half,
+        high_full, overhead, ldpc, ldpc_random, binary
     };
     for (const MatrixStructure* structure : structures)
     {
@@ -5157,6 +5222,17 @@ static bool run_new_structure_variant_tests(std::string* why)
         return self_fail(why, "large cap-fold structures did not fold tail mass");
     }
 
+    const unsigned scale_cap = clamp_degree(fold50->MaxDegree, N);
+    const double scale0 = structure_degree_weight(
+        *fold0, scale_cap, N, row_count, scale_cap);
+    const double scale50 = structure_degree_weight(
+        *fold50, scale_cap, N, row_count, scale_cap);
+    const double scale200 = structure_degree_weight(
+        *fold200, scale_cap, N, row_count, scale_cap);
+    if (!(scale0 < scale50 && scale50 < scale200)) {
+        return self_fail(why, "scaled fold weights are not monotonic");
+    }
+
     const double robust_degree2 = structure_degree_weight(
         *robust, 2, N, row_count, clamp_degree(robust->MaxDegree, N));
     if (!(robust_degree2 > lt_weight(2, N))) {
@@ -5179,6 +5255,13 @@ static bool run_new_structure_variant_tests(std::string* why)
         return self_fail(why, "degree-3/4 explicit mass did not affect degree 3");
     }
 
+    const double extra_min2_d2 = structure_degree_weight(
+        *extra34_min2, 2, N, row_count,
+        clamp_degree(extra34_min2->MaxDegree, N));
+    if (!(extra34_min2->MinDegree == 2 && extra_min2_d2 > lt_weight(2, N))) {
+        return self_fail(why, "min-2 degree-mass variant is malformed");
+    }
+
     const double oh_zero = structure_degree_weight(
         *overhead, 1, N, N, clamp_degree(overhead->MaxDegree, N));
     const double oh_high = structure_degree_weight(
@@ -5197,6 +5280,18 @@ static bool run_new_structure_variant_tests(std::string* why)
         (double)binary_refs / (double)(128u * 256u);
     if (binary_density < 0.40 || binary_density > 0.60) {
         return self_fail(why, "binary_p50 density is outside smoke-test bounds");
+    }
+
+    const std::vector<std::vector<uint16_t> > high_half_rows =
+        generate_random_structure_rows(*high_half, N, row_count, seed);
+    const std::vector<std::vector<uint16_t> > high_full_rows =
+        generate_random_structure_rows(*high_full, N, row_count, seed);
+    for (unsigned i = 0; i < 4u; ++i)
+    {
+        if (high_half_rows[i].size() != N / 2u ||
+            high_full_rows[i].size() != N) {
+            return self_fail(why, "explicit high-degree rows have wrong degree");
+        }
     }
 
     const unsigned S = raptorq_ldpc_symbol_count(N);

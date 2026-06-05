@@ -139,6 +139,131 @@ confirmed that `lt_m2_c512`, `lt_m2_c1024`, `lt_m2_c512_fold`, and
 the original `N=320` focused table were from structure-name-derived independent
 matrix streams, not from a real distribution difference.
 
+## N=320 Recipe Ablation Sweep
+
+Follow-up protocol for the small-N recipe search:
+
+- Binary: current `experiments/peeling/peel_sweep`.
+- Structures: 52 N=320-focused structures, including cap sweeps, fold-scale
+  sweeps, min-degree controls, tiny degree-1 mixtures, tail-alpha controls,
+  explicit high-degree rows, degree-2/3/4 mass controls, `wirehair_rand`, and
+  `binary_p50`.
+- Methods: all 115 peeling/inactivation schedules.
+- Size: fixed `N=320`, `N-jitter=0`.
+- Fixed row overheads: 0, 1, 2, 4, and 8 packets.
+- Trials: 4 seed families x 100 trials, reported below as combined 400-trial
+  empirical distributions for each exact `structure + method + overhead` row.
+- Matrix seeds: paired across methods inside each structure. Different
+  structures still use structure-name-derived streams, so exact ties should be
+  treated cautiously unless a common-random-number structure comparison is
+  added.
+- Production deterministic Wirehair rows remain excluded. `wirehair_rand` is
+  the Wirehair row-weight distribution with fully random column choices.
+
+Validation:
+
+- `bash experiments/peeling/build.sh`
+- `./experiments/peeling/peel_sweep --self-test`
+- ASan/UBSan self-test build and run.
+- ASan/UBSan smoke sweep over representative new structures and top methods.
+- CSV integrity checks over all 119600 result rows: expected row counts, 100
+  trials, fixed `N=320`, paired-random source, full 115-method coverage, PDFs
+  present, expected row overheads, and no production Wirehair structure.
+
+Top exact `structure + method` combinations by fixed row overhead:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | lt_m2_c320_d2_003 | hyb_rqbeam | 11.918 | 5.20 | 12 | 16 | 987.0 |
+| 0 | 2 | lt_c320_d2_003_d3_003_d4_003 | rqd2_default | 11.950 | 6.50 | 12 | 16 | 516.4 |
+| 0 | 3 | lt_c320_d2_003_d3_003_d4_003 | raptorq_d2cc | 11.950 | 6.50 | 12 | 16 | 532.2 |
+| 0 | 4 | lt_c320_d2_003_d3_003_d4_003 | ks_random | 11.950 | 6.50 | 12 | 16 | 847.8 |
+| 0 | 5 | lt_c320_d2_003_d3_003_d4_003 | rqd2_minfill | 11.950 | 6.50 | 12 | 16 | 859.2 |
+| 1 | 1 | lt_m2_c320_d3_003 | hyb_rqbeam | 11.375 | 6.16 | 11 | 16 | 920.4 |
+| 1 | 2 | lt_m1_c320 | hyb_rqbeam | 11.398 | 6.32 | 11 | 16 | 879.0 |
+| 1 | 3 | lt_m2_c320_d3_003 | rqd2_default | 11.408 | 6.20 | 11 | 16 | 522.0 |
+| 1 | 4 | lt_m2_c320_d3_003 | raptorq_d2cc | 11.408 | 6.20 | 11 | 16 | 531.1 |
+| 1 | 5 | lt_m2_c320_d3_003 | ks_boundary_min | 11.408 | 6.20 | 11 | 16 | 899.8 |
+| 2 | 1 | lt_m2_c256_fold25 | hyb_rqbeam | 10.870 | 6.10 | 11 | 15 | 799.7 |
+| 2 | 2 | lt_m2_c256_fold25 | raptorq_d2cc | 10.893 | 6.13 | 11 | 15 | 451.4 |
+| 2 | 3 | lt_m2_c256_fold25 | rqd2_default | 10.893 | 6.13 | 11 | 15 | 466.9 |
+| 2 | 4 | lt_m2_c256_fold25 | ks_boundary_min | 10.893 | 6.13 | 11 | 15 | 770.0 |
+| 2 | 5 | lt_m2_c256_fold25 | ks_random | 10.893 | 6.13 | 11 | 15 | 772.9 |
+| 4 | 1 | wirehair_rand | rqd2_default | 9.762 | 5.51 | 10 | 14 | 147.2 |
+| 4 | 2 | wirehair_rand | raptorq_d2cc | 9.762 | 5.51 | 10 | 14 | 151.2 |
+| 4 | 3 | wirehair_rand | rqcc_lowref | 9.762 | 5.51 | 10 | 14 | 151.2 |
+| 4 | 4 | wirehair_rand | rqcc_minfill | 9.762 | 5.51 | 10 | 14 | 314.3 |
+| 4 | 5 | wirehair_rand | rqcc_livemin | 9.762 | 5.51 | 10 | 14 | 317.0 |
+| 8 | 1 | lt_c320_d2_003 | hyb_rqbeam | 7.997 | 5.97 | 8 | 12 | 839.4 |
+| 8 | 2 | lt_c320_d2_003 | rqcc_dup | 8.015 | 5.97 | 8 | 12 | 987.9 |
+| 8 | 3 | lt_c320_d2_003 | rqd2_default | 8.018 | 5.98 | 8 | 12 | 510.8 |
+| 8 | 4 | lt_c320_d2_003 | raptorq_d2cc | 8.018 | 5.98 | 8 | 12 | 529.7 |
+| 8 | 5 | lt_c320_d2_003 | rqd2_minfill | 8.018 | 5.98 | 8 | 12 | 871.2 |
+
+Top distinct structures by their best exact method:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | lt_m2_c320_d2_003 | hyb_rqbeam | 11.918 | 5.20 | 12 | 16 | 987.0 |
+| 0 | 2 | lt_c320_d2_003_d3_003_d4_003 | rqd2_default | 11.950 | 6.50 | 12 | 16 | 516.4 |
+| 0 | 3 | lt_c320_d3_003 | hyb_rqbeam | 12.033 | 6.59 | 12 | 17 | 923.5 |
+| 0 | 4 | lt_m2_c256_fold | hyb_rqbeam | 12.037 | 6.04 | 12 | 16 | 868.8 |
+| 0 | 5 | lt_m2_c128 | rqcc_maxrow | 12.050 | 6.60 | 12 | 17 | 974.0 |
+| 1 | 1 | lt_m2_c320_d3_003 | hyb_rqbeam | 11.375 | 6.16 | 11 | 16 | 920.4 |
+| 1 | 2 | lt_m1_c320 | hyb_rqbeam | 11.398 | 6.32 | 11 | 16 | 879.0 |
+| 1 | 3 | wirehair_rand | hyb_rqbeam | 11.463 | 5.70 | 11 | 16 | 592.6 |
+| 1 | 4 | lt_c320_d3_003 | hyb_rqbeam | 11.495 | 6.63 | 11 | 16 | 955.1 |
+| 1 | 5 | d1mix_lt_p2 | hyb_rqbeam | 11.535 | 6.92 | 11 | 16 | 991.0 |
+| 2 | 1 | lt_m2_c256_fold25 | hyb_rqbeam | 10.870 | 6.10 | 11 | 15 | 799.7 |
+| 2 | 2 | lt_c320_d4_003 | hyb_rqbeam | 10.900 | 6.19 | 11 | 16 | 894.9 |
+| 2 | 3 | lt_m2_c256 | hyb_rqbeam | 10.947 | 6.29 | 11 | 15 | 775.0 |
+| 2 | 4 | lt_c320_d3_003 | hyb_rqbeam | 10.975 | 5.79 | 11 | 15 | 904.9 |
+| 2 | 5 | lt_c320_d2_003 | hyb_rqbeam | 10.980 | 6.15 | 11 | 16 | 908.9 |
+| 4 | 1 | wirehair_rand | rqd2_default | 9.762 | 5.51 | 10 | 14 | 147.2 |
+| 4 | 2 | lt_m2_c128_fold | hyb_rqbeam | 9.910 | 5.82 | 10 | 14 | 607.0 |
+| 4 | 3 | lt_c320_d2_003 | hyb_rqbeam | 9.915 | 5.66 | 10 | 14 | 934.9 |
+| 4 | 4 | lt_c320_d3_003 | hyb_rqbeam | 10.002 | 6.48 | 10 | 14 | 919.3 |
+| 4 | 5 | lt_c320_d2_008_d3_003_d4_003 | hyb_rqbeam | 10.055 | 6.90 | 10 | 15 | 1100.0 |
+| 8 | 1 | lt_c320_d2_003 | hyb_rqbeam | 7.997 | 5.97 | 8 | 12 | 839.4 |
+| 8 | 2 | lt_m1_c320 | rqd2_default | 8.172 | 5.36 | 8 | 12 | 532.4 |
+| 8 | 3 | lt_c320_d3_003 | hyb_rqbeam | 8.190 | 5.86 | 8 | 13 | 850.0 |
+| 8 | 4 | wirehair_rand | rqcc_lowref | 8.262 | 5.92 | 8 | 13 | 146.8 |
+| 8 | 5 | lt_c320_d2_003_d3_003_d4_003 | hyb_rqbeam | 8.325 | 5.97 | 8 | 13 | 890.8 |
+
+Method costs for the top methods:
+
+- `hyb_rqbeam`: `O(rqcc_lowref then beam near tail)`.
+- `rqd2_default`: `O(rows*degree + cols)`, largest degree-2 component/default
+  tie.
+- `raptorq_d2cc`: `O(rows*degree + cols)`, largest degree-2 component.
+- `rqcc_lowref`: `O(rows*degree + cols)`, largest degree-2 component plus low
+  refs.
+- `rqcc_dup`: `O(rows*degree + cols + cc*rowrefs)`, largest degree-2
+  component plus duplicate partners.
+
+Ablation readout:
+
+- At zero overhead, the cleanest new signal is a very small explicit
+  degree-2 mass on the min-2 cap-320 LT family:
+  `lt_m2_c320_d2_003 + hyb_rqbeam` averaged 11.918 residual columns.
+- The fastest near-tie at zero overhead is
+  `lt_c320_d2_003_d3_003_d4_003 + rqd2_default` at 11.950 residual columns and
+  about half the measured harness time of the best-mean row.
+- The winner changes with row overhead. `lt_m2_c320_d3_003` is best at +1,
+  `lt_m2_c256_fold25` at +2, `wirehair_rand` at +4, and `lt_c320_d2_003` at
+  +8. The differences among good sparse candidates are small: usually a few
+  tenths of a residual column over 400 trials.
+- Full cap-fold is not consistently best at N=320. A 25 percent folded-tail
+  scale on cap 256 wins the +2 row case, while folded-tail scale 0 and exact
+  caps are competitive elsewhere.
+- Forced high-degree rows are a clear failure mode for this peel-only metric:
+  the best explicit-high variant still leaves about 140 residual columns across
+  all overheads tested.
+- Tail-alpha/temperature variants are also poor at N=320, with best means
+  around 21 to 24 residual columns.
+- Dense `binary_p50` remains only a smoke baseline. Peeling has to inactivate
+  nearly the whole matrix before rows become peelable.
+
 ## Dense Binary Smoke Baseline
 
 The harness includes `binary_p50`, a fully random dense binary matrix where
