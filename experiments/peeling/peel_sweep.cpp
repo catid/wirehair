@@ -515,6 +515,8 @@ static const MatrixStructure kStructures[] = {
     {"lt_m2_c64", "LT degree distribution, min 2, cap 64", kStructureLT, 2, 64},
     {"lt_m2_c128", "LT degree distribution, min 2, cap 128", kStructureLT, 2, 128},
     {"lt_m2_c256", "LT degree distribution, min 2, cap 256", kStructureLT, 2, 256},
+    {"lt_m2_c512", "LT degree distribution, min 2, cap 512", kStructureLT, 2, 512},
+    {"lt_m2_c1024", "LT degree distribution, min 2, cap 1024", kStructureLT, 2, 1024},
     {"lt_m3_c16", "LT degree distribution, min 3, cap 16", kStructureLT, 3, 16},
     {"lt_m3_c32", "LT degree distribution, min 3, cap 32", kStructureLT, 3, 32},
     {"lt_m3_c64", "LT degree distribution, min 3, cap 64", kStructureLT, 3, 64},
@@ -571,6 +573,8 @@ static const MatrixStructure kStructures[] = {
     {"lt_m2_c64_fold", "LT min 2 cap 64 with probability mass above cap folded into cap", kStructureLTFold, 2, 64},
     {"lt_m2_c128_fold", "LT min 2 cap 128 with probability mass above cap folded into cap", kStructureLTFold, 2, 128},
     {"lt_m2_c256_fold", "LT min 2 cap 256 with probability mass above cap folded into cap", kStructureLTFold, 2, 256},
+    {"lt_m2_c512_fold", "LT min 2 cap 512 with probability mass above cap folded into cap", kStructureLTFold, 2, 512},
+    {"lt_m2_c1024_fold", "LT min 2 cap 1024 with probability mass above cap folded into cap", kStructureLTFold, 2, 1024},
     {"lt_d3_003_d4_003", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.03, 0.03, 0.0},
     {"lt_d3_008_d4_003", "LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.08, 0.03, 0.0},
     {"lt_d3_003_d4_008", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.08", kStructureLTExtra34, 1, 64, 0.03, 0.08, 0.0},
@@ -5070,13 +5074,18 @@ static bool run_new_structure_variant_tests(std::string* why)
     const MatrixStructure* robust = find_structure("rs_c003_d10_c128");
     const MatrixStructure* alpha = find_structure("sol_alpha075_c128");
     const MatrixStructure* cap256 = find_structure("lt_m2_c256");
+    const MatrixStructure* cap512 = find_structure("lt_m2_c512");
+    const MatrixStructure* cap1024 = find_structure("lt_m2_c1024");
     const MatrixStructure* fold = find_structure("lt_m2_c128_fold");
+    const MatrixStructure* fold512 = find_structure("lt_m2_c512_fold");
+    const MatrixStructure* fold1024 = find_structure("lt_m2_c1024_fold");
     const MatrixStructure* extra34 = find_structure("lt_d3_008_d4_008");
     const MatrixStructure* overhead = find_structure("ohdep_lt_adapt128");
     const MatrixStructure* ldpc = find_structure("raptorq_ldpc_struct");
     const MatrixStructure* ldpc_random = find_structure("raptorq_ldpc_rand");
-    if (!robust || !alpha || !cap256 || !fold || !extra34 || !overhead ||
-        !ldpc || !ldpc_random) {
+    if (!robust || !alpha || !cap256 || !cap512 || !cap1024 || !fold ||
+        !fold512 || !fold1024 || !extra34 || !overhead || !ldpc ||
+        !ldpc_random) {
         return self_fail(why, "new structure variant lookup failed");
     }
 
@@ -5084,7 +5093,8 @@ static bool run_new_structure_variant_tests(std::string* why)
     const unsigned row_count = 320;
     const uint64_t seed = UINT64_C(0x6e65777661726961);
     const MatrixStructure* structures[] = {
-        robust, alpha, cap256, fold, extra34, overhead, ldpc, ldpc_random
+        robust, alpha, cap256, cap512, cap1024, fold, fold512, fold1024,
+        extra34, overhead, ldpc, ldpc_random
     };
     for (const MatrixStructure* structure : structures)
     {
@@ -5106,6 +5116,19 @@ static bool run_new_structure_variant_tests(std::string* why)
         *fold, cap, N, row_count, cap);
     if (folded <= lt_weight(cap, N)) {
         return self_fail(why, "cap-fold structure did not fold tail mass");
+    }
+
+    const unsigned larger_n = 3200;
+    const unsigned larger_rows = 3200;
+    const unsigned cap512_value = clamp_degree(fold512->MaxDegree, larger_n);
+    const unsigned cap1024_value = clamp_degree(fold1024->MaxDegree, larger_n);
+    const double folded512 = structure_degree_weight(
+        *fold512, cap512_value, larger_n, larger_rows, cap512_value);
+    const double folded1024 = structure_degree_weight(
+        *fold1024, cap1024_value, larger_n, larger_rows, cap1024_value);
+    if (folded512 <= lt_weight(cap512_value, larger_n) ||
+        folded1024 <= lt_weight(cap1024_value, larger_n)) {
+        return self_fail(why, "large cap-fold structures did not fold tail mass");
     }
 
     const double robust_degree2 = structure_degree_weight(

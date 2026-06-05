@@ -7,10 +7,10 @@ They do not model dense solver cost or dense residual success probability.
 
 ## Fresh Random-Only Sweep
 
-Protocol:
+Original broad-sweep protocol:
 
 - Binary: current `experiments/peeling/peel_sweep`.
-- Structures: all 111 random-compatible structures.
+- Structures: the then-current 111 random-compatible structures.
 - Methods: all 115 peeling/inactivation schedules.
 - Sizes: anchor `N=320,3200,32000`, with actual `N` sampled from
   `anchor +/- 10` per trial.
@@ -64,9 +64,48 @@ relative comparisons, not as a stable benchmark.
 | 32000 | 1 | lt_m2_c256_fold | rqd2_default | 123.25 | 629.51 | 118 | 168 | 7.9 | O(rows*degree + cols) largest degree-2 component/default tie |
 | 32000 | 2 | lt_m2_c256_fold | rqcc_lowref | 125.52 | 365.96 | 125 | 161 | 6.9 | O(rows*degree + cols) largest degree-2 component + low refs |
 
-At large N, `lt_m2_c256_fold` is the strongest pure-random structure found.
-The fast RaptorQ-style degree-2 component schedules are effectively tied on
-residuals, with `rqd2_default` and `rqcc_lowref` the most practical winners.
+In the original broad sweep, `lt_m2_c256_fold` was the strongest pure-random
+structure found. The follow-up high-cap sweep below supersedes that large-N
+recommendation.
+
+## High-Cap LT Follow-Up
+
+After `lt_m2_c256_fold` won the original zero-overhead pure-random comparison,
+the harness added `lt_m2_c512`, `lt_m2_c1024`, `lt_m2_c512_fold`, and
+`lt_m2_c1024_fold`.
+
+Focused protocol:
+
+- Structures: `lt_m2_c128_fold`, `lt_m2_c256`, `lt_m2_c256_fold`,
+  `lt_m2_c512`, `lt_m2_c512_fold`, `lt_m2_c1024`,
+  `lt_m2_c1024_fold`, and `wirehair_rand`.
+- Methods: current fast/frontier degree-2-component schedules
+  `10,18,40,41,42,43,44,78,79,99`.
+- Sizes: anchor `N=320,3200,32000`, N-jitter 10.
+- Fixed overhead: 0.
+- Trials: 100, paired matrix seeds, PDFs enabled.
+
+Best method per structure, breaking equal mean residual count by lower
+`total_us`:
+
+| N | rank | structure | method | mean cols | sd | median | p95 | thr/s |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 320 | 1 | lt_m2_c1024_fold | hyb_rqbeam | 11.75 | 2.45 | 12 | 15 | 898.1 |
+| 320 | 2 | wirehair_rand | hyb_rqbeam | 11.84 | 2.63 | 12 | 17 | 1309.1 |
+| 320 | 3 | lt_m2_c512_fold | hyb_rqbeam | 12.02 | 2.30 | 12 | 16 | 891.3 |
+| 3200 | 1 | lt_m2_c1024 | hyb_rqbeam | 35.72 | 6.16 | 35 | 47 | 47.9 |
+| 3200 | 2 | lt_m2_c512_fold | rqcc_lowref | 35.95 | 6.22 | 35 | 46 | 106.2 |
+| 3200 | 3 | lt_m2_c512 | raptorq_d2cc | 35.97 | 7.04 | 35 | 51 | 120.7 |
+| 32000 | 1 | lt_m2_c1024_fold | rqd2_default | 106.11 | 18.60 | 104 | 140 | 4.8 |
+| 32000 | 2 | lt_m2_c512_fold | rqcc_lowref | 108.45 | 18.31 | 104 | 141 | 7.0 |
+| 32000 | 3 | lt_m2_c1024 | rqcc_lowref | 109.38 | 20.47 | 105 | 147 | 5.5 |
+| 32000 | 4 | lt_m2_c256_fold | rqcc_lowref | 123.26 | 21.95 | 123 | 160 | 9.3 |
+
+At `N=32000`, `lt_m2_c1024_fold` improves the previous best
+`lt_m2_c256_fold` mean residual count by about 14 percent. `lt_m2_c512_fold`
+is only about 2 percent worse than `lt_m2_c1024_fold` and is meaningfully
+faster in this focused run, so it is the more practical current candidate if
+peel-side runtime matters.
 
 ## Percent Overhead At N=32000
 
