@@ -107,6 +107,32 @@ is only about 2 percent worse than `lt_m2_c1024_fold` and is meaningfully
 faster in this focused run, so it is the more practical current candidate if
 peel-side runtime matters.
 
+Audit caveats:
+
+- This is an equal-row comparison, not an equal sparse-edge or symbol-XOR
+  comparison. At `N=32000`, expected row degree is about 7.11 for
+  `lt_m2_c256_fold`, 7.80 for `lt_m2_c512_fold`, and 8.48 for
+  `lt_m2_c1024_fold`. Some quality gain is therefore purchased with more
+  sparse references per row.
+- A naive equal-edge rerun is not a valid replacement for the zero-overhead
+  comparison because reducing high-cap row counts below `N` makes the system
+  underdetermined and leaves thousands of residuals by construction.
+- Matrix seeds are paired across methods within a structure. Different
+  structures still use structure-name-derived seed streams, so structure
+  comparisons are not common-random-number paired. Four separate seed-family
+  reruns at `N=32000` kept the same ranking: `lt_m2_c1024_fold` averaged
+  105.98 residual columns, `lt_m2_c512_fold` 109.86, `lt_m2_c256_fold`
+  121.69, and `wirehair_rand` 207.57.
+- For `N <= cap`, folded and non-folded high-cap LT structures clamp to the
+  same distribution. Small-N differences among `c512`/`c1024` variants should
+  be treated as Monte Carlo noise unless a common-random-number structure test
+  is added.
+- The high-cap run was focused on the fast/frontier method set. An all-method
+  audit completed for `lt_m2_c256_fold` and `lt_m2_c512_fold` and found the
+  same best methods. It was stopped in known-slow methods while processing
+  `lt_m2_c1024_fold`; among completed methods, the best residual remained
+  106.11.
+
 ## Percent Overhead At N=32000
 
 Pure random-row results, excluding LDPC-precode variants:
