@@ -133,6 +133,46 @@ Audit caveats:
   `lt_m2_c1024_fold`; among completed methods, the best residual remained
   106.11.
 
+At `N=320`, caps above `N` clamp to `N`. A same-matrix check with `N-jitter=0`
+confirmed that `lt_m2_c512`, `lt_m2_c1024`, `lt_m2_c512_fold`, and
+`lt_m2_c1024_fold` produce identical non-timing results. The differences in
+the original `N=320` focused table were from structure-name-derived independent
+matrix streams, not from a real distribution difference.
+
+## Dense Binary Smoke Baseline
+
+The harness includes `binary_p50`, a fully random dense binary matrix where
+each row includes each column independently with probability 0.5. This is a
+smoke-test baseline rather than a practical sparse-code candidate: rows have
+average degree `N/2`, so storage, row updates, and real symbol XOR work scale
+quadratically.
+
+Input: `--structures binary_p50 --N 320 --N-jitter 10 --methods all
+--trials 100 --overhead 0 --pdf`
+
+All 115 methods completed. Because the matrix is dense, peeling has to
+inactivate almost every column before rows become peelable; the residual dense
+count is therefore around 300 columns for `N ~= 320`.
+
+| rank | method | mean cols | sd | median | p95 | total_us | cost |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | bm_minrand | 300.05 | 6.23 | 300 | 310 | 3256.8 | O(rows*degree) min row, random all-but-one |
+| 2 | minrow_ovmax | 300.08 | 6.05 | 301 | 309 | 61091.3 | O(rows*degree + candidates) all min rows/max overlap |
+| 3 | allmin_default | 300.11 | 5.98 | 300 | 309 | 3628.0 | O(rows*degree + candidates) all minimum rows + default score |
+| 4 | allmin_ratio | 300.11 | 6.16 | 301 | 309 | 60569.6 | O(rows*degree + candidates*rowrefs) all minimum rows + d2/fill ratio |
+| 5 | minrow_best | 300.11 | 5.98 | 300 | 309 | 61242.3 | O(rows*degree) best column among all minimum rows |
+| 10 | raptorq_d2cc | 300.18 | 6.09 | 301 | 309 | 3636.7 | O(rows*degree + cols) largest degree-2 component |
+| 11 | rqd2_default | 300.18 | 6.09 | 301 | 309 | 3712.7 | O(rows*degree + cols) largest degree-2 component/default tie |
+| 19 | rq_minrow | 300.20 | 6.09 | 301 | 309 | 3518.6 | O(rows*degree) Raptor-style minimum row degree |
+| 54 | default | 305.38 | 6.26 | 306 | 315 | 4822.2 | O(cols) cached degree-2 refs |
+| 101 | rqcc_lowref | 309.09 | 6.26 | 310 | 319 | 3587.2 | O(rows*degree + cols) largest degree-2 component + low refs |
+| 113 | global_lowref | 309.99 | 6.21 | 311 | 320 | 3496.9 | O(cols) all columns + low reference count |
+
+The dense baseline is useful because it behaves very differently from the
+sparse LT-style matrices: algorithm choices only move the residual by about 10
+columns, while the absolute residual is close to `N`. That is expected for a
+dense random matrix under a peel/inactivation schedule.
+
 ## Percent Overhead At N=32000
 
 Pure random-row results, excluding LDPC-precode variants:

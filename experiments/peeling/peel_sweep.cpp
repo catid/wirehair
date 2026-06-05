@@ -445,6 +445,7 @@ enum StructureKind
     kStructureOverheadLT,
     kStructureRaptorQLdpcStruct,
     kStructureRaptorQLdpcRandom,
+    kStructureBinaryP50,
 };
 
 struct MatrixStructure
@@ -493,6 +494,7 @@ struct MatrixStructure
 
 static const MatrixStructure kStructures[] = {
     {"wirehair_rand", "Wirehair row-weight distribution with random columns", kStructureWirehairRandom, 1, 65535},
+    {"binary_p50", "fully random dense binary matrix rows with P(column)=0.5", kStructureBinaryP50, 1, 65535},
     {"uniform1_8", "uniform row degree in [1,8]", kStructureUniform, 1, 8, 0.0, 0.0},
     {"uniform2_8", "uniform row degree in [2,8]", kStructureUniform, 2, 8, 0.0, 0.0},
     {"uniform3_8", "uniform row degree in [3,8]", kStructureUniform, 3, 8, 0.0, 0.0},
@@ -4346,6 +4348,22 @@ static std::vector<uint16_t> random_row_columns(
     return row;
 }
 
+static std::vector<uint16_t> binary_p50_row_columns(unsigned N, Rng& rng)
+{
+    std::vector<uint16_t> row;
+    row.reserve((N + 1u) / 2u);
+    for (unsigned column_i = 0; column_i < N; ++column_i)
+    {
+        if (rng.u32() & 1u) {
+            row.push_back((uint16_t)column_i);
+        }
+    }
+    if (row.empty()) {
+        row.push_back((uint16_t)(rng.u32() % N));
+    }
+    return row;
+}
+
 static unsigned row_projected_max_load(
     const std::vector<uint16_t>& row,
     const std::vector<unsigned>& column_loads)
@@ -4629,14 +4647,21 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
     }
     for (unsigned row_i = 0; row_i < row_count; ++row_i)
     {
-        const unsigned degree = is_raptorq_ldpc_structure(structure) ?
-            choose_structure_degree(kStructures[0], N, row_count, rng) :
-            choose_structure_degree(structure, N, row_count, rng);
-        const std::vector<uint16_t> row =
-            structure.Kind == kStructureBalancedUniform ?
-            balanced_row_columns(structure, N, degree, column_loads,
-                total_refs, rng) :
-            random_row_columns(N, degree, rng);
+        std::vector<uint16_t> row;
+        if (structure.Kind == kStructureBinaryP50)
+        {
+            row = binary_p50_row_columns(N, rng);
+        }
+        else
+        {
+            const unsigned degree = is_raptorq_ldpc_structure(structure) ?
+                choose_structure_degree(kStructures[0], N, row_count, rng) :
+                choose_structure_degree(structure, N, row_count, rng);
+            row = structure.Kind == kStructureBalancedUniform ?
+                balanced_row_columns(structure, N, degree, column_loads,
+                    total_refs, rng) :
+                random_row_columns(N, degree, rng);
+        }
         for (uint16_t column_i : row) {
             ++column_loads[column_i];
         }
@@ -5083,9 +5108,10 @@ static bool run_new_structure_variant_tests(std::string* why)
     const MatrixStructure* overhead = find_structure("ohdep_lt_adapt128");
     const MatrixStructure* ldpc = find_structure("raptorq_ldpc_struct");
     const MatrixStructure* ldpc_random = find_structure("raptorq_ldpc_rand");
+    const MatrixStructure* binary = find_structure("binary_p50");
     if (!robust || !alpha || !cap256 || !cap512 || !cap1024 || !fold ||
         !fold512 || !fold1024 || !extra34 || !overhead || !ldpc ||
-        !ldpc_random) {
+        !ldpc_random || !binary) {
         return self_fail(why, "new structure variant lookup failed");
     }
 
@@ -5094,7 +5120,7 @@ static bool run_new_structure_variant_tests(std::string* why)
     const uint64_t seed = UINT64_C(0x6e65777661726961);
     const MatrixStructure* structures[] = {
         robust, alpha, cap256, cap512, cap1024, fold, fold512, fold1024,
-        extra34, overhead, ldpc, ldpc_random
+        extra34, overhead, ldpc, ldpc_random, binary
     };
     for (const MatrixStructure* structure : structures)
     {
@@ -5159,6 +5185,18 @@ static bool run_new_structure_variant_tests(std::string* why)
         *overhead, 1, N, N + 16, clamp_degree(overhead->MaxDegree, N));
     if (!(oh_high > oh_zero)) {
         return self_fail(why, "overhead-dependent PDF did not change degree-1 mass");
+    }
+
+    const std::vector<std::vector<uint16_t> > binary_rows =
+        generate_random_structure_rows(*binary, 128, 256, seed);
+    unsigned binary_refs = 0;
+    for (const std::vector<uint16_t>& row : binary_rows) {
+        binary_refs += (unsigned)row.size();
+    }
+    const double binary_density =
+        (double)binary_refs / (double)(128u * 256u);
+    if (binary_density < 0.40 || binary_density > 0.60) {
+        return self_fail(why, "binary_p50 density is outside smoke-test bounds");
     }
 
     const unsigned S = raptorq_ldpc_symbol_count(N);
