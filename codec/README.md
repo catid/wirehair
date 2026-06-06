@@ -74,6 +74,7 @@ Benchmark smoke checks:
 ```bash
 cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
+./build/codec/wirehair_v2_bench compare --nlo 3200 --nhi 3200 --trials 20 --bb-list 1280 --v2-profile tuned --peel-candidates 8 --peel-trials 2
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench densecheck --N 7533 --bb 1280 --candidates 4 --trials 1
 ./build/codec/wirehair_v2_bench densetune --N 320,1000 --bb-list 1280 --candidates 4 --trials 2
