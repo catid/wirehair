@@ -12,6 +12,7 @@ endif()
 
 option(MARCH_NATIVE "Use -march=native option" ON)
 option(BUILD_TESTS "build testsuite" ON)
+option(BUILD_CODEC_V2 "build isolated v2 codec scaffold" ON)
 set(WH_LTO "OFF" CACHE STRING "Link-time optimization mode: OFF, ON, AUTO, or THIN")
 set_property(CACHE WH_LTO PROPERTY STRINGS OFF ON AUTO THIN)
 set(WH_PGO_MODE "OFF" CACHE STRING "Profile-guided optimization mode: OFF, GENERATE, or USE")
@@ -138,6 +139,10 @@ if (BUILD_TESTS)
     target_link_libraries(gen_dcounts wirehair)
 
     add_executable(gen_tables ${GEN_TABLES})
+endif()
+
+if (BUILD_CODEC_V2)
+    add_subdirectory(codec)
 endif()
 
 include(GNUInstallDirs)
