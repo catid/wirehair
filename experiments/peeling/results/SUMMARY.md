@@ -264,6 +264,159 @@ Ablation readout:
 - Dense `binary_p50` remains only a smoke baseline. Peeling has to inactivate
   nearly the whole matrix before rows become peelable.
 
+## N=3200 Recipe Ablation Sweep
+
+Follow-up protocol for the medium-N recipe search:
+
+- Binary: current `experiments/peeling/peel_sweep`.
+- Normal sparse structures: 76 structures, adding N=3200 cap sweeps,
+  cap-fold sweeps, fold-scale controls, min-degree controls, tail-alpha
+  controls, degree-2/3/4 explicit mass controls, and `wirehair_rand`.
+- Methods: all 115 peeling/inactivation schedules for the normal sparse set.
+- Size: fixed `N=3200`, `N-jitter=0`.
+- Fixed row overheads: 0, 1, 2, 4, and 8 packets.
+- Trials: 4 seed families x 100 trials, reported below as combined 400-trial
+  empirical distributions for each exact `structure + method + overhead` row.
+- Matrix seeds: paired across methods inside each structure. Different
+  structures still use structure-name-derived streams, so exact ties should be
+  treated cautiously unless a common-random-number structure comparison is
+  added.
+- Production deterministic Wirehair rows remain excluded. `wirehair_rand` is
+  the Wirehair row-weight distribution with fully random column choices.
+- Dense and explicit-high-row controls were run as limited-method smoke tests,
+  not mixed into the normal sparse rankings.
+
+Validation:
+
+- `bash experiments/peeling/build.sh`
+- `./experiments/peeling/peel_sweep --self-test`
+- CSV integrity checks over all completed shards: normal `174800/174800`
+  rows, high-row smoke `3520/3520` rows, binary smoke `140/140` rows, fixed
+  `N=3200`, paired-random source, expected overheads, PDFs present, and no
+  production Wirehair structure.
+- A bug-fix pass found that explicit-high-row structures were using default
+  `1/d` weights for their ordinary base rows instead of the intended LT
+  weights. That was fixed and covered by self-tests. The normal sparse sweep
+  did not include these high-row structures.
+
+Top exact `structure + method` combinations by fixed row overhead:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | lt_m2_c1920 | rqcc_dup | 35.023 | 39.44 | 34 | 47 | 57014.6 |
+| 0 | 2 | lt_m2_c1920 | raptorq_d2cc | 35.030 | 39.39 | 34 | 47 | 26023.8 |
+| 0 | 3 | lt_m2_c1920 | rqd2_default | 35.030 | 39.39 | 34 | 47 | 26234.0 |
+| 0 | 4 | lt_m2_c1920 | ks_boundary_min | 35.030 | 39.39 | 34 | 47 | 56435.7 |
+| 0 | 5 | lt_m2_c1920 | ks_lowref | 35.030 | 39.39 | 34 | 47 | 56813.2 |
+| 1 | 1 | lt_m2_c3200 | rqd2_default | 34.752 | 37.07 | 34 | 45 | 40931.3 |
+| 1 | 2 | lt_m2_c3200 | raptorq_d2cc | 34.752 | 37.07 | 34 | 45 | 40936.3 |
+| 1 | 3 | lt_m2_c3200 | rqd2_minfill | 34.752 | 37.07 | 34 | 45 | 84698.8 |
+| 1 | 4 | lt_m2_c3200 | ks_boundary_max | 34.752 | 37.07 | 34 | 45 | 85813.8 |
+| 1 | 5 | lt_m2_c3200 | ks_lowref | 34.752 | 37.07 | 34 | 45 | 86184.1 |
+| 2 | 1 | lt_m2_c1024_fold25 | rqd2_default | 34.380 | 38.82 | 34 | 45 | 15823.7 |
+| 2 | 2 | lt_m2_c1024_fold25 | raptorq_d2cc | 34.380 | 38.82 | 34 | 45 | 15899.9 |
+| 2 | 3 | lt_m2_c1024_fold25 | rqd2_minfill | 34.380 | 38.82 | 34 | 45 | 33698.1 |
+| 2 | 4 | lt_m2_c1024_fold25 | ks_random | 34.380 | 38.82 | 34 | 45 | 33754.5 |
+| 2 | 5 | lt_m2_c1024_fold25 | ks_boundary_min | 34.380 | 38.82 | 34 | 45 | 34468.3 |
+| 4 | 1 | lt_m2_c1024 | rqd2_default | 33.240 | 38.93 | 32 | 44 | 15573.1 |
+| 4 | 2 | lt_m2_c1024 | raptorq_d2cc | 33.240 | 38.93 | 32 | 44 | 15739.9 |
+| 4 | 3 | lt_m2_c1024 | rqd2_minfill | 33.240 | 38.93 | 32 | 44 | 32085.5 |
+| 4 | 4 | lt_m2_c1024 | rqcc_dup | 33.240 | 38.93 | 32 | 44 | 33139.9 |
+| 4 | 5 | lt_m2_c1024 | ks_boundary_min | 33.240 | 38.93 | 32 | 44 | 33199.3 |
+| 8 | 1 | lt_m2_c1280 | rqd2_default | 31.165 | 38.93 | 30 | 43 | 18528.8 |
+| 8 | 2 | lt_m2_c1280 | raptorq_d2cc | 31.165 | 38.93 | 30 | 43 | 18694.7 |
+| 8 | 3 | lt_m2_c1280 | rqd2_minfill | 31.165 | 38.93 | 30 | 43 | 39229.9 |
+| 8 | 4 | lt_m2_c1280 | ks_random | 31.165 | 38.93 | 30 | 43 | 39421.3 |
+| 8 | 5 | lt_m2_c1280 | ks_lowref | 31.165 | 38.93 | 30 | 43 | 39517.4 |
+
+Top distinct structures by their best exact method:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | lt_m2_c1920 | rqcc_dup | 35.023 | 39.44 | 34 | 47 | 57014.6 |
+| 0 | 2 | lt_m1_c3200 | raptorq_d2cc | 35.365 | 40.57 | 35 | 47 | 41306.2 |
+| 0 | 3 | lt_m2_c3200 | raptorq_d2cc | 35.468 | 37.35 | 35 | 47 | 40354.7 |
+| 0 | 4 | lt_m2_c512_fold | rqd2_default | 35.485 | 41.92 | 34 | 48 | 10675.4 |
+| 0 | 5 | lt_m2_c1024 | raptorq_d2cc | 35.528 | 38.65 | 35 | 46 | 15868.5 |
+| 1 | 1 | lt_m2_c3200 | rqd2_default | 34.752 | 37.07 | 34 | 45 | 40931.3 |
+| 1 | 2 | lt_m2_c1920_fold | rqd2_default | 34.825 | 45.06 | 34 | 48 | 26662.2 |
+| 1 | 3 | lt_m2_c1920 | raptorq_d2cc | 34.858 | 33.63 | 35 | 45 | 25930.2 |
+| 1 | 4 | lt_m2_c960 | rqcc_lowref | 34.917 | 42.28 | 34 | 48 | 15218.9 |
+| 1 | 5 | lt_m2_c1024_fold0 | raptorq_d2cc | 34.990 | 33.82 | 34 | 46 | 15643.3 |
+| 2 | 1 | lt_m2_c1024_fold25 | rqd2_default | 34.380 | 38.82 | 34 | 45 | 15823.7 |
+| 2 | 2 | lt_m2_c1920 | rqcc_dup | 34.523 | 43.17 | 34 | 46 | 55372.6 |
+| 2 | 3 | lt_m2_c1024_fold0 | raptorq_d2cc | 34.550 | 38.89 | 34 | 46 | 15443.4 |
+| 2 | 4 | lt_m2_c640_fold | rqcc_dup | 34.583 | 42.71 | 34 | 47 | 32275.9 |
+| 2 | 5 | lt_m2_c1024_fold50 | rqd2_default | 34.587 | 36.71 | 34 | 46 | 16069.5 |
+| 4 | 1 | lt_m2_c1024 | rqd2_default | 33.240 | 38.93 | 32 | 44 | 15573.1 |
+| 4 | 2 | lt_m2_c3200 | rqcc_dup | 33.375 | 44.30 | 32 | 46 | 76660.1 |
+| 4 | 3 | lt_m2_c3200_fold | rqcc_dup | 33.405 | 39.59 | 33 | 45 | 80733.4 |
+| 4 | 4 | lt_m2_c1024_fold25 | rqcc_dup | 33.455 | 45.53 | 33 | 46 | 34273.1 |
+| 4 | 5 | lt_m2_c960_fold | raptorq_d2cc | 33.490 | 44.56 | 33 | 45 | 15746.1 |
+| 8 | 1 | lt_m2_c1280 | rqd2_default | 31.165 | 38.93 | 30 | 43 | 18528.8 |
+| 8 | 2 | lt_m2_c512_fold | raptorq_d2cc | 31.250 | 40.96 | 30 | 44 | 10576.1 |
+| 8 | 3 | lt_m2_c1280_fold | raptorq_d2cc | 31.317 | 42.74 | 31 | 44 | 19467.0 |
+| 8 | 4 | lt_m2_c1920_fold | rqd2_default | 31.440 | 42.72 | 30 | 43 | 26844.9 |
+| 8 | 5 | lt_m2_c1920 | rqd2_default | 31.468 | 43.08 | 31 | 44 | 25143.4 |
+
+Method costs for the top methods:
+
+- `rqd2_default`: `O(rows*degree + cols)`, largest degree-2 component/default
+  tie.
+- `raptorq_d2cc`: `O(rows*degree + cols)`, largest degree-2 component.
+- `rqcc_lowref`: `O(rows*degree + cols)`, largest degree-2 component plus low
+  refs.
+- `rqcc_dup`: `O(rows*degree + cols + cc*rowrefs)`, largest degree-2
+  component plus duplicate partners.
+- `rqd2_minfill`: `O(rows*degree + cols + rowrefs)`, largest degree-2
+  component plus min-fill tie.
+- `ks_boundary_min` and `ks_boundary_max`:
+  `O(rows*degree + cols + cc*rowrefs)`, largest degree-2 component plus
+  component-boundary tie.
+
+Ablation readout:
+
+- At N=3200, the strongest normal sparse recipes are high-cap min-2 LT
+  variants. The strict zero-overhead winner is `lt_m2_c1920 + rqcc_dup` at
+  35.023 residual columns, but `raptorq_d2cc`/`rqd2_default` are within 0.007
+  residual columns and are about 2x faster in this harness.
+- The preferred cap shifts with overhead: `c1920` at +0, `c3200` at +1,
+  `c1024_fold25` at +2, `c1024` at +4, and `c1280` at +8.
+- `wirehair_rand` is not competitive in this N=3200 cohort: at zero overhead
+  its best exact method is `raptorq_d2cc` at 41.395 mean residual columns,
+  versus 35.023 for the best high-cap LT recipe.
+- The explicit degree-2/3/4 mass and tail-alpha controls do not improve the
+  high-cap LT frontier at N=3200. Tail-alpha variants are especially poor:
+  `sol_m2_alpha075_c3200` leaves about 530 residual columns at zero overhead.
+
+Limited high-row smoke top rows:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | lt_m2_c320_hi2_h160 | rqd2_default | 35.843 | 37.09 | 35 | 47 | 8137.9 |
+| 0 | 2 | lt_m2_c320_hi2_h160 | raptorq_d2cc | 35.843 | 37.09 | 35 | 47 | 8359.7 |
+| 0 | 3 | lt_m2_c320_hi2_h160 | hyb_rqbeam | 35.928 | 37.24 | 35 | 47 | 24816.0 |
+| 1 | 1 | lt_m2_c3200_hi1_h1600 | rqd2_default | 34.972 | 41.06 | 34 | 47 | 40503.7 |
+| 2 | 1 | lt_m2_c320_hi2_h160 | raptorq_d2cc | 34.885 | 44.40 | 34 | 47 | 8306.2 |
+| 4 | 1 | lt_m2_c3200_hi1_h3200 | raptorq_d2cc | 33.398 | 41.94 | 32 | 45 | 44375.3 |
+| 8 | 1 | lt_m2_c3200_hi2_h1600 | rqd2_default | 31.663 | 37.90 | 31 | 43 | 42482.4 |
+
+Dense `binary_p50` smoke top rows:
+
+| OH | rank | structure | method | mean cols | var | median | p95 | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | binary_p50 | rqd2_default | 3171.613 | 0.61 | 3172 | 3173 | 1442434.0 |
+| 0 | 2 | binary_p50 | raptorq_d2cc | 3171.613 | 0.61 | 3172 | 3173 | 1525862.6 |
+| 0 | 3 | binary_p50 | allmin_default | 3171.620 | 0.55 | 3172 | 3173 | 1368721.9 |
+| 1 | 1 | binary_p50 | allmin_default | 3171.622 | 0.60 | 3172 | 3173 | 1406812.2 |
+| 2 | 1 | binary_p50 | allmin_default | 3171.610 | 0.53 | 3172 | 3173 | 1386085.7 |
+| 4 | 1 | binary_p50 | raptorq_d2cc | 3171.645 | 0.59 | 3172 | 3173 | 1247087.7 |
+| 8 | 1 | binary_p50 | allmin_default | 3171.605 | 0.60 | 3172 | 3173 | 1381012.8 |
+
+The dense baseline behaves as a smoke test should: residuals stay near `N`
+because almost every column must be inactivated before dense random rows become
+peelable. It should not be used as a normal sparse-code candidate.
+
 ## Dense Binary Smoke Baseline
 
 The harness includes `binary_p50`, a fully random dense binary matrix where
