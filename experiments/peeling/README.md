@@ -22,6 +22,15 @@ Self-test the sweep model and method invariants:
 ./experiments/peeling/peel_sweep --self-test
 ```
 
+Calibrate block-XOR solve cost for 1280-byte and 1 MiB pieces:
+
+```bash
+./experiments/peeling/xor_bench --target-gib 16 --repeats 3
+```
+
+The benchmark reports median microseconds per `dst_block ^= src_block`, which
+can convert `peel_sweep` timing columns into block-XOR-equivalent cost.
+
 Example sweep:
 
 ```bash

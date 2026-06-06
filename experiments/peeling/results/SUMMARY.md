@@ -638,3 +638,94 @@ Readout:
 - For ties in residual count, `rqd2_default`/`raptorq_d2cc` remain the
   practical CPU choices. `ks_boundary_max` often trims solve/combined XORs
   slightly, but costs much more wall time.
+
+## Boundary Approximation And XOR Calibration Sweep
+
+Follow-up protocol: same reduced frontier style, but focused on
+`wirehair_rand`, promising min-2 LT cap variants, and the boundary-method
+families.  Each row is 100 paired trials with `N-jitter=10` and fixed packet
+overhead `0,1,2`.  Aggregate CSV:
+`experiments/peeling/results/boundary_xor_focus_N1000_6400_32000_j10.csv`.
+
+XOR calibration used a solve-like random block-XOR benchmark:
+`./experiments/peeling/xor_bench --target-gib 32 --repeats 5`.
+
+| block bytes | median us per block XOR | median GiB/s |
+| ---: | ---: | ---: |
+| 1280 | 0.020892014 | 114.119 |
+| 1048576 | 52.306576874 | 37.340 |
+
+The derived `greedy_xor_eq_*` columns convert greedy peel scheduler time into
+equivalent block XORs.  `matrix_solve_plus_greedy_xors_*` adds row generation
+XORs, solve XOR estimates, and greedy scheduler time in the same units.
+
+Boundary approximation check versus full `ks_boundary_max` over 81 paired
+structure/N/OH comparisons:
+
+| method | mean residual delta | mean solve XOR delta | mean greedy-time ratio | same mean residual rows |
+| --- | ---: | ---: | ---: | ---: |
+| ks_bmax_top16 | 0.0000 | 11.24 | 0.1817 | 81 / 81 |
+| ks_bmax_top64 | 0.0000 | 1.11 | 0.1947 | 81 / 81 |
+| hyb_bmax5 | 0.0000 | 89.27 | 0.1523 | 81 / 81 |
+| hyb_bmax10 | 0.0000 | 81.54 | 0.1665 | 81 / 81 |
+| rqd2_default | 0.0000 | 97.09 | 0.1431 | 81 / 81 |
+| rqcc_lowref | 0.0101 | 490.44 | 0.1444 | 51 / 81 |
+| raptorq_d2cc | 0.0000 | 489.86 | 0.1423 | 81 / 81 |
+
+The first top-K implementation accidentally built the whole metric cache and
+was not faster.  After changing limited boundary scoring to local
+per-candidate metrics, top16/top64 preserved residual quality and ran in about
+18-20 percent of full boundary-max greedy time.
+
+Pure residual winners:
+
+| N | OH | structure | method | mean cols | solve XORs | greedy us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 1000 | 0 | lt_m2_c640 | ks_bmax_top64 | 20.45 | 6388 | 622 |
+| 1000 | 1 | lt_m2_c256_fold | ks_boundary_max | 19.79 | 5978 | 2796 |
+| 1000 | 2 | lt_m2_c1024_fold0 | ks_boundary_max | 19.59 | 6748 | 3553 |
+| 6400 | 0 | lt_m2_c1920 | ks_boundary_max | 48.80 | 47629 | 54274 |
+| 6400 | 1 | lt_m2_c3200 | ks_boundary_max | 48.07 | 50465 | 68573 |
+| 6400 | 2 | lt_m2_c640 | ks_boundary_max | 47.47 | 40774 | 25240 |
+| 32000 | 0 | lt_m2_c3200 | ks_boundary_max | 103.26 | 254134 | 604143 |
+| 32000 | 1 | lt_m2_c3200 | ks_boundary_max | 103.10 | 253904 | 612870 |
+| 32000 | 2 | lt_m2_c2560_fold | ks_boundary_max | 103.79 | 275441 | 922097 |
+
+Best total cost at 1280-byte pieces:
+
+| N | OH | structure | method | mean cols | matrix+solve+greedy eq XORs | greedy eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 1000 | 0 | wirehair_rand | raptorq_d2cc | 21.68 | 18783 | 9970 |
+| 1000 | 1 | wirehair_rand | rqd2_default | 21.51 | 21096 | 12230 |
+| 1000 | 2 | wirehair_rand | raptorq_d2cc | 21.08 | 18332 | 9391 |
+| 6400 | 0 | lt_m2_c320 | rqcc_lowref | 54.14 | 212088 | 140614 |
+| 6400 | 1 | lt_m2_c320 | rqd2_default | 55.12 | 199952 | 128173 |
+| 6400 | 2 | lt_m2_c320 | raptorq_d2cc | 51.78 | 197445 | 126144 |
+| 32000 | 0 | lt_m2_c320 | rqd2_default | 138.28 | 1599144 | 1235999 |
+| 32000 | 1 | lt_m2_c320 | raptorq_d2cc | 142.43 | 1566252 | 1202670 |
+| 32000 | 2 | lt_m2_c320 | rqd2_default | 142.30 | 1623084 | 1258744 |
+
+Best total cost at 1 MiB pieces:
+
+| N | OH | structure | method | mean cols | matrix+solve+greedy eq XORs | greedy eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 1000 | 0 | wirehair_rand | ks_bmax_top16 | 21.68 | 8732 | 5.3 |
+| 1000 | 1 | wirehair_rand | ks_bmax_top16 | 21.51 | 8859 | 5.8 |
+| 1000 | 2 | wirehair_rand | ks_bmax_top16 | 21.08 | 8860 | 5.5 |
+| 6400 | 0 | wirehair_rand | ks_bmax_top16 | 62.91 | 64125 | 91.5 |
+| 6400 | 1 | wirehair_rand | ks_bmax_top16 | 61.31 | 63799 | 94.4 |
+| 6400 | 2 | wirehair_rand | ks_bmax_top16 | 62.08 | 64296 | 90.8 |
+| 32000 | 0 | wirehair_rand | ks_bmax_top64 | 204.43 | 345128 | 883.8 |
+| 32000 | 1 | wirehair_rand | hyb_bmax5 | 205.47 | 345369 | 780.0 |
+| 32000 | 2 | wirehair_rand | ks_bmax_top64 | 206.89 | 346911 | 992.6 |
+
+Readout:
+
+- For 1280-byte pieces, scheduler CPU dominates quickly; cheap schedules on
+  lower-XOR structures win the total-cost metric even with worse residuals.
+- For 1 MiB pieces, scheduler CPU is nearly free in block-XOR units; the best
+  rows favor lower row-generation and solve XOR counts, and top-K boundary
+  scoring becomes attractive.
+- Pure residual minimization still favors higher-cap min-2 LT structures, but
+  those can be a poor total-cost choice once row-generation XORs and scheduler
+  CPU are included.

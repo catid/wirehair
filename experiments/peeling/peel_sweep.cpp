@@ -467,6 +467,11 @@ static const Method kMethods[] = {
     {112, "lazy_liveref",  "O(cols + touched_rows*degree) incremental live-ref cache", kPoolLegacy, kScoreLegacy, 0},
     {113, "lazy_fill",     "O(cols + touched_rows*degree) incremental fill cache", kPoolLegacy, kScoreLegacy, 0},
     {114, "lazy_d2",       "O(cols + touched_rows*degree) incremental degree-2 cache", kPoolLegacy, kScoreLegacy, 0},
+
+    {115, "ks_bmax_top16", "O(rows*degree + cols + min(16,cc)*rowrefs) degree-2 CC/default top16 then boundary-max", kPoolLegacy, kScoreLegacy, 0},
+    {116, "ks_bmax_top64", "O(rows*degree + cols + min(64,cc)*rowrefs) degree-2 CC/default top64 then boundary-max", kPoolLegacy, kScoreLegacy, 0},
+    {117, "hyb_bmax5",     "O(rqd2_default then boundary-max below 5pct todo)", kPoolLegacy, kScoreLegacy, 0},
+    {118, "hyb_bmax10",    "O(rqd2_default then boundary-max below 10pct todo)", kPoolLegacy, kScoreLegacy, 0},
 };
 
 static const Method* find_method(int id)
@@ -2991,7 +2996,8 @@ private:
     uint16_t select_best_scored_candidate(
         const std::vector<uint16_t>& candidates,
         unsigned score_mode,
-        uint32_t seed) const
+        uint32_t seed,
+        bool use_cache = true) const
     {
         uint16_t best = kListTerm;
         Key best_key;
@@ -3021,7 +3027,8 @@ private:
                 break;
             }
             const Metrics m = flags != 0 ?
-                cached_metrics(column_i, flags) : Metrics();
+                (use_cache ? cached_metrics(column_i, flags) :
+                    collect_metrics(column_i)) : Metrics();
             const unsigned boundary =
                 m.LiveRefs > m.ExactD2 ? m.LiveRefs - m.ExactD2 : 0;
             Key key;
@@ -3064,6 +3071,79 @@ private:
             }
         }
         return best;
+    }
+
+    std::vector<uint16_t> top_default_subset(
+        const std::vector<uint16_t>& candidates,
+        unsigned limit,
+        uint32_t seed) const
+    {
+        if (limit == 0) {
+            return std::vector<uint16_t>();
+        }
+        if (candidates.size() <= limit) {
+            return candidates;
+        }
+
+        struct CandidateEntry
+        {
+            Key Score;
+            uint16_t Column;
+        };
+        std::vector<CandidateEntry> heap;
+        heap.reserve(limit);
+        const auto better_entry = [](const CandidateEntry& a,
+            const CandidateEntry& b) {
+            return better_key(a.Score, b.Score);
+        };
+
+        for (uint16_t column_i : candidates)
+        {
+            if (Columns[column_i].Mark != kMarkTodo) {
+                continue;
+            }
+            const CandidateEntry entry = {
+                default_key(column_i, seed),
+                column_i
+            };
+            if (heap.size() < limit)
+            {
+                heap.push_back(entry);
+                std::push_heap(heap.begin(), heap.end(), better_entry);
+            }
+            else if (better_key(entry.Score, heap.front().Score))
+            {
+                std::pop_heap(heap.begin(), heap.end(), better_entry);
+                heap.back() = entry;
+                std::push_heap(heap.begin(), heap.end(), better_entry);
+            }
+        }
+
+        std::sort(heap.begin(), heap.end(), better_entry);
+        std::vector<uint16_t> subset;
+        subset.reserve(heap.size());
+        for (const CandidateEntry& entry : heap) {
+            subset.push_back(entry.Column);
+        }
+        return subset;
+    }
+
+    uint16_t select_ks_boundary_top(
+        unsigned limit,
+        uint32_t seed) const
+    {
+        std::vector<uint16_t> candidates =
+            collect_sized_d2_component_candidates(true);
+        if (candidates.empty()) {
+            return select_min_row_degree(seed, true, false);
+        }
+        candidates = top_default_subset(candidates, limit, seed);
+        if (candidates.empty()) {
+            return select_min_row_degree(seed, true, false);
+        }
+        const uint16_t selected =
+            select_best_scored_candidate(candidates, 2, seed, false);
+        return selected != kListTerm ? selected : select_by_full_scan(0, seed);
     }
 
     uint16_t select_ks_variant(unsigned mode, uint32_t seed) const
@@ -3311,11 +3391,16 @@ private:
     uint16_t select_hybrid(unsigned mode, uint32_t seed) const
     {
         const unsigned todo = count_todo_columns();
-        const unsigned pct = mode == 1 || mode == 3 || mode == 5 ? 10u : 5u;
+        const unsigned pct = mode == 1 || mode == 3 || mode == 5 ||
+            mode == 8 ? 10u : 5u;
         const unsigned threshold = std::max(1u, (N * pct + 99u) / 100u);
         if (mode == 6) {
             return todo <= threshold ? select_beam(2, 4, seed) :
                 select_raptorq_d2_component(seed, 0);
+        }
+        if (mode == 7 || mode == 8) {
+            return todo <= threshold ? select_ks_variant(3, seed) :
+                select_raptorq_d2_component(seed, 1);
         }
         if (todo > threshold) {
             return select_by_full_scan(0, seed);
@@ -3465,6 +3550,14 @@ private:
             return select_lazy_cached(1, seed);
         case 114:
             return select_lazy_cached(2, seed);
+        case 115:
+            return select_ks_boundary_top(16, seed);
+        case 116:
+            return select_ks_boundary_top(64, seed);
+        case 117:
+            return select_hybrid(7, seed);
+        case 118:
+            return select_hybrid(8, seed);
         default:
             return select_by_full_scan(method_id, seed);
         }
