@@ -205,10 +205,33 @@ struct Summary
     unsigned Max = 0;
 };
 
+struct RealSummary
+{
+    double Mean = 0.0;
+    double Sd = 0.0;
+    double Min = 0.0;
+    double P50 = 0.0;
+    double P95 = 0.0;
+    double P99 = 0.0;
+    double Max = 0.0;
+};
+
 static unsigned percentile(const std::vector<unsigned>& sorted, double p)
 {
     if (sorted.empty()) {
         return 0;
+    }
+    size_t index = (size_t)(p * (double)(sorted.size() - 1) + 0.5);
+    if (index >= sorted.size()) {
+        index = sorted.size() - 1;
+    }
+    return sorted[index];
+}
+
+static double percentile_real(const std::vector<double>& sorted, double p)
+{
+    if (sorted.empty()) {
+        return 0.0;
     }
     size_t index = (size_t)(p * (double)(sorted.size() - 1) + 0.5);
     if (index >= sorted.size()) {
@@ -242,6 +265,35 @@ static Summary summarize(std::vector<unsigned> values)
     s.P50 = percentile(values, 0.50);
     s.P95 = percentile(values, 0.95);
     s.P99 = percentile(values, 0.99);
+    s.Max = values.back();
+    return s;
+}
+
+static RealSummary summarize_real(std::vector<double> values)
+{
+    RealSummary s;
+    if (values.empty()) {
+        return s;
+    }
+
+    std::sort(values.begin(), values.end());
+    double sum = 0.0;
+    for (double v : values) {
+        sum += v;
+    }
+    s.Mean = sum / values.size();
+
+    double var = 0.0;
+    for (double v : values)
+    {
+        const double d = v - s.Mean;
+        var += d * d;
+    }
+    s.Sd = std::sqrt(var / values.size());
+    s.Min = values.front();
+    s.P50 = percentile_real(values, 0.50);
+    s.P95 = percentile_real(values, 0.95);
+    s.P99 = percentile_real(values, 0.99);
     s.Max = values.back();
     return s;
 }
@@ -821,6 +873,8 @@ struct TrialResult
 {
     unsigned ActualN = 0;
     unsigned MatrixRows = 0;
+    uint64_t MatrixRefs = 0;
+    uint64_t MatrixXors = 0;
     unsigned ResidualCols = 0;
     unsigned ResidualRows = 0;
     unsigned Components = 0;
@@ -829,9 +883,18 @@ struct TrialResult
     unsigned InitialTodo = 0;
     unsigned InitialD2Rows = 0;
     unsigned Choices = 0;
+    uint64_t SparseSolveXors = 0;
+    double DenseSolveXorsEst = 0.0;
+    double TotalSolveXorsEst = 0.0;
     unsigned BuildUsec = 0;
     unsigned GreedyUsec = 0;
     unsigned TotalUsec = 0;
+};
+
+struct MatrixWork
+{
+    uint64_t Refs = 0;
+    uint64_t Xors = 0;
 };
 
 struct TrialConfig
@@ -885,6 +948,7 @@ public:
         result.ResidualCols = DeferCount;
         result.ResidualRows = DeferredRows;
         result.Choices = ChoiceCount;
+        result.SparseSolveXors = SparseSolveXors;
         measure_components(result.Components, result.MaxComponent, result.SumSquares);
         return result;
     }
@@ -928,6 +992,7 @@ public:
         result.ResidualCols = DeferCount;
         result.ResidualRows = DeferredRows;
         result.Choices = ChoiceCount;
+        result.SparseSolveXors = SparseSolveXors;
         measure_components(result.Components, result.MaxComponent, result.SumSquares);
         if (out) {
             *out = result;
@@ -1033,6 +1098,9 @@ public:
                 unmarked[unmarked_count & 1u] = column_i;
                 ++unmarked_count;
             }
+            else if (Columns[column_i].Mark == kMarkPeel) {
+                ++SparseSolveXors;
+            }
         }
 
         row.Live = (uint16_t)unmarked_count;
@@ -1090,6 +1158,9 @@ public:
             {
                 unmarked[unmarked_count & 1u] = column_i;
                 ++unmarked_count;
+            }
+            else if (Columns[column_i].Mark == kMarkPeel) {
+                ++SparseSolveXors;
             }
         }
 
@@ -1358,6 +1429,7 @@ private:
     unsigned DeferCount = 0;
     unsigned DeferredRows = 0;
     unsigned ChoiceCount = 0;
+    uint64_t SparseSolveXors = 0;
     mutable std::vector<Metrics> MetricCache;
     mutable std::vector<std::vector<std::pair<uint16_t, unsigned> > > PartnerCounts;
     mutable std::vector<uint16_t> LiveDegreeCounts;
@@ -1649,6 +1721,8 @@ private:
         for (unsigned queue_i = 0; queue_i < queue.size(); ++queue_i)
         {
             const uint16_t column_i = queue[queue_i];
+            const bool column_is_peel =
+                Columns[column_i].Mark == kMarkPeel;
             const std::vector<uint16_t>& refs = Columns[column_i].Rows;
 
             for (uint16_t row_i : refs)
@@ -1656,6 +1730,10 @@ private:
                 Row& row = Rows[row_i];
                 if (row.Live == 0) {
                     continue;
+                }
+                if (column_is_peel &&
+                    !(row.Solved && row.PeelColumn == column_i)) {
+                    ++SparseSolveXors;
                 }
 
                 adjust_row_metric_contribution(row_i, -1, column_i);
@@ -4794,6 +4872,32 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
     return rows;
 }
 
+static MatrixWork measure_matrix_work(
+    const std::vector<std::vector<uint16_t> >& rows)
+{
+    MatrixWork work;
+    for (const std::vector<uint16_t>& row : rows)
+    {
+        work.Refs += (uint64_t)row.size();
+        if (!row.empty()) {
+            work.Xors += (uint64_t)(row.size() - 1u);
+        }
+    }
+    return work;
+}
+
+static double dense_solve_xors_estimate(
+    unsigned residual_cols,
+    unsigned residual_rows)
+{
+    if (residual_cols == 0 || residual_rows == 0) {
+        return 0.0;
+    }
+    const unsigned active_rows =
+        residual_rows > residual_cols ? residual_rows : residual_cols;
+    return (double)residual_cols * (double)active_rows;
+}
+
 static bool feed_row_vectors(
     PeelSim& sim,
     const std::vector<std::vector<uint16_t> >& rows,
@@ -5110,6 +5214,38 @@ static bool run_synthetic_structure_tests(std::string* why)
         rows.push_back(std::vector<uint16_t>{0, 5, 10});
         if (!run_structure_methods("cap4", 12, rows, 2, 4, 0, why)) {
             return false;
+        }
+    }
+    return true;
+}
+
+static bool run_matrix_work_tests(std::string* why)
+{
+    std::vector<std::vector<uint16_t> > rows;
+    rows.push_back(std::vector<uint16_t>{0, 1, 2});
+    rows.push_back(std::vector<uint16_t>{3});
+    rows.push_back(std::vector<uint16_t>{1, 4});
+
+    const MatrixWork work = measure_matrix_work(rows);
+    if (work.Refs != 6u || work.Xors != 3u) {
+        return self_fail(why, "matrix row XOR accounting is wrong");
+    }
+    if (dense_solve_xors_estimate(0, 5) != 0.0 ||
+        dense_solve_xors_estimate(4, 6) != 24.0 ||
+        dense_solve_xors_estimate(6, 4) != 36.0) {
+        return self_fail(why, "dense solve XOR estimate is wrong");
+    }
+
+    {
+        PeelSim sim(2);
+        std::string detail;
+        if (!sim.feed_columns(std::vector<uint16_t>{0}, &detail) ||
+            !sim.feed_columns(std::vector<uint16_t>{0, 1}, &detail)) {
+            return self_fail(why, "sparse solve XOR test feed failed: " + detail);
+        }
+        const TrialResult result = sim.run_greedy(0, UINT32_C(0x51f15eed));
+        if (result.SparseSolveXors != 1u) {
+            return self_fail(why, "sparse solve XOR accounting missed known row input");
         }
     }
     return true;
@@ -5583,6 +5719,9 @@ static bool run_self_tests(std::string* why)
     if (!run_synthetic_structure_tests(why)) {
         return false;
     }
+    if (!run_matrix_work_tests(why)) {
+        return false;
+    }
     if (!run_random_structure_generator_tests(why)) {
         return false;
     }
@@ -5623,6 +5762,7 @@ static TrialResult run_trial(
     std::string why;
     const std::vector<std::vector<uint16_t> > rows =
         generate_random_structure_rows(structure, N, row_count, matrix_seed);
+    const MatrixWork work = measure_matrix_work(rows);
     if (!feed_row_vectors(sim, rows, &why))
     {
         std::fprintf(stderr, "random structure generation failed: %s\n",
@@ -5634,6 +5774,12 @@ static TrialResult run_trial(
     TrialResult result = sim.run_greedy(method_id, action_seed);
     result.ActualN = N;
     result.MatrixRows = (unsigned)rows.size();
+    result.MatrixRefs = work.Refs;
+    result.MatrixXors = work.Xors;
+    result.DenseSolveXorsEst = dense_solve_xors_estimate(
+        result.ResidualCols, result.ResidualRows);
+    result.TotalSolveXorsEst =
+        (double)result.SparseSolveXors + result.DenseSolveXorsEst;
     result.BuildUsec = build_usec;
     result.TotalUsec = (unsigned)((now_sec() - start) * 1000000.0 + 0.5);
     return result;
@@ -5995,11 +6141,13 @@ int main(int argc, char** argv)
     std::printf("method_id,method,cost,structure,N,N_jitter,"
                 "actual_N_mu,actual_N_min,actual_N_max,"
                 "matrix_rows_mu,matrix_rows_min,matrix_rows_max,"
+                "matrix_refs_mu,row_refs_mu,row_xors_mu,matrix_xors_mu,"
                 "overhead,overhead_pct,source,trials,"
                 "cols_mu,cols_sd,c50,c95,c99,cmax,"
                 "rows_mu,rows_sd,r50,r95,r99,rmax,"
                 "comp_mu,maxcomp_mu,sumsq_mu,"
                 "init_todo_mu,init_d2_mu,choices_mu,"
+                "solve_sparse_xors_mu,solve_dense_xors_est_mu,solve_total_xors_est_mu,"
                 "build_us,greedy_us,total_us");
     if (print_pdf) {
         std::printf(",cols_pdf,rows_pdf");
@@ -6087,11 +6235,21 @@ int main(int argc, char** argv)
                     std::vector<unsigned> actual_ns, matrix_rows;
                     std::vector<unsigned> cols, rows, comps, maxcomps, sumsqs;
                     std::vector<unsigned> init_todo, init_d2, choices;
+                    std::vector<double> matrix_refs, row_refs, row_xors;
+                    std::vector<double> matrix_xors, sparse_solve_xors;
+                    std::vector<double> dense_solve_xors, total_solve_xors;
                     unsigned long long build_sum = 0;
                     unsigned long long greedy_sum = 0;
                     unsigned long long total_sum = 0;
                     actual_ns.reserve(results.size());
                     matrix_rows.reserve(results.size());
+                    matrix_refs.reserve(results.size());
+                    row_refs.reserve(results.size());
+                    row_xors.reserve(results.size());
+                    matrix_xors.reserve(results.size());
+                    sparse_solve_xors.reserve(results.size());
+                    dense_solve_xors.reserve(results.size());
+                    total_solve_xors.reserve(results.size());
                     cols.reserve(results.size());
                     rows.reserve(results.size());
                     comps.reserve(results.size());
@@ -6105,6 +6263,15 @@ int main(int argc, char** argv)
                     {
                         actual_ns.push_back(r.ActualN);
                         matrix_rows.push_back(r.MatrixRows);
+                        matrix_refs.push_back((double)r.MatrixRefs);
+                        row_refs.push_back(r.MatrixRows == 0 ?
+                            0.0 : (double)r.MatrixRefs / (double)r.MatrixRows);
+                        row_xors.push_back(r.MatrixRows == 0 ?
+                            0.0 : (double)r.MatrixXors / (double)r.MatrixRows);
+                        matrix_xors.push_back((double)r.MatrixXors);
+                        sparse_solve_xors.push_back((double)r.SparseSolveXors);
+                        dense_solve_xors.push_back(r.DenseSolveXorsEst);
+                        total_solve_xors.push_back(r.TotalSolveXorsEst);
                         cols.push_back(r.ResidualCols);
                         rows.push_back(r.ResidualRows);
                         comps.push_back(r.Components);
@@ -6120,6 +6287,10 @@ int main(int argc, char** argv)
 
                     const Summary actual_n_s = summarize(actual_ns);
                     const Summary matrix_rows_s = summarize(matrix_rows);
+                    const RealSummary matrix_refs_s = summarize_real(matrix_refs);
+                    const RealSummary row_refs_s = summarize_real(row_refs);
+                    const RealSummary row_xors_s = summarize_real(row_xors);
+                    const RealSummary matrix_xors_s = summarize_real(matrix_xors);
                     const Summary col_s = summarize(cols);
                     const Summary row_s = summarize(rows);
                     const Summary comp_s = summarize(comps);
@@ -6128,15 +6299,23 @@ int main(int argc, char** argv)
                     const Summary init_todo_s = summarize(init_todo);
                     const Summary init_d2_s = summarize(init_d2);
                     const Summary choice_s = summarize(choices);
+                    const RealSummary sparse_solve_xors_s =
+                        summarize_real(sparse_solve_xors);
+                    const RealSummary dense_solve_xors_s =
+                        summarize_real(dense_solve_xors);
+                    const RealSummary total_solve_xors_s =
+                        summarize_real(total_solve_xors);
 
                     const char* source_label = matrix_seed_mode == "paired" ?
                         "random-paired" : "random-independent";
                     std::printf("%d,%s,\"%s\",%s,%u,%d,"
                                 "%.2f,%u,%u,"
                                 "%.2f,%u,%u,"
+                                "%.2f,%.4f,%.4f,%.2f,"
                                 "%d,%.6g,%s,%d,"
                                 "%.2f,%.2f,%u,%u,%u,%u,"
                                 "%.2f,%.2f,%u,%u,%u,%u,"
+                                "%.2f,%.2f,%.2f,"
                                 "%.2f,%.2f,%.2f,"
                                 "%.2f,%.2f,%.2f,"
                                 "%.1f,%.1f,%.1f",
@@ -6144,11 +6323,16 @@ int main(int argc, char** argv)
                         N, n_jitter,
                         actual_n_s.Mean, actual_n_s.Min, actual_n_s.Max,
                         matrix_rows_s.Mean, matrix_rows_s.Min, matrix_rows_s.Max,
+                        matrix_refs_s.Mean, row_refs_s.Mean,
+                        row_xors_s.Mean, matrix_xors_s.Mean,
                         overhead, overhead_pct, source_label, trials,
                         col_s.Mean, col_s.Sd, col_s.P50, col_s.P95, col_s.P99, col_s.Max,
                         row_s.Mean, row_s.Sd, row_s.P50, row_s.P95, row_s.P99, row_s.Max,
                         comp_s.Mean, maxcomp_s.Mean, sumsq_s.Mean,
                         init_todo_s.Mean, init_d2_s.Mean, choice_s.Mean,
+                        sparse_solve_xors_s.Mean,
+                        dense_solve_xors_s.Mean,
+                        total_solve_xors_s.Mean,
                         (double)build_sum / trials,
                         (double)greedy_sum / trials,
                         (double)total_sum / trials);

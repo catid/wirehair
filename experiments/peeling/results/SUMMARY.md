@@ -417,6 +417,80 @@ The dense baseline behaves as a smoke test should: residuals stay near `N`
 because almost every column must be inactivated before dense random rows become
 peelable. It should not be used as a normal sparse-code candidate.
 
+## N=3200 XOR-Cost Follow-Up
+
+Residual count alone is not enough because larger caps buy lower dense
+residuals with more sparse references per generated row. A follow-up run added
+the following structural XOR metrics to `peel_sweep`:
+
+- `row_xors_mu`: average `degree - 1` block XORs needed to generate one row.
+- `matrix_xors_mu`: total row-generation block XORs for the received matrix.
+- `solve_sparse_xors_mu`: block XORs from propagating peeled symbols into live
+  rows. This includes rows that arrive after a referenced column has already
+  peeled.
+- `solve_dense_xors_est_mu`: dense residual block-XOR estimate,
+  `residual_cols * max(residual_cols, residual_rows)`.
+- `solve_total_xors_est_mu`: sparse solve XORs plus dense residual estimate.
+- `combined_xors`: `matrix_xors_mu + solve_total_xors_est_mu`. This mixes
+  encoder-side row generation and decoder-side solve work, so treat it as an
+  end-to-end block-XOR proxy, not as a single-machine benchmark.
+
+Validation:
+
+- `bash experiments/peeling/build.sh`
+- `./experiments/peeling/peel_sweep --self-test`
+- Added regression coverage for sparse solve XOR accounting when a row consumes
+  a column that peeled before the row was added.
+- Frontier rerun: 27 structures x 13 methods x overheads 0/1/2/4/8 x 4 seed
+  families x 100 trials. Residual means matched the original full sweep to
+  floating-point roundoff.
+
+Best residual rows with XOR metrics:
+
+| OH | structure | method | mean cols | row XOR/packet | encode XORs | solve total | combined |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | lt_m2_c1920 | rqcc_dup | 35.023 | 7.174 | 22956 | 23872 | 46828 |
+| 1 | lt_m2_c3200 | ks_boundary_max | 34.752 | 7.597 | 24317 | 25170 | 49487 |
+| 2 | lt_m2_c1024_fold25 | ks_boundary_max | 34.380 | 6.649 | 21290 | 22200 | 43490 |
+| 4 | lt_m2_c1024 | ks_boundary_max | 33.240 | 6.511 | 20861 | 21784 | 42645 |
+| 8 | lt_m2_c1280 | ks_boundary_max | 31.165 | 6.713 | 21537 | 22454 | 43991 |
+
+`ks_boundary_max` often has the lowest data-XOR count among methods tied on
+residual quality, but it is not the fastest schedule by CPU time because it
+uses component-boundary scoring. If CPU time is the tie-breaker,
+`rqd2_default` or `raptorq_d2cc` usually remain the practical choices.
+
+Pareto readout, residual quality versus combined block-XOR proxy:
+
+| OH | structure | method | mean cols | row XOR/packet | solve total | combined |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 0 | lt_m2_c1920 | rqcc_dup | 35.023 | 7.174 | 23872 | 46828 |
+| 0 | lt_m2_c1024 | ks_boundary_max | 35.528 | 6.507 | 21740 | 42561 |
+| 0 | lt_m2_c512 | ks_boundary_max | 36.225 | 5.839 | 19699 | 38385 |
+| 0 | wirehair_rand | ks_boundary_max | 41.395 | 4.731 | 16612 | 31750 |
+| 1 | lt_m2_c3200 | ks_boundary_max | 34.752 | 7.597 | 25170 | 49487 |
+| 1 | lt_m2_c960 | ks_boundary_max | 34.917 | 6.467 | 21618 | 42317 |
+| 1 | lt_m2_c640 | ks_boundary_max | 35.325 | 6.068 | 20396 | 39821 |
+| 1 | wirehair_rand | ks_boundary_max | 40.657 | 4.729 | 16597 | 31733 |
+| 2 | lt_m2_c1024_fold25 | ks_boundary_max | 34.380 | 6.649 | 22200 | 43490 |
+| 2 | lt_m2_c1024_fold0 | ks_boundary_max | 34.550 | 6.525 | 21825 | 42719 |
+| 2 | lt_m2_c512 | ks_boundary_max | 34.835 | 5.858 | 19756 | 38512 |
+| 2 | wirehair_rand | ks_boundary_max | 40.303 | 4.721 | 16603 | 31721 |
+| 4 | lt_m2_c1024 | ks_boundary_max | 33.240 | 6.511 | 21784 | 42645 |
+| 4 | lt_m2_c512 | ks_boundary_max | 34.025 | 5.816 | 19659 | 38294 |
+| 4 | wirehair_rand | ks_boundary_max | 38.752 | 4.713 | 16544 | 31645 |
+| 8 | lt_m2_c1280 | ks_boundary_max | 31.165 | 6.713 | 22454 | 43991 |
+| 8 | lt_m2_c512_fold | ks_boundary_max | 31.250 | 6.691 | 22379 | 43845 |
+| 8 | lt_m2_c1024_fold0 | ks_boundary_max | 31.582 | 6.498 | 21811 | 42656 |
+| 8 | lt_m2_c192_fold | ks_boundary_max | 32.303 | 5.792 | 19613 | 38194 |
+
+This changes the interpretation of the N=3200 sweep. If the objective is only
+to minimize residual dense size, use the high-cap winners above. If block XOR
+budget matters, `lt_m2_c512`/`lt_m2_c512_fold` and `lt_m2_c1024` variants are
+more attractive tradeoffs: they usually give up less than one residual column
+while saving roughly 10 to 18 percent of the combined block-XOR proxy versus
+the highest-cap residual winner.
+
 ## Dense Binary Smoke Baseline
 
 The harness includes `binary_p50`, a fully random dense binary matrix where
