@@ -22,7 +22,7 @@ Self-test the sweep model and method invariants:
 ./experiments/peeling/peel_sweep --self-test
 ```
 
-Calibrate block-XOR solve cost for 1280-byte and 1 MiB pieces:
+Calibrate block-XOR solve cost for 1280-byte, 100 KiB, and 1 MiB pieces:
 
 ```bash
 ./experiments/peeling/xor_bench --target-gib 16 --repeats 3

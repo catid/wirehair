@@ -257,7 +257,7 @@ static int run_one_size(
 static void usage(const char* argv0)
 {
     std::fprintf(stderr,
-        "usage: %s [--sizes 1280,1048576] [--target-gib 16] "
+        "usage: %s [--sizes 1280,102400,1048576] [--target-gib 16] "
         "[--repeats 3] [--seed N]\n",
         argv0);
 }
@@ -266,7 +266,7 @@ static void usage(const char* argv0)
 
 int main(int argc, char** argv)
 {
-    std::string sizes_spec = "1280,1048576";
+    std::string sizes_spec = "1280,102400,1048576";
     double target_gib = 16.0;
     unsigned repeats = 3;
     uint64_t seed = UINT64_C(0x51f15eed12345678);

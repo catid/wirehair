@@ -1,0 +1,5 @@
+# command=./experiments/peeling/xor_bench --sizes 1280,102400,1048576 --target-gib 32 --repeats 5
+block_bytes,working_blocks,ops_per_repeat,repeats,median_total_us,median_us_per_xor,median_gib_per_s,checksum
+1280,8192,26843545,5,606055.916,0.022577343,105.601,0xfad0ff05c573828e
+102400,1024,335544,5,1446107.547,4.309740442,44.257,0x9a28020f920ae9b9
+1048576,128,32768,5,1504951.861,45.927485992,42.526,0x41a2e3e2b8b07e3c
