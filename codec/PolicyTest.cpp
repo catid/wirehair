@@ -1,6 +1,7 @@
 #include "WirehairV2Policy.h"
 #include "WirehairV2Codec.h"
 #include "WirehairV2Peel.h"
+#include "WirehairV2Plan.h"
 #include "WirehairV2Seeds.h"
 
 #include <cstring>
@@ -241,12 +242,41 @@ int main()
     Check(eval_a.TotalXorCost >= eval_a.MatrixXors,
         "total xor estimate should include matrix xors");
 
+    const PeelSolvePlan plan_a =
+        BuildPeelSolvePlan(SelectSeedProfile(96u, 1280u), 0u, UINT64_C(0x5511));
+    const PeelSolvePlan plan_b =
+        BuildPeelSolvePlan(SelectSeedProfile(96u, 1280u), 0u, UINT64_C(0x5511));
+    Check(plan_a.MatrixSeed == plan_b.MatrixSeed,
+        "peel solve plan seed should be deterministic");
+    Check(plan_a.Rows.size() == 96u, "H=0 plan should generate N rows");
+    Check(plan_a.Evaluation.Columns == 96u,
+        "peel solve plan should evaluate N columns");
+
+    const PeelSolvePlan plan_h2 =
+        BuildPeelSolvePlan(SelectSeedProfile(96u, 1280u), 2u, UINT64_C(0x5511));
+    Check(plan_h2.MatrixSeed != plan_a.MatrixSeed,
+        "peel solve plan seed should include row count");
+    Check(plan_h2.Rows.size() == 98u,
+        "overhead plan should generate N + H rows");
+
+    SeedProfile altered_seed = SelectSeedProfile(96u, 1280u);
+    altered_seed.PeelSeed =
+        (uint16_t)((altered_seed.PeelSeed + 1u) & 0xffu);
+    Check(MatrixSeedFromProfile(altered_seed, 96u, UINT64_C(0x5511)) !=
+            plan_a.MatrixSeed,
+        "peel solve plan seed should include selected peel seed");
+
     SeedTuningOptions tuning = DefaultSeedTuningOptions();
     tuning.PeelCandidates = 4u;
     tuning.TrialsPerCandidate = 1u;
+    const SeedProfile base80 = SelectSeedProfile(80u, 1280u);
     const SeedProfile tuned = TuneSeedProfile(80u, 1280u, tuning);
     Check(tuned.Tuned, "seed tuner should mark tuned profiles");
     Check(tuned.TuningXorCost > 0u, "seed tuner should report xor cost");
+    if (tuned.PeelSeed != base80.PeelSeed) {
+        Check(tuned.UsedPeelFixup,
+            "seed tuner should update peel fixup metadata after tuning");
+    }
 
     CheckV2RoundTrip();
 

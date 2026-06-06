@@ -3,6 +3,8 @@ add_library(wirehair_v2_policy
     WirehairV2Codec.h
     WirehairV2Peel.cpp
     WirehairV2Peel.h
+    WirehairV2Plan.cpp
+    WirehairV2Plan.h
     WirehairV2Policy.cpp
     WirehairV2Policy.h
     WirehairV2Seeds.cpp

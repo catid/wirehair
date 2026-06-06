@@ -2,7 +2,7 @@
 
 #include "../WirehairTools.h"
 
-#include "WirehairV2Peel.h"
+#include "WirehairV2Plan.h"
 
 #include <math.h>
 
@@ -168,12 +168,14 @@ SeedProfile TuneSeedProfile(
         uint64_t xor_sum = 0;
         for (uint16_t trial = 0; trial < trials; ++trial)
         {
-            const uint64_t matrix_seed = options.Seed ^
-                ((uint64_t)block_count * UINT64_C(0xbf58476d1ce4e5b9)) ^
-                ((uint64_t)candidate.PeelSeed * UINT64_C(0x94d049bb133111eb)) ^
-                ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
-            const PeelEvaluation eval =
-                EvaluatePeeling(base.Policy.Codec, block_count, matrix_seed);
+            SeedProfile trial_profile = base;
+            trial_profile.PeelSeed = candidate.PeelSeed;
+            trial_profile.DenseSeed = candidate.DenseSeed;
+            const PeelSolvePlan plan =
+                BuildPeelSolvePlan(trial_profile, 0u,
+                    options.Seed ^
+                    ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93)));
+            const PeelEvaluation& eval = plan.Evaluation;
             candidate.ResidualMean += eval.ResidualColumns;
             if (eval.ResidualColumns > candidate.ResidualMax) {
                 candidate.ResidualMax = eval.ResidualColumns;
@@ -210,6 +212,9 @@ SeedProfile TuneSeedProfile(
 
     base.PeelSeed = candidates[best_i].PeelSeed;
     base.DenseSeed = candidates[best_i].DenseSeed;
+    base.UsedPeelFixup = HasPeelFixup(block_count, base.PeelSeed);
+    base.UsedDenseFixup =
+        HasDenseFixup(block_count, base.DenseCount, base.DenseSeed);
     base.Tuned = true;
     base.TuningResidualMean = candidates[best_i].ResidualMean;
     base.TuningResidualColumns = candidates[best_i].ResidualMax;
