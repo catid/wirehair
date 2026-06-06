@@ -562,3 +562,79 @@ same-degree LDPC control.
 At medium and large N, the actual structured RaptorQ LDPC rows beat the random
 same-degree LDPC control. At N around 320, the random control is slightly better
 for fixed overhead 0 and 1.
+
+## Reduced Frontier Sweep
+
+To cut down the experiment space, the reduced frontier sweep used the union of
+structures and methods that had appeared on the best residual, runtime, and XOR
+frontiers in the earlier runs. It then ran the full Cartesian product of that
+reduced list at `N=1000`, `N=6400`, and `N=32000`.
+
+Protocol: `N-jitter=10`, fixed overhead rows `0,1,2`, paired matrix seeds, 4
+seed families, and 100 trials per seed family. Each aggregate row is therefore
+400 trials. The compact aggregate CSV is
+`experiments/peeling/results/reduced_frontier_N1000_6400_32000_j10.csv`.
+
+Selected structures:
+`wirehair_rand`, `rs_c001_d50_c128`, `lt_m2_c96_fold`, `lt_m2_c128_fold`,
+`lt_m2_c192`, `lt_m2_c256`, `lt_m2_c256_fold`, `lt_m2_c256_fold0`,
+`lt_m2_c256_fold25`, `lt_m2_c320`, `lt_m2_c320_d2_003`,
+`lt_m2_c320_d3_003`, `lt_c320_d3_003`, `lt_m2_c512`, `lt_m2_c512_fold`,
+`lt_m2_c640`, `lt_m2_c960`, `lt_m2_c1024`, `lt_m2_c1024_fold0`,
+`lt_m2_c1024_fold25`, `lt_m2_c1024_fold50`, `lt_m2_c1280`,
+`lt_m2_c1920`, `lt_m2_c2560_fold`, `lt_m2_c3200`.
+
+Selected methods:
+`default`, `random_tie`, `raptorq_d2cc`, `rqd2_default`, `rqd2_minfill`,
+`top16_lowref`, `rqcc_lowref`, `rqcc_dup`, `rqcc_ratio`,
+`ks_boundary_min`, `ks_boundary_max`, `ks_lowref`, `ks_random`,
+`hyb_lowref10`, `hyb_rqbeam`.
+
+Validation:
+
+- 48 shard files checked: 12 each for N=1000, N=6400, N=32000 prefix, and
+  N=32000 remainder.
+- stderr logs were empty.
+- All aggregate rows have 400 trials.
+- N samples stayed inside the requested +/-10 band.
+- Final aggregate row count is 3375:
+  3 N values x 3 overheads x 25 structures x 15 methods.
+
+Residual winners:
+
+| N | OH | structure | method | mean cols | var | median | p95 | row XOR/packet | combined XORs | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | lt_m2_c256_fold | raptorq_d2cc | 20.63 | 15.42 | 20 | 28 | 5.81 | 12014 | 2384 |
+| 1000 | 1 | lt_m2_c256_fold | raptorq_d2cc | 20.05 | 14.58 | 20 | 26 | 5.77 | 11946 | 2209 |
+| 1000 | 2 | lt_m2_c640 | raptorq_d2cc | 19.57 | 14.37 | 19 | 26 | 6.04 | 12480 | 4437 |
+| 6400 | 0 | lt_m2_c1920 | raptorq_d2cc | 48.62 | 71.01 | 48 | 64 | 7.06 | 92653 | 51520 |
+| 6400 | 1 | lt_m2_c3200 | raptorq_d2cc | 48.48 | 82.26 | 47 | 64 | 7.68 | 100649 | 79920 |
+| 6400 | 2 | lt_m2_c1024_fold0 | rqd2_default | 47.54 | 78.49 | 46 | 63 | 6.52 | 85510 | 32325 |
+| 32000 | 0 | lt_m2_c2560_fold | rqd2_default | 104.85 | 453.32 | 101 | 143 | 8.37 | 545568 | 453523 |
+| 32000 | 1 | lt_m2_c3200 | raptorq_d2cc | 104.42 | 384.11 | 101 | 142 | 7.64 | 500153 | 479702 |
+| 32000 | 2 | lt_m2_c3200 | raptorq_d2cc | 103.12 | 414.41 | 100 | 142 | 7.66 | 501280 | 476483 |
+
+Best combined-XOR rows within residual slack:
+
+| N | OH | structure | method | mean cols | row XOR/packet | solve XORs | combined XORs | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | wirehair_rand | ks_boundary_max | 21.83 | 4.20 | 4583 | 8786 | 2119 |
+| 1000 | 1 | wirehair_rand | ks_boundary_max | 21.27 | 4.24 | 4624 | 8866 | 1764 |
+| 1000 | 2 | wirehair_rand | ks_boundary_max | 21.03 | 4.23 | 4636 | 8877 | 2039 |
+| 6400 | 0 | lt_m2_c320 | ks_boundary_max | 53.43 | 5.36 | 36894 | 71206 | 28264 |
+| 6400 | 1 | lt_m2_c320 | ks_boundary_max | 53.11 | 5.37 | 36957 | 71329 | 29488 |
+| 6400 | 2 | lt_m2_c320 | ks_boundary_max | 51.93 | 5.37 | 36861 | 71213 | 29468 |
+| 32000 | 0 | lt_m2_c960 | ks_boundary_max | 112.09 | 6.44 | 218228 | 424463 | 563118 |
+| 32000 | 1 | lt_m2_c960 | ks_boundary_max | 110.39 | 6.46 | 218354 | 425031 | 551895 |
+| 32000 | 2 | lt_m2_c960 | ks_boundary_max | 110.86 | 6.44 | 217880 | 423855 | 572682 |
+
+Readout:
+
+- Pure residual quality continues to favor higher-cap min-2 LT variants.
+- The XOR frontier is different. Within a 10 percent or +1 residual-column
+  slack window, lower-cap structures save substantial block XORs:
+  `wirehair_rand` at N=1000, `lt_m2_c320` at N=6400, and `lt_m2_c960` at
+  N=32000.
+- For ties in residual count, `rqd2_default`/`raptorq_d2cc` remain the
+  practical CPU choices. `ks_boundary_max` often trims solve/combined XORs
+  slightly, but costs much more wall time.
