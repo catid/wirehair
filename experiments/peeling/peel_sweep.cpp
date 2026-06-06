@@ -472,6 +472,15 @@ static const Method kMethods[] = {
     {116, "ks_bmax_top64", "O(rows*degree + cols + min(64,cc)*rowrefs) degree-2 CC/default top64 then boundary-max", kPoolLegacy, kScoreLegacy, 0},
     {117, "hyb_bmax5",     "O(rqd2_default then boundary-max below 5pct todo)", kPoolLegacy, kScoreLegacy, 0},
     {118, "hyb_bmax10",    "O(rqd2_default then boundary-max below 10pct todo)", kPoolLegacy, kScoreLegacy, 0},
+
+    {119, "av_top16",      "O(cols + 16*local-avalanche) top16/default + local cascade estimate", kPoolLegacy, kScoreLegacy, 0},
+    {120, "av_top64",      "O(cols + 64*local-avalanche) top64/default + local cascade estimate", kPoolLegacy, kScoreLegacy, 0},
+    {121, "av_rqcc16",     "O(rows*degree + cols + min(16,cc)*local-avalanche) degree-2 CC + local cascade estimate", kPoolLegacy, kScoreLegacy, 0},
+    {122, "av_rqcc64",     "O(rows*degree + cols + min(64,cc)*local-avalanche) degree-2 CC + local cascade estimate", kPoolLegacy, kScoreLegacy, 0},
+    {123, "sim1_top16",    "O(cols + 16*copy) top16/default + exact one-step score", kPoolLegacy, kScoreLegacy, 0},
+    {124, "sim1_rqcc16",   "O(rows*degree + cols + min(16,cc)*copy) degree-2 CC + exact one-step score", kPoolLegacy, kScoreLegacy, 0},
+    {125, "hyb_rqav5",     "O(rqd2_default then rqcc16 avalanche-est below 5pct todo)", kPoolLegacy, kScoreLegacy, 0},
+    {126, "hyb_rqav10",    "O(rqd2_default then rqcc16 avalanche-est below 10pct todo)", kPoolLegacy, kScoreLegacy, 0},
 };
 
 static const Method* find_method(int id)
@@ -911,6 +920,13 @@ struct TrialConfig
     uint32_t ActionSeed = 0;
 };
 
+struct AvalancheEstimate
+{
+    unsigned Removed = 0;
+    unsigned Peeled = 0;
+    unsigned SingletonRows = 0;
+};
+
 class PeelSim
 {
 public:
@@ -1066,6 +1082,53 @@ public:
             }
         }
         return validate_state(true, why);
+    }
+
+    bool validate_avalanche_estimate(uint32_t seed, std::string* why) const
+    {
+        const std::vector<uint16_t> candidates = top_default_candidates(32, seed);
+        for (uint16_t column_i : candidates)
+        {
+            const AvalancheEstimate estimate = estimate_avalanche(column_i);
+            PeelSim copy = *this;
+            const unsigned before = copy.count_todo_columns();
+            std::vector<uint16_t> action(1, column_i);
+            if (!copy.apply_inactivation_action(action)) {
+                return fail(why, "avalanche validation action did not apply");
+            }
+            const unsigned exact_removed = before - copy.count_todo_columns();
+            if (estimate.Removed != exact_removed) {
+                return fail(why, "local avalanche estimate differs from exact one-step simulation");
+            }
+        }
+        return true;
+    }
+
+    bool run_avalanche_estimate_walk(
+        int method_id,
+        uint32_t seed,
+        unsigned steps,
+        std::string* why)
+    {
+        for (unsigned step = 0; step < steps; ++step)
+        {
+            std::string detail;
+            if (!validate_avalanche_estimate(seed + step, &detail)) {
+                return fail(why, detail.c_str());
+            }
+            const uint16_t column_i = select_column(method_id, seed + step);
+            if (column_i == kListTerm) {
+                break;
+            }
+            std::vector<uint16_t> action(1, column_i);
+            if (!apply_inactivation_action(action)) {
+                return fail(why, "avalanche estimate walk action did not apply");
+            }
+            if (!validate_state(false, &detail)) {
+                return fail(why, detail.c_str());
+            }
+        }
+        return true;
     }
 
     bool add_test_row(const std::vector<uint16_t>& columns, std::string* why)
@@ -2407,7 +2470,10 @@ private:
         return best;
     }
 
-    std::vector<uint16_t> top_default_candidates(unsigned limit, uint32_t seed) const
+    std::vector<uint16_t> top_default_candidates_from(
+        const std::vector<uint16_t>& source,
+        unsigned limit,
+        uint32_t seed) const
     {
         std::vector<uint16_t> candidates;
         if (limit == 0) {
@@ -2427,8 +2493,11 @@ private:
             return better_key(a.Score, b.Score);
         };
 
-        for (uint16_t column_i : TodoColumns)
+        for (uint16_t column_i : source)
         {
+            if (column_i >= N || Columns[column_i].Mark != kMarkTodo) {
+                continue;
+            }
             const Key key = default_key(column_i, seed);
             const CandidateEntry entry = {key, column_i};
             if (heap.size() < limit)
@@ -2449,6 +2518,11 @@ private:
             candidates.push_back(entry.Column);
         }
         return candidates;
+    }
+
+    std::vector<uint16_t> top_default_candidates(unsigned limit, uint32_t seed) const
+    {
+        return top_default_candidates_from(TodoColumns, limit, seed);
     }
 
     uint16_t select_topk_lookfill(uint32_t seed, unsigned top_k) const
@@ -3388,11 +3462,156 @@ private:
         return best != kListTerm ? best : select_by_full_scan(0, seed);
     }
 
+    AvalancheEstimate estimate_avalanche(uint16_t column_i) const
+    {
+        AvalancheEstimate estimate;
+        if (column_i >= N || Columns[column_i].Mark != kMarkTodo) {
+            return estimate;
+        }
+
+        std::vector<uint8_t> removed(N, 0);
+        std::vector<uint16_t> queue;
+        queue.reserve(64);
+
+        removed[column_i] = 1;
+        queue.push_back(column_i);
+        estimate.Removed = 1;
+
+        for (unsigned queue_i = 0; queue_i < queue.size(); ++queue_i)
+        {
+            const uint16_t removed_column = queue[queue_i];
+            const std::vector<uint16_t>& refs = Columns[removed_column].Rows;
+            for (uint16_t row_i : refs)
+            {
+                const Row& row = Rows[row_i];
+                if (row.Live == 0) {
+                    continue;
+                }
+
+                unsigned live_after = 0;
+                uint16_t only_live = kListTerm;
+                for (uint16_t row_column : row.Columns)
+                {
+                    if (Columns[row_column].Mark != kMarkTodo ||
+                        removed[row_column]) {
+                        continue;
+                    }
+                    only_live = row_column;
+                    ++live_after;
+                    if (live_after > 1) {
+                        break;
+                    }
+                }
+
+                if (live_after == 1 && only_live != kListTerm &&
+                    !removed[only_live])
+                {
+                    removed[only_live] = 1;
+                    queue.push_back(only_live);
+                    ++estimate.Removed;
+                    ++estimate.Peeled;
+                    ++estimate.SingletonRows;
+                }
+            }
+        }
+        return estimate;
+    }
+
+    Key avalanche_estimate_key(uint16_t column_i, uint32_t seed) const
+    {
+        const AvalancheEstimate estimate = estimate_avalanche(column_i);
+        if (estimate.Removed == 0) {
+            return Key(INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN);
+        }
+
+        const Metrics m = cached_metrics(column_i,
+            kMetricExactD2 | kMetricLookahead | kMetricFill);
+        const Key tie = default_key(column_i, seed);
+        return Key((int64_t)estimate.Removed, (int64_t)estimate.Peeled,
+            (int64_t)estimate.SingletonRows + (int64_t)m.ExactD2,
+            (int64_t)m.Lookahead - (int64_t)m.Fill, tie.A);
+    }
+
+    Key exact_one_step_key(uint16_t column_i, uint32_t seed) const
+    {
+        if (column_i >= N || Columns[column_i].Mark != kMarkTodo) {
+            return Key(INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN);
+        }
+
+        PeelSim copy = *this;
+        std::vector<uint16_t> action(1, column_i);
+        if (!copy.apply_inactivation_action(action)) {
+            return Key(INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN);
+        }
+
+        Key key = copy.beam_terminal_key();
+        const Key tie = default_key(column_i, seed);
+        key.E = tie.A;
+        return key;
+    }
+
+    uint16_t select_by_scored_candidates(
+        const std::vector<uint16_t>& candidates,
+        uint32_t seed,
+        bool exact_one_step) const
+    {
+        uint16_t best = kListTerm;
+        Key best_key;
+        for (uint16_t column_i : candidates)
+        {
+            const Key key = exact_one_step ?
+                exact_one_step_key(column_i, seed) :
+                avalanche_estimate_key(column_i, seed);
+            if (best == kListTerm || better_key(key, best_key))
+            {
+                best = column_i;
+                best_key = key;
+            }
+        }
+        return best != kListTerm ? best : select_by_full_scan(0, seed);
+    }
+
+    uint16_t select_avalanche_top(unsigned top_k, uint32_t seed) const
+    {
+        const std::vector<uint16_t> candidates = top_default_candidates(top_k, seed);
+        return select_by_scored_candidates(candidates, seed, false);
+    }
+
+    uint16_t select_avalanche_rqcc(unsigned top_k, uint32_t seed) const
+    {
+        std::vector<uint16_t> candidates = collect_d2_candidates(true);
+        if (!candidates.empty()) {
+            candidates = top_default_candidates_from(candidates, top_k, seed);
+        }
+        if (candidates.empty()) {
+            candidates = top_default_candidates(top_k, seed);
+        }
+        return select_by_scored_candidates(candidates, seed, false);
+    }
+
+    uint16_t select_exact_one_step_top(unsigned top_k, uint32_t seed) const
+    {
+        const std::vector<uint16_t> candidates = top_default_candidates(top_k, seed);
+        return select_by_scored_candidates(candidates, seed, true);
+    }
+
+    uint16_t select_exact_one_step_rqcc(unsigned top_k, uint32_t seed) const
+    {
+        std::vector<uint16_t> candidates = collect_d2_candidates(true);
+        if (!candidates.empty()) {
+            candidates = top_default_candidates_from(candidates, top_k, seed);
+        }
+        if (candidates.empty()) {
+            candidates = top_default_candidates(top_k, seed);
+        }
+        return select_by_scored_candidates(candidates, seed, true);
+    }
+
     uint16_t select_hybrid(unsigned mode, uint32_t seed) const
     {
         const unsigned todo = count_todo_columns();
         const unsigned pct = mode == 1 || mode == 3 || mode == 5 ||
-            mode == 8 ? 10u : 5u;
+            mode == 8 || mode == 10 ? 10u : 5u;
         const unsigned threshold = std::max(1u, (N * pct + 99u) / 100u);
         if (mode == 6) {
             return todo <= threshold ? select_beam(2, 4, seed) :
@@ -3400,6 +3619,10 @@ private:
         }
         if (mode == 7 || mode == 8) {
             return todo <= threshold ? select_ks_variant(3, seed) :
+                select_raptorq_d2_component(seed, 1);
+        }
+        if (mode == 9 || mode == 10) {
+            return todo <= threshold ? select_avalanche_rqcc(16, seed) :
                 select_raptorq_d2_component(seed, 1);
         }
         if (todo > threshold) {
@@ -3558,6 +3781,22 @@ private:
             return select_hybrid(7, seed);
         case 118:
             return select_hybrid(8, seed);
+        case 119:
+            return select_avalanche_top(16, seed);
+        case 120:
+            return select_avalanche_top(64, seed);
+        case 121:
+            return select_avalanche_rqcc(16, seed);
+        case 122:
+            return select_avalanche_rqcc(64, seed);
+        case 123:
+            return select_exact_one_step_top(16, seed);
+        case 124:
+            return select_exact_one_step_rqcc(16, seed);
+        case 125:
+            return select_hybrid(9, seed);
+        case 126:
+            return select_hybrid(10, seed);
         default:
             return select_by_full_scan(method_id, seed);
         }
@@ -4161,19 +4400,35 @@ private:
                 return fail(why, "minimum-row method selected outside row pool");
             }
         }
-        else if (method_id == 11 || method_id == 16 || method_id == 17)
+        else if (method_id == 11 || method_id == 16 || method_id == 17 ||
+            method_id == 119 || method_id == 120 || method_id == 123)
         {
             unsigned top_k = 8;
             if (method_id == 16) {
                 top_k = 4;
             }
-            else if (method_id == 17) {
+            else if (method_id == 17 || method_id == 119 ||
+                method_id == 123) {
                 top_k = 16;
+            }
+            else if (method_id == 120) {
+                top_k = 64;
             }
             const std::vector<uint16_t> candidates =
                 top_default_candidates(top_k, seed);
             if (!candidates.empty() && !contains_candidate(candidates, column_i)) {
                 return fail(why, "top-K method selected outside top-K pool");
+            }
+        }
+        else if (method_id == 121 || method_id == 122 || method_id == 124)
+        {
+            const unsigned top_k = method_id == 122 ? 64u : 16u;
+            std::vector<uint16_t> candidates = collect_d2_candidates(true);
+            if (!candidates.empty()) {
+                candidates = top_default_candidates_from(candidates, top_k, seed);
+            }
+            if (!candidates.empty() && !contains_candidate(candidates, column_i)) {
+                return fail(why, "avalanche method selected outside component pool");
             }
         }
         return true;
@@ -5807,6 +6062,40 @@ static bool run_lazy_metric_tests(std::string* why)
     return true;
 }
 
+static bool run_avalanche_estimate_tests(std::string* why)
+{
+    const MatrixStructure* structure = find_structure("lt_m2_c128");
+    if (!structure) {
+        return self_fail(why, "avalanche estimate test structure is missing");
+    }
+
+    PeelSim sim(160);
+    std::string detail;
+    if (!feed_random_structure(
+        sim, *structure, 160, 160, UINT64_C(0x6176616c616e6368), &detail)) {
+        return self_fail(why, "avalanche estimate structure feed failed: " + detail);
+    }
+    if (!sim.validate_avalanche_estimate(UINT32_C(0x51f15eed), &detail)) {
+        return self_fail(why, "initial avalanche estimate validation failed: " + detail);
+    }
+
+    TrialResult result;
+    if (!sim.run_greedy_checked(18, UINT32_C(0x51f15eed), &result, &detail)) {
+        return self_fail(why, "avalanche estimate walk failed: " + detail);
+    }
+
+    PeelSim tail(160);
+    if (!feed_random_structure(
+        tail, *structure, 160, 160, UINT64_C(0x6176616c616e6368), &detail)) {
+        return self_fail(why, "avalanche estimate tail feed failed: " + detail);
+    }
+    if (!tail.run_avalanche_estimate_walk(
+        18, UINT32_C(0x51f15eed), 8, &detail)) {
+        return self_fail(why, "avalanche estimate step validation failed: " + detail);
+    }
+    return true;
+}
+
 static bool run_self_tests(std::string* why)
 {
     if (!run_synthetic_structure_tests(why)) {
@@ -5831,6 +6120,9 @@ static bool run_self_tests(std::string* why)
         return false;
     }
     if (!run_lazy_metric_tests(why)) {
+        return false;
+    }
+    if (!run_avalanche_estimate_tests(why)) {
         return false;
     }
     if (!PeelSim::validate_multistart_tie_break(why)) {

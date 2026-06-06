@@ -835,3 +835,97 @@ Readout:
   still needs dense/heavy precode co-optimization and real codec failure-rate
   validation; the cap-only production prototype was already rejected in
   `wirehair-vbk`.
+
+## Bounded Lookahead Cost Pass
+
+This pass tested cheaper alternatives to exact bounded path lookahead in the
+standalone peeling harness.  New methods:
+
+- `av_top16`, `av_top64`: top-K/default candidates scored by a local exact
+  avalanche-size estimate, without copying the full graph.
+- `av_rqcc16`, `av_rqcc64`: largest degree-2 component candidates, capped by
+  top-K/default score, then local avalanche estimate.
+- `sim1_top16`, `sim1_rqcc16`: exact one-step copied simulation controls.
+- `hyb_rqav5`, `hyb_rqav10`: `rqd2_default` until the residual tail, then
+  `av_rqcc16`.
+
+Validation:
+
+- Normal `peel_sweep --self-test`.
+- ASan/UBSan `peel_sweep --self-test`.
+- Added a self-test that compares the local avalanche removed-column count
+  against an exact one-step copied simulation on top candidates and during a
+  short inactivation walk.
+- N=32000 smoke showed exact one-step copy controls take multi-second trials,
+  so they were kept out of the large-N main sweep.
+
+Main aggregate:
+`experiments/peeling/results/lookahead_cost_N1000_6400_32000_j10.csv`.
+This is 10 frontier/prior structures x 13 methods x N=1000/6400/32000 x
+fixed overhead 0/1/2, 50 paired trials per row, `N-jitter=10`, with PDFs.
+Exact-copy control aggregate:
+`experiments/peeling/results/lookahead_exact_controls_N1000_6400_j10.csv`.
+
+Best pure residual winners in the main sweep:
+
+| N | OH | structure | method | mean cols | p95 | greedy us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 1000 | 0 | lt_m2_c3200 | av_top64 | 18.30 | 23 | 5175 |
+| 1000 | 1 | lt_m2_c2560 | av_top64 | 18.40 | 24 | 8072 |
+| 1000 | 2 | lt_m2_c2560 | av_top64 | 17.90 | 26 | 9224 |
+| 6400 | 0 | lt_m2_c3200 | av_top64 | 44.98 | 60 | 97458 |
+| 6400 | 1 | lt_m2_c3200 | av_top64 | 42.98 | 57 | 142522 |
+| 6400 | 2 | lt_m2_c2560 | av_top64 | 43.32 | 60 | 124273 |
+| 32000 | 0 | lt_m2_c3200 | av_top64 | 93.88 | 127 | 809841 |
+| 32000 | 1 | lt_m2_c2560 | av_top64 | 93.70 | 113 | 847280 |
+| 32000 | 2 | lt_m2_c2560 | av_top64 | 91.54 | 119 | 846878 |
+
+Old-vs-new residual frontier:
+
+| N | OH | best old method | old cols | best new method | new cols |
+| ---: | ---: | --- | ---: | --- | ---: |
+| 1000 | 0 | rqd2_default | 20.44 | av_top64 | 18.30 |
+| 1000 | 1 | rqd2_default | 20.36 | av_top64 | 18.40 |
+| 1000 | 2 | rqd2_default | 19.52 | av_top64 | 17.90 |
+| 6400 | 0 | rqd2_default | 49.34 | av_top64 | 44.98 |
+| 6400 | 1 | rqd2_default | 47.68 | av_top64 | 42.98 |
+| 6400 | 2 | rqd2_default | 47.58 | av_top64 | 43.32 |
+| 32000 | 0 | rqd2_default | 100.66 | av_top64 | 93.88 |
+| 32000 | 1 | ks_bmax_top16 | 99.80 | av_top64 | 93.70 |
+| 32000 | 2 | rqd2_default | 97.94 | av_top64 | 91.54 |
+
+Best 1 MiB total-cost winners:
+
+| N | OH | structure | method | mean cols | total eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: |
+| 1000 | 0 | lt_m2_c16 | ks_bmax_top16 | 43.56 | 6987 |
+| 1000 | 1 | lt_m1_c16 | ks_bmax_top16 | 44.04 | 7020 |
+| 1000 | 2 | lt_m2_c16 | ks_bmax_top16 | 43.40 | 7112 |
+| 6400 | 0 | lt_m1_c64 | ks_bmax_top64 | 90.88 | 56945 |
+| 6400 | 1 | lt_m1_c64 | ks_bmax_top64 | 91.08 | 57142 |
+| 6400 | 2 | lt_no1_64 | ks_bmax_top16 | 91.00 | 57266 |
+| 32000 | 0 | rs_c001_d50_c128 | ks_bmax_top16 | 224.48 | 340286 |
+| 32000 | 1 | rs_c003_d10_c128 | ks_bmax_top16 | 193.80 | 337449 |
+| 32000 | 2 | rs_c003_d10_c128 | hyb_rqav5 | 194.92 | 338435 |
+
+Readout:
+
+- `av_top64` is the best residual-quality schedule in this focused set,
+  reducing mean residual columns by about 2 at N=1000, 4-5 at N=6400, and 6-7
+  at N=32000 versus the best prior methods on the same selected structures.
+- That residual gain is not cost-free.  Across paired rows, `av_top64` had a
+  median greedy-time ratio of about 9.9x versus `rqd2_default`; `av_top16` was
+  about 5.3x.  The capped rqcc avalanche variants did not improve residuals
+  over the rqcc baseline enough to justify their cost.
+- Exact one-step copy controls did not buy meaningful extra quality.  On the
+  N=1000/6400 control set, `sim1_top16` was usually equal to or worse than
+  `av_top16/av_top64`, while often 4x-220x slower.  `sim1_rqcc16` typically
+  matched `rqcc_lowref` residuals while being tens to hundreds of times slower.
+- Cost frontiers still favor `ks_bmax_top16/top64` for 1 MiB pieces and mostly
+  `rqd2_default`/`rqcc_lowref` at smaller pieces.  `hyb_rqav5` only reached the
+  1 MiB top row once, at N=32000/OH=2, and the margin was tiny.
+- Conclusion: local avalanche lookahead is useful as a residual-quality
+  diagnostic, but not a clear shipping scheduler improvement.  If we pursue it
+  further, the next step should be a truly incremental avalanche/bucket
+  implementation or a tail-only trigger tuned specifically for large block
+  sizes.
