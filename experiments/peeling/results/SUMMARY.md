@@ -747,3 +747,91 @@ Readout:
 - Pure residual minimization still favors higher-cap min-2 LT structures, but
   those can be a poor total-cost choice once row-generation XORs and scheduler
   CPU are included.
+
+## Degree Retune Cost Frontier
+
+This pass targets `wirehair-vbk`: retune the random row degree distribution for
+lower symbol-XOR traffic while keeping overhead and residual size visible.  The
+broad screen covered all 191 pure random-row structures, excluding dense binary
+and RaptorQ-LDPC controls, with methods `10,18,40,115,116,117,118`.
+`N=1000` and `N=6400` completed for all structures at 50 trials; `N=32000` was
+stopped after the low-degree, d1mix, uniform-mix, and robust-LT families because
+the remaining speculative heavy-tail families were not likely cost-frontier
+contenders and were much slower.
+
+The confirmation run used the union of broad-screen frontier structures and
+prior high-quality structures: 45 structures x 7 methods x 3 N anchors x 3
+fixed-overhead values, 100 paired trials per row, `N-jitter=10`, with residual
+PDFs.  Aggregate CSV:
+`experiments/peeling/results/degree_retune_frontier_N1000_6400_32000_j10.csv`.
+
+Pure residual winners:
+
+| N | OH | structure | method | mean cols | var | median | p95 | row XOR/packet | solve XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | lt_m2_c192_fold | raptorq_d2cc | 20.08 | 13.69 | 20 | 27 | 5.5788 | 5948 |
+| 1000 | 1 | lt_m1_c256 | rqcc_lowref | 19.68 | 19.36 | 19 | 27 | 5.1770 | 5568 |
+| 1000 | 2 | lt_m2_c1024_fold25 | rqd2_default | 19.40 | 10.76 | 19 | 25 | 6.3961 | 6653 |
+| 6400 | 0 | lt_m2_c1920 | raptorq_d2cc | 48.80 | 53.29 | 48 | 62 | 7.1535 | 48091 |
+| 6400 | 1 | lt_m2_c3200 | raptorq_d2cc | 48.07 | 83.17 | 46 | 65 | 7.5992 | 50944 |
+| 6400 | 2 | lt_m1_c3200 | raptorq_d2cc | 47.05 | 78.32 | 47 | 61 | 7.6538 | 51244 |
+| 32000 | 0 | lt_m2_c3200 | raptorq_d2cc | 103.26 | 348.94 | 101 | 137 | 7.6383 | 255225 |
+| 32000 | 1 | lt_m2_c2560 | raptorq_d2cc | 101.41 | 396.81 | 98 | 135 | 7.4401 | 248672 |
+| 32000 | 2 | lt_m2_c2560 | rqd2_default | 99.07 | 172.92 | 97 | 123 | 7.4076 | 246244 |
+
+Best total cost at 1280-byte pieces:
+
+| N | OH | structure | method | mean cols | var | p95 | row XOR/packet | solve XORs | total eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | robust_d1_001_d2_020 | rqcc_lowref | 38.48 | 64.96 | 52 | 3.3089 | 4846 | 14722 |
+| 1000 | 1 | lt_robust64 | rqcc_lowref | 32.49 | 56.25 | 45 | 3.4854 | 4627 | 14918 |
+| 1000 | 2 | robust_d1_001_d2_012 | rqd2_default | 31.00 | 61.94 | 43 | 3.4320 | 4465 | 14480 |
+| 6400 | 0 | robust_d1_001_d2_003 | rqcc_lowref | 114.85 | 359.48 | 146 | 3.6795 | 37116 | 105548 |
+| 6400 | 1 | robust_d1_001_d2_003 | rqcc_lowref | 116.32 | 368.64 | 150 | 3.6827 | 37605 | 107940 |
+| 6400 | 2 | robust_d1_001_d2_003 | rqcc_lowref | 117.11 | 351.19 | 149 | 3.6768 | 37862 | 109207 |
+| 32000 | 0 | rs_c001_d50_c128 | rqcc_lowref | 220.45 | 355.32 | 252 | 4.5285 | 193785 | 879720 |
+| 32000 | 1 | lt_m2_c96 | rqcc_lowref | 300.25 | 600.25 | 338 | 4.1840 | 224819 | 884498 |
+| 32000 | 2 | lt_m2_c96 | rqcc_lowref | 302.08 | 823.69 | 351 | 4.1876 | 226564 | 897877 |
+
+Best total cost at 100 KiB pieces:
+
+| N | OH | structure | method | mean cols | var | p95 | row XOR/packet | solve XORs | total eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | lt_m2_c16 | rqd2_default | 44.30 | 35.05 | 55 | 2.5402 | 4494 | 7079 |
+| 1000 | 1 | lt_m1_c16 | rqd2_default | 43.81 | 37.45 | 53 | 2.5234 | 4484 | 7056 |
+| 1000 | 2 | lt_m2_c16 | rqd2_default | 43.38 | 46.10 | 55 | 2.5581 | 4532 | 7146 |
+| 6400 | 0 | d1mix_lt_p005 | rqd2_default | 91.58 | 180.90 | 115 | 3.8032 | 32808 | 57543 |
+| 6400 | 1 | lt_m1_c64 | rqd2_default | 91.25 | 175.30 | 109 | 3.8095 | 32837 | 57658 |
+| 6400 | 2 | lt_no1_64 | rqd2_default | 91.52 | 151.54 | 112 | 3.8080 | 32947 | 57765 |
+| 32000 | 0 | rs_c001_d50_c128 | rqcc_lowref | 220.45 | 355.32 | 252 | 4.5285 | 193785 | 341534 |
+| 32000 | 1 | rs_c003_d10_c128 | rqd2_default | 196.54 | 465.70 | 236 | 4.6734 | 188480 | 342320 |
+| 32000 | 2 | rs_c001_d50_c128 | rqcc_lowref | 218.09 | 470.46 | 252 | 4.5374 | 193592 | 342037 |
+
+Best total cost at 1 MiB pieces:
+
+| N | OH | structure | method | mean cols | var | p95 | row XOR/packet | solve XORs | total eq XORs |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 0 | lt_m1_c16 | ks_bmax_top16 | 44.20 | 37.82 | 55 | 2.5412 | 4489 | 7034 |
+| 1000 | 1 | lt_m1_c16 | ks_bmax_top16 | 43.81 | 37.45 | 53 | 2.5234 | 4483 | 7013 |
+| 1000 | 2 | lt_m2_c16 | ks_bmax_top16 | 43.38 | 46.10 | 55 | 2.5581 | 4531 | 7099 |
+| 6400 | 0 | d1mix_lt_p005 | ks_bmax_top64 | 91.58 | 180.90 | 115 | 3.8032 | 32804 | 57182 |
+| 6400 | 1 | lt_m1_c64 | ks_bmax_top64 | 91.25 | 175.30 | 109 | 3.8095 | 32830 | 57256 |
+| 6400 | 2 | lt_no1_64 | ks_bmax_top64 | 91.52 | 151.54 | 112 | 3.8080 | 32938 | 57361 |
+| 32000 | 0 | rs_c001_d50_c128 | ks_bmax_top64 | 220.45 | 355.32 | 252 | 4.5285 | 193562 | 338789 |
+| 32000 | 1 | rs_c003_d10_c128 | ks_bmax_top16 | 196.54 | 465.70 | 236 | 4.6734 | 188434 | 338412 |
+| 32000 | 2 | rs_c001_d50_c128 | ks_bmax_top16 | 218.09 | 470.46 | 252 | 4.5374 | 193346 | 338892 |
+
+Readout:
+
+- The cost-optimal degree distribution moves upward with N: cap16 around
+  N=1000, cap64/d1mix around N=6400, and robust-soliton-ish cap128 around
+  N=32000 for 100 KiB and 1 MiB pieces.
+- For 1280-byte pieces, scheduler CPU dominates enough that `rqcc_lowref` on
+  low-degree robust LT rows wins most total-cost rows, even though residuals are
+  much larger than the pure-residual optimum.
+- For 100 KiB and 1 MiB pieces, scheduler time is much less important and
+  `ks_bmax_top16/top64` becomes useful again when solve XORs tie closely.
+- These are experiment-harness results only. Shipping a degree-table retune
+  still needs dense/heavy precode co-optimization and real codec failure-rate
+  validation; the cap-only production prototype was already rejected in
+  `wirehair-vbk`.
