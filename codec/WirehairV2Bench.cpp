@@ -2,6 +2,8 @@
 #include "WirehairV2Plan.h"
 #include "WirehairV2Seeds.h"
 
+#include "../WirehairTools.h"
+
 #include <wirehair/wirehair.h>
 
 #include <algorithm>
@@ -81,12 +83,29 @@ struct Accum
     uint64_t RecoverBytes = 0;
 };
 
+enum CompareProfileMode
+{
+    CompareProfileBase,
+    CompareProfileTuned,
+    CompareProfileAuto
+};
+
 struct CompareOptions
 {
-    bool V2Tuned = false;
+    CompareProfileMode ProfileMode = CompareProfileBase;
     uint16_t PeelCandidates = 16;
     uint16_t PeelTrials = 3;
+    uint16_t AutoTrials = 8;
     uint64_t TuneSeed = UINT64_C(0x9a7e11a);
+    uint64_t AutoSeed = UINT64_C(0xa570ca1);
+    double AutoMinDelta = 0.10;
+    bool LogAutoChoices = false;
+};
+
+struct CachedCompareProfile
+{
+    bool UseTuned = false;
+    wirehair_v2::SeedProfile TunedProfile;
 };
 
 std::vector<int> ParseIntList(const std::string& text)
@@ -101,6 +120,26 @@ std::vector<int> ParseIntList(const std::string& text)
         const int value = std::atoi(token.c_str());
         if (value > 0) {
             out.push_back(value);
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        pos = comma + 1u;
+    }
+    return out;
+}
+
+std::vector<int> ParseSignedIntList(const std::string& text)
+{
+    std::vector<int> out;
+    size_t pos = 0;
+    while (pos < text.size())
+    {
+        const size_t comma = text.find(',', pos);
+        const std::string token = text.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (!token.empty()) {
+            out.push_back(std::atoi(token.c_str()));
         }
         if (comma == std::string::npos) {
             break;
@@ -317,36 +356,137 @@ double MeanOverheadOrFailure(const Accum& acc)
     return ok > 0u ? (double)acc.OverheadSum / (double)ok : -1.0;
 }
 
+double SelectionMeanOverhead(const Accum& acc)
+{
+    const uint64_t ok = acc.Trials - acc.Failures;
+    return ok > 0u ? (double)acc.OverheadSum / (double)ok : 1e9;
+}
+
+bool IsBetterSelection(
+    const Accum& candidate,
+    const Accum& base,
+    double min_mean_delta)
+{
+    if (candidate.Failures != base.Failures) {
+        return candidate.Failures < base.Failures;
+    }
+
+    const double candidate_mean = SelectionMeanOverhead(candidate);
+    const double base_mean = SelectionMeanOverhead(base);
+    if (base_mean - candidate_mean >= min_mean_delta) {
+        return true;
+    }
+
+    return false;
+}
+
 uint64_t ProfileCacheKey(uint32_t N, uint32_t block_bytes)
 {
     return ((uint64_t)N << 32) | (uint64_t)block_bytes;
 }
 
-const wirehair_v2::SeedProfile* SelectCompareProfile(
+const char* CompareProfileModeName(CompareProfileMode mode)
+{
+    switch (mode) {
+    case CompareProfileBase:
+        return "base";
+    case CompareProfileTuned:
+        return "tuned";
+    case CompareProfileAuto:
+        return "auto";
+    }
+    return "unknown";
+}
+
+wirehair_v2::SeedProfile BuildTunedProfile(
     uint32_t N,
     uint32_t block_bytes,
-    const CompareOptions& options,
-    std::map<uint64_t, wirehair_v2::SeedProfile>& cache)
+    const CompareOptions& options)
 {
-    if (!options.V2Tuned) {
-        return 0;
-    }
-
-    const uint64_t key = ProfileCacheKey(N, block_bytes);
-    const std::map<uint64_t, wirehair_v2::SeedProfile>::iterator found =
-        cache.find(key);
-    if (found != cache.end()) {
-        return &found->second;
-    }
-
     wirehair_v2::SeedTuningOptions tuning =
         wirehair_v2::DefaultSeedTuningOptions();
     tuning.PeelCandidates = options.PeelCandidates;
     tuning.TrialsPerCandidate = options.PeelTrials;
     tuning.Seed = options.TuneSeed;
-    const wirehair_v2::SeedProfile profile =
-        wirehair_v2::TuneSeedProfile(N, block_bytes, tuning);
-    return &cache.insert(std::make_pair(key, profile)).first->second;
+    return wirehair_v2::TuneSeedProfile(N, block_bytes, tuning);
+}
+
+void CalibrateAutoProfile(
+    uint32_t N,
+    uint32_t block_bytes,
+    double loss,
+    const CompareOptions& options,
+    CachedCompareProfile& cached)
+{
+    cached.TunedProfile = BuildTunedProfile(N, block_bytes, options);
+
+    Accum base_acc;
+    Accum tuned_acc;
+    for (uint32_t trial = 0; trial < options.AutoTrials; ++trial)
+    {
+        const uint64_t trial_seed =
+            options.AutoSeed ^
+            ((uint64_t)N * UINT64_C(0x9e3779b97f4a7c15)) ^
+            ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+            ((uint64_t)trial * UINT64_C(0x94d049bb133111eb));
+        AddTrial(base_acc, N,
+            RunV2Trial(N, block_bytes, loss, trial_seed, 0));
+        AddTrial(tuned_acc, N,
+            RunV2Trial(N, block_bytes, loss, trial_seed,
+                &cached.TunedProfile));
+    }
+
+    cached.UseTuned =
+        IsBetterSelection(tuned_acc, base_acc, options.AutoMinDelta);
+    if (options.LogAutoChoices)
+    {
+        std::printf(
+            "# auto_profile N=%u bb=%u choice=%s base_fail=%llu "
+            "base_oh=%.4f base_max=%u tuned_fail=%llu tuned_oh=%.4f "
+            "tuned_max=%u min_delta=%.4f\n",
+            N,
+            block_bytes,
+            cached.UseTuned ? "tuned" : "base",
+            (unsigned long long)base_acc.Failures,
+            MeanOverheadOrFailure(base_acc),
+            base_acc.OverheadMax,
+            (unsigned long long)tuned_acc.Failures,
+            MeanOverheadOrFailure(tuned_acc),
+            tuned_acc.OverheadMax,
+            options.AutoMinDelta);
+    }
+}
+
+const wirehair_v2::SeedProfile* SelectCompareProfile(
+    uint32_t N,
+    uint32_t block_bytes,
+    double loss,
+    const CompareOptions& options,
+    std::map<uint64_t, CachedCompareProfile>& cache)
+{
+    if (options.ProfileMode == CompareProfileBase) {
+        return 0;
+    }
+
+    const uint64_t key = ProfileCacheKey(N, block_bytes);
+    const std::map<uint64_t, CachedCompareProfile>::iterator found =
+        cache.find(key);
+    if (found != cache.end()) {
+        return found->second.UseTuned ? &found->second.TunedProfile : 0;
+    }
+
+    CachedCompareProfile cached;
+    if (options.ProfileMode == CompareProfileTuned)
+    {
+        cached.UseTuned = true;
+        cached.TunedProfile = BuildTunedProfile(N, block_bytes, options);
+    }
+    else {
+        CalibrateAutoProfile(N, block_bytes, loss, options, cached);
+    }
+    const std::map<uint64_t, CachedCompareProfile>::iterator inserted =
+        cache.insert(std::make_pair(key, cached)).first;
+    return inserted->second.UseTuned ? &inserted->second.TunedProfile : 0;
 }
 
 uint32_t Percentile(std::vector<uint32_t> values, double p)
@@ -360,6 +500,20 @@ uint32_t Percentile(std::vector<uint32_t> values, double p)
         index = values.size() - 1u;
     }
     return values[index];
+}
+
+double OverheadStdDev(const Accum& acc)
+{
+    const uint64_t ok = acc.Trials - acc.Failures;
+    const double mean = MeanOverheadOrFailure(acc);
+    if (ok == 0u || mean < 0.0) {
+        return 0.0;
+    }
+    double var = (double)acc.OverheadSq / (double)ok - mean * mean;
+    if (var < 0.0) {
+        var = 0.0;
+    }
+    return std::sqrt(var);
 }
 
 void PrintAccum(const char* name, uint32_t block_bytes, const Accum& acc)
@@ -435,7 +589,15 @@ int CmdCompare(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--v2-profile") && i + 1 < argc) {
             const char* profile = argv[++i];
-            compare_options.V2Tuned = !std::strcmp(profile, "tuned");
+            if (!std::strcmp(profile, "tuned")) {
+                compare_options.ProfileMode = CompareProfileTuned;
+            }
+            else if (!std::strcmp(profile, "auto")) {
+                compare_options.ProfileMode = CompareProfileAuto;
+            }
+            else {
+                compare_options.ProfileMode = CompareProfileBase;
+            }
         }
         else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
             compare_options.PeelCandidates = (uint16_t)std::atoi(argv[++i]);
@@ -443,8 +605,17 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--peel-trials") && i + 1 < argc) {
             compare_options.PeelTrials = (uint16_t)std::atoi(argv[++i]);
         }
+        else if (!std::strcmp(argv[i], "--auto-trials") && i + 1 < argc) {
+            compare_options.AutoTrials = (uint16_t)std::atoi(argv[++i]);
+        }
         else if (!std::strcmp(argv[i], "--tune-seed") && i + 1 < argc) {
             compare_options.TuneSeed = std::strtoull(argv[++i], 0, 0);
+        }
+        else if (!std::strcmp(argv[i], "--auto-seed") && i + 1 < argc) {
+            compare_options.AutoSeed = std::strtoull(argv[++i], 0, 0);
+        }
+        else if (!std::strcmp(argv[i], "--auto-min-delta") && i + 1 < argc) {
+            compare_options.AutoMinDelta = std::atof(argv[++i]);
         }
     }
 
@@ -462,21 +633,33 @@ int CmdCompare(int argc, char** argv)
     if (compare_options.PeelTrials < 1u) {
         compare_options.PeelTrials = 1u;
     }
+    if (compare_options.AutoTrials < 1u) {
+        compare_options.AutoTrials = 1u;
+    }
+    if (compare_options.AutoMinDelta < 0.0) {
+        compare_options.AutoMinDelta = 0.0;
+    }
+    compare_options.LogAutoChoices =
+        compare_options.ProfileMode == CompareProfileAuto && nlo == nhi;
 
     std::printf(
         "# compare: N=[%u,%u] trials/bb=%u loss=%.2f seed=0x%llx "
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
-        "tune_seed=0x%llx\n",
+        "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
+        "auto_seed=0x%llx\n",
         nlo,
         nhi,
         trials,
         loss,
         (unsigned long long)seed,
         max_message_mib,
-        compare_options.V2Tuned ? "tuned" : "base",
+        CompareProfileModeName(compare_options.ProfileMode),
         compare_options.PeelCandidates,
         compare_options.PeelTrials,
-        (unsigned long long)compare_options.TuneSeed);
+        compare_options.AutoTrials,
+        compare_options.AutoMinDelta,
+        (unsigned long long)compare_options.TuneSeed,
+        (unsigned long long)compare_options.AutoSeed);
     std::printf(
         "%-9s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -524,7 +707,7 @@ int CmdCompare(int argc, char** argv)
 
         Accum baseline;
         Accum v2;
-        std::map<uint64_t, wirehair_v2::SeedProfile> profile_cache;
+        std::map<uint64_t, CachedCompareProfile> profile_cache;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
             const uint32_t N =
@@ -532,14 +715,19 @@ int CmdCompare(int argc, char** argv)
             const uint64_t trial_seed = rng.Next();
             const wirehair_v2::SeedProfile* profile =
                 SelectCompareProfile(
-                    N, block_bytes, compare_options, profile_cache);
+                    N, block_bytes, loss, compare_options, profile_cache);
             AddTrial(baseline, N,
                 RunBaselineTrial(N, block_bytes, loss, trial_seed));
             AddTrial(v2, N,
                 RunV2Trial(N, block_bytes, loss, trial_seed, profile));
         }
         PrintAccum("baseline", block_bytes, baseline);
-        PrintAccum(compare_options.V2Tuned ? "v2_tuned" : "v2", block_bytes, v2);
+        PrintAccum(
+            compare_options.ProfileMode == CompareProfileBase ? "v2" :
+            compare_options.ProfileMode == CompareProfileTuned ? "v2_tuned" :
+            "v2_auto",
+            block_bytes,
+            v2);
     }
     return 0;
 }
@@ -828,6 +1016,117 @@ int CmdDenseTune(int argc, char** argv)
     return 0;
 }
 
+int CmdDenseCount(int argc, char** argv)
+{
+    std::string nlist = "320,1000,3200";
+    std::string bb_list = "1280,102400";
+    std::string delta_list = "-16,-8,-4,0,4,8,16,32";
+    uint32_t trials = 100u;
+    double loss = 0.10;
+    uint64_t seed = UINT64_C(0xdeca770);
+
+    for (int i = 0; i < argc; ++i)
+    {
+        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
+            nlist = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
+            bb_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--deltas") && i + 1 < argc) {
+            delta_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
+            trials = (uint32_t)std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
+            loss = std::atof(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
+            seed = std::strtoull(argv[++i], 0, 0);
+        }
+    }
+
+    if (trials < 1u) {
+        trials = 1u;
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    const std::vector<int> Deltas = ParseSignedIntList(delta_list);
+    if (Ns.empty() || BBs.empty() || Deltas.empty()) {
+        std::fprintf(stderr,
+            "densecount requires non-empty --N, --bb-list, and --deltas\n");
+        return 1;
+    }
+
+    std::printf(
+        "# densecount: trials=%u loss=%.2f seed=0x%llx\n",
+        trials,
+        loss,
+        (unsigned long long)seed);
+    std::printf(
+        "N,bb,base_dense,dense,delta,dense_seed,fail,OH_mean,OH_sd,"
+        "OH50,OH95,OH99,OH_max,create_MBps,decode_MBps,recover_MBps\n");
+
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const uint32_t N = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+        const wirehair_v2::SeedProfile base =
+            wirehair_v2::SelectSeedProfile(N, block_bytes);
+
+        for (int delta : Deltas)
+        {
+            int dense_count = (int)base.DenseCount + delta;
+            if (dense_count < 1) {
+                dense_count = 1;
+            }
+            if (dense_count > CAT_MAX_DENSE_ROWS) {
+                dense_count = CAT_MAX_DENSE_ROWS;
+            }
+
+            wirehair_v2::SeedProfile profile = base;
+            profile.DenseCount = (uint16_t)dense_count;
+            profile.DenseSeed = wirehair::GetDenseSeed(N, profile.DenseCount);
+
+            Accum acc;
+            for (uint32_t trial = 0; trial < trials; ++trial)
+            {
+                const uint64_t trial_seed =
+                    seed ^
+                    ((uint64_t)N * UINT64_C(0x9e3779b97f4a7c15)) ^
+                    ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+                    ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+                AddTrial(acc, N,
+                    RunV2Trial(N, block_bytes, loss, trial_seed, &profile));
+            }
+
+            std::printf(
+                "%u,%u,%u,%u,%d,%u,%llu,%.4f,%.4f,%u,%u,%u,%u,"
+                "%.1f,%.1f,%.1f\n",
+                N,
+                block_bytes,
+                base.DenseCount,
+                profile.DenseCount,
+                delta,
+                profile.DenseSeed,
+                (unsigned long long)acc.Failures,
+                MeanOverheadOrFailure(acc),
+                OverheadStdDev(acc),
+                Percentile(acc.Overheads, 0.50),
+                Percentile(acc.Overheads, 0.95),
+                Percentile(acc.Overheads, 0.99),
+                acc.OverheadMax,
+                Mbps(acc.CreateBytes, acc.CreateSeconds),
+                Mbps(acc.DecodeBytes, acc.DecodeSeconds),
+                Mbps(acc.RecoverBytes, acc.RecoverSeconds));
+        }
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -839,7 +1138,7 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|seedtable|densecheck|densetune [opts]\n");
+            "usage: wirehair_v2_bench compare|seedtable|densecheck|densetune|densecount [opts]\n");
         return 1;
     }
     if (!std::strcmp(argv[1], "compare")) {
@@ -853,6 +1152,9 @@ int main(int argc, char** argv)
     }
     if (!std::strcmp(argv[1], "densetune")) {
         return CmdDenseTune(argc - 2, argv + 2);
+    }
+    if (!std::strcmp(argv[1], "densecount")) {
+        return CmdDenseCount(argc - 2, argv + 2);
     }
     std::fprintf(stderr, "unknown mode: %s\n", argv[1]);
     return 1;
