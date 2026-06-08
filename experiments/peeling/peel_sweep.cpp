@@ -4744,42 +4744,87 @@ static double structure_degree_weight(
     }
 }
 
-static unsigned weighted_degree(
-    const MatrixStructure& structure,
-    unsigned N,
-    unsigned row_count,
-    Rng& rng)
+class WeightedDegreeSampler
 {
-    const unsigned min_degree = clamp_degree(structure.MinDegree, N);
-    const unsigned max_degree = clamp_degree(structure.MaxDegree, N);
-    double total = 0.0;
-    for (unsigned d = min_degree; d <= max_degree; ++d)
+public:
+    WeightedDegreeSampler() = default;
+
+    WeightedDegreeSampler(
+        const MatrixStructure& structure,
+        unsigned N,
+        unsigned row_count)
     {
-        const double w =
-            structure_degree_weight(structure, d, N, row_count, max_degree);
-        total += w;
-    }
-    if (total <= 0.0) {
-        return uniform_degree(min_degree, max_degree, rng);
+        reset(structure, N, row_count);
     }
 
-    double target = rng.unit() * total;
-    for (unsigned d = min_degree; d <= max_degree; ++d)
+    void reset(
+        const MatrixStructure& structure,
+        unsigned N,
+        unsigned row_count)
     {
-        const double w =
-            structure_degree_weight(structure, d, N, row_count, max_degree);
-        if (target <= w) {
-            return d;
+        MinDegree = clamp_degree(structure.MinDegree, N);
+        MaxDegree = clamp_degree(structure.MaxDegree, N);
+        Total = 0.0;
+        Cumulative.clear();
+        Cumulative.reserve(MaxDegree - MinDegree + 1u);
+        for (unsigned d = MinDegree; d <= MaxDegree; ++d)
+        {
+            Total += structure_degree_weight(
+                structure, d, N, row_count, MaxDegree);
+            Cumulative.push_back(Total);
         }
-        target -= w;
+        if (Total <= 0.0) {
+            Cumulative.clear();
+        }
     }
-    return max_degree;
+
+    unsigned sample(Rng& rng) const
+    {
+        if (Cumulative.empty()) {
+            return uniform_degree(MinDegree, MaxDegree, rng);
+        }
+
+        const double target = rng.unit() * Total;
+        for (size_t i = 0; i < Cumulative.size(); ++i)
+        {
+            if (target <= Cumulative[i]) {
+                return MinDegree + (unsigned)i;
+            }
+        }
+        return MaxDegree;
+    }
+
+private:
+    unsigned MinDegree = 1;
+    unsigned MaxDegree = 1;
+    double Total = 0.0;
+    std::vector<double> Cumulative;
+};
+
+static bool uses_weighted_degree_sampler(const MatrixStructure& structure)
+{
+    switch (structure.Kind)
+    {
+    case kStructureLT:
+    case kStructureHarmonic:
+    case kStructureRobustSoliton:
+    case kStructureLTAlpha:
+    case kStructureLTExtra34:
+    case kStructureLTFold:
+    case kStructureLTFoldScale:
+    case kStructureLTHighRows:
+    case kStructureOverheadLT:
+    case kStructureOnePlusLT:
+        return true;
+    default:
+        return false;
+    }
 }
 
 static unsigned choose_structure_degree(
     const MatrixStructure& structure,
     unsigned N,
-    unsigned row_count,
+    const WeightedDegreeSampler& weighted,
     Rng& rng)
 {
     const unsigned min_degree = clamp_degree(structure.MinDegree, N);
@@ -4812,7 +4857,7 @@ static unsigned choose_structure_degree(
     case kStructureLTFoldScale:
     case kStructureLTHighRows:
     case kStructureOverheadLT:
-        return weighted_degree(structure, N, row_count, rng);
+        return weighted.sample(rng);
     case kStructureOnePlusUniform:
         if (rng.unit() < structure.A) {
             return 1;
@@ -4822,7 +4867,7 @@ static unsigned choose_structure_degree(
         if (rng.unit() < structure.A) {
             return 1;
         }
-        return weighted_degree(structure, N, row_count, rng);
+        return weighted.sample(rng);
     case kStructureTwoModeUniform:
         if (rng.unit() < structure.A)
         {
@@ -5180,6 +5225,10 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
     uint64_t seed)
 {
     Rng rng(seed);
+    WeightedDegreeSampler degree_sampler;
+    if (uses_weighted_degree_sampler(structure)) {
+        degree_sampler.reset(structure, N, row_count);
+    }
     std::vector<unsigned> column_loads(N, 0);
     unsigned total_refs = 0;
     std::vector<std::vector<uint16_t> > rows;
@@ -5204,8 +5253,10 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
         else
         {
             const unsigned degree = is_raptorq_ldpc_structure(structure) ?
-                choose_structure_degree(kStructures[0], N, row_count, rng) :
-                choose_structure_degree(structure, N, row_count, rng);
+                choose_structure_degree(
+                    kStructures[0], N, degree_sampler, rng) :
+                choose_structure_degree(
+                    structure, N, degree_sampler, rng);
             row = structure.Kind == kStructureBalancedUniform ?
                 balanced_row_columns(structure, N, degree, column_loads,
                     total_refs, rng) :

@@ -119,6 +119,33 @@ void CheckV2RoundTrip()
         "v2 recovered message should match input");
 }
 
+void CheckGeneratedRows(
+    const wirehair_v2::PeelingCodec& codec,
+    uint32_t block_count,
+    uint32_t row_count,
+    uint64_t seed)
+{
+    const std::vector<std::vector<uint16_t> > rows =
+        wirehair_v2::GeneratePeelMatrixRows(
+            codec, block_count, row_count, seed);
+    const std::vector<std::vector<uint16_t> > rows_repeat =
+        wirehair_v2::GeneratePeelMatrixRows(
+            codec, block_count, row_count, seed);
+
+    Check(rows.size() == row_count,
+        "generated matrix should contain requested rows");
+    Check(rows == rows_repeat, "generated matrix rows should be deterministic");
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        Check(!rows[i].empty(), "generated row should not be empty");
+        Check(rows[i].size() <= codec.MaxDegree,
+            "generated row should obey degree cap");
+        Check(rows[i].size() <= block_count,
+            "generated row should not exceed block count");
+        CheckRowHasNoDuplicates(rows[i]);
+    }
+}
+
 } // namespace
 
 int main()
@@ -221,14 +248,22 @@ int main()
 
     const PeelingCodec eval_codec =
         MakePeelingCodec(PeelStructure::LtM1C16, PeelSolver::KsBmaxTop16);
-    const std::vector<std::vector<uint16_t> > rows =
-        GeneratePeelMatrixRows(eval_codec, 48u, 48u, UINT64_C(0x1234));
-    Check(rows.size() == 48u, "generated matrix should contain requested rows");
-    for (size_t i = 0; i < rows.size(); ++i)
+    const PeelStructure all_structures[] = {
+        PeelStructure::LtM1C16,
+        PeelStructure::LtM1C32,
+        PeelStructure::LtM1C64,
+        PeelStructure::LtM2C96,
+        PeelStructure::RobustD1_001D2_003,
+        PeelStructure::RobustD1_001D2_012,
+        PeelStructure::RsC001D50C128,
+        PeelStructure::RsC003D10C128
+    };
+    for (size_t i = 0; i < sizeof(all_structures) / sizeof(all_structures[0]); ++i)
     {
-        Check(!rows[i].empty(), "generated row should not be empty");
-        Check(rows[i].size() <= 16u, "generated row should obey degree cap");
-        CheckRowHasNoDuplicates(rows[i]);
+        CheckGeneratedRows(
+            MakePeelingCodec(all_structures[i], PeelSolver::KsBmaxTop16),
+            96u, 97u,
+            UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
 
     const PeelEvaluation eval_a =

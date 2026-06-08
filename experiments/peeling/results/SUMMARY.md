@@ -929,3 +929,30 @@ Readout:
   further, the next step should be a truly incremental avalanche/bucket
   implementation or a tail-only trigger tuned specifically for large block
   sizes.
+
+## Cached Degree Sampler Optimization
+
+Follow-up implementation pass: weighted random-row structures now build their
+degree CDF once per generated matrix instead of recomputing degree weights for
+every row.  This is a speed-only change; deterministic non-timing columns were
+identical before and after on a paired `lt_m2_c320`, `rs_c001_d50_c128`, and
+`wirehair_rand` smoke sweep.
+
+Measured on `N=1000`, 5 trials, `ks_bmax_top16`, overhead 0:
+
+| structure | build_us before | build_us after | change |
+| --- | ---: | ---: | ---: |
+| `lt_m2_c320` | 1193.2 | 381.6 | -68.0% |
+| `rs_c001_d50_c128` | 1143.2 | 275.6 | -75.9% |
+| `wirehair_rand` | 270.6 | 259.4 | -4.1% |
+
+The same cache was added to the smaller codec-side v2 peel evaluator.  The
+focused seed-table case
+`N=32000 --peel-candidates 128 --trials 4 --bb-list 1280` stayed byte-identical
+and improved from 121.65s to 116.83s (-4.0%).  Validation:
+
+- `cmake --build build --target wirehair_v2_policy_test wirehair_v2_bench -j 8`
+- `./build/codec/wirehair_v2_policy_test`
+- `./experiments/peeling/build.sh`
+- `./experiments/peeling/peel_sweep --self-test`
+- ASan/UBSan `peel_sweep --self-test`

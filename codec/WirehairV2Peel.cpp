@@ -115,31 +115,48 @@ double DegreeWeight(
     return LtWeight(degree, block_count);
 }
 
-uint32_t ChooseDegree(
-    const PeelingCodec& codec,
-    uint32_t block_count,
-    Rng& rng)
+class DegreeSampler
 {
-    const uint32_t min_degree = ClampDegree(codec.MinDegree, block_count);
-    const uint32_t max_degree = ClampDegree(codec.MaxDegree, block_count);
-    double total = 0.0;
-    for (uint32_t d = min_degree; d <= max_degree; ++d) {
-        total += DegreeWeight(codec, d, block_count);
-    }
-    if (total <= 0.0) {
-        return min_degree;
-    }
-    double target = rng.Unit() * total;
-    for (uint32_t d = min_degree; d <= max_degree; ++d)
+public:
+    DegreeSampler(
+        const PeelingCodec& codec,
+        uint32_t block_count)
+        : MinDegree(ClampDegree(codec.MinDegree, block_count)),
+          MaxDegree(ClampDegree(codec.MaxDegree, block_count))
     {
-        const double w = DegreeWeight(codec, d, block_count);
-        if (target <= w) {
-            return d;
+        Cumulative.reserve(MaxDegree - MinDegree + 1u);
+        for (uint32_t d = MinDegree; d <= MaxDegree; ++d)
+        {
+            Total += DegreeWeight(codec, d, block_count);
+            Cumulative.push_back(Total);
         }
-        target -= w;
+        if (Total <= 0.0) {
+            Cumulative.clear();
+        }
     }
-    return max_degree;
-}
+
+    uint32_t Sample(Rng& rng) const
+    {
+        if (Cumulative.empty()) {
+            return MinDegree;
+        }
+
+        const double target = rng.Unit() * Total;
+        for (size_t i = 0; i < Cumulative.size(); ++i)
+        {
+            if (target <= Cumulative[i]) {
+                return MinDegree + (uint32_t)i;
+            }
+        }
+        return MaxDegree;
+    }
+
+private:
+    uint32_t MinDegree;
+    uint32_t MaxDegree;
+    double Total = 0.0;
+    std::vector<double> Cumulative;
+};
 
 std::vector<uint16_t> RandomRowColumns(
     uint32_t block_count,
@@ -450,11 +467,12 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     uint64_t seed)
 {
     Rng rng(seed);
+    const DegreeSampler degrees(codec, block_count);
     std::vector<std::vector<uint16_t> > rows;
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
     {
-        const uint32_t degree = ChooseDegree(codec, block_count, rng);
+        const uint32_t degree = degrees.Sample(rng);
         rows.push_back(RandomRowColumns(block_count, degree, rng));
     }
     return rows;
