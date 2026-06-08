@@ -956,3 +956,22 @@ and improved from 121.65s to 116.83s (-4.0%).  Validation:
 - `./experiments/peeling/build.sh`
 - `./experiments/peeling/peel_sweep --self-test`
 - ASan/UBSan `peel_sweep --self-test`
+
+## Codec V2 Peel Scorer Shortcuts
+
+Follow-up codec-side pass: the v2 peel evaluator no longer rescans incident
+rows to count live references for todo columns.  For a todo column, every
+incident row necessarily still has at least that column live, so the live-row
+count is the stored column incidence count.  Boundary scoring for the top-K
+degree-2 component candidates now uses the degree-2 endpoint counts already
+collected during candidate construction instead of rescanning incident rows.
+
+The focused seed-table case
+`N=32000 --peel-candidates 128 --trials 4 --bb-list 1280` stayed byte-identical
+and improved further from 116.83s to 51.35s.  Relative to the pre-cache
+baseline from the previous pass, the same case moved from 121.65s to 51.35s
+(-57.8%).  Validation:
+
+- `cmake --build build --target wirehair_v2_policy_test wirehair_v2_bench -j 8`
+- `./build/codec/wirehair_v2_policy_test`
+- `wirehair_v2_bench seedtable --N 1000,6400,32000 --bb-list 1280,102400 --peel-candidates 8 --trials 2`

@@ -215,6 +215,13 @@ struct ColumnState
     bool Todo;
 };
 
+struct ColumnCandidate
+{
+    uint16_t Column;
+    uint32_t Refs;
+    uint32_t Degree2Refs;
+};
+
 class PeelSolverState
 {
 public:
@@ -331,14 +338,9 @@ private:
 
     uint32_t CountLiveRowsForColumn(uint16_t column) const
     {
-        uint32_t count = 0;
-        for (uint16_t row_i : Columns[column].Rows)
-        {
-            if (Rows[row_i].Live > 0u) {
-                ++count;
-            }
-        }
-        return count;
+        // For a todo column, every incident row still has at least this
+        // column live, so the live-row count is just the stored incidence.
+        return (uint32_t)Columns[column].Rows.size();
     }
 
     void MarkResidualRows(uint16_t column)
@@ -382,8 +384,8 @@ private:
 
     uint16_t SelectDegree2ComponentColumn(uint16_t top_k) const
     {
-        std::vector<uint16_t> candidates;
-        candidates.reserve(BlockCount);
+        std::vector<uint16_t> degree2_columns;
+        degree2_columns.reserve(BlockCount);
         for (uint32_t r = 0; r < Rows.size(); ++r)
         {
             if (Rows[r].Live != 2u) {
@@ -392,57 +394,61 @@ private:
             for (uint16_t c : Rows[r].Columns)
             {
                 if (Columns[c].Todo) {
-                    candidates.push_back(c);
+                    degree2_columns.push_back(c);
                 }
             }
         }
-        if (candidates.empty()) {
+        if (degree2_columns.empty()) {
             return SelectFallbackColumn();
         }
-        std::sort(candidates.begin(), candidates.end());
-        candidates.erase(std::unique(candidates.begin(), candidates.end()),
-            candidates.end());
+        std::sort(degree2_columns.begin(), degree2_columns.end());
+
+        std::vector<ColumnCandidate> candidates;
+        candidates.reserve(degree2_columns.size());
+        for (size_t i = 0; i < degree2_columns.size();)
+        {
+            const uint16_t column = degree2_columns[i];
+            size_t j = i + 1u;
+            while (j < degree2_columns.size() && degree2_columns[j] == column) {
+                ++j;
+            }
+
+            ColumnCandidate candidate;
+            candidate.Column = column;
+            candidate.Refs = CountLiveRowsForColumn(column);
+            candidate.Degree2Refs = (uint32_t)(j - i);
+            candidates.push_back(candidate);
+            i = j;
+        }
 
         std::sort(candidates.begin(), candidates.end(),
-            [this](uint16_t a, uint16_t b) {
-                const uint32_t ar = CountLiveRowsForColumn(a);
-                const uint32_t br = CountLiveRowsForColumn(b);
-                if (ar != br) {
-                    return ar < br;
+            [](const ColumnCandidate& a, const ColumnCandidate& b) {
+                if (a.Refs != b.Refs) {
+                    return a.Refs < b.Refs;
                 }
-                return a < b;
+                return a.Column < b.Column;
             });
 
         if (top_k == 0u || top_k > candidates.size()) {
             top_k = (uint16_t)candidates.size();
         }
 
-        uint16_t best = candidates[0];
+        uint16_t best = candidates[0].Column;
         uint32_t best_boundary = 0;
         for (uint16_t i = 0; i < top_k; ++i)
         {
-            const uint16_t c = candidates[i];
-            const uint32_t boundary = CountBoundaryRows(c);
+            const ColumnCandidate& c = candidates[i];
+            // Singleton rows were exhausted before inactivation selection, so
+            // non-degree-2 incident rows are exactly the boundary rows.
+            const uint32_t boundary =
+                c.Refs > c.Degree2Refs ? c.Refs - c.Degree2Refs : 0u;
             if (i == 0u || boundary > best_boundary)
             {
-                best = c;
+                best = c.Column;
                 best_boundary = boundary;
             }
         }
         return best;
-    }
-
-    uint32_t CountBoundaryRows(uint16_t column) const
-    {
-        uint32_t boundary = 0;
-        for (uint16_t row_i : Columns[column].Rows)
-        {
-            const RowState& row = Rows[row_i];
-            if (row.Live > 2u) {
-                ++boundary;
-            }
-        }
-        return boundary;
     }
 
     const PeelingCodec& Codec;
