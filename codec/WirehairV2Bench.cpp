@@ -99,6 +99,9 @@ struct CompareOptions
     uint64_t TuneSeed = UINT64_C(0x9a7e11a);
     uint64_t AutoSeed = UINT64_C(0xa570ca1);
     double AutoMinDelta = 0.10;
+    bool DenseOverride = false;
+    int DenseDelta = 0;
+    uint16_t DenseCandidate = 0;
     bool LogAutoChoices = false;
 };
 
@@ -411,6 +414,30 @@ wirehair_v2::SeedProfile BuildTunedProfile(
     return wirehair_v2::TuneSeedProfile(N, block_bytes, tuning);
 }
 
+void ApplyDenseOverride(
+    wirehair_v2::SeedProfile& profile,
+    const CompareOptions& options)
+{
+    if (!options.DenseOverride) {
+        return;
+    }
+
+    int dense_count = (int)profile.DenseCount + options.DenseDelta;
+    if (dense_count < 1) {
+        dense_count = 1;
+    }
+    if (dense_count > CAT_MAX_DENSE_ROWS) {
+        dense_count = CAT_MAX_DENSE_ROWS;
+    }
+
+    profile.DenseCount = (uint16_t)dense_count;
+    const uint16_t table_seed =
+        wirehair::GetDenseSeed(profile.BlockCount, profile.DenseCount);
+    profile.DenseSeed =
+        wirehair_v2::CandidateDenseSeed(table_seed, options.DenseCandidate);
+    profile.UsedDenseFixup = profile.DenseSeed != table_seed;
+}
+
 void CalibrateAutoProfile(
     uint32_t N,
     uint32_t block_bytes,
@@ -465,6 +492,18 @@ const wirehair_v2::SeedProfile* SelectCompareProfile(
     std::map<uint64_t, CachedCompareProfile>& cache)
 {
     if (options.ProfileMode == CompareProfileBase) {
+        if (options.DenseOverride)
+        {
+            CachedCompareProfile cached;
+            cached.UseTuned = true;
+            cached.TunedProfile =
+                wirehair_v2::SelectSeedProfile(N, block_bytes);
+            ApplyDenseOverride(cached.TunedProfile, options);
+            const std::map<uint64_t, CachedCompareProfile>::iterator inserted =
+                cache.insert(std::make_pair(
+                    ProfileCacheKey(N, block_bytes), cached)).first;
+            return &inserted->second.TunedProfile;
+        }
         return 0;
     }
 
@@ -480,9 +519,20 @@ const wirehair_v2::SeedProfile* SelectCompareProfile(
     {
         cached.UseTuned = true;
         cached.TunedProfile = BuildTunedProfile(N, block_bytes, options);
+        ApplyDenseOverride(cached.TunedProfile, options);
     }
     else {
         CalibrateAutoProfile(N, block_bytes, loss, options, cached);
+        if (!cached.UseTuned && options.DenseOverride)
+        {
+            cached.UseTuned = true;
+            cached.TunedProfile =
+                wirehair_v2::SelectSeedProfile(N, block_bytes);
+            ApplyDenseOverride(cached.TunedProfile, options);
+        }
+        else if (cached.UseTuned) {
+            ApplyDenseOverride(cached.TunedProfile, options);
+        }
     }
     const std::map<uint64_t, CachedCompareProfile>::iterator inserted =
         cache.insert(std::make_pair(key, cached)).first;
@@ -617,6 +667,14 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--auto-min-delta") && i + 1 < argc) {
             compare_options.AutoMinDelta = std::atof(argv[++i]);
         }
+        else if (!std::strcmp(argv[i], "--dense-delta") && i + 1 < argc) {
+            compare_options.DenseOverride = true;
+            compare_options.DenseDelta = std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--dense-candidate") && i + 1 < argc) {
+            compare_options.DenseOverride = true;
+            compare_options.DenseCandidate = (uint16_t)std::atoi(argv[++i]);
+        }
     }
 
     const std::vector<int> block_bytes_list = ParseIntList(bb_list);
@@ -639,6 +697,9 @@ int CmdCompare(int argc, char** argv)
     if (compare_options.AutoMinDelta < 0.0) {
         compare_options.AutoMinDelta = 0.0;
     }
+    if (compare_options.DenseCandidate > 255u) {
+        compare_options.DenseCandidate = 255u;
+    }
     compare_options.LogAutoChoices =
         compare_options.ProfileMode == CompareProfileAuto && nlo == nhi;
 
@@ -646,7 +707,8 @@ int CmdCompare(int argc, char** argv)
         "# compare: N=[%u,%u] trials/bb=%u loss=%.2f seed=0x%llx "
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
-        "auto_seed=0x%llx\n",
+        "auto_seed=0x%llx dense_override=%u dense_delta=%d "
+        "dense_candidate=%u\n",
         nlo,
         nhi,
         trials,
@@ -659,7 +721,10 @@ int CmdCompare(int argc, char** argv)
         compare_options.AutoTrials,
         compare_options.AutoMinDelta,
         (unsigned long long)compare_options.TuneSeed,
-        (unsigned long long)compare_options.AutoSeed);
+        (unsigned long long)compare_options.AutoSeed,
+        compare_options.DenseOverride ? 1u : 0u,
+        compare_options.DenseDelta,
+        compare_options.DenseCandidate);
     std::printf(
         "%-9s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -1127,6 +1192,138 @@ int CmdDenseCount(int argc, char** argv)
     return 0;
 }
 
+int CmdDenseGrid(int argc, char** argv)
+{
+    std::string nlist = "320,1000";
+    std::string bb_list = "1280,102400";
+    std::string delta_list = "-8,0,8";
+    uint32_t candidates = 8u;
+    uint32_t trials = 80u;
+    double loss = 0.10;
+    uint64_t seed = UINT64_C(0xded6e12d);
+
+    for (int i = 0; i < argc; ++i)
+    {
+        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
+            nlist = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
+            bb_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--deltas") && i + 1 < argc) {
+            delta_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
+            candidates = (uint32_t)std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
+            trials = (uint32_t)std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
+            loss = std::atof(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
+            seed = std::strtoull(argv[++i], 0, 0);
+        }
+    }
+
+    if (candidates < 1u) {
+        candidates = 1u;
+    }
+    if (candidates > 256u) {
+        candidates = 256u;
+    }
+    if (trials < 1u) {
+        trials = 1u;
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    const std::vector<int> Deltas = ParseSignedIntList(delta_list);
+    if (Ns.empty() || BBs.empty() || Deltas.empty()) {
+        std::fprintf(stderr,
+            "densegrid requires non-empty --N, --bb-list, and --deltas\n");
+        return 1;
+    }
+
+    std::printf(
+        "# densegrid: candidates=%u trials=%u loss=%.2f seed=0x%llx\n",
+        candidates,
+        trials,
+        loss,
+        (unsigned long long)seed);
+    std::printf(
+        "N,bb,base_dense,dense,delta,table_dense_seed,candidate,dense_seed,"
+        "fail,OH_mean,OH_sd,OH50,OH95,OH99,OH_max,create_MBps,decode_MBps,"
+        "recover_MBps\n");
+
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const uint32_t N = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+        const wirehair_v2::SeedProfile base =
+            wirehair_v2::SelectSeedProfile(N, block_bytes);
+
+        for (int delta : Deltas)
+        {
+            int dense_count = (int)base.DenseCount + delta;
+            if (dense_count < 1) {
+                dense_count = 1;
+            }
+            if (dense_count > CAT_MAX_DENSE_ROWS) {
+                dense_count = CAT_MAX_DENSE_ROWS;
+            }
+            const uint16_t dense_count_u = (uint16_t)dense_count;
+            const uint16_t table_seed =
+                wirehair::GetDenseSeed(N, dense_count_u);
+
+            for (uint32_t candidate = 0; candidate < candidates; ++candidate)
+            {
+                wirehair_v2::SeedProfile profile = base;
+                profile.DenseCount = dense_count_u;
+                profile.DenseSeed = wirehair_v2::CandidateDenseSeed(
+                    table_seed, (uint16_t)candidate);
+
+                Accum acc;
+                for (uint32_t trial = 0; trial < trials; ++trial)
+                {
+                    const uint64_t trial_seed =
+                        seed ^
+                        ((uint64_t)N * UINT64_C(0x9e3779b97f4a7c15)) ^
+                        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+                        ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+                    AddTrial(acc, N,
+                        RunV2Trial(N, block_bytes, loss, trial_seed, &profile));
+                }
+
+                std::printf(
+                    "%u,%u,%u,%u,%d,%u,%u,%u,%llu,%.4f,%.4f,%u,%u,%u,%u,"
+                    "%.1f,%.1f,%.1f\n",
+                    N,
+                    block_bytes,
+                    base.DenseCount,
+                    profile.DenseCount,
+                    delta,
+                    table_seed,
+                    candidate,
+                    profile.DenseSeed,
+                    (unsigned long long)acc.Failures,
+                    MeanOverheadOrFailure(acc),
+                    OverheadStdDev(acc),
+                    Percentile(acc.Overheads, 0.50),
+                    Percentile(acc.Overheads, 0.95),
+                    Percentile(acc.Overheads, 0.99),
+                    acc.OverheadMax,
+                    Mbps(acc.CreateBytes, acc.CreateSeconds),
+                    Mbps(acc.DecodeBytes, acc.DecodeSeconds),
+                    Mbps(acc.RecoverBytes, acc.RecoverSeconds));
+            }
+        }
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1138,7 +1335,7 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|seedtable|densecheck|densetune|densecount [opts]\n");
+            "usage: wirehair_v2_bench compare|seedtable|densecheck|densetune|densecount|densegrid [opts]\n");
         return 1;
     }
     if (!std::strcmp(argv[1], "compare")) {
@@ -1155,6 +1352,9 @@ int main(int argc, char** argv)
     }
     if (!std::strcmp(argv[1], "densecount")) {
         return CmdDenseCount(argc - 2, argv + 2);
+    }
+    if (!std::strcmp(argv[1], "densegrid")) {
+        return CmdDenseGrid(argc - 2, argv + 2);
     }
     std::fprintf(stderr, "unknown mode: %s\n", argv[1]);
     return 1;

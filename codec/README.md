@@ -54,6 +54,8 @@ Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and
 report overhead.  Both modes report `-1` for mean overhead when every trial
 failed, and `densetune` compares candidates for explicit N/block-byte lists.
+`densecount` sweeps dense row-count deltas with paired trial seeds, and
+`densegrid` sweeps dense row-count deltas plus dense seed candidates.
 
 ## Codec Wrapper
 
@@ -76,8 +78,10 @@ cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
 ./build/codec/wirehair_v2_bench compare --nlo 3200 --nhi 3200 --trials 20 --bb-list 1280 --v2-profile tuned --peel-candidates 8 --peel-trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
+./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench densecheck --N 7533 --bb 1280 --candidates 4 --trials 1
 ./build/codec/wirehair_v2_bench densetune --N 320,1000 --bb-list 1280 --candidates 4 --trials 2
 ./build/codec/wirehair_v2_bench densecount --N 320,1000 --bb-list 1280 --deltas -8,0,8 --trials 20
+./build/codec/wirehair_v2_bench densegrid --N 320 --bb-list 102400 --deltas -16,0,4 --candidates 8 --trials 20
 ```
