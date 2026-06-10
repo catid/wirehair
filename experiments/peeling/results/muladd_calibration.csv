@@ -1,0 +1,4 @@
+block_bytes,pool_blocks,ops_per_repeat,repeats,xor_median_us_per_op,xor_median_gib_per_s,muladd_median_us_per_op,muladd_median_gib_per_s,muladd_xor_ratio,checksum
+1280,3355443,26843545,5,0.154693115,15.412,0.283156334,8.420,1.8304,0xb4ab058b55359e6f
+102400,41943,335544,5,5.674483084,33.613,6.228047902,30.625,1.0976,0xaed593a15f4cf349
+1048576,4096,32768,5,55.369071198,35.275,55.505721559,35.188,1.0025,0xeb9c8d892147dd3c

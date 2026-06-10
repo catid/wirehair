@@ -5,6 +5,31 @@ They do not model dense solver cost or dense residual success probability.
 `N` is the number of blocks; payload bytes and memory pressure scale as
 `N * block_bytes`.
 
+## Quiet-Window Block-Operation Calibration (2026-06-10)
+
+Calibration files:
+
+- `cold_xor_calibration.csv`: cold-pool block-XOR baseline.
+- `muladd_calibration.csv`: `gf256_muladd_mem` vs XOR on the same cold-pool
+  protocol.
+- `fanin_gather.csv`: chained pairwise XORs vs fused k-ary gather XOR.
+
+Protocol: `xor_bench`, 4 GiB cold pool, `--target-gib 32`, 5 repeats, seed 1,
+single-core `taskset -c 8`.  The cold XOR baseline reports 15.2 GiB/s at
+1280-byte blocks, 33.7 GiB/s at 100 KiB, and 35.1 GiB/s at 1 MiB.
+
+`gf256_muladd_mem` is much slower than XOR only for 1280-byte blocks
+(`muladd_xor_ratio=1.83`).  At 100 KiB it is close to XOR (`1.10`), and at
+1 MiB it is effectively bandwidth-equivalent (`1.00`).  Heavy-row cost models
+should therefore not apply a large muladd penalty at large block sizes.
+
+The fused gather-XOR experiment is not strong enough to justify a production
+gather-kernel phase.  The session-plan kill gate was add8 >= 1.15x at 1 MiB;
+the measured add8 ratio is 1.127x at 1 MiB.  Gather remains useful as evidence
+for the cost model (`k=8` is 1.34x at 100 KiB and 2.22x at 1280 bytes), but
+the production implementation branch should stop unless a real schedule replay
+shows a stronger bottleneck-specific win.
+
 ## Fresh Random-Only Sweep
 
 Original broad-sweep protocol:
