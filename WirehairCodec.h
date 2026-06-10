@@ -307,7 +307,7 @@ class Codec
     // Parameters
 
     /// Number of bytes in a block
-    unsigned _block_bytes = 0;
+    size_t _block_bytes = 0;
 
     /// Number of blocks in the message
     uint16_t _block_count = 0;

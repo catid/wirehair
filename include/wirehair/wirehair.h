@@ -165,7 +165,6 @@ typedef struct WirehairCodec_t { char impl; }* WirehairCodec;
     Preconditions:
         N >= 2
         N <= 64000
-        (N + 512) * blockBytes < 2^32 (internal offsets are 32-bit)
 
     Pass 0 for reuseOpt if you do not want to reuse a WirehairCodec object.
     If this function fails, any codec passed via reuseOpt has been freed:

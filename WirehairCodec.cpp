@@ -3082,12 +3082,11 @@ WirehairResult Codec::ChooseMatrix(
         return Wirehair_BadInput_LargeN;
     }
 
-    // All per-block offset arithmetic below multiplies a block index by the
-    // 32-bit _block_bytes; if the intermediate block span can reach 2^32
-    // bytes those products wrap and silently corrupt data, so reject here.
+    // 32-bit platforms cannot address the largest intermediate block offset.
     const uint64_t max_block_index =
         block_count_wide + CAT_MAX_DENSE_ROWS + kHeavyRows + 1;
-    if (max_block_index * block_bytes > UINT64_C(0xFFFFFFFF)) {
+    if (sizeof(size_t) < sizeof(uint64_t) &&
+        max_block_index * block_bytes > static_cast<uint64_t>((size_t)-1)) {
         return Wirehair_InvalidInput;
     }
 
