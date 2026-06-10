@@ -35,6 +35,8 @@ equal failure rate, much cheaper solve.
 | 10000 | ldpc | 1.95% | 159.6 (-17%) | 94.6k (-29%) | 62.7k (-43%) |
 | 32000 | dense (prod) | 1.43% | 461.5 | 459.4k | 1526.5k |
 | 32000 | ldpc | 1.73% | 331.2 (-28%) | 318.1k (-31%) | 566.8k (-63%) |
+| 64000 | dense (prod) | 1.40% | 843.8 | 952.2k | 9358.6k |
+| 64000 | ldpc | 1.70% | 575.1 (-32%) | 646.0k (-32%) | 2972.5k (-68%) |
 
 backsub XORs (the dominant block cost) are equal between dense and ldpc at
 equal column counts; the savings above are on top of that.
@@ -66,8 +68,9 @@ sparse 29.4k, bitops 16.6k.
 - Shrinking D below a K-dependent threshold introduces a heavy-tailed def
   distribution (def up to ~30) that overhead does NOT fix; the def PDF shows
   production-size D pins def exactly at its minimum H while undersized D has
-  a long tail.  At K=32000, S=95 (half) collapses entirely (99%+ fail).
-  Safe shrink shrinks with K: ~0.8x at K=1000-3200, ~1.0x by K=10000+.
+  a long tail.  At K=32000 and K=64000, half-size precodes collapse entirely
+  (99-100% fail).  Safe shrink shrinks with K: ~0.8x at K=1000-3200, ~1.0x by
+  K=10000+.
 - Fixed-weight sparse dense rows (w32/w64) are NOT viable replacements
   (fail 25-100%).
 - Heavy-only (no binary precode) needs H ~ 64 at K=10000+ and is dominated.
