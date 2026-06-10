@@ -45,6 +45,15 @@ seeds for the same modulo bucket at H=0 (`rows = N`) and picks a non-outlier
 candidate with low estimated XOR cost.  This is intended to prevent degenerate
 N where the residual or solve XOR count spikes.
 
+**Model-transfer caveat (wirehair-b6h):** TuneSeedProfile scores candidates in
+the v2 synthetic row model, but the winning seed is injected into the
+PRODUCTION solver as `_p_seed`, which drives a completely different
+seed-to-matrix mapping.  The bench `tuned` arm therefore measures an
+effectively random seed replacement, not tuning signal; only the `auto` arm
+(which A/B-validates tuned-vs-base with real trials) produces decision-grade
+numbers.  Do not draw conclusions from `tuned`-arm sweeps until the tuner
+evaluates candidates with real codec trials.
+
 `BuildPeelSolvePlan()` is the shared policy-driven row-generation path.  It
 combines `PeelingCodec` + `SeedProfile` into a deterministic matrix seed,
 generates rows, and runs the selected peel solver/evaluator.  The seed-table
