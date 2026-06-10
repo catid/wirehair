@@ -253,6 +253,41 @@ void CheckDecodeAfterAllOriginalSuccess()
     wirehair_free(decoder);
 }
 
+void CheckPeelSolverSelectionSemantics()
+{
+    wirehair_v2::PeelingCodec lowref =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::RqccLowref);
+    std::vector<std::vector<uint16_t> > lowref_rows;
+    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u});
+    lowref_rows.push_back(std::vector<uint16_t>{1u, 2u});
+    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u, 3u});
+    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u, 4u});
+    const wirehair_v2::PeelEvaluation lowref_eval =
+        wirehair_v2::EvaluatePeelingRows(lowref, 5u, lowref_rows);
+    Check(lowref_eval.ResidualColumns == 1u,
+        "rqcc_lowref should solve the hand matrix with one inactivation");
+    Check(lowref_eval.ResidualRows == 1u,
+        "rqcc_lowref should pick the low-ref endpoint in the largest D2 component");
+
+    wirehair_v2::PeelingCodec ks =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+    std::vector<std::vector<uint16_t> > ks_rows;
+    for (uint16_t column = 0u; column < 17u; ++column) {
+        ks_rows.push_back(std::vector<uint16_t>{column, (uint16_t)(column + 1u)});
+    }
+    ks_rows.push_back(std::vector<uint16_t>{0u, 1u, 18u});
+    const wirehair_v2::PeelEvaluation ks_eval =
+        wirehair_v2::EvaluatePeelingRows(ks, 19u, ks_rows);
+    Check(ks_eval.ResidualColumns == 1u,
+        "ks_bmax_top16 should solve the hand matrix with one inactivation");
+    Check(ks_eval.ResidualRows == 3u,
+        "ks_bmax_top16 should boundary-score after top-default D2 filtering");
+}
+
 } // namespace
 
 int main()
@@ -330,6 +365,7 @@ int main()
         MakePeelingCodec(PeelStructure::LtM1C32, PeelSolver::RqccLowref);
     Check(lowref.SolverCandidateLimit == 0u,
         "rqcc_lowref should not use a top-K boundary candidate limit");
+    CheckPeelSolverSelectionSemantics();
 
     Check(ToString(PeelSolver::KsBmaxTop16) == std::string("ks_bmax_top16"),
         "solver string mismatch");

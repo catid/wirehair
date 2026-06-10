@@ -212,6 +212,7 @@ struct RowState
 struct ColumnState
 {
     std::vector<uint16_t> Rows;
+    uint32_t Weight2Refs;
     bool Todo;
 };
 
@@ -220,6 +221,9 @@ struct ColumnCandidate
     uint16_t Column;
     uint32_t Refs;
     uint32_t Degree2Refs;
+    uint32_t Weight2Refs;
+    uint32_t Lookahead;
+    uint32_t Fill;
 };
 
 class PeelSolverState
@@ -236,6 +240,7 @@ public:
           DeferredRows(rows.size(), 0)
     {
         for (uint32_t c = 0; c < block_count; ++c) {
+            Columns[c].Weight2Refs = 0u;
             Columns[c].Todo = true;
         }
         for (uint32_t r = 0; r < rows.size(); ++r)
@@ -247,6 +252,9 @@ public:
             }
             if (Rows[r].Live == 1u) {
                 Queue.push((uint16_t)r);
+            }
+            else if (Rows[r].Live == 2u) {
+                IncrementWeight2Refs(Rows[r]);
             }
         }
         TodoColumns = block_count;
@@ -333,6 +341,9 @@ private:
             if (row.Live == 1u) {
                 Queue.push(row_i);
             }
+            else if (row.Live == 2u) {
+                IncrementWeight2Refs(row);
+            }
         }
     }
 
@@ -341,6 +352,36 @@ private:
         // For a todo column, every incident row still has at least this
         // column live, so the live-row count is just the stored incidence.
         return (uint32_t)Columns[column].Rows.size();
+    }
+
+    unsigned ScanTodoColumns(
+        const RowState& row,
+        uint16_t* out,
+        unsigned out_count) const
+    {
+        unsigned count = 0u;
+        for (uint16_t c : row.Columns)
+        {
+            if (Columns[c].Todo)
+            {
+                if (count < out_count) {
+                    out[count] = c;
+                }
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    void IncrementWeight2Refs(const RowState& row)
+    {
+        uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
+        const unsigned count = ScanTodoColumns(row, live, 2u);
+        if (count != 2u) {
+            return;
+        }
+        ++Columns[live[0]].Weight2Refs;
+        ++Columns[live[1]].Weight2Refs;
     }
 
     void MarkResidualRows(uint16_t column)
@@ -358,97 +399,327 @@ private:
     uint16_t SelectInactivationColumn() const
     {
         if (Codec.Solver == PeelSolver::RqccLowref) {
-            return SelectDegree2ComponentColumn(0u);
+            return SelectRqccLowRefColumn();
         }
-        return SelectDegree2ComponentColumn(Codec.SolverCandidateLimit);
+        return SelectKsBoundaryTopKColumn(Codec.SolverCandidateLimit);
     }
 
-    uint16_t SelectFallbackColumn() const
+    bool LowRefBetter(
+        const ColumnCandidate& a,
+        const ColumnCandidate& b) const
     {
-        uint16_t best = UINT16_MAX;
-        uint32_t best_refs = UINT_MAX;
+        if (a.Refs != b.Refs) {
+            return a.Refs < b.Refs;
+        }
+        if (a.Weight2Refs != b.Weight2Refs) {
+            return a.Weight2Refs > b.Weight2Refs;
+        }
+        return a.Column > b.Column;
+    }
+
+    bool DefaultBetter(
+        const ColumnCandidate& a,
+        const ColumnCandidate& b) const
+    {
+        if (a.Weight2Refs != b.Weight2Refs) {
+            return a.Weight2Refs > b.Weight2Refs;
+        }
+        if (a.Refs != b.Refs) {
+            return a.Refs > b.Refs;
+        }
+        return a.Column > b.Column;
+    }
+
+    bool BoundaryBetter(
+        const ColumnCandidate& a,
+        const ColumnCandidate& b) const
+    {
+        const uint32_t a_boundary =
+            a.Refs > a.Degree2Refs ? a.Refs - a.Degree2Refs : 0u;
+        const uint32_t b_boundary =
+            b.Refs > b.Degree2Refs ? b.Refs - b.Degree2Refs : 0u;
+        if (a_boundary != b_boundary) {
+            return a_boundary > b_boundary;
+        }
+        if (a.Degree2Refs != b.Degree2Refs) {
+            return a.Degree2Refs > b.Degree2Refs;
+        }
+        if (a.Lookahead != b.Lookahead) {
+            return a.Lookahead > b.Lookahead;
+        }
+        if (a.Fill != b.Fill) {
+            return a.Fill < b.Fill;
+        }
+        return a.Column > b.Column;
+    }
+
+    ColumnCandidate MeasureCandidate(uint16_t column) const
+    {
+        ColumnCandidate candidate;
+        candidate.Column = column;
+        candidate.Refs = CountLiveRowsForColumn(column);
+        candidate.Degree2Refs = 0u;
+        candidate.Weight2Refs = Columns[column].Weight2Refs;
+        candidate.Lookahead = 0u;
+        candidate.Fill = 0u;
+
+        for (uint16_t row_i : Columns[column].Rows)
+        {
+            const RowState& row = Rows[row_i];
+            if (row.Live == 0u) {
+                continue;
+            }
+            if (row.Live > 1u) {
+                candidate.Fill += row.Live - 1u;
+            }
+            if (row.Live == 2u)
+            {
+                uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
+                const unsigned count = ScanTodoColumns(row, live, 2u);
+                if (count != 2u) {
+                    continue;
+                }
+                uint16_t partner = UINT16_MAX;
+                if (live[0] == column) {
+                    partner = live[1];
+                }
+                else if (live[1] == column) {
+                    partner = live[0];
+                }
+                else {
+                    continue;
+                }
+                ++candidate.Degree2Refs;
+                candidate.Lookahead += Columns[partner].Weight2Refs;
+            }
+        }
+        return candidate;
+    }
+
+    uint16_t SelectLowRefFallbackColumn() const
+    {
+        bool have_best = false;
+        ColumnCandidate best = {};
         for (uint32_t c = 0; c < BlockCount; ++c)
         {
             if (!Columns[c].Todo) {
                 continue;
             }
-            const uint32_t refs = CountLiveRowsForColumn((uint16_t)c);
-            if (best == UINT16_MAX || refs < best_refs)
+            const ColumnCandidate candidate = MeasureCandidate((uint16_t)c);
+            if (!have_best || LowRefBetter(candidate, best))
             {
-                best = (uint16_t)c;
-                best_refs = refs;
+                best = candidate;
+                have_best = true;
             }
         }
-        return best;
+        return have_best ? best.Column : UINT16_MAX;
     }
 
-    uint16_t SelectDegree2ComponentColumn(uint16_t top_k) const
+    uint16_t SelectMinRowLowRefColumn() const
     {
-        std::vector<uint16_t> degree2_columns;
-        degree2_columns.reserve(BlockCount);
+        uint16_t best_row = UINT16_MAX;
+        uint16_t best_live = UINT16_MAX;
         for (uint32_t r = 0; r < Rows.size(); ++r)
         {
-            if (Rows[r].Live != 2u) {
+            const RowState& row = Rows[r];
+            if (row.Live <= 1u || row.Live >= best_live) {
                 continue;
             }
-            for (uint16_t c : Rows[r].Columns)
+            best_row = (uint16_t)r;
+            best_live = row.Live;
+        }
+        if (best_row == UINT16_MAX) {
+            return SelectLowRefFallbackColumn();
+        }
+
+        bool have_best = false;
+        ColumnCandidate best = {};
+        for (uint16_t column : Rows[best_row].Columns)
+        {
+            if (!Columns[column].Todo) {
+                continue;
+            }
+            const ColumnCandidate candidate = MeasureCandidate(column);
+            if (!have_best || LowRefBetter(candidate, best))
             {
-                if (Columns[c].Todo) {
-                    degree2_columns.push_back(c);
-                }
+                best = candidate;
+                have_best = true;
             }
         }
-        if (degree2_columns.empty()) {
-            return SelectFallbackColumn();
+        return have_best ? best.Column : SelectLowRefFallbackColumn();
+    }
+
+    uint16_t FindRoot(
+        std::vector<uint16_t>& parent,
+        uint16_t column) const
+    {
+        while (parent[column] != column)
+        {
+            parent[column] = parent[parent[column]];
+            column = parent[column];
         }
-        std::sort(degree2_columns.begin(), degree2_columns.end());
+        return column;
+    }
+
+    void UnionRoots(
+        std::vector<uint16_t>& parent,
+        std::vector<uint32_t>& size,
+        uint16_t a,
+        uint16_t b) const
+    {
+        uint16_t ra = FindRoot(parent, a);
+        uint16_t rb = FindRoot(parent, b);
+        if (ra == rb) {
+            return;
+        }
+        if (size[ra] < size[rb])
+        {
+            const uint16_t temp = ra;
+            ra = rb;
+            rb = temp;
+        }
+        parent[rb] = ra;
+        size[ra] += size[rb];
+    }
+
+    void AddCandidate(
+        std::vector<uint16_t>& candidates,
+        std::vector<uint8_t>& seen,
+        uint16_t column) const
+    {
+        if (column == UINT16_MAX || !Columns[column].Todo) {
+            return;
+        }
+        if (!seen[column])
+        {
+            seen[column] = 1u;
+            candidates.push_back(column);
+        }
+    }
+
+    std::vector<uint16_t> CollectLargestDegree2ComponentColumns() const
+    {
+        std::vector<uint16_t> candidates;
+        std::vector<uint16_t> parent(BlockCount);
+        std::vector<uint32_t> size(BlockCount, 0u);
+        std::vector<uint8_t> active(BlockCount, 0u);
+        std::vector<uint16_t> active_columns;
+        const auto activate = [&](uint16_t column) {
+            if (!active[column])
+            {
+                active[column] = 1u;
+                parent[column] = column;
+                size[column] = 1u;
+                active_columns.push_back(column);
+            }
+        };
+
+        for (const RowState& row : Rows)
+        {
+            if (row.Live != 2u) {
+                continue;
+            }
+            uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
+            const unsigned count = ScanTodoColumns(row, live, 2u);
+            if (count == 2u)
+            {
+                activate(live[0]);
+                activate(live[1]);
+                UnionRoots(parent, size, live[0], live[1]);
+            }
+        }
+
+        uint16_t best_root = UINT16_MAX;
+        uint32_t best_size = 0u;
+        for (uint16_t column : active_columns)
+        {
+            const uint16_t root = FindRoot(parent, column);
+            if (size[root] > best_size)
+            {
+                best_size = size[root];
+                best_root = root;
+            }
+        }
+        if (best_root == UINT16_MAX) {
+            return candidates;
+        }
+
+        std::vector<uint8_t> seen(BlockCount, 0u);
+        for (const RowState& row : Rows)
+        {
+            if (row.Live != 2u) {
+                continue;
+            }
+            uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
+            const unsigned count = ScanTodoColumns(row, live, 2u);
+            if (count != 2u || FindRoot(parent, live[0]) != best_root) {
+                continue;
+            }
+            AddCandidate(candidates, seen, live[0]);
+            AddCandidate(candidates, seen, live[1]);
+        }
+        return candidates;
+    }
+
+    uint16_t SelectRqccLowRefColumn() const
+    {
+        const std::vector<uint16_t> columns =
+            CollectLargestDegree2ComponentColumns();
+        if (columns.empty()) {
+            return SelectLowRefFallbackColumn();
+        }
+
+        bool have_best = false;
+        ColumnCandidate best = {};
+        for (uint16_t column : columns)
+        {
+            const ColumnCandidate candidate = MeasureCandidate(column);
+            if (!have_best || LowRefBetter(candidate, best))
+            {
+                best = candidate;
+                have_best = true;
+            }
+        }
+        return have_best ? best.Column : SelectLowRefFallbackColumn();
+    }
+
+    uint16_t SelectKsBoundaryTopKColumn(uint16_t top_k) const
+    {
+        const std::vector<uint16_t> columns =
+            CollectLargestDegree2ComponentColumns();
+        if (columns.empty()) {
+            return SelectMinRowLowRefColumn();
+        }
 
         std::vector<ColumnCandidate> candidates;
-        candidates.reserve(degree2_columns.size());
-        for (size_t i = 0; i < degree2_columns.size();)
-        {
-            const uint16_t column = degree2_columns[i];
-            size_t j = i + 1u;
-            while (j < degree2_columns.size() && degree2_columns[j] == column) {
-                ++j;
-            }
-
-            ColumnCandidate candidate;
-            candidate.Column = column;
-            candidate.Refs = CountLiveRowsForColumn(column);
-            candidate.Degree2Refs = (uint32_t)(j - i);
-            candidates.push_back(candidate);
-            i = j;
+        candidates.reserve(columns.size());
+        for (uint16_t column : columns) {
+            candidates.push_back(MeasureCandidate(column));
         }
-
-        std::sort(candidates.begin(), candidates.end(),
-            [](const ColumnCandidate& a, const ColumnCandidate& b) {
-                if (a.Refs != b.Refs) {
-                    return a.Refs < b.Refs;
-                }
-                return a.Column < b.Column;
-            });
 
         if (top_k == 0u || top_k > candidates.size()) {
             top_k = (uint16_t)candidates.size();
         }
-
-        uint16_t best = candidates[0].Column;
-        uint32_t best_boundary = 0;
-        for (uint16_t i = 0; i < top_k; ++i)
+        if (top_k < candidates.size())
         {
-            const ColumnCandidate& c = candidates[i];
-            // Singleton rows were exhausted before inactivation selection, so
-            // non-degree-2 incident rows are exactly the boundary rows.
-            const uint32_t boundary =
-                c.Refs > c.Degree2Refs ? c.Refs - c.Degree2Refs : 0u;
-            if (i == 0u || boundary > best_boundary)
+            std::sort(candidates.begin(), candidates.end(),
+                [this](const ColumnCandidate& a, const ColumnCandidate& b) {
+                    return DefaultBetter(a, b);
+                });
+            candidates.resize(top_k);
+        }
+
+        bool have_best = false;
+        ColumnCandidate best = {};
+        for (const ColumnCandidate& candidate : candidates)
+        {
+            if (!have_best || BoundaryBetter(candidate, best))
             {
-                best = c.Column;
-                best_boundary = boundary;
+                best = candidate;
+                have_best = true;
             }
         }
-        return best;
+        return have_best ? best.Column : SelectMinRowLowRefColumn();
     }
 
     const PeelingCodec& Codec;
