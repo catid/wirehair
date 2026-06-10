@@ -1069,3 +1069,76 @@ baseline from the previous pass, the same case moved from 121.65s to 51.35s
 - `cmake --build build --target wirehair_v2_policy_test wirehair_v2_bench -j 8`
 - `./build/codec/wirehair_v2_policy_test`
 - `wirehair_v2_bench seedtable --N 1000,6400,32000 --bb-list 1280,102400 --peel-candidates 8 --trials 2`
+
+## June 2026 Session: Calibration Refresh, Fold/Cap Grid (E2), Deck Columns (E8)
+
+### Cold-pool calibration refresh
+
+`xor_bench` gained `--cold` (4 GiB pool, permutation walk), `--muladd`, and
+`--fanin` modes after the cache-residency finding (the old 1280-byte constant
+0.0226 us/xor was measured on a 10 MiB L3-resident set).  Quiet-window,
+taskset, 32 GiB target, 5-repeat medians
+(`cold_xor_calibration.csv`, `muladd_calibration.csv`, `fanin_gather.csv`):
+
+| block | cold XOR us/op | GiB/s | muladd:xor | add8 fused:chained |
+| ---: | ---: | ---: | ---: | ---: |
+| 1280 B | 0.157 | 15.2 | 1.83 | 2.22 |
+| 100 KiB | 5.66 | 33.7 | 1.10 | 1.34 |
+| 1 MiB | 55.7 | 35.1 | 1.00 | 1.13 |
+
+Readouts:
+
+- The fully-cold 1280-byte XOR cost is ~7x the old cache-resident constant.
+  Real decode footprints sit between the two (N * block_bytes); conversions
+  should interpolate by footprint, not reuse a single constant.
+- GF(256) muladd is essentially free relative to XOR at >=100 KiB blocks and
+  only 1.83x at MTU — heavy-row counts are cheap reliability (feeds the E1
+  H=12 promotion in `../../precode/results/`).
+- E6 gather-kernel kill-gate: fused 8-source gather-XOR at 1 MiB is 1.13x,
+  below the 1.15x bar — the production multi-source gather change is killed
+  for large blocks but re-scoped for <=100 KiB (2.2x at MTU; see beads issue
+  "Re-scoped: k-ary gather-XOR kernels pay only at <=100KiB blocks").
+
+### E2: fold-scale x cap fine grid at percent overhead
+
+Protocol: 35 structures (caps 384..2048 x folds {0.10,0.25,0.40,0.60}, d2/d3
+mass variants, comparators), methods {10,18,40,115}, N {320,3200,32000} jitter
+10, pct {0,1,2,5}, 200 paired trials x 4 seed families
+(`e2_foldcap_seed1-4.csv`).
+
+- Regression gate passed: OH0 N=32000 reproduces the prior frontier ordering
+  (c1024_fold 106.34 / c512_fold 109.08 / c256_fold 120.92).
+- The published pct-overhead frontier was stale: at N=32000 pct1 the old
+  winner (lt_m2_c256_fold + rqcc_lowref, 42.55) is beaten 49% by
+  lt_m2_c2048_fold60 (21.83) in 4/4 seed families; at pct2/pct5 the same
+  structure wins (10.65 / 5.34).
+- No interior fold optimum: quality is monotone in BOTH fold fraction (0.60
+  best everywhere at pct>=1) and cap.  The grid's quality gains are mostly
+  purchased with edges (c2048_fold60 = 8.75 XOR/row vs c256_fold 7.10).
+- Quality-per-edge frontier is still held by the plain `_fold` family:
+  c512_fold (7.77 edges, 28.78 at pct1) and c1024_fold (8.49, 22.85) dominate
+  equal-edge grid points.
+- Extra low-degree mass (`_d2_003`/`_d3_003`) is catastrophic at N=32000
+  (181-188 mean cols at OH0 vs 106 baseline).  Decisive negative.
+- ks_bmax_top16 (the v2 policy solver) was the best method in every cell.
+
+### E8: deck-dealt column-degree regularization — killed
+
+Hypothesis (refuted): the high-cap families' advantage comes from removing the
+low-coverage column tail, so exact column balancing at equal edges should match
+their quality at lower edge cost.
+
+Result (`e8_deck_seed1.csv`, 400 paired trials, ks_bmax_top16, OH0):
+
+| N | iid c256_fold | deck | deckloss10 | deckloss30 | p2c |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 320 | 12.45 | 20.68 | 20.72 | 20.80 | 18.67 |
+| 3200 | 36.20 | 134.86 | 135.59 | 136.03 | 121.05 |
+| 32000 | 120.77 | 1269.43 | 1272.63 | 1271.76 | 1120.44 |
+
+Exact balancing is 1.7x worse at N=320 growing to 10.5x at N=32000; random row
+loss (deckloss) does not recover the iid behavior, so the regularization
+itself is the harm, and even the soft power-of-two-choices variant loses ~9x.
+Irregular (Poisson) column degrees are necessary for peel avalanches.  The
+experiment was stopped after seed 1; the effect size makes more seeds
+pointless.
