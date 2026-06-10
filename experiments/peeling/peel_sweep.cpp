@@ -170,7 +170,7 @@ static std::vector<double> parse_double_list(
 
         char* end = nullptr;
         const double value = std::strtod(part.c_str(), &end);
-        if (end == part.c_str() || *end != '\0')
+        if (end == part.c_str() || *end != '\0' || !std::isfinite(value))
         {
             if (ok) {
                 *ok = false;
@@ -5399,11 +5399,17 @@ static TrialConfig make_trial_config(
 {
     TrialConfig config;
     config.ActualN = sample_actual_n(anchor_n, n_jitter, trial, seed);
-    const int pct_rows = (int)std::ceil(
+    const double pct_rows = std::ceil(
         (double)config.ActualN * overhead_pct / 100.0);
-    const int row_count_signed = rows_override > 0 ?
-        rows_override : (int)config.ActualN + overhead + pct_rows;
-    config.MatrixRows = row_count_signed > 0 ? (unsigned)row_count_signed : 0;
+    const double row_count = rows_override > 0 ?
+        (double)rows_override :
+        (double)config.ActualN + (double)overhead + pct_rows;
+    if (!std::isfinite(row_count) || row_count > 65535.0) {
+        config.MatrixRows = 65536u;
+    }
+    else {
+        config.MatrixRows = row_count > 0.0 ? (unsigned)row_count : 0;
+    }
 
     config.BaseSeed = seed ^
         ((uint64_t)config.ActualN * UINT64_C(0xbf58476d1ce4e5b9)) ^
@@ -6118,6 +6124,44 @@ static bool run_n_jitter_protocol_tests(std::string* why)
     return true;
 }
 
+static bool run_overhead_pct_validation_tests(std::string* why)
+{
+    bool ok = false;
+    std::vector<double> parsed = parse_double_list("0,12.5", &ok);
+    if (!ok || parsed.size() != 2u || parsed[0] != 0.0 || parsed[1] != 12.5) {
+        return self_fail(why, "finite overhead-pct list did not parse");
+    }
+
+    parsed = parse_double_list("nan", &ok);
+    if (ok) {
+        return self_fail(why, "nan overhead-pct parsed as valid");
+    }
+    parsed = parse_double_list("inf", &ok);
+    if (ok) {
+        return self_fail(why, "inf overhead-pct parsed as valid");
+    }
+
+    const MatrixStructure* structure = find_structure("lt_m2_c64");
+    if (!structure) {
+        return self_fail(why, "overhead-pct test structure is missing");
+    }
+
+    const TrialConfig valid = make_trial_config(
+        0, 320, 0, 0, 0, 10.0, 0, UINT64_C(0x6f76657268656164),
+        *structure, "paired");
+    if (valid.ActualN != 320u || valid.MatrixRows != 352u) {
+        return self_fail(why, "finite overhead-pct row count is wrong");
+    }
+
+    const TrialConfig huge = make_trial_config(
+        0, 64000, 0, 0, 0, 1.0e9, 0, UINT64_C(0x6f76657268656164),
+        *structure, "paired");
+    if (huge.MatrixRows <= 65535u) {
+        return self_fail(why, "huge overhead-pct did not trip row limit");
+    }
+    return true;
+}
+
 static bool run_lazy_metric_tests(std::string* why)
 {
     const MatrixStructure* structure = find_structure("lt_m2_c64");
@@ -6195,6 +6239,9 @@ static bool run_self_tests(std::string* why)
         return false;
     }
     if (!run_n_jitter_protocol_tests(why)) {
+        return false;
+    }
+    if (!run_overhead_pct_validation_tests(why)) {
         return false;
     }
     if (!run_lazy_metric_tests(why)) {
