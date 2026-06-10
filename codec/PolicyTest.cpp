@@ -337,9 +337,14 @@ void CheckBlockBytesUpperBound()
     std::vector<uint8_t> message(64u);
     WirehairCodec encoder = wirehair_encoder_create(
         0, &message[0], UINT64_C(0x100000000), 0x80000000u);
+    WirehairCodec decoder = wirehair_decoder_create(
+        0, UINT64_C(0x100000000), 0x80000000u);
     Check(encoder == 0,
-        "block_bytes >= 2^31 should be rejected at initialization");
+        "block_bytes >= 2^31 should be rejected for encoder initialization");
+    Check(decoder == 0,
+        "block_bytes >= 2^31 should be rejected for decoder initialization");
     wirehair_free(encoder);
+    wirehair_free(decoder);
 }
 
 void CheckPeelSolverSelectionSemantics()
