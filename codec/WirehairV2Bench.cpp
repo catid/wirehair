@@ -691,10 +691,13 @@ PrecodeRecipe BuildPrecodeRecipe(
             recipe.DenseRows = 0;
         }
         recipe.Columns = recipe.LdpcColumns + recipe.DenseRows;
+        // Only charge Shuffle-2 dense generation when dense rows exist;
+        // the pure-LDPC fallback above must cost the same as PrecodeModelLdpc
         recipe.GenerationXors =
             3.0 * (double)block_count +
             (double)recipe.LdpcColumns +
-            2.5 * (double)(block_count + recipe.DenseRows);
+            (recipe.DenseRows > 0u ?
+                2.5 * (double)(block_count + recipe.DenseRows) : 0.0);
     }
     return recipe;
 }

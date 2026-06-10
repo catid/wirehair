@@ -1075,6 +1075,15 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
         return false;
     }
 
+    // The LDPC family indexes parity buckets with rng.Below(S); S == 0 would
+    // write through an empty checks vector in GenerateSystem
+    if (out.D == 0u &&
+        (out.Kind == SchemeKind::LdpcStair ||
+         out.Kind == SchemeKind::LdpcTri ||
+         out.Kind == SchemeKind::LdpcDense)) {
+        return false;
+    }
+
     out.Name = token;
     return true;
 }
@@ -1145,6 +1154,17 @@ static bool SelfTest()
         "none", "dense_d8", "densesparse_w6_d8", "ldpc_s5", "ldpctri_s5",
         "heavyonly_h4", "ldpcdense_s5_d4", "ldpcdense_s6_d3_h8"
     };
+    const char* invalid_tokens[] = {
+        "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4"
+    };
+    for (const char* token : invalid_tokens)
+    {
+        Scheme scheme;
+        if (MakeScheme(token, 32, scheme)) {
+            fprintf(stderr, "self-test: invalid scheme %s was accepted\n", token);
+            return false;
+        }
+    }
     unsigned checked = 0;
     for (unsigned K = 8; K <= 48; K += 8)
     {

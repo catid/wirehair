@@ -164,8 +164,11 @@ static void QuickPeelTest(
 
     unsigned added = 0;
 
+    // Loss patterns must depend only on (N, trial): folding the candidate
+    // p_seed in scores each candidate on different loss sets, biasing the
+    // minimum-failure pick toward lucky streams (winner's curse)
     wirehair::PCGRandom prng;
-    prng.Seed((uint64_t)N * p_seed, trials + p_seed);
+    prng.Seed((uint64_t)N, trials);
 
     int lossCount = (N + 9) / 10;
     std::vector<uint16_t> losses;
@@ -255,7 +258,10 @@ int main()
         Message[i] = (uint8_t)i;
     }
 
-    for (unsigned i = 2; i < kPeelSeedSubdivisions; ++i)
+    // Subdivisions 0 and 1 map real block counts (N = 2048+i stepping 2048,
+    // i.e. 2048, 2049, 4096, 4097, ...) and need tuning like every other
+    // residue class; starting at 2 carried forward untested table entries
+    for (unsigned i = 0; i < kPeelSeedSubdivisions; ++i)
     {
         int best_peel_seed = 0;
         int best_failures = 10000;

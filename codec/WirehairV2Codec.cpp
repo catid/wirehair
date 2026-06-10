@@ -5,9 +5,17 @@
 namespace wirehair_v2 {
 namespace {
 
+uint64_t BlockCountWideFor(uint64_t message_bytes, uint32_t block_bytes)
+{
+    // Divide before adding the round-up so the sum cannot wrap uint64
+    return message_bytes / block_bytes +
+        ((message_bytes % block_bytes != 0u) ? 1u : 0u);
+}
+
 uint32_t BlockCountFor(uint64_t message_bytes, uint32_t block_bytes)
 {
-    return (uint32_t)((message_bytes + block_bytes - 1u) / block_bytes);
+    // Only valid after ValidateCodecInput has bounded the wide count
+    return (uint32_t)BlockCountWideFor(message_bytes, block_bytes);
 }
 
 WirehairResult ValidateCodecInput(uint64_t message_bytes, uint32_t block_bytes)
@@ -15,7 +23,9 @@ WirehairResult ValidateCodecInput(uint64_t message_bytes, uint32_t block_bytes)
     if (message_bytes < 1u || block_bytes < 1u) {
         return Wirehair_InvalidInput;
     }
-    const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
+    // Validate at full width before narrowing: truncating first would wrap
+    // huge messages into the accepted range or report the wrong error code
+    const uint64_t block_count = BlockCountWideFor(message_bytes, block_bytes);
     if (block_count < CAT_WIREHAIR_MIN_N) {
         return Wirehair_BadInput_SmallN;
     }
@@ -51,17 +61,21 @@ WirehairResult Codec::InitializeEncoder(
     }
 
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
-    CurrentProfile = seed_override ? *seed_override :
+    const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
     Impl.OverrideSeeds(
-        CurrentProfile.DenseCount,
-        CurrentProfile.PeelSeed,
-        CurrentProfile.DenseSeed);
+        profile.DenseCount,
+        profile.PeelSeed,
+        profile.DenseSeed);
 
     WirehairResult result = Impl.InitializeEncoder(message_bytes, block_bytes);
     if (result == Wirehair_Success) {
         result = Impl.EncodeFeed(message);
+    }
+    if (result == Wirehair_Success) {
+        // Only publish the profile for initializations that succeeded
+        CurrentProfile = profile;
     }
     return result;
 }
@@ -78,15 +92,21 @@ WirehairResult Codec::InitializeDecoder(
     }
 
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
-    CurrentProfile = seed_override ? *seed_override :
+    const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
     Impl.OverrideSeeds(
-        CurrentProfile.DenseCount,
-        CurrentProfile.PeelSeed,
-        CurrentProfile.DenseSeed);
+        profile.DenseCount,
+        profile.PeelSeed,
+        profile.DenseSeed);
 
-    return Impl.InitializeDecoder(message_bytes, block_bytes);
+    const WirehairResult result =
+        Impl.InitializeDecoder(message_bytes, block_bytes);
+    if (result == Wirehair_Success) {
+        // Only publish the profile for initializations that succeeded
+        CurrentProfile = profile;
+    }
+    return result;
 }
 
 WirehairResult Codec::Encode(

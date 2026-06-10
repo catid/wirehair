@@ -72,7 +72,9 @@ set(GEN_TABLES
 
 if(MSVC)
 else()
-    set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+    # Append so user-provided flags (e.g. -DCMAKE_CXX_FLAGS="-DWH_GFNI=1
+    # -mgfni") survive; overwriting silently disabled opt-in SIMD kernels
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O3")

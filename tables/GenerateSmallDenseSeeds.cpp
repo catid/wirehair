@@ -456,10 +456,13 @@ int main()
         {
             cout << "For N = " << N << " trying count = " << count << endl;
 
+            // Advance the trial-stream seed once per count, not once per
+            // candidate: candidates must share paired trials or selection by
+            // minimum failure count is biased (winner's curse)
+            ++seed;
+
             for (unsigned d_seed = 0; d_seed < d_seed_max; ++d_seed)
             {
-                ++seed;
-
                 FailedTrials = 0;
 
 #pragma omp parallel for
@@ -490,10 +493,10 @@ int main()
         int bestPeelSeed = 0;
         int bestPeelFails = 100000;
 
-        int peelSeedMax = 256;
-        if (N < kTinyTableCount) {
-            peelSeedMax = 65536;
-        }
+        // kSmallPeelSeeds stores uint8_t entries, so searching past 255 would
+        // pick a winner that truncates to a different (already-rejected) seed
+        // at runtime.  Keep the search inside the table's representable range.
+        const int peelSeedMax = 256;
 
         for (int peelSeed = 0; peelSeed < peelSeedMax; ++peelSeed)
         {

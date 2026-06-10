@@ -24,9 +24,18 @@ Best tile by block size:
 | kib100 | 102400 | 70.086 | 16 KiB | 90.032 | 1.285x |
 | mib1 | 1048576 | 74.728 | 16 KiB | 156.202 | 2.090x |
 
+**Stale-data caveat (2026-06-10):** the CSV and the mtu1280 row above predate
+the e26a6cc harness fix.  Every published mtu1280 "tiled" row used tile sizes
+(16 KiB+) at or above the 1280-byte block size, which the fixed harness now
+skips as degenerate untiled replays; no genuine sub-block (256/512 B) tile was
+ever measured for mtu1280.  Treat the mtu1280 readout below as "no evidence",
+not "measured neutral", until the fixed binary regenerates this CSV.  The
+kib100/mib1 rows used tiles below the block size and are unaffected.
+
 Readout:
 
 - Tiling is neutral/slightly negative for MTU-sized 1280-byte symbols.
+  (See stale-data caveat: this row was a degenerate measurement.)
 - For 100 KiB symbols, 16 KiB tiles improved synthetic row-op throughput by
   about 28%.
 - For 1 MiB symbols, 16-64 KiB tiles roughly doubled synthetic row-op

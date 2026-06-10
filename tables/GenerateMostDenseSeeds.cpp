@@ -329,11 +329,14 @@ int main()
         int best_dense_seed = 0;
         int best_failures = 10000;
 
+        // Advance the trial-stream seed once per N, not once per candidate:
+        // candidates must share paired trials or selection by minimum failure
+        // count is biased toward lucky streams (winner's curse)
+        ++seed;
+
         for (unsigned d_seed = 0; d_seed < 256; ++d_seed)
         {
             const int N = N_found;
-
-            ++seed;
 
             FailedTrials = 0;
 

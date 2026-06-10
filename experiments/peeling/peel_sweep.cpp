@@ -788,7 +788,8 @@ struct Metrics
 {
     unsigned ExactD2 = 0;
     unsigned Fill = 0;
-    unsigned FillSquare = 0;
+    // 64-bit: dense structures at large N overflow a 32-bit sum of links^2
+    uint64_t FillSquare = 0;
     unsigned Lookahead = 0;
     unsigned DistinctPartners = 0;
     unsigned DuplicatePartners = 0;
@@ -1956,7 +1957,7 @@ private:
             {
                 const unsigned links = row.Live - 1;
                 m.Fill += links;
-                m.FillSquare += links * links;
+                m.FillSquare += (uint64_t)links * links;
                 if (row.Live < m.MinLive) {
                     m.MinLive = row.Live;
                 }
@@ -2124,7 +2125,9 @@ private:
             if (counts[live] != UINT16_MAX) {
                 ++counts[live];
             }
-            if (live < m.MinLive) {
+            // MinLive == 0 is the empty sentinel set by the decrement path;
+            // a plain numeric compare would leave it stuck at 0 forever
+            if (m.MinLive == 0 || live < m.MinLive) {
                 m.MinLive = live;
             }
             if (live > m.MaxLive) {
@@ -2198,7 +2201,7 @@ private:
         const bool need_degree34 = (flags & kMetricDegree34) != 0;
 
         const unsigned fill = row.Live > 1 ? row.Live - 1u : 0u;
-        const unsigned fill_square = fill * fill;
+        const uint64_t fill_square = (uint64_t)fill * fill;
         uint16_t live_pair[2] = {kListTerm, kListTerm};
         const bool need_pair = need_lookahead || need_partners;
         const unsigned live_pair_count = row.Live == 2 && need_pair ?
