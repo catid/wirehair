@@ -22,7 +22,9 @@ construction (it is recorded before the heavy MDS patch is applied); the
 script asserts this per row by checking that re-scoring at the row's modeled
 H reproduces the recorded fail_rate.  Cost columns always reflect the row's
 modeled H; rows where a fail@H' column differs from the modeled H are not
-cost-adjusted (the modeled-H column is marked with '*').
+cost-adjusted (the modeled-H column is marked with '*').  Rows with nonzero
+runaway_rate are sorted after finite-cost rows because their cost means are
+conditional on completed trials only.
 
 Output: a ranked table (ascending total_block_ops) per (K, oh, bb), plus the
 muladd:xor crossover ratio at which the ldpcdense H=12 scheme stops beating
@@ -186,6 +188,7 @@ def score_row(raw, fields, path):
         raise ValueError("%s: def_pdf mass %.6f != 1 for %s K=%d oh=%d"
                          % (path, mass, raw["scheme"], k, oh))
     fail_rate = float(raw["fail_rate"])
+    runaway_rate = float(raw.get("runaway_rate") or 0.0)
     rescored = fail_at(pdf, h)
     # def_pdf must be H-independent by construction: re-scoring at the row's
     # own modeled H has to reproduce the recorded fail_rate.
@@ -201,12 +204,14 @@ def score_row(raw, fields, path):
     return {
         "K": k, "oh": oh, "H": h, "scheme": raw["scheme"], "file": path,
         "base": base, "heavy": heavy, "ge_src": ge_src,
-        "fail_rate": fail_rate,
+        "fail_rate": fail_rate, "runaway_rate": runaway_rate,
         "fails": {hp: fail_at(pdf, hp) for hp in H_PRIMES},
     }
 
 
 def total_ops(row, ratio, pessimistic):
+    if row.get("runaway_rate", 0.0) > 0.0:
+        return float("inf")
     factor = 2.0 if pessimistic else 1.0
     return row["base"] + ratio * factor * row["heavy"]
 
@@ -248,7 +253,8 @@ def print_report(rows, bb_list, ratios, pessimistic, out=sys.stdout):
                       % (k, oh, bb, ratio, mode))
             hdr = " %2s  %-28s %3s " % ("#", "scheme", "H")
             hdr += "".join("%11s" % ("fail@H%d" % hp) for hp in H_PRIMES)
-            hdr += "%14s %5s %12s\n" % ("total_ops", "ge", "heavy_ops")
+            hdr += "%14s %5s %12s %9s\n" % (
+                "total_ops", "ge", "heavy_ops", "runaway")
             out.write(hdr)
             for i, r in enumerate(ranked):
                 name = r["scheme"]
@@ -259,19 +265,24 @@ def print_report(rows, bb_list, ratios, pessimistic, out=sys.stdout):
                     mark = "*" if hp == r["H"] else " "
                     cells += "  %.6f%s" % (r["fails"][hp], mark)
                 factor = 2.0 if pessimistic else 1.0
-                out.write(" %2d  %-28s %3d %s%14.1f %5s %12.1f\n"
+                total = total_ops(r, ratio, pessimistic)
+                total_text = "runaway" if total == float("inf") else "%.1f" % total
+                out.write(" %2d  %-28s %3d %s%14s %5s %12.1f %9.6f\n"
                           % (i + 1, name, r["H"], cells,
-                             total_ops(r, ratio, pessimistic),
-                             r["ge_src"], ratio * factor * r["heavy"]))
+                             total_text, r["ge_src"],
+                             ratio * factor * r["heavy"],
+                             r["runaway_rate"]))
             out.write("\n")
 
         # Crossover: block-size independent (totals are linear in the ratio)
         dense6 = [r for r in grp
-                  if r["H"] == 6 and (r["scheme"] == "dense"
-                                      or r["scheme"].startswith("dense_d")
-                                      or r["scheme"] == "dense_h6")]
+                  if r["runaway_rate"] == 0.0 and r["H"] == 6
+                  and (r["scheme"] == "dense"
+                       or r["scheme"].startswith("dense_d")
+                       or r["scheme"] == "dense_h6")]
         ldpc12 = [r for r in grp
-                  if r["H"] == 12 and r["scheme"].startswith("ldpcdense")]
+                  if r["runaway_rate"] == 0.0 and r["H"] == 12
+                  and r["scheme"].startswith("ldpcdense")]
         if dense6 and ldpc12:
             for lr in ldpc12:
                 for dr in dense6:
@@ -293,7 +304,9 @@ def print_report(rows, bb_list, ratios, pessimistic, out=sys.stdout):
     out.write("notes: fail@H' re-scored from def_pdf (def > H' = failure); "
               "'*' marks each row's modeled H.  Cost columns always use the "
               "modeled H; fail@H' columns with H' != modeled H are NOT "
-              "cost-adjusted.\n")
+              "cost-adjusted.  Nonzero runaway_rate means --max-inact "
+              "aborted some trials, so total_ops is reported as runaway and "
+              "sorted after finite-cost rows.\n")
 
 
 #------------------------------------------------------------------------------
@@ -307,6 +320,10 @@ SELFTEST_SIM = """K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_
 # Same rows but without heavy/ge_real columns: tests derivation fallbacks
 SELFTEST_SIM_OLD = """K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_max,def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,residual_rows_mu,recv_xors_per_packet,precode_gen_xors_mu,sparse_solve_xors_mu,backsub_xors_mu,ge_block_xors_mu,ge_bitops_mu
 100,dense,10,6,0,1000,0.100000,1.000000,1.0,13,0:0.900000|7:0.050000|13:0.050000,20.00,1.00,25,19.0,80.0,19.0,5.0000,100.0,200.0,300.0,50.0,999.0
+"""
+
+SELFTEST_SIM_RUNAWAY = """K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_max,def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,residual_rows_mu,recv_xors_per_packet,precode_gen_xors_mu,sparse_solve_xors_mu,backsub_xors_mu,ge_block_xors_mu,ge_bitops_mu,heavy_muladds_mu,heavy_divs_mu,runaway_rate
+100,ldpcdense_s8_d4,8,6,0,1000,1.000000,1.000000,0.0,0,999999:1.000000,0.00,0.00,0,0.0,0.0,0.0,0.0000,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.000000
 """
 
 SELFTEST_XOR = """block_bytes,working_blocks,ops_per_repeat,repeats,median_total_us,median_us_per_xor,median_gib_per_s,checksum
@@ -337,6 +354,9 @@ def self_test():
                        (xor_path, SELFTEST_XOR), (mul_path, SELFTEST_MULADD)):
         with open(path, "w") as f:
             f.write(text)
+    runaway_path = os.path.join(tmpdir, "runaway.csv")
+    with open(runaway_path, "w") as f:
+        f.write(SELFTEST_SIM_RUNAWAY)
 
     xor_us = load_us_per_op(xor_path, "xor")
     mul_us = load_us_per_op(mul_path, "muladd")
@@ -377,6 +397,13 @@ def self_test():
     assert approx(old["base"], 5 * 100 + 100 + 200 + 300 + 50.0)
     assert approx(old["heavy"], 6 * 20.0 + 36.0)
 
+    # New --max-inact layout: runaway rows have H-independent failure but no
+    # meaningful cost means, so total_ops is deliberately unrankable.
+    runaway = load_rows([runaway_path])[0]
+    assert approx(runaway["runaway_rate"], 1.0)
+    assert runaway["fails"][6] == 1.0 and runaway["fails"][16] == 1.0
+    assert total_ops(runaway, 3.0, False) == float("inf")
+
     # H-independence assert must fire on an inconsistent fail_rate
     bad_path = os.path.join(tmpdir, "bad.csv")
     with open(bad_path, "w") as f:
@@ -394,6 +421,10 @@ def self_test():
     print_report(rows, [1280, 102400], ratios, False, out=buf)
     text = buf.getvalue()
     assert "crossover K=100 oh=0" in text and "1.369" in text, text
+    buf = io.StringIO()
+    print_report(rows + [runaway], [1280], ratios, False, out=buf)
+    text = buf.getvalue()
+    assert "runaway" in text and "1.000000" in text, text
 
     print("rank_total self-test passed")
     return 0
