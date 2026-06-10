@@ -47,6 +47,14 @@ struct Rng {
     int range(int lo, int hi) { return hi <= lo ? lo : lo + (int)(u32() % (uint32_t)(hi - lo + 1)); }
 };
 
+static unsigned repair_start_block_id(Rng& rng, int N, unsigned maxNeeded) {
+    const uint32_t minId = (uint32_t)N;
+    const uint32_t maxStart = UINT32_MAX - maxNeeded;
+    if (maxStart <= minId) return minId;
+    const uint32_t span = maxStart - minId + 1u;
+    return minId + (rng.u32() % span);
+}
+
 static void* xaligned(size_t bytes) {
     size_t a = 64;
     size_t rounded = (bytes + a - 1) & ~(a - 1);
@@ -325,13 +333,14 @@ static int roundtrip(uint64_t seed, int N, int blockBytes, int startMode, double
     // Loop only advances on delivered blocks; loss at or near 1.0 would spin forever.
     if (lossRate > 0.99) lossRate = 0.99;
     // startMode 0: from blockId 0 (systematic + repair). 1: repair-only from a random offset >= N.
-    unsigned blockId = (startMode == 1) ? (unsigned)(N + (rng.u32() % 16)) : 0;
     unsigned needed = 0;
     int rc = 0;
     // Cap on *delivered* blocks. Generous so rare-but-legitimate wirehair overhead tails
     // (pathological erasure subsets, ~1e-5 freq) still complete and get counted. A genuinely
     // broken ablation surfaces as decode-error/mismatch (caught immediately) or never-decode.
     const unsigned maxNeeded = (unsigned)N * 2 + 512;
+    unsigned blockId = (startMode == 1) ?
+        repair_start_block_id(rng, N, maxNeeded) : 0;
     bool decoded_ok = false;
     for (;;) {
         if (needed >= maxNeeded) {
@@ -664,9 +673,10 @@ static int cmd_repro(int argc, char** argv) {
     WirehairCodec dec = wirehair_decoder_create(nullptr, messageBytes, bb);
     printf("repro N=%d bb=%d final=%d msgBytes=%llu startMode=%d loss=%.2f enc=%p dec=%p\n",
            N, bb, finalBytes, (unsigned long long)messageBytes, startMode, loss, (void*)enc, (void*)dec);
-    unsigned blockId = (startMode==1)?(unsigned)(N+(rng.u32()%16)):0, needed=0;
+    const unsigned maxNeeded = (unsigned)N + 512 + (unsigned)N;
+    unsigned blockId = (startMode==1)?repair_start_block_id(rng, N, maxNeeded):0, needed=0;
     for (;;) {
-        if (needed >= (unsigned)N + 512 + (unsigned)N) { printf("GIVING UP needed=%u\n", needed); break; }
+        if (needed >= maxNeeded) { printf("GIVING UP needed=%u\n", needed); break; }
         bool drop = (startMode==0) && (rng.unit() < loss);
         unsigned thisId = blockId++;
         if (drop) continue;
