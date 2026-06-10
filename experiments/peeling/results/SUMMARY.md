@@ -656,6 +656,10 @@ XOR calibration used a solve-like random block-XOR benchmark:
 | 102400 | 4.309740442 | 44.257 |
 | 1048576 | 45.927485992 | 42.526 |
 
+Note: these calibration values predate the `xor_bench` default working-set
+change to 256 MiB. Regenerate before using the 1280-byte row for block-XOR
+conversion; the old small-block run may have been cache-resident.
+
 The derived `greedy_xor_eq_*` columns convert greedy peel scheduler time into
 equivalent block XORs.  `matrix_solve_plus_greedy_xors_*` adds row generation
 XORs, solve XOR estimates, and greedy scheduler time in the same units.

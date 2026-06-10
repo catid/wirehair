@@ -29,7 +29,9 @@ Calibrate block-XOR solve cost for 1280-byte, 100 KiB, and 1 MiB pieces:
 ```
 
 The benchmark reports median microseconds per `dst_block ^= src_block`, which
-can convert `peel_sweep` timing columns into block-XOR-equivalent cost.
+can convert `peel_sweep` timing columns into block-XOR-equivalent cost. It uses
+a 256 MiB working set by default so small block sizes do not benchmark a
+cache-resident buffer; use `--working-mib` for quick local smoke runs.
 
 Example sweep:
 

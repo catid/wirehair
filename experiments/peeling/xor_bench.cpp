@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -58,7 +59,7 @@ static double parse_double(const char* text, bool* ok)
     char* end = nullptr;
     const double value = std::strtod(text, &end);
     if (ok) {
-        *ok = end != text && *end == '\0';
+        *ok = end != text && *end == '\0' && std::isfinite(value);
     }
     return value;
 }
@@ -103,15 +104,21 @@ static std::vector<size_t> parse_size_list(const std::string& text, bool* ok)
     return values;
 }
 
-static size_t default_working_blocks(size_t block_bytes)
+static size_t working_blocks_for(size_t block_bytes, size_t working_mib)
 {
-    if (block_bytes <= 4096) {
-        return 8192;
+    const size_t mib = 1024u * 1024u;
+    if (working_mib > SIZE_MAX / mib) {
+        return 0;
     }
-    if (block_bytes >= 1024 * 1024) {
-        return 128;
+    const size_t target_bytes = working_mib * mib;
+    if (target_bytes > SIZE_MAX - block_bytes + 1u) {
+        return 0;
     }
-    return 1024;
+    size_t blocks = (target_bytes + block_bytes - 1u) / block_bytes;
+    if (blocks < 2u) {
+        blocks = 2u;
+    }
+    return blocks;
 }
 
 static void block_xor(uint8_t* dst, const uint8_t* src, size_t bytes)
@@ -162,9 +169,16 @@ static int run_one_size(
     size_t block_bytes,
     double target_gib,
     unsigned repeats,
+    size_t working_mib,
     uint64_t seed)
 {
-    const size_t working_blocks = default_working_blocks(block_bytes);
+    const size_t working_blocks = working_blocks_for(block_bytes, working_mib);
+    if (working_blocks == 0 || working_blocks > SIZE_MAX / block_bytes)
+    {
+        std::fprintf(stderr, "working set is too large for block size %zu\n",
+            block_bytes);
+        return 1;
+    }
     const size_t total_bytes = working_blocks * block_bytes;
     uint8_t* data = nullptr;
     if (!allocate_aligned(total_bytes, &data))
@@ -258,7 +272,7 @@ static void usage(const char* argv0)
 {
     std::fprintf(stderr,
         "usage: %s [--sizes 1280,102400,1048576] [--target-gib 16] "
-        "[--repeats 3] [--seed N]\n",
+        "[--repeats 3] [--working-mib 256] [--seed N]\n",
         argv0);
 }
 
@@ -269,6 +283,7 @@ int main(int argc, char** argv)
     std::string sizes_spec = "1280,102400,1048576";
     double target_gib = 16.0;
     unsigned repeats = 3;
+    size_t working_mib = 256;
     uint64_t seed = UINT64_C(0x51f15eed12345678);
 
     for (int i = 1; i < argc; ++i)
@@ -297,6 +312,17 @@ int main(int argc, char** argv)
                 return 1;
             }
             repeats = (unsigned)value;
+        }
+        else if (arg == "--working-mib" && i + 1 < argc)
+        {
+            bool ok = false;
+            const uint64_t value = parse_u64(argv[++i], &ok);
+            if (!ok || value == 0 || value > SIZE_MAX)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            working_mib = (size_t)value;
         }
         else if (arg == "--seed" && i + 1 < argc)
         {
@@ -327,7 +353,8 @@ int main(int argc, char** argv)
         "median_total_us,median_us_per_xor,median_gib_per_s,checksum\n");
     for (size_t block_bytes : sizes)
     {
-        const int rc = run_one_size(block_bytes, target_gib, repeats, seed);
+        const int rc = run_one_size(
+            block_bytes, target_gib, repeats, working_mib, seed);
         if (rc != 0) {
             return rc;
         }
