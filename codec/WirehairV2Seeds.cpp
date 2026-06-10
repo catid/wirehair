@@ -118,8 +118,11 @@ uint16_t CandidatePeelSeed(uint16_t bucket, uint16_t base_seed, uint16_t index)
 
 uint16_t CandidateDenseSeed(uint16_t base_seed, uint16_t index)
 {
+    // Index 0 is the untouched base profile.  Tiny-N dense seeds exceed
+    // 8 bits, so masking here would evaluate a different profile than the
+    // one production ships.
     if (index == 0) {
-        return (uint16_t)(base_seed & 0xffu);
+        return base_seed;
     }
     const uint32_t h = Hash32(
         ((uint32_t)base_seed << 9) ^

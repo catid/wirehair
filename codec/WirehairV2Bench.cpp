@@ -166,6 +166,11 @@ TrialResult RunBaselineTrial(
     double loss_rate,
     uint64_t seed)
 {
+    // The delivery loop only advances on delivered blocks; loss at or near
+    // 1.0 would spin forever.
+    if (loss_rate > 0.99) {
+        loss_rate = 0.99;
+    }
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
     std::vector<uint8_t> message((size_t)message_bytes);
@@ -252,6 +257,11 @@ TrialResult RunV2Trial(
     uint64_t seed,
     const wirehair_v2::SeedProfile* profile)
 {
+    // The delivery loop only advances on delivered blocks; loss at or near
+    // 1.0 would spin forever.
+    if (loss_rate > 0.99) {
+        loss_rate = 0.99;
+    }
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
     std::vector<uint8_t> message((size_t)message_bytes);
@@ -426,8 +436,10 @@ void ApplyDenseOverride(
     if (dense_count < 1) {
         dense_count = 1;
     }
-    if (dense_count > CAT_MAX_DENSE_ROWS) {
-        dense_count = CAT_MAX_DENSE_ROWS;
+    // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100 entries;
+    // counts above 398 would read out of bounds in release builds.
+    if (dense_count > 398) {
+        dense_count = 398;
     }
 
     profile.DenseCount = (uint16_t)dense_count;
@@ -445,7 +457,19 @@ void CalibrateAutoProfile(
     const CompareOptions& options,
     CachedCompareProfile& cached)
 {
+    // Apply the dense override before calibrating so the A/B decision is
+    // made on exactly the profiles that will be measured afterwards.
     cached.TunedProfile = BuildTunedProfile(N, block_bytes, options);
+    ApplyDenseOverride(cached.TunedProfile, options);
+
+    wirehair_v2::SeedProfile base_profile;
+    const wirehair_v2::SeedProfile* base_arg = 0;
+    if (options.DenseOverride)
+    {
+        base_profile = wirehair_v2::SelectSeedProfile(N, block_bytes);
+        ApplyDenseOverride(base_profile, options);
+        base_arg = &base_profile;
+    }
 
     Accum base_acc;
     Accum tuned_acc;
@@ -457,7 +481,7 @@ void CalibrateAutoProfile(
             ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
             ((uint64_t)trial * UINT64_C(0x94d049bb133111eb));
         AddTrial(base_acc, N,
-            RunV2Trial(N, block_bytes, loss, trial_seed, 0));
+            RunV2Trial(N, block_bytes, loss, trial_seed, base_arg));
         AddTrial(tuned_acc, N,
             RunV2Trial(N, block_bytes, loss, trial_seed,
                 &cached.TunedProfile));
@@ -522,15 +546,14 @@ const wirehair_v2::SeedProfile* SelectCompareProfile(
         ApplyDenseOverride(cached.TunedProfile, options);
     }
     else {
+        // CalibrateAutoProfile already applies the dense override to both
+        // arms, so the winning profile needs no further mutation here.
         CalibrateAutoProfile(N, block_bytes, loss, options, cached);
         if (!cached.UseTuned && options.DenseOverride)
         {
             cached.UseTuned = true;
             cached.TunedProfile =
                 wirehair_v2::SelectSeedProfile(N, block_bytes);
-            ApplyDenseOverride(cached.TunedProfile, options);
-        }
-        else if (cached.UseTuned) {
             ApplyDenseOverride(cached.TunedProfile, options);
         }
     }
@@ -942,8 +965,9 @@ int CmdDenseCheck(int argc, char** argv)
         Accum acc;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
+            // Candidate index deliberately excluded: paired trials across
+            // candidates (common random numbers).
             const uint64_t trial_seed = seed ^
-                ((uint64_t)c * UINT64_C(0x9e3779b97f4a7c15)) ^
                 ((uint64_t)trial * UINT64_C(0xbf58476d1ce4e5b9));
             AddTrial(acc, N,
                 RunV2Trial(N, block_bytes, loss, trial_seed, &profile));
@@ -1032,10 +1056,12 @@ int CmdDenseTune(int argc, char** argv)
             Accum acc;
             for (uint32_t trial = 0; trial < trials; ++trial)
             {
+                // Candidate index is deliberately excluded so every dense
+                // seed candidate sees identical message/loss trials, same
+                // as the densecount/densegrid paired protocol.
                 const uint64_t trial_seed = seed ^
                     ((uint64_t)n_value * UINT64_C(0x9e3779b97f4a7c15)) ^
                     ((uint64_t)bb_value * UINT64_C(0xbf58476d1ce4e5b9)) ^
-                    ((uint64_t)c * UINT64_C(0x94d049bb133111eb)) ^
                     ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
                 AddTrial(acc, (uint32_t)n_value,
                     RunV2Trial((uint32_t)n_value, (uint32_t)bb_value,
@@ -1147,8 +1173,11 @@ int CmdDenseCount(int argc, char** argv)
             if (dense_count < 1) {
                 dense_count = 1;
             }
-            if (dense_count > CAT_MAX_DENSE_ROWS) {
-                dense_count = CAT_MAX_DENSE_ROWS;
+            // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100
+            // entries, so counts above 398 (kept = 2 mod 4 like production
+            // counts) would read out of bounds in release builds.
+            if (dense_count > 398) {
+                dense_count = 398;
             }
 
             wirehair_v2::SeedProfile profile = base;
@@ -1270,8 +1299,11 @@ int CmdDenseGrid(int argc, char** argv)
             if (dense_count < 1) {
                 dense_count = 1;
             }
-            if (dense_count > CAT_MAX_DENSE_ROWS) {
-                dense_count = CAT_MAX_DENSE_ROWS;
+            // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100
+            // entries, so counts above 398 (kept = 2 mod 4 like production
+            // counts) would read out of bounds in release builds.
+            if (dense_count > 398) {
+                dense_count = 398;
             }
             const uint16_t dense_count_u = (uint16_t)dense_count;
             const uint16_t table_seed =
