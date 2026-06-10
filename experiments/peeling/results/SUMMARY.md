@@ -164,6 +164,71 @@ confirmed that `lt_m2_c512`, `lt_m2_c1024`, `lt_m2_c512_fold`, and
 the original `N=320` focused table were from structure-name-derived independent
 matrix streams, not from a real distribution difference.
 
+## E2 Fold/Cap Percent-Overhead Grid (2026-06-10)
+
+Session-plan E2 extended the high-cap LT search across fold scales and percent
+overhead. Result files:
+
+- `e2_foldcap_seed1.csv` ... `e2_foldcap_seed4.csv`
+
+Protocol:
+
+- Structures: 35 fold/cap candidates: high-cap comparators, cap
+  `{384,512,768,1024,1536,2048}` with fold scales
+  `{0.10,0.25,0.40,0.60}`, plus small degree-2/3 mass variants.
+- Methods: `raptorq_d2cc`, `rqd2_default`, `rqcc_lowref`,
+  `ks_bmax_top16`.
+- Sizes: `N=320,3200,32000`, with `N-jitter=10`.
+- Overhead: percent overhead `0,1,2,5`.
+- Trials: 4 seed families x 200 trials, paired matrix seeds.
+
+Validation:
+
+- `./experiments/peeling/peel_sweep --self-test` was already passing for the
+  E2/E8 implementation checkpoint.
+- `/tmp/e2_done` reported `OK`; `/tmp/e2_seed*.err` were empty.
+- Each seed file has 1680 data rows plus one CSV header:
+  `35 structures * 3 N values * 4 overheads * 4 methods`.
+- The N=32000/OH0 regression gate reproduced the old high-cap ordering:
+  `lt_m2_c1024_fold` 106.34 residual columns, `lt_m2_c512_fold` 109.08,
+  `lt_m2_c256_fold` 120.92.
+
+Best exact `structure + method` combinations by seed-averaged residual columns:
+
+| N | pct OH | structure | method | cols_mu | c95 | xors_est | total_us |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 320 | 0 | `lt_m2_c384_fold25` | `raptorq_d2cc` | 12.04 | 16.5 | 1809 | 241 |
+| 320 | 1 | `lt_m2_c768_fold10` | `raptorq_d2cc` | 10.09 | 14.5 | 1855 | 193 |
+| 320 | 2 | `lt_m2_c1024_fold40` | `raptorq_d2cc` | 8.75 | 13.0 | 1870 | 190 |
+| 320 | 5 | `lt_m2_c1024_fold25` | `rqd2_default` | 5.50 | 9.0 | 1885 | 178 |
+| 3200 | 0 | `lt_m2_c2048_fold25` | `rqd2_default` | 35.46 | 46.8 | 24300 | 4449 |
+| 3200 | 1 | `lt_m2_c1024_fold60` | `raptorq_d2cc` | 20.85 | 33.0 | 23445 | 3647 |
+| 3200 | 2 | `lt_m2_c2048_fold10` | `raptorq_d2cc` | 12.18 | 21.8 | 24702 | 3863 |
+| 3200 | 5 | `lt_m2_c2048_fold25` | `rqcc_lowref` | 3.73 | 8.5 | 25220 | 3759 |
+| 32000 | 0 | `lt_m2_c3200` | `raptorq_d2cc` | 103.85 | 141.5 | 255716 | 94174 |
+| 32000 | 1 | `lt_m2_c2048_fold60` | `raptorq_d2cc` | 21.83 | 45.8 | 258561 | 65210 |
+| 32000 | 2 | `lt_m2_c2048_fold60` | `rqd2_default` | 10.65 | 22.8 | 260708 | 62514 |
+| 32000 | 5 | `lt_m2_c2048_fold60` | `rqd2_default` | 5.34 | 10.0 | 269510 | 63263 |
+
+Decision-grade findings:
+
+- The session-plan promotion gate passes.  At `N=32000`, pct1,
+  `lt_m2_c2048_fold60` beats the stale `lt_m2_c256_fold` + `rqcc_lowref`
+  baseline in all four seed families by 47.3%, 48.4%, 50.0%, and 49.2%
+  residual columns respectively.  Seed-averaged, the old baseline is 42.55
+  residual columns and `lt_m2_c2048_fold60` is 21.83.
+- The percent-overhead high-cap advantage does not wash out; it grows at pct1
+  and pct2.  `lt_m2_c2048_fold60` is the large-N standing candidate for the
+  next precode/cost cross-check.
+- The residual win is not free.  At `N=32000`, pct1, estimated solve XORs rise
+  from about 212.9k (`lt_m2_c256_fold`) to 258.6k
+  (`lt_m2_c2048_fold60`).  Do not promote it to production without the
+  precode/cost objective from `rank_total.py` or a codec replay showing the
+  residual reduction pays for the extra sparse work.
+- Small-N winners vary by cap/fold because caps above N clamp and independent
+  structure seed streams still introduce noise.  Treat the large-N result as
+  the useful signal from this run.
+
 ## N=320 Recipe Ablation Sweep
 
 Follow-up protocol for the small-N recipe search:
