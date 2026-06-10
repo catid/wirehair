@@ -1157,6 +1157,24 @@ class Codec
     */
     void Substitute();
 
+#ifdef WH_OPLOG
+    void OpLogStage(const char* stage) const;
+    void OpLog(
+        const char* op_type,
+        const char* dst_kind,
+        int dst_block,
+        unsigned dst_offset,
+        const char* src0_kind,
+        int src0_block,
+        unsigned src0_offset,
+        const char* src1_kind,
+        int src1_block,
+        unsigned src1_offset,
+        unsigned scalar,
+        unsigned bytes) const;
+    int OpLogRecoveryBlock(const void* ptr) const;
+#endif
+
 
     //--------------------------------------------------------------------------
     // Main Driver
