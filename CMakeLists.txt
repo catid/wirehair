@@ -125,8 +125,13 @@ set_target_properties(wirehair PROPERTIES SOVERSION 2)
 target_include_directories(wirehair PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
 if (BUILD_TESTS)
+    find_package(OpenMP QUIET)
+
     add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
     target_link_libraries(unit_test wirehair)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(unit_test OpenMP::OpenMP_CXX)
+    endif()
 
     add_executable(gen_small_dseeds ${GEN_SMALL_DSEEDS})
     target_link_libraries(gen_small_dseeds wirehair)
