@@ -82,3 +82,4 @@ experiments/peeling/results/fresh_*/
 # Beads / Dolt files (added by bd init)
 .dolt/
 .beads-credential-key
+experiments/precode/precode_sim
