@@ -4297,6 +4297,7 @@ WirehairResult Codec::InitializeEncoder(
         }
 
         // Encoder-specific
+        _decode_complete = false;
         _input_final_bytes = partial_final_bytes;
         _output_final_bytes = _block_bytes;
         _extra_count = 0;
@@ -4494,6 +4495,7 @@ WirehairResult Codec::InitializeDecoder(
 
     // Decoder-specific
     _row_count = 0;
+    _decode_complete = false;
     _output_final_bytes = partial_final_bytes;
 
     // Hack: Prevents row-based ids from causing partial copies when they
@@ -4586,6 +4588,12 @@ WirehairResult Codec::DecodeFeed(
         }
     }
 
+    // Once decoding has succeeded, later valid packets cannot improve state.
+    // Avoid resuming GE after the all-original fast path, which has no GE rows.
+    if (_decode_complete) {
+        return Wirehair_Success;
+    }
+
 #if defined(CAT_ALL_ORIGINAL)
     // If provided a block of non-original data, mark all original as false
     if (block_id >= _block_count) {
@@ -4603,6 +4611,7 @@ WirehairResult Codec::DecodeFeed(
 
         if (result == Wirehair_Success) {
             GenerateRecoveryBlocks();
+            _decode_complete = true;
         }
 
         return result;
@@ -4655,6 +4664,7 @@ WirehairResult Codec::DecodeFeed(
             _all_original = false;
             return Wirehair_InvalidInput;
         }
+        _decode_complete = true;
         return Wirehair_Success;
     }
 #endif
@@ -4665,6 +4675,7 @@ WirehairResult Codec::DecodeFeed(
     // If solve was successful (common):
     if (result == Wirehair_Success) {
         GenerateRecoveryBlocks();
+        _decode_complete = true;
     }
 
     return result;

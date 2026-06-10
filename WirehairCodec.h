@@ -333,6 +333,9 @@ class Codec
     /// Number of stored rows
     uint16_t _row_count = 0;
 
+    /// Boolean: Decoder has already recovered enough rows
+    bool _decode_complete = false;
+
     /// Number of mix columns
     uint16_t _mix_count = 0;
 
@@ -1308,6 +1311,8 @@ public:
         This function accumulates the new block in a large staging buffer.
         As soon as N blocks are collected, SolveMatrix() is run.
         After N blocks, ResumeSolveMatrix() is run.
+        After decoding succeeds, later valid blocks return success without
+        changing decoder state.
     */
     WirehairResult DecodeFeed(
         const unsigned block_id,

@@ -4,6 +4,7 @@
 #include "WirehairV2Plan.h"
 #include "WirehairV2Seeds.h"
 #include "../WirehairTools.h"
+#include <wirehair/wirehair.h>
 
 #include <cstring>
 #include <iostream>
@@ -177,6 +178,77 @@ void CheckCoreSeedHelpers()
         "oversized dense-count override should fail initialization");
 }
 
+void CheckDecodeAfterAllOriginalSuccess()
+{
+    const uint32_t N = 4u;
+    const uint32_t block_bytes = 16u;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+
+    std::vector<uint8_t> message((size_t)message_bytes);
+    std::vector<uint8_t> recovered((size_t)message_bytes, 0xa5);
+    std::vector<uint8_t> repair(block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 31u + 7u);
+    }
+
+    WirehairCodec encoder = wirehair_encoder_create(
+        0, &message[0], message_bytes, block_bytes);
+    WirehairCodec decoder = wirehair_decoder_create(
+        0, message_bytes, block_bytes);
+    Check(encoder != 0, "core encoder initialization should succeed");
+    Check(decoder != 0, "core decoder initialization should succeed");
+    if (!encoder || !decoder) {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return;
+    }
+
+    WirehairResult result = Wirehair_NeedMore;
+    for (uint32_t block_id = 0; block_id < N; ++block_id)
+    {
+        result = wirehair_decode(
+            decoder,
+            block_id,
+            &message[(size_t)block_id * block_bytes],
+            block_bytes);
+        if (block_id + 1u < N) {
+            Check(result == Wirehair_NeedMore,
+                "core decoder should need more originals before completion");
+        }
+    }
+    Check(result == Wirehair_Success,
+        "core decoder should complete on the last original block");
+
+    uint32_t written = 0;
+    Check(wirehair_encode(
+            encoder, N, &repair[0], block_bytes, &written) ==
+            Wirehair_Success,
+        "core encoder should generate a repair block");
+    Check(written == block_bytes,
+        "core repair block should be a full block");
+    Check(wirehair_decode(decoder, N, &repair[0], written) ==
+            Wirehair_Success,
+        "core decoder should ignore valid packets after completion");
+    Check(wirehair_recover(decoder, &recovered[0], message_bytes) ==
+            Wirehair_Success,
+        "core recovery should still succeed after post-completion packet");
+    Check(std::memcmp(&recovered[0], &message[0], (size_t)message_bytes) == 0,
+        "core recovered message should match input");
+
+    decoder = wirehair_decoder_create(decoder, message_bytes, block_bytes);
+    Check(decoder != 0, "core decoder reuse should succeed");
+    if (!decoder) {
+        wirehair_free(encoder);
+        return;
+    }
+    result = wirehair_decode(decoder, 0u, &message[0], block_bytes);
+    Check(result == Wirehair_NeedMore,
+        "core decoder reuse should reset completion state");
+
+    wirehair_free(encoder);
+    wirehair_free(decoder);
+}
+
 } // namespace
 
 int main()
@@ -185,6 +257,7 @@ int main()
 
     Check(wirehair_init() == Wirehair_Success, "wirehair_init should succeed");
     CheckCoreSeedHelpers();
+    CheckDecodeAfterAllOriginalSuccess();
 
     Check(ClassifyBlockBytes(1280u) == BlockByteClass::Small,
         "1280-byte blocks should use small byte class");
