@@ -1,0 +1,401 @@
+# methods:
+#    0 default          O(cols) cached degree-2 refs
+#    1 exact_d2         O(cols + touched_rows*degree) incremental exact degree-2
+#    2 lookahead        O(cols + touched_rows*degree) incremental degree-2 partner potential
+#    3 weighted         O(cols + touched_rows*degree) incremental exact/look/fill
+#    4 min_fill         O(cols + touched_rows*degree) incremental Markowitz-style fill
+#    5 min_fillsq       O(cols + touched_rows*degree) incremental quadratic fill
+#    6 dup_partner      O(cols + touched_rows*degree) incremental repeated degree-2 partners
+#    7 random_tie       O(cols) seeded randomized default ties
+#    8 rowrefs          O(cols) column reference count
+#    9 min_row_degree   O(rows*degree) minimum live row
+#   10 raptorq_d2cc     O(rows*degree + cols) largest degree-2 component
+#   11 topk8_lookfill   O(cols + 8*rowrefs) top-K look/fill
+#   12 exact_ratio      O(cols + touched_rows*degree) incremental exact degree-2 per fill
+#   13 min_maxrow       O(cols + touched_rows*degree) incremental minimize worst touched row
+#   14 d3_support       O(cols + touched_rows*degree) incremental degree-3 support
+#   15 rq_minrow        O(rows*degree) Raptor-style minimum row degree
+#   16 topk4_lookfill   O(cols + 4*rowrefs) top-K look/fill
+#   17 topk16_lookfill  O(cols + 16*rowrefs) top-K look/fill
+#   18 rqd2_default     O(rows*degree + cols) largest degree-2 component/default tie
+#   19 rqd2_minfill     O(rows*degree + cols + rowrefs) largest degree-2 component/min-fill tie
+#   20 minrow_best      O(rows*degree) best column among all minimum rows
+#   21 top32_lookfill   O(cols + 32*rowrefs) top-K/default pool + look/fill score
+#   22 top64_lookfill   O(cols + 64*rowrefs) top-K/default pool + look/fill score
+#   23 top8_ratio       O(cols + 8*rowrefs) top-K/default pool + d2/fill ratio
+#   24 top16_ratio      O(cols + 16*rowrefs) top-K/default pool + d2/fill ratio
+#   25 top32_ratio      O(cols + 32*rowrefs) top-K/default pool + d2/fill ratio
+#   26 top16_dup        O(cols + 16*rowrefs) top-K/default pool + duplicate partners
+#   27 top16_d3         O(cols + 16*rowrefs) top-K/default pool + degree-3 support
+#   28 top16_livemin    O(cols + 16*rowrefs) top-K/default pool + low live refs
+#   29 top16_lowref     O(cols) top-K/default pool + low reference count
+#   30 top16_livemax    O(cols + 16*rowrefs) top-K/default pool + high live refs
+#   31 top32_minfill    O(cols + 32*rowrefs) top-K/default pool + min-fill
+#   32 top32_maxrow     O(cols + 32*rowrefs) top-K/default pool + min max-row
+#   33 d2pool_default   O(rows*degree + candidates) all degree-2 endpoints + default score
+#   34 d2pool_lowref    O(rows*degree + candidates) all degree-2 endpoints + low refs
+#   35 d2pool_lookfill  O(rows*degree + candidates*rowrefs) all degree-2 endpoints + look/fill
+#   36 d2pool_dup       O(rows*degree + candidates*rowrefs) all degree-2 endpoints + duplicate partners
+#   37 d2pool_ratio     O(rows*degree + candidates*rowrefs) all degree-2 endpoints + d2/fill ratio
+#   38 d2pool_minfill   O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min-fill
+#   39 d2pool_maxrow    O(rows*degree + candidates*rowrefs) all degree-2 endpoints + min max-row
+#   40 rqcc_lowref      O(rows*degree + cols) largest degree-2 component + low refs
+#   41 rqcc_lookfill    O(rows*degree + cols + cc*rowrefs) largest degree-2 component + look/fill
+#   42 rqcc_dup         O(rows*degree + cols + cc*rowrefs) largest degree-2 component + duplicate partners
+#   43 rqcc_ratio       O(rows*degree + cols + cc*rowrefs) largest degree-2 component + d2/fill ratio
+#   44 rqcc_minfill     O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min-fill
+#   45 rqcc_livemin     O(rows*degree + cols + cc*rowrefs) largest degree-2 component + low live refs
+#   46 rqcc_maxrow      O(rows*degree + cols + cc*rowrefs) largest degree-2 component + min max-row
+#   47 minrow_default   O(rows*degree + row_degree) first minimum row + default score
+#   48 minrow_lowref    O(rows*degree + row_degree) first minimum row + low refs
+#   49 minrow_minfill   O(rows*degree + row_degree*rowrefs) first minimum row + min-fill
+#   50 minrow_lookfill  O(rows*degree + row_degree*rowrefs) first minimum row + look/fill
+#   51 minrow_ratio     O(rows*degree + row_degree*rowrefs) first minimum row + d2/fill ratio
+#   52 allmin_default   O(rows*degree + candidates) all minimum rows + default score
+#   53 allmin_lowref    O(rows*degree + candidates) all minimum rows + low refs
+#   54 allmin_minfill   O(rows*degree + candidates*rowrefs) all minimum rows + min-fill
+#   55 allmin_lookfill  O(rows*degree + candidates*rowrefs) all minimum rows + look/fill
+#   56 allmin_ratio     O(rows*degree + candidates*rowrefs) all minimum rows + d2/fill ratio
+#   57 global_lowref    O(cols) all columns + low reference count
+#   58 global_livemin   O(cols + touched_rows*degree) all columns + low live refs
+#   59 global_livemax   O(cols*rowrefs) all columns + high live refs
+#   60 global_random    O(cols) all columns + seeded randomized tie
+#   61 top32_lowref     O(cols) top-K/default pool + low reference count
+#   62 top64_ratio      O(cols + 64*rowrefs) top-K/default pool + d2/fill ratio
+#   63 top64_minfill    O(cols + 64*rowrefs) top-K/default pool + min-fill
+#   64 top32_d3         O(cols + 32*rowrefs) top-K/default pool + degree-3 support
+#   65 random_col       O(cols) uniformly random inactivation
+#   66 bm_minrand       O(rows*degree) min row, random all-but-one
+#   67 bm_minbest       O(rows*degree) min row, leave best default
+#   68 bm_minworst      O(rows*degree) min row, leave worst default
+#   69 bm_c_tiny        O(rows*degree) Burshtein-Miller omega2-heavy row
+#   70 bm_c_decay       O(rows*degree) Burshtein-Miller decaying row weights
+#   71 bm_c_uniform     O(rows*degree) random residual row all-but-one
+#   72 bm_local2        O(rows + 64*degree) bounded row-action local lookahead
+#   73 ks_d2_random     O(rows*degree) random degree-2 endpoint
+#   74 ks_smallcc       O(rows*degree + cols) smallest degree-2 component
+#   75 ks_boundary_min  O(rows*degree + cols + cc*rowrefs) largest degree-2 component/min boundary
+#   76 ks_boundary_max  O(rows*degree + cols + cc*rowrefs) largest degree-2 component/max boundary
+#   77 ks_fillmin       O(rows*degree + cols + cc*rowrefs) largest degree-2 component/min fill
+#   78 ks_lowref        O(rows*degree + cols) largest degree-2 component/low refs
+#   79 ks_random        O(rows*degree + cols) largest degree-2 component/random tie
+#   80 ks_all_d2_fill   O(rows*degree + candidates*rowrefs) all degree-2 endpoints/min fill
+#   81 minrow_rowdeg    O(rows*degree + candidates) all min rows/row degree
+#   82 minrow_ovmin     O(rows*degree + candidates) all min rows/min overlap
+#   83 minrow_ovmax     O(rows*degree + candidates) all min rows/max overlap
+#   84 minrow_comp      O(rows*degree + candidates*rowrefs) all min rows/component impact
+#   85 minrow_fill      O(rows*degree + candidates*rowrefs) all min rows/estimated fill
+#   86 minrow_fillratio O(rows*degree + candidates*rowrefs) all min rows/d2-fill ratio
+#   87 minrow_liveref   O(rows*degree + candidates*rowrefs) all min rows/low live refs
+#   88 minrow_rand      O(rows*degree + candidates) all min rows/random tie
+#   89 beam_d2w4        O(top-K, tail<=8 depth*width*copy) beam depth 2 width 4
+#   90 beam_d2w8        O(top-K, tail<=8 depth*width*copy) beam depth 2 width 8
+#   91 beam_d3w4        O(top-K, tail<=8 depth*width*copy) beam depth 3 width 4
+#   92 beam_d3w8        O(top-K, tail<=8 depth*width*copy) beam depth 3 width 8
+#   93 hyb_lowref5      O(default then rqcc_lowref below 5pct todo)
+#   94 hyb_lowref10     O(default then rqcc_lowref below 10pct todo)
+#   95 hyb_ratio5       O(default then rqcc_ratio below 5pct todo)
+#   96 hyb_ratio10      O(default then rqcc_ratio below 10pct todo)
+#   97 hyb_beam5        O(default then beam depth2/width4 below 5pct todo)
+#   98 hyb_beam10       O(default then beam depth2/width4 below 10pct todo)
+#   99 hyb_rqbeam       O(rqcc_lowref then beam near tail)
+#   100 ms_rtie2         O(2*random_tie schedule) best of two random-tie runs
+#   101 ms_rcol2         O(2*random_col schedule) best of two random-column runs
+#   102 ms_rtie4         O(4*random_tie schedule) best of four random-tie runs
+#   103 ms_rcol4         O(4*random_col schedule) best of four random-column runs
+#   104 ms_def_rtie      O(default + random_tie multistart)
+#   105 ms_rqcc_rand     O(rqcc randomized tie multistart)
+#   106 rah_le2          O(rows*degree) row-action when live degree <= 2
+#   107 rah_le3          O(rows*degree) row-action when live degree <= 3
+#   108 rah_le4          O(rows*degree) row-action when live degree <= 4
+#   109 rah_bm3          O(rows*degree) BM row-action below degree 3 else singleton
+#   110 rah_local3       O(rows + 64*degree) bounded local row-action below degree 3 else rqcc
+#   111 rah_min4         O(rows*degree) min-row action below degree 4 else rqcc
+#   112 lazy_liveref     O(cols + touched_rows*degree) incremental live-ref cache
+#   113 lazy_fill        O(cols + touched_rows*degree) incremental fill cache
+#   114 lazy_d2          O(cols + touched_rows*degree) incremental degree-2 cache
+#   115 ks_bmax_top16    O(rows*degree + cols + min(16,cc)*rowrefs) degree-2 CC/default top16 then boundary-max
+#   116 ks_bmax_top64    O(rows*degree + cols + min(64,cc)*rowrefs) degree-2 CC/default top64 then boundary-max
+#   117 hyb_bmax5        O(rqd2_default then boundary-max below 5pct todo)
+#   118 hyb_bmax10       O(rqd2_default then boundary-max below 10pct todo)
+#   119 av_top16         O(cols + 16*local-avalanche) top16/default + local cascade estimate
+#   120 av_top64         O(cols + 64*local-avalanche) top64/default + local cascade estimate
+#   121 av_rqcc16        O(rows*degree + cols + min(16,cc)*local-avalanche) degree-2 CC + local cascade estimate
+#   122 av_rqcc64        O(rows*degree + cols + min(64,cc)*local-avalanche) degree-2 CC + local cascade estimate
+#   123 sim1_top16       O(cols + 16*copy) top16/default + exact one-step score
+#   124 sim1_rqcc16      O(rows*degree + cols + min(16,cc)*copy) degree-2 CC + exact one-step score
+#   125 hyb_rqav5        O(rqd2_default then rqcc16 avalanche-est below 5pct todo)
+#   126 hyb_rqav10       O(rqd2_default then rqcc16 avalanche-est below 10pct todo)
+#   127 av_lazy16        O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache
+#   128 av_lazy64        O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache
+# structures:
+#   wirehair_rand  Wirehair row-weight distribution with random columns
+#   binary_p50     fully random dense binary matrix rows with P(column)=0.5
+#   uniform1_8     uniform row degree in [1,8]
+#   uniform2_8     uniform row degree in [2,8]
+#   uniform3_8     uniform row degree in [3,8]
+#   uniform1_16    uniform row degree in [1,16]
+#   uniform2_16    uniform row degree in [2,16]
+#   uniform3_16    uniform row degree in [3,16]
+#   gauss4_min1    rounded gaussian degree around 4, min 1, cap 16
+#   gauss4_min2    rounded gaussian degree around 4, min 2, cap 16
+#   gauss6_min2    rounded gaussian degree around 6, min 2, cap 24
+#   lt_trunc64     truncated ideal-soliton-like degree distribution, cap 64
+#   lt_no1_64      truncated ideal-soliton-like distribution without degree 1
+#   lt_robust64    LT-like distribution with extra degree-1/2 mass, cap 64
+#   lt_m1_c16      LT degree distribution, min 1, cap 16
+#   lt_m1_c32      LT degree distribution, min 1, cap 32
+#   lt_m1_c64      LT degree distribution, min 1, cap 64
+#   lt_m1_c128     LT degree distribution, min 1, cap 128
+#   lt_m1_c256     LT degree distribution, min 1, cap 256
+#   lt_m1_c320     LT degree distribution, min 1, cap 320
+#   lt_m1_c3200    LT degree distribution, min 1, cap 3200
+#   lt_m2_c16      LT degree distribution, min 2, cap 16
+#   lt_m2_c32      LT degree distribution, min 2, cap 32
+#   lt_m2_c64      LT degree distribution, min 2, cap 64
+#   lt_m2_c96      LT degree distribution, min 2, cap 96
+#   lt_m2_c128     LT degree distribution, min 2, cap 128
+#   lt_m2_c192     LT degree distribution, min 2, cap 192
+#   lt_m2_c256     LT degree distribution, min 2, cap 256
+#   lt_m2_c320     LT degree distribution, min 2, cap 320
+#   lt_m2_c512     LT degree distribution, min 2, cap 512
+#   lt_m2_c640     LT degree distribution, min 2, cap 640
+#   lt_m2_c960     LT degree distribution, min 2, cap 960
+#   lt_m2_c1024    LT degree distribution, min 2, cap 1024
+#   lt_m2_c1280    LT degree distribution, min 2, cap 1280
+#   lt_m2_c1920    LT degree distribution, min 2, cap 1920
+#   lt_m2_c2560    LT degree distribution, min 2, cap 2560
+#   lt_m2_c3200    LT degree distribution, min 2, cap 3200
+#   lt_m3_c16      LT degree distribution, min 3, cap 16
+#   lt_m3_c32      LT degree distribution, min 3, cap 32
+#   lt_m3_c64      LT degree distribution, min 3, cap 64
+#   lt_m3_c128     LT degree distribution, min 3, cap 128
+#   lt_m3_c256     LT degree distribution, min 3, cap 256
+#   lt_m3_c320     LT degree distribution, min 3, cap 320
+#   lt_m3_c3200    LT degree distribution, min 3, cap 3200
+#   d1mix_lt_p0    0 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p005  0.5 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p01   1 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p2    2 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p5    5 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p10   10 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p20   20 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_lt_p30   30 percent degree-1 rows, otherwise LT min 2 cap 64
+#   d1mix_u2_8_p0  0 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_8_p2  2 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_8_p5  5 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_8_p10 10 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_8_p20 20 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_8_p30 30 percent degree-1 rows, otherwise uniform [2,8]
+#   d1mix_u2_16_p0 0 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_16_p2 2 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_16_p5 5 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_16_p10 10 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_16_p20 20 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_16_p30 30 percent degree-1 rows, otherwise uniform [2,16]
+#   d1mix_u2_64_p0 0 percent degree-1 rows, otherwise uniform [2,64]
+#   d1mix_u2_64_p2 2 percent degree-1 rows, otherwise uniform [2,64]
+#   d1mix_u2_64_p5 5 percent degree-1 rows, otherwise uniform [2,64]
+#   d1mix_u2_64_p10 10 percent degree-1 rows, otherwise uniform [2,64]
+#   d1mix_u2_64_p20 20 percent degree-1 rows, otherwise uniform [2,64]
+#   d1mix_u2_64_p30 30 percent degree-1 rows, otherwise uniform [2,64]
+#   robust_d1_001_d2_003 LT cap64 plus degree-1 mass 0.01 and degree-2 mass 0.03
+#   robust_d1_001_d2_008 LT cap64 plus degree-1 mass 0.01 and degree-2 mass 0.08
+#   robust_d1_001_d2_012 LT cap64 plus degree-1 mass 0.01 and degree-2 mass 0.12
+#   robust_d1_001_d2_020 LT cap64 plus degree-1 mass 0.01 and degree-2 mass 0.20
+#   robust_d1_003_d2_003 LT cap64 plus degree-1 mass 0.03 and degree-2 mass 0.03
+#   robust_d1_003_d2_008 LT cap64 plus degree-1 mass 0.03 and degree-2 mass 0.08
+#   robust_d1_003_d2_012 LT cap64 plus degree-1 mass 0.03 and degree-2 mass 0.12
+#   robust_d1_003_d2_020 LT cap64 plus degree-1 mass 0.03 and degree-2 mass 0.20
+#   robust_d1_005_d2_003 LT cap64 plus degree-1 mass 0.05 and degree-2 mass 0.03
+#   robust_d1_005_d2_008 LT cap64 plus degree-1 mass 0.05 and degree-2 mass 0.08
+#   robust_d1_005_d2_012 LT cap64 plus degree-1 mass 0.05 and degree-2 mass 0.12
+#   robust_d1_005_d2_020 LT cap64 plus degree-1 mass 0.05 and degree-2 mass 0.20
+#   robust_d1_010_d2_003 LT cap64 plus degree-1 mass 0.10 and degree-2 mass 0.03
+#   robust_d1_010_d2_008 LT cap64 plus degree-1 mass 0.10 and degree-2 mass 0.08
+#   robust_d1_010_d2_012 LT cap64 plus degree-1 mass 0.10 and degree-2 mass 0.12
+#   robust_d1_010_d2_020 LT cap64 plus degree-1 mass 0.10 and degree-2 mass 0.20
+#   rs_c001_d50_c128 true robust soliton c=0.01 delta=0.50, cap 128, renormalized
+#   rs_c003_d10_c128 true robust soliton c=0.03 delta=0.10, cap 128, renormalized
+#   rs_c005_d05_c128 true robust soliton c=0.05 delta=0.05, cap 128, renormalized
+#   rs_c010_d01_c128 true robust soliton c=0.10 delta=0.01, cap 128, renormalized
+#   sol_alpha075_c128 ideal soliton weights raised to alpha=0.75, cap 128
+#   sol_alpha125_c128 ideal soliton weights raised to alpha=1.25, cap 128
+#   sol_alpha150_c128 ideal soliton weights raised to alpha=1.50, cap 128
+#   sol_m2_alpha075_c320 LT min 2 cap 320 with weights raised to alpha=0.75
+#   sol_m2_alpha125_c320 LT min 2 cap 320 with weights raised to alpha=1.25
+#   sol_m2_alpha150_c320 LT min 2 cap 320 with weights raised to alpha=1.50
+#   sol_m2_alpha075_c3200 LT min 2 cap 3200 with weights raised to alpha=0.75
+#   sol_m2_alpha125_c3200 LT min 2 cap 3200 with weights raised to alpha=1.25
+#   sol_m2_alpha150_c3200 LT min 2 cap 3200 with weights raised to alpha=1.50
+#   lt_m1_c64_fold LT min 1 cap 64 with probability mass above cap folded into cap
+#   lt_m2_c64_fold LT min 2 cap 64 with probability mass above cap folded into cap
+#   lt_m2_c96_fold LT min 2 cap 96 with probability mass above cap folded into cap
+#   lt_m2_c128_fold LT min 2 cap 128 with probability mass above cap folded into cap
+#   lt_m2_c192_fold LT min 2 cap 192 with probability mass above cap folded into cap
+#   lt_m2_c256_fold LT min 2 cap 256 with probability mass above cap folded into cap
+#   lt_m2_c320_fold LT min 2 cap 320 with probability mass above cap folded into cap
+#   lt_m2_c512_fold LT min 2 cap 512 with probability mass above cap folded into cap
+#   lt_m2_c640_fold LT min 2 cap 640 with probability mass above cap folded into cap
+#   lt_m2_c960_fold LT min 2 cap 960 with probability mass above cap folded into cap
+#   lt_m2_c1024_fold LT min 2 cap 1024 with probability mass above cap folded into cap
+#   lt_m2_c1280_fold LT min 2 cap 1280 with probability mass above cap folded into cap
+#   lt_m2_c1920_fold LT min 2 cap 1920 with probability mass above cap folded into cap
+#   lt_m2_c2560_fold LT min 2 cap 2560 with probability mass above cap folded into cap
+#   lt_m2_c3200_fold LT min 2 cap 3200 with probability mass above cap folded into cap
+#   lt_m2_c256_fold0 LT min 2 cap 256 with 0 percent folded tail mass
+#   lt_m2_c256_fold25 LT min 2 cap 256 with 25 percent folded tail mass
+#   lt_m2_c256_fold50 LT min 2 cap 256 with 50 percent folded tail mass
+#   lt_m2_c256_fold200 LT min 2 cap 256 with 200 percent folded tail mass
+#   lt_m2_c1024_fold0 LT min 2 cap 1024 with 0 percent folded tail mass
+#   lt_m2_c1024_fold25 LT min 2 cap 1024 with 25 percent folded tail mass
+#   lt_m2_c1024_fold50 LT min 2 cap 1024 with 50 percent folded tail mass
+#   lt_m2_c1024_fold200 LT min 2 cap 1024 with 200 percent folded tail mass
+#   lt_m2_c384_fold10 LT min 2 cap 384 with 10 percent folded tail mass
+#   lt_m2_c384_fold25 LT min 2 cap 384 with 25 percent folded tail mass
+#   lt_m2_c384_fold40 LT min 2 cap 384 with 40 percent folded tail mass
+#   lt_m2_c384_fold60 LT min 2 cap 384 with 60 percent folded tail mass
+#   lt_m2_c512_fold10 LT min 2 cap 512 with 10 percent folded tail mass
+#   lt_m2_c512_fold25 LT min 2 cap 512 with 25 percent folded tail mass
+#   lt_m2_c512_fold40 LT min 2 cap 512 with 40 percent folded tail mass
+#   lt_m2_c512_fold60 LT min 2 cap 512 with 60 percent folded tail mass
+#   lt_m2_c768_fold10 LT min 2 cap 768 with 10 percent folded tail mass
+#   lt_m2_c768_fold25 LT min 2 cap 768 with 25 percent folded tail mass
+#   lt_m2_c768_fold40 LT min 2 cap 768 with 40 percent folded tail mass
+#   lt_m2_c768_fold60 LT min 2 cap 768 with 60 percent folded tail mass
+#   lt_m2_c1024_fold10 LT min 2 cap 1024 with 10 percent folded tail mass
+#   lt_m2_c1024_fold40 LT min 2 cap 1024 with 40 percent folded tail mass
+#   lt_m2_c1024_fold60 LT min 2 cap 1024 with 60 percent folded tail mass
+#   lt_m2_c1536_fold10 LT min 2 cap 1536 with 10 percent folded tail mass
+#   lt_m2_c1536_fold25 LT min 2 cap 1536 with 25 percent folded tail mass
+#   lt_m2_c1536_fold40 LT min 2 cap 1536 with 40 percent folded tail mass
+#   lt_m2_c1536_fold60 LT min 2 cap 1536 with 60 percent folded tail mass
+#   lt_m2_c2048_fold10 LT min 2 cap 2048 with 10 percent folded tail mass
+#   lt_m2_c2048_fold25 LT min 2 cap 2048 with 25 percent folded tail mass
+#   lt_m2_c2048_fold40 LT min 2 cap 2048 with 40 percent folded tail mass
+#   lt_m2_c2048_fold60 LT min 2 cap 2048 with 60 percent folded tail mass
+#   lt_d3_003_d4_003 LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.03
+#   lt_d3_008_d4_003 LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.03
+#   lt_d3_003_d4_008 LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.08
+#   lt_d3_008_d4_008 LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.08
+#   lt_d2_008_d3_003_d4_003 LT cap64 plus degree-2 mass 0.08, degree-3 mass 0.03, degree-4 mass 0.03
+#   lt_c320_d2_003 LT cap320 plus independent degree-2 mass 0.03
+#   lt_c320_d2_008 LT cap320 plus independent degree-2 mass 0.08
+#   lt_c320_d3_003 LT cap320 plus independent degree-3 mass 0.03
+#   lt_c320_d4_003 LT cap320 plus independent degree-4 mass 0.03
+#   lt_c320_d2_003_d3_003_d4_003 LT cap320 plus degree-2/3/4 mass 0.03 each
+#   lt_c320_d2_008_d3_003_d4_003 LT cap320 plus degree-2 mass 0.08, degree-3/4 mass 0.03
+#   lt_m2_c320_d2_003 LT min 2 cap320 plus independent degree-2 mass 0.03
+#   lt_m2_c320_d2_008 LT min 2 cap320 plus independent degree-2 mass 0.08
+#   lt_m2_c320_d3_003 LT min 2 cap320 plus independent degree-3 mass 0.03
+#   lt_m2_c320_d4_003 LT min 2 cap320 plus independent degree-4 mass 0.03
+#   lt_m2_c320_d2_003_d3_003_d4_003 LT min 2 cap320 plus degree-2/3/4 mass 0.03 each
+#   lt_m2_c320_d2_008_d3_003_d4_003 LT min 2 cap320 plus degree-2 mass 0.08, degree-3/4 mass 0.03
+#   lt_c3200_d2_003 LT cap3200 plus independent degree-2 mass 0.03
+#   lt_c3200_d2_008 LT cap3200 plus independent degree-2 mass 0.08
+#   lt_c3200_d3_003 LT cap3200 plus independent degree-3 mass 0.03
+#   lt_c3200_d4_003 LT cap3200 plus independent degree-4 mass 0.03
+#   lt_c3200_d2_003_d3_003_d4_003 LT cap3200 plus degree-2/3/4 mass 0.03 each
+#   lt_c3200_d2_008_d3_003_d4_003 LT cap3200 plus degree-2 mass 0.08, degree-3/4 mass 0.03
+#   lt_m2_c3200_d2_003 LT min 2 cap3200 plus independent degree-2 mass 0.03
+#   lt_m2_c3200_d2_008 LT min 2 cap3200 plus independent degree-2 mass 0.08
+#   lt_m2_c3200_d3_003 LT min 2 cap3200 plus independent degree-3 mass 0.03
+#   lt_m2_c3200_d4_003 LT min 2 cap3200 plus independent degree-4 mass 0.03
+#   lt_m2_c3200_d2_003_d3_003_d4_003 LT min 2 cap3200 plus degree-2/3/4 mass 0.03 each
+#   lt_m2_c3200_d2_008_d3_003_d4_003 LT min 2 cap3200 plus degree-2 mass 0.08, degree-3/4 mass 0.03
+#   lt_m2_c512_d2_003 LT min 2 cap512 plus independent degree-2 mass 0.03
+#   lt_m2_c512_d3_003 LT min 2 cap512 plus independent degree-3 mass 0.03
+#   lt_m2_c1024_d2_003 LT min 2 cap1024 plus independent degree-2 mass 0.03
+#   lt_m2_c1024_d3_003 LT min 2 cap1024 plus independent degree-3 mass 0.03
+#   lt_m2_c2048_d2_003 LT min 2 cap2048 plus independent degree-2 mass 0.03
+#   lt_m2_c2048_d3_003 LT min 2 cap2048 plus independent degree-3 mass 0.03
+#   lt_m2_c320_hi1_h160 LT min 2 cap 320 with 1 explicit degree-N/2 row
+#   lt_m2_c320_hi2_h160 LT min 2 cap 320 with 2 explicit degree-N/2 rows
+#   lt_m2_c320_hi4_h160 LT min 2 cap 320 with 4 explicit degree-N/2 rows
+#   lt_m2_c320_hi8_h160 LT min 2 cap 320 with 8 explicit degree-N/2 rows
+#   lt_m2_c320_hi1_h320 LT min 2 cap 320 with 1 explicit degree-N row
+#   lt_m2_c320_hi2_h320 LT min 2 cap 320 with 2 explicit degree-N rows
+#   lt_m2_c320_hi4_h320 LT min 2 cap 320 with 4 explicit degree-N rows
+#   lt_m2_c320_hi8_h320 LT min 2 cap 320 with 8 explicit degree-N rows
+#   lt_m2_c3200_hi1_h1600 LT min 2 cap 3200 with 1 explicit degree-N/2 row
+#   lt_m2_c3200_hi2_h1600 LT min 2 cap 3200 with 2 explicit degree-N/2 rows
+#   lt_m2_c3200_hi4_h1600 LT min 2 cap 3200 with 4 explicit degree-N/2 rows
+#   lt_m2_c3200_hi8_h1600 LT min 2 cap 3200 with 8 explicit degree-N/2 rows
+#   lt_m2_c3200_hi1_h3200 LT min 2 cap 3200 with 1 explicit degree-N row
+#   lt_m2_c3200_hi2_h3200 LT min 2 cap 3200 with 2 explicit degree-N rows
+#   lt_m2_c3200_hi4_h3200 LT min 2 cap 3200 with 4 explicit degree-N rows
+#   lt_m2_c3200_hi8_h3200 LT min 2 cap 3200 with 8 explicit degree-N rows
+#   ohdep_lt_adapt128 overhead-dependent LT cap128: low-degree mass adapts from +0 to +5 percent overhead
+#   ohdep_lt_no1_128 overhead-dependent LT cap128: suppresses degree-1 mass at zero/near-zero overhead
+#   ohdep_lt_tail256 overhead-dependent LT cap256: longer tail at zero overhead with stronger low-degree mass at overhead
+#   raptorq_ldpc_struct RaptorQ LDPC check-row pattern over fixed N columns plus random repair rows
+#   raptorq_ldpc_rand randomized control with the same RaptorQ LDPC check-row degrees plus random repair rows
+#   two_low24_t5_h8_32 95 percent uniform [2,4], 5 percent uniform [8,32]
+#   two_low24_t5_h16_64 95 percent uniform [2,4], 5 percent uniform [16,64]
+#   two_low24_t5_h32_128 95 percent uniform [2,4], 5 percent uniform [32,128]
+#   two_low24_t10_h8_32 90 percent uniform [2,4], 10 percent uniform [8,32]
+#   two_low24_t10_h16_64 90 percent uniform [2,4], 10 percent uniform [16,64]
+#   two_low24_t10_h32_128 90 percent uniform [2,4], 10 percent uniform [32,128]
+#   two_low24_t20_h8_32 80 percent uniform [2,4], 20 percent uniform [8,32]
+#   two_low24_t20_h16_64 80 percent uniform [2,4], 20 percent uniform [16,64]
+#   two_low24_t20_h32_128 80 percent uniform [2,4], 20 percent uniform [32,128]
+#   two_low23_t10_h16_64 90 percent uniform [2,3], 10 percent uniform [16,64]
+#   bal_u2_16_load125 balanced uniform [2,16], reject above 1.25x mean load
+#   bal_u2_16_load150 balanced uniform [2,16], reject above 1.50x mean load
+#   bal_u2_16_load200 balanced uniform [2,16], reject above 2.00x mean load
+#   bal_u2_16_best2 balanced uniform [2,16], best of 2 row candidates
+#   bal_u2_16_best4 balanced uniform [2,16], best of 4 row candidates
+#   deck_lt_m2_c256_fold deck-dealt exactly balanced columns, LT min 2 cap 256 folded tail degree law
+#   deck_lt_m2_c512_fold deck-dealt exactly balanced columns, LT min 2 cap 512 folded tail degree law
+#   deck_lt_m2_c128 deck-dealt exactly balanced columns, LT min 2 cap 128 degree law
+#   deck_lt_m2_c16 deck-dealt exactly balanced columns, LT min 2 cap 16 degree law
+#   deck_lt_m1_c64 deck-dealt exactly balanced columns, LT min 1 cap 64 degree law
+#   deck_rs_c001_d50_c128 deck-dealt exactly balanced columns, robust soliton c=0.01 delta=0.50 cap 128 degree law
+#   deckloss10_lt_m2_c256_fold deck deal over 1.11x virtual rows then keep configured rows, LT min 2 cap 256 folded tail
+#   deckloss30_lt_m2_c256_fold deck deal over 1.43x virtual rows then keep configured rows, LT min 2 cap 256 folded tail
+#   p2c_lt_m2_c256_fold power-of-two-choices column balance, LT min 2 cap 256 folded tail degree law
+#   harmonic1_32   degree probability proportional to 1/d in [1,32]
+#   harmonic2_32   degree probability proportional to 1/d in [2,32]
+#   one10_u2_8     10 percent degree-1 rows, otherwise uniform [2,8]
+#   one25_u2_8     25 percent degree-1 rows, otherwise uniform [2,8]
+#   cap4_u2        uniform [2,4] max-degree cap
+#   cap8_u2        uniform [2,8] max-degree cap
+#   cap16_u2       uniform [2,16] max-degree cap
+# sweep: trials=6 threads=1 structures=wirehair_rand,lt_m2_c1024,lt_m2_c256_fold matrix_seeds=paired overhead=0 overhead_pct=0 rows_override=0 N_jitter=10 seed=0x6c617a7961766131
+method_id,method,cost,structure,N,N_jitter,actual_N_mu,actual_N_min,actual_N_max,matrix_rows_mu,matrix_rows_min,matrix_rows_max,matrix_refs_mu,row_refs_mu,row_xors_mu,matrix_xors_mu,overhead,overhead_pct,source,trials,cols_mu,cols_sd,c50,c95,c99,cmax,rows_mu,rows_sd,r50,r95,r99,rmax,comp_mu,maxcomp_mu,sumsq_mu,init_todo_mu,init_d2_mu,choices_mu,solve_sparse_xors_mu,solve_dense_xors_est_mu,solve_total_xors_est_mu,build_us,greedy_us,total_us
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",wirehair_rand,1000,10,997.67,991,1008,997.67,991,1008,5236.17,5.2476,4.2476,4238.50,0,0,random-paired,6,20.33,3.14,19,25,25,25,20.33,3.14,19,25,25,25,18.83,2.50,30.67,760.67,387.00,20.33,4144.67,423.33,4568.00,468.7,1788.5,2307.5
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",wirehair_rand,6400,10,6399.33,6390,6405,6399.33,6390,6405,36908.67,5.7676,4.7676,30509.33,0,0,random-paired,6,66.00,13.38,70,84,84,84,66.00,13.38,70,84,84,84,64.83,1.67,69.33,6399.33,3194.17,66.00,30154.83,4535.00,34689.83,3102.0,17677.2,20919.5
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",wirehair_rand,32000,10,31998.00,31992,32005,31998.00,31992,32005,184201.67,5.7567,4.7567,152203.67,0,0,random-paired,6,218.67,36.89,208,299,299,299,218.67,36.89,208,299,299,299,217.67,1.67,220.67,31998.00,16050.00,218.67,151352.50,49176.00,200528.50,37674.2,195989.3,235088.5
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",wirehair_rand,1000,10,997.67,991,1008,997.67,991,1008,5236.17,5.2476,4.2476,4238.50,0,0,random-paired,6,20.33,3.14,19,25,25,25,20.33,3.14,19,25,25,25,18.83,2.50,30.67,760.67,387.00,20.33,4144.67,423.33,4568.00,387.7,1813.5,2243.8
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",wirehair_rand,6400,10,6399.33,6390,6405,6399.33,6390,6405,36908.67,5.7676,4.7676,30509.33,0,0,random-paired,6,66.00,13.38,70,84,84,84,66.00,13.38,70,84,84,84,64.83,1.67,69.33,6399.33,3194.17,66.00,30154.83,4535.00,34689.83,2918.3,20602.8,23651.3
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",wirehair_rand,32000,10,31998.00,31992,32005,31998.00,31992,32005,184201.67,5.7567,4.7567,152203.67,0,0,random-paired,6,218.67,36.89,208,299,299,299,218.67,36.89,208,299,299,299,217.67,1.67,220.67,31998.00,16050.00,218.67,151352.50,49176.00,200528.50,43688.0,266973.5,311787.3
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",wirehair_rand,1000,10,997.67,991,1008,997.67,991,1008,5236.17,5.2476,4.2476,4238.50,0,0,random-paired,6,20.17,3.24,19,25,25,25,20.17,3.24,19,25,25,25,19.00,1.83,24.17,760.67,387.00,20.17,4148.50,417.17,4565.67,428.3,3004.3,3471.5
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",wirehair_rand,6400,10,6399.33,6390,6405,6399.33,6390,6405,36908.67,5.7676,4.7676,30509.33,0,0,random-paired,6,65.33,13.17,70,83,83,83,65.33,13.17,70,83,83,83,64.50,1.50,67.33,6399.33,3194.17,65.33,30181.33,4442.00,34623.33,3005.5,34941.0,38089.8
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",wirehair_rand,32000,10,31998.00,31992,32005,31998.00,31992,32005,184201.67,5.7567,4.7567,152203.67,0,0,random-paired,6,215.83,35.88,202,294,294,294,215.83,35.88,202,294,294,294,215.17,1.67,217.50,31998.00,16050.00,215.83,151452.83,47871.17,199324.00,30207.5,341949.8,373068.5
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",wirehair_rand,1000,10,997.67,991,1008,997.67,991,1008,5236.17,5.2476,4.2476,4238.50,0,0,random-paired,6,20.17,3.24,19,25,25,25,20.17,3.24,19,25,25,25,19.00,1.83,24.17,760.67,387.00,20.17,4148.50,417.17,4565.67,396.3,3343.8,3777.3
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",wirehair_rand,6400,10,6399.33,6390,6405,6399.33,6390,6405,36908.67,5.7676,4.7676,30509.33,0,0,random-paired,6,65.33,13.17,70,83,83,83,65.33,13.17,70,83,83,83,64.50,1.50,67.33,6399.33,3194.17,65.33,30181.33,4442.00,34623.33,2938.2,44413.8,47450.3
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",wirehair_rand,32000,10,31998.00,31992,32005,31998.00,31992,32005,184201.67,5.7567,4.7567,152203.67,0,0,random-paired,6,215.83,35.88,202,294,294,294,215.83,35.88,202,294,294,294,215.17,1.67,217.50,31998.00,16050.00,215.83,151452.83,47871.17,199324.00,35708.7,511429.7,547973.0
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c1024,1000,10,997.67,991,1008,997.67,991,1008,7573.33,7.5868,6.5868,6575.67,0,0,random-paired,6,17.33,3.14,18,23,23,23,17.33,3.14,18,23,23,23,9.33,9.00,144.33,997.67,505.83,17.33,6442.00,310.33,6752.33,757.7,5052.2,5829.5
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c1024,6400,10,6399.33,6390,6405,6399.33,6390,6405,47320.17,7.3947,6.3947,40920.83,0,0,random-paired,6,47.83,12.89,44,74,74,74,47.83,12.89,44,74,74,74,43.17,4.33,81.50,6399.33,3208.00,47.83,40576.00,2454.17,43030.17,8073.5,49257.5,57423.2
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c1024,32000,10,31998.00,31992,32005,31998.00,31992,32005,239128.67,7.4732,6.4732,207130.67,0,0,random-paired,6,116.17,22.08,112,160,160,160,116.17,22.08,112,160,160,160,113.17,2.50,129.50,31998.00,16032.50,116.17,206309.50,13982.17,220291.67,69622.3,522850.5,593521.0
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c1024,1000,10,997.67,991,1008,997.67,991,1008,7573.33,7.5868,6.5868,6575.67,0,0,random-paired,6,17.33,3.14,18,23,23,23,17.33,3.14,18,23,23,23,9.33,9.00,144.33,997.67,505.83,17.33,6442.00,310.33,6752.33,716.7,5480.5,6227.5
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c1024,6400,10,6399.33,6390,6405,6399.33,6390,6405,47320.17,7.3947,6.3947,40920.83,0,0,random-paired,6,47.83,12.89,44,74,74,74,47.83,12.89,44,74,74,74,43.17,4.33,81.50,6399.33,3208.00,47.83,40576.00,2454.17,43030.17,7780.3,55939.0,63863.8
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c1024,32000,10,31998.00,31992,32005,31998.00,31992,32005,239128.67,7.4732,6.4732,207130.67,0,0,random-paired,6,116.17,22.08,112,160,160,160,116.17,22.08,112,160,160,160,113.17,2.50,129.50,31998.00,16032.50,116.17,206309.50,13982.17,220291.67,70928.8,615493.0,687519.0
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c1024,1000,10,997.67,991,1008,997.67,991,1008,7573.33,7.5868,6.5868,6575.67,0,0,random-paired,6,17.33,3.14,18,23,23,23,17.33,3.14,18,23,23,23,9.67,8.67,138.67,997.67,505.83,17.33,6446.83,310.33,6757.17,765.5,7139.8,7928.5
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c1024,6400,10,6399.33,6390,6405,6399.33,6390,6405,47320.17,7.3947,6.3947,40920.83,0,0,random-paired,6,46.83,13.22,42,74,74,74,46.83,13.22,42,74,74,74,42.33,4.67,81.17,6399.33,3208.00,46.83,40603.33,2368.17,42971.50,7479.0,76180.2,83787.8
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c1024,32000,10,31998.00,31992,32005,31998.00,31992,32005,239128.67,7.4732,6.4732,207130.67,0,0,random-paired,6,113.17,21.49,109,154,154,154,113.17,21.49,109,154,154,154,111.67,1.50,116.50,31998.00,16032.50,113.17,206396.00,13268.50,219664.50,73708.0,793003.5,867855.0
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c1024,1000,10,997.67,991,1008,997.67,991,1008,7573.33,7.5868,6.5868,6575.67,0,0,random-paired,6,17.33,3.14,18,23,23,23,17.33,3.14,18,23,23,23,9.67,8.67,138.67,997.67,505.83,17.33,6446.83,310.33,6757.17,699.8,7452.5,8173.7
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c1024,6400,10,6399.33,6390,6405,6399.33,6390,6405,47320.17,7.3947,6.3947,40920.83,0,0,random-paired,6,46.83,13.22,42,74,74,74,46.83,13.22,42,74,74,74,42.33,4.67,81.17,6399.33,3208.00,46.83,40603.33,2368.17,42971.50,7598.7,83061.0,90780.8
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c1024,32000,10,31998.00,31992,32005,31998.00,31992,32005,239128.67,7.4732,6.4732,207130.67,0,0,random-paired,6,113.17,21.49,109,154,154,154,113.17,21.49,109,154,154,154,111.67,1.50,116.50,31998.00,16032.50,113.17,206396.00,13268.50,219664.50,66498.8,960062.2,1027823.3
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c256_fold,1000,10,997.67,991,1008,997.67,991,1008,7121.33,7.1360,6.1360,6123.67,0,0,random-paired,6,20.00,2.45,21,22,22,22,20.00,2.45,21,22,22,22,13.00,7.50,91.33,997.67,497.50,20.00,5963.17,406.00,6369.17,605.7,3706.3,4351.3
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c256_fold,6400,10,6399.33,6390,6405,6399.33,6390,6405,45985.17,7.1859,6.1859,39585.83,0,0,random-paired,6,54.33,10.26,55,73,73,73,54.33,10.26,55,73,73,73,47.17,4.83,94.00,6399.33,3200.17,54.33,39120.50,3057.33,42177.83,5030.7,34877.3,40027.3
+119,av_top16,"O(cols + 16*local-avalanche) top16/default + local cascade estimate",lt_m2_c256_fold,32000,10,31998.00,31992,32005,31998.00,31992,32005,228628.33,7.1451,6.1451,196630.33,0,0,random-paired,6,129.67,21.39,129,169,169,169,129.67,21.39,129,169,169,169,123.83,3.17,145.67,31998.00,16016.83,129.67,195688.33,17271.00,212959.33,57120.0,375395.0,433647.2
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c256_fold,1000,10,997.67,991,1008,997.67,991,1008,7121.33,7.1360,6.1360,6123.67,0,0,random-paired,6,20.00,2.45,21,22,22,22,20.00,2.45,21,22,22,22,13.00,7.50,91.33,997.67,497.50,20.00,5963.17,406.00,6369.17,590.2,4188.8,4820.3
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c256_fold,6400,10,6399.33,6390,6405,6399.33,6390,6405,45985.17,7.1859,6.1859,39585.83,0,0,random-paired,6,54.33,10.26,55,73,73,73,54.33,10.26,55,73,73,73,47.17,4.83,94.00,6399.33,3200.17,54.33,39120.50,3057.33,42177.83,5091.8,43122.8,48358.7
+127,av_lazy16,"O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache",lt_m2_c256_fold,32000,10,31998.00,31992,32005,31998.00,31992,32005,228628.33,7.1451,6.1451,196630.33,0,0,random-paired,6,129.67,21.39,129,169,169,169,129.67,21.39,129,169,169,169,123.83,3.17,145.67,31998.00,16016.83,129.67,195688.33,17271.00,212959.33,54314.7,445158.8,500811.5
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c256_fold,1000,10,997.67,991,1008,997.67,991,1008,7121.33,7.1360,6.1360,6123.67,0,0,random-paired,6,20.00,2.45,21,22,22,22,20.00,2.45,21,22,22,22,13.17,7.33,94.00,997.67,497.50,20.00,5968.00,406.00,6374.00,615.8,6341.5,6994.3
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c256_fold,6400,10,6399.33,6390,6405,6399.33,6390,6405,45985.17,7.1859,6.1859,39585.83,0,0,random-paired,6,52.83,10.70,51,73,73,73,52.83,10.70,51,73,73,73,47.67,3.83,73.83,6399.33,3200.17,52.83,39178.50,2905.83,42084.33,4907.5,63747.0,68770.0
+120,av_top64,"O(cols + 64*local-avalanche) top64/default + local cascade estimate",lt_m2_c256_fold,32000,10,31998.00,31992,32005,31998.00,31992,32005,228628.33,7.1451,6.1451,196630.33,0,0,random-paired,6,127.33,20.16,126,164,164,164,127.33,20.16,126,164,164,164,123.83,2.33,135.67,31998.00,16016.83,127.33,195790.17,16620.33,212410.50,55967.8,666515.0,723585.5
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c256_fold,1000,10,997.67,991,1008,997.67,991,1008,7121.33,7.1360,6.1360,6123.67,0,0,random-paired,6,20.00,2.45,21,22,22,22,20.00,2.45,21,22,22,22,13.17,7.33,94.00,997.67,497.50,20.00,5968.00,406.00,6374.00,685.8,7645.8,8373.5
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c256_fold,6400,10,6399.33,6390,6405,6399.33,6390,6405,45985.17,7.1859,6.1859,39585.83,0,0,random-paired,6,52.83,10.70,51,73,73,73,52.83,10.70,51,73,73,73,47.67,3.83,73.83,6399.33,3200.17,52.83,39178.50,2905.83,42084.33,5326.2,70751.5,76233.2
+128,av_lazy64,"O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache",lt_m2_c256_fold,32000,10,31998.00,31992,32005,31998.00,31992,32005,228628.33,7.1451,6.1451,196630.33,0,0,random-paired,6,127.33,20.16,126,164,164,164,127.33,20.16,126,164,164,164,123.83,2.33,135.67,31998.00,16016.83,127.33,195790.17,16620.33,212410.50,54746.3,876730.7,932690.0

@@ -481,6 +481,9 @@ static const Method kMethods[] = {
     {124, "sim1_rqcc16",   "O(rows*degree + cols + min(16,cc)*copy) degree-2 CC + exact one-step score", kPoolLegacy, kScoreLegacy, 0},
     {125, "hyb_rqav5",     "O(rqd2_default then rqcc16 avalanche-est below 5pct todo)", kPoolLegacy, kScoreLegacy, 0},
     {126, "hyb_rqav10",    "O(rqd2_default then rqcc16 avalanche-est below 10pct todo)", kPoolLegacy, kScoreLegacy, 0},
+
+    {127, "av_lazy16",     "O(cols + dirty local-avalanche) av_top16 with dependency-invalidated cache", kPoolLegacy, kScoreLegacy, 0},
+    {128, "av_lazy64",     "O(cols + dirty local-avalanche) av_top64 with dependency-invalidated cache", kPoolLegacy, kScoreLegacy, 0},
 };
 
 static const Method* find_method(int id)
@@ -1066,6 +1069,50 @@ public:
         return validate_result(result, why);
     }
 
+    bool run_greedy_traced(
+        int method_id,
+        uint32_t seed,
+        TrialResult* out,
+        std::vector<uint16_t>* trace,
+        std::string* why)
+    {
+        if (is_multistart_method(method_id)) {
+            return fail(why, "traced runs do not support multistart methods");
+        }
+
+        TrialResult result;
+        result.InitialTodo = count_todo_columns();
+        result.InitialD2Rows = count_live_rows(2);
+
+        const double greedy_start = now_sec();
+        for (;;)
+        {
+            const std::vector<uint16_t> action =
+                select_inactivation_action(method_id, seed);
+            if (action.empty()) {
+                break;
+            }
+            if (trace) {
+                trace->insert(trace->end(), action.begin(), action.end());
+            }
+            if (!apply_inactivation_action(action)) {
+                return fail(why, "traced action did not apply");
+            }
+        }
+        result.GreedyUsec = elapsed_usec(greedy_start);
+
+        result.ResidualCols = DeferCount;
+        result.ResidualRows = DeferredRows;
+        result.Choices = ChoiceCount;
+        result.SparseSolveXors = SparseSolveXors;
+        measure_components(result.Components, result.MaxComponent,
+            result.SumSquares);
+        if (out) {
+            *out = result;
+        }
+        return true;
+    }
+
     bool validate_lazy_equivalence(uint32_t seed, std::string* why) const
     {
         for (uint16_t column_i : TodoColumns)
@@ -1566,6 +1613,15 @@ private:
     mutable unsigned LiveDegreeStride = 0;
     mutable bool MetricCacheValid = false;
     mutable unsigned MetricCacheFlags = 0;
+    mutable std::vector<AvalancheEstimate> AvalancheCacheValue;
+    mutable std::vector<uint8_t> AvalancheCacheValid;
+    mutable std::vector<std::vector<uint16_t> > AvalancheRowDependents;
+    mutable std::vector<uint32_t> AvalancheRemovedEpoch;
+    mutable std::vector<uint32_t> AvalancheRowEpoch;
+    mutable std::vector<uint16_t> AvalancheQueueScratch;
+    mutable std::vector<uint16_t> AvalancheDepScratch;
+    mutable uint32_t AvalancheEpoch = 0;
+    mutable bool AvalancheCacheActive = false;
 
     static unsigned elapsed_usec(double start)
     {
@@ -1583,6 +1639,74 @@ private:
         MetricCacheValid = false;
         MetricCacheFlags = 0;
         LiveDegreeStride = 0;
+        invalidate_avalanche_cache();
+    }
+
+    void invalidate_avalanche_cache() const
+    {
+        AvalancheCacheActive = false;
+        AvalancheCacheValue.clear();
+        AvalancheCacheValid.clear();
+        AvalancheRowDependents.clear();
+        AvalancheRemovedEpoch.clear();
+        AvalancheRowEpoch.clear();
+        AvalancheEpoch = 0;
+    }
+
+    uint32_t next_avalanche_epoch() const
+    {
+        // Epoch stamps avoid re-zeroing O(N) scratch on each cache miss.
+        if (AvalancheRemovedEpoch.size() != N) {
+            AvalancheRemovedEpoch.assign(N, 0);
+        }
+        if (AvalancheRowEpoch.size() != Rows.size()) {
+            AvalancheRowEpoch.assign(Rows.size(), 0);
+        }
+        if (++AvalancheEpoch == 0)
+        {
+            std::fill(AvalancheRemovedEpoch.begin(),
+                AvalancheRemovedEpoch.end(), 0u);
+            std::fill(AvalancheRowEpoch.begin(),
+                AvalancheRowEpoch.end(), 0u);
+            AvalancheEpoch = 1;
+        }
+        return AvalancheEpoch;
+    }
+
+    void ensure_avalanche_cache() const
+    {
+        if (AvalancheCacheActive &&
+            AvalancheCacheValue.size() == N &&
+            AvalancheRowDependents.size() == Rows.size()) {
+            return;
+        }
+        AvalancheCacheValue.assign(N, AvalancheEstimate());
+        AvalancheCacheValid.assign(N, 0);
+        AvalancheRowDependents.assign(
+            Rows.size(), std::vector<uint16_t>());
+        AvalancheCacheActive = true;
+    }
+
+    void dirty_avalanche_row(uint16_t row_i) const
+    {
+        if (row_i >= AvalancheRowDependents.size()) {
+            return;
+        }
+        std::vector<uint16_t>& dependents = AvalancheRowDependents[row_i];
+        for (uint16_t column_i : dependents)
+        {
+            if (column_i < AvalancheCacheValid.size()) {
+                AvalancheCacheValid[column_i] = 0;
+            }
+        }
+        dependents.clear();
+    }
+
+    void dirty_avalanche_column(uint16_t column_i) const
+    {
+        if (column_i < AvalancheCacheValid.size()) {
+            AvalancheCacheValid[column_i] = 0;
+        }
     }
 
     void mark_column(uint16_t column_i, uint8_t mark)
@@ -1854,6 +1978,9 @@ private:
             const bool column_is_peel =
                 Columns[column_i].Mark == kMarkPeel;
             const std::vector<uint16_t>& refs = Columns[column_i].Rows;
+            if (AvalancheCacheActive) {
+                dirty_avalanche_column(column_i);
+            }
 
             for (uint16_t row_i : refs)
             {
@@ -1867,6 +1994,9 @@ private:
                 }
 
                 adjust_row_metric_contribution(row_i, -1, column_i);
+                if (AvalancheCacheActive) {
+                    dirty_avalanche_row(row_i);
+                }
                 --row.Live;
                 if (row.Live == 1)
                 {
@@ -3591,9 +3721,97 @@ private:
         return estimate;
     }
 
-    Key avalanche_estimate_key(uint16_t column_i, uint32_t seed) const
+    AvalancheEstimate estimate_avalanche_collect(
+        uint16_t column_i,
+        std::vector<uint16_t>& dep_rows) const
     {
-        const AvalancheEstimate estimate = estimate_avalanche(column_i);
+        AvalancheEstimate estimate;
+        if (column_i >= N || Columns[column_i].Mark != kMarkTodo) {
+            return estimate;
+        }
+
+        const uint32_t epoch = next_avalanche_epoch();
+        std::vector<uint32_t>& removed = AvalancheRemovedEpoch;
+        std::vector<uint32_t>& row_seen = AvalancheRowEpoch;
+        std::vector<uint16_t>& queue = AvalancheQueueScratch;
+        queue.clear();
+
+        removed[column_i] = epoch;
+        queue.push_back(column_i);
+        estimate.Removed = 1;
+
+        for (unsigned queue_i = 0; queue_i < queue.size(); ++queue_i)
+        {
+            const uint16_t removed_column = queue[queue_i];
+            const std::vector<uint16_t>& refs = Columns[removed_column].Rows;
+            for (uint16_t row_i : refs)
+            {
+                const Row& row = Rows[row_i];
+                if (row.Live == 0) {
+                    continue;
+                }
+                if (row_seen[row_i] != epoch)
+                {
+                    row_seen[row_i] = epoch;
+                    dep_rows.push_back(row_i);
+                }
+
+                unsigned live_after = 0;
+                uint16_t only_live = kListTerm;
+                for (uint16_t row_column : row.Columns)
+                {
+                    if (Columns[row_column].Mark != kMarkTodo ||
+                        removed[row_column] == epoch) {
+                        continue;
+                    }
+                    only_live = row_column;
+                    ++live_after;
+                    if (live_after > 1) {
+                        break;
+                    }
+                }
+
+                if (live_after == 1 && only_live != kListTerm &&
+                    removed[only_live] != epoch)
+                {
+                    removed[only_live] = epoch;
+                    queue.push_back(only_live);
+                    ++estimate.Removed;
+                    ++estimate.Peeled;
+                    ++estimate.SingletonRows;
+                }
+            }
+        }
+        return estimate;
+    }
+
+    AvalancheEstimate lazy_avalanche_estimate(uint16_t column_i) const
+    {
+        if (column_i >= N) {
+            return AvalancheEstimate();
+        }
+        ensure_avalanche_cache();
+        if (column_i < AvalancheCacheValid.size() &&
+            AvalancheCacheValid[column_i]) {
+            return AvalancheCacheValue[column_i];
+        }
+
+        AvalancheDepScratch.clear();
+        const AvalancheEstimate estimate =
+            estimate_avalanche_collect(column_i, AvalancheDepScratch);
+        for (uint16_t row_i : AvalancheDepScratch) {
+            AvalancheRowDependents[row_i].push_back(column_i);
+        }
+        AvalancheCacheValue[column_i] = estimate;
+        AvalancheCacheValid[column_i] = 1;
+        return estimate;
+    }
+
+    Key avalanche_key_from_estimate(
+        uint16_t column_i,
+        const AvalancheEstimate& estimate,
+        uint32_t seed) const
+    {
         if (estimate.Removed == 0) {
             return Key(INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN);
         }
@@ -3604,6 +3822,12 @@ private:
         return Key((int64_t)estimate.Removed, (int64_t)estimate.Peeled,
             (int64_t)estimate.SingletonRows + (int64_t)m.ExactD2,
             (int64_t)m.Lookahead - (int64_t)m.Fill, tie.A);
+    }
+
+    Key avalanche_estimate_key(uint16_t column_i, uint32_t seed) const
+    {
+        return avalanche_key_from_estimate(
+            column_i, estimate_avalanche(column_i), seed);
     }
 
     Key exact_one_step_key(uint16_t column_i, uint32_t seed) const
@@ -3649,6 +3873,25 @@ private:
     {
         const std::vector<uint16_t> candidates = top_default_candidates(top_k, seed);
         return select_by_scored_candidates(candidates, seed, false);
+    }
+
+    uint16_t select_avalanche_lazy_top(unsigned top_k, uint32_t seed) const
+    {
+        const std::vector<uint16_t> candidates =
+            top_default_candidates(top_k, seed);
+        uint16_t best = kListTerm;
+        Key best_key;
+        for (uint16_t column_i : candidates)
+        {
+            const Key key = avalanche_key_from_estimate(
+                column_i, lazy_avalanche_estimate(column_i), seed);
+            if (best == kListTerm || better_key(key, best_key))
+            {
+                best = column_i;
+                best_key = key;
+            }
+        }
+        return best != kListTerm ? best : select_by_full_scan(0, seed);
     }
 
     uint16_t select_avalanche_rqcc(unsigned top_k, uint32_t seed) const
@@ -3871,6 +4114,10 @@ private:
             return select_hybrid(9, seed);
         case 126:
             return select_hybrid(10, seed);
+        case 127:
+            return select_avalanche_lazy_top(16, seed);
+        case 128:
+            return select_avalanche_lazy_top(64, seed);
         default:
             return select_by_full_scan(method_id, seed);
         }
@@ -6747,6 +6994,108 @@ static bool run_avalanche_estimate_tests(std::string* why)
     return true;
 }
 
+static bool run_lazy_avalanche_pair_tests(std::string* why)
+{
+    struct MethodPair
+    {
+        int ExactMethod;
+        int LazyMethod;
+        const char* Label;
+    };
+    static const MethodPair kPairs[] = {
+        {119, 127, "av_top16/av_lazy16"},
+        {120, 128, "av_top64/av_lazy64"},
+    };
+    static const char* const kStructureNames[] = {
+        "wirehair_rand", "lt_m2_c1024", "lt_m2_c256_fold"
+    };
+    static const unsigned kAnchors[] = {320, 1280, 3200};
+    const int pair_trials = 2;
+    const uint64_t seed = UINT64_C(0x6c617a7961766131);
+
+    for (const char* structure_name : kStructureNames)
+    {
+        const MatrixStructure* structure = find_structure(structure_name);
+        if (!structure)
+        {
+            return self_fail(why,
+                std::string("lazy avalanche test structure is missing: ") +
+                structure_name);
+        }
+
+        for (unsigned anchor_n : kAnchors)
+        {
+            for (int trial = 0; trial < pair_trials; ++trial)
+            {
+                const TrialConfig config = make_trial_config(
+                    0, anchor_n, trial, 0, 0, 0.0, 10, seed,
+                    *structure, "paired");
+                const std::vector<std::vector<uint16_t> > rows =
+                    generate_random_structure_rows(*structure,
+                        config.ActualN, config.MatrixRows, config.MatrixSeed);
+
+                for (const MethodPair& pair : kPairs)
+                {
+                    std::string detail;
+                    PeelSim exact_sim(config.ActualN);
+                    PeelSim lazy_sim(config.ActualN);
+                    if (!feed_row_vectors(exact_sim, rows, &detail) ||
+                        !feed_row_vectors(lazy_sim, rows, &detail))
+                    {
+                        return self_fail(why,
+                            "lazy avalanche pair feed failed: " + detail);
+                    }
+
+                    TrialResult exact_result;
+                    TrialResult lazy_result;
+                    std::vector<uint16_t> exact_trace;
+                    std::vector<uint16_t> lazy_trace;
+                    if (!exact_sim.run_greedy_traced(pair.ExactMethod,
+                        config.ActionSeed, &exact_result, &exact_trace,
+                        &detail))
+                    {
+                        return self_fail(why,
+                            "exact avalanche traced run failed: " + detail);
+                    }
+                    if (!lazy_sim.run_greedy_traced(pair.LazyMethod,
+                        config.ActionSeed, &lazy_result, &lazy_trace,
+                        &detail))
+                    {
+                        return self_fail(why,
+                            "lazy avalanche traced run failed: " + detail);
+                    }
+
+                    if (exact_trace != lazy_trace)
+                    {
+                        return self_fail(why, std::string(pair.Label) +
+                            ": selected column sequences differ");
+                    }
+                    if (exact_result.ResidualCols != lazy_result.ResidualCols ||
+                        exact_result.ResidualRows != lazy_result.ResidualRows ||
+                        exact_result.Choices != lazy_result.Choices ||
+                        exact_result.Components != lazy_result.Components ||
+                        exact_result.MaxComponent != lazy_result.MaxComponent ||
+                        exact_result.SumSquares != lazy_result.SumSquares ||
+                        exact_result.SparseSolveXors != lazy_result.SparseSolveXors ||
+                        exact_result.InitialTodo != lazy_result.InitialTodo ||
+                        exact_result.InitialD2Rows != lazy_result.InitialD2Rows)
+                    {
+                        return self_fail(why, std::string(pair.Label) +
+                            ": traced results differ");
+                    }
+                    if (!exact_sim.validate_state(true, &detail) ||
+                        !lazy_sim.validate_state(true, &detail))
+                    {
+                        return self_fail(why,
+                            "lazy avalanche pair final state invalid: " + detail);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static bool run_self_tests(std::string* why)
 {
     if (!run_synthetic_structure_tests(why)) {
@@ -6780,6 +7129,9 @@ static bool run_self_tests(std::string* why)
         return false;
     }
     if (!run_avalanche_estimate_tests(why)) {
+        return false;
+    }
+    if (!run_lazy_avalanche_pair_tests(why)) {
         return false;
     }
     if (!PeelSim::validate_multistart_tie_break(why)) {

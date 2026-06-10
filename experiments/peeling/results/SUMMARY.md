@@ -1024,6 +1024,16 @@ Readout:
   implementation or a tail-only trigger tuned specifically for large block
   sizes.
 
+Follow-up `av_lazy16` / `av_lazy64` dependency-cache pass
+(`n34_8_lazy_avalanche_smoke.csv`, 6 paired trials, N jitter 10, one thread)
+added cache-backed equivalents of `av_top16` / `av_top64`.  Paired self-tests
+and the smoke CSV show identical residual metrics and sparse-XOR estimates for
+every tested row, but the cache was slower in all 18 pairwise comparisons:
+`av_lazy16` was 1.01x-1.36x slower than `av_top16`, and `av_lazy64` was
+1.04x-1.50x slower than `av_top64`.  Verdict: this exact dependency-cache
+shape is killed; it preserves decisions but adds more bookkeeping than it
+removes.
+
 ## Cached Degree Sampler Optimization
 
 Follow-up implementation pass: weighted random-row structures now build their
