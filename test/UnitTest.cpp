@@ -177,12 +177,32 @@ static bool DoesCodecProduceOriginals(
 
         const unsigned expectedBytes = (i == N - 1) ? finalBytes : blockBytes;
 
+        if (recoveredBytes != expectedBytes)
+        {
+            SIAMESE_DEBUG_BREAK();
+            cout << "Failed wirehair_recover_block bytes_out check for N = "
+                << N << ", i = " << i << ": got " << recoveredBytes
+                << " expected " << expectedBytes << endl;
+            return false;
+        }
+
         if (0 != memcmp(message + i * blockBytes, decodedMessage, expectedBytes))
         {
             SIAMESE_DEBUG_BREAK();
             cout << "Failed to wirehair_recover_block the data with original pieces for N = " << N << endl;
             return false;
         }
+    }
+
+    uint32_t recoveredBytes = 1234;
+    WirehairResult invalidBlockResult = wirehair_recover_block(
+        decoder, 0x10000u, decodedMessage, &recoveredBytes);
+    if (invalidBlockResult != Wirehair_InvalidInput || recoveredBytes != 0)
+    {
+        SIAMESE_DEBUG_BREAK();
+        cout << "Failed to reject wrapped wirehair_recover_block id for N = "
+            << N << endl;
+        return false;
     }
 
     return true;

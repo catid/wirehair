@@ -83,8 +83,10 @@ static GF256_FORCE_INLINE uint8x16_t vqtbl1q_u8(uint8x16_t a, uint8x16_t b)
 //
 // This is executed during initialization to make sure the library is working
 
-static const unsigned kTestBufferBytes = 32 + 16 + 8 + 4 + 2 + 1;
-static const unsigned kTestBufferAllocated = 64;
+// Cover at least one 64-byte iteration so the GFNI and AVX-512 kernels
+// (which only engage for bytes >= 64) are exercised, plus an odd tail.
+static const unsigned kTestBufferBytes = 64 + 32 + 16 + 8 + 4 + 2 + 1;
+static const unsigned kTestBufferAllocated = 128;
 struct SelfTestBuffersT
 {
     GF256_ALIGNED uint8_t A[kTestBufferAllocated];
@@ -289,6 +291,12 @@ static void _cpuid(unsigned int cpu_info[4U], const unsigned int cpu_info_type)
 #if defined(LINUX_ARM)
 static void checkLinuxARMNeonCapabilities( bool& cpuHasNeon )
 {
+#if defined(__aarch64__)
+    // AArch64 mandates Advanced SIMD (NEON).  Parsing 64-bit auxv records
+    // with the 32-bit Elf32_auxv_t layout would misread AT_HWCAP and
+    // wrongly disable NEON here.
+    cpuHasNeon = true;
+#else
     auto cpufile = open("/proc/self/auxv", O_RDONLY);
     Elf32_auxv_t auxv;
     if (cpufile >= 0)
@@ -308,6 +316,7 @@ static void checkLinuxARMNeonCapabilities( bool& cpuHasNeon )
     {
         cpuHasNeon = false;
     }
+#endif
 }
 #endif
 #endif // defined(GF256_TARGET_MOBILE)
@@ -691,10 +700,11 @@ extern "C" int gf256_init_(int version)
     if (version != GF256_VERSION)
         return -1; // User's header does not match library version.
 
-    // Avoid multiple initialization
+    // Avoid multiple initialization.
+    // Only latch success: a failed init must stay failed on retry, or a
+    // caller that retries would get success with unusable (zeroed) tables.
     if (Initialized)
         return 0;
-    Initialized = true;
 
     if (!IsExpectedEndian())
         return -2; // Unexpected byte order.
@@ -713,6 +723,7 @@ extern "C" int gf256_init_(int version)
     if (!gf256_self_test())
         return -3; // Self-test failed (perhaps untested configuration)
 
+    Initialized = true;
     return 0;
 }
 
@@ -1261,7 +1272,8 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
     }
 }
 
-extern "C" void gf256_mul_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx, uint8_t y, int bytes)
+// vz == vx (in-place) is supported: no restrict qualifiers here.
+extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 {
     WH_BUMP(3, bytes);
     // Special cases are rare in codec hot paths.

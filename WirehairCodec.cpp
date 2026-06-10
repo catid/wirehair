@@ -3067,18 +3067,32 @@ WirehairResult Codec::ChooseMatrix(
         return Wirehair_InvalidInput;
     }
 
-    // Calculate message block count
+    // Calculate message block count.
+    // Validate before narrowing to 16 bits: truncating first would wrap large
+    // counts into the accepted range and silently encode the wrong message.
     _block_bytes = block_bytes;
-    _block_count = static_cast<uint16_t>((message_bytes + _block_bytes - 1) / _block_bytes);
-    _block_next_prime = NextPrime16(_block_count);
+    const uint64_t block_count_wide =
+        (message_bytes + _block_bytes - 1) / _block_bytes;
 
     // Validate block count
-    if (_block_count < CAT_WIREHAIR_MIN_N) {
+    if (block_count_wide < CAT_WIREHAIR_MIN_N) {
         return Wirehair_BadInput_SmallN;
     }
-    if (_block_count > CAT_WIREHAIR_MAX_N) {
+    if (block_count_wide > CAT_WIREHAIR_MAX_N) {
         return Wirehair_BadInput_LargeN;
     }
+
+    // All per-block offset arithmetic below multiplies a block index by the
+    // 32-bit _block_bytes; if the intermediate block span can reach 2^32
+    // bytes those products wrap and silently corrupt data, so reject here.
+    const uint64_t max_block_index =
+        block_count_wide + CAT_MAX_DENSE_ROWS + kHeavyRows + 1;
+    if (max_block_index * block_bytes > UINT64_C(0xFFFFFFFF)) {
+        return Wirehair_InvalidInput;
+    }
+
+    _block_count = static_cast<uint16_t>(block_count_wide);
+    _block_next_prime = NextPrime16(_block_count);
 
     CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
     CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
@@ -3567,9 +3581,11 @@ WirehairResult Codec::ReconstructBlock(
     CAT_IF_DUMP(cout << endl << "---- ReconstructBlock ----" << endl << endl;)
 
     // Validate input
-    if (!block_out || block_id >= _block_count)
+    if (!block_out || !bytes_out || block_id >= _block_count)
     {
-        *bytes_out = 0;
+        if (bytes_out) {
+            *bytes_out = 0;
+        }
         return Wirehair_InvalidInput;
     }
 
@@ -3729,7 +3745,7 @@ WirehairResult Codec::ReconstructOutput(
         // If the row identifier indicates it is part of the original message data:
         if (block_id < _block_count)
         {
-            CAT_IF_DUMP(cout << "Copying received row " << id << endl;)
+            CAT_IF_DUMP(cout << "Copying received row " << block_id << endl;)
 
             uint8_t * GF256_RESTRICT dest = output_blocks + _block_bytes * block_id;
             const unsigned bytes = (block_id != (unsigned)_block_count - 1) ? _block_bytes : _output_final_bytes;
@@ -3761,7 +3777,7 @@ WirehairResult Codec::ReconstructOutput(
             block_bytes = _output_final_bytes;
         }
 
-        CAT_IF_DUMP(cout << "Regenerating row " << row_i << ":";)
+        CAT_IF_DUMP(cout << "Regenerating row " << block_id << ":";)
 
         PeelRowParameters params;
         params.Initialize(block_id, _p_seed, block_count, _mix_count);
@@ -4298,7 +4314,9 @@ uint32_t Codec::Encode(
     unsigned copyBytes;
 
     // If this is the last block:
-    if ((uint16_t)block_id == _block_count - 1) {
+    // Compare the full 32-bit id (as DecodeFeed does): recovery rows with
+    // id = 65536 + (_block_count - 1) must be full-size, not final-size.
+    if (block_id == (uint32_t)(_block_count - 1u)) {
         copyBytes = _input_final_bytes;
     }
     else {

@@ -165,8 +165,11 @@ typedef struct WirehairCodec_t { char impl; }* WirehairCodec;
     Preconditions:
         N >= 2
         N <= 64000
+        (N + 512) * blockBytes < 2^32 (internal offsets are 32-bit)
 
     Pass 0 for reuseOpt if you do not want to reuse a WirehairCodec object.
+    If this function fails, any codec passed via reuseOpt has been freed:
+    do not reuse or wirehair_free() it after a failed call.
 
     Returns a non-zero object pointer on success.
     Returns nullptr(0) on failure.
@@ -210,6 +213,8 @@ WIREHAIR_EXPORT WirehairResult wirehair_encode(
     the corresponding wirehair_encoder_create() call.
 
     Pass 0 for reuseOpt if you do not want to reuse a WirehairCodec object.
+    If this function fails, any codec passed via reuseOpt has been freed:
+    do not reuse or wirehair_free() it after a failed call.
 
     Returns a non-zero object pointer on success.
     Returns nullptr(0) on failure.
@@ -232,7 +237,7 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
     Returns Wirehair_Success if data recovery is complete.
     + Use wirehair_recover() or wirehair_recover_block()
       to reconstruct the recovered data.
-    Returns Wirehair_NeedsMoreData if more data is needed to decode.
+    Returns Wirehair_NeedMore if more data is needed to decode.
     Returns other codes on error.
 */
 WIREHAIR_EXPORT WirehairResult wirehair_decode(
@@ -263,8 +268,9 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover(
     wirehair_recover_block()
 
     Reconstruct a single block of the message after reading is complete.
-    It is much slower than wirehair_recover() for original data, so it
-    is better to avoid calling this function for blockId < N.
+    If the requested original block was received directly, it is copied from
+    decoder staging. Otherwise it is regenerated from recovery state, which can
+    be much slower than wirehair_recover().
 
     Preconditions:
     Block ptr buffer contains enough space to hold the block (blockBytes)
@@ -295,7 +301,7 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
     application side.
 
     Preconditions:
-    wirehair_decoder_read() returned Wirehair_Success
+    wirehair_decode() returned Wirehair_Success
 
     Returns Wirehair_Success if the operation was successful.
     Returns other codes on error.

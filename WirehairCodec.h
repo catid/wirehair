@@ -1357,9 +1357,10 @@ public:
     /**
         ReconstructBlock()
 
-        This function reconstructs an original block from the recovery
-        blocks, which is much slower than copying from the input data, so
-        should be done selectively.  This is only done during decoding.
+        This function reconstructs an original block. If the original block was
+        received directly, it is copied from input staging; otherwise it is
+        regenerated from the recovery blocks, which is much slower. This is only
+        done during decoding.
 
         Precondition: DecodeFeed() has returned success
 

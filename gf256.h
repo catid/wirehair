@@ -290,17 +290,19 @@ extern void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT
 extern void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                              const void * GF256_RESTRICT vy, int bytes);
 
-/// Performs "z[] = x[] * y" bulk memory operation
-extern void gf256_mul_mem(void * GF256_RESTRICT vz,
-                          const void * GF256_RESTRICT vx, uint8_t y, int bytes);
+/// Performs "z[] = x[] * y" bulk memory operation.
+/// Unlike the other bulk operations, vz == vx (in-place) is supported, so
+/// these parameters must not be restrict-qualified.
+extern void gf256_mul_mem(void * vz,
+                          const void * vx, uint8_t y, int bytes);
 
 /// Performs "z[] += x[] * y" bulk memory operation
 extern void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                              const void * GF256_RESTRICT vx, int bytes);
 
-/// Performs "x[] /= y" bulk memory operation
-static GF256_FORCE_INLINE void gf256_div_mem(void * GF256_RESTRICT vz,
-                                             const void * GF256_RESTRICT vx, uint8_t y, int bytes)
+/// Performs "x[] /= y" bulk memory operation.  vz == vx is supported.
+static GF256_FORCE_INLINE void gf256_div_mem(void * vz,
+                                             const void * vx, uint8_t y, int bytes)
 {
     // Multiply by inverse
     gf256_mul_mem(vz, vx, y == 1 ? (uint8_t)1 : GF256Ctx.GF256_INV_TABLE[y], bytes);

@@ -58,6 +58,7 @@ WIREHAIR_EXPORT const char *wirehair_result_string(
     case Wirehair_InvalidInput:      return "Wirehair_InvalidInput";
     case Wirehair_OOM:               return "Wirehair_OOM";
     case Wirehair_UnsupportedPlatform: return "Wirehair_UnsupportedPlatform";
+    case Wirehair_Error:             return "Wirehair_Error";
     default:
         break;
     }
@@ -91,7 +92,10 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
 )
 {
     // If input is invalid:
+    // Free any reuse codec so every failure path has the same ownership
+    // contract: on failure, reuseOpt has been released.
     if (!m_init || !message || messageBytes < 1 || blockBytes < 1) {
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
         return nullptr;
     }
 
@@ -100,6 +104,9 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
     // Allocate a new Codec object
     if (!codec) {
         codec = new (std::nothrow) wirehair::Codec;
+        if (!codec) {
+            return nullptr;
+        }
     }
 
     // Initialize codec
@@ -153,7 +160,10 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
 )
 {
     // If input is invalid:
+    // Free any reuse codec so every failure path has the same ownership
+    // contract: on failure, reuseOpt has been released.
     if (!m_init || messageBytes < 1 || blockBytes < 1) {
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
         return nullptr;
     }
 
@@ -162,6 +172,9 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
     // Allocate a new Codec object
     if (!codec) {
         codec = new (std::nothrow) wirehair::Codec;
+        if (!codec) {
+            return nullptr;
+        }
     }
 
     // Allocate memory for decoding
@@ -220,6 +233,10 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
 {
     // If input is invalid:
     if (!codec || !blockDataOut || !bytesOut) {
+        return Wirehair_InvalidInput;
+    }
+    if (blockId > 0xffffu) {
+        *bytesOut = 0;
         return Wirehair_InvalidInput;
     }
 
