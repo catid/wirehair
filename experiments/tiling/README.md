@@ -43,6 +43,12 @@ Set `WH_OPLOG_PATH` while running a decode workload:
 WH_OPLOG_PATH=/tmp/wirehair_oplog.csv /tmp/whx_oplog count --N 1000 --bb 102400 --loss 0.10
 ```
 
+Replay the captured schedule in this harness:
+
+```bash
+./experiments/tiling/rowop_tiling --schedule /tmp/wirehair_oplog.csv --block-bytes 102400 --tiles 4096,8192,16384,32768,65536 --repeats 5
+```
+
 The CSV columns are:
 
 ```text
