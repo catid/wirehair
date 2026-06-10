@@ -3074,6 +3074,9 @@ WirehairResult Codec::ChooseMatrix(
 {
     CAT_IF_DUMP(cout << endl << "---- ChooseMatrix ----" << endl << endl;)
 
+    const bool seed_override = _seed_override;
+    _seed_override = false;
+
     // Validate input
     if (message_bytes < 1 || block_bytes < 1) {
         return Wirehair_InvalidInput;
@@ -3108,7 +3111,7 @@ WirehairResult Codec::ChooseMatrix(
     CAT_IF_DUMP(cout << "Total message = " << message_bytes << " bytes.  Block bytes = " << _block_bytes << endl;)
     CAT_IF_DUMP(cout << "Block count = " << _block_count << " +Prime=" << _block_next_prime << endl;)
 
-    if (!_seed_override)
+    if (!seed_override)
     {
         // Pick dense row count, dense row seed, and peel row seed
         _dense_count = GetDenseCount(_block_count);

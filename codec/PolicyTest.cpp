@@ -172,10 +172,14 @@ void CheckCoreSeedHelpers()
     invalid_dense.OverrideSeeds(0u, 0u, 0u);
     Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_InvalidInput,
         "zero dense-count override should fail initialization");
+    Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_Success,
+        "failed dense-count override should not persist");
 
     invalid_dense.OverrideSeeds((uint16_t)(CAT_MAX_DENSE_ROWS + 1u), 0u, 0u);
     Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_InvalidInput,
         "oversized dense-count override should fail initialization");
+    Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_Success,
+        "oversized dense-count override should not persist");
 }
 
 void CheckDecodeAfterAllOriginalSuccess()

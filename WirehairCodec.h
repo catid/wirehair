@@ -1256,7 +1256,7 @@ public:
     //--------------------------------------------------------------------------
     // Encoder API
 
-    /// Allow seeds to be overridden
+    /// Override seeds for the next encoder or decoder initialization attempt
     void OverrideSeeds(
         uint16_t dense_count,
         uint16_t p_seed,
