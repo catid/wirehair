@@ -244,6 +244,15 @@ struct TrialResult
     uint64_t BacksubXors;    // sum of popcount(proj) over peeled columns
     uint64_t GeBlockXors;    // ~R^2/2 dense block-op estimate
     uint64_t GeBitOps;       // residual_rows * R^2 / 64 word-op estimate
+    uint64_t HeavyValueMuladds; // H*Inactivated + H*H block-unit GF(256) muladds
+                                // (heavy value substitution + heavy GE elim)
+    uint64_t HeavyDivs;      // H block-unit GF(256) divides
+    // --ge-replay only (zero otherwise):
+    uint64_t GeRealWordXors; // 64-bit words actually XORed during eliminations
+    uint64_t GeRealRowOps;   // row eliminations performed
+    uint64_t GeFillIn;       // pivot-row popcount growth above initial weight
+    unsigned DefBand;        // deepest deficient col from-the-end position + 1
+    bool DefOutsideW18;      // any deficient col with from-the-end pos >= 18
 };
 
 //------------------------------------------------------------------------------
@@ -315,13 +324,18 @@ struct GeneratedSystem
     uint64_t PrecodeGenXors;
 };
 
+// paired_recv_seed (optional, --paired): seed for a SECOND RNG dedicated to
+// received-row generation, whose value omits the scheme token, so different
+// schemes at the same (K, oh, trial, --seed) draw an identical received-row
+// stream.  Constraint rows always keep the scheme-dependent stream (`seed`).
 static GeneratedSystem GenerateSystem(
     const Scheme& scheme,
     unsigned K,
     unsigned received,
     RowDist dist,
     unsigned mix,
-    uint64_t seed)
+    uint64_t seed,
+    const uint64_t* paired_recv_seed = nullptr)
 {
     GeneratedSystem sys;
     sys.K = K;
@@ -497,14 +511,55 @@ static GeneratedSystem GenerateSystem(
     }
 
     // --- Received rows ---
+    // Paired mode: every RNG draw below is scheme-independent (degree sample,
+    // source columns over [0, K), and exactly `mix` raw 64-bit canonical mix
+    // draws per row -- consumed even when the precode space is empty), so two
+    // schemes at the same (K, oh, trial, --seed) stay in stream lockstep.  The
+    // canonical mix draws are mapped into the scheme-local D+H precode space
+    // by modulo + deterministic linear probing (distinctness without extra
+    // draws); the mapped columns coincide across schemes iff D+H coincides.
     const DegreeSampler degrees(dist, K);
+    Rng paired_rng(paired_recv_seed ? *paired_recv_seed : 0);
+    Rng& recv_rng = paired_recv_seed ? paired_rng : rng;
     for (unsigned r = 0; r < received; ++r)
     {
         SparseRow row;
         row.IsConstraint = false;
-        const unsigned degree = degrees.Sample(rng);
-        AddDistinctColumns(row.Columns, 0, K, degree, rng);
-        if (precode_space > 0u) {
+        const unsigned degree = degrees.Sample(recv_rng);
+        AddDistinctColumns(row.Columns, 0, K, degree, recv_rng);
+        if (paired_recv_seed)
+        {
+            const size_t mix_start = row.Columns.size();
+            for (unsigned m = 0; m < mix; ++m)
+            {
+                const uint64_t draw = recv_rng.Next();
+                if (precode_space == 0u ||
+                    row.Columns.size() - mix_start >= precode_space) {
+                    continue; // draw consumed anyway: keep streams in lockstep
+                }
+                const uint32_t offset = (uint32_t)(draw % precode_space);
+                for (unsigned probe = 0; probe < precode_space; ++probe)
+                {
+                    const uint32_t column =
+                        K + (offset + probe) % precode_space;
+                    bool duplicate = false;
+                    for (size_t i = mix_start; i < row.Columns.size(); ++i)
+                    {
+                        if (row.Columns[i] == column)
+                        {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (!duplicate)
+                    {
+                        row.Columns.push_back(column);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (precode_space > 0u) {
             AddDistinctColumns(row.Columns, K, precode_space, mix, rng);
         }
         if (row.Columns.size() > 1u) {
@@ -692,7 +747,7 @@ class BitMatrix
 {
 public:
     explicit BitMatrix(unsigned bits)
-        : Bits(bits), Words((bits + 63u) / 64u) {}
+        : Words((bits + 63u) / 64u), Bits(bits) {}
 
     unsigned Words;
 
@@ -759,9 +814,13 @@ private:
     std::vector<std::vector<uint64_t> > Stored;
 };
 
+// residual_bits_out (optional): the exact per-unused-row projections onto the
+// inactivated columns (bit i = i-th column in INACTIVATION order) that the
+// rank accumulator consumes, captured before in-place reduction, for replay.
 static ResidualAnalysis AnalyzeResidual(
     const GeneratedSystem& sys,
-    const PeelOutcome& peel)
+    const PeelOutcome& peel,
+    std::vector<std::vector<uint64_t> >* residual_bits_out = nullptr)
 {
     ResidualAnalysis res;
     res.Inactivated = (unsigned)peel.InactOrder.size();
@@ -857,12 +916,147 @@ static ResidualAnalysis AnalyzeResidual(
                 }
             }
         }
+        if (residual_bits_out) {
+            residual_bits_out->push_back(rowbits); // copy: Insert reduces in place
+        }
         rank += rank_matrix.Insert(rowbits);
     }
 
     res.ResidualRows = residual_rows;
     res.Rank = rank;
     return res;
+}
+
+//------------------------------------------------------------------------------
+// --ge-replay: explicit plain GE on the residual binary system
+//
+// Rows are the unused-row projections onto the inactivated columns (the same
+// bitsets the rank accumulator consumes); columns are in INACTIVATION order.
+// Rows are processed in ascending initial-popcount order (cheapest-pivot-first,
+// a production-like heuristic; --ge-replay-reverse flips to descending as a
+// sensitivity check) and the order is fixed up front, not re-sorted during
+// elimination.  For each column j in order, the first remaining row with bit j
+// becomes the pivot and is XORed into every remaining row that has bit j set.
+// Counted per elimination: one row op, and (words - j/64) word XORs -- the
+// 64-bit words a triangular implementation actually touches.  Fill-in is the
+// popcount growth of a pivot row above its initial weight, measured at the
+// moment it is selected as pivot.  Columns that end pivotless (deficient) are
+// recorded by their from-the-end position (last inactivated column = 0).
+
+struct GeReplayResult
+{
+    unsigned Rank;
+    unsigned Def;
+    uint64_t WordXors;       // 64-bit words XORed during eliminations
+    uint64_t RowOps;         // row eliminations
+    uint64_t FillIn;         // pivot popcount growth above initial weight
+    unsigned DefBand;        // deepest deficient from-the-end position + 1 (0 = none)
+    bool DefOutsideW18;      // any deficient from-the-end position >= 18
+};
+
+static GeReplayResult ReplayGe(
+    std::vector<std::vector<uint64_t> > rows, // by value: consumed as workspace
+    unsigned R,
+    bool descending_weight)
+{
+    GeReplayResult out;
+    out.Rank = 0;
+    out.Def = 0;
+    out.WordXors = 0;
+    out.RowOps = 0;
+    out.FillIn = 0;
+    out.DefBand = 0;
+    out.DefOutsideW18 = false;
+    if (R == 0u) {
+        return out;
+    }
+    const unsigned words = (R + 63u) / 64u;
+    const size_t n = rows.size();
+
+    std::vector<uint32_t> init_pop(n, 0);
+    for (size_t i = 0; i < n; ++i)
+    {
+        unsigned pop = 0;
+        for (unsigned w = 0; w < words; ++w) {
+            pop += (unsigned)__builtin_popcountll(rows[i][w]);
+        }
+        init_pop[i] = pop;
+    }
+
+    // Stable sort by initial weight: deterministic given the system row order
+    std::vector<uint32_t> order(n);
+    for (size_t i = 0; i < n; ++i) {
+        order[i] = (uint32_t)i;
+    }
+    std::stable_sort(order.begin(), order.end(),
+        [&](uint32_t a, uint32_t b) {
+            return descending_weight ? init_pop[a] > init_pop[b]
+                                     : init_pop[a] < init_pop[b];
+        });
+    std::vector<std::vector<uint64_t> > work;
+    std::vector<uint32_t> pops;
+    work.reserve(n);
+    pops.reserve(n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        work.push_back(std::move(rows[order[i]]));
+        pops.push_back(init_pop[order[i]]);
+    }
+
+    size_t pivot_count = 0;
+    for (unsigned j = 0; j < R; ++j)
+    {
+        const unsigned word = j >> 6;
+        const uint64_t mask = UINT64_C(1) << (j & 63u);
+        size_t found = SIZE_MAX;
+        for (size_t r = pivot_count; r < n; ++r)
+        {
+            if (work[r][word] & mask)
+            {
+                found = r;
+                break;
+            }
+        }
+        if (found == SIZE_MAX)
+        {
+            // Deficient column: record its from-the-end position
+            const unsigned from_end = R - 1u - j;
+            if (from_end + 1u > out.DefBand) {
+                out.DefBand = from_end + 1u;
+            }
+            if (from_end >= 18u) {
+                out.DefOutsideW18 = true;
+            }
+            ++out.Def;
+            continue;
+        }
+        std::swap(work[found], work[pivot_count]);
+        std::swap(pops[found], pops[pivot_count]);
+        const std::vector<uint64_t>& pivot = work[pivot_count];
+
+        unsigned pop_now = 0;
+        for (unsigned w = 0; w < words; ++w) {
+            pop_now += (unsigned)__builtin_popcountll(pivot[w]);
+        }
+        if (pop_now > pops[pivot_count]) {
+            out.FillIn += pop_now - pops[pivot_count];
+        }
+
+        for (size_t r = pivot_count + 1u; r < n; ++r)
+        {
+            if (work[r][word] & mask)
+            {
+                for (unsigned w = word; w < words; ++w) {
+                    work[r][w] ^= pivot[w];
+                }
+                ++out.RowOps;
+                out.WordXors += words - word;
+            }
+        }
+        ++pivot_count;
+    }
+    out.Rank = (unsigned)pivot_count;
+    return out;
 }
 
 //------------------------------------------------------------------------------
@@ -892,7 +1086,10 @@ static TrialResult RunTrial(
     unsigned overhead,
     RowDist dist,
     unsigned mix,
-    uint64_t seed)
+    uint64_t seed,
+    const uint64_t* paired_recv_seed = nullptr,
+    bool ge_replay = false,
+    bool ge_replay_reverse = false)
 {
     TrialResult t;
     std::memset(&t, 0, sizeof(t));
@@ -901,11 +1098,13 @@ static TrialResult RunTrial(
     // constraint rows are free (known structure), so the binary system is
     // (K + overhead + D) rows over L = K + D + H columns, and L - K of the
     // unknowns are precode blocks the decoder does not return to the caller.
-    const GeneratedSystem sys =
-        GenerateSystem(scheme, K, K + overhead, dist, mix, seed);
+    const GeneratedSystem sys = GenerateSystem(
+        scheme, K, K + overhead, dist, mix, seed, paired_recv_seed);
 
     const PeelOutcome peel = PeelSolver(sys.L, sys.Rows).Run();
-    const ResidualAnalysis res = AnalyzeResidual(sys, peel);
+    std::vector<std::vector<uint64_t> > residual_bits;
+    const ResidualAnalysis res = AnalyzeResidual(
+        sys, peel, ge_replay ? &residual_bits : nullptr);
 
     const unsigned R = res.Inactivated;
     const unsigned def = R - res.Rank;
@@ -924,6 +1123,29 @@ static TrialResult RunTrial(
     t.BacksubXors = res.BacksubXors;
     t.GeBlockXors = (uint64_t)R * R / 2u;
     t.GeBitOps = (uint64_t)res.ResidualRows * R * R / 64u;
+    t.HeavyValueMuladds =
+        (uint64_t)scheme.H * R + (uint64_t)scheme.H * scheme.H;
+    t.HeavyDivs = scheme.H;
+
+    if (ge_replay)
+    {
+        const GeReplayResult rep =
+            ReplayGe(std::move(residual_bits), R, ge_replay_reverse);
+        if (rep.Rank != res.Rank)
+        {
+            fprintf(stderr,
+                "FATAL: --ge-replay rank %u != accumulator rank %u "
+                "(scheme=%s K=%u oh=%u seed=0x%llx)\n",
+                rep.Rank, res.Rank, scheme.Name.c_str(), K, overhead,
+                (unsigned long long)seed);
+            std::abort();
+        }
+        t.GeRealWordXors = rep.WordXors;
+        t.GeRealRowOps = rep.RowOps;
+        t.GeFillIn = rep.FillIn;
+        t.DefBand = rep.DefBand;
+        t.DefOutsideW18 = rep.DefOutsideW18;
+    }
     return t;
 }
 
@@ -1107,7 +1329,14 @@ struct Aggregate
     double BacksubXorSum = 0;
     double GeBlockXorSum = 0;
     double GeBitOpSum = 0;
-    std::vector<uint32_t> DefHist; // def occurrence counts
+    double HeavyMuladdSum = 0;
+    double HeavyDivSum = 0;
+    double GeRealWordXorSum = 0;
+    double GeRealRowOpSum = 0;
+    double FillInSum = 0;
+    uint64_t DefOutsideW18Count = 0;
+    std::vector<uint32_t> DefBands; // per-trial deepest def band (--ge-replay)
+    std::vector<uint32_t> DefHist;  // def occurrence counts
 
     void Add(const TrialResult& t)
     {
@@ -1140,8 +1369,31 @@ struct Aggregate
         BacksubXorSum += (double)t.BacksubXors;
         GeBlockXorSum += (double)t.GeBlockXors;
         GeBitOpSum += (double)t.GeBitOps;
+        HeavyMuladdSum += (double)t.HeavyValueMuladds;
+        HeavyDivSum += (double)t.HeavyDivs;
+        GeRealWordXorSum += (double)t.GeRealWordXors;
+        GeRealRowOpSum += (double)t.GeRealRowOps;
+        FillInSum += (double)t.GeFillIn;
+        if (t.DefOutsideW18) {
+            ++DefOutsideW18Count;
+        }
+        DefBands.push_back(t.DefBand);
     }
 };
+
+// Nearest-rank percentile over a SORTED vector; 0 for empty input
+static unsigned PercentileSorted(const std::vector<uint32_t>& sorted, double p)
+{
+    if (sorted.empty()) {
+        return 0;
+    }
+    const double rank = std::ceil(p * (double)sorted.size());
+    size_t idx = (rank < 1.0) ? 0 : (size_t)rank - 1u;
+    if (idx >= sorted.size()) {
+        idx = sorted.size() - 1u;
+    }
+    return sorted[idx];
+}
 
 //------------------------------------------------------------------------------
 // Self-test
@@ -1219,7 +1471,9 @@ static bool SelfTest()
                             token, K);
                         return false;
                     }
-                    const ResidualAnalysis res = AnalyzeResidual(sys, peel);
+                    std::vector<std::vector<uint64_t> > residual_bits;
+                    const ResidualAnalysis res =
+                        AnalyzeResidual(sys, peel, &residual_bits);
                     const unsigned via_peel =
                         (unsigned)peel.PeelOrder.size() + res.Rank;
                     const unsigned direct = BruteForceRank(sys);
@@ -1231,13 +1485,28 @@ static bool SelfTest()
                             token, K, oh, trial, via_peel, direct);
                         return false;
                     }
+
+                    // GE replay (both row orders) must reproduce the
+                    // accumulator rank on the same residual system
+                    const unsigned R = (unsigned)peel.InactOrder.size();
+                    const GeReplayResult fwd = ReplayGe(residual_bits, R, false);
+                    const GeReplayResult rev = ReplayGe(residual_bits, R, true);
+                    if (fwd.Rank != res.Rank || rev.Rank != res.Rank ||
+                        fwd.Def != R - res.Rank || rev.Def != R - res.Rank)
+                    {
+                        fprintf(stderr,
+                            "self-test: ge-replay rank broke: %s K=%u oh=%u "
+                            "trial=%u accum=%u fwd=%u rev=%u\n",
+                            token, K, oh, trial, res.Rank, fwd.Rank, rev.Rank);
+                        return false;
+                    }
                     ++checked;
                 }
             }
         }
     }
 
-    // Determinism
+    // Determinism + heavy-cost identity
     {
         Scheme scheme;
         MakeScheme("ldpc_s7", 64, scheme);
@@ -1248,6 +1517,109 @@ static bool SelfTest()
             a.SparseSolveXors != b.SparseSolveXors)
         {
             fprintf(stderr, "self-test: determinism broke\n");
+            return false;
+        }
+        if (a.HeavyValueMuladds !=
+                (uint64_t)scheme.H * a.Inactivated +
+                (uint64_t)scheme.H * scheme.H ||
+            a.HeavyDivs != scheme.H)
+        {
+            fprintf(stderr, "self-test: heavy cost identity broke\n");
+            return false;
+        }
+    }
+
+    // --paired: different schemes at equal sizes must generate identical
+    // received-row degree sequences + source columns (and identical mix
+    // columns when their D+H precode spaces coincide); without --paired the
+    // received rows must differ for at least one instance.
+    {
+        const unsigned K = 32, received = 34;
+        Scheme a, b, c;
+        if (!MakeScheme("dense_d8", K, a) ||
+            !MakeScheme("ldpc_s8", K, b) ||
+            !MakeScheme("none", K, c))
+        {
+            fprintf(stderr, "self-test: paired scheme setup broke\n");
+            return false;
+        }
+        auto source_cols = [&](const GeneratedSystem& sys,
+                               std::vector<std::vector<uint32_t> >& out,
+                               std::vector<std::vector<uint32_t> >& out_mix) {
+            out.clear();
+            out_mix.clear();
+            for (const SparseRow& row : sys.Rows)
+            {
+                if (row.IsConstraint) {
+                    continue;
+                }
+                std::vector<uint32_t> src, mixc;
+                for (uint32_t col : row.Columns)
+                {
+                    if (col < K) {
+                        src.push_back(col);
+                    }
+                    else {
+                        mixc.push_back(col - K);
+                    }
+                }
+                out.push_back(src);
+                out_mix.push_back(mixc);
+            }
+        };
+        bool any_unpaired_diff = false;
+        for (unsigned trial = 0; trial < 8; ++trial)
+        {
+            const uint64_t seed_a =
+                Mix64(HashString64("dense_d8") ^ Mix64(1000u + trial));
+            const uint64_t seed_b =
+                Mix64(HashString64("ldpc_s8") ^ Mix64(1000u + trial));
+            const uint64_t seed_c =
+                Mix64(HashString64("none") ^ Mix64(1000u + trial));
+            const uint64_t recv_seed = Mix64(UINT64_C(0x9a17ed) + trial);
+
+            const GeneratedSystem pa = GenerateSystem(
+                a, K, received, RowDist::Wirehair, 3, seed_a, &recv_seed);
+            const GeneratedSystem pb = GenerateSystem(
+                b, K, received, RowDist::Wirehair, 3, seed_b, &recv_seed);
+            const GeneratedSystem pc = GenerateSystem(
+                c, K, received, RowDist::Wirehair, 3, seed_c, &recv_seed);
+            std::vector<std::vector<uint32_t> > sa, sb, sc, ma, mb, mc;
+            source_cols(pa, sa, ma);
+            source_cols(pb, sb, mb);
+            source_cols(pc, sc, mc);
+            if (sa != sb || sa != sc)
+            {
+                fprintf(stderr,
+                    "self-test: paired source columns differ (trial %u)\n",
+                    trial);
+                return false;
+            }
+            // dense_d8 (D+H = 8+6) and ldpc_s8 (8+6) share the precode space
+            // width, so the canonical mix mapping must coincide exactly
+            if (pa.D + pa.H == pb.D + pb.H && ma != mb)
+            {
+                fprintf(stderr,
+                    "self-test: paired mix columns differ at equal D+H "
+                    "(trial %u)\n", trial);
+                return false;
+            }
+
+            const GeneratedSystem ua = GenerateSystem(
+                a, K, received, RowDist::Wirehair, 3, seed_a);
+            const GeneratedSystem ub = GenerateSystem(
+                b, K, received, RowDist::Wirehair, 3, seed_b);
+            std::vector<std::vector<uint32_t> > usa, usb, uma, umb;
+            source_cols(ua, usa, uma);
+            source_cols(ub, usb, umb);
+            if (usa != usb) {
+                any_unpaired_diff = true;
+            }
+        }
+        if (!any_unpaired_diff)
+        {
+            fprintf(stderr,
+                "self-test: unpaired schemes never diverged (suspicious)\n");
             return false;
         }
     }
@@ -1290,6 +1662,9 @@ int main(int argc, char** argv)
     RowDist dist = RowDist::Wirehair;
     unsigned mix = 3;
     bool self_test = false;
+    bool ge_replay = false;
+    bool ge_replay_reverse = false;
+    bool paired = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1348,6 +1723,16 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (arg == "--ge-replay") {
+            ge_replay = true;
+        }
+        else if (arg == "--ge-replay-reverse") {
+            ge_replay = true; // reverse implies replay
+            ge_replay_reverse = true;
+        }
+        else if (arg == "--paired") {
+            paired = true;
+        }
         else if (arg == "--self-test") {
             self_test = true;
         }
@@ -1378,7 +1763,12 @@ int main(int argc, char** argv)
            "def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,"
            "residual_rows_mu,recv_xors_per_packet,precode_gen_xors_mu,"
            "sparse_solve_xors_mu,backsub_xors_mu,ge_block_xors_mu,"
-           "ge_bitops_mu\n");
+           "ge_bitops_mu,heavy_muladds_mu,heavy_divs_mu");
+    if (ge_replay) {
+        printf(",ge_real_bitops_mu,ge_real_rowops_mu,fill_in_mu,"
+               "def_outside_w18_rate,def_band_w95,def_band_w99");
+    }
+    printf("\n");
     fflush(stdout);
 
     for (unsigned K : k_list)
@@ -1410,8 +1800,16 @@ int main(int argc, char** argv)
                             Mix64(HashString64(token)) ^
                             Mix64((uint64_t)oh * UINT64_C(0xd6e8feb86659fd93)) ^
                             Mix64((uint64_t)trial * UINT64_C(0xbf58476d1ce4e5b9)));
-                        const TrialResult t =
-                            RunTrial(scheme, K, oh, dist, mix, seed);
+                        // --paired: received-row seed omits the scheme token
+                        const uint64_t recv_seed = Mix64(
+                            base_seed ^
+                            Mix64((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+                            Mix64((uint64_t)oh * UINT64_C(0xd6e8feb86659fd93)) ^
+                            Mix64((uint64_t)trial * UINT64_C(0xbf58476d1ce4e5b9)));
+                        const TrialResult t = RunTrial(
+                            scheme, K, oh, dist, mix, seed,
+                            paired ? &recv_seed : nullptr,
+                            ge_replay, ge_replay_reverse);
                         std::lock_guard<std::mutex> lock(agg_mutex);
                         agg.Add(t);
                     }
@@ -1445,7 +1843,7 @@ int main(int argc, char** argv)
                 }
                 printf("%u,%s,%u,%u,%u,%llu,%.6f,%.6f,%.4f,%.0f,%s,"
                        "%.2f,%.2f,%.0f,%.2f,%.2f,%.2f,%.4f,%.1f,%.1f,%.1f,"
-                       "%.1f,%.1f\n",
+                       "%.1f,%.1f,%.1f,%.1f",
                     K, token.c_str(), scheme.D, scheme.H, oh,
                     (unsigned long long)agg.Trials,
                     agg.Fails / n,
@@ -1464,7 +1862,21 @@ int main(int argc, char** argv)
                     agg.SparseXorSum / n,
                     agg.BacksubXorSum / n,
                     agg.GeBlockXorSum / n,
-                    agg.GeBitOpSum / n);
+                    agg.GeBitOpSum / n,
+                    agg.HeavyMuladdSum / n,
+                    agg.HeavyDivSum / n);
+                if (ge_replay)
+                {
+                    std::sort(agg.DefBands.begin(), agg.DefBands.end());
+                    printf(",%.1f,%.1f,%.2f,%.6f,%u,%u",
+                        agg.GeRealWordXorSum / n,
+                        agg.GeRealRowOpSum / n,
+                        agg.FillInSum / n,
+                        (double)agg.DefOutsideW18Count / n,
+                        PercentileSorted(agg.DefBands, 0.95),
+                        PercentileSorted(agg.DefBands, 0.99));
+                }
+                printf("\n");
                 fflush(stdout);
             }
         }
