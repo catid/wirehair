@@ -2,7 +2,7 @@
 
 This folder is isolated from the shipping Wirehair codec.  It is for the next
 codec version and contains the peel policy, seed selector, H=0 peel evaluator,
-and a codec wrapper used for seed-tuned experiments.
+and a codec wrapper used for v2 experiments.
 
 Initial solver policy:
 
@@ -46,13 +46,11 @@ candidate with low estimated XOR cost.  This is intended to prevent degenerate
 N where the residual or solve XOR count spikes.
 
 **Model-transfer caveat (wirehair-b6h):** TuneSeedProfile scores candidates in
-the v2 synthetic row model, but the winning seed is injected into the
-PRODUCTION solver as `_p_seed`, which drives a completely different
-seed-to-matrix mapping.  The bench `tuned` arm therefore measures an
-effectively random seed replacement, not tuning signal; only the `auto` arm
-(which A/B-validates tuned-vs-base with real trials) produces decision-grade
-numbers.  Do not draw conclusions from `tuned`-arm sweeps until the tuner
-evaluates candidates with real codec trials.
+the v2 synthetic row model, but the winning seed cannot be injected into the
+PRODUCTION solver as `_p_seed` without changing the seed-to-matrix mapping.
+The bench `compare --v2-profile tuned` arm is therefore retired; use
+`--v2-profile auto`, which A/B-validates the synthetic candidate against the
+base profile with real trials, or `seedtable` for offline diagnostics.
 
 `BuildPeelSolvePlan()` is the shared policy-driven row-generation path.  It
 combines `PeelingCodec` + `SeedProfile` into a deterministic matrix seed,
@@ -98,10 +96,9 @@ Benchmark smoke checks:
 ```bash
 cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
-./build/codec/wirehair_v2_bench compare --nlo 3200 --nhi 3200 --trials 20 --bb-list 1280 --v2-profile tuned --peel-candidates 8 --peel-trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
-./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
+./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6
 ./build/codec/wirehair_v2_bench peelcost --N 320,3200,32000 --bb-list 1280,102400 --structures policy,lt_m2_c96,lt_m2_c256,lt_m2_c512 --precode dense,ldpcdense --overhead 0,2 --trials 8
 ./build/codec/wirehair_v2_bench densecheck --N 7533 --bb 1280 --candidates 4 --trials 1
 ./build/codec/wirehair_v2_bench densetune --N 320,1000 --bb-list 1280 --candidates 4 --trials 2

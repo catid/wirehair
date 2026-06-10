@@ -86,7 +86,6 @@ struct Accum
 enum CompareProfileMode
 {
     CompareProfileBase,
-    CompareProfileTuned,
     CompareProfileAuto
 };
 
@@ -469,8 +468,6 @@ const char* CompareProfileModeName(CompareProfileMode mode)
     switch (mode) {
     case CompareProfileBase:
         return "base";
-    case CompareProfileTuned:
-        return "tuned";
     case CompareProfileAuto:
         return "auto";
     }
@@ -884,23 +881,15 @@ const wirehair_v2::SeedProfile* SelectCompareProfile(
     }
 
     CachedCompareProfile cached;
-    if (options.ProfileMode == CompareProfileTuned)
+    // CalibrateAutoProfile already applies the dense override to both
+    // arms, so the winning profile needs no further mutation here.
+    CalibrateAutoProfile(N, block_bytes, loss, options, cached);
+    if (!cached.UseTuned && options.DenseOverride)
     {
         cached.UseTuned = true;
-        cached.TunedProfile = BuildTunedProfile(N, block_bytes, options);
+        cached.TunedProfile =
+            wirehair_v2::SelectSeedProfile(N, block_bytes);
         ApplyDenseOverride(cached.TunedProfile, options);
-    }
-    else {
-        // CalibrateAutoProfile already applies the dense override to both
-        // arms, so the winning profile needs no further mutation here.
-        CalibrateAutoProfile(N, block_bytes, loss, options, cached);
-        if (!cached.UseTuned && options.DenseOverride)
-        {
-            cached.UseTuned = true;
-            cached.TunedProfile =
-                wirehair_v2::SelectSeedProfile(N, block_bytes);
-            ApplyDenseOverride(cached.TunedProfile, options);
-        }
     }
     const std::map<uint64_t, CachedCompareProfile>::iterator inserted =
         cache.insert(std::make_pair(key, cached)).first;
@@ -1008,13 +997,24 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--v2-profile") && i + 1 < argc) {
             const char* profile = argv[++i];
             if (!std::strcmp(profile, "tuned")) {
-                compare_options.ProfileMode = CompareProfileTuned;
+                std::fprintf(stderr,
+                    "--v2-profile tuned is retired: the synthetic peel "
+                    "tuner does not transfer to production p_seed values. "
+                    "Use --v2-profile auto for real-trial validation, or "
+                    "seedtable for offline diagnostics.\n");
+                return 1;
             }
             else if (!std::strcmp(profile, "auto")) {
                 compare_options.ProfileMode = CompareProfileAuto;
             }
-            else {
+            else if (!std::strcmp(profile, "base")) {
                 compare_options.ProfileMode = CompareProfileBase;
+            }
+            else {
+                std::fprintf(stderr,
+                    "unknown --v2-profile '%s' (expected base or auto)\n",
+                    profile);
+                return 1;
             }
         }
         else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
@@ -1157,7 +1157,6 @@ int CmdCompare(int argc, char** argv)
         PrintAccum("baseline", block_bytes, baseline);
         PrintAccum(
             compare_options.ProfileMode == CompareProfileBase ? "v2" :
-            compare_options.ProfileMode == CompareProfileTuned ? "v2_tuned" :
             "v2_auto",
             block_bytes,
             v2);
