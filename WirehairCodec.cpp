@@ -2852,9 +2852,9 @@ void Codec::BackSubstituteAboveDiagonal()
         {
             const uint16_t up_row_i = _pivots[ge_up_i];
 
-            // If element is heavy:
+            // If this row's element for the current column is stored in the heavy matrix:
             if (up_row_i >= first_heavy_row &&
-                ge_up_i >= first_heavy_column)
+                pivot_i >= first_heavy_column)
             {
                 const unsigned heavy_row_i = up_row_i - first_heavy_row;
                 const unsigned heavy_col_i = pivot_i - first_heavy_column;
