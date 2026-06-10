@@ -29,6 +29,8 @@
 
 #include "gf256.h"
 
+#include <cstring>
+
 #ifdef WH_COUNT
 // Task 6a: thread-local per-op byte/call counters.
 static thread_local uint64_t t_gf_bytes[6] = {0,0,0,0,0,0};
@@ -39,6 +41,43 @@ extern "C" void gf256_count_reset(void) { for (int i=0;i<6;++i){t_gf_bytes[i]=0;
 #define WH_BUMP(op, n) do { t_gf_bytes[op] += (uint64_t)(n); t_gf_calls[op]++; } while(0)
 #else
 #define WH_BUMP(op, n) do {} while(0)
+#endif
+
+static GF256_FORCE_INLINE uint64_t gf256_loadu64(const void* p)
+{
+    uint64_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static GF256_FORCE_INLINE uint32_t gf256_loadu32(const void* p)
+{
+    uint32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static GF256_FORCE_INLINE void gf256_storeu64(void* p, uint64_t v)
+{
+    std::memcpy(p, &v, sizeof(v));
+}
+
+static GF256_FORCE_INLINE void gf256_storeu32(void* p, uint32_t v)
+{
+    std::memcpy(p, &v, sizeof(v));
+}
+
+#if defined(__has_cpp_attribute)
+# if __has_cpp_attribute(fallthrough)
+#  define GF256_FALLTHROUGH [[fallthrough]]
+# endif
+#endif
+#ifndef GF256_FALLTHROUGH
+# if defined(__GNUC__) && __GNUC__ >= 7
+#  define GF256_FALLTHROUGH __attribute__((fallthrough))
+# else
+#  define GF256_FALLTHROUGH ((void)0)
+# endif
 #endif
 
 #ifdef LINUX_ARM
@@ -793,15 +832,20 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
     else
 # endif // GF256_TRY_NEON
     {
-        uint64_t * GF256_RESTRICT x8 = reinterpret_cast<uint64_t *>(x16);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y16);
+        uint8_t * GF256_RESTRICT x8 = reinterpret_cast<uint8_t *>(x16);
+        const uint8_t * GF256_RESTRICT y8 = reinterpret_cast<const uint8_t *>(y16);
 
         const unsigned count = (unsigned)bytes / 8;
         for (unsigned ii = 0; ii < count; ++ii)
-            x8[ii] ^= y8[ii];
+        {
+            const unsigned offset = ii * 8u;
+            gf256_storeu64(
+                x8 + offset,
+                gf256_loadu64(x8 + offset) ^ gf256_loadu64(y8 + offset));
+        }
 
-        x16 = reinterpret_cast<GF256_M128 *>(x8 + count);
-        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count);
+        x16 = reinterpret_cast<GF256_M128 *>(x8 + count * 8u);
+        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count * 8u);
 
         bytes -= (count * 8);
     }
@@ -922,26 +966,24 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
     const int eight = bytes & 8;
     if (eight)
     {
-        uint64_t * GF256_RESTRICT x8 = reinterpret_cast<uint64_t *>(x1);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y1);
-        *x8 ^= *y8;
+        gf256_storeu64(x1, gf256_loadu64(x1) ^ gf256_loadu64(y1));
     }
 
     // Handle a block of 4 bytes
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT x4 = reinterpret_cast<uint32_t *>(x1 + eight);
-        const uint32_t * GF256_RESTRICT y4 = reinterpret_cast<const uint32_t *>(y1 + eight);
-        *x4 ^= *y4;
+        gf256_storeu32(
+            x1 + eight,
+            gf256_loadu32(x1 + eight) ^ gf256_loadu32(y1 + eight));
     }
 
     // Handle final bytes
     const int offset = eight + four;
     switch (bytes & 3)
     {
-    case 3: x1[offset + 2] ^= y1[offset + 2];
-    case 2: x1[offset + 1] ^= y1[offset + 1];
+    case 3: x1[offset + 2] ^= y1[offset + 2]; GF256_FALLTHROUGH;
+    case 2: x1[offset + 1] ^= y1[offset + 1]; GF256_FALLTHROUGH;
     case 1: x1[offset] ^= y1[offset];
     default:
         break;
@@ -978,17 +1020,24 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
     else
 # endif // GF256_TRY_NEON
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z16);
-        const uint64_t * GF256_RESTRICT x8 = reinterpret_cast<const uint64_t *>(x16);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y16);
+        uint8_t * GF256_RESTRICT z8 = reinterpret_cast<uint8_t *>(z16);
+        const uint8_t * GF256_RESTRICT x8 = reinterpret_cast<const uint8_t *>(x16);
+        const uint8_t * GF256_RESTRICT y8 = reinterpret_cast<const uint8_t *>(y16);
 
         const unsigned count = (unsigned)bytes / 8;
         for (unsigned ii = 0; ii < count; ++ii)
-            z8[ii] ^= x8[ii] ^ y8[ii];
+        {
+            const unsigned offset = ii * 8u;
+            gf256_storeu64(
+                z8 + offset,
+                gf256_loadu64(z8 + offset) ^
+                gf256_loadu64(x8 + offset) ^
+                gf256_loadu64(y8 + offset));
+        }
 
-        z16 = reinterpret_cast<GF256_M128 *>(z8 + count);
-        x16 = reinterpret_cast<const GF256_M128 *>(x8 + count);
-        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count);
+        z16 = reinterpret_cast<GF256_M128 *>(z8 + count * 8u);
+        x16 = reinterpret_cast<const GF256_M128 *>(x8 + count * 8u);
+        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count * 8u);
 
         bytes -= (count * 8);
     }
@@ -1065,28 +1114,28 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
     const int eight = bytes & 8;
     if (eight)
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z1);
-        const uint64_t * GF256_RESTRICT x8 = reinterpret_cast<const uint64_t *>(x1);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y1);
-        *z8 ^= *x8 ^ *y8;
+        gf256_storeu64(
+            z1,
+            gf256_loadu64(z1) ^ gf256_loadu64(x1) ^ gf256_loadu64(y1));
     }
 
     // Handle a block of 4 bytes
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT z4 = reinterpret_cast<uint32_t *>(z1 + eight);
-        const uint32_t * GF256_RESTRICT x4 = reinterpret_cast<const uint32_t *>(x1 + eight);
-        const uint32_t * GF256_RESTRICT y4 = reinterpret_cast<const uint32_t *>(y1 + eight);
-        *z4 ^= *x4 ^ *y4;
+        gf256_storeu32(
+            z1 + eight,
+            gf256_loadu32(z1 + eight) ^
+            gf256_loadu32(x1 + eight) ^
+            gf256_loadu32(y1 + eight));
     }
 
     // Handle final bytes
     const int offset = eight + four;
     switch (bytes & 3)
     {
-    case 3: z1[offset + 2] ^= x1[offset + 2] ^ y1[offset + 2];
-    case 2: z1[offset + 1] ^= x1[offset + 1] ^ y1[offset + 1];
+    case 3: z1[offset + 2] ^= x1[offset + 2] ^ y1[offset + 2]; GF256_FALLTHROUGH;
+    case 2: z1[offset + 1] ^= x1[offset + 1] ^ y1[offset + 1]; GF256_FALLTHROUGH;
     case 1: z1[offset] ^= x1[offset] ^ y1[offset];
     default:
         break;
@@ -1140,17 +1189,22 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
     else
 # endif // GF256_TRY_NEON
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z16);
-        const uint64_t * GF256_RESTRICT x8 = reinterpret_cast<const uint64_t *>(x16);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y16);
+        uint8_t * GF256_RESTRICT z8 = reinterpret_cast<uint8_t *>(z16);
+        const uint8_t * GF256_RESTRICT x8 = reinterpret_cast<const uint8_t *>(x16);
+        const uint8_t * GF256_RESTRICT y8 = reinterpret_cast<const uint8_t *>(y16);
 
         const unsigned count = (unsigned)bytes / 8;
         for (unsigned ii = 0; ii < count; ++ii)
-            z8[ii] = x8[ii] ^ y8[ii];
+        {
+            const unsigned offset = ii * 8u;
+            gf256_storeu64(
+                z8 + offset,
+                gf256_loadu64(x8 + offset) ^ gf256_loadu64(y8 + offset));
+        }
 
-        x16 = reinterpret_cast<const GF256_M128 *>(x8 + count);
-        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count);
-        z16 = reinterpret_cast<GF256_M128 *>(z8 + count);
+        x16 = reinterpret_cast<const GF256_M128 *>(x8 + count * 8u);
+        y16 = reinterpret_cast<const GF256_M128 *>(y8 + count * 8u);
+        z16 = reinterpret_cast<GF256_M128 *>(z8 + count * 8u);
 
         bytes -= (count * 8);
     }
@@ -1244,28 +1298,24 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
     const int eight = bytes & 8;
     if (eight)
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z1);
-        const uint64_t * GF256_RESTRICT x8 = reinterpret_cast<const uint64_t *>(x1);
-        const uint64_t * GF256_RESTRICT y8 = reinterpret_cast<const uint64_t *>(y1);
-        *z8 = *x8 ^ *y8;
+        gf256_storeu64(z1, gf256_loadu64(x1) ^ gf256_loadu64(y1));
     }
 
     // Handle a block of 4 bytes
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT z4 = reinterpret_cast<uint32_t *>(z1 + eight);
-        const uint32_t * GF256_RESTRICT x4 = reinterpret_cast<const uint32_t *>(x1 + eight);
-        const uint32_t * GF256_RESTRICT y4 = reinterpret_cast<const uint32_t *>(y1 + eight);
-        *z4 = *x4 ^ *y4;
+        gf256_storeu32(
+            z1 + eight,
+            gf256_loadu32(x1 + eight) ^ gf256_loadu32(y1 + eight));
     }
 
     // Handle final bytes
     const int offset = eight + four;
     switch (bytes & 3)
     {
-    case 3: z1[offset + 2] = x1[offset + 2] ^ y1[offset + 2];
-    case 2: z1[offset + 1] = x1[offset + 1] ^ y1[offset + 1];
+    case 3: z1[offset + 2] = x1[offset + 2] ^ y1[offset + 2]; GF256_FALLTHROUGH;
+    case 2: z1[offset + 1] = x1[offset + 1] ^ y1[offset + 1]; GF256_FALLTHROUGH;
     case 1: z1[offset] = x1[offset] ^ y1[offset];
     default:
         break;
@@ -1409,7 +1459,6 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
     // Handle blocks of 8 bytes
     while (bytes >= 8)
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z1);
 #ifdef GF256_IS_BIG_ENDIAN
         uint64_t word = (uint64_t)table[x1[0]] << 56;
         word |= (uint64_t)table[x1[1]] << 48;
@@ -1429,7 +1478,7 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         word |= (uint64_t)table[x1[6]] << 48;
         word |= (uint64_t)table[x1[7]] << 56;
 #endif
-        *z8 = word;
+        gf256_storeu64(z1, word);
 
         bytes -= 8, x1 += 8, z1 += 8;
     }
@@ -1438,7 +1487,6 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT z4 = reinterpret_cast<uint32_t *>(z1);
 #ifdef GF256_IS_BIG_ENDIAN
         uint32_t word = (uint32_t)table[x1[0]] << 24;
         word |= (uint32_t)table[x1[1]] << 16;
@@ -1450,15 +1498,15 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         word |= (uint32_t)table[x1[2]] << 16;
         word |= (uint32_t)table[x1[3]] << 24;
 #endif
-        *z4 = word;
+        gf256_storeu32(z1, word);
     }
 
     // Handle single bytes
     const int offset = four;
     switch (bytes & 3)
     {
-    case 3: z1[offset + 2] = table[x1[offset + 2]];
-    case 2: z1[offset + 1] = table[x1[offset + 1]];
+    case 3: z1[offset + 2] = table[x1[offset + 2]]; GF256_FALLTHROUGH;
+    case 2: z1[offset + 1] = table[x1[offset + 1]]; GF256_FALLTHROUGH;
     case 1: z1[offset] = table[x1[offset]];
     default:
         break;
@@ -1676,7 +1724,6 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
     // Handle blocks of 8 bytes
     while (bytes >= 8)
     {
-        uint64_t * GF256_RESTRICT z8 = reinterpret_cast<uint64_t *>(z1);
 #ifdef GF256_IS_BIG_ENDIAN
         uint64_t word = (uint64_t)table[x1[0]] << 56;
         word |= (uint64_t)table[x1[1]] << 48;
@@ -1696,7 +1743,7 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
         word |= (uint64_t)table[x1[6]] << 48;
         word |= (uint64_t)table[x1[7]] << 56;
 #endif
-        *z8 ^= word;
+        gf256_storeu64(z1, gf256_loadu64(z1) ^ word);
 
         bytes -= 8, x1 += 8, z1 += 8;
     }
@@ -1705,7 +1752,6 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT z4 = reinterpret_cast<uint32_t *>(z1);
 #ifdef GF256_IS_BIG_ENDIAN
         uint32_t word = (uint32_t)table[x1[0]] << 24;
         word |= (uint32_t)table[x1[1]] << 16;
@@ -1717,15 +1763,15 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
         word |= (uint32_t)table[x1[2]] << 16;
         word |= (uint32_t)table[x1[3]] << 24;
 #endif
-        *z4 ^= word;
+        gf256_storeu32(z1, gf256_loadu32(z1) ^ word);
     }
 
     // Handle single bytes
     const int offset = four;
     switch (bytes & 3)
     {
-    case 3: z1[offset + 2] ^= table[x1[offset + 2]];
-    case 2: z1[offset + 1] ^= table[x1[offset + 1]];
+    case 3: z1[offset + 2] ^= table[x1[offset + 2]]; GF256_FALLTHROUGH;
+    case 2: z1[offset + 1] ^= table[x1[offset + 1]]; GF256_FALLTHROUGH;
     case 1: z1[offset] ^= table[x1[offset]];
     default:
         break;
@@ -1736,19 +1782,20 @@ extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy
 {
     WH_BUMP(5, bytes);
 #if defined(GF256_TARGET_MOBILE)
-    uint64_t * GF256_RESTRICT x16 = reinterpret_cast<uint64_t *>(vx);
-    uint64_t * GF256_RESTRICT y16 = reinterpret_cast<uint64_t *>(vy);
+    uint8_t * GF256_RESTRICT x16 = reinterpret_cast<uint8_t *>(vx);
+    uint8_t * GF256_RESTRICT y16 = reinterpret_cast<uint8_t *>(vy);
 
     const unsigned count = (unsigned)bytes / 8;
     for (unsigned ii = 0; ii < count; ++ii)
     {
-        const uint64_t temp = x16[ii];
-        x16[ii] = y16[ii];
-        y16[ii] = temp;
+        const unsigned offset = ii * 8u;
+        const uint64_t temp = gf256_loadu64(x16 + offset);
+        gf256_storeu64(x16 + offset, gf256_loadu64(y16 + offset));
+        gf256_storeu64(y16 + offset, temp);
     }
 
-    x16 += count;
-    y16 += count;
+    x16 += count * 8u;
+    y16 += count * 8u;
     bytes -= count * 8;
 #else
     GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<GF256_M128 *>(vx);
@@ -1846,24 +1893,18 @@ extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy
     const int eight = bytes & 8;
     if (eight)
     {
-        uint64_t * GF256_RESTRICT x8 = reinterpret_cast<uint64_t *>(x1);
-        uint64_t * GF256_RESTRICT y8 = reinterpret_cast<uint64_t *>(y1);
-
-        uint64_t temp = *x8;
-        *x8 = *y8;
-        *y8 = temp;
+        const uint64_t temp = gf256_loadu64(x1);
+        gf256_storeu64(x1, gf256_loadu64(y1));
+        gf256_storeu64(y1, temp);
     }
 
     // Handle a block of 4 bytes
     const int four = bytes & 4;
     if (four)
     {
-        uint32_t * GF256_RESTRICT x4 = reinterpret_cast<uint32_t *>(x1 + eight);
-        uint32_t * GF256_RESTRICT y4 = reinterpret_cast<uint32_t *>(y1 + eight);
-
-        uint32_t temp = *x4;
-        *x4 = *y4;
-        *y4 = temp;
+        const uint32_t temp = gf256_loadu32(x1 + eight);
+        gf256_storeu32(x1 + eight, gf256_loadu32(y1 + eight));
+        gf256_storeu32(y1 + eight, temp);
     }
 
     // Handle final bytes
@@ -1871,8 +1912,8 @@ extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy
     uint8_t temp;
     switch (bytes & 3)
     {
-    case 3: temp = x1[offset + 2]; x1[offset + 2] = y1[offset + 2]; y1[offset + 2] = temp;
-    case 2: temp = x1[offset + 1]; x1[offset + 1] = y1[offset + 1]; y1[offset + 1] = temp;
+    case 3: temp = x1[offset + 2]; x1[offset + 2] = y1[offset + 2]; y1[offset + 2] = temp; GF256_FALLTHROUGH;
+    case 2: temp = x1[offset + 1]; x1[offset + 1] = y1[offset + 1]; y1[offset + 1] = temp; GF256_FALLTHROUGH;
     case 1: temp = x1[offset]; x1[offset] = y1[offset]; y1[offset] = temp;
     default:
         break;
