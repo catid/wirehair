@@ -121,6 +121,52 @@ void CheckV2RoundTrip()
         "v2 recovered message should match input");
 }
 
+void CheckV2InvalidInitialization()
+{
+    const uint32_t N = 40u;
+    const uint32_t block_bytes = 96u;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes, 0x42);
+
+    wirehair_v2::Codec decoder;
+    Check(decoder.InitializeDecoder(message_bytes, block_bytes) ==
+            Wirehair_Success,
+        "v2 decoder baseline initialization should succeed");
+    const wirehair_v2::SeedProfile profile = decoder.Profile();
+
+    Check(decoder.InitializeDecoder(UINT64_MAX, 16u) ==
+            Wirehair_BadInput_LargeN,
+        "v2 decoder should reject huge message sizes before narrowing");
+    Check(decoder.Profile().BlockCount == profile.BlockCount &&
+            decoder.Profile().BlockBytes == profile.BlockBytes &&
+            decoder.Profile().PeelSeed == profile.PeelSeed &&
+            decoder.Profile().DenseSeed == profile.DenseSeed &&
+            decoder.Profile().DenseCount == profile.DenseCount,
+        "v2 failed input validation should preserve the last good profile");
+
+    wirehair_v2::SeedProfile invalid_profile = profile;
+    invalid_profile.DenseCount = 0u;
+    Check(decoder.InitializeDecoder(message_bytes, block_bytes,
+            &invalid_profile) == Wirehair_InvalidInput,
+        "v2 decoder should reject invalid dense-count overrides");
+    Check(decoder.Profile().BlockCount == profile.BlockCount &&
+            decoder.Profile().BlockBytes == profile.BlockBytes &&
+            decoder.Profile().PeelSeed == profile.PeelSeed &&
+            decoder.Profile().DenseSeed == profile.DenseSeed &&
+            decoder.Profile().DenseCount == profile.DenseCount,
+        "v2 failed core initialization should preserve the last good profile");
+
+    wirehair_v2::Codec encoder;
+    Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes) ==
+            Wirehair_Success,
+        "v2 encoder baseline initialization should succeed");
+    invalid_profile = encoder.Profile();
+    invalid_profile.DenseCount = 0u;
+    Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes,
+            &invalid_profile) == Wirehair_InvalidInput,
+        "v2 encoder should reject invalid dense-count overrides");
+}
+
 void CheckGeneratedRows(
     const wirehair_v2::PeelingCodec& codec,
     uint32_t block_count,
@@ -403,6 +449,7 @@ int main()
     CheckDecodeAfterAllOriginalSuccess();
     CheckDecodeAfterDuplicateOriginalFailure();
     CheckBlockBytesUpperBound();
+    CheckV2InvalidInitialization();
 
     Check(ClassifyBlockBytes(1280u) == BlockByteClass::Small,
         "1280-byte blocks should use small byte class");
