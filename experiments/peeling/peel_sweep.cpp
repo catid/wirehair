@@ -514,6 +514,7 @@ enum StructureKind
     kStructureRaptorQLdpcStruct,
     kStructureRaptorQLdpcRandom,
     kStructureBinaryP50,
+    kStructureDeckColumns,
 };
 
 struct MatrixStructure
@@ -530,6 +531,9 @@ struct MatrixStructure
     unsigned AltMaxDegree;
     unsigned BalanceMode;
     double BalanceValue;
+    // Underlying row-degree law used by wrapper kinds (kStructureDeckColumns);
+    // defaults to Kind itself for every ordinary structure.
+    StructureKind DegreeKind;
 
     MatrixStructure(
         const char* name,
@@ -543,7 +547,8 @@ struct MatrixStructure
         unsigned alt_min_degree = 0,
         unsigned alt_max_degree = 0,
         unsigned balance_mode = 0,
-        double balance_value = 0.0)
+        double balance_value = 0.0,
+        int degree_kind = -1)
         : Name(name),
           Description(description),
           Kind(kind),
@@ -555,7 +560,8 @@ struct MatrixStructure
           AltMinDegree(alt_min_degree),
           AltMaxDegree(alt_max_degree),
           BalanceMode(balance_mode),
-          BalanceValue(balance_value)
+          BalanceValue(balance_value),
+          DegreeKind(degree_kind >= 0 ? (StructureKind)degree_kind : kind)
     {
     }
 };
@@ -683,6 +689,29 @@ static const MatrixStructure kStructures[] = {
     {"lt_m2_c1024_fold25", "LT min 2 cap 1024 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 0.25},
     {"lt_m2_c1024_fold50", "LT min 2 cap 1024 with 50 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 0.50},
     {"lt_m2_c1024_fold200", "LT min 2 cap 1024 with 200 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 2.00},
+    {"lt_m2_c384_fold10", "LT min 2 cap 384 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 384, 0.10},
+    {"lt_m2_c384_fold25", "LT min 2 cap 384 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 384, 0.25},
+    {"lt_m2_c384_fold40", "LT min 2 cap 384 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 384, 0.40},
+    {"lt_m2_c384_fold60", "LT min 2 cap 384 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 384, 0.60},
+    {"lt_m2_c512_fold10", "LT min 2 cap 512 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 512, 0.10},
+    {"lt_m2_c512_fold25", "LT min 2 cap 512 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 512, 0.25},
+    {"lt_m2_c512_fold40", "LT min 2 cap 512 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 512, 0.40},
+    {"lt_m2_c512_fold60", "LT min 2 cap 512 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 512, 0.60},
+    {"lt_m2_c768_fold10", "LT min 2 cap 768 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 768, 0.10},
+    {"lt_m2_c768_fold25", "LT min 2 cap 768 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 768, 0.25},
+    {"lt_m2_c768_fold40", "LT min 2 cap 768 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 768, 0.40},
+    {"lt_m2_c768_fold60", "LT min 2 cap 768 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 768, 0.60},
+    {"lt_m2_c1024_fold10", "LT min 2 cap 1024 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 0.10},
+    {"lt_m2_c1024_fold40", "LT min 2 cap 1024 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 0.40},
+    {"lt_m2_c1024_fold60", "LT min 2 cap 1024 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 1024, 0.60},
+    {"lt_m2_c1536_fold10", "LT min 2 cap 1536 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 1536, 0.10},
+    {"lt_m2_c1536_fold25", "LT min 2 cap 1536 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 1536, 0.25},
+    {"lt_m2_c1536_fold40", "LT min 2 cap 1536 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 1536, 0.40},
+    {"lt_m2_c1536_fold60", "LT min 2 cap 1536 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 1536, 0.60},
+    {"lt_m2_c2048_fold10", "LT min 2 cap 2048 with 10 percent folded tail mass", kStructureLTFoldScale, 2, 2048, 0.10},
+    {"lt_m2_c2048_fold25", "LT min 2 cap 2048 with 25 percent folded tail mass", kStructureLTFoldScale, 2, 2048, 0.25},
+    {"lt_m2_c2048_fold40", "LT min 2 cap 2048 with 40 percent folded tail mass", kStructureLTFoldScale, 2, 2048, 0.40},
+    {"lt_m2_c2048_fold60", "LT min 2 cap 2048 with 60 percent folded tail mass", kStructureLTFoldScale, 2, 2048, 0.60},
     {"lt_d3_003_d4_003", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.03, 0.03, 0.0},
     {"lt_d3_008_d4_003", "LT cap64 plus independent degree-3 mass 0.08 and degree-4 mass 0.03", kStructureLTExtra34, 1, 64, 0.08, 0.03, 0.0},
     {"lt_d3_003_d4_008", "LT cap64 plus independent degree-3 mass 0.03 and degree-4 mass 0.08", kStructureLTExtra34, 1, 64, 0.03, 0.08, 0.0},
@@ -712,6 +741,12 @@ static const MatrixStructure kStructures[] = {
     {"lt_m2_c3200_d4_003", "LT min 2 cap3200 plus independent degree-4 mass 0.03", kStructureLTExtra34, 2, 3200, 0.0, 0.03, 0.0},
     {"lt_m2_c3200_d2_003_d3_003_d4_003", "LT min 2 cap3200 plus degree-2/3/4 mass 0.03 each", kStructureLTExtra34, 2, 3200, 0.03, 0.03, 0.03},
     {"lt_m2_c3200_d2_008_d3_003_d4_003", "LT min 2 cap3200 plus degree-2 mass 0.08, degree-3/4 mass 0.03", kStructureLTExtra34, 2, 3200, 0.03, 0.03, 0.08},
+    {"lt_m2_c512_d2_003", "LT min 2 cap512 plus independent degree-2 mass 0.03", kStructureLTExtra34, 2, 512, 0.0, 0.0, 0.03},
+    {"lt_m2_c512_d3_003", "LT min 2 cap512 plus independent degree-3 mass 0.03", kStructureLTExtra34, 2, 512, 0.03, 0.0, 0.0},
+    {"lt_m2_c1024_d2_003", "LT min 2 cap1024 plus independent degree-2 mass 0.03", kStructureLTExtra34, 2, 1024, 0.0, 0.0, 0.03},
+    {"lt_m2_c1024_d3_003", "LT min 2 cap1024 plus independent degree-3 mass 0.03", kStructureLTExtra34, 2, 1024, 0.03, 0.0, 0.0},
+    {"lt_m2_c2048_d2_003", "LT min 2 cap2048 plus independent degree-2 mass 0.03", kStructureLTExtra34, 2, 2048, 0.0, 0.0, 0.03},
+    {"lt_m2_c2048_d3_003", "LT min 2 cap2048 plus independent degree-3 mass 0.03", kStructureLTExtra34, 2, 2048, 0.03, 0.0, 0.0},
     {"lt_m2_c320_hi1_h160", "LT min 2 cap 320 with 1 explicit degree-N/2 row", kStructureLTHighRows, 2, 320, 1.0, 0.5},
     {"lt_m2_c320_hi2_h160", "LT min 2 cap 320 with 2 explicit degree-N/2 rows", kStructureLTHighRows, 2, 320, 2.0, 0.5},
     {"lt_m2_c320_hi4_h160", "LT min 2 cap 320 with 4 explicit degree-N/2 rows", kStructureLTHighRows, 2, 320, 4.0, 0.5},
@@ -748,6 +783,15 @@ static const MatrixStructure kStructures[] = {
     {"bal_u2_16_load200", "balanced uniform [2,16], reject above 2.00x mean load", kStructureBalancedUniform, 2, 16, 0.0, 0.0, 0.0, 0, 0, 1, 2.00},
     {"bal_u2_16_best2", "balanced uniform [2,16], best of 2 row candidates", kStructureBalancedUniform, 2, 16, 0.0, 0.0, 0.0, 0, 0, 2, 2.0},
     {"bal_u2_16_best4", "balanced uniform [2,16], best of 4 row candidates", kStructureBalancedUniform, 2, 16, 0.0, 0.0, 0.0, 0, 0, 2, 4.0},
+    {"deck_lt_m2_c256_fold", "deck-dealt exactly balanced columns, LT min 2 cap 256 folded tail degree law", kStructureDeckColumns, 2, 256, 0.0, 0.0, 0.0, 0, 0, 0, 1.0, kStructureLTFold},
+    {"deck_lt_m2_c512_fold", "deck-dealt exactly balanced columns, LT min 2 cap 512 folded tail degree law", kStructureDeckColumns, 2, 512, 0.0, 0.0, 0.0, 0, 0, 0, 1.0, kStructureLTFold},
+    {"deck_lt_m2_c128", "deck-dealt exactly balanced columns, LT min 2 cap 128 degree law", kStructureDeckColumns, 2, 128, 0.0, 0.0, 0.0, 0, 0, 0, 1.0, kStructureLT},
+    {"deck_lt_m2_c16", "deck-dealt exactly balanced columns, LT min 2 cap 16 degree law", kStructureDeckColumns, 2, 16, 0.0, 0.0, 0.0, 0, 0, 0, 1.0, kStructureLT},
+    {"deck_lt_m1_c64", "deck-dealt exactly balanced columns, LT min 1 cap 64 degree law", kStructureDeckColumns, 1, 64, 0.0, 0.0, 0.0, 0, 0, 0, 1.0, kStructureLT},
+    {"deck_rs_c001_d50_c128", "deck-dealt exactly balanced columns, robust soliton c=0.01 delta=0.50 cap 128 degree law", kStructureDeckColumns, 1, 128, 0.01, 0.50, 0.0, 0, 0, 0, 1.0, kStructureRobustSoliton},
+    {"deckloss10_lt_m2_c256_fold", "deck deal over 1.11x virtual rows then keep configured rows, LT min 2 cap 256 folded tail", kStructureDeckColumns, 2, 256, 0.0, 0.0, 0.0, 0, 0, 0, 1.11, kStructureLTFold},
+    {"deckloss30_lt_m2_c256_fold", "deck deal over 1.43x virtual rows then keep configured rows, LT min 2 cap 256 folded tail", kStructureDeckColumns, 2, 256, 0.0, 0.0, 0.0, 0, 0, 0, 1.43, kStructureLTFold},
+    {"p2c_lt_m2_c256_fold", "power-of-two-choices column balance, LT min 2 cap 256 folded tail degree law", kStructureLTFold, 2, 256, 0.0, 0.0, 0.0, 0, 0, 3, 2.0},
     {"harmonic1_32", "degree probability proportional to 1/d in [1,32]", kStructureHarmonic, 1, 32, 0.0, 0.0},
     {"harmonic2_32", "degree probability proportional to 1/d in [2,32]", kStructureHarmonic, 2, 32, 0.0, 0.0},
     {"one10_u2_8", "10 percent degree-1 rows, otherwise uniform [2,8]", kStructureOnePlusUniform, 2, 8, 0.10, 0.0},
@@ -4702,6 +4746,17 @@ static double overhead_lt_weight(
     return w;
 }
 
+// Wrapper kinds (deck-dealt column balancing) reuse the row-degree law of an
+// underlying structure kind; everything degree-related dispatches on this so
+// the wrapper changes only column selection, never the degree distribution.
+static StructureKind structure_degree_law(const MatrixStructure& structure)
+{
+    if (structure.Kind == kStructureDeckColumns) {
+        return structure.DegreeKind;
+    }
+    return structure.Kind;
+}
+
 static double structure_degree_weight(
     const MatrixStructure& structure,
     unsigned degree,
@@ -4709,7 +4764,7 @@ static double structure_degree_weight(
     unsigned row_count,
     unsigned max_degree)
 {
-    switch (structure.Kind)
+    switch (structure_degree_law(structure))
     {
     case kStructureLT:
     case kStructureOnePlusLT:
@@ -4833,7 +4888,7 @@ private:
 
 static bool uses_weighted_degree_sampler(const MatrixStructure& structure)
 {
-    switch (structure.Kind)
+    switch (structure_degree_law(structure))
     {
     case kStructureLT:
     case kStructureHarmonic:
@@ -4860,7 +4915,7 @@ static unsigned choose_structure_degree(
     const unsigned min_degree = clamp_degree(structure.MinDegree, N);
     const unsigned max_degree = clamp_degree(structure.MaxDegree, N);
 
-    switch (structure.Kind)
+    switch (structure_degree_law(structure))
     {
     case kStructureWirehairRandom:
     {
@@ -5029,6 +5084,29 @@ static bool row_within_load_limit(
     return true;
 }
 
+static uint16_t sample_column_not_in_row(
+    unsigned N,
+    const std::vector<uint16_t>& row,
+    Rng& rng)
+{
+    for (;;)
+    {
+        const uint16_t column_i = (uint16_t)(rng.u32() % N);
+        bool duplicate = false;
+        for (uint16_t c : row)
+        {
+            if (c == column_i)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            return column_i;
+        }
+    }
+}
+
 static std::vector<uint16_t> balanced_row_columns(
     const MatrixStructure& structure,
     unsigned N,
@@ -5080,6 +5158,27 @@ static std::vector<uint16_t> balanced_row_columns(
             }
         }
         return best;
+    }
+
+    if (structure.BalanceMode == 3)
+    {
+        // Power-of-two-choices: for each edge sample two iid candidate
+        // columns (rejecting duplicates within the row) and keep the one
+        // with the lower current column load; ties keep the first.
+        degree = clamp_degree(degree, N);
+        if (degree >= N) {
+            return random_row_columns(N, N, rng);
+        }
+        std::vector<uint16_t> row;
+        row.reserve(degree);
+        while (row.size() < degree)
+        {
+            const uint16_t first = sample_column_not_in_row(N, row, rng);
+            const uint16_t second = sample_column_not_in_row(N, row, rng);
+            row.push_back(
+                column_loads[second] < column_loads[first] ? second : first);
+        }
+        return row;
     }
 
     return random_row_columns(N, degree, rng);
@@ -5248,12 +5347,189 @@ static void add_raptorq_ldpc_rows(
     }
 }
 
+// Appends one freshly shuffled permutation of all N column ids to the deck.
+static void append_shuffled_deck(
+    std::vector<uint16_t>& deck,
+    unsigned N,
+    Rng& rng)
+{
+    const size_t base = deck.size();
+    for (unsigned column_i = 0; column_i < N; ++column_i) {
+        deck.push_back((uint16_t)column_i);
+    }
+    for (unsigned i = 0; i < N; ++i)
+    {
+        const unsigned j = i + (rng.u32() % (N - i));
+        const uint16_t swapped = deck[base + j];
+        deck[base + j] = deck[base + i];
+        deck[base + i] = swapped;
+    }
+}
+
+static unsigned deck_virtual_row_count(
+    const MatrixStructure& structure,
+    unsigned row_count)
+{
+    double multiplier = structure.BalanceValue;
+    if (multiplier < 1.0) {
+        multiplier = 1.0;
+    }
+    const double virtual_rows = std::ceil((double)row_count * multiplier);
+    if (virtual_rows <= (double)row_count) {
+        return row_count;
+    }
+    return (unsigned)virtual_rows;
+}
+
+// Rare end-of-deal conflicts (the final cards all duplicating columns of the
+// last rows) can leave one column a use short and another a use over.  Move
+// single references from globally max-loaded columns to min-loaded columns
+// until usage counts differ by at most 1.  Each move strictly reduces the
+// usage-count spread potential, so this terminates quickly.
+static void rebalance_deck_columns(
+    std::vector<std::vector<uint16_t> >& rows,
+    unsigned N)
+{
+    std::vector<unsigned> counts(N, 0);
+    for (const std::vector<uint16_t>& row : rows)
+    {
+        for (uint16_t column_i : row) {
+            ++counts[column_i];
+        }
+    }
+
+    for (;;)
+    {
+        unsigned min_col = 0;
+        unsigned max_col = 0;
+        for (unsigned column_i = 1; column_i < N; ++column_i)
+        {
+            if (counts[column_i] < counts[min_col]) {
+                min_col = column_i;
+            }
+            if (counts[column_i] > counts[max_col]) {
+                max_col = column_i;
+            }
+        }
+        if (counts[max_col] - counts[min_col] <= 1u) {
+            break;
+        }
+
+        bool moved = false;
+        for (std::vector<uint16_t>& row : rows)
+        {
+            bool has_min = false;
+            bool has_max = false;
+            size_t max_pos = 0;
+            for (size_t i = 0; i < row.size(); ++i)
+            {
+                if (row[i] == (uint16_t)min_col) {
+                    has_min = true;
+                }
+                else if (row[i] == (uint16_t)max_col)
+                {
+                    has_max = true;
+                    max_pos = i;
+                }
+            }
+            if (has_max && !has_min)
+            {
+                row[max_pos] = (uint16_t)min_col;
+                --counts[max_col];
+                ++counts[min_col];
+                moved = true;
+                break;
+            }
+        }
+        if (!moved) {
+            break;
+        }
+    }
+}
+
+// Deck-dealt column-degree regularization: row degrees come from the
+// underlying degree law exactly as for the iid structure, but columns are
+// dealt from repeated shuffled decks of all N column ids so column degrees
+// are exactly balanced (max-min <= 1) at the same total edge budget.  Cards
+// that would duplicate a column already in the current row are skipped and
+// stay queued for later rows.  Loss variants (BalanceValue > 1) deal across
+// extra virtual rows sampled from the same law and keep only the configured
+// row count, modeling balance surviving random row loss.
+static std::vector<std::vector<uint16_t> > generate_deck_structure_rows(
+    const MatrixStructure& structure,
+    unsigned N,
+    unsigned row_count,
+    uint64_t seed)
+{
+    Rng rng(seed);
+    WeightedDegreeSampler degree_sampler;
+    if (uses_weighted_degree_sampler(structure)) {
+        degree_sampler.reset(structure, N, row_count);
+    }
+
+    const unsigned virtual_rows = deck_virtual_row_count(structure, row_count);
+    std::vector<unsigned> degrees(virtual_rows, 1);
+    for (unsigned row_i = 0; row_i < virtual_rows; ++row_i)
+    {
+        degrees[row_i] = clamp_degree(
+            choose_structure_degree(structure, N, degree_sampler, rng), N);
+    }
+
+    std::vector<uint16_t> deck;
+    size_t deck_pos = 0;
+    std::vector<uint8_t> in_row(N, 0);
+    std::vector<std::vector<uint16_t> > rows;
+    rows.reserve(virtual_rows);
+    for (unsigned row_i = 0; row_i < virtual_rows; ++row_i)
+    {
+        const unsigned degree = degrees[row_i];
+        std::vector<uint16_t> row;
+        row.reserve(degree);
+        while (row.size() < degree)
+        {
+            size_t scan = deck_pos;
+            for (;;)
+            {
+                if (scan >= deck.size()) {
+                    append_shuffled_deck(deck, N, rng);
+                }
+                if (!in_row[deck[scan]]) {
+                    break;
+                }
+                // Skip-and-requeue: this card duplicates a column already
+                // in the row, so leave it queued and look at the next card.
+                ++scan;
+            }
+            const uint16_t column_i = deck[scan];
+            deck[scan] = deck[deck_pos];
+            ++deck_pos;
+            in_row[column_i] = 1;
+            row.push_back(column_i);
+        }
+        for (uint16_t column_i : row) {
+            in_row[column_i] = 0;
+        }
+        rows.push_back(row);
+    }
+
+    rebalance_deck_columns(rows, N);
+
+    if (rows.size() > row_count) {
+        rows.resize(row_count);
+    }
+    return rows;
+}
+
 static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
     const MatrixStructure& structure,
     unsigned N,
     unsigned row_count,
     uint64_t seed)
 {
+    if (structure.Kind == kStructureDeckColumns) {
+        return generate_deck_structure_rows(structure, N, row_count, seed);
+    }
+
     Rng rng(seed);
     WeightedDegreeSampler degree_sampler;
     if (uses_weighted_degree_sampler(structure)) {
@@ -5287,7 +5563,8 @@ static std::vector<std::vector<uint16_t> > generate_random_structure_rows(
                     kStructures[0], N, degree_sampler, rng) :
                 choose_structure_degree(
                     structure, N, degree_sampler, rng);
-            row = structure.Kind == kStructureBalancedUniform ?
+            row = (structure.Kind == kStructureBalancedUniform ||
+                structure.BalanceMode != 0) ?
                 balanced_row_columns(structure, N, degree, column_loads,
                     total_refs, rng) :
                 random_row_columns(N, degree, rng);
@@ -5927,6 +6204,51 @@ static bool run_new_structure_variant_tests(std::string* why)
         return self_fail(why, "scaled 1024 fold weights are not monotonic");
     }
 
+    const MatrixStructure* fold512_10 = find_structure("lt_m2_c512_fold10");
+    const MatrixStructure* fold512_40 = find_structure("lt_m2_c512_fold40");
+    const MatrixStructure* fold512_60 = find_structure("lt_m2_c512_fold60");
+    const MatrixStructure* fold2048_25 = find_structure("lt_m2_c2048_fold25");
+    const MatrixStructure* grid_d2 = find_structure("lt_m2_c1024_d2_003");
+    const MatrixStructure* grid_d3 = find_structure("lt_m2_c2048_d3_003");
+    if (!fold512_10 || !fold512_40 || !fold512_60 || !fold2048_25 ||
+        !grid_d2 || !grid_d3) {
+        return self_fail(why, "fold/cap fine-grid structure lookup failed");
+    }
+
+    const unsigned grid_cap = clamp_degree(fold512_10->MaxDegree, larger_n);
+    const double grid512_10 = structure_degree_weight(
+        *fold512_10, grid_cap, larger_n, larger_rows, grid_cap);
+    const double grid512_40 = structure_degree_weight(
+        *fold512_40, grid_cap, larger_n, larger_rows, grid_cap);
+    const double grid512_60 = structure_degree_weight(
+        *fold512_60, grid_cap, larger_n, larger_rows, grid_cap);
+    if (!(grid512_10 < grid512_40 && grid512_40 < grid512_60)) {
+        return self_fail(why, "fine-grid 512 fold weights are not monotonic");
+    }
+    if (!(grid512_10 > lt_weight(grid_cap, larger_n))) {
+        return self_fail(why, "fine-grid cap 512 fold10 did not fold tail mass");
+    }
+
+    const unsigned grid2048_cap = clamp_degree(fold2048_25->MaxDegree, larger_n);
+    const double grid2048_25 = structure_degree_weight(
+        *fold2048_25, grid2048_cap, larger_n, larger_rows, grid2048_cap);
+    if (!(grid2048_25 > lt_weight(grid2048_cap, larger_n))) {
+        return self_fail(why, "fine-grid cap 2048 fold25 did not fold tail mass");
+    }
+
+    const double grid_d2_w = structure_degree_weight(
+        *grid_d2, 2, larger_n, larger_rows,
+        clamp_degree(grid_d2->MaxDegree, larger_n));
+    const double grid_d3_w = structure_degree_weight(
+        *grid_d3, 3, larger_n, larger_rows,
+        clamp_degree(grid_d3->MaxDegree, larger_n));
+    if (!(grid_d2->MinDegree == 2 && grid_d2_w > lt_weight(2, larger_n))) {
+        return self_fail(why, "fine-grid cap 1024 d2 mass variant is malformed");
+    }
+    if (!(grid_d3->MinDegree == 2 && grid_d3_w > lt_weight(3, larger_n))) {
+        return self_fail(why, "fine-grid cap 2048 d3 mass variant is malformed");
+    }
+
     const double robust_degree2 = structure_degree_weight(
         *robust, 2, N, row_count, clamp_degree(robust->MaxDegree, N));
     if (!(robust_degree2 > lt_weight(2, N))) {
@@ -6041,6 +6363,210 @@ static bool run_new_structure_variant_tests(std::string* why)
         if (ldpc_rows[i] != random_rows[i]) {
             return self_fail(why, "LDPC control did not preserve paired packet rows");
         }
+    }
+
+    return true;
+}
+
+static unsigned column_usage_spread(
+    const std::vector<std::vector<uint16_t> >& rows,
+    unsigned N)
+{
+    std::vector<unsigned> counts(N, 0);
+    for (const std::vector<uint16_t>& row : rows)
+    {
+        for (uint16_t column_i : row) {
+            ++counts[column_i];
+        }
+    }
+    unsigned min_count = counts[0];
+    unsigned max_count = counts[0];
+    for (unsigned column_i = 1; column_i < N; ++column_i)
+    {
+        if (counts[column_i] < min_count) {
+            min_count = counts[column_i];
+        }
+        if (counts[column_i] > max_count) {
+            max_count = counts[column_i];
+        }
+    }
+    return max_count - min_count;
+}
+
+static uint64_t total_row_refs(const std::vector<std::vector<uint16_t> >& rows)
+{
+    uint64_t refs = 0;
+    for (const std::vector<uint16_t>& row : rows) {
+        refs += (uint64_t)row.size();
+    }
+    return refs;
+}
+
+static bool run_deck_balance_tests(std::string* why)
+{
+    struct DeckCase
+    {
+        const char* DeckName;
+        const char* BaseName;
+    };
+    const DeckCase deck_cases[] = {
+        {"deck_lt_m2_c256_fold", "lt_m2_c256_fold"},
+        {"deck_lt_m2_c512_fold", "lt_m2_c512_fold"},
+        {"deck_lt_m2_c128", "lt_m2_c128"},
+        {"deck_lt_m2_c16", "lt_m2_c16"},
+        {"deck_lt_m1_c64", "lt_m1_c64"},
+        {"deck_rs_c001_d50_c128", "rs_c001_d50_c128"},
+    };
+
+    const unsigned N = 320;
+    const unsigned row_count = 352;
+    for (const DeckCase& deck_case : deck_cases)
+    {
+        const MatrixStructure* deck = find_structure(deck_case.DeckName);
+        const MatrixStructure* base = find_structure(deck_case.BaseName);
+        if (!deck || !base) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck structure lookup failed");
+        }
+        if (deck->Kind != kStructureDeckColumns ||
+            deck->DegreeKind != base->Kind ||
+            deck->MinDegree != base->MinDegree ||
+            deck->MaxDegree != base->MaxDegree ||
+            deck->A != base->A || deck->B != base->B) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck structure does not mirror its base degree law");
+        }
+
+        const uint64_t seed = UINT64_C(0x6465636b6465616c) ^
+            hash_string64(deck_case.DeckName);
+        const std::vector<std::vector<uint16_t> > rows =
+            generate_random_structure_rows(*deck, N, row_count, seed);
+        const std::vector<std::vector<uint16_t> > again =
+            generate_random_structure_rows(*deck, N, row_count, seed);
+        if (rows != again) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck generator is not deterministic");
+        }
+        if (rows.size() != row_count) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck generator changed the row count");
+        }
+        // Also checks row degree bounds, column range, and that no row
+        // contains the same column twice.
+        if (!validate_raw_structure(deck_case.DeckName, N, rows,
+            clamp_degree(deck->MinDegree, N),
+            clamp_degree(deck->MaxDegree, N), 0, why)) {
+            return false;
+        }
+        if (column_usage_spread(rows, N) > 1u) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck column degrees are not balanced within 1");
+        }
+
+        // The deck deal must spend exactly the edge budget an iid generator
+        // would draw from the same degree-law stream: every row degree has
+        // to match the law sample, so total edges match the iid equivalent.
+        Rng law_rng(seed);
+        WeightedDegreeSampler law_sampler;
+        if (uses_weighted_degree_sampler(*deck)) {
+            law_sampler.reset(*deck, N, row_count);
+        }
+        uint64_t expected_refs = 0;
+        for (unsigned row_i = 0; row_i < row_count; ++row_i)
+        {
+            const unsigned degree = clamp_degree(
+                choose_structure_degree(*deck, N, law_sampler, law_rng), N);
+            if (rows[row_i].size() != degree) {
+                return self_fail(why, std::string(deck_case.DeckName) +
+                    ": deck row degree does not match the degree-law sample");
+            }
+            expected_refs += degree;
+        }
+        if (total_row_refs(rows) != expected_refs) {
+            return self_fail(why, std::string(deck_case.DeckName) +
+                ": deck edge budget diverged from the iid degree law");
+        }
+    }
+
+    const char* loss_names[] = {
+        "deckloss10_lt_m2_c256_fold",
+        "deckloss30_lt_m2_c256_fold",
+    };
+    for (const char* name : loss_names)
+    {
+        const MatrixStructure* loss = find_structure(name);
+        if (!loss || loss->Kind != kStructureDeckColumns) {
+            return self_fail(why, std::string(name) +
+                ": deck loss structure lookup failed");
+        }
+        if (!(loss->BalanceValue > 1.0)) {
+            return self_fail(why, std::string(name) +
+                ": deck loss virtual row multiplier is missing");
+        }
+        if (deck_virtual_row_count(*loss, row_count) <= row_count) {
+            return self_fail(why, std::string(name) +
+                ": deck loss did not add virtual rows");
+        }
+
+        const uint64_t seed = UINT64_C(0x6465636b6c6f7373) ^
+            hash_string64(name);
+        const std::vector<std::vector<uint16_t> > rows =
+            generate_random_structure_rows(*loss, N, row_count, seed);
+        const std::vector<std::vector<uint16_t> > again =
+            generate_random_structure_rows(*loss, N, row_count, seed);
+        if (rows != again) {
+            return self_fail(why, std::string(name) +
+                ": deck loss generator is not deterministic");
+        }
+        if (rows.size() != row_count) {
+            return self_fail(why, std::string(name) +
+                ": deck loss generator kept the wrong row count");
+        }
+        if (!validate_raw_structure(name, N, rows,
+            clamp_degree(loss->MinDegree, N),
+            clamp_degree(loss->MaxDegree, N), 0, why)) {
+            return false;
+        }
+        // Dropping virtual rows breaks exact balance, but the surviving
+        // spread should stay far below an adversarial blowup.
+        if (column_usage_spread(rows, N) > 32u) {
+            return self_fail(why, std::string(name) +
+                ": deck loss column spread is implausibly large");
+        }
+    }
+
+    const MatrixStructure* p2c = find_structure("p2c_lt_m2_c256_fold");
+    const MatrixStructure* p2c_base = find_structure("lt_m2_c256_fold");
+    if (!p2c || !p2c_base) {
+        return self_fail(why, "p2c structure lookup failed");
+    }
+    if (p2c->BalanceMode != 3u || p2c->Kind != p2c_base->Kind ||
+        p2c->MinDegree != p2c_base->MinDegree ||
+        p2c->MaxDegree != p2c_base->MaxDegree) {
+        return self_fail(why, "p2c structure does not mirror its base degree law");
+    }
+
+    const uint64_t p2c_seed = UINT64_C(0x7032636465616c) ^
+        hash_string64(p2c->Name);
+    const std::vector<std::vector<uint16_t> > p2c_rows =
+        generate_random_structure_rows(*p2c, N, row_count, p2c_seed);
+    const std::vector<std::vector<uint16_t> > p2c_again =
+        generate_random_structure_rows(*p2c, N, row_count, p2c_seed);
+    if (p2c_rows != p2c_again) {
+        return self_fail(why, "p2c generator is not deterministic");
+    }
+    if (p2c_rows.size() != row_count) {
+        return self_fail(why, "p2c generator changed the row count");
+    }
+    if (!validate_raw_structure(p2c->Name, N, p2c_rows,
+        clamp_degree(p2c->MinDegree, N),
+        clamp_degree(p2c->MaxDegree, N), 0, why)) {
+        return false;
+    }
+    const std::vector<std::vector<uint16_t> > iid_rows =
+        generate_random_structure_rows(*p2c_base, N, row_count, p2c_seed);
+    if (column_usage_spread(p2c_rows, N) > column_usage_spread(iid_rows, N)) {
+        return self_fail(why, "p2c column spread exceeds the iid spread");
     }
 
     return true;
@@ -6239,6 +6765,9 @@ static bool run_self_tests(std::string* why)
         return false;
     }
     if (!run_new_structure_variant_tests(why)) {
+        return false;
+    }
+    if (!run_deck_balance_tests(why)) {
         return false;
     }
     if (!run_n_jitter_protocol_tests(why)) {
