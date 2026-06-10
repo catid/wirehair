@@ -1489,6 +1489,23 @@ public:
         return true;
     }
 
+    static bool validate_minrow_random_tie(std::string* why)
+    {
+        PeelSim sim(4);
+        std::string detail;
+        if (!sim.add_test_row(std::vector<uint16_t>{0, 1}, &detail) ||
+            !sim.add_test_row(std::vector<uint16_t>{0, 2}, &detail)) {
+            return fail(why, detail.c_str());
+        }
+
+        const std::vector<uint16_t> action =
+            sim.select_inactivation_action(88, UINT32_C(6));
+        if (action.size() != 1 || action[0] != 2) {
+            return fail(why, "minrow_rand weighted duplicate columns");
+        }
+        return true;
+    }
+
 private:
     unsigned N;
     std::vector<Row> Rows;
@@ -3285,6 +3302,10 @@ private:
 
         uint16_t best_column = kListTerm;
         Key best_key;
+        std::vector<uint8_t> seen;
+        if (mode == 7) {
+            seen.assign(N, 0);
+        }
         for (uint16_t row_i = 0; row_i < Rows.size(); ++row_i)
         {
             const Row& row = Rows[row_i];
@@ -3304,6 +3325,13 @@ private:
             {
                 if (Columns[column_i].Mark != kMarkTodo) {
                     continue;
+                }
+                if (mode == 7)
+                {
+                    if (seen[column_i]) {
+                        continue;
+                    }
+                    seen[column_i] = 1;
                 }
 
                 unsigned flags = 0;
@@ -3365,7 +3393,6 @@ private:
                     break;
                 case 7:
                     key = Key((int64_t)hash32(seed ^ (uint32_t)column_i ^
-                        ((uint32_t)row_i * UINT32_C(0x27d4eb2d)) ^
                         ((uint32_t)ChoiceCount * UINT32_C(0x165667b1))),
                         (int64_t)m.ExactD2, -(int64_t)m.Fill, (int64_t)column_i, 0);
                     break;
@@ -6177,6 +6204,9 @@ static bool run_self_tests(std::string* why)
         return false;
     }
     if (!PeelSim::validate_multistart_tie_break(why)) {
+        return false;
+    }
+    if (!PeelSim::validate_minrow_random_tie(why)) {
         return false;
     }
     return true;
