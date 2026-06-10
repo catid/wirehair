@@ -2,6 +2,10 @@
 
 #include "SiameseTools.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <atomic>
@@ -18,6 +22,52 @@ static const unsigned kMaxBlockBytes = 65;
 static const unsigned kExtraWarnThreshold = 4;
 
 static const uint8_t kPadChar = (uint8_t)0xee;
+
+static bool ReadEnvUnsigned(const char* name, unsigned& out)
+{
+    const char* value = getenv(name);
+    if (!value || !value[0]) {
+        return true;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long parsed = strtoul(value, &end, 0);
+    if (errno != 0 || !end || *end != '\0' || parsed > UINT_MAX)
+    {
+        cout << "Invalid " << name << " = " << value << endl;
+        return false;
+    }
+
+    out = (unsigned)parsed;
+    return true;
+}
+
+static bool ReadEnvU64(const char* name, uint64_t& out)
+{
+    const char* value = getenv(name);
+    if (!value || !value[0]) {
+        return true;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = strtoull(value, &end, 0);
+    if (errno != 0 || !end || *end != '\0')
+    {
+        cout << "Invalid " << name << " = " << value << endl;
+        return false;
+    }
+
+    out = (uint64_t)parsed;
+    return true;
+}
+
+static bool ReadEnvFlag(const char* name)
+{
+    const char* value = getenv(name);
+    return value && value[0] && strcmp(value, "0") != 0;
+}
 
 static void FillMessage(uint8_t* message, unsigned bytes, siamese::PCGRandom& prng)
 {
@@ -898,6 +948,33 @@ static const unsigned kBenchmarkNList[] = {
 
 int main()
 {
+    unsigned minN = kMinN;
+    unsigned maxN = kMaxN;
+    unsigned minBlockBytes = 1;
+    unsigned maxBlockBytes = kMaxBlockBytes;
+    unsigned benchTrials = 2000;
+    uint64_t seed = siamese::GetTimeUsec();
+    const bool skipBench = ReadEnvFlag("WIREHAIR_UNIT_SKIP_BENCH");
+
+    if (!ReadEnvUnsigned("WIREHAIR_UNIT_MIN_N", minN) ||
+        !ReadEnvUnsigned("WIREHAIR_UNIT_MAX_N", maxN) ||
+        !ReadEnvUnsigned("WIREHAIR_UNIT_BLOCK_BYTES_MIN", minBlockBytes) ||
+        !ReadEnvUnsigned("WIREHAIR_UNIT_BLOCK_BYTES_MAX", maxBlockBytes) ||
+        !ReadEnvUnsigned("WIREHAIR_UNIT_BENCH_TRIALS", benchTrials) ||
+        !ReadEnvU64("WIREHAIR_UNIT_SEED", seed))
+    {
+        return -5;
+    }
+
+    if (minN < kMinN || maxN > kMaxN || minN > maxN ||
+        minBlockBytes < 1u || maxBlockBytes > kMaxBlockBytes ||
+        minBlockBytes > maxBlockBytes ||
+        (!skipBench && benchTrials == 0u))
+    {
+        cout << "Invalid unit-test range" << endl;
+        return -6;
+    }
+
     const WirehairResult initResult = wirehair_init();
 
     if (initResult != Wirehair_Success)
@@ -914,37 +991,43 @@ int main()
         return -2;
     }
 
+    if (!skipBench)
+    {
 #ifdef BENCHMARK_SHORT_LIST
-    for (unsigned i = 0; i < sizeof(kBenchmarkNList) / sizeof(kBenchmarkNList[0]); ++i)
-    {
-        const unsigned N = kBenchmarkNList[i];
-#else
-    for (unsigned N = 2; N < 64000; N *= 2)
-    {
-#endif
-        const unsigned kPacketBytes = 1300;
-        const unsigned kBenchTrials = 2000;
-
-        if (!Benchmark(N, kPacketBytes, kBenchTrials))
+        for (unsigned i = 0; i < sizeof(kBenchmarkNList) / sizeof(kBenchmarkNList[0]); ++i)
         {
-            SIAMESE_DEBUG_BREAK();
-            cout << "!!! Benchmark failed" << endl;
-            return -3;
+            const unsigned N = kBenchmarkNList[i];
+#else
+        for (unsigned N = 2; N < 64000; N *= 2)
+        {
+#endif
+            const unsigned kPacketBytes = 1300;
+
+            if (!Benchmark(N, kPacketBytes, benchTrials))
+            {
+                SIAMESE_DEBUG_BREAK();
+                cout << "!!! Benchmark failed" << endl;
+                return -3;
+            }
         }
     }
 
     cout << "Wirehair Unit Test" << endl;
 
-    uint64_t seed = siamese::GetTimeUsec();
-
     cout << "Start seed = " << seed << endl;
+    cout << "N range = [" << minN << ", " << maxN << "]"
+         << ", BlockBytes range = [" << minBlockBytes << ", "
+         << maxBlockBytes << "]" << endl;
 
-    for (unsigned N = kMinN; N <= kMaxN; ++N)
+    for (unsigned N = minN; N <= maxN; ++N)
     {
 #ifdef ENABLE_OMP
 #pragma omp parallel for
 #endif
-        for (int blockBytes = 1; blockBytes <= kMaxBlockBytes; ++blockBytes) {
+        for (int blockBytes = (int)minBlockBytes;
+             blockBytes <= (int)maxBlockBytes;
+             ++blockBytes)
+        {
             TestN(seed, N, blockBytes);
         }
 
