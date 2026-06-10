@@ -260,32 +260,42 @@ void CheckPeelSolverSelectionSemantics()
             wirehair_v2::PeelStructure::LtM1C32,
             wirehair_v2::PeelSolver::RqccLowref);
     std::vector<std::vector<uint16_t> > lowref_rows;
-    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u});
-    lowref_rows.push_back(std::vector<uint16_t>{1u, 2u});
-    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u, 3u});
-    lowref_rows.push_back(std::vector<uint16_t>{0u, 1u, 4u});
+    lowref_rows.push_back(std::vector<uint16_t>{0u, 2u});
+    lowref_rows.push_back(std::vector<uint16_t>{1u, 3u});
+    lowref_rows.push_back(std::vector<uint16_t>{1u, 2u, 3u});
     const wirehair_v2::PeelEvaluation lowref_eval =
-        wirehair_v2::EvaluatePeelingRows(lowref, 5u, lowref_rows);
-    Check(lowref_eval.ResidualColumns == 1u,
-        "rqcc_lowref should solve the hand matrix with one inactivation");
+        wirehair_v2::EvaluatePeelingRows(lowref, 4u, lowref_rows);
+    Check(lowref_eval.ResidualColumns == 2u,
+        "rqcc_lowref should use the largest D2 component before low-ref scoring");
     Check(lowref_eval.ResidualRows == 1u,
-        "rqcc_lowref should pick the low-ref endpoint in the largest D2 component");
+        "rqcc_lowref hand matrix should leave one deferred row");
 
     wirehair_v2::PeelingCodec ks =
         wirehair_v2::MakePeelingCodec(
             wirehair_v2::PeelStructure::LtM1C32,
             wirehair_v2::PeelSolver::KsBmaxTop16);
     std::vector<std::vector<uint16_t> > ks_rows;
-    for (uint16_t column = 0u; column < 17u; ++column) {
-        ks_rows.push_back(std::vector<uint16_t>{column, (uint16_t)(column + 1u)});
-    }
-    ks_rows.push_back(std::vector<uint16_t>{0u, 1u, 18u});
+    ks_rows.push_back(std::vector<uint16_t>{0u, 2u});
+    ks_rows.push_back(std::vector<uint16_t>{1u, 3u});
+    ks_rows.push_back(std::vector<uint16_t>{1u, 2u, 3u});
     const wirehair_v2::PeelEvaluation ks_eval =
-        wirehair_v2::EvaluatePeelingRows(ks, 19u, ks_rows);
-    Check(ks_eval.ResidualColumns == 1u,
-        "ks_bmax_top16 should solve the hand matrix with one inactivation");
-    Check(ks_eval.ResidualRows == 3u,
-        "ks_bmax_top16 should boundary-score after top-default D2 filtering");
+        wirehair_v2::EvaluatePeelingRows(ks, 4u, ks_rows);
+    Check(ks_eval.ResidualColumns == 2u,
+        "ks_bmax_top16 should use the largest D2 component before boundary scoring");
+    Check(ks_eval.ResidualRows == 1u,
+        "ks_bmax_top16 hand matrix should leave one deferred row");
+
+    std::vector<std::vector<uint16_t> > deferred_rows;
+    deferred_rows.push_back(std::vector<uint16_t>{0u, 1u});
+    deferred_rows.push_back(std::vector<uint16_t>{1u, 2u});
+    deferred_rows.push_back(std::vector<uint16_t>{0u, 1u, 3u});
+    deferred_rows.push_back(std::vector<uint16_t>{0u, 1u, 4u});
+    const wirehair_v2::PeelEvaluation deferred_eval =
+        wirehair_v2::EvaluatePeelingRows(lowref, 5u, deferred_rows);
+    Check(deferred_eval.ResidualColumns == 1u,
+        "peel evaluator should solve the deferred-row hand matrix with one inactivation");
+    Check(deferred_eval.ResidualRows == 0u,
+        "peel evaluator should not count rows solved by the peel cascade as residual");
 }
 
 } // namespace

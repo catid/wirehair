@@ -207,6 +207,8 @@ struct RowState
 {
     std::vector<uint16_t> Columns;
     uint16_t Live;
+    bool Solved;
+    bool Deferred;
 };
 
 struct ColumnState
@@ -220,6 +222,7 @@ struct ColumnCandidate
 {
     uint16_t Column;
     uint32_t Refs;
+    uint32_t LiveRefs;
     uint32_t Degree2Refs;
     uint32_t Weight2Refs;
     uint32_t Lookahead;
@@ -236,8 +239,7 @@ public:
         : Codec(codec),
           BlockCount(block_count),
           Rows(rows.size()),
-          Columns(block_count),
-          DeferredRows(rows.size(), 0)
+          Columns(block_count)
     {
         for (uint32_t c = 0; c < block_count; ++c) {
             Columns[c].Weight2Refs = 0u;
@@ -247,10 +249,15 @@ public:
         {
             Rows[r].Columns = rows[r];
             Rows[r].Live = (uint16_t)rows[r].size();
+            Rows[r].Solved = false;
+            Rows[r].Deferred = false;
             for (uint16_t c : rows[r]) {
                 Columns[c].Rows.push_back((uint16_t)r);
             }
-            if (Rows[r].Live == 1u) {
+            if (Rows[r].Live == 0u) {
+                MarkDeferredRow((uint16_t)r);
+            }
+            else if (Rows[r].Live == 1u) {
                 Queue.push((uint16_t)r);
             }
             else if (Rows[r].Live == 2u) {
@@ -273,7 +280,6 @@ public:
                 break;
             }
             ++ResidualColumns;
-            MarkResidualRows(column);
             RemoveColumn(column);
         }
 
@@ -306,12 +312,18 @@ private:
         {
             const uint16_t row_i = Queue.front();
             Queue.pop();
-            if (row_i >= Rows.size() || Rows[row_i].Live != 1u) {
+            if (row_i >= Rows.size() || Rows[row_i].Live != 1u ||
+                Rows[row_i].Solved || Rows[row_i].Deferred) {
                 continue;
             }
             const uint16_t column = OnlyLiveColumn(row_i);
-            if (column < BlockCount && Columns[column].Todo) {
+            if (column < BlockCount && Columns[column].Todo)
+            {
+                Rows[row_i].Solved = true;
                 RemoveColumn(column);
+            }
+            else {
+                MarkDeferredRow(row_i);
             }
         }
     }
@@ -334,24 +346,20 @@ private:
         for (uint16_t row_i : Columns[column].Rows)
         {
             RowState& row = Rows[row_i];
-            if (row.Live == 0u) {
+            if (row.Live == 0u || row.Deferred) {
                 continue;
             }
             --row.Live;
-            if (row.Live == 1u) {
+            if (row.Live == 0u) {
+                MarkDeferredRow(row_i);
+            }
+            else if (row.Live == 1u) {
                 Queue.push(row_i);
             }
             else if (row.Live == 2u) {
                 IncrementWeight2Refs(row);
             }
         }
-    }
-
-    uint32_t CountLiveRowsForColumn(uint16_t column) const
-    {
-        // For a todo column, every incident row still has at least this
-        // column live, so the live-row count is just the stored incidence.
-        return (uint32_t)Columns[column].Rows.size();
     }
 
     unsigned ScanTodoColumns(
@@ -384,15 +392,14 @@ private:
         ++Columns[live[1]].Weight2Refs;
     }
 
-    void MarkResidualRows(uint16_t column)
+    void MarkDeferredRow(uint16_t row_i)
     {
-        for (uint16_t row_i : Columns[column].Rows)
+        RowState& row = Rows[row_i];
+        if (!row.Solved && !row.Deferred)
         {
-            if (Rows[row_i].Live > 0u && !DeferredRows[row_i])
-            {
-                DeferredRows[row_i] = 1;
-                ++ResidualRows;
-            }
+            row.Live = 0u;
+            row.Deferred = true;
+            ++ResidualRows;
         }
     }
 
@@ -435,9 +442,9 @@ private:
         const ColumnCandidate& b) const
     {
         const uint32_t a_boundary =
-            a.Refs > a.Degree2Refs ? a.Refs - a.Degree2Refs : 0u;
+            a.LiveRefs > a.Degree2Refs ? a.LiveRefs - a.Degree2Refs : 0u;
         const uint32_t b_boundary =
-            b.Refs > b.Degree2Refs ? b.Refs - b.Degree2Refs : 0u;
+            b.LiveRefs > b.Degree2Refs ? b.LiveRefs - b.Degree2Refs : 0u;
         if (a_boundary != b_boundary) {
             return a_boundary > b_boundary;
         }
@@ -457,7 +464,8 @@ private:
     {
         ColumnCandidate candidate;
         candidate.Column = column;
-        candidate.Refs = CountLiveRowsForColumn(column);
+        candidate.Refs = (uint32_t)Columns[column].Rows.size();
+        candidate.LiveRefs = 0u;
         candidate.Degree2Refs = 0u;
         candidate.Weight2Refs = Columns[column].Weight2Refs;
         candidate.Lookahead = 0u;
@@ -466,9 +474,10 @@ private:
         for (uint16_t row_i : Columns[column].Rows)
         {
             const RowState& row = Rows[row_i];
-            if (row.Live == 0u) {
+            if (row.Live == 0u || row.Deferred) {
                 continue;
             }
+            ++candidate.LiveRefs;
             if (row.Live > 1u) {
                 candidate.Fill += row.Live - 1u;
             }
@@ -522,7 +531,7 @@ private:
         for (uint32_t r = 0; r < Rows.size(); ++r)
         {
             const RowState& row = Rows[r];
-            if (row.Live <= 1u || row.Live >= best_live) {
+            if (row.Live <= 1u || row.Deferred || row.Live >= best_live) {
                 continue;
             }
             best_row = (uint16_t)r;
@@ -616,7 +625,7 @@ private:
 
         for (const RowState& row : Rows)
         {
-            if (row.Live != 2u) {
+            if (row.Live != 2u || row.Deferred) {
                 continue;
             }
             uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
@@ -647,7 +656,7 @@ private:
         std::vector<uint8_t> seen(BlockCount, 0u);
         for (const RowState& row : Rows)
         {
-            if (row.Live != 2u) {
+            if (row.Live != 2u || row.Deferred) {
                 continue;
             }
             uint16_t live[2] = {UINT16_MAX, UINT16_MAX};
@@ -726,7 +735,6 @@ private:
     uint32_t BlockCount;
     std::vector<RowState> Rows;
     std::vector<ColumnState> Columns;
-    std::vector<uint8_t> DeferredRows;
     std::queue<uint16_t> Queue;
     uint32_t TodoColumns = 0;
     uint32_t ResidualRows = 0;
