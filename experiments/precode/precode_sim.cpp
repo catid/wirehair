@@ -118,9 +118,12 @@ static uint64_t HashString64(const std::string& s)
 
 enum class RowDist
 {
-    Wirehair,   // production GeneratePeelRowWeight
-    LtM1C64,    // soliton-ish truncated LT, min degree 1, cap 64
-    LtM2C1024   // min degree 2, cap 1024 (residual-quality frontier family)
+    Wirehair,     // production GeneratePeelRowWeight
+    LtM1C64,      // soliton-ish truncated LT, min degree 1, cap 64
+    LtM1C16,      // same LT family, min degree 1, cap 16
+    LtM2C1024,    // min degree 2, cap 1024 (residual-quality frontier family)
+    RsC001D50C128 // robust soliton c=0.01 delta=0.50, min degree 1, cap 128
+                  // (peel_sweep robust_soliton_weight law, renormalized)
 };
 
 struct DegreeSampler
@@ -139,9 +142,17 @@ struct DegreeSampler
             return;
         }
         unsigned min_d = 1, cap = 64;
+        bool robust = false;
         if (dist == RowDist::LtM2C1024) {
             min_d = 2;
             cap = 1024;
+        }
+        else if (dist == RowDist::LtM1C16) {
+            cap = 16;
+        }
+        else if (dist == RowDist::RsC001D50C128) {
+            cap = 128;
+            robust = true;
         }
         if (min_d > k) {
             min_d = k;
@@ -155,6 +166,31 @@ struct DegreeSampler
         }
         MinDegree = min_d;
         MaxDegree = max_d;
+        // Robust soliton tau-spike parameters; this mirrors peel_sweep's
+        // robust_soliton_weight EXACTLY: R = max(1, c*ln(N/delta)*sqrt(N)),
+        // spike = clamp(floor(N/R), 1, N), tau(d) = R/(d*N) for d < spike,
+        // R*ln(R/delta)/N at d == spike, 0 above; the cap truncates the law
+        // (the spike itself is truncated away when spike > cap) and the
+        // cumulative sum renormalizes.
+        const double rs_c = 0.01;
+        const double rs_delta = 0.50;
+        double rs_R = 0.0;
+        unsigned rs_spike = 0;
+        if (robust)
+        {
+            const double n = (double)k;
+            rs_R = rs_c * std::log(n / rs_delta) * std::sqrt(n);
+            if (rs_R < 1.0) {
+                rs_R = 1.0;
+            }
+            rs_spike = (unsigned)std::floor(n / rs_R);
+            if (rs_spike < 1u) {
+                rs_spike = 1u;
+            }
+            if (rs_spike > k) {
+                rs_spike = k;
+            }
+        }
         Cumulative.reserve(max_d - min_d + 1u);
         for (unsigned d = min_d; d <= max_d; ++d)
         {
@@ -164,6 +200,20 @@ struct DegreeSampler
             }
             else {
                 w = 1.0 / ((double)d * (double)(d - 1u));
+            }
+            if (robust)
+            {
+                double tau = 0.0;
+                if (d < rs_spike) {
+                    tau = rs_R / ((double)d * (double)k);
+                }
+                else if (d == rs_spike) {
+                    tau = rs_R * std::log(rs_R / rs_delta) / (double)k;
+                }
+                if (tau < 0.0) {
+                    tau = 0.0;
+                }
+                w += tau;
             }
             Total += w;
             Cumulative.push_back(Total);
@@ -210,9 +260,14 @@ enum class SchemeKind
                  // staircase double-diagonal among parity columns
     LdpcTri,     // RaptorQ-flavored: like stair but each source connects to 3
                  // parities chosen as {a, a+b, a+2b} mod D (circulant-ish)
-    LdpcDense    // S staircase parity columns + D2 dense p=0.5 rows over all
+    LdpcDense,   // S staircase parity columns + D2 dense p=0.5 rows over all
                  // K + S + D2 binary columns: staircase peels cheaply, dense
                  // rows pin the residual tail
+    LdpcDenseShuffle2 // like LdpcDense but the D2 rows are generated
+                 // Shuffle-2-style from a seeded column deck (production
+                 // MultiplyDenseRows mechanics; see README for the exact
+                 // rule): first row = half the deck, each next row = previous
+                 // row with exactly 2 deck-driven bit flips
 };
 
 struct Scheme
@@ -223,6 +278,8 @@ struct Scheme
     unsigned H;       // heavy GF(256) rows/columns (MDS patch model)
     unsigned Weight;  // DenseSparse row weight
     unsigned Dense2;  // LdpcDense extra dense row/column count
+    unsigned N1;      // staircase parities each SOURCE column connects to
+                      // (LdpcStair/LdpcDense family; default 3 = historical)
 };
 
 //------------------------------------------------------------------------------
@@ -233,6 +290,9 @@ struct TrialResult
     bool Ok;                 // generation/solve consistency
     bool SuccessNoHeavy;     // def == 0
     bool Success;            // def <= H
+    bool Runaway;            // --max-inact guard fired: peeling abandoned;
+                             // counts as a decode failure, excluded from
+                             // inact/cost means
     unsigned Def;            // residual column deficiency before heavy patch
     unsigned Inactivated;    // |I|
     unsigned ResidualRank;
@@ -310,6 +370,26 @@ static void AddDistinctColumns(
         if (!duplicate) {
             row.push_back(column);
         }
+    }
+}
+
+// Sattolo-style inside-out shuffle mirroring production ShuffleDeck16
+// (WirehairTools.cpp:398): deck[0] = 0; for ii in [1, n): jj = rand % ii;
+// deck[ii] = deck[jj]; deck[jj] = ii.  Production consumes its PCGRandom in
+// 8-/16-bit chunks; the simulator draws jj as an unbiased full-width uniform
+// in [0, ii) from the same Rng stream instead (documented deviation -- the
+// codec implementation uses ShuffleDeck16 + PCGRandom directly).
+static void Shuffle2Deck(std::vector<uint32_t>& deck, Rng& rng)
+{
+    if (deck.empty()) {
+        return;
+    }
+    deck[0] = 0;
+    for (uint32_t ii = 1; ii < (uint32_t)deck.size(); ++ii)
+    {
+        const uint32_t jj = rng.Below(ii);
+        deck[ii] = deck[jj];
+        deck[jj] = ii;
     }
 }
 
@@ -402,29 +482,49 @@ static GeneratedSystem GenerateSystem(
     case SchemeKind::LdpcStair:
     case SchemeKind::LdpcTri:
     case SchemeKind::LdpcDense:
+    case SchemeKind::LdpcDenseShuffle2:
     {
         const unsigned S = scheme.D;
+        unsigned n1 = scheme.N1;
+        if (n1 < 1u) {
+            n1 = 1u;
+        }
+        if (n1 > 8u) {
+            n1 = 8u;
+        }
         std::vector<std::vector<uint32_t> > checks(S);
+        uint32_t picks[8];
         for (unsigned c = 0; c < K; ++c)
         {
             if (scheme.Kind != SchemeKind::LdpcTri)
             {
-                // 3 distinct random parities per source column
-                uint32_t p1 = rng.Below(S);
-                uint32_t p2 = rng.Below(S);
-                while (S > 1u && p2 == p1) {
-                    p2 = rng.Below(S);
-                }
-                uint32_t p3 = rng.Below(S);
-                while (S > 2u && (p3 == p1 || p3 == p2)) {
-                    p3 = rng.Below(S);
-                }
-                checks[p1].push_back(c);
-                if (S > 1u) {
-                    checks[p2].push_back(c);
-                }
-                if (S > 2u) {
-                    checks[p3].push_back(c);
+                // n1 distinct random parities per source column (as many
+                // distinct as S allows).  For n1 == 3 this draws EXACTLY the
+                // same RNG stream as the historical hardcoded 3-hit loop, so
+                // pre-n1 tokens keep generating identical systems.
+                for (unsigned hit = 0; hit < n1; ++hit)
+                {
+                    uint32_t p = rng.Below(S);
+                    if (S > hit)
+                    {
+                        for (bool collide = true; collide;)
+                        {
+                            collide = false;
+                            for (unsigned j = 0; j < hit; ++j)
+                            {
+                                if (picks[j] == p)
+                                {
+                                    collide = true;
+                                    p = rng.Below(S);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    picks[hit] = p;
+                    if (hit == 0u || S > hit) {
+                        checks[p].push_back(c);
+                    }
                 }
             }
             else
@@ -506,6 +606,65 @@ static GeneratedSystem GenerateSystem(
             // Shuffle-2-style incremental value generation estimate
             sys.PrecodeGenXors += (uint64_t)(span * 5u) / 2u;
         }
+        // LdpcDenseShuffle2: D2 rows generated Shuffle-2-style from a single
+        // column deck over all span = K + S + D2 binary columns, mirroring
+        // production MultiplyDenseRows (WirehairCodec.cpp:786) as closely as
+        // the bitset representation allows.  Exact rule (see README, must
+        // stay codec-portable):
+        //   1. deck = Shuffle2Deck over span columns (constraint-row Rng);
+        //      set_count = ceil(span/2); first row = deck[0 .. set_count).
+        //   2. Reshuffle deck; set half = deck[0 .. set_count), clear half =
+        //      deck[set_count .. span).  Next floor(D2/2) rows: row[i+1] =
+        //      row[i] XOR {set_half[ii], clear_half[ii]}, ii = 0,1,...
+        //   3. Reshuffle deck again; remaining floor(D2/2) - 1 + (D2 & 1)
+        //      rows by the same flip rule, ii restarting at 0.
+        // Every row after the first differs from its predecessor in exactly
+        // 2 columns (deck entries at distinct positions are distinct).  No
+        // destination-row permutation deck: row order does not change the
+        // linear system (production MAY add it for stream parity).
+        else if (scheme.Kind == SchemeKind::LdpcDenseShuffle2 &&
+                 scheme.Dense2 > 0u)
+        {
+            const unsigned span = K + S + scheme.Dense2;
+            const unsigned set_count = (span + 1u) >> 1;
+            std::vector<uint32_t> deck(span);
+            Shuffle2Deck(deck, rng);
+            std::vector<uint8_t> bitmap(span, 0);
+            for (unsigned i = 0; i < set_count; ++i) {
+                bitmap[deck[i]] = 1;
+            }
+            auto emit_row = [&]() {
+                SparseRow row;
+                row.IsConstraint = true;
+                row.Columns.reserve(set_count + 8u);
+                for (unsigned col = 0; col < span; ++col)
+                {
+                    if (bitmap[col]) {
+                        row.Columns.push_back(col);
+                    }
+                }
+                sys.Rows.push_back(std::move(row));
+            };
+            emit_row();
+            // Incremental value generation: first-row accumulation, then two
+            // block XORs per subsequent row
+            sys.PrecodeGenXors += set_count;
+            const unsigned halves[2] = {
+                scheme.Dense2 >> 1,
+                (scheme.Dense2 >> 1) + (scheme.Dense2 & 1u) - 1u
+            };
+            for (unsigned half = 0; half < 2u; ++half)
+            {
+                Shuffle2Deck(deck, rng); // Shuffle-2 reshuffle
+                for (unsigned ii = 0; ii < halves[half]; ++ii)
+                {
+                    bitmap[deck[ii]] ^= 1;             // set-half flip
+                    bitmap[deck[set_count + ii]] ^= 1; // clear-half flip
+                    emit_row();
+                    sys.PrecodeGenXors += 2u;
+                }
+            }
+        }
         break;
     }
     }
@@ -580,6 +739,7 @@ struct PeelOutcome
     std::vector<uint32_t> PeelOrder;        // columns in chronological solve order
     std::vector<uint32_t> InactOrder;       // columns in inactivation order
     uint64_t SparseSolveXors;
+    bool Aborted;                           // --max-inact guard fired
 };
 
 static const uint8_t kStatePeeled = 0;
@@ -608,12 +768,15 @@ public:
         }
     }
 
-    PeelOutcome Run()
+    // max_inact == 0 means unlimited; otherwise the solve aborts (Aborted set)
+    // as soon as the inactivated column count EXCEEDS max_inact.
+    PeelOutcome Run(unsigned max_inact = 0)
     {
         PeelOutcome out;
         out.ColumnState.assign(ColumnCount, kStatePeeled);
         out.SolveRow.assign(ColumnCount, UINT32_MAX);
         out.SparseSolveXors = 0;
+        out.Aborted = false;
 
         unsigned todo = ColumnCount;
         size_t queue_head = 0;
@@ -653,6 +816,11 @@ public:
             const uint32_t column = SelectInactivationColumn();
             out.ColumnState[column] = kStateInactivated;
             out.InactOrder.push_back(column);
+            if (max_inact != 0u && out.InactOrder.size() > (size_t)max_inact)
+            {
+                out.Aborted = true;
+                return out;
+            }
             ResolveColumn(column);
             --todo;
         }
@@ -1089,7 +1257,8 @@ static TrialResult RunTrial(
     uint64_t seed,
     const uint64_t* paired_recv_seed = nullptr,
     bool ge_replay = false,
-    bool ge_replay_reverse = false)
+    bool ge_replay_reverse = false,
+    unsigned max_inact = 0)
 {
     TrialResult t;
     std::memset(&t, 0, sizeof(t));
@@ -1101,7 +1270,19 @@ static TrialResult RunTrial(
     const GeneratedSystem sys = GenerateSystem(
         scheme, K, K + overhead, dist, mix, seed, paired_recv_seed);
 
-    const PeelOutcome peel = PeelSolver(sys.L, sys.Rows).Run();
+    const PeelOutcome peel = PeelSolver(sys.L, sys.Rows).Run(max_inact);
+    if (peel.Aborted)
+    {
+        // --max-inact runaway: peeling abandoned before completion, so no
+        // residual rank (or cost ledger) exists.  Recorded as a failed trial;
+        // the aggregator excludes it from inact/cost means.
+        t.Ok = true;
+        t.Runaway = true;
+        t.Success = false;
+        t.SuccessNoHeavy = false;
+        t.Inactivated = (unsigned)peel.InactOrder.size();
+        return t;
+    }
     std::vector<std::vector<uint64_t> > residual_bits;
     const ResidualAnalysis res = AnalyzeResidual(
         sys, peel, ge_replay ? &residual_bits : nullptr);
@@ -1176,14 +1357,20 @@ static bool ParseUnsigned(const std::string& s, unsigned& out)
 //   ldpc_s<S>
 //   ldpc2x           (S = 2 * GetDenseCount(K))
 //   ldpctri / ldpctri_s<S>
+//   ldpcdense[_n1<X>]_s<S>_d<D2>[_s2]
+//                    (X in {2,3,4}: staircase parities per source column,
+//                     absent = 3 = historical behavior; _s2 = Shuffle-2
+//                     structured D2 rows instead of iid p=0.5)
 //   heavyonly        (D = 0, H = 16)
-// Optional suffix on any token: _h<H> to override heavy row count.
+// Optional suffix on any token: _h<H> to override heavy row count
+// (after _s2 when both are present: ..._s2_h<H>).
 static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
 {
     std::string body = token;
     out.H = 6;
     out.Weight = 0;
     out.Dense2 = 0;
+    out.N1 = 3;
 
     const size_t hpos = body.rfind("_h");
     if (hpos != std::string::npos)
@@ -1194,6 +1381,17 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
             out.H = h;
             body = body.substr(0, hpos);
         }
+    }
+
+    // _s2 suffix: Shuffle-2 structured D2 rows; only defined on the
+    // ldpcdense family (the prefix check keeps ldpc_s2 meaning S = 2)
+    bool shuffle2 = false;
+    if (body.rfind("ldpcdense", 0) == 0 &&
+        body.size() > 3u &&
+        body.compare(body.size() - 3u, 3u, "_s2") == 0)
+    {
+        shuffle2 = true;
+        body = body.substr(0, body.size() - 3u);
     }
 
     const unsigned dense_count = GetDenseCount((uint32_t)K);
@@ -1257,9 +1455,40 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
             return false;
         }
     }
+    else if (body.rfind("ldpcdense_n1", 0) == 0)
+    {
+        // ldpcdense_n1<X>_s<S>_d<D2>
+        std::string rest = body.substr(12);
+        const size_t spos = rest.find("_s");
+        if (spos == std::string::npos) {
+            return false;
+        }
+        unsigned n1 = 0;
+        if (!ParseUnsigned(rest.substr(0, spos), n1)) {
+            return false;
+        }
+        if (n1 < 2u || n1 > 4u) {
+            return false; // E5 sweeps X in {2,3,4} only
+        }
+        out.N1 = n1;
+        rest = rest.substr(spos + 2u);
+        const size_t dpos = rest.find("_d");
+        if (dpos == std::string::npos) {
+            return false;
+        }
+        if (!ParseUnsigned(rest.substr(0, dpos), out.D)) {
+            return false;
+        }
+        if (!ParseUnsigned(rest.substr(dpos + 2u), out.Dense2)) {
+            return false;
+        }
+        out.Kind = shuffle2 ? SchemeKind::LdpcDenseShuffle2
+                            : SchemeKind::LdpcDense;
+    }
     else if (body.rfind("ldpcdense_s", 0) == 0)
     {
-        out.Kind = SchemeKind::LdpcDense;
+        out.Kind = shuffle2 ? SchemeKind::LdpcDenseShuffle2
+                            : SchemeKind::LdpcDense;
         std::string rest = body.substr(11);
         const size_t dpos = rest.find("_d");
         if (dpos == std::string::npos) {
@@ -1302,7 +1531,8 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
     if (out.D == 0u &&
         (out.Kind == SchemeKind::LdpcStair ||
          out.Kind == SchemeKind::LdpcTri ||
-         out.Kind == SchemeKind::LdpcDense)) {
+         out.Kind == SchemeKind::LdpcDense ||
+         out.Kind == SchemeKind::LdpcDenseShuffle2)) {
         return false;
     }
 
@@ -1318,6 +1548,7 @@ struct Aggregate
     uint64_t Trials = 0;
     uint64_t Fails = 0;
     uint64_t FailsNoHeavy = 0;
+    uint64_t Runaways = 0;  // --max-inact aborts: in fail_rate, out of means
     double DefSum = 0, DefMax = 0;
     double InactSum = 0, InactSqSum = 0, InactMax = 0;
     double RankSum = 0;
@@ -1346,6 +1577,13 @@ struct Aggregate
         }
         if (!t.SuccessNoHeavy) {
             ++FailsNoHeavy;
+        }
+        if (t.Runaway)
+        {
+            // Counts as a decode failure (above), but peeling was abandoned:
+            // no def/inact/cost statistics exist for this trial.
+            ++Runaways;
+            return;
         }
         DefSum += t.Def;
         if (t.Def > DefMax) {
@@ -1398,16 +1636,63 @@ static unsigned PercentileSorted(const std::vector<uint32_t>& sorted, double p)
 //------------------------------------------------------------------------------
 // Self-test
 
+// Self-test only: an INDEPENDENT transcription of the analytic degree laws
+// (peel_sweep's lt_weight + robust_soliton_weight) so the chi-square clause
+// can catch a mis-ported formula in DegreeSampler's cumulative table.
+static double SelfTestDegreeWeight(RowDist dist, unsigned d, unsigned K)
+{
+    double w;
+    if (d <= 1u) {
+        w = 1.0 / (double)K;
+    }
+    else {
+        w = 1.0 / ((double)d * (double)(d - 1u));
+    }
+    if (dist == RowDist::RsC001D50C128)
+    {
+        const double c = 0.01;
+        const double delta = 0.50;
+        const double n = (double)K;
+        double R = c * std::log(n / delta) * std::sqrt(n);
+        if (R < 1.0) {
+            R = 1.0;
+        }
+        unsigned spike = (unsigned)std::floor(n / R);
+        if (spike < 1u) {
+            spike = 1u;
+        }
+        if (spike > K) {
+            spike = K;
+        }
+        double tau = 0.0;
+        if (d < spike) {
+            tau = R / ((double)d * n);
+        }
+        else if (d == spike) {
+            tau = R * std::log(R / delta) / n;
+        }
+        if (tau < 0.0) {
+            tau = 0.0;
+        }
+        w += tau;
+    }
+    return w;
+}
+
 static bool SelfTest()
 {
     // Rank invariance: peeled + residual rank must equal brute-force rank of
     // the whole binary system, for every scheme and instance.
     const char* tokens[] = {
         "none", "dense_d8", "densesparse_w6_d8", "ldpc_s5", "ldpctri_s5",
-        "heavyonly_h4", "ldpcdense_s5_d4", "ldpcdense_s6_d3_h8"
+        "heavyonly_h4", "ldpcdense_s5_d4", "ldpcdense_s6_d3_h8",
+        "ldpcdense_s5_d4_s2", "ldpcdense_n12_s5_d4", "ldpcdense_n14_s5_d4",
+        "ldpcdense_n14_s5_d4_s2", "ldpcdense_n12_s6_d3_s2_h8"
     };
     const char* invalid_tokens[] = {
-        "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4"
+        "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4", "ldpcdense_s0_d4_s2",
+        "ldpcdense_n11_s5_d4", "ldpcdense_n15_s5_d4", "ldpcdense_n1_s5_d4",
+        "ldpcdense_n13_d4"
     };
     for (const char* token : invalid_tokens)
     {
@@ -1527,6 +1812,26 @@ static bool SelfTest()
             fprintf(stderr, "self-test: heavy cost identity broke\n");
             return false;
         }
+
+        // Same determinism guarantee for the new kinds (Shuffle-2 D2 rows,
+        // n1 variant, robust-soliton rowdist)
+        Scheme s2scheme;
+        if (!MakeScheme("ldpcdense_n12_s7_d4_s2", 64, s2scheme)) {
+            fprintf(stderr, "self-test: s2 determinism scheme broke\n");
+            return false;
+        }
+        const TrialResult c = RunTrial(
+            s2scheme, 64, 2, RowDist::RsC001D50C128, 3, 777);
+        const TrialResult d = RunTrial(
+            s2scheme, 64, 2, RowDist::RsC001D50C128, 3, 777);
+        if (c.Def != d.Def || c.Inactivated != d.Inactivated ||
+            c.ResidualRank != d.ResidualRank ||
+            c.SparseSolveXors != d.SparseSolveXors ||
+            c.PrecodeGenXors != d.PrecodeGenXors)
+        {
+            fprintf(stderr, "self-test: s2/rowdist determinism broke\n");
+            return false;
+        }
     }
 
     // --paired: different schemes at equal sizes must generate identical
@@ -1624,6 +1929,276 @@ static bool SelfTest()
         }
     }
 
+    // _s2 schemes: the D2 dense rows must follow the documented Shuffle-2
+    // rule exactly -- first row has ceil(span/2) columns; every subsequent
+    // row differs from its predecessor in EXACTLY 2 columns.
+    {
+        auto symdiff = [](const std::vector<uint32_t>& a,
+                          const std::vector<uint32_t>& b) -> size_t {
+            size_t i = 0, j = 0, diff = 0;
+            while (i < a.size() && j < b.size())
+            {
+                if (a[i] == b[j]) {
+                    ++i;
+                    ++j;
+                }
+                else if (a[i] < b[j]) {
+                    ++diff;
+                    ++i;
+                }
+                else {
+                    ++diff;
+                    ++j;
+                }
+            }
+            return diff + (a.size() - i) + (b.size() - j);
+        };
+        const char* s2_tokens[] = {
+            "ldpcdense_s5_d4_s2", "ldpcdense_n12_s6_d5_s2",
+            "ldpcdense_s7_d1_s2", "ldpcdense_s6_d2_s2",
+            "ldpcdense_n14_s8_d12_s2"
+        };
+        for (const char* token : s2_tokens)
+        {
+            for (unsigned k2 = 16; k2 <= 48; k2 += 16)
+            {
+                Scheme scheme;
+                if (!MakeScheme(token, k2, scheme) ||
+                    scheme.Kind != SchemeKind::LdpcDenseShuffle2)
+                {
+                    fprintf(stderr, "self-test: bad _s2 scheme %s\n", token);
+                    return false;
+                }
+                const uint64_t seed =
+                    Mix64(HashString64(token) ^ (uint64_t)(k2 * 7919u));
+                const GeneratedSystem sys = GenerateSystem(
+                    scheme, k2, k2 + 2u, RowDist::LtM1C64, 3, seed);
+                const unsigned S = scheme.D;
+                const unsigned D2 = scheme.Dense2;
+                const unsigned span = k2 + S + D2;
+                for (unsigned r = 0; r < S + D2; ++r)
+                {
+                    if (!sys.Rows[r].IsConstraint)
+                    {
+                        fprintf(stderr,
+                            "self-test: %s constraint layout broke\n", token);
+                        return false;
+                    }
+                }
+                if ((unsigned)sys.Rows[S].Columns.size() != (span + 1u) >> 1)
+                {
+                    fprintf(stderr,
+                        "self-test: %s K=%u first _s2 row weight %zu != "
+                        "ceil(span/2) = %u\n",
+                        token, k2, sys.Rows[S].Columns.size(),
+                        (span + 1u) >> 1);
+                    return false;
+                }
+                for (unsigned r = 1; r < D2; ++r)
+                {
+                    const size_t diff = symdiff(
+                        sys.Rows[S + r - 1u].Columns,
+                        sys.Rows[S + r].Columns);
+                    if (diff != 2u)
+                    {
+                        fprintf(stderr,
+                            "self-test: %s K=%u _s2 row %u differs from "
+                            "previous in %zu columns (want 2)\n",
+                            token, k2, r, diff);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    // n1 variants: each SOURCE column must hit exactly X staircase parities
+    // (tokens use S > X so distinct parities are always achievable); tokens
+    // without _n1 must keep the historical X = 3.
+    {
+        struct N1Case
+        {
+            const char* Token;
+            unsigned X;
+        };
+        const N1Case n1_cases[] = {
+            { "ldpcdense_n12_s8_d3", 2 },
+            { "ldpcdense_n13_s8_d3", 3 },
+            { "ldpcdense_n14_s8_d3", 4 },
+            { "ldpcdense_s8_d3", 3 },        // n1 absent = 3 (compatibility)
+            { "ldpcdense_n12_s8_d3_s2", 2 }, // _s2 must not disturb the hits
+            { "ldpc_s8", 3 },
+        };
+        const unsigned k3 = 24;
+        for (const N1Case& nc : n1_cases)
+        {
+            Scheme scheme;
+            if (!MakeScheme(nc.Token, k3, scheme))
+            {
+                fprintf(stderr, "self-test: bad n1 scheme %s\n", nc.Token);
+                return false;
+            }
+            const GeneratedSystem sys = GenerateSystem(
+                scheme, k3, k3, RowDist::LtM1C64, 3,
+                Mix64(HashString64(nc.Token) ^ UINT64_C(0x71a7)));
+            std::vector<unsigned> hits(k3, 0);
+            for (unsigned r = 0; r < scheme.D; ++r)
+            {
+                for (uint32_t col : sys.Rows[r].Columns)
+                {
+                    if (col < k3) {
+                        ++hits[col];
+                    }
+                }
+            }
+            for (unsigned col = 0; col < k3; ++col)
+            {
+                if (hits[col] != nc.X)
+                {
+                    fprintf(stderr,
+                        "self-test: %s source column %u has %u parity hits "
+                        "(want %u)\n",
+                        nc.Token, col, hits[col], nc.X);
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Degree-law chi-square: for every non-Wirehair rowdist, ~200k sampled
+    // degrees at K=3200 must match the analytic law transcribed independently
+    // in SelfTestDegreeWeight (guards against a silently mis-ported weight
+    // formula).  Bins are pooled to expected count >= 10; the bound
+    // df + 8*sqrt(2*df) + 30 is loose against sampling noise (typical chi2
+    // is df +- 2*sqrt(2*df)) yet far below the chi2 a wrong spike/tau/cap
+    // produces (orders of magnitude larger).
+    {
+        struct DistCase
+        {
+            RowDist Dist;
+            const char* Name;
+            unsigned MinD;
+            unsigned Cap;
+        };
+        const DistCase dist_cases[] = {
+            { RowDist::LtM1C64, "lt_m1_c64", 1, 64 },
+            { RowDist::LtM1C16, "lt_m1_c16", 1, 16 },
+            { RowDist::LtM2C1024, "lt_m2_c1024", 2, 1024 },
+            { RowDist::RsC001D50C128, "rs_c001_d50_c128", 1, 128 },
+        };
+        const unsigned chi_k = 3200;
+        const unsigned samples = 200000;
+        for (const DistCase& dc : dist_cases)
+        {
+            const DegreeSampler sampler(dc.Dist, chi_k);
+            Rng rng(Mix64(HashString64(dc.Name) ^ UINT64_C(0xc41a55a)));
+            std::vector<uint64_t> hist(dc.Cap + 1u, 0);
+            for (unsigned s = 0; s < samples; ++s)
+            {
+                const unsigned deg = sampler.Sample(rng);
+                if (deg < dc.MinD || deg > dc.Cap)
+                {
+                    fprintf(stderr,
+                        "self-test: %s degree %u outside [%u, %u]\n",
+                        dc.Name, deg, dc.MinD, dc.Cap);
+                    return false;
+                }
+                ++hist[deg];
+            }
+            double total = 0.0;
+            std::vector<double> weight(dc.Cap + 1u, 0.0);
+            for (unsigned deg = dc.MinD; deg <= dc.Cap; ++deg)
+            {
+                weight[deg] = SelfTestDegreeWeight(dc.Dist, deg, chi_k);
+                total += weight[deg];
+            }
+            // Pool ascending-degree bins to expected >= 10; the leftover
+            // tail merges into the last pooled bin
+            std::vector<double> exp_bins, obs_bins;
+            double e = 0.0, o = 0.0;
+            for (unsigned deg = dc.MinD; deg <= dc.Cap; ++deg)
+            {
+                e += (double)samples * weight[deg] / total;
+                o += (double)hist[deg];
+                if (e >= 10.0)
+                {
+                    exp_bins.push_back(e);
+                    obs_bins.push_back(o);
+                    e = 0.0;
+                    o = 0.0;
+                }
+            }
+            if ((e > 0.0 || o > 0.0) && !exp_bins.empty())
+            {
+                exp_bins.back() += e;
+                obs_bins.back() += o;
+            }
+            if (exp_bins.size() < 2u)
+            {
+                fprintf(stderr,
+                    "self-test: %s chi-square degenerate\n", dc.Name);
+                return false;
+            }
+            double chi2 = 0.0;
+            for (size_t b = 0; b < exp_bins.size(); ++b)
+            {
+                const double diff = obs_bins[b] - exp_bins[b];
+                chi2 += diff * diff / exp_bins[b];
+            }
+            const double df = (double)(exp_bins.size() - 1u);
+            const double bound = df + 8.0 * std::sqrt(2.0 * df) + 30.0;
+            if (chi2 > bound)
+            {
+                fprintf(stderr,
+                    "self-test: %s degree chi-square %.1f > bound %.1f "
+                    "(df=%.0f): weight-law port mismatch?\n",
+                    dc.Name, chi2, bound, df);
+                return false;
+            }
+        }
+    }
+
+    // --max-inact runaway guard: capping below the trial's natural
+    // inactivation count must mark the trial as a runaway failure; capping
+    // at exactly the natural count must reproduce the unlimited result.
+    {
+        Scheme scheme;
+        if (!MakeScheme("dense", 64, scheme))
+        {
+            fprintf(stderr, "self-test: max-inact scheme broke\n");
+            return false;
+        }
+        const TrialResult full = RunTrial(
+            scheme, 64, 0, RowDist::Wirehair, 3, 24681357);
+        if (full.Runaway || full.Inactivated < 2u)
+        {
+            fprintf(stderr,
+                "self-test: max-inact reference trial unusable "
+                "(runaway=%d inact=%u)\n",
+                (int)full.Runaway, full.Inactivated);
+            return false;
+        }
+        const TrialResult capped = RunTrial(
+            scheme, 64, 0, RowDist::Wirehair, 3, 24681357,
+            nullptr, false, false, full.Inactivated - 1u);
+        if (!capped.Runaway || capped.Success || capped.SuccessNoHeavy)
+        {
+            fprintf(stderr, "self-test: max-inact cap did not abort\n");
+            return false;
+        }
+        const TrialResult exact = RunTrial(
+            scheme, 64, 0, RowDist::Wirehair, 3, 24681357,
+            nullptr, false, false, full.Inactivated);
+        if (exact.Runaway || exact.Def != full.Def ||
+            exact.Inactivated != full.Inactivated ||
+            exact.ResidualRank != full.ResidualRank)
+        {
+            fprintf(stderr,
+                "self-test: max-inact == natural inact changed the trial\n");
+            return false;
+        }
+    }
+
     printf("self-test passed (%u rank-invariance instances)\n", checked);
     return true;
 }
@@ -1661,6 +2236,7 @@ int main(int argc, char** argv)
     uint64_t base_seed = UINT64_C(0x5eed5eed5eed5eed);
     RowDist dist = RowDist::Wirehair;
     unsigned mix = 3;
+    unsigned max_inact = 0; // 0 = unlimited
     bool self_test = false;
     bool ge_replay = false;
     bool ge_replay_reverse = false;
@@ -1715,13 +2291,22 @@ int main(int argc, char** argv)
             else if (v == "lt_m1_c64") {
                 dist = RowDist::LtM1C64;
             }
+            else if (v == "lt_m1_c16") {
+                dist = RowDist::LtM1C16;
+            }
             else if (v == "lt_m2_c1024") {
                 dist = RowDist::LtM2C1024;
+            }
+            else if (v == "rs_c001_d50_c128") {
+                dist = RowDist::RsC001D50C128;
             }
             else {
                 fprintf(stderr, "unknown rowdist %s\n", v.c_str());
                 return 1;
             }
+        }
+        else if (arg == "--max-inact") {
+            ParseUnsigned(next(), max_inact);
         }
         else if (arg == "--ge-replay") {
             ge_replay = true;
@@ -1768,6 +2353,7 @@ int main(int argc, char** argv)
         printf(",ge_real_bitops_mu,ge_real_rowops_mu,fill_in_mu,"
                "def_outside_w18_rate,def_band_w95,def_band_w99");
     }
+    printf(",runaway_rate");
     printf("\n");
     fflush(stdout);
 
@@ -1809,7 +2395,7 @@ int main(int argc, char** argv)
                         const TrialResult t = RunTrial(
                             scheme, K, oh, dist, mix, seed,
                             paired ? &recv_seed : nullptr,
-                            ge_replay, ge_replay_reverse);
+                            ge_replay, ge_replay_reverse, max_inact);
                         std::lock_guard<std::mutex> lock(agg_mutex);
                         agg.Add(t);
                     }
@@ -1826,9 +2412,18 @@ int main(int argc, char** argv)
                 }
 
                 const double n = (double)(agg.Trials ? agg.Trials : 1u);
-                const double inact_mu = agg.InactSum / n;
+                // Runaway trials (--max-inact) are in fail_rate but have no
+                // def/inact/cost statistics: means use completed trials only
+                const uint64_t completed = agg.Trials - agg.Runaways;
+                const double m = (double)(completed ? completed : 1u);
+                const double inact_mu = agg.InactSum / m;
                 const double inact_var =
-                    agg.InactSqSum / n - inact_mu * inact_mu;
+                    agg.InactSqSum / m - inact_mu * inact_mu;
+                // def_pdf keeps its contract (re-scoring it at any H must
+                // reproduce the fail rate): it is normalized over ALL trials
+                // and runaways appear as a sentinel def=999999 bucket that
+                // fails at every H.  With no runaways this is the historical
+                // per-completed-trial pdf unchanged.
                 std::string def_pdf;
                 for (size_t d = 0; d < agg.DefHist.size(); ++d)
                 {
@@ -1841,6 +2436,14 @@ int main(int argc, char** argv)
                         d, agg.DefHist[d] / n);
                     def_pdf += buf;
                 }
+                if (agg.Runaways > 0u)
+                {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%s999999:%.6f",
+                        def_pdf.empty() ? "" : "|",
+                        agg.Runaways / n);
+                    def_pdf += buf;
+                }
                 printf("%u,%s,%u,%u,%u,%llu,%.6f,%.6f,%.4f,%.0f,%s,"
                        "%.2f,%.2f,%.0f,%.2f,%.2f,%.2f,%.4f,%.1f,%.1f,%.1f,"
                        "%.1f,%.1f,%.1f,%.1f",
@@ -1848,34 +2451,35 @@ int main(int argc, char** argv)
                     (unsigned long long)agg.Trials,
                     agg.Fails / n,
                     agg.FailsNoHeavy / n,
-                    agg.DefSum / n,
+                    agg.DefSum / m,
                     agg.DefMax,
                     def_pdf.empty() ? "0:1.000000" : def_pdf.c_str(),
                     inact_mu,
                     inact_var > 0.0 ? std::sqrt(inact_var) : 0.0,
                     agg.InactMax,
-                    agg.RankSum / n,
-                    agg.PeeledSum / n,
-                    agg.ResidualRowsSum / n,
-                    agg.RecvXorSum / n / (double)(K + oh),
-                    agg.PrecodeXorSum / n,
-                    agg.SparseXorSum / n,
-                    agg.BacksubXorSum / n,
-                    agg.GeBlockXorSum / n,
-                    agg.GeBitOpSum / n,
-                    agg.HeavyMuladdSum / n,
-                    agg.HeavyDivSum / n);
+                    agg.RankSum / m,
+                    agg.PeeledSum / m,
+                    agg.ResidualRowsSum / m,
+                    agg.RecvXorSum / m / (double)(K + oh),
+                    agg.PrecodeXorSum / m,
+                    agg.SparseXorSum / m,
+                    agg.BacksubXorSum / m,
+                    agg.GeBlockXorSum / m,
+                    agg.GeBitOpSum / m,
+                    agg.HeavyMuladdSum / m,
+                    agg.HeavyDivSum / m);
                 if (ge_replay)
                 {
                     std::sort(agg.DefBands.begin(), agg.DefBands.end());
                     printf(",%.1f,%.1f,%.2f,%.6f,%u,%u",
-                        agg.GeRealWordXorSum / n,
-                        agg.GeRealRowOpSum / n,
-                        agg.FillInSum / n,
-                        (double)agg.DefOutsideW18Count / n,
+                        agg.GeRealWordXorSum / m,
+                        agg.GeRealRowOpSum / m,
+                        agg.FillInSum / m,
+                        (double)agg.DefOutsideW18Count / m,
                         PercentileSorted(agg.DefBands, 0.95),
                         PercentileSorted(agg.DefBands, 0.99));
                 }
+                printf(",%.6f", agg.Runaways / n);
                 printf("\n");
                 fflush(stdout);
             }

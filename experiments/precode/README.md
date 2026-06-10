@@ -33,12 +33,28 @@ with `experiments/peeling/xor_bench` timings.
 ## Correctness
 
 The self-test proves the projection replay correct via rank invariance: for
-thousands of random instances across all scheme kinds, `peeled + residual_rank`
-must equal the brute-force GE rank of the entire binary system, because peeling
-is just a solving strategy and cannot change rank.  It additionally checks that
-the `--ge-replay` explicit elimination (both row orders) reproduces the rank
-accumulator's rank on every one of those instances, and that `--paired`
-received-row generation is scheme-independent (see below).
+thousands of random instances across all scheme kinds (including the `_s2`
+and `_n1<X>` variants), `peeled + residual_rank` must equal the brute-force GE
+rank of the entire binary system, because peeling is just a solving strategy
+and cannot change rank.  It additionally checks that the `--ge-replay`
+explicit elimination (both row orders) reproduces the rank accumulator's rank
+on every one of those instances, and that `--paired` received-row generation
+is scheme-independent (see below).  Further clauses:
+
+- `_s2` structure: the first D2 row has exactly `ceil(span/2)` columns and
+  every subsequent D2 row differs from its predecessor in EXACTLY 2 columns;
+- `_n1<X>`: every source column hits exactly X distinct staircase parities
+  (and tokens without `_n1` keep the historical X = 3);
+- degree-law chi-square: for every non-Wirehair `--rowdist`, ~200k sampled
+  degrees at K = 3200 are tested against an independently transcribed copy of
+  the analytic weight law (bins pooled to expected count >= 10; bound
+  `df + 8*sqrt(2*df) + 30` — loose against noise, far below the chi-square a
+  mis-ported spike/tau/cap produces);
+- `--max-inact`: capping below a trial's natural inactivation count must
+  flag it as a runaway failure, capping at exactly the natural count must
+  reproduce the unlimited result bit-for-bit;
+- determinism of the new kinds (Shuffle-2 D2 rows, n1 variants, robust
+  soliton rowdist).
 
 ```bash
 bash experiments/precode/build.sh
@@ -129,8 +145,95 @@ default 4.0, fills in).
 | `ldpc[_s<S>]` | LDPC-staircase: each source column in 3 random parities, double-diagonal parity chain |
 | `ldpc2x` | staircase with `S = 2 * GetDenseCount(K)` |
 | `ldpctri[_s<S>]` | circulant triple `{a, a+b, a+2b} mod S` variant |
+| `ldpcdense_s<S>_d<D2>` | S staircase parity columns + D2 iid p=0.5 dense rows over all `K + S + D2` binary columns |
+| `ldpcdense_n1<X>_s<S>_d<D2>` | same, but each SOURCE column connects to X (2, 3 or 4) distinct staircase parities; `_n1` absent = 3 (token and RNG-stream compatible with the historical behavior) |
+| `ldpcdense...`+`_s2` | D2 rows generated Shuffle-2-style instead of iid (exact rule below); combines with `_n1<X>`, e.g. `ldpcdense_n12_s50_d12_s2` |
 | `heavyonly` | no binary precode, heavy only (default H=16) |
-| any token + `_h<H>` | override heavy row count |
+| any token + `_h<H>` | override heavy row count (after `_s2` when both present: `..._s2_h<H>`) |
+
+### `_s2`: Shuffle-2 structured D2 rows (exact generation rule)
+
+This is the production-implementable form of the D2 dense rows, mirroring the
+window mechanics of `MultiplyDenseRows` (WirehairCodec.cpp:786) /
+`ShuffleDeck16` (WirehairTools.cpp:398).  The rule below is what the simulator
+certifies and what a codec implementation must reproduce bit-exactly over the
+matrix bits (`span = K + S + D2`, the full binary column space the D2 rows
+cover: source + staircase parity + dense columns):
+
+1. **Deck construction.** `deck` = permutation of the `span` column ids,
+   produced by the Sattolo-style inside-out shuffle used by `ShuffleDeck16`:
+   `deck[0] = 0; for ii in [1, span): jj = rand() % ii; deck[ii] = deck[jj];
+   deck[jj] = ii;`.  The simulator draws `jj` as an unbiased full-width
+   uniform in `[0, ii)` from the trial's constraint-row splitmix64 RNG
+   (immediately after the staircase rows are generated, so the deck stream is
+   seeded by the scheme/trial seed).  Production will instead consume a
+   `PCGRandom` seeded with the dense seed in 8-/16-bit chunks exactly as
+   `ShuffleDeck16` does — the *structure* of the rule is what the simulator
+   certifies, not the raw bit source.
+2. **First-row window.** `set_count = ceil(span/2) = (span+1) >> 1`.  The
+   first D2 row has exactly the columns `deck[0 .. set_count)` set.
+3. **Per-row flip selection.** Reshuffle the deck (same shuffle, continuing
+   the same RNG stream).  Interpret `set_half = deck[0 .. set_count)` and
+   `clear_half = deck[set_count .. span)`.  The next `floor(D2/2)` rows are
+   each `row[i+1] = row[i] XOR {set_half[ii], clear_half[ii]}` for
+   `ii = 0, 1, 2, ...` — exactly two bit flips per row; the two flipped
+   columns are always distinct because deck entries at distinct positions are
+   distinct.  Then reshuffle the deck once more and generate the remaining
+   `floor(D2/2) - 1 + (D2 & 1)` rows by the same flip rule with `ii`
+   restarting at 0.  Row count check: `1 + floor(D2/2) + floor(D2/2) - 1 +
+   (D2 & 1) = D2`, mirroring production's two half-loops around the second
+   reshuffle.
+
+Documented deviations from production `MultiplyDenseRows` (both deliberate):
+(a) ONE window spanning all `span` columns instead of production's successive
+blocks of `dense_count` columns — production XOR-accumulates every block's
+pattern into the destination rows, which destroys the global 2-flip chain;
+with a single window the "each row = previous row + 2 flips" property holds
+over the whole row, which is the structure E5 is testing; (b) no `rows`
+destination-permutation deck — rows are emitted in generation order, which
+cannot change the linear system (a codec implementation MAY reintroduce the
+rows deck for stream parity with `MultiplyDenseRows`).
+
+Value-generation cost charged to `precode_gen_xors_mu`: `set_count +
+2*(D2-1)` block XORs (first-row accumulation plus two incremental flips per
+subsequent row), vs the `2.5 * span` window estimate charged to the iid
+model.
+
+## `--rowdist`: received-row degree distributions
+
+| token | law |
+| --- | --- |
+| `wirehair` (default) | production `GeneratePeelRowWeight` |
+| `lt_m1_c64` | truncated LT (soliton-like, `w(1) = 1/K`, `w(d) = 1/(d(d-1))`), min degree 1, cap 64, renormalized |
+| `lt_m1_c16` | same LT family, min degree 1, cap 16 |
+| `lt_m2_c1024` | LT family, min degree 2, cap 1024 |
+| `rs_c001_d50_c128` | robust soliton `c = 0.01, delta = 0.50`, min degree 1, cap 128 |
+
+`rs_c001_d50_c128` mirrors `peel_sweep`'s `robust_soliton_weight` exactly:
+`R = max(1, c*ln(K/delta)*sqrt(K))`, `spike = clamp(floor(K/R), 1, K)`,
+`w(d) = lt(d) + tau(d)` with `tau(d) = R/(d*K)` for `d < spike`,
+`R*ln(R/delta)/K` at `d == spike`, 0 above; the cap truncates the law (at
+K = 3200 the spike sits at d = 645, above the 128 cap, so only the `R/(d*K)`
+shoulder survives) and the cumulative sum renormalizes.  All non-Wirehair
+laws are chi-square-validated against an independent transcription in the
+self-test.
+
+## `--max-inact <count>`: runaway guard
+
+Retuned low-cap rowdists (especially `lt_m1_c16` at large K) can drive the
+peeler into pathological inactivation counts, making the residual-rank step
+quadratically expensive.  `--max-inact N` aborts a trial as soon as the
+inactivated column count EXCEEDS N (0 = unlimited, the default).  Aborted
+trials are recorded as *runaways*: they count as decode failures in
+`fail_rate` / `fail_rate_noheavy`, are reported in the `runaway_rate` column
+(appended at the end of the CSV), and are EXCLUDED from every def/inact/cost
+mean (those statistics do not exist for an abandoned solve, and a partial
+inactivation count would bias the means of the surviving trials).  In
+`def_pdf` runaways appear as a sentinel `999999:<rate>` bucket so the pdf
+stays normalized over all trials and re-scoring it at any H still reproduces
+the fail rate exactly (`rank_total.py` asserts this).  A nonzero
+`runaway_rate` is signal, not an error — it certifies that the
+(rowdist, scheme, K) cell blows past the bound.
 
 ## Example
 
@@ -149,7 +252,9 @@ pattern): K in {1000, 3200, 10000, 32000, 64000}, 14 schemes, OH in {0,1,2,5}.
   construction (binary rows minus unknowns = OH - H), so it is only meaningful
   for `none`.
 - `def_pdf`: empirical def distribution (`value:probability`), enough to
-  re-evaluate any alternative heavy-row count after the fact.
+  re-evaluate any alternative heavy-row count after the fact.  Normalized
+  over ALL trials; `--max-inact` runaways show up as a `999999:<rate>`
+  sentinel bucket (fails at every H), keeping `P(def > H) == fail_rate`.
 - `inact_*`: inactivated column count (GE width).
 - `backsub_xors_mu`: sum of popcount(projection) over peeled columns — the
   block-XOR cost of pushing inactivated solutions back into peeled columns;
@@ -165,6 +270,10 @@ pattern): K in {1000, 3200, 10000, 32000, 64000}, 14 schemes, OH in {0,1,2,5}.
   `ge_real_bitops_mu` (measured 64-bit word XORs), `ge_real_rowops_mu`
   (measured row eliminations = real GE block XORs), `fill_in_mu`,
   `def_outside_w18_rate`, `def_band_w95`, `def_band_w99` (see above).
+- `runaway_rate` (always present, last column): fraction of trials aborted by
+  `--max-inact` (0 when the guard is off).  Runaway trials are inside
+  `fail_rate`/`fail_rate_noheavy` but outside every mean column, whose
+  denominators are the completed trials only.
 
 Existing column order is unchanged; new columns are appended at the end so
 old CSV parsers keep working.
