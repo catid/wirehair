@@ -245,6 +245,8 @@ int main(int argc, char** argv)
         {"mib1", 1048576, 256, 8, 1},
     };
     const size_t tiles[] = {
+        256,        // sub-block tiles so the small-block cases measure
+        512,        // a real tiled replay instead of degenerating to untiled
         16 * 1024,
         32 * 1024,
         64 * 1024,
@@ -311,6 +313,12 @@ int main(int argc, char** argv)
 
         for (size_t tile : tiles)
         {
+            // A tile at or above the block size replays the identical loop
+            // as untiled; reporting it as "tiled" would present run-to-run
+            // noise as a tiling result.
+            if (tile >= c.BlockBytes) {
+                continue;
+            }
             const double tiled = time_tiled(
                 base, ops, words_per_block, tile, repeats, &checksum);
             print_result(c, "tiled", tile, ops.size(), tiled, checksum);

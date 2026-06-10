@@ -42,8 +42,9 @@ struct Rng {
     }
     uint32_t u32() { return (uint32_t)(next() >> 32); }
     double unit() { return (next() >> 11) * (1.0 / 9007199254740992.0); } // [0,1)
-    // uniform int in [lo, hi]
-    int range(int lo, int hi) { return lo + (int)(u32() % (uint32_t)(hi - lo + 1)); }
+    // uniform int in [lo, hi]; degenerate ranges return lo instead of
+    // dividing by zero (reachable via e.g. "ohead --bb 0")
+    int range(int lo, int hi) { return hi <= lo ? lo : lo + (int)(u32() % (uint32_t)(hi - lo + 1)); }
 };
 
 static void* xaligned(size_t bytes) {
@@ -100,40 +101,57 @@ static bool micro_selfcheck() {
         uint8_t* ref = (uint8_t*)xaligned(n + pad);
         for (int i = 0; i < n + pad; ++i) { x[i] = (uint8_t)rng.u32(); y[i] = (uint8_t)rng.u32(); z[i] = (uint8_t)rng.u32(); }
         uint8_t c = (uint8_t)rng.u32();
+        // Snapshot the padding; kernels with tail-handling overruns would
+        // scribble here, so verify it after every destination write.
+        uint8_t padx[pad], pady[pad], padz[pad];
+        memcpy(padx, x + n, pad); memcpy(pady, y + n, pad); memcpy(padz, z + n, pad);
+        auto pad_ok = [&](const uint8_t* buf, const uint8_t* snap, const char* what) {
+            if (memcmp(buf + n, snap, pad) != 0) {
+                fprintf(stderr, "FAIL %s overran n=%d\n", what, n);
+                return false;
+            }
+            return true;
+        };
 
         // add_mem: x ^= y
         memcpy(ref, x, n);
         for (int i = 0; i < n; ++i) ref[i] ^= y[i];
         gf256_add_mem(x, y, n);
         if (memcmp(x, ref, n) != 0) { fprintf(stderr, "FAIL add_mem n=%d\n", n); ok = false; }
+        if (!pad_ok(x, padx, "add_mem")) ok = false;
 
         // addset_mem: z = x ^ y
         for (int i = 0; i < n; ++i) ref[i] = x[i] ^ y[i];
         gf256_addset_mem(z, x, y, n);
         if (memcmp(z, ref, n) != 0) { fprintf(stderr, "FAIL addset_mem n=%d\n", n); ok = false; }
+        if (!pad_ok(z, padz, "addset_mem")) ok = false;
 
         // add2_mem: z ^= x ^ y
         for (int i = 0; i < n; ++i) z[i] = (uint8_t)rng.u32();
         for (int i = 0; i < n; ++i) ref[i] = (uint8_t)(z[i] ^ x[i] ^ y[i]);
         gf256_add2_mem(z, x, y, n);
         if (memcmp(z, ref, n) != 0) { fprintf(stderr, "FAIL add2_mem n=%d\n", n); ok = false; }
+        if (!pad_ok(z, padz, "add2_mem")) ok = false;
 
         // mul_mem: z = x * c
         for (int i = 0; i < n; ++i) ref[i] = ref_mul(x[i], c);
         gf256_mul_mem(z, x, c, n);
         if (memcmp(z, ref, n) != 0) { fprintf(stderr, "FAIL mul_mem n=%d c=%u\n", n, c); ok = false; }
+        if (!pad_ok(z, padz, "mul_mem")) ok = false;
 
         // muladd_mem: z += x * c
         for (int i = 0; i < n; ++i) z[i] = (uint8_t)rng.u32();
         for (int i = 0; i < n; ++i) ref[i] = (uint8_t)(z[i] ^ ref_mul(x[i], c));
         gf256_muladd_mem(z, c, x, n);
         if (memcmp(z, ref, n) != 0) { fprintf(stderr, "FAIL muladd_mem n=%d c=%u\n", n, c); ok = false; }
+        if (!pad_ok(z, padz, "muladd_mem")) ok = false;
 
         // memswap: x <-> y
         memcpy(ref, x, n);
         memcpy(z, y, n);
         gf256_memswap(x, y, n);
         if (memcmp(x, z, n) != 0 || memcmp(y, ref, n) != 0) { fprintf(stderr, "FAIL memswap n=%d\n", n); ok = false; }
+        if (!pad_ok(x, padx, "memswap.x") || !pad_ok(y, pady, "memswap.y")) ok = false;
 
         free(x); free(y); free(z); free(ref);
     }
@@ -304,6 +322,8 @@ static int roundtrip(uint64_t seed, int N, int blockBytes, int startMode, double
     if (!dec) { wirehair_free(enc); if (failmsg) sprintf(failmsg, "decoder_create null N=%d bb=%d", N, blockBytes); return 2; }
 
     vector<uint8_t> block(blockBytes);
+    // Loop only advances on delivered blocks; loss at or near 1.0 would spin forever.
+    if (lossRate > 0.99) lossRate = 0.99;
     // startMode 0: from blockId 0 (systematic + repair). 1: repair-only from a random offset >= N.
     unsigned blockId = (startMode == 1) ? (unsigned)(N + (rng.u32() % 16)) : 0;
     unsigned needed = 0;
@@ -466,13 +486,13 @@ struct BenchAccum {
     double encode_us = 0; uint64_t encode_n = 0; uint64_t encode_bytes = 0;
     double decode_us = 0; uint64_t decode_n = 0; uint64_t decode_bytes = 0;
     double recover_us = 0; uint64_t recover_n = 0; uint64_t recover_bytes = 0;
-    uint64_t overhead_sum = 0; uint64_t rounds = 0;
+    uint64_t overhead_sum = 0; uint64_t rounds = 0; uint64_t fails = 0;
     void merge(const BenchAccum& o){
         enc_create_us+=o.enc_create_us; enc_create_n+=o.enc_create_n;
         encode_us+=o.encode_us; encode_n+=o.encode_n; encode_bytes+=o.encode_bytes;
         decode_us+=o.decode_us; decode_n+=o.decode_n; decode_bytes+=o.decode_bytes;
         recover_us+=o.recover_us; recover_n+=o.recover_n; recover_bytes+=o.recover_bytes;
-        overhead_sum+=o.overhead_sum; rounds+=o.rounds;
+        overhead_sum+=o.overhead_sum; rounds+=o.rounds; fails+=o.fails;
     }
 };
 
@@ -529,7 +549,10 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
     }
     if (timed) {
         a.decode_us += d_accum * 1e6; a.decode_n += needed; a.decode_bytes += (uint64_t)needed * blockBytes;
-        a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0; a.rounds++;
+        // Failed rounds are counted separately; folding their capped "needed"
+        // into overhead_sum would silently shift the overhead statistic.
+        if (ok) { a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0; a.rounds++; }
+        else { a.fails++; }
     }
 
     if (ok) {
@@ -614,12 +637,14 @@ static int cmd_bench(int argc, char** argv) {
         (void)cr;
         if (matrix) {
             double msgMiB = (double)((uint64_t)N * blockBytes) / 1048576.0;
-            printf("%-8d %-8d %10.2f %14.1f %14.1f %14.1f %14.1f %10.4f\n",
+            printf("%-8d %-8d %10.2f %14.1f %14.1f %14.1f %14.1f %10.4f",
                    N, blockBytes, msgMiB, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
         } else {
-            printf("%-8d %14.1f %14.1f %14.1f %14.1f %10.4f\n",
+            printf("%-8d %14.1f %14.1f %14.1f %14.1f %10.4f",
                    N, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
         }
+        if (global.fails) printf("  FAILS=%llu", (unsigned long long)global.fails);
+        printf("\n");
         fflush(stdout);
     }
     return 0;
@@ -700,7 +725,7 @@ static int cmd_ohead(int argc, char** argv) {
                     long idx = next.fetch_add(1);
                     if (idx >= trials) break;
                     uint32_t extra = 0;
-                    uint64_t s = baseSeed + (uint64_t)N * 0x9E3779B1u + (uint64_t)idx * 2654435761ull;
+                    uint64_t s = baseSeed + (uint64_t)N * 0x9E3779B1u + (uint64_t)idx * 0xD1B54A32D192ED03ull; // distinct strides: equal strides made seed(N, idx) == seed(N+d, idx-d)
                     int rc = roundtrip(s, N, bb, startMode, loss, &extra, nullptr);
                     if (rc == 0) loc.add_overhead(extra); else lf++;
                 }
@@ -803,7 +828,7 @@ static int cmd_seedsearch(int argc, char** argv) {
         vector<thread> ts;
         for (int t=0;t<threads;++t) ts.emplace_back([&](){
             for(;;){ int s=si.fetch_add(1); if(s>=nseeds) break;
-                sm[s]=seed_mean(N,bb,startMode,loss,s,-1,tsearch,0x5EED + (uint64_t)N*911 + (uint64_t)s*7);
+                sm[s]=seed_mean(N,bb,startMode,loss,s,-1,tsearch,0x5EED + (uint64_t)N*911); // base independent of s: paired loss patterns across candidates (avoids winner's curse)
             }
         });
         for(auto&th:ts) th.join();
@@ -828,7 +853,7 @@ static int cmd_seedsearch(int argc, char** argv) {
             for (int t=0;t<threads;++t) ts2.emplace_back([&](){
                 for(;;){ int c=ci.fetch_add(1); if(c>=ncomb) break;
                     int p=peels[c/dseeds], d=c%dseeds;
-                    cs[c]=seed_mean(N,bb,startMode,0.30,p,d,tsearch,0xDEED + (uint64_t)N*701 + (uint64_t)c*13);
+                    cs[c]=seed_mean(N,bb,startMode,0.30,p,d,tsearch,0xDEED + (uint64_t)N*701); // base independent of c: paired trials across candidates
                 }
             });
             for(auto&th:ts2) th.join();
@@ -879,7 +904,7 @@ static int cmd_scan(int argc, char** argv) {
                 uint64_t osum = 0; uint32_t omax = 0; long fail = 0;
                 for (long k = 0; k < trials; ++k) {
                     uint32_t extra = 0;
-                    uint64_t s = baseSeed + (uint64_t)N * 0x9E3779B1u + (uint64_t)k * 2654435761ull;
+                    uint64_t s = baseSeed + (uint64_t)N * 0x9E3779B1u + (uint64_t)k * 0xD1B54A32D192ED03ull; // distinct strides: equal strides made seed(N, k) == seed(N+d, k-d)
                     int rc = roundtrip(s, N, bb, startMode, loss, &extra, nullptr);
                     if (rc == 0) { osum += extra; if (extra > omax) omax = extra; } else fail++;
                 }
@@ -1088,12 +1113,19 @@ static int cmd_count(int argc, char** argv) {
         WirehairCodec dcd=wirehair_decoder_create(nullptr,msgBytes,bb);
         unsigned id=(startMode==1)?(unsigned)N:0, needed=0; uint32_t wl=0; bool ok=false;
         gf256_count_reset();
+        // Attribute encoder repair-block generation separately so the
+        // decode(feed) stage reports decoder traffic only.
+        uint64_t encB=0, encPreB=0;
         for(;;){ if(needed>=(unsigned)N*2+512)break;
             bool drop=(startMode==0)&&(rng.unit()<loss); unsigned t=id++; if(drop)continue;
+            encPreB=0; for(int k2=0;k2<6;++k2) encPreB+=gf256_count_bytes(k2);
             wirehair_encode(enc,t,blk.data(),bb,&wl); needed++;
+            { uint64_t post=0; for(int k2=0;k2<6;++k2) post+=gf256_count_bytes(k2); encB+=post-encPreB; }
             WirehairResult dr=wirehair_decode(dcd,t,blk.data(),wl);
             if(dr==Wirehair_Success){ok=true;break;} if(dr!=Wirehair_NeedMore)break; }
-        count_dump("decode(feed)", msgBytes);
+        printf("%-16s msg=%lluB | total=%.2fMB (excluded from decode stage below)\n",
+            "encode(repair)", (unsigned long long)msgBytes, encB/1e6);
+        count_dump("decode(feed)+enc", msgBytes);
         if(ok){ gf256_count_reset(); wirehair_recover(dcd,dec.data(),msgBytes); count_dump("recover", msgBytes);
             printf("# recover correct: %s\n", memcmp(dec.data(),msg.data(),msgBytes)==0?"YES":"NO"); }
         wirehair_free(enc); wirehair_free(dcd);
