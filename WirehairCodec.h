@@ -336,6 +336,10 @@ class Codec
     /// Boolean: Decoder has already recovered enough rows
     bool _decode_complete = false;
 
+    /// Boolean: Decoder detected a precondition violation (e.g. duplicate
+    /// original blocks) before GE state existed; later feeds must not resume
+    bool _decode_failed = false;
+
     /// Number of mix columns
     uint16_t _mix_count = 0;
 

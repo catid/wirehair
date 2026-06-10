@@ -3082,6 +3082,13 @@ WirehairResult Codec::ChooseMatrix(
         return Wirehair_InvalidInput;
     }
 
+    // The gf256 bulk routines take a signed int byte count, so block sizes
+    // of 2^31 bytes or more would truncate to a negative length and skip or
+    // corrupt the value-phase block operations.
+    if (block_bytes > 0x7FFFFFFFu) {
+        return Wirehair_InvalidInput;
+    }
+
     // Calculate message block count.
     // Validate before narrowing to 16 bits: truncating first would wrap large
     // counts into the accepted range and silently encode the wrong message.
@@ -3278,6 +3285,11 @@ WirehairResult Codec::ResumeSolveMatrix(
     CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
     if (!data) {
+        return Wirehair_InvalidInput;
+    }
+
+    // Resuming requires GE state from a prior SolveMatrix() attempt
+    if (!_ge_matrix || !_ge_row_map || !_pivots) {
         return Wirehair_InvalidInput;
     }
 
@@ -4026,13 +4038,15 @@ bool Codec::AllocateMatrix()
     // Clear entire Compression matrix
     memset(_compress_matrix, 0, compress_matrix_words * sizeof(uint64_t));
 
-    // Clear entire GE matrix.
-    // This clears ge_cols not ge_rows because we just need to clear the upper
-    // square matrix, whereas ge_rows also includes some extra rows for data
-    // received in excess of N for when the decoder fails and has to resume
-    // again.
-    // When these extra rows are added we clear the row memory at that point.
-    memset(_ge_matrix, 0, ge_cols * ge_pitch * sizeof(uint64_t));
+    // Clear the upper square of the GE matrix, bounded by the allocated row
+    // count.  The allocation holds ge_rows rows; for the encoder ge_rows is
+    // smaller than ge_cols because the trailing heavy-row indices are only
+    // ever accessed through _heavy_matrix, so they need no clearing here
+    // (with WH_ALIGN64 pitch rounding, clearing ge_cols rows would write past
+    // the end of the allocation).  Decoder extra rows beyond the square are
+    // cleared when they are added during resume.
+    const unsigned ge_clear_rows = ge_rows < ge_cols ? ge_rows : ge_cols;
+    memset(_ge_matrix, 0, ge_clear_rows * ge_pitch * sizeof(uint64_t));
 
     return true;
 }
@@ -4301,6 +4315,7 @@ WirehairResult Codec::InitializeEncoder(
 
         // Encoder-specific
         _decode_complete = false;
+        _decode_failed = false;
         _input_final_bytes = partial_final_bytes;
         _output_final_bytes = _block_bytes;
         _extra_count = 0;
@@ -4499,6 +4514,7 @@ WirehairResult Codec::InitializeDecoder(
     // Decoder-specific
     _row_count = 0;
     _decode_complete = false;
+    _decode_failed = false;
     _output_final_bytes = partial_final_bytes;
 
     // Hack: Prevents row-based ids from causing partial copies when they
@@ -4597,6 +4613,13 @@ WirehairResult Codec::DecodeFeed(
         return Wirehair_Success;
     }
 
+    // After a precondition violation detected before GE state existed
+    // (duplicate original blocks on the all-original path), the decoder has
+    // N stored rows but no GE matrix; resuming would write through null maps.
+    if (_decode_failed) {
+        return Wirehair_InvalidInput;
+    }
+
 #if defined(CAT_ALL_ORIGINAL)
     // If provided a block of non-original data, mark all original as false
     if (block_id >= _block_count) {
@@ -4662,9 +4685,12 @@ WirehairResult Codec::DecodeFeed(
     if (_all_original) {
         // Check input:
         if (!IsAllOriginalData()) {
-            // Application violated precondition that all inputs must be unique
+            // Application violated precondition that all inputs must be unique.
+            // SolveMatrix never ran, so no GE state exists; mark the decode
+            // failed so later feeds do not try to resume GE.
             CAT_DEBUG_BREAK();
             _all_original = false;
+            _decode_failed = true;
             return Wirehair_InvalidInput;
         }
         _decode_complete = true;

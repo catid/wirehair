@@ -253,6 +253,95 @@ void CheckDecodeAfterAllOriginalSuccess()
     wirehair_free(decoder);
 }
 
+void CheckDecodeAfterDuplicateOriginalFailure()
+{
+    const uint32_t N = 16u;
+    const uint32_t block_bytes = 16u;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+
+    std::vector<uint8_t> message((size_t)message_bytes);
+    std::vector<uint8_t> recovered((size_t)message_bytes, 0xa5);
+    std::vector<uint8_t> repair(block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 17u + 3u);
+    }
+
+    WirehairCodec encoder = wirehair_encoder_create(
+        0, &message[0], message_bytes, block_bytes);
+    WirehairCodec decoder = wirehair_decoder_create(
+        0, message_bytes, block_bytes);
+    Check(encoder != 0, "dup-test encoder initialization should succeed");
+    Check(decoder != 0, "dup-test decoder initialization should succeed");
+    if (!encoder || !decoder) {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return;
+    }
+
+    // Feed N original-range ids with one duplicate (0 twice, N-1 missing):
+    // the all-original check fails on the Nth feed before GE state exists.
+    WirehairResult result = Wirehair_NeedMore;
+    for (uint32_t feed = 0; feed < N; ++feed)
+    {
+        const uint32_t block_id = (feed == 1u) ? 0u : feed;
+        result = wirehair_decode(
+            decoder,
+            block_id,
+            &message[(size_t)block_id * block_bytes],
+            block_bytes);
+    }
+    Check(result == Wirehair_InvalidInput,
+        "duplicate original set should be rejected as invalid input");
+
+    // Later packets must return an error instead of resuming missing GE state
+    uint32_t written = 0;
+    Check(wirehair_encode(
+            encoder, N + 2u, &repair[0], block_bytes, &written) ==
+            Wirehair_Success,
+        "dup-test encoder should generate a repair block");
+    Check(wirehair_decode(decoder, N + 2u, &repair[0], written) ==
+            Wirehair_InvalidInput,
+        "feeds after duplicate-original failure should error, not crash");
+
+    // Reuse must clear the failed state
+    decoder = wirehair_decoder_create(decoder, message_bytes, block_bytes);
+    Check(decoder != 0, "dup-test decoder reuse should succeed");
+    if (decoder) {
+        result = Wirehair_NeedMore;
+        for (uint32_t block_id = 0; block_id < N && result == Wirehair_NeedMore;
+            ++block_id)
+        {
+            result = wirehair_decode(
+                decoder,
+                block_id,
+                &message[(size_t)block_id * block_bytes],
+                block_bytes);
+        }
+        Check(result == Wirehair_Success,
+            "dup-test decoder reuse should decode a clean original set");
+        Check(wirehair_recover(decoder, &recovered[0], message_bytes) ==
+                Wirehair_Success,
+            "dup-test reuse recovery should succeed");
+        Check(std::memcmp(
+                &recovered[0], &message[0], (size_t)message_bytes) == 0,
+            "dup-test recovered message should match input");
+    }
+
+    wirehair_free(encoder);
+    wirehair_free(decoder);
+}
+
+void CheckBlockBytesUpperBound()
+{
+    // gf256 bulk routines take int byte counts; 2^31 must be rejected
+    std::vector<uint8_t> message(64u);
+    WirehairCodec encoder = wirehair_encoder_create(
+        0, &message[0], UINT64_C(0x100000000), 0x80000000u);
+    Check(encoder == 0,
+        "block_bytes >= 2^31 should be rejected at initialization");
+    wirehair_free(encoder);
+}
+
 void CheckPeelSolverSelectionSemantics()
 {
     wirehair_v2::PeelingCodec lowref =
@@ -307,6 +396,8 @@ int main()
     Check(wirehair_init() == Wirehair_Success, "wirehair_init should succeed");
     CheckCoreSeedHelpers();
     CheckDecodeAfterAllOriginalSuccess();
+    CheckDecodeAfterDuplicateOriginalFailure();
+    CheckBlockBytesUpperBound();
 
     Check(ClassifyBlockBytes(1280u) == BlockByteClass::Small,
         "1280-byte blocks should use small byte class");
