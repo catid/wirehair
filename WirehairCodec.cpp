@@ -3056,6 +3056,18 @@ extern "C" void wh_set_override(int N, int dense, int pseed, int dseed) {
 }
 #endif
 
+static bool IsDenseCountValid(unsigned dense_count)
+{
+    return dense_count > 0 && dense_count <= CAT_MAX_DENSE_ROWS;
+}
+
+#ifdef WH_SEED_KNOBS
+static bool HasDenseSeedTableEntry(unsigned dense_count)
+{
+    return dense_count / 4 < kDenseSeedCount;
+}
+#endif
+
 WirehairResult Codec::ChooseMatrix(
     uint64_t message_bytes,
     unsigned block_bytes)
@@ -3106,7 +3118,19 @@ WirehairResult Codec::ChooseMatrix(
         // Experiment-only (compile with -DWH_SEED_KNOBS). Thread-local override (for parallel
         // seed search) takes precedence; env override is a fallback for manual single-N checks.
         if (t_ovr_N == (int)_block_count) {
-            if (t_ovr_dense >= 0) { _dense_count = (uint16_t)t_ovr_dense; _d_seed = GetDenseSeed(_block_count, _dense_count); }
+            if (t_ovr_dense >= 0) {
+                const unsigned dense_override = (unsigned)t_ovr_dense;
+                if (!IsDenseCountValid(dense_override)) {
+                    return Wirehair_InvalidInput;
+                }
+                _dense_count = (uint16_t)dense_override;
+                if (t_ovr_dseed < 0) {
+                    if (!HasDenseSeedTableEntry(_dense_count)) {
+                        return Wirehair_InvalidInput;
+                    }
+                    _d_seed = GetDenseSeed(_block_count, _dense_count);
+                }
+            }
             if (t_ovr_pseed >= 0) _p_seed = (uint32_t)t_ovr_pseed;
             if (t_ovr_dseed >= 0) _d_seed = (uint32_t)t_ovr_dseed;
         } else {
@@ -3114,11 +3138,30 @@ WirehairResult Codec::ChooseMatrix(
             if (!ovN || atoi(ovN) == (int)_block_count) {
                 const char* ps = ::getenv("WH_PSEED"); if (ps) _p_seed = (uint32_t)strtoul(ps, nullptr, 0);
                 const char* dd = ::getenv("WH_DENSE");
-                if (dd) { _dense_count = (uint16_t)atoi(dd); _d_seed = GetDenseSeed(_block_count, _dense_count); }
-                const char* ds = ::getenv("WH_DSEED"); if (ds) _d_seed = (uint32_t)strtoul(ds, nullptr, 0);
+                const char* ds = ::getenv("WH_DSEED");
+                if (dd) {
+                    const int dense_value = atoi(dd);
+                    if (dense_value <= 0 ||
+                        !IsDenseCountValid((unsigned)dense_value))
+                    {
+                        return Wirehair_InvalidInput;
+                    }
+                    _dense_count = (uint16_t)dense_value;
+                    if (!ds) {
+                        if (!HasDenseSeedTableEntry(_dense_count)) {
+                            return Wirehair_InvalidInput;
+                        }
+                        _d_seed = GetDenseSeed(_block_count, _dense_count);
+                    }
+                }
+                if (ds) _d_seed = (uint32_t)strtoul(ds, nullptr, 0);
             }
         }
 #endif
+    }
+
+    if (!IsDenseCountValid(_dense_count)) {
+        return Wirehair_InvalidInput;
     }
 
     CAT_IF_DUMP(cout << "Peel seed = " << _p_seed << "  Dense seed = " << _d_seed << endl;)

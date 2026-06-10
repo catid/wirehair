@@ -3,6 +3,7 @@
 #include "WirehairV2Peel.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2Seeds.h"
+#include "../WirehairTools.h"
 
 #include <cstring>
 #include <iostream>
@@ -146,6 +147,36 @@ void CheckGeneratedRows(
     }
 }
 
+void CheckCoreSeedHelpers()
+{
+    wirehair::PCGRandom prng;
+    prng.Seed(1u);
+    uint16_t sentinel = 0x1234u;
+    wirehair::ShuffleDeck16(prng, &sentinel, 0u);
+    Check(sentinel == 0x1234u, "zero-count shuffle should not touch output");
+
+    const unsigned fixup_N = 5550u;
+    const uint16_t default_dense = wirehair::GetDenseCount(fixup_N);
+    Check(wirehair::GetDenseSeed(fixup_N, default_dense) == 23u,
+        "default dense count should use dense seed fixup");
+
+    const uint16_t alternate_dense =
+        (default_dense >= 6u) ? (uint16_t)(default_dense - 4u) :
+                                (uint16_t)(default_dense + 4u);
+    Check(wirehair::GetDenseSeed(fixup_N, alternate_dense) ==
+            wirehair::kDenseSeeds[alternate_dense / 4u],
+        "non-default dense count should bypass per-N dense seed fixup");
+
+    wirehair::Codec invalid_dense;
+    invalid_dense.OverrideSeeds(0u, 0u, 0u);
+    Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_InvalidInput,
+        "zero dense-count override should fail initialization");
+
+    invalid_dense.OverrideSeeds((uint16_t)(CAT_MAX_DENSE_ROWS + 1u), 0u, 0u);
+    Check(invalid_dense.InitializeEncoder(40u, 10u) == Wirehair_InvalidInput,
+        "oversized dense-count override should fail initialization");
+}
+
 } // namespace
 
 int main()
@@ -153,6 +184,7 @@ int main()
     using namespace wirehair_v2;
 
     Check(wirehair_init() == Wirehair_Success, "wirehair_init should succeed");
+    CheckCoreSeedHelpers();
 
     Check(ClassifyBlockBytes(1280u) == BlockByteClass::Small,
         "1280-byte blocks should use small byte class");

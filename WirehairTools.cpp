@@ -400,6 +400,10 @@ void ShuffleDeck16(
     uint16_t * GF256_RESTRICT deck,
     const uint32_t count)
 {
+    if (count == 0) {
+        return;
+    }
+
     deck[0] = 0;
 
     // If we can unroll 4 times:
@@ -1027,7 +1031,8 @@ static const unsigned kDenseSeedFixupCount =
 
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
 {
-    // Correction table first (binary search).
+    // Correction table first (binary search).  These per-N fixups are tuned
+    // for the default dense count, so bypass them for dense-count sweeps.
     {
         unsigned lo = 0, hi = kDenseSeedFixupCount;
         while (lo < hi) {
@@ -1035,7 +1040,10 @@ uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
             if (kDenseSeedFixups[mid].N < N) lo = mid + 1;
             else hi = mid;
         }
-        if (lo < kDenseSeedFixupCount && kDenseSeedFixups[lo].N == N) {
+        if (lo < kDenseSeedFixupCount &&
+            kDenseSeedFixups[lo].N == N &&
+            dense_count == GetDenseCount(N))
+        {
             return kDenseSeedFixups[lo].Seed;
         }
     }
