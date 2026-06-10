@@ -36,6 +36,10 @@ set(UNIT_TEST_SOURCE_FILES
         test/UnitTest.cpp
         )
 
+set(LARGE_MESSAGE_TEST_SOURCE_FILES
+        test/LargeMessageTest.cpp
+        )
+
 set(GEN_SMALL_DSEEDS
         test/SiameseTools.cpp
         test/SiameseTools.h
@@ -132,6 +136,9 @@ if (BUILD_TESTS)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(unit_test OpenMP::OpenMP_CXX)
     endif()
+
+    add_executable(large_message_test EXCLUDE_FROM_ALL ${LARGE_MESSAGE_TEST_SOURCE_FILES})
+    target_link_libraries(large_message_test wirehair)
 
     add_executable(gen_small_dseeds ${GEN_SMALL_DSEEDS})
     target_link_libraries(gen_small_dseeds wirehair)
