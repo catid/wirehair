@@ -86,3 +86,4 @@ experiments/precode/precode_sim
 experiments/peeling/xor_bench
 experiments/precode/results/*.err
 .claude/worktrees/
+experiments/tiling/rowop_tiling
