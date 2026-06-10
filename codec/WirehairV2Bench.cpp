@@ -111,6 +111,52 @@ struct CachedCompareProfile
     wirehair_v2::SeedProfile TunedProfile;
 };
 
+struct PeelCostCandidate
+{
+    std::string Name;
+    bool UsePolicy;
+    wirehair_v2::PeelingCodec Codec;
+};
+
+enum PrecodeModelKind
+{
+    PrecodeModelDense,
+    PrecodeModelLdpc,
+    PrecodeModelLdpcDense
+};
+
+struct PrecodeModel
+{
+    std::string Name;
+    PrecodeModelKind Kind;
+};
+
+struct PrecodeRecipe
+{
+    uint32_t Columns;
+    uint32_t LdpcColumns;
+    uint32_t DenseRows;
+    uint32_t HeavyRows;
+    double GenerationXors;
+};
+
+struct PeelCostAccum
+{
+    uint64_t Trials = 0;
+    double ResidualColumns = 0.0;
+    double ResidualRows = 0.0;
+    uint32_t ResidualColumnsMax = 0;
+    double MatrixRefs = 0.0;
+    double MatrixXors = 0.0;
+    double LegacyTotalXors = 0.0;
+    double SolveWidth = 0.0;
+    double PrecodeGenXors = 0.0;
+    double BackSubXors = 0.0;
+    double GeBlockXors = 0.0;
+    double HeavyMuladds = 0.0;
+    double TotalBlockXors = 0.0;
+};
+
 std::vector<int> ParseIntList(const std::string& text)
 {
     std::vector<int> out;
@@ -143,6 +189,26 @@ std::vector<int> ParseSignedIntList(const std::string& text)
             pos, comma == std::string::npos ? std::string::npos : comma - pos);
         if (!token.empty()) {
             out.push_back(std::atoi(token.c_str()));
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        pos = comma + 1u;
+    }
+    return out;
+}
+
+std::vector<std::string> ParseStringList(const std::string& text)
+{
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < text.size())
+    {
+        const size_t comma = text.find(',', pos);
+        const std::string token = text.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (!token.empty()) {
+            out.push_back(token);
         }
         if (comma == std::string::npos) {
             break;
@@ -409,6 +475,282 @@ const char* CompareProfileModeName(CompareProfileMode mode)
         return "auto";
     }
     return "unknown";
+}
+
+uint64_t Mix64(uint64_t x)
+{
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x *= UINT64_C(0x94d049bb133111eb);
+    x ^= x >> 31;
+    return x;
+}
+
+wirehair_v2::PeelingCodec MakeBenchLtCodec(
+    uint16_t min_degree,
+    uint16_t max_degree,
+    wirehair_v2::PeelSolver solver)
+{
+    wirehair_v2::PeelingCodec codec;
+    codec.Solver = solver;
+    codec.Structure = wirehair_v2::PeelStructure::LtM1C32;
+    codec.Family = wirehair_v2::DegreeFamily::Lt;
+    codec.MinDegree = min_degree;
+    codec.MaxDegree = max_degree;
+    codec.SolverCandidateLimit =
+        solver == wirehair_v2::PeelSolver::KsBmaxTop16 ? 16u : 0u;
+    codec.Degree1Mass = 0.0;
+    codec.Degree2Mass = 0.0;
+    codec.RobustC = 0.0;
+    codec.RobustDelta = 0.0;
+    codec.FullyRandomRows = true;
+    return codec;
+}
+
+wirehair_v2::PeelingCodec MakeBenchRobustD1D2Codec(
+    uint16_t max_degree,
+    double degree1_mass,
+    double degree2_mass,
+    wirehair_v2::PeelSolver solver)
+{
+    wirehair_v2::PeelingCodec codec;
+    codec.Solver = solver;
+    codec.Structure = wirehair_v2::PeelStructure::RobustD1_001D2_003;
+    codec.Family = wirehair_v2::DegreeFamily::RobustD1D2;
+    codec.MinDegree = 1u;
+    codec.MaxDegree = max_degree;
+    codec.SolverCandidateLimit =
+        solver == wirehair_v2::PeelSolver::KsBmaxTop16 ? 16u : 0u;
+    codec.Degree1Mass = degree1_mass;
+    codec.Degree2Mass = degree2_mass;
+    codec.RobustC = 0.0;
+    codec.RobustDelta = 0.0;
+    codec.FullyRandomRows = true;
+    return codec;
+}
+
+wirehair_v2::PeelingCodec MakeBenchRobustSolitonCodec(
+    double c,
+    double delta,
+    uint16_t max_degree,
+    wirehair_v2::PeelSolver solver)
+{
+    wirehair_v2::PeelingCodec codec;
+    codec.Solver = solver;
+    codec.Structure = wirehair_v2::PeelStructure::RsC001D50C128;
+    codec.Family = wirehair_v2::DegreeFamily::RobustSoliton;
+    codec.MinDegree = 1u;
+    codec.MaxDegree = max_degree;
+    codec.SolverCandidateLimit =
+        solver == wirehair_v2::PeelSolver::KsBmaxTop16 ? 16u : 0u;
+    codec.Degree1Mass = 0.0;
+    codec.Degree2Mass = 0.0;
+    codec.RobustC = c;
+    codec.RobustDelta = delta;
+    codec.FullyRandomRows = true;
+    return codec;
+}
+
+bool ParsePeelSolver(
+    const std::string& name,
+    wirehair_v2::PeelSolver& solver)
+{
+    if (name == "ks_bmax_top16" || name == "ks") {
+        solver = wirehair_v2::PeelSolver::KsBmaxTop16;
+        return true;
+    }
+    if (name == "rqcc_lowref" || name == "rqcc") {
+        solver = wirehair_v2::PeelSolver::RqccLowref;
+        return true;
+    }
+    return false;
+}
+
+bool MakeNamedPeelCostCandidate(
+    const std::string& name,
+    wirehair_v2::PeelSolver solver,
+    PeelCostCandidate& candidate)
+{
+    candidate.Name = name;
+    candidate.UsePolicy = false;
+    if (name == "policy") {
+        candidate.UsePolicy = true;
+        candidate.Codec = MakeBenchLtCodec(1u, 32u, solver);
+        return true;
+    }
+    if (name == "lt_m1_c16") {
+        candidate.Codec = MakeBenchLtCodec(1u, 16u, solver);
+        return true;
+    }
+    if (name == "lt_m1_c32") {
+        candidate.Codec = MakeBenchLtCodec(1u, 32u, solver);
+        return true;
+    }
+    if (name == "lt_m1_c64") {
+        candidate.Codec = MakeBenchLtCodec(1u, 64u, solver);
+        return true;
+    }
+    if (name == "lt_m2_c96") {
+        candidate.Codec = MakeBenchLtCodec(2u, 96u, solver);
+        return true;
+    }
+    if (name == "lt_m2_c128") {
+        candidate.Codec = MakeBenchLtCodec(2u, 128u, solver);
+        return true;
+    }
+    if (name == "lt_m2_c256") {
+        candidate.Codec = MakeBenchLtCodec(2u, 256u, solver);
+        return true;
+    }
+    if (name == "lt_m2_c512") {
+        candidate.Codec = MakeBenchLtCodec(2u, 512u, solver);
+        return true;
+    }
+    if (name == "lt_m2_c1024") {
+        candidate.Codec = MakeBenchLtCodec(2u, 1024u, solver);
+        return true;
+    }
+    if (name == "robust_d1_001_d2_003") {
+        candidate.Codec = MakeBenchRobustD1D2Codec(64u, 0.01, 0.03, solver);
+        return true;
+    }
+    if (name == "robust_d1_001_d2_012") {
+        candidate.Codec = MakeBenchRobustD1D2Codec(64u, 0.01, 0.12, solver);
+        return true;
+    }
+    if (name == "rs_c001_d50_c128") {
+        candidate.Codec = MakeBenchRobustSolitonCodec(0.01, 0.50, 128u, solver);
+        return true;
+    }
+    if (name == "rs_c003_d10_c128") {
+        candidate.Codec = MakeBenchRobustSolitonCodec(0.03, 0.10, 128u, solver);
+        return true;
+    }
+    return false;
+}
+
+bool MakePrecodeModel(const std::string& name, PrecodeModel& model)
+{
+    model.Name = name;
+    if (name == "dense") {
+        model.Kind = PrecodeModelDense;
+        return true;
+    }
+    if (name == "ldpc") {
+        model.Kind = PrecodeModelLdpc;
+        return true;
+    }
+    if (name == "ldpcdense") {
+        model.Kind = PrecodeModelLdpcDense;
+        return true;
+    }
+    return false;
+}
+
+PrecodeRecipe BuildPrecodeRecipe(
+    const PrecodeModel& model,
+    uint32_t block_count,
+    uint32_t heavy_rows)
+{
+    const uint32_t dense_count = wirehair::GetDenseCount(block_count);
+    PrecodeRecipe recipe;
+    recipe.Columns = dense_count;
+    recipe.LdpcColumns = 0;
+    recipe.DenseRows = dense_count;
+    recipe.HeavyRows = heavy_rows;
+    recipe.GenerationXors = 2.5 * (double)(block_count + dense_count);
+
+    if (model.Kind == PrecodeModelLdpc)
+    {
+        recipe.LdpcColumns = dense_count;
+        recipe.DenseRows = 0;
+        recipe.GenerationXors =
+            3.0 * (double)block_count + (double)recipe.LdpcColumns;
+    }
+    else if (model.Kind == PrecodeModelLdpcDense)
+    {
+        if (block_count <= 1200u)
+        {
+            recipe.LdpcColumns = 25u;
+            recipe.DenseRows = 16u;
+        }
+        else if (block_count <= 5000u)
+        {
+            recipe.LdpcColumns = 43u;
+            recipe.DenseRows = 12u;
+        }
+        else if (block_count <= 20000u)
+        {
+            recipe.LdpcColumns = 52u;
+            recipe.DenseRows = 34u;
+        }
+        else
+        {
+            recipe.LdpcColumns = dense_count;
+            recipe.DenseRows = 0;
+        }
+        recipe.Columns = recipe.LdpcColumns + recipe.DenseRows;
+        recipe.GenerationXors =
+            3.0 * (double)block_count +
+            (double)recipe.LdpcColumns +
+            2.5 * (double)(block_count + recipe.DenseRows);
+    }
+    return recipe;
+}
+
+uint64_t PeelCostMatrixSeed(
+    uint64_t seed,
+    uint32_t block_count,
+    uint32_t overhead_rows,
+    uint32_t trial)
+{
+    uint64_t x = seed;
+    x ^= Mix64((uint64_t)block_count * UINT64_C(0x9e3779b97f4a7c15));
+    x ^= Mix64((uint64_t)overhead_rows * UINT64_C(0x94d049bb133111eb));
+    x ^= Mix64((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+    return Mix64(x);
+}
+
+void AddPeelCostTrial(
+    PeelCostAccum& acc,
+    const wirehair_v2::PeelEvaluation& eval,
+    const PrecodeRecipe& recipe)
+{
+    const double solve_width =
+        (double)eval.ResidualColumns +
+        (double)recipe.Columns +
+        (double)recipe.HeavyRows;
+    const double backsub_xors = solve_width * (double)eval.Columns;
+    const double ge_block_xors = solve_width * solve_width * 0.5;
+    const double heavy_muladds = solve_width * (double)recipe.HeavyRows;
+    const double total =
+        (double)eval.MatrixXors +
+        recipe.GenerationXors +
+        backsub_xors +
+        ge_block_xors +
+        heavy_muladds;
+
+    ++acc.Trials;
+    acc.ResidualColumns += (double)eval.ResidualColumns;
+    acc.ResidualRows += (double)eval.ResidualRows;
+    if (eval.ResidualColumns > acc.ResidualColumnsMax) {
+        acc.ResidualColumnsMax = eval.ResidualColumns;
+    }
+    acc.MatrixRefs += (double)eval.MatrixRefs;
+    acc.MatrixXors += (double)eval.MatrixXors;
+    acc.LegacyTotalXors += (double)eval.TotalXorCost;
+    acc.SolveWidth += solve_width;
+    acc.PrecodeGenXors += recipe.GenerationXors;
+    acc.BackSubXors += backsub_xors;
+    acc.GeBlockXors += ge_block_xors;
+    acc.HeavyMuladds += heavy_muladds;
+    acc.TotalBlockXors += total;
+}
+
+double CostMean(double sum, uint64_t trials)
+{
+    return trials > 0u ? sum / (double)trials : 0.0;
 }
 
 wirehair_v2::SeedProfile BuildTunedProfile(
@@ -905,6 +1247,216 @@ int CmdSeedTable(int argc, char** argv)
     return 0;
 }
 
+int CmdPeelCost(int argc, char** argv)
+{
+    std::string nlist = "320,3200,32000";
+    std::string bb_list = "1280,102400,1048576";
+    std::string structure_list =
+        "policy,lt_m1_c32,lt_m2_c96,lt_m2_c128,lt_m2_c256,"
+        "lt_m2_c512,rs_c001_d50_c128,rs_c003_d10_c128";
+    std::string precode_list = "dense,ldpcdense";
+    std::string overhead_list = "0,1,2";
+    std::string solver_name = "ks_bmax_top16";
+    uint32_t trials = 20u;
+    uint32_t heavy_rows = 6u;
+    uint64_t seed = UINT64_C(0xc057c0de);
+
+    for (int i = 0; i < argc; ++i)
+    {
+        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
+            nlist = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
+            bb_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--structures") && i + 1 < argc) {
+            structure_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--precode") && i + 1 < argc) {
+            precode_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--overhead") && i + 1 < argc) {
+            overhead_list = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--solver") && i + 1 < argc) {
+            solver_name = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
+            trials = (uint32_t)std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--heavy") && i + 1 < argc) {
+            heavy_rows = (uint32_t)std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
+            seed = std::strtoull(argv[++i], 0, 0);
+        }
+    }
+
+    if (trials < 1u) {
+        trials = 1u;
+    }
+    if (heavy_rows > 128u) {
+        heavy_rows = 128u;
+    }
+
+    wirehair_v2::PeelSolver solver = wirehair_v2::PeelSolver::KsBmaxTop16;
+    if (!ParsePeelSolver(solver_name, solver)) {
+        std::fprintf(stderr, "unknown peel solver: %s\n", solver_name.c_str());
+        return 1;
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    const std::vector<int> Overheads = ParseSignedIntList(overhead_list);
+    const std::vector<std::string> structure_names =
+        ParseStringList(structure_list);
+    const std::vector<std::string> precode_names =
+        ParseStringList(precode_list);
+    if (Ns.empty() || BBs.empty() || Overheads.empty() ||
+        structure_names.empty() || precode_names.empty())
+    {
+        std::fprintf(stderr,
+            "peelcost requires non-empty --N, --bb-list, --overhead, "
+            "--structures, and --precode\n");
+        return 1;
+    }
+
+    std::vector<PeelCostCandidate> candidates;
+    for (size_t i = 0; i < structure_names.size(); ++i)
+    {
+        PeelCostCandidate candidate;
+        if (!MakeNamedPeelCostCandidate(structure_names[i], solver, candidate))
+        {
+            std::fprintf(stderr,
+                "unknown peelcost structure: %s\n", structure_names[i].c_str());
+            return 1;
+        }
+        candidates.push_back(candidate);
+    }
+
+    std::vector<PrecodeModel> precodes;
+    for (size_t i = 0; i < precode_names.size(); ++i)
+    {
+        PrecodeModel model;
+        if (!MakePrecodeModel(precode_names[i], model))
+        {
+            std::fprintf(stderr,
+                "unknown peelcost precode: %s\n", precode_names[i].c_str());
+            return 1;
+        }
+        precodes.push_back(model);
+    }
+
+    std::printf(
+        "# peelcost: trials=%u solver=%s heavy=%u seed=0x%llx\n",
+        trials,
+        solver_name.c_str(),
+        heavy_rows,
+        (unsigned long long)seed);
+    std::printf(
+        "# cost model is a block-XOR proxy: matrix_xors + precode_gen + "
+        "N*solve_width + solve_width^2/2 + H*solve_width\n");
+    std::printf(
+        "# precode schemes change width/generation estimates only; "
+        "rank and constraint-row effects require precode_sim\n");
+    std::printf(
+        "N,bb,overhead,solver,structure,precode,D,ldpc_cols,dense_rows,H,"
+        "trials,resid_cols_mu,resid_cols_max,resid_rows_mu,matrix_refs_mu,"
+        "matrix_xors_mu,legacy_total_xors_mu,solve_width_mu,"
+        "precode_gen_xors_mu,backsub_xors_mu,ge_block_xors_mu,"
+        "heavy_muladds_mu,total_block_xors_mu\n");
+
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const uint32_t N = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+
+        if (N < 2u || N > 65535u || block_bytes < 1u)
+        {
+            std::fprintf(stderr,
+                "peelcost N must be in [2,65535] and bb must be positive\n");
+            return 1;
+        }
+
+        for (int overhead_value : Overheads)
+        {
+            if (overhead_value < 0 ||
+                N + (uint32_t)overhead_value > 65535u)
+            {
+                std::fprintf(stderr,
+                    "peelcost overhead must be non-negative and N+overhead "
+                    "must be <= 65535\n");
+                return 1;
+            }
+            const uint32_t overhead = (uint32_t)overhead_value;
+            for (size_t c = 0; c < candidates.size(); ++c)
+            {
+                wirehair_v2::PeelingCodec codec =
+                    candidates[c].UsePolicy ?
+                    wirehair_v2::SelectPeelingCodec(N, block_bytes) :
+                    candidates[c].Codec;
+                codec.Solver = solver;
+                codec.SolverCandidateLimit =
+                    solver == wirehair_v2::PeelSolver::KsBmaxTop16 ? 16u : 0u;
+
+                std::vector<wirehair_v2::PeelEvaluation> evals;
+                evals.reserve(trials);
+                for (uint32_t trial = 0; trial < trials; ++trial)
+                {
+                    const uint64_t matrix_seed =
+                        PeelCostMatrixSeed(
+                            seed, N, overhead, trial);
+                    const std::vector<std::vector<uint16_t> > rows =
+                        wirehair_v2::GeneratePeelMatrixRows(
+                            codec, N, N + overhead, matrix_seed);
+                    evals.push_back(
+                        wirehair_v2::EvaluatePeelingRows(codec, N, rows));
+                }
+
+                for (size_t p = 0; p < precodes.size(); ++p)
+                {
+                    const PrecodeRecipe recipe =
+                        BuildPrecodeRecipe(precodes[p], N, heavy_rows);
+                    PeelCostAccum acc;
+                    for (size_t trial = 0; trial < evals.size(); ++trial) {
+                        AddPeelCostTrial(acc, evals[trial], recipe);
+                    }
+
+                    std::printf(
+                        "%u,%u,%u,%s,%s,%s,%u,%u,%u,%u,%llu,"
+                        "%.4f,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                        "%.4f,%.4f,%.4f,%.4f\n",
+                        N,
+                        block_bytes,
+                        overhead,
+                        wirehair_v2::ToString(solver),
+                        candidates[c].Name.c_str(),
+                        precodes[p].Name.c_str(),
+                        recipe.Columns,
+                        recipe.LdpcColumns,
+                        recipe.DenseRows,
+                        recipe.HeavyRows,
+                        (unsigned long long)acc.Trials,
+                        CostMean(acc.ResidualColumns, acc.Trials),
+                        acc.ResidualColumnsMax,
+                        CostMean(acc.ResidualRows, acc.Trials),
+                        CostMean(acc.MatrixRefs, acc.Trials),
+                        CostMean(acc.MatrixXors, acc.Trials),
+                        CostMean(acc.LegacyTotalXors, acc.Trials),
+                        CostMean(acc.SolveWidth, acc.Trials),
+                        CostMean(acc.PrecodeGenXors, acc.Trials),
+                        CostMean(acc.BackSubXors, acc.Trials),
+                        CostMean(acc.GeBlockXors, acc.Trials),
+                        CostMean(acc.HeavyMuladds, acc.Trials),
+                        CostMean(acc.TotalBlockXors, acc.Trials));
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 int CmdDenseCheck(int argc, char** argv)
 {
     uint32_t N = 7533u;
@@ -1367,7 +1919,7 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|seedtable|densecheck|densetune|densecount|densegrid [opts]\n");
+            "usage: wirehair_v2_bench compare|seedtable|peelcost|densecheck|densetune|densecount|densegrid [opts]\n");
         return 1;
     }
     if (!std::strcmp(argv[1], "compare")) {
@@ -1375,6 +1927,9 @@ int main(int argc, char** argv)
     }
     if (!std::strcmp(argv[1], "seedtable")) {
         return CmdSeedTable(argc - 2, argv + 2);
+    }
+    if (!std::strcmp(argv[1], "peelcost")) {
+        return CmdPeelCost(argc - 2, argv + 2);
     }
     if (!std::strcmp(argv[1], "densecheck")) {
         return CmdDenseCheck(argc - 2, argv + 2);
