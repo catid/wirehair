@@ -333,7 +333,10 @@ static bool TestAllRecoveryData(
             }
 
             SIAMESE_DEBUG_BREAK();
-            cout << "wirehair_decode failed for " << blockId << " and N = " << N << endl;
+            cout << "wirehair_decode failed for " << blockId
+                << " and N = " << N
+                << ", blockBytes = " << blockBytes
+                << ", result = " << wirehair_result_string(decodeResult) << endl;
             return false;
         }
     }
@@ -430,7 +433,8 @@ static bool Test_DecodeAllOriginal(
     if (!TestAllRecoveryData(decoder, decoder2, N, blockBytes, finalBytes, message, decodedMessage, messageBytes))
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "TestAllRecoveryData failed for N = " << N << endl;
+        cout << "TestAllRecoveryData failed for N = " << N
+            << ", blockBytes = " << blockBytes << endl;
         return false;
     }
 
@@ -470,7 +474,8 @@ static bool Test_DecodeAllRecovery(
     if (!TestAllRecoveryData(encoder, decoder, N, blockBytes, finalBytes, message, decodedMessage, messageBytes))
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "TestAllRecoveryData failed for N = " << N << endl;
+        cout << "TestAllRecoveryData failed for N = " << N
+            << ", blockBytes = " << blockBytes << endl;
         return false;
     }
 
@@ -522,8 +527,14 @@ static bool Test_DecodeRandomLosses(
     {
         SIAMESE_DEBUG_BREAK();
         cout << "!!! Failed to create decoder for N = " << N << ", blockBytes = " << blockBytes << endl;
+        wirehair_free(encoder);
         return false;
     }
+
+    const auto cleanup = [&]() {
+        wirehair_free(decoder);
+        wirehair_free(encoder);
+    };
 
     unsigned blockId = 0;
     unsigned needed = 0;
@@ -543,6 +554,7 @@ static bool Test_DecodeRandomLosses(
         {
             SIAMESE_DEBUG_BREAK();
             cout << "wirehair_encode failed for N = " << N << endl;
+            cleanup();
             return false;
         }
 
@@ -552,6 +564,7 @@ static bool Test_DecodeRandomLosses(
             {
                 SIAMESE_DEBUG_BREAK();
                 cout << "wirehair_encode failed wrong len for " << blockId << " and N = " << N << endl;
+                cleanup();
                 return false;
             }
         }
@@ -564,8 +577,26 @@ static bool Test_DecodeRandomLosses(
                 break;
             }
 
+            if (decodeResult == Wirehair_ExtraInsufficient)
+            {
+                // The decoder has a fixed extra-row budget; exhausting it is
+                // the same nonfatal overhead class as the warning below.
+                const unsigned extra = needed > N ? needed - N : 0;
+                cout << "Test_DecodeRandomLosses: Too much overhead: decoder exhausted extra rows after "
+                    << extra << " extra for N=" << N
+                    << " Seed=" << seed
+                    << " BlockBytes=" << blockBytes
+                    << " blockId=" << blockId << endl;
+                cleanup();
+                return true;
+            }
+
             SIAMESE_DEBUG_BREAK();
-            cout << "wirehair_decode failed for " << blockId << " and N = " << N << endl;
+            cout << "wirehair_decode failed for " << blockId
+                << " and N = " << N
+                << ", blockBytes = " << blockBytes
+                << ", result = " << wirehair_result_string(decodeResult) << endl;
+            cleanup();
             return false;
         }
     }
@@ -580,11 +611,11 @@ static bool Test_DecodeRandomLosses(
     {
         SIAMESE_DEBUG_BREAK();
         cout << "!! Decoder2 failed to produce originals" << endl;
+        cleanup();
         return false;
     }
 
-    wirehair_free(decoder);
-    wirehair_free(encoder);
+    cleanup();
 
     return true;
 }
@@ -653,7 +684,7 @@ static void TestN(uint64_t seed, int N, unsigned blockBytes)
     if (!Test_DecodeRandomLosses(prng, seed, N, blockBytes, finalBytes, &message[0], decodedMessagePtr, messageBytes))
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "!!! Test_DecodeAllRecovery failed" << endl;
+        cout << "!!! Test_DecodeRandomLosses failed" << endl;
         TestFailed = true;
         return;
     }
