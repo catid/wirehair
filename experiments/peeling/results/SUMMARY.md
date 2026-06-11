@@ -1152,3 +1152,36 @@ itself is the harm, and even the soft power-of-two-choices variant loses ~9x.
 Irregular (Poisson) column degrees are necessary for peel avalanches.  The
 experiment was stopped after seed 1; the effect size makes more seeds
 pointless.
+
+### Named v2 peelcost candidate expansion
+
+Follow-up protocol: `wirehair_v2_bench peelcost`, `ks_bmax_top16`, 13 named v2
+structures, N {320, 3200, 32000}, block bytes {1280, 102400, 1048576},
+overhead {0, 1, 2}, dense and ldpcdense precode proxies, 8 paired trials
+(`v2_peelcost_named_N320_3200_32000_t8.csv`).  Validation: rebuilt
+`wirehair_v2_bench`; CSV shape is 702 data rows = 3 N x 3 block sizes x
+3 overheads x 13 structures x 2 precodes, with all rows at 8 trials.
+
+Readout:
+
+- Small N still wants a small cap under this named-candidate proxy.  At N=320,
+  dense/1280B/OH0, `lt_m2_c96` is best at 20.38k block-XOR proxy vs policy
+  20.74k (0.983x).  At OH2, `lt_m1_c64` is best at 19.78k vs policy 20.94k
+  (0.945x).
+- Medium N shifts to high caps.  At N=3200, dense/1280B, `lt_m2_c1024` wins at
+  OH0 and OH2 (0.680x and 0.761x policy), while `lt_m2_c512` wins OH1
+  (0.730x policy).  ldpcdense changes the absolute proxy slightly but not the
+  winner.
+- Large N is dominated by `lt_m2_c1024` in every N=32000 cell across block
+  size, overhead, and dense/ldpcdense proxy.  Dense ratios versus policy are
+  0.60-0.63 at 1280B, 0.71-0.75 at 100 KiB, and 0.75-0.80 at 1 MiB.  The
+  smaller apparent large-block gain comes from the block-size-dependent policy
+  baseline, not from candidate cost changing.
+- The explicit low-degree robust mixtures are not a large-N path here:
+  `robust_d1_001_d2_003` is near the small-N OH2 frontier, but at N=32000/OH0
+  it leaves 547 residual columns versus 109 for `lt_m2_c1024`.
+
+This does not supersede the E2 fold/cap sweep and is not a decode-failure
+model.  It strengthens the existing direction for `wirehair-vbk`: cap should
+scale upward with N, candidate promotion still requires precode_sim rank/failure
+validation with the selected dense/LDPC-heavy rule.
