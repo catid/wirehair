@@ -107,3 +107,98 @@ simple unless a later RHS/value-schedule metric shows a real block-XOR win.
    small vs the savings), LDPC parity-check value generation in the encoder
    pipeline, and production peeling treats constraint rows differently (the
    simulator lets precode rows peel, which is the point of the staircase).
+
+## June 2026 Big-K Session
+
+New artifacts:
+
+- `e3a_K16000.csv`, `e3a_K20000.csv`, `e3a_K32000.csv`,
+  `e3a_K48000.csv`, `e3a_K64000.csv`: paired big-K hybrid grids.
+- `e1_hgrid_K32000.csv`, `e1_hgrid_K64000.csv`: GE replay and heavy-band
+  census for the chosen frontier.
+- `e5_K32000.csv`, `e5_K64000.csv`: shuffle2 and n1/n12 implementability
+  checks at the full-size D2=12 rule point.
+
+### Rule
+
+Use the existing production dense-count table for S, add D2=12 extra dense
+binary rows, and use H=12 full-width heavy rows for the conservative prototype
+and Phase-B certification candidate:
+
+`ldpcdense_s<GetDenseCount(K)>_d12_h12`
+
+This rule is intentionally conservative.  The H=6 `ldpcdense_sDprod_d12`
+rows are already strong at K=32000 and K=64000, but H=12 provides the desired
+tail suppression without giving up the LDPC sparse-solve savings.
+
+| K | dense H6 fail OH0 | selected H12 rule | fail OH0/OH1/OH2 | sparse XORs vs dense | GE vs dense |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 32000 | 2.20% | `ldpcdense_s190_d12_h12` | 0.033% / 0.033% / 0.000% | -29.6% | -54.4% real |
+| 48000 | 1.77% | `ldpcdense_s370_d12_h12` | 0.000% / 0.000% / 0.000% | -35.0% | -55.2% estimated |
+| 64000 | 1.93% | `ldpcdense_s346_d12_h12` | 0.067% / 0.000% / 0.000% | -31.4% | -64.2% real |
+
+K=48000 keeps the production table value S=370 even though the table is
+non-monotone relative to K=64000 S=346.  The measured K=48000 point is strong,
+so do not smooth the table before certification.
+
+### Cost Model Correction
+
+The old GE-bitop columns overstate absolute GE replay work by about 5x at big
+K.  GE replay measured:
+
+- K=32000 dense H6: estimated 1.52M bitops, real 297.8k bitops.
+- K=64000 dense H6: estimated 9.42M bitops, real 1.71M bitops.
+
+The relative LDPC and hybrid savings survive replay.  At K=64000, pure LDPC
+H6 has -32.3% sparse XORs and -67.7% real GE bitops vs dense.  The conservative
+`ldpcdense_s346_d12_h12` point has -31.4% sparse XORs and -64.2% real GE
+bitops vs dense.
+
+`rank_total.py` folds receive XORs, precode generation, sparse solve,
+backsubstitution, replayed GE row ops where available, and calibrated heavy
+GF(256) muladds into a single block-op score.  At 1280-byte blocks and OH0,
+pure `ldpc_h12` is about 1.1-1.2% cheaper than dense at K=32000/64000, but it
+has no dense binary safety rows.  The conservative full hybrid H12 point is
+about +4.9% total block ops at K=32000 and +2.6% at K=64000 vs dense because
+of LDPC parity generation, while buying much lower failure tails.
+
+### Heavy Band
+
+The big-K GE replay census gives the production band target:
+
+- H=6 rows: W99 is 13-14, with `def_outside_w18_rate` <= 0.0013.
+- H=12 rows: W99 is 17-20, with OH0 `def_outside_w18_rate` around
+  0.012-0.021 for the tested dense/LDPC/hybrid rows.
+
+An H=12 production path should not rely on the current 18-column heavy band
+being sufficient for every row.  Either support a wider/full heavy solve in the
+v2 path or certify a precise band/table regeneration rule.
+
+### E5 Implementability
+
+At K=64000, the baseline H6 point is:
+
+`ldpcdense_s346_d12`: OH0/OH1/OH2 fail = 1.133% / 0.100% / 0.133%.
+
+Shuffle2 alone reduces precode generation work from 353.2k to 224.5k XORs, but
+it is not reliability-neutral at max K under H=6:
+
+`ldpcdense_s346_d12_s2`: 1.733% / 0.167% / 0.200%.
+
+Re-scoring the same deficit PDFs at H=12 brings shuffle2 OH0 back to the same
+observed 0.067% tail as the baseline H12 rule, so shuffle2 is a certification
+candidate only if the implementation commits to H=12.  It should not be the
+default H=6-compatible spec.
+
+n12 is not viable at max K:
+
+- `ldpcdense_n12_s346_d12`: 5.033% / 2.533% / 2.400%.
+- `ldpcdense_n12_s346_d12_s2`: 35.067% / 26.767% / 24.900%.
+
+The high-D2 control `ldpcdense_s346_d104` gives 1.267% / 0.000% / 0.000%, but
+GE grows to about 5.52M estimated bitops vs 3.22M for D2=12, so it is not the
+frontier unless certification requires OH1/OH2 zero-failure margins.
+
+Recommendation for Phase B: certify the iid D2=12 H12 rule as the primary
+candidate, optionally include shuffle2 H12 as a secondary generation-saving
+candidate, and do not include n12 or n12+shuffle2 except as rejected controls.
