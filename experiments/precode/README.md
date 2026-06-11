@@ -72,7 +72,11 @@ popcount (cheapest-pivot-first, a production-like heuristic;
 `--ge-replay-reverse` flips to descending order as a sensitivity check, and
 implies `--ge-replay`).  Plain GE then runs column by column: the first
 remaining row with the column bit set becomes the pivot and is XORed into
-every remaining row holding that bit.  Recorded per trial:
+every remaining row holding that bit.  `--ge-pivot-window N` implies
+`--ge-replay` and changes only the replay pivot choice: it scans the next `N`
+remaining rows for the current column and chooses the candidate with the lowest
+remaining tail popcount, falling back to the first later candidate if the
+bounded window has none.  Recorded per trial:
 
 - word XORs: each elimination costs `words - col/64` 64-bit word XORs, the
   words a triangular implementation actually touches (`ge_real_bitops_mu`);

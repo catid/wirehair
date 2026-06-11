@@ -83,6 +83,19 @@ from received-row deficiencies, not the precode.  The precode determines
 whether you *reach* that floor and what the solve costs; H (and OH) determine
 the floor itself.
 
+## Pivot-window GE replay (`wirehair-ht0`)
+
+`ht0_ge_pivot_window.csv` adds a replay-only `--ge-pivot-window` screen over
+K={1000,3200,10000}, schemes={dense,ldpc}, OH=0, 300 paired trials.  Windows
+16/64/256 choose the candidate pivot with the lowest remaining tail popcount
+within the next N replay rows.
+
+Readout: pivot windows cut the fill-in counter by 80-98%, but they do not cut
+the actual replayed GE work.  `ge_real_bitops_mu` and `ge_real_rowops_mu` stay
+flat or drift slightly upward (roughly -0.1% to +0.3% across this screen).  This
+does not justify a production pivot-selection change; keep production pivoting
+simple unless a later RHS/value-schedule metric shows a real block-XOR win.
+
 ## Interpretation for v2
 
 1. The dense binary matrix can be replaced by an LDPC staircase + a few dense

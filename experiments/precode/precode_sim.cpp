@@ -1104,7 +1104,9 @@ static ResidualAnalysis AnalyzeResidual(
 // a production-like heuristic; --ge-replay-reverse flips to descending as a
 // sensitivity check) and the order is fixed up front, not re-sorted during
 // elimination.  For each column j in order, the first remaining row with bit j
-// becomes the pivot and is XORed into every remaining row that has bit j set.
+// normally becomes the pivot.  --ge-pivot-window=N instead scans the next N
+// remaining rows and picks the candidate with the lowest remaining tail
+// popcount, falling back to the first later candidate if the window has none.
 // Counted per elimination: one row op, and (words - j/64) word XORs -- the
 // 64-bit words a triangular implementation actually touches.  Fill-in is the
 // popcount growth of a pivot row above its initial weight, measured at the
@@ -1122,10 +1124,24 @@ struct GeReplayResult
     bool DefOutsideW18;      // any deficient from-the-end position >= 18
 };
 
+static unsigned TailPopcount(
+    const std::vector<uint64_t>& row,
+    unsigned word,
+    uint64_t mask,
+    unsigned words)
+{
+    unsigned pop = (unsigned)__builtin_popcountll(row[word] & ~(mask - 1u));
+    for (unsigned w = word + 1u; w < words; ++w) {
+        pop += (unsigned)__builtin_popcountll(row[w]);
+    }
+    return pop;
+}
+
 static GeReplayResult ReplayGe(
     std::vector<std::vector<uint64_t> > rows, // by value: consumed as workspace
     unsigned R,
-    bool descending_weight)
+    bool descending_weight,
+    unsigned pivot_window = 0)
 {
     GeReplayResult out;
     out.Rank = 0;
@@ -1177,7 +1193,30 @@ static GeReplayResult ReplayGe(
         const unsigned word = j >> 6;
         const uint64_t mask = UINT64_C(1) << (j & 63u);
         size_t found = SIZE_MAX;
-        for (size_t r = pivot_count; r < n; ++r)
+        if (pivot_window > 0u)
+        {
+            const size_t window_end = std::min(
+                n, pivot_count + (size_t)pivot_window);
+            unsigned best_tail = UINT32_MAX;
+            for (size_t r = pivot_count; r < window_end; ++r)
+            {
+                if (work[r][word] & mask)
+                {
+                    const unsigned tail = TailPopcount(work[r], word, mask, words);
+                    if (tail < best_tail)
+                    {
+                        best_tail = tail;
+                        found = r;
+                        if (tail <= 1u) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        const size_t search_begin =
+            found == SIZE_MAX ? pivot_count : pivot_count + (size_t)pivot_window;
+        for (size_t r = search_begin; found == SIZE_MAX && r < n; ++r)
         {
             if (work[r][word] & mask)
             {
@@ -1258,6 +1297,7 @@ static TrialResult RunTrial(
     const uint64_t* paired_recv_seed = nullptr,
     bool ge_replay = false,
     bool ge_replay_reverse = false,
+    unsigned ge_pivot_window = 0,
     unsigned max_inact = 0)
 {
     TrialResult t;
@@ -1311,7 +1351,8 @@ static TrialResult RunTrial(
     if (ge_replay)
     {
         const GeReplayResult rep =
-            ReplayGe(std::move(residual_bits), R, ge_replay_reverse);
+            ReplayGe(std::move(residual_bits), R, ge_replay_reverse,
+                     ge_pivot_window);
         if (rep.Rank != res.Rank)
         {
             fprintf(stderr,
@@ -2180,7 +2221,7 @@ static bool SelfTest()
         }
         const TrialResult capped = RunTrial(
             scheme, 64, 0, RowDist::Wirehair, 3, 24681357,
-            nullptr, false, false, full.Inactivated - 1u);
+            nullptr, false, false, 0, full.Inactivated - 1u);
         if (!capped.Runaway || capped.Success || capped.SuccessNoHeavy)
         {
             fprintf(stderr, "self-test: max-inact cap did not abort\n");
@@ -2188,7 +2229,7 @@ static bool SelfTest()
         }
         const TrialResult exact = RunTrial(
             scheme, 64, 0, RowDist::Wirehair, 3, 24681357,
-            nullptr, false, false, full.Inactivated);
+            nullptr, false, false, 0, full.Inactivated);
         if (exact.Runaway || exact.Def != full.Def ||
             exact.Inactivated != full.Inactivated ||
             exact.ResidualRank != full.ResidualRank)
@@ -2237,6 +2278,7 @@ int main(int argc, char** argv)
     RowDist dist = RowDist::Wirehair;
     unsigned mix = 3;
     unsigned max_inact = 0; // 0 = unlimited
+    unsigned ge_pivot_window = 0; // 0 = first eligible pivot
     bool self_test = false;
     bool ge_replay = false;
     bool ge_replay_reverse = false;
@@ -2307,6 +2349,10 @@ int main(int argc, char** argv)
         }
         else if (arg == "--max-inact") {
             ParseUnsigned(next(), max_inact);
+        }
+        else if (arg == "--ge-pivot-window") {
+            ge_replay = true; // pivot-window selection is a replay mode
+            ParseUnsigned(next(), ge_pivot_window);
         }
         else if (arg == "--ge-replay") {
             ge_replay = true;
@@ -2395,7 +2441,8 @@ int main(int argc, char** argv)
                         const TrialResult t = RunTrial(
                             scheme, K, oh, dist, mix, seed,
                             paired ? &recv_seed : nullptr,
-                            ge_replay, ge_replay_reverse, max_inact);
+                            ge_replay, ge_replay_reverse, ge_pivot_window,
+                            max_inact);
                         std::lock_guard<std::mutex> lock(agg_mutex);
                         agg.Add(t);
                     }
