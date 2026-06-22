@@ -764,7 +764,8 @@ static double seed_mean(int N, int bb, int startMode, double loss, int pseed, in
         wh_set_override(ovrN, -1, pseed, dseed);
         uint32_t extra = 0;
         int rc = roundtrip(rng.next(), N, bb, startMode, loss, &extra, nullptr);
-        if (rc == 0) osum += extra; else fail++;
+        if (rc == 0) osum += extra;
+        else { fail++; break; }
     }
     wh_set_override(-1, -1, -1, -1);
     return fail ? 1e9 : (double)osum / trials;
@@ -776,19 +777,27 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
     std::atomic<long> idx{0};
     std::atomic<uint64_t> osum{0};
     std::atomic<long> fail{0};
+    std::atomic<bool> stop{false};
     const int ovrN = (pseed < 0 && dseed < 0) ? -1 : N;
     vector<thread> ts;
     for (int t = 0; t < threads; ++t) ts.emplace_back([&]() {
         uint64_t lsum = 0; long lf = 0;
         for (;;) {
+            if (stop.load()) break;
             long k = idx.fetch_add(128);
             if (k >= trials) break;
             long end = k + 128; if (end > trials) end = trials;
             for (long j = k; j < end; ++j) {
+                if (stop.load()) break;
                 wh_set_override(ovrN, -1, pseed, dseed);
                 uint32_t extra = 0;
                 int rc = roundtrip(base + (uint64_t)j * 2654435761ull, N, bb, startMode, loss, &extra, nullptr);
-                if (rc == 0) lsum += extra; else lf++;
+                if (rc == 0) lsum += extra;
+                else {
+                    lf++;
+                    stop.store(true);
+                    break;
+                }
             }
         }
         osum += lsum; fail += lf;
@@ -796,6 +805,40 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
     });
     for (auto& th : ts) th.join();
     return fail.load() ? 1e9 : (double)osum.load() / trials;
+}
+
+static int cmd_seedmean(int argc, char** argv) {
+    int threads = resolve_threads();
+    int N = 0, pseed = -1, dseed = -1;
+    int bb = 64, startMode = 0;
+    long trials = 10000;
+    double loss = 0.10;
+    uint64_t base = 0x51EED00DULL;
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--N") && i + 1 < argc) N = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n") && i + 1 < argc) N = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pseed") && i + 1 < argc) pseed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dseed") && i + 1 < argc) dseed = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) trials = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--bb") && i + 1 < argc) bb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) loss = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) startMode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) base = strtoull(argv[++i], nullptr, 0);
+    }
+    if (N < 2 || N > 64000 || bb <= 0 || trials < 1 ||
+        pseed < -1 || pseed > 255 || dseed < -1 || dseed > 255 ||
+        !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        (startMode != 0 && startMode != 1))
+    {
+        fprintf(stderr, "seedmean requires 2 <= --N <= 64000, positive --bb/--trials, seeds in [-1,255], 0 <= --loss <= 0.99, and --startmode 0 or 1\n");
+        return 2;
+    }
+    const double mean = seed_mean_par(N, bb, startMode, loss, pseed, dseed, trials, base, threads);
+    printf("# seedmean: threads=%d trials=%ld bb=%d startMode=%d loss=%.2f seed=0x%llx\n",
+           threads, trials, bb, startMode, loss, (unsigned long long)base);
+    printf("%-8s %8s %8s %8s %12s %8s\n", "N", "pseed", "dseed", "trials", "mean", "failed");
+    printf("%-8d %8d %8d %8ld %12.4f %8d\n", N, pseed, dseed, trials, mean, mean >= 1e8 ? 1 : 0);
+    return 0;
 }
 
 // For each weak N, search peel seeds [0,255] (parallel across seeds), pick the best, and verify
@@ -1152,10 +1195,18 @@ int main(int argc, char** argv) {
 #endif
     if (argc < 2) {
 #ifdef WH_COUNT
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch|peelstat] [--threads T] [opts]\n");
+#ifdef WH_SEED_KNOBS
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch|peelstat] [--threads T] [opts]\n");
+#else
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|peelstat] [--threads T] [opts]\n");
+#endif
         fprintf(stderr, "  bench/count/peelstat accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
 #else
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedsearch] [--threads T] [opts]\n");
+#ifdef WH_SEED_KNOBS
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch] [--threads T] [opts]\n");
+#else
+        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan] [--threads T] [opts]\n");
+#endif
         fprintf(stderr, "  bench accepts --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
 #endif
         return 1;
@@ -1172,6 +1223,7 @@ int main(int argc, char** argv) {
     if (mode == "repro") return cmd_repro(ac, av);
     if (mode == "scan")  return cmd_scan(ac, av);
 #ifdef WH_SEED_KNOBS
+    if (mode == "seedmean") return cmd_seedmean(ac, av);
     if (mode == "seedsearch") return cmd_seedsearch(ac, av);
 #endif
     if (mode == "micro") return cmd_micro(ac, av);
