@@ -118,6 +118,8 @@ New artifacts:
   census for the chosen frontier.
 - `e5_K32000.csv`, `e5_K64000.csv`: shuffle2 and n1/n12 implementability
   checks at the full-size D2=12 rule point.
+- `phaseb_cert_20260626.csv`: paired Phase-B certification run with seed
+  `0x5eed0002`, OH0/OH1, and 200k/100k/50k trials by size band.
 
 ### Rule
 
@@ -140,6 +142,39 @@ tail suppression without giving up the LDPC sparse-solve savings.
 K=48000 keeps the production table value S=370 even though the table is
 non-monotone relative to K=64000 S=346.  The measured K=48000 point is strong,
 so do not smooth the table before certification.
+
+### Phase B Certification
+
+`phaseb_cert_20260626.csv` certifies the primary
+`ldpcdense_s<GetDenseCount(K)>_d12_h12` rule and secondary
+`ldpcdense_s<GetDenseCount(K)>_d12_s2_h12` rule against dense with paired
+received-row randomness.  Trial counts were 200k for K<=20000, 100k at
+K=32000, and 50k at K=48000/64000.
+
+The primary rule clears the failure gate at every K and OH0/OH1; every measured
+failure rate is below dense, with the widest primary 95% binomial half-width
+0.020pp at K=64000 OH0.  For K>=10000 it also clears the sparse-solve gate by
+27.9-34.9%.  The inactivation gate needs the same interpretation as the H=12
+rule selection: raw `inact_mu` is only -6.7% at K=10000 because the candidate
+has six additional heavy rows, but `rank_mu` (the non-heavy residual width) is
+-10.1% there and improves to -30.1% by K=64000.  If the ship gate is interpreted
+as literal raw `inact_mu`, K=10000 needs a small retune; under residual-width
+interpretation the primary table is certified.
+
+| K | dense fail OH0/OH1 | primary fail OH0/OH1 | primary rank / raw inact / sparse | s2 fail OH0/OH1 | s2 gen vs primary |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10000 | 1.754%/0.179% | 0.042%/0.018% | -10.1% / -6.7% / -27.9% | 0.085%/0.046% | -36.5% |
+| 16000 | 1.654%/0.150% | 0.053%/0.017% | -17.0% / -14.3% / -28.4% | 0.093%/0.046% | -36.4% |
+| 20000 | 1.618%/0.101% | 0.049%/0.009% | -19.7% / -17.5% / -28.8% | 0.071%/0.026% | -36.4% |
+| 32000 | 1.724%/0.112% | 0.038%/0.002% | -24.9% / -23.3% / -29.6% | 0.079%/0.030% | -36.4% |
+| 48000 | 1.610%/0.010% | 0.034%/0.000% | -24.2% / -23.3% / -34.9% | 0.030%/0.000% | -36.5% |
+| 64000 | 1.710%/0.186% | 0.052%/0.032% | -30.1% / -29.2% / -31.4% | 0.156%/0.108% | -36.4% |
+
+The `_s2_h12` variant is production-attractive because it cuts D2 generation by
+36.4-36.5% and clears the dense-relative failure and sparse-solve gates.  It is
+not the primary certified rule: it leaks relative to iid D2 at max K
+(K=64000 OH1 is 0.108% vs 0.032%), and its K=10000 residual-width reduction is
+just under 10%.
 
 ### Cost Model Correction
 
