@@ -10,6 +10,8 @@ CXX="${CXX:-g++}"
     -I"$ROOT" -I"$ROOT/include" \
     "$ROOT/experiments/precode/precode_sim.cpp" \
     "$ROOT/WirehairTools.cpp" \
+    "$ROOT/codec/WirehairV2Precode.cpp" \
+    "$ROOT/gf256.cpp" \
     -o "$OUT"
 
 echo "built $OUT"

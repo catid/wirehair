@@ -30,6 +30,8 @@
 
 #include "WirehairTools.h"
 
+#include "codec/WirehairV2Precode.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -266,11 +268,15 @@ enum class SchemeKind
     LdpcDense,   // S staircase parity columns + D2 dense p=0.5 rows over all
                  // K + S + D2 binary columns: staircase peels cheaply, dense
                  // rows pin the residual tail
-    LdpcDenseShuffle2 // like LdpcDense but the D2 rows are generated
+    LdpcDenseShuffle2, // like LdpcDense but the D2 rows are generated
                  // Shuffle-2-style from a seeded column deck (production
                  // MultiplyDenseRows mechanics; see README for the exact
                  // rule): first row = half the deck, each next row = previous
                  // row with exactly 2 deck-driven bit flips
+    CodecPort    // constraint rows imported from the actual codec-side
+                 // construction (codec/WirehairV2Precode.cpp: PCGRandom
+                 // staircase + unbiased Shuffle-2 deck), so the certified
+                 // rank/failure machinery here validates the real port
 };
 
 struct Scheme
@@ -667,6 +673,56 @@ static GeneratedSystem GenerateSystem(
                     sys.PrecodeGenXors += 2u;
                 }
             }
+        }
+        break;
+    }
+    case SchemeKind::CodecPort:
+    {
+        // Constraint rows from the real codec-side construction so the
+        // rank/failure machinery here certifies the port itself.  The
+        // codec uses its own PCGRandom streams seeded from `seed`; the
+        // sim's constraint rng is deliberately unused in this branch
+        // (received rows keep their own stream, paired or not).
+        wirehair_v2::PrecodeParams params;
+        params.BlockCount = K;
+        params.Staircase = scheme.D;
+        params.DenseRows = scheme.Dense2;
+        params.HeavyRows = scheme.H;
+        params.SourceHits = scheme.N1;
+        params.Seed = seed;
+
+        wirehair_v2::PrecodeSystem codec_sys;
+        if (!wirehair_v2::BuildPrecodeSystem(params, codec_sys))
+        {
+            fprintf(stderr,
+                "codecport: BuildPrecodeSystem rejected K=%u S=%u D2=%u N1=%u\n",
+                K, scheme.D, scheme.Dense2, scheme.N1);
+            exit(1);
+        }
+
+        for (const std::vector<uint32_t>& columns : codec_sys.StaircaseRows)
+        {
+            SparseRow row;
+            row.IsConstraint = true;
+            row.Columns = columns;
+            if (row.Columns.size() > 1u) {
+                sys.PrecodeGenXors += row.Columns.size() - 1u;
+            }
+            sys.Rows.push_back(std::move(row));
+        }
+
+        // Same incremental-generation accounting as LdpcDenseShuffle2:
+        // first-row accumulation, then two block XORs per subsequent row
+        const unsigned span = K + scheme.D + scheme.Dense2;
+        bool first_dense = true;
+        for (const std::vector<uint32_t>& columns : codec_sys.DenseRowColumns)
+        {
+            SparseRow row;
+            row.IsConstraint = true;
+            row.Columns = columns;
+            sys.PrecodeGenXors += first_dense ? ((span + 1u) >> 1) : 2u;
+            first_dense = false;
+            sys.Rows.push_back(std::move(row));
         }
         break;
     }
@@ -1565,6 +1621,18 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
             out.H = 16;
         }
     }
+    else if (body == "codecport")
+    {
+        // Certified rule as ported to codec/WirehairV2Precode.cpp:
+        // S = GetDenseCount(K), D2 = 12, N1 = 2, default H = 12
+        out.Kind = SchemeKind::CodecPort;
+        out.D = dense_count;
+        out.Dense2 = 12;
+        out.N1 = 2;
+        if (token.find("_h") == std::string::npos) {
+            out.H = 12;
+        }
+    }
     else
     {
         return false;
@@ -1576,7 +1644,8 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
         (out.Kind == SchemeKind::LdpcStair ||
          out.Kind == SchemeKind::LdpcTri ||
          out.Kind == SchemeKind::LdpcDense ||
-         out.Kind == SchemeKind::LdpcDenseShuffle2)) {
+         out.Kind == SchemeKind::LdpcDenseShuffle2 ||
+         out.Kind == SchemeKind::CodecPort)) {
         return false;
     }
 
@@ -1731,7 +1800,8 @@ static bool SelfTest()
         "none", "dense_d8", "densesparse_w6_d8", "ldpc_s5", "ldpctri_s5",
         "heavyonly_h4", "ldpcdense_s5_d4", "ldpcdense_s6_d3_h8",
         "ldpcdense_s5_d4_s2", "ldpcdense_n12_s5_d4", "ldpcdense_n14_s5_d4",
-        "ldpcdense_n14_s5_d4_s2", "ldpcdense_n12_s6_d3_s2_h8"
+        "ldpcdense_n14_s5_d4_s2", "ldpcdense_n12_s6_d3_s2_h8",
+        "codecport"
     };
     const char* invalid_tokens[] = {
         "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4", "ldpcdense_s0_d4_s2",
