@@ -1621,14 +1621,24 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
             out.H = 16;
         }
     }
-    else if (body == "codecport")
+    else if (body == "codecport" || body.rfind("codecport_n1", 0) == 0)
     {
         // Certified rule as ported to codec/WirehairV2Precode.cpp:
-        // S = GetDenseCount(K), D2 = 12, N1 = 2, default H = 12
+        // S = GetDenseCount(K), D2 = 12, default H = 12.  N1 defaults to
+        // the handoff verdict (2); codecport_n1<X> overrides it so the
+        // K=10000 n12-leak decision can be measured on the real port.
         out.Kind = SchemeKind::CodecPort;
         out.D = dense_count;
         out.Dense2 = 12;
         out.N1 = 2;
+        if (body != "codecport")
+        {
+            unsigned n1 = 0;
+            if (!ParseUnsigned(body.substr(12), n1) || n1 < 1u || n1 > 8u) {
+                return false;
+            }
+            out.N1 = n1;
+        }
         if (token.find("_h") == std::string::npos) {
             out.H = 12;
         }
