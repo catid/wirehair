@@ -288,26 +288,71 @@ bool ComputePrecodeValues(
             }
         }
 
-        // Known parts: H accumulators, muladd per (row, known column)
+        // Known parts.  Coefficients repeat with period `window`, so when
+        // there are many more known columns than residues it is much
+        // cheaper to XOR same-residue columns into buckets first and
+        // muladd each bucket once per row: L XORs + H*window muladds
+        // instead of H*L muladds (~6x fewer block ops at K=3200).  The
+        // bucket buffer costs window*block_bytes, so huge blocks fall back
+        // to the direct path rather than allocating hundreds of MB.
         std::vector<uint8_t> rhs((size_t)H * block_bytes, 0);
-        uint32_t m = 0;
-        for (uint32_t c = 0; c < heavy_base; ++c)
+        const bool bucketed =
+            heavy_base >= 2u * window &&
+            (uint64_t)window * block_bytes <= (UINT64_C(64) << 20);
+        if (bucketed)
         {
-            const uint8_t* v = column_value(c);
+            std::vector<uint8_t> bucket((size_t)window * block_bytes, 0);
+            uint32_t m = 0;
+            for (uint32_t c = 0; c < heavy_base; ++c)
+            {
+                gf256_add_mem(
+                    bucket.data() + (size_t)m * block_bytes,
+                    column_value(c),
+                    bytes);
+                ++st.HeavyBucketXors;
+                if (++m >= window) {
+                    m = 0;
+                }
+            }
             for (uint32_t r = 0; r < H; ++r)
             {
-                const uint8_t y = coef[(size_t)r * window + m];
                 uint8_t* dst = rhs.data() + (size_t)r * block_bytes;
-                if (y == 1u) {
-                    gf256_add_mem(dst, v, bytes);
+                for (uint32_t mm = 0; mm < window; ++mm)
+                {
+                    const uint8_t y = coef[(size_t)r * window + mm];
+                    const uint8_t* v =
+                        bucket.data() + (size_t)mm * block_bytes;
+                    if (y == 1u) {
+                        gf256_add_mem(dst, v, bytes);
+                    }
+                    else {
+                        gf256_muladd_mem(dst, y, v, bytes);
+                    }
+                    ++st.HeavyMulAdds;
                 }
-                else {
-                    gf256_muladd_mem(dst, y, v, bytes);
-                }
-                ++st.HeavyMulAdds;
             }
-            if (++m >= window) {
-                m = 0;
+        }
+        else
+        {
+            uint32_t m = 0;
+            for (uint32_t c = 0; c < heavy_base; ++c)
+            {
+                const uint8_t* v = column_value(c);
+                for (uint32_t r = 0; r < H; ++r)
+                {
+                    const uint8_t y = coef[(size_t)r * window + m];
+                    uint8_t* dst = rhs.data() + (size_t)r * block_bytes;
+                    if (y == 1u) {
+                        gf256_add_mem(dst, v, bytes);
+                    }
+                    else {
+                        gf256_muladd_mem(dst, y, v, bytes);
+                    }
+                    ++st.HeavyMulAdds;
+                }
+                if (++m >= window) {
+                    m = 0;
+                }
             }
         }
 

@@ -55,8 +55,14 @@ struct PrecodeEncodeStats
     /// GF(2) Gauss-Jordan block XORs + solution copies for the dense corner
     uint64_t DenseSolveBlockOps;
 
+    /// Plain block XORs folding same-residue known columns into the
+    /// mod-(256 - H) residue buckets before the heavy accumulation
+    /// (model: K + S + D2 when the bucketed path is taken, else 0)
+    uint64_t HeavyBucketXors;
+
     /// GF(256) muladd-class block ops accumulating the heavy known parts
-    /// (model: H * (K + S + D2))
+    /// (model: H * min(K + S + D2, 256 - H) bucketed, H * (K + S + D2)
+    /// direct)
     uint64_t HeavyMulAdds;
 
     /// GF(256) block ops (muladd/div/copy) solving the H x H Cauchy corner
