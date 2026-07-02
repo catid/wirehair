@@ -7,6 +7,8 @@ add_library(wirehair_v2_policy
     WirehairV2Plan.h
     WirehairV2Policy.cpp
     WirehairV2Policy.h
+    WirehairV2Precode.cpp
+    WirehairV2Precode.h
     WirehairV2Seeds.cpp
     WirehairV2Seeds.h
 )
@@ -17,6 +19,9 @@ target_link_libraries(wirehair_v2_policy PUBLIC wirehair)
 if (BUILD_TESTS)
     add_executable(wirehair_v2_policy_test PolicyTest.cpp)
     target_link_libraries(wirehair_v2_policy_test wirehair_v2_policy)
+
+    add_executable(wirehair_v2_precode_test PrecodeTest.cpp)
+    target_link_libraries(wirehair_v2_precode_test wirehair_v2_policy)
 
     add_executable(wirehair_v2_bench WirehairV2Bench.cpp)
     target_link_libraries(wirehair_v2_bench wirehair_v2_policy)
