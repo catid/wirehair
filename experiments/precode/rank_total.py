@@ -219,8 +219,10 @@ def total_ops(row, ratio, pessimistic):
 def crossover_ratio(dense_row, ldpc_row, pessimistic):
     """muladd:xor ratio where ldpc total equals dense total.
 
-    Returns (ratio, verdict): ldpc beats dense for ratios BELOW the value.
-    ratio is None for the degenerate cases (never / always beats).
+    Returns (ratio, verdict).  The verdict states the direction: when ldpc
+    has MORE heavy work it beats dense below the ratio; when ldpc has LESS
+    heavy work but a heavier base it beats dense above the ratio.  ratio is
+    None for the degenerate cases (never / always beats).
     """
     factor = 2.0 if pessimistic else 1.0
     dheavy = factor * (ldpc_row["heavy"] - dense_row["heavy"])
@@ -232,6 +234,10 @@ def crossover_ratio(dense_row, ldpc_row, pessimistic):
         return r, "beats below this ratio"
     if dbase > 0.0:
         return None, "beats at every ratio (cheaper base and heavy)"
+    if dheavy < 0.0 and dbase <= 0.0:
+        # ldpc is heavier in base ops but lighter in heavy ops: the heavy
+        # savings grow with the ratio, so ldpc wins ABOVE the crossover.
+        return dbase / dheavy, "beats above this ratio"
     return None, "never beats (heavier base, no heavy advantage)"
 
 

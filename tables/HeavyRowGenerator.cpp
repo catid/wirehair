@@ -134,7 +134,14 @@ static bool IsFullRank(
                     {
                         const uint8_t elim = gf256_div(rem_value, row0);
 
-                        gf256_muladd_mem(rem_row + i, elim, ge_row + i, kRows - i);
+                        // Eliminate within the offset submatrix being
+                        // rank-checked: pivots are read at offset + i, so
+                        // the row update must start there too.
+                        gf256_muladd_mem(
+                            rem_row + offset + i,
+                            elim,
+                            ge_row + offset + i,
+                            kRows - i);
                     }
                 }
 
@@ -151,8 +158,16 @@ static bool IsFullRank(
     return true;
 }
 
-// Define this to search for a perfect seed
-//#define ENABLE_HEAVY_SEARCH
+// Historical note: this generator originally searched for a "perfect" seed
+// whose right 6x6 submatrix stayed invertible under every random binary
+// perturbation of the left columns.  The rank check used to eliminate the
+// wrong columns, so it accepted the shipped seed with zero failures.  With
+// the corrected elimination, the measured singular rate for the shipped
+// matrix is ~0.39% per trial -- the same as a uniformly random 6x6 GF(256)
+// matrix (~1/256) -- and no seed can reach zero over 1M trials, so the
+// perfect-seed search was removed.  The generator now verifies that it
+// reproduces the shipped kHeavyMatrix bytes (the wire-format regression
+// gate) and reports the perturbation failure rate as information only.
 
 // Params for a Cauchy matrix that is offset from 0
 struct OffsetCauchyMatrixParams
@@ -209,8 +224,6 @@ static void PrintMatrix(const uint8_t* matrix)
     cout << "static const unsigned kHeavyCols = " << kColumns << ";" << endl;
     cout << "static const uint8_t kHeavyMatrix[kHeavyRows][kHeavyCols] = {" << endl;
 
-    const unsigned modulus = 8;
-
     for (unsigned i = 0; i < kRows; ++i)
     {
         cout << "    { ";
@@ -227,6 +240,17 @@ static void PrintMatrix(const uint8_t* matrix)
     cout << dec << endl;
 }
 
+// The kHeavyMatrix bytes shipped in WirehairCodec.cpp.  Changing them breaks
+// wire-format compatibility, so the generator must reproduce them exactly.
+static const uint8_t kShippedHeavyMatrix[kRows][kColumns] = {
+    { 0x85, 0xd3, 0x66, 0xf3, 0x38, 0x95, 0x56, 0xad, 0x57, 0xaf, 0x58, 0x48, 0xbc, 0xfa, 0x02, 0xc5, 0x43, 0xe8, },
+    { 0xd3, 0x85, 0xf3, 0x66, 0x95, 0x38, 0xad, 0x56, 0xaf, 0x57, 0x48, 0x58, 0xfa, 0xbc, 0xc5, 0x02, 0xe8, 0x43, },
+    { 0x82, 0x22, 0x57, 0xaf, 0x56, 0xad, 0x38, 0x95, 0x66, 0xf3, 0x43, 0xe8, 0x02, 0xc5, 0xbc, 0xfa, 0x58, 0x48, },
+    { 0x22, 0x82, 0xaf, 0x57, 0xad, 0x56, 0x95, 0x38, 0xf3, 0x66, 0xe8, 0x43, 0xc5, 0x02, 0xfa, 0xbc, 0x48, 0x58, },
+    { 0x51, 0x34, 0x56, 0xad, 0x57, 0xaf, 0x66, 0xf3, 0x38, 0x95, 0x02, 0xc5, 0x43, 0xe8, 0x58, 0x48, 0xbc, 0xfa, },
+    { 0x34, 0x51, 0xad, 0x56, 0xaf, 0x57, 0xf3, 0x66, 0x95, 0x38, 0xc5, 0x02, 0xe8, 0x43, 0x48, 0x58, 0xfa, 0xbc, },
+};
+
 bool Generate_HeavyRows()
 {
     // Stored row-first
@@ -234,57 +258,63 @@ bool Generate_HeavyRows()
 
     gf256_init();
 
-    // First seed I found that works
-    uint64_t seed = 2318331135281;
+    // The seed that produced the shipped kHeavyMatrix
+    const uint64_t seed = 2318331135281;
 
-    for (;; ++seed)
+    OffsetCauchyMatrixParams params;
+    if (!params.Initialize(seed))
     {
-        // Choose random offset parameters
-        OffsetCauchyMatrixParams params;
-        if (!params.Initialize(seed)) {
-            continue;
-        }
-
-        unsigned failures = 0;
-        static const unsigned kTrials = 1000000;
-
-        for (unsigned trial = 0; trial < kTrials; ++trial)
-        {
-            params.FillMatrix(matrix);
-
-            PCGRandom mix_prng;
-            mix_prng.Seed(seed, trial);
-
-            for (unsigned col = 0; col < (kColumns - kRows); ++col) {
-                EliminateColumn(mix_prng, col, matrix);
-            }
-
-            if (!IsFullRank(matrix, kColumns - kRows)) {
-                ++failures;
-                break;
-            }
-        }
-
-        if (failures == 0)
-        {
-            cout << "Found perfect Cauchy matrix with seed = " << seed << endl;
-            cout << "* Rows = " << params.Rows << endl;
-            cout << "* Cols = " << params.Cols << endl;
-            cout << "* RowWiggle = " << params.RowWiggle << endl;
-            cout << "* ColWiggle = " << params.ColWiggle << endl;
-
-            params.FillMatrix(matrix);
-
-            PrintMatrix(matrix);
-
-            break;
-        }
-
-#ifndef ENABLE_HEAVY_SEARCH
-        cout << "FAILURE: Seed did not work" << endl;
+        cout << "FAILURE: Shipped seed no longer initializes" << endl;
         return false;
-#endif
     }
+
+    // Regression gate: the generator must reproduce the shipped bytes
+    params.FillMatrix(matrix);
+    for (unsigned i = 0; i < kRows; ++i)
+    {
+        for (unsigned j = 0; j < kColumns; ++j)
+        {
+            if (matrix[i * kColumns + j] != kShippedHeavyMatrix[i][j])
+            {
+                cout << "FAILURE: Generated matrix does not match shipped "
+                    "kHeavyMatrix at row " << i << " col " << j << endl;
+                return false;
+            }
+        }
+    }
+
+    // Informational: measure how often the right submatrix goes singular
+    // under random binary perturbation of the left columns.  Expect ~1/256.
+    unsigned failures = 0;
+    static const unsigned kTrials = 1000000;
+
+    for (unsigned trial = 0; trial < kTrials; ++trial)
+    {
+        params.FillMatrix(matrix);
+
+        PCGRandom mix_prng;
+        mix_prng.Seed(seed, trial);
+
+        for (unsigned col = 0; col < (kColumns - kRows); ++col) {
+            EliminateColumn(mix_prng, col, matrix);
+        }
+
+        if (!IsFullRank(matrix, kColumns - kRows)) {
+            ++failures;
+        }
+    }
+
+    cout << "Shipped Cauchy matrix reproduced from seed = " << seed << endl;
+    cout << "* Rows = " << params.Rows << endl;
+    cout << "* Cols = " << params.Cols << endl;
+    cout << "* RowWiggle = " << params.RowWiggle << endl;
+    cout << "* ColWiggle = " << params.ColWiggle << endl;
+    cout << "* Perturbation singular rate: " << failures << " / " << kTrials
+        << " (expected ~1/256 = 3906)" << endl;
+
+    params.FillMatrix(matrix);
+
+    PrintMatrix(matrix);
 
     return true;
 }

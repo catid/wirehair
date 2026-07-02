@@ -75,7 +75,10 @@ struct Rng
         if (bound <= 1u) {
             return 0;
         }
-        const uint32_t threshold = (uint32_t)((0u - (uint64_t)bound) % bound);
+        // 2^32 mod bound, computed in 32-bit arithmetic: 0u - bound wraps to
+        // 2^32 - bound.  (Widening to 64 bits first would compute 2^64 mod
+        // bound, which is the wrong rejection threshold for a 32-bit lane.)
+        const uint32_t threshold = (0u - bound) % bound;
         for (;;)
         {
             const uint32_t x = U32();

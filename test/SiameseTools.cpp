@@ -94,7 +94,9 @@ uint64_t GetTimeUsec()
     mach_timespec_t tv;
     clock_get_time(m_clock_serv, &tv);
 
-    return 1000000 * tv.tv_sec + tv.tv_nsec / 1000;
+    // tv_sec is a 32-bit unsigned int on Mach: widen before multiplying or
+    // the product wraps every ~4295 seconds.
+    return UINT64_C(1000000) * tv.tv_sec + tv.tv_nsec / 1000;
 #else
     struct timeval tv;
     gettimeofday(&tv, nullptr);

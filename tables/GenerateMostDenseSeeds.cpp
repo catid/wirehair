@@ -13,8 +13,10 @@ using namespace std;
 //#define ENABLE_FULL_SEARCH
 
 #ifdef ENABLE_FULL_SEARCH
+// Must match the kDenseSeedCount definition near the bottom of this file
+// (which is declared after this point, so it cannot be referenced here).
 static const unsigned kDenseMin = 2;
-static const unsigned kDenseMax = kDenseSeedCount - 1;
+static const unsigned kDenseMax = 100 - 1;
 #else
 static const unsigned kDenseMin = 52/4;
 static const unsigned kDenseMax = 62/4;

@@ -197,6 +197,22 @@ std::vector<int> ParseSignedIntList(const std::string& text)
     return out;
 }
 
+// Seed tables cover block counts [2, 64000].  GetDenseCount extrapolates
+// past 64000 and GetDenseSeed then indexes the 100-entry kDenseSeeds table
+// out of range, so reject out-of-domain N before building any seed profile.
+bool ValidateBlockCounts(const std::vector<int>& Ns, const char* command)
+{
+    for (int n : Ns)
+    {
+        if (n < 2 || n > 64000) {
+            std::fprintf(stderr,
+                "%s --N values must be in [2,64000], got %d\n", command, n);
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<std::string> ParseStringList(const std::string& text)
 {
     std::vector<std::string> out;
@@ -1046,7 +1062,9 @@ int CmdCompare(int argc, char** argv)
     }
 
     const std::vector<int> block_bytes_list = ParseIntList(bb_list);
-    if (block_bytes_list.empty() || nlo < 2u || nhi < nlo || trials == 0u) {
+    if (block_bytes_list.empty() || nlo < 2u || nhi < nlo || nhi > 64000u ||
+        trials == 0u)
+    {
         std::fprintf(stderr, "invalid compare arguments\n");
         return 1;
     }
@@ -1205,6 +1223,9 @@ int CmdSeedTable(int argc, char** argv)
     const std::vector<int> BBs = ParseIntList(bb_list);
     if (Ns.empty() || BBs.empty()) {
         std::fprintf(stderr, "seedtable requires non-empty --N and --bb-list\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "seedtable")) {
         return 1;
     }
 
@@ -1499,8 +1520,9 @@ int CmdDenseCheck(int argc, char** argv)
     if (trials < 1u) {
         trials = 1u;
     }
-    if (N < 1u || block_bytes < 1u) {
-        std::fprintf(stderr, "densecheck requires positive --N and --bb\n");
+    if (N < 2u || N > 64000u || block_bytes < 1u) {
+        std::fprintf(stderr,
+            "densecheck requires --N in [2,64000] and positive --bb\n");
         return 1;
     }
     const wirehair_v2::SeedProfile base =
@@ -1580,6 +1602,9 @@ int CmdDenseTune(int argc, char** argv)
     const std::vector<int> BBs = ParseIntList(bb_list);
     if (Ns.empty() || BBs.empty()) {
         std::fprintf(stderr, "densetune requires non-empty --N and --bb-list\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "densetune")) {
         return 1;
     }
 
@@ -1704,6 +1729,9 @@ int CmdDenseCount(int argc, char** argv)
             "densecount requires non-empty --N, --bb-list, and --deltas\n");
         return 1;
     }
+    if (!ValidateBlockCounts(Ns, "densecount")) {
+        return 1;
+    }
 
     std::printf(
         "# densecount: trials=%u loss=%.2f seed=0x%llx\n",
@@ -1826,6 +1854,9 @@ int CmdDenseGrid(int argc, char** argv)
     if (Ns.empty() || BBs.empty() || Deltas.empty()) {
         std::fprintf(stderr,
             "densegrid requires non-empty --N, --bb-list, and --deltas\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "densegrid")) {
         return 1;
     }
 
