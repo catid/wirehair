@@ -64,6 +64,31 @@ WirehairResult_Padding = 0x7fffffff  # /* int32_t padding */
 
 wirehair = ctypes.CDLL("libwirehair-shared.so")  # MSWindows: just remove ".so" part to use DLL
 
+# Declare prototypes.  Without these, ctypes defaults every return value and
+# argument to a 32-bit int: the 64-bit WirehairCodec pointers returned by the
+# create functions get truncated and the first call that dereferences one
+# crashes (or worse) on any 64-bit platform.
+wirehair.wirehair_init_.argtypes = [ctypes.c_int32]
+wirehair.wirehair_init_.restype = ctypes.c_int32
+wirehair.wirehair_encoder_create.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+wirehair.wirehair_encoder_create.restype = ctypes.c_void_p
+wirehair.wirehair_decoder_create.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+wirehair.wirehair_decoder_create.restype = ctypes.c_void_p
+wirehair.wirehair_encode.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint32)]
+wirehair.wirehair_encode.restype = ctypes.c_int32
+wirehair.wirehair_decode.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
+wirehair.wirehair_decode.restype = ctypes.c_int32
+wirehair.wirehair_recover.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+wirehair.wirehair_recover.restype = ctypes.c_int32
+wirehair.wirehair_free.argtypes = [ctypes.c_void_p]
+wirehair.wirehair_free.restype = None
+
 KPacketSize = ctypes.c_int(32)  # this can be extremaly large 1400 or more! :-)
 Message_tmp = b'A working example. this need be minimum o 2*KPacketSize; because this I in filling ' \
               b'more and more words just' \
@@ -77,20 +102,20 @@ if wirehair.wirehair_init_(2) != Wirehair_Success :
     print("Wirehair_Init() failed! exiting.")
     exit()
 
-encoder = wirehair.wirehair_encoder_create(0, ctypes.byref(Message),
+encoder = wirehair.wirehair_encoder_create(None, ctypes.byref(Message),
                                            ctypes.c_uint64(len(Message)),
                                            ctypes.c_uint32(KPacketSize.value))
 
-if encoder == 0:
+if not encoder:
     print("Creation of encoder failed! exiting.")
     exit()
 
-decoder = wirehair.wirehair_decoder_create(0,
+decoder = wirehair.wirehair_decoder_create(None,
                                            ctypes.c_uint64(len(Message)),
                                            ctypes.c_uint32(KPacketSize.value))
 
-if decoder == 0:
-    print("Creation of encoder failed! exiting.")
+if not decoder:
+    print("Creation of decoder failed! exiting.")
     wirehair.wirehair_free(encoder)
     exit()
 
@@ -134,7 +159,12 @@ while True:
         break
 
     if decodeResult != Wirehair_NeedMore:
+        # Anything other than Success/NeedMore is a terminal decoder error:
+        # feeding more blocks can never succeed, so bail out
         print("Wirehair_decode failed: ", decodeResult, " \n")
+        wirehair.wirehair_free(encoder)
+        wirehair.wirehair_free(decoder)
+        exit()
 
 decoded = (ctypes.c_uint8 * len(Message))()
 

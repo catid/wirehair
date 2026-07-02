@@ -6,6 +6,48 @@
 #include <algorithm>
 
 namespace wirehair_v2 {
+namespace {
+
+// Unbiased uniform in [0, bound) via Lemire multiply-shift rejection,
+// matching the simulator's Rng::Below that the certification ran with
+uint32_t UniformBelow(wirehair::PCGRandom& prng, uint32_t bound)
+{
+    if (bound <= 1u) {
+        return 0;
+    }
+    // 2^32 mod bound, computed in 32-bit arithmetic
+    const uint32_t threshold = (0u - bound) % bound;
+    for (;;)
+    {
+        const uint32_t x = prng.Next();
+        const uint64_t m = (uint64_t)x * bound;
+        if ((uint32_t)m >= threshold) {
+            return (uint32_t)(m >> 32);
+        }
+    }
+}
+
+// Sattolo-style inside-out deck shuffle with UNBIASED position draws.
+// Production ShuffleDeck16 draws 16-bit chunks modulo ii, which is fine at
+// its <= ~500-entry dense-count sizes but measurably biased once the deck
+// spans the whole precode (set-half membership 0.455-0.577 instead of 0.500
+// at span ~64000).  The Phase B certification assumed unbiased decks, so
+// this keeps the same deck structure with a rejection-sampled draw.
+void UnbiasedShuffleDeck(
+    wirehair::PCGRandom& prng,
+    uint16_t* deck,
+    uint32_t count)
+{
+    deck[0] = 0;
+    for (uint32_t ii = 1; ii < count; ++ii)
+    {
+        const uint32_t jj = UniformBelow(prng, ii);
+        deck[ii] = deck[jj];
+        deck[jj] = (uint16_t)ii;
+    }
+}
+
+} // namespace
 
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
 {
@@ -29,7 +71,9 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     const uint32_t N1 = params.SourceHits;
     const uint32_t span = K + S + D2;
 
-    if (K < 2u || K > 64000u || S == 0u || N1 == 0u) {
+    // N1 is capped at 8 like the simulator's n1 clamp (and the picks
+    // scratch array below)
+    if (K < 2u || K > 64000u || S == 0u || N1 == 0u || N1 > 8u) {
         return false;
     }
     // ShuffleDeck16 decks are uint16_t
@@ -54,8 +98,8 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     }
 
     // Each source column hits min(N1, S) distinct parities.  Distinctness
-    // by retry: N1 is tiny (2) relative to S (>= 14 in the production
-    // dense-count table), so retries are rare.
+    // by retry: the tiny-K dense-count table goes as low as S=2 (K=2), but
+    // hits <= S always leaves a free residue, so the loop terminates.
     {
         uint32_t picks[8];
         const uint32_t hits = N1 < S ? N1 : S;
@@ -66,7 +110,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                 uint32_t p;
                 bool collide;
                 do {
-                    p = prng.Next() % S;
+                    p = UniformBelow(prng, S);
                     collide = false;
                     for (uint32_t j = 0; j < hit; ++j) {
                         if (picks[j] == p) {
@@ -106,7 +150,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         std::vector<uint16_t> deck(span);
         std::vector<uint8_t> bitmap(span, 0);
 
-        wirehair::ShuffleDeck16(prng, deck.data(), span);
+        UnbiasedShuffleDeck(prng, deck.data(), span);
         for (uint32_t i = 0; i < set_count; ++i) {
             bitmap[deck[i]] = 1;
         }
@@ -129,7 +173,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         };
         for (uint32_t half = 0; half < 2u; ++half)
         {
-            wirehair::ShuffleDeck16(prng, deck.data(), span);
+            UnbiasedShuffleDeck(prng, deck.data(), span);
             for (uint32_t ii = 0; ii < halves[half]; ++ii)
             {
                 // Deck entries at distinct positions are distinct columns,
@@ -149,6 +193,11 @@ uint8_t HeavyCoefficient(
     uint32_t ge_column,
     uint32_t heavy_rows)
 {
+    // Past 128 rows the X window shrinks below H and the per-window MDS
+    // claim silently degrades
+    CAT_DEBUG_ASSERT(heavy_rows >= 1u && heavy_rows <= 128u);
+    CAT_DEBUG_ASSERT(heavy_row < heavy_rows);
+
     // Y values occupy [0, H); X values occupy [H, 256).  X ^ Y is never
     // zero because the sets are disjoint, and within one 244-column window
     // all X are distinct, giving the Cauchy MDS property there.

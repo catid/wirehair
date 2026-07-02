@@ -140,6 +140,8 @@ if (BUILD_TESTS)
     add_executable(large_message_test EXCLUDE_FROM_ALL ${LARGE_MESSAGE_TEST_SOURCE_FILES})
     target_link_libraries(large_message_test wirehair)
 
+    # The seed generators carry `#pragma omp parallel for` search loops;
+    # without the OpenMP link they silently run single-threaded
     add_executable(gen_small_dseeds ${GEN_SMALL_DSEEDS})
     target_link_libraries(gen_small_dseeds wirehair)
 
@@ -152,6 +154,13 @@ if (BUILD_TESTS)
     add_executable(gen_dcounts ${GEN_DCOUNTS})
     target_link_libraries(gen_dcounts wirehair)
 
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(gen_small_dseeds OpenMP::OpenMP_CXX)
+        target_link_libraries(gen_peel_seeds OpenMP::OpenMP_CXX)
+        target_link_libraries(gen_most_dseeds OpenMP::OpenMP_CXX)
+        target_link_libraries(gen_dcounts OpenMP::OpenMP_CXX)
+    endif()
+
     add_executable(gen_tables ${GEN_TABLES})
 endif()
 
@@ -161,9 +170,11 @@ endif()
 
 include(GNUInstallDirs)
 
+# The header is installed by the include/ DIRECTORY rule below; the target
+# sets no PUBLIC_HEADER property, so a PUBLIC_HEADER clause here would be a
+# silent no-op.
 install(TARGETS wirehair
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include DESTINATION ${CMAKE_INSTALL_PREFIX})
 install(DIRECTORY python DESTINATION ${CMAKE_INSTALL_PREFIX})

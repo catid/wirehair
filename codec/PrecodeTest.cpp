@@ -82,9 +82,20 @@ bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
             return false;
         }
 
-        for (uint32_t col : row) {
+        for (uint32_t col : row)
+        {
             if (col < K) {
                 ++source_hits[col];
+            }
+            // Parity-range membership must be EXACTLY own + link: any other
+            // parity column means a wrong staircase direction or link bug
+            else if (col != K + j &&
+                     !(j > 0u && col == K + j - 1u))
+            {
+                std::fprintf(stderr,
+                    "K=%u: staircase row %u has stray parity column %u\n",
+                    K, j, col);
+                return false;
             }
         }
     }
@@ -140,12 +151,18 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
         return false;
     }
 
-    // Every subsequent row differs from its predecessor in EXACTLY 2 columns
+    // Every subsequent row differs from its predecessor in EXACTLY 2
+    // columns, and within each reshuffle half the flip pairs come from
+    // distinct deck positions, so they must be pairwise disjoint.  A missing
+    // reshuffle (half 2 reusing half 1's flips) creates exact linear
+    // dependences among the D2 rows — the failure class these rows exist to
+    // prevent — and would only be caught here.
+    std::vector<std::vector<uint32_t>> flips(D2);
     for (uint32_t r = 1; r < D2; ++r)
     {
         const std::vector<uint32_t>& prev = system.DenseRowColumns[r - 1u];
         const std::vector<uint32_t>& cur = system.DenseRowColumns[r];
-        std::vector<uint32_t> sym;
+        std::vector<uint32_t>& sym = flips[r];
         std::set_symmetric_difference(
             prev.begin(), prev.end(),
             cur.begin(), cur.end(),
@@ -155,6 +172,24 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
             std::fprintf(stderr,
                 "K=%u: dense rows %u->%u differ in %zu columns, want 2\n",
                 K, r - 1u, r, sym.size());
+            return false;
+        }
+    }
+    const uint32_t half1_end = 1u + (D2 >> 1); // flips[1 .. half1_end)
+    for (uint32_t half = 0; half < 2u; ++half)
+    {
+        const uint32_t begin = half == 0u ? 1u : half1_end;
+        const uint32_t end = half == 0u ? half1_end : D2;
+        std::vector<uint32_t> seen;
+        for (uint32_t r = begin; r < end; ++r) {
+            seen.insert(seen.end(), flips[r].begin(), flips[r].end());
+        }
+        std::sort(seen.begin(), seen.end());
+        if (std::adjacent_find(seen.begin(), seen.end()) != seen.end())
+        {
+            std::fprintf(stderr,
+                "K=%u: dense flip columns repeat within half %u "
+                "(reshuffle cadence broken)\n", K, half);
             return false;
         }
     }
@@ -177,7 +212,8 @@ bool TestDeterminism(uint32_t K)
         std::fprintf(stderr, "K=%u: same seed produced different systems\n", K);
         return false;
     }
-    if (a.StaircaseRows == c.StaircaseRows)
+    if (a.StaircaseRows == c.StaircaseRows ||
+        a.DenseRowColumns == c.DenseRowColumns)
     {
         std::fprintf(stderr, "K=%u: different seed produced same system\n", K);
         return false;
@@ -232,9 +268,10 @@ bool TestHeavyCoefficients()
         }
     }
 
-    // Every H x H submatrix within one 244-column window must be
-    // invertible (Cauchy MDS property).  Exhaustive over window starts and
-    // deterministically-jittered column choices.
+    // H x H submatrices within a 244-column window must be invertible
+    // (Cauchy MDS property).  The coefficient depends only on c mod 244, so
+    // sampled distinct-column subsets of one window cover the structure;
+    // the MDS guarantee itself is analytic (Cauchy determinant).
     wirehair::PCGRandom prng;
     prng.Seed(UINT64_C(0x4ea7c0de), 12u);
     for (uint32_t base = 0; base < window; base += 7u)

@@ -381,6 +381,12 @@ private:
         return count;
     }
 
+    // Weight2Refs is cumulative BY DESIGN: it counts columns that were ever
+    // in a live weight-2 row and is never decremented, mirroring production
+    // GreedyPeeling (WirehairCodec.cpp: "cannot hurt even if not true").
+    // Recorded peel_sweep/peelcost results and the solver-structure
+    // selections depend on this semantics; a live count exists separately
+    // as peel_sweep's ExactD2 for experiments.
     void IncrementWeight2Refs(const RowState& row)
     {
         uint16_t live[2] = {UINT16_MAX, UINT16_MAX};

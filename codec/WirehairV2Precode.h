@@ -79,8 +79,8 @@ struct PrecodeSystem
     Build the staircase + Shuffle-2 constraint structure.
 
     Returns false only for invalid parameters (BlockCount outside
-    [2, 64000], Staircase == 0, SourceHits == 0, or a span that does not
-    fit the 16-bit deck domain).
+    [2, 64000], Staircase == 0, SourceHits outside [1, 8], or a span that
+    does not fit the 16-bit deck domain).
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 
