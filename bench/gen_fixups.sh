@@ -23,5 +23,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
     }' | sort -n -u -k1,1 | awk '{printf "    { %5d, %3d },\n", $1, $2}'
 } > "$OUT"
 
-n=$(grep -c '{ ' "$OUT" || true)
+# Anchored so the "Format: { N, seed }" header comment is not counted
+n=$(grep -c '^    {' "$OUT" || true)
 echo "wrote $OUT with $n corrections (DEFTHRESH=$DEFTHRESH GOOD=$GOOD GOOD30=$GOOD30)"

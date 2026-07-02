@@ -71,6 +71,14 @@ struct PrecodeSystem
         [0, K + S + D2), stored as a sorted column list.  Row 0 has exactly
         ceil(span/2) columns; every row r > 0 differs from row r - 1 in
         exactly two columns.
+
+        Known limitation (inherited from the certified reference
+        construction): at tiny EVEN spans (K=2 and K=4 with the certified
+        table) a later row's weight can walk down to exactly zero — a dead
+        constraint — at roughly 1e-4 systems.  Guarding would break the
+        exact-2-difference invariant, and the production policy does not
+        rely on the precode at such tiny K, so it is documented rather
+        than patched.
     */
     std::vector<std::vector<uint32_t>> DenseRowColumns;
 };

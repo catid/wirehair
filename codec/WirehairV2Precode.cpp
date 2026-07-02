@@ -9,7 +9,9 @@ namespace wirehair_v2 {
 namespace {
 
 // Unbiased uniform in [0, bound) via Lemire multiply-shift rejection,
-// matching the simulator's Rng::Below that the certification ran with
+// matching the simulator's corrected Rng::Below used for the codecport
+// certification (the earlier Phase B runs predate the Below threshold fix;
+// its bias was <= bound/2^32, statistically immaterial at those rates)
 uint32_t UniformBelow(wirehair::PCGRandom& prng, uint32_t bound)
 {
     if (bound <= 1u) {

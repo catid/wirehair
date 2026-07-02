@@ -257,9 +257,22 @@ every point; inact/rank match within ~1 column.  The generation savings are
 the N1=2 verdict (K fewer staircase XORs); the sparse-solve savings come
 from the lighter staircase rows.  The rank-invariance self-test covers the
 `codecport` token, so the port's systems are consistency-proven, not just
-sampled.  Before shipping, the K=10000 point needs a >=100k-trial paired
-confirmation (the known n12 combined-leak caveat) and large-K coverage
-(K=32000/64000) in the Phase 4 end-to-end pass.
+sampled.
+
+Reproducibility note: the 2026-07-02 `Rng::Below` threshold fix changed
+every scheme's RNG streams, so CSVs recorded before it (including
+`phaseb_cert_20260626.csv`) are no longer byte-reproducible with the
+current binary; the old threshold's bias was <= bound/2^32, statistically
+immaterial at all recorded rates.
+
+`codecport_cert_K10000_t100k_20260702.csv` is the 100k-trial paired
+K=10000 confirmation (seed `0x5eed0004`): dense 1.797%/0.191%, reference
+0.086%/0.043%, codecport 0.115%/0.048% at OH0/OH1.  The OH0 delta
+(+0.029pp, borderline at the paired 95% width ~0.028pp) is the known
+n12-vs-n13 combined-leak caveat surfacing; OH1 matches.  Both stay 15-20x
+below dense.  Phase 4 must decide: accept the OH0 leak, use N1=3 at the
+K=10000 table point only, or re-tune -- alongside the still-open
+K=32000/64000 coverage.
 
 ### Heavy Band
 
