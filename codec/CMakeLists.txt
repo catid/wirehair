@@ -9,6 +9,8 @@ add_library(wirehair_v2_policy
     WirehairV2Policy.h
     WirehairV2Precode.cpp
     WirehairV2Precode.h
+    WirehairV2PrecodeEncode.cpp
+    WirehairV2PrecodeEncode.h
     WirehairV2Seeds.cpp
     WirehairV2Seeds.h
 )
@@ -25,4 +27,7 @@ if (BUILD_TESTS)
 
     add_executable(wirehair_v2_bench WirehairV2Bench.cpp)
     target_link_libraries(wirehair_v2_bench wirehair_v2_policy)
+
+    add_executable(wirehair_v2_precode_encode_test PrecodeEncodeTest.cpp)
+    target_link_libraries(wirehair_v2_precode_encode_test wirehair_v2_policy)
 endif()

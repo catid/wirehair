@@ -42,6 +42,24 @@ struct PrecodeParams
     uint32_t DenseRows;    ///< D2: Shuffle-2 dense binary rows
     uint32_t HeavyRows;    ///< H: Cauchy heavy rows
     uint32_t SourceHits;   ///< N1: staircase parities per source column
+
+    /**
+        Identity-corner dense variant: the Shuffle-2 deck spans only the
+        K + S source/staircase columns and dense row r additionally
+        references exactly its own dense column K + S + r.
+
+        The certified construction (false) decks over ALL K + S + D2
+        binary columns, which makes the D2 x D2 dense-column corner rank
+        ~1 (consecutive rows differ in just 2 columns), so a phased
+        encoder can essentially never solve for the dense parity values
+        directly — measured 0/2000 feasible seeds at K >= 1000.  With the
+        identity corner each dense parity is simply its row's known-column
+        sum (encoder-feasible by construction, same 2-XOR incremental
+        generation).  Changes the linear system: requires recertification
+        before shipping.
+    */
+    bool DenseIdentityCorner;
+
     uint64_t Seed;         ///< constraint-generation seed
 };
 

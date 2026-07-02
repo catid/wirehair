@@ -289,6 +289,9 @@ struct Scheme
     unsigned Dense2;  // LdpcDense extra dense row/column count
     unsigned N1;      // staircase parities each SOURCE column connects to
                       // (LdpcStair/LdpcDense family; default 3 = historical)
+    bool IdentCorner; // CodecPort only: identity-corner dense variant
+                      // (deck excludes dense columns; row r owns column
+                      // K+S+r) -- the encoder-feasible restructuring
 };
 
 //------------------------------------------------------------------------------
@@ -689,6 +692,7 @@ static GeneratedSystem GenerateSystem(
         params.DenseRows = scheme.Dense2;
         params.HeavyRows = scheme.H;
         params.SourceHits = scheme.N1;
+        params.DenseIdentityCorner = scheme.IdentCorner;
         params.Seed = seed;
 
         wirehair_v2::PrecodeSystem codec_sys;
@@ -1471,6 +1475,7 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
     out.Weight = 0;
     out.Dense2 = 0;
     out.N1 = 3;
+    out.IdentCorner = false;
 
     const size_t hpos = body.rfind("_h");
     if (hpos != std::string::npos)
@@ -1481,6 +1486,16 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
             out.H = h;
             body = body.substr(0, hpos);
         }
+    }
+
+    // _ic suffix (codecport family only): identity-corner dense variant
+    // (deck excludes the dense columns; row r owns column K+S+r)
+    if (body.rfind("codecport", 0) == 0 &&
+        body.size() > 3u &&
+        body.compare(body.size() - 3u, 3u, "_ic") == 0)
+    {
+        out.IdentCorner = true;
+        body = body.substr(0, body.size() - 3u);
     }
 
     // _s2 suffix: Shuffle-2 structured D2 rows; only defined on the
@@ -1811,7 +1826,7 @@ static bool SelfTest()
         "heavyonly_h4", "ldpcdense_s5_d4", "ldpcdense_s6_d3_h8",
         "ldpcdense_s5_d4_s2", "ldpcdense_n12_s5_d4", "ldpcdense_n14_s5_d4",
         "ldpcdense_n14_s5_d4_s2", "ldpcdense_n12_s6_d3_s2_h8",
-        "codecport"
+        "codecport", "codecport_ic", "codecport_n13_ic"
     };
     const char* invalid_tokens[] = {
         "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4", "ldpcdense_s0_d4_s2",

@@ -61,6 +61,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.DenseRows = 12u;
     params.HeavyRows = 12u;
     params.SourceHits = 2u;
+    params.DenseIdentityCorner = false;
     params.Seed = seed;
     return params;
 }
@@ -76,6 +77,13 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     // N1 is capped at 8 like the simulator's n1 clamp (and the picks
     // scratch array below)
     if (K < 2u || K > 64000u || S == 0u || N1 == 0u || N1 > 8u) {
+        return false;
+    }
+    // Identity-corner flips draw deck positions up to
+    // set_count + D2/2 - 1, so the K + S deck must cover both halves
+    // (rejects only tiny K: the production table gives K + S >= 14 from
+    // K = 8 upward)
+    if (params.DenseIdentityCorner && K + S < 2u * (D2 >> 1)) {
         return false;
     }
     // ShuffleDeck16 decks are uint16_t
@@ -148,24 +156,34 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     //      the same flip rule, ii restarting at 0.
     if (D2 > 0u)
     {
-        const uint32_t set_count = (span + 1u) >> 1;
-        std::vector<uint16_t> deck(span);
-        std::vector<uint8_t> bitmap(span, 0);
+        // Certified construction decks over all binary columns; the
+        // identity-corner variant excludes the D2 dense columns and gives
+        // each row its own dense column instead (see the header)
+        const uint32_t deck_span =
+            params.DenseIdentityCorner ? (K + S) : span;
+        const uint32_t set_count = (deck_span + 1u) >> 1;
+        std::vector<uint16_t> deck(deck_span);
+        std::vector<uint8_t> bitmap(deck_span, 0);
 
-        UnbiasedShuffleDeck(prng, deck.data(), span);
+        UnbiasedShuffleDeck(prng, deck.data(), deck_span);
         for (uint32_t i = 0; i < set_count; ++i) {
             bitmap[deck[i]] = 1;
         }
 
         uint32_t row_i = 0;
         const auto emit_row = [&]() {
-            std::vector<uint32_t>& columns = out.DenseRowColumns[row_i++];
+            std::vector<uint32_t>& columns = out.DenseRowColumns[row_i];
             columns.reserve(set_count + 8u);
-            for (uint32_t col = 0; col < span; ++col) {
+            for (uint32_t col = 0; col < deck_span; ++col) {
                 if (bitmap[col]) {
                     columns.push_back(col);
                 }
             }
+            if (params.DenseIdentityCorner) {
+                // Own dense column is above every deck column: stays sorted
+                columns.push_back(K + S + row_i);
+            }
+            ++row_i;
         };
         emit_row();
 
@@ -175,7 +193,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         };
         for (uint32_t half = 0; half < 2u; ++half)
         {
-            UnbiasedShuffleDeck(prng, deck.data(), span);
+            UnbiasedShuffleDeck(prng, deck.data(), deck_span);
             for (uint32_t ii = 0; ii < halves[half]; ++ii)
             {
                 // Deck entries at distinct positions are distinct columns,

@@ -83,6 +83,7 @@ experiments/peeling/results/fresh_*/
 .dolt/
 .beads-credential-key
 experiments/precode/precode_sim
+experiments/precode/precode_sim.ic
 experiments/peeling/xor_bench
 experiments/precode/results/*.err
 .claude/worktrees/

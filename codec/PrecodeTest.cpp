@@ -343,6 +343,82 @@ int main()
         }
     }
 
+    // Identity-corner dense variant: deck spans only K + S, and dense row
+    // r references exactly its own dense column K + S + r
+    for (uint32_t K : Ks)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(K, 0x5eedu);
+        params.DenseIdentityCorner = true;
+        wirehair_v2::PrecodeSystem system;
+        const bool feasible =
+            params.BlockCount + params.Staircase >=
+            2u * (params.DenseRows >> 1);
+        if (!BuildPrecodeSystem(params, system))
+        {
+            if (feasible) {
+                std::fprintf(stderr, "K=%u: ic build failed\n", K);
+                return 1;
+            }
+            continue; // tiny K: rejection is the contract
+        }
+        if (!feasible) {
+            std::fprintf(stderr, "K=%u: infeasible ic build accepted\n", K);
+            return 1;
+        }
+        if (!TestStaircase(system)) {
+            return 1;
+        }
+        const uint32_t S = params.Staircase;
+        const uint32_t D2 = params.DenseRows;
+        const uint32_t deck_span = K + S;
+        for (uint32_t r = 0; r < D2; ++r)
+        {
+            const std::vector<uint32_t>& row = system.DenseRowColumns[r];
+            uint32_t own = 0;
+            for (uint32_t col : row)
+            {
+                if (col >= deck_span)
+                {
+                    if (col != deck_span + r) {
+                        std::fprintf(stderr,
+                            "K=%u: ic row %u has foreign dense column %u\n",
+                            K, r, col);
+                        return 1;
+                    }
+                    ++own;
+                }
+            }
+            if (own != 1u) {
+                std::fprintf(stderr,
+                    "K=%u: ic row %u own-column count %u\n", K, r, own);
+                return 1;
+            }
+        }
+        if (system.DenseRowColumns[0].size() != ((deck_span + 1u) >> 1) + 1u)
+        {
+            std::fprintf(stderr, "K=%u: ic row 0 size wrong\n", K);
+            return 1;
+        }
+        // Consecutive rows: 2 deck flips + the two distinct own columns
+        for (uint32_t r = 1; r < D2; ++r)
+        {
+            std::vector<uint32_t> sym;
+            std::set_symmetric_difference(
+                system.DenseRowColumns[r - 1u].begin(),
+                system.DenseRowColumns[r - 1u].end(),
+                system.DenseRowColumns[r].begin(),
+                system.DenseRowColumns[r].end(),
+                std::back_inserter(sym));
+            if (sym.size() != 4u) {
+                std::fprintf(stderr,
+                    "K=%u: ic rows %u->%u differ in %zu columns, want 4\n",
+                    K, r - 1u, r, sym.size());
+                return 1;
+            }
+        }
+    }
+
     std::printf("precode_test: PASS\n");
     return 0;
 }
