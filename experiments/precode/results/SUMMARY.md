@@ -234,6 +234,33 @@ has no dense binary safety rows.  The conservative full hybrid H12 point is
 about +4.9% total block ops at K=32000 and +2.6% at K=64000 vs dense because
 of LDPC parity generation, while buying much lower failure tails.
 
+### Codec Port Certification (2026-07-02)
+
+`codecport_cert_K{1000,3200,10000}_20260702.csv` certify the codec-side
+construction (`codec/WirehairV2Precode.cpp`, exposed as scheme token
+`codecport`) with paired 20k-trial runs at seed `0x5eed0003` against dense
+and the Phase B reference.  The port differs from the reference on purpose:
+PCGRandom streams instead of splitmix, an UNBIASED Sattolo deck (production
+`ShuffleDeck16`'s 16-bit modulo draw skews set-half membership to
+0.455-0.577 at span ~64000, which the Phase B runs never used), and N1=2
+staircase hits per the handoff verdict instead of the reference's default
+N1=3.
+
+| K | dense fail OH0/OH1 | ref s2_h12 fail | codecport fail | codecport sparse vs ref | codecport gen vs ref |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 1.650%/0.010% | 0.035%/0.000% | 0.030%/0.000% | -5.0% | -27.8% |
+| 3200 | 1.290%/0.015% | 0.035%/0.000% | 0.040%/0.000% | -4.2% | -28.3% |
+| 10000 | 1.755%/0.215% | 0.060%/0.045% | 0.080%/0.030% | -4.8% | -28.4% |
+
+Failure deltas vs the reference are inside the 95% binomial half-width at
+every point; inact/rank match within ~1 column.  The generation savings are
+the N1=2 verdict (K fewer staircase XORs); the sparse-solve savings come
+from the lighter staircase rows.  The rank-invariance self-test covers the
+`codecport` token, so the port's systems are consistency-proven, not just
+sampled.  Before shipping, the K=10000 point needs a >=100k-trial paired
+confirmation (the known n12 combined-leak caveat) and large-K coverage
+(K=32000/64000) in the Phase 4 end-to-end pass.
+
 ### Heavy Band
 
 The big-K GE replay census gives the production band target:
