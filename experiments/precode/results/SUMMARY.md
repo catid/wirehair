@@ -176,6 +176,43 @@ not the primary certified rule: it leaks relative to iid D2 at max K
 (K=64000 OH1 is 0.108% vs 0.032%), and its K=10000 residual-width reduction is
 just under 10%.
 
+### Ship Gate Decision (2026-07-02, resolves the K=10000 raw-inact question)
+
+The inactivation ship gate for H-changing schemes uses **residual width
+(`rank_mu`, the non-heavy residual)**, not literal raw `inact_mu`.  Under this
+interpretation the primary `ldpcdense_s<GetDenseCount(K)>_d12_h12` table is
+certified as-is for K>=10000; the K=10000 table point is NOT retuned.
+
+Rationale:
+
+- Raw `inact_mu` mechanically includes the H heavy columns, which are
+  inactivated by construction.  Moving H=6 to H=12 adds ~6 inactivated
+  columns regardless of how well the scheme peels; comparing raw counts
+  across different H double-charges the candidate for structure whose real
+  cost is already tracked separately (`heavy_muladds_mu`, folded into the
+  `rank_total.py` block-op score at the calibrated muladd:xor ratio).
+- `rank_mu` is what scales the GE/backsub work the gate exists to bound, and
+  it is H-comparable: dense H6 rank_mu 187.3 vs candidate 168.3 at K=10000
+  OH0 (-10.1%), improving monotonically to -30.1% at K=64000.
+- Every other gate already clears at K=10000: failure 0.042% vs dense 1.754%
+  at OH0 (~40x), sparse-solve XORs -27.9%.
+- Retuning S at K=10000 to chase literal raw `inact_mu` >= -10% would either
+  grow S past the production dense-count table (extra precode-gen cost) or
+  shrink the point into the undersized-dense def-tail regime, and would burn
+  a 200k-trial recertification to fix a metric artifact rather than a real
+  cost or reliability problem.
+
+Guard rails attached to this decision:
+
+- The residual-width gate must always be read next to the `rank_total.py`
+  total-block-op score so an H increase cannot hide a real cost regression.
+- K=10000 remains the weakest point of the shipping band: smallest
+  sparse-solve/rank gains and, at 1280-byte blocks with estimated GE, a
+  +7.4% (s2) to +9.8% (primary) total-op premium vs dense (the estimated GE
+  term overstates replay work ~5x at big K, so the true premium is smaller).
+  If wirehair-axd end-to-end validation shows a real K=10000 regression,
+  revisit that table point as a cost optimization -- not as a gate question.
+
 ### Cost Model Correction
 
 The old GE-bitop columns overstate absolute GE replay work by about 5x at big
