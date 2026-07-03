@@ -128,7 +128,19 @@ set_target_properties(wirehair PROPERTIES VERSION 2)
 set_target_properties(wirehair PROPERTIES SOVERSION 2)
 target_include_directories(wirehair PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
+set(WIREHAIR_INSTALL_TARGETS wirehair)
+if(NOT BUILD_SHARED_LIBS AND NOT WIN32)
+    add_library(wirehair_shared SHARED ${LIB_SOURCE_FILES})
+    set_target_properties(wirehair_shared PROPERTIES
+        OUTPUT_NAME wirehair
+        VERSION 2
+        SOVERSION 2)
+    target_include_directories(wirehair_shared PUBLIC ${PROJECT_SOURCE_DIR}/include)
+    list(APPEND WIREHAIR_INSTALL_TARGETS wirehair_shared)
+endif()
+
 if (BUILD_TESTS)
+    enable_testing()
     find_package(OpenMP QUIET)
 
     add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
@@ -136,6 +148,9 @@ if (BUILD_TESTS)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(unit_test OpenMP::OpenMP_CXX)
     endif()
+    add_test(NAME unit_test COMMAND unit_test)
+    set_tests_properties(unit_test PROPERTIES
+        ENVIRONMENT "WIREHAIR_UNIT_SKIP_BENCH=1;WIREHAIR_UNIT_MIN_N=2;WIREHAIR_UNIT_MAX_N=256;WIREHAIR_UNIT_BLOCK_BYTES_MIN=1;WIREHAIR_UNIT_BLOCK_BYTES_MAX=32")
 
     add_executable(large_message_test EXCLUDE_FROM_ALL ${LARGE_MESSAGE_TEST_SOURCE_FILES})
     target_link_libraries(large_message_test wirehair)
@@ -173,8 +188,9 @@ include(GNUInstallDirs)
 # The header is installed by the include/ DIRECTORY rule below; the target
 # sets no PUBLIC_HEADER property, so a PUBLIC_HEADER clause here would be a
 # silent no-op.
-install(TARGETS wirehair
+install(TARGETS ${WIREHAIR_INSTALL_TARGETS}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(DIRECTORY include DESTINATION ${CMAKE_INSTALL_PREFIX})
-install(DIRECTORY python DESTINATION ${CMAKE_INSTALL_PREFIX})
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY python/ DESTINATION python)

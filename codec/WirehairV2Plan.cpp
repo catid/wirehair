@@ -42,7 +42,24 @@ PeelSolvePlan BuildPeelSolvePlan(
 {
     PeelSolvePlan plan;
     plan.Profile = profile;
-    plan.RowCount = profile.BlockCount + overhead_rows;
+    const uint64_t row_count =
+        (uint64_t)profile.BlockCount + (uint64_t)overhead_rows;
+    if (row_count > kMaxPeelMatrixRows)
+    {
+        plan.RowCount = 0u;
+        plan.MatrixSeed = MatrixSeedFromProfile(profile, 0u, salt);
+        plan.Evaluation.Rows = 0u;
+        plan.Evaluation.Columns = profile.BlockCount;
+        plan.Evaluation.ResidualRows = 0u;
+        plan.Evaluation.ResidualColumns = profile.BlockCount;
+        plan.Evaluation.MatrixRefs = 0u;
+        plan.Evaluation.MatrixXors = 0u;
+        plan.Evaluation.SolveDenseXors = UINT64_MAX;
+        plan.Evaluation.TotalXorCost = UINT64_MAX;
+        return plan;
+    }
+
+    plan.RowCount = (uint32_t)row_count;
     plan.MatrixSeed = MatrixSeedFromProfile(profile, plan.RowCount, salt);
     plan.Rows = GeneratePeelMatrixRows(
         profile.Policy.Codec,

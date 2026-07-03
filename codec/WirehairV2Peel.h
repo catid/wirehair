@@ -7,6 +7,8 @@
 
 namespace wirehair_v2 {
 
+static const uint32_t kMaxPeelMatrixRows = 65536u;
+
 struct PeelEvaluation
 {
     uint32_t Rows;

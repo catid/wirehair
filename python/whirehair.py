@@ -20,6 +20,9 @@
 # adjust it for your actual lib and remenber you can do much more. Enjoy!!
 
 import ctypes
+import ctypes.util
+import os
+import sys
 
 # Success code
 Wirehair_Success = 0
@@ -62,7 +65,59 @@ WirehairResult_Count = 11  # /* for asserts */
 
 WirehairResult_Padding = 0x7fffffff  # /* int32_t padding */
 
-wirehair = ctypes.CDLL("libwirehair-shared.so")  # MSWindows: just remove ".so" part to use DLL
+def _load_wirehair():
+    names = []
+    if sys.platform.startswith("win"):
+        names = ["wirehair.dll", "libwirehair.dll"]
+    elif sys.platform == "darwin":
+        names = ["libwirehair.dylib", "libwirehair.2.dylib"]
+    else:
+        names = ["libwirehair.so", "libwirehair.so.2"]
+
+    candidates = []
+    env_path = os.environ.get("WIREHAIR_LIBRARY")
+    if env_path:
+        candidates.append(env_path)
+
+    here = os.path.abspath(os.path.dirname(__file__))
+    prefix = os.path.abspath(os.path.join(here, os.pardir))
+    library_roots = (
+        os.path.join(prefix, "lib"),
+        os.path.join(prefix, "lib64"),
+    )
+    for directory in (
+        here,
+        library_roots[0],
+        library_roots[1],
+    ):
+        for name in names:
+            candidates.append(os.path.join(directory, name))
+
+    for root in library_roots:
+        if not os.path.isdir(root):
+            continue
+        for directory, _, files in os.walk(root):
+            for name in names:
+                if name in files:
+                    candidates.append(os.path.join(directory, name))
+
+    found = ctypes.util.find_library("wirehair")
+    if found:
+        candidates.append(found)
+    candidates.extend(names)
+
+    errors = []
+    for candidate in candidates:
+        try:
+            return ctypes.CDLL(candidate)
+        except OSError as e:
+            errors.append("%s: %s" % (candidate, e))
+
+    raise OSError("Unable to load Wirehair shared library. Tried:\n" +
+                  "\n".join(errors))
+
+
+wirehair = _load_wirehair()
 
 # Declare prototypes.  Without these, ctypes defaults every return value and
 # argument to a 32-bit int: the 64-bit WirehairCodec pointers returned by the

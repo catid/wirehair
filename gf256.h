@@ -86,8 +86,11 @@
 #endif
 
 #if !defined(GF256_TARGET_MOBILE)
-    #include <tmmintrin.h> // SSSE3: _mm_shuffle_epi8
     #include <emmintrin.h> // SSE2
+# if defined(__SSSE3__)
+    #define GF256_TRY_SSSE3
+    #include <tmmintrin.h> // SSSE3: _mm_shuffle_epi8
+# endif
 #endif // GF256_TARGET_MOBILE
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)

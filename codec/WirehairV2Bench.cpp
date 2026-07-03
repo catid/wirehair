@@ -7,7 +7,9 @@
 #include <wirehair/wirehair.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -160,15 +162,23 @@ std::vector<int> ParseIntList(const std::string& text)
 {
     std::vector<int> out;
     size_t pos = 0;
-    while (pos < text.size())
+    while (pos <= text.size())
     {
         const size_t comma = text.find(',', pos);
         const std::string token = text.substr(
             pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        const int value = std::atoi(token.c_str());
-        if (value > 0) {
-            out.push_back(value);
+        if (token.empty() || token[0] < '0' || token[0] > '9') {
+            return std::vector<int>();
         }
+        errno = 0;
+        char* end = nullptr;
+        const long value = std::strtol(token.c_str(), &end, 10);
+        if (errno != 0 || !end || *end != '\0' ||
+            value < 1 || value > INT_MAX)
+        {
+            return std::vector<int>();
+        }
+        out.push_back((int)value);
         if (comma == std::string::npos) {
             break;
         }
@@ -181,14 +191,31 @@ std::vector<int> ParseSignedIntList(const std::string& text)
 {
     std::vector<int> out;
     size_t pos = 0;
-    while (pos < text.size())
+    while (pos <= text.size())
     {
         const size_t comma = text.find(',', pos);
         const std::string token = text.substr(
             pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        if (!token.empty()) {
-            out.push_back(std::atoi(token.c_str()));
+        if (token.empty()) {
+            return std::vector<int>();
         }
+        if (token[0] == '-') {
+            if (token.size() == 1u || token[1] < '0' || token[1] > '9') {
+                return std::vector<int>();
+            }
+        }
+        else if (token[0] < '0' || token[0] > '9') {
+            return std::vector<int>();
+        }
+        errno = 0;
+        char* end = nullptr;
+        const long value = std::strtol(token.c_str(), &end, 10);
+        if (errno != 0 || !end || *end != '\0' ||
+            value < INT_MIN || value > INT_MAX)
+        {
+            return std::vector<int>();
+        }
+        out.push_back((int)value);
         if (comma == std::string::npos) {
             break;
         }
@@ -208,6 +235,80 @@ bool ValidateBlockCounts(const std::vector<int>& Ns, const char* command)
             std::fprintf(stderr,
                 "%s --N values must be in [2,64000], got %d\n", command, n);
             return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateDenseDeltas(const std::vector<int>& deltas, const char* command)
+{
+    for (int delta : deltas)
+    {
+        if ((delta % 4) != 0)
+        {
+            std::fprintf(stderr,
+                "%s --deltas/--dense-delta must preserve D %% 4 == 2; "
+                "delta %d is invalid\n",
+                command,
+                delta);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool DenseCountForDelta(
+    const wirehair_v2::SeedProfile& base,
+    int delta,
+    const char* command,
+    uint32_t N,
+    uint32_t block_bytes,
+    uint16_t* dense_count_out)
+{
+    const int dense_count = (int)base.DenseCount + delta;
+    // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100 entries,
+    // and production dense counts are always 2 mod 4.
+    if (dense_count < 2 || dense_count > 398 || (dense_count % 4) != 2)
+    {
+        std::fprintf(stderr,
+            "%s dense delta %d gives invalid dense count %d for N=%u bb=%u\n",
+            command,
+            delta,
+            dense_count,
+            N,
+            block_bytes);
+        return false;
+    }
+    if (dense_count_out) {
+        *dense_count_out = (uint16_t)dense_count;
+    }
+    return true;
+}
+
+bool ValidateDenseCountsForInputs(
+    const std::vector<int>& Ns,
+    const std::vector<int>& BBs,
+    const std::vector<int>& Deltas,
+    const char* command)
+{
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const wirehair_v2::SeedProfile base =
+            wirehair_v2::SelectSeedProfile(
+                (uint32_t)n_value,
+                (uint32_t)bb_value);
+        for (int delta : Deltas)
+        {
+            if (!DenseCountForDelta(
+                    base,
+                    delta,
+                    command,
+                    (uint32_t)n_value,
+                    (uint32_t)bb_value,
+                    nullptr))
+            {
+                return false;
+            }
         }
     }
     return true;
@@ -790,17 +891,19 @@ void ApplyDenseOverride(
         return;
     }
 
-    int dense_count = (int)profile.DenseCount + options.DenseDelta;
-    if (dense_count < 1) {
-        dense_count = 1;
-    }
-    // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100 entries;
-    // counts above 398 would read out of bounds in release builds.
-    if (dense_count > 398) {
-        dense_count = 398;
+    uint16_t dense_count = 0u;
+    if (!DenseCountForDelta(
+            profile,
+            options.DenseDelta,
+            "compare",
+            profile.BlockCount,
+            profile.BlockBytes,
+            &dense_count))
+    {
+        return;
     }
 
-    profile.DenseCount = (uint16_t)dense_count;
+    profile.DenseCount = dense_count;
     const uint16_t table_seed =
         wirehair::GetDenseSeed(profile.BlockCount, profile.DenseCount);
     profile.DenseSeed =
@@ -1052,8 +1155,13 @@ int CmdCompare(int argc, char** argv)
             compare_options.AutoMinDelta = std::atof(argv[++i]);
         }
         else if (!std::strcmp(argv[i], "--dense-delta") && i + 1 < argc) {
+            const std::vector<int> deltas = ParseSignedIntList(argv[++i]);
+            if (deltas.size() != 1u) {
+                std::fprintf(stderr, "bad --dense-delta value\n");
+                return 1;
+            }
             compare_options.DenseOverride = true;
-            compare_options.DenseDelta = std::atoi(argv[++i]);
+            compare_options.DenseDelta = deltas[0];
         }
         else if (!std::strcmp(argv[i], "--dense-candidate") && i + 1 < argc) {
             compare_options.DenseOverride = true;
@@ -1085,6 +1193,28 @@ int CmdCompare(int argc, char** argv)
     }
     if (compare_options.DenseCandidate > 255u) {
         compare_options.DenseCandidate = 255u;
+    }
+    if (compare_options.DenseOverride &&
+        !ValidateDenseDeltas(
+            std::vector<int>(1, compare_options.DenseDelta),
+            "compare"))
+    {
+        return 1;
+    }
+    if (compare_options.DenseOverride)
+    {
+        std::vector<int> Ns;
+        for (uint32_t N = nlo; N <= nhi; ++N) {
+            Ns.push_back((int)N);
+        }
+        if (!ValidateDenseCountsForInputs(
+                Ns,
+                block_bytes_list,
+                std::vector<int>(1, compare_options.DenseDelta),
+                "compare"))
+        {
+            return 1;
+        }
     }
     compare_options.LogAutoChoices =
         compare_options.ProfileMode == CompareProfileAuto && nlo == nhi;
@@ -1732,6 +1862,12 @@ int CmdDenseCount(int argc, char** argv)
     if (!ValidateBlockCounts(Ns, "densecount")) {
         return 1;
     }
+    if (!ValidateDenseDeltas(Deltas, "densecount")) {
+        return 1;
+    }
+    if (!ValidateDenseCountsForInputs(Ns, BBs, Deltas, "densecount")) {
+        return 1;
+    }
 
     std::printf(
         "# densecount: trials=%u loss=%.2f seed=0x%llx\n",
@@ -1751,19 +1887,15 @@ int CmdDenseCount(int argc, char** argv)
 
         for (int delta : Deltas)
         {
-            int dense_count = (int)base.DenseCount + delta;
-            if (dense_count < 1) {
-                dense_count = 1;
-            }
-            // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100
-            // entries, so counts above 398 (kept = 2 mod 4 like production
-            // counts) would read out of bounds in release builds.
-            if (dense_count > 398) {
-                dense_count = 398;
+            uint16_t dense_count = 0u;
+            if (!DenseCountForDelta(
+                    base, delta, "densecount", N, block_bytes, &dense_count))
+            {
+                return 1;
             }
 
             wirehair_v2::SeedProfile profile = base;
-            profile.DenseCount = (uint16_t)dense_count;
+            profile.DenseCount = dense_count;
             profile.DenseSeed = wirehair::GetDenseSeed(N, profile.DenseCount);
 
             Accum acc;
@@ -1859,6 +1991,12 @@ int CmdDenseGrid(int argc, char** argv)
     if (!ValidateBlockCounts(Ns, "densegrid")) {
         return 1;
     }
+    if (!ValidateDenseDeltas(Deltas, "densegrid")) {
+        return 1;
+    }
+    if (!ValidateDenseCountsForInputs(Ns, BBs, Deltas, "densegrid")) {
+        return 1;
+    }
 
     std::printf(
         "# densegrid: candidates=%u trials=%u loss=%.2f seed=0x%llx\n",
@@ -1880,17 +2018,12 @@ int CmdDenseGrid(int argc, char** argv)
 
         for (int delta : Deltas)
         {
-            int dense_count = (int)base.DenseCount + delta;
-            if (dense_count < 1) {
-                dense_count = 1;
+            uint16_t dense_count_u = 0u;
+            if (!DenseCountForDelta(
+                    base, delta, "densegrid", N, block_bytes, &dense_count_u))
+            {
+                return 1;
             }
-            // GetDenseSeed reads kDenseSeeds[dense_count / 4] with only 100
-            // entries, so counts above 398 (kept = 2 mod 4 like production
-            // counts) would read out of bounds in release builds.
-            if (dense_count > 398) {
-                dense_count = 398;
-            }
-            const uint16_t dense_count_u = (uint16_t)dense_count;
             const uint16_t table_seed =
                 wirehair::GetDenseSeed(N, dense_count_u);
 

@@ -284,10 +284,14 @@ static bool CpuHasGFNI = false;
 #ifdef GF256_TRY_AVX512
 static bool CpuHasAVX512 = false;
 #endif
+#ifdef GF256_TRY_SSSE3
 static bool CpuHasSSSE3 = false;
+#endif
 
 #define CPUID_EBX_AVX2    0x00000020
+#ifdef GF256_TRY_SSSE3
 #define CPUID_ECX_SSSE3   0x00000200
+#endif
 
 static void _cpuid(unsigned int cpu_info[4U], const unsigned int cpu_info_type)
 {
@@ -391,7 +395,9 @@ static void gf256_architecture_init()
     unsigned int cpu_info[4];
 
     _cpuid(cpu_info, 1);
+#if defined(GF256_TRY_SSSE3)
     CpuHasSSSE3 = ((cpu_info[2] & CPUID_ECX_SSSE3) != 0);
+#endif
 
 #if defined(GF256_TRY_AVX2)
     _cpuid(cpu_info, 7);
@@ -414,11 +420,11 @@ static void gf256_architecture_init()
     CpuHasAVX512 = (cpu_info[1] & (1u << 16)) != 0; // AVX512F
 #endif // GF256_TRY_AVX512
 
-    // When AVX2 and SSSE3 are unavailable, Siamese takes 4x longer to decode
-    // and 2.6x longer to encode.  Encoding requires a lot more simple XOR ops
-    // so it is still pretty fast.  Decoding is usually really quick because
-    // average loss rates are low, but when needed it requires a lot more
-    // GF multiplies requiring table lookups which is slower.
+    // When AVX2 and SSSE3 are unavailable at compile or run time, Siamese
+    // takes 4x longer to decode and 2.6x longer to encode.  Encoding requires
+    // a lot more simple XOR ops so it is still pretty fast.  Decoding is
+    // usually really quick because average loss rates are low, but when needed
+    // it requires a lot more GF multiplies requiring table lookups.
 
 #endif // GF256_TARGET_MOBILE
 }
@@ -790,6 +796,10 @@ extern "C" int gf256_init_(int version)
 extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
                               const void * GF256_RESTRICT vy, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     WH_BUMP(0, bytes);
     GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<GF256_M128 *>(vx);
     const GF256_M128 * GF256_RESTRICT y16 = reinterpret_cast<const GF256_M128 *>(vy);
@@ -993,6 +1003,10 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
 extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                                const void * GF256_RESTRICT vy, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     WH_BUMP(1, bytes);
     GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128*>(vz);
     const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128*>(vx);
@@ -1145,6 +1159,10 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
 extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                                  const void * GF256_RESTRICT vy, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     WH_BUMP(2, bytes);
     GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128*>(vz);
     const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128*>(vx);
@@ -1325,6 +1343,10 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
 // vz == vx (in-place) is supported: no restrict qualifiers here.
 extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     WH_BUMP(3, bytes);
     // Special cases are rare in codec hot paths.
     if (GF256_UNLIKELY(y <= 1))
@@ -1426,6 +1448,7 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
+# if defined(GF256_TRY_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
         // Partial product tables; see above
@@ -1450,6 +1473,7 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
             bytes -= 16, ++x16, ++z16;
         } while (bytes >= 16);
     }
+# endif // GF256_TRY_SSSE3
 #endif
 
     uint8_t * GF256_RESTRICT z1 = reinterpret_cast<uint8_t*>(z16);
@@ -1516,6 +1540,10 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                                  const void * GF256_RESTRICT vx, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     // Special cases are rare in codec hot paths.
     if (GF256_UNLIKELY(y <= 1))
     {
@@ -1663,6 +1691,7 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
+# if defined(GF256_TRY_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
         // Partial product tables; see above
@@ -1719,6 +1748,7 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
             bytes -= 16, ++x16, ++z16;
         }
     }
+# endif // GF256_TRY_SSSE3
 #endif // GF256_TARGET_MOBILE
 
     uint8_t * GF256_RESTRICT z1 = reinterpret_cast<uint8_t*>(z16);
@@ -1784,6 +1814,10 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
 
 extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy, int bytes)
 {
+    if (bytes <= 0) {
+        return;
+    }
+
     WH_BUMP(5, bytes);
 #if defined(GF256_TARGET_MOBILE)
     uint8_t * GF256_RESTRICT x16 = reinterpret_cast<uint8_t *>(vx);

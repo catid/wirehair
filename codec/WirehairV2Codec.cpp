@@ -61,6 +61,12 @@ WirehairResult Codec::InitializeEncoder(
     }
 
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
+    if (seed_override &&
+        (seed_override->BlockCount != block_count ||
+         seed_override->BlockBytes != block_bytes))
+    {
+        return Wirehair_InvalidInput;
+    }
     const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
@@ -92,6 +98,12 @@ WirehairResult Codec::InitializeDecoder(
     }
 
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
+    if (seed_override &&
+        (seed_override->BlockCount != block_count ||
+         seed_override->BlockBytes != block_bytes))
+    {
+        return Wirehair_InvalidInput;
+    }
     const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
@@ -119,10 +131,10 @@ WirehairResult Codec::Encode(
         return Wirehair_InvalidInput;
     }
     const uint32_t written = Impl.Encode(block_id, block_out, out_bytes);
+    *data_bytes_out = written;
     if (written == 0u) {
         return Wirehair_InvalidInput;
     }
-    *data_bytes_out = written;
     return Wirehair_Success;
 }
 

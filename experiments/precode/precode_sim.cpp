@@ -1459,6 +1459,21 @@ static bool ParseUnsigned(const std::string& s, unsigned& out)
     return true;
 }
 
+static bool ParseU64(const std::string& s, uint64_t& out)
+{
+    if (s.empty() || s[0] < '0' || s[0] > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long v = strtoull(s.c_str(), &end, 0);
+    if (!end || *end != '\0' || errno == ERANGE) {
+        return false;
+    }
+    out = (uint64_t)v;
+    return true;
+}
+
 // Token grammar:
 //   none
 //   dense            (D = GetDenseCount(K), H = 6)
@@ -2363,9 +2378,7 @@ static std::vector<std::string> SplitCsv(const std::string& s)
         if (comma == std::string::npos) {
             comma = s.size();
         }
-        if (comma > start) {
-            out.push_back(s.substr(start, comma - start));
-        }
+        out.push_back(s.substr(start, comma - start));
         start = comma + 1u;
     }
     return out;
@@ -2403,33 +2416,57 @@ int main(int argc, char** argv)
         if (arg == "--K") {
             for (const std::string& t : SplitCsv(next())) {
                 unsigned v = 0;
-                if (ParseUnsigned(t, v)) {
-                    k_list.push_back(v);
+                if (!ParseUnsigned(t, v)) {
+                    fprintf(stderr, "bad --K token %s\n", t.c_str());
+                    return 1;
                 }
+                if (v == 0u) {
+                    fprintf(stderr, "bad --K token %s\n", t.c_str());
+                    return 1;
+                }
+                k_list.push_back(v);
             }
         }
         else if (arg == "--oh") {
             for (const std::string& t : SplitCsv(next())) {
                 unsigned v = 0;
-                if (ParseUnsigned(t, v)) {
-                    oh_list.push_back(v);
+                if (!ParseUnsigned(t, v)) {
+                    fprintf(stderr, "bad --oh token %s\n", t.c_str());
+                    return 1;
                 }
+                oh_list.push_back(v);
             }
         }
         else if (arg == "--schemes") {
             scheme_tokens = SplitCsv(next());
         }
         else if (arg == "--trials") {
-            ParseUnsigned(next(), trials);
+            const std::string v = next();
+            if (!ParseUnsigned(v, trials)) {
+                fprintf(stderr, "bad --trials value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--threads") {
-            ParseUnsigned(next(), threads);
+            const std::string v = next();
+            if (!ParseUnsigned(v, threads)) {
+                fprintf(stderr, "bad --threads value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--seed") {
-            base_seed = strtoull(next().c_str(), nullptr, 0);
+            const std::string v = next();
+            if (!ParseU64(v, base_seed)) {
+                fprintf(stderr, "bad --seed value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--mix") {
-            ParseUnsigned(next(), mix);
+            const std::string v = next();
+            if (!ParseUnsigned(v, mix)) {
+                fprintf(stderr, "bad --mix value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--rowdist") {
             const std::string v = next();
@@ -2454,11 +2491,19 @@ int main(int argc, char** argv)
             }
         }
         else if (arg == "--max-inact") {
-            ParseUnsigned(next(), max_inact);
+            const std::string v = next();
+            if (!ParseUnsigned(v, max_inact)) {
+                fprintf(stderr, "bad --max-inact value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--ge-pivot-window") {
             ge_replay = true; // pivot-window selection is a replay mode
-            ParseUnsigned(next(), ge_pivot_window);
+            const std::string v = next();
+            if (!ParseUnsigned(v, ge_pivot_window)) {
+                fprintf(stderr, "bad --ge-pivot-window value %s\n", v.c_str());
+                return 1;
+            }
         }
         else if (arg == "--ge-replay") {
             ge_replay = true;

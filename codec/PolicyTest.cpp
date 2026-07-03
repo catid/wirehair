@@ -3,6 +3,7 @@
 #include "WirehairV2Peel.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2Seeds.h"
+#include "../gf256.h"
 #include "../WirehairTools.h"
 #include <wirehair/wirehair.h>
 
@@ -165,6 +166,41 @@ void CheckV2InvalidInitialization()
     Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes,
             &invalid_profile) == Wirehair_InvalidInput,
         "v2 encoder should reject invalid dense-count overrides");
+
+    wirehair_v2::SeedProfile mismatched_profile = encoder.Profile();
+    mismatched_profile.BlockCount = N + 1u;
+    Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes,
+            &mismatched_profile) == Wirehair_InvalidInput,
+        "v2 encoder should reject seed overrides for a different block count");
+    mismatched_profile = encoder.Profile();
+    mismatched_profile.BlockBytes = block_bytes + 1u;
+    Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes,
+            &mismatched_profile) == Wirehair_InvalidInput,
+        "v2 encoder should reject seed overrides for different block bytes");
+    Check(decoder.InitializeDecoder(message_bytes, block_bytes,
+            &mismatched_profile) == Wirehair_InvalidInput,
+        "v2 decoder should reject seed overrides for different block bytes");
+}
+
+void CheckV2EncodeFailureClearsByteCount()
+{
+    const uint32_t N = 4u;
+    const uint32_t block_bytes = 32u;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes, 0x42);
+    std::vector<uint8_t> block(block_bytes);
+
+    wirehair_v2::Codec encoder;
+    Check(encoder.InitializeEncoder(&message[0], message_bytes, block_bytes) ==
+            Wirehair_Success,
+        "v2 byte-count test encoder initialization should succeed");
+
+    uint32_t written = 0x12345678u;
+    Check(encoder.Encode(0u, &block[0], block_bytes - 1u, &written) ==
+            Wirehair_InvalidInput,
+        "v2 encode should reject too-small output buffers");
+    Check(written == 0u,
+        "v2 failed encode should clear the byte-count output");
 }
 
 void CheckGeneratedRows(
@@ -192,6 +228,46 @@ void CheckGeneratedRows(
             "generated row should not exceed block count");
         CheckRowHasNoDuplicates(rows[i]);
     }
+}
+
+void CheckPeelRowCountBounds()
+{
+    const wirehair_v2::PeelingCodec codec =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C16,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+
+    const std::vector<std::vector<uint16_t> > too_many_generated =
+        wirehair_v2::GeneratePeelMatrixRows(
+            codec, 2u, wirehair_v2::kMaxPeelMatrixRows + 1u,
+            UINT64_C(0x1234));
+    Check(too_many_generated.empty(),
+        "peel row generation should reject unrepresentable row indexes");
+
+    std::vector<std::vector<uint16_t> > too_many_rows(
+        wirehair_v2::kMaxPeelMatrixRows + 1u);
+    too_many_rows[wirehair_v2::kMaxPeelMatrixRows].push_back(0u);
+    const wirehair_v2::PeelEvaluation eval =
+        wirehair_v2::EvaluatePeelingRows(codec, 2u, too_many_rows);
+    Check(eval.TotalXorCost == UINT64_MAX &&
+            eval.ResidualColumns == 2u,
+        "peel evaluator should reject row counts that would wrap uint16_t");
+
+    std::vector<std::vector<uint16_t> > invalid_columns(1u);
+    invalid_columns[0].push_back(65535u);
+    const wirehair_v2::PeelEvaluation invalid_eval =
+        wirehair_v2::EvaluatePeelingRows(codec, 2u, invalid_columns);
+    Check(invalid_eval.TotalXorCost == UINT64_MAX &&
+            invalid_eval.ResidualColumns == 2u,
+        "peel evaluator should reject caller rows with invalid columns");
+
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(64000u, 1280u);
+    const wirehair_v2::PeelSolvePlan plan =
+        wirehair_v2::BuildPeelSolvePlan(profile, 1537u, UINT64_C(0x5511));
+    Check(plan.RowCount == 0u &&
+            plan.Evaluation.TotalXorCost == UINT64_MAX,
+        "peel solve plan should reject N + overhead rows above uint16_t range");
 }
 
 void CheckCoreSeedHelpers()
@@ -348,6 +424,15 @@ void CheckDecodeAfterDuplicateOriginalFailure()
     Check(wirehair_decode(decoder, N + 2u, &repair[0], written) ==
             Wirehair_InvalidInput,
         "feeds after duplicate-original failure should error, not crash");
+    Check(wirehair_recover(decoder, &recovered[0], message_bytes) ==
+            Wirehair_InvalidInput,
+        "recover after duplicate-original failure should report invalid input");
+    uint32_t bytes_out = 0x12345678u;
+    Check(wirehair_recover_block(decoder, 0u, &repair[0], &bytes_out) ==
+            Wirehair_InvalidInput,
+        "recover_block after duplicate-original failure should report invalid input");
+    Check(bytes_out == 0u,
+        "recover_block after duplicate-original failure should clear byte count");
 
     // Reuse must clear the failed state
     decoder = wirehair_decoder_create(decoder, message_bytes, block_bytes);
@@ -391,6 +476,90 @@ void CheckBlockBytesUpperBound()
         "block_bytes >= 2^31 should be rejected for decoder initialization");
     wirehair_free(encoder);
     wirehair_free(decoder);
+}
+
+void CheckRecoverBeforeDecodeComplete()
+{
+    const uint32_t N = 4u;
+    const uint32_t block_bytes = 16u;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    std::vector<uint8_t> recovered((size_t)message_bytes, 0xcc);
+    std::vector<uint8_t> block(block_bytes, 0xdd);
+
+    WirehairCodec decoder = wirehair_decoder_create(
+        0, message_bytes, block_bytes);
+    Check(decoder != 0, "fresh-recover decoder initialization should succeed");
+    if (!decoder) {
+        return;
+    }
+
+    Check(wirehair_recover(decoder, &recovered[0], message_bytes) ==
+            Wirehair_NeedMore,
+        "fresh decoder recover should require a completed decode");
+    Check(recovered[0] == 0xcc,
+        "fresh decoder recover should not write output");
+
+    uint32_t bytes_out = 0x12345678u;
+    Check(wirehair_recover_block(decoder, 0u, &block[0], &bytes_out) ==
+            Wirehair_NeedMore,
+        "fresh decoder recover_block should require a completed decode");
+    Check(bytes_out == 0u,
+        "fresh decoder recover_block should clear byte count");
+    Check(block[0] == 0xdd,
+        "fresh decoder recover_block should not write output");
+
+    wirehair_free(decoder);
+}
+
+void CheckGf256RejectsNonPositiveLengths()
+{
+    uint8_t x[20];
+    uint8_t y[20];
+    uint8_t z[20];
+    uint8_t x0[20];
+    uint8_t y0[20];
+    uint8_t z0[20];
+
+    for (size_t i = 0; i < sizeof(x); ++i)
+    {
+        x[i] = (uint8_t)(0x11u + i);
+        y[i] = (uint8_t)(0x80u - i);
+        z[i] = (uint8_t)(0x40u + i);
+    }
+    std::memcpy(x0, x, sizeof(x));
+    std::memcpy(y0, y, sizeof(y));
+    std::memcpy(z0, z, sizeof(z));
+
+    gf256_add_mem(x, y, -1);
+    Check(std::memcmp(x, x0, sizeof(x)) == 0,
+        "gf256_add_mem should ignore negative byte counts");
+    gf256_add2_mem(z, x, y, -1);
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_add2_mem should ignore negative byte counts");
+    gf256_addset_mem(z, x, y, -1);
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_addset_mem should ignore negative byte counts");
+    gf256_mul_mem(z, x, 0u, -1);
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_mul_mem should ignore negative byte counts");
+    gf256_muladd_mem(z, 1u, x, -1);
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_muladd_mem should ignore negative byte counts");
+    gf256_memswap(x, y, -1);
+    Check(std::memcmp(x, x0, sizeof(x)) == 0 &&
+            std::memcmp(y, y0, sizeof(y)) == 0,
+        "gf256_memswap should ignore negative byte counts");
+
+    gf256_add_mem(x, y, 0);
+    gf256_add2_mem(z, x, y, 0);
+    gf256_addset_mem(z, x, y, 0);
+    gf256_mul_mem(z, x, 0u, 0);
+    gf256_muladd_mem(z, 1u, x, 0);
+    gf256_memswap(x, y, 0);
+    Check(std::memcmp(x, x0, sizeof(x)) == 0 &&
+            std::memcmp(y, y0, sizeof(y)) == 0 &&
+            std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256 operations should ignore zero byte counts");
 }
 
 void CheckPeelSolverSelectionSemantics()
@@ -449,7 +618,10 @@ int main()
     CheckDecodeAfterAllOriginalSuccess();
     CheckDecodeAfterDuplicateOriginalFailure();
     CheckBlockBytesUpperBound();
+    CheckRecoverBeforeDecodeComplete();
+    CheckGf256RejectsNonPositiveLengths();
     CheckV2InvalidInitialization();
+    CheckV2EncodeFailureClearsByteCount();
 
     Check(ClassifyBlockBytes(1280u) == BlockByteClass::Small,
         "1280-byte blocks should use small byte class");
@@ -563,6 +735,7 @@ int main()
             96u, 97u,
             UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
+    CheckPeelRowCountBounds();
 
     const PeelEvaluation eval_a =
         EvaluatePeeling(eval_codec, 64u, UINT64_C(0x998877));

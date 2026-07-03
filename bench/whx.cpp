@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -28,6 +30,55 @@ using Clock = std::chrono::steady_clock;
 
 static double now_sec() {
     return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+}
+
+static bool parse_u64_strict(const char* s, uint64_t& out) {
+    if (!s || !*s || *s < '0' || *s > '9') return false;
+    errno = 0;
+    char* end = nullptr;
+    unsigned long long v = strtoull(s, &end, 0);
+    if (errno != 0 || end == s || !end || *end != '\0') return false;
+    out = (uint64_t)v;
+    return true;
+}
+
+static bool parse_int_strict(const char* s, int& out) {
+    if (!s || !*s) return false;
+    errno = 0;
+    char* end = nullptr;
+    long v = strtol(s, &end, 0);
+    if (errno != 0 || end == s || !end || *end != '\0' ||
+        v < INT_MIN || v > INT_MAX) return false;
+    out = (int)v;
+    return true;
+}
+
+static bool parse_long_strict(const char* s, long& out) {
+    if (!s || !*s) return false;
+    errno = 0;
+    char* end = nullptr;
+    long v = strtol(s, &end, 0);
+    if (errno != 0 || end == s || !end || *end != '\0') return false;
+    out = v;
+    return true;
+}
+
+static bool parse_double_strict(const char* s, double& out) {
+    if (!s || !*s) return false;
+    errno = 0;
+    char* end = nullptr;
+    double v = strtod(s, &end);
+    if (errno != 0 || end == s || !end || *end != '\0' || !std::isfinite(v)) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+static bool valid_roundtrip_args(int N, int bb, int startMode, double loss) {
+    return N >= 2 && N <= 64000 && bb >= 1 &&
+        (startMode == 0 || startMode == 1) &&
+        loss >= 0.0 && loss <= 0.99 && std::isfinite(loss);
 }
 
 // ---- splitmix64 PRNG (deterministic, fast, per-thread) ----
@@ -316,6 +367,15 @@ struct Stat {
 // failmsg (if non-null) gets a description on failure.
 static int roundtrip(uint64_t seed, int N, int blockBytes, int startMode, double lossRate,
                      uint32_t* extra_out, char* failmsg) {
+    // Fail fast with a usage message on out-of-domain parameters.  Most
+    // commands pass --nlo/--nmax/--bb through unvalidated; negative or zero
+    // values wrap messageBytes to ~2^64 below and the resulting uncaught
+    // vector length_error kills a whole campaign with no explanation.
+    if (N < 2 || N > 64000 || blockBytes < 1) {
+        fprintf(stderr, "roundtrip: invalid N=%d bb=%d (need 2 <= N <= 64000, bb >= 1)\n",
+                N, blockBytes);
+        exit(2);
+    }
     Rng rng(seed);
     int finalBytes = rng.range(1, blockBytes);
     uint64_t messageBytes = (uint64_t)(N - 1) * blockBytes + finalBytes;
@@ -424,9 +484,13 @@ static int cmd_fuzz(int argc, char** argv) {
     int Nmax = 4000;
     uint64_t baseSeed = 0xABCDEF12345ULL;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--secs") && i + 1 < argc) seconds = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--nmax") && i + 1 < argc) Nmax = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) baseSeed = strtoull(argv[++i], nullptr, 0);
+        if (!strcmp(argv[i], "--secs") && i + 1 < argc) { if (!parse_double_strict(argv[++i], seconds)) return 2; }
+        else if (!strcmp(argv[i], "--nmax") && i + 1 < argc) { if (!parse_int_strict(argv[++i], Nmax)) return 2; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
+    }
+    if (seconds < 0.0 || Nmax < 2 || Nmax > 64000) {
+        fprintf(stderr, "fuzz requires --secs >= 0 and 2 <= --nmax <= 64000\n");
+        return 2;
     }
     printf("# fuzz: threads=%d secs=%.1f Nmax=%d seed=0x%llx\n", threads, seconds, Nmax, (unsigned long long)baseSeed);
     Stat global; std::mutex gmu;
@@ -662,8 +726,19 @@ static int cmd_bench(int argc, char** argv) {
 // Deterministic single-trial trace: whx repro <seed> <N> <bb> <startMode> <loss>
 static int cmd_repro(int argc, char** argv) {
     if (argc < 5) { fprintf(stderr, "repro <seed> <N> <bb> <startMode> <loss>\n"); return 1; }
-    uint64_t seed = strtoull(argv[0], nullptr, 0);
-    int N = atoi(argv[1]); int bb = atoi(argv[2]); int startMode = atoi(argv[3]); double loss = atof(argv[4]);
+    uint64_t seed = 0;
+    int N = 0, bb = 0, startMode = 0;
+    double loss = 0.0;
+    if (!parse_u64_strict(argv[0], seed) ||
+        !parse_int_strict(argv[1], N) ||
+        !parse_int_strict(argv[2], bb) ||
+        !parse_int_strict(argv[3], startMode) ||
+        !parse_double_strict(argv[4], loss) ||
+        !valid_roundtrip_args(N, bb, startMode, loss))
+    {
+        fprintf(stderr, "repro: invalid arguments (need 2 <= N <= 64000, bb >= 1, startMode 0/1, 0 <= loss <= 0.99)\n");
+        return 2;
+    }
     Rng rng(seed);
     int finalBytes = rng.range(1, bb);
     uint64_t messageBytes = (uint64_t)(N - 1) * bb + finalBytes;
@@ -673,6 +748,11 @@ static int cmd_repro(int argc, char** argv) {
     WirehairCodec dec = wirehair_decoder_create(nullptr, messageBytes, bb);
     printf("repro N=%d bb=%d final=%d msgBytes=%llu startMode=%d loss=%.2f enc=%p dec=%p\n",
            N, bb, finalBytes, (unsigned long long)messageBytes, startMode, loss, (void*)enc, (void*)dec);
+    if (!enc || !dec) {
+        wirehair_free(enc);
+        wirehair_free(dec);
+        return 3;
+    }
     const unsigned maxNeeded = (unsigned)N + 512 + (unsigned)N;
     unsigned blockId = (startMode==1)?repair_start_block_id(rng, N, maxNeeded):0, needed=0;
     for (;;) {
@@ -681,7 +761,12 @@ static int cmd_repro(int argc, char** argv) {
         unsigned thisId = blockId++;
         if (drop) continue;
         uint32_t wl=0;
-        wirehair_encode(enc, thisId, block.data(), bb, &wl);
+        WirehairResult er = wirehair_encode(enc, thisId, block.data(), bb, &wl);
+        if (er != Wirehair_Success) {
+            printf("ENCODE ERROR er=%d\n", er);
+            wirehair_free(enc); wirehair_free(dec);
+            return 4;
+        }
         needed++;
         WirehairResult dr = wirehair_decode(dec, thisId, block.data(), wl);
         if (needed <= 8 || needed % 256 == 0 || dr != Wirehair_NeedMore)
@@ -690,12 +775,13 @@ static int cmd_repro(int argc, char** argv) {
             WirehairResult rr = wirehair_recover(dec, decoded.data(), messageBytes);
             int cmp = memcmp(decoded.data(), message.data(), messageBytes);
             printf("DECODED at needed=%u (extra=%d) recover=%d cmp=%d\n", needed, (int)needed-N, rr, cmp);
-            break;
+            wirehair_free(enc); wirehair_free(dec);
+            return (rr == Wirehair_Success && cmp == 0) ? 0 : 6;
         }
-        if (dr != Wirehair_NeedMore) { printf("DECODE ERROR dr=%d\n", dr); break; }
+        if (dr != Wirehair_NeedMore) { printf("DECODE ERROR dr=%d\n", dr); wirehair_free(enc); wirehair_free(dec); return 5; }
     }
     wirehair_free(enc); wirehair_free(dec);
-    return 0;
+    return 7;
 }
 
 // Overhead characterization sweep: for each N, run many round-trips and report
@@ -709,14 +795,20 @@ static int cmd_ohead(int argc, char** argv) {
     double loss = 0.10;
     uint64_t baseSeed = 0xACE0;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--nlo") && i+1<argc) nlo = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--nhi") && i+1<argc) nhi = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--nstep") && i+1<argc) nstep = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--trials") && i+1<argc) trials = atol(argv[++i]);
-        else if (!strcmp(argv[i], "--bb") && i+1<argc) bb = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--startmode") && i+1<argc) startMode = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--loss") && i+1<argc) loss = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--seed") && i+1<argc) baseSeed = strtoull(argv[++i],nullptr,0);
+        if (!strcmp(argv[i], "--nlo") && i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; }
+        else if (!strcmp(argv[i], "--nhi") && i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; }
+        else if (!strcmp(argv[i], "--nstep") && i+1<argc) { if (!parse_int_strict(argv[++i], nstep)) return 2; }
+        else if (!strcmp(argv[i], "--trials") && i+1<argc) { if (!parse_long_strict(argv[++i], trials)) return 2; }
+        else if (!strcmp(argv[i], "--bb") && i+1<argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
+        else if (!strcmp(argv[i], "--startmode") && i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
+        else if (!strcmp(argv[i], "--loss") && i+1<argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i], "--seed") && i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
+    }
+    if (nlo < 2 || nhi > 64000 || nlo > nhi || nstep < 0 ||
+        trials < 1 || !valid_roundtrip_args(nlo, bb, startMode, loss))
+    {
+        fprintf(stderr, "ohead: invalid range or parameters\n");
+        return 2;
     }
     vector<int> Ns;
     if (nstep > 0) { for (int n = nlo; n <= nhi; n += nstep) Ns.push_back(n); }
@@ -862,7 +954,31 @@ static int cmd_seedsearch(int argc, char** argv) {
     if (nseeds < 1) nseeds = 1;
     if (nseeds > 256) nseeds = 256;
     vector<int> Ns;
-    if (!nfile.empty()) { FILE* f=fopen(nfile.c_str(),"r"); if(f){ int n; while(fscanf(f,"%d",&n)==1) Ns.push_back(n); fclose(f);} }
+    if (!nfile.empty()) {
+        // Loud failure on a bad path or malformed file: the old fscanf loop
+        // silently produced an empty/truncated N list and the campaign
+        // exited 0 looking like a complete search with no weak N.
+        FILE* f = fopen(nfile.c_str(), "r");
+        if (!f) { fprintf(stderr, "seedsearch: cannot open --nfile %s\n", nfile.c_str()); return 2; }
+        char linebuf[512];
+        int lineno = 0;
+        while (fgets(linebuf, sizeof(linebuf), f)) {
+            ++lineno;
+            const char* s = linebuf;
+            while (*s == ' ' || *s == '\t') ++s;
+            if (*s == '\0' || *s == '\n' || *s == '#') continue; // blank/comment
+            char* end = nullptr;
+            long n = strtol(s, &end, 10);
+            if (end == s || n < 2 || n > 64000) {
+                fprintf(stderr, "seedsearch: bad N at %s:%d: %s", nfile.c_str(), lineno, linebuf);
+                fclose(f);
+                return 2;
+            }
+            Ns.push_back((int)n);
+        }
+        fclose(f);
+        if (Ns.empty()) { fprintf(stderr, "seedsearch: --nfile %s has no N values\n", nfile.c_str()); return 2; }
+    }
     if (!nlist.empty()) { size_t p=0; while(p<nlist.size()){size_t q=nlist.find(',',p); int n=atoi(nlist.substr(p,q==string::npos?string::npos:q-p).c_str()); if(n>0)Ns.push_back(n); if(q==string::npos)break; p=q+1;} }
     int dseeds = 0;          // 0 = peel-only (back-compat); >0 = enable joint dense-seed search for hard N
     double goodthr = 0.05;   // peel-only is accepted if max(v10,v30) < goodthr; else search dense
@@ -934,14 +1050,21 @@ static int cmd_scan(int argc, char** argv) {
     double loss = 0.10, thresh = 0.08;
     uint64_t baseSeed = 0x5CA4;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i],"--nlo")&&i+1<argc) nlo=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--nhi")&&i+1<argc) nhi=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--trials")&&i+1<argc) trials=atol(argv[++i]);
-        else if (!strcmp(argv[i],"--bb")&&i+1<argc) bb=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--startmode")&&i+1<argc) startMode=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--loss")&&i+1<argc) loss=atof(argv[++i]);
-        else if (!strcmp(argv[i],"--thresh")&&i+1<argc) thresh=atof(argv[++i]);
-        else if (!strcmp(argv[i],"--seed")&&i+1<argc) baseSeed=strtoull(argv[++i],nullptr,0);
+        if (!strcmp(argv[i],"--nlo")&&i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; }
+        else if (!strcmp(argv[i],"--nhi")&&i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; }
+        else if (!strcmp(argv[i],"--trials")&&i+1<argc) { if (!parse_long_strict(argv[++i], trials)) return 2; }
+        else if (!strcmp(argv[i],"--bb")&&i+1<argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
+        else if (!strcmp(argv[i],"--startmode")&&i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
+        else if (!strcmp(argv[i],"--loss")&&i+1<argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i],"--thresh")&&i+1<argc) { if (!parse_double_strict(argv[++i], thresh)) return 2; }
+        else if (!strcmp(argv[i],"--seed")&&i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
+    }
+    if (nlo < 2 || nhi > 64000 || nlo > nhi || trials < 1 ||
+        !valid_roundtrip_args(nlo, bb, startMode, loss) ||
+        thresh < 0.0 || !std::isfinite(thresh))
+    {
+        fprintf(stderr, "scan: invalid range or parameters\n");
+        return 2;
     }
     printf("# scan: threads=%d N=[%d,%d] trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
            threads, nlo, nhi, trials, bb, startMode, loss, thresh);
@@ -1216,7 +1339,12 @@ int main(int argc, char** argv) {
     // dispatched before this, silently ignoring --threads and defaulting to ~102 threads).
     vector<char*> rest;
     for (int i = 2; i < argc; ++i) {
-        if (!strcmp(argv[i], "--threads") && i + 1 < argc) { g_threads = atoi(argv[++i]); }
+        if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+            if (!parse_int_strict(argv[++i], g_threads) || g_threads < 1) {
+                fprintf(stderr, "invalid --threads\n");
+                return 2;
+            }
+        }
         else rest.push_back(argv[i]);
     }
     int ac = (int)rest.size(); char** av = rest.data();

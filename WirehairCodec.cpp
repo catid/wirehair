@@ -3906,6 +3906,16 @@ WirehairResult Codec::ReconstructBlock(
         }
         return Wirehair_InvalidInput;
     }
+    if (_decode_failed)
+    {
+        *bytes_out = 0;
+        return Wirehair_InvalidInput;
+    }
+    if (!_decode_complete)
+    {
+        *bytes_out = 0;
+        return Wirehair_NeedMore;
+    }
 
     // If this original block was received directly, copy it from the input
     // staging area instead of regenerating it from the solved columns.
@@ -4043,6 +4053,12 @@ WirehairResult Codec::ReconstructOutput(
     if (message_bytes != _block_bytes * (_block_count - 1) + _output_final_bytes) {
         CAT_DEBUG_BREAK();
         return Wirehair_InvalidInput;
+    }
+    if (_decode_failed) {
+        return Wirehair_InvalidInput;
+    }
+    if (!_decode_complete) {
+        return Wirehair_NeedMore;
     }
     uint8_t * GF256_RESTRICT output_blocks = reinterpret_cast<uint8_t *>( message_out );
 

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -143,6 +144,32 @@ static std::vector<int> parse_int_list(const std::string& text, bool* ok = nullp
         start = comma + 1;
     }
     return out;
+}
+
+static bool parse_int_scalar(const char* text, int& out)
+{
+    bool ok = false;
+    const std::vector<int> values = parse_int_list(text ? text : "", &ok);
+    if (!ok || values.size() != 1u) {
+        return false;
+    }
+    out = values[0];
+    return true;
+}
+
+static bool parse_u64_scalar(const char* text, uint64_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 0);
+    if (errno != 0 || end == text || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
 }
 
 static std::vector<double> parse_double_list(
@@ -7371,28 +7398,49 @@ int main(int argc, char** argv)
             structures_spec = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], trials)) {
+                std::fprintf(stderr, "bad --trials value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) {
-            threads = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], threads)) {
+                std::fprintf(stderr, "bad --threads value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], nullptr, 0);
+            if (!parse_u64_scalar(argv[++i], seed)) {
+                std::fprintf(stderr, "bad --seed value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--overhead") && i + 1 < argc) {
-            overhead = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], overhead)) {
+                std::fprintf(stderr, "bad --overhead value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--overhead-pct") && i + 1 < argc) {
             overhead_pct_spec = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--rows") && i + 1 < argc) {
-            rows_override = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], rows_override)) {
+                std::fprintf(stderr, "bad --rows value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--N-jitter") && i + 1 < argc) {
-            n_jitter = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], n_jitter)) {
+                std::fprintf(stderr, "bad --N-jitter value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--n-jitter") && i + 1 < argc) {
-            n_jitter = std::atoi(argv[++i]);
+            if (!parse_int_scalar(argv[++i], n_jitter)) {
+                std::fprintf(stderr, "bad --n-jitter value: %s\n", argv[i]);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--matrix-seeds") && i + 1 < argc) {
             matrix_seed_mode = argv[++i];

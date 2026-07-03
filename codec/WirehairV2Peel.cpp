@@ -33,6 +33,20 @@ struct Rng
     }
 };
 
+PeelEvaluation InvalidPeelEvaluation(uint32_t rows, uint32_t columns)
+{
+    PeelEvaluation eval;
+    eval.Rows = rows;
+    eval.Columns = columns;
+    eval.ResidualRows = rows;
+    eval.ResidualColumns = columns;
+    eval.MatrixRefs = 0;
+    eval.MatrixXors = 0;
+    eval.SolveDenseXors = UINT64_MAX;
+    eval.TotalXorCost = UINT64_MAX;
+    return eval;
+}
+
 uint32_t ClampDegree(uint32_t degree, uint32_t block_count)
 {
     if (degree < 1u) {
@@ -757,6 +771,13 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     uint32_t row_count,
     uint64_t seed)
 {
+    if (block_count == 0u ||
+        block_count > UINT16_MAX ||
+        row_count > kMaxPeelMatrixRows)
+    {
+        return std::vector<std::vector<uint16_t> >();
+    }
+
     Rng rng(seed);
     const DegreeSampler degrees(codec, block_count);
     std::vector<std::vector<uint16_t> > rows;
@@ -784,6 +805,25 @@ PeelEvaluation EvaluatePeelingRows(
     uint32_t block_count,
     const std::vector<std::vector<uint16_t> >& rows)
 {
+    if (block_count == 0u ||
+        block_count > UINT16_MAX ||
+        rows.size() > kMaxPeelMatrixRows)
+    {
+        return InvalidPeelEvaluation(
+            rows.size() > UINT32_MAX ? UINT32_MAX : (uint32_t)rows.size(),
+            block_count);
+    }
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        for (uint16_t c : rows[r])
+        {
+            if (c >= block_count)
+            {
+                return InvalidPeelEvaluation((uint32_t)rows.size(), block_count);
+            }
+        }
+    }
+
     PeelSolverState solver(codec, block_count, rows);
     uint64_t refs = 0;
     uint64_t xors = 0;
