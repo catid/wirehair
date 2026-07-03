@@ -289,6 +289,11 @@ extern void gf256_add_mem(void * GF256_RESTRICT vx,
 extern void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                            const void * GF256_RESTRICT vy, int bytes);
 
+/// Performs "z[] += srcs[0][] + ... + srcs[src_count-1][]" bulk operation
+extern void gf256_add_multi_mem(void * GF256_RESTRICT vz,
+                                const void * const * GF256_RESTRICT vsrcs,
+                                int src_count, int bytes);
+
 /// Performs "z[] = x[] + y[]" bulk memory operation
 extern void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                              const void * GF256_RESTRICT vy, int bytes);

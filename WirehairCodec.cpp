@@ -240,6 +240,58 @@ int Codec::OpLogRecoveryBlock(const void* ptr) const
 #define WH_OPLOG_DIV(dst_block, scalar, bytes) do {} while (false)
 #endif
 
+#if defined(WH_GATHER) && (WH_GATHER+0)
+
+static const unsigned kGatherMaxBlockBytes = 128u * 1024u;
+
+static GF256_FORCE_INLINE bool UseGatherXor(unsigned block_bytes)
+{
+    return block_bytes <= kGatherMaxBlockBytes;
+}
+
+class GatherXor
+{
+public:
+    GatherXor(uint8_t* dest, unsigned bytes)
+        : Dest(dest)
+        , Bytes((int)bytes)
+        , Count(0)
+    {
+    }
+
+    void Add(const uint8_t* src)
+    {
+        Sources[Count++] = src;
+        if (Count == kMaxSources) {
+            Flush();
+        }
+    }
+
+    void Flush()
+    {
+        if (Count == 1) {
+            gf256_add_mem(Dest, Sources[0], Bytes);
+        }
+        else if (Count == 2) {
+            gf256_add2_mem(Dest, Sources[0], Sources[1], Bytes);
+        }
+        else if (Count > 2) {
+            gf256_add_multi_mem(Dest, Sources, (int)Count, Bytes);
+        }
+        Count = 0;
+    }
+
+private:
+    static const unsigned kMaxSources = 8;
+
+    uint8_t* Dest;
+    int Bytes;
+    const void* Sources[kMaxSources];
+    unsigned Count;
+};
+
+#endif // WH_GATHER
+
 
 //------------------------------------------------------------------------------
 // Stage (1) Peeling:
@@ -3227,67 +3279,131 @@ void Codec::Substitute()
         CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[2]) < _recovery_rows);
         const uint8_t * GF256_RESTRICT src1 = _recovery_blocks + _block_bytes * (_block_count + mix.Columns[2]);
 
-        // Add next two mixing columns in
-        gf256_add2_mem(dest, src0, src1, _block_bytes);
-        WH_OPLOG_ADD2(dest_column_i, _block_count + mix.Columns[1], _block_count + mix.Columns[2], _block_bytes);
-
-        CAT_IF_ROWOP(++rowops;)
-
-        // If at least two peeling columns are set:
-        if (CAT_LIKELY(row->Params.PeelCount >= 2)) // common case:
+#if defined(WH_GATHER) && (WH_GATHER+0)
+        if (UseGatherXor(_block_bytes))
         {
-            PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
+            GatherXor gather(dest, _block_bytes);
 
-            const uint16_t column_0 = iter.GetColumn();
-            iter.Iterate();
-            const uint16_t column_1 = iter.GetColumn();
-
-            // Common case:
-            if (CAT_LIKELY(column_0 != dest_column_i))
-            {
-                CAT_DEBUG_ASSERT(column_0 < _recovery_rows);
-                const uint8_t * GF256_RESTRICT peel0 = _recovery_blocks + _block_bytes * column_0;
-
-                // Common case:
-                if (CAT_LIKELY(column_1 != dest_column_i)) {
-                    CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
-                    gf256_add2_mem(dest, peel0, _recovery_blocks + _block_bytes * column_1, _block_bytes);
-                    WH_OPLOG_ADD2(dest_column_i, column_0, column_1, _block_bytes);
-                }
-                else {
-                    gf256_add_mem(dest, peel0, _block_bytes);
-                    WH_OPLOG_XOR(dest_column_i, column_0, _block_bytes);
-                }
-            }
-            else {
-                CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
-                gf256_add_mem(dest, _recovery_blocks + _block_bytes * column_1, _block_bytes);
-                WH_OPLOG_XOR(dest_column_i, column_1, _block_bytes);
-            }
+            gather.Add(src0);
+            gather.Add(src1);
+            WH_OPLOG_XOR(dest_column_i, _block_count + mix.Columns[1], _block_bytes);
+            WH_OPLOG_XOR(dest_column_i, _block_count + mix.Columns[2], _block_bytes);
             CAT_IF_ROWOP(++rowops;)
 
-            // For each remaining column:
-            while (iter.Iterate())
+            // If at least two peeling columns are set:
+            if (CAT_LIKELY(row->Params.PeelCount >= 2)) // common case:
             {
-                const uint16_t column_i = iter.GetColumn();
-                CAT_DEBUG_ASSERT(column_i < _recovery_rows);
-                const uint8_t * GF256_RESTRICT peel_src = _recovery_blocks + _block_bytes * column_i;
+                PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
 
-                CAT_IF_DUMP(cout << " " << column_i;)
+                const uint16_t column_0 = iter.GetColumn();
+                iter.Iterate();
+                const uint16_t column_1 = iter.GetColumn();
 
-                // If column is not the solved one:
-                if (CAT_LIKELY(column_i != dest_column_i))
+                if (CAT_LIKELY(column_0 != dest_column_i))
                 {
-                    gf256_add_mem(dest, peel_src, _block_bytes);
-                    WH_OPLOG_XOR(dest_column_i, column_i, _block_bytes);
-                    CAT_IF_ROWOP(++rowops;)
-                    CAT_IF_DUMP(cout << "[" << (unsigned)peel_src[0] << "]";)
+                    CAT_DEBUG_ASSERT(column_0 < _recovery_rows);
+                    gather.Add(_recovery_blocks + _block_bytes * column_0);
+                    WH_OPLOG_XOR(dest_column_i, column_0, _block_bytes);
+                }
+
+                if (CAT_LIKELY(column_1 != dest_column_i))
+                {
+                    CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
+                    gather.Add(_recovery_blocks + _block_bytes * column_1);
+                    WH_OPLOG_XOR(dest_column_i, column_1, _block_bytes);
+                }
+                CAT_IF_ROWOP(++rowops;)
+
+                // For each remaining column:
+                while (iter.Iterate())
+                {
+                    const uint16_t column_i = iter.GetColumn();
+                    CAT_DEBUG_ASSERT(column_i < _recovery_rows);
+                    const uint8_t * GF256_RESTRICT peel_src = _recovery_blocks + _block_bytes * column_i;
+
+                    CAT_IF_DUMP(cout << " " << column_i;)
+
+                    // If column is not the solved one:
+                    if (CAT_LIKELY(column_i != dest_column_i))
+                    {
+                        gather.Add(peel_src);
+                        WH_OPLOG_XOR(dest_column_i, column_i, _block_bytes);
+                        CAT_IF_ROWOP(++rowops;)
+                        CAT_IF_DUMP(cout << "[" << (unsigned)peel_src[0] << "]";)
+                    }
+                    else {
+                        CAT_IF_DUMP(cout << "*";)
+                    }
+                }
+            } // end if weight 2
+
+            gather.Flush();
+        }
+        else
+#endif // WH_GATHER
+        {
+            // Add next two mixing columns in
+            gf256_add2_mem(dest, src0, src1, _block_bytes);
+            WH_OPLOG_ADD2(dest_column_i, _block_count + mix.Columns[1], _block_count + mix.Columns[2], _block_bytes);
+
+            CAT_IF_ROWOP(++rowops;)
+
+            // If at least two peeling columns are set:
+            if (CAT_LIKELY(row->Params.PeelCount >= 2)) // common case:
+            {
+                PeelRowIterator iter(row->Params, _block_count, _block_next_prime);
+
+                const uint16_t column_0 = iter.GetColumn();
+                iter.Iterate();
+                const uint16_t column_1 = iter.GetColumn();
+
+                // Common case:
+                if (CAT_LIKELY(column_0 != dest_column_i))
+                {
+                    CAT_DEBUG_ASSERT(column_0 < _recovery_rows);
+                    const uint8_t * GF256_RESTRICT peel0 = _recovery_blocks + _block_bytes * column_0;
+
+                    // Common case:
+                    if (CAT_LIKELY(column_1 != dest_column_i)) {
+                        CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
+                        gf256_add2_mem(dest, peel0, _recovery_blocks + _block_bytes * column_1, _block_bytes);
+                        WH_OPLOG_ADD2(dest_column_i, column_0, column_1, _block_bytes);
+                    }
+                    else {
+                        gf256_add_mem(dest, peel0, _block_bytes);
+                        WH_OPLOG_XOR(dest_column_i, column_0, _block_bytes);
+                    }
                 }
                 else {
-                    CAT_IF_DUMP(cout << "*";)
+                    CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
+                    gf256_add_mem(dest, _recovery_blocks + _block_bytes * column_1, _block_bytes);
+                    WH_OPLOG_XOR(dest_column_i, column_1, _block_bytes);
                 }
-            }
-        } // end if weight 2
+                CAT_IF_ROWOP(++rowops;)
+
+                // For each remaining column:
+                while (iter.Iterate())
+                {
+                    const uint16_t column_i = iter.GetColumn();
+                    CAT_DEBUG_ASSERT(column_i < _recovery_rows);
+                    const uint8_t * GF256_RESTRICT peel_src = _recovery_blocks + _block_bytes * column_i;
+
+                    CAT_IF_DUMP(cout << " " << column_i;)
+
+                    // If column is not the solved one:
+                    if (CAT_LIKELY(column_i != dest_column_i))
+                    {
+                        gf256_add_mem(dest, peel_src, _block_bytes);
+                        WH_OPLOG_XOR(dest_column_i, column_i, _block_bytes);
+                        CAT_IF_ROWOP(++rowops;)
+                        CAT_IF_DUMP(cout << "[" << (unsigned)peel_src[0] << "]";)
+                    }
+                    else {
+                        CAT_IF_DUMP(cout << "*";)
+                    }
+                }
+            } // end if weight 2
+        }
 
         CAT_IF_DUMP(cout << endl;)
     }
@@ -4788,6 +4904,75 @@ uint32_t Codec::Encode(
 
     CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[0]) < _recovery_rows);
     const uint8_t * GF256_RESTRICT mix0_src = _recovery_blocks + _block_bytes * (_block_count + mix.Columns[0]);
+
+#if defined(WH_GATHER) && (WH_GATHER+0)
+    if (UseGatherXor(_block_bytes))
+    {
+        GatherXor gather(data_out, copyBytes);
+
+        // If peeler has multiple columns:
+        if (iter.Iterate())
+        {
+            const uint16_t peel_1 = iter.GetColumn();
+
+            CAT_IF_DUMP(cout << " " << peel_1;)
+
+            CAT_DEBUG_ASSERT(peel_1 < _recovery_rows);
+
+            // Combine first two columns into output buffer (faster than memcpy + memxor)
+            gf256_addset_mem(
+                data_out,
+                first,
+                _recovery_blocks + _block_bytes * peel_1,
+                copyBytes);
+
+            // For each remaining peeler column:
+            while (iter.Iterate())
+            {
+                const uint16_t peel_x = iter.GetColumn();
+
+                CAT_IF_DUMP(cout << " " << peel_x;)
+
+                CAT_DEBUG_ASSERT(peel_x < _recovery_rows);
+
+                // Mix in each column
+                gather.Add(_recovery_blocks + _block_bytes * peel_x);
+            }
+
+            CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[0]) < _recovery_rows);
+
+            // Mix first mixer block in directly
+            gather.Add(mix0_src);
+        }
+        else
+        {
+            CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[0]) < _recovery_rows);
+
+            // Mix first with first mixer block (faster than memcpy + memxor)
+            gf256_addset_mem(data_out, first, mix0_src, copyBytes);
+        }
+
+        CAT_IF_DUMP(cout << " " << (_block_count + mix.Columns[0]);)
+
+        // Add in remaining 2 mixer columns:
+
+        CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[1]) < _recovery_rows);
+        const uint8_t * GF256_RESTRICT mix1_src = _recovery_blocks + _block_bytes * (_block_count + mix.Columns[1]);
+        CAT_IF_DUMP(cout << " " << (_block_count + mix.Columns[1]);)
+
+        CAT_DEBUG_ASSERT((unsigned)(_block_count + mix.Columns[2]) < _recovery_rows);
+        const uint8_t * GF256_RESTRICT mix2_src = _recovery_blocks + _block_bytes * (_block_count + mix.Columns[2]);
+        CAT_IF_DUMP(cout << " " << (_block_count + mix.Columns[2]);)
+
+        gather.Add(mix1_src);
+        gather.Add(mix2_src);
+        gather.Flush();
+
+        CAT_IF_DUMP(cout << endl;)
+
+        return copyBytes;
+    }
+#endif // WH_GATHER
 
     // If peeler has multiple columns:
     if (iter.Iterate())

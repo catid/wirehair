@@ -131,6 +131,9 @@ struct SelfTestBuffersT
     GF256_ALIGNED uint8_t A[kTestBufferAllocated];
     GF256_ALIGNED uint8_t B[kTestBufferAllocated];
     GF256_ALIGNED uint8_t C[kTestBufferAllocated];
+    GF256_ALIGNED uint8_t D[kTestBufferAllocated];
+    GF256_ALIGNED uint8_t E[kTestBufferAllocated];
+    GF256_ALIGNED uint8_t F[kTestBufferAllocated];
 };
 static GF256_ALIGNED SelfTestBuffersT m_SelfTestBuffers;
 
@@ -143,6 +146,12 @@ static bool gf256_self_test()
     if ((uintptr_t)m_SelfTestBuffers.B % GF256_ALIGN_BYTES != 0)
         return false;
     if ((uintptr_t)m_SelfTestBuffers.C % GF256_ALIGN_BYTES != 0)
+        return false;
+    if ((uintptr_t)m_SelfTestBuffers.D % GF256_ALIGN_BYTES != 0)
+        return false;
+    if ((uintptr_t)m_SelfTestBuffers.E % GF256_ALIGN_BYTES != 0)
+        return false;
+    if ((uintptr_t)m_SelfTestBuffers.F % GF256_ALIGN_BYTES != 0)
         return false;
 
     // Check multiplication/division
@@ -171,6 +180,9 @@ static bool gf256_self_test()
     m_SelfTestBuffers.A[kTestBufferBytes] = 0x5a;
     m_SelfTestBuffers.B[kTestBufferBytes] = 0x5a;
     m_SelfTestBuffers.C[kTestBufferBytes] = 0x5a;
+    m_SelfTestBuffers.D[kTestBufferBytes] = 0x5a;
+    m_SelfTestBuffers.E[kTestBufferBytes] = 0x5a;
+    m_SelfTestBuffers.F[kTestBufferBytes] = 0x5a;
 
     // Test gf256_add_mem()
     for (unsigned i = 0; i < kTestBufferBytes; ++i)
@@ -207,6 +219,39 @@ static bool gf256_self_test()
         if (m_SelfTestBuffers.A[i] != (0xaa ^ 0x6c))
             return false;
 
+    // Test gf256_add_multi_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        m_SelfTestBuffers.A[i] = (uint8_t)(i * 3u + 0x11u);
+        m_SelfTestBuffers.B[i] = (uint8_t)(i * 5u + 0x23u);
+        m_SelfTestBuffers.C[i] = (uint8_t)(i * 7u + 0x35u);
+        m_SelfTestBuffers.D[i] = (uint8_t)(i * 11u + 0x47u);
+        m_SelfTestBuffers.E[i] = (uint8_t)(i * 13u + 0x59u);
+        m_SelfTestBuffers.F[i] = (uint8_t)(i * 17u + 0x6bu);
+    }
+    {
+        const void* srcs[] = {
+            m_SelfTestBuffers.B,
+            m_SelfTestBuffers.C,
+            m_SelfTestBuffers.D,
+            m_SelfTestBuffers.E,
+            m_SelfTestBuffers.F
+        };
+        gf256_add_multi_mem(m_SelfTestBuffers.A, srcs, 5, kTestBufferBytes);
+    }
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        const uint8_t expected =
+            (uint8_t)(i * 3u + 0x11u) ^
+            (uint8_t)(i * 5u + 0x23u) ^
+            (uint8_t)(i * 7u + 0x35u) ^
+            (uint8_t)(i * 11u + 0x47u) ^
+            (uint8_t)(i * 13u + 0x59u) ^
+            (uint8_t)(i * 17u + 0x6bu);
+        if (m_SelfTestBuffers.A[i] != expected)
+            return false;
+    }
+
     // Test gf256_muladd_mem()
     for (unsigned i = 0; i < kTestBufferBytes; ++i)
     {
@@ -236,6 +281,12 @@ static bool gf256_self_test()
     if (m_SelfTestBuffers.B[kTestBufferBytes] != 0x5a)
         return false;
     if (m_SelfTestBuffers.C[kTestBufferBytes] != 0x5a)
+        return false;
+    if (m_SelfTestBuffers.D[kTestBufferBytes] != 0x5a)
+        return false;
+    if (m_SelfTestBuffers.E[kTestBufferBytes] != 0x5a)
+        return false;
+    if (m_SelfTestBuffers.F[kTestBufferBytes] != 0x5a)
         return false;
 
     return true;
@@ -1153,6 +1204,125 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
     case 1: z1[offset] ^= x1[offset] ^ y1[offset];
     default:
         break;
+    }
+}
+
+template<unsigned SrcCount>
+static GF256_FORCE_INLINE void gf256_add_multi_fixed(
+    uint8_t * GF256_RESTRICT z,
+    const uint8_t * const * GF256_RESTRICT srcs,
+    int bytes)
+{
+    unsigned offset = 0;
+
+    while (bytes >= 8)
+    {
+        uint64_t acc = gf256_loadu64(z + offset);
+        for (unsigned j = 0; j < SrcCount; ++j) {
+            acc ^= gf256_loadu64(srcs[j] + offset);
+        }
+        gf256_storeu64(z + offset, acc);
+        offset += 8;
+        bytes -= 8;
+    }
+
+    while (bytes-- > 0)
+    {
+        uint8_t acc = z[offset];
+        for (unsigned j = 0; j < SrcCount; ++j) {
+            acc ^= srcs[j][offset];
+        }
+        z[offset++] = acc;
+    }
+}
+
+static GF256_FORCE_INLINE void gf256_add_multi_generic(
+    uint8_t * GF256_RESTRICT z,
+    const uint8_t * const * GF256_RESTRICT srcs,
+    int src_count,
+    int bytes)
+{
+    unsigned offset = 0;
+
+    while (bytes >= 8)
+    {
+        uint64_t acc = gf256_loadu64(z + offset);
+        for (int j = 0; j < src_count; ++j) {
+            acc ^= gf256_loadu64(srcs[j] + offset);
+        }
+        gf256_storeu64(z + offset, acc);
+        offset += 8;
+        bytes -= 8;
+    }
+
+    while (bytes-- > 0)
+    {
+        uint8_t acc = z[offset];
+        for (int j = 0; j < src_count; ++j) {
+            acc ^= srcs[j][offset];
+        }
+        z[offset++] = acc;
+    }
+}
+
+extern "C" void gf256_add_multi_mem(
+    void * GF256_RESTRICT vz,
+    const void * const * GF256_RESTRICT vsrcs,
+    int src_count,
+    int bytes)
+{
+    if (bytes <= 0 || src_count <= 0) {
+        return;
+    }
+    if (src_count == 1)
+    {
+        gf256_add_mem(vz, vsrcs[0], bytes);
+        return;
+    }
+    if (src_count == 2)
+    {
+        gf256_add2_mem(vz, vsrcs[0], vsrcs[1], bytes);
+        return;
+    }
+
+    WH_BUMP(0, bytes);
+
+    uint8_t * GF256_RESTRICT z = reinterpret_cast<uint8_t *>(vz);
+    const uint8_t * srcs[16];
+    if (src_count <= (int)(sizeof(srcs) / sizeof(srcs[0])))
+    {
+        for (int j = 0; j < src_count; ++j) {
+            srcs[j] = reinterpret_cast<const uint8_t *>(vsrcs[j]);
+        }
+
+        switch (src_count)
+        {
+        case 3:  gf256_add_multi_fixed<3>(z, srcs, bytes);  return;
+        case 4:  gf256_add_multi_fixed<4>(z, srcs, bytes);  return;
+        case 5:  gf256_add_multi_fixed<5>(z, srcs, bytes);  return;
+        case 6:  gf256_add_multi_fixed<6>(z, srcs, bytes);  return;
+        case 7:  gf256_add_multi_fixed<7>(z, srcs, bytes);  return;
+        case 8:  gf256_add_multi_fixed<8>(z, srcs, bytes);  return;
+        case 12: gf256_add_multi_fixed<12>(z, srcs, bytes); return;
+        case 16: gf256_add_multi_fixed<16>(z, srcs, bytes); return;
+        default:
+            gf256_add_multi_generic(z, srcs, src_count, bytes);
+            return;
+        }
+    }
+
+    const uint8_t * src_window[16];
+    int remaining = src_count;
+    const void * const * next = vsrcs;
+    while (remaining > 0)
+    {
+        const int count = remaining > 16 ? 16 : remaining;
+        for (int j = 0; j < count; ++j) {
+            src_window[j] = reinterpret_cast<const uint8_t *>(next[j]);
+        }
+        gf256_add_multi_generic(z, src_window, count, bytes);
+        next += count;
+        remaining -= count;
     }
 }
 

@@ -30,6 +30,22 @@ for the cost model (`k=8` is 1.34x at 100 KiB and 2.22x at 1280 bytes), but
 the production implementation branch should stop unless a real schedule replay
 shows a stronger bottleneck-specific win.
 
+Follow-up prototype (2026-07-03): an opt-in `-DWH_GATHER=1` codec path now
+fuses recovery-source XORs in `Substitute()` and `Encode()` behind a
+`block_bytes <= 128 KiB` runtime gate.  Default builds keep the old path.
+`gf256_add_multi_mem()` is covered by the GF256 init self-test and the codec
+path was validated with repro/fuzz, ASan/UBSan, default CTest, WH_GATHER CTest,
+and WH_GATHER+WH_OPLOG schedule replay.
+
+Readout: `WH_COUNT` confirms the gate and the intended work reduction.  At
+N=128/bb=1280, `Substitute` XOR accounting drops from 0.92 MB to 0.35 MB and
+repair-encode accounting from 0.17 MB to 0.05 MB.  At N=128/bb=102400,
+`Substitute` drops from 73.93 MB to 28.06 MB and repair encode from 13.52 MB
+to 3.79 MB.  At N=128/bb=1048576 and at the first byte above the gate
+(131073), count output is identical to the base build.  Timing smoke was
+mixed: repair encode improved, while create/decode did not in the small N=128
+runs, so this remains an opt-in prototype and not a default production win.
+
 ## Fresh Random-Only Sweep
 
 Original broad-sweep protocol:
