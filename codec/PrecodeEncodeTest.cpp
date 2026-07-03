@@ -4,6 +4,7 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,23 @@
 //    2*(D2 - 1) block ops for the staircase + dense known-part path.
 
 namespace {
+
+bool ParsePositiveU32(const char* text, uint32_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' ||
+        value == 0 || value > UINT32_MAX)
+    {
+        return false;
+    }
+    out = (uint32_t)value;
+    return true;
+}
 
 const uint8_t* ColumnValue(
     const wirehair_v2::PrecodeSystem& system,
@@ -477,8 +495,10 @@ int main(int argc, char** argv)
 
     // Feasibility trials tunable so the sanitizer build stays quick
     uint32_t trials = 2000u;
-    if (argc > 1) {
-        trials = (uint32_t)std::strtoul(argv[1], nullptr, 10);
+    if (argc > 2 || (argc == 2 && !ParsePositiveU32(argv[1], trials))) {
+        std::fprintf(stderr,
+            "usage: %s [positive feasibility-trials]\n", argv[0]);
+        return 1;
     }
 
     bool ok = true;

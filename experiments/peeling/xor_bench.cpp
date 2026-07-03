@@ -320,8 +320,19 @@ static std::vector<uint32_t> make_block_permutation(size_t n_blocks, Rng& rng)
 static size_t ops_for_target(
     double target_gib, size_t bytes_per_op, size_t min_ops)
 {
+    if (bytes_per_op == 0 || !std::isfinite(target_gib) ||
+        target_gib <= 0.0)
+    {
+        return 0;
+    }
     const double target_bytes = target_gib * kGiBDouble;
+    if (!std::isfinite(target_bytes)) {
+        return 0;
+    }
     const double count = target_bytes / (double)bytes_per_op;
+    if (!std::isfinite(count) || count > (double)SIZE_MAX) {
+        return 0;
+    }
     size_t ops = count < 1.0 ? (size_t)1 : (size_t)count;
     if (ops < min_ops) {
         ops = min_ops;
@@ -458,6 +469,12 @@ static int run_cold_xor_size(
     const std::vector<uint32_t> perm = make_block_permutation(n_blocks, rng);
 
     const size_t op_count = ops_for_target(target_gib, block_bytes, 1024);
+    if (op_count == 0)
+    {
+        std::fprintf(stderr, "target size is too large for block size %zu\n",
+            block_bytes);
+        return 1;
+    }
     std::vector<Op> ops(op_count);
     for (size_t i = 0; i < op_count; ++i)
     {
@@ -551,6 +568,12 @@ static int run_muladd_size(
     const std::vector<uint32_t> perm = make_block_permutation(n_blocks, rng);
 
     const size_t op_count = ops_for_target(target_gib, block_bytes, 1024);
+    if (op_count == 0)
+    {
+        std::fprintf(stderr, "target size is too large for block size %zu\n",
+            block_bytes);
+        return 1;
+    }
     std::vector<MulOp> ops(op_count);
     for (size_t i = 0; i < op_count; ++i)
     {
@@ -652,6 +675,12 @@ static int run_fanin_size(
     const size_t stride = k + 1;
     const size_t bytes_per_op = stride * block_bytes;
     const size_t op_count = ops_for_target(target_gib, bytes_per_op, 64);
+    if (op_count == 0)
+    {
+        std::fprintf(stderr, "target size is too large for block size %zu\n",
+            block_bytes);
+        return 1;
+    }
 
     // idx[i*stride] is the destination block, the next k entries are sources.
     // Consecutive permutation slots are distinct, so dst != any src.
@@ -762,10 +791,12 @@ static int run_one_size(
         data[i] = (uint8_t)init_rng.next();
     }
 
-    const double target_bytes = target_gib * 1024.0 * 1024.0 * 1024.0;
-    size_t op_count = (size_t)(target_bytes / (double)block_bytes);
-    if (op_count < 1024) {
-        op_count = 1024;
+    const size_t op_count = ops_for_target(target_gib, block_bytes, 1024);
+    if (op_count == 0)
+    {
+        std::fprintf(stderr, "target size is too large for block size %zu\n",
+            block_bytes);
+        return 1;
     }
 
     std::vector<Op> ops(op_count);
@@ -935,7 +966,8 @@ int main(int argc, char** argv)
         {
             bool ok = false;
             pool_gib = parse_double(argv[++i], &ok);
-            if (!ok || pool_gib < 0.5)
+            if (!ok || pool_gib < 0.5 ||
+                pool_gib > (double)SIZE_MAX / kGiBDouble)
             {
                 usage(argv[0]);
                 return 1;

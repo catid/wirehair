@@ -512,6 +512,69 @@ static bool validate_n_bb_lists(const vector<int>& Ns, const vector<int>& BBs, c
     return true;
 }
 
+static bool option_in(const char* arg, const char* const* options) {
+    for (int i = 0; options[i]; ++i) {
+        if (!strcmp(arg, options[i])) return true;
+    }
+    return false;
+}
+
+static bool validate_mode_options(const string& mode, int argc, char** argv) {
+    static const char* none[] = { nullptr };
+    static const char* micro_values[] = { "--secs", nullptr };
+    static const char* bench_values[] = { "--bb", "--bb-list", "--loss", "--N", "--rounds", nullptr };
+    static const char* fuzz_values[] = { "--secs", "--nmax", "--seed", nullptr };
+    static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", nullptr };
+    static const char* scan_values[] = { "--nlo", "--nhi", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
+#ifdef WH_SEED_KNOBS
+    static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
+    static const char* seedsearch_values[] = { "--nlist", "--nfile", "--tsearch", "--tverify", "--nseeds", "--bb", "--loss", "--startmode", "--dseeds", "--goodthr", nullptr };
+#endif
+#ifdef WH_COUNT
+    static const char* peelstat_values[] = { "--N", "--bb", "--bb-list", "--trials", "--loss", "--startmode", "--seed", "--threads", nullptr };
+    static const char* count_values[] = { "--N", "--bb", "--bb-list", "--loss", "--startmode", nullptr };
+#endif
+
+    const char* const* value_options = none;
+    const char* const* flag_options = none;
+    if (mode == "micro") value_options = micro_values;
+    else if (mode == "bench") value_options = bench_values;
+    else if (mode == "fuzz") value_options = fuzz_values;
+    else if (mode == "repro") value_options = none;
+    else if (mode == "ohead") value_options = ohead_values;
+    else if (mode == "scan") value_options = scan_values;
+#ifdef WH_SEED_KNOBS
+    else if (mode == "seedmean") value_options = seedmean_values;
+    else if (mode == "seedsearch") value_options = seedsearch_values;
+#endif
+#ifdef WH_COUNT
+    else if (mode == "peelstat") value_options = peelstat_values;
+    else if (mode == "count") value_options = count_values;
+#endif
+    else {
+        return true; // Unknown mode is reported by the dispatcher.
+    }
+
+    for (int i = 0; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (option_in(arg, value_options)) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s requires a value\n", arg);
+                return false;
+            }
+            ++i;
+        }
+        else if (option_in(arg, flag_options)) {
+            continue;
+        }
+        else if (arg[0] == '-') {
+            fprintf(stderr, "unknown option for %s: %s\n", mode.c_str(), arg);
+            return false;
+        }
+    }
+    return true;
+}
+
 static int cmd_fuzz(int argc, char** argv) {
     int threads = resolve_threads();
     double seconds = 20.0;
@@ -622,17 +685,24 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
     double t0 = now_sec();
     w.enc = wirehair_encoder_create(w.enc, w.message.data(), messageBytes, blockBytes); // reuse
     double t1 = now_sec();
-    if (!w.enc) return;
+    if (!w.enc) { if (timed) a.fails++; return; }
     if (timed) { a.enc_create_us += (t1 - t0) * 1e6; a.enc_create_n++; }
 
     w.dec = wirehair_decoder_create(w.dec, messageBytes, blockBytes); // reuse
-    if (!w.dec) return;
+    if (!w.dec) { if (timed) a.fails++; return; }
 
     // measure encode of repair blocks (ids N..N+enc_count-1)
     const int enc_count = 64;
     uint32_t wl = 0;
     double e0 = now_sec();
-    for (int i = 0; i < enc_count; ++i) wirehair_encode(w.enc, N + i, w.block.data(), blockBytes, &wl);
+    for (int i = 0; i < enc_count; ++i) {
+        if (wirehair_encode(w.enc, N + i, w.block.data(), blockBytes, &wl) !=
+            Wirehair_Success)
+        {
+            if (timed) a.fails++;
+            return;
+        }
+    }
     double e1 = now_sec();
     if (timed) { a.encode_us += (e1 - e0) * 1e6; a.encode_n += enc_count; a.encode_bytes += (uint64_t)enc_count * blockBytes; }
 
@@ -646,7 +716,11 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
         bool drop = rng.unit() < lossRate;
         unsigned thisId = blockId++;
         if (drop) continue;
-        wirehair_encode(w.enc, thisId, w.block.data(), blockBytes, &wl);
+        if (wirehair_encode(w.enc, thisId, w.block.data(), blockBytes, &wl) !=
+            Wirehair_Success)
+        {
+            break;
+        }
         needed++;
         double d0 = now_sec();
         WirehairResult dr = wirehair_decode(w.dec, thisId, w.block.data(), wl);
@@ -656,17 +730,26 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
     }
     if (timed) {
         a.decode_us += d_accum * 1e6; a.decode_n += needed; a.decode_bytes += (uint64_t)needed * blockBytes;
-        // Failed rounds are counted separately; folding their capped "needed"
-        // into overhead_sum would silently shift the overhead statistic.
-        if (ok) { a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0; a.rounds++; }
-        else { a.fails++; }
     }
-
     if (ok) {
         double r0 = now_sec();
         WirehairResult rr = wirehair_recover(w.dec, w.decoded.data(), messageBytes);
         double r1 = now_sec();
-        if (timed && rr == Wirehair_Success) { a.recover_us += (r1 - r0) * 1e6; a.recover_n++; a.recover_bytes += messageBytes; }
+        if (timed && rr == Wirehair_Success) {
+            a.recover_us += (r1 - r0) * 1e6;
+            a.recover_n++;
+            a.recover_bytes += messageBytes;
+            a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0;
+            a.rounds++;
+        }
+        else if (timed) {
+            a.fails++;
+        }
+    }
+    else if (timed) {
+        // Failed rounds are counted separately; folding their capped "needed"
+        // into overhead_sum would silently shift the overhead statistic.
+        a.fails++;
     }
 }
 
@@ -709,6 +792,7 @@ static int cmd_bench(int argc, char** argv) {
         printf("%-8s %-8s %10s %14s %14s %14s %14s %10s\n", "N", "bb", "msg_MiB", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
     else
         printf("%-8s %14s %14s %14s %14s %10s\n", "N", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
+    bool failed = false;
     for (int blockBytes : BBs) for (int N : Ns) {
         // total rounds across all threads; scale down for large N to keep runtime bounded
         int total_rounds = rounds_per_N;
@@ -765,10 +849,13 @@ static int cmd_bench(int argc, char** argv) {
                    N, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
         }
         if (global.fails) printf("  FAILS=%llu", (unsigned long long)global.fails);
+        if (global.fails || global.rounds == 0) {
+            failed = true;
+        }
         printf("\n");
         fflush(stdout);
     }
-    return 0;
+    return failed ? 1 : 0;
 }
 
 // Deterministic single-trial trace: whx repro <seed> <N> <bb> <startMode> <loss>
@@ -1399,10 +1486,6 @@ static int cmd_count(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (wirehair_init() != Wirehair_Success) { fprintf(stderr, "wirehair_init failed\n"); return 2; }
-#ifdef WH_COUNT
-    if (argc>=2 && !strcmp(argv[1],"count")) { vector<char*> r(argv+2,argv+argc); return cmd_count((int)r.size(), r.data()); }
-    if (argc>=2 && !strcmp(argv[1],"peelstat")) { vector<char*> r(argv+2,argv+argc); return cmd_peelstat((int)r.size(), r.data()); }
-#endif
     if (argc < 2) {
 #ifdef WH_COUNT
 #ifdef WH_SEED_KNOBS
@@ -1426,7 +1509,11 @@ int main(int argc, char** argv) {
     // dispatched before this, silently ignoring --threads and defaulting to ~102 threads).
     vector<char*> rest;
     for (int i = 2; i < argc; ++i) {
-        if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+        if (!strcmp(argv[i], "--threads")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--threads requires a value\n");
+                return 2;
+            }
             if (!parse_int_strict(argv[++i], g_threads) || g_threads < 1) {
                 fprintf(stderr, "invalid --threads\n");
                 return 2;
@@ -1435,6 +1522,7 @@ int main(int argc, char** argv) {
         else rest.push_back(argv[i]);
     }
     int ac = (int)rest.size(); char** av = rest.data();
+    if (!validate_mode_options(mode, ac, av)) return 2;
     if (mode == "repro") return cmd_repro(ac, av);
     if (mode == "scan")  return cmd_scan(ac, av);
 #ifdef WH_SEED_KNOBS
@@ -1445,6 +1533,10 @@ int main(int argc, char** argv) {
     if (mode == "bench") return cmd_bench(ac, av);
     if (mode == "fuzz")  return cmd_fuzz(ac, av);
     if (mode == "ohead") return cmd_ohead(ac, av);
+#ifdef WH_COUNT
+    if (mode == "count") return cmd_count(ac, av);
+    if (mode == "peelstat") return cmd_peelstat(ac, av);
+#endif
     fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 1;
 }

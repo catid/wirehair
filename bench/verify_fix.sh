@@ -18,7 +18,7 @@ echo "=== (2) re-scan previously-weak N (should now report 0 WEAK) ==="
 ./bench/whx.fix scan --threads 96 --nlo 2048 --nhi 24000 --trials 200 --bb 64 \
     --startmode 0 --loss 0.10 --thresh 0.10 > $R/scan_after.log 2>$R/scan_after.err
 echo "weak BEFORE: $(grep -c '^WEAK' $R/scan_2k_24k.log)   weak AFTER: $(grep -c '^WEAK' $R/scan_after.log)"
-echo "residual weak after fix:"; grep '^WEAK' $R/scan_after.log | head -20
+echo "residual weak after fix:"; grep '^WEAK' $R/scan_after.log | head -20 || true
 
 echo "=== (3) correctness fuzz on fixed build (must be 0 fails) ==="
 # NOTE: this seed was historically written 0xF1XED, which strtoull truncates

@@ -34,6 +34,10 @@ case "$LTO" in
         LINK_FLAGS="$LINK_FLAGS -flto=auto"
         ;;
     thin|THIN)
+        if ! "$CXX" -dM -E -x c++ /dev/null 2>/dev/null | grep -q '__clang__'; then
+            echo "LTO=thin requires Clang; CXX='$CXX' does not support -flto=thin" >&2
+            exit 2
+        fi
         FLAGS="$FLAGS -flto=thin"
         LINK_FLAGS="$LINK_FLAGS -flto=thin"
         ;;

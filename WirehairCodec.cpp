@@ -66,6 +66,8 @@ using namespace std;
 #endif
 
 #ifdef WH_SEED_KNOBS
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
 #endif
 
@@ -3327,6 +3329,38 @@ static bool HasDenseSeedTableEntry(unsigned dense_count)
 {
     return dense_count / 4 < kDenseSeedCount;
 }
+
+static bool ParseKnobInt(const char* text, int& out)
+{
+    if (!text || !*text) {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long value = strtol(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0' ||
+        value < INT_MIN || value > INT_MAX)
+    {
+        return false;
+    }
+    out = (int)value;
+    return true;
+}
+
+static bool ParseKnobU32(const char* text, uint32_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long value = strtoul(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0' || value > UINT32_MAX) {
+        return false;
+    }
+    out = (uint32_t)value;
+    return true;
+}
 #endif
 
 WirehairResult Codec::ChooseMatrix(
@@ -3406,12 +3440,26 @@ WirehairResult Codec::ChooseMatrix(
             if (t_ovr_dseed >= 0) _d_seed = (uint32_t)t_ovr_dseed;
         } else {
             const char* ovN = ::getenv("WH_OVR_N");
-            if (!ovN || atoi(ovN) == (int)_block_count) {
-                const char* ps = ::getenv("WH_PSEED"); if (ps) _p_seed = (uint32_t)strtoul(ps, nullptr, 0);
+            int override_n = 0;
+            if (ovN && !ParseKnobInt(ovN, override_n)) {
+                return Wirehair_InvalidInput;
+            }
+            if (!ovN || override_n == (int)_block_count) {
+                uint32_t seed_value = 0;
+                const char* ps = ::getenv("WH_PSEED");
+                if (ps) {
+                    if (!ParseKnobU32(ps, seed_value)) {
+                        return Wirehair_InvalidInput;
+                    }
+                    _p_seed = seed_value;
+                }
                 const char* dd = ::getenv("WH_DENSE");
                 const char* ds = ::getenv("WH_DSEED");
                 if (dd) {
-                    const int dense_value = atoi(dd);
+                    int dense_value = 0;
+                    if (!ParseKnobInt(dd, dense_value)) {
+                        return Wirehair_InvalidInput;
+                    }
                     if (dense_value <= 0 ||
                         !IsDenseCountValid((unsigned)dense_value))
                     {
@@ -3425,7 +3473,12 @@ WirehairResult Codec::ChooseMatrix(
                         _d_seed = GetDenseSeed(_block_count, _dense_count);
                     }
                 }
-                if (ds) _d_seed = (uint32_t)strtoul(ds, nullptr, 0);
+                if (ds) {
+                    if (!ParseKnobU32(ds, seed_value)) {
+                        return Wirehair_InvalidInput;
+                    }
+                    _d_seed = seed_value;
+                }
             }
         }
 #endif
