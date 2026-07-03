@@ -29,6 +29,10 @@ static bool ReadEnvUnsigned(const char* name, unsigned& out)
     if (!value || !value[0]) {
         return true;
     }
+    if (value[0] == '-') {
+        cout << "Invalid " << name << " = " << value << endl;
+        return false;
+    }
 
     errno = 0;
     char* end = nullptr;
@@ -48,6 +52,10 @@ static bool ReadEnvU64(const char* name, uint64_t& out)
     const char* value = getenv(name);
     if (!value || !value[0]) {
         return true;
+    }
+    if (value[0] == '-') {
+        cout << "Invalid " << name << " = " << value << endl;
+        return false;
     }
 
     errno = 0;

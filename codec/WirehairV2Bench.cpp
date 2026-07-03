@@ -109,6 +109,28 @@ bool ParseDoubleArg(const char* option, const char* value, double& out)
     return ParseDoubleScalar(value, out) || BadArg(option, value);
 }
 
+bool TakeArg(
+    const char* command,
+    const char* option,
+    int argc,
+    char** argv,
+    int& i,
+    const char*& value)
+{
+    if (i + 1 >= argc) {
+        std::fprintf(stderr, "%s: %s requires a value\n", command, option);
+        return false;
+    }
+    value = argv[++i];
+    return true;
+}
+
+bool UnknownArg(const char* command, const char* option)
+{
+    std::fprintf(stderr, "%s: unknown option %s\n", command, option);
+    return false;
+}
+
 struct Rng
 {
     uint64_t State;
@@ -1173,29 +1195,38 @@ int CmdCompare(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--nlo") && i + 1 < argc) {
-            if (!ParseU32Arg("--nlo", argv[++i], nlo)) return 1;
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--nlo")) {
+            if (!TakeArg("compare", "--nlo", argc, argv, i, value) ||
+                !ParseU32Arg("--nlo", value, nlo)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--nhi") && i + 1 < argc) {
-            if (!ParseU32Arg("--nhi", argv[++i], nhi)) return 1;
+        else if (!std::strcmp(argv[i], "--nhi")) {
+            if (!TakeArg("compare", "--nhi", argc, argv, i, value) ||
+                !ParseU32Arg("--nhi", value, nhi)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("compare", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("compare", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("compare", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("compare", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--max-message-mib") && i + 1 < argc) {
-            if (!ParseU32Arg("--max-message-mib", argv[++i], max_message_mib)) return 1;
+        else if (!std::strcmp(argv[i], "--max-message-mib")) {
+            if (!TakeArg("compare", "--max-message-mib", argc, argv, i, value) ||
+                !ParseU32Arg("--max-message-mib", value, max_message_mib)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--v2-profile") && i + 1 < argc) {
-            const char* profile = argv[++i];
+        else if (!std::strcmp(argv[i], "--v2-profile")) {
+            if (!TakeArg("compare", "--v2-profile", argc, argv, i, value)) return 1;
+            const char* profile = value;
             if (!std::strcmp(profile, "tuned")) {
                 std::fprintf(stderr,
                     "--v2-profile tuned is retired: the synthetic peel "
@@ -1217,32 +1248,39 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
         }
-        else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
-            if (!ParseU16Arg("--peel-candidates", argv[++i],
+        else if (!std::strcmp(argv[i], "--peel-candidates")) {
+            if (!TakeArg("compare", "--peel-candidates", argc, argv, i, value) ||
+                !ParseU16Arg("--peel-candidates", value,
                     compare_options.PeelCandidates)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--peel-trials") && i + 1 < argc) {
-            if (!ParseU16Arg("--peel-trials", argv[++i],
+        else if (!std::strcmp(argv[i], "--peel-trials")) {
+            if (!TakeArg("compare", "--peel-trials", argc, argv, i, value) ||
+                !ParseU16Arg("--peel-trials", value,
                     compare_options.PeelTrials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--auto-trials") && i + 1 < argc) {
-            if (!ParseU16Arg("--auto-trials", argv[++i],
+        else if (!std::strcmp(argv[i], "--auto-trials")) {
+            if (!TakeArg("compare", "--auto-trials", argc, argv, i, value) ||
+                !ParseU16Arg("--auto-trials", value,
                     compare_options.AutoTrials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--tune-seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--tune-seed", argv[++i],
+        else if (!std::strcmp(argv[i], "--tune-seed")) {
+            if (!TakeArg("compare", "--tune-seed", argc, argv, i, value) ||
+                !ParseU64Arg("--tune-seed", value,
                     compare_options.TuneSeed)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--auto-seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--auto-seed", argv[++i],
+        else if (!std::strcmp(argv[i], "--auto-seed")) {
+            if (!TakeArg("compare", "--auto-seed", argc, argv, i, value) ||
+                !ParseU64Arg("--auto-seed", value,
                     compare_options.AutoSeed)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--auto-min-delta") && i + 1 < argc) {
-            if (!ParseDoubleArg("--auto-min-delta", argv[++i],
+        else if (!std::strcmp(argv[i], "--auto-min-delta")) {
+            if (!TakeArg("compare", "--auto-min-delta", argc, argv, i, value) ||
+                !ParseDoubleArg("--auto-min-delta", value,
                     compare_options.AutoMinDelta)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--dense-delta") && i + 1 < argc) {
-            const std::vector<int> deltas = ParseSignedIntList(argv[++i]);
+        else if (!std::strcmp(argv[i], "--dense-delta")) {
+            if (!TakeArg("compare", "--dense-delta", argc, argv, i, value)) return 1;
+            const std::vector<int> deltas = ParseSignedIntList(value);
             if (deltas.size() != 1u) {
                 std::fprintf(stderr, "bad --dense-delta value\n");
                 return 1;
@@ -1250,10 +1288,14 @@ int CmdCompare(int argc, char** argv)
             compare_options.DenseOverride = true;
             compare_options.DenseDelta = deltas[0];
         }
-        else if (!std::strcmp(argv[i], "--dense-candidate") && i + 1 < argc) {
+        else if (!std::strcmp(argv[i], "--dense-candidate")) {
             compare_options.DenseOverride = true;
-            if (!ParseU16Arg("--dense-candidate", argv[++i],
+            if (!TakeArg("compare", "--dense-candidate", argc, argv, i, value) ||
+                !ParseU16Arg("--dense-candidate", value,
                     compare_options.DenseCandidate)) return 1;
+        }
+        else if (!UnknownArg("compare", argv[i])) {
+            return 1;
         }
     }
 
@@ -1410,20 +1452,29 @@ int CmdSeedTable(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            nlist = argv[++i];
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("seedtable", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("seedtable", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
-            if (!ParseU32Arg("--peel-candidates", argv[++i], peel_candidates)) return 1;
+        else if (!std::strcmp(argv[i], "--peel-candidates")) {
+            if (!TakeArg("seedtable", "--peel-candidates", argc, argv, i, value) ||
+                !ParseU32Arg("--peel-candidates", value, peel_candidates)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("seedtable", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("seedtable", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("seedtable", argv[i])) {
+            return 1;
         }
     }
 
@@ -1504,32 +1555,45 @@ int CmdPeelCost(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            nlist = argv[++i];
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("peelcost", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("peelcost", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--structures") && i + 1 < argc) {
-            structure_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--structures")) {
+            if (!TakeArg("peelcost", "--structures", argc, argv, i, value)) return 1;
+            structure_list = value;
         }
-        else if (!std::strcmp(argv[i], "--precode") && i + 1 < argc) {
-            precode_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--precode")) {
+            if (!TakeArg("peelcost", "--precode", argc, argv, i, value)) return 1;
+            precode_list = value;
         }
-        else if (!std::strcmp(argv[i], "--overhead") && i + 1 < argc) {
-            overhead_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (!TakeArg("peelcost", "--overhead", argc, argv, i, value)) return 1;
+            overhead_list = value;
         }
-        else if (!std::strcmp(argv[i], "--solver") && i + 1 < argc) {
-            solver_name = argv[++i];
+        else if (!std::strcmp(argv[i], "--solver")) {
+            if (!TakeArg("peelcost", "--solver", argc, argv, i, value)) return 1;
+            solver_name = value;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("peelcost", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--heavy") && i + 1 < argc) {
-            if (!ParseU32Arg("--heavy", argv[++i], heavy_rows)) return 1;
+        else if (!std::strcmp(argv[i], "--heavy")) {
+            if (!TakeArg("peelcost", "--heavy", argc, argv, i, value) ||
+                !ParseU32Arg("--heavy", value, heavy_rows)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("peelcost", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("peelcost", argv[i])) {
+            return 1;
         }
     }
 
@@ -1712,23 +1776,33 @@ int CmdDenseCheck(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            if (!ParseU32Arg("--N", argv[++i], N)) return 1;
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("densecheck", "--N", argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, N)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--bb") && i + 1 < argc) {
-            if (!ParseU32Arg("--bb", argv[++i], block_bytes)) return 1;
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (!TakeArg("densecheck", "--bb", argc, argv, i, value) ||
+                !ParseU32Arg("--bb", value, block_bytes)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
+        else if (!std::strcmp(argv[i], "--candidates")) {
+            if (!TakeArg("densecheck", "--candidates", argc, argv, i, value) ||
+                !ParseU32Arg("--candidates", value, candidates)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("densecheck", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("densecheck", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("densecheck", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("densecheck", argv[i])) {
+            return 1;
         }
     }
 
@@ -1789,23 +1863,33 @@ int CmdDenseTune(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            nlist = argv[++i];
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("densetune", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("densetune", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
+        else if (!std::strcmp(argv[i], "--candidates")) {
+            if (!TakeArg("densetune", "--candidates", argc, argv, i, value) ||
+                !ParseU32Arg("--candidates", value, candidates)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("densetune", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("densetune", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("densetune", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("densetune", argv[i])) {
+            return 1;
         }
     }
 
@@ -1918,23 +2002,33 @@ int CmdDenseCount(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            nlist = argv[++i];
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("densecount", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("densecount", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--deltas") && i + 1 < argc) {
-            delta_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--deltas")) {
+            if (!TakeArg("densecount", "--deltas", argc, argv, i, value)) return 1;
+            delta_list = value;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("densecount", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("densecount", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("densecount", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("densecount", argv[i])) {
+            return 1;
         }
     }
 
@@ -2038,26 +2132,37 @@ int CmdDenseGrid(int argc, char** argv)
 
     for (int i = 0; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            nlist = argv[++i];
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("densegrid", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
         }
-        else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
-            bb_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("densegrid", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
         }
-        else if (!std::strcmp(argv[i], "--deltas") && i + 1 < argc) {
-            delta_list = argv[++i];
+        else if (!std::strcmp(argv[i], "--deltas")) {
+            if (!TakeArg("densegrid", "--deltas", argc, argv, i, value)) return 1;
+            delta_list = value;
         }
-        else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
+        else if (!std::strcmp(argv[i], "--candidates")) {
+            if (!TakeArg("densegrid", "--candidates", argc, argv, i, value) ||
+                !ParseU32Arg("--candidates", value, candidates)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("densegrid", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("densegrid", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
         }
-        else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("densegrid", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+        else if (!UnknownArg("densegrid", argv[i])) {
+            return 1;
         }
     }
 

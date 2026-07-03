@@ -2544,6 +2544,18 @@ int main(int argc, char** argv)
         fprintf(stderr, "--trials must be positive\n");
         return 1;
     }
+    for (unsigned K : k_list)
+    {
+        if (K < CAT_WIREHAIR_MIN_N || K > CAT_WIREHAIR_MAX_N)
+        {
+            fprintf(stderr,
+                "--K value %u is outside Wirehair production range [%u, %u]\n",
+                K,
+                (unsigned)CAT_WIREHAIR_MIN_N,
+                (unsigned)CAT_WIREHAIR_MAX_N);
+            return 1;
+        }
+    }
 
     printf("K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_max,"
            "def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,"

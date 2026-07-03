@@ -2,7 +2,9 @@
 # Generate WirehairPeelFixups.inc from one or more seedsearch output files.
 # Accepts a fix only when it's a genuine, robustly-verified improvement:
 #   default_mean > DEFTHRESH  AND  best@0.10 < GOOD  AND  best@0.30 < GOOD30
-# seedsearch line format: "N best_pseed default_mean best_mean@0.10 best_mean@0.30"
+# seedsearch line formats:
+#   old: "N best_pseed default_mean best_mean@0.10 best_mean@0.30"
+#   new: "N best_pseed best_dseed default_mean best_mean@0.10 best_mean@0.30"
 set -euo pipefail
 DEFTHRESH=${DEFTHRESH:-0.05}   # require the table seed to show >=2.5x-normal overhead (real defect)
 GOOD=${GOOD:-0.045}            # replacement must verify near-normal at loss 0.10
@@ -16,13 +18,21 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
   echo "// Filter: default>$DEFTHRESH, best@0.10<$GOOD, best@0.30<$GOOD30. Format: { N, seed }"
   cat "$@" | awk -v dt="$DEFTHRESH" -v g="$GOOD" -v g3="$GOOD30" '
     function uint(x){ return x ~ /^[0-9]+$/ }
+    function sint(x){ return x ~ /^-?[0-9]+$/ }
     function num(x){ return x ~ /^([0-9]+([.][0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/ }
     function die(){ printf "malformed seedsearch line: %s\n", $0 > "/dev/stderr"; exit 2 }
     /^#/ || NF==0 { next }
-    NF!=5 { die() }
-    {
+    NF!=5 && NF!=6 { die() }
+    NF==5 {
       if (!uint($1) || !uint($2) || !num($3) || !num($4) || !num($5)) die();
       N=$1; seed=$2; def=$3; b10=$4; b30=$5;
+    }
+    NF==6 {
+      if (!uint($1) || !uint($2) || !sint($3) || !num($4) || !num($5) || !num($6)) die();
+      N=$1; seed=$2; dseed=$3; def=$4; b10=$5; b30=$6;
+      if (dseed+0 < -1 || dseed+0 > 255) die();
+    }
+    {
       if (seed+0 > 255 || N+0 < 2 || N+0 > 64000) die();
       if (def+0 > dt && b10+0 < g && b30+0 < g3 && seed+0>=0 && seed+0<=255 && N+0>=2 && N+0<=64000)
         print N+0, seed+0;

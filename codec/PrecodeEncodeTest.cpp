@@ -153,7 +153,7 @@ uint32_t DenseCornerRank(const wirehair_v2::PrecodeSystem& system)
         for (const uint32_t col : system.DenseRowColumns[r])
         {
             if (col >= dense_base) {
-                masks[r] |= UINT64_C(1) << (col - dense_base);
+                masks[r] ^= UINT64_C(1) << (col - dense_base);
             }
         }
     }
@@ -482,6 +482,13 @@ bool TestMalformedDenseCorner()
     if (wirehair_v2::DenseCornerInvertible(system)) {
         std::fprintf(stderr,
             "malformed dense corner should not be reported invertible\n");
+        return false;
+    }
+
+    system.DenseRowColumns[0] = std::vector<uint32_t>{3u, 3u};
+    if (wirehair_v2::DenseCornerInvertible(system)) {
+        std::fprintf(stderr,
+            "duplicate dense columns should cancel in GF(2)\n");
         return false;
     }
     return true;

@@ -90,7 +90,7 @@ bool DenseColumnMask(
         if (col - dense_base >= dense_rows) {
             return false;
         }
-        mask |= UINT64_C(1) << (col - dense_base);
+        mask ^= UINT64_C(1) << (col - dense_base);
     }
     mask_out = mask;
     return true;

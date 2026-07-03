@@ -33,6 +33,8 @@
 #endif
 
 #include <cmath>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 
 #ifdef _MSC_VER
@@ -541,6 +543,28 @@ static const uint8_t kPeelWeightFirstByTopByte[256] = {
     16, 17, 18, 19, 21, 23, 25, 28, 32, 36, 42, 51, 63, 63, 63, 63,
 };
 
+#ifdef WH_SEED_KNOBS
+static int ReadPeelCap()
+{
+    const char* value = ::getenv("WH_PEELCAP");
+    if (!value || !*value) {
+        return -1;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const long cap = ::strtol(value, &end, 0);
+    if (errno != 0 || !end || *end != '\0' ||
+        cap > (long)kMaxPeelCount)
+    {
+        ::fprintf(stderr, "Invalid WH_PEELCAP = %s\n", value);
+        return -1;
+    }
+
+    return (cap > 3) ? (int)cap : -1;
+}
+#endif
+
 uint16_t GeneratePeelRowWeight(
     uint32_t rv, ///< 32-bit random value
     uint16_t block_count ///< Number of input blocks
@@ -577,7 +601,7 @@ uint16_t GeneratePeelRowWeight(
 
 #ifdef WH_SEED_KNOBS
     // Experiment (task6): cap peel-row weight to make rows lighter (fewer symbol XORs).
-    { static int cap = -2; if (cap == -2) { const char* e = ::getenv("WH_PEELCAP"); cap = e ? atoi(e) : -1; }
+    { static int cap = -2; if (cap == -2) cap = ReadPeelCap();
       if (cap > 3 && weight > (uint16_t)cap) weight = (uint16_t)cap; }
 #endif
 
