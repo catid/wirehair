@@ -1516,14 +1516,18 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                                  const void * GF256_RESTRICT vx, int bytes)
 {
-    WH_BUMP(4, bytes);
     // Special cases are rare in codec hot paths.
     if (GF256_UNLIKELY(y <= 1))
     {
+        // Count AFTER the special cases: y == 1 delegates to
+        // gf256_add_mem, which does its own op-0 accounting (bumping
+        // op-4 here too double-counted those bytes under WH_COUNT), and
+        // y == 0 moves no bytes at all.
         if (y == 1)
             gf256_add_mem(vz, vx, bytes);
         return;
     }
+    WH_BUMP(4, bytes);
 
     GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128 *>(vz);
     const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128 *>(vx);

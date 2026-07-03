@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -1439,12 +1440,19 @@ static TrialResult RunTrial(
 
 static bool ParseUnsigned(const std::string& s, unsigned& out)
 {
-    if (s.empty()) {
+    // Require a leading digit: strtoul silently accepts whitespace and
+    // sign prefixes, so "-1" would wrap to 4294967295
+    if (s.empty() || s[0] < '0' || s[0] > '9') {
         return false;
     }
+    errno = 0;
     char* end = nullptr;
-    const unsigned long v = strtoul(s.c_str(), &end, 10);
-    if (!end || *end != '\0') {
+    const unsigned long long v = strtoull(s.c_str(), &end, 10);
+    if (!end || *end != '\0' || errno == ERANGE ||
+        v > 0xffffffffull)
+    {
+        // Out-of-range values used to truncate to 32 bits, so e.g.
+        // dense_d4294967296 ran with D=0 while the CSV kept the label
         return false;
     }
     out = (unsigned)v;

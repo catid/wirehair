@@ -72,22 +72,26 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     const uint32_t S = params.Staircase;
     const uint32_t D2 = params.DenseRows;
     const uint32_t N1 = params.SourceHits;
-    const uint32_t span = K + S + D2;
+    // Widen before summing: caller-supplied S or D2 near 2^32 would wrap
+    // span back into the accepted range and defeat the rejection below
+    const uint64_t span_wide = (uint64_t)K + S + D2;
 
     // N1 is capped at 8 like the simulator's n1 clamp (and the picks
     // scratch array below)
     if (K < 2u || K > 64000u || S == 0u || N1 == 0u || N1 > 8u) {
         return false;
     }
+    // Deck entries are uint16_t.  Checked at 64-bit width and before the
+    // K + S comparison below so wrapped sums cannot sneak past either.
+    if (span_wide > 65535u) {
+        return false;
+    }
+    const uint32_t span = (uint32_t)span_wide;
     // Identity-corner flips draw deck positions up to
     // set_count + D2/2 - 1, so the K + S deck must cover both halves
     // (rejects only tiny K: the production table gives K + S >= 14 from
     // K = 8 upward)
     if (params.DenseIdentityCorner && K + S < 2u * (D2 >> 1)) {
-        return false;
-    }
-    // ShuffleDeck16 decks are uint16_t
-    if (span > 65535u) {
         return false;
     }
 
