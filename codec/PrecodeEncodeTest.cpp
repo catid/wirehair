@@ -444,6 +444,31 @@ bool TestCostModel()
     return ok;
 }
 
+bool TestMalformedDenseCorner()
+{
+    wirehair_v2::PrecodeSystem system;
+    system.Params.BlockCount = 2u;
+    system.Params.Staircase = 1u;
+    system.Params.DenseRows = 1u;
+    system.Params.HeavyRows = 0u;
+    system.Params.SourceHits = 1u;
+    system.Params.DenseIdentityCorner = false;
+    system.Params.Seed = 0u;
+    system.StaircaseRows.push_back(std::vector<uint32_t>{0u, 2u});
+
+    // dense_base is K + S = 3.  Column 67 is dense_base + 64, which used
+    // to shift by 64 in DenseCornerInvertible before row validation.  Keep
+    // a valid dense column at the tail so the test also catches validators
+    // that only scan the sorted dense tail and miss malformed unsorted rows.
+    system.DenseRowColumns.push_back(std::vector<uint32_t>{67u, 0u, 3u});
+    if (wirehair_v2::DenseCornerInvertible(system)) {
+        std::fprintf(stderr,
+            "malformed dense corner should not be reported invertible\n");
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -459,6 +484,7 @@ int main(int argc, char** argv)
     bool ok = true;
     ok = TestCorrectnessAsBuilt() && ok;
     ok = TestCorrectnessDoctored() && ok;
+    ok = TestMalformedDenseCorner() && ok;
     ok = TestCostModel() && ok;
     ok = TestFeasibility(trials) && ok;
 

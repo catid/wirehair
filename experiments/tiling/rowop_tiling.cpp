@@ -1,6 +1,7 @@
 // Standalone benchmark for replaying block-data row operations by byte tiles.
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cstdint>
@@ -237,12 +238,13 @@ static std::vector<std::string> split_csv(const std::string& line)
 
 static bool parse_u32(const std::string& s, uint32_t* out)
 {
-    if (s.empty()) {
+    if (s.empty() || s[0] < '0' || s[0] > '9') {
         return false;
     }
+    errno = 0;
     char* end = nullptr;
     const unsigned long v = std::strtoul(s.c_str(), &end, 0);
-    if (!end || *end || v > UINT32_MAX) {
+    if (!end || *end || errno == ERANGE || v > UINT32_MAX) {
         return false;
     }
     *out = (uint32_t)v;
@@ -265,12 +267,15 @@ static bool parse_int_field(const std::string& s, int* out)
 
 static bool parse_size_field(const std::string& s, size_t* out)
 {
-    if (s.empty()) {
+    if (s.empty() || s[0] < '0' || s[0] > '9') {
         return false;
     }
+    errno = 0;
     char* end = nullptr;
     const unsigned long long v = std::strtoull(s.c_str(), &end, 0);
-    if (!end || *end) {
+    if (!end || *end || errno == ERANGE ||
+        v > (unsigned long long)((size_t)-1))
+    {
         return false;
     }
     *out = (size_t)v;
@@ -280,6 +285,9 @@ static bool parse_size_field(const std::string& s, size_t* out)
 static bool parse_size_list(const std::string& s, std::vector<size_t>* out)
 {
     out->clear();
+    if (s.empty() || s[s.size() - 1] == ',') {
+        return false;
+    }
     std::stringstream ss(s);
     std::string item;
     while (std::getline(ss, item, ','))

@@ -1,6 +1,7 @@
 #include "WirehairV2Codec.h"
 
 #include "../WirehairTools.h"
+#include "../gf256.h"
 
 namespace wirehair_v2 {
 namespace {
@@ -35,6 +36,11 @@ WirehairResult ValidateCodecInput(uint64_t message_bytes, uint32_t block_bytes)
     return Wirehair_Success;
 }
 
+WirehairResult EnsureGf256Initialized()
+{
+    return gf256_init() == 0 ? Wirehair_Success : Wirehair_UnsupportedPlatform;
+}
+
 } // namespace
 
 Codec::Codec()
@@ -53,6 +59,10 @@ WirehairResult Codec::InitializeEncoder(
 {
     if (!message) {
         return Wirehair_InvalidInput;
+    }
+    const WirehairResult gf_result = EnsureGf256Initialized();
+    if (gf_result != Wirehair_Success) {
+        return gf_result;
     }
     const WirehairResult input_result =
         ValidateCodecInput(message_bytes, block_bytes);
@@ -91,6 +101,10 @@ WirehairResult Codec::InitializeDecoder(
     uint32_t block_bytes,
     const SeedProfile* seed_override)
 {
+    const WirehairResult gf_result = EnsureGf256Initialized();
+    if (gf_result != Wirehair_Success) {
+        return gf_result;
+    }
     const WirehairResult input_result =
         ValidateCodecInput(message_bytes, block_bytes);
     if (input_result != Wirehair_Success) {

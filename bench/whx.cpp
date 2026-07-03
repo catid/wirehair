@@ -319,7 +319,13 @@ static int cmd_micro(int argc, char** argv) {
     int threads = resolve_threads();
     double seconds = 0.7;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--secs") && i + 1 < argc) seconds = atof(argv[++i]);
+        if (!strcmp(argv[i], "--secs") && i + 1 < argc) {
+            if (!parse_double_strict(argv[++i], seconds)) return 2;
+        }
+    }
+    if (seconds < 0.0) {
+        fprintf(stderr, "micro requires --secs >= 0\n");
+        return 2;
     }
     printf("# micro: threads=%d secs=%.2f  (per-thread median GBPS / aggregate GBPS)\n", threads, seconds);
     if (!micro_selfcheck()) { printf("!!! micro_selfcheck FAILED\n"); return 1; }
@@ -464,18 +470,46 @@ static int sample_blockBytes(Rng& rng) {
     return rng.range(1, 8192);
 }
 
-static vector<int> parse_int_list(const string& list) {
-    vector<int> values;
+static bool parse_positive_int_list(const string& list, vector<int>& values) {
+    values.clear();
+    if (list.empty() || list[list.size() - 1] == ',') {
+        return false;
+    }
     size_t p = 0;
     while (p < list.size()) {
         size_t q = list.find(',', p);
         string tok = list.substr(p, q == string::npos ? string::npos : q - p);
-        int v = atoi(tok.c_str());
-        if (v > 0) values.push_back(v);
+        int v = 0;
+        if (tok.empty() || tok[0] < '0' || tok[0] > '9' ||
+            !parse_int_strict(tok.c_str(), v) || v <= 0)
+        {
+            return false;
+        }
+        values.push_back(v);
         if (q == string::npos) break;
         p = q + 1;
     }
-    return values;
+    return !values.empty();
+}
+
+static bool validate_n_bb_lists(const vector<int>& Ns, const vector<int>& BBs, const char* cmd) {
+    if (Ns.empty() || BBs.empty()) {
+        fprintf(stderr, "%s requires non-empty --N and --bb/--bb-list positive integer lists\n", cmd);
+        return false;
+    }
+    for (int N : Ns) {
+        if (N < 2 || N > 64000) {
+            fprintf(stderr, "%s requires every N in 2..64000\n", cmd);
+            return false;
+        }
+    }
+    for (int bb : BBs) {
+        if (bb < 1) {
+            fprintf(stderr, "%s requires every block byte count to be positive\n", cmd);
+            return false;
+        }
+    }
+    return true;
 }
 
 static int cmd_fuzz(int argc, char** argv) {
@@ -641,19 +675,33 @@ static int cmd_bench(int argc, char** argv) {
     string bblist = "1300";
     double lossRate = 0.10;
     int rounds_per_N = 0; // 0 => auto by N
+    bool rounds_set = false;
     string nlist = "32,128,512,1024,2048,8192,32000";
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i], "--bb") && i + 1 < argc) bblist = argv[++i];
         else if (!strcmp(argv[i], "--bb-list") && i + 1 < argc) bblist = argv[++i];
-        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) lossRate = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) {
+            if (!parse_double_strict(argv[++i], lossRate)) return 2;
+        }
         else if (!strcmp(argv[i], "--N") && i + 1 < argc) nlist = argv[++i];
-        else if (!strcmp(argv[i], "--rounds") && i + 1 < argc) rounds_per_N = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--rounds") && i + 1 < argc) {
+            if (!parse_int_strict(argv[++i], rounds_per_N)) return 2;
+            rounds_set = true;
+        }
     }
-    vector<int> Ns = parse_int_list(nlist);
-    vector<int> BBs = parse_int_list(bblist);
-    if (Ns.empty() || BBs.empty()) {
-        fprintf(stderr, "bench requires non-empty --N and --bb/--bb-list positive integer lists\n");
-        return 1;
+    vector<int> Ns;
+    vector<int> BBs;
+    if (!parse_positive_int_list(nlist, Ns) ||
+        !parse_positive_int_list(bblist, BBs) ||
+        !validate_n_bb_lists(Ns, BBs, "bench"))
+    {
+        return 2;
+    }
+    if (!std::isfinite(lossRate) || lossRate < 0.0 || lossRate >= 1.0 ||
+        (rounds_set && rounds_per_N < 1))
+    {
+        fprintf(stderr, "bench requires 0 <= --loss < 1 and positive --rounds when specified\n");
+        return 2;
     }
     const bool matrix = BBs.size() > 1;
     printf("# bench: threads=%d bb=%s loss=%.2f\n", threads, bblist.c_str(), lossRate);
@@ -907,15 +955,15 @@ static int cmd_seedmean(int argc, char** argv) {
     double loss = 0.10;
     uint64_t base = 0x51EED00DULL;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--N") && i + 1 < argc) N = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n") && i + 1 < argc) N = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--pseed") && i + 1 < argc) pseed = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--dseed") && i + 1 < argc) dseed = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) trials = atol(argv[++i]);
-        else if (!strcmp(argv[i], "--bb") && i + 1 < argc) bb = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) loss = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) startMode = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) base = strtoull(argv[++i], nullptr, 0);
+        if (!strcmp(argv[i], "--N") && i + 1 < argc) { if (!parse_int_strict(argv[++i], N)) return 2; }
+        else if (!strcmp(argv[i], "--n") && i + 1 < argc) { if (!parse_int_strict(argv[++i], N)) return 2; }
+        else if (!strcmp(argv[i], "--pseed") && i + 1 < argc) { if (!parse_int_strict(argv[++i], pseed)) return 2; }
+        else if (!strcmp(argv[i], "--dseed") && i + 1 < argc) { if (!parse_int_strict(argv[++i], dseed)) return 2; }
+        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) { if (!parse_long_strict(argv[++i], trials)) return 2; }
+        else if (!strcmp(argv[i], "--bb") && i + 1 < argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], base)) return 2; }
     }
     if (N < 2 || N > 64000 || bb <= 0 || trials < 1 ||
         pseed < -1 || pseed > 255 || dseed < -1 || dseed > 255 ||
@@ -944,14 +992,17 @@ static int cmd_seedsearch(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i],"--nlist")&&i+1<argc) nlist=argv[++i];
         else if (!strcmp(argv[i],"--nfile")&&i+1<argc) nfile=argv[++i];
-        else if (!strcmp(argv[i],"--tsearch")&&i+1<argc) tsearch=atol(argv[++i]);
-        else if (!strcmp(argv[i],"--tverify")&&i+1<argc) tverify=atol(argv[++i]);
-        else if (!strcmp(argv[i],"--nseeds")&&i+1<argc) nseeds=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--bb")&&i+1<argc) bb=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--loss")&&i+1<argc) loss=atof(argv[++i]);
-        else if (!strcmp(argv[i],"--startmode")&&i+1<argc) startMode=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--tsearch")&&i+1<argc) { if (!parse_long_strict(argv[++i], tsearch)) return 2; }
+        else if (!strcmp(argv[i],"--tverify")&&i+1<argc) { if (!parse_long_strict(argv[++i], tverify)) return 2; }
+        else if (!strcmp(argv[i],"--nseeds")&&i+1<argc) { if (!parse_int_strict(argv[++i], nseeds)) return 2; }
+        else if (!strcmp(argv[i],"--bb")&&i+1<argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
+        else if (!strcmp(argv[i],"--loss")&&i+1<argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i],"--startmode")&&i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
     }
-    if (nseeds < 1) nseeds = 1;
+    if (nseeds < 1) {
+        fprintf(stderr, "seedsearch requires --nseeds >= 1\n");
+        return 2;
+    }
     if (nseeds > 256) nseeds = 256;
     vector<int> Ns;
     if (!nfile.empty()) {
@@ -969,7 +1020,8 @@ static int cmd_seedsearch(int argc, char** argv) {
             if (*s == '\0' || *s == '\n' || *s == '#') continue; // blank/comment
             char* end = nullptr;
             long n = strtol(s, &end, 10);
-            if (end == s || n < 2 || n > 64000) {
+            while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
+            if (end == s || *end != '\0' || n < 2 || n > 64000) {
                 fprintf(stderr, "seedsearch: bad N at %s:%d: %s", nfile.c_str(), lineno, linebuf);
                 fclose(f);
                 return 2;
@@ -979,12 +1031,33 @@ static int cmd_seedsearch(int argc, char** argv) {
         fclose(f);
         if (Ns.empty()) { fprintf(stderr, "seedsearch: --nfile %s has no N values\n", nfile.c_str()); return 2; }
     }
-    if (!nlist.empty()) { size_t p=0; while(p<nlist.size()){size_t q=nlist.find(',',p); int n=atoi(nlist.substr(p,q==string::npos?string::npos:q-p).c_str()); if(n>0)Ns.push_back(n); if(q==string::npos)break; p=q+1;} }
+    if (!nlist.empty()) {
+        vector<int> listed;
+        if (!parse_positive_int_list(nlist, listed)) {
+            fprintf(stderr, "seedsearch: bad --nlist\n");
+            return 2;
+        }
+        Ns.insert(Ns.end(), listed.begin(), listed.end());
+    }
     int dseeds = 0;          // 0 = peel-only (back-compat); >0 = enable joint dense-seed search for hard N
     double goodthr = 0.05;   // peel-only is accepted if max(v10,v30) < goodthr; else search dense
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i],"--dseeds")&&i+1<argc) dseeds=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--goodthr")&&i+1<argc) goodthr=atof(argv[++i]);
+        if (!strcmp(argv[i],"--dseeds")&&i+1<argc) { if (!parse_int_strict(argv[++i], dseeds)) return 2; }
+        else if (!strcmp(argv[i],"--goodthr")&&i+1<argc) { if (!parse_double_strict(argv[++i], goodthr)) return 2; }
+    }
+    if (Ns.empty() || tsearch < 1 || tverify < 1 || bb < 1 ||
+        !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        (startMode != 0 && startMode != 1) ||
+        dseeds < 0 || !std::isfinite(goodthr) || goodthr < 0.0)
+    {
+        fprintf(stderr, "seedsearch: invalid parameters\n");
+        return 2;
+    }
+    for (int N : Ns) {
+        if (N < 2 || N > 64000) {
+            fprintf(stderr, "seedsearch requires every N in 2..64000\n");
+            return 2;
+        }
     }
     if (dseeds > 256) dseeds = 256;
     fprintf(stderr,"# seedsearch: threads=%d Ns=%zu nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f\n",
@@ -1153,22 +1226,28 @@ static int cmd_peelstat(int argc, char** argv) {
         if (!strcmp(argv[i], "--N") && i + 1 < argc) nlist = argv[++i];
         else if (!strcmp(argv[i], "--bb") && i + 1 < argc) bblist = argv[++i];
         else if (!strcmp(argv[i], "--bb-list") && i + 1 < argc) bblist = argv[++i];
-        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) trials = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) loss = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) startMode = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) baseSeed = strtoull(argv[++i], nullptr, 0);
+        else if (!strcmp(argv[i], "--trials") && i + 1 < argc) { if (!parse_int_strict(argv[++i], trials)) return 2; }
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
-            g_threads = atoi(argv[++i]);
+            if (!parse_int_strict(argv[++i], g_threads) || g_threads < 1) return 2;
             threads = resolve_threads();
         }
     }
-    if (trials < 1) trials = 1;
-
-    vector<int> Ns = parse_int_list(nlist);
-    vector<int> BBs = parse_int_list(bblist);
-    if (Ns.empty() || BBs.empty()) {
-        fprintf(stderr, "peelstat requires non-empty --N and --bb/--bb-list positive integer lists\n");
-        return 1;
+    vector<int> Ns;
+    vector<int> BBs;
+    if (!parse_positive_int_list(nlist, Ns) ||
+        !parse_positive_int_list(bblist, BBs) ||
+        !validate_n_bb_lists(Ns, BBs, "peelstat"))
+    {
+        return 2;
+    }
+    if (trials < 1 || !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        (startMode != 0 && startMode != 1))
+    {
+        fprintf(stderr, "peelstat: invalid parameters\n");
+        return 2;
     }
 
     const char* mode = getenv("WH_PEEL_MODE");
@@ -1264,13 +1343,21 @@ static int cmd_count(int argc, char** argv) {
     for (int i=0;i<argc;++i){ if(!strcmp(argv[i],"--N")&&i+1<argc)nlist=argv[++i];
         else if(!strcmp(argv[i],"--bb")&&i+1<argc)bblist=argv[++i];
         else if(!strcmp(argv[i],"--bb-list")&&i+1<argc)bblist=argv[++i];
-        else if(!strcmp(argv[i],"--loss")&&i+1<argc)loss=atof(argv[++i]);
-        else if(!strcmp(argv[i],"--startmode")&&i+1<argc)startMode=atoi(argv[++i]); }
-    vector<int> Ns = parse_int_list(nlist);
-    vector<int> BBs = parse_int_list(bblist);
-    if (Ns.empty() || BBs.empty()) {
-        fprintf(stderr, "count requires non-empty --N and --bb/--bb-list positive integer lists\n");
-        return 1;
+        else if(!strcmp(argv[i],"--loss")&&i+1<argc){ if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if(!strcmp(argv[i],"--startmode")&&i+1<argc){ if (!parse_int_strict(argv[++i], startMode)) return 2; } }
+    vector<int> Ns;
+    vector<int> BBs;
+    if (!parse_positive_int_list(nlist, Ns) ||
+        !parse_positive_int_list(bblist, BBs) ||
+        !validate_n_bb_lists(Ns, BBs, "count"))
+    {
+        return 2;
+    }
+    if (!std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        (startMode != 0 && startMode != 1))
+    {
+        fprintf(stderr, "count: invalid parameters\n");
+        return 2;
     }
     for (int bb : BBs) for (int N : Ns) {
         Rng rng(0xC007 + (uint64_t)N * 131 + (uint64_t)bb * 17);

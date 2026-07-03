@@ -98,6 +98,9 @@ if(NOT MSVC)
     elseif(WH_LTO_UC STREQUAL "AUTO")
         set(WH_LTO_FLAG "-flto=auto")
     elseif(WH_LTO_UC STREQUAL "THIN")
+        if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR "WH_LTO=THIN requires Clang; ${CMAKE_CXX_COMPILER_ID} does not support -flto=thin")
+        endif()
         set(WH_LTO_FLAG "-flto=thin")
     elseif(NOT WH_LTO_UC STREQUAL "OFF")
         message(FATAL_ERROR "Unknown WH_LTO='${WH_LTO}' (expected OFF, ON, AUTO, or THIN)")
@@ -193,4 +196,6 @@ install(TARGETS ${WIREHAIR_INSTALL_TARGETS}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY python/ DESTINATION python)
+install(DIRECTORY python/ DESTINATION python
+    FILES_MATCHING PATTERN "*.py"
+    PATTERN "__pycache__" EXCLUDE)

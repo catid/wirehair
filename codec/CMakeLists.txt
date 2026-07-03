@@ -23,6 +23,10 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_policy_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_policy_test COMMAND wirehair_v2_policy_test)
 
+    add_executable(wirehair_v2_noinit_test V2NoInitTest.cpp)
+    target_link_libraries(wirehair_v2_noinit_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_noinit_test COMMAND wirehair_v2_noinit_test)
+
     add_executable(wirehair_v2_precode_test PrecodeTest.cpp)
     target_link_libraries(wirehair_v2_precode_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_test COMMAND wirehair_v2_precode_test)

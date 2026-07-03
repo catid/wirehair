@@ -3,7 +3,7 @@
 # Accepts a fix only when it's a genuine, robustly-verified improvement:
 #   default_mean > DEFTHRESH  AND  best@0.10 < GOOD  AND  best@0.30 < GOOD30
 # seedsearch line format: "N best_pseed default_mean best_mean@0.10 best_mean@0.30"
-set -e
+set -euo pipefail
 DEFTHRESH=${DEFTHRESH:-0.05}   # require the table seed to show >=2.5x-normal overhead (real defect)
 GOOD=${GOOD:-0.045}            # replacement must verify near-normal at loss 0.10
 GOOD30=${GOOD30:-0.06}         # ...and at loss 0.30 (robust across loss rates)
@@ -15,9 +15,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
   echo "// bench/whx seedsearch + bench/gen_fixups.sh. Sorted ascending by N (binary search)."
   echo "// Filter: default>$DEFTHRESH, best@0.10<$GOOD, best@0.30<$GOOD30. Format: { N, seed }"
   cat "$@" | awk -v dt="$DEFTHRESH" -v g="$GOOD" -v g3="$GOOD30" '
-    /^#/ || NF<5 { next }
+    function uint(x){ return x ~ /^[0-9]+$/ }
+    function num(x){ return x ~ /^([0-9]+([.][0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/ }
+    function die(){ printf "malformed seedsearch line: %s\n", $0 > "/dev/stderr"; exit 2 }
+    /^#/ || NF==0 { next }
+    NF!=5 { die() }
     {
+      if (!uint($1) || !uint($2) || !num($3) || !num($4) || !num($5)) die();
       N=$1; seed=$2; def=$3; b10=$4; b30=$5;
+      if (seed+0 > 255 || N+0 < 2 || N+0 > 64000) die();
       if (def+0 > dt && b10+0 < g && b30+0 < g3 && seed+0>=0 && seed+0<=255 && N+0>=2 && N+0<=64000)
         print N+0, seed+0;
     }' | sort -n -u -k1,1 | awk '{printf "    { %5d, %3d },\n", $1, $2}'

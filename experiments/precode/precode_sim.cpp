@@ -2540,6 +2540,10 @@ int main(int argc, char** argv)
     if (threads < 1u) {
         threads = 1;
     }
+    if (trials == 0u) {
+        fprintf(stderr, "--trials must be positive\n");
+        return 1;
+    }
 
     printf("K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_max,"
            "def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,"
@@ -2566,6 +2570,12 @@ int main(int argc, char** argv)
             }
             for (unsigned oh : oh_list)
             {
+                if (oh > 0xffffffffu - K)
+                {
+                    fprintf(stderr, "bad --oh value %u for K=%u: K + oh overflows\n",
+                        oh, K);
+                    return 1;
+                }
                 Aggregate agg;
                 std::mutex agg_mutex;
                 std::atomic<unsigned> next_trial(0);

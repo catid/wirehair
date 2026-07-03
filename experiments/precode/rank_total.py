@@ -49,6 +49,21 @@ DEFAULT_BB = "1280,102400,1048576"
 PDF_TOLERANCE = 1e-4
 
 
+def parse_bb_list(text):
+    """Parse a non-empty CSV of positive decimal block sizes."""
+    if text is None or text == "":
+        raise ValueError("--bb must be a non-empty CSV of positive integers")
+    out = []
+    for part in text.split(","):
+        if not part or not part.isdigit():
+            raise ValueError("--bb contains an invalid token: %r" % part)
+        value = int(part)
+        if value <= 0:
+            raise ValueError("--bb values must be positive")
+        out.append(value)
+    return out
+
+
 def parse_def_pdf(text):
     """'6:0.983250|7:0.016000' -> {6: 0.98325, 7: 0.016}"""
     pdf = {}
@@ -371,6 +386,13 @@ def self_test():
     ratios = build_ratios([1280, 102400, 999], xor_us, mul_us, 5.0)
     assert approx(ratios[1280], 3.0) and approx(ratios[102400], 4.0)
     assert approx(ratios[999], 5.0)  # fallback for uncalibrated size
+    assert parse_bb_list(DEFAULT_BB) == [1280, 102400, 1048576]
+    for bad in ("", ",", "1280,", "1280,,1024", "-1", "0", "10abc"):
+        try:
+            parse_bb_list(bad)
+            raise SystemExit("self-test FAILED: accepted bad --bb %r" % bad)
+        except ValueError:
+            pass
 
     rows = load_rows([sim_path])
     assert len(rows) == 2
@@ -458,7 +480,10 @@ def main():
     if not args.csvs:
         ap.error("no input CSVs (or use --self-test)")
 
-    bb_list = [int(x) for x in args.bb.split(",") if x]
+    try:
+        bb_list = parse_bb_list(args.bb)
+    except ValueError as e:
+        ap.error(str(e))
     xor_us = load_us_per_op(args.xor_csv, "xor")
     muladd_us = load_us_per_op(args.muladd_csv, "muladd")
     ratios = build_ratios(bb_list, xor_us, muladd_us, args.assume_ratio)

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Chains after the scan: waits for it to finish (one campaign at a time), extracts weak N,
 # runs a small validation, then the full seedsearch. Writes to bench/results/.
+set -euo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 R=bench/results
 # Wait for the scan to appear before waiting for it to finish: if it never

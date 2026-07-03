@@ -28,6 +28,87 @@ double NowSeconds()
         Clock::now().time_since_epoch()).count();
 }
 
+bool ParseU32Scalar(const char* text, uint32_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || value > UINT32_MAX) {
+        return false;
+    }
+    out = (uint32_t)value;
+    return true;
+}
+
+bool ParseU16Scalar(const char* text, uint16_t& out)
+{
+    uint32_t value = 0u;
+    if (!ParseU32Scalar(text, value) || value > UINT16_MAX) {
+        return false;
+    }
+    out = (uint16_t)value;
+    return true;
+}
+
+bool ParseU64Scalar(const char* text, uint64_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
+bool ParseDoubleScalar(const char* text, double& out)
+{
+    if (!text || !*text || ((*text < '0' || *text > '9') && *text != '.')) {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (errno != 0 || !end || *end != '\0' || !std::isfinite(value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+bool BadArg(const char* option, const char* value)
+{
+    std::fprintf(stderr, "bad %s value: %s\n", option, value ? value : "");
+    return false;
+}
+
+bool ParseU32Arg(const char* option, const char* value, uint32_t& out)
+{
+    return ParseU32Scalar(value, out) || BadArg(option, value);
+}
+
+bool ParseU16Arg(const char* option, const char* value, uint16_t& out)
+{
+    return ParseU16Scalar(value, out) || BadArg(option, value);
+}
+
+bool ParseU64Arg(const char* option, const char* value, uint64_t& out)
+{
+    return ParseU64Scalar(value, out) || BadArg(option, value);
+}
+
+bool ParseDoubleArg(const char* option, const char* value, double& out)
+{
+    return ParseDoubleScalar(value, out) || BadArg(option, value);
+}
+
 struct Rng
 {
     uint64_t State;
@@ -1093,25 +1174,25 @@ int CmdCompare(int argc, char** argv)
     for (int i = 0; i < argc; ++i)
     {
         if (!std::strcmp(argv[i], "--nlo") && i + 1 < argc) {
-            nlo = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--nlo", argv[++i], nlo)) return 1;
         }
         else if (!std::strcmp(argv[i], "--nhi") && i + 1 < argc) {
-            nhi = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--nhi", argv[++i], nhi)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--bb-list") && i + 1 < argc) {
             bb_list = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            loss = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
         else if (!std::strcmp(argv[i], "--max-message-mib") && i + 1 < argc) {
-            max_message_mib = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--max-message-mib", argv[++i], max_message_mib)) return 1;
         }
         else if (!std::strcmp(argv[i], "--v2-profile") && i + 1 < argc) {
             const char* profile = argv[++i];
@@ -1137,22 +1218,28 @@ int CmdCompare(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
-            compare_options.PeelCandidates = (uint16_t)std::atoi(argv[++i]);
+            if (!ParseU16Arg("--peel-candidates", argv[++i],
+                    compare_options.PeelCandidates)) return 1;
         }
         else if (!std::strcmp(argv[i], "--peel-trials") && i + 1 < argc) {
-            compare_options.PeelTrials = (uint16_t)std::atoi(argv[++i]);
+            if (!ParseU16Arg("--peel-trials", argv[++i],
+                    compare_options.PeelTrials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--auto-trials") && i + 1 < argc) {
-            compare_options.AutoTrials = (uint16_t)std::atoi(argv[++i]);
+            if (!ParseU16Arg("--auto-trials", argv[++i],
+                    compare_options.AutoTrials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--tune-seed") && i + 1 < argc) {
-            compare_options.TuneSeed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--tune-seed", argv[++i],
+                    compare_options.TuneSeed)) return 1;
         }
         else if (!std::strcmp(argv[i], "--auto-seed") && i + 1 < argc) {
-            compare_options.AutoSeed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--auto-seed", argv[++i],
+                    compare_options.AutoSeed)) return 1;
         }
         else if (!std::strcmp(argv[i], "--auto-min-delta") && i + 1 < argc) {
-            compare_options.AutoMinDelta = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--auto-min-delta", argv[++i],
+                    compare_options.AutoMinDelta)) return 1;
         }
         else if (!std::strcmp(argv[i], "--dense-delta") && i + 1 < argc) {
             const std::vector<int> deltas = ParseSignedIntList(argv[++i]);
@@ -1165,7 +1252,8 @@ int CmdCompare(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--dense-candidate") && i + 1 < argc) {
             compare_options.DenseOverride = true;
-            compare_options.DenseCandidate = (uint16_t)std::atoi(argv[++i]);
+            if (!ParseU16Arg("--dense-candidate", argv[++i],
+                    compare_options.DenseCandidate)) return 1;
         }
     }
 
@@ -1329,13 +1417,13 @@ int CmdSeedTable(int argc, char** argv)
             bb_list = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--peel-candidates") && i + 1 < argc) {
-            peel_candidates = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--peel-candidates", argv[++i], peel_candidates)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 
@@ -1435,13 +1523,13 @@ int CmdPeelCost(int argc, char** argv)
             solver_name = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--heavy") && i + 1 < argc) {
-            heavy_rows = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--heavy", argv[++i], heavy_rows)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 
@@ -1471,6 +1559,9 @@ int CmdPeelCost(int argc, char** argv)
         std::fprintf(stderr,
             "peelcost requires non-empty --N, --bb-list, --overhead, "
             "--structures, and --precode\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "peelcost")) {
         return 1;
     }
 
@@ -1622,22 +1713,22 @@ int CmdDenseCheck(int argc, char** argv)
     for (int i = 0; i < argc; ++i)
     {
         if (!std::strcmp(argv[i], "--N") && i + 1 < argc) {
-            N = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--N", argv[++i], N)) return 1;
         }
         else if (!std::strcmp(argv[i], "--bb") && i + 1 < argc) {
-            block_bytes = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--bb", argv[++i], block_bytes)) return 1;
         }
         else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            candidates = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            loss = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 
@@ -1705,16 +1796,16 @@ int CmdDenseTune(int argc, char** argv)
             bb_list = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            candidates = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            loss = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 
@@ -1837,13 +1928,13 @@ int CmdDenseCount(int argc, char** argv)
             delta_list = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            loss = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 
@@ -1957,16 +2048,16 @@ int CmdDenseGrid(int argc, char** argv)
             delta_list = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--candidates") && i + 1 < argc) {
-            candidates = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--candidates", argv[++i], candidates)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials") && i + 1 < argc) {
-            trials = (uint32_t)std::atoi(argv[++i]);
+            if (!ParseU32Arg("--trials", argv[++i], trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--loss") && i + 1 < argc) {
-            loss = std::atof(argv[++i]);
+            if (!ParseDoubleArg("--loss", argv[++i], loss)) return 1;
         }
         else if (!std::strcmp(argv[i], "--seed") && i + 1 < argc) {
-            seed = std::strtoull(argv[++i], 0, 0);
+            if (!ParseU64Arg("--seed", argv[++i], seed)) return 1;
         }
     }
 

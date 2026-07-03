@@ -75,21 +75,25 @@ uint32_t MaskRank(std::vector<uint64_t>& masks, uint32_t width)
 }
 
 /// Dense-column bit mask of one dense row (bits over [K + S, K + S + D2))
-uint64_t DenseColumnMask(
+bool DenseColumnMask(
     const std::vector<uint32_t>& row_columns,
-    uint32_t dense_base)
+    uint32_t dense_base,
+    uint32_t dense_rows,
+    uint64_t& mask_out)
 {
     uint64_t mask = 0;
-    // Sorted rows put the dense columns at the tail
-    for (size_t i = row_columns.size(); i > 0; --i)
+    for (uint32_t col : row_columns)
     {
-        const uint32_t col = row_columns[i - 1u];
         if (col < dense_base) {
-            break;
+            continue;
+        }
+        if (col - dense_base >= dense_rows) {
+            return false;
         }
         mask |= UINT64_C(1) << (col - dense_base);
     }
-    return mask;
+    mask_out = mask;
+    return true;
 }
 
 } // namespace
@@ -108,7 +112,11 @@ bool DenseCornerInvertible(const PrecodeSystem& system)
         system.Params.BlockCount + system.Params.Staircase;
     std::vector<uint64_t> masks(D2);
     for (uint32_t r = 0; r < D2; ++r) {
-        masks[r] = DenseColumnMask(system.DenseRowColumns[r], dense_base);
+        if (!DenseColumnMask(
+                system.DenseRowColumns[r], dense_base, D2, masks[r]))
+        {
+            return false;
+        }
     }
     return MaskRank(masks, D2) == D2;
 }

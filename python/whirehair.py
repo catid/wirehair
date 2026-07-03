@@ -144,105 +144,116 @@ wirehair.wirehair_recover.restype = ctypes.c_int32
 wirehair.wirehair_free.argtypes = [ctypes.c_void_p]
 wirehair.wirehair_free.restype = None
 
-KPacketSize = ctypes.c_int(32)  # this can be extremaly large 1400 or more! :-)
-Message_tmp = b'A working example. this need be minimum o 2*KPacketSize; because this I in filling ' \
-              b'more and more words just' \
-              b'by the sake of filling... :-)  the real data can be and will be different :-) '
 
-Message = (ctypes.c_uint8 * len(Message_tmp)).from_buffer_copy(Message_tmp)
+def _run_example():
+    KPacketSize = ctypes.c_int(32)  # this can be extremaly large 1400 or more! :-)
+    Message_tmp = b'A working example. this need be minimum o 2*KPacketSize; because this I in filling ' \
+                  b'more and more words just' \
+                  b'by the sake of filling... :-)  the real data can be and will be different :-) '
 
-if wirehair.wirehair_init_(2) != Wirehair_Success :
-    # this "2" can change in future wirehair releases. :-)
-    # Just updated when necessary.
-    print("Wirehair_Init() failed! exiting.")
-    exit()
+    Message = (ctypes.c_uint8 * len(Message_tmp)).from_buffer_copy(Message_tmp)
 
-encoder = wirehair.wirehair_encoder_create(None, ctypes.byref(Message),
-                                           ctypes.c_uint64(len(Message)),
-                                           ctypes.c_uint32(KPacketSize.value))
+    if wirehair.wirehair_init_(2) != Wirehair_Success :
+        # this "2" can change in future wirehair releases. :-)
+        # Just updated when necessary.
+        print("Wirehair_Init() failed! exiting.")
+        return 1
 
-if not encoder:
-    print("Creation of encoder failed! exiting.")
-    exit()
+    encoder = wirehair.wirehair_encoder_create(None, ctypes.byref(Message),
+                                               ctypes.c_uint64(len(Message)),
+                                               ctypes.c_uint32(KPacketSize.value))
 
-decoder = wirehair.wirehair_decoder_create(None,
-                                           ctypes.c_uint64(len(Message)),
-                                           ctypes.c_uint32(KPacketSize.value))
+    if not encoder:
+        print("Creation of encoder failed! exiting.")
+        return 1
 
-if not decoder:
-    print("Creation of decoder failed! exiting.")
-    wirehair.wirehair_free(encoder)
-    exit()
+    decoder = wirehair.wirehair_decoder_create(None,
+                                               ctypes.c_uint64(len(Message)),
+                                               ctypes.c_uint32(KPacketSize.value))
 
-blockid = ctypes.c_uint(0)
-needed = ctypes.c_uint(0)
+    if not decoder:
+        print("Creation of decoder failed! exiting.")
+        wirehair.wirehair_free(encoder)
+        return 1
 
-while True:
+    blockid = ctypes.c_uint(0)
+    needed = ctypes.c_uint(0)
 
-    blockid.value += 1
+    while True:
 
-    # simulate 10% packet loss
-    if (blockid.value % 10) == 0:
-        continue
+        blockid.value += 1
 
-    needed.value += 1
-    block = (ctypes.c_uint8 * KPacketSize.value)()
-    # ? They are real need to redefining it always in loop ??
-    # ? Will speedup define it before the while loop, just one time?
+        # simulate 10% packet loss
+        if (blockid.value % 10) == 0:
+            continue
 
-    # Encode a packet
-    writelen = ctypes.c_uint32(0)
-    encodedResult = wirehair.wirehair_encode(encoder, #encoder object
-                                            ctypes.c_uint(blockid.value), #ID of block to generate
-                                            ctypes.byref(block), #output buffer
-                                            ctypes.c_uint32(KPacketSize.value), #output buffer size
-                                            ctypes.byref(writelen)) # returned block length
+        needed.value += 1
+        block = (ctypes.c_uint8 * KPacketSize.value)()
+        # ? They are real need to redefining it always in loop ??
+        # ? Will speedup define it before the while loop, just one time?
 
-    if encodedResult != Wirehair_Success:
-        print("Wirehair_encode failed! exiting.")
-        exit()
+        # Encode a packet
+        writelen = ctypes.c_uint32(0)
+        encodedResult = wirehair.wirehair_encode(encoder, #encoder object
+                                                ctypes.c_uint(blockid.value), #ID of block to generate
+                                                ctypes.byref(block), #output buffer
+                                                ctypes.c_uint32(KPacketSize.value), #output buffer size
+                                                ctypes.byref(writelen)) # returned block length
 
-    decodeResult = wirehair.wirehair_decode(
-        decoder,  # Decoder Object
-        ctypes.c_uint(blockid.value),  # ID of block that was encoded
-        ctypes.byref(block),  # input buffer
-        writelen  # Block length
+        if encodedResult != Wirehair_Success:
+            print("Wirehair_encode failed! exiting.")
+            wirehair.wirehair_free(encoder)
+            wirehair.wirehair_free(decoder)
+            return 1
+
+        decodeResult = wirehair.wirehair_decode(
+            decoder,  # Decoder Object
+            ctypes.c_uint(blockid.value),  # ID of block that was encoded
+            ctypes.byref(block),  # input buffer
+            writelen  # Block length
+        )
+
+        if decodeResult == Wirehair_Success:
+            # Decoder has enough data to recover now
+            break
+
+        if decodeResult != Wirehair_NeedMore:
+            # Anything other than Success/NeedMore is a terminal decoder error:
+            # feeding more blocks can never succeed, so bail out
+            print("Wirehair_decode failed: ", decodeResult, " \n")
+            wirehair.wirehair_free(encoder)
+            wirehair.wirehair_free(decoder)
+            return 1
+
+    decoded = (ctypes.c_uint8 * len(Message))()
+
+    # recover original data on decoder side
+    decodeResult = wirehair.wirehair_recover(
+        decoder,
+        ctypes.byref(decoded),
+        ctypes.c_uint64(len(Message))
     )
 
-    if decodeResult == Wirehair_Success:
-        # Decoder has enough data to recover now
-        break
-
-    if decodeResult != Wirehair_NeedMore:
-        # Anything other than Success/NeedMore is a terminal decoder error:
-        # feeding more blocks can never succeed, so bail out
-        print("Wirehair_decode failed: ", decodeResult, " \n")
+    if decodeResult != 0:
+        print("Wirehair_recover failed! exiting.")
         wirehair.wirehair_free(encoder)
         wirehair.wirehair_free(decoder)
-        exit()
+        return 1
 
-decoded = (ctypes.c_uint8 * len(Message))()
+    if decoded[:] == Message[:]:
+        print("msgs are equal")
 
-# recover original data on decoder side
-decodeResult = wirehair.wirehair_recover(
-    decoder,
-    ctypes.byref(decoded),
-    ctypes.c_uint64(len(Message))
-)
+    # just more for fun
+    eita = (ctypes.c_byte * len(Message)).from_buffer_copy(bytearray(decoded[:]))
+    print(str(eita, "ascii"))
 
-if decodeResult != 0:
-    print("Wirehair_recover failed! exiting.")
-    exit()
+    wirehair.wirehair_free(encoder) ## ? are need to "free" from python? maybe not. :-)
+    wirehair.wirehair_free(decoder) ## fixme if necessary: if "wirehair.wirehair_free()" are causing trouble, remove they.
+    return 0
 
-if decoded[:] == Message[:]:
-    print("msgs are equal")
 
-# just more for fun
-eita = (ctypes.c_byte * len(Message)).from_buffer_copy(bytearray(decoded[:]))
-print(str(eita, "ascii"))
-
-wirehair.wirehair_free(encoder) ## ? are need to "free" from python? maybe not. :-)
-wirehair.wirehair_free(decoder) ## fixme if necessary: if "wirehair.wirehair_free()" are causing trouble, remove they.
+if __name__ == "__main__":
+    sys.exit(_run_example())
 
 #  Obs.: tested in Linux Ubuntu Disco Jingo, gcc-8.3 and python 3.7.2+
 #  in 19 march 2019

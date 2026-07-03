@@ -3,7 +3,7 @@
 # Formats: 5-col "N pseed def b10 b30" (peel-only), 6-col "N pseed dseed def b10 b30" (joint).
 # When a N appears in multiple outputs, keep the BEST (peel,dense) combo (min of max(b10,b30)).
 # Keep only genuine verified fixes (default weak; best good at loss 0.10 AND 0.30). Sorted by N.
-set -e
+set -euo pipefail
 GOOD=${GOOD:-0.05}
 GOOD30=${GOOD30:-0.10}
 DEFTHRESH=${DEFTHRESH:-0.05}
@@ -11,11 +11,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 TMP="$(mktemp)"
 
 cat "$@" | awk -v dt="$DEFTHRESH" -v g="$GOOD" -v g3="$GOOD30" '
+  function uint(x){ return x ~ /^[0-9]+$/ }
+  function sint(x){ return x ~ /^-?[0-9]+$/ }
+  function num(x){ return x ~ /^([0-9]+([.][0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/ }
+  function die(){ printf "malformed seedsearch line: %s\n", $0 > "/dev/stderr"; exit 2 }
   function mx(a,b){ return a>b?a:b }
-  /^#/ { next }
-  NF==5 { N=$1; p=$2; d=-1; def=$3; b10=$4; b30=$5 }
-  NF==6 { N=$1; p=$2; d=$3; def=$4; b10=$5; b30=$6 }
+  /^#/ || NF==0 { next }
+  NF!=5 && NF!=6 { die() }
+  NF==5 {
+    if (!uint($1) || !uint($2) || !num($3) || !num($4) || !num($5)) die();
+    N=$1; p=$2; d=-1; def=$3; b10=$4; b30=$5
+  }
+  NF==6 {
+    if (!uint($1) || !uint($2) || !sint($3) || !num($4) || !num($5) || !num($6)) die();
+    N=$1; p=$2; d=$3; def=$4; b10=$5; b30=$6
+  }
   NF==5 || NF==6 {
+    if (N+0 < 2 || N+0 > 64000 || p+0 > 255 || d+0 < -1 || d+0 > 255) die();
     if (def+0>dt && b10+0<g && b30+0<g3 && N+0>=2 && N+0<=64000 && p+0>=0 && p+0<=255) {
       s = mx(b10+0, b30+0)
       if (!(N in bs) || s < bs[N]) { bs[N]=s; bp[N]=p+0; bd[N]=d+0 }
