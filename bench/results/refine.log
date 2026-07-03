@@ -1,0 +1,24 @@
+refine start 15:54:57
+# seedsearch: threads=78 Ns=229 nseeds=40 dseeds=32 tsearch=150 tverify=2000 goodthr=0.040
+refine search done 16:11:13, 69 N
+peel corrections: 574 | dense corrections: 62
+WirehairCodec.cpp: In member function ‘void wirehair::Codec::BackSubstituteAboveDiagonal()’:
+WirehairCodec.cpp:2303:39: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2303 |                         gf256_div_mem(src, src, code_value, _block_bytes);
+      |                                       ^~~  ~~~
+WirehairCodec.cpp:2387:35: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2387 |                     gf256_div_mem(src, src, code_value, _block_bytes);
+      |                                   ^~~  ~~~
+WirehairCodec.cpp:2652:31: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2652 |                 gf256_div_mem(src, src, code_value, _block_bytes);
+      |                               ^~~  ~~~
+built bench/whx.fix  (EXTRA='')
+# fuzz done: 37.1s trials=49152 fails=0 rate=1323 trials/s
+# overhead(success trials=49152): mean=0.0254 p50=0 p99=1 p999=1 max=134
+  N=24146 @0.30: mean=0.1330 max=347
+  N=24166 @0.30: mean=0.0170 max=1
+  N=6107 @0.30: mean=0.0200 max=2
+  N=7533 @0.30: mean=0.0183 max=2
+  N=11446 @0.30: mean=0.0163 max=1
+  N=5550 @0.30: mean=0.0217 max=2
+refine finalize done 16:11:57

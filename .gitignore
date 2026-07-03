@@ -72,6 +72,8 @@ bench/results/*.out
 bench/results/*.txt
 bench/results/*.sh
 bench/results/*.md
+!bench/results/*.log
+!bench/results/*.sh
 !bench/results/FINDINGS.md
 bench/results/Wirehair*Fixups.inc
 
@@ -86,5 +88,6 @@ experiments/precode/precode_sim
 experiments/precode/precode_sim.ic
 experiments/peeling/xor_bench
 experiments/precode/results/*.err
+!experiments/precode/results/*.err
 .claude/worktrees/
 experiments/tiling/rowop_tiling

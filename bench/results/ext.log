@@ -1,0 +1,19 @@
+scan start 16:25:09
+  ...scanned 4000 N
+scan done 16:39:07, weak=201
+# seedsearch: threads=80 Ns=201 nseeds=40 dseeds=32 tsearch=150 tverify=2000 goodthr=0.040
+joint done 17:27:48, 69 N
+peel corrections: 606 | dense corrections: 92
+WirehairCodec.cpp: In member function ‘void wirehair::Codec::BackSubstituteAboveDiagonal()’:
+WirehairCodec.cpp:2303:39: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2303 |                         gf256_div_mem(src, src, code_value, _block_bytes);
+      |                                       ^~~  ~~~
+WirehairCodec.cpp:2387:35: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2387 |                     gf256_div_mem(src, src, code_value, _block_bytes);
+      |                                   ^~~  ~~~
+WirehairCodec.cpp:2652:31: warning: passing argument 1 to ‘restrict’-qualified parameter aliases with argument 2 [-Wrestrict]
+ 2652 |                 gf256_div_mem(src, src, code_value, _block_bytes);
+      |                               ^~~  ~~~
+built bench/whx.fixed  (EXTRA='')
+# overhead(success trials=31840): mean=0.0230 p50=0 p99=1 p999=1 max=125
+ext done 17:28:22
