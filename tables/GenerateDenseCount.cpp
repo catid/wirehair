@@ -153,6 +153,12 @@ int main()
         int lowestFailures = 100000;
         lastBest = 0;
 
+        // Advance the trial-stream seed once per N, not once per count
+        // candidate: candidates must share paired trials or selection by
+        // minimum failure count is biased toward lucky streams (winner's
+        // curse) -- same fix as the sibling seed generators
+        ++seed;
+
         for (; count <= N; ++count)
         {
 #if 0
@@ -161,7 +167,6 @@ int main()
             }
 #endif
 
-            ++seed;
             FailedTrials = 0;
 
 #pragma omp parallel for
