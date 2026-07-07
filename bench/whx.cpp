@@ -8,6 +8,7 @@
 // Built by bench/build.sh, linking the wirehair sources directly.
 
 #include "wirehair/wirehair.h"
+#include "WirehairCodec.h"
 #include "gf256.h"
 
 #include <cstdio>
@@ -77,6 +78,12 @@ static bool parse_double_strict(const char* s, double& out) {
 
 static bool valid_roundtrip_args(int N, int bb, int startMode, double loss) {
     return N >= 2 && N <= 64000 && bb >= 1 &&
+        (startMode == 0 || startMode == 1) &&
+        loss >= 0.0 && loss <= 0.99 && std::isfinite(loss);
+}
+
+static bool valid_seedcheck_args(int N, int bb, int startMode, double loss) {
+    return N >= 2 && N <= 64000 && bb >= 0 &&
         (startMode == 0 || startMode == 1) &&
         loss >= 0.0 && loss <= 0.99 && std::isfinite(loss);
 }
@@ -371,16 +378,91 @@ struct Stat {
 
 // Single round trip. Returns 0 = success, nonzero = failure code. Fills *extra with overhead.
 // failmsg (if non-null) gets a description on failure.
+static bool matrix_encoder_ok(int N, char* failmsg) {
+    if (N < 2 || N > 64000) {
+        fprintf(stderr, "matrix_encoder_ok: invalid N=%d (need 2 <= N <= 64000)\n", N);
+        exit(2);
+    }
+
+    wirehair::Codec enc;
+    WirehairResult er = enc.InitializeEncoder((uint64_t)N, 1);
+    if (er == Wirehair_Success) {
+        er = enc.EncodeFeedMatrixOnly();
+    }
+    if (er != Wirehair_Success) {
+        if (failmsg) sprintf(failmsg, "matrix encoder rc=%d N=%d", er, N);
+        return false;
+    }
+
+    return true;
+}
+
+static int matrix_decode_roundtrip(uint64_t seed, int N, int startMode, double lossRate,
+                                   uint32_t* extra_out, char* failmsg) {
+    if (N < 2 || N > 64000) {
+        fprintf(stderr, "matrix_decode_roundtrip: invalid N=%d (need 2 <= N <= 64000)\n", N);
+        exit(2);
+    }
+
+    Rng rng(seed);
+
+    wirehair::Codec dec;
+    WirehairResult dr = dec.InitializeDecoder((uint64_t)N, 1);
+    if (dr != Wirehair_Success) {
+        if (failmsg) sprintf(failmsg, "matrix decoder init rc=%d N=%d", dr, N);
+        return 2;
+    }
+
+    if (lossRate > 0.99) lossRate = 0.99;
+    unsigned needed = 0;
+    const unsigned maxNeeded = (unsigned)N * 2 + 512;
+    unsigned blockId = (startMode == 1) ?
+        repair_start_block_id(rng, N, maxNeeded) : 0;
+
+    for (;;) {
+        if (needed >= maxNeeded) {
+            if (failmsg) sprintf(failmsg, "no matrix decode after %u delivered (N=%d)", needed, N);
+            return 3;
+        }
+
+        bool drop = (startMode == 0) && (rng.unit() < lossRate);
+        unsigned thisId = blockId++;
+        if (drop) continue;
+
+        ++needed;
+        dr = dec.DecodeFeedMatrixOnly(thisId);
+        if (dr == Wirehair_Success) {
+            if (extra_out) *extra_out = needed - (uint32_t)N;
+            return 0;
+        }
+        if (dr != Wirehair_NeedMore) {
+            if (failmsg) sprintf(failmsg, "matrix decode rc=%d id=%u N=%d", dr, thisId, N);
+            return 4;
+        }
+    }
+}
+
+static int matrix_roundtrip(uint64_t seed, int N, int startMode, double lossRate,
+                            uint32_t* extra_out, char* failmsg) {
+    if (!matrix_encoder_ok(N, failmsg)) {
+        return 1;
+    }
+    return matrix_decode_roundtrip(seed, N, startMode, lossRate, extra_out, failmsg);
+}
+
 static int roundtrip(uint64_t seed, int N, int blockBytes, int startMode, double lossRate,
                      uint32_t* extra_out, char* failmsg) {
     // Fail fast with a usage message on out-of-domain parameters.  Most
     // commands pass --nlo/--nmax/--bb through unvalidated; negative or zero
     // values wrap messageBytes to ~2^64 below and the resulting uncaught
     // vector length_error kills a whole campaign with no explanation.
-    if (N < 2 || N > 64000 || blockBytes < 1) {
-        fprintf(stderr, "roundtrip: invalid N=%d bb=%d (need 2 <= N <= 64000, bb >= 1)\n",
+    if (N < 2 || N > 64000 || blockBytes < 0) {
+        fprintf(stderr, "roundtrip: invalid N=%d bb=%d (need 2 <= N <= 64000, bb >= 0)\n",
                 N, blockBytes);
         exit(2);
+    }
+    if (blockBytes == 0) {
+        return matrix_roundtrip(seed, N, startMode, lossRate, extra_out, failmsg);
     }
     Rng rng(seed);
     int finalBytes = rng.range(1, blockBytes);
@@ -940,7 +1022,7 @@ static int cmd_ohead(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
     }
     if (nlo < 2 || nhi > 64000 || nlo > nhi || nstep < 0 ||
-        trials < 1 || !valid_roundtrip_args(nlo, bb, startMode, loss))
+        trials < 1 || !valid_seedcheck_args(nlo, bb, startMode, loss))
     {
         fprintf(stderr, "ohead: invalid range or parameters\n");
         return 2;
@@ -987,6 +1069,23 @@ static double seed_mean(int N, int bb, int startMode, double loss, int pseed, in
     Rng rng(base);
     const int ovrN = (pseed < 0 && dseed < 0) ? -1 : N;
     uint64_t osum = 0; long fail = 0;
+
+    if (bb == 0) {
+        wh_set_override(ovrN, -1, pseed, dseed);
+        if (!matrix_encoder_ok(N, nullptr)) {
+            wh_set_override(-1, -1, -1, -1);
+            return 1e9;
+        }
+        for (long k = 0; k < trials; ++k) {
+            uint32_t extra = 0;
+            int rc = matrix_decode_roundtrip(rng.next(), N, startMode, loss, &extra, nullptr);
+            if (rc == 0) osum += extra;
+            else { fail++; break; }
+        }
+        wh_set_override(-1, -1, -1, -1);
+        return fail ? 1e9 : (double)osum / trials;
+    }
+
     for (long k = 0; k < trials; ++k) {
         wh_set_override(ovrN, -1, pseed, dseed);
         uint32_t extra = 0;
@@ -1009,6 +1108,15 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
     vector<thread> ts;
     for (int t = 0; t < threads; ++t) ts.emplace_back([&]() {
         uint64_t lsum = 0; long lf = 0;
+        if (bb == 0) {
+            wh_set_override(ovrN, -1, pseed, dseed);
+            if (!matrix_encoder_ok(N, nullptr)) {
+                fail++;
+                stop.store(true);
+                wh_set_override(-1, -1, -1, -1);
+                return;
+            }
+        }
         for (;;) {
             if (stop.load()) break;
             long k = idx.fetch_add(128);
@@ -1016,9 +1124,15 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
             long end = k + 128; if (end > trials) end = trials;
             for (long j = k; j < end; ++j) {
                 if (stop.load()) break;
-                wh_set_override(ovrN, -1, pseed, dseed);
                 uint32_t extra = 0;
-                int rc = roundtrip(base + (uint64_t)j * 2654435761ull, N, bb, startMode, loss, &extra, nullptr);
+                int rc;
+                if (bb == 0) {
+                    rc = matrix_decode_roundtrip(base + (uint64_t)j * 2654435761ull, N, startMode, loss, &extra, nullptr);
+                }
+                else {
+                    wh_set_override(ovrN, -1, pseed, dseed);
+                    rc = roundtrip(base + (uint64_t)j * 2654435761ull, N, bb, startMode, loss, &extra, nullptr);
+                }
                 if (rc == 0) lsum += extra;
                 else {
                     lf++;
@@ -1052,12 +1166,12 @@ static int cmd_seedmean(int argc, char** argv) {
         else if (!strcmp(argv[i], "--startmode") && i + 1 < argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], base)) return 2; }
     }
-    if (N < 2 || N > 64000 || bb <= 0 || trials < 1 ||
+    if (N < 2 || N > 64000 || bb < 0 || trials < 1 ||
         pseed < -1 || pseed > 255 || dseed < -1 || dseed > 255 ||
         !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
         (startMode != 0 && startMode != 1))
     {
-        fprintf(stderr, "seedmean requires 2 <= --N <= 64000, positive --bb/--trials, seeds in [-1,255], 0 <= --loss <= 0.99, and --startmode 0 or 1\n");
+        fprintf(stderr, "seedmean requires 2 <= --N <= 64000, --bb >= 0, positive --trials, seeds in [-1,255], 0 <= --loss <= 0.99, and --startmode 0 or 1\n");
         return 2;
     }
     const double mean = seed_mean_par(N, bb, startMode, loss, pseed, dseed, trials, base, threads);
@@ -1132,7 +1246,7 @@ static int cmd_seedsearch(int argc, char** argv) {
         if (!strcmp(argv[i],"--dseeds")&&i+1<argc) { if (!parse_int_strict(argv[++i], dseeds)) return 2; }
         else if (!strcmp(argv[i],"--goodthr")&&i+1<argc) { if (!parse_double_strict(argv[++i], goodthr)) return 2; }
     }
-    if (Ns.empty() || tsearch < 1 || tverify < 1 || bb < 1 ||
+    if (Ns.empty() || tsearch < 1 || tverify < 1 || bb < 0 ||
         !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
         (startMode != 0 && startMode != 1) ||
         dseeds < 0 || !std::isfinite(goodthr) || goodthr < 0.0)
@@ -1147,8 +1261,8 @@ static int cmd_seedsearch(int argc, char** argv) {
         }
     }
     if (dseeds > 256) dseeds = 256;
-    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f\n",
-            threads,Ns.size(),nseeds,dseeds,tsearch,tverify,goodthr);
+    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu bb=%d nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f\n",
+            threads,Ns.size(),bb,nseeds,dseeds,tsearch,tverify,goodthr);
     printf("# N  best_pseed  best_dseed  default_mean  best_mean@0.10  best_mean@0.30\n");
     for (int N : Ns) {
         // Stage 1: search peel seeds (default dense). One thread per candidate seed.
@@ -1220,7 +1334,7 @@ static int cmd_scan(int argc, char** argv) {
         else if (!strcmp(argv[i],"--seed")&&i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
     }
     if (nlo < 2 || nhi > 64000 || nlo > nhi || trials < 1 ||
-        !valid_roundtrip_args(nlo, bb, startMode, loss) ||
+        !valid_seedcheck_args(nlo, bb, startMode, loss) ||
         thresh < 0.0 || !std::isfinite(thresh))
     {
         fprintf(stderr, "scan: invalid range or parameters\n");

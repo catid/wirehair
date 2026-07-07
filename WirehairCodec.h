@@ -1238,6 +1238,15 @@ class Codec
         const void * GF256_RESTRICT data ///< Block data
     );
 
+    WirehairResult ResumeSolveMatrixNoData(
+        const unsigned id ///< Block ID
+    );
+
+    WirehairResult ResumeSolveMatrixInternal(
+        const unsigned id, ///< Block ID
+        const void * GF256_RESTRICT data, ///< Block data, when copy_data is true
+        bool copy_data);
+
 #if defined(CAT_ALL_ORIGINAL)
     /**
         IsAllOriginalData()
@@ -1303,6 +1312,9 @@ public:
     */
     WirehairResult EncodeFeed(const void * GF256_RESTRICT message_in);
 
+    /// Benchmark/test hook: validate the encoder matrix without row values.
+    WirehairResult EncodeFeedMatrixOnly();
+
     /**
         Encode()
 
@@ -1341,6 +1353,10 @@ public:
         const void * GF256_RESTRICT block_in,
         const unsigned block_bytes
     );
+
+    /// Benchmark/test hook: feed only the row id and validate matrix solvability.
+    WirehairResult DecodeFeedMatrixOnly(
+        const unsigned block_id);
 
     /**
         GenerateRecoveryBlocks()

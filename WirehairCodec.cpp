@@ -3712,9 +3712,24 @@ WirehairResult Codec::ResumeSolveMatrix(
     const void * GF256_RESTRICT data ///< Block data
 )
 {
+    return ResumeSolveMatrixInternal(id, data, true);
+}
+
+WirehairResult Codec::ResumeSolveMatrixNoData(
+    const unsigned id ///< Block ID
+)
+{
+    return ResumeSolveMatrixInternal(id, nullptr, false);
+}
+
+WirehairResult Codec::ResumeSolveMatrixInternal(
+    const unsigned id, ///< Block ID
+    const void * GF256_RESTRICT data, ///< Block data
+    bool copy_data)
+{
     CAT_IF_DUMP(cout << endl << "---- ResumeSolveMatrix ----" << endl << endl;)
 
-    if (!data) {
+    if (copy_data && !data) {
         return Wirehair_InvalidInput;
     }
 
@@ -3782,20 +3797,23 @@ WirehairResult Codec::ResumeSolveMatrix(
     PeelRow * GF256_RESTRICT row = &_peel_rows[row_i];
     row->RecoveryId = id;
 
-    uint8_t * GF256_RESTRICT block_store_dest = _input_blocks + _block_bytes * row_i;
-
-    // Copy new block to input blocks
-    if (id != (unsigned)_block_count - 1) {
-        memcpy(block_store_dest, data, _block_bytes);
-    }
-    else
+    if (copy_data)
     {
-        memcpy(block_store_dest, data, _output_final_bytes);
+        uint8_t * GF256_RESTRICT block_store_dest = _input_blocks + _block_bytes * row_i;
 
-        memset(
-            block_store_dest + _output_final_bytes,
-            0,
-            _block_bytes - _output_final_bytes);
+        // Copy new block to input blocks
+        if (id != (unsigned)_block_count - 1) {
+            memcpy(block_store_dest, data, _block_bytes);
+        }
+        else
+        {
+            memcpy(block_store_dest, data, _output_final_bytes);
+
+            memset(
+                block_store_dest + _output_final_bytes,
+                0,
+                _block_bytes - _output_final_bytes);
+        }
     }
 
     // Generate new GE row
@@ -4839,6 +4857,40 @@ WirehairResult Codec::EncodeFeed(const void * GF256_RESTRICT message_in)
     }
 }
 
+WirehairResult Codec::EncodeFeedMatrixOnly()
+{
+    CAT_IF_DUMP(cout << endl << "---- EncodeFeedMatrixOnly ----" << endl << endl;)
+
+    if (!_input_blocks)
+    {
+        if (!AllocateInput()) {
+            return Wirehair_OOM;
+        }
+        memset(_input_blocks, 0, static_cast<size_t>(_block_count) * _block_bytes);
+    }
+
+    // For each input row:
+    for (uint16_t id = 0; id < _block_count; ++id) {
+        if (!OpportunisticPeeling(id, id)) {
+            return Wirehair_BadPeelSeed;
+        }
+    }
+
+    // Solve matrix but skip GenerateRecoveryBlocks(); this hook is only
+    // validating seed/table invertibility for offline search.
+    WirehairResult result = SolveMatrix();
+
+    if (result == Wirehair_Success) {
+        return Wirehair_Success;
+    }
+    else if (result == Wirehair_NeedMore) {
+        return Wirehair_BadPeelSeed;
+    }
+    else {
+        return result;
+    }
+}
+
 uint32_t Codec::Encode(
     const uint32_t block_id, ///< Block id to generate
     void * GF256_RESTRICT block_out, ///< Block data output
@@ -5250,6 +5302,97 @@ WirehairResult Codec::DecodeFeed(
     // If solve was successful (common):
     if (result == Wirehair_Success) {
         GenerateRecoveryBlocks();
+        _decode_complete = true;
+    }
+
+    return result;
+}
+
+WirehairResult Codec::DecodeFeedMatrixOnly(
+    const uint32_t block_id)
+{
+    if (_row_count == 0 && _input_blocks) {
+        memset(_input_blocks, 0, static_cast<size_t>(_block_count + _extra_count) * _block_bytes);
+    }
+
+    // Once decoding has succeeded, later valid packets cannot improve state.
+    // Avoid resuming GE after the all-original fast path, which has no GE rows.
+    if (_decode_complete) {
+        return Wirehair_Success;
+    }
+
+    // After a precondition violation detected before GE state existed
+    // (duplicate original blocks on the all-original path), the decoder has
+    // N stored rows but no GE matrix; resuming would write through null maps.
+    if (_decode_failed) {
+        return Wirehair_InvalidInput;
+    }
+
+#if defined(CAT_ALL_ORIGINAL)
+    // If provided a block of non-original data, mark all original as false
+    if (block_id >= _block_count) {
+        _all_original = false;
+    }
+#endif
+
+    const uint16_t row_i = _row_count;
+
+    // If at least N rows stored:
+    if (row_i >= _block_count)
+    {
+        // Resume GE from this row without copying payload bytes.
+        const WirehairResult result = ResumeSolveMatrixNoData(block_id);
+
+        if (result == Wirehair_Success) {
+            _decode_complete = true;
+        }
+
+        return result;
+    }
+
+    // If opportunistic peeling failed for this row:
+    if (!OpportunisticPeeling(row_i, block_id))
+    {
+        // This means that there was not enough room in the sparse matrix
+        // data structure to store the data in this row.  We will need to
+        // wait for another row that references different columns in
+        // order to continue
+        return Wirehair_NeedMore;
+    }
+
+    ++_row_count;
+    CAT_DEBUG_ASSERT(_row_count <= _block_count);
+
+    // If not enough blocks yet:
+    if (_row_count != _block_count) {
+        return Wirehair_NeedMore;
+    }
+
+#if defined(CAT_ALL_ORIGINAL)
+    // If all original data, return success (common case)
+    if (_all_original) {
+        // Check input:
+        if (!IsAllOriginalData()) {
+            // Application violated precondition that all inputs must be unique.
+            // SolveMatrix never ran, so no GE state exists; mark the decode
+            // failed so later feeds do not try to resume GE.
+            CAT_DEBUG_BREAK();
+            _all_original = false;
+            _decode_failed = true;
+            return Wirehair_InvalidInput;
+        }
+        _decode_complete = true;
+        return Wirehair_Success;
+    }
+#endif
+
+    // Attempt to solve the matrix.  This validates the seed/table choice and
+    // intentionally skips GenerateRecoveryBlocks(), which only computes row
+    // values after the matrix has already been proven invertible.
+    const WirehairResult result = SolveMatrix();
+
+    // If solve was successful (common):
+    if (result == Wirehair_Success) {
         _decode_complete = true;
     }
 
