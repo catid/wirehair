@@ -565,9 +565,11 @@ bool TestRecoveryBlockEncoding()
         wirehair_v2::MakePeelingCodec(
             wirehair_v2::PeelStructure::LtM1C32,
             wirehair_v2::PeelSolver::KsBmaxTop16);
+    const uint64_t row_seed = UINT64_C(0xdec0de);
+    const uint32_t recovery_mix = 5u;
     const std::vector<std::vector<uint32_t> > rows =
         wirehair_v2::GenerateRecoveryMatrixRows(
-            codec, K, parity_count, 8u, 5u, UINT64_C(0xdec0de));
+            codec, K, parity_count, 8u, recovery_mix, row_seed);
     if (rows.size() != 8u) {
         std::fprintf(stderr, "recovery encode: row generation failed\n");
         return false;
@@ -602,6 +604,67 @@ bool TestRecoveryBlockEncoding()
     }
 
     uint64_t ops = UINT64_MAX;
+    const uint32_t source_id = 17u;
+    if (!wirehair_v2::ComputeEncodedBlock(
+            system, codec, row_seed, recovery_mix,
+            source.data(), nullptr, bb, source_id, got.data(), &ops) ||
+        !EqualBlock(
+            got.data(), source.data() + (size_t)source_id * bb, bb) ||
+        ops != 1u)
+    {
+        std::fprintf(stderr, "recovery encode: encoded source block failed\n");
+        return false;
+    }
+
+    const uint32_t recovery_index = 4u;
+    if (!wirehair_v2::ComputeEncodedBlock(
+            system, codec, row_seed, recovery_mix,
+            source.data(), parity.data(), bb, K + recovery_index,
+            got.data(), &ops))
+    {
+        std::fprintf(stderr,
+            "recovery encode: encoded recovery block failed\n");
+        return false;
+    }
+    ManualRecoveryBlock(
+        system, source.data(), parity.data(), bb,
+        rows[recovery_index], want.data());
+    if (!EqualBlock(got.data(), want.data(), bb) ||
+        ops != rows[recovery_index].size())
+    {
+        std::fprintf(stderr,
+            "recovery encode: encoded recovery block mismatch\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    if (wirehair_v2::ComputeEncodedBlock(
+            system, codec, row_seed, recovery_mix,
+            source.data(), nullptr, bb, K + recovery_index,
+            got.data(), &ops) ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }) ||
+        ops != 0u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: recovery block should require parity values\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    if (wirehair_v2::ComputeEncodedBlock(
+            system, codec, row_seed, recovery_mix,
+            source.data(), parity.data(), bb,
+            K + wirehair_v2::kMaxPeelMatrixRows, got.data(), &ops) ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }) ||
+        ops != 0u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: invalid encoded block id should not write\n");
+        return false;
+    }
+
     const std::vector<uint32_t> source_only{0u};
     if (!wirehair_v2::ComputeRecoveryBlock(
             system, source.data(), parity.data(), bb, source_only,

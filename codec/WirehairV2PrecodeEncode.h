@@ -1,5 +1,6 @@
 #pragma once
 
+#include "WirehairV2Peel.h"
 #include "WirehairV2Precode.h"
 
 #include <stdint.h>
@@ -121,6 +122,31 @@ bool ComputeRecoveryBlock(
     const uint8_t* parity_blocks,
     uint32_t block_bytes,
     const std::vector<uint32_t>& row_columns,
+    uint8_t* block_out,
+    uint64_t* block_ops_out = nullptr);
+
+/**
+    Compute one encoder output block.
+
+    block_id < K copies the corresponding source block.  block_id >= K treats
+    block_id - K as the zero-based recovery row index, generates that row with
+    GenerateRecoveryMatrixRow(), then evaluates it with ComputeRecoveryBlock().
+    `row_seed` is the seed for the recovery row stream, and `mix_count` is the
+    number of precode columns appended to each recovery row.
+
+    `parity_blocks` may be null only for source block ids; recovery ids require
+    the S + D2 + H parity blocks already computed by ComputePrecodeValues().
+    `block_out` must not overlap the source/parity block arrays.
+*/
+bool ComputeEncodedBlock(
+    const PrecodeSystem& system,
+    const PeelingCodec& codec,
+    uint64_t row_seed,
+    uint32_t mix_count,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    uint32_t block_id,
     uint8_t* block_out,
     uint64_t* block_ops_out = nullptr);
 

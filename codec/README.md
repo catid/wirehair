@@ -67,7 +67,9 @@ recovery block index; use the batch form for adjacent rows.
 `ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
 intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full
-`[source | precode]` intermediate block vector.
+`[source | precode]` intermediate block vector.  `ComputeEncodedBlock()` wraps
+that mapping for encoder block IDs: `block_id < K` copies a source block, and
+`block_id >= K` evaluates recovery row `block_id - K`.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and

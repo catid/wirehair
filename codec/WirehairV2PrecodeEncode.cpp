@@ -506,4 +506,66 @@ bool ComputeRecoveryBlock(
     return true;
 }
 
+bool ComputeEncodedBlock(
+    const PrecodeSystem& system,
+    const PeelingCodec& codec,
+    uint64_t row_seed,
+    uint32_t mix_count,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t S = system.Params.Staircase;
+    const uint32_t D2 = system.Params.DenseRows;
+    const uint32_t H = system.Params.HeavyRows;
+    const uint64_t precode_count = (uint64_t)S + D2 + H;
+
+    uint64_t local_ops = 0;
+    uint64_t& ops = block_ops_out ? *block_ops_out : local_ops;
+    ops = 0;
+
+    if (!source_blocks || !block_out ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu)
+    {
+        return false;
+    }
+    if (K == 0u || K > UINT16_MAX || D2 > 64u || H > 128u ||
+        precode_count > UINT16_MAX - K)
+    {
+        return false;
+    }
+
+    if (block_id < K)
+    {
+        std::memcpy(
+            block_out,
+            source_blocks + (size_t)block_id * block_bytes,
+            block_bytes);
+        ops = 1u;
+        return true;
+    }
+
+    if (!parity_blocks) {
+        return false;
+    }
+    const uint32_t recovery_index = block_id - K;
+    if (recovery_index >= kMaxPeelMatrixRows) {
+        return false;
+    }
+
+    const std::vector<uint32_t> row = GenerateRecoveryMatrixRow(
+        codec, K, (uint32_t)precode_count, recovery_index, mix_count,
+        row_seed);
+    if (row.empty()) {
+        return false;
+    }
+    return ComputeRecoveryBlock(
+        system, source_blocks, parity_blocks, block_bytes, row, block_out,
+        &ops);
+}
+
 } // namespace wirehair_v2
