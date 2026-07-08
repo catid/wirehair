@@ -568,4 +568,128 @@ bool ComputeEncodedBlock(
         &ops);
 }
 
+PrecodeEncoder::PrecodeEncoder()
+{
+}
+
+bool PrecodeEncoder::Initialize(
+    const PrecodeSystem& system,
+    const PeelingCodec& codec,
+    uint64_t row_seed,
+    uint32_t mix_count,
+    const uint8_t* source_blocks,
+    uint32_t block_bytes)
+{
+    Initialized = false;
+    SystemValue = PrecodeSystem();
+    CodecValue = PeelingCodec();
+    RowSeed = 0;
+    MixCount = 0;
+    SourceBlocks = nullptr;
+    BlockBytesValue = 0;
+    ParityBlockStorage.clear();
+    StatsValue = PrecodeEncodeStats{};
+
+    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu) {
+        return false;
+    }
+
+    const uint32_t K = system.Params.BlockCount;
+    const uint64_t parity_count_wide =
+        (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows +
+        system.Params.HeavyRows;
+    if (K == 0u ||
+        K > UINT16_MAX ||
+        parity_count_wide == 0u ||
+        parity_count_wide > UINT16_MAX - K ||
+        parity_count_wide > (size_t)-1 / (size_t)block_bytes)
+    {
+        return false;
+    }
+    const uint32_t parity_count = (uint32_t)parity_count_wide;
+
+    std::vector<uint8_t> parity(
+        (size_t)parity_count * (size_t)block_bytes);
+    PrecodeEncodeStats stats = {};
+    if (!ComputePrecodeValues(
+            system, source_blocks, block_bytes, parity.data(), &stats))
+    {
+        return false;
+    }
+
+    SystemValue = system;
+    CodecValue = codec;
+    RowSeed = row_seed;
+    MixCount = mix_count;
+    SourceBlocks = source_blocks;
+    BlockBytesValue = block_bytes;
+    ParityBlockStorage.swap(parity);
+    StatsValue = stats;
+    Initialized = true;
+    return true;
+}
+
+bool PrecodeEncoder::Encode(
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out) const
+{
+    if (!Initialized || !block_out) {
+        if (block_ops_out) {
+            *block_ops_out = 0;
+        }
+        return false;
+    }
+    return ComputeEncodedBlock(
+        SystemValue,
+        CodecValue,
+        RowSeed,
+        MixCount,
+        SourceBlocks,
+        ParityBlockStorage.data(),
+        BlockBytesValue,
+        block_id,
+        block_out,
+        block_ops_out);
+}
+
+bool PrecodeEncoder::IsInitialized() const
+{
+    return Initialized;
+}
+
+uint32_t PrecodeEncoder::SourceBlockCount() const
+{
+    return Initialized ? SystemValue.Params.BlockCount : 0u;
+}
+
+uint32_t PrecodeEncoder::ParityBlockCount() const
+{
+    return Initialized ?
+        SystemValue.Params.Staircase + SystemValue.Params.DenseRows +
+            SystemValue.Params.HeavyRows :
+        0u;
+}
+
+uint32_t PrecodeEncoder::BlockBytes() const
+{
+    return Initialized ? BlockBytesValue : 0u;
+}
+
+const PrecodeEncodeStats& PrecodeEncoder::EncodeStats() const
+{
+    return StatsValue;
+}
+
+const uint8_t* PrecodeEncoder::ParityBlocks() const
+{
+    return Initialized ? ParityBlockStorage.data() : nullptr;
+}
+
+const PrecodeSystem& PrecodeEncoder::System() const
+{
+    return SystemValue;
+}
+
 } // namespace wirehair_v2

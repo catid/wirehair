@@ -150,4 +150,51 @@ bool ComputeEncodedBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out = nullptr);
 
+/**
+    Encoder-side state for the V2 precode block-data path.
+
+    The source block array is borrowed, not copied, and must remain valid while
+    the encoder is used.  The computed S + D2 + H parity blocks are owned by
+    this object.  Initialize returns false for invalid arguments or
+    encoder-infeasible precode systems, e.g. a singular dense corner.
+    Accessors return zero/null/default state until initialization succeeds.
+*/
+class PrecodeEncoder
+{
+public:
+    PrecodeEncoder();
+
+    bool Initialize(
+        const PrecodeSystem& system,
+        const PeelingCodec& codec,
+        uint64_t row_seed,
+        uint32_t mix_count,
+        const uint8_t* source_blocks,
+        uint32_t block_bytes);
+
+    bool Encode(
+        uint32_t block_id,
+        uint8_t* block_out,
+        uint64_t* block_ops_out = nullptr) const;
+
+    bool IsInitialized() const;
+    uint32_t SourceBlockCount() const;
+    uint32_t ParityBlockCount() const;
+    uint32_t BlockBytes() const;
+    const PrecodeEncodeStats& EncodeStats() const;
+    const uint8_t* ParityBlocks() const;
+    const PrecodeSystem& System() const;
+
+private:
+    PrecodeSystem SystemValue;
+    PeelingCodec CodecValue;
+    uint64_t RowSeed = 0;
+    uint32_t MixCount = 0;
+    const uint8_t* SourceBlocks = nullptr;
+    uint32_t BlockBytesValue = 0;
+    std::vector<uint8_t> ParityBlockStorage;
+    PrecodeEncodeStats StatsValue = {};
+    bool Initialized = false;
+};
+
 } // namespace wirehair_v2

@@ -69,7 +69,9 @@ intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full
 `[source | precode]` intermediate block vector.  `ComputeEncodedBlock()` wraps
 that mapping for encoder block IDs: `block_id < K` copies a source block, and
-`block_id >= K` evaluates recovery row `block_id - K`.
+`block_id >= K` evaluates recovery row `block_id - K`.  `PrecodeEncoder`
+caches the computed precode parity blocks and exposes the same block-id encode
+mapping without requiring callers to manage the parity buffer directly.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and

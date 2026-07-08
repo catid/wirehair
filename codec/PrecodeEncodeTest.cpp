@@ -549,8 +549,9 @@ bool TestRecoveryBlockEncoding()
     std::vector<uint8_t> source((size_t)K * bb);
     std::vector<uint8_t> parity((size_t)parity_count * bb);
     FillRandomBlocks(source.data(), source.size(), UINT64_C(0xbeadfeed));
+    wirehair_v2::PrecodeEncodeStats precode_stats;
     if (!wirehair_v2::ComputePrecodeValues(
-            system, source.data(), bb, parity.data()))
+            system, source.data(), bb, parity.data(), &precode_stats))
     {
         std::fprintf(stderr, "recovery encode: precode values failed\n");
         return false;
@@ -603,7 +604,75 @@ bool TestRecoveryBlockEncoding()
         }
     }
 
+    wirehair_v2::PrecodeEncoder uninitialized_encoder;
     uint64_t ops = UINT64_MAX;
+    if (uninitialized_encoder.Encode(0u, got.data(), &ops) || ops != 0u) {
+        std::fprintf(stderr,
+            "recovery encode: uninitialized encoder should fail\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeEncoder encoder_state;
+    if (!encoder_state.Initialize(
+            system, codec, row_seed, recovery_mix, source.data(), bb))
+    {
+        std::fprintf(stderr,
+            "recovery encode: PrecodeEncoder initialize failed\n");
+        return false;
+    }
+    if (!encoder_state.IsInitialized() ||
+        encoder_state.SourceBlockCount() != K ||
+        encoder_state.ParityBlockCount() != parity_count ||
+        encoder_state.BlockBytes() != bb ||
+        !encoder_state.ParityBlocks())
+    {
+        std::fprintf(stderr,
+            "recovery encode: PrecodeEncoder accessors failed\n");
+        return false;
+    }
+    if (encoder_state.EncodeStats().StaircaseBlockOps !=
+            precode_stats.StaircaseBlockOps ||
+        encoder_state.EncodeStats().DenseKnownBlockOps !=
+            precode_stats.DenseKnownBlockOps ||
+        encoder_state.EncodeStats().DenseSolveBlockOps !=
+            precode_stats.DenseSolveBlockOps ||
+        encoder_state.EncodeStats().HeavyBucketXors !=
+            precode_stats.HeavyBucketXors ||
+        encoder_state.EncodeStats().HeavyMulAdds !=
+            precode_stats.HeavyMulAdds ||
+        encoder_state.EncodeStats().HeavySolveBlockOps !=
+            precode_stats.HeavySolveBlockOps)
+    {
+        std::fprintf(stderr,
+            "recovery encode: PrecodeEncoder stats mismatch\n");
+        return false;
+    }
+    if (std::memcmp(
+            encoder_state.ParityBlocks(), parity.data(),
+            (size_t)parity_count * bb) != 0)
+    {
+        std::fprintf(stderr,
+            "recovery encode: PrecodeEncoder parity mismatch\n");
+        return false;
+    }
+    if (encoder_state.Initialize(
+            system, codec, row_seed, recovery_mix, nullptr, bb) ||
+        encoder_state.IsInitialized() ||
+        encoder_state.ParityBlocks() ||
+        encoder_state.BlockBytes() != 0u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: failed initialize should clear state\n");
+        return false;
+    }
+    if (!encoder_state.Initialize(
+            system, codec, row_seed, recovery_mix, source.data(), bb))
+    {
+        std::fprintf(stderr,
+            "recovery encode: PrecodeEncoder reinitialize failed\n");
+        return false;
+    }
+
     const uint32_t source_id = 17u;
     if (!wirehair_v2::ComputeEncodedBlock(
             system, codec, row_seed, recovery_mix,
@@ -613,6 +682,15 @@ bool TestRecoveryBlockEncoding()
         ops != 1u)
     {
         std::fprintf(stderr, "recovery encode: encoded source block failed\n");
+        return false;
+    }
+    if (!encoder_state.Encode(source_id, got.data(), &ops) ||
+        !EqualBlock(
+            got.data(), source.data() + (size_t)source_id * bb, bb) ||
+        ops != 1u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: state encoded source block failed\n");
         return false;
     }
 
@@ -634,6 +712,14 @@ bool TestRecoveryBlockEncoding()
     {
         std::fprintf(stderr,
             "recovery encode: encoded recovery block mismatch\n");
+        return false;
+    }
+    if (!encoder_state.Encode(K + recovery_index, got.data(), &ops) ||
+        !EqualBlock(got.data(), want.data(), bb) ||
+        ops != rows[recovery_index].size())
+    {
+        std::fprintf(stderr,
+            "recovery encode: state encoded recovery block mismatch\n");
         return false;
     }
 
@@ -662,6 +748,17 @@ bool TestRecoveryBlockEncoding()
     {
         std::fprintf(stderr,
             "recovery encode: invalid encoded block id should not write\n");
+        return false;
+    }
+    std::fill(got.begin(), got.end(), 0xacu);
+    if (encoder_state.Encode(
+            K + wirehair_v2::kMaxPeelMatrixRows, got.data(), &ops) ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }) ||
+        ops != 0u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: invalid state encoded block should not write\n");
         return false;
     }
 
