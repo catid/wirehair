@@ -301,6 +301,39 @@ unfinished for roughly 15 minutes.  Treat K=64000 as still requiring an
 overnight/full-box certification pass before shipping identity-corner or
 closing the V2 precode issue.
 
+### Degree-rowdist retune screen (2026-07-08)
+
+`degree_rowdist_{wirehair,lt_m2_c1024,rs_c001_d50_c128,lt_m1_c16,lt_m1_c64}_K10000_32000_t500_20260708.csv`
+is a bounded paired screen of the degree-distribution retune shortlist
+(seed `0x5eed0006`, OH0/OH1/OH2, schemes `dense`, `codecport`,
+`codecport_n13`).  `degree_rowdist_{wirehair,lt_m2_c1024}_K64000_t100_20260708.csv`
+adds a max-K smoke for the only non-production rowdist that survived the broad
+screen.  `degree_rowdist_rank_K10000_32000_t500_K64000_t100_20260708.txt`
+is the `rank_total.py` total-block-op report using the calibration CSVs.
+
+Verdict: do not promote any rowdist from this shortlist.  The cost-only
+ranking is not a promotion criterion because it puts unreliable low-degree
+rows first.  Under a reliability gate:
+
+- `lt_m1_c16` is a hard reject: 100% failure at K=10000 and K=32000 for all
+  tested schemes and overheads.
+- `lt_m1_c64` is also a hard reject: K=10000 fails about 96.8-99.8%, and
+  K=32000 fails 100%.
+- `rs_c001_d50_c128` is not viable at scale: K=10000 already fails 2.6-9.4%
+  depending on precode/OH, and K=32000 fails about 53-67%.
+- `lt_m2_c1024` is reliability-viable in this bounded screen with the H12
+  codecport precode (0/500 failures at K=10000 and K=32000; 0/100 at
+  K=64000), but it does not beat the production `wirehair` rowdist under the
+  codecport total-op model.  At K=32000/OH0/bb=1280, reliability-gated totals
+  are about 5.060M for `wirehair+codecport_n13` vs 5.101M for
+  `lt_m2_c1024+codecport`; at K=64000/OH0/bb=1280 the same comparison is
+  about 16.291M vs 16.372M.
+
+The practical retune conclusion is that the current production received-row
+degree law remains the best codecport partner among the tested named
+distributions.  Future degree work needs a new co-optimized family rather than
+promoting the existing low-cap or robust-soliton controls.
+
 ### Heavy Band
 
 The big-K GE replay census gives the production band target:
