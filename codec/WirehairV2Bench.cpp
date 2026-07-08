@@ -1,5 +1,6 @@
 #include "WirehairV2Codec.h"
 #include "WirehairV2Plan.h"
+#include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
 
 #include "../WirehairTools.h"
@@ -226,7 +227,9 @@ enum PrecodeModelKind
 {
     PrecodeModelDense,
     PrecodeModelLdpc,
-    PrecodeModelLdpcDense
+    PrecodeModelLdpcDense,
+    PrecodeModelCodecPort,
+    PrecodeModelCodecPortIdentityCorner
 };
 
 struct PrecodeModel
@@ -862,7 +865,38 @@ bool MakePrecodeModel(const std::string& name, PrecodeModel& model)
         model.Kind = PrecodeModelLdpcDense;
         return true;
     }
+    if (name == "codecport") {
+        model.Kind = PrecodeModelCodecPort;
+        return true;
+    }
+    if (name == "codecport_ic") {
+        model.Kind = PrecodeModelCodecPortIdentityCorner;
+        return true;
+    }
     return false;
+}
+
+bool IsCodecPortPrecode(const PrecodeModel& model)
+{
+    return model.Kind == PrecodeModelCodecPort ||
+        model.Kind == PrecodeModelCodecPortIdentityCorner;
+}
+
+double CertifiedPrecodeGenerationXors(
+    const wirehair_v2::PrecodeParams& params)
+{
+    const uint32_t hits =
+        params.SourceHits < params.Staircase ?
+        params.SourceHits : params.Staircase;
+    const uint64_t staircase_xors =
+        (uint64_t)hits * params.BlockCount + params.Staircase - 1u;
+    const uint64_t deck_span =
+        (uint64_t)params.BlockCount + params.Staircase +
+        (params.DenseIdentityCorner ? 0u : params.DenseRows);
+    const uint64_t dense_xors =
+        params.DenseRows > 0u ?
+        ((deck_span + 1u) >> 1) + 2u * (params.DenseRows - 1u) : 0u;
+    return (double)(staircase_xors + dense_xors);
 }
 
 PrecodeRecipe BuildPrecodeRecipe(
@@ -915,6 +949,18 @@ PrecodeRecipe BuildPrecodeRecipe(
             (double)recipe.LdpcColumns +
             (recipe.DenseRows > 0u ?
                 2.5 * (double)(block_count + recipe.DenseRows) : 0.0);
+    }
+    else if (IsCodecPortPrecode(model))
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(block_count, 0u);
+        params.DenseIdentityCorner =
+            model.Kind == PrecodeModelCodecPortIdentityCorner;
+        recipe.Columns = params.Staircase + params.DenseRows;
+        recipe.LdpcColumns = params.Staircase;
+        recipe.DenseRows = params.DenseRows;
+        recipe.HeavyRows = params.HeavyRows;
+        recipe.GenerationXors = CertifiedPrecodeGenerationXors(params);
     }
     return recipe;
 }
@@ -1668,6 +1714,9 @@ int CmdPeelCost(int argc, char** argv)
         "# precode schemes change width/generation estimates only; "
         "rank and constraint-row effects require precode_sim\n");
     std::printf(
+        "# --heavy applies to dense/ldpc/ldpcdense; "
+        "codecport schemes use MakeCertifiedParams() H\n");
+    std::printf(
         "N,bb,overhead,solver,structure,precode,D,ldpc_cols,dense_rows,H,"
         "trials,resid_cols_mu,resid_cols_max,resid_rows_mu,matrix_refs_mu,"
         "matrix_xors_mu,legacy_total_xors_mu,solve_width_mu,"
@@ -1684,6 +1733,19 @@ int CmdPeelCost(int argc, char** argv)
             std::fprintf(stderr,
                 "peelcost N must be in [2,65535] and bb must be positive\n");
             return 1;
+        }
+        for (size_t p = 0; p < precodes.size(); ++p)
+        {
+            if (IsCodecPortPrecode(precodes[p]) &&
+                N > CAT_WIREHAIR_MAX_N)
+            {
+                std::fprintf(stderr,
+                    "peelcost precode %s requires N in [%u,%u]\n",
+                    precodes[p].Name.c_str(),
+                    (unsigned)CAT_WIREHAIR_MIN_N,
+                    (unsigned)CAT_WIREHAIR_MAX_N);
+                return 1;
+            }
         }
 
         for (int overhead_value : Overheads)

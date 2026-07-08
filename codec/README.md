@@ -67,15 +67,18 @@ failed, and `densetune` compares candidates for explicit N/block-byte lists.
 `peelcost` is an offline scoring helper for degree-distribution retuning.  It
 keeps the production codec untouched, generates policy or named experimental
 peel distributions, and reports a block-XOR cost proxy that combines sparse
-matrix XORs with a dense/LDPC-dense precode width estimate:
+matrix XORs with a dense/LDPC-dense/certified-codec-port precode width estimate:
 
 ```text
 matrix_xors + precode_gen + N * solve_width + solve_width^2 / 2 + H * solve_width
 ```
 
 This is not a decode-failure model, and it does not replay LDPC constraint-row
-rank effects.  Use `experiments/precode/precode_sim` for rank/failure
-validation before promoting any degree/precode candidate.
+rank effects.  The certified precode proxy names are `codecport` and
+`codecport_ic`; both use `MakeCertifiedParams()` for S/D2/H/N1 and differ only
+in dense identity-corner accounting, so the `--heavy` override only applies to
+the older dense/LDPC proxy models.  Use `experiments/precode/precode_sim` for
+rank/failure validation before promoting any degree/precode candidate.
 
 ## Codec Wrapper
 
@@ -99,7 +102,7 @@ cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6
-./build/codec/wirehair_v2_bench peelcost --N 320,3200,32000 --bb-list 1280,102400 --structures policy,lt_m2_c96,lt_m2_c256,lt_m2_c512 --precode dense,ldpcdense --overhead 0,2 --trials 8
+./build/codec/wirehair_v2_bench peelcost --N 320,3200,32000 --bb-list 1280,102400 --structures policy,lt_m2_c96,lt_m2_c256,lt_m2_c512 --precode dense,ldpcdense,codecport --overhead 0,2 --trials 8
 ./build/codec/wirehair_v2_bench densecheck --N 7533 --bb 1280 --candidates 4 --trials 1
 ./build/codec/wirehair_v2_bench densetune --N 320,1000 --bb-list 1280 --candidates 4 --trials 2
 ./build/codec/wirehair_v2_bench densecount --N 320,1000 --bb-list 1280 --deltas -8,0,8 --trials 20
