@@ -3,6 +3,10 @@
 #include "../WirehairCodec.h"
 #include "../WirehairTools.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -259,8 +263,101 @@ static void RandomTrial(
     }
 }
 
-int main()
+static bool ParseU64(const char* text, uint64_t& out)
 {
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = strtoull(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
+static bool ParseUnsigned(const char* text, unsigned& out)
+{
+    uint64_t value = 0;
+    if (!ParseU64(text, value) || value > UINT_MAX) {
+        return false;
+    }
+    out = (unsigned)value;
+    return true;
+}
+
+static void Usage(const char* program)
+{
+    cerr
+        << "usage: " << program << " [--seed U64] [--trials N] "
+        << "[--dense-index-lo I] [--dense-index-hi I]\n";
+}
+
+int main(int argc, char** argv)
+{
+    uint64_t seed = siamese::GetTimeUsec();
+    unsigned fixedTrials = 0;
+    unsigned denseIndexLo = kDenseMin;
+    unsigned denseIndexHi = kDenseMax;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* arg = argv[i];
+        auto next = [&]() -> const char* {
+            if (i + 1 >= argc) {
+                cerr << "missing value for " << arg << endl;
+                Usage(argv[0]);
+                exit(1);
+            }
+            return argv[++i];
+        };
+        if (!strcmp(arg, "--seed")) {
+            if (!ParseU64(next(), seed)) {
+                cerr << "bad --seed value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--trials")) {
+            if (!ParseUnsigned(next(), fixedTrials) || fixedTrials == 0 ||
+                fixedTrials > (unsigned)INT_MAX)
+            {
+                cerr << "bad --trials value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--dense-index-lo")) {
+            if (!ParseUnsigned(next(), denseIndexLo)) {
+                cerr << "bad --dense-index-lo value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--dense-index-hi")) {
+            if (!ParseUnsigned(next(), denseIndexHi)) {
+                cerr << "bad --dense-index-hi value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--help")) {
+            Usage(argv[0]);
+            return 0;
+        }
+        else {
+            cerr << "unknown argument " << arg << endl;
+            Usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (denseIndexLo < kDenseMin || denseIndexHi > kDenseMax ||
+        denseIndexLo > denseIndexHi)
+    {
+        cerr << "dense index range must be in [" << kDenseMin << ", "
+            << kDenseMax << "]" << endl;
+        return 1;
+    }
+
     FillSeeds();
 
     const int gfInitResult = gf256_init();
@@ -274,9 +371,15 @@ int main()
 
     message.resize(64000);
 
-    uint64_t seed = siamese::GetTimeUsec();
+    cerr
+        << "# GenerateMostDenseSeeds seed=0x" << hex << seed << dec
+        << " dense_index_lo=" << denseIndexLo
+        << " dense_index_hi=" << denseIndexHi
+        << " fixed_trials=" << fixedTrials << endl;
 
-    for (unsigned i_dense_count = kDenseMin; i_dense_count <= kDenseMax; ++i_dense_count)
+    for (unsigned i_dense_count = denseIndexLo;
+         i_dense_count <= denseIndexHi;
+         ++i_dense_count)
     {
         int N_found = -1;
         int count_found = -1;
@@ -301,8 +404,9 @@ int main()
             continue;
         }
 
-        int NumTrials = 1000;
+        unsigned NumTrials = fixedTrials ? fixedTrials : 1000u;
 
+        if (!fixedTrials)
         {
             unsigned d_seed = 0;
 
@@ -315,21 +419,31 @@ int main()
             uint64_t t0 = siamese::GetTimeUsec();
 
 #pragma omp parallel for
-            for (int trial = 0; trial < NumTrials; ++trial) {
+            for (int trial = 0; trial < (int)NumTrials; ++trial) {
                 RandomTrial(N, count_found, seed, (uint16_t)d_seed, trial);
             }
 
             uint64_t t1 = siamese::GetTimeUsec();
 
             const float actualMsec = (t1 - t0) / 1000.f; // msec
-            const float mult = targetMsec / actualMsec;
-            NumTrials = (int)(NumTrials * mult);
+            const float mult =
+                actualMsec > 0.f ? targetMsec / actualMsec : 1.f;
+            const double scaledTrials = (double)NumTrials * mult;
+            if (scaledTrials < 1.0) {
+                NumTrials = 1;
+            }
+            else if (scaledTrials > (double)INT_MAX) {
+                NumTrials = (unsigned)INT_MAX;
+            }
+            else {
+                NumTrials = (unsigned)scaledTrials;
+            }
 
             cout << "NumTrials=1000 took " << (t1 - t0) / 1000 << " msec.  Mult = " << mult << " -> NumTrials = " << NumTrials << endl;
         }
 
         int best_dense_seed = 0;
-        int best_failures = 10000;
+        unsigned best_failures = UINT_MAX;
 
         // Advance the trial-stream seed once per N, not once per candidate:
         // candidates must share paired trials or selection by minimum failure
@@ -345,7 +459,7 @@ int main()
             //uint64_t t0 = siamese::GetTimeUsec();
 
 #pragma omp parallel for // num_threads(6)
-            for (int trial = 0; trial < NumTrials; ++trial) {
+            for (int trial = 0; trial < (int)NumTrials; ++trial) {
                 RandomTrial(N, count_found, seed, (uint16_t)d_seed, trial);
             }
 
@@ -353,7 +467,7 @@ int main()
             //const float actualMsec = (t1 - t0) / 1000.f; // msec
             //cout << "In " << actualMsec << " msec" << endl;
 
-            const int failures = FailedTrials;
+            const unsigned failures = FailedTrials;
 
             if (failures < best_failures)
             {
