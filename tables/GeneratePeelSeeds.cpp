@@ -3,6 +3,10 @@
 #include "../WirehairCodec.h"
 #include "../WirehairTools.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -239,10 +243,137 @@ static void QuickPeelTest(
     }
 }
 
-static const int kTrials = 10;
-
-int main()
+static bool ParseU64(const char* text, uint64_t& out)
 {
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = strtoull(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
+static bool ParseUnsigned(const char* text, unsigned& out)
+{
+    uint64_t value = 0;
+    if (!ParseU64(text, value) || value > UINT_MAX) {
+        return false;
+    }
+    out = (unsigned)value;
+    return true;
+}
+
+static void Usage(const char* program)
+{
+    cerr
+        << "usage: " << program << " [--trials N] [--sublo I] "
+        << "[--subhi I] [--nlo N] [--nhi N] [--max-tries N] "
+        << "[--skip-tuning]\n";
+}
+
+static unsigned FirstNForSubdivision(unsigned subdivision, unsigned nlo)
+{
+    const unsigned first = 2048u + subdivision;
+    if (first >= nlo) {
+        return first;
+    }
+    const unsigned delta = nlo - first;
+    const unsigned steps =
+        (delta + kPeelSeedSubdivisions - 1u) / kPeelSeedSubdivisions;
+    return first + steps * kPeelSeedSubdivisions;
+}
+
+int main(int argc, char** argv)
+{
+    unsigned trials = 10;
+    unsigned sublo = 0;
+    unsigned subhi = kPeelSeedSubdivisions - 1u;
+    unsigned nlo = 2048;
+    unsigned nhi = CAT_WIREHAIR_MAX_N;
+    unsigned maxTries = kMaxTuningTries;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* arg = argv[i];
+        auto next = [&]() -> const char* {
+            if (i + 1 >= argc) {
+                cerr << "missing value for " << arg << endl;
+                Usage(argv[0]);
+                exit(1);
+            }
+            return argv[++i];
+        };
+        if (!strcmp(arg, "--trials")) {
+            if (!ParseUnsigned(next(), trials) || trials == 0 ||
+                trials > (unsigned)INT_MAX)
+            {
+                cerr << "bad --trials value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--sublo")) {
+            if (!ParseUnsigned(next(), sublo)) {
+                cerr << "bad --sublo value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--subhi")) {
+            if (!ParseUnsigned(next(), subhi)) {
+                cerr << "bad --subhi value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nlo")) {
+            if (!ParseUnsigned(next(), nlo)) {
+                cerr << "bad --nlo value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nhi")) {
+            if (!ParseUnsigned(next(), nhi)) {
+                cerr << "bad --nhi value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--max-tries")) {
+            if (!ParseUnsigned(next(), maxTries) || maxTries == 0) {
+                cerr << "bad --max-tries value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--skip-tuning")) {
+            SkipTuning = true;
+        }
+        else if (!strcmp(arg, "--help")) {
+            Usage(argv[0]);
+            return 0;
+        }
+        else {
+            cerr << "unknown argument " << arg << endl;
+            Usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (sublo >= kPeelSeedSubdivisions ||
+        subhi >= kPeelSeedSubdivisions ||
+        sublo > subhi)
+    {
+        cerr << "subdivision range must be in [0, "
+            << (kPeelSeedSubdivisions - 1u) << "]" << endl;
+        return 1;
+    }
+    if (nlo < 2048u || nhi > CAT_WIREHAIR_MAX_N || nlo > nhi) {
+        cerr << "N range must be in [2048, " << CAT_WIREHAIR_MAX_N
+            << "]" << endl;
+        return 1;
+    }
+
     const int gfInitResult = gf256_init();
 
     FillSeeds();
@@ -261,19 +392,38 @@ int main()
     // Subdivisions 0 and 1 map real block counts (N = 2048+i stepping 2048,
     // i.e. 2048, 2049, 4096, 4097, ...) and need tuning like every other
     // residue class; starting at 2 carried forward untested table entries
-    for (unsigned i = 0; i < kPeelSeedSubdivisions; ++i)
+    cerr
+        << "# GeneratePeelSeeds trials=" << trials
+        << " sublo=" << sublo
+        << " subhi=" << subhi
+        << " nlo=" << nlo
+        << " nhi=" << nhi
+        << " max_tries=" << maxTries
+        << " skip_tuning=" << (SkipTuning ? 1 : 0) << endl;
+
+    for (unsigned i = sublo; i <= subhi; ++i)
     {
         int best_peel_seed = 0;
-        int best_failures = 10000;
+        unsigned best_failures = UINT_MAX;
 
-        int tries = 0;
+        unsigned tries = 0;
+        const unsigned firstN = FirstNForSubdivision(i, nlo);
+        if (firstN > nhi)
+        {
+            cout << "subdivision = " << i
+                << " : Skipped no N in requested range; kept seed = "
+                << (int)kPeelSeeds[i] << endl;
+            continue;
+        }
 
         for (unsigned p_seed = 0; p_seed < 256; ++p_seed)
         {
             FailedTrials = 0;
 
 #pragma omp parallel for
-            for (int N = 2048 + i; N <= 64000; N += kPeelSeedSubdivisions)
+            for (int N = (int)firstN;
+                 N <= (int)nhi;
+                 N += (int)kPeelSeedSubdivisions)
             {
                 QuickReject(N, (uint16_t)p_seed);
             }
@@ -293,15 +443,17 @@ int main()
 
             FailedTrials = 0;
 
-            for (int N = 2048 + i; N <= 64000; N += kPeelSeedSubdivisions)
+            for (int N = (int)firstN;
+                 N <= (int)nhi;
+                 N += (int)kPeelSeedSubdivisions)
             {
 #pragma omp parallel for
-                for (int trials = 0; trials < kTrials; ++trials) {
-                    QuickPeelTest(N, (uint16_t)p_seed, trials);
+                for (int trial = 0; trial < (int)trials; ++trial) {
+                    QuickPeelTest(N, (uint16_t)p_seed, trial);
                 }
             }
 
-            const int failures = FailedTrials;
+            const unsigned failures = FailedTrials;
             cout << "failures = " << failures << endl;
 
             if (failures < best_failures)
@@ -318,7 +470,7 @@ int main()
 
             ++tries;
 
-            if (tries >= kMaxTuningTries) {
+            if (tries >= maxTries) {
                 break;
             }
         }
