@@ -3,6 +3,7 @@
 #include "WirehairV2Precode.h"
 
 #include <stdint.h>
+#include <vector>
 
 /*
     Encoder value phase for the certified V2 precode (wirehair-axd Phase 3).
@@ -100,5 +101,27 @@ bool ComputePrecodeValues(
     uint32_t block_bytes,
     uint8_t* parity_blocks,
     PrecodeEncodeStats* stats = nullptr);
+
+/**
+    Compute one V2 recovery symbol from a row over the intermediate domain
+    [source | staircase | dense | heavy].
+
+    `row_columns` uses the same global column numbering as
+    GenerateRecoveryMatrixRows(): columns < K reference source_blocks, and
+    columns >= K reference parity_blocks at offset column - K.  The output is
+    the GF(2) XOR of all referenced block values.  A first-term copy counts as
+    one block op, matching the precode cost convention; an empty row produces
+    the zero block and zero ops.
+
+    `block_out` must not overlap the source/parity block arrays.
+*/
+bool ComputeRecoveryBlock(
+    const PrecodeSystem& system,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    const std::vector<uint32_t>& row_columns,
+    uint8_t* block_out,
+    uint64_t* block_ops_out = nullptr);
 
 } // namespace wirehair_v2

@@ -452,4 +452,58 @@ bool ComputePrecodeValues(
     return true;
 }
 
+bool ComputeRecoveryBlock(
+    const PrecodeSystem& system,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    const std::vector<uint32_t>& row_columns,
+    uint8_t* block_out,
+    uint64_t* block_ops_out)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t S = system.Params.Staircase;
+    const uint32_t D2 = system.Params.DenseRows;
+    const uint32_t H = system.Params.HeavyRows;
+    const uint64_t precode_count = (uint64_t)S + D2 + H;
+    const uint64_t total_columns = (uint64_t)K + precode_count;
+
+    uint64_t local_ops = 0;
+    uint64_t& ops = block_ops_out ? *block_ops_out : local_ops;
+    ops = 0;
+
+    if (!source_blocks || !parity_blocks || !block_out ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu)
+    {
+        return false;
+    }
+    if (K == 0u || K > UINT16_MAX || D2 > 64u || H > 128u ||
+        total_columns > UINT16_MAX ||
+        system.StaircaseRows.size() != S ||
+        system.DenseRowColumns.size() != D2)
+    {
+        return false;
+    }
+
+    const auto column_value = [&](uint32_t c) -> const uint8_t* {
+        return c < K ?
+            source_blocks + (size_t)c * block_bytes :
+            parity_blocks + (size_t)(c - K) * block_bytes;
+    };
+
+    for (const uint32_t col : row_columns)
+    {
+        if (col >= total_columns) {
+            return false;
+        }
+    }
+
+    BlockAccumulator acc(block_out, block_bytes, ops);
+    for (const uint32_t col : row_columns) {
+        acc.Add(column_value(col));
+    }
+    acc.Finish();
+    return true;
+}
+
 } // namespace wirehair_v2

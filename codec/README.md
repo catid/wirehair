@@ -60,6 +60,10 @@ and benchmark commands use this path so matrix statistics stay consistent.
 the real precode path: it keeps the source-column prefix identical to
 `GeneratePeelMatrixRows()` for the same seed, then appends distinct columns from
 the intermediate precode range `[K, K + S + D2 + H)`.
+`ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
+intermediate block values for encoder-feasible precode systems, and
+`ComputeRecoveryBlock()` evaluates one generated recovery row over the full
+`[source | precode]` intermediate block vector.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and
@@ -89,7 +93,10 @@ rank/failure validation before promoting any degree/precode candidate.
 `wirehair_v2::Codec` is a full encoder/decoder facade.  It selects a
 `SeedProfile`, injects the selected dense count, peel seed, and dense seed into
 the underlying solver, then exposes encode/decode/recover methods.  Production
-codec files are not modified by this wrapper.
+codec files are not modified by this wrapper.  The facade still emits and
+decodes V1-compatible recovery packets; the certified V2 precode block-data
+path is exposed by the helper APIs above until the matching V2 decoder is
+ported.
 
 Validation:
 

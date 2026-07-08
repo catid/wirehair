@@ -1,4 +1,5 @@
 #include "WirehairV2PrecodeEncode.h"
+#include "WirehairV2Peel.h"
 
 #include "../WirehairTools.h"
 #include "../gf256.h"
@@ -496,6 +497,175 @@ bool TestMalformedDenseCorner()
     return true;
 }
 
+void ManualRecoveryBlock(
+    const wirehair_v2::PrecodeSystem& system,
+    const uint8_t* source, const uint8_t* parity,
+    uint32_t block_bytes,
+    const std::vector<uint32_t>& row_columns,
+    uint8_t* block_out)
+{
+    std::memset(block_out, 0, block_bytes);
+    for (const uint32_t col : row_columns)
+    {
+        gf256_add_mem(block_out,
+            ColumnValue(system, source, parity, block_bytes, col),
+            (int)block_bytes);
+    }
+}
+
+bool EqualBlock(
+    const uint8_t* a, const uint8_t* b, uint32_t block_bytes)
+{
+    return std::memcmp(a, b, block_bytes) == 0;
+}
+
+bool IsZeroBlock(const uint8_t* a, uint32_t block_bytes)
+{
+    for (uint32_t i = 0; i < block_bytes; ++i) {
+        if (a[i] != 0u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestRecoveryBlockEncoding()
+{
+    const uint32_t K = 1000u;
+    const uint32_t bb = 37u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(K, UINT64_C(0x5eed1234));
+    params.DenseIdentityCorner = true;
+
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildPrecodeSystem(params, system)) {
+        std::fprintf(stderr, "recovery encode: build failed\n");
+        return false;
+    }
+
+    const uint32_t parity_count =
+        system.Params.Staircase + system.Params.DenseRows +
+        system.Params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * bb);
+    std::vector<uint8_t> parity((size_t)parity_count * bb);
+    FillRandomBlocks(source.data(), source.size(), UINT64_C(0xbeadfeed));
+    if (!wirehair_v2::ComputePrecodeValues(
+            system, source.data(), bb, parity.data()))
+    {
+        std::fprintf(stderr, "recovery encode: precode values failed\n");
+        return false;
+    }
+    if (!VerifyValues(
+            system, source.data(), parity.data(), bb, "recovery encode"))
+    {
+        return false;
+    }
+
+    const wirehair_v2::PeelingCodec codec =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+    const std::vector<std::vector<uint32_t> > rows =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, parity_count, 8u, 5u, UINT64_C(0xdec0de));
+    if (rows.size() != 8u) {
+        std::fprintf(stderr, "recovery encode: row generation failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> got(bb), want(bb);
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        uint64_t ops = UINT64_MAX;
+        if (!wirehair_v2::ComputeRecoveryBlock(
+                system, source.data(), parity.data(), bb, rows[r],
+                got.data(), &ops))
+        {
+            std::fprintf(stderr,
+                "recovery encode: ComputeRecoveryBlock failed for row %zu\n",
+                r);
+            return false;
+        }
+        ManualRecoveryBlock(
+            system, source.data(), parity.data(), bb, rows[r], want.data());
+        if (!EqualBlock(got.data(), want.data(), bb)) {
+            std::fprintf(stderr,
+                "recovery encode: row %zu did not match manual XOR\n", r);
+            return false;
+        }
+        if (ops != rows[r].size()) {
+            std::fprintf(stderr,
+                "recovery encode: row %zu ops %llu != columns %zu\n",
+                r, (unsigned long long)ops, rows[r].size());
+            return false;
+        }
+    }
+
+    uint64_t ops = UINT64_MAX;
+    const std::vector<uint32_t> source_only{0u};
+    if (!wirehair_v2::ComputeRecoveryBlock(
+            system, source.data(), parity.data(), bb, source_only,
+            got.data(), &ops) ||
+        !EqualBlock(got.data(), source.data(), bb) || ops != 1u)
+    {
+        std::fprintf(stderr, "recovery encode: source-only row failed\n");
+        return false;
+    }
+
+    const std::vector<uint32_t> parity_only{K + system.Params.Staircase};
+    if (!wirehair_v2::ComputeRecoveryBlock(
+            system, source.data(), parity.data(), bb, parity_only,
+            got.data(), &ops) ||
+        !EqualBlock(
+            got.data(), parity.data() + (size_t)system.Params.Staircase * bb,
+            bb) ||
+        ops != 1u)
+    {
+        std::fprintf(stderr, "recovery encode: parity-only row failed\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    const std::vector<uint32_t> empty_row;
+    if (!wirehair_v2::ComputeRecoveryBlock(
+            system, source.data(), parity.data(), bb, empty_row,
+            got.data(), &ops) ||
+        !IsZeroBlock(got.data(), bb) || ops != 0u)
+    {
+        std::fprintf(stderr, "recovery encode: empty row failed\n");
+        return false;
+    }
+
+    const std::vector<uint32_t> bad_row{
+        0u,
+        K + parity_count
+    };
+    std::fill(got.begin(), got.end(), 0xacu);
+    if (wirehair_v2::ComputeRecoveryBlock(
+            system, source.data(), parity.data(), bb, bad_row,
+            got.data(), &ops) ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }) ||
+        ops != 0u)
+    {
+        std::fprintf(stderr,
+            "recovery encode: invalid row should fail without writes\n");
+        return false;
+    }
+
+    if (wirehair_v2::ComputeRecoveryBlock(
+            system, source.data(), parity.data(), 0u, source_only,
+            got.data()))
+    {
+        std::fprintf(stderr,
+            "recovery encode: zero block_bytes should fail\n");
+        return false;
+    }
+
+    std::printf("recovery block encoding: PASS\n");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -515,6 +685,7 @@ int main(int argc, char** argv)
     ok = TestCorrectnessDoctored() && ok;
     ok = TestMalformedDenseCorner() && ok;
     ok = TestCostModel() && ok;
+    ok = TestRecoveryBlockEncoding() && ok;
     ok = TestFeasibility(trials) && ok;
 
     if (!ok) {
