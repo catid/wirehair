@@ -56,6 +56,10 @@ base profile with real trials, or `seedtable` for offline diagnostics.
 combines `PeelingCodec` + `SeedProfile` into a deterministic matrix seed,
 generates rows, and runs the selected peel solver/evaluator.  The seed-table
 and benchmark commands use this path so matrix statistics stay consistent.
+`GenerateRecoveryMatrixRows()` is the corresponding V2 recovery-row helper for
+the real precode path: it keeps the source-column prefix identical to
+`GeneratePeelMatrixRows()` for the same seed, then appends distinct columns from
+the intermediate precode range `[K, K + S + D2 + H)`.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and

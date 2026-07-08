@@ -27,6 +27,24 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     uint32_t row_count,
     uint64_t seed);
 
+/**
+    Generate recovery rows over the full V2 intermediate-symbol domain:
+    source columns [0, source_count) followed by precode columns
+    [source_count, source_count + precode_count).
+
+    The source-column prefix is identical to GeneratePeelMatrixRows() for the
+    same codec/source_count/row_count/seed.  Precode mix columns are drawn from
+    a separate deterministic stream so changing precode_count does not retune
+    the source-row distribution.
+*/
+std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
+    const PeelingCodec& codec,
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t row_count,
+    uint32_t mix_count,
+    uint64_t seed);
+
 PeelEvaluation EvaluatePeeling(
     const PeelingCodec& codec,
     uint32_t block_count,

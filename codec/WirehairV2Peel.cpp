@@ -217,6 +217,56 @@ std::vector<uint16_t> RandomRowColumns(
     return row;
 }
 
+void AddDistinctOffsetColumns(
+    std::vector<uint32_t>& row,
+    uint32_t offset,
+    uint32_t column_count,
+    uint32_t count,
+    Rng& rng)
+{
+    if (column_count == 0u || count == 0u) {
+        return;
+    }
+    if (count > column_count) {
+        count = column_count;
+    }
+
+    if (count >= (column_count + 3u) / 4u)
+    {
+        std::vector<uint32_t> deck;
+        deck.reserve(column_count);
+        for (uint32_t i = 0; i < column_count; ++i) {
+            deck.push_back(offset + i);
+        }
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t j = i + (rng.U32() % (column_count - i));
+            const uint32_t value = deck[j];
+            deck[j] = deck[i];
+            deck[i] = value;
+            row.push_back(value);
+        }
+        return;
+    }
+
+    const size_t start_size = row.size();
+    while (row.size() - start_size < count)
+    {
+        const uint32_t column = offset + (rng.U32() % column_count);
+        bool duplicate = false;
+        for (size_t i = start_size; i < row.size(); ++i)
+        {
+            if (row[i] == column) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            row.push_back(column);
+        }
+    }
+}
+
 struct RowState
 {
     std::vector<uint16_t> Columns;
@@ -786,6 +836,50 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     {
         const uint32_t degree = degrees.Sample(rng);
         rows.push_back(RandomRowColumns(block_count, degree, rng));
+    }
+    return rows;
+}
+
+std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
+    const PeelingCodec& codec,
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t row_count,
+    uint32_t mix_count,
+    uint64_t seed)
+{
+    if (source_count == 0u ||
+        source_count > UINT16_MAX ||
+        row_count > kMaxPeelMatrixRows ||
+        precode_count > UINT16_MAX - source_count)
+    {
+        return std::vector<std::vector<uint32_t> >();
+    }
+
+    Rng source_rng(seed);
+    Rng mix_rng(seed ^ UINT64_C(0x9e3779b97f4a7c15));
+    const DegreeSampler degrees(codec, source_count);
+    std::vector<std::vector<uint32_t> > rows;
+    rows.reserve(row_count);
+    for (uint32_t r = 0; r < row_count; ++r)
+    {
+        const uint32_t degree = degrees.Sample(source_rng);
+        const std::vector<uint16_t> source_columns =
+            RandomRowColumns(source_count, degree, source_rng);
+
+        std::vector<uint32_t> row;
+        row.reserve(source_columns.size() +
+            (mix_count < precode_count ? mix_count : precode_count));
+        for (uint16_t column : source_columns) {
+            row.push_back(column);
+        }
+        AddDistinctOffsetColumns(
+            row,
+            source_count,
+            precode_count,
+            mix_count,
+            mix_rng);
+        rows.push_back(std::move(row));
     }
     return rows;
 }

@@ -2,6 +2,7 @@
 #include "WirehairV2Codec.h"
 #include "WirehairV2Peel.h"
 #include "WirehairV2Plan.h"
+#include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
 #include "../gf256.h"
 #include "../WirehairTools.h"
@@ -63,6 +64,17 @@ void CheckRowHasNoDuplicates(const std::vector<uint16_t>& row)
     {
         for (size_t j = i + 1u; j < row.size(); ++j) {
             Check(row[i] != row[j], "generated row should not duplicate columns");
+        }
+    }
+}
+
+void CheckRowHasNoDuplicates(const std::vector<uint32_t>& row)
+{
+    for (size_t i = 0; i < row.size(); ++i)
+    {
+        for (size_t j = i + 1u; j < row.size(); ++j) {
+            Check(row[i] != row[j],
+                "generated recovery row should not duplicate columns");
         }
     }
 }
@@ -228,6 +240,89 @@ void CheckGeneratedRows(
             "generated row should not exceed block count");
         CheckRowHasNoDuplicates(rows[i]);
     }
+}
+
+void CheckGeneratedRecoveryRows()
+{
+    const uint32_t K = 1000u;
+    const uint32_t row_count = 32u;
+    const uint32_t mix_count = 3u;
+    const uint64_t seed = UINT64_C(0x12345678);
+    const wirehair_v2::PeelingCodec codec =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+    const wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(K, seed);
+    const uint32_t precode_count =
+        params.Staircase + params.DenseRows + params.HeavyRows;
+
+    const std::vector<std::vector<uint16_t> > source_rows =
+        wirehair_v2::GeneratePeelMatrixRows(codec, K, row_count, seed);
+    const std::vector<std::vector<uint32_t> > rows =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, precode_count, row_count, mix_count, seed);
+    const std::vector<std::vector<uint32_t> > rows_repeat =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, precode_count, row_count, mix_count, seed);
+
+    Check(rows.size() == row_count,
+        "recovery row generator should contain requested rows");
+    Check(rows == rows_repeat,
+        "recovery row generator should be deterministic");
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        const std::vector<uint32_t>& row = rows[i];
+        Check(row.size() == source_rows[i].size() + mix_count,
+            "recovery row should append precode mix columns");
+        for (size_t j = 0; j < source_rows[i].size(); ++j) {
+            Check(row[j] == source_rows[i][j],
+                "recovery row source prefix should match peel row");
+        }
+        for (size_t j = source_rows[i].size(); j < row.size(); ++j)
+        {
+            Check(row[j] >= K && row[j] < K + precode_count,
+                "recovery row mix column should be in precode range");
+        }
+        CheckRowHasNoDuplicates(row);
+    }
+
+    const std::vector<std::vector<uint32_t> > no_precode =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, 0u, row_count, mix_count, seed);
+    Check(no_precode.size() == row_count,
+        "zero-precode recovery row generator should contain requested rows");
+    for (size_t i = 0; i < no_precode.size(); ++i)
+    {
+        Check(no_precode[i].size() == source_rows[i].size(),
+            "zero-precode recovery rows should have only source columns");
+    }
+
+    const std::vector<std::vector<uint32_t> > capped_mix =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, 2u, row_count, 5u, seed);
+    Check(capped_mix.size() == row_count,
+        "capped-mix recovery row generator should contain requested rows");
+    for (size_t i = 0; i < capped_mix.size(); ++i)
+    {
+        Check(capped_mix[i].size() == source_rows[i].size() + 2u,
+            "recovery row mix count should cap at precode column count");
+    }
+
+    Check(wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, 0u, precode_count, row_count, mix_count, seed).empty(),
+        "recovery row generator should reject zero source count");
+    Check(wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, UINT16_MAX + 1u, precode_count, row_count,
+            mix_count, seed).empty(),
+        "recovery row generator should reject source counts above uint16");
+    Check(wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, UINT16_MAX, 1u, row_count, mix_count, seed).empty(),
+        "recovery row generator should reject total columns above uint16");
+    Check(wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, precode_count, wirehair_v2::kMaxPeelMatrixRows + 1u,
+            mix_count, seed).empty(),
+        "recovery row generator should reject unrepresentable row counts");
 }
 
 void CheckPeelRowCountBounds()
@@ -735,6 +830,7 @@ int main()
             96u, 97u,
             UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
+    CheckGeneratedRecoveryRows();
     CheckPeelRowCountBounds();
 
     const PeelEvaluation eval_a =
