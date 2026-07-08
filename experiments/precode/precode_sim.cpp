@@ -1478,6 +1478,25 @@ static bool ParseU64(const std::string& s, uint64_t& out)
     return true;
 }
 
+static bool ParseNonNegativeDouble(const std::string& s, double& out)
+{
+    if (s.empty() ||
+        ((s[0] < '0' || s[0] > '9') && s[0] != '.'))
+    {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const double v = strtod(s.c_str(), &end);
+    if (!end || *end != '\0' || errno == ERANGE ||
+        !std::isfinite(v) || v < 0.0)
+    {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
 // Token grammar:
 //   none
 //   dense            (D = GetDenseCount(K), H = 6)
@@ -2475,6 +2494,7 @@ int main(int argc, char** argv)
     RowDist dist = RowDist::Wirehair;
     unsigned mix = 3;
     unsigned max_inact = 0; // 0 = unlimited
+    double max_row_seconds = 0.0; // 0 = unlimited
     unsigned ge_pivot_window = 0; // 0 = first eligible pivot
     bool self_test = false;
     bool ge_replay = false;
@@ -2575,6 +2595,13 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (arg == "--max-row-seconds") {
+            const std::string v = next();
+            if (!ParseNonNegativeDouble(v, max_row_seconds)) {
+                fprintf(stderr, "bad --max-row-seconds value %s\n", v.c_str());
+                return 1;
+            }
+        }
         else if (arg == "--ge-pivot-window") {
             ge_replay = true; // pivot-window selection is a replay mode
             const std::string v = next();
@@ -2669,13 +2696,33 @@ int main(int argc, char** argv)
                 Aggregate agg;
                 std::mutex agg_mutex;
                 std::atomic<unsigned> next_trial(0);
+                std::atomic<bool> stop_row(false);
+                const auto row_start = std::chrono::steady_clock::now();
 
                 auto worker = [&]() {
                     for (;;)
                     {
+                        if (stop_row.load(std::memory_order_relaxed)) {
+                            return;
+                        }
                         const unsigned trial = next_trial.fetch_add(1u);
                         if (trial >= trials) {
                             return;
+                        }
+                        if (max_row_seconds > 0.0)
+                        {
+                            // Always allow the first trial to start,
+                            // so tiny bounds do not emit zero-trial rows.
+                            const double elapsed =
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() -
+                                    row_start).count();
+                            if (trial > 0u && elapsed >= max_row_seconds)
+                            {
+                                stop_row.store(
+                                    true, std::memory_order_relaxed);
+                                return;
+                            }
                         }
                         const uint64_t seed = Mix64(
                             base_seed ^
@@ -2707,6 +2754,17 @@ int main(int argc, char** argv)
                 }
                 for (std::thread& th : pool) {
                     th.join();
+                }
+                if (max_row_seconds > 0.0 && agg.Trials < trials)
+                {
+                    fprintf(stderr,
+                        "# max-row-seconds stopped K=%u scheme=%s oh=%u "
+                        "after %llu/%u trials\n",
+                        K,
+                        token.c_str(),
+                        oh,
+                        (unsigned long long)agg.Trials,
+                        trials);
                 }
 
                 const double n = (double)(agg.Trials ? agg.Trials : 1u);

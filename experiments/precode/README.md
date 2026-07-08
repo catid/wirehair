@@ -240,6 +240,17 @@ the fail rate exactly (`rank_total.py` asserts this).  A nonzero
 `runaway_rate` is signal, not an error — it certifies that the
 (rowdist, scheme, K) cell blows past the bound.
 
+## `--max-row-seconds <seconds>`: bounded aggregate rows
+
+`--max-row-seconds S` bounds each output CSV row.  Worker threads stop
+launching new trials after roughly `S` seconds for that `(K, scheme, oh)` cell,
+finish any in-flight trials, and still emit the aggregate row with the actual
+completed `trials` count.  This is intended for very large K certification
+probes where a full row may otherwise run for a long time without producing
+usable output.  Because the cutoff is wall-clock and scheduler dependent, use
+unbounded fixed-trial runs for final certification.  `0` (the default) disables
+the bound.
+
 ## Example
 
 ```bash
