@@ -69,5 +69,8 @@
     and eliminate other heavy rows according to the GE algorithm.
     Finally the remaining rows are nearly all heavy and a small square
     heavy GF(256) matrix is inverted to complete the solution.
+    `perturbationTrials` controls the informational random binary
+    perturbation measurement.  The default preserves the historical 1M-trial
+    run; pass 0 to skip the measurement after the shipped-byte regression.
 */
-bool Generate_HeavyRows();
+bool Generate_HeavyRows(unsigned perturbationTrials = 1000000);

@@ -251,7 +251,7 @@ static const uint8_t kShippedHeavyMatrix[kRows][kColumns] = {
     { 0x34, 0x51, 0xad, 0x56, 0xaf, 0x57, 0xf3, 0x66, 0x95, 0x38, 0xc5, 0x02, 0xe8, 0x43, 0x48, 0x58, 0xfa, 0xbc, },
 };
 
-bool Generate_HeavyRows()
+bool Generate_HeavyRows(unsigned perturbationTrials)
 {
     // Stored row-first
     uint8_t matrix[kRows * kColumns];
@@ -286,9 +286,8 @@ bool Generate_HeavyRows()
     // Informational: measure how often the right submatrix goes singular
     // under random binary perturbation of the left columns.  Expect ~1/256.
     unsigned failures = 0;
-    static const unsigned kTrials = 1000000;
 
-    for (unsigned trial = 0; trial < kTrials; ++trial)
+    for (unsigned trial = 0; trial < perturbationTrials; ++trial)
     {
         params.FillMatrix(matrix);
 
@@ -309,8 +308,16 @@ bool Generate_HeavyRows()
     cout << "* Cols = " << params.Cols << endl;
     cout << "* RowWiggle = " << params.RowWiggle << endl;
     cout << "* ColWiggle = " << params.ColWiggle << endl;
-    cout << "* Perturbation singular rate: " << failures << " / " << kTrials
-        << " (expected ~1/256 = 3906)" << endl;
+    if (perturbationTrials != 0)
+    {
+        cout << "* Perturbation singular rate: " << failures << " / "
+            << perturbationTrials << " (expected ~1/256 = "
+            << perturbationTrials / 256 << ")" << endl;
+    }
+    else
+    {
+        cout << "* Perturbation singular measurement skipped" << endl;
+    }
 
     params.FillMatrix(matrix);
 

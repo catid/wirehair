@@ -37,6 +37,9 @@ using namespace siamese;
 #include <algorithm>
 #include <iomanip>
 #include <cmath>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 using namespace std;
 
 #ifdef _MSC_VER
@@ -1893,13 +1896,83 @@ static void Benchmark_DenseSeedCount()
 
 
 //------------------------------------------------------------------------------
+// CLI
+
+static bool ParseUnsigned(const char* text, unsigned& out)
+{
+    if (!text || !*text) {
+        return false;
+    }
+
+    char* end = nullptr;
+    const unsigned long value = strtoul(text, &end, 0);
+    if (!end || *end != '\0' || value > UINT_MAX) {
+        return false;
+    }
+
+    out = (unsigned)value;
+    return true;
+}
+
+static void Usage(const char* program)
+{
+    cerr << "Usage: " << program << " [options]\n"
+        << "Options:\n"
+        << "  --benchmarks              Enable timing benchmarks (default)\n"
+        << "  --no-benchmarks, --no-bench\n"
+        << "                            Skip timing benchmarks\n"
+        << "  --heavy-trials N          Heavy-row perturbation trials (default 1000000; 0 skips)\n"
+        << "  --help                    Show this help\n";
+}
+
+//------------------------------------------------------------------------------
 // Entrypoint
 
-int main()
+int main(int argc, char** argv)
 {
     cout << "Wirehair Table Generator" << endl;
 
     bool enableBenchmarks = true;
+    unsigned heavyTrials = 1000000;
+
+    auto next = [&](int& i)->const char*
+    {
+        if (i + 1 >= argc) {
+            return nullptr;
+        }
+        return argv[++i];
+    };
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* arg = argv[i];
+        if (!strcmp(arg, "--benchmarks"))
+        {
+            enableBenchmarks = true;
+        }
+        else if (!strcmp(arg, "--no-benchmarks") || !strcmp(arg, "--no-bench"))
+        {
+            enableBenchmarks = false;
+        }
+        else if (!strcmp(arg, "--heavy-trials"))
+        {
+            if (!ParseUnsigned(next(i), heavyTrials))
+            {
+                Usage(argv[0]);
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--help"))
+        {
+            Usage(argv[0]);
+            return 0;
+        }
+        else
+        {
+            Usage(argv[0]);
+            return 1;
+        }
+    }
 
 #ifdef TABLEGEN_DEBUG
     cout << "WARNING: This is built in debug mode so benchmarks are disabled." << endl;
@@ -1924,7 +1997,7 @@ int main()
 
     //--------------------------------------------------------------------------
 
-    if (!Generate_HeavyRows()) {
+    if (!Generate_HeavyRows(heavyTrials)) {
         cout << "Generate_HeavyRows() : Tests failed" << endl;
         return -1;
     }
