@@ -25,6 +25,8 @@ SEED=${SEED:-123456789}
 DCOUNT_TRIALS=${DCOUNT_TRIALS:-8}
 DCOUNT_NLO=${DCOUNT_NLO:-2}
 DCOUNT_NHI=${DCOUNT_NHI:-16}
+DCOUNT_MAX_FAILURES=${DCOUNT_MAX_FAILURES:-10}
+DCOUNT_LOW_COUNT_RUN=${DCOUNT_LOW_COUNT_RUN:-4}
 
 PEEL_TRIALS=${PEEL_TRIALS:-1}
 PEEL_SUBLO=${PEEL_SUBLO:-0}
@@ -114,6 +116,11 @@ run_step() {
     echo "run_gen_tables=$RUN_GEN_TABLES"
     echo "omp_num_threads=$OMP_NUM_THREADS"
     echo "seed=$SEED"
+    echo "dcount_trials=$DCOUNT_TRIALS"
+    echo "dcount_nlo=$DCOUNT_NLO"
+    echo "dcount_nhi=$DCOUNT_NHI"
+    echo "dcount_max_failures=$DCOUNT_MAX_FAILURES"
+    echo "dcount_low_count_run=$DCOUNT_LOW_COUNT_RUN"
     echo
 } > "$MANIFEST"
 
@@ -127,7 +134,9 @@ if [[ "$RUN_DENSE_COUNT" == 1 ]]; then
         --seed "$SEED" \
         --trials "$DCOUNT_TRIALS" \
         --nlo "$DCOUNT_NLO" \
-        --nhi "$DCOUNT_NHI"
+        --nhi "$DCOUNT_NHI" \
+        --max-failures "$DCOUNT_MAX_FAILURES" \
+        --low-count-run "$DCOUNT_LOW_COUNT_RUN"
 fi
 
 if [[ "$RUN_PEEL_SEEDS" == 1 ]]; then
