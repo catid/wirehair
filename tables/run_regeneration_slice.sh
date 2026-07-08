@@ -22,6 +22,7 @@ fi
 
 SEED=${SEED:-123456789}
 
+DCOUNT_SEED=${DCOUNT_SEED:-$SEED}
 DCOUNT_TRIALS=${DCOUNT_TRIALS:-8}
 DCOUNT_NLO=${DCOUNT_NLO:-2}
 DCOUNT_NHI=${DCOUNT_NHI:-16}
@@ -116,6 +117,7 @@ run_step() {
     echo "run_gen_tables=$RUN_GEN_TABLES"
     echo "omp_num_threads=$OMP_NUM_THREADS"
     echo "seed=$SEED"
+    echo "dcount_seed=$DCOUNT_SEED"
     echo "dcount_trials=$DCOUNT_TRIALS"
     echo "dcount_nlo=$DCOUNT_NLO"
     echo "dcount_nhi=$DCOUNT_NHI"
@@ -131,7 +133,7 @@ fi
 if [[ "$RUN_DENSE_COUNT" == 1 ]]; then
     run_step dense_count \
         "$BUILD_DIR/gen_dcounts" \
-        --seed "$SEED" \
+        --seed "$DCOUNT_SEED" \
         --trials "$DCOUNT_TRIALS" \
         --nlo "$DCOUNT_NLO" \
         --nhi "$DCOUNT_NHI" \
