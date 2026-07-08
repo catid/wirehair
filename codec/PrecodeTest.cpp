@@ -17,15 +17,32 @@ namespace {
 
 bool TestParams()
 {
-    const wirehair_v2::PrecodeParams params =
-        wirehair_v2::MakeCertifiedParams(3200u, 1u);
-    if (params.Staircase != wirehair::GetDenseCount(3200u) ||
-        params.DenseRows != 12u ||
-        params.HeavyRows != 12u ||
-        params.SourceHits != 2u)
+    struct ParamCase
     {
-        std::fprintf(stderr, "certified params wrong for K=3200\n");
-        return false;
+        uint32_t K;
+        uint32_t SourceHits;
+    };
+    const ParamCase cases[] = {
+        { 3200u, 2u },
+        { 9999u, 2u },
+        { 10000u, 3u },
+        { 32000u, 3u },
+        { 64000u, 3u },
+    };
+    for (const ParamCase& c : cases)
+    {
+        const wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(c.K, 1u);
+        if (params.Staircase != wirehair::GetDenseCount(c.K) ||
+            params.DenseRows != 12u ||
+            params.HeavyRows != 12u ||
+            params.SourceHits != c.SourceHits)
+        {
+            std::fprintf(stderr,
+                "certified params wrong for K=%u (N1=%u, want %u)\n",
+                c.K, params.SourceHits, c.SourceHits);
+            return false;
+        }
     }
 
     // Out-of-domain block counts must not reach GetDenseCount (it

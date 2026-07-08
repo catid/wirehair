@@ -717,15 +717,19 @@ static GeneratedSystem GenerateSystem(
         }
 
         // Same incremental-generation accounting as LdpcDenseShuffle2:
-        // first-row accumulation, then two block XORs per subsequent row
-        const unsigned span = K + scheme.D + scheme.Dense2;
+        // first-row accumulation over known deck columns, then two block
+        // XORs per subsequent row.  Identity-corner rows own one dense
+        // output column each, which is not part of the known accumulation.
+        const unsigned deck_span = scheme.IdentCorner ?
+            K + scheme.D : K + scheme.D + scheme.Dense2;
         bool first_dense = true;
         for (const std::vector<uint32_t>& columns : codec_sys.DenseRowColumns)
         {
             SparseRow row;
             row.IsConstraint = true;
             row.Columns = columns;
-            sys.PrecodeGenXors += first_dense ? ((span + 1u) >> 1) : 2u;
+            sys.PrecodeGenXors +=
+                first_dense ? ((deck_span + 1u) >> 1) : 2u;
             first_dense = false;
             sys.Rows.push_back(std::move(row));
         }
@@ -1663,12 +1667,13 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
     {
         // Certified rule as ported to codec/WirehairV2Precode.cpp:
         // S = GetDenseCount(K), D2 = 12, default H = 12.  N1 defaults to
-        // the handoff verdict (2); codecport_n1<X> overrides it so the
-        // K=10000 n12-leak decision can be measured on the real port.
+        // the codec's banded verdict (2 below K=10000, 3 from K=10000
+        // upward); codecport_n1<X> overrides it so old n12/n13 controls
+        // remain reproducible on the real port.
         out.Kind = SchemeKind::CodecPort;
         out.D = dense_count;
         out.Dense2 = 12;
-        out.N1 = 2;
+        out.N1 = K >= 10000u ? 3u : 2u;
         if (body != "codecport")
         {
             unsigned n1 = 0;
@@ -2171,6 +2176,79 @@ static bool SelfTest()
                     }
                 }
             }
+        }
+    }
+
+    // codecport default follows the codec's K-banded N1 verdict, while
+    // explicit n1 suffixes remain fixed controls.
+    {
+        struct CodecPortCase
+        {
+            const char* Token;
+            unsigned K;
+            unsigned N1;
+            bool IdentCorner;
+        };
+        const CodecPortCase cases[] = {
+            { "codecport", 9999, 2, false },
+            { "codecport", 10000, 3, false },
+            { "codecport_n12", 10000, 2, false },
+            { "codecport_n13_ic", 10000, 3, true },
+        };
+        for (const CodecPortCase& c : cases)
+        {
+            Scheme scheme;
+            if (!MakeScheme(c.Token, c.K, scheme) ||
+                scheme.Kind != SchemeKind::CodecPort ||
+                scheme.N1 != c.N1 ||
+                scheme.IdentCorner != c.IdentCorner)
+            {
+                fprintf(stderr,
+                    "self-test: codecport default/override broke for %s K=%u\n",
+                    c.Token, c.K);
+                return false;
+            }
+        }
+    }
+
+    // codecport identity-corner value generation uses a K+S deck and an
+    // owned dense output column, so its first dense row should not be
+    // charged for the excluded D2 dense-column half.
+    {
+        const unsigned cost_k = 128;
+        const unsigned S = GetDenseCount((uint32_t)cost_k);
+        const unsigned D2 = 12;
+        Scheme non_ic, ic;
+        if (!MakeScheme("codecport_n13", cost_k, non_ic) ||
+            !MakeScheme("codecport_n13_ic", cost_k, ic))
+        {
+            fprintf(stderr, "self-test: bad codecport cost schemes\n");
+            return false;
+        }
+        const GeneratedSystem a = GenerateSystem(
+            non_ic, cost_k, 0, RowDist::LtM1C64, 3,
+            UINT64_C(0x1dca7c05));
+        const GeneratedSystem b = GenerateSystem(
+            ic, cost_k, 0, RowDist::LtM1C64, 3,
+            UINT64_C(0x1dca7c05));
+        const uint64_t staircase = 3ull * cost_k + S - 1u;
+        const uint64_t non_ic_model =
+            staircase + (((cost_k + S + D2) + 1u) >> 1) +
+            2ull * (D2 - 1u);
+        const uint64_t ic_model =
+            staircase + (((cost_k + S) + 1u) >> 1) +
+            2ull * (D2 - 1u);
+        if (a.PrecodeGenXors != non_ic_model ||
+            b.PrecodeGenXors != ic_model)
+        {
+            fprintf(stderr,
+                "self-test: codecport generation cost model broke "
+                "(non-ic=%llu/%llu ic=%llu/%llu)\n",
+                (unsigned long long)a.PrecodeGenXors,
+                (unsigned long long)non_ic_model,
+                (unsigned long long)b.PrecodeGenXors,
+                (unsigned long long)ic_model);
+            return false;
         }
     }
 

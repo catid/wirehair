@@ -392,10 +392,10 @@ bool TestFeasibility(uint32_t trials)
 
 bool TestCostModel()
 {
-    const uint32_t Ks[] = {16u, 1000u, 3200u};
+    const uint32_t Ks[] = {16u, 1000u, 3200u, 10000u};
     bool ok = true;
 
-    std::printf("\ncost check vs model 2K + S - 1 + ceil(span/2) + "
+    std::printf("\ncost check vs model min(N1,S)*K + S - 1 + ceil(span/2) + "
         "2*(D2-1):\n");
     for (const uint32_t K : Ks)
     {
@@ -423,7 +423,9 @@ bool TestCostModel()
         (void)wirehair_v2::ComputePrecodeValues(
             system, source.data(), bb, parity.data(), &stats);
 
-        const uint64_t staircase_model = 2ull * K + S - 1u;
+        const uint32_t hits =
+            system.Params.SourceHits < S ? system.Params.SourceHits : S;
+        const uint64_t staircase_model = (uint64_t)hits * K + S - 1u;
         const uint64_t dense_model =
             ((span + 1u) >> 1) + 2ull * (D2 - 1u);
         const uint64_t measured =

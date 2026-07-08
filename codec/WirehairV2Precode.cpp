@@ -8,6 +8,13 @@
 namespace wirehair_v2 {
 namespace {
 
+uint32_t CertifiedSourceHits(uint32_t block_count)
+{
+    // K=32000 codec-port certification rejects N1=2 at large K, while
+    // K=10000 is the transition point tracked in the Phase 4 notes.
+    return block_count >= 10000u ? 3u : 2u;
+}
+
 // Unbiased uniform in [0, bound) via Lemire multiply-shift rejection,
 // matching the simulator's corrected Rng::Below used for the codecport
 // certification (the earlier Phase B runs predate the Below threshold fix;
@@ -60,7 +67,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
         wirehair::GetDenseCount(block_count) : 0u;
     params.DenseRows = 12u;
     params.HeavyRows = 12u;
-    params.SourceHits = 2u;
+    params.SourceHits = CertifiedSourceHits(block_count);
     params.DenseIdentityCorner = false;
     params.Seed = seed;
     return params;

@@ -238,13 +238,14 @@ of LDPC parity generation, while buying much lower failure tails.
 
 `codecport_cert_K{1000,3200,10000}_20260702.csv` certify the codec-side
 construction (`codec/WirehairV2Precode.cpp`, exposed as scheme token
-`codecport`) with paired 20k-trial runs at seed `0x5eed0003` against dense
-and the Phase B reference.  The port differs from the reference on purpose:
-PCGRandom streams instead of splitmix, an UNBIASED Sattolo deck (production
-`ShuffleDeck16`'s 16-bit modulo draw skews set-half membership to
+`codecport` at the time; current binaries reproduce these rows with explicit
+`codecport_n12`) with paired 20k-trial runs at seed `0x5eed0003` against
+dense and the Phase B reference.  The port differs from the reference on
+purpose: PCGRandom streams instead of splitmix, an UNBIASED Sattolo deck
+(production `ShuffleDeck16`'s 16-bit modulo draw skews set-half membership to
 0.455-0.577 at span ~64000, which the Phase B runs never used), and N1=2
-staircase hits per the handoff verdict instead of the reference's default
-N1=3.
+staircase hits per the early handoff verdict instead of the reference's
+default N1=3.
 
 | K | dense fail OH0/OH1 | ref s2_h12 fail | codecport fail | codecport sparse vs ref | codecport gen vs ref |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -273,6 +274,14 @@ n12-vs-n13 combined-leak caveat surfacing; OH1 matches.  Both stay 15-20x
 below dense.  Phase 4 must decide: accept the OH0 leak, use N1=3 at the
 K=10000 table point only, or re-tune -- alongside the still-open
 K=32000/64000 coverage.
+
+`codecport_cert_K32000_20260702.csv` extends the paired codec-port check to
+K=32000 and rejects N1=2 for large K: dense fails 1.685%/0.115% at OH0/OH1,
+the reference `ldpcdense_s190_d12_s2_h12` fails 0.075%/0.030%, historical
+N1=2 `codecport` fails 0.980%/0.590%, and `codecport_n13` restores
+reference-level 0.090%/0.035%.  Current codec and simulator defaults
+therefore use N1=3 from K=10000 upward; explicit `codecport_n12` remains the
+old control.  K=64000 and identity-corner certification remain pending.
 
 ### Heavy Band
 

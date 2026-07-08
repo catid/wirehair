@@ -12,8 +12,9 @@
     results/SUMMARY.md "Ship Gate Decision"):
 
     - S = GetDenseCount(K) LDPC-staircase parity columns.  Each SOURCE column
-      connects to N1 distinct staircase parities; parity row j additionally
-      references its own parity column K+j and the staircase link K+j-1.
+      connects to N1 distinct staircase parities (N1 = 2 below K=10000,
+      N1 = 3 from K=10000 upward); parity row j additionally references its
+      own parity column K+j and the staircase link K+j-1.
     - D2 = 12 dense binary rows over all span = K + S + D2 binary columns,
       generated Shuffle-2 style: first row = the ceil(span/2) set-half of a
       shuffled deck, every subsequent row = previous row XOR two deck-driven
@@ -63,7 +64,8 @@ struct PrecodeParams
     uint64_t Seed;         ///< constraint-generation seed
 };
 
-/// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12, N1 = 2
+/// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12,
+/// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 
 struct PrecodeSystem
@@ -86,9 +88,13 @@ struct PrecodeSystem
         Shuffle-2 dense rows.
 
         Row r (r in [0, D2)) is a GF(2) constraint over binary columns
-        [0, K + S + D2), stored as a sorted column list.  Row 0 has exactly
-        ceil(span/2) columns; every row r > 0 differs from row r - 1 in
-        exactly two columns.
+        [0, K + S + D2), stored as a sorted column list.  In the certified
+        construction, row 0 has exactly ceil((K+S+D2)/2) columns and every
+        row r > 0 differs from row r - 1 in exactly two columns.  In the
+        identity-corner variant, the deck spans only K+S known columns and
+        each row additionally owns dense column K+S+r; consecutive full rows
+        differ in four columns, but their known-column part still changes by
+        exactly two deck flips.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified

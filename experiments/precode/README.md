@@ -152,6 +152,7 @@ default 4.0, fills in).
 | `ldpcdense_s<S>_d<D2>` | S staircase parity columns + D2 iid p=0.5 dense rows over all `K + S + D2` binary columns |
 | `ldpcdense_n1<X>_s<S>_d<D2>` | same, but each SOURCE column connects to X (2, 3 or 4) distinct staircase parities; `_n1` absent = 3 (token and RNG-stream compatible with the historical behavior) |
 | `ldpcdense...`+`_s2` | D2 rows generated Shuffle-2-style instead of iid (exact rule below); combines with `_n1<X>`, e.g. `ldpcdense_n12_s50_d12_s2` |
+| `codecport[_n1<X>][_ic]` | real codec-side V2 precode construction: `S = GetDenseCount(K)`, `D2 = 12`, H=12, default N1=2 below K=10000 and N1=3 from K=10000 upward; `_n1<X>` pins a comparison value (for example `codecport_n12`, `codecport_n13_ic`), and `_ic` uses the identity-corner dense variant |
 | `heavyonly` | no binary precode, heavy only (default H=16) |
 | any token + `_h<H>` | override heavy row count (after `_s2` when both present: `..._s2_h<H>`) |
 

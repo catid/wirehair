@@ -13,8 +13,8 @@
     [source | staircase | dense | heavy]:
 
     - STAIRCASE rows solve by one forward pass: parity j is the XOR of its
-      row's other columns (source hits + the j-1 link), exactly the certified
-      2K + S - 1 block ops at N1 = 2.
+      row's other columns (source hits + the j-1 link), exactly
+      min(N1,S)*K + S - 1 block ops.
     - Shuffle-2 DENSE rows couple all D2 dense parity values, because every
       row spans source, staircase AND dense columns.  The rows are
       transformed to consecutive-row differences (an invertible unit
@@ -44,7 +44,8 @@ namespace wirehair_v2 {
 
 struct PrecodeEncodeStats
 {
-    /// Staircase forward pass block ops (certified model: 2K + S - 1)
+    /// Staircase forward pass block ops
+    /// (certified model: min(N1,S)*K + S - 1)
     uint64_t StaircaseBlockOps;
 
     /// Dense difference-row known-part block ops
