@@ -233,6 +233,11 @@ void CheckGeneratedRows(
     Check(rows == rows_repeat, "generated matrix rows should be deterministic");
     for (size_t i = 0; i < rows.size(); ++i)
     {
+        const std::vector<uint16_t> single =
+            wirehair_v2::GeneratePeelMatrixRow(
+                codec, block_count, (uint32_t)i, seed);
+        Check(single == rows[i],
+            "single peel row should match generated matrix row");
         Check(!rows[i].empty(), "generated row should not be empty");
         Check(rows[i].size() <= codec.MaxDegree,
             "generated row should obey degree cap");
@@ -273,6 +278,11 @@ void CheckGeneratedRecoveryRows()
     for (size_t i = 0; i < rows.size(); ++i)
     {
         const std::vector<uint32_t>& row = rows[i];
+        const std::vector<uint32_t> single =
+            wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, precode_count, (uint32_t)i, mix_count, seed);
+        Check(single == row,
+            "single recovery row should match generated matrix row");
         Check(row.size() == source_rows[i].size() + mix_count,
             "recovery row should append precode mix columns");
         for (size_t j = 0; j < source_rows[i].size(); ++j) {
@@ -323,6 +333,10 @@ void CheckGeneratedRecoveryRows()
             codec, K, precode_count, wirehair_v2::kMaxPeelMatrixRows + 1u,
             mix_count, seed).empty(),
         "recovery row generator should reject unrepresentable row counts");
+    Check(wirehair_v2::GenerateRecoveryMatrixRow(
+            codec, K, precode_count, wirehair_v2::kMaxPeelMatrixRows,
+            mix_count, seed).empty(),
+        "single recovery row generator should reject unrepresentable index");
 }
 
 void CheckPeelRowCountBounds()
@@ -338,6 +352,13 @@ void CheckPeelRowCountBounds()
             UINT64_C(0x1234));
     Check(too_many_generated.empty(),
         "peel row generation should reject unrepresentable row indexes");
+
+    const std::vector<uint16_t> bad_single =
+        wirehair_v2::GeneratePeelMatrixRow(
+            codec, 2u, wirehair_v2::kMaxPeelMatrixRows,
+            UINT64_C(0x1234));
+    Check(bad_single.empty(),
+        "single peel row generation should reject unrepresentable row index");
 
     std::vector<std::vector<uint16_t> > too_many_rows(
         wirehair_v2::kMaxPeelMatrixRows + 1u);

@@ -56,10 +56,14 @@ base profile with real trials, or `seedtable` for offline diagnostics.
 combines `PeelingCodec` + `SeedProfile` into a deterministic matrix seed,
 generates rows, and runs the selected peel solver/evaluator.  The seed-table
 and benchmark commands use this path so matrix statistics stay consistent.
+`GeneratePeelMatrixRow()` replays the same deterministic stream to return one
+zero-based row, which is useful for block-id-indexed encoder paths.
 `GenerateRecoveryMatrixRows()` is the corresponding V2 recovery-row helper for
 the real precode path: it keeps the source-column prefix identical to
 `GeneratePeelMatrixRows()` for the same seed, then appends distinct columns from
 the intermediate precode range `[K, K + S + D2 + H)`.
+`GenerateRecoveryMatrixRow()` provides the matching single-row lookup for one
+recovery block index; use the batch form for adjacent rows.
 `ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
 intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full

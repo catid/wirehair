@@ -28,6 +28,17 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     uint64_t seed);
 
 /**
+    Generate one peel row by replaying the same deterministic row stream used
+    by GeneratePeelMatrixRows().  `row_index` is zero-based and must be below
+    kMaxPeelMatrixRows.
+*/
+std::vector<uint16_t> GeneratePeelMatrixRow(
+    const PeelingCodec& codec,
+    uint32_t block_count,
+    uint32_t row_index,
+    uint64_t seed);
+
+/**
     Generate recovery rows over the full V2 intermediate-symbol domain:
     source columns [0, source_count) followed by precode columns
     [source_count, source_count + precode_count).
@@ -42,6 +53,20 @@ std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
     uint32_t source_count,
     uint32_t precode_count,
     uint32_t row_count,
+    uint32_t mix_count,
+    uint64_t seed);
+
+/**
+    Generate one recovery row by replaying the same deterministic row stream
+    used by GenerateRecoveryMatrixRows().  This is the encoder-facing mapping
+    from recovery block index to the V2 intermediate-symbol row; callers that
+    need many adjacent rows should use the batch API above.
+*/
+std::vector<uint32_t> GenerateRecoveryMatrixRow(
+    const PeelingCodec& codec,
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t row_index,
     uint32_t mix_count,
     uint64_t seed);
 

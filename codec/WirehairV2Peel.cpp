@@ -267,6 +267,41 @@ void AddDistinctOffsetColumns(
     }
 }
 
+std::vector<uint16_t> DrawPeelRow(
+    const DegreeSampler& degrees,
+    uint32_t block_count,
+    Rng& rng)
+{
+    const uint32_t degree = degrees.Sample(rng);
+    return RandomRowColumns(block_count, degree, rng);
+}
+
+std::vector<uint32_t> DrawRecoveryRow(
+    const DegreeSampler& degrees,
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t mix_count,
+    Rng& source_rng,
+    Rng& mix_rng)
+{
+    const std::vector<uint16_t> source_columns =
+        DrawPeelRow(degrees, source_count, source_rng);
+
+    std::vector<uint32_t> row;
+    row.reserve(source_columns.size() +
+        (mix_count < precode_count ? mix_count : precode_count));
+    for (uint16_t column : source_columns) {
+        row.push_back(column);
+    }
+    AddDistinctOffsetColumns(
+        row,
+        source_count,
+        precode_count,
+        mix_count,
+        mix_rng);
+    return row;
+}
+
 struct RowState
 {
     std::vector<uint16_t> Columns;
@@ -834,10 +869,31 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
     {
-        const uint32_t degree = degrees.Sample(rng);
-        rows.push_back(RandomRowColumns(block_count, degree, rng));
+        rows.push_back(DrawPeelRow(degrees, block_count, rng));
     }
     return rows;
+}
+
+std::vector<uint16_t> GeneratePeelMatrixRow(
+    const PeelingCodec& codec,
+    uint32_t block_count,
+    uint32_t row_index,
+    uint64_t seed)
+{
+    if (block_count == 0u ||
+        block_count > UINT16_MAX ||
+        row_index >= kMaxPeelMatrixRows)
+    {
+        return std::vector<uint16_t>();
+    }
+
+    Rng rng(seed);
+    const DegreeSampler degrees(codec, block_count);
+    std::vector<uint16_t> row;
+    for (uint32_t r = 0; r <= row_index; ++r) {
+        row = DrawPeelRow(degrees, block_count, rng);
+    }
+    return row;
 }
 
 std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
@@ -863,25 +919,40 @@ std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
     {
-        const uint32_t degree = degrees.Sample(source_rng);
-        const std::vector<uint16_t> source_columns =
-            RandomRowColumns(source_count, degree, source_rng);
-
-        std::vector<uint32_t> row;
-        row.reserve(source_columns.size() +
-            (mix_count < precode_count ? mix_count : precode_count));
-        for (uint16_t column : source_columns) {
-            row.push_back(column);
-        }
-        AddDistinctOffsetColumns(
-            row,
-            source_count,
-            precode_count,
-            mix_count,
-            mix_rng);
-        rows.push_back(std::move(row));
+        rows.push_back(DrawRecoveryRow(
+            degrees, source_count, precode_count, mix_count,
+            source_rng, mix_rng));
     }
     return rows;
+}
+
+std::vector<uint32_t> GenerateRecoveryMatrixRow(
+    const PeelingCodec& codec,
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t row_index,
+    uint32_t mix_count,
+    uint64_t seed)
+{
+    if (source_count == 0u ||
+        source_count > UINT16_MAX ||
+        row_index >= kMaxPeelMatrixRows ||
+        precode_count > UINT16_MAX - source_count)
+    {
+        return std::vector<uint32_t>();
+    }
+
+    Rng source_rng(seed);
+    Rng mix_rng(seed ^ UINT64_C(0x9e3779b97f4a7c15));
+    const DegreeSampler degrees(codec, source_count);
+    std::vector<uint32_t> row;
+    for (uint32_t r = 0; r <= row_index; ++r)
+    {
+        row = DrawRecoveryRow(
+            degrees, source_count, precode_count, mix_count,
+            source_rng, mix_rng);
+    }
+    return row;
 }
 
 PeelEvaluation EvaluatePeeling(
