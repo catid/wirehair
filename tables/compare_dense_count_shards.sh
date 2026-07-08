@@ -56,8 +56,8 @@ int main()
     int min_delta = 0;
     int max_delta = 0;
     long long delta_sum = 0;
+    bool header_printed = false;
 
-    std::cout << "Source\tN\tCurrentDense\tGeneratedDense\tDelta\n";
     while (std::getline(std::cin, line))
     {
         const std::string::size_type tab1 = line.find('\t');
@@ -75,6 +75,10 @@ int main()
         const unsigned current = wirehair::GetDenseCount(n);
         const int delta = (int)generated - (int)current;
         ++total;
+        if (!header_printed) {
+            std::cout << "Source\tN\tCurrentDense\tGeneratedDense\tDelta\n";
+            header_printed = true;
+        }
         if (delta == 0) {
             continue;
         }
@@ -115,11 +119,34 @@ int main()
 }
 CPP
 
+records="$tmpdir/dense_count_records.tsv"
 for input in "${inputs[@]}"; do
     awk -v source="$input" '
-        NR == 1 { next }
-        NF >= 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+        function is_uint(value) {
+            return value ~ /^[0-9]+$/
+        }
+
+        function is_number(value) {
+            return value ~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/
+        }
+
+        FNR == 1 { next }
+        NF == 0 { next }
+        NF >= 3 && is_uint($1) && is_uint($2) && is_number($3) {
             printf "%s\t%s\t%s\n", source, $1, $2
+            next
+        }
+        {
+            printf "malformed dense-count row: %s:%u: %s\n",
+                source, FNR, $0 > "/dev/stderr"
+            exit 1
         }
     ' "$input"
-done | "$tmpdir/compare_dense_count"
+done > "$records"
+
+if [[ ! -s "$records" ]]; then
+    echo "no dense-count rows found" >&2
+    exit 1
+fi
+
+"$tmpdir/compare_dense_count" < "$records"
