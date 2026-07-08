@@ -72,6 +72,13 @@ that mapping for encoder block IDs: `block_id < K` copies a source block, and
 `block_id >= K` evaluates recovery row `block_id - K`.  `PrecodeEncoder`
 caches the computed precode parity blocks and exposes the same block-id encode
 mapping without requiring callers to manage the parity buffer directly.
+`MessagePrecodeEncoder` is the message-level adapter: it owns the zero-padded
+source block array for arbitrary message bytes and reports the partial byte
+count for the final source block while emitting full-size recovery blocks.  Its
+default options follow the certified dense corner, which is usually not
+encoder-feasible for direct parity precomputation; use the identity-corner
+option only for explicit encoder-feasibility experiments pending
+recertification.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and

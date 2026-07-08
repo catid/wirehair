@@ -2,6 +2,7 @@
 
 #include "WirehairV2Peel.h"
 #include "WirehairV2Precode.h"
+#include "WirehairV2Seeds.h"
 
 #include <stdint.h>
 #include <vector>
@@ -43,6 +44,12 @@
 */
 
 namespace wirehair_v2 {
+
+static const uint32_t kDefaultRecoveryMixCount = 5u;
+static const uint64_t kMessagePrecodeSeedSalt =
+    UINT64_C(0x763263707265636f);
+static const uint64_t kMessageRecoveryRowSeedSalt =
+    UINT64_C(0x76327265636f7665);
 
 struct PrecodeEncodeStats
 {
@@ -194,6 +201,69 @@ private:
     uint32_t BlockBytesValue = 0;
     std::vector<uint8_t> ParityBlockStorage;
     PrecodeEncodeStats StatsValue = {};
+    bool Initialized = false;
+};
+
+struct MessagePrecodeEncoderOptions
+{
+    uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
+    bool DenseIdentityCorner = false;
+    uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
+    uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
+};
+
+/**
+    Message-level adapter for the V2 precode encoder.
+
+    This owns the zero-padded source block array for an arbitrary byte-length
+    message, derives the certified precode system and recovery-row seed from a
+    SeedProfile, and exposes V1-style encode semantics: source block ids emit
+    only the original byte count for the final partial block, while recovery
+    block ids emit a full block.
+
+    The default options preserve the certified dense corner, which is often not
+    directly encoder-feasible for phased parity precomputation.  Set
+    DenseIdentityCorner=true only for explicit encoder-feasibility experiments
+    pending recertification of that variant.
+*/
+class MessagePrecodeEncoder
+{
+public:
+    MessagePrecodeEncoder();
+    MessagePrecodeEncoder(const MessagePrecodeEncoder&) = delete;
+    MessagePrecodeEncoder& operator=(const MessagePrecodeEncoder&) = delete;
+
+    bool Initialize(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = nullptr,
+        const MessagePrecodeEncoderOptions* options = nullptr);
+
+    bool Encode(
+        uint32_t block_id,
+        uint8_t* block_out,
+        uint32_t out_bytes,
+        uint32_t* data_bytes_out,
+        uint64_t* block_ops_out = nullptr) const;
+
+    bool IsInitialized() const;
+    uint64_t MessageBytes() const;
+    uint32_t SourceBlockCount() const;
+    uint32_t BlockBytes() const;
+    const SeedProfile& Profile() const;
+    const MessagePrecodeEncoderOptions& Options() const;
+    const PrecodeEncodeStats& EncodeStats() const;
+    const uint8_t* SourceBlocks() const;
+    const PrecodeEncoder& BlockEncoder() const;
+
+private:
+    SeedProfile ProfileValue = {};
+    MessagePrecodeEncoderOptions OptionsValue;
+    PrecodeEncoder EncoderValue;
+    std::vector<uint8_t> SourceBlockStorage;
+    uint64_t MessageBytesValue = 0;
+    uint32_t BlockBytesValue = 0;
     bool Initialized = false;
 };
 

@@ -826,6 +826,156 @@ bool TestRecoveryBlockEncoding()
     return true;
 }
 
+bool TestMessagePrecodeEncoder()
+{
+    const uint32_t K = 1000u;
+    const uint32_t bb = 37u;
+    const uint32_t tail = 13u;
+    const uint64_t message_bytes = (uint64_t)(K - 1u) * bb + tail;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    FillRandomBlocks(message.data(), message.size(), UINT64_C(0x1234beef));
+
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.DenseIdentityCorner = true;
+    options.RecoveryMixCount = 5u;
+
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    if (!encoder.Initialize(
+            message.data(), message_bytes, bb, nullptr, &options))
+    {
+        std::fprintf(stderr,
+            "message encoder: identity-corner initialize failed\n");
+        return false;
+    }
+    if (!encoder.IsInitialized() ||
+        encoder.MessageBytes() != message_bytes ||
+        encoder.SourceBlockCount() != K ||
+        encoder.BlockBytes() != bb ||
+        encoder.Profile().BlockCount != K ||
+        encoder.Profile().BlockBytes != bb ||
+        encoder.Options().RecoveryMixCount != options.RecoveryMixCount ||
+        !encoder.Options().DenseIdentityCorner ||
+        !encoder.SourceBlocks() ||
+        !encoder.BlockEncoder().IsInitialized())
+    {
+        std::fprintf(stderr, "message encoder: accessors failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> got(bb, 0xac), want(bb, 0xbd);
+    uint32_t data_bytes = UINT32_MAX;
+    uint64_t ops = UINT64_MAX;
+    if (!encoder.Encode(0u, got.data(), bb, &data_bytes, &ops) ||
+        data_bytes != bb ||
+        ops != 1u ||
+        std::memcmp(got.data(), message.data(), bb) != 0)
+    {
+        std::fprintf(stderr, "message encoder: source block failed\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    const uint8_t* tail_src =
+        message.data() + (size_t)(K - 1u) * bb;
+    if (!encoder.Encode(K - 1u, got.data(), tail, &data_bytes, &ops) ||
+        data_bytes != tail ||
+        ops != 1u ||
+        std::memcmp(got.data(), tail_src, tail) != 0 ||
+        !std::all_of(got.begin() + tail, got.end(),
+            [](uint8_t x) { return x == 0xacu; }))
+    {
+        std::fprintf(stderr, "message encoder: final partial source failed\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    data_bytes = UINT32_MAX;
+    ops = UINT64_MAX;
+    if (encoder.Encode(K - 1u, got.data(), tail - 1u, &data_bytes, &ops) ||
+        data_bytes != 0u ||
+        ops != 0u ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }))
+    {
+        std::fprintf(stderr,
+            "message encoder: short partial-source buffer should fail\n");
+        return false;
+    }
+
+    const uint32_t recovery_id = K + 3u;
+    std::fill(got.begin(), got.end(), 0xacu);
+    if (!encoder.Encode(recovery_id, got.data(), bb, &data_bytes, &ops) ||
+        data_bytes != bb ||
+        ops == 0u)
+    {
+        std::fprintf(stderr, "message encoder: recovery block failed\n");
+        return false;
+    }
+    uint64_t want_ops = UINT64_MAX;
+    if (!encoder.BlockEncoder().Encode(
+            recovery_id, want.data(), &want_ops) ||
+        want_ops != ops ||
+        !EqualBlock(got.data(), want.data(), bb))
+    {
+        std::fprintf(stderr,
+            "message encoder: recovery block mismatch\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), 0xacu);
+    data_bytes = UINT32_MAX;
+    ops = UINT64_MAX;
+    if (encoder.Encode(recovery_id, got.data(), bb - 1u, &data_bytes, &ops) ||
+        data_bytes != 0u ||
+        ops != 0u ||
+        !std::all_of(got.begin(), got.end(),
+            [](uint8_t x) { return x == 0xacu; }))
+    {
+        std::fprintf(stderr,
+            "message encoder: short recovery buffer should fail\n");
+        return false;
+    }
+
+    wirehair_v2::SeedProfile mismatch =
+        wirehair_v2::SelectSeedProfile(K, bb);
+    ++mismatch.BlockCount;
+    if (encoder.Initialize(
+            message.data(), message_bytes, bb, &mismatch, &options) ||
+        encoder.IsInitialized() ||
+        encoder.SourceBlocks() ||
+        encoder.SourceBlockCount() != 0u ||
+        encoder.BlockEncoder().IsInitialized())
+    {
+        std::fprintf(stderr,
+            "message encoder: failed reinitialize should clear state\n");
+        return false;
+    }
+
+    if (encoder.Initialize(nullptr, message_bytes, bb, nullptr, &options) ||
+        encoder.IsInitialized())
+    {
+        std::fprintf(stderr,
+            "message encoder: null message should fail\n");
+        return false;
+    }
+    const uint8_t dummy = 0u;
+    if (encoder.Initialize(
+            &dummy,
+            UINT64_C(0x100000000),
+            UINT32_C(0x80000000),
+            nullptr,
+            &options) ||
+        encoder.IsInitialized())
+    {
+        std::fprintf(stderr,
+            "message encoder: oversized block should fail before allocation\n");
+        return false;
+    }
+
+    std::printf("message precode encoder: PASS\n");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -846,6 +996,7 @@ int main(int argc, char** argv)
     ok = TestMalformedDenseCorner() && ok;
     ok = TestCostModel() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
+    ok = TestMessagePrecodeEncoder() && ok;
     ok = TestFeasibility(trials) && ok;
 
     if (!ok) {
