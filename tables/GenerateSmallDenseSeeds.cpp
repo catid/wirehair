@@ -2,6 +2,10 @@
 
 #include "../WirehairCodec.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -10,8 +14,6 @@
 using namespace std;
 
 //#define ENABLE_FULL_SEARCH
-
-static const int kTrials = 3500;
 
 
 #if !defined(ENABLE_FULL_SEARCH)
@@ -396,8 +398,99 @@ static unsigned GetDenseCountGuess(unsigned N)
     return dense_count;
 }
 
-int main()
+static bool ParseU64(const char* text, uint64_t& out)
 {
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = strtoull(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
+static bool ParseUnsigned(const char* text, unsigned& out)
+{
+    uint64_t value = 0;
+    if (!ParseU64(text, value) || value > UINT_MAX) {
+        return false;
+    }
+    out = (unsigned)value;
+    return true;
+}
+
+static void Usage(const char* program)
+{
+    cerr
+        << "usage: " << program << " [--seed U64] [--trials N] "
+        << "[--nlo N] [--nhi N]\n";
+}
+
+int main(int argc, char** argv)
+{
+    uint64_t seed = siamese::GetTimeUsec();
+    unsigned trials = 3500;
+    unsigned nlo = 2;
+    unsigned nhi = kTinyTableCount + kSmallTableCount - 1u;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* arg = argv[i];
+        auto next = [&]() -> const char* {
+            if (i + 1 >= argc) {
+                cerr << "missing value for " << arg << endl;
+                Usage(argv[0]);
+                exit(1);
+            }
+            return argv[++i];
+        };
+        if (!strcmp(arg, "--seed")) {
+            if (!ParseU64(next(), seed)) {
+                cerr << "bad --seed value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--trials")) {
+            if (!ParseUnsigned(next(), trials) || trials == 0 ||
+                trials > (unsigned)INT_MAX)
+            {
+                cerr << "bad --trials value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nlo")) {
+            if (!ParseUnsigned(next(), nlo)) {
+                cerr << "bad --nlo value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nhi")) {
+            if (!ParseUnsigned(next(), nhi)) {
+                cerr << "bad --nhi value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--help")) {
+            Usage(argv[0]);
+            return 0;
+        }
+        else {
+            cerr << "unknown argument " << arg << endl;
+            Usage(argv[0]);
+            return 1;
+        }
+    }
+
+    const unsigned maxN = kTinyTableCount + kSmallTableCount - 1u;
+    if (nlo < 2u || nhi > maxN || nlo > nhi) {
+        cerr << "N range must be in [2, " << maxN << "]" << endl;
+        return 1;
+    }
+
     FillTables();
 
     const int gfInitResult = gf256_init();
@@ -413,20 +506,31 @@ int main()
         Message[i] = (uint8_t)i;
     }
 
-    uint64_t seed = siamese::GetTimeUsec();
+    cerr
+        << "# GenerateSmallDenseSeeds seed=0x" << hex << seed << dec
+        << " trials=" << trials
+        << " nlo=" << nlo
+        << " nhi=" << nhi << endl;
 
 #ifdef ENABLE_FULL_SEARCH
     static const int N_Min = 2;
     static const int N_Max = kTinyTableCount + kSmallTableCount - 1;
     for (int N = N_Min; N <= N_Max; ++N)
     {
+        if ((unsigned)N < nlo || (unsigned)N > nhi) {
+            continue;
+        }
 #else
     // This allows me to run the Unit Test to evaluate seeds, and then
     // the ones that tend to fail too much can be put in this list and
     // refined further.
-    for (int N_i = 0; N_i < sizeof(N_List) / sizeof(N_List[0]); ++N_i)
+    const int nListCount = (int)(sizeof(N_List) / sizeof(N_List[0]));
+    for (int N_i = 0; N_i < nListCount; ++N_i)
     {
         int N = N_List[N_i];
+        if ((unsigned)N < nlo || (unsigned)N > nhi) {
+            continue;
+        }
 #endif
 
         int countGuess = (int)GetDenseCountGuess(N);
@@ -466,7 +570,7 @@ int main()
                 FailedTrials = 0;
 
 #pragma omp parallel for
-                for (int trial = 0; trial < kTrials; ++trial) {
+                for (int trial = 0; trial < (int)trials; ++trial) {
                     RandomTrial(N, count, seed, (uint16_t)d_seed, trial);
                 }
 
@@ -542,7 +646,7 @@ int main()
 
         cout << "N = " << N << ": Best peel seed = " << bestPeelSeed << " fails = " << bestPeelFails << endl;
 
-        if (N < kTinyTableCount) {
+        if ((unsigned)N < kTinyTableCount) {
             kTinyDenseCounts[N] = (uint8_t)best_count;
             kTinyDenseSeeds[N] = (uint16_t)best_seed;
         }
