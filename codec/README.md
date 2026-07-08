@@ -111,7 +111,9 @@ the underlying solver, then exposes encode/decode/recover methods.  Production
 codec files are not modified by this wrapper.  The facade still emits and
 decodes V1-compatible recovery packets; the certified V2 precode block-data
 path is exposed by the helper APIs above until the matching V2 decoder is
-ported.
+ported.  `InitializePrecodeEncoder()` is an explicit experimental encoder-only
+entry point that routes `Encode()` through `MessagePrecodeEncoder`; do not feed
+those recovery packets to the facade decoder until the V2 decoder is ported.
 
 Validation:
 

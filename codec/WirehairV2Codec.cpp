@@ -3,6 +3,8 @@
 #include "../WirehairTools.h"
 #include "../gf256.h"
 
+#include <utility>
+
 namespace wirehair_v2 {
 namespace {
 
@@ -92,8 +94,49 @@ WirehairResult Codec::InitializeEncoder(
     if (result == Wirehair_Success) {
         // Only publish the profile for initializations that succeeded
         CurrentProfile = profile;
+        PrecodeImpl.reset();
     }
     return result;
+}
+
+WirehairResult Codec::InitializePrecodeEncoder(
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const SeedProfile* seed_override,
+    const MessagePrecodeEncoderOptions* options)
+{
+    if (!message) {
+        return Wirehair_InvalidInput;
+    }
+    const WirehairResult gf_result = EnsureGf256Initialized();
+    if (gf_result != Wirehair_Success) {
+        return gf_result;
+    }
+    const WirehairResult input_result =
+        ValidateCodecInput(message_bytes, block_bytes);
+    if (input_result != Wirehair_Success) {
+        return input_result;
+    }
+
+    const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
+    if (seed_override &&
+        (seed_override->BlockCount != block_count ||
+         seed_override->BlockBytes != block_bytes))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    std::unique_ptr<MessagePrecodeEncoder> next(new MessagePrecodeEncoder());
+    if (!next->Initialize(
+            message, message_bytes, block_bytes, seed_override, options))
+    {
+        return Wirehair_BadDenseSeed;
+    }
+
+    CurrentProfile = next->Profile();
+    PrecodeImpl = std::move(next);
+    return Wirehair_Success;
 }
 
 WirehairResult Codec::InitializeDecoder(
@@ -131,6 +174,7 @@ WirehairResult Codec::InitializeDecoder(
     if (result == Wirehair_Success) {
         // Only publish the profile for initializations that succeeded
         CurrentProfile = profile;
+        PrecodeImpl.reset();
     }
     return result;
 }
@@ -143,6 +187,16 @@ WirehairResult Codec::Encode(
 {
     if (!block_out || !data_bytes_out) {
         return Wirehair_InvalidInput;
+    }
+    if (PrecodeImpl && PrecodeImpl->IsInitialized())
+    {
+        return PrecodeImpl->Encode(
+            block_id,
+            static_cast<uint8_t*>(block_out),
+            out_bytes,
+            data_bytes_out) ?
+            Wirehair_Success :
+            Wirehair_InvalidInput;
     }
     const uint32_t written = Impl.Encode(block_id, block_out, out_bytes);
     *data_bytes_out = written;
@@ -157,6 +211,9 @@ WirehairResult Codec::Decode(
     const void* block_in,
     uint32_t block_bytes)
 {
+    if (PrecodeImpl && PrecodeImpl->IsInitialized()) {
+        return Wirehair_InvalidInput;
+    }
     if (!block_in || block_bytes == 0u) {
         return Wirehair_InvalidInput;
     }
@@ -165,6 +222,9 @@ WirehairResult Codec::Decode(
 
 WirehairResult Codec::Recover(void* message_out, uint64_t message_bytes)
 {
+    if (PrecodeImpl && PrecodeImpl->IsInitialized()) {
+        return Wirehair_InvalidInput;
+    }
     if (!message_out) {
         return Wirehair_InvalidInput;
     }

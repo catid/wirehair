@@ -134,6 +134,116 @@ void CheckV2RoundTrip()
         "v2 recovered message should match input");
 }
 
+void CheckV2PrecodeEncoderFacade()
+{
+    using namespace wirehair_v2;
+
+    const uint32_t N = 1000u;
+    const uint32_t block_bytes = 37u;
+    const uint32_t final_bytes = 13u;
+    const uint64_t message_bytes =
+        (uint64_t)(N - 1u) * block_bytes + final_bytes;
+
+    std::vector<uint8_t> message((size_t)message_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 29u + 11u);
+    }
+
+    MessagePrecodeEncoderOptions options;
+    options.DenseIdentityCorner = true;
+    options.RecoveryMixCount = 5u;
+
+    Codec encoder;
+    Check(encoder.InitializePrecodeEncoder(
+            &message[0], message_bytes, block_bytes, 0, &options) ==
+            Wirehair_Success,
+        "v2 precode facade initialization should succeed");
+    Check(encoder.Profile().BlockCount == N &&
+            encoder.Profile().BlockBytes == block_bytes,
+        "v2 precode facade should publish selected profile");
+
+    MessagePrecodeEncoder reference;
+    Check(reference.Initialize(
+            &message[0], message_bytes, block_bytes,
+            &encoder.Profile(), &options),
+        "v2 precode reference initialization should succeed");
+
+    std::vector<uint8_t> got(block_bytes, 0xac);
+    std::vector<uint8_t> want(block_bytes, 0xbd);
+    uint32_t written = 0;
+    Check(encoder.Encode(0u, &got[0], block_bytes, &written) ==
+            Wirehair_Success,
+        "v2 precode facade should encode a source block");
+    Check(written == block_bytes &&
+            std::memcmp(&got[0], &message[0], block_bytes) == 0,
+        "v2 precode facade source block should match input");
+
+    for (size_t i = 0; i < got.size(); ++i) {
+        got[i] = 0xac;
+    }
+    Check(encoder.Encode(N - 1u, &got[0], final_bytes, &written) ==
+            Wirehair_Success,
+        "v2 precode facade should encode a partial final source block");
+    Check(written == final_bytes &&
+            std::memcmp(
+                &got[0],
+                &message[(size_t)(N - 1u) * block_bytes],
+                final_bytes) == 0,
+        "v2 precode facade final source bytes should match input");
+    bool tail_untouched = true;
+    for (uint32_t i = final_bytes; i < block_bytes; ++i) {
+        tail_untouched = tail_untouched && got[i] == 0xac;
+    }
+    Check(tail_untouched,
+        "v2 precode facade should not write beyond final source bytes");
+
+    const uint32_t recovery_id = N + 5u;
+    uint32_t want_written = 0;
+    Check(encoder.Encode(recovery_id, &got[0], block_bytes, &written) ==
+            Wirehair_Success,
+        "v2 precode facade should encode a recovery block");
+    Check(reference.Encode(
+            recovery_id, &want[0], block_bytes, &want_written),
+        "v2 precode reference should encode matching recovery block");
+    Check(written == block_bytes &&
+            want_written == block_bytes &&
+            std::memcmp(&got[0], &want[0], block_bytes) == 0,
+        "v2 precode facade recovery block should match reference");
+    Check(encoder.Decode(recovery_id, &got[0], block_bytes) ==
+            Wirehair_InvalidInput,
+        "v2 precode facade should reject decode in encoder-only mode");
+    std::vector<uint8_t> recovered((size_t)message_bytes);
+    Check(encoder.Recover(&recovered[0], message_bytes) ==
+            Wirehair_InvalidInput,
+        "v2 precode facade should reject recover in encoder-only mode");
+
+    const SeedProfile good_profile = encoder.Profile();
+    SeedProfile mismatch = good_profile;
+    ++mismatch.BlockCount;
+    Check(encoder.InitializePrecodeEncoder(
+            &message[0], message_bytes, block_bytes, &mismatch, &options) ==
+            Wirehair_InvalidInput,
+        "v2 precode facade should reject mismatched seed overrides");
+    Check(encoder.Profile().BlockCount == good_profile.BlockCount &&
+            encoder.Profile().BlockBytes == good_profile.BlockBytes,
+        "v2 precode failed init should preserve profile");
+    Check(encoder.Encode(recovery_id, &got[0], block_bytes, &written) ==
+            Wirehair_Success &&
+            std::memcmp(&got[0], &want[0], block_bytes) == 0,
+        "v2 precode failed init should preserve last good encoder");
+
+    Check(encoder.InitializeEncoder(
+            &message[0], message_bytes, block_bytes) == Wirehair_Success,
+        "v2 facade should switch back to the existing encoder");
+    for (size_t i = 0; i < got.size(); ++i) {
+        got[i] = 0xac;
+    }
+    Check(encoder.Encode(N - 1u, &got[0], final_bytes, &written) ==
+            Wirehair_Success &&
+            written == final_bytes,
+        "v2 existing encoder should remain usable after precode mode");
+}
+
 void CheckV2InvalidInitialization()
 {
     const uint32_t N = 40u;
@@ -902,6 +1012,7 @@ int main()
     }
 
     CheckV2RoundTrip();
+    CheckV2PrecodeEncoderFacade();
 
     if (Failures != 0) {
         return 1;

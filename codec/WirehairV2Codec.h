@@ -1,8 +1,11 @@
 #pragma once
 
+#include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Seeds.h"
 
 #include "../WirehairCodec.h"
+
+#include <memory>
 
 namespace wirehair_v2 {
 
@@ -17,6 +20,13 @@ public:
         uint64_t message_bytes,
         uint32_t block_bytes,
         const SeedProfile* seed_override = 0);
+
+    WirehairResult InitializePrecodeEncoder(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = 0,
+        const MessagePrecodeEncoderOptions* options = 0);
 
     WirehairResult InitializeDecoder(
         uint64_t message_bytes,
@@ -40,6 +50,7 @@ public:
 
 private:
     wirehair::Codec Impl;
+    std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;
     SeedProfile CurrentProfile;
 };
 
