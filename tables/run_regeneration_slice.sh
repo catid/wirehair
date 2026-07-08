@@ -5,6 +5,13 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build"}
 OUT_DIR=${OUT_DIR:-"$ROOT_DIR/tables/results/slice_$(date -u +%Y%m%dT%H%M%SZ)"}
 REPEAT=${REPEAT:-1}
+BUILD_GENERATORS=${BUILD_GENERATORS:-1}
+
+RUN_DENSE_COUNT=${RUN_DENSE_COUNT:-1}
+RUN_PEEL_SEEDS=${RUN_PEEL_SEEDS:-1}
+RUN_MOST_DENSE_SEEDS=${RUN_MOST_DENSE_SEEDS:-1}
+RUN_SMALL_DENSE_SEEDS=${RUN_SMALL_DENSE_SEEDS:-1}
+RUN_GEN_TABLES=${RUN_GEN_TABLES:-1}
 
 if [[ "$BUILD_DIR" != /* ]]; then
     BUILD_DIR="$ROOT_DIR/$BUILD_DIR"
@@ -99,52 +106,70 @@ run_step() {
     echo "out_dir=$OUT_DIR"
     echo "git_commit=$(git -C "$ROOT_DIR" rev-parse HEAD)"
     echo "repeat=$REPEAT"
+    echo "build_generators=$BUILD_GENERATORS"
+    echo "run_dense_count=$RUN_DENSE_COUNT"
+    echo "run_peel_seeds=$RUN_PEEL_SEEDS"
+    echo "run_most_dense_seeds=$RUN_MOST_DENSE_SEEDS"
+    echo "run_small_dense_seeds=$RUN_SMALL_DENSE_SEEDS"
+    echo "run_gen_tables=$RUN_GEN_TABLES"
     echo "omp_num_threads=$OMP_NUM_THREADS"
     echo "seed=$SEED"
     echo
 } > "$MANIFEST"
 
-build_generators
-
-run_step dense_count \
-    "$BUILD_DIR/gen_dcounts" \
-    --seed "$SEED" \
-    --trials "$DCOUNT_TRIALS" \
-    --nlo "$DCOUNT_NLO" \
-    --nhi "$DCOUNT_NHI"
-
-peel_cmd=(
-    "$BUILD_DIR/gen_peel_seeds"
-    --trials "$PEEL_TRIALS"
-    --sublo "$PEEL_SUBLO"
-    --subhi "$PEEL_SUBHI"
-    --nlo "$PEEL_NLO"
-    --nhi "$PEEL_NHI"
-    --max-tries "$PEEL_MAX_TRIES"
-)
-if [[ "$PEEL_SKIP_TUNING" == 1 ]]; then
-    peel_cmd+=(--skip-tuning)
+if [[ "$BUILD_GENERATORS" == 1 ]]; then
+    build_generators
 fi
-run_step peel_seeds "${peel_cmd[@]}"
 
-run_step most_dense_seeds \
-    "$BUILD_DIR/gen_most_dseeds" \
-    --seed "$SEED" \
-    --trials "$MOST_DENSE_TRIALS" \
-    --dense-index-lo "$MOST_DENSE_INDEX_LO" \
-    --dense-index-hi "$MOST_DENSE_INDEX_HI"
-
-run_step small_dense_seeds \
-    "$BUILD_DIR/gen_small_dseeds" \
-    --seed "$SEED" \
-    --trials "$SMALL_DENSE_TRIALS" \
-    --nlo "$SMALL_DENSE_NLO" \
-    --nhi "$SMALL_DENSE_NHI"
-
-gen_tables_cmd=("$BUILD_DIR/gen_tables" --heavy-trials "$HEAVY_TRIALS")
-if [[ "$GEN_TABLES_NO_BENCHMARKS" == 1 ]]; then
-    gen_tables_cmd+=(--no-benchmarks)
+if [[ "$RUN_DENSE_COUNT" == 1 ]]; then
+    run_step dense_count \
+        "$BUILD_DIR/gen_dcounts" \
+        --seed "$SEED" \
+        --trials "$DCOUNT_TRIALS" \
+        --nlo "$DCOUNT_NLO" \
+        --nhi "$DCOUNT_NHI"
 fi
-run_step gen_tables "${gen_tables_cmd[@]}"
+
+if [[ "$RUN_PEEL_SEEDS" == 1 ]]; then
+    peel_cmd=(
+        "$BUILD_DIR/gen_peel_seeds"
+        --trials "$PEEL_TRIALS"
+        --sublo "$PEEL_SUBLO"
+        --subhi "$PEEL_SUBHI"
+        --nlo "$PEEL_NLO"
+        --nhi "$PEEL_NHI"
+        --max-tries "$PEEL_MAX_TRIES"
+    )
+    if [[ "$PEEL_SKIP_TUNING" == 1 ]]; then
+        peel_cmd+=(--skip-tuning)
+    fi
+    run_step peel_seeds "${peel_cmd[@]}"
+fi
+
+if [[ "$RUN_MOST_DENSE_SEEDS" == 1 ]]; then
+    run_step most_dense_seeds \
+        "$BUILD_DIR/gen_most_dseeds" \
+        --seed "$SEED" \
+        --trials "$MOST_DENSE_TRIALS" \
+        --dense-index-lo "$MOST_DENSE_INDEX_LO" \
+        --dense-index-hi "$MOST_DENSE_INDEX_HI"
+fi
+
+if [[ "$RUN_SMALL_DENSE_SEEDS" == 1 ]]; then
+    run_step small_dense_seeds \
+        "$BUILD_DIR/gen_small_dseeds" \
+        --seed "$SEED" \
+        --trials "$SMALL_DENSE_TRIALS" \
+        --nlo "$SMALL_DENSE_NLO" \
+        --nhi "$SMALL_DENSE_NHI"
+fi
+
+if [[ "$RUN_GEN_TABLES" == 1 ]]; then
+    gen_tables_cmd=("$BUILD_DIR/gen_tables" --heavy-trials "$HEAVY_TRIALS")
+    if [[ "$GEN_TABLES_NO_BENCHMARKS" == 1 ]]; then
+        gen_tables_cmd+=(--no-benchmarks)
+    fi
+    run_step gen_tables "${gen_tables_cmd[@]}"
+fi
 
 echo "slice complete: $OUT_DIR"
