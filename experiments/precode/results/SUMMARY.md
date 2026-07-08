@@ -283,6 +283,24 @@ reference-level 0.090%/0.035%.  Current codec and simulator defaults
 therefore use N1=3 from K=10000 upward; explicit `codecport_n12` remains the
 old control.  K=64000 and identity-corner certification remain pending.
 
+`codecport_n13_ic_cert_K10000_32000_20260708.csv` reruns the N1=3 port and
+identity-corner variant at seed `0x5eed0005` after fixing the simulator's
+identity-corner generation-cost accounting.  At 20k paired trials:
+K=10000 `codecport_n13` fails 0.085%/0.025% and `codecport_n13_ic` fails
+0.105%/0.045%; K=32000 `codecport_n13` fails 0.090%/0.035% and
+`codecport_n13_ic` fails 0.095%/0.030%.  The identity-corner rows match
+N1=3 within sample noise at these sizes and show the expected six-XOR lower
+`precode_gen_xors_mu` because the dense deck excludes the 12 dense columns.
+
+`codecport_n13_ic_smoke_K64000_t2000_20260708.csv` is a bounded K=64000
+smoke at the same seed: `codecport_n13` fails 0.200%/0.200% and
+`codecport_n13_ic` fails 0.300%/0.200% at OH0/OH1 over 2k paired trials.
+This is useful signal but not the full certification gate; a 20k K=64000 run
+was attempted on 120 threads and stopped after the first large row remained
+unfinished for roughly 15 minutes.  Treat K=64000 as still requiring an
+overnight/full-box certification pass before shipping identity-corner or
+closing the V2 precode issue.
+
 ### Heavy Band
 
 The big-K GE replay census gives the production band target:
