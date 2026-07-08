@@ -1,7 +1,12 @@
 #include "../test/SiameseTools.h"
 
 #include "../WirehairCodec.h"
+#include "../WirehairTools.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -119,8 +124,114 @@ static void RandomTrial(
     }
 }
 
-int main()
+static bool ParseU64(const char* text, uint64_t& out)
 {
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = strtoull(text, &end, 0);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
+static bool ParseUnsigned(const char* text, unsigned& out)
+{
+    uint64_t value = 0;
+    if (!ParseU64(text, value) || value > UINT_MAX) {
+        return false;
+    }
+    out = (unsigned)value;
+    return true;
+}
+
+static void Usage(const char* program)
+{
+    cerr
+        << "usage: " << program << " [--seed U64] [--trials N] "
+        << "[--nlo N] [--nhi N] [--max-failures N] "
+        << "[--low-count-run N]\n";
+}
+
+int main(int argc, char** argv)
+{
+    uint64_t seed = siamese::GetTimeUsec();
+    unsigned trials = 500;
+    unsigned nlo = 2;
+    unsigned nhi = 64000;
+    unsigned maxFailures = 10;
+    unsigned lowCountRun = 4;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const char* arg = argv[i];
+        auto next = [&]() -> const char* {
+            if (i + 1 >= argc) {
+                cerr << "missing value for " << arg << endl;
+                Usage(argv[0]);
+                exit(1);
+            }
+            return argv[++i];
+        };
+        if (!strcmp(arg, "--seed")) {
+            if (!ParseU64(next(), seed)) {
+                cerr << "bad --seed value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--trials")) {
+            if (!ParseUnsigned(next(), trials) || trials == 0 ||
+                trials > (unsigned)INT_MAX)
+            {
+                cerr << "bad --trials value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nlo")) {
+            if (!ParseUnsigned(next(), nlo)) {
+                cerr << "bad --nlo value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--nhi")) {
+            if (!ParseUnsigned(next(), nhi)) {
+                cerr << "bad --nhi value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--max-failures")) {
+            if (!ParseUnsigned(next(), maxFailures)) {
+                cerr << "bad --max-failures value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--low-count-run")) {
+            if (!ParseUnsigned(next(), lowCountRun) || lowCountRun == 0) {
+                cerr << "bad --low-count-run value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--help")) {
+            Usage(argv[0]);
+            return 0;
+        }
+        else {
+            cerr << "unknown argument " << arg << endl;
+            Usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (nlo < CAT_WIREHAIR_MIN_N || nhi > CAT_WIREHAIR_MAX_N || nlo > nhi) {
+        cerr << "N range must be in [" << CAT_WIREHAIR_MIN_N << ", "
+            << CAT_WIREHAIR_MAX_N << "]" << endl;
+        return 1;
+    }
+
     const int gfInitResult = gf256_init();
 
     // If gf256 init failed:
@@ -132,15 +243,20 @@ int main()
 
     message.resize(64000);
 
-    uint64_t seed = siamese::GetTimeUsec();
+    int lastBest = nlo <= CAT_WIREHAIR_MIN_N ?
+        0 : wirehair::GetDenseCount(nlo);
 
-    int lastBest = 0;
-
-    static const int kTrials = 500;
+    cerr
+        << "# GenerateDenseCount seed=0x" << hex << seed << dec
+        << " trials=" << trials
+        << " nlo=" << nlo
+        << " nhi=" << nhi
+        << " max_failures=" << maxFailures
+        << " low_count_run=" << lowCountRun << endl;
 
     cout << "N\tDenseCount\tLowestFailures" << endl;
 
-    for (int N = 2; N <= 64000;)
+    for (unsigned N = nlo; N <= nhi;)
     {
         unsigned lowCount = 0;
 
@@ -150,7 +266,7 @@ int main()
             count = 1;
         }
 
-        int lowestFailures = 100000;
+        unsigned lowestFailures = UINT_MAX;
         lastBest = 0;
 
         // Advance the trial-stream seed once per N, not once per count
@@ -159,7 +275,7 @@ int main()
         // curse) -- same fix as the sibling seed generators
         ++seed;
 
-        for (; count <= N; ++count)
+        for (; count <= (int)N; ++count)
         {
 #if 0
             if (count % 4 != 2 && N > 32) {
@@ -170,12 +286,12 @@ int main()
             FailedTrials = 0;
 
 #pragma omp parallel for
-            for (int trial = 0; trial < kTrials; ++trial) {
-                RandomTrial(N, count, seed, trial);
+            for (int trial = 0; trial < (int)trials; ++trial) {
+                RandomTrial(N, count, seed, (unsigned)trial);
             }
 
-            const int failures = FailedTrials;
-            //cout << " *** " << N << "\t" << count << "\t" << (failures / (float)kTrials) << endl;
+            const unsigned failures = FailedTrials;
+            //cout << " *** " << N << "\t" << count << "\t" << (failures / (float)trials) << endl;
 
             if (failures < lowestFailures)
             {
@@ -183,15 +299,16 @@ int main()
                 lastBest = count;
             }
 
-            if (failures <= 10)
+            if (failures <= maxFailures)
             {
-                if (++lowCount >= 4) {
+                if (++lowCount >= lowCountRun) {
                     break;
                 }
             }
         }
 
-        cout << N << "\t" << lastBest << "\t" << (lowestFailures / (float)kTrials) << endl;
+        cout << N << "\t" << lastBest << "\t" <<
+            (lowestFailures / (float)trials) << endl;
 
         int scale = N / 64;
         if (scale < 1) {
