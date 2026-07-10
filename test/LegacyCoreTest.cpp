@@ -349,15 +349,18 @@ void TestGF256WireContract()
 
 void TestLegacyWireProfiles()
 {
-    CHECK(sizeof(WirehairWireProfile) == 16);
-    CHECK(WIREHAIR_LEGACY_PROFILE_PRE_FIXUP ==
-        UINT64_C(0xe1b9f77f1c90f680));
-    CHECK(WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07 ==
-        UINT64_C(0x4d241359db07bb07));
-    CHECK(WIREHAIR_LEGACY_PROFILE_CURRENT ==
-        WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07);
-    CHECK(WIREHAIR_LEGACY_PROFILE_PRE_FIXUP !=
-        WIREHAIR_LEGACY_PROFILE_CURRENT);
+    static_assert(sizeof(WirehairWireProfile) == 16,
+        "WirehairWireProfile ABI size changed");
+    static_assert(WIREHAIR_LEGACY_PROFILE_PRE_FIXUP ==
+        UINT64_C(0xe1b9f77f1c90f680), "pre-fixup profile ID changed");
+    static_assert(WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07 ==
+        UINT64_C(0x4d241359db07bb07), "current profile ID changed");
+    static_assert(WIREHAIR_LEGACY_PROFILE_CURRENT ==
+        WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07,
+        "current profile alias changed");
+    static_assert(WIREHAIR_LEGACY_PROFILE_PRE_FIXUP !=
+        WIREHAIR_LEGACY_PROFILE_CURRENT,
+        "legacy wire profiles must remain distinct");
 
     WirehairWireProfile base = {};
     WirehairWireProfile current = {};
@@ -1754,7 +1757,7 @@ void TestEncoderDetachCore()
             std::vector<uint8_t> data(block_bytes, uint8_t{0xa5});
             uint32_t written = 0;
             CHECK(wirehair_encode(
-                encoder, id, data.data(), data.size(), &written) ==
+                encoder, id, data.data(), block_bytes, &written) ==
                 Wirehair_Success);
             CHECK(written > 0 && written <= block_bytes);
             data.resize(written);
@@ -1769,7 +1772,7 @@ void TestEncoderDetachCore()
             std::vector<uint8_t> actual(block_bytes, uint8_t{0x5a});
             uint32_t written = 0;
             CHECK(wirehair_encode(
-                encoder, packet.first, actual.data(), actual.size(),
+                encoder, packet.first, actual.data(), block_bytes,
                 &written) == Wirehair_Success);
             actual.resize(written);
             CHECK(actual == packet.second);
@@ -1839,7 +1842,7 @@ void TestEncoderDetachCore()
         {
             uint32_t written = 0;
             CHECK(wirehair_encode(
-                owned, id, packet.data(), packet.size(), &written) ==
+                owned, id, packet.data(), block_bytes, &written) ==
                 Wirehair_Success);
             result = wirehair_decode(
                 decoder, id, packet.data(), written);
@@ -1987,7 +1990,7 @@ void BenchmarkDetachTradeoff()
             {
                 uint32_t written = 0;
                 CHECK(wirehair_encode(
-                    encoder, id, packet.data(), packet.size(), &written) ==
+                    encoder, id, packet.data(), block_bytes, &written) ==
                     Wirehair_Success);
                 checksum += packet[0];
                 checksum += packet[written - 1];

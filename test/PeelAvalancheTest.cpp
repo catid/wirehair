@@ -264,7 +264,7 @@ int RunAvalanche(TestContext& context)
         return 1;
     }
 
-    std::fill(recovered.begin(), recovered.end(), 0);
+    std::fill(recovered.begin(), recovered.end(), uint8_t{0});
     if (wirehair_recover(decoder, recovered.data(), recovered.size()) !=
             Wirehair_Success ||
         recovered != *context.Message)
