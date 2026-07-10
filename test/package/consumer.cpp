@@ -6,10 +6,6 @@
 #include <cstdint>
 #include <cstring>
 
-#if __cplusplus < 201103L
-#error "wirehair::wirehair must publish the C++11 requirement of wirehair.hpp"
-#endif
-
 namespace {
 
 int CppV2RoundTrip()

@@ -116,6 +116,15 @@ if (BUILD_TESTS)
     add_executable(wirehair_v2_profile_test V2ProfileTest.cpp)
     wirehair_apply_project_options(wirehair_v2_profile_test)
     target_link_libraries(wirehair_v2_profile_test wirehair)
+    if(WIN32 AND WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+        # Windows has no build-tree RPATH.  This executable lives in the
+        # codec configuration directory, while the primary DLL lives in the
+        # root configuration directory, so stage the runtime beside it.
+        add_custom_command(TARGET wirehair_v2_profile_test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:wirehair>
+                $<TARGET_FILE_DIR:wirehair_v2_profile_test>)
+    endif()
     add_test(NAME wirehair_v2_profile_test COMMAND wirehair_v2_profile_test)
     set_tests_properties(wirehair_v2_profile_test PROPERTIES
         LABELS "v2;profile;serialization;golden;e2e;abi"
