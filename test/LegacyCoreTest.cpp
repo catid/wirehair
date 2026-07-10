@@ -520,7 +520,7 @@ void TestOwnedInputAndRecoverBlock()
     std::memset(source, 0xa7, message_bytes);
     delete[] source;
 
-    std::vector<uint8_t> systematic(block_bytes, 0);
+    std::vector<uint8_t> systematic(block_bytes, uint8_t{0});
     uint32_t written = 0;
     CHECK(wirehair_encode(
         encoder, 0, systematic.data(), block_bytes, &written) ==
@@ -540,7 +540,7 @@ void TestOwnedInputAndRecoverBlock()
     {
         const uint32_t expected_bytes = id + 1 == block_count ?
             static_cast<uint32_t>(message_bytes % block_bytes) : block_bytes;
-        std::vector<uint8_t> output(block_bytes + 2u, 0xa5);
+        std::vector<uint8_t> output(block_bytes + 2u, uint8_t{0xa5});
         uint32_t bytes = 1234;
         CHECK(wirehair_recover_block_ex(
             decoder, id, output.data() + 1, expected_bytes - 1, &bytes) ==
@@ -560,7 +560,7 @@ void TestOwnedInputAndRecoverBlock()
             expected_bytes) == 0);
     }
 
-    std::vector<uint8_t> output(block_bytes, 0xa5);
+    std::vector<uint8_t> output(block_bytes, uint8_t{0xa5});
     uint32_t bytes = 99;
     CHECK(wirehair_recover_block_ex(
         decoder, 0, nullptr, 0, &bytes) == Wirehair_InvalidInput);
@@ -601,7 +601,7 @@ void TestOwnedInputAndRecoverBlock()
     CHECK(wirehair_encoder_create_owned_ex(
         encoder, replacement.data(), replacement.size(), block_bytes,
         &encoder) == Wirehair_Success);
-    std::fill(replacement.begin(), replacement.end(), 0);
+    std::fill(replacement.begin(), replacement.end(), uint8_t{0});
     CHECK(wirehair_encode(
         encoder, 0, output.data(), block_bytes, &bytes) == Wirehair_Success);
     const std::vector<uint8_t> replacement_expected =
@@ -621,17 +621,17 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(encoder != nullptr);
     message[0] ^= 0xff;
 
-    std::vector<uint8_t> output(block_bytes, 0xa5);
+    std::vector<uint8_t> output(block_bytes, uint8_t{0xa5});
     uint32_t bytes = 77;
     CHECK(wirehair_encode(
-        encoder, 0, output.data(), output.size(), &bytes) == Wirehair_Success);
+        encoder, 0, output.data(), block_bytes, &bytes) == Wirehair_Success);
     CHECK(bytes == block_bytes && output[0] == message[0]);
     CHECK(wirehair_decode(
         encoder, 0, output.data(), bytes) == Wirehair_InvalidInput);
     CHECK(wirehair_recover(
         encoder, output.data(), message.size()) == Wirehair_InvalidInput);
     CHECK(wirehair_recover_block_ex(
-        encoder, 0, output.data(), output.size(), &bytes) ==
+        encoder, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_InvalidInput);
     CHECK(bytes == 0);
     CHECK(wirehair_decoder_becomes_encoder(encoder) == Wirehair_InvalidInput);
@@ -639,10 +639,10 @@ void TestLifecycleAndBorrowedMutation()
     WirehairCodec decoder = wirehair_decoder_create(
         nullptr, message.size(), block_bytes);
     CHECK(decoder != nullptr);
-    std::fill(output.begin(), output.end(), 0xa5);
+    std::fill(output.begin(), output.end(), uint8_t{0xa5});
     bytes = 77;
     CHECK(wirehair_encode(
-        decoder, 0, output.data(), output.size(), &bytes) ==
+        decoder, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_InvalidInput);
     CHECK(bytes == 0);
     CHECK(std::all_of(output.begin(), output.end(),
@@ -650,7 +650,7 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(wirehair_recover(
         decoder, message.data(), message.size()) == Wirehair_NeedMore);
     CHECK(wirehair_recover_block_ex(
-        decoder, 0, output.data(), output.size(), &bytes) ==
+        decoder, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_NeedMore);
     CHECK(bytes == 0);
     CHECK(wirehair_decoder_becomes_encoder(decoder) == Wirehair_InvalidInput);
@@ -659,7 +659,7 @@ void TestLifecycleAndBorrowedMutation()
     for (unsigned id = 0; id < 2; ++id)
     {
         CHECK(wirehair_encode(
-            encoder, id, output.data(), output.size(), &bytes) ==
+            encoder, id, output.data(), block_bytes, &bytes) ==
             Wirehair_Success);
         decode_result = wirehair_decode(decoder, id, output.data(), bytes);
     }
@@ -670,25 +670,25 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(recovered == message);
 
     bytes = 77;
-    std::fill(output.begin(), output.end(), 0xa5);
+    std::fill(output.begin(), output.end(), uint8_t{0xa5});
     CHECK(wirehair_encode(
-        decoder, 0, output.data(), output.size(), &bytes) ==
+        decoder, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_InvalidInput);
     CHECK(bytes == 0);
     CHECK(wirehair_decoder_becomes_encoder(decoder) == Wirehair_Success);
     CHECK(wirehair_decoder_becomes_encoder(decoder) == Wirehair_InvalidInput);
     CHECK(wirehair_decode(
-        decoder, 3, output.data(), output.size()) == Wirehair_InvalidInput);
+        decoder, 3, output.data(), block_bytes) == Wirehair_InvalidInput);
     CHECK(wirehair_recover(
         decoder, recovered.data(), recovered.size()) == Wirehair_InvalidInput);
     CHECK(wirehair_encode(
-        decoder, 3, output.data(), output.size(), &bytes) == Wirehair_Success);
+        decoder, 3, output.data(), block_bytes, &bytes) == Wirehair_Success);
 
     WirehairCodec failed = wirehair_decoder_create(
         nullptr, message.size(), block_bytes);
     CHECK(failed != nullptr);
     CHECK(wirehair_encode(
-        encoder, 0, output.data(), output.size(), &bytes) == Wirehair_Success);
+        encoder, 0, output.data(), block_bytes, &bytes) == Wirehair_Success);
     CHECK(wirehair_decode(failed, 0, output.data(), bytes) == Wirehair_NeedMore);
     CHECK(wirehair_decode(failed, 0, output.data(), bytes) ==
         Wirehair_InvalidInput);
@@ -699,7 +699,7 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(wirehair_decoder_becomes_encoder(failed) == Wirehair_InvalidInput);
     bytes = 77;
     CHECK(wirehair_encode(
-        failed, 0, output.data(), output.size(), &bytes) ==
+        failed, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_InvalidInput);
     CHECK(bytes == 0);
 
@@ -709,7 +709,7 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(reused != nullptr);
     bytes = 77;
     CHECK(wirehair_encode(
-        reused, 0, output.data(), output.size(), &bytes) ==
+        reused, 0, output.data(), block_bytes, &bytes) ==
         Wirehair_InvalidInput);
     CHECK(bytes == 0);
 

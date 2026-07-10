@@ -9,6 +9,11 @@
 
 typedef int (*round_trip_fn)(void);
 
+#if defined(_WIN32)
+typedef char wirehair_function_pointer_sizes_must_match[
+    sizeof(FARPROC) == sizeof(round_trip_fn) ? 1 : -1];
+#endif
+
 int main(int argc, char** argv)
 {
     round_trip_fn round_trip;
@@ -33,11 +38,6 @@ int main(int argc, char** argv)
                 (unsigned long)GetLastError());
             FreeLibrary(plugin);
             return 4;
-        }
-        if (sizeof(symbol) != sizeof(round_trip)) {
-            fprintf(stderr, "function pointer size mismatch\n");
-            FreeLibrary(plugin);
-            return 5;
         }
         memcpy(&round_trip, &symbol, sizeof(round_trip));
         result = round_trip();

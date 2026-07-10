@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <stdexcept>
 #include <utility>

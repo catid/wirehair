@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 // Encoder value phase tests for the certified precode (wirehair-axd
@@ -903,7 +904,7 @@ bool TestRecoveryBlockEncoding()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     if (wirehair_v2::ComputeEncodedBlock(
             system, codec, row_seed, recovery_mix,
             source.data(), nullptr, bb, K + recovery_index,
@@ -967,7 +968,7 @@ bool TestRecoveryBlockEncoding()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     const std::vector<uint32_t> empty_row;
     if (!wirehair_v2::ComputeRecoveryBlock(
             system, source.data(), parity.data(), bb, empty_row,
@@ -982,7 +983,7 @@ bool TestRecoveryBlockEncoding()
         0u,
         K + parity_count
     };
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     if (wirehair_v2::ComputeRecoveryBlock(
             system, source.data(), parity.data(), bb, bad_row,
             got.data(), &ops) ||
@@ -1056,7 +1057,7 @@ bool TestMessagePrecodeEncoder()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     const uint8_t* tail_src =
         message.data() + (size_t)(K - 1u) * bb;
     if (!encoder.Encode(K - 1u, got.data(), tail, &data_bytes, &ops) ||
@@ -1070,7 +1071,7 @@ bool TestMessagePrecodeEncoder()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     data_bytes = UINT32_MAX;
     ops = UINT64_MAX;
     if (encoder.Encode(K - 1u, got.data(), tail - 1u, &data_bytes, &ops) ||
@@ -1085,7 +1086,7 @@ bool TestMessagePrecodeEncoder()
     }
 
     const uint32_t recovery_id = K + 3u;
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     if (!encoder.Encode(recovery_id, got.data(), bb, &data_bytes, &ops) ||
         data_bytes != bb ||
         ops == 0u)
@@ -1120,8 +1121,8 @@ bool TestMessagePrecodeEncoder()
     };
     for (uint32_t packet_id : reordered_ids)
     {
-        std::fill(got.begin(), got.end(), 0xacu);
-        std::fill(want.begin(), want.end(), 0xbdu);
+        std::fill(got.begin(), got.end(), uint8_t{0xac});
+        std::fill(want.begin(), want.end(), uint8_t{0xbd});
         data_bytes = UINT32_MAX;
         if (!encoder.Encode(
                 packet_id, got.data(), bb, &data_bytes, &ops))
@@ -1185,7 +1186,7 @@ bool TestMessagePrecodeEncoder()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
     data_bytes = UINT32_MAX;
     ops = UINT64_MAX;
     if (encoder.Encode(recovery_id, got.data(), bb - 1u, &data_bytes, &ops) ||
@@ -1355,7 +1356,7 @@ bool TestTypedFailuresAndAllocationContainment()
         return false;
     }
 
-    std::fill(output.begin(), output.end(), 0x5au);
+    std::fill(output.begin(), output.end(), uint8_t{0x5a});
     const std::vector<uint8_t> facade_before = output;
     data_bytes = UINT32_MAX;
     wirehair_v2::SetAllocationFailureCountdownForTesting(0);

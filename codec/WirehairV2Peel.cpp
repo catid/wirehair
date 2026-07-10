@@ -36,7 +36,8 @@ struct Rng
 
     double Unit()
     {
-        return (Next() >> 11) * (1.0 / 9007199254740992.0);
+        return static_cast<double>(Next() >> 11) *
+            (1.0 / 9007199254740992.0);
     }
 };
 

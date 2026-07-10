@@ -19,6 +19,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -160,7 +161,8 @@ struct Rng
 
     double Unit()
     {
-        return (Next() >> 11) * (1.0 / 9007199254740992.0);
+        return static_cast<double>(Next() >> 11) *
+            (1.0 / 9007199254740992.0);
     }
 };
 

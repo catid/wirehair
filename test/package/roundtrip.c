@@ -17,12 +17,13 @@ int wirehair_package_round_trip(void)
     WirehairCodec encoder = 0;
     WirehairCodec decoder = 0;
     WirehairResult decode_result = Wirehair_NeedMore;
-    unsigned i;
+    uint32_t i;
+    size_t order_i;
 
     if (wirehair_init() != Wirehair_Success) {
         return 1;
     }
-    for (i = 0; i < MessageBytes; ++i) {
+    for (i = 0; i < (uint32_t)MessageBytes; ++i) {
         message[i] = (uint8_t)(i * 29u + 11u);
     }
 
@@ -35,15 +36,17 @@ int wirehair_package_round_trip(void)
         return 2;
     }
 
-    for (i = 0; i < sizeof(reordered_ids) / sizeof(reordered_ids[0]); ++i)
+    for (order_i = 0;
+         order_i < sizeof(reordered_ids) / sizeof(reordered_ids[0]);
+         ++order_i)
     {
         uint32_t written = 0;
-        const unsigned block_id = reordered_ids[i];
+        const uint32_t block_id = reordered_ids[order_i];
         if (block_id == 2) {
             continue;
         }
         if (wirehair_encode(
-                encoder, block_id, block, sizeof(block), &written) !=
+                encoder, block_id, block, (uint32_t)BlockBytes, &written) !=
             Wirehair_Success)
         {
             wirehair_free(encoder);
@@ -70,17 +73,19 @@ int wirehair_package_round_trip(void)
         return 5;
     }
 
-    for (i = 0; i < BlockCount; ++i)
+    for (i = 0; i < (uint32_t)BlockCount; ++i)
     {
-        const uint32_t expected_bytes = i + 1u == BlockCount ?
+        const uint32_t expected_bytes = i + 1u == (uint32_t)BlockCount ?
             1u : (uint32_t)BlockBytes;
         uint32_t written = 0;
         memset(block, 0, sizeof(block));
         if (wirehair_recover_block_ex(
-                decoder, i, block, sizeof(block), &written) !=
+                decoder, i, block, (uint32_t)BlockBytes, &written) !=
                 Wirehair_Success ||
             written != expected_bytes ||
-            memcmp(block, message + i * BlockBytes, expected_bytes) != 0)
+            memcmp(block,
+                message + i * (uint32_t)BlockBytes,
+                expected_bytes) != 0)
         {
             wirehair_free(encoder);
             wirehair_free(decoder);
@@ -97,9 +102,9 @@ int wirehair_package_round_trip(void)
     {
         uint32_t written = 0;
         if (wirehair_encode(
-                decoder, 2, block, sizeof(block), &written) !=
+                decoder, 2, block, (uint32_t)BlockBytes, &written) !=
                 Wirehair_Success ||
-            written != BlockBytes ||
+            written != (uint32_t)BlockBytes ||
             memcmp(block, message + 2 * BlockBytes, BlockBytes) != 0)
         {
             wirehair_free(encoder);

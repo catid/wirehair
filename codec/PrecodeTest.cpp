@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
+#include <utility>
 #include <vector>
 
 // Structural invariant tests for the certified precode construction
