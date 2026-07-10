@@ -30,6 +30,8 @@
 #include "WirehairCodec.h"
 #include "WirehairEnvironment.h"
 
+#include <climits>
+
 
 //------------------------------------------------------------------------------
 // Precompiler-conditional console output
@@ -68,7 +70,6 @@ using namespace std;
 
 #ifdef WH_SEED_KNOBS
 #include <cerrno>
-#include <climits>
 #include <cstdlib>
 #endif
 
@@ -78,6 +79,14 @@ using namespace std;
 
 
 namespace wirehair {
+
+
+static GF256_FORCE_INLINE int Gf256ByteCount(size_t bytes)
+{
+    // ChooseMatrix rejects block sizes that exceed the GF256 API's int range.
+    CAT_DEBUG_ASSERT(bytes <= static_cast<size_t>(INT_MAX));
+    return static_cast<int>(bytes);
+}
 
 
 #ifdef WH_OPLOG
@@ -946,7 +955,7 @@ void Codec::PeelDiagonal()
                 // If referencing row is already copied to the recovery blocks:
                 if (ref_row->Marks.Result.IsCopied) {
                     // Add this row block value to it
-                    gf256_add_mem(temp_block_dest, temp_block_src, _block_bytes);
+                    gf256_add_mem(temp_block_dest, temp_block_src, Gf256ByteCount(_block_bytes));
                 }
                 else
                 {
@@ -955,7 +964,7 @@ void Codec::PeelDiagonal()
                     // If this is not the last block:
                     if (CAT_LIKELY(ref_row_i != _block_count - 1)) {
                         // Add this row block value with message block to it (optimization)
-                        gf256_addset_mem(temp_block_dest, temp_block_src, block_src, _block_bytes);
+                        gf256_addset_mem(temp_block_dest, temp_block_src, block_src, Gf256ByteCount(_block_bytes));
                     }
                     else
                     {
@@ -1879,13 +1888,13 @@ void Codec::InitializeColumnValues()
 
                 // If combo unused:
                 if (!combo) {
-                    gf256_add_mem(buffer_dest, src, _block_bytes);
+                    gf256_add_mem(buffer_dest, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(dest_column_i, column_i, _block_bytes);
                 }
                 else
                 {
                     // Use combo
-                    gf256_addset_mem(buffer_dest, combo, src, _block_bytes);
+                    gf256_addset_mem(buffer_dest, combo, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADDSET_INPUT_REC(dest_column_i, row_i, column_i, _block_bytes);
 
                     combo = 0;
@@ -1997,7 +2006,7 @@ void Codec::MultiplyDenseValues()
                 else if (combo == temp_block)
                 {
                     // Else if combo has been used: XOR it in
-                    gf256_add_mem(temp_block, src, _block_bytes);
+                    gf256_add_mem(temp_block, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(temp_block_i, column_i + bit_i, _block_bytes);
 
                     CAT_IF_ROWOP(++rowops;)
@@ -2005,7 +2014,7 @@ void Codec::MultiplyDenseValues()
                 else
                 {
                     // Else if combo needs to be used: Combine into block
-                    gf256_addset_mem(temp_block, combo, src, _block_bytes);
+                    gf256_addset_mem(temp_block, combo, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADDSET_REC_REC(temp_block_i, OpLogRecoveryBlock(combo), column_i + bit_i, _block_bytes);
 
                     CAT_IF_ROWOP(++rowops;)
@@ -2038,7 +2047,7 @@ void Codec::MultiplyDenseValues()
             if (dest_column_i != LIST_TERM)
             {
                 CAT_DEBUG_ASSERT(dest_column_i < _recovery_rows);
-                gf256_add_mem(_recovery_blocks + _block_bytes * dest_column_i, temp_block, _block_bytes);
+                gf256_add_mem(_recovery_blocks + _block_bytes * dest_column_i, temp_block, Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(dest_column_i, temp_block_i, _block_bytes);
                 CAT_IF_ROWOP(++rowops;)
             }
@@ -2072,7 +2081,7 @@ void Codec::MultiplyDenseValues()
                         temp_block,
                         source_block + _block_bytes * bit0,
                         source_block + _block_bytes * bit1,
-                        _block_bytes);
+                        Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADD2(temp_block_i, column_i + bit0, column_i + bit1, _block_bytes);
                 }
                 else
@@ -2082,7 +2091,7 @@ void Codec::MultiplyDenseValues()
                     gf256_add_mem(
                         temp_block,
                         source_block + _block_bytes * bit0,
-                        _block_bytes);
+                        Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(temp_block_i, column_i + bit0, _block_bytes);
                 }
                 CAT_IF_ROWOP(++rowops;)
@@ -2094,7 +2103,7 @@ void Codec::MultiplyDenseValues()
                 gf256_add_mem(
                     temp_block,
                     source_block + _block_bytes * bit1,
-                    _block_bytes);
+                    Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(temp_block_i, column_i + bit1, _block_bytes);
 
                 CAT_IF_ROWOP(++rowops;)
@@ -2112,7 +2121,7 @@ void Codec::MultiplyDenseValues()
                 gf256_add_mem(
                     _recovery_blocks + _block_bytes * dest_column_i,
                     temp_block,
-                    _block_bytes);
+                    Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(dest_column_i, temp_block_i, _block_bytes);
 
                 CAT_IF_ROWOP(++rowops;)
@@ -2148,7 +2157,7 @@ void Codec::MultiplyDenseValues()
                         temp_block,
                         source_block + _block_bytes * bit0,
                         source_block + _block_bytes * bit1,
-                        _block_bytes);
+                        Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADD2(temp_block_i, column_i + bit0, column_i + bit1, _block_bytes);
                 }
                 else
@@ -2160,7 +2169,7 @@ void Codec::MultiplyDenseValues()
                     gf256_add_mem(
                         temp_block,
                         source_block + _block_bytes * bit0,
-                        _block_bytes);
+                        Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(temp_block_i, column_i + bit0, _block_bytes);
                 }
 
@@ -2175,7 +2184,7 @@ void Codec::MultiplyDenseValues()
                 gf256_add_mem(
                     temp_block,
                     source_block + _block_bytes * bit1,
-                    _block_bytes);
+                    Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(temp_block_i, column_i + bit1, _block_bytes);
 
                 CAT_IF_ROWOP(++rowops;)
@@ -2193,7 +2202,7 @@ void Codec::MultiplyDenseValues()
                 gf256_add_mem(
                     _recovery_blocks + _block_bytes * dest_column_i,
                     temp_block,
-                    _block_bytes);
+                    Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(dest_column_i, temp_block_i, _block_bytes);
 
                 CAT_IF_ROWOP(++rowops;)
@@ -2338,7 +2347,7 @@ void Codec::AddSubdiagonalValues()
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * dest_col_i;
 
                         // Back-substitute
-                        gf256_add_mem(dest, src, _block_bytes);
+                        gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(dest_col_i, _ge_col_map[src_pivot_i], _block_bytes);
 
                         CAT_IF_ROWOP(++rowops;)
@@ -2359,16 +2368,16 @@ void Codec::AddSubdiagonalValues()
             win_table[1] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i];
             CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 1] < _recovery_rows);
             win_table[2] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 1];
-            gf256_addset_mem(win_table[3], win_table[1], win_table[2], _block_bytes);
+            gf256_addset_mem(win_table[3], win_table[1], win_table[2], Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[3]), _ge_col_map[pivot_i], _ge_col_map[pivot_i + 1], _block_bytes);
             CAT_IF_ROWOP(++rowops;)
 
             // Generate window table: 3 bits
             CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 2] < _recovery_rows);
             win_table[4] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 2];
-            gf256_addset_mem(win_table[5], win_table[1], win_table[4], _block_bytes);
-            gf256_addset_mem(win_table[6], win_table[2], win_table[4], _block_bytes);
-            gf256_addset_mem(win_table[7], win_table[1], win_table[6], _block_bytes);
+            gf256_addset_mem(win_table[5], win_table[1], win_table[4], Gf256ByteCount(_block_bytes));
+            gf256_addset_mem(win_table[6], win_table[2], win_table[4], Gf256ByteCount(_block_bytes));
+            gf256_addset_mem(win_table[7], win_table[1], win_table[6], Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[5]), _ge_col_map[pivot_i], _ge_col_map[pivot_i + 2], _block_bytes);
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[6]), _ge_col_map[pivot_i + 1], _ge_col_map[pivot_i + 2], _block_bytes);
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[7]), _ge_col_map[pivot_i], OpLogRecoveryBlock(win_table[6]), _block_bytes);
@@ -2378,7 +2387,7 @@ void Codec::AddSubdiagonalValues()
             CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 3] < _recovery_rows);
             win_table[8] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 3];
             for (unsigned ii = 1; ii < 8; ++ii) {
-                gf256_addset_mem(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+                gf256_addset_mem(win_table[8 + ii], win_table[ii], win_table[8], Gf256ByteCount(_block_bytes));
                 WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[8 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[pivot_i + 3], _block_bytes);
             }
             CAT_IF_ROWOP(rowops += 7;)
@@ -2389,7 +2398,7 @@ void Codec::AddSubdiagonalValues()
                 CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 4] < _recovery_rows);
                 win_table[16] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 4];
                 for (unsigned ii = 1; ii < 16; ++ii) {
-                    gf256_addset_mem(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+                    gf256_addset_mem(win_table[16 + ii], win_table[ii], win_table[16], Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[16 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[pivot_i + 4], _block_bytes);
                 }
                 CAT_IF_ROWOP(rowops += 15;)
@@ -2399,7 +2408,7 @@ void Codec::AddSubdiagonalValues()
                     CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 5] < _recovery_rows);
                     win_table[32] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 5];
                     for (unsigned ii = 1; ii < 32; ++ii) {
-                        gf256_addset_mem(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+                        gf256_addset_mem(win_table[32 + ii], win_table[ii], win_table[32], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[32 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[pivot_i + 5], _block_bytes);
                     }
                     CAT_IF_ROWOP(rowops += 31;)
@@ -2409,7 +2418,7 @@ void Codec::AddSubdiagonalValues()
                         CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 6] < _recovery_rows);
                         win_table[64] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 6];
                         for (unsigned ii = 1; ii < 64; ++ii) {
-                            gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+                            gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], Gf256ByteCount(_block_bytes));
                             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[64 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[pivot_i + 6], _block_bytes);
                         }
                         CAT_IF_ROWOP(rowops += 63;)
@@ -2420,7 +2429,7 @@ void Codec::AddSubdiagonalValues()
                             CAT_DEBUG_ASSERT(_ge_col_map[pivot_i + 7] < _recovery_rows);
                             win_table[128] = _recovery_blocks + _block_bytes * _ge_col_map[pivot_i + 7];
                             for (unsigned ii = 1; ii < 128; ++ii) {
-                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], _block_bytes);
+                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], Gf256ByteCount(_block_bytes));
                                 WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[128 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[pivot_i + 7], _block_bytes);
                             }
                             CAT_IF_ROWOP(rowops += 127;)
@@ -2459,7 +2468,7 @@ void Codec::AddSubdiagonalValues()
 
                         // Back-substitute
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_below_i];
-                        gf256_add_mem(dest, win_table[win_bits], _block_bytes);
+                        gf256_add_mem(dest, win_table[win_bits], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(_ge_col_map[ge_below_i], OpLogRecoveryBlock(win_table[win_bits]), _block_bytes);
                         CAT_IF_ROWOP(++rowops;)
                     }
@@ -2489,7 +2498,7 @@ void Codec::AddSubdiagonalValues()
 
                         // Back-substitute
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_below_i];
-                        gf256_add_mem(dest, win_table[win_bits], _block_bytes);
+                        gf256_add_mem(dest, win_table[win_bits], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(_ge_col_map[ge_below_i], OpLogRecoveryBlock(win_table[win_bits]), _block_bytes);
                         CAT_IF_ROWOP(++rowops;)
                     }
@@ -2570,10 +2579,10 @@ void Codec::AddSubdiagonalValues()
                 const uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[sub_i];
 
                 if (code_value == 1) {
-                    gf256_add_mem(dest, src, _block_bytes);
+                    gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(column_i, _ge_col_map[sub_i], _block_bytes);
                 } else {
-                    gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                    gf256_muladd_mem(dest, code_value, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_MULADD(column_i, code_value, _ge_col_map[sub_i], _block_bytes);
                 }
 
@@ -2609,7 +2618,7 @@ void Codec::AddSubdiagonalValues()
                 const uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * column_j;
 
                 // Add pivot for non-zero bit to destination row value
-                gf256_add_mem(dest, src, _block_bytes);
+                gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                 WH_OPLOG_XOR(column_i, column_j, _block_bytes);
                 CAT_IF_ROWOP(++rowops;)
 
@@ -2742,7 +2751,7 @@ void Codec::BackSubstituteAboveDiagonal()
 
                     // Normalize code value, setting it to 1 (implicitly nonzero)
                     if (code_value != 1) {
-                        gf256_div_mem(src, src, code_value, _block_bytes);
+                        gf256_div_mem(src, src, code_value, Gf256ByteCount(_block_bytes));
                         WH_OPLOG_DIV(_ge_col_map[src_pivot_i], code_value, _block_bytes);
                         CAT_IF_ROWOP(++heavyops;)
                     }
@@ -2778,10 +2787,10 @@ void Codec::BackSubstituteAboveDiagonal()
 
                         // Back-substitute
                         if (code_value == 1) {
-                            gf256_add_mem(dest, src, _block_bytes);
+                            gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                             WH_OPLOG_XOR(_ge_col_map[dest_pivot_i], _ge_col_map[src_pivot_i], _block_bytes);
                         } else {
-                            gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                            gf256_muladd_mem(dest, code_value, src, Gf256ByteCount(_block_bytes));
                             WH_OPLOG_MULADD(_ge_col_map[dest_pivot_i], code_value, _ge_col_map[src_pivot_i], _block_bytes);
                         }
 
@@ -2797,7 +2806,7 @@ void Codec::BackSubstituteAboveDiagonal()
                             uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[dest_pivot_i];
 
                             // Back-substitute
-                            gf256_add_mem(dest, src, _block_bytes);
+                            gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                             WH_OPLOG_XOR(_ge_col_map[dest_pivot_i], _ge_col_map[src_pivot_i], _block_bytes);
 
                             CAT_IF_ROWOP(++rowops;)
@@ -2834,7 +2843,7 @@ void Codec::BackSubstituteAboveDiagonal()
                     CAT_DEBUG_ASSERT(_ge_col_map[backsub_i] < _recovery_rows);
                     uint8_t * GF256_RESTRICT src = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
 
-                    gf256_div_mem(src, src, code_value, _block_bytes);
+                    gf256_div_mem(src, src, code_value, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_DIV(_ge_col_map[backsub_i], code_value, _block_bytes);
                     CAT_IF_ROWOP(++heavyops;)
                 }
@@ -2847,16 +2856,16 @@ void Codec::BackSubstituteAboveDiagonal()
             win_table[1] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i];
             CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 1] < _recovery_rows);
             win_table[2] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 1];
-            gf256_addset_mem(win_table[3], win_table[1], win_table[2], _block_bytes);
+            gf256_addset_mem(win_table[3], win_table[1], win_table[2], Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[3]), _ge_col_map[backsub_i], _ge_col_map[backsub_i + 1], _block_bytes);
             CAT_IF_ROWOP(++rowops;)
 
             // Generate window table: 3 bits
             CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 2] < _recovery_rows);
             win_table[4] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 2];
-            gf256_addset_mem(win_table[5], win_table[1], win_table[4], _block_bytes);
-            gf256_addset_mem(win_table[6], win_table[2], win_table[4], _block_bytes);
-            gf256_addset_mem(win_table[7], win_table[1], win_table[6], _block_bytes);
+            gf256_addset_mem(win_table[5], win_table[1], win_table[4], Gf256ByteCount(_block_bytes));
+            gf256_addset_mem(win_table[6], win_table[2], win_table[4], Gf256ByteCount(_block_bytes));
+            gf256_addset_mem(win_table[7], win_table[1], win_table[6], Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[5]), _ge_col_map[backsub_i], _ge_col_map[backsub_i + 2], _block_bytes);
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[6]), _ge_col_map[backsub_i + 1], _ge_col_map[backsub_i + 2], _block_bytes);
             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[7]), _ge_col_map[backsub_i], OpLogRecoveryBlock(win_table[6]), _block_bytes);
@@ -2866,7 +2875,7 @@ void Codec::BackSubstituteAboveDiagonal()
             CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 3] < _recovery_rows);
             win_table[8] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 3];
             for (unsigned ii = 1; ii < 8; ++ii) {
-                gf256_addset_mem(win_table[8 + ii], win_table[ii], win_table[8], _block_bytes);
+                gf256_addset_mem(win_table[8 + ii], win_table[ii], win_table[8], Gf256ByteCount(_block_bytes));
                 WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[8 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[backsub_i + 3], _block_bytes);
             }
             CAT_IF_ROWOP(rowops += 7;)
@@ -2877,7 +2886,7 @@ void Codec::BackSubstituteAboveDiagonal()
                 CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 4] < _recovery_rows);
                 win_table[16] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 4];
                 for (unsigned ii = 1; ii < 16; ++ii) {
-                    gf256_addset_mem(win_table[16 + ii], win_table[ii], win_table[16], _block_bytes);
+                    gf256_addset_mem(win_table[16 + ii], win_table[ii], win_table[16], Gf256ByteCount(_block_bytes));
                     WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[16 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[backsub_i + 4], _block_bytes);
                 }
                 CAT_IF_ROWOP(rowops += 15;)
@@ -2887,7 +2896,7 @@ void Codec::BackSubstituteAboveDiagonal()
                     CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 5] < _recovery_rows);
                     win_table[32] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 5];
                     for (unsigned ii = 1; ii < 32; ++ii) {
-                        gf256_addset_mem(win_table[32 + ii], win_table[ii], win_table[32], _block_bytes);
+                        gf256_addset_mem(win_table[32 + ii], win_table[ii], win_table[32], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[32 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[backsub_i + 5], _block_bytes);
                     }
                     CAT_IF_ROWOP(rowops += 31;)
@@ -2897,7 +2906,7 @@ void Codec::BackSubstituteAboveDiagonal()
                         CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 6] < _recovery_rows);
                         win_table[64] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 6];
                         for (unsigned ii = 1; ii < 64; ++ii) {
-                            gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], _block_bytes);
+                            gf256_addset_mem(win_table[64 + ii], win_table[ii], win_table[64], Gf256ByteCount(_block_bytes));
                             WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[64 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[backsub_i + 6], _block_bytes);
                         }
                         CAT_IF_ROWOP(rowops += 63;)
@@ -2908,7 +2917,7 @@ void Codec::BackSubstituteAboveDiagonal()
                             CAT_DEBUG_ASSERT(_ge_col_map[backsub_i + 7] < _recovery_rows);
                             win_table[128] = _recovery_blocks + _block_bytes * _ge_col_map[backsub_i + 7];
                             for (unsigned ii = 1; ii < 128; ++ii) {
-                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], _block_bytes);
+                                gf256_addset_mem(win_table[128 + ii], win_table[ii], win_table[128], Gf256ByteCount(_block_bytes));
                                 WH_OPLOG_ADDSET_REC_REC(OpLogRecoveryBlock(win_table[128 + ii]), OpLogRecoveryBlock(win_table[ii]), _ge_col_map[backsub_i + 7], _block_bytes);
                             }
                             CAT_IF_ROWOP(rowops += 127;)
@@ -2955,7 +2964,7 @@ void Codec::BackSubstituteAboveDiagonal()
                                 CAT_DEBUG_ASSERT(_ge_col_map[ge_column_j] < _recovery_rows);
                                 const uint8_t *src = _recovery_blocks + _block_bytes * _ge_col_map[ge_column_j];
 
-                                gf256_add_mem(dest, src, _block_bytes);
+                                gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                                 WH_OPLOG_XOR(_ge_col_map[ge_above_i], _ge_col_map[ge_column_j], _block_bytes);
 
                                 CAT_IF_ROWOP(++rowops;)
@@ -2989,10 +2998,10 @@ void Codec::BackSubstituteAboveDiagonal()
 
                         // Back-substitute
                         if (code_value == 1) {
-                            gf256_add_mem(dest, src, _block_bytes);
+                            gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                             WH_OPLOG_XOR(_ge_col_map[ge_above_i], _ge_col_map[ge_column_j], _block_bytes);
                         } else {
-                            gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                            gf256_muladd_mem(dest, code_value, src, Gf256ByteCount(_block_bytes));
                             WH_OPLOG_MULADD(_ge_col_map[ge_above_i], code_value, _ge_col_map[ge_column_j], _block_bytes);
                         }
 
@@ -3039,7 +3048,7 @@ void Codec::BackSubstituteAboveDiagonal()
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i];
 
                         // Back-substitute
-                        gf256_add_mem(dest, win_table[win_bits], _block_bytes);
+                        gf256_add_mem(dest, win_table[win_bits], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(_ge_col_map[above_pivot_i], OpLogRecoveryBlock(win_table[win_bits]), _block_bytes);
 
                         CAT_IF_ROWOP(++rowops;)
@@ -3073,7 +3082,7 @@ void Codec::BackSubstituteAboveDiagonal()
                         uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[above_pivot_i];
 
                         // Back-substitute
-                        gf256_add_mem(dest, win_table[win_bits], _block_bytes);
+                        gf256_add_mem(dest, win_table[win_bits], Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(_ge_col_map[above_pivot_i], OpLogRecoveryBlock(win_table[win_bits]), _block_bytes);
 
                         CAT_IF_ROWOP(++rowops;)
@@ -3145,7 +3154,7 @@ void Codec::BackSubstituteAboveDiagonal()
 
             // Normalize code value, setting it to 1 (implicitly nonzero)
             if (code_value != 1) {
-                gf256_div_mem(src, src, code_value, _block_bytes);
+                gf256_div_mem(src, src, code_value, Gf256ByteCount(_block_bytes));
                 WH_OPLOG_DIV(_ge_col_map[pivot_i], code_value, _block_bytes);
                 CAT_IF_ROWOP(++heavyops;)
             }
@@ -3180,10 +3189,10 @@ void Codec::BackSubstituteAboveDiagonal()
 
                 // Back-substitute
                 if (code_value == 1) {
-                    gf256_add_mem(dest, src, _block_bytes);
+                    gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(_ge_col_map[ge_up_i], _ge_col_map[pivot_i], _block_bytes);
                 } else {
-                    gf256_muladd_mem(dest, code_value, src, _block_bytes);
+                    gf256_muladd_mem(dest, code_value, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_MULADD(_ge_col_map[ge_up_i], code_value, _ge_col_map[pivot_i], _block_bytes);
                 }
 
@@ -3204,7 +3213,7 @@ void Codec::BackSubstituteAboveDiagonal()
                     uint8_t * GF256_RESTRICT dest = _recovery_blocks + _block_bytes * _ge_col_map[ge_up_i];
 
                     // Back-substitute
-                    gf256_add_mem(dest, src, _block_bytes);
+                    gf256_add_mem(dest, src, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(_ge_col_map[ge_up_i], _ge_col_map[pivot_i], _block_bytes);
 
                     CAT_IF_ROWOP(++rowops;)
@@ -3267,7 +3276,7 @@ void Codec::Substitute()
 
         // If copying from final block:
         if (CAT_LIKELY(row_i != _block_count - 1)) {
-            gf256_addset_mem(dest, src, input_src, _block_bytes);
+            gf256_addset_mem(dest, src, input_src, Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADDSET_REC_INPUT(dest_column_i, _block_count + mix.Columns[0], row_i, _block_bytes);
         }
         else
@@ -3351,7 +3360,7 @@ void Codec::Substitute()
 #endif // WH_GATHER
         {
             // Add next two mixing columns in
-            gf256_add2_mem(dest, src0, src1, _block_bytes);
+            gf256_add2_mem(dest, src0, src1, Gf256ByteCount(_block_bytes));
             WH_OPLOG_ADD2(dest_column_i, _block_count + mix.Columns[1], _block_count + mix.Columns[2], _block_bytes);
 
             CAT_IF_ROWOP(++rowops;)
@@ -3374,17 +3383,17 @@ void Codec::Substitute()
                     // Common case:
                     if (CAT_LIKELY(column_1 != dest_column_i)) {
                         CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
-                        gf256_add2_mem(dest, peel0, _recovery_blocks + _block_bytes * column_1, _block_bytes);
+                        gf256_add2_mem(dest, peel0, _recovery_blocks + _block_bytes * column_1, Gf256ByteCount(_block_bytes));
                         WH_OPLOG_ADD2(dest_column_i, column_0, column_1, _block_bytes);
                     }
                     else {
-                        gf256_add_mem(dest, peel0, _block_bytes);
+                        gf256_add_mem(dest, peel0, Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(dest_column_i, column_0, _block_bytes);
                     }
                 }
                 else {
                     CAT_DEBUG_ASSERT(column_1 < _recovery_rows);
-                    gf256_add_mem(dest, _recovery_blocks + _block_bytes * column_1, _block_bytes);
+                    gf256_add_mem(dest, _recovery_blocks + _block_bytes * column_1, Gf256ByteCount(_block_bytes));
                     WH_OPLOG_XOR(dest_column_i, column_1, _block_bytes);
                 }
                 CAT_IF_ROWOP(++rowops;)
@@ -3401,7 +3410,7 @@ void Codec::Substitute()
                     // If column is not the solved one:
                     if (CAT_LIKELY(column_i != dest_column_i))
                     {
-                        gf256_add_mem(dest, peel_src, _block_bytes);
+                        gf256_add_mem(dest, peel_src, Gf256ByteCount(_block_bytes));
                         WH_OPLOG_XOR(dest_column_i, column_i, _block_bytes);
                         CAT_IF_ROWOP(++rowops;)
                         CAT_IF_DUMP(cout << "[" << (unsigned)peel_src[0] << "]";)
@@ -3524,12 +3533,13 @@ WirehairResult Codec::ChooseMatrix(
     }
 
     // 32-bit platforms cannot address the largest intermediate block offset.
+#if SIZE_MAX < UINT64_MAX
     const uint64_t max_block_index =
         block_count_wide + CAT_MAX_DENSE_ROWS + kHeavyRows + 1;
-    if (sizeof(size_t) < sizeof(uint64_t) &&
-        max_block_index * block_bytes > static_cast<uint64_t>((size_t)-1)) {
+    if (max_block_index * block_bytes > static_cast<uint64_t>(SIZE_MAX)) {
         return Wirehair_InvalidInput;
     }
+#endif
 
     _block_count = static_cast<uint16_t>(block_count_wide);
     _block_next_prime = NextPrime16(_block_count);
@@ -4293,7 +4303,8 @@ WirehairResult Codec::ReconstructOutput(
             CAT_IF_DUMP(cout << "Copying received row " << block_id << endl;)
 
             uint8_t * GF256_RESTRICT dest = output_blocks + _block_bytes * block_id;
-            const unsigned bytes = (block_id != (unsigned)_block_count - 1) ? _block_bytes : _output_final_bytes;
+            const size_t bytes = block_id != (unsigned)_block_count - 1 ?
+                _block_bytes : _output_final_bytes;
 
             memcpy(dest, src, bytes);
 
@@ -4305,7 +4316,7 @@ WirehairResult Codec::ReconstructOutput(
     // Regenerate any rows that got lost:
 
     uint8_t * GF256_RESTRICT dest = output_blocks;
-    unsigned block_bytes = _block_bytes;
+    unsigned block_bytes = BlockBytes();
 
     // For each block to generate:
     const uint16_t block_count = _block_count;
@@ -4837,16 +4848,17 @@ WirehairResult Codec::InitializeEncoder(
     if (result == Wirehair_Success)
     {
         // Calculate partial final bytes
-        unsigned partial_final_bytes = message_bytes % _block_bytes;
+        unsigned partial_final_bytes = static_cast<unsigned>(
+            message_bytes % _block_bytes);
         if (partial_final_bytes <= 0) {
-            partial_final_bytes = _block_bytes;
+            partial_final_bytes = BlockBytes();
         }
 
         // Encoder-specific
         _decode_complete = false;
         _decode_failed = false;
         _input_final_bytes = partial_final_bytes;
-        _output_final_bytes = _block_bytes;
+        _output_final_bytes = BlockBytes();
         _extra_count = 0;
         _original_out_of_order = false;
 
@@ -4973,7 +4985,7 @@ uint32_t Codec::Encode(
         copyBytes = _input_final_bytes;
     }
     else {
-        copyBytes = _block_bytes;
+        copyBytes = BlockBytes();
     }
 
     // If not enough space in output buffer:
@@ -5168,9 +5180,10 @@ WirehairResult Codec::InitializeDecoder(
     }
 
     // Calculate partial final bytes
-    unsigned partial_final_bytes = message_bytes % _block_bytes;
+    unsigned partial_final_bytes = static_cast<unsigned>(
+        message_bytes % _block_bytes);
     if (partial_final_bytes <= 0) {
-        partial_final_bytes = _block_bytes;
+        partial_final_bytes = BlockBytes();
     }
 
     // Decoder-specific
@@ -5183,7 +5196,7 @@ WirehairResult Codec::InitializeDecoder(
     // happen to be the last block id.  This is only an issue because the
     // shared codec source code happens to be built with more encoder-like
     // semantics
-    _input_final_bytes = _block_bytes;
+    _input_final_bytes = BlockBytes();
 
     _extra_count = CAT_MAX_EXTRA_ROWS;
 #if defined(CAT_ALL_ORIGINAL)

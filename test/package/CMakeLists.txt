@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(wirehair_package_consumer LANGUAGES C CXX)
 
+option(WIREHAIR_STRICT_WARNINGS
+    "Treat compiler warnings as errors for package consumers" OFF)
+
 find_package(wirehair CONFIG REQUIRED)
 enable_testing()
 
@@ -21,6 +24,18 @@ add_executable(package_plugin_host plugin_host.c)
 target_link_libraries(package_plugin_host PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME package_plugin_round_trip
     COMMAND package_plugin_host $<TARGET_FILE:package_plugin>)
+
+if(WIREHAIR_STRICT_WARNINGS)
+    foreach(target IN ITEMS package_c_consumer package_cpp_consumer
+            package_plugin package_plugin_host)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4 /WX)
+        else()
+            target_compile_options(${target} PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+    endforeach()
+endif()
 
 if(WIN32)
     get_target_property(wirehair_imported_type wirehair::wirehair TYPE)

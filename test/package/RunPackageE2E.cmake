@@ -1,5 +1,5 @@
 foreach(required IN ITEMS PROJECT_SOURCE_DIR TEST_ROOT TEST_GENERATOR
-        TEST_C_COMPILER TEST_CXX_COMPILER TEST_SHARED TEST_CONFIG)
+        TEST_C_COMPILER TEST_CXX_COMPILER TEST_SHARED TEST_CONFIG TEST_STRICT)
     if(NOT DEFINED ${required})
         message(FATAL_ERROR "${required} is required")
     endif()
@@ -42,6 +42,7 @@ run_checked("producer configure"
     "-DCMAKE_INSTALL_PREFIX=${original_prefix}"
     "-DCMAKE_INSTALL_LIBDIR=${custom_libdir}"
     "-DBUILD_SHARED_LIBS=${TEST_SHARED}"
+    "-DWIREHAIR_STRICT_WARNINGS=${TEST_STRICT}"
     -DBUILD_TESTS=OFF
     -DBUILD_CODEC_V2=OFF
     -DWIREHAIR_BUILD_BOTH=OFF
@@ -93,6 +94,7 @@ run_checked("consumer configure"
     "-DCMAKE_C_COMPILER=${TEST_C_COMPILER}"
     "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}"
     "-DCMAKE_BUILD_TYPE=${TEST_CONFIG}"
+    "-DWIREHAIR_STRICT_WARNINGS=${TEST_STRICT}"
     "-Dwirehair_DIR=${relocated_prefix}/${custom_libdir}/cmake/wirehair")
 run_checked("consumer build"
     "${CMAKE_COMMAND}" --build "${consumer_build}"

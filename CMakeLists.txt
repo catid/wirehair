@@ -26,6 +26,8 @@ option(WIREHAIR_BUILD_BENCHMARKS
     "Include benchmark executables in the default build" OFF)
 option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
+option(WIREHAIR_STRICT_WARNINGS
+    "Treat compiler warnings as errors for Wirehair targets" OFF)
 set(WH_LTO "OFF" CACHE STRING "Link-time optimization mode: OFF, ON, AUTO, or THIN")
 set_property(CACHE WH_LTO PROPERTY STRINGS OFF ON AUTO THIN)
 set(WH_PGO_MODE "OFF" CACHE STRING "Profile-guided optimization mode: OFF, GENERATE, or USE")
@@ -149,8 +151,14 @@ function(wirehair_apply_project_options target)
     target_compile_features(${target} PRIVATE cxx_std_11)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
+        if(WIREHAIR_STRICT_WARNINGS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra)
+        if(WIREHAIR_STRICT_WARNINGS)
+            target_compile_options(${target} PRIVATE -Wpedantic -Werror)
+        endif()
     endif()
     if(WIREHAIR_NATIVE_COMPILE_OPTION)
         target_compile_options(${target} PRIVATE
@@ -486,6 +494,7 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
                 -DTEST_SHARED=${_wirehair_package_shared}
                 -DTEST_CONFIG=${_wirehair_package_config}
+                -DTEST_STRICT=${WIREHAIR_STRICT_WARNINGS}
                 -P ${PROJECT_SOURCE_DIR}/test/package/RunPackageE2E.cmake)
         set_tests_properties(package_${_wirehair_package_variant}_e2e
             PROPERTIES TIMEOUT 240)

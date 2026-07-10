@@ -98,15 +98,19 @@ class RunnerTests(unittest.TestCase):
 
     def test_strict_flags_cover_unix_and_msvc_c_and_cxx(self):
         unix = mock.Mock(strict=True, generator="Ninja")
-        self.assertEqual([
-            "-DCMAKE_C_FLAGS=-Wall -Wextra -Wpedantic -Werror",
-            "-DCMAKE_CXX_FLAGS=-Wall -Wextra -Wpedantic -Werror",
-        ], run_ci.strict_cmake_args(unix))
+        self.assertEqual(
+            ["-DWIREHAIR_STRICT_WARNINGS=ON"],
+            run_ci.strict_cmake_args(unix),
+        )
         msvc = mock.Mock(strict=True, generator="Visual Studio 17 2022")
-        self.assertEqual([
-            "-DCMAKE_C_FLAGS=/W4 /WX",
-            "-DCMAKE_CXX_FLAGS=/W4 /WX",
-        ], run_ci.strict_cmake_args(msvc))
+        self.assertEqual(
+            ["-DWIREHAIR_STRICT_WARNINGS=ON"],
+            run_ci.strict_cmake_args(msvc),
+        )
+        self.assertFalse(any(
+            argument.startswith(("-DCMAKE_C_FLAGS=", "-DCMAKE_CXX_FLAGS="))
+            for argument in run_ci.strict_cmake_args(msvc)
+        ))
 
     def test_msvc_strict_matrix_enables_and_smokes_explicit_tools(self):
         args = mock.Mock(

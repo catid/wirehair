@@ -255,11 +255,7 @@ def package_consumer(args):
 def strict_cmake_args(args):
     if not getattr(args, "strict", False):
         return []
-    if is_msvc_generator(args.generator):
-        flags = "/W4 /WX"
-    else:
-        flags = "-Wall -Wextra -Wpedantic -Werror"
-    return ["-DCMAKE_C_FLAGS=" + flags, "-DCMAKE_CXX_FLAGS=" + flags]
+    return ["-DWIREHAIR_STRICT_WARNINGS=ON"]
 
 
 def consumer_toolchain_args(args):
