@@ -877,7 +877,9 @@ private:
 
     The heavy rows are made up of bytes instead of bits.  Each byte
     represents a number in the Galois field GF(2^^8) defined by the
-    generator polynomial 0x15F.
+    irreducible polynomial x^8 + x^6 + x^3 + x^2 + 1 (0x14D), with 2 as
+    the generator element.  An older version of this comment incorrectly
+    said 0x15F; production codecs have always initialized the 0x14D field.
 
     The heavy rows are designed to make it easier to find pivots in
     just the last few columns of the GE matrix.  This design choice was

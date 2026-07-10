@@ -143,6 +143,41 @@ bool BasicRoundTrip(uint32_t salt)
     return ok;
 }
 
+void TestGF256WireContract()
+{
+    // These values pin the production GF(256) field used by the heavy rows.
+    // They are interoperability vectors, not a replacement for the exhaustive
+    // backend self-tests in gf256_init().
+    CHECK(GF256Ctx.Polynomial == 0x14d);
+    CHECK(gf256_mul(0x53, 0xca) == 0x94);
+    CHECK(gf256_mul(0x57, 0x83) == 0x43);
+    CHECK(gf256_div(0x53, 0xca) == 0x44);
+    CHECK(gf256_inv(0xca) == 0x5d);
+
+    // Pin an externally observable packet too.  This catches changes to the
+    // heavy-field contract even when the internal arithmetic vectors still
+    // happen to be updated together with the implementation.
+    static const uint8_t kExpectedRepair[16] = {
+        0x17, 0xed, 0xd1, 0x3d, 0xc5, 0xa4, 0x7a, 0x85,
+        0xc4, 0x43, 0xc6, 0x57, 0x64, 0xe8, 0x7e, 0x56
+    };
+    const std::vector<uint8_t> message = MakeMessage(128);
+    WirehairCodec encoder = wirehair_encoder_create(
+        nullptr, message.data(), message.size(), 16);
+    CHECK(encoder != nullptr);
+    if (encoder)
+    {
+        uint8_t repair[sizeof(kExpectedRepair)] = {};
+        uint32_t written = 0;
+        CHECK(wirehair_encode(
+            encoder, 12345, repair, sizeof(repair), &written) ==
+            Wirehair_Success);
+        CHECK(written == sizeof(kExpectedRepair));
+        CHECK(std::memcmp(repair, kExpectedRepair, sizeof(repair)) == 0);
+        wirehair_free(encoder);
+    }
+}
+
 int RunPreinit()
 {
     uint8_t message[64] = {};
@@ -821,6 +856,7 @@ int main(int argc, char** argv)
     std::printf("Active x86 kernels: SSSE3=%d AVX2=%d GFNI=%d AVX512=%d\n",
         active.SSSE3, active.AVX2, active.GFNI, active.AVX512);
 
+    TestGF256WireContract();
     TestCreationResultsAndBoundaries();
     TestOwnedInputAndRecoverBlock();
     TestLifecycleAndBorrowedMutation();
