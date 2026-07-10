@@ -10,6 +10,7 @@
 #include "wirehair/wirehair.h"
 #include "WirehairCodec.h"
 #include "WirehairEnvironment.h"
+#include "WirehairTools.h"
 #include "gf256.h"
 
 #include <cstdio>
@@ -30,6 +31,10 @@
 
 using namespace std;
 using Clock = std::chrono::steady_clock;
+
+static const char* seed_fixup_policy() {
+    return wirehair::SeedFixupsEnabled() ? "enabled" : "disabled";
+}
 
 static double now_sec() {
     return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
@@ -164,6 +169,7 @@ static uint8_t ref_mul(uint8_t a, uint8_t b) { return gf256_mul(a, b); } // uses
 static bool micro_selfcheck() {
     Rng rng(0xC0FFEEULL);
     bool ok = true;
+
     for (int iter = 0; iter < 2000 && ok; ++iter) {
         int n = rng.range(1, 600);
         // extra padding so we can detect overruns
@@ -726,7 +732,7 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     static const char* micro_values[] = { "--secs", nullptr };
     static const char* bench_values[] = { "--bb", "--bb-list", "--loss", "--N", "--rounds", "--memory-mib", nullptr };
     static const char* fuzz_values[] = { "--secs", "--nmax", "--seed", nullptr };
-    static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", "--samples-out", nullptr };
+    static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--seed", "--samples-out", nullptr };
     static const char* scan_values[] = { "--nlo", "--nhi", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
 #ifdef WH_SEED_KNOBS
     static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
@@ -1375,11 +1381,13 @@ static int cmd_ohead(int argc, char** argv) {
     int startMode = 1;                   // repair-only: pure code overhead (most seed-sensitive)
     double loss = 0.10;
     uint64_t baseSeed = 0xACE0;
-    string samples_path;
+    string samples_path, nfile;
+    bool range_explicit = false;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i], "--nlo") && i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; }
-        else if (!strcmp(argv[i], "--nhi") && i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; }
-        else if (!strcmp(argv[i], "--nstep") && i+1<argc) { if (!parse_int_strict(argv[++i], nstep)) return 2; }
+        if (!strcmp(argv[i], "--nlo") && i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; range_explicit = true; }
+        else if (!strcmp(argv[i], "--nhi") && i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; range_explicit = true; }
+        else if (!strcmp(argv[i], "--nstep") && i+1<argc) { if (!parse_int_strict(argv[++i], nstep)) return 2; range_explicit = true; }
+        else if (!strcmp(argv[i], "--nfile") && i+1<argc) nfile = argv[++i];
         else if (!strcmp(argv[i], "--trials") && i+1<argc) { if (!parse_long_strict(argv[++i], trials)) return 2; }
         else if (!strcmp(argv[i], "--bb") && i+1<argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
         else if (!strcmp(argv[i], "--startmode") && i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
@@ -1387,14 +1395,31 @@ static int cmd_ohead(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
         else if (!strcmp(argv[i], "--samples-out") && i+1<argc) samples_path = argv[++i];
     }
-    if (nlo < 2 || nhi > 64000 || nlo > nhi || nstep < 0 ||
-        trials < 1 || !valid_seedcheck_args(nlo, bb, startMode, loss))
+    if ((!nfile.empty() && range_explicit) || nstep < 0 || trials < 1 ||
+        bb < 0 || (startMode != 0 && startMode != 1) ||
+        !std::isfinite(loss) || loss < 0.0 || loss > 0.99)
+    {
+        fprintf(stderr, "ohead: invalid parameters (--nfile cannot be combined with range options)\n");
+        return 2;
+    }
+    vector<int> Ns;
+    if (!nfile.empty()) {
+        if (!read_n_file_strict(nfile, "ohead", Ns)) return 2;
+        sort(Ns.begin(), Ns.end());
+        if (adjacent_find(Ns.begin(), Ns.end()) != Ns.end()) {
+            fprintf(stderr, "ohead: duplicate N in --nfile %s\n", nfile.c_str());
+            return 2;
+        }
+        nlo = Ns.front();
+        nhi = Ns.back();
+    }
+    else if (nlo < 2 || nhi > 64000 || nlo > nhi ||
+             !valid_seedcheck_args(nlo, bb, startMode, loss))
     {
         fprintf(stderr, "ohead: invalid range or parameters\n");
         return 2;
     }
-    vector<int> Ns;
-    if (nstep > 0) {
+    else if (nstep > 0) {
         for (int64_t n = nlo; n <= nhi; n += (int64_t)nstep) Ns.push_back((int)n);
     }
     else if (nlo == nhi) { Ns.push_back(nlo); }
@@ -1419,8 +1444,10 @@ static int cmd_ohead(int argc, char** argv) {
         }
         fprintf(samples_file, "# whx-ohead-samples-v1 columns=N trial extra\n");
     }
-    printf("# ohead: threads=%d trials/N=%ld bb=%d startMode=%d loss=%.2f Ns=%zu range[%d,%d]\n",
-           threads, trials, bb, startMode, loss, Ns.size(), nlo, nhi);
+    printf("# ohead: threads=%d trials/N=%ld bb=%d startMode=%d loss=%.2f seed=0x%llx seed_fixups=%s Ns=%zu %s[%d,%d]\n",
+           threads, trials, bb, startMode, loss,
+           (unsigned long long)baseSeed, seed_fixup_policy(), Ns.size(),
+           nfile.empty() ? "range" : "nfile-range", nlo, nhi);
     printf("%-8s %10s %6s %6s %6s %6s %10s\n", "N", "mean", "p50", "p99", "p999", "max", "fail");
     for (int N : Ns) {
         std::atomic<uint64_t> next{0};
@@ -1448,7 +1475,7 @@ static int cmd_ohead(int argc, char** argv) {
         }
         for (auto& th : ts) th.join();
         double mean = global.trials ? (double)global.overhead_sum/global.trials : 0;
-        printf("%-8d %10.4f %6d %6d %6d %6u %10ld\n", N, mean,
+        printf("%-8d %20.17g %6d %6d %6d %6u %10ld\n", N, mean,
                (int)histogram_quantile(global.overhead_hist, 0.50L),
                (int)histogram_quantile(global.overhead_hist, 0.99L),
                (int)histogram_quantile(global.overhead_hist, 0.999L),
@@ -1682,8 +1709,9 @@ static int cmd_seedsearch(int argc, char** argv) {
         }
     }
     if (dseeds > 256) dseeds = 256;
-    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu bb=%d nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f primary_loss=0.10 secondary_loss=0.30 pairing=paired\n",
-            threads,Ns.size(),bb,nseeds,dseeds,tsearch,tverify,goodthr);
+    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu bb=%d nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f primary_loss=0.10 secondary_loss=0.30 pairing=paired seed_fixups=%s\n",
+            threads,Ns.size(),bb,nseeds,dseeds,tsearch,tverify,goodthr,
+            seed_fixup_policy());
     printf("# schema=whx-seedsearch-v1 primary_loss=0.10 secondary_loss=0.30 finalist_trials=paired tie_break=peel_then_lowest_seed\n");
     printf("# pairing=paired validation_trials=%ld trial_stride=%llu primary_base=0xBEE5+N*577 secondary_base=0xF00D+N*331\n",
            tverify, (unsigned long long)kValidationTrialStride);
@@ -1804,16 +1832,26 @@ static int cmd_scan(int argc, char** argv) {
     }
     const int active_threads = std::min<int>(threads, (int)Ns.size());
     if (!nfile.empty()) {
-        printf("# scan: threads=%d source=%s count=%zu trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
-               active_threads, nfile.c_str(), Ns.size(), trials, bb, startMode, loss, thresh);
+        printf("# scan: threads=%d source=%s count=%zu trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f seed=0x%llx seed_fixups=%s\n",
+               active_threads, nfile.c_str(), Ns.size(), trials, bb, startMode, loss, thresh,
+               (unsigned long long)baseSeed,
+               seed_fixup_policy());
     }
     else {
-        printf("# scan: threads=%d N=[%d,%d] trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
-               active_threads, nlo, nhi, trials, bb, startMode, loss, thresh);
+        printf("# scan: threads=%d N=[%d,%d] trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f seed=0x%llx seed_fixups=%s\n",
+               active_threads, nlo, nhi, trials, bb, startMode, loss, thresh,
+               (unsigned long long)baseSeed,
+               seed_fixup_policy());
     }
     std::atomic<size_t> next_index{0};
     std::mutex pmu;
     std::atomic<long> scanned{0};
+    struct ScanResult {
+        uint64_t overhead_sum = 0;
+        uint32_t overhead_max = 0;
+        long failures = 0;
+    };
+    vector<ScanResult> scan_results(Ns.size());
     vector<thread> ts;
     for (int t = 0; t < active_threads; ++t) {
         ts.emplace_back([&]() {
@@ -1828,18 +1866,24 @@ static int cmd_scan(int argc, char** argv) {
                     int rc = roundtrip(s, N, bb, startMode, loss, &extra, nullptr);
                     if (rc == 0) { osum += extra; if (extra > omax) omax = extra; } else fail++;
                 }
-                double mean = (double)osum / trials;
-                if (mean > thresh || fail > 0) {
-                    std::lock_guard<std::mutex> lk(pmu);
-                    printf("WEAK N=%-6d mean=%.4f max=%u fail=%ld\n", N, mean, omax, fail);
-                    fflush(stdout);
-                }
+                scan_results[index].overhead_sum = osum;
+                scan_results[index].overhead_max = omax;
+                scan_results[index].failures = fail;
                 long sc = ++scanned;
                 if (sc % 4000 == 0) { std::lock_guard<std::mutex> lk(pmu); fprintf(stderr, "  ...scanned %ld N\n", sc); }
             }
         });
     }
     for (auto& th : ts) th.join();
+    for (size_t index = 0; index < Ns.size(); ++index) {
+        const ScanResult& result = scan_results[index];
+        const long double mean =
+            (long double)result.overhead_sum / (long double)trials;
+        if (mean > (long double)thresh || result.failures > 0) {
+            printf("WEAK N=%-6d mean=%.17Lg max=%u fail=%ld\n",
+                   Ns[index], mean, result.overhead_max, result.failures);
+        }
+    }
     printf("# scan done: %ld N scanned\n", scanned.load());
     return 0;
 }
@@ -2079,6 +2123,16 @@ static int cmd_selftest(int argc, char**) {
         return condition;
     };
     bool ok = true;
+
+#if defined(WIREHAIR_DISABLE_SEED_FIXUPS)
+    ok &= expect(!wirehair::SeedFixupsEnabled(),
+                 "harness and codec both disable seed fixups");
+    printf("# seed_fixups=disabled\n");
+#else
+    ok &= expect(wirehair::SeedFixupsEnabled(),
+                 "harness and codec both enable seed fixups");
+    printf("# seed_fixups=enabled\n");
+#endif
 
     vector<uint64_t> hist;
     ok &= expect(histogram_quantile(hist, 0.5L) == 0, "empty histogram");

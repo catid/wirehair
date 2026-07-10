@@ -9,10 +9,14 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2Policy.h
     WirehairV2Precode.cpp
     WirehairV2Precode.h
+    WirehairV2PrecodeDecode.cpp
+    WirehairV2PrecodeDecode.h
     WirehairV2PrecodeEncode.cpp
     WirehairV2PrecodeEncode.h
     WirehairV2Seeds.cpp
     WirehairV2Seeds.h
+    WirehairV2Solve.cpp
+    WirehairV2Solve.h
 )
 
 target_include_directories(wirehair_v2_policy PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -64,6 +68,32 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_precode_encode_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_encode_test COMMAND wirehair_v2_precode_encode_test)
 
+    add_executable(wirehair_v2_precode_solve_test PrecodeSolveTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_precode_solve_test)
+    target_link_libraries(wirehair_v2_precode_solve_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_precode_solve_test COMMAND wirehair_v2_precode_solve_test)
+
+    add_executable(wirehair_v2_precode_roundtrip_test PrecodeRoundTripTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_precode_roundtrip_test)
+    target_link_libraries(wirehair_v2_precode_roundtrip_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_precode_roundtrip_test COMMAND wirehair_v2_precode_roundtrip_test)
+
+    add_executable(wirehair_v2_precode_seed_selection_test
+        PrecodeSeedSelectionTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_precode_seed_selection_test)
+    target_link_libraries(wirehair_v2_precode_seed_selection_test
+        wirehair_v2_policy)
+    if(_wirehair_v2_sanitized)
+        set(_wirehair_v2_seed_selection_args --sanitizer)
+    else()
+        set(_wirehair_v2_seed_selection_args "")
+    endif()
+    add_test(NAME wirehair_v2_precode_seed_selection_test
+        COMMAND wirehair_v2_precode_seed_selection_test
+            ${_wirehair_v2_seed_selection_args})
+    set_tests_properties(wirehair_v2_precode_seed_selection_test
+        PROPERTIES TIMEOUT 180)
+
     if(UNIX AND NOT _wirehair_v2_sanitized)
         add_test(
             NAME wirehair_v2_precode_oom_test
@@ -80,7 +110,7 @@ else()
 endif()
 add_executable(wirehair_v2_bench ${WIREHAIR_BENCH_EXCLUDE}
     WirehairV2Bench.cpp)
-target_link_libraries(wirehair_v2_bench wirehair_v2_policy)
+target_link_libraries(wirehair_v2_bench wirehair_v2_policy Threads::Threads)
 wirehair_apply_project_options(wirehair_v2_bench)
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
     add_test(

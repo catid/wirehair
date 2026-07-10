@@ -1020,7 +1020,7 @@ bool TestMessagePrecodeEncoder()
 
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.DenseIdentityCorner = true;
-    options.RecoveryMixCount = 5u;
+    options.RecoveryMixCount = wirehair_v2::kCertifiedPacketMixCount;
 
     wirehair_v2::MessagePrecodeEncoder encoder;
     if (!encoder.Initialize(
@@ -1038,7 +1038,7 @@ bool TestMessagePrecodeEncoder()
         encoder.Profile().BlockBytes != bb ||
         encoder.Options().RecoveryMixCount != options.RecoveryMixCount ||
         !encoder.Options().DenseIdentityCorner ||
-        !encoder.SourceBlocks() ||
+        !encoder.IntermediateBlocks() ||
         !encoder.BlockEncoder().IsInitialized())
     {
         std::fprintf(stderr, "message encoder: accessors failed\n");
@@ -1050,7 +1050,7 @@ bool TestMessagePrecodeEncoder()
     uint64_t ops = UINT64_MAX;
     if (!encoder.Encode(0u, got.data(), bb, &data_bytes, &ops) ||
         data_bytes != bb ||
-        ops != 1u ||
+        ops == 0u ||
         std::memcmp(got.data(), message.data(), bb) != 0)
     {
         std::fprintf(stderr, "message encoder: source block failed\n");
@@ -1062,12 +1062,24 @@ bool TestMessagePrecodeEncoder()
         message.data() + (size_t)(K - 1u) * bb;
     if (!encoder.Encode(K - 1u, got.data(), tail, &data_bytes, &ops) ||
         data_bytes != tail ||
-        ops != 1u ||
+        ops == 0u ||
         std::memcmp(got.data(), tail_src, tail) != 0 ||
         !std::all_of(got.begin() + tail, got.end(),
             [](uint8_t x) { return x == 0xacu; }))
     {
         std::fprintf(stderr, "message encoder: final partial source failed\n");
+        return false;
+    }
+
+    std::fill(got.begin(), got.end(), uint8_t{0xac});
+    if (!encoder.Encode(K - 1u, got.data(), bb, &data_bytes, &ops) ||
+        data_bytes != tail ||
+        std::memcmp(got.data(), tail_src, tail) != 0 ||
+        !std::all_of(got.begin() + tail, got.end(),
+            [](uint8_t x) { return x == 0xacu; }))
+    {
+        std::fprintf(stderr,
+            "message encoder: full-capacity partial source over-wrote tail\n");
         return false;
     }
 
@@ -1107,15 +1119,14 @@ bool TestMessagePrecodeEncoder()
 
     const wirehair_v2::PrecodeEncoder& blocks = encoder.BlockEncoder();
     const wirehair_v2::PrecodeSystem& encoder_system = blocks.System();
-    const uint32_t parity_count = blocks.ParityBlockCount();
-    const std::vector<std::vector<uint32_t> > oracle_rows =
-        wirehair_v2::GenerateRecoveryMatrixRows(
-            encoder.Profile().Policy.Codec,
-            K,
-            parity_count,
-            16u,
-            blocks.RecoveryMixCount(),
-            blocks.RecoveryRowSeed());
+    wirehair_v2::PacketRowConfig packet_config;
+    packet_config.PeelSeed = (uint32_t)blocks.RecoveryRowSeed();
+    packet_config.MixCount = blocks.RecoveryMixCount();
+    if (!blocks.IntermediateBlocks()) {
+        std::fprintf(stderr,
+            "message encoder: solved intermediate storage unavailable\n");
+        return false;
+    }
     const uint32_t reordered_ids[] = {
         K + 9u, 2u, K + 1u, K - 1u, K + 15u, 0u, K + 4u
     };
@@ -1148,14 +1159,18 @@ bool TestMessagePrecodeEncoder()
         }
         else
         {
-            const uint32_t row_index = packet_id - K;
-            ManualRecoveryBlock(
+            if (!wirehair_v2::EvaluatePacketBlock(
                 encoder_system,
-                encoder.SourceBlocks(),
-                blocks.ParityBlocks(),
+                packet_config,
+                blocks.IntermediateBlocks(),
                 bb,
-                oracle_rows[row_index],
-                want.data());
+                packet_id,
+                want.data()))
+            {
+                std::fprintf(stderr,
+                    "message encoder: packet oracle evaluation failed\n");
+                return false;
+            }
             if (data_bytes != bb || !EqualBlock(got.data(), want.data(), bb))
             {
                 std::fprintf(stderr,
@@ -1166,17 +1181,14 @@ bool TestMessagePrecodeEncoder()
     }
 
     const uint32_t max_packet_id = UINT32_MAX;
-    const std::vector<uint32_t> max_row =
-        wirehair_v2::GenerateRecoveryMatrixRow(
-            encoder.Profile().Policy.Codec,
-            K,
-            parity_count,
-            max_packet_id - K,
-            blocks.RecoveryMixCount(),
-            blocks.RecoveryRowSeed());
-    ManualRecoveryBlock(
-        encoder_system, encoder.SourceBlocks(), blocks.ParityBlocks(), bb,
-        max_row, want.data());
+    if (!wirehair_v2::EvaluatePacketBlock(
+            encoder_system, packet_config, blocks.IntermediateBlocks(), bb,
+            max_packet_id, want.data()))
+    {
+        std::fprintf(stderr,
+            "message encoder: maximum packet-id oracle failed\n");
+        return false;
+    }
     if (!encoder.Encode(
             max_packet_id, got.data(), bb, &data_bytes, &ops) ||
         data_bytes != bb || !EqualBlock(got.data(), want.data(), bb))
@@ -1206,7 +1218,7 @@ bool TestMessagePrecodeEncoder()
     if (encoder.Initialize(
             message.data(), message_bytes, bb, &mismatch, &options) ||
         !encoder.IsInitialized() ||
-        !encoder.SourceBlocks() ||
+        !encoder.IntermediateBlocks() ||
         encoder.SourceBlockCount() != K ||
         !encoder.BlockEncoder().IsInitialized())
     {
@@ -1260,12 +1272,13 @@ bool TestTypedFailuresAndAllocationContainment()
     }
 
     const wirehair_v2::SeedProfile working_profile = encoder.Profile();
-    const uint8_t* const working_source = encoder.SourceBlocks();
+    const uint8_t* working_source = encoder.IntermediateBlocks();
     const uint8_t dummy = 0u;
     if (encoder.InitializeResult(
             &dummy, UINT64_C(0x100000000), UINT32_C(0x80000000),
             nullptr, &identity) != Wirehair_InvalidInput ||
-        !encoder.IsInitialized() || encoder.SourceBlocks() != working_source ||
+        !encoder.IsInitialized() ||
+        encoder.IntermediateBlocks() != working_source ||
         encoder.Profile().BlockCount != working_profile.BlockCount)
     {
         std::fprintf(stderr,
@@ -1276,22 +1289,23 @@ bool TestTypedFailuresAndAllocationContainment()
     wirehair_v2::MessagePrecodeEncoderOptions certified;
     if (encoder.InitializeResult(
             message.data(), message_bytes, bb, nullptr, &certified) !=
-            Wirehair_BadDenseSeed || !encoder.IsInitialized() ||
-        encoder.SourceBlocks() != working_source)
+            Wirehair_Success || !encoder.IsInitialized() ||
+        encoder.Options().DenseIdentityCorner)
     {
         std::fprintf(stderr,
-            "typed failures: singular dense classification/state failed\n");
+            "typed failures: certified global solve failed\n");
         return false;
     }
+    working_source = encoder.IntermediateBlocks();
 
-    for (int64_t failure = 0; failure < 5; ++failure)
+    for (int64_t failure = 0; failure < 4; ++failure)
     {
         wirehair_v2::SetAllocationFailureCountdownForTesting(failure);
         const WirehairResult init_oom = encoder.InitializeResult(
             message.data(), message_bytes, bb, nullptr, &identity);
         wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
         if (init_oom != Wirehair_OOM || !encoder.IsInitialized() ||
-            encoder.SourceBlocks() != working_source)
+            encoder.IntermediateBlocks() != working_source)
         {
             std::fprintf(stderr,
                 "typed failures: init OOM containment failed at %lld\n",
@@ -1337,7 +1351,7 @@ bool TestTypedFailuresAndAllocationContainment()
         facade.Profile().BlockCount != K ||
         facade.InitializePrecodeEncoder(
             message.data(), message_bytes, bb, nullptr, &certified) !=
-            Wirehair_BadDenseSeed ||
+            Wirehair_Success ||
         facade.Profile().BlockCount != K)
     {
         std::fprintf(stderr,

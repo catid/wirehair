@@ -72,5 +72,5 @@ awk -F '\t' '
     }
 ' "$tmp" | LC_ALL=C sort -n -k1,1 > "$aggregate"
 
-printf "N\tObservations\tMinGeneratedDense\tMaxGeneratedDense\tLowestFailuresAtMax\tSourcesAtMax\n"
+printf "N\tObservations\tMinGeneratedDense\tMaxGeneratedDense\tSelectedFailureRateAtMax\tSourcesAtMax\n"
 cat "$aggregate"

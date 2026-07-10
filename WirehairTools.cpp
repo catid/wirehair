@@ -1053,15 +1053,18 @@ const uint8_t kDenseSeeds[kDenseSeedCount] = {
 
 // Per-N dense-seed corrections (Task5) for N where a peel-seed change alone can't fix the
 // overhead defect. Paired with WirehairPeelFixups.inc. Sorted ascending by N for binary search.
+#if !defined(WIREHAIR_DISABLE_SEED_FIXUPS)
 struct DenseSeedFixup { uint16_t N; uint8_t Seed; };
 static const DenseSeedFixup kDenseSeedFixups[] = {
 #include "WirehairDenseFixups.inc"
 };
 static const unsigned kDenseSeedFixupCount =
     (unsigned)(sizeof(kDenseSeedFixups) / sizeof(kDenseSeedFixups[0]));
+#endif
 
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
 {
+#if !defined(WIREHAIR_DISABLE_SEED_FIXUPS)
     // Correction table first (binary search).  These per-N fixups are tuned
     // for the default dense count, so bypass them for dense-count sweeps.
     {
@@ -1078,7 +1081,13 @@ uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
             return kDenseSeedFixups[lo].Seed;
         }
     }
+#endif
 
+    return GetBaseDenseSeed(N, dense_count);
+}
+
+uint16_t GetBaseDenseSeed(unsigned N, unsigned dense_count)
+{
     if (N < kTinyTableCount) {
         // Get seed from tiny table (16-bit)
         return kTinyDenseSeeds[N];
@@ -1172,15 +1181,18 @@ const uint8_t kPeelSeeds[kPeelSeedSubdivisions] = {
 // Per-N peel-seed corrections for weak-spot N where the default table seed yields
 // anomalously high decode overhead (5-150x). Each N's peel seed only affects that N,
 // so these are safe, isolated overrides. Sorted ascending by N for binary search.
+#if !defined(WIREHAIR_DISABLE_SEED_FIXUPS)
 struct PeelSeedFixup { uint16_t N; uint8_t Seed; };
 static const PeelSeedFixup kPeelSeedFixups[] = {
 #include "WirehairPeelFixups.inc"
 };
 static const unsigned kPeelSeedFixupCount =
     (unsigned)(sizeof(kPeelSeedFixups) / sizeof(kPeelSeedFixups[0]));
+#endif
 
 uint16_t GetPeelSeed(unsigned N)
 {
+#if !defined(WIREHAIR_DISABLE_SEED_FIXUPS)
     // Check the correction table first (binary search).
     {
         unsigned lo = 0, hi = kPeelSeedFixupCount;
@@ -1193,7 +1205,13 @@ uint16_t GetPeelSeed(unsigned N)
             return kPeelSeedFixups[lo].Seed;
         }
     }
+#endif
 
+    return GetBasePeelSeed(N);
+}
+
+uint16_t GetBasePeelSeed(unsigned N)
+{
     if (N < (kTinyTableCount + kSmallTableCount)) {
         return kSmallPeelSeeds[N];
     }
@@ -1204,6 +1222,15 @@ uint16_t GetPeelSeed(unsigned N)
 
     // Get seed from subdivided table
     return kPeelSeeds[subdivision];
+}
+
+bool SeedFixupsEnabled()
+{
+#if defined(WIREHAIR_DISABLE_SEED_FIXUPS)
+    return false;
+#else
+    return true;
+#endif
 }
 
 

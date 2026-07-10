@@ -1,5 +1,6 @@
 #pragma once
 
+#include "WirehairV2PrecodeDecode.h"
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Seeds.h"
 
@@ -33,6 +34,12 @@ public:
         uint32_t block_bytes,
         const SeedProfile* seed_override = 0);
 
+    WirehairResult InitializePrecodeDecoder(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = 0,
+        const MessagePrecodeEncoderOptions* options = 0);
+
     WirehairResult Encode(
         uint32_t block_id,
         void* block_out,
@@ -51,6 +58,7 @@ public:
 private:
     wirehair::Codec Impl;
     std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;
+    std::unique_ptr<MessagePrecodeDecoder> PrecodeDecoderImpl;
     SeedProfile CurrentProfile = {};
 };
 

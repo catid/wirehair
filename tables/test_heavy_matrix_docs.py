@@ -3,6 +3,7 @@
 
 import re
 import sys
+import unittest
 from pathlib import Path
 
 
@@ -53,5 +54,10 @@ def main():
     return 0
 
 
+class HeavyMatrixDocsTest(unittest.TestCase):
+    def test_heavy_matrix_claims_and_authority(self):
+        self.assertEqual(main(), 0)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()

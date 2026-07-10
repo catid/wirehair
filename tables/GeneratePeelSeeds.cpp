@@ -2,14 +2,19 @@
 
 #include "../WirehairCodec.h"
 #include "../WirehairTools.h"
+#include "PeelSelectionPolicy.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <limits>
+#include <string>
 #include <vector>
 #include <atomic>
 using namespace std;
@@ -78,6 +83,7 @@ using namespace std;
 //// Entrypoint
 
 static bool SkipTuning = false;
+static uint64_t CampaignSeed = 123456789;
 
 static const int kMaxTuningTries = 8;
 
@@ -93,8 +99,42 @@ void FillSeeds()
 }
 
 static std::atomic<unsigned> FailedTrials(0);
+static const unsigned kHardFailurePenalty = 1000000;
 
 uint8_t Message[64000];
+
+static uint64_t DeriveTrialSeed(uint64_t base_seed, unsigned N)
+{
+    uint64_t value = (base_seed ^ 0x5045454cULL) +
+        0x9e3779b97f4a7c15ULL * (uint64_t)N;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static uint64_t BaseTablesHash()
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned N = 2048; N <= CAT_WIREHAIR_MAX_N; ++N)
+    {
+        const uint16_t count = wirehair::GetDenseCount(N);
+        const uint16_t denseSeed = wirehair::GetBaseDenseSeed(N, count);
+        hash ^= N;
+        hash *= 1099511628211ULL;
+        hash ^= count;
+        hash *= 1099511628211ULL;
+        hash ^= denseSeed;
+        hash *= 1099511628211ULL;
+    }
+    for (unsigned subdivision = 0;
+         subdivision < kPeelSeedSubdivisions;
+         ++subdivision)
+    {
+        hash ^= kPeelSeeds[subdivision];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 static void QuickReject(
     unsigned N,
@@ -103,7 +143,7 @@ static void QuickReject(
     wirehair::Codec encoder;
 
     const uint16_t dense_count = wirehair::GetDenseCount(N);
-    const uint16_t dense_seed = wirehair::GetDenseSeed(N, dense_count);
+    const uint16_t dense_seed = wirehair::GetBaseDenseSeed(N, dense_count);
 
     // Override the seeds
     encoder.OverrideSeeds(dense_count, p_seed, dense_seed);
@@ -126,12 +166,13 @@ static void QuickReject(
 static void QuickPeelTest(
     unsigned N,
     const uint16_t p_seed,
-    int trials)
+    unsigned trial,
+    unsigned loss_percent)
 {
     wirehair::Codec encoder, decoder;
 
     const uint16_t dense_count = wirehair::GetDenseCount(N);
-    const uint16_t dense_seed = wirehair::GetDenseSeed(N, dense_count);
+    const uint16_t dense_seed = wirehair::GetBaseDenseSeed(N, dense_count);
 
     // Override the seeds
     encoder.OverrideSeeds(dense_count, p_seed, dense_seed);
@@ -149,7 +190,7 @@ static void QuickPeelTest(
     if (result != Wirehair_Success) {
         // Huge penalty
         cout << "InitializeEncoder/EncodeFeed failed" << endl;
-        FailedTrials += 10000;
+        FailedTrials += kHardFailurePenalty;
         return;
     }
 
@@ -158,7 +199,7 @@ static void QuickPeelTest(
     if (result != Wirehair_Success) {
         cout << "InitializeDecoder failed" << endl;
         // Huge penalty
-        FailedTrials += 10000;
+        FailedTrials += kHardFailurePenalty;
         return;
     }
 
@@ -168,24 +209,20 @@ static void QuickPeelTest(
     // p_seed in scores each candidate on different loss sets, biasing the
     // minimum-failure pick toward lucky streams (winner's curse)
     wirehair::PCGRandom prng;
-    prng.Seed((uint64_t)N, trials);
+    prng.Seed(DeriveTrialSeed(CampaignSeed, N), trial);
 
-    int lossCount = (N + 9) / 10;
-    std::vector<uint16_t> losses;
-    losses.resize(N);
+    const unsigned lossCount =
+        (N * loss_percent + 99u) / 100u;
+    std::vector<uint16_t> losses(N);
 
     wirehair::ShuffleDeck16(prng, &losses[0], N);
+    const std::vector<uint8_t> dropped =
+        wirehair_table::BuildPeelDropMask(losses, lossCount);
 
-    for (unsigned i = 0;; ++i)
+    const uint64_t packetIdCount = wirehair_table::PeelPacketIdCount(N);
+    for (uint64_t packetId = 0; packetId < packetIdCount; ++packetId)
     {
-        bool match = false;
-        for (int j = 0; j < lossCount; ++j) {
-            if (losses[j] == i) {
-                match = true;
-                break;
-            }
-        }
-        if (match) {
+        if (packetId < dropped.size() && dropped[(size_t)packetId]) {
             continue;
         }
 
@@ -193,17 +230,19 @@ static void QuickPeelTest(
 
         uint8_t encodedData[1];
 
-        const uint32_t encodedBytes = encoder.Encode(i, encodedData, 1);
+        const uint32_t encodedBytes = encoder.Encode(
+            (uint32_t)packetId, encodedData, 1);
 
         if (encodedBytes == 0)
         {
             cout << "Encode failed" << endl;
             // Huge penalty
-            FailedTrials += 10000;
+            FailedTrials += kHardFailurePenalty;
             return;
         }
 
-        result = decoder.DecodeFeed(i, encodedData, encodedBytes);
+        result = decoder.DecodeFeed(
+            (uint32_t)packetId, encodedData, encodedBytes);
 
         if (result != Wirehair_NeedMore)
         {
@@ -221,22 +260,17 @@ static void QuickPeelTest(
                 else if (added >= N + 3) {
                     FailedTrials += (added - N) * 3;
                 }
-                break;
+                return;
             }
 
             cout << "DecodeFeed failed" << endl;
             // Huge penalty
-            FailedTrials += 10000;
-            return;
-        }
-
-        if (added > N + 10) {
-            cout << "added = " << added << " for " << N << endl;
-            // Huge penalty
-            FailedTrials += 10000;
+            FailedTrials += kHardFailurePenalty;
             return;
         }
     }
+    cout << "packet-id cap reached for N = " << N << endl;
+    FailedTrials += kHardFailurePenalty;
 }
 
 static bool ParseU64(const char* text, uint64_t& out)
@@ -264,12 +298,42 @@ static bool ParseUnsigned(const char* text, unsigned& out)
     return true;
 }
 
+static bool PathExists(const string& path)
+{
+    ifstream input(path.c_str(), ios::binary);
+    return input.good();
+}
+
+static bool FinalizeResults(
+    ofstream& results,
+    const string& temporary_path,
+    const string& final_path)
+{
+    if (final_path.empty()) {
+        return true;
+    }
+    results.flush();
+    const bool write_ok = results.good();
+    results.close();
+    if (!write_ok || !results) {
+        cerr << "failed writing --results file: " << temporary_path << endl;
+        return false;
+    }
+    if (rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+        cerr << "unable to publish --results file " << final_path << ": "
+            << strerror(errno) << endl;
+        return false;
+    }
+    return true;
+}
+
 static void Usage(const char* program)
 {
     cerr
-        << "usage: " << program << " [--trials N] [--sublo I] "
+        << "usage: " << program << " [--seed U64] [--trials N] [--sublo I] "
         << "[--subhi I] [--nlo N] [--nhi N] [--max-tries N] "
-        << "[--skip-tuning]\n";
+        << "[--loss10-percent N] [--loss30-percent N] "
+        << "[--skip-tuning] [--results FILE]\n";
 }
 
 static unsigned FirstNForSubdivision(unsigned subdivision, unsigned nlo)
@@ -292,6 +356,10 @@ int main(int argc, char** argv)
     unsigned nlo = 2048;
     unsigned nhi = CAT_WIREHAIR_MAX_N;
     unsigned maxTries = kMaxTuningTries;
+    unsigned loss10Percent = 10;
+    unsigned loss30Percent = 30;
+    string resultsPath;
+    string resultsTemporaryPath;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -304,9 +372,15 @@ int main(int argc, char** argv)
             }
             return argv[++i];
         };
-        if (!strcmp(arg, "--trials")) {
+        if (!strcmp(arg, "--seed")) {
+            if (!ParseU64(next(), CampaignSeed)) {
+                cerr << "bad --seed value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--trials")) {
             if (!ParseUnsigned(next(), trials) || trials == 0 ||
-                trials > (unsigned)INT_MAX)
+                trials > wirehair_table::MaxPeelTrials(kHardFailurePenalty))
             {
                 cerr << "bad --trials value" << endl;
                 return 1;
@@ -342,8 +416,27 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!strcmp(arg, "--loss10-percent")) {
+            if (!ParseUnsigned(next(), loss10Percent)) {
+                cerr << "bad --loss10-percent value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--loss30-percent")) {
+            if (!ParseUnsigned(next(), loss30Percent)) {
+                cerr << "bad --loss30-percent value" << endl;
+                return 1;
+            }
+        }
         else if (!strcmp(arg, "--skip-tuning")) {
             SkipTuning = true;
+        }
+        else if (!strcmp(arg, "--results")) {
+            resultsPath = next();
+            if (resultsPath.empty()) {
+                cerr << "bad --results value" << endl;
+                return 1;
+            }
         }
         else if (!strcmp(arg, "--help")) {
             Usage(argv[0]);
@@ -369,6 +462,13 @@ int main(int argc, char** argv)
             << "]" << endl;
         return 1;
     }
+    if (loss10Percent < 1u || loss30Percent > 99u ||
+        loss10Percent >= loss30Percent)
+    {
+        cerr << "loss percentages must satisfy 1 <= loss10 < loss30 <= 99"
+            << endl;
+        return 1;
+    }
 
     const int gfInitResult = gf256_init();
 
@@ -385,35 +485,92 @@ int main(int argc, char** argv)
         Message[i] = (uint8_t)i;
     }
 
+    ofstream results;
+    const uint64_t baseTablesHash = BaseTablesHash();
+    if (!resultsPath.empty())
+    {
+        resultsTemporaryPath = resultsPath + ".tmp";
+        if (PathExists(resultsPath) || PathExists(resultsTemporaryPath)) {
+            cerr << "--results destination already exists: " << resultsPath
+                << endl;
+            return 1;
+        }
+        results.open(resultsTemporaryPath.c_str(), ios::out | ios::trunc);
+        if (!results) {
+            cerr << "unable to open --results file: " << resultsPath << endl;
+            return 1;
+        }
+        results << "Subdivision\tFirstN\tLastN\tPeelSeed\tWorstScore"
+            "\tTotalScore\tTotalScore10\tTotalScore30"
+            "\tCurrentPeelSeed\tTrials\tMaxTries"
+            "\tEvaluatedCandidates\tEvaluatedScenarios\tPrunedCandidates"
+            "\tScenarioCount\tBaseSeed\tRequestedNLo\tRequestedNHi"
+            "\tBaseTablesHash\tLoss10Percent\tLoss30Percent"
+            "\tMethodVersion\tStatus\n";
+    }
+
     // Subdivisions 0 and 1 map real block counts (N = 2048+i stepping 2048,
     // i.e. 2048, 2049, 4096, 4097, ...) and need tuning like every other
     // residue class; starting at 2 carried forward untested table entries
     cerr
-        << "# GeneratePeelSeeds trials=" << trials
+        << "# GeneratePeelSeeds seed=0x" << hex << CampaignSeed << dec
+        << " trials=" << trials
         << " sublo=" << sublo
         << " subhi=" << subhi
         << " nlo=" << nlo
         << " nhi=" << nhi
         << " max_tries=" << maxTries
+        << " loss10_percent=" << loss10Percent
+        << " loss30_percent=" << loss30Percent
         << " skip_tuning=" << (SkipTuning ? 1 : 0) << endl;
 
     for (unsigned i = sublo; i <= subhi; ++i)
     {
-        int best_peel_seed = 0;
-        unsigned best_failures = UINT_MAX;
+        const unsigned current_peel_seed = kPeelSeeds[i];
+        unsigned best_peel_seed = current_peel_seed;
+        wirehair_table::PeelCandidateScore bestScore =
+            wirehair_table::PeelCandidateScore::WorstPossible();
+        bool found_candidate = false;
+        bool selectedWithoutTuning = false;
 
-        unsigned tries = 0;
+        unsigned evaluatedCandidates = 0;
         const unsigned firstN = FirstNForSubdivision(i, nlo);
         if (firstN > nhi)
         {
             cout << "subdivision = " << i
                 << " : Skipped no N in requested range; kept seed = "
                 << (int)kPeelSeeds[i] << endl;
+            if (!resultsPath.empty())
+            {
+                results << i << "\t0\t0\t" << current_peel_seed
+                    << "\t0\t0\t0\t0\t" << current_peel_seed << '\t' << trials
+                    << '\t' << maxTries << "\t0\t0\t0\t0\t" << CampaignSeed
+                    << '\t' << nlo << '\t' << nhi << '\t' << baseTablesHash
+                    << '\t' << loss10Percent << '\t' << loss30Percent
+                    << "\tpeel-v4\tretained-no-N\n";
+            }
             continue;
         }
-
-        for (unsigned p_seed = 0; p_seed < 256; ++p_seed)
+        const unsigned lastN = firstN +
+            ((nhi - firstN) / kPeelSeedSubdivisions) *
+                kPeelSeedSubdivisions;
+        vector<int> scenarioNs;
+        for (int N = (int)firstN;
+             N <= (int)nhi;
+             N += (int)kPeelSeedSubdivisions)
         {
+            scenarioNs.push_back(N);
+        }
+        reverse(scenarioNs.begin(), scenarioNs.end());
+        const unsigned scenarioCount = (unsigned)scenarioNs.size() * 2u;
+        uint64_t evaluatedScenarios = 0;
+        unsigned prunedCandidates = 0;
+
+        // Evaluate the shipped seed first so exact score ties retain it.
+        for (unsigned rank = 0; rank < 256; ++rank)
+        {
+            const unsigned p_seed = rank == 0 ? current_peel_seed :
+                (rank <= current_peel_seed ? rank - 1u : rank);
             FailedTrials = 0;
 
 #pragma omp parallel for
@@ -429,51 +586,124 @@ int main(int argc, char** argv)
             }
 
             cout << "For subdivision " << i << " of " << kPeelSeedSubdivisions << " - testing seed " << p_seed << endl;
+            ++evaluatedCandidates;
 
             if (SkipTuning)
             {
                 best_peel_seed = p_seed;
-                best_failures = 0;
+                bestScore = wirehair_table::PeelCandidateScore();
+                found_candidate = true;
+                selectedWithoutTuning = true;
                 break;
             }
 
-            FailedTrials = 0;
-
-            for (int N = (int)firstN;
-                 N <= (int)nhi;
-                 N += (int)kPeelSeedSubdivisions)
+            wirehair_table::PeelCandidateScore candidateScore;
+            bool pruned = false;
+            for (int N : scenarioNs)
             {
+                // Evaluate the harder loss first to reject weak candidates
+                // earlier without changing the complete score.
+                FailedTrials = 0;
 #pragma omp parallel for
                 for (int trial = 0; trial < (int)trials; ++trial) {
-                    QuickPeelTest(N, (uint16_t)p_seed, trial);
+                    QuickPeelTest(
+                        N, (uint16_t)p_seed, (unsigned)trial, loss30Percent);
+                }
+                candidateScore.Add(FailedTrials, true);
+                ++evaluatedScenarios;
+                if (wirehair_table::CannotBeatPeelScore(
+                        candidateScore, bestScore))
+                {
+                    pruned = true;
+                    break;
+                }
+
+                FailedTrials = 0;
+#pragma omp parallel for
+                for (int trial = 0; trial < (int)trials; ++trial) {
+                    QuickPeelTest(
+                        N, (uint16_t)p_seed, (unsigned)trial, loss10Percent);
+                }
+                candidateScore.Add(FailedTrials, false);
+                ++evaluatedScenarios;
+                if (wirehair_table::CannotBeatPeelScore(
+                        candidateScore, bestScore))
+                {
+                    pruned = true;
+                    break;
                 }
             }
+            if (pruned) {
+                ++prunedCandidates;
+                cout << "pruned worst = " << candidateScore.WorstScore
+                    << " partial total = " << candidateScore.TotalScore << endl;
+                if (evaluatedCandidates >= maxTries) {
+                    break;
+                }
+                continue;
+            }
 
-            const unsigned failures = FailedTrials;
-            cout << "failures = " << failures << endl;
+            cout << "total10 = " << candidateScore.TotalScore10
+                << " total30 = " << candidateScore.TotalScore30
+                << " worst = " << candidateScore.WorstScore
+                << " total = " << candidateScore.TotalScore << endl;
 
-            if (failures < best_failures)
+            if (wirehair_table::IsBetterPeelScore(candidateScore, bestScore))
             {
                 best_peel_seed = p_seed;
-                best_failures = failures;
+                bestScore = candidateScore;
+                found_candidate = true;
 
-                cout << "*** subdivision = " << i << " : Picked seed = " << best_peel_seed << " failures = " << best_failures << endl;
+                cout << "*** subdivision = " << i << " : Picked seed = "
+                    << best_peel_seed << " worst = " << bestScore.WorstScore
+                    << " total = " << bestScore.TotalScore << endl;
 
-                if (failures <= 0) {
+                if (bestScore.WorstScore == 0) {
                     break;
                 }
             }
 
-            ++tries;
-
-            if (tries >= maxTries) {
+            if (evaluatedCandidates >= maxTries) {
                 break;
             }
         }
 
-        cout << "subdivision = " << i << " : Picked seed = " << best_peel_seed << " failures = " << best_failures << endl;
+        if (!found_candidate)
+        {
+            cout << "subdivision = " << i
+                << " : No admissible candidate; retained seed = "
+                << current_peel_seed << endl;
+        }
+
+        cout << "subdivision = " << i << " : Picked seed = " << best_peel_seed
+            << " worst = " << bestScore.WorstScore
+            << " total = " << bestScore.TotalScore
+            << " total10 = " << bestScore.TotalScore10
+            << " total30 = " << bestScore.TotalScore30
+            << endl;
 
         kPeelSeeds[i] = (uint8_t)best_peel_seed;
+        if (!resultsPath.empty())
+        {
+            results << i << '\t' << firstN << '\t' << lastN << '\t'
+                << best_peel_seed << '\t' << bestScore.WorstScore << '\t'
+                << bestScore.TotalScore << '\t' << bestScore.TotalScore10 << '\t'
+                << bestScore.TotalScore30 << '\t' << current_peel_seed << '\t'
+                << trials << '\t'
+                << maxTries << '\t' << evaluatedCandidates << '\t'
+                << evaluatedScenarios << '\t' << prunedCandidates << '\t'
+                << scenarioCount << '\t'
+                << CampaignSeed << '\t' << nlo << '\t' << nhi << '\t'
+                << baseTablesHash << '\t' << loss10Percent << '\t'
+                << loss30Percent << "\tpeel-v4\t"
+                << (!found_candidate ? "retained-no-candidate" :
+                    selectedWithoutTuning ? "selected-skip-tuning" : "searched")
+                << '\n';
+            if (!results) {
+                cerr << "failed writing --results file: " << resultsPath << endl;
+                return 1;
+            }
+        }
     }
 
     cout << "static const unsigned kPeelSeedSubdivisions = " << kPeelSeedSubdivisions << ";" << endl;
@@ -498,5 +728,6 @@ int main(int argc, char** argv)
     cout << "};" << endl;
 
 
-    return 0;
+    return FinalizeResults(
+        results, resultsTemporaryPath, resultsPath) ? 0 : 1;
 }

@@ -16,6 +16,7 @@ OUT="$KNOBS" TAG=test-whx-knobs EXTRA=-DWH_SEED_KNOBS=1 bash bench/build.sh >/de
 
 "$NORMAL" ohead --threads 1 --nlo 100 --nhi 100 --trials 1 --bb 1 \
     --startmode 1 --loss 0 --seed 12 >"$TMP/ohead-one.out"
+grep -Fq 'seed=0xc' "$TMP/ohead-one.out"
 awk '$1 == 100 { found=1; good=($2 == 1 && $3 == 1 && $4 == 1 && $5 == 1 && $6 == 1 && $7 == 0) }
      END { exit !(found && good) }' "$TMP/ohead-one.out"
 
@@ -84,6 +85,16 @@ printf '32\n64\n' >"$TMP/n-file"
 "$NORMAL" scan --threads 64 --nfile "$TMP/n-file" --trials 1 --bb 1 \
     --startmode 0 --loss 0.10 --thresh 999 --seed 1 >"$TMP/scan.out"
 grep -Fq '# scan done: 2 N scanned' "$TMP/scan.out"
+
+scan_repeat_args=(scan --nlo 32 --nhi 48 --trials 8 --bb 1
+    --startmode 0 --loss 0.10 --thresh 0 --seed 456)
+"$NORMAL" "${scan_repeat_args[@]}" --threads 1 >"$TMP/scan-t1.out"
+"$NORMAL" "${scan_repeat_args[@]}" --threads 4 >"$TMP/scan-t4.out"
+sed -E 's/threads=[0-9]+/threads=N/' "$TMP/scan-t1.out" >"$TMP/scan-t1.norm"
+sed -E 's/threads=[0-9]+/threads=N/' "$TMP/scan-t4.out" >"$TMP/scan-t4.norm"
+cmp "$TMP/scan-t1.norm" "$TMP/scan-t4.norm"
+awk '/^WEAK N=/{ n=$2; sub(/^N=/, "", n); if (n+0 <= previous) exit 1; previous=n+0 }' \
+    "$TMP/scan-t4.out"
 
 for bad_loss in 0.20 nan malformed; do
     set +e

@@ -152,7 +152,7 @@ void CheckV2PrecodeEncoderFacade()
 
     MessagePrecodeEncoderOptions options;
     options.DenseIdentityCorner = true;
-    options.RecoveryMixCount = 5u;
+    options.RecoveryMixCount = wirehair_v2::kCertifiedPacketMixCount;
 
     Codec encoder;
     Check(encoder.InitializePrecodeEncoder(
@@ -182,7 +182,7 @@ void CheckV2PrecodeEncoderFacade()
     for (size_t i = 0; i < got.size(); ++i) {
         got[i] = 0xac;
     }
-    Check(encoder.Encode(N - 1u, &got[0], final_bytes, &written) ==
+    Check(encoder.Encode(N - 1u, &got[0], block_bytes, &written) ==
             Wirehair_Success,
         "v2 precode facade should encode a partial final source block");
     Check(written == final_bytes &&
@@ -232,6 +232,67 @@ void CheckV2PrecodeEncoderFacade()
             Wirehair_Success &&
             std::memcmp(&got[0], &want[0], block_bytes) == 0,
         "v2 precode failed init should preserve last good encoder");
+
+    Codec legacy_encoder;
+    Codec legacy_decoder;
+    const bool legacy_initialized =
+        legacy_encoder.InitializeEncoder(
+            &message[0], message_bytes, block_bytes) == Wirehair_Success &&
+        legacy_decoder.InitializeDecoder(
+            message_bytes, block_bytes) == Wirehair_Success;
+    Check(legacy_initialized,
+        "legacy mode-separation controls should initialize");
+    if (legacy_initialized)
+    {
+        const SeedProfile legacy_encoder_profile = legacy_encoder.Profile();
+        const SeedProfile legacy_decoder_profile = legacy_decoder.Profile();
+        Check(legacy_encoder.InitializeEncoder(
+                &message[0], message_bytes, block_bytes, &good_profile) ==
+                Wirehair_InvalidInput &&
+                legacy_decoder.InitializeDecoder(
+                    message_bytes, block_bytes, &good_profile) ==
+                Wirehair_InvalidInput,
+            "legacy modes should reject a selected V2 contract profile");
+        SeedProfile mixed_profile = good_profile;
+        mixed_profile.V2SeedSelected = false;
+        Check(legacy_encoder.InitializeEncoder(
+                &message[0], message_bytes, block_bytes, &mixed_profile) ==
+                Wirehair_InvalidInput &&
+                legacy_decoder.InitializeDecoder(
+                    message_bytes, block_bytes, &mixed_profile) ==
+                Wirehair_InvalidInput,
+            "legacy modes should reject mixed V2 contract state");
+        Check(!legacy_encoder.Profile().V2SeedSelected &&
+                !legacy_decoder.Profile().V2SeedSelected &&
+                legacy_encoder.Profile().PeelSeed ==
+                    legacy_encoder_profile.PeelSeed &&
+                legacy_decoder.Profile().PeelSeed ==
+                    legacy_decoder_profile.PeelSeed,
+            "failed V2-profile downgrade should preserve legacy state");
+
+        WirehairResult legacy_result = Wirehair_NeedMore;
+        std::vector<uint8_t> legacy_block(block_bytes, 0u);
+        for (uint32_t block_id = 0;
+             block_id < N && legacy_result == Wirehair_NeedMore;
+             ++block_id)
+        {
+            uint32_t legacy_bytes = 0u;
+            const WirehairResult encode_result = legacy_encoder.Encode(
+                block_id, &legacy_block[0], block_bytes, &legacy_bytes);
+            if (encode_result != Wirehair_Success) {
+                legacy_result = encode_result;
+                break;
+            }
+            legacy_result = legacy_decoder.Decode(
+                block_id, &legacy_block[0], legacy_bytes);
+        }
+        std::vector<uint8_t> legacy_recovered((size_t)message_bytes, 0u);
+        Check(legacy_result == Wirehair_Success &&
+                legacy_decoder.Recover(
+                    &legacy_recovered[0], message_bytes) == Wirehair_Success &&
+                legacy_recovered == message,
+            "legacy state should remain byte-exact after rejected V2 profile");
+    }
 
     Check(encoder.InitializeEncoder(
             &message[0], message_bytes, block_bytes) == Wirehair_Success,

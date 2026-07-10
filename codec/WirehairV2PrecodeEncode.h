@@ -3,6 +3,7 @@
 #include "WirehairV2Peel.h"
 #include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
+#include "WirehairV2Solve.h"
 
 #include <wirehair/wirehair.h>
 
@@ -47,7 +48,7 @@
 
 namespace wirehair_v2 {
 
-static const uint32_t kDefaultRecoveryMixCount = 5u;
+static const uint32_t kDefaultRecoveryMixCount = kCertifiedPacketMixCount;
 static const uint64_t kMessagePrecodeSeedSalt =
     UINT64_C(0x763263707265636f);
 static const uint64_t kMessageRecoveryRowSeedSalt =
@@ -215,11 +216,17 @@ public:
     uint32_t RecoveryMixCount() const;
     const PrecodeEncodeStats& EncodeStats() const;
     const uint8_t* ParityBlocks() const;
+    const uint8_t* IntermediateBlocks() const;
     const PrecodeSystem& System() const;
 
 private:
     friend class MessagePrecodeEncoder;
     void Swap(PrecodeEncoder& other) noexcept;
+    WirehairResult InitializeSolvedSystem(
+        const PrecodeSystem& system,
+        const PacketRowConfig& packet_config,
+        std::vector<uint8_t>& intermediate_blocks,
+        uint32_t block_bytes);
 
     PrecodeSystem SystemValue = {};
     PeelingCodec CodecValue = {};
@@ -228,7 +235,10 @@ private:
     const uint8_t* SourceBlocks = nullptr;
     uint32_t BlockBytesValue = 0;
     std::vector<uint8_t> ParityBlockStorage;
+    std::vector<uint8_t> SolvedIntermediateStorage;
+    PacketRowConfig PacketConfigValue = {};
     PrecodeEncodeStats StatsValue = {};
+    bool UsesPacketContract = false;
     bool Initialized = false;
 };
 
@@ -240,19 +250,50 @@ struct MessagePrecodeEncoderOptions
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
 };
 
+/** True when any selected or mixed V2 precode contract state is present. */
+bool HasMessagePrecodeContractState(const SeedProfile& profile);
+
+/**
+    Resolve and validate the matrix options bound to a selected V2 profile.
+
+    An unselected profile uses requested_options (or the defaults when null).
+    A selected profile carries the complete versioned packet/precode contract;
+    null options inherit that contract and explicit options must match it.
+*/
+bool ResolveMessagePrecodeOptions(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions* requested_options,
+    MessagePrecodeEncoderOptions& resolved_options);
+
+/** Resolve exact precode dimensions and packet seeds from the profile. */
+bool ResolveMessagePrecodeConfiguration(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    PrecodeParams& params,
+    PacketRowConfig& packet_config);
+
+/** Publish the complete matrix contract and selected seed attempt. */
+void BindMessagePrecodeProfile(
+    SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt);
+
 /**
     Message-level adapter for the V2 precode encoder.
 
-    This owns the zero-padded source block array for an arbitrary byte-length
-    message, derives the certified precode system and recovery-row seed from a
-    SeedProfile, and exposes V1-style encode semantics: source block ids emit
-    only the original byte count for the final partial block, while recovery
-    block ids emit a full block.
+    This zero-pads the arbitrary byte-length message while solving, owns the
+    resulting full intermediate vector, derives the certified precode system
+    and packet seed from a SeedProfile, and exposes V1-style encode semantics:
+    systematic block ids emit only the original byte count for the final
+    partial block, while recovery block ids emit a full block.
 
-    The default options preserve the certified dense corner, which is often not
-    directly encoder-feasible for phased parity precomputation.  Set
-    DenseIdentityCorner=true only for explicit encoder-feasibility experiments
-    pending recertification of that variant.
+    The default path preserves the certified full-span dense rows.  It solves
+    K deterministic systematic packet equations together with all precode
+    constraints for the complete intermediate vector, so it does not require
+    the dense parity corner to be independently invertible.  The
+    DenseIdentityCorner option remains an experimental oracle variant.
 
     Initialization is transactional: any invalid, singular, or allocation
     failure preserves the last successfully initialized encoder.
@@ -300,14 +341,16 @@ public:
     const SeedProfile& Profile() const;
     const MessagePrecodeEncoderOptions& Options() const;
     const PrecodeEncodeStats& EncodeStats() const;
-    const uint8_t* SourceBlocks() const;
+    const PrecodeSolveStats& SolveStats() const;
+    /** Complete solved [source-domain | precode] intermediate vector. */
+    const uint8_t* IntermediateBlocks() const;
     const PrecodeEncoder& BlockEncoder() const;
 
 private:
     SeedProfile ProfileValue = {};
     MessagePrecodeEncoderOptions OptionsValue = {};
     PrecodeEncoder EncoderValue;
-    std::vector<uint8_t> SourceBlockStorage;
+    PrecodeSolveStats SolveStatsValue = {};
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;
     bool Initialized = false;

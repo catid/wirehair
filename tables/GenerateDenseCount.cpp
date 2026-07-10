@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -145,12 +146,65 @@ static bool ParseUnsigned(const char* text, unsigned& out)
     return true;
 }
 
+static uint64_t DeriveTrialSeed(uint64_t base_seed, unsigned N)
+{
+    uint64_t value = (base_seed ^ 0x44434f554e54ULL) +
+        0x9e3779b97f4a7c15ULL * (uint64_t)N;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static uint64_t SourceTablesHash()
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned N = CAT_WIREHAIR_MIN_N;
+         N <= CAT_WIREHAIR_MAX_N;
+         ++N)
+    {
+        hash ^= N;
+        hash *= 1099511628211ULL;
+        hash ^= wirehair::GetDenseCount(N);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static bool PathExists(const string& path)
+{
+    ifstream input(path.c_str(), ios::binary);
+    return input.good();
+}
+
+static bool FinalizeResults(
+    ofstream& results,
+    const string& temporary_path,
+    const string& final_path)
+{
+    if (final_path.empty()) {
+        return true;
+    }
+    results.flush();
+    const bool write_ok = results.good();
+    results.close();
+    if (!write_ok || !results) {
+        cerr << "failed writing --results file: " << temporary_path << endl;
+        return false;
+    }
+    if (rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+        cerr << "unable to publish --results file " << final_path << ": "
+            << strerror(errno) << endl;
+        return false;
+    }
+    return true;
+}
+
 static void Usage(const char* program)
 {
     cerr
         << "usage: " << program << " [--seed U64] [--trials N] "
         << "[--nlo N] [--nhi N] [--max-failures N] "
-        << "[--low-count-run N]\n";
+        << "[--low-count-run N] [--results FILE]\n";
 }
 
 int main(int argc, char** argv)
@@ -161,6 +215,8 @@ int main(int argc, char** argv)
     unsigned nhi = 64000;
     unsigned maxFailures = 10;
     unsigned lowCountRun = 4;
+    string resultsPath;
+    string resultsTemporaryPath;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -211,6 +267,13 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!strcmp(arg, "--results")) {
+            resultsPath = next();
+            if (resultsPath.empty()) {
+                cerr << "bad --results value" << endl;
+                return 1;
+            }
+        }
         else if (!strcmp(arg, "--help")) {
             Usage(argv[0]);
             return 0;
@@ -238,9 +301,26 @@ int main(int argc, char** argv)
     }
 
     message.resize(64000);
+    const uint64_t sourceTablesHash = SourceTablesHash();
 
-    int lastBest = nlo <= CAT_WIREHAIR_MIN_N ?
-        0 : wirehair::GetDenseCount(nlo);
+    ofstream results;
+    if (!resultsPath.empty())
+    {
+        resultsTemporaryPath = resultsPath + ".tmp";
+        if (PathExists(resultsPath) || PathExists(resultsTemporaryPath)) {
+            cerr << "--results destination already exists: " << resultsPath
+                << endl;
+            return 1;
+        }
+        results.open(resultsTemporaryPath.c_str(), ios::out | ios::trunc);
+        if (!results) {
+            cerr << "unable to open --results file: " << resultsPath << endl;
+            return 1;
+        }
+        results << "N\tDenseCount\tSelectedFailures\tTrials"
+            "\tMaxFailures\tLowCountRun\tBaseSeed\tTrialSeed"
+            "\tQualifyingCount\tSourceTablesHash\tMethodVersion\tStatus\n";
+    }
 
     cerr
         << "# GenerateDenseCount seed=0x" << hex << seed << dec
@@ -250,26 +330,39 @@ int main(int argc, char** argv)
         << " max_failures=" << maxFailures
         << " low_count_run=" << lowCountRun << endl;
 
-    cout << "N\tDenseCount\tLowestFailures" << endl;
+    cout << "N\tDenseCount\tSelectedFailureRate" << endl;
 
-    for (unsigned N = nlo; N <= nhi;)
+    // Always walk the canonical N=2 lattice and filter by the requested
+    // range.  Combined with per-N seeds and search starts, concatenated range
+    // shards are byte-equivalent to a monolithic full-domain run.
+    unsigned emittedRows = 0;
+    for (unsigned N = CAT_WIREHAIR_MIN_N; N <= nhi;)
     {
+        if (N < nlo)
+        {
+            unsigned scale = N / 64;
+            if (scale < 1) {
+                scale = 1;
+            }
+            const unsigned next = N + scale;
+            N = next > CAT_WIREHAIR_MAX_N ? CAT_WIREHAIR_MAX_N : next;
+            continue;
+        }
+
         unsigned lowCount = 0;
 
-        // Start close to the last best to save time
-        int count = lastBest - 10;
+        // Use a per-N start rather than carrying the prior result, so shard
+        // boundaries cannot alter the candidates evaluated for an N.
+        int count = (int)wirehair::GetDenseCount(N) - 10;
         if (count < 1) {
             count = 1;
         }
 
         unsigned lowestFailures = UINT_MAX;
-        lastBest = 0;
-
-        // Advance the trial-stream seed once per N, not once per count
-        // candidate: candidates must share paired trials or selection by
-        // minimum failure count is biased toward lucky streams (winner's
-        // curse) -- same fix as the sibling seed generators
-        ++seed;
+        unsigned lowestFailureCount = (unsigned)count;
+        unsigned selectedFailures = UINT_MAX;
+        unsigned selectedCount = 0;
+        const uint64_t trialSeed = DeriveTrialSeed(seed, N);
 
         for (; count <= (int)N; ++count)
         {
@@ -283,7 +376,7 @@ int main(int argc, char** argv)
 
 #pragma omp parallel for
             for (int trial = 0; trial < (int)trials; ++trial) {
-                RandomTrial(N, count, seed, (unsigned)trial);
+                RandomTrial(N, count, trialSeed, (unsigned)trial);
             }
 
             const unsigned failures = FailedTrials;
@@ -292,26 +385,66 @@ int main(int argc, char** argv)
             if (failures < lowestFailures)
             {
                 lowestFailures = failures;
-                lastBest = count;
+                lowestFailureCount = (unsigned)count;
             }
 
             if (failures <= maxFailures)
             {
+                // Select the configured Nth count under the failure ceiling,
+                // matching the methodology documented above.  The old code
+                // stopped here but reported the unrelated minimum-failure
+                // count, which did not implement its stated knee rule.
                 if (++lowCount >= lowCountRun) {
+                    selectedCount = (unsigned)count;
+                    selectedFailures = failures;
                     break;
                 }
             }
         }
 
-        cout << N << "\t" << lastBest << "\t" <<
-            (lowestFailures / (float)trials) << endl;
+        // A pathological N with too few qualifying counts still gets the
+        // best observed fallback rather than an invalid zero entry.
+        if (selectedCount == 0)
+        {
+            selectedCount = lowestFailureCount;
+            selectedFailures = lowestFailures;
+        }
 
+        cout << N << "\t" << selectedCount << "\t" <<
+            (selectedFailures / (float)trials) << endl;
+        if (results)
+        {
+            results << N << '\t' << selectedCount << '\t'
+                << selectedFailures << '\t' << trials << '\t'
+                << maxFailures << '\t' << lowCountRun << '\t' << seed
+                << '\t' << trialSeed << '\t' << lowCount << '\t'
+                << sourceTablesHash << "\tdense-count-v2\t"
+                << (lowCount >= lowCountRun ? "selected-knee" : "fallback-minimum")
+                << '\n';
+            if (!results) {
+                cerr << "failed writing --results file: " << resultsPath << endl;
+                return 1;
+            }
+        }
+        ++emittedRows;
+
+        if (N == CAT_WIREHAIR_MAX_N) {
+            break;
+        }
         int scale = N / 64;
         if (scale < 1) {
             scale = 1;
         }
-        N += scale;
+        const unsigned next = N + (unsigned)scale;
+        N = next > CAT_WIREHAIR_MAX_N ? CAT_WIREHAIR_MAX_N : next;
     }
 
-    return 0;
+    if (emittedRows == 0) {
+        cerr << "requested N range selects no canonical dense-count samples"
+            << endl;
+        return 1;
+    }
+
+    return FinalizeResults(
+        results, resultsTemporaryPath, resultsPath) ? 0 : 1;
 }

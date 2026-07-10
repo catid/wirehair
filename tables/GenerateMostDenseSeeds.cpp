@@ -3,28 +3,26 @@
 #include "../WirehairCodec.h"
 #include "../WirehairTools.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 #include <atomic>
 using namespace std;
 
-//#define ENABLE_FULL_SEARCH
-
-#ifdef ENABLE_FULL_SEARCH
-// Must match the kDenseSeedCount definition near the bottom of this file
-// (which is declared after this point, so it cannot be referenced here).
-static const unsigned kDenseMin = 2;
-static const unsigned kDenseMax = 100 - 1;
-#else
-static const unsigned kDenseMin = 52/4;
-static const unsigned kDenseMax = 62/4;
-#endif
+static const unsigned kDenseDomainMin = 2;
+static const unsigned kDenseDomainMax = 100 - 1;
+static const unsigned kDefaultDenseMin = 52 / 4;
+static const unsigned kDefaultDenseMax = 62 / 4;
 
 static const float targetMsec = 5000; // msec
 
@@ -284,19 +282,99 @@ static bool ParseUnsigned(const char* text, unsigned& out)
     return true;
 }
 
+static uint64_t DeriveTrialSeed(uint64_t base_seed, unsigned dense_index)
+{
+    uint64_t value = (base_seed ^ 0x4d4f5354ULL) +
+        0x9e3779b97f4a7c15ULL * (uint64_t)dense_index;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static uint64_t SourceTablesHash()
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned N = 2048; N <= CAT_WIREHAIR_MAX_N; ++N)
+    {
+        const uint16_t count = wirehair::GetDenseCount(N);
+        hash ^= N;
+        hash *= 1099511628211ULL;
+        hash ^= count;
+        hash *= 1099511628211ULL;
+    }
+    for (unsigned i = 0; i < kDenseSeedCount; ++i)
+    {
+        hash ^= kDenseSeeds[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static string FormatSampleNs(const vector<int>& sampled_ns)
+{
+    if (sampled_ns.empty()) {
+        return "none";
+    }
+    ostringstream output;
+    for (size_t i = 0; i < sampled_ns.size(); ++i)
+    {
+        if (i > 0) {
+            output << ',';
+        }
+        output << sampled_ns[i];
+    }
+    return output.str();
+}
+
+static bool PathExists(const string& path)
+{
+    ifstream input(path.c_str(), ios::binary);
+    return input.good();
+}
+
+static bool FinalizeResults(
+    ofstream& results,
+    const string& temporary_path,
+    const string& final_path)
+{
+    if (final_path.empty()) {
+        return true;
+    }
+    results.flush();
+    const bool write_ok = results.good();
+    results.close();
+    if (!write_ok || !results) {
+        cerr << "failed writing --results file: " << temporary_path << endl;
+        return false;
+    }
+    if (rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+        cerr << "unable to publish --results file " << final_path << ": "
+            << strerror(errno) << endl;
+        return false;
+    }
+    return true;
+}
+
 static void Usage(const char* program)
 {
     cerr
         << "usage: " << program << " [--seed U64] [--trials N] "
-        << "[--dense-index-lo I] [--dense-index-hi I]\n";
+        << "[--dense-index-lo I] [--dense-index-hi I] "
+        << "[--n-samples N] [--full-search] [--results FILE]\n";
 }
 
 int main(int argc, char** argv)
 {
     uint64_t seed = siamese::GetTimeUsec();
     unsigned fixedTrials = 0;
-    unsigned denseIndexLo = kDenseMin;
-    unsigned denseIndexHi = kDenseMax;
+    unsigned denseIndexLo = kDefaultDenseMin;
+    unsigned denseIndexHi = kDefaultDenseMax;
+    bool denseIndexLoSet = false;
+    bool denseIndexHiSet = false;
+    bool fullSearch = false;
+    unsigned requestedNSamples = 1;
+    string resultsPath;
+    string resultsTemporaryPath;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -328,10 +406,30 @@ int main(int argc, char** argv)
                 cerr << "bad --dense-index-lo value" << endl;
                 return 1;
             }
+            denseIndexLoSet = true;
         }
         else if (!strcmp(arg, "--dense-index-hi")) {
             if (!ParseUnsigned(next(), denseIndexHi)) {
                 cerr << "bad --dense-index-hi value" << endl;
+                return 1;
+            }
+            denseIndexHiSet = true;
+        }
+        else if (!strcmp(arg, "--full-search")) {
+            fullSearch = true;
+        }
+        else if (!strcmp(arg, "--n-samples")) {
+            if (!ParseUnsigned(next(), requestedNSamples) ||
+                requestedNSamples == 0)
+            {
+                cerr << "bad --n-samples value" << endl;
+                return 1;
+            }
+        }
+        else if (!strcmp(arg, "--results")) {
+            resultsPath = next();
+            if (resultsPath.empty()) {
+                cerr << "bad --results value" << endl;
                 return 1;
             }
         }
@@ -346,11 +444,25 @@ int main(int argc, char** argv)
         }
     }
 
-    if (denseIndexLo < kDenseMin || denseIndexHi > kDenseMax ||
+    if (fullSearch && (denseIndexLoSet || denseIndexHiSet)) {
+        cerr << "--full-search cannot be combined with dense index bounds" << endl;
+        return 1;
+    }
+    if (fullSearch) {
+        denseIndexLo = kDenseDomainMin;
+        denseIndexHi = kDenseDomainMax;
+    }
+    if (!resultsPath.empty() && fixedTrials == 0) {
+        cerr << "--results requires deterministic --trials" << endl;
+        return 1;
+    }
+
+    if (denseIndexLo < kDenseDomainMin ||
+        denseIndexHi > kDenseDomainMax ||
         denseIndexLo > denseIndexHi)
     {
-        cerr << "dense index range must be in [" << kDenseMin << ", "
-            << kDenseMax << "]" << endl;
+        cerr << "dense index range must be in [" << kDenseDomainMin << ", "
+            << kDenseDomainMax << "]" << endl;
         return 1;
     }
 
@@ -366,12 +478,34 @@ int main(int argc, char** argv)
     }
 
     message.resize(64000);
+    const uint64_t sourceTablesHash = SourceTablesHash();
+
+    ofstream results;
+    if (!resultsPath.empty())
+    {
+        resultsTemporaryPath = resultsPath + ".tmp";
+        if (PathExists(resultsPath) || PathExists(resultsTemporaryPath)) {
+            cerr << "--results destination already exists: " << resultsPath
+                << endl;
+            return 1;
+        }
+        results.open(resultsTemporaryPath.c_str(), ios::out | ios::trunc);
+        if (!results) {
+            cerr << "unable to open --results file: " << resultsPath << endl;
+            return 1;
+        }
+        results << "DenseIndex\tUsed\tN\tDenseCount\tDenseSeed"
+            "\tWorstFailures\tTotalFailures\tCurrentDenseSeed\tTrials"
+            "\tBaseSeed\tTrialSeed\tRequestedNSamples\tEvaluatedNSamples"
+            "\tSampleNHash\tSampleNs\tSourceTablesHash\tMethodVersion\n";
+    }
 
     cerr
         << "# GenerateMostDenseSeeds seed=0x" << hex << seed << dec
         << " dense_index_lo=" << denseIndexLo
         << " dense_index_hi=" << denseIndexHi
-        << " fixed_trials=" << fixedTrials << endl;
+        << " fixed_trials=" << fixedTrials
+        << " n_samples=" << requestedNSamples << endl;
 
     for (unsigned i_dense_count = denseIndexLo;
          i_dense_count <= denseIndexHi;
@@ -379,6 +513,7 @@ int main(int argc, char** argv)
     {
         int N_found = -1;
         int count_found = -1;
+        vector<int> matchingNs;
 
         for (int N = 2048; N <= 64000; ++N)
         {
@@ -393,11 +528,50 @@ int main(int argc, char** argv)
             if (tableIndex == i_dense_count) {
                 N_found = N;
                 count_found = dense_count;
+                matchingNs.push_back(N);
             }
         }
 
         if (N_found <= 0) {
+            if (!resultsPath.empty())
+            {
+                results << i_dense_count << "\t0\t0\t"
+                    << (i_dense_count * 4u + 2u) << '\t'
+                    << (unsigned)kDenseSeeds[i_dense_count]
+                    << "\t0\t0\t" << (unsigned)kDenseSeeds[i_dense_count]
+                    << "\t" << fixedTrials << "\t" << seed << "\t"
+                    << DeriveTrialSeed(seed, i_dense_count) << '\t'
+                    << requestedNSamples << "\t0\t0\tnone\t"
+                    << sourceTablesHash << "\tmost-dense-v3\n";
+            }
             continue;
+        }
+
+        const unsigned currentDenseSeed = kDenseSeeds[i_dense_count];
+        const uint64_t trialSeed = DeriveTrialSeed(seed, i_dense_count);
+        vector<int> sampledNs;
+        if (requestedNSamples == 1 || matchingNs.size() == 1)
+        {
+            sampledNs.push_back(matchingNs.back());
+        }
+        else
+        {
+            const unsigned sampleCount = min<unsigned>(
+                requestedNSamples, (unsigned)matchingNs.size());
+            for (unsigned sample = 0; sample < sampleCount; ++sample)
+            {
+                const size_t position = (size_t)sample *
+                    (matchingNs.size() - 1u) / (sampleCount - 1u);
+                if (sampledNs.empty() || sampledNs.back() != matchingNs[position]) {
+                    sampledNs.push_back(matchingNs[position]);
+                }
+            }
+        }
+        uint64_t sampleNHash = 1469598103934665603ULL;
+        for (int sampleN : sampledNs)
+        {
+            sampleNHash ^= (unsigned)sampleN;
+            sampleNHash *= 1099511628211ULL;
         }
 
         unsigned NumTrials = fixedTrials ? fixedTrials : 1000u;
@@ -408,15 +582,14 @@ int main(int argc, char** argv)
 
             const int N = N_found;
 
-            ++seed;
-
             FailedTrials = 0;
 
             uint64_t t0 = siamese::GetTimeUsec();
 
 #pragma omp parallel for
             for (int trial = 0; trial < (int)NumTrials; ++trial) {
-                RandomTrial(N, count_found, seed, (uint16_t)d_seed, trial);
+                RandomTrial(
+                    N, count_found, trialSeed, (uint16_t)d_seed, trial);
             }
 
             uint64_t t1 = siamese::GetTimeUsec();
@@ -438,57 +611,76 @@ int main(int argc, char** argv)
             cout << "NumTrials=1000 took " << (t1 - t0) / 1000 << " msec.  Mult = " << mult << " -> NumTrials = " << NumTrials << endl;
         }
 
-        int best_dense_seed = 0;
-        unsigned best_failures = UINT_MAX;
+        unsigned best_dense_seed = currentDenseSeed;
+        unsigned best_worst_failures = UINT_MAX;
+        uint64_t best_total_failures = numeric_limits<uint64_t>::max();
 
-        // Advance the trial-stream seed once per N, not once per candidate:
-        // candidates must share paired trials or selection by minimum failure
-        // count is biased toward lucky streams (winner's curse)
-        ++seed;
-
-        for (unsigned d_seed = 0; d_seed < 256; ++d_seed)
+        // Evaluate the shipped seed first so exact score ties retain it.
+        for (unsigned rank = 0; rank < 256; ++rank)
         {
-            const int N = N_found;
+            const unsigned d_seed = rank == 0 ? currentDenseSeed :
+                (rank <= currentDenseSeed ? rank - 1u : rank);
+            unsigned worstFailures = 0;
+            uint64_t totalFailures = 0;
+            for (int N : sampledNs)
+            {
+                FailedTrials = 0;
+                const unsigned denseCount = wirehair::GetDenseCount(N);
 
-            FailedTrials = 0;
-
-            //uint64_t t0 = siamese::GetTimeUsec();
-
-#pragma omp parallel for // num_threads(6)
-            for (int trial = 0; trial < (int)NumTrials; ++trial) {
-                RandomTrial(N, count_found, seed, (uint16_t)d_seed, trial);
+#pragma omp parallel for
+                for (int trial = 0; trial < (int)NumTrials; ++trial) {
+                    RandomTrial(
+                        N, denseCount, trialSeed, (uint16_t)d_seed, trial);
+                }
+                const unsigned failures = FailedTrials;
+                worstFailures = max(worstFailures, failures);
+                totalFailures += failures;
             }
 
-            //uint64_t t1 = siamese::GetTimeUsec();
-            //const float actualMsec = (t1 - t0) / 1000.f; // msec
-            //cout << "In " << actualMsec << " msec" << endl;
-
-            const unsigned failures = FailedTrials;
-
-            if (failures < best_failures)
+            if (worstFailures < best_worst_failures ||
+                (worstFailures == best_worst_failures &&
+                 totalFailures < best_total_failures))
             {
                 best_dense_seed = d_seed;
-                best_failures = failures;
+                best_worst_failures = worstFailures;
+                best_total_failures = totalFailures;
 
                 cout << "*** In progress N = " << N_found
                     << " dense_count = " << count_found << " : Picked seed = " << best_dense_seed
-                    << " failures = " << best_failures << " avg fail = " << best_failures << endl;
+                    << " worst failures = " << best_worst_failures
+                    << " total failures = " << best_total_failures << endl;
 
-                if (failures == 0) {
+                if (best_worst_failures == 0) {
                     break;
                 }
             }
         }
 
-        if (best_failures >= 1000) {
+        if (best_worst_failures >= NumTrials) {
             cout << "Unable to find any good dense seeds!" << endl;
         }
 
         cout << "Selected: N = " << N_found
             << " dense_count = " << count_found << " : Picked seed = " << best_dense_seed
-            << " failures = " << best_failures << " avg fail = " << best_failures << endl;
+            << " worst failures = " << best_worst_failures
+            << " total failures = " << best_total_failures << endl;
 
         kDenseSeeds[i_dense_count] = (uint8_t)best_dense_seed;
+        if (!resultsPath.empty())
+        {
+            results << i_dense_count << "\t1\t" << N_found << '\t'
+                << count_found << '\t' << best_dense_seed << '\t'
+                << best_worst_failures << '\t' << best_total_failures << '\t'
+                << currentDenseSeed << '\t' << NumTrials << '\t' << seed
+                << '\t' << trialSeed << '\t' << requestedNSamples << '\t'
+                << sampledNs.size() << '\t' << sampleNHash << '\t'
+                << FormatSampleNs(sampledNs) << '\t'
+                << sourceTablesHash << "\tmost-dense-v3\n";
+            if (!results) {
+                cerr << "failed writing --results file: " << resultsPath << endl;
+                return 1;
+            }
+        }
     }
 
     cout << "static const unsigned kDenseSeedCount = " << kDenseSeedCount << ";" << endl;
@@ -513,5 +705,6 @@ int main(int argc, char** argv)
     cout << "};" << endl;
     cout << dec << endl;
 
-    return 0;
+    return FinalizeResults(
+        results, resultsTemporaryPath, resultsPath) ? 0 : 1;
 }

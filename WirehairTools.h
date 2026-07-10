@@ -528,6 +528,11 @@ uint16_t GetDenseCount(unsigned N);
 */
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count);
 
+/// Returns the generated base-table dense seed without exact-N fixups.
+/// Offline table regeneration uses this to avoid depending on the reactive
+/// correction tables that a replacement campaign is intended to supersede.
+uint16_t GetBaseDenseSeed(unsigned N, unsigned dense_count);
+
 
 //------------------------------------------------------------------------------
 // PeelSeed
@@ -536,6 +541,14 @@ uint16_t GetDenseSeed(unsigned N, unsigned dense_count);
     This function returns the seed to use for the peel rows.
 */
 uint16_t GetPeelSeed(unsigned N);
+
+/// Returns the generated base-table peel seed without exact-N fixups.
+uint16_t GetBasePeelSeed(unsigned N);
+
+/// Reports whether this translation unit was compiled with exact-N seed
+/// fixups enabled.  Offline validation uses this to prove that its harness and
+/// linked codec were built with the same fixup policy.
+bool SeedFixupsEnabled();
 
 
 } // namespace wirehair

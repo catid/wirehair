@@ -66,6 +66,13 @@ the intermediate precode range `[K, K + S + D2 + H)`.
 recovery block index.  Batch and single generation are bit-identical, the
 source and precode-mix streams are independently keyed, and the source prefix
 continues to match the corresponding peel row.
+The real packet contract is version 3 and is exposed by
+`GeneratePacketMatrixRow()`.  It uses production Wirehair's integer
+`GeneratePeelRowWeight()` distribution, three precode mix columns in the
+certified default (the bound experimental option permits one through three),
+and the public packet ID directly.  IDs below K are therefore distinct
+systematic equations rather than fixed intermediate columns, and repair IDs
+cannot collide with them.
 `ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
 intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full
@@ -74,13 +81,30 @@ that mapping for encoder block IDs: `block_id < K` copies a source block, and
 `block_id >= K` evaluates recovery row `block_id - K`.  `PrecodeEncoder`
 caches the computed precode parity blocks and exposes the same block-id encode
 mapping without requiring callers to manage the parity buffer directly.
-`MessagePrecodeEncoder` is the message-level adapter: it owns the zero-padded
-source block array for arbitrary message bytes and reports the partial byte
-count for the final source block while emitting full-size recovery blocks.  Its
-default options follow the certified dense corner, which is usually not
-encoder-feasible for direct parity precomputation; use the identity-corner
-option only for explicit encoder-feasibility experiments pending
-recertification.
+`MessagePrecodeEncoder` is the message-level adapter: it zero-pads the message
+during initialization, solves the K systematic packet equations plus every certified
+precode constraint for all intermediate blocks, and reports the partial byte
+count for the final systematic packet while emitting full-size repairs.
+`MessagePrecodeDecoder` incrementally collects the same versioned packet
+equations, peels the binary system, solves the projected residual together with
+the actual Cauchy GF(256) rows, and reconstructs the original systematic
+equations.  The identity-corner option remains an explicit experiment; the
+default full-span Shuffle-2 construction no longer depends on its singular
+D2-only parity corner.
+Its `IntermediateBlocks()` accessor exposes the solved full intermediate
+vector; it intentionally does not retain or mislabel a second copy of the
+original systematic message.
+
+The encoder expands the public seed profile into a deterministic joint
+precode/packet seed sequence and selects the first attempt whose K systematic
+equations plus precode constraints have full rank.  Attempt zero is the base
+profile; attempt `i` adds fixed full-period constants to both seeds.  The
+published profile transports that attempt together with every derived matrix
+field.  A decoder recomputes those fields from the base profile, bound options,
+and attempt and rejects any mismatch before building the system; it does not
+independently select or blindly trust the derived values.  Exhaustive
+K=2..2048 tests lock the current fixup attempts (13 K values, maximum attempt
+2), and representative large K values exercise the same contract.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and
@@ -115,18 +139,36 @@ rank/failure validation before promoting any degree/precode candidate.
 `wirehair_v2::Codec` is a full encoder/decoder facade.  It selects a
 `SeedProfile`, injects the selected dense count, peel seed, and dense seed into
 the underlying solver, then exposes encode/decode/recover methods.  Production
-codec files are not modified by this wrapper.  The facade still emits and
-decodes V1-compatible recovery packets; the certified V2 precode block-data
-path is exposed by the helper APIs above until the matching V2 decoder is
-ported.  `InitializePrecodeEncoder()` is an explicit experimental encoder-only
-entry point that routes `Encode()` through `MessagePrecodeEncoder`; do not feed
-those recovery packets to the facade decoder until the V2 decoder is ported.
+codec files are not modified by this wrapper.  `InitializeEncoder()` and
+`InitializeDecoder()` retain the V1-compatible path and reject profiles that
+carry any selected or mixed V2 contract state; V2 packets must use the explicit
+precode initializers.
+`InitializePrecodeEncoder()` and `InitializePrecodeDecoder()` select the
+version-3 certified-precode path.  A successfully selected profile binds the
+packet/precode contract versions, exact precode dimensions and seeds, and all
+matrix-affecting options.  A decoder given that profile inherits the bound
+options when its options argument is null; explicit mismatches are rejected
+before matrix construction.  `DenseCount` is validated and directly determines
+the staircase width, so a serialized selected profile does not silently depend
+on the local dense-count table.  The precode decoder supports reordered
+systematic and repair packets, duplicate-ID validation, resumable
+`Wirehair_NeedMore`, and exact message recovery.
+
+The codec provides erasure recovery, not packet authentication.  Any K
+independent packet equations, including altered right-hand sides, can define a
+different valid message, so callers must authenticate packets or verify the
+recovered message with a cryptographic digest/MAC.  Identical/conflicting
+duplicates and packets checked against a completed or overdetermined solution
+are consistency-checked, but those checks are not a substitute for integrity
+metadata.
 
 Validation:
 
 ```bash
 cmake --build build --target wirehair_v2_policy_test
 ./build/codec/wirehair_v2_policy_test
+cmake --build build --target wirehair_v2_precode_roundtrip_test
+./build/codec/wirehair_v2_precode_roundtrip_test
 ```
 
 Benchmark smoke checks:
@@ -134,6 +176,8 @@ Benchmark smoke checks:
 ```bash
 cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
+./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 3200 --trials 10 --bb-list 17,1280,102400 --max-message-mib 128 --loss 0.10 --precode
+./build/codec/wirehair_v2_bench precodefail --N 1000,3200,10000,32000,64000 --bb-list 1280 --overhead 0,1 --trials 100 --threads 16 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6

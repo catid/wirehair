@@ -24,10 +24,14 @@ option(WIREHAIR_BUILD_TOOLS
     "Include offline table and seed generators in the default build" OFF)
 option(WIREHAIR_BUILD_BENCHMARKS
     "Include benchmark executables in the default build" OFF)
+option(WIREHAIR_BUILD_VALIDATION_HARNESS
+    "Build the internal whx seed-table validation harness" OFF)
 option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
 option(WIREHAIR_STRICT_WARNINGS
     "Treat compiler warnings as errors for Wirehair targets" OFF)
+option(WIREHAIR_DISABLE_SEED_FIXUPS
+    "Disable exact-N seed fixups for offline base-table validation" OFF)
 set(WH_LTO "OFF" CACHE STRING "Link-time optimization mode: OFF, ON, AUTO, or THIN")
 set_property(CACHE WH_LTO PROPERTY STRINGS OFF ON AUTO THIN)
 set(WH_PGO_MODE "OFF" CACHE STRING "Profile-guided optimization mode: OFF, GENERATE, or USE")
@@ -176,6 +180,13 @@ function(wirehair_apply_project_options target)
     endif()
 endfunction()
 
+function(wirehair_apply_seed_fixup_policy target)
+    if(WIREHAIR_DISABLE_SEED_FIXUPS)
+        target_compile_definitions(${target} PRIVATE
+            WIREHAIR_DISABLE_SEED_FIXUPS=1)
+    endif()
+endfunction()
+
 function(wirehair_configure_library target variant)
     set_target_properties(${target} PROPERTIES
         VERSION ${PROJECT_VERSION}
@@ -195,6 +206,7 @@ function(wirehair_configure_library target variant)
         set_target_properties(${target} PROPERTIES
             POSITION_INDEPENDENT_CODE ${WIREHAIR_STATIC_PIC})
     endif()
+    wirehair_apply_seed_fixup_policy(${target})
     wirehair_apply_project_options(${target})
 endfunction()
 
@@ -214,6 +226,7 @@ if(WIREHAIR_BUILD_BOTH AND NOT WIN32)
     target_include_directories(wirehair_objects PRIVATE
         ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(wirehair_objects PRIVATE WIREHAIR_BUILDING=1)
+    wirehair_apply_seed_fixup_policy(wirehair_objects)
     target_link_libraries(wirehair_objects PRIVATE Threads::Threads)
     wirehair_apply_project_options(wirehair_objects)
 
@@ -256,6 +269,26 @@ add_library(wirehair::wirehair ALIAS wirehair)
 if (BUILD_TESTS)
     enable_testing()
     find_package(OpenMP QUIET)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    add_test(NAME table_python_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s tables -p test_*.py)
+    set_tests_properties(table_python_tests PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        TIMEOUT 120
+        LABELS "offline;seed-table;python")
+
+    # This lint is an executable script rather than a unittest.TestCase, so
+    # unittest discovery only imports it.  Register it directly to execute its
+    # source-tree checks under CTest.
+    add_test(NAME heavy_matrix_docs_test
+        COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tables/test_heavy_matrix_docs.py)
+    set_tests_properties(heavy_matrix_docs_test PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        TIMEOUT 30
+        LABELS "offline;heavy-matrix;docs;python")
 
     add_executable(unit_test ${UNIT_TEST_SOURCE_FILES})
     wirehair_apply_project_options(unit_test)
@@ -264,6 +297,19 @@ if (BUILD_TESTS)
         target_link_libraries(unit_test OpenMP::OpenMP_CXX)
     endif()
     add_test(NAME unit_test COMMAND unit_test)
+
+    add_executable(peel_selection_policy_test
+        test/PeelSelectionPolicyTest.cpp)
+    wirehair_apply_project_options(peel_selection_policy_test)
+    add_test(NAME peel_selection_policy_test COMMAND peel_selection_policy_test)
+    set_tests_properties(peel_selection_policy_test PROPERTIES
+        TIMEOUT 15 LABELS "offline;seed-table;unit")
+
+    add_executable(atomic_result_file_test test/AtomicResultFileTest.cpp)
+    wirehair_apply_project_options(atomic_result_file_test)
+    add_test(NAME atomic_result_file_test COMMAND atomic_result_file_test)
+    set_tests_properties(atomic_result_file_test PROPERTIES
+        TIMEOUT 15 LABELS "offline;seed-table;unit")
     set_tests_properties(unit_test PROPERTIES
         ENVIRONMENT "WIREHAIR_UNIT_SKIP_BENCH=1;WIREHAIR_UNIT_MIN_N=2;WIREHAIR_UNIT_MAX_N=256;WIREHAIR_UNIT_BLOCK_BYTES_MIN=1;WIREHAIR_UNIT_BLOCK_BYTES_MAX=32")
 
@@ -283,6 +329,7 @@ if (BUILD_TESTS)
     target_compile_definitions(wirehair_test_support
         PRIVATE WIREHAIR_TESTING=1 WIREHAIR_BUILDING=1
         PUBLIC WIREHAIR_STATIC=1)
+    wirehair_apply_seed_fixup_policy(wirehair_test_support)
     target_link_libraries(wirehair_test_support PRIVATE Threads::Threads)
     set_target_properties(wirehair_test_support PROPERTIES
         POSITION_INDEPENDENT_CODE ${WIREHAIR_STATIC_PIC})
@@ -434,9 +481,57 @@ foreach(_wirehair_generator IN ITEMS
     endif()
     wirehair_apply_project_options(${_wirehair_generator})
 endforeach()
-add_executable(gen_tables ${WIREHAIR_TOOL_EXCLUDE} ${GEN_TABLES})
+if(BUILD_TESTS)
+    set(WIREHAIR_GEN_TABLES_EXCLUDE "")
+else()
+    set(WIREHAIR_GEN_TABLES_EXCLUDE ${WIREHAIR_TOOL_EXCLUDE})
+endif()
+add_executable(gen_tables ${WIREHAIR_GEN_TABLES_EXCLUDE} ${GEN_TABLES})
 target_link_libraries(gen_tables PRIVATE Threads::Threads)
 wirehair_apply_project_options(gen_tables)
+if(BUILD_TESTS)
+    add_test(NAME heavy_matrix_generator_test
+        COMMAND ${CMAKE_COMMAND}
+            -DBINARY=$<TARGET_FILE:gen_tables>
+            -P ${PROJECT_SOURCE_DIR}/test/cmake/RunHeavyMatrixGenerator.cmake)
+    set_tests_properties(heavy_matrix_generator_test PROPERTIES
+        TIMEOUT 60 LABELS "offline;seed-table;heavy")
+endif()
+
+if(BUILD_TESTS AND WIREHAIR_BUILD_TOOLS AND UNIX)
+    find_program(WIREHAIR_BASH_EXECUTABLE bash)
+    if(WIREHAIR_BASH_EXECUTABLE)
+        add_test(NAME heavy_matrix_generator_test
+            COMMAND ${WIREHAIR_BASH_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tables/test_heavy_matrix_generator.sh
+                $<TARGET_FILE:gen_tables>)
+        set_tests_properties(heavy_matrix_generator_test PROPERTIES
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            TIMEOUT 120
+            LABELS "offline;heavy-matrix;generator;regression")
+    endif()
+endif()
+
+if(WIREHAIR_BUILD_VALIDATION_HARNESS)
+    set(WIREHAIR_WHX_EXCLUDE "")
+else()
+    set(WIREHAIR_WHX_EXCLUDE EXCLUDE_FROM_ALL)
+endif()
+add_library(wirehair_whx_support STATIC ${WIREHAIR_WHX_EXCLUDE}
+    ${LIB_SOURCE_FILES})
+target_compile_definitions(wirehair_whx_support PRIVATE WH_SEED_KNOBS=1)
+wirehair_configure_library(wirehair_whx_support STATIC)
+add_executable(wirehair_whx ${WIREHAIR_WHX_EXCLUDE} bench/whx.cpp)
+target_include_directories(wirehair_whx PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(wirehair_whx PRIVATE WH_SEED_KNOBS=1)
+wirehair_apply_seed_fixup_policy(wirehair_whx)
+wirehair_apply_project_options(wirehair_whx)
+target_link_libraries(wirehair_whx PRIVATE wirehair_whx_support)
+if(BUILD_TESTS AND WIREHAIR_BUILD_VALIDATION_HARNESS)
+    add_test(NAME wirehair_whx_selftest COMMAND wirehair_whx selftest)
+    set_tests_properties(wirehair_whx_selftest PROPERTIES
+        TIMEOUT 30 LABELS "offline;seed-table;fixup-policy")
+endif()
 
 if (BUILD_CODEC_V2)
     add_subdirectory(codec)

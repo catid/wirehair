@@ -8,6 +8,7 @@
 #include <wirehair/wirehair.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -19,6 +20,8 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -730,6 +733,86 @@ TrialResult RunV2Trial(
     return tr;
 }
 
+TrialResult RunV2PrecodeTrial(
+    uint32_t N,
+    uint32_t block_bytes,
+    double loss_rate,
+    uint64_t seed,
+    const wirehair_v2::SeedProfile* profile)
+{
+    TrialResult tr = {};
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    std::vector<uint8_t> block(block_bytes);
+    FillMessage(message, seed);
+    Rng rng(seed ^ UINT64_C(0x10fade));
+
+    wirehair_v2::Codec enc;
+    wirehair_v2::Codec dec;
+    const double c0 = NowSeconds();
+    WirehairResult result = enc.InitializePrecodeEncoder(
+        message.data(), message_bytes, block_bytes, profile);
+    if (result == Wirehair_Success) {
+        result = dec.InitializePrecodeDecoder(
+            message_bytes, block_bytes, &enc.Profile());
+    }
+    tr.CreateSeconds = NowSeconds() - c0;
+    if (result != Wirehair_Success) {
+        return tr;
+    }
+
+    uint32_t delivered = 0u;
+    uint32_t block_id = 0u;
+    const uint32_t max_delivered = N * 2u + 512u;
+    while (delivered < max_delivered)
+    {
+        const bool drop = ShouldDrop(rng, loss_rate);
+        const uint32_t this_id = block_id++;
+        if (drop) {
+            continue;
+        }
+        uint32_t write_bytes = 0u;
+        const double e0 = NowSeconds();
+        const WirehairResult encode_result = enc.Encode(
+            this_id, block.data(), block_bytes, &write_bytes);
+        tr.EncodeSeconds += NowSeconds() - e0;
+        if (encode_result != Wirehair_Success) {
+            break;
+        }
+        tr.EncodedBytes += write_bytes;
+        ++delivered;
+
+        const double d0 = NowSeconds();
+        const WirehairResult decode_result = dec.Decode(
+            this_id, block.data(), write_bytes);
+        tr.DecodeSeconds += NowSeconds() - d0;
+        tr.DecodedBytes += write_bytes;
+        if (decode_result == Wirehair_Success)
+        {
+            tr.Ok = true;
+            break;
+        }
+        if (decode_result != Wirehair_NeedMore) {
+            break;
+        }
+    }
+
+    if (tr.Ok)
+    {
+        std::vector<uint8_t> decoded((size_t)message_bytes, 0u);
+        const double r0 = NowSeconds();
+        const WirehairResult recover_result =
+            dec.Recover(decoded.data(), message_bytes);
+        tr.RecoverSeconds = NowSeconds() - r0;
+        tr.RecoveredBytes = message_bytes;
+        tr.Ok = recover_result == Wirehair_Success && decoded == message;
+        if (tr.Ok) {
+            tr.Extra = delivered - N;
+        }
+    }
+    return tr;
+}
+
 void AddTrial(Accum& acc, uint32_t N, const TrialResult& tr)
 {
     ++acc.Trials;
@@ -1346,6 +1429,7 @@ int CmdCompare(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0xc0decafe);
     std::string bb_list = "1280,102400";
+    bool include_precode = false;
     CompareOptions compare_options;
 
     for (int i = 0; i < argc; ++i)
@@ -1378,6 +1462,9 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--max-message-mib")) {
             if (!TakeArg("compare", "--max-message-mib", argc, argv, i, value) ||
                 !ParseU32Arg("--max-message-mib", value, max_message_mib)) return 1;
+        }
+        else if (!std::strcmp(argv[i], "--precode")) {
+            include_precode = true;
         }
         else if (!std::strcmp(argv[i], "--v2-profile")) {
             if (!TakeArg("compare", "--v2-profile", argc, argv, i, value)) return 1;
@@ -1530,7 +1617,7 @@ int CmdCompare(int argc, char** argv)
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
-        "dense_candidate=%u\n",
+        "dense_candidate=%u precode=%u\n",
         nlo,
         nhi,
         trials,
@@ -1546,7 +1633,8 @@ int CmdCompare(int argc, char** argv)
         (unsigned long long)compare_options.AutoSeed,
         compare_options.DenseOverride ? 1u : 0u,
         compare_options.DenseDelta,
-        compare_options.DenseCandidate);
+        compare_options.DenseCandidate,
+        include_precode ? 1u : 0u);
     std::printf(
         "%-9s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -1585,6 +1673,7 @@ int CmdCompare(int argc, char** argv)
 
         Accum baseline;
         Accum v2;
+        Accum precode;
         std::map<uint64_t, CachedCompareProfile> profile_cache;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
@@ -1598,6 +1687,11 @@ int CmdCompare(int argc, char** argv)
                 RunBaselineTrial(N, block_bytes, loss, trial_seed));
             AddTrial(v2, N,
                 RunV2Trial(N, block_bytes, loss, trial_seed, profile));
+            if (include_precode) {
+                AddTrial(precode, N,
+                    RunV2PrecodeTrial(
+                        N, block_bytes, loss, trial_seed, profile));
+            }
         }
         PrintAccum("baseline", block_bytes, baseline);
         PrintAccum(
@@ -1605,6 +1699,9 @@ int CmdCompare(int argc, char** argv)
             "v2_auto",
             block_bytes,
             v2);
+        if (include_precode) {
+            PrintAccum("v2_precode", block_bytes, precode);
+        }
     }
     return 0;
 }
@@ -2497,6 +2594,301 @@ int CmdDenseGrid(int argc, char** argv)
     return 0;
 }
 
+struct MatrixFailureTrial
+{
+    WirehairResult Result = Wirehair_Error;
+    uint32_t Inactivated = 0u;
+    uint32_t Rank = 0u;
+    uint64_t SolveNanoseconds = 0u;
+};
+
+class ThreadJoinGuard
+{
+public:
+    explicit ThreadJoinGuard(std::vector<std::thread>& threads)
+        : Threads(threads)
+    {
+    }
+
+    ~ThreadJoinGuard()
+    {
+        JoinAll();
+    }
+
+    void JoinAll() noexcept
+    {
+        for (std::thread& thread : Threads)
+        {
+            if (!thread.joinable()) {
+                continue;
+            }
+            try {
+                thread.join();
+            }
+            catch (...) {
+                try {
+                    thread.detach();
+                }
+                catch (...) {
+                }
+            }
+        }
+    }
+
+private:
+    std::vector<std::thread>& Threads;
+};
+
+int CmdPrecodeFail(int argc, char** argv)
+{
+    std::string nlist = "1000,3200,10000,32000,64000";
+    std::string bb_list = "1280";
+    std::string overhead_list = "0,1";
+    uint32_t trials = 100u;
+    uint32_t threads = 1u;
+    double loss = 0.10;
+    uint64_t seed = UINT64_C(0x5eedf411);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint32_t fail_thread_launch_after = UINT32_MAX;
+#endif
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("precodefail", "--N", argc, argv, i, value)) return 1;
+            nlist = value;
+        }
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("precodefail", "--bb-list", argc, argv, i, value)) return 1;
+            bb_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (!TakeArg("precodefail", "--overhead", argc, argv, i, value)) return 1;
+            overhead_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg("precodefail", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials)) return 1;
+        }
+        else if (!std::strcmp(argv[i], "--threads")) {
+            if (!TakeArg("precodefail", "--threads", argc, argv, i, value) ||
+                !ParseU32Arg("--threads", value, threads)) return 1;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("precodefail", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("precodefail", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed)) return 1;
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
+            if (!TakeArg(
+                    "precodefail", "--fail-thread-launch-after",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--fail-thread-launch-after", value,
+                    fail_thread_launch_after)) return 1;
+        }
+#endif
+        else if (!UnknownArg("precodefail", argv[i])) {
+            return 1;
+        }
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    const std::vector<int> overheads = ParseSignedIntList(overhead_list);
+    if (Ns.empty() || BBs.empty() || overheads.empty() ||
+        trials == 0u || threads == 0u || threads > 256u ||
+        !ValidateBlockCounts(Ns, "precodefail") ||
+        !ValidateLoss(loss, "precodefail"))
+    {
+        std::fprintf(stderr, "invalid precodefail arguments\n");
+        return 1;
+    }
+    for (int overhead : overheads) {
+        if (overhead < 0 || overhead > 1024) {
+            std::fprintf(stderr,
+                "precodefail overhead must be in [0,1024]\n");
+            return 1;
+        }
+    }
+    for (int bb : BBs) {
+        if (bb < 1) {
+            std::fprintf(stderr, "precodefail bb must be positive\n");
+            return 1;
+        }
+    }
+
+    std::printf(
+        "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx\n",
+        trials, threads, loss, (unsigned long long)seed);
+    std::printf(
+        "N,bb,overhead,trials,success,rank_fail,error,fail_rate,"
+        "inact_mu,inact_max,solve_ms_mu,seed_attempt,first_rank_fail\n");
+
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const uint32_t K = (uint32_t)n_value;
+        const uint32_t bb = (uint32_t)bb_value;
+        const wirehair_v2::SeedProfile profile =
+            wirehair_v2::SelectSeedProfile(K, bb);
+        const wirehair_v2::PrecodeParams base_params =
+            wirehair_v2::MakeCertifiedParams(
+                K,
+                wirehair_v2::MatrixSeedFromProfile(
+                    profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+        wirehair_v2::PacketRowConfig base_config;
+        base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
+            profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+        base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+        wirehair_v2::PrecodeSystem system;
+        wirehair_v2::PacketRowConfig config;
+        uint32_t seed_attempt = 0u;
+        const WirehairResult select_result =
+            wirehair_v2::SelectSystematicConfiguration(
+                base_params, base_config, system, config, &seed_attempt);
+        if (select_result != Wirehair_Success) {
+            std::fprintf(stderr,
+                "precodefail seed selection failed N=%u bb=%u result=%d\n",
+                K, bb, (int)select_result);
+            return 2;
+        }
+
+        for (int overhead_value : overheads)
+        {
+            const uint32_t overhead = (uint32_t)overhead_value;
+            std::vector<MatrixFailureTrial> results(trials);
+            std::atomic<uint32_t> next_trial(0u);
+            std::atomic<bool> cancel_workers(false);
+            std::atomic<bool> worker_failed(false);
+            const uint32_t worker_count = std::min(threads, trials);
+            std::vector<std::thread> workers;
+            ThreadJoinGuard join_guard(workers);
+            workers.reserve(worker_count);
+            try
+            {
+                for (uint32_t worker = 0; worker < worker_count; ++worker)
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    if (worker == fail_thread_launch_after)
+                    {
+                        throw std::system_error(
+                            std::make_error_code(
+                                std::errc::resource_unavailable_try_again),
+                            "injected precodefail thread launch failure");
+                    }
+#endif
+                    workers.push_back(std::thread([&, overhead]() {
+                        try
+                        {
+                            const uint8_t zero = 0u;
+                            for (;;)
+                            {
+                                if (cancel_workers.load()) {
+                                    break;
+                                }
+                                const uint32_t trial = next_trial.fetch_add(1u);
+                                if (trial >= trials) {
+                                    break;
+                                }
+                                Rng rng(
+                                    seed ^
+                                    ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+                                    ((uint64_t)bb * UINT64_C(0xbf58476d1ce4e5b9)) ^
+                                    ((uint64_t)overhead * UINT64_C(0x94d049bb133111eb)) ^
+                                    ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93)));
+                                std::vector<wirehair_v2::SolvePacket> packets;
+                                packets.reserve((size_t)K + overhead);
+                                uint32_t block_id = 0u;
+                                while (packets.size() < (size_t)K + overhead)
+                                {
+                                    const uint32_t id = block_id++;
+                                    if (ShouldDrop(rng, loss)) {
+                                        continue;
+                                    }
+                                    wirehair_v2::SolvePacket packet;
+                                    packet.BlockId = id;
+                                    packet.Data = &zero;
+                                    packets.push_back(packet);
+                                }
+                                std::vector<uint8_t> intermediate;
+                                wirehair_v2::PrecodeSolveStats solve_stats;
+                                MatrixFailureTrial& result = results[trial];
+                                result.Result = wirehair_v2::SolvePrecodeSystem(
+                                    system, config, packets, 1u,
+                                    intermediate, &solve_stats);
+                                result.Inactivated =
+                                    solve_stats.InactivatedColumns;
+                                result.Rank = solve_stats.ResidualRank;
+                                result.SolveNanoseconds =
+                                    solve_stats.BuildNanoseconds +
+                                    solve_stats.PeelNanoseconds +
+                                    solve_stats.ProjectNanoseconds +
+                                    solve_stats.ResidualNanoseconds +
+                                    solve_stats.BackSubNanoseconds;
+                            }
+                        }
+                        catch (...) {
+                            worker_failed.store(true);
+                            cancel_workers.store(true);
+                        }
+                    }));
+                }
+            }
+            catch (const std::system_error& error)
+            {
+                cancel_workers.store(true);
+                std::fprintf(stderr,
+                    "precodefail thread launch failed: %s\n", error.what());
+                return 1;
+            }
+            join_guard.JoinAll();
+            if (worker_failed.load()) {
+                std::fprintf(stderr, "precodefail worker failed\n");
+                return 2;
+            }
+
+            uint32_t successes = 0u, rank_failures = 0u, errors = 0u;
+            uint32_t first_rank_failure = UINT32_MAX;
+            uint64_t inact_sum = 0u, solve_ns_sum = 0u;
+            uint32_t inact_max = 0u;
+            for (const MatrixFailureTrial& result : results)
+            {
+                if (result.Result == Wirehair_Success) {
+                    ++successes;
+                }
+                else if (result.Result == Wirehair_NeedMore) {
+                    ++rank_failures;
+                    if (first_rank_failure == UINT32_MAX) {
+                        first_rank_failure = (uint32_t)(&result - results.data());
+                    }
+                }
+                else {
+                    ++errors;
+                }
+                inact_sum += result.Inactivated;
+                solve_ns_sum += result.SolveNanoseconds;
+                inact_max = std::max(inact_max, result.Inactivated);
+            }
+            std::printf(
+                "%u,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%d\n",
+                K, bb, overhead, trials, successes, rank_failures, errors,
+                (double)(rank_failures + errors) / trials,
+                (double)inact_sum / trials,
+                inact_max,
+                (double)solve_ns_sum / trials / 1000000.0,
+                seed_attempt,
+                first_rank_failure == UINT32_MAX ?
+                    -1 : (int)first_rank_failure);
+        }
+    }
+    return 0;
+}
+
 int CmdSelfTest()
 {
     const double losses[] = {0.0, 0.99};
@@ -2532,7 +2924,7 @@ int main(int argc, char** argv)
     if (argc < 2) {
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|seedtable|peelcost|densecheck|"
-            "densetune|densecount|densegrid|selftest [opts]\n");
+            "densetune|densecount|densegrid|precodefail|selftest [opts]\n");
         return 1;
     }
     try
@@ -2558,6 +2950,9 @@ int main(int argc, char** argv)
         if (!std::strcmp(argv[1], "densegrid")) {
             return CmdDenseGrid(argc - 2, argv + 2);
         }
+        if (!std::strcmp(argv[1], "precodefail")) {
+            return CmdPrecodeFail(argc - 2, argv + 2);
+        }
         if (!std::strcmp(argv[1], "selftest")) {
             if (argc != 2) {
                 std::fprintf(stderr, "selftest takes no options\n");
@@ -2576,6 +2971,12 @@ int main(int argc, char** argv)
     {
         std::fprintf(stderr,
             "wirehair_v2_bench: requested workload exceeds container limits\n");
+        return 2;
+    }
+    catch (const std::system_error& error)
+    {
+        std::fprintf(stderr,
+            "wirehair_v2_bench: system error: %s\n", error.what());
         return 2;
     }
     std::fprintf(stderr, "unknown mode: %s\n", argv[1]);

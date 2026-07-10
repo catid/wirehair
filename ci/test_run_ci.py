@@ -74,9 +74,11 @@ class RunnerTests(unittest.TestCase):
 
     def test_parser_rejects_unknown_linkage_and_accepts_extra_cmake_args(self):
         parsed = run_ci.parse_args([
-            "matrix", "--linkage", "shared", "--cmake-arg=-DTESTING=ON"
+            "matrix", "--linkage", "shared", "--tool-coverage",
+            "--cmake-arg=-DTESTING=ON"
         ])
         self.assertEqual("shared", parsed.linkage)
+        self.assertTrue(parsed.tool_coverage)
         self.assertEqual(["-DTESTING=ON"], parsed.cmake_arg)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             run_ci.parse_args(["matrix", "--linkage", "both"])
@@ -117,6 +119,7 @@ class RunnerTests(unittest.TestCase):
             linkage="static",
             strict=True,
             generator="Visual Studio 17 2022",
+            tool_coverage=False,
         )
         with mock.patch.object(run_ci, "python_unit_tests"), \
                 mock.patch.object(run_ci, "configure") as configure, \
@@ -129,7 +132,11 @@ class RunnerTests(unittest.TestCase):
                 mock.patch.object(run_ci, "package_consumer"):
             run_ci.run_matrix(args)
         configure.assert_called_once_with(
-            args, shared=False, explicit_tools=True)
+            args,
+            shared=False,
+            explicit_tools=True,
+            validation_harness=False,
+        )
         smoke.assert_called_once_with(args)
         exports.assert_not_called()
 
@@ -138,6 +145,7 @@ class RunnerTests(unittest.TestCase):
             linkage="shared",
             strict=True,
             generator="Visual Studio 17 2022",
+            tool_coverage=False,
         )
         with mock.patch.object(run_ci, "python_unit_tests"), \
                 mock.patch.object(run_ci, "configure"), \
@@ -170,6 +178,7 @@ class RunnerTests(unittest.TestCase):
             linkage="static",
             strict=True,
             generator="Ninja",
+            tool_coverage=False,
         )
         with mock.patch.object(run_ci, "python_unit_tests"), \
                 mock.patch.object(run_ci, "configure") as configure, \
@@ -182,9 +191,60 @@ class RunnerTests(unittest.TestCase):
                 mock.patch.object(run_ci, "package_consumer"):
             run_ci.run_matrix(args)
         configure.assert_called_once_with(
-            args, shared=False, explicit_tools=False)
+            args,
+            shared=False,
+            explicit_tools=False,
+            validation_harness=False,
+        )
         smoke.assert_not_called()
         exports.assert_not_called()
+
+    def test_tool_coverage_enables_generators_benchmarks_and_whx(self):
+        args = mock.Mock(
+            linkage="static",
+            strict=True,
+            generator="Ninja",
+            tool_coverage=True,
+        )
+        with mock.patch.object(run_ci, "python_unit_tests"), \
+                mock.patch.object(run_ci, "configure") as configure, \
+                mock.patch.object(run_ci, "build"), \
+                mock.patch.object(run_ci, "explicit_tools_smoke") as smoke, \
+                mock.patch.object(run_ci, "large_message_profiles"), \
+                mock.patch.object(run_ci, "ctest"), \
+                mock.patch.object(run_ci, "install"), \
+                mock.patch.object(run_ci, "validate_msvc_exports"), \
+                mock.patch.object(run_ci, "package_consumer"):
+            run_ci.run_matrix(args)
+        configure.assert_called_once_with(
+            args,
+            shared=False,
+            explicit_tools=True,
+            validation_harness=True,
+        )
+        smoke.assert_called_once_with(args)
+
+    def test_configure_spells_out_tool_and_fixup_policy(self):
+        args = mock.Mock(
+            build_dir=Path("build/ci-tool-coverage"),
+            config="Release",
+            generator="Ninja",
+            architecture=None,
+            strict=True,
+            cmake_arg=[],
+        )
+        with mock.patch.object(run_ci, "run") as run:
+            run_ci.configure(
+                args,
+                shared=False,
+                explicit_tools=True,
+                validation_harness=True,
+            )
+        command = run.call_args.args[0]
+        self.assertIn("-DWIREHAIR_BUILD_TOOLS=ON", command)
+        self.assertIn("-DWIREHAIR_BUILD_BENCHMARKS=ON", command)
+        self.assertIn("-DWIREHAIR_BUILD_VALIDATION_HARNESS=ON", command)
+        self.assertIn("-DWIREHAIR_DISABLE_SEED_FIXUPS=OFF", command)
 
     def test_negative_path_requires_failure_and_expected_diagnostic(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -114,6 +114,8 @@ expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
 expect_success("loss boundary oracle: PASS" selftest)
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
+expect_success("v2_precode" compare --nlo 64 --nhi 64 --trials 1
+    --bb-list 8 --max-message-mib 1 --loss 0 --precode)
 expect_success("# densetune:" densetune --N 2 --bb-list 8 --candidates 1
     --trials 1 --loss 0)
 expect_success("# densecount:" densecount --N 2 --bb-list 8 --deltas 0
@@ -122,6 +124,11 @@ expect_success("# densegrid:" densegrid --N 2 --bb-list 8 --deltas 0
     --candidates 1 --trials 1 --loss 0)
 expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
+expect_success("# precodefail:" precodefail --N 64 --bb-list 8
+    --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+expect_failure("thread launch failed" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 4 --threads 2 --loss 0.1
+    --fail-thread-launch-after 1)
 
 # Invalid experiment grids must fail before emitting a result header.
 run_bench(result out err peelcost --N 2 --bb-list 8 --trials 1

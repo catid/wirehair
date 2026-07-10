@@ -663,8 +663,52 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
     swap(SourceBlocks, other.SourceBlocks);
     swap(BlockBytesValue, other.BlockBytesValue);
     ParityBlockStorage.swap(other.ParityBlockStorage);
+    SolvedIntermediateStorage.swap(other.SolvedIntermediateStorage);
+    swap(PacketConfigValue, other.PacketConfigValue);
     swap(StatsValue, other.StatsValue);
+    swap(UsesPacketContract, other.UsesPacketContract);
     swap(Initialized, other.Initialized);
+}
+
+WirehairResult PrecodeEncoder::InitializeSolvedSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    std::vector<uint8_t>& intermediate_blocks,
+    uint32_t block_bytes)
+{
+    if (!ValidatePrecodeSystem(system) ||
+        packet_config.MixCount == 0u || packet_config.MixCount > 3u ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu)
+    {
+        return Wirehair_InvalidInput;
+    }
+    const uint32_t L = system.Params.BlockCount + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const uint64_t expected = (uint64_t)L * block_bytes;
+    if (expected > (uint64_t)((size_t)-1) ||
+        intermediate_blocks.size() != (size_t)expected)
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
+        PrecodeEncoder next;
+        next.SystemValue = system;
+        next.RowSeed = packet_config.PeelSeed;
+        next.MixCount = packet_config.MixCount;
+        next.BlockBytesValue = block_bytes;
+        next.PacketConfigValue = packet_config;
+        next.SolvedIntermediateStorage.swap(intermediate_blocks);
+        next.SourceBlocks = next.SolvedIntermediateStorage.data();
+        next.UsesPacketContract = true;
+        next.Initialized = true;
+        Swap(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
 }
 
 bool PrecodeEncoder::Initialize(
@@ -759,6 +803,26 @@ WirehairResult PrecodeEncoder::EncodeResult(
     }
     try
     {
+        if (UsesPacketContract)
+        {
+            GuardedAllocation();
+            uint64_t local_ops = 0u;
+            if (!EvaluatePacketBlockForValidatedSystem(
+                    SystemValue,
+                    PacketConfigValue,
+                    SolvedIntermediateStorage.data(),
+                    BlockBytesValue,
+                    block_id,
+                    block_out,
+                    &local_ops))
+            {
+                return Wirehair_InvalidInput;
+            }
+            if (block_ops_out) {
+                *block_ops_out = local_ops;
+            }
+            return Wirehair_Success;
+        }
         if (block_id >= SystemValue.Params.BlockCount) {
             GuardedAllocation();
         }
@@ -831,7 +895,20 @@ const PrecodeEncodeStats& PrecodeEncoder::EncodeStats() const
 
 const uint8_t* PrecodeEncoder::ParityBlocks() const
 {
-    return Initialized ? ParityBlockStorage.data() : nullptr;
+    if (!Initialized) {
+        return nullptr;
+    }
+    if (UsesPacketContract) {
+        return SolvedIntermediateStorage.data() +
+            (size_t)SystemValue.Params.BlockCount * BlockBytesValue;
+    }
+    return ParityBlockStorage.data();
+}
+
+const uint8_t* PrecodeEncoder::IntermediateBlocks() const
+{
+    return Initialized && UsesPacketContract ?
+        SolvedIntermediateStorage.data() : nullptr;
 }
 
 const PrecodeSystem& PrecodeEncoder::System() const
@@ -841,6 +918,184 @@ const PrecodeSystem& PrecodeEncoder::System() const
 
 MessagePrecodeEncoder::MessagePrecodeEncoder()
 {
+}
+
+namespace {
+
+uint64_t MessagePrecodeMatrixSeed(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options)
+{
+    uint64_t salt = options.PrecodeSeedSalt;
+    if (options.DenseIdentityCorner) {
+        salt ^= UINT64_C(0x4f6eecb28d4a9137);
+    }
+    return MatrixSeedFromProfile(profile, 0u, salt);
+}
+
+uint32_t MessagePacketPeelSeed(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options)
+{
+    const uint64_t mix_delta =
+        (uint64_t)(options.RecoveryMixCount ^ kDefaultRecoveryMixCount);
+    const uint64_t salt = options.RecoveryRowSeedSalt ^
+        (mix_delta * UINT64_C(0xa0761d6478bd642f));
+    return PacketPeelSeedFromProfile(profile, salt);
+}
+
+} // namespace
+
+bool HasMessagePrecodeContractState(const SeedProfile& profile)
+{
+    return profile.V2SeedSelected || profile.V2SeedAttempt != 0u ||
+        profile.V2PrecodeContractVersion != 0u ||
+        profile.V2PacketRowContractVersion != 0u ||
+        profile.V2StaircaseCount != 0u ||
+        profile.V2DenseRowCount != 0u ||
+        profile.V2HeavyRowCount != 0u ||
+        profile.V2SourceHits != 0u ||
+        profile.V2PrecodeSeed != 0u ||
+        profile.V2PacketPeelSeed != 0u ||
+        profile.V2RecoveryMixCount != 0u ||
+        profile.V2DenseIdentityCorner ||
+        profile.V2PrecodeSeedSalt != 0u ||
+        profile.V2RecoveryRowSeedSalt != 0u;
+}
+
+bool ResolveMessagePrecodeOptions(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions* requested_options,
+    MessagePrecodeEncoderOptions& resolved_options)
+{
+    if (!profile.V2SeedSelected)
+    {
+        if (HasMessagePrecodeContractState(profile)) {
+            return false;
+        }
+        resolved_options = requested_options ? *requested_options :
+            MessagePrecodeEncoderOptions();
+        return resolved_options.RecoveryMixCount > 0u &&
+            resolved_options.RecoveryMixCount <= kCertifiedPacketMixCount;
+    }
+
+    if (profile.V2SeedAttempt >= kMaxPacketSeedAttempts ||
+        profile.V2PrecodeContractVersion != kPrecodeContractVersion ||
+        profile.V2PacketRowContractVersion != kPacketRowContractVersion ||
+        profile.V2StaircaseCount == 0u ||
+        profile.V2StaircaseCount != profile.DenseCount ||
+        profile.V2DenseRowCount == 0u ||
+        profile.V2HeavyRowCount == 0u ||
+        profile.V2SourceHits == 0u ||
+        profile.V2RecoveryMixCount == 0u ||
+        profile.V2RecoveryMixCount > kCertifiedPacketMixCount)
+    {
+        return false;
+    }
+
+    MessagePrecodeEncoderOptions bound;
+    bound.RecoveryMixCount = profile.V2RecoveryMixCount;
+    bound.DenseIdentityCorner = profile.V2DenseIdentityCorner;
+    bound.PrecodeSeedSalt = profile.V2PrecodeSeedSalt;
+    bound.RecoveryRowSeedSalt = profile.V2RecoveryRowSeedSalt;
+    if (requested_options &&
+        (requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
+         requested_options->DenseIdentityCorner != bound.DenseIdentityCorner ||
+         requested_options->PrecodeSeedSalt != bound.PrecodeSeedSalt ||
+         requested_options->RecoveryRowSeedSalt != bound.RecoveryRowSeedSalt))
+    {
+        return false;
+    }
+    resolved_options = bound;
+    return true;
+}
+
+bool ResolveMessagePrecodeConfiguration(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    PrecodeParams& params,
+    PacketRowConfig& packet_config)
+{
+    MessagePrecodeEncoderOptions validated_options;
+    if (!ResolveMessagePrecodeOptions(
+            profile, &options, validated_options))
+    {
+        return false;
+    }
+    if (profile.DenseCount == 0u ||
+        profile.DenseCount > wirehair::kMaxDenseCount ||
+        (profile.BlockCount >= wirehair::kTinyTableCount &&
+         profile.DenseCount % 4u != 2u))
+    {
+        return false;
+    }
+    if (profile.V2SeedSelected)
+    {
+        PrecodeParams expected = MakeCertifiedParams(
+            profile.BlockCount,
+            MessagePrecodeMatrixSeed(profile, validated_options));
+        expected.Staircase = profile.DenseCount;
+        expected.DenseIdentityCorner = validated_options.DenseIdentityCorner;
+        expected = PrecodeParamsForAttempt(
+            expected, profile.V2SeedAttempt);
+
+        PacketRowConfig expected_packet;
+        expected_packet.PeelSeed = MessagePacketPeelSeed(
+            profile, validated_options);
+        expected_packet.MixCount = validated_options.RecoveryMixCount;
+        expected_packet = PacketConfigForAttempt(
+            expected_packet, profile.V2SeedAttempt);
+
+        if (profile.V2StaircaseCount != expected.Staircase ||
+            profile.V2DenseRowCount != expected.DenseRows ||
+            profile.V2HeavyRowCount != expected.HeavyRows ||
+            profile.V2SourceHits != expected.SourceHits ||
+            profile.V2PrecodeSeed != expected.Seed ||
+            profile.V2PacketPeelSeed != expected_packet.PeelSeed ||
+            profile.V2RecoveryMixCount != expected_packet.MixCount ||
+            profile.V2DenseIdentityCorner !=
+                expected.DenseIdentityCorner)
+        {
+            return false;
+        }
+        params = expected;
+        packet_config = expected_packet;
+        return true;
+    }
+
+    params = MakeCertifiedParams(
+        profile.BlockCount,
+        MessagePrecodeMatrixSeed(profile, validated_options));
+    params.Staircase = profile.DenseCount;
+    params.DenseIdentityCorner = validated_options.DenseIdentityCorner;
+    packet_config.PeelSeed = MessagePacketPeelSeed(
+        profile, validated_options);
+    packet_config.MixCount = validated_options.RecoveryMixCount;
+    return true;
+}
+
+void BindMessagePrecodeProfile(
+    SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    const PrecodeSystem& system,
+    const PacketRowConfig& packet_config,
+    uint32_t packet_seed_attempt)
+{
+    profile.DenseCount = (uint16_t)system.Params.Staircase;
+    profile.V2SeedSelected = true;
+    profile.V2SeedAttempt = packet_seed_attempt;
+    profile.V2PrecodeContractVersion = kPrecodeContractVersion;
+    profile.V2PacketRowContractVersion = kPacketRowContractVersion;
+    profile.V2StaircaseCount = system.Params.Staircase;
+    profile.V2DenseRowCount = system.Params.DenseRows;
+    profile.V2HeavyRowCount = system.Params.HeavyRows;
+    profile.V2SourceHits = system.Params.SourceHits;
+    profile.V2PrecodeSeed = system.Params.Seed;
+    profile.V2PacketPeelSeed = packet_config.PeelSeed;
+    profile.V2RecoveryMixCount = options.RecoveryMixCount;
+    profile.V2DenseIdentityCorner = options.DenseIdentityCorner;
+    profile.V2PrecodeSeedSalt = options.PrecodeSeedSalt;
+    profile.V2RecoveryRowSeedSalt = options.RecoveryRowSeedSalt;
 }
 
 bool MessagePrecodeEncoder::Initialize(
@@ -876,8 +1131,10 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
     {
         return Wirehair_InvalidInput;
     }
-    const MessagePrecodeEncoderOptions opts =
-        options ? *options : MessagePrecodeEncoderOptions();
+    MessagePrecodeEncoderOptions opts;
+    if (!ResolveMessagePrecodeOptions(profile, options, opts)) {
+        return Wirehair_InvalidInput;
+    }
 
     const uint64_t source_bytes =
         (uint64_t)block_count * (uint64_t)block_bytes;
@@ -890,10 +1147,17 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         std::vector<uint8_t> source_storage((size_t)source_bytes, 0u);
         std::memcpy(source_storage.data(), message, (size_t)message_bytes);
 
-        PrecodeParams params = MakeCertifiedParams(
-            block_count,
-            MatrixSeedFromProfile(profile, 0u, opts.PrecodeSeedSalt));
-        params.DenseIdentityCorner = opts.DenseIdentityCorner;
+        PrecodeParams base_params;
+        PacketRowConfig base_config;
+        if (!ResolveMessagePrecodeConfiguration(
+                profile, opts, base_params, base_config))
+        {
+            return Wirehair_InvalidInput;
+        }
+        uint32_t packet_seed_attempt = profile.V2SeedSelected ?
+            profile.V2SeedAttempt : 0u;
+        PrecodeParams params = base_params;
+        PacketRowConfig packet_config = base_config;
 
         GuardedAllocation();
         PrecodeSystem system;
@@ -901,24 +1165,84 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
             return Wirehair_InvalidInput;
         }
 
-        const uint64_t row_seed = MatrixSeedFromProfile(
-            profile, kMaxPeelMatrixRows, opts.RecoveryRowSeedSalt);
-        PrecodeEncoder next_encoder;
-        const WirehairResult encoder_result = next_encoder.InitializeResult(
+        GuardedAllocation();
+        std::vector<SolvePacket> packets;
+        packets.reserve(block_count);
+        for (uint32_t block_id = 0; block_id < block_count; ++block_id)
+        {
+            SolvePacket packet;
+            packet.BlockId = block_id;
+            packet.Data = source_storage.data() +
+                (size_t)block_id * block_bytes;
+            packets.push_back(packet);
+        }
+        GuardedAllocation();
+        std::vector<uint8_t> intermediate_blocks;
+        PrecodeSolveStats solve_stats;
+        WirehairResult solve_result = SolvePrecodeSystem(
             system,
-            profile.Policy.Codec,
-            row_seed,
-            opts.RecoveryMixCount,
-            source_storage.data(),
+            packet_config,
+            packets,
+            block_bytes,
+            intermediate_blocks,
+            &solve_stats);
+        if (solve_result == Wirehair_NeedMore ||
+            solve_result == Wirehair_Error)
+        {
+            if (profile.V2SeedSelected) {
+                return solve_result == Wirehair_NeedMore ?
+                    Wirehair_BadPeelSeed : solve_result;
+            }
+            PrecodeSystem selected_system;
+            PacketRowConfig selected_config;
+            const WirehairResult select_result = SelectSystematicConfiguration(
+                base_params,
+                base_config,
+                selected_system,
+                selected_config,
+                &packet_seed_attempt);
+            if (select_result != Wirehair_Success) {
+                return select_result;
+            }
+            if (packet_seed_attempt == 0u) {
+                return Wirehair_Error;
+            }
+            intermediate_blocks.clear();
+            system = std::move(selected_system);
+            solve_result = SolvePrecodeSystem(
+                system,
+                selected_config,
+                packets,
+                block_bytes,
+                intermediate_blocks,
+                &solve_stats);
+            packet_config = selected_config;
+        }
+        if (solve_result != Wirehair_Success) {
+            return solve_result;
+        }
+        solve_stats.PacketSeedAttempt = packet_seed_attempt;
+
+        PrecodeEncoder next_encoder;
+        const WirehairResult encoder_result = next_encoder.InitializeSolvedSystem(
+            system,
+            packet_config,
+            intermediate_blocks,
             block_bytes);
         if (encoder_result != Wirehair_Success) {
             return encoder_result;
         }
 
-        SourceBlockStorage.swap(source_storage);
         EncoderValue.Swap(next_encoder);
         ProfileValue = profile;
+        BindMessagePrecodeProfile(
+            ProfileValue,
+            opts,
+            system,
+            packet_config,
+            packet_seed_attempt);
         OptionsValue = opts;
+        SolveStatsValue = solve_stats;
         MessageBytesValue = message_bytes;
         BlockBytesValue = block_bytes;
         Initialized = true;
@@ -963,14 +1287,35 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
         if (out_bytes < bytes) {
             return Wirehair_InvalidInput;
         }
-        std::memcpy(
-            block_out,
-            SourceBlockStorage.data() + (size_t)block_id * BlockBytesValue,
-            bytes);
-        *data_bytes_out = bytes;
-        if (block_ops_out) {
-            *block_ops_out = 1u;
+        if (bytes == BlockBytesValue)
+        {
+            const WirehairResult result = EncoderValue.EncodeResult(
+                block_id, static_cast<uint8_t*>(block_out), block_ops_out);
+            if (result != Wirehair_Success) {
+                return result;
+            }
         }
+        else
+        {
+            try
+            {
+                std::vector<uint8_t> full_block(BlockBytesValue, 0u);
+                uint64_t ops = 0u;
+                const WirehairResult result = EncoderValue.EncodeResult(
+                    block_id, full_block.data(), &ops);
+                if (result != Wirehair_Success) {
+                    return result;
+                }
+                std::memcpy(block_out, full_block.data(), bytes);
+                if (block_ops_out) {
+                    *block_ops_out = ops;
+                }
+            }
+            catch (const std::bad_alloc&) {
+                return Wirehair_OOM;
+            }
+        }
+        *data_bytes_out = bytes;
         return Wirehair_Success;
     }
 
@@ -1021,9 +1366,14 @@ const PrecodeEncodeStats& MessagePrecodeEncoder::EncodeStats() const
     return EncoderValue.EncodeStats();
 }
 
-const uint8_t* MessagePrecodeEncoder::SourceBlocks() const
+const PrecodeSolveStats& MessagePrecodeEncoder::SolveStats() const
 {
-    return Initialized ? SourceBlockStorage.data() : nullptr;
+    return SolveStatsValue;
+}
+
+const uint8_t* MessagePrecodeEncoder::IntermediateBlocks() const
+{
+    return Initialized ? EncoderValue.IntermediateBlocks() : nullptr;
 }
 
 const PrecodeEncoder& MessagePrecodeEncoder::BlockEncoder() const

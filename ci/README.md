@@ -18,9 +18,15 @@ the installed DLL and requires exactly all 15 public `wirehair_*` C entry
 points. Its complete export table is retained in `ci-logs` for failure
 diagnostics. These VS17 jobs are pinned to the `windows-2022` runner image so
 the image and requested Visual Studio generator cannot drift apart.
+The hosted static GCC and Clang lanes additionally pass `--tool-coverage` to
+build the excluded offline generators, V2 benchmark CLI, and `wirehair_whx`
+validation harness. Their CTest run includes the heavy-matrix generator
+regression, V2 benchmark CLI contract, and whx selftest with seed fixups
+explicitly enabled.
 
 ```sh
 python3 ci/run_ci.py matrix --linkage static --strict \
+  --tool-coverage \
   --build-dir build/ci-gcc-static --install-dir build/install-gcc-static \
   --generator Ninja --cmake-arg=-DCMAKE_C_COMPILER=gcc \
   --cmake-arg=-DCMAKE_CXX_COMPILER=g++

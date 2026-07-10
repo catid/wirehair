@@ -27,36 +27,42 @@ jobs:
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+            coverage_args: --tool-coverage
           - os: ubuntu-latest
             compiler: gcc
             linkage: shared
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+            coverage_args: ""
           - os: ubuntu-latest
             compiler: clang
             linkage: static
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+            coverage_args: --tool-coverage
           - os: ubuntu-latest
             compiler: clang
             linkage: shared
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+            coverage_args: ""
           - os: windows-2022
             compiler: msvc
             linkage: static
             generator: Visual Studio 17 2022
             architecture_args: --architecture x64
             cmake_compilers: ""
+            coverage_args: ""
           - os: windows-2022
             compiler: msvc
             linkage: shared
             generator: Visual Studio 17 2022
             architecture_args: --architecture x64
             cmake_compilers: ""
+            coverage_args: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,6 +79,7 @@ jobs:
           --generator "${{ matrix.generator }}"
           ${{ matrix.architecture_args }}
           ${{ matrix.cmake_compilers }}
+          ${{ matrix.coverage_args }}
           --jobs 2
       - name: Upload failure diagnostics
         if: failure()

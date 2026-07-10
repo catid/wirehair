@@ -143,7 +143,9 @@ def is_msvc_generator(generator):
     return bool(generator and generator.startswith("Visual Studio"))
 
 
-def configure(args, *, shared, extra_args=(), explicit_tools=False):
+def configure(
+        args, *, shared, extra_args=(), explicit_tools=False,
+        validation_harness=False):
     command = [
         "cmake",
         "-S", ROOT,
@@ -156,6 +158,9 @@ def configure(args, *, shared, extra_args=(), explicit_tools=False):
         "-DWH_PGO_MODE=OFF",
         "-DWIREHAIR_BUILD_TOOLS=" + ("ON" if explicit_tools else "OFF"),
         "-DWIREHAIR_BUILD_BENCHMARKS=" + ("ON" if explicit_tools else "OFF"),
+        "-DWIREHAIR_BUILD_VALIDATION_HARNESS=" +
+        ("ON" if validation_harness else "OFF"),
+        "-DWIREHAIR_DISABLE_SEED_FIXUPS=OFF",
         "-DWIREHAIR_BUILD_BOTH=OFF",
         "-DBUILD_SHARED_LIBS=" + ("ON" if shared else "OFF"),
         "-DCMAKE_BUILD_TYPE=" + args.config,
@@ -539,9 +544,18 @@ def explicit_tools_smoke(args):
 
 def run_matrix(args):
     shared = args.linkage == "shared"
-    explicit_tools = args.strict and is_msvc_generator(args.generator)
+    tool_coverage = args.tool_coverage
+    explicit_tools = (
+        tool_coverage or
+        (args.strict and is_msvc_generator(args.generator))
+    )
     python_unit_tests()
-    configure(args, shared=shared, explicit_tools=explicit_tools)
+    configure(
+        args,
+        shared=shared,
+        explicit_tools=explicit_tools,
+        validation_harness=tool_coverage,
+    )
     build(args)
     if explicit_tools:
         explicit_tools_smoke(args)
@@ -893,6 +907,14 @@ def parse_args(argv=None):
         "--strict",
         action="store_true",
         help="treat portable compiler warnings as errors",
+    )
+    matrix.add_argument(
+        "--tool-coverage",
+        action="store_true",
+        help=(
+            "build offline generators, benchmarks, and the seed-table "
+            "validation harness"
+        ),
     )
     matrix.set_defaults(function=run_matrix)
 

@@ -63,5 +63,5 @@ awk -F '\t' '
     }
 ' "$tmp" | LC_ALL=C sort -n -k1,1 > "$candidate"
 
-printf "N\tDenseCount\tLowestFailures\tObservations\tMinGeneratedDense\tSourcesAtMax\n"
+printf "N\tDenseCount\tSelectedFailureRate\tObservations\tMinGeneratedDense\tSourcesAtMax\n"
 cat "$candidate"

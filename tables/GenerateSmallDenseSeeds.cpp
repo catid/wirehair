@@ -1,9 +1,12 @@
 #include "../test/SiameseTools.h"
 
 #include "../WirehairCodec.h"
+#include "../WirehairTools.h"
+#include "SeedSelectionPolicy.h"
 
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -420,6 +423,65 @@ static bool ParseUnsigned(const char* text, unsigned& out)
     return true;
 }
 
+static uint64_t DeriveTrialSeed(uint64_t base_seed, unsigned N)
+{
+    // SplitMix64 finalizer: stable across processes, compilers, and shard plans.
+    uint64_t value = (base_seed ^ 0x534d414c4cULL) +
+        0x9e3779b97f4a7c15ULL * (uint64_t)N;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static uint64_t SmallTablesHash()
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned N = 2; N < kTinyTableCount + kSmallTableCount; ++N)
+    {
+        const uint16_t count = wirehair::GetDenseCount(N);
+        const uint16_t denseSeed = wirehair::GetBaseDenseSeed(N, count);
+        const uint16_t peelSeed = wirehair::GetBasePeelSeed(N);
+        hash ^= N;
+        hash *= 1099511628211ULL;
+        hash ^= count;
+        hash *= 1099511628211ULL;
+        hash ^= denseSeed;
+        hash *= 1099511628211ULL;
+        hash ^= peelSeed;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static bool PathExists(const string& path)
+{
+    ifstream input(path.c_str(), ios::binary);
+    return input.good();
+}
+
+static bool FinalizeResults(
+    ofstream& results,
+    const string& temporary_path,
+    const string& final_path)
+{
+    if (final_path.empty()) {
+        return true;
+    }
+    results.flush();
+    const bool write_ok = results.good();
+    results.close();
+    if (!write_ok || !results) {
+        cerr << "failed writing --results file: " << temporary_path << endl;
+        return false;
+    }
+    if (rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+        cerr << "unable to publish --results file " << final_path << ": "
+            << strerror(errno) << endl;
+        return false;
+    }
+    return true;
+}
+
 static bool ParseNList(
     const char* text,
     vector<unsigned>& values,
@@ -541,7 +603,7 @@ static void Usage(const char* program)
     cerr
         << "usage: " << program << " [--seed U64] [--trials N] "
         << "[--nlo N] [--nhi N] [--nlist N[,N...]] "
-        << "[--selection-self-test]\n";
+        << "[--full-search] [--results FILE] [--selection-self-test]\n";
 }
 
 int main(int argc, char** argv)
@@ -552,7 +614,10 @@ int main(int argc, char** argv)
     unsigned nhi = kTinyTableCount + kSmallTableCount - 1u;
     vector<unsigned> explicit_candidates;
     bool has_explicit_candidates = false;
+    bool full_search = false;
     bool selection_self_test = false;
+    string results_path;
+    string results_temporary_path;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -599,6 +664,16 @@ int main(int argc, char** argv)
             }
             has_explicit_candidates = true;
         }
+        else if (!strcmp(arg, "--full-search")) {
+            full_search = true;
+        }
+        else if (!strcmp(arg, "--results")) {
+            results_path = next();
+            if (results_path.empty()) {
+                cerr << "bad --results value" << endl;
+                return 1;
+            }
+        }
         else if (!strcmp(arg, "--selection-self-test")) {
             selection_self_test = true;
         }
@@ -623,11 +698,23 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (full_search && has_explicit_candidates) {
+        cerr << "--full-search cannot be combined with --nlist" << endl;
+        return 1;
+    }
+
     vector<unsigned> candidates;
     const char* selection_source = nullptr;
     if (has_explicit_candidates) {
         candidates = explicit_candidates;
         selection_source = "explicit";
+    }
+    else if (full_search) {
+        const unsigned maxN = kTinyTableCount + kSmallTableCount - 1u;
+        for (unsigned N = 2; N <= maxN; ++N) {
+            candidates.push_back(N);
+        }
+        selection_source = "full";
     }
 #ifdef ENABLE_FULL_SEARCH
     else {
@@ -655,6 +742,27 @@ int main(int argc, char** argv)
     }
 
     FillTables();
+    const uint64_t smallTablesHash = SmallTablesHash();
+
+    ofstream results;
+    if (!results_path.empty())
+    {
+        results_temporary_path = results_path + ".tmp";
+        if (PathExists(results_path) || PathExists(results_temporary_path)) {
+            cerr << "--results destination already exists: " << results_path
+                << endl;
+            return 1;
+        }
+        results.open(results_temporary_path.c_str(), ios::out | ios::trunc);
+        if (!results) {
+            cerr << "unable to open --results file: " << results_path << endl;
+            return 1;
+        }
+        results << "N\tDenseCount\tDenseSeed\tPeelSeed\tDenseFailures"
+            "\tPeelScore\tCurrentDenseCount\tCurrentDenseSeed"
+            "\tCurrentPeelSeed\tTrials\tBaseSeed\tTrialSeed"
+            "\tSmallTablesHash\tMethodVersion\n";
+    }
 
     const int gfInitResult = gf256_init();
 
@@ -682,6 +790,11 @@ int main(int argc, char** argv)
     for (unsigned selected_n : selected)
     {
         const int N = (int)selected_n;
+        const unsigned currentDenseCount = wirehair::GetDenseCount(N);
+        const unsigned currentDenseSeed = wirehair::GetBaseDenseSeed(
+            N, currentDenseCount);
+        const unsigned currentPeelSeed = wirehair::GetBasePeelSeed(N);
+        const uint64_t trialSeed = DeriveTrialSeed(seed, (unsigned)N);
 
         int countGuess = (int)GetDenseCountGuess(N);
         int countGuessMin = countGuess - 2;
@@ -702,26 +815,34 @@ int main(int argc, char** argv)
             d_seed_max = 256;
         }
 
-        int best_seed = 0;
-        int best_count = 0;
-        int best_failures = 10000;
+        int best_seed = (int)currentDenseSeed;
+        int best_count = (int)currentDenseCount;
+        int best_failures = INT_MAX;
+        vector<unsigned> countCandidates;
+        if (currentDenseCount >= 2u && currentDenseCount <= (unsigned)N) {
+            countCandidates.push_back(currentDenseCount);
+        }
+        for (int count = countGuessMin; count <= countGuessMax; ++count) {
+            if ((unsigned)count != currentDenseCount) {
+                countCandidates.push_back((unsigned)count);
+            }
+        }
 
-        for (int count = countGuessMin; count <= countGuessMax; ++count)
+        bool foundZeroDenseScore = false;
+        for (unsigned count : countCandidates)
         {
             cout << "For N = " << N << " trying count = " << count << endl;
 
-            // Advance the trial-stream seed once per count, not once per
-            // candidate: candidates must share paired trials or selection by
-            // minimum failure count is biased (winner's curse)
-            ++seed;
-
-            for (unsigned d_seed = 0; d_seed < d_seed_max; ++d_seed)
+            for (unsigned rank = 0; rank < d_seed_max; ++rank)
             {
+                const unsigned d_seed = wirehair_table::CurrentFirstCandidate(
+                    rank, currentDenseSeed, d_seed_max);
                 FailedTrials = 0;
 
 #pragma omp parallel for
                 for (int trial = 0; trial < (int)trials; ++trial) {
-                    RandomTrial(N, count, seed, (uint16_t)d_seed, trial);
+                    RandomTrial(
+                        N, (int)count, trialSeed, (uint16_t)d_seed, trial);
                 }
 
                 const int failures = FailedTrials;
@@ -729,33 +850,37 @@ int main(int argc, char** argv)
                 if (failures < best_failures)
                 {
                     best_seed = d_seed;
-                    best_count = count;
+                    best_count = (int)count;
                     best_failures = failures;
 
                     cout << "*** New best dense: N = " << N << ": Best dense seed = " << best_seed << ", best count = " << best_count << ", best failures = " << best_failures << endl;
 
                     if (failures <= 0) {
+                        foundZeroDenseScore = true;
                         break;
                     }
                 }
+            }
+            if (foundZeroDenseScore) {
+                break;
             }
         }
 
         cout << "N = " << N << ": Best dense seed = " << best_seed << ", best count = " << best_count << ", best failures = " << best_failures << endl;
 
 
-        int bestPeelSeed = 0;
-        int bestPeelFails = 100000;
+        int bestPeelSeed = (int)currentPeelSeed;
+        int bestPeelFails = INT_MAX;
 
         // kSmallPeelSeeds stores uint8_t entries, so searching past 255 would
         // pick a winner that truncates to a different (already-rejected) seed
         // at runtime.  Keep the search inside the table's representable range.
         const int peelSeedMax = 256;
 
-        for (int peelSeed = 0; peelSeed < peelSeedMax; ++peelSeed)
+        for (unsigned rank = 0; rank < (unsigned)peelSeedMax; ++rank)
         {
-            ++seed;
-
+            const int peelSeed = (int)wirehair_table::CurrentFirstCandidate(
+                rank, currentPeelSeed, (unsigned)peelSeedMax);
             FailedTrials = 0;
 
             if (N < 300)
@@ -804,6 +929,19 @@ int main(int argc, char** argv)
             kSmallDenseSeeds[N - kTinyTableCount] = (uint8_t)best_seed;
         }
         kSmallPeelSeeds[N] = (uint8_t)bestPeelSeed;
+        if (!results_path.empty())
+        {
+            results << N << '\t' << best_count << '\t' << best_seed << '\t'
+                << bestPeelSeed << '\t' << best_failures << '\t'
+                << bestPeelFails << '\t' << currentDenseCount << '\t'
+                << currentDenseSeed << '\t' << currentPeelSeed << '\t'
+                << trials << '\t' << seed << '\t' << trialSeed << '\t'
+                << smallTablesHash << "\tsmall-v3\n";
+            if (!results) {
+                cerr << "failed writing --results file: " << results_path << endl;
+                return 1;
+            }
+        }
         ++processed;
     }
 
@@ -883,5 +1021,6 @@ int main(int argc, char** argv)
 
     cout << "};" << endl;
 
-    return 0;
+    return FinalizeResults(
+        results, results_temporary_path, results_path) ? 0 : 1;
 }
