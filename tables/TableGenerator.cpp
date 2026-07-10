@@ -38,8 +38,6 @@ using namespace siamese;
 #include <algorithm>
 #include <iomanip>
 #include <cmath>
-#include <climits>
-#include <cstdlib>
 #include <cstring>
 using namespace std;
 
@@ -1903,19 +1901,33 @@ static void Benchmark_DenseSeedCount()
 //------------------------------------------------------------------------------
 // CLI
 
-static bool ParseUnsigned(const char* text, unsigned& out)
+static const unsigned kDefaultHeavyTrials = 1000000;
+static const unsigned kMaxHeavyTrials = 10000000;
+
+static bool ParseUnsignedDecimal(
+    const char* text,
+    const unsigned maximum,
+    unsigned& out)
 {
     if (!text || !*text) {
         return false;
     }
 
-    char* end = nullptr;
-    const unsigned long value = strtoul(text, &end, 0);
-    if (!end || *end != '\0' || value > UINT_MAX) {
-        return false;
+    unsigned value = 0;
+    for (const char* p = text; *p; ++p)
+    {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+
+        const unsigned digit = (unsigned)(*p - '0');
+        if (digit > maximum || value > (maximum - digit) / 10) {
+            return false;
+        }
+        value = value * 10 + digit;
     }
 
-    out = (unsigned)value;
+    out = value;
     return true;
 }
 
@@ -1926,7 +1938,9 @@ static void Usage(const char* program)
         << "  --benchmarks              Enable timing benchmarks (default)\n"
         << "  --no-benchmarks, --no-bench\n"
         << "                            Skip timing benchmarks\n"
-        << "  --heavy-trials N          Heavy-row perturbation trials (default 1000000; 0 skips)\n"
+        << "  --heavy-trials N          Decimal heavy-row perturbation trials\n"
+        << "                            (default " << kDefaultHeavyTrials
+        << "; 0 skips; maximum " << kMaxHeavyTrials << ")\n"
         << "  --help                    Show this help\n";
 }
 
@@ -1935,10 +1949,8 @@ static void Usage(const char* program)
 
 int main(int argc, char** argv)
 {
-    cout << "Wirehair Table Generator" << endl;
-
     bool enableBenchmarks = true;
-    unsigned heavyTrials = 1000000;
+    unsigned heavyTrials = kDefaultHeavyTrials;
 
     auto next = [&](int& i)->const char*
     {
@@ -1961,7 +1973,7 @@ int main(int argc, char** argv)
         }
         else if (!strcmp(arg, "--heavy-trials"))
         {
-            if (!ParseUnsigned(next(i), heavyTrials))
+            if (!ParseUnsignedDecimal(next(i), kMaxHeavyTrials, heavyTrials))
             {
                 Usage(argv[0]);
                 return 1;
@@ -1978,6 +1990,8 @@ int main(int argc, char** argv)
             return 1;
         }
     }
+
+    cout << "Wirehair Table Generator" << endl;
 
 #ifdef TABLEGEN_DEBUG
     cout << "WARNING: This is built in debug mode so benchmarks are disabled." << endl;

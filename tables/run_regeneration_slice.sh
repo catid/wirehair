@@ -118,6 +118,8 @@ run_step() {
     echo "run_gen_tables=$RUN_GEN_TABLES"
     echo "omp_num_threads=$OMP_NUM_THREADS"
     echo "seed=$SEED"
+    echo "dcount_schema=1"
+    echo "dcount_methodology=wirehair-generate-dense-count-v1"
     echo "dcount_seed=$DCOUNT_SEED"
     echo "dcount_trials=$DCOUNT_TRIALS"
     echo "dcount_nlo=$DCOUNT_NLO"

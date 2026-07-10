@@ -27,6 +27,23 @@ function(require_match value pattern label)
     endif()
 endfunction()
 
+function(require_cli_rejected_before_output executable label)
+    execute_process(
+        COMMAND "${executable}" --no-benchmarks --heavy-trials ${ARGN}
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE out
+        ERROR_VARIABLE err
+        TIMEOUT 10)
+    if(result EQUAL 0)
+        message(FATAL_ERROR "${label}: invalid value was accepted")
+    endif()
+    if(NOT out STREQUAL "")
+        message(FATAL_ERROR
+            "${label}: generator produced output before rejecting input:\n${out}")
+    endif()
+    require_match("${err}" "Usage:" "${label} diagnostic")
+endfunction()
+
 set(generator_args -G "${TEST_GENERATOR}")
 if(DEFINED TEST_GENERATOR_PLATFORM AND NOT TEST_GENERATOR_PLATFORM STREQUAL "")
     list(APPEND generator_args -A "${TEST_GENERATOR_PLATFORM}")
@@ -237,6 +254,18 @@ run_checked(dcount_output "dense count smoke"
 run_checked(tables_output "table generator smoke"
     "${exe_dir}/gen_tables${TEST_EXE_SUFFIX}"
     --no-benchmarks --heavy-trials 0)
+set(gen_tables_exe "${exe_dir}/gen_tables${TEST_EXE_SUFFIX}")
+require_cli_rejected_before_output("${gen_tables_exe}"
+    "missing heavy-trials value")
+foreach(invalid IN ITEMS -1 +1 " 1" "1 " 1x 0x10 10000001
+        4294967296 18446744073709551616)
+    require_cli_rejected_before_output("${gen_tables_exe}"
+        "invalid heavy-trials value '${invalid}'" "${invalid}")
+endforeach()
+run_checked(tables_maximum_output "maximum heavy-trials parse"
+    "${gen_tables_exe}" --heavy-trials 10000000 --help)
+require_match("${tables_maximum_output}" "maximum 10000000"
+    "maximum heavy-trials help")
 run_checked(bench_output "v2 benchmark smoke"
     "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
     compare --nlo 2 --nhi 2 --trials 1 --bb-list 8

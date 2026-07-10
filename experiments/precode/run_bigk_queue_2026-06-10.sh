@@ -59,7 +59,25 @@ run_csv() {
     [ -n "$expect_oh" ] && validation+=(--expect-oh "$expect_oh")
     [ -n "$expect_schemes" ] && validation+=(--expect-schemes "$expect_schemes")
     [ -n "$expect_trials" ] && validation+=(--expect-trials "$expect_trials")
-    if ! "${validation[@]}" > /dev/null 2>> "$tmp_err"; then
+    # Keep command-specific grid expectations on the candidate alone.  Then
+    # reject cell collisions with final shards sharing its <campaign>_K prefix.
+    local out_dir="."
+    if [[ "$out" == */* ]]; then
+      out_dir="${out%/*}"
+    fi
+    local out_name="${out##*/}"
+    local campaign="${out_name%%_K*}"
+    local campaign_validation=(python3 "$VALIDATOR")
+    local shard
+    while IFS= read -r -d '' shard; do
+      if [ "$shard" != "$out" ]; then
+        campaign_validation+=("$shard")
+      fi
+    done < <(find "$out_dir" -maxdepth 1 -type f \
+      -name "${campaign}_K*.csv" -print0)
+    campaign_validation+=("$tmp_csv")
+    if ! "${validation[@]}" > /dev/null 2>> "$tmp_err" ||
+        ! "${campaign_validation[@]}" > /dev/null 2>> "$tmp_err"; then
       mv -f "$tmp_csv" "${out}.invalid"
       mv -f "$tmp_err" "$err"
       echo "FAIL $out validation" >> "$FAIL_FILE"
@@ -114,6 +132,31 @@ queue_self_test() {
   if [ ! -s "$valid" ] || [ -e "${valid}.err" ] ||
       find "$test_dir" -type f -name '*.tmp.*' -print -quit | grep -q .; then
     echo "queue self-test: valid promotion left missing or stale artifacts" >&2
+    exit 1
+  fi
+
+  local existing="$test_dir/collision_Kexisting.csv"
+  local collision="$test_dir/collision_Kcandidate.csv"
+  cp -f "$valid" "$existing"
+  if run_csv "$collision" sed -n p "$existing"; then
+    echo "queue self-test: duplicate campaign cell was promoted" >&2
+    exit 1
+  fi
+  if [ -e "$collision" ] || [ ! -s "${collision}.invalid" ] ||
+      [ ! -s "${collision}.err" ] ||
+      ! grep -Fq "first seen at $existing:2" "${collision}.err" ||
+      ! grep -Eq 'collision_Kcandidate\.csv\.tmp\.[^:]+:2: duplicate experiment row' \
+        "${collision}.err"; then
+    echo "queue self-test: duplicate campaign cell was not quarantined" >&2
+    exit 1
+  fi
+
+  local unrelated="$test_dir/unrelated_Kexisting.csv"
+  local isolated="$test_dir/isolated_Kcandidate.csv"
+  cp -f "$valid" "$unrelated"
+  if ! run_csv "$isolated" sed -n p "$unrelated" || [ ! -s "$isolated" ] ||
+      [ -e "${isolated}.err" ]; then
+    echo "queue self-test: unrelated campaign blocked valid promotion" >&2
     exit 1
   fi
 

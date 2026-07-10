@@ -82,16 +82,16 @@ def deficit_pdf(text, source, line):
     return result, tolerance
 
 
-def validate_file(path):
+def validate_file(path, seen=None):
     source = str(path)
     rows = []
+    seen = {} if seen is None else seen
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, strict=True)
         if reader.fieldnames is None:
             raise ValidationError(f"{source}: empty CSV")
         if tuple(reader.fieldnames) not in SCHEMAS:
             raise ValidationError(f"{source}: unsupported precode CSV header")
-        seen = set()
         for line, row in enumerate(reader, 2):
             if None in row or any(value is None for value in row.values()):
                 raise ValidationError(f"{source}:{line}: wrong field count")
@@ -149,9 +149,14 @@ def validate_file(path):
                 values.get("pivot_window"), values["K"], row["scheme"],
                 values["D"], values["H"], values["oh"],
             )
-            if key in seen:
-                raise ValidationError(f"{source}:{line}: duplicate experiment row {key}")
-            seen.add(key)
+            previous = seen.get(key)
+            if previous is not None:
+                previous_source, previous_line = previous
+                raise ValidationError(
+                    f"{source}:{line}: duplicate experiment row {key}; "
+                    f"first seen at {previous_source}:{previous_line}"
+                )
+            seen[key] = (source, line)
             rows.append({**values, "scheme": row["scheme"]})
     if not rows:
         raise ValidationError(f"{source}: CSV has no data rows")
@@ -250,11 +255,12 @@ def main(argv=None):
             overheads = merge_expectation("oh", overheads, manifest["oh"])
             trials = merge_expectation("trials", trials, manifest["trials"])
         rows = []
+        seen = {}
         for name in args.files:
             path = Path(name)
             if not path.is_file():
                 raise ValidationError(f"missing precode result: {path}")
-            rows.extend(validate_file(path))
+            rows.extend(validate_file(path, seen))
         validate_grid(rows, ks, schemes, overheads, trials)
     except (OSError, csv.Error, ValidationError, ValueError) as exc:
         print(exc, file=sys.stderr)

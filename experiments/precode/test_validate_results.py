@@ -116,15 +116,59 @@ class ValidateResultsTests(unittest.TestCase):
 
     def test_duplicate_rows_within_file(self):
         result_file = self.write_csv(rows=[valid_row(), valid_row()])
-        with self.assertRaisesRegex(validator.ValidationError, "duplicate experiment row"):
+        with self.assertRaisesRegex(
+                validator.ValidationError,
+                r"results\.csv:3: duplicate experiment row .*first seen at .*results\.csv:2"):
             validator.validate_file(result_file)
+
+    def test_repeated_path_reports_both_source_locations(self):
+        result_file = self.write_csv()
+        for manifest in (None, self.write_manifest()):
+            with self.subTest(manifest=manifest):
+                arguments = [result_file, result_file]
+                if manifest is not None:
+                    arguments.extend(("--manifest", manifest))
+                result, _, error = self.run_main(*arguments)
+                self.assertEqual(1, result)
+                self.assertIn("duplicate experiment row", error)
+                self.assertEqual(2, error.count(f"{result_file}:2"))
+
+    def test_duplicate_cells_across_distinct_files(self):
+        first = self.write_csv("first.csv")
+        cases = (
+            ("identical", valid_row()),
+            ("conflicting", valid_row(trials=11)),
+        )
+        for kind, duplicate in cases:
+            for manifest in (None, self.write_manifest()):
+                with self.subTest(kind=kind, manifest=manifest):
+                    second = self.write_csv("second.csv", rows=[duplicate])
+                    arguments = [first, second]
+                    if manifest is not None:
+                        arguments.extend(("--manifest", manifest))
+                    result, _, error = self.run_main(*arguments)
+                    self.assertEqual(1, result)
+                    self.assertIn("duplicate experiment row", error)
+                    self.assertIn(f"{second}:2", error)
+                    self.assertIn(f"first seen at {first}:2", error)
+
+    def test_disjoint_shards_with_and_without_manifest(self):
+        first = self.write_csv("first.csv")
+        second = self.write_csv(
+            "second.csv", rows=[valid_row(scheme="ldpc", D=20)]
+        )
+        for manifest in (None, self.write_manifest(schemes=["dense", "ldpc"])):
+            with self.subTest(manifest=manifest):
+                arguments = [first, second]
+                if manifest is not None:
+                    arguments.extend(("--manifest", manifest))
+                result, output, error = self.run_main(*arguments)
+                self.assertEqual((0, ""), (result, error))
+                self.assertIn("2 precode result file(s), 2 row(s)", output)
 
     def test_grid_trials_and_manifest(self):
         result_file = self.write_csv()
-        manifest = self.root / "manifest.json"
-        manifest.write_text(json.dumps({
-            "K": [1000], "schemes": ["dense"], "oh": [0], "trials": 10,
-        }), encoding="utf-8")
+        manifest = self.write_manifest()
         result, _, error = self.run_main(result_file, "--manifest", manifest)
         self.assertEqual((0, ""), (result, error))
 
@@ -157,6 +201,14 @@ class ValidateResultsTests(unittest.TestCase):
                 manifest.write_text(contents, encoding="utf-8")
                 result, _, _ = self.run_main(result_file, "--manifest", manifest)
                 self.assertEqual(1, result)
+
+    def write_manifest(self, schemes=None):
+        manifest = self.root / "manifest.json"
+        manifest.write_text(json.dumps({
+            "K": [1000], "schemes": schemes or ["dense"],
+            "oh": [0], "trials": 10,
+        }), encoding="utf-8")
+        return manifest
 
 
 if __name__ == "__main__":

@@ -13,10 +13,16 @@ fixed, the shipped matrix becomes singular in roughly 1/256 random binary
 perturbation trials, the expected floor for a random 6x6 GF(256) matrix.
 
 `gen_tables --heavy-trials N` reports this singular rate as an empirical,
-deterministic measurement. The result is informational and never certifies
-all perturbations. Small samples may observe zero failures. Production keeps
-the shipped bytes for wire compatibility and handles occasional rank loss by
-accepting additional recovery rows.
+deterministic measurement. `N` is a decimal integer from 0 through 10,000,000;
+the default is 1,000,000 and zero skips the measurement. The finite maximum
+prevents malformed or accidentally enormous command-line values from starting
+an unbounded offline job. Run multiple explicitly recorded invocations if an
+experiment needs a larger aggregate sample.
+
+The result is informational and never certifies all perturbations. Small
+samples may observe zero failures. Production keeps the shipped bytes for wire
+compatibility and handles occasional rank loss by accepting additional
+recovery rows.
 
 The precode simulator's full-coverage MDS heavy patch is a separate modeling
 assumption. Its results must not be described as a guarantee of the legacy

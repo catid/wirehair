@@ -12,12 +12,27 @@ if [ ! -d "$RESULT_DIR" ]; then
 fi
 
 fail=0
+validated_files=0
+validated_rows=0
 
 mapfile -d '' csv_files < <(find "$RESULT_DIR" -type f -name '*.csv' -print0)
 if ((${#csv_files[@]} > 0)); then
-  if ! "$PYTHON" "$VALIDATOR" "${csv_files[@]}"; then
-    fail=1
-  fi
+  # This directory aggregates independent campaigns whose control rows may
+  # intentionally overlap.  Validate each artifact here; queue promotion
+  # separately validates all shards belonging to the campaign being extended.
+  for csv_file in "${csv_files[@]}"; do
+    if validation_output=$("$PYTHON" "$VALIDATOR" "$csv_file"); then
+      if [[ "$validation_output" =~ ,\ ([0-9]+)\ row\(s\)$ ]]; then
+        ((validated_files += 1))
+        ((validated_rows += BASH_REMATCH[1]))
+      else
+        echo "unexpected validator output for $csv_file: $validation_output" >&2
+        fail=1
+      fi
+    else
+      fail=1
+    fi
+  done
 else
   echo "no CSV result files: $RESULT_DIR" >&2
   fail=1
@@ -39,4 +54,5 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
+echo "validated $validated_files precode result file(s), $validated_rows row(s)"
 echo "precode result integrity OK: $RESULT_DIR"
