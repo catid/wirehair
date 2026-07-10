@@ -57,6 +57,8 @@ void CheckPolicy(
     Check(codec.SolverCandidateLimit == 16u,
         "ks_bmax_top16 should use 16 candidates");
     Check(codec.FullyRandomRows, "selected codec rows should be fully random");
+    Check(!codec.UseWirehairRowDistribution,
+        "base policy should retain its named experimental row distribution");
 }
 
 void CheckRowHasNoDuplicates(const std::vector<uint16_t>& row)
@@ -76,6 +78,28 @@ void CheckRowHasNoDuplicates(const std::vector<uint32_t>& row)
         for (size_t j = i + 1u; j < row.size(); ++j) {
             Check(row[i] != row[j],
                 "generated recovery row should not duplicate columns");
+        }
+    }
+}
+
+void CheckWirehairRowDegreeCap()
+{
+    const uint32_t block_counts[] = { 2u, 3u, 32u, 64u, 127u, 128u };
+    wirehair_v2::PeelingCodec codec = wirehair_v2::MakePeelingCodec(
+        wirehair_v2::PeelStructure::LtM1C64,
+        wirehair_v2::PeelSolver::KsBmaxTop16);
+    codec.UseWirehairRowDistribution = true;
+    for (const uint32_t K : block_counts)
+    {
+        const std::vector<std::vector<uint16_t> > rows =
+            wirehair_v2::GeneratePeelMatrixRows(
+                codec, K, 4096u, UINT64_C(0x5748524f57434150) ^ K);
+        Check(rows.size() == 4096u,
+            "Wirehair-distribution row sample count mismatch");
+        const size_t max_degree = K / 2u > 0u ? K / 2u : 1u;
+        for (const std::vector<uint16_t>& row : rows) {
+            Check(!row.empty() && row.size() <= max_degree,
+                "Wirehair-distribution row exceeded production K/2 cap");
         }
     }
 }
@@ -500,7 +524,7 @@ void CheckGeneratedRecoveryRows()
     {
         Check(wirehair_v2::GenerateRecoveryMatrixRow(
                 codec, K, 81u, expected.Id, 3u, seed) == expected.Columns,
-            "recovery row contract-v2 golden vector changed");
+            "recovery row contract-v3 golden vector changed");
     }
 }
 
@@ -1094,6 +1118,7 @@ int main()
             UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
     CheckGeneratedRecoveryRows();
+    CheckWirehairRowDegreeCap();
     CheckRecoveryRowScaling();
     CheckPeelRowCountBounds();
 

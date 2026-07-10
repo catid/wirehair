@@ -7,6 +7,7 @@
 #include <wirehair/wirehair.h>
 
 #include <stdint.h>
+#include <unordered_set>
 #include <vector>
 
 /*
@@ -47,7 +48,7 @@
 
 namespace wirehair_v2 {
 
-static const uint32_t kDefaultRecoveryMixCount = 5u;
+static const uint32_t kDefaultRecoveryMixCount = 3u;
 static const uint64_t kMessagePrecodeSeedSalt =
     UINT64_C(0x763263707265636f);
 static const uint64_t kMessageRecoveryRowSeedSalt =
@@ -235,7 +236,8 @@ private:
 struct MessagePrecodeEncoderOptions
 {
     uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
-    bool DenseIdentityCorner = false;
+    bool DenseIdentityCorner = true;
+    bool UseWirehairRowDistribution = true;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
 };
@@ -249,10 +251,10 @@ struct MessagePrecodeEncoderOptions
     only the original byte count for the final partial block, while recovery
     block ids emit a full block.
 
-    The default options preserve the certified dense corner, which is often not
-    directly encoder-feasible for phased parity precomputation.  Set
-    DenseIdentityCorner=true only for explicit encoder-feasibility experiments
-    pending recertification of that variant.
+    The default options use the encoder-feasible identity dense corner and the
+    production Wirehair recovery-row degree distribution selected by the final
+    certification campaign.  DenseIdentityCorner=false retains the historical
+    comparison construction, which is usually not encoder-feasible.
 
     Initialization is transactional: any invalid, singular, or allocation
     failure preserves the last successfully initialized encoder.
@@ -311,6 +313,75 @@ private:
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;
     bool Initialized = false;
+};
+
+/**
+    Correctness-first decoder for the V2 precode packet format.
+
+    Received packets are combined with the staircase, Shuffle-2, and Cauchy
+    constraints and solved with sparse peeling plus bounded inactivation over
+    GF(256).  This is intentionally isolated from the production V1 solver:
+    it establishes an end-to-end V2 data path while the optimized V2 solver
+    is still being developed.
+
+    Duplicate packet ids are ignored.  Decode returns Wirehair_NeedMore until
+    the collected equations have full rank, then Recover copies the original
+    byte-length message.  Initialization is transactional.
+*/
+class MessagePrecodeDecoder
+{
+public:
+    MessagePrecodeDecoder();
+    MessagePrecodeDecoder(const MessagePrecodeDecoder&) = delete;
+    MessagePrecodeDecoder& operator=(const MessagePrecodeDecoder&) = delete;
+
+    WirehairResult InitializeResult(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = nullptr,
+        const MessagePrecodeEncoderOptions* options = nullptr);
+
+    WirehairResult DecodeResult(
+        uint32_t block_id,
+        const uint8_t* block_in,
+        uint32_t block_bytes);
+
+    WirehairResult RecoverResult(
+        void* message_out,
+        uint64_t message_bytes) const;
+
+    bool IsInitialized() const;
+    bool IsDecoded() const;
+    uint64_t MessageBytes() const;
+    uint32_t SourceBlockCount() const;
+    uint32_t BlockBytes() const;
+    uint32_t PacketCount() const;
+    const SeedProfile& Profile() const;
+    const MessagePrecodeEncoderOptions& Options() const;
+    const PrecodeSystem& System() const;
+
+private:
+    struct Packet
+    {
+        uint32_t BlockId = 0;
+        std::vector<uint8_t> Data;
+    };
+
+    WirehairResult TrySolve();
+    void Swap(MessagePrecodeDecoder& other) noexcept;
+
+    SeedProfile ProfileValue = {};
+    MessagePrecodeEncoderOptions OptionsValue = {};
+    PrecodeSystem SystemValue = {};
+    PeelingCodec CodecValue = {};
+    uint64_t RowSeed = 0;
+    std::vector<Packet> Packets;
+    std::unordered_set<uint32_t> PacketIds;
+    std::vector<uint8_t> DecodedValues;
+    uint64_t MessageBytesValue = 0;
+    uint32_t BlockBytesValue = 0;
+    bool Initialized = false;
+    bool Decoded = false;
 };
 
 } // namespace wirehair_v2

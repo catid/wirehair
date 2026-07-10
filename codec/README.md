@@ -77,10 +77,24 @@ mapping without requiring callers to manage the parity buffer directly.
 `MessagePrecodeEncoder` is the message-level adapter: it owns the zero-padded
 source block array for arbitrary message bytes and reports the partial byte
 count for the final source block while emitting full-size recovery blocks.  Its
-default options follow the certified dense corner, which is usually not
-encoder-feasible for direct parity precomputation; use the identity-corner
-option only for explicit encoder-feasibility experiments pending
-recertification.
+default uses the encoder-feasible identity dense corner and the production
+Wirehair recovery-row degree distribution selected by certification.  Set
+`DenseIdentityCorner=false` only to reproduce the historical comparison
+construction, whose dense parity corner is usually singular.
+`MessagePrecodeDecoder` is the matching correctness-first decoder.  It combines
+received source/recovery packets with all certified precode constraints, peels
+sparse degree-one columns, and solves a bounded GF(256) inactivation residual.
+Duplicate packet IDs are ignored and the final partial source packet is
+zero-padded internally.  The residual is capped at 4096 inactive columns, so
+this prototype can return `Wirehair_NeedMore` for very large/high-loss cases
+that require the future optimized V2 solver.  Both systematic decoding and a
+recovery-only schedule are validated at the full K=64000 domain limit.
+
+The benchmark's `precodecheck` mode exercises that explicit V2 encoder and
+decoder end to end (unlike `compare`, whose arms deliberately retain the
+V1-compatible packet format).  It reports terminal failure categories,
+successful overhead percentiles, and stage throughput for an explicit
+K/block-byte grid.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and
@@ -112,21 +126,26 @@ rank/failure validation before promoting any degree/precode candidate.
 
 ## Codec Wrapper
 
-`wirehair_v2::Codec` is a full encoder/decoder facade.  It selects a
-`SeedProfile`, injects the selected dense count, peel seed, and dense seed into
-the underlying solver, then exposes encode/decode/recover methods.  Production
+`wirehair_v2::Codec` is a full encoder/decoder facade.  Its existing
+`InitializeEncoder()` and `InitializeDecoder()` modes select a
+`SeedProfile`, inject the selected dense count, peel seed, and dense seed into
+the underlying solver, then expose encode/decode/recover methods.  Production
 codec files are not modified by this wrapper.  The facade still emits and
-decodes V1-compatible recovery packets; the certified V2 precode block-data
-path is exposed by the helper APIs above until the matching V2 decoder is
-ported.  `InitializePrecodeEncoder()` is an explicit experimental encoder-only
-entry point that routes `Encode()` through `MessagePrecodeEncoder`; do not feed
-those recovery packets to the facade decoder until the V2 decoder is ported.
+decodes V1-compatible recovery packets in those modes.  The explicit
+`InitializePrecodeEncoder()` and `InitializePrecodeDecoder()` modes route the
+facade through the matching experimental V2 packet format.  V1 and V2 modes
+remain deliberately separate, and successful mode changes discard the prior
+mode's state.
 
 Validation:
 
 ```bash
 cmake --build build --target wirehair_v2_policy_test
 ./build/codec/wirehair_v2_policy_test
+cmake --build build --target wirehair_v2_precode_decode_test
+./build/codec/wirehair_v2_precode_decode_test
+./build/codec/wirehair_v2_precode_decode_test --large
+./build/codec/wirehair_v2_precode_decode_test --large-recovery
 ```
 
 Benchmark smoke checks:
@@ -134,6 +153,7 @@ Benchmark smoke checks:
 ```bash
 cmake --build build --target wirehair_v2_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
+./build/codec/wirehair_v2_bench precodecheck --N 64,320,1000 --bb-list 16,1280 --trials 10 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6

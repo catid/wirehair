@@ -8,7 +8,7 @@
 namespace wirehair_v2 {
 
 static const uint32_t kMaxPeelMatrixRows = 65536u;
-static const uint32_t kRecoveryRowContractVersion = 2u;
+static const uint32_t kRecoveryRowContractVersion = 3u;
 
 struct RecoveryRowGenerationStats
 {

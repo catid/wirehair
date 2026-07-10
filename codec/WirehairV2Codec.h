@@ -28,6 +28,12 @@ public:
         const SeedProfile* seed_override = 0,
         const MessagePrecodeEncoderOptions* options = 0);
 
+    WirehairResult InitializePrecodeDecoder(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = 0,
+        const MessagePrecodeEncoderOptions* options = 0);
+
     WirehairResult InitializeDecoder(
         uint64_t message_bytes,
         uint32_t block_bytes,
@@ -51,6 +57,7 @@ public:
 private:
     wirehair::Codec Impl;
     std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;
+    std::unique_ptr<MessagePrecodeDecoder> PrecodeDecoderImpl;
     SeedProfile CurrentProfile = {};
 };
 

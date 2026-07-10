@@ -1038,6 +1038,7 @@ bool TestMessagePrecodeEncoder()
         encoder.Profile().BlockBytes != bb ||
         encoder.Options().RecoveryMixCount != options.RecoveryMixCount ||
         !encoder.Options().DenseIdentityCorner ||
+        !encoder.Options().UseWirehairRowDistribution ||
         !encoder.SourceBlocks() ||
         !encoder.BlockEncoder().IsInitialized())
     {
@@ -1108,9 +1109,13 @@ bool TestMessagePrecodeEncoder()
     const wirehair_v2::PrecodeEncoder& blocks = encoder.BlockEncoder();
     const wirehair_v2::PrecodeSystem& encoder_system = blocks.System();
     const uint32_t parity_count = blocks.ParityBlockCount();
+    wirehair_v2::PeelingCodec recovery_codec =
+        encoder.Profile().Policy.Codec;
+    recovery_codec.UseWirehairRowDistribution =
+        encoder.Options().UseWirehairRowDistribution;
     const std::vector<std::vector<uint32_t> > oracle_rows =
         wirehair_v2::GenerateRecoveryMatrixRows(
-            encoder.Profile().Policy.Codec,
+            recovery_codec,
             K,
             parity_count,
             16u,
@@ -1168,7 +1173,7 @@ bool TestMessagePrecodeEncoder()
     const uint32_t max_packet_id = UINT32_MAX;
     const std::vector<uint32_t> max_row =
         wirehair_v2::GenerateRecoveryMatrixRow(
-            encoder.Profile().Policy.Codec,
+            recovery_codec,
             K,
             parity_count,
             max_packet_id - K,
@@ -1274,6 +1279,7 @@ bool TestTypedFailuresAndAllocationContainment()
     }
 
     wirehair_v2::MessagePrecodeEncoderOptions certified;
+    certified.DenseIdentityCorner = false;
     if (encoder.InitializeResult(
             message.data(), message_bytes, bb, nullptr, &certified) !=
             Wirehair_BadDenseSeed || !encoder.IsInitialized() ||

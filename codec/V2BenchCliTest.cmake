@@ -65,6 +65,8 @@ expect_failure("bad --trials value" seedtable --N 2 --bb-list 1
 # Every loss-accepting mode rejects values above the shared boundary.
 expect_failure("loss must be" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 1 --max-message-mib 1 --loss 0.9900001)
+expect_failure("loss must be" precodecheck --N 2 --bb-list 1 --trials 1
+    --loss 0.9900001)
 expect_failure("loss must be" densecheck --N 2 --bb 1 --candidates 1
     --trials 1 --loss 0.9900001)
 expect_failure("loss must be" densetune --N 2 --bb-list 1 --candidates 1
@@ -80,6 +82,8 @@ foreach(loss IN ITEMS -0.1 1.0 nan inf malformed)
         --trials 1 --loss ${loss})
     expect_failure("loss" compare --nlo 2 --nhi 2 --trials 1
         --bb-list 1 --max-message-mib 1 --loss ${loss})
+    expect_failure("loss" precodecheck --N 2 --bb-list 1 --trials 1
+        --loss ${loss})
     expect_failure("loss" densetune --N 2 --bb-list 1 --candidates 1
         --trials 1 --loss ${loss})
     expect_failure("loss" densecount --N 2 --bb-list 1 --deltas 0
@@ -92,6 +96,8 @@ foreach(loss IN ITEMS 0 0.37)
         --trials 1 --loss ${loss})
     expect_success("loss=${loss}" compare --nlo 2 --nhi 2 --trials 1
         --bb-list 1 --max-message-mib 1 --loss ${loss})
+    expect_success("loss=${loss}" precodecheck --N 2 --bb-list 1
+        --trials 1 --loss ${loss})
     expect_success("loss=${loss}" densetune --N 2 --bb-list 1
         --candidates 1 --trials 1 --loss ${loss})
     expect_success("loss=${loss}" densecount --N 2 --bb-list 1
@@ -103,6 +109,8 @@ expect_success("loss=0.98999999999999999" densecheck --N 2 --bb 1
     --candidates 1 --trials 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" compare --nlo 2 --nhi 2
     --trials 1 --bb-list 1 --max-message-mib 1 --loss 0.99)
+expect_success("loss=0.98999999999999999" precodecheck --N 2 --bb-list 1
+    --trials 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" densetune --N 2 --bb-list 1
     --candidates 1 --trials 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" densecount --N 2 --bb-list 1
@@ -114,6 +122,8 @@ expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
 expect_success("loss boundary oracle: PASS" selftest)
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
+expect_success("# precodecheck:" precodecheck --N 2 --bb-list 8
+    --trials 1 --loss 0)
 expect_success("# densetune:" densetune --N 2 --bb-list 8 --candidates 1
     --trials 1 --loss 0)
 expect_success("# densecount:" densecount --N 2 --bb-list 8 --deltas 0

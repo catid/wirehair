@@ -531,6 +531,10 @@ def explicit_tools_smoke(args):
             "compare", "--nlo", "2", "--nhi", "2", "--trials", "1",
             "--bb-list", "8", "--max-message-mib", "1", "--loss", "0",
         ]),
+        ("wirehair_v2_bench", [
+            "precodecheck", "--N", "2", "--bb-list", "8",
+            "--trials", "1", "--loss", "0",
+        ]),
     )
     for name, arguments in cases:
         executable = find_executable(args.build_dir, name, args.config)
@@ -606,7 +610,11 @@ def run_scheduled(args):
         shared=False,
         extra_args=("-DWIREHAIR_ENABLE_SCHEDULED_TESTS=ON",),
     )
-    build(args, targets=("unit_test", "large_message_test"))
+    build(args, targets=(
+        "unit_test",
+        "large_message_test",
+        "wirehair_v2_precode_decode_test",
+    ))
     ctest(args, label="^scheduled$")
     large_message_profiles(args, "scheduled")
     logs = Path(args.build_dir) / "ci-logs"

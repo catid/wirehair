@@ -57,6 +57,7 @@ struct PeelingCodec
     double RobustC = 0.0;
     double RobustDelta = 0.0;
     bool FullyRandomRows = false;
+    bool UseWirehairRowDistribution = false;
 };
 
 struct PeelPolicy

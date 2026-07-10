@@ -174,6 +174,7 @@ bool ShouldDrop(Rng& rng, double loss_rate)
 struct TrialResult
 {
     bool Ok;
+    WirehairResult TerminalResult;
     uint32_t Extra;
     double CreateSeconds;
     double EncodeSeconds;
@@ -727,6 +728,90 @@ TrialResult RunV2Trial(
             tr.Extra = delivered - N;
         }
     }
+    return tr;
+}
+
+TrialResult RunV2PrecodeTrial(
+    uint32_t N,
+    uint32_t block_bytes,
+    double loss_rate,
+    uint64_t seed)
+{
+    TrialResult tr = {};
+    tr.TerminalResult = Wirehair_Error;
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    std::vector<uint8_t> decoded((size_t)message_bytes, 0u);
+    std::vector<uint8_t> block(block_bytes);
+    FillMessage(message, seed);
+    Rng rng(seed ^ UINT64_C(0x7632707265636f64));
+
+    wirehair_v2::Codec enc;
+    wirehair_v2::Codec dec;
+    const double c0 = NowSeconds();
+    WirehairResult result = enc.InitializePrecodeEncoder(
+        message.data(), message_bytes, block_bytes);
+    if (result == Wirehair_Success) {
+        result = dec.InitializePrecodeDecoder(message_bytes, block_bytes);
+    }
+    tr.CreateSeconds = NowSeconds() - c0;
+    if (result != Wirehair_Success) {
+        tr.TerminalResult = result;
+        return tr;
+    }
+
+    uint32_t delivered = 0u;
+    uint32_t block_id = 0u;
+    uint32_t write_bytes = 0u;
+    const uint32_t max_delivered = N * 2u + 512u;
+    result = Wirehair_NeedMore;
+    while (delivered < max_delivered)
+    {
+        const bool drop = ShouldDrop(rng, loss_rate);
+        const uint32_t this_id = block_id++;
+        if (drop) {
+            continue;
+        }
+        const double e0 = NowSeconds();
+        result = enc.Encode(
+            this_id, block.data(), block_bytes, &write_bytes);
+        tr.EncodeSeconds += NowSeconds() - e0;
+        if (result != Wirehair_Success) {
+            break;
+        }
+        tr.EncodedBytes += write_bytes;
+        ++delivered;
+
+        const double d0 = NowSeconds();
+        result = dec.Decode(this_id, block.data(), write_bytes);
+        tr.DecodeSeconds += NowSeconds() - d0;
+        tr.DecodedBytes += write_bytes;
+        if (result == Wirehair_Success) {
+            tr.Ok = true;
+            break;
+        }
+        if (result != Wirehair_NeedMore) {
+            break;
+        }
+    }
+
+    if (tr.Ok)
+    {
+        const double r0 = NowSeconds();
+        result = dec.Recover(decoded.data(), message_bytes);
+        tr.RecoverSeconds = NowSeconds() - r0;
+        tr.RecoveredBytes = message_bytes;
+        tr.Ok = result == Wirehair_Success &&
+            std::memcmp(decoded.data(), message.data(),
+                (size_t)message_bytes) == 0;
+        if (!tr.Ok && result == Wirehair_Success) {
+            result = Wirehair_Error;
+        }
+        if (tr.Ok) {
+            tr.Extra = delivered - N;
+        }
+    }
+    tr.TerminalResult = result;
     return tr;
 }
 
@@ -1976,6 +2061,149 @@ int CmdPeelCost(int argc, char** argv)
     return 0;
 }
 
+int CmdPrecodeCheck(int argc, char** argv)
+{
+    std::string nlist = "64,320,1000";
+    std::string bb_list = "16,1280";
+    uint32_t trials = 10u;
+    double loss = 0.10;
+    uint64_t seed = UINT64_C(0x7632707265636f64);
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("precodecheck", "--N", argc, argv, i, value)) {
+                return 1;
+            }
+            nlist = value;
+        }
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg(
+                    "precodecheck", "--bb-list", argc, argv, i, value))
+            {
+                return 1;
+            }
+            bb_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--trials")) {
+            if (!TakeArg(
+                    "precodecheck", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg(
+                    "precodecheck", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg(
+                    "precodecheck", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed))
+            {
+                return 1;
+            }
+        }
+        else if (!UnknownArg("precodecheck", argv[i])) {
+            return 1;
+        }
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    if (Ns.empty() || BBs.empty() || trials == 0u || trials > 10000u) {
+        std::fprintf(stderr,
+            "precodecheck requires non-empty lists and trials in [1,10000]\n");
+        return 1;
+    }
+    if (!ValidateBlockCounts(Ns, "precodecheck") ||
+        !ValidateLoss(loss, "precodecheck") ||
+        !ValidateMessageInputs(Ns, BBs, "precodecheck"))
+    {
+        return 1;
+    }
+
+    std::printf(
+        "# precodecheck: trials=%u loss=%.17g seed=0x%llx "
+        "identity_corner=1 rowdist=wirehair mix=%u\n",
+        trials,
+        loss,
+        (unsigned long long)seed,
+        wirehair_v2::kDefaultRecoveryMixCount);
+    std::printf(
+        "N,bb,trials,success,fail,terminal_need_more,terminal_invalid,"
+        "terminal_extra_insufficient,terminal_other,OH_mean,OH_sd,OH50,"
+        "OH95,OH99,OH_max,create_MBps,encode_MBps,decode_MBps,recover_MBps\n");
+
+    for (const int bb_value : BBs) for (const int n_value : Ns)
+    {
+        const uint32_t N = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+        Accum acc;
+        uint64_t terminal_need_more = 0u;
+        uint64_t terminal_invalid = 0u;
+        uint64_t terminal_extra = 0u;
+        uint64_t terminal_other = 0u;
+        for (uint32_t trial = 0; trial < trials; ++trial)
+        {
+            const uint64_t trial_seed = seed ^
+                ((uint64_t)N * UINT64_C(0x9e3779b97f4a7c15)) ^
+                ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+                ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+            const TrialResult result = RunV2PrecodeTrial(
+                N, block_bytes, loss, trial_seed);
+            AddTrial(acc, N, result);
+            if (result.Ok) {
+                continue;
+            }
+            switch (result.TerminalResult)
+            {
+            case Wirehair_NeedMore:
+                ++terminal_need_more;
+                break;
+            case Wirehair_InvalidInput:
+                ++terminal_invalid;
+                break;
+            case Wirehair_ExtraInsufficient:
+                ++terminal_extra;
+                break;
+            default:
+                ++terminal_other;
+                break;
+            }
+        }
+        std::printf(
+            "%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.4f,%.4f,%u,%u,"
+            "%u,%u,%.1f,%.1f,%.1f,%.1f\n",
+            N,
+            block_bytes,
+            (unsigned long long)acc.Trials,
+            (unsigned long long)(acc.Trials - acc.Failures),
+            (unsigned long long)acc.Failures,
+            (unsigned long long)terminal_need_more,
+            (unsigned long long)terminal_invalid,
+            (unsigned long long)terminal_extra,
+            (unsigned long long)terminal_other,
+            MeanOverheadOrFailure(acc),
+            OverheadStdDev(acc),
+            Percentile(acc.Overheads, 0.50),
+            Percentile(acc.Overheads, 0.95),
+            Percentile(acc.Overheads, 0.99),
+            acc.OverheadMax,
+            Mbps(acc.CreateBytes, acc.CreateSeconds),
+            Mbps(acc.EncodeBytes, acc.EncodeSeconds),
+            Mbps(acc.DecodeBytes, acc.DecodeSeconds),
+            Mbps(acc.RecoverBytes, acc.RecoverSeconds));
+    }
+    return 0;
+}
+
 int CmdDenseCheck(int argc, char** argv)
 {
     uint32_t N = 7533u;
@@ -2531,14 +2759,18 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|seedtable|peelcost|densecheck|"
-            "densetune|densecount|densegrid|selftest [opts]\n");
+            "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
+            "peelcost|densecheck|densetune|densecount|densegrid|selftest "
+            "[opts]\n");
         return 1;
     }
     try
     {
         if (!std::strcmp(argv[1], "compare")) {
             return CmdCompare(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "precodecheck")) {
+            return CmdPrecodeCheck(argc - 2, argv + 2);
         }
         if (!std::strcmp(argv[1], "seedtable")) {
             return CmdSeedTable(argc - 2, argv + 2);

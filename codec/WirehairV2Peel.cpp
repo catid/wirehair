@@ -1,5 +1,7 @@
 #include "WirehairV2Peel.h"
 
+#include "../WirehairTools.h"
+
 #include <algorithm>
 #include <limits.h>
 #include <math.h>
@@ -163,7 +165,9 @@ public:
         const PeelingCodec& codec,
         uint32_t block_count)
         : MinDegree(ClampDegree(codec.MinDegree, block_count)),
-          MaxDegree(ClampDegree(codec.MaxDegree, block_count))
+          MaxDegree(ClampDegree(codec.MaxDegree, block_count)),
+          BlockCount(block_count),
+          UseWirehairDistribution(codec.UseWirehairRowDistribution)
     {
         Cumulative.reserve(MaxDegree - MinDegree + 1u);
         for (uint32_t d = MinDegree; d <= MaxDegree; ++d)
@@ -178,6 +182,18 @@ public:
 
     uint32_t Sample(Rng& rng) const
     {
+        if (UseWirehairDistribution) {
+            uint32_t degree = wirehair::GeneratePeelRowWeight(
+                rng.U32(), (uint16_t)BlockCount);
+            uint32_t max_degree = BlockCount / 2u;
+            if (max_degree < 1u) {
+                max_degree = 1u;
+            }
+            if (degree > max_degree) {
+                degree = max_degree;
+            }
+            return ClampDegree(degree, BlockCount);
+        }
         if (Cumulative.empty()) {
             return MinDegree;
         }
@@ -195,6 +211,8 @@ public:
 private:
     uint32_t MinDegree;
     uint32_t MaxDegree;
+    uint32_t BlockCount;
+    bool UseWirehairDistribution;
     double Total = 0.0;
     std::vector<double> Cumulative;
 };

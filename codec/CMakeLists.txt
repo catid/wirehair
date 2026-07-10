@@ -64,6 +64,23 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_precode_encode_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_encode_test COMMAND wirehair_v2_precode_encode_test)
 
+    add_executable(wirehair_v2_precode_decode_test PrecodeDecodeTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_precode_decode_test)
+    target_link_libraries(wirehair_v2_precode_decode_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_precode_decode_test COMMAND wirehair_v2_precode_decode_test)
+    if(WIREHAIR_ENABLE_SCHEDULED_TESTS)
+        add_test(
+            NAME wirehair_v2_precode_decode_large
+            COMMAND wirehair_v2_precode_decode_test --large)
+        add_test(
+            NAME wirehair_v2_precode_decode_large_recovery
+            COMMAND wirehair_v2_precode_decode_test --large-recovery)
+        set_tests_properties(
+            wirehair_v2_precode_decode_large
+            wirehair_v2_precode_decode_large_recovery
+            PROPERTIES LABELS "scheduled;v2" TIMEOUT 600 RUN_SERIAL TRUE)
+    endif()
+
     if(UNIX AND NOT _wirehair_v2_sanitized)
         add_test(
             NAME wirehair_v2_precode_oom_test

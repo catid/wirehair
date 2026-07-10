@@ -900,13 +900,15 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         if (!BuildPrecodeSystem(params, system)) {
             return Wirehair_InvalidInput;
         }
-
         const uint64_t row_seed = MatrixSeedFromProfile(
             profile, kMaxPeelMatrixRows, opts.RecoveryRowSeedSalt);
+        PeelingCodec recovery_codec = profile.Policy.Codec;
+        recovery_codec.UseWirehairRowDistribution =
+            opts.UseWirehairRowDistribution;
         PrecodeEncoder next_encoder;
         const WirehairResult encoder_result = next_encoder.InitializeResult(
             system,
-            profile.Policy.Codec,
+            recovery_codec,
             row_seed,
             opts.RecoveryMixCount,
             source_storage.data(),
@@ -1029,6 +1031,694 @@ const uint8_t* MessagePrecodeEncoder::SourceBlocks() const
 const PrecodeEncoder& MessagePrecodeEncoder::BlockEncoder() const
 {
     return EncoderValue;
+}
+
+MessagePrecodeDecoder::MessagePrecodeDecoder()
+{
+}
+
+void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
+{
+    using std::swap;
+    swap(ProfileValue, other.ProfileValue);
+    swap(OptionsValue, other.OptionsValue);
+    swap(SystemValue.Params, other.SystemValue.Params);
+    SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
+    SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
+    swap(CodecValue, other.CodecValue);
+    swap(RowSeed, other.RowSeed);
+    Packets.swap(other.Packets);
+    PacketIds.swap(other.PacketIds);
+    DecodedValues.swap(other.DecodedValues);
+    swap(MessageBytesValue, other.MessageBytesValue);
+    swap(BlockBytesValue, other.BlockBytesValue);
+    swap(Initialized, other.Initialized);
+    swap(Decoded, other.Decoded);
+}
+
+WirehairResult MessagePrecodeDecoder::InitializeResult(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const SeedProfile* seed_override,
+    const MessagePrecodeEncoderOptions* options)
+{
+    if (gf256_init() != 0) {
+        return Wirehair_UnsupportedPlatform;
+    }
+    uint32_t block_count = 0u;
+    if (!MessageBlockCount(message_bytes, block_bytes, block_count)) {
+        return Wirehair_InvalidInput;
+    }
+
+    const SeedProfile profile = seed_override ? *seed_override :
+        SelectSeedProfile(block_count, block_bytes);
+    if (profile.BlockCount != block_count ||
+        profile.BlockBytes != block_bytes)
+    {
+        return Wirehair_InvalidInput;
+    }
+    const MessagePrecodeEncoderOptions opts =
+        options ? *options : MessagePrecodeEncoderOptions();
+
+    try
+    {
+        PrecodeParams params = MakeCertifiedParams(
+            block_count,
+            MatrixSeedFromProfile(profile, 0u, opts.PrecodeSeedSalt));
+        params.DenseIdentityCorner = opts.DenseIdentityCorner;
+
+        GuardedAllocation();
+        PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system)) {
+            return Wirehair_InvalidInput;
+        }
+        const uint64_t precode_count =
+            (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        const uint64_t column_count = (uint64_t)block_count + precode_count;
+        const uint64_t max_rows =
+            precode_count + (uint64_t)block_count + 4096u;
+        const uint64_t size_limit = (uint64_t)((size_t)-1);
+        if (message_bytes > size_limit ||
+            column_count > size_limit / block_bytes ||
+            max_rows > size_limit / block_bytes)
+        {
+            return Wirehair_InvalidInput;
+        }
+
+        MessagePrecodeDecoder next;
+        next.ProfileValue = profile;
+        next.OptionsValue = opts;
+        next.SystemValue = std::move(system);
+        next.CodecValue = profile.Policy.Codec;
+        next.CodecValue.UseWirehairRowDistribution =
+            opts.UseWirehairRowDistribution;
+        next.RowSeed = MatrixSeedFromProfile(
+            profile, kMaxPeelMatrixRows, opts.RecoveryRowSeedSalt);
+        next.MessageBytesValue = message_bytes;
+        next.BlockBytesValue = block_bytes;
+        next.Initialized = true;
+        Swap(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
+}
+
+WirehairResult MessagePrecodeDecoder::DecodeResult(
+    uint32_t block_id,
+    const uint8_t* block_in,
+    uint32_t block_bytes)
+{
+    if (!Initialized || !block_in) {
+        return Wirehair_InvalidInput;
+    }
+
+    const uint32_t K = ProfileValue.BlockCount;
+    const uint32_t expected_bytes = block_id < K ?
+        SourceBlockBytes(
+            MessageBytesValue, BlockBytesValue, K, block_id) :
+        BlockBytesValue;
+    if (block_bytes != expected_bytes) {
+        return Wirehair_InvalidInput;
+    }
+    if (Decoded) {
+        return Wirehair_Success;
+    }
+    if (PacketIds.find(block_id) != PacketIds.end()) {
+        return Packets.size() >= K ? TrySolve() : Wirehair_NeedMore;
+    }
+    if (Packets.size() >= (size_t)K + 4096u) {
+        return Wirehair_ExtraInsufficient;
+    }
+
+    try
+    {
+        Packet packet;
+        packet.BlockId = block_id;
+        GuardedAllocation();
+        packet.Data.assign(BlockBytesValue, 0u);
+        std::memcpy(packet.Data.data(), block_in, block_bytes);
+
+        GuardedAllocation();
+        const std::pair<std::unordered_set<uint32_t>::iterator, bool> inserted =
+            PacketIds.insert(block_id);
+        if (!inserted.second) {
+            return Wirehair_NeedMore;
+        }
+        try
+        {
+            GuardedAllocation();
+            Packets.push_back(std::move(packet));
+        }
+        catch (...)
+        {
+            PacketIds.erase(inserted.first);
+            throw;
+        }
+
+        if (Packets.size() < K) {
+            return Wirehair_NeedMore;
+        }
+        return TrySolve();
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
+}
+
+WirehairResult MessagePrecodeDecoder::TrySolve()
+{
+    struct Entry
+    {
+        uint32_t Column;
+        uint8_t Coefficient;
+    };
+    struct Equation
+    {
+        std::vector<Entry> Entries;
+        uint32_t ActiveDegree = 0;
+    };
+    struct Pivot
+    {
+        uint32_t Column;
+        uint32_t Row;
+    };
+
+    static const uint32_t kMaxInactiveColumns = 4096u;
+    const uint32_t K = SystemValue.Params.BlockCount;
+    const uint32_t S = SystemValue.Params.Staircase;
+    const uint32_t D2 = SystemValue.Params.DenseRows;
+    const uint32_t H = SystemValue.Params.HeavyRows;
+    const uint32_t precode_count = S + D2 + H;
+    const uint32_t column_count = K + precode_count;
+    const uint32_t constraint_count = precode_count;
+    const size_t row_count = (size_t)constraint_count + Packets.size();
+    const int bytes = (int)BlockBytesValue;
+
+    try
+    {
+        GuardedAllocation();
+        std::vector<Equation> equations;
+        equations.reserve(row_count);
+
+        for (uint32_t r = 0; r < S; ++r)
+        {
+            Equation equation;
+            equation.Entries.reserve(SystemValue.StaircaseRows[r].size());
+            for (const uint32_t column : SystemValue.StaircaseRows[r]) {
+                equation.Entries.push_back(Entry{column, 1u});
+            }
+            equation.ActiveDegree = (uint32_t)equation.Entries.size();
+            equations.push_back(std::move(equation));
+        }
+        for (uint32_t r = 0; r < D2; ++r)
+        {
+            Equation equation;
+            equation.Entries.reserve(SystemValue.DenseRowColumns[r].size());
+            for (const uint32_t column : SystemValue.DenseRowColumns[r]) {
+                equation.Entries.push_back(Entry{column, 1u});
+            }
+            equation.ActiveDegree = (uint32_t)equation.Entries.size();
+            equations.push_back(std::move(equation));
+        }
+        for (uint32_t r = 0; r < H; ++r)
+        {
+            Equation equation;
+            equation.Entries.reserve(column_count);
+            for (uint32_t column = 0; column < column_count; ++column) {
+                equation.Entries.push_back(Entry{
+                    column, HeavyCoefficient(r, column, H)});
+            }
+            equation.ActiveDegree = column_count;
+            equations.push_back(std::move(equation));
+        }
+        for (const Packet& packet : Packets)
+        {
+            Equation equation;
+            if (packet.BlockId < K) {
+                equation.Entries.push_back(Entry{packet.BlockId, 1u});
+            }
+            else
+            {
+                const std::vector<uint32_t> columns =
+                    GenerateRecoveryMatrixRow(
+                        CodecValue,
+                        K,
+                        precode_count,
+                        packet.BlockId - K,
+                        OptionsValue.RecoveryMixCount,
+                        RowSeed);
+                if (columns.empty()) {
+                    return Wirehair_InvalidInput;
+                }
+                equation.Entries.reserve(columns.size());
+                for (const uint32_t column : columns) {
+                    equation.Entries.push_back(Entry{column, 1u});
+                }
+            }
+            equation.ActiveDegree = (uint32_t)equation.Entries.size();
+            equations.push_back(std::move(equation));
+        }
+        if (equations.size() != row_count) {
+            return Wirehair_Error;
+        }
+
+        GuardedAllocation();
+        std::vector<uint8_t> rhs(
+            row_count * (size_t)BlockBytesValue, 0u);
+        for (size_t i = 0; i < Packets.size(); ++i) {
+            std::memcpy(
+                rhs.data() +
+                    ((size_t)constraint_count + i) * BlockBytesValue,
+                Packets[i].Data.data(),
+                BlockBytesValue);
+        }
+
+        typedef std::pair<uint32_t, uint8_t> RowCoefficient;
+        GuardedAllocation();
+        std::vector<std::vector<RowCoefficient> > adjacency(column_count);
+        for (uint32_t row = 0; row < equations.size(); ++row) {
+            for (const Entry& entry : equations[row].Entries) {
+                if (entry.Column >= column_count || entry.Coefficient == 0u) {
+                    return Wirehair_Error;
+                }
+                adjacency[entry.Column].push_back(
+                    RowCoefficient(row, entry.Coefficient));
+            }
+        }
+
+        GuardedAllocation();
+        std::vector<uint8_t> column_state(column_count, 0u);
+        std::vector<uint8_t> pivoted_row(row_count, 0u);
+        std::vector<uint32_t> degree_one;
+        degree_one.reserve(row_count);
+        for (uint32_t row = 0; row < equations.size(); ++row) {
+            if (equations[row].ActiveDegree == 1u) {
+                degree_one.push_back(row);
+            }
+        }
+        size_t degree_one_head = 0u;
+
+        std::vector<std::vector<uint8_t> > inactive_columns;
+        std::vector<uint32_t> inactive_ids;
+        std::vector<Pivot> pivots;
+        inactive_columns.reserve(256u);
+        inactive_ids.reserve(256u);
+        pivots.reserve(column_count);
+        uint32_t unresolved = column_count;
+
+        while (unresolved > 0u)
+        {
+            uint32_t pivot_row = (uint32_t)row_count;
+            while (degree_one_head < degree_one.size())
+            {
+                const uint32_t candidate = degree_one[degree_one_head++];
+                if (!pivoted_row[candidate] &&
+                    equations[candidate].ActiveDegree == 1u)
+                {
+                    pivot_row = candidate;
+                    break;
+                }
+            }
+
+            if (pivot_row >= row_count)
+            {
+                if (inactive_columns.size() >= kMaxInactiveColumns) {
+                    return Wirehair_NeedMore;
+                }
+
+                uint32_t inactive_column = column_count;
+                uint32_t best_degree_two_refs = 0u;
+                uint32_t best_live_refs = 0u;
+                for (uint32_t column = 0; column < column_count; ++column)
+                {
+                    if (column_state[column] != 0u) {
+                        continue;
+                    }
+                    uint32_t degree_two_refs = 0u;
+                    uint32_t live_refs = 0u;
+                    for (const RowCoefficient& edge : adjacency[column])
+                    {
+                        if (pivoted_row[edge.first]) {
+                            continue;
+                        }
+                        ++live_refs;
+                        if (equations[edge.first].ActiveDegree == 2u) {
+                            ++degree_two_refs;
+                        }
+                    }
+                    if (inactive_column >= column_count ||
+                        degree_two_refs > best_degree_two_refs ||
+                        (degree_two_refs == best_degree_two_refs &&
+                         live_refs > best_live_refs))
+                    {
+                        inactive_column = column;
+                        best_degree_two_refs = degree_two_refs;
+                        best_live_refs = live_refs;
+                    }
+                }
+                if (inactive_column >= column_count || best_live_refs == 0u) {
+                    return Wirehair_NeedMore;
+                }
+
+                GuardedAllocation();
+                std::vector<uint8_t> coefficients(row_count, 0u);
+                for (const RowCoefficient& edge : adjacency[inactive_column]) {
+                    if (!pivoted_row[edge.first]) {
+                        coefficients[edge.first] = edge.second;
+                    }
+                }
+                inactive_columns.push_back(std::move(coefficients));
+                inactive_ids.push_back(inactive_column);
+                column_state[inactive_column] = 1u;
+                --unresolved;
+                for (const RowCoefficient& edge : adjacency[inactive_column])
+                {
+                    const uint32_t row = edge.first;
+                    if (pivoted_row[row]) {
+                        continue;
+                    }
+                    if (equations[row].ActiveDegree == 0u) {
+                        return Wirehair_Error;
+                    }
+                    --equations[row].ActiveDegree;
+                    if (equations[row].ActiveDegree == 1u) {
+                        degree_one.push_back(row);
+                    }
+                }
+                continue;
+            }
+
+            uint32_t pivot_column = column_count;
+            uint8_t pivot_coefficient = 0u;
+            for (const Entry& entry : equations[pivot_row].Entries) {
+                if (column_state[entry.Column] == 0u) {
+                    pivot_column = entry.Column;
+                    pivot_coefficient = entry.Coefficient;
+                    break;
+                }
+            }
+            if (pivot_column >= column_count || pivot_coefficient == 0u) {
+                return Wirehair_Error;
+            }
+
+            pivoted_row[pivot_row] = 1u;
+            column_state[pivot_column] = 2u;
+            --unresolved;
+            uint8_t* const pivot_rhs =
+                rhs.data() + (size_t)pivot_row * BlockBytesValue;
+            if (pivot_coefficient != 1u)
+            {
+                const uint8_t inverse = gf256_inv(pivot_coefficient);
+                for (std::vector<uint8_t>& column : inactive_columns) {
+                    column[pivot_row] =
+                        gf256_mul(column[pivot_row], inverse);
+                }
+                gf256_div_mem(
+                    pivot_rhs, pivot_rhs, pivot_coefficient, bytes);
+            }
+
+            for (const RowCoefficient& edge : adjacency[pivot_column])
+            {
+                const uint32_t row = edge.first;
+                if (row == pivot_row || pivoted_row[row]) {
+                    continue;
+                }
+                const uint8_t scale = edge.second;
+                for (std::vector<uint8_t>& column : inactive_columns) {
+                    column[row] = (uint8_t)(
+                        column[row] ^
+                        gf256_mul(scale, column[pivot_row]));
+                }
+                uint8_t* const target_rhs =
+                    rhs.data() + (size_t)row * BlockBytesValue;
+                if (scale == 1u) {
+                    gf256_add_mem(target_rhs, pivot_rhs, bytes);
+                }
+                else {
+                    gf256_muladd_mem(target_rhs, scale, pivot_rhs, bytes);
+                }
+                if (equations[row].ActiveDegree == 0u) {
+                    return Wirehair_Error;
+                }
+                --equations[row].ActiveDegree;
+                if (equations[row].ActiveDegree == 1u) {
+                    degree_one.push_back(row);
+                }
+            }
+            pivots.push_back(Pivot{pivot_column, pivot_row});
+        }
+
+        const size_t inactive_count = inactive_columns.size();
+        std::vector<uint32_t> residual_rows;
+        residual_rows.reserve(row_count);
+        for (uint32_t row = 0; row < equations.size(); ++row)
+        {
+            if (pivoted_row[row]) {
+                continue;
+            }
+            bool any_coefficient = false;
+            for (size_t j = 0; j < inactive_count; ++j) {
+                if (inactive_columns[j][row] != 0u) {
+                    any_coefficient = true;
+                    break;
+                }
+            }
+            if (any_coefficient) {
+                residual_rows.push_back(row);
+            }
+            else
+            {
+                const uint8_t* const row_rhs =
+                    rhs.data() + (size_t)row * BlockBytesValue;
+                for (uint32_t b = 0; b < BlockBytesValue; ++b) {
+                    if (row_rhs[b] != 0u) {
+                        return Wirehair_NeedMore;
+                    }
+                }
+            }
+        }
+        if (residual_rows.size() < inactive_count) {
+            return Wirehair_NeedMore;
+        }
+
+        GuardedAllocation();
+        std::vector<uint8_t> matrix(
+            residual_rows.size() * inactive_count, 0u);
+        std::vector<uint8_t> residual_rhs(
+            residual_rows.size() * (size_t)BlockBytesValue, 0u);
+        for (size_t r = 0; r < residual_rows.size(); ++r)
+        {
+            const uint32_t source_row = residual_rows[r];
+            for (size_t j = 0; j < inactive_count; ++j) {
+                matrix[r * inactive_count + j] =
+                    inactive_columns[j][source_row];
+            }
+            std::memcpy(
+                residual_rhs.data() + r * BlockBytesValue,
+                rhs.data() + (size_t)source_row * BlockBytesValue,
+                BlockBytesValue);
+        }
+
+        for (size_t column = 0; column < inactive_count; ++column)
+        {
+            size_t pivot = column;
+            while (pivot < residual_rows.size() &&
+                matrix[pivot * inactive_count + column] == 0u)
+            {
+                ++pivot;
+            }
+            if (pivot >= residual_rows.size()) {
+                return Wirehair_NeedMore;
+            }
+            if (pivot != column)
+            {
+                for (size_t j = 0; j < inactive_count; ++j) {
+                    std::swap(
+                        matrix[column * inactive_count + j],
+                        matrix[pivot * inactive_count + j]);
+                }
+                for (uint32_t b = 0; b < BlockBytesValue; ++b) {
+                    std::swap(
+                        residual_rhs[column * BlockBytesValue + b],
+                        residual_rhs[pivot * BlockBytesValue + b]);
+                }
+            }
+
+            const uint8_t pivot_value =
+                matrix[column * inactive_count + column];
+            if (pivot_value != 1u)
+            {
+                const uint8_t inverse = gf256_inv(pivot_value);
+                for (size_t j = 0; j < inactive_count; ++j) {
+                    matrix[column * inactive_count + j] = gf256_mul(
+                        matrix[column * inactive_count + j], inverse);
+                }
+                gf256_div_mem(
+                    residual_rhs.data() + column * BlockBytesValue,
+                    residual_rhs.data() + column * BlockBytesValue,
+                    pivot_value,
+                    bytes);
+            }
+
+            for (size_t row = 0; row < residual_rows.size(); ++row)
+            {
+                if (row == column) {
+                    continue;
+                }
+                const uint8_t scale =
+                    matrix[row * inactive_count + column];
+                if (scale == 0u) {
+                    continue;
+                }
+                for (size_t j = 0; j < inactive_count; ++j) {
+                    matrix[row * inactive_count + j] = (uint8_t)(
+                        matrix[row * inactive_count + j] ^
+                        gf256_mul(
+                            scale,
+                            matrix[column * inactive_count + j]));
+                }
+                uint8_t* const target =
+                    residual_rhs.data() + row * BlockBytesValue;
+                const uint8_t* const source =
+                    residual_rhs.data() + column * BlockBytesValue;
+                if (scale == 1u) {
+                    gf256_add_mem(target, source, bytes);
+                }
+                else {
+                    gf256_muladd_mem(target, scale, source, bytes);
+                }
+            }
+        }
+        for (size_t row = inactive_count;
+            row < residual_rows.size(); ++row)
+        {
+            const uint8_t* const row_rhs =
+                residual_rhs.data() + row * BlockBytesValue;
+            for (uint32_t b = 0; b < BlockBytesValue; ++b) {
+                if (row_rhs[b] != 0u) {
+                    return Wirehair_NeedMore;
+                }
+            }
+        }
+
+        GuardedAllocation();
+        std::vector<uint8_t> values(
+            (size_t)column_count * BlockBytesValue, 0u);
+        for (size_t j = 0; j < inactive_count; ++j) {
+            std::memcpy(
+                values.data() + (size_t)inactive_ids[j] * BlockBytesValue,
+                residual_rhs.data() + j * BlockBytesValue,
+                BlockBytesValue);
+        }
+        for (const Pivot& pivot : pivots)
+        {
+            uint8_t* const value =
+                values.data() + (size_t)pivot.Column * BlockBytesValue;
+            std::memcpy(
+                value,
+                rhs.data() + (size_t)pivot.Row * BlockBytesValue,
+                BlockBytesValue);
+            for (size_t j = 0; j < inactive_count; ++j)
+            {
+                const uint8_t scale = inactive_columns[j][pivot.Row];
+                if (scale == 1u) {
+                    gf256_add_mem(
+                        value,
+                        values.data() +
+                            (size_t)inactive_ids[j] * BlockBytesValue,
+                        bytes);
+                }
+                else if (scale != 0u) {
+                    gf256_muladd_mem(
+                        value,
+                        scale,
+                        values.data() +
+                            (size_t)inactive_ids[j] * BlockBytesValue,
+                        bytes);
+                }
+            }
+        }
+
+        DecodedValues.swap(values);
+        Decoded = true;
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
+}
+
+WirehairResult MessagePrecodeDecoder::RecoverResult(
+    void* message_out,
+    uint64_t message_bytes) const
+{
+    if (!Initialized || !message_out ||
+        message_bytes != MessageBytesValue)
+    {
+        return Wirehair_InvalidInput;
+    }
+    if (!Decoded) {
+        return Wirehair_NeedMore;
+    }
+    std::memcpy(message_out, DecodedValues.data(), (size_t)message_bytes);
+    return Wirehair_Success;
+}
+
+bool MessagePrecodeDecoder::IsInitialized() const
+{
+    return Initialized;
+}
+
+bool MessagePrecodeDecoder::IsDecoded() const
+{
+    return Decoded;
+}
+
+uint64_t MessagePrecodeDecoder::MessageBytes() const
+{
+    return Initialized ? MessageBytesValue : 0u;
+}
+
+uint32_t MessagePrecodeDecoder::SourceBlockCount() const
+{
+    return Initialized ? ProfileValue.BlockCount : 0u;
+}
+
+uint32_t MessagePrecodeDecoder::BlockBytes() const
+{
+    return Initialized ? BlockBytesValue : 0u;
+}
+
+uint32_t MessagePrecodeDecoder::PacketCount() const
+{
+    return Initialized ? (uint32_t)Packets.size() : 0u;
+}
+
+const SeedProfile& MessagePrecodeDecoder::Profile() const
+{
+    return ProfileValue;
+}
+
+const MessagePrecodeEncoderOptions& MessagePrecodeDecoder::Options() const
+{
+    return OptionsValue;
+}
+
+const PrecodeSystem& MessagePrecodeDecoder::System() const
+{
+    return SystemValue;
 }
 
 } // namespace wirehair_v2

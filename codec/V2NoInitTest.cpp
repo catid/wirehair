@@ -26,12 +26,14 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         profile.Policy.Codec.Degree2Mass == 0.0 &&
         profile.Policy.Codec.RobustC == 0.0 &&
         profile.Policy.Codec.RobustDelta == 0.0 &&
-        !profile.Policy.Codec.FullyRandomRows;
+        !profile.Policy.Codec.FullyRandomRows &&
+        !profile.Policy.Codec.UseWirehairRowDistribution;
 }
 
 bool CheckPatternInitializedAccessors()
 {
     using wirehair_v2::Codec;
+    using wirehair_v2::MessagePrecodeDecoder;
     using wirehair_v2::MessagePrecodeEncoder;
     using wirehair_v2::PrecodeEncoder;
 
@@ -86,7 +88,8 @@ bool CheckPatternInitializedAccessors()
         message_encoder->SourceBlocks() != nullptr ||
         !IsDefaultProfile(message_encoder->Profile()) ||
         options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
-        options.DenseIdentityCorner ||
+        !options.DenseIdentityCorner ||
+        !options.UseWirehairRowDistribution ||
         options.PrecodeSeedSalt != wirehair_v2::kMessagePrecodeSeedSalt ||
         options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
@@ -98,6 +101,38 @@ bool CheckPatternInitializedAccessors()
         return false;
     }
     message_encoder->~MessagePrecodeEncoder();
+
+    alignas(MessagePrecodeDecoder)
+        unsigned char decoder_storage[sizeof(MessagePrecodeDecoder)];
+    std::memset(decoder_storage, 0xfe, sizeof(decoder_storage));
+    MessagePrecodeDecoder* decoder =
+        new (decoder_storage) MessagePrecodeDecoder;
+    const wirehair_v2::MessagePrecodeEncoderOptions& decoder_options =
+        decoder->Options();
+    const wirehair_v2::PrecodeSystem& decoder_system = decoder->System();
+    if (decoder->IsInitialized() || decoder->IsDecoded() ||
+        decoder->MessageBytes() != 0u ||
+        decoder->SourceBlockCount() != 0u || decoder->BlockBytes() != 0u ||
+        decoder->PacketCount() != 0u ||
+        !IsDefaultProfile(decoder->Profile()) ||
+        decoder_options.RecoveryMixCount !=
+            wirehair_v2::kDefaultRecoveryMixCount ||
+        !decoder_options.DenseIdentityCorner ||
+        !decoder_options.UseWirehairRowDistribution ||
+        decoder_options.PrecodeSeedSalt !=
+            wirehair_v2::kMessagePrecodeSeedSalt ||
+        decoder_options.RecoveryRowSeedSalt !=
+            wirehair_v2::kMessageRecoveryRowSeedSalt ||
+        decoder_system.Params.BlockCount != 0u ||
+        !decoder_system.StaircaseRows.empty() ||
+        !decoder_system.DenseRowColumns.empty())
+    {
+        std::fprintf(stderr,
+            "pattern MessagePrecodeDecoder accessors were not initialized\n");
+        decoder->~MessagePrecodeDecoder();
+        return false;
+    }
+    decoder->~MessagePrecodeDecoder();
     return true;
 }
 
