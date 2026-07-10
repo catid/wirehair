@@ -149,16 +149,27 @@ wall-clock differences from the public job timestamps and exclude billing-
 rounding policy. Data-integrity and architecture-portability jobs added by
 separate changes after that run are outside this optimization comparison.
 
-On the same 128-CPU development host and same fully enumerated 32-test tree,
-the old serial full-CTest schedule took 70.26 seconds per cell. The new
-two-worker owner schedule took 46.50 seconds, while a non-owner's 28-test
-compiler-sensitive subset took 31.93 seconds. Across six matrix cells, the
-CTest portion therefore drops from 7.03 to 3.44 summed minutes (51%). Applying
-that measured delta to the hosted baseline gives a planning estimate of 8.69
-matrix job-minutes and 15.08 job-minutes for the same nine-job baseline set
-before normal runner variance; the first hosted run after merge is the
-authoritative after measurement. Its critical path should remain sanitizer-
-owned, while that job also stops running the four uninstrumented nested gates.
+On the same 128-CPU development host and the fully enumerated 32-test tree at
+the time of the optimization, the old serial full-CTest schedule took 70.26
+seconds per cell. The new two-worker owner schedule took 46.50 seconds, while
+a non-owner's 28-test compiler-sensitive subset took 31.93 seconds. Across six
+matrix cells, the isolated CTest portion dropped from 7.03 to 3.44 summed
+minutes (51%).
+
+The authoritative after run
+[`29128713010`](https://github.com/catid/wirehair/actions/runs/29128713010)
+at commit `06d80d1` passed all 12 jobs. Comparing the same six build matrix
+cells, summed time fell from 12.28 to 11.47 minutes (6.6%), while their critical
+path moved from 2:50 to 2:52. The same nine-job baseline set used 20.47 summed
+minutes and retained a sanitizer-owned 5:35 critical path, versus 18.67 and
+5:33 before. That raw total is not a fixed-workload comparison: the audit grew
+the registered graph from 32 to 41 tests and lengthened the TSan, package, and
+ABI gates after the baseline. The separately added repository-integrity,
+ARM64, and i686 jobs contributed another 1.77 summed minutes, for 22.23 across
+all 12 jobs, without extending the 5:35 workflow wall time. The observed
+hosted result replaces the earlier linear planning estimate; configure, build,
+install, and expanded-test costs dominate more than the isolated CTest timing
+suggested.
 
 For an internal pull request, feature-branch pushes previously triggered both
 `push` and `pull_request` copies of the entire workflow. `push` is now limited
