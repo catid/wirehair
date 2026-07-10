@@ -55,6 +55,59 @@ bugs, edge cases, and incorrect assumptions before declaring the pass complete.
 After making code edits, always do repeated bug fix passes until a full pass
 finds no bugs.
 
+## External Max-Effort Planning and Review
+
+When the user authorizes Claude/Fable, use it as a read-only planning and
+adversarial-review aid:
+
+```bash
+env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY \
+  -u GEMINI_API_KEY -u EXA_API_KEY -u SLACK_APP_TOKEN -u SLACK_BOT_TOKEN \
+  claude -p --model fable --effort max \
+  --permission-mode plan --tools 'Read,Grep,Glob,Bash' \
+  --no-session-persistence --max-budget-usd 20 '<focused review prompt>'
+```
+
+- Prefer the signed-in Claude Max session (`ANTHROPIC_API_KEY` unset) when a
+  separately configured API key is quota-limited.  Strip unrelated secrets
+  from the subprocess environment.
+- Scope the prompt to an exact commit/diff and subsystem.  State that the
+  review is read-only, forbid edits and long workloads, enumerate the risks to
+  inspect, and request prioritized findings with exact file:line evidence and
+  minimal fixes.
+- For complex work, use two narrow passes when worthwhile: before coding, ask
+  for architecture alternatives, failure modes, and a validation plan; after
+  the diff is coherent, ask for the adversarial file:line review.  Reusing one
+  giant session is slower and makes budget failures less actionable.
+- A budget-exhausted run that returns no report is not a review.  Narrow the
+  scope or, when authorized, use a sufficient cap; the first successful
+  repository review here needed more than a $5 cap and completed under $20.
+- Fable is advisory, not an authority.  Reproduce every finding locally,
+  reject unsound suggestions explicitly, apply fixes ourselves, and rerun the
+  relevant gates.  Never expose private code to an external reviewer without
+  the user's authorization.
+
+## Web Research With Exa
+
+Use the Exa MCP as a fast discovery-and-fetch pipeline when web research is
+needed:
+
+1. Call `web_search_exa` with a semantically rich description of the ideal
+   page (including technology/version and the evidence sought), normally with
+   3-5 results.  Do not submit a loose keyword pile.
+2. Prefer primary papers, standards, official documentation, and upstream
+   repositories from the result set.  Follow the best URLs with
+   `web_fetch_exa`; batch related URLs and set a bounded character limit.
+3. Verify material claims against the fetched primary source and cite that
+   source, not the search highlight.  Use the normal browser/search path when
+   Exa is unavailable, when an authoritative site needs direct inspection, or
+   when current facts require an additional check.
+
+Exa is for external discovery, not facts already available in the repository.
+The validated pattern in this project was a targeted technical search that
+surfaced the primary inactivation-decoding paper, followed by a focused fetch
+of its authoritative arXiv page.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 

@@ -76,7 +76,8 @@ WirehairResult Codec::InitializeEncoder(
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
     if (seed_override &&
         (seed_override->BlockCount != block_count ||
-         seed_override->BlockBytes != block_bytes))
+         seed_override->BlockBytes != block_bytes ||
+         HasMessagePrecodeContractState(*seed_override)))
     {
         return Wirehair_InvalidInput;
     }
@@ -149,50 +150,6 @@ WirehairResult Codec::InitializePrecodeEncoder(
     }
 }
 
-WirehairResult Codec::InitializePrecodeDecoder(
-    uint64_t message_bytes,
-    uint32_t block_bytes,
-    const SeedProfile* seed_override,
-    const MessagePrecodeEncoderOptions* options)
-{
-    const WirehairResult gf_result = EnsureGf256Initialized();
-    if (gf_result != Wirehair_Success) {
-        return gf_result;
-    }
-    const WirehairResult input_result =
-        ValidateCodecInput(message_bytes, block_bytes);
-    if (input_result != Wirehair_Success) {
-        return input_result;
-    }
-
-    const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
-    if (seed_override &&
-        (seed_override->BlockCount != block_count ||
-         seed_override->BlockBytes != block_bytes))
-    {
-        return Wirehair_InvalidInput;
-    }
-
-    try
-    {
-        std::unique_ptr<MessagePrecodeDecoder> next(
-            new MessagePrecodeDecoder());
-        const WirehairResult result = next->InitializeResult(
-            message_bytes, block_bytes, seed_override, options);
-        if (result != Wirehair_Success) {
-            return result;
-        }
-
-        CurrentProfile = next->Profile();
-        PrecodeDecoderImpl = std::move(next);
-        PrecodeImpl.reset();
-        return Wirehair_Success;
-    }
-    catch (const std::bad_alloc&) {
-        return Wirehair_OOM;
-    }
-}
-
 WirehairResult Codec::InitializeDecoder(
     uint64_t message_bytes,
     uint32_t block_bytes,
@@ -211,7 +168,8 @@ WirehairResult Codec::InitializeDecoder(
     const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
     if (seed_override &&
         (seed_override->BlockCount != block_count ||
-         seed_override->BlockBytes != block_bytes))
+         seed_override->BlockBytes != block_bytes ||
+         HasMessagePrecodeContractState(*seed_override)))
     {
         return Wirehair_InvalidInput;
     }
@@ -234,6 +192,48 @@ WirehairResult Codec::InitializeDecoder(
     return result;
 }
 
+WirehairResult Codec::InitializePrecodeDecoder(
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const SeedProfile* seed_override,
+    const MessagePrecodeEncoderOptions* options)
+{
+    const WirehairResult gf_result = EnsureGf256Initialized();
+    if (gf_result != Wirehair_Success) {
+        return gf_result;
+    }
+    const WirehairResult input_result =
+        ValidateCodecInput(message_bytes, block_bytes);
+    if (input_result != Wirehair_Success) {
+        return input_result;
+    }
+    const uint32_t block_count = BlockCountFor(message_bytes, block_bytes);
+    if (seed_override &&
+        (seed_override->BlockCount != block_count ||
+         seed_override->BlockBytes != block_bytes))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    try
+    {
+        std::unique_ptr<MessagePrecodeDecoder> next(
+            new MessagePrecodeDecoder());
+        const WirehairResult result = next->InitializeResult(
+            message_bytes, block_bytes, seed_override, options);
+        if (result != Wirehair_Success) {
+            return result;
+        }
+        CurrentProfile = next->Profile();
+        PrecodeDecoderImpl = std::move(next);
+        PrecodeImpl.reset();
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+}
+
 WirehairResult Codec::Encode(
     uint32_t block_id,
     void* block_out,
@@ -243,9 +243,6 @@ WirehairResult Codec::Encode(
     if (!block_out || !data_bytes_out) {
         return Wirehair_InvalidInput;
     }
-    if (PrecodeDecoderImpl && PrecodeDecoderImpl->IsInitialized()) {
-        return Wirehair_InvalidInput;
-    }
     if (PrecodeImpl && PrecodeImpl->IsInitialized())
     {
         return PrecodeImpl->EncodeResult(
@@ -253,6 +250,9 @@ WirehairResult Codec::Encode(
             static_cast<uint8_t*>(block_out),
             out_bytes,
             data_bytes_out);
+    }
+    if (PrecodeDecoderImpl && PrecodeDecoderImpl->IsInitialized()) {
+        return Wirehair_InvalidInput;
     }
     const uint32_t written = Impl.Encode(block_id, block_out, out_bytes);
     *data_bytes_out = written;
@@ -275,9 +275,7 @@ WirehairResult Codec::Decode(
     }
     if (PrecodeDecoderImpl && PrecodeDecoderImpl->IsInitialized()) {
         return PrecodeDecoderImpl->DecodeResult(
-            block_id,
-            static_cast<const uint8_t*>(block_in),
-            block_bytes);
+            block_id, block_in, block_bytes);
     }
     return Impl.DecodeFeed(block_id, block_in, block_bytes);
 }

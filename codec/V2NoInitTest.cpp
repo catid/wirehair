@@ -12,7 +12,20 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
     return profile.BlockCount == 0u && profile.BlockBytes == 0u &&
         profile.DenseCount == 0u && profile.PeelSeed == 0u &&
         profile.DenseSeed == 0u && profile.PeelSeedBucket == 0u &&
-        !profile.UsedPeelFixup && !profile.UsedDenseFixup && !profile.Tuned &&
+        !profile.UsedPeelFixup && !profile.UsedDenseFixup &&
+        !profile.V2SeedSelected && profile.V2SeedAttempt == 0u &&
+        profile.V2PrecodeContractVersion == 0u &&
+        profile.V2PacketRowContractVersion == 0u &&
+        profile.V2StaircaseCount == 0u &&
+        profile.V2DenseRowCount == 0u &&
+        profile.V2HeavyRowCount == 0u &&
+        profile.V2SourceHits == 0u && profile.V2PrecodeSeed == 0u &&
+        profile.V2PacketPeelSeed == 0u &&
+        profile.V2RecoveryMixCount == 0u &&
+        !profile.V2DenseIdentityCorner &&
+        profile.V2PrecodeSeedSalt == 0u &&
+        profile.V2RecoveryRowSeedSalt == 0u &&
+        !profile.Tuned &&
         profile.TuningResidualMean == 0.0 &&
         profile.TuningResidualColumns == 0u &&
         profile.TuningXorCost == 0u && profile.TuningTrials == 0u &&
@@ -26,8 +39,7 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         profile.Policy.Codec.Degree2Mass == 0.0 &&
         profile.Policy.Codec.RobustC == 0.0 &&
         profile.Policy.Codec.RobustDelta == 0.0 &&
-        !profile.Policy.Codec.FullyRandomRows &&
-        !profile.Policy.Codec.UseWirehairRowDistribution;
+        !profile.Policy.Codec.FullyRandomRows;
 }
 
 bool CheckPatternInitializedAccessors()
@@ -58,6 +70,7 @@ bool CheckPatternInitializedAccessors()
         encoder->RecoveryRowSeed() != 0u ||
         encoder->RecoveryMixCount() != 0u ||
         encoder->ParityBlocks() != nullptr ||
+        encoder->IntermediateBlocks() != nullptr ||
         system.Params.BlockCount != 0u || system.Params.Staircase != 0u ||
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
@@ -85,11 +98,10 @@ bool CheckPatternInitializedAccessors()
         message_encoder->MessageBytes() != 0u ||
         message_encoder->SourceBlockCount() != 0u ||
         message_encoder->BlockBytes() != 0u ||
-        message_encoder->SourceBlocks() != nullptr ||
+        message_encoder->IntermediateBlocks() != nullptr ||
         !IsDefaultProfile(message_encoder->Profile()) ||
         options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
-        !options.DenseIdentityCorner ||
-        !options.UseWirehairRowDistribution ||
+        options.DenseIdentityCorner ||
         options.PrecodeSeedSalt != wirehair_v2::kMessagePrecodeSeedSalt ||
         options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
@@ -105,34 +117,41 @@ bool CheckPatternInitializedAccessors()
     alignas(MessagePrecodeDecoder)
         unsigned char decoder_storage[sizeof(MessagePrecodeDecoder)];
     std::memset(decoder_storage, 0xfe, sizeof(decoder_storage));
-    MessagePrecodeDecoder* decoder =
+    MessagePrecodeDecoder* message_decoder =
         new (decoder_storage) MessagePrecodeDecoder;
     const wirehair_v2::MessagePrecodeEncoderOptions& decoder_options =
-        decoder->Options();
-    const wirehair_v2::PrecodeSystem& decoder_system = decoder->System();
-    if (decoder->IsInitialized() || decoder->IsDecoded() ||
-        decoder->MessageBytes() != 0u ||
-        decoder->SourceBlockCount() != 0u || decoder->BlockBytes() != 0u ||
-        decoder->PacketCount() != 0u ||
-        !IsDefaultProfile(decoder->Profile()) ||
+        message_decoder->Options();
+    const wirehair_v2::PrecodeSystem& decoder_system =
+        message_decoder->System();
+    const wirehair_v2::PrecodeSolveStats& solve_stats =
+        message_decoder->SolveStats();
+    if (message_decoder->IsInitialized() || message_decoder->IsDecoded() ||
+        message_decoder->ReceivedCount() != 0u ||
+        message_decoder->SolveAttemptCount() != 0u ||
+        message_decoder->MessageBytes() != 0u ||
+        message_decoder->BlockBytes() != 0u ||
+        message_decoder->IntermediateBlocks() != nullptr ||
+        !IsDefaultProfile(message_decoder->Profile()) ||
         decoder_options.RecoveryMixCount !=
             wirehair_v2::kDefaultRecoveryMixCount ||
-        !decoder_options.DenseIdentityCorner ||
-        !decoder_options.UseWirehairRowDistribution ||
+        decoder_options.DenseIdentityCorner ||
         decoder_options.PrecodeSeedSalt !=
             wirehair_v2::kMessagePrecodeSeedSalt ||
         decoder_options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
         decoder_system.Params.BlockCount != 0u ||
         !decoder_system.StaircaseRows.empty() ||
-        !decoder_system.DenseRowColumns.empty())
+        !decoder_system.DenseRowColumns.empty() ||
+        solve_stats.PacketRows != 0u ||
+        solve_stats.InactivatedColumns != 0u ||
+        solve_stats.ResidualRank != 0u)
     {
         std::fprintf(stderr,
             "pattern MessagePrecodeDecoder accessors were not initialized\n");
-        decoder->~MessagePrecodeDecoder();
+        message_decoder->~MessagePrecodeDecoder();
         return false;
     }
-    decoder->~MessagePrecodeDecoder();
+    message_decoder->~MessagePrecodeDecoder();
     return true;
 }
 

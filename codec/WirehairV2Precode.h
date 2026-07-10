@@ -56,8 +56,11 @@ struct PrecodeParams
         directly — measured 0/2000 feasible seeds at K >= 1000.  With the
         identity corner each dense parity is simply its row's known-column
         sum (encoder-feasible by construction, same 2-XOR incremental
-        generation).  Changes the linear system: requires recertification
-        before shipping.
+        generation).  The variant cleared paired 20k reliability comparisons
+        through K=64000, but remains experimental: it changes the system, is
+        unavailable at K=2..5 under this cadence, and the version-4 joint
+        packet/precode solver already makes the certified full-span system
+        encoder-feasible.
     */
     bool DenseIdentityCorner = false;
 
@@ -100,9 +103,10 @@ struct PrecodeSystem
         construction): at tiny EVEN spans (K=2 and K=4 with the certified
         table) a later row's weight can walk down to exactly zero — a dead
         constraint — at roughly 1e-4 systems.  Guarding would break the
-        exact-2-difference invariant, and the production policy does not
-        rely on the precode at such tiny K, so it is documented rather
-        than patched.
+        exact-2-difference invariant.  Version-4 message initialization
+        instead rejects rank-deficient attempts and deterministically selects
+        a full-rank joint packet/precode seed; exhaustive tiny-K tests pin the
+        selected attempts.
     */
     std::vector<std::vector<uint32_t>> DenseRowColumns;
 };
@@ -128,7 +132,9 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system);
 
     Cauchy element 1 / (X ^ Y) with Y = r and X = H + (c mod (256 - H)):
     nonzero everywhere, and every square submatrix drawn from one
-    244-column window is invertible.  heavy_rows must be <= 128.
+    244-column window is invertible.  heavy_rows must be <= 128.  Direct
+    callers must initialize GF256 first (`wirehair_init()` or `gf256_init()`);
+    all encoder/decoder/solver entry points do this internally.
 */
 uint8_t HeavyCoefficient(
     uint32_t heavy_row,

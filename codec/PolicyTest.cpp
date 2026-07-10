@@ -4,6 +4,7 @@
 #include "WirehairV2Plan.h"
 #include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
+#include "WirehairV2Solve.h"
 #include "../gf256.h"
 #include "../WirehairTools.h"
 #include <wirehair/wirehair.h>
@@ -57,8 +58,6 @@ void CheckPolicy(
     Check(codec.SolverCandidateLimit == 16u,
         "ks_bmax_top16 should use 16 candidates");
     Check(codec.FullyRandomRows, "selected codec rows should be fully random");
-    Check(!codec.UseWirehairRowDistribution,
-        "base policy should retain its named experimental row distribution");
 }
 
 void CheckRowHasNoDuplicates(const std::vector<uint16_t>& row)
@@ -85,22 +84,54 @@ void CheckRowHasNoDuplicates(const std::vector<uint32_t>& row)
 void CheckWirehairRowDegreeCap()
 {
     const uint32_t block_counts[] = { 2u, 3u, 32u, 64u, 127u, 128u };
-    wirehair_v2::PeelingCodec codec = wirehair_v2::MakePeelingCodec(
-        wirehair_v2::PeelStructure::LtM1C64,
-        wirehair_v2::PeelSolver::KsBmaxTop16);
-    codec.UseWirehairRowDistribution = true;
     for (const uint32_t K : block_counts)
     {
-        const std::vector<std::vector<uint16_t> > rows =
-            wirehair_v2::GeneratePeelMatrixRows(
-                codec, K, 4096u, UINT64_C(0x5748524f57434150) ^ K);
-        Check(rows.size() == 4096u,
-            "Wirehair-distribution row sample count mismatch");
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = UINT32_C(0x5748524f) ^ K;
+        config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
         const size_t max_degree = K / 2u > 0u ? K / 2u : 1u;
-        for (const std::vector<uint16_t>& row : rows) {
-            Check(!row.empty() && row.size() <= max_degree,
-                "Wirehair-distribution row exceeded production K/2 cap");
+        for (uint32_t id = 0; id < 4096u; ++id)
+        {
+            const std::vector<uint32_t> row =
+                wirehair_v2::GeneratePacketMatrixRow(
+                    K, 81u, id, config);
+            Check(row.size() >= config.MixCount &&
+                    row.size() - config.MixCount <= max_degree,
+                "production packet row exceeded its K/2 source cap");
         }
+    }
+}
+
+void CheckShippingPacketRowContract()
+{
+    Check(wirehair_v2::kPacketRowContractVersion == 4u,
+        "shipping packet-row contract should be canonical version 4");
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x12345678);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    struct GoldenRow
+    {
+        uint32_t Id;
+        std::vector<uint32_t> Columns;
+    };
+    const GoldenRow golden[] = {
+        { 0u, {483u, 870u, 1002u, 1072u, 1059u} },
+        { 1u, {634u, 862u, 1000u, 1031u, 1062u} },
+        { 65536u,
+            {990u, 523u, 56u, 598u, 131u, 673u, 206u,
+                1048u, 1026u, 1004u} },
+        { UINT32_C(0xf1234567),
+            {261u, 766u, 262u, 1057u, 1065u, 1073u} },
+        { UINT32_MAX,
+            {19u, 889u, 750u, 611u, 472u, 333u, 194u, 55u,
+                925u, 786u, 647u, 508u, 369u, 230u, 91u,
+                1070u, 1075u, 1080u} },
+    };
+    for (const GoldenRow& expected : golden)
+    {
+        Check(wirehair_v2::GeneratePacketMatrixRow(
+                1000u, 81u, expected.Id, config) == expected.Columns,
+            "shipping packet-row contract-v4 golden vector changed");
     }
 }
 
@@ -176,7 +207,7 @@ void CheckV2PrecodeEncoderFacade()
 
     MessagePrecodeEncoderOptions options;
     options.DenseIdentityCorner = true;
-    options.RecoveryMixCount = 5u;
+    options.RecoveryMixCount = wirehair_v2::kCertifiedPacketMixCount;
 
     Codec encoder;
     Check(encoder.InitializePrecodeEncoder(
@@ -206,7 +237,7 @@ void CheckV2PrecodeEncoderFacade()
     for (size_t i = 0; i < got.size(); ++i) {
         got[i] = 0xac;
     }
-    Check(encoder.Encode(N - 1u, &got[0], final_bytes, &written) ==
+    Check(encoder.Encode(N - 1u, &got[0], block_bytes, &written) ==
             Wirehair_Success,
         "v2 precode facade should encode a partial final source block");
     Check(written == final_bytes &&
@@ -524,7 +555,7 @@ void CheckGeneratedRecoveryRows()
     {
         Check(wirehair_v2::GenerateRecoveryMatrixRow(
                 codec, K, 81u, expected.Id, 3u, seed) == expected.Columns,
-            "recovery row contract-v3 golden vector changed");
+            "experimental recovery-row golden vector changed");
     }
 }
 
@@ -1118,6 +1149,7 @@ int main()
             UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
     CheckGeneratedRecoveryRows();
+    CheckShippingPacketRowContract();
     CheckWirehairRowDegreeCap();
     CheckRecoveryRowScaling();
     CheckPeelRowCountBounds();

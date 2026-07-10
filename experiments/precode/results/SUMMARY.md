@@ -282,7 +282,7 @@ the reference `ldpcdense_s190_d12_s2_h12` fails 0.075%/0.030%, historical
 N1=2 `codecport` fails 0.980%/0.590%, and `codecport_n13` restores
 reference-level 0.090%/0.035%.  Current codec and simulator defaults
 therefore use N1=3 from K=10000 upward; explicit `codecport_n12` remains the
-old control.  K=64000 and identity-corner certification remain pending.
+old control.
 
 `codecport_n13_ic_cert_K10000_32000_20260708.csv` reruns the N1=3 port and
 identity-corner variant at seed `0x5eed0005` after fixing the simulator's
@@ -296,11 +296,25 @@ N1=3 within sample noise at these sizes and show the expected six-XOR lower
 `codecport_n13_ic_smoke_K64000_t2000_20260708.csv` is a bounded K=64000
 smoke at the same seed: `codecport_n13` fails 0.200%/0.200% and
 `codecport_n13_ic` fails 0.300%/0.200% at OH0/OH1 over 2k paired trials.
-This is useful signal but not the full certification gate; a 20k K=64000 run
-was attempted on 120 threads and stopped after the first large row remained
-unfinished for roughly 15 minutes.  Treat K=64000 as still requiring an
-overnight/full-box certification pass before shipping identity-corner or
-closing the V2 precode issue.
+This was useful early signal, not the final certification gate.
+
+`codecport_n13_ic_cert_K64000_20260710.csv` is the completed unbounded max-K
+gate: paired seed `0x5eed0006`, 20k trials per row, D=346/H=12, OH0/OH1, and
+zero runaways.  Full-span `codecport_n13` fails 25/20,000 (0.125%) at OH0 and
+15/20,000 (0.075%) at OH1; `codecport_n13_ic` fails 25/20,000 (0.125%) and
+13/20,000 (0.065%).  Identity is therefore non-inferior at both overheads
+(differences 0.000 and -0.010 percentage points), with the expected six-XOR
+lower `precode_gen_xors_mu` (224540 vs 224546).  The run completed in 54:24
+on 64 threads with empty stderr and status 0; the canonical CSV SHA-256 is
+`bddc95f6f8000a4659ef0a61a14cc2f62fe68003bf51e85e32ac7ca80df280fb`.
+
+This clears the identity-corner reliability question but does not make it the
+shipping message default.  The version-4 codec now solves the K systematic
+packet equations jointly with the precode constraints, making the certified
+full-span system encoder-feasible across K=2..64000 without changing its
+matrix.  The identity corner remains a measured experiment (and its current
+generation cadence is invalid at K=2..5); the unsuffixed full-span construction
+stays authoritative for the wire path.
 
 ### Degree-rowdist retune screen (2026-07-08)
 

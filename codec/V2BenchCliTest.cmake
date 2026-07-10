@@ -67,6 +67,8 @@ expect_failure("loss must be" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 1 --max-message-mib 1 --loss 0.9900001)
 expect_failure("loss must be" precodecheck --N 2 --bb-list 1 --trials 1
     --loss 0.9900001)
+expect_failure("loss must be" precodefail --N 64 --bb-list 1 --overhead 0
+    --trials 1 --threads 1 --loss 0.9900001)
 expect_failure("loss must be" densecheck --N 2 --bb 1 --candidates 1
     --trials 1 --loss 0.9900001)
 expect_failure("loss must be" densetune --N 2 --bb-list 1 --candidates 1
@@ -84,6 +86,8 @@ foreach(loss IN ITEMS -0.1 1.0 nan inf malformed)
         --bb-list 1 --max-message-mib 1 --loss ${loss})
     expect_failure("loss" precodecheck --N 2 --bb-list 1 --trials 1
         --loss ${loss})
+    expect_failure("loss" precodefail --N 64 --bb-list 1 --overhead 0
+        --trials 1 --threads 1 --loss ${loss})
     expect_failure("loss" densetune --N 2 --bb-list 1 --candidates 1
         --trials 1 --loss ${loss})
     expect_failure("loss" densecount --N 2 --bb-list 1 --deltas 0
@@ -98,6 +102,8 @@ foreach(loss IN ITEMS 0 0.37)
         --bb-list 1 --max-message-mib 1 --loss ${loss})
     expect_success("loss=${loss}" precodecheck --N 2 --bb-list 1
         --trials 1 --loss ${loss})
+    expect_success("loss=${loss}" precodefail --N 64 --bb-list 1
+        --overhead 0 --trials 1 --threads 1 --loss ${loss})
     expect_success("loss=${loss}" densetune --N 2 --bb-list 1
         --candidates 1 --trials 1 --loss ${loss})
     expect_success("loss=${loss}" densecount --N 2 --bb-list 1
@@ -111,6 +117,8 @@ expect_success("loss=0.98999999999999999" compare --nlo 2 --nhi 2
     --trials 1 --bb-list 1 --max-message-mib 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" precodecheck --N 2 --bb-list 1
     --trials 1 --loss 0.99)
+expect_success("loss=0.98999999999999999" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" densetune --N 2 --bb-list 1
     --candidates 1 --trials 1 --loss 0.99)
 expect_success("loss=0.98999999999999999" densecount --N 2 --bb-list 1
@@ -122,8 +130,10 @@ expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
 expect_success("loss boundary oracle: PASS" selftest)
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
-expect_success("# precodecheck:" precodecheck --N 2 --bb-list 8
+expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8
     --trials 1 --loss 0)
+expect_success("v2_precode[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode)
 expect_success("# densetune:" densetune --N 2 --bb-list 8 --candidates 1
     --trials 1 --loss 0)
 expect_success("# densecount:" densecount --N 2 --bb-list 8 --deltas 0
@@ -132,6 +142,21 @@ expect_success("# densegrid:" densegrid --N 2 --bb-list 8 --deltas 0
     --candidates 1 --trials 1 --loss 0)
 expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
+expect_success("# precodefail:" precodefail --N 64 --bb-list 8
+    --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+
+# Thread parsing and the partially-launched worker cleanup path.
+expect_failure("bad --threads value" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads malformed --loss 0.1)
+expect_failure("threads must be in" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 0 --loss 0.1)
+expect_failure("threads must be in" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 257 --loss 0.1)
+expect_failure("bad --threads value" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 4294967296 --loss 0.1)
+expect_failure("thread launch failed" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 4 --threads 2 --loss 0.1
+    --fail-thread-launch-after 1)
 
 # Invalid experiment grids must fail before emitting a result header.
 run_bench(result out err peelcost --N 2 --bb-list 8 --trials 1

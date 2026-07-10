@@ -188,6 +188,16 @@ bool CheckInvalidAndOom()
                 Wirehair_Success,
             "direct decoder initialization failed") ||
         !Check(
+            decoder.InitializeResult(UINT64_MAX, 16u, nullptr, &options) ==
+                Wirehair_InvalidInput && decoder.IsInitialized(),
+            "decoder overflow input was not rejected transactionally") ||
+        !Check(
+            decoder.InitializeResult(
+                UINT64_C(0x100000000), UINT32_C(0x80000000),
+                nullptr, &options) == Wirehair_InvalidInput &&
+                decoder.IsInitialized(),
+            "decoder oversized block input was not rejected transactionally") ||
+        !Check(
             decoder.RecoverResult(nullptr, 1024u) == Wirehair_InvalidInput,
             "null recovery output was accepted"))
     {
@@ -205,18 +215,6 @@ bool CheckInvalidAndOom()
     }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    wirehair_v2::MessagePrecodeDecoder oom_decoder;
-    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
-    const WirehairResult oom_result =
-        oom_decoder.InitializeResult(1024u, 16u, nullptr, &options);
-    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
-    if (!Check(
-            oom_result == Wirehair_OOM && !oom_decoder.IsInitialized(),
-            "decoder initialization OOM was not contained"))
-    {
-        return false;
-    }
-
     const uint32_t K = 64u;
     const uint32_t solve_block_bytes = 37u;
     std::vector<uint8_t> source((size_t)K * solve_block_bytes, 0u);
@@ -250,22 +248,28 @@ bool CheckInvalidAndOom()
     for (uint32_t b = 0; b < solve_block_bytes; ++b) {
         final_packet[b] = (uint8_t)((K - 1u) * 7u + b * 11u + 3u);
     }
-    wirehair_v2::SetAllocationFailureCountdownForTesting(3);
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
     const WirehairResult solve_oom = solve_oom_decoder.DecodeResult(
         K - 1u, final_packet, solve_block_bytes);
-    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
     const bool retryable_state =
         solve_oom == Wirehair_OOM &&
-        solve_oom_decoder.PacketCount() == K &&
+        solve_oom_decoder.ReceivedCount() == K &&
         !solve_oom_decoder.IsDecoded();
     const WirehairResult retry_result = solve_oom_decoder.DecodeResult(
         K - 1u, final_packet, solve_block_bytes);
+    std::vector<uint8_t> recovered(source.size(), 0u);
     if (!Check(
             retryable_state,
             "solve-path OOM did not preserve retryable packet state") ||
         !Check(
             retry_result == Wirehair_Success,
-            "duplicate retry after solve-path OOM did not decode"))
+            "duplicate retry after solve-path OOM did not decode") ||
+        !Check(
+            solve_oom_decoder.RecoverResult(
+                recovered.data(), recovered.size()) == Wirehair_Success &&
+                recovered == source,
+            "duplicate retry after solve-path OOM recovered wrong data"))
     {
         return false;
     }

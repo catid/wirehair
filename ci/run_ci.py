@@ -532,13 +532,24 @@ def explicit_tools_smoke(args):
             "--bb-list", "8", "--max-message-mib", "1", "--loss", "0",
         ]),
         ("wirehair_v2_bench", [
-            "precodecheck", "--N", "2", "--bb-list", "8",
+            "precodecheck", "--N", "64", "--bb-list", "8",
             "--trials", "1", "--loss", "0",
+        ]),
+        ("wirehair_v2_bench", [
+            "precodefail", "--N", "64", "--bb-list", "8",
+            "--overhead", "0", "--trials", "1", "--threads", "1",
+            "--loss", "0",
         ]),
     )
     for name, arguments in cases:
         executable = find_executable(args.build_dir, name, args.config)
-        run([executable, *arguments], log_path=logs / (name + "-smoke.log"))
+        log_name = name
+        if name == "wirehair_v2_bench" and arguments:
+            log_name += "-" + arguments[0]
+        run(
+            [executable, *arguments],
+            log_path=logs / (log_name + "-smoke.log"),
+        )
 
 
 def run_matrix(args):
