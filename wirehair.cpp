@@ -28,10 +28,156 @@
 
 #include <wirehair/wirehair.h>
 #include "WirehairCodec.h"
+#include "WirehairEnvironment.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
 #include <new> // std::nothrow
 
-static bool m_init = false;
+namespace {
+
+std::once_flag InitOnce;
+std::atomic<int> PublishedInitResult(Wirehair_Error);
+WirehairResult InitResult = Wirehair_Error;
+
+WirehairResult GetPublishedInitResult()
+{
+    return static_cast<WirehairResult>(
+        PublishedInitResult.load(std::memory_order_acquire));
+}
+
+bool TestForcesAllocationFailure()
+{
+#if defined(WIREHAIR_TESTING)
+    const wirehair::EnvironmentValue environment(
+        "WIREHAIR_TEST_FORCE_OOM");
+    const char* value = environment.Get();
+    return value && value[0] == '1' && value[1] == '\0';
+#else
+    return false;
+#endif
+}
+
+WirehairResult TestForcedCreationResult()
+{
+#if defined(WIREHAIR_TESTING)
+    const wirehair::EnvironmentValue environment(
+        "WIREHAIR_TEST_FORCE_CREATE_RESULT");
+    const char* value = environment.Get();
+    if (value && *value) {
+        const int result = std::atoi(value);
+        if (result > Wirehair_Success && result < WirehairResult_Count) {
+            return static_cast<WirehairResult>(result);
+        }
+    }
+#endif
+    return Wirehair_Success;
+}
+
+WirehairResult CreateEncoder(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    bool copyInput,
+    WirehairCodec* codecOut)
+{
+    if (!codecOut) {
+        return Wirehair_InvalidInput;
+    }
+    *codecOut = nullptr;
+
+    wirehair::Codec* codec = reinterpret_cast<wirehair::Codec*>(reuseOpt);
+    const WirehairResult initResult = GetPublishedInitResult();
+    if (initResult != Wirehair_Success) {
+        delete codec;
+        return initResult;
+    }
+    if (!message || messageBytes < 1 || blockBytes < 1) {
+        delete codec;
+        return Wirehair_InvalidInput;
+    }
+    if (TestForcesAllocationFailure()) {
+        delete codec;
+        return Wirehair_OOM;
+    }
+    const WirehairResult forcedResult = TestForcedCreationResult();
+    if (forcedResult != Wirehair_Success) {
+        delete codec;
+        return forcedResult;
+    }
+
+    if (!codec) {
+        codec = new (std::nothrow) wirehair::Codec;
+        if (!codec) {
+            return Wirehair_OOM;
+        }
+    }
+
+    WirehairResult result = codec->InitializeEncoder(messageBytes, blockBytes);
+    if (result == Wirehair_Success) {
+        result = codec->EncodeFeed(message, copyInput);
+    }
+    if (result != Wirehair_Success) {
+        delete codec;
+        return result;
+    }
+
+    *codecOut = reinterpret_cast<WirehairCodec>(codec);
+    return Wirehair_Success;
+}
+
+WirehairResult CreateDecoder(
+    WirehairCodec reuseOpt,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut)
+{
+    if (!codecOut) {
+        return Wirehair_InvalidInput;
+    }
+    *codecOut = nullptr;
+
+    wirehair::Codec* codec = reinterpret_cast<wirehair::Codec*>(reuseOpt);
+    const WirehairResult initResult = GetPublishedInitResult();
+    if (initResult != Wirehair_Success) {
+        delete codec;
+        return initResult;
+    }
+    if (messageBytes < 1 || blockBytes < 1) {
+        delete codec;
+        return Wirehair_InvalidInput;
+    }
+    if (TestForcesAllocationFailure()) {
+        delete codec;
+        return Wirehair_OOM;
+    }
+    const WirehairResult forcedResult = TestForcedCreationResult();
+    if (forcedResult != Wirehair_Success) {
+        delete codec;
+        return forcedResult;
+    }
+
+    if (!codec) {
+        codec = new (std::nothrow) wirehair::Codec;
+        if (!codec) {
+            return Wirehair_OOM;
+        }
+    }
+
+    const WirehairResult result =
+        codec->InitializeDecoder(messageBytes, blockBytes);
+    if (result != Wirehair_Success) {
+        delete codec;
+        return result;
+    }
+
+    *codecOut = reinterpret_cast<WirehairCodec>(codec);
+    return Wirehair_Success;
+}
+
+} // namespace
 
 
 extern "C" {
@@ -73,15 +219,13 @@ WIREHAIR_EXPORT WirehairResult wirehair_init_(int expected_version)
         return Wirehair_InvalidInput;
     }
 
-    const int gfInitResult = gf256_init();
+    std::call_once(InitOnce, []() {
+        InitResult = gf256_init() == 0 ?
+            Wirehair_Success : Wirehair_UnsupportedPlatform;
+        PublishedInitResult.store(InitResult, std::memory_order_release);
+    });
 
-    // If gf256 init failed:
-    if (gfInitResult != 0) {
-        return Wirehair_UnsupportedPlatform;
-    }
-
-    m_init = true;
-    return Wirehair_Success;
+    return InitResult;
 }
 
 WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
@@ -91,42 +235,44 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
     uint32_t    blockBytes  ///< Bytes in an output block
 )
 {
-    // If input is invalid:
-    // Free any reuse codec so every failure path has the same ownership
-    // contract: on failure, reuseOpt has been released.
-    if (!m_init || !message || messageBytes < 1 || blockBytes < 1) {
-        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
-        return nullptr;
-    }
+    WirehairCodec codec = nullptr;
+    (void)CreateEncoder(
+        reuseOpt, message, messageBytes, blockBytes, false, &codec);
+    return codec;
+}
 
-    wirehair::Codec* codec = reinterpret_cast<wirehair::Codec*>(reuseOpt);
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut)
+{
+    return CreateEncoder(
+        reuseOpt, message, messageBytes, blockBytes, false, codecOut);
+}
 
-    // Allocate a new Codec object
-    if (!codec) {
-        codec = new (std::nothrow) wirehair::Codec;
-        if (!codec) {
-            return nullptr;
-        }
-    }
+WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create_owned(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes)
+{
+    WirehairCodec codec = nullptr;
+    (void)CreateEncoder(
+        reuseOpt, message, messageBytes, blockBytes, true, &codec);
+    return codec;
+}
 
-    // Initialize codec
-    WirehairResult result = codec->InitializeEncoder(messageBytes, blockBytes);
-
-    // If initialization succeeded:
-    if (result == Wirehair_Success) {
-        // Feed message to codec
-        result = codec->EncodeFeed(message);
-    }
-
-    // If either function failed:
-    if (result != Wirehair_Success)
-    {
-        // Note this will also release the reuse parameter
-        delete codec;
-        codec = nullptr;
-    }
-
-    return reinterpret_cast<WirehairCodec>(codec);
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_owned_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut)
+{
+    return CreateEncoder(
+        reuseOpt, message, messageBytes, blockBytes, true, codecOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_encode(
@@ -137,11 +283,17 @@ WIREHAIR_EXPORT WirehairResult wirehair_encode(
     uint32_t* dataBytesOut  ///< Number of bytes written <= blockBytes
 )
 {
+    if (dataBytesOut) {
+        *dataBytesOut = 0;
+    }
     if (!codec || !blockDataOut || !dataBytesOut) {
         return Wirehair_InvalidInput;
     }
 
     wirehair::Codec* session = reinterpret_cast<wirehair::Codec*>(codec);
+    if (!session->CanEncode()) {
+        return Wirehair_InvalidInput;
+    }
 
     const uint32_t writtenBytes = session->Encode(blockId, blockDataOut, outBytes);
     *dataBytesOut = writtenBytes;
@@ -159,36 +311,18 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
     uint32_t    blockBytes  ///< Bytes in each encoded block
 )
 {
-    // If input is invalid:
-    // Free any reuse codec so every failure path has the same ownership
-    // contract: on failure, reuseOpt has been released.
-    if (!m_init || messageBytes < 1 || blockBytes < 1) {
-        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
-        return nullptr;
-    }
+    WirehairCodec codec = nullptr;
+    (void)CreateDecoder(reuseOpt, messageBytes, blockBytes, &codec);
+    return codec;
+}
 
-    wirehair::Codec* codec = reinterpret_cast<wirehair::Codec*>(reuseOpt);
-
-    // Allocate a new Codec object
-    if (!codec) {
-        codec = new (std::nothrow) wirehair::Codec;
-        if (!codec) {
-            return nullptr;
-        }
-    }
-
-    // Allocate memory for decoding
-    WirehairResult result = codec->InitializeDecoder(messageBytes, blockBytes);
-
-    // If either function failed:
-    if (result != Wirehair_Success)
-    {
-        // Note this will also release the reuse parameter
-        delete codec;
-        codec = nullptr;
-    }
-
-    return reinterpret_cast<WirehairCodec>(codec);
+WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_ex(
+    WirehairCodec reuseOpt,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut)
+{
+    return CreateDecoder(reuseOpt, messageBytes, blockBytes, codecOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_decode(
@@ -204,6 +338,9 @@ WIREHAIR_EXPORT WirehairResult wirehair_decode(
     }
 
     wirehair::Codec* decoder = reinterpret_cast<wirehair::Codec*>(codec);
+    if (!decoder->CanDecode()) {
+        return Wirehair_InvalidInput;
+    }
 
     return decoder->DecodeFeed(blockId, blockData, dataBytes);
 }
@@ -231,18 +368,30 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
     uint32_t*  bytesOut  ///< Set to the number of data bytes in the block
 )
 {
-    // If input is invalid:
-    if (!codec || !blockDataOut || !bytesOut) {
-        return Wirehair_InvalidInput;
-    }
-    if (blockId > 0xffffu) {
+    return wirehair_recover_block_ex(
+        codec, blockId, blockDataOut, UINT32_MAX, bytesOut);
+}
+
+WIREHAIR_EXPORT WirehairResult wirehair_recover_block_ex(
+    WirehairCodec codec,
+    unsigned blockId,
+    void* blockDataOut,
+    uint32_t outputCapacity,
+    uint32_t* bytesOut)
+{
+    if (bytesOut) {
         *bytesOut = 0;
+    }
+    if (!codec || !blockDataOut || !bytesOut || blockId > 0xffffu) {
         return Wirehair_InvalidInput;
     }
 
     wirehair::Codec* decoder = reinterpret_cast<wirehair::Codec*>(codec);
-
-    return decoder->ReconstructBlock((uint16_t)blockId, blockDataOut, bytesOut);
+    return decoder->ReconstructBlock(
+        static_cast<uint16_t>(blockId),
+        blockDataOut,
+        outputCapacity,
+        bytesOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_decoder_becomes_encoder(

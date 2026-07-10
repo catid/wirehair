@@ -41,6 +41,53 @@ explorer .
 
 Then you can use Visual Studio Community Edition to open up the `wirehair.sln` file and build the software.
 
+The default CMake build is portable and produces one static library.  Standard
+CMake configuration and compiler variables are left under caller/toolchain
+control.  Wirehair adds only target-scoped `/W4` on MSVC or `-Wall -Wextra` on
+other compilers; Release optimization remains CMake's standard policy.
+
+Useful build options are:
+
+* `BUILD_SHARED_LIBS=ON` selects the shared library instead.
+* `WIREHAIR_BUILD_BOTH=ON` explicitly produces static and shared variants.  On
+  Unix-like platforms they share one PIC object compilation.
+* `WIREHAIR_STATIC_PIC=OFF` disables PIC for a static-only build.  It defaults
+  to `ON`, so the installed archive can be embedded in plugins/shared objects.
+* `MARCH_NATIVE=ON` opts into `-march=native` after a compiler capability
+  check.  Such a build is host-specific and must not be deployed to older or
+  otherwise different CPUs; the default is `OFF`.
+* `BUILD_TESTS`, `BUILD_CODEC_V2`, `WIREHAIR_BUILD_TOOLS`, and
+  `WIREHAIR_BUILD_BENCHMARKS` control their named groups.  Offline generators
+  and the V2 benchmark remain available as explicit targets when their options
+  are `OFF`, but are excluded from the default build.
+* `WIREHAIR_ENABLE_SCHEDULED_TESTS=ON` registers resource-bounded high-N,
+  packet-size, and large-block E2E profiles in addition to the fast tests.
+* `WH_LTO` and `WH_PGO_MODE` add target-scoped optimization flags without
+  rewriting caller compiler or linker cache variables.
+
+For example, build a generator or benchmark explicitly without adding all
+offline tools to routine builds:
+
+~~~
+cmake -S . -B build
+cmake --build build --target gen_tables wirehair_v2_bench
+./build/gen_tables --no-benchmarks --heavy-trials 0
+./build/codec/wirehair_v2_bench compare --nlo 2 --nhi 2 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
+~~~
+
+An installed tree exports a relocatable CMake package.  Downstream C and C++
+projects use the same target for static or shared installs:
+
+~~~cmake
+find_package(wirehair CONFIG REQUIRED)
+target_link_libraries(my_target PRIVATE wirehair::wirehair)
+~~~
+
+`CMAKE_INSTALL_PREFIX` and `CMAKE_INSTALL_LIBDIR` may both be customized.  The
+imported target supplies include paths, thread linkage, and the Windows
+DLL/static API definitions; consumers should not define Wirehair export macros
+manually.
+
 
 #### Example Usage
 

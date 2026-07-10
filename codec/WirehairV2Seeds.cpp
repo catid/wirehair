@@ -151,7 +151,7 @@ SeedProfile TuneSeedProfile(
     if (peel_candidates > 256u) {
         peel_candidates = 256u;
     }
-    const uint16_t trials =
+    const uint32_t trials =
         options.TrialsPerCandidate > 0u ? options.TrialsPerCandidate : 1u;
 
     SeedTuningCandidate candidates[256];
@@ -169,7 +169,7 @@ SeedProfile TuneSeedProfile(
         candidate.Score = 0.0;
 
         uint64_t xor_sum = 0;
-        for (uint16_t trial = 0; trial < trials; ++trial)
+        for (uint32_t trial = 0; trial < trials; ++trial)
         {
             SeedProfile trial_profile = base;
             trial_profile.PeelSeed = candidate.PeelSeed;
@@ -222,6 +222,7 @@ SeedProfile TuneSeedProfile(
     base.TuningResidualMean = candidates[best_i].ResidualMean;
     base.TuningResidualColumns = candidates[best_i].ResidualMax;
     base.TuningXorCost = candidates[best_i].XorCostMean;
+    base.TuningTrials = trials;
     return base;
 }
 

@@ -17,8 +17,9 @@
 //               conditions so the muladd:xor ratio is meaningful.
 //   --fanin   : k-ary gather-XOR microbenchmark, dst ^= s1 ^ ... ^ sk,
 //               comparing k chained pairwise passes against one fused pass.
-//               Logical traffic is defined as (k+1)*block_bytes per op for
-//               BOTH arms so the throughput ratio is comparable.
+//               The legacy normalized rate uses (k+1)*block_bytes for both
+//               arms.  Schema v2 also reports logical destination work and
+//               distinct chained/fused read/write traffic estimates.
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include "gf256.h"
+#include "../ByteLedger.h"
 
 namespace {
 
@@ -281,6 +283,11 @@ static bool allocate_aligned(size_t bytes, uint8_t** out)
 
 static const double kGiBDouble = 1024.0 * 1024.0 * 1024.0;
 
+static double gib_per_second(uint64_t bytes, double usec)
+{
+    return ((double)bytes / kGiBDouble) / (usec / 1000000.0);
+}
+
 static uint8_t* allocate_pool(size_t pool_bytes, uint64_t seed)
 {
     uint8_t* data = nullptr;
@@ -519,15 +526,25 @@ static int run_cold_xor_size(
     }
 
     const uint64_t sum = checksum_buffer(pool, pool_bytes);
-    std::printf("%zu,%zu,%zu,%u,%.3f,%.9f,%.3f,0x%016llx\n",
+    const wirehair_experiments::ByteLedger ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::Xor, block_bytes);
+    const double median_usec = median_of(usec_per_xor);
+    std::printf("%zu,%zu,%zu,%u,%.3f,%.9f,%.3f,0x%016llx,"
+        "2,%llu,%llu,%llu,%.3f,%.3f\n",
         block_bytes,
         n_blocks,
         ops.size(),
         repeats,
         median_of(total_usec),
-        median_of(usec_per_xor),
+        median_usec,
         median_of(gib_per_sec),
-        (unsigned long long)sum);
+        (unsigned long long)sum,
+        (unsigned long long)ledger.LogicalBytes,
+        (unsigned long long)ledger.ReadBytes,
+        (unsigned long long)ledger.WriteBytes,
+        gib_per_second(ledger.LogicalBytes, median_usec),
+        gib_per_second(ledger.TrafficBytes(), median_usec));
     return 0;
 }
 
@@ -629,9 +646,13 @@ static int run_muladd_size(
     const double muladd_med = median_of(muladd_usec);
     const double traffic_gib_per_op =
         (2.0 * (double)block_bytes) / kGiBDouble;
+    const wirehair_experiments::ByteLedger ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::Muladd, block_bytes);
     const uint64_t sum = checksum_buffer(pool, pool_bytes);
 
-    std::printf("%zu,%zu,%zu,%u,%.9f,%.3f,%.9f,%.3f,%.4f,0x%016llx\n",
+    std::printf("%zu,%zu,%zu,%u,%.9f,%.3f,%.9f,%.3f,%.4f,0x%016llx,"
+        "2,%llu,%llu,%llu,%.3f,%.3f,%.3f,%.3f\n",
         block_bytes,
         n_blocks,
         ops.size(),
@@ -641,7 +662,14 @@ static int run_muladd_size(
         muladd_med,
         traffic_gib_per_op / (muladd_med / 1000000.0),
         muladd_med / xor_med,
-        (unsigned long long)sum);
+        (unsigned long long)sum,
+        (unsigned long long)ledger.LogicalBytes,
+        (unsigned long long)ledger.ReadBytes,
+        (unsigned long long)ledger.WriteBytes,
+        gib_per_second(ledger.LogicalBytes, xor_med),
+        gib_per_second(ledger.TrafficBytes(), xor_med),
+        gib_per_second(ledger.LogicalBytes, muladd_med),
+        gib_per_second(ledger.TrafficBytes(), muladd_med));
     return 0;
 }
 
@@ -671,7 +699,7 @@ static int run_fanin_size(
         ((uint64_t)k << 40) ^ UINT64_C(0xfa414fa414fa414f));
     const std::vector<uint32_t> perm = make_block_permutation(n_blocks, rng);
 
-    // Logical traffic per op: k source reads + 1 destination write.
+    // Preserve the historical (k+1)*bytes normalized-work denominator.
     const size_t stride = k + 1;
     const size_t bytes_per_op = stride * block_bytes;
     const size_t op_count = ops_for_target(target_gib, bytes_per_op, 64);
@@ -744,9 +772,18 @@ static int run_fanin_size(
     const double chained_med = median_of(chained_usec);
     const double gather_med = median_of(gather_usec);
     const double logical_gib_per_op = (double)bytes_per_op / kGiBDouble;
+    const wirehair_experiments::ByteLedger chained_ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::FaninChained,
+            block_bytes, k);
+    const wirehair_experiments::ByteLedger gather_ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::FaninFused,
+            block_bytes, k);
     const uint64_t sum = checksum_buffer(pool, pool_bytes);
 
-    std::printf("%zu,%zu,%zu,%zu,%u,%.9f,%.3f,%.9f,%.3f,%.4f,0x%016llx\n",
+    std::printf("%zu,%zu,%zu,%zu,%u,%.9f,%.3f,%.9f,%.3f,%.4f,0x%016llx,"
+        "2,%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%.3f\n",
         k,
         block_bytes,
         n_blocks,
@@ -757,7 +794,16 @@ static int run_fanin_size(
         gather_med,
         logical_gib_per_op / (gather_med / 1000000.0),
         chained_med / gather_med,
-        (unsigned long long)sum);
+        (unsigned long long)sum,
+        (unsigned long long)chained_ledger.LogicalBytes,
+        (unsigned long long)chained_ledger.ReadBytes,
+        (unsigned long long)chained_ledger.WriteBytes,
+        (unsigned long long)gather_ledger.ReadBytes,
+        (unsigned long long)gather_ledger.WriteBytes,
+        gib_per_second(chained_ledger.LogicalBytes, chained_med),
+        gib_per_second(chained_ledger.TrafficBytes(), chained_med),
+        gib_per_second(gather_ledger.LogicalBytes, gather_med),
+        gib_per_second(gather_ledger.TrafficBytes(), gather_med));
     return 0;
 }
 
@@ -855,15 +901,25 @@ static int run_one_size(
     std::sort(gib_per_sec.begin(), gib_per_sec.end());
     const size_t mid = usec_per_xor.size() / 2u;
     const uint64_t sum = checksum_buffer(data, total_bytes);
-    std::printf("%zu,%zu,%zu,%u,%.3f,%.9f,%.3f,0x%016llx\n",
+    const wirehair_experiments::ByteLedger ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::Xor, block_bytes);
+    const double median_usec = usec_per_xor[mid];
+    std::printf("%zu,%zu,%zu,%u,%.3f,%.9f,%.3f,0x%016llx,"
+        "2,%llu,%llu,%llu,%.3f,%.3f\n",
         block_bytes,
         working_blocks,
         ops.size(),
         repeats,
         total_usec[mid],
-        usec_per_xor[mid],
+        median_usec,
         gib_per_sec[mid],
-        (unsigned long long)sum);
+        (unsigned long long)sum,
+        (unsigned long long)ledger.LogicalBytes,
+        (unsigned long long)ledger.ReadBytes,
+        (unsigned long long)ledger.WriteBytes,
+        gib_per_second(ledger.LogicalBytes, median_usec),
+        gib_per_second(ledger.TrafficBytes(), median_usec));
 
     std::free(data);
     return 0;
@@ -887,7 +943,7 @@ static void usage(const char* argv0)
         "  --pool-gib: cold pool size in GiB (default 4; >= 4 recommended "
         "to defeat L3 caching)\n"
         "\n"
-        "Any of --cold/--muladd/--fanin suppresses the default mode.\n",
+        "The --cold, --muladd, and --fanin output modes are mutually exclusive.\n",
         argv0);
 }
 
@@ -966,7 +1022,7 @@ int main(int argc, char** argv)
         {
             bool ok = false;
             pool_gib = parse_double(argv[++i], &ok);
-            if (!ok || pool_gib < 0.5 ||
+            if (!ok || pool_gib < 0.01 ||
                 pool_gib > (double)SIZE_MAX / kGiBDouble)
             {
                 usage(argv[0]);
@@ -1008,12 +1064,30 @@ int main(int argc, char** argv)
         }
     }
 
+    const unsigned selected_modes = (cold_mode ? 1u : 0u) +
+        (muladd_mode ? 1u : 0u) + (!fanin_ks.empty() ? 1u : 0u);
+    if (selected_modes > 1u)
+    {
+        std::fprintf(stderr,
+            "--cold, --muladd, and --fanin are mutually exclusive output modes\n");
+        return 1;
+    }
+
     const bool pool_modes = cold_mode || muladd_mode || !fanin_ks.empty();
+    if (!wirehair_experiments::VerifyByteLedger())
+    {
+        std::fprintf(stderr, "byte-ledger self-check failed\n");
+        return 1;
+    }
+    std::fprintf(stderr, "byte-ledger self-check passed\n");
     if (!pool_modes)
     {
         // Legacy default mode, unchanged.
         std::printf("block_bytes,working_blocks,ops_per_repeat,repeats,"
-            "median_total_us,median_us_per_xor,median_gib_per_s,checksum\n");
+            "median_total_us,median_us_per_xor,median_gib_per_s,checksum,"
+            "schema_version,logical_bytes_per_op,estimated_read_bytes_per_op,"
+            "estimated_write_bytes_per_op,logical_gib_per_s,"
+            "estimated_traffic_gib_per_s\n");
         for (size_t block_bytes : sizes)
         {
             const int rc = run_one_size(
@@ -1068,7 +1142,10 @@ int main(int argc, char** argv)
     if (cold_mode && rc == 0)
     {
         std::printf("block_bytes,working_blocks,ops_per_repeat,repeats,"
-            "median_total_us,median_us_per_xor,median_gib_per_s,checksum\n");
+            "median_total_us,median_us_per_xor,median_gib_per_s,checksum,"
+            "schema_version,logical_bytes_per_op,estimated_read_bytes_per_op,"
+            "estimated_write_bytes_per_op,logical_gib_per_s,"
+            "estimated_traffic_gib_per_s\n");
         for (size_t block_bytes : sizes)
         {
             rc = run_cold_xor_size(
@@ -1084,7 +1161,10 @@ int main(int argc, char** argv)
         std::printf("block_bytes,pool_blocks,ops_per_repeat,repeats,"
             "xor_median_us_per_op,xor_median_gib_per_s,"
             "muladd_median_us_per_op,muladd_median_gib_per_s,"
-            "muladd_xor_ratio,checksum\n");
+            "muladd_xor_ratio,checksum,schema_version,logical_bytes_per_op,"
+            "estimated_read_bytes_per_op,estimated_write_bytes_per_op,"
+            "xor_logical_gib_per_s,xor_estimated_traffic_gib_per_s,"
+            "muladd_logical_gib_per_s,muladd_estimated_traffic_gib_per_s\n");
         for (size_t block_bytes : sizes)
         {
             rc = run_muladd_size(
@@ -1098,9 +1178,15 @@ int main(int argc, char** argv)
     if (!fanin_ks.empty() && rc == 0)
     {
         std::printf("k,block_bytes,pool_blocks,ops_per_repeat,repeats,"
-            "chained_median_us_per_op,chained_logical_gib_per_s,"
-            "gather_median_us_per_op,gather_logical_gib_per_s,"
-            "gather_chained_ratio,checksum\n");
+            "chained_median_us_per_op,chained_legacy_normalized_gib_per_s,"
+            "gather_median_us_per_op,gather_legacy_normalized_gib_per_s,"
+            "gather_chained_ratio,checksum,schema_version,logical_bytes_per_op,"
+            "chained_estimated_read_bytes_per_op,"
+            "chained_estimated_write_bytes_per_op,"
+            "gather_estimated_read_bytes_per_op,"
+            "gather_estimated_write_bytes_per_op,"
+            "chained_logical_gib_per_s,chained_estimated_traffic_gib_per_s,"
+            "gather_logical_gib_per_s,gather_estimated_traffic_gib_per_s\n");
         for (size_t k : fanin_ks)
         {
             for (size_t block_bytes : sizes)

@@ -220,14 +220,43 @@ extern gf256_ctx GF256Ctx;
 //------------------------------------------------------------------------------
 // Initialization
 
+/// Injectable x86 capability snapshot used by runtime dispatch tests.
+typedef struct gf256_x86_cpu_snapshot_t
+{
+    uint32_t MaxBasicLeaf;
+    uint32_t Leaf1ECX;
+    uint32_t Leaf7EBX;
+    uint32_t Leaf7ECX;
+    uint64_t XCR0;
+} gf256_x86_cpu_snapshot;
+
+/// Legal x86 dispatch choices after applying OSXSAVE/XCR0 requirements.
+typedef struct gf256_x86_cpu_features_t
+{
+    int SSSE3;
+    int AVX2;
+    int GFNI;
+    int AVX512;
+} gf256_x86_cpu_features;
+
+/// Pure capability selector.  It never executes CPUID or XGETBV.
+extern void gf256_select_x86_cpu_features(
+    const gf256_x86_cpu_snapshot* snapshot,
+    gf256_x86_cpu_features* features);
+
+/// Report the kernels selected for the current process build and host.
+extern void gf256_get_active_x86_cpu_features(
+    gf256_x86_cpu_features* features);
+
 /**
     Initialize a context, filling in the tables.
     
     Thread-safety / Usage Notes:
     
-    It is perfectly safe and encouraged to use a gf256_ctx object from multiple
-    threads.  The gf256_init() is relatively expensive and should only be done
-    once, though it will take less than a millisecond.
+    It is safe to call gf256_init() concurrently.  Initialization runs once and
+    publishes a cached success or permanent platform/self-test failure.  A
+    version mismatch affects only that caller and does not poison a later call
+    with the correct version.
     
     The gf256_ctx object must be aligned to 16 byte boundary.
     Simply tag the object with GF256_ALIGNED to achieve this.

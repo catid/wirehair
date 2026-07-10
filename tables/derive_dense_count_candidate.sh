@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHON=${PYTHON:-python3}
+
 if [[ "$#" -eq 0 ]]; then
     inputs=("-")
 else
@@ -18,47 +21,8 @@ tmp=$(mktemp)
 candidate=$(mktemp)
 trap 'rm -f "$tmp" "$candidate"' EXIT
 
-read_aggregate() {
-    local input="$1"
-    local source="$input"
-    if [[ "$input" == "-" ]]; then
-        source="<stdin>"
-    fi
-
-    awk -F '\t' -v source="$source" '
-        function is_uint(value) {
-            return value ~ /^[0-9]+$/
-        }
-
-        function is_number(value) {
-            return value ~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/
-        }
-
-        FNR == 1 && $1 == "N" { next }
-        NF == 0 { next }
-        NF >= 5 && is_uint($1) && is_uint($2) && is_uint($3) &&
-            is_uint($4) && is_number($5) {
-            if (($3 + 0) > ($4 + 0)) {
-                printf "malformed dense-count aggregate row: %s:%u: min > max: %s\n",
-                    source, FNR, $0 > "/dev/stderr"
-                exit 1
-            }
-            row_source = (NF >= 6 && $6 != "") ? $6 : source
-            printf "%s\t%s\t%s\t%s\t%s\t%s\n",
-                $1, $2, $3, $4, $5, row_source
-            next
-        }
-        {
-            printf "malformed dense-count aggregate row: %s:%u: %s\n",
-                source, FNR, $0 > "/dev/stderr"
-            exit 1
-        }
-    ' "$input"
-}
-
-for input in "${inputs[@]}"; do
-    read_aggregate "$input"
-done > "$tmp"
+"$PYTHON" "$ROOT_DIR/tables/dense_count_validate.py" aggregate \
+    "${inputs[@]}" > "$tmp"
 
 awk -F '\t' '
     NF >= 6 {

@@ -11,11 +11,18 @@ namespace {
 struct Rng
 {
     uint64_t State;
+    uint64_t* Draws;
 
-    explicit Rng(uint64_t seed) : State(seed) {}
+    explicit Rng(uint64_t seed, uint64_t* draws = nullptr)
+        : State(seed), Draws(draws)
+    {
+    }
 
     uint64_t Next()
     {
+        if (Draws) {
+            ++*Draws;
+        }
         uint64_t z = (State += UINT64_C(0x9e3779b97f4a7c15));
         z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
@@ -32,6 +39,25 @@ struct Rng
         return (Next() >> 11) * (1.0 / 9007199254740992.0);
     }
 };
+
+static const uint64_t kSourceRowStreamSalt =
+    UINT64_C(0x7632726f77737263);
+static const uint64_t kMixRowStreamSalt =
+    UINT64_C(0x7632726f776d6978);
+
+uint64_t Mix64(uint64_t z)
+{
+    z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+}
+
+uint64_t RowStreamSeed(uint64_t seed, uint32_t row_index, uint64_t salt)
+{
+    const uint64_t keyed_index =
+        (uint64_t)row_index * UINT64_C(0xd6e8feb86659fd93);
+    return Mix64(seed ^ salt ^ keyed_index);
+}
 
 PeelEvaluation InvalidPeelEvaluation(uint32_t rows, uint32_t columns)
 {
@@ -863,12 +889,12 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
         return std::vector<std::vector<uint16_t> >();
     }
 
-    Rng rng(seed);
     const DegreeSampler degrees(codec, block_count);
     std::vector<std::vector<uint16_t> > rows;
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
     {
+        Rng rng(RowStreamSeed(seed, r, kSourceRowStreamSalt));
         rows.push_back(DrawPeelRow(degrees, block_count, rng));
     }
     return rows;
@@ -881,19 +907,14 @@ std::vector<uint16_t> GeneratePeelMatrixRow(
     uint64_t seed)
 {
     if (block_count == 0u ||
-        block_count > UINT16_MAX ||
-        row_index >= kMaxPeelMatrixRows)
+        block_count > UINT16_MAX)
     {
         return std::vector<uint16_t>();
     }
 
-    Rng rng(seed);
+    Rng rng(RowStreamSeed(seed, row_index, kSourceRowStreamSalt));
     const DegreeSampler degrees(codec, block_count);
-    std::vector<uint16_t> row;
-    for (uint32_t r = 0; r <= row_index; ++r) {
-        row = DrawPeelRow(degrees, block_count, rng);
-    }
-    return row;
+    return DrawPeelRow(degrees, block_count, rng);
 }
 
 std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
@@ -912,13 +933,13 @@ std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
         return std::vector<std::vector<uint32_t> >();
     }
 
-    Rng source_rng(seed);
-    Rng mix_rng(seed ^ UINT64_C(0x9e3779b97f4a7c15));
     const DegreeSampler degrees(codec, source_count);
     std::vector<std::vector<uint32_t> > rows;
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
     {
+        Rng source_rng(RowStreamSeed(seed, r, kSourceRowStreamSalt));
+        Rng mix_rng(RowStreamSeed(seed, r, kMixRowStreamSalt));
         rows.push_back(DrawRecoveryRow(
             degrees, source_count, precode_count, mix_count,
             source_rng, mix_rng));
@@ -932,27 +953,31 @@ std::vector<uint32_t> GenerateRecoveryMatrixRow(
     uint32_t precode_count,
     uint32_t row_index,
     uint32_t mix_count,
-    uint64_t seed)
+    uint64_t seed,
+    RecoveryRowGenerationStats* stats)
 {
+    RecoveryRowGenerationStats local_stats;
+    RecoveryRowGenerationStats& generation = stats ? *stats : local_stats;
+    generation = RecoveryRowGenerationStats{};
+
     if (source_count == 0u ||
         source_count > UINT16_MAX ||
-        row_index >= kMaxPeelMatrixRows ||
         precode_count > UINT16_MAX - source_count)
     {
         return std::vector<uint32_t>();
     }
 
-    Rng source_rng(seed);
-    Rng mix_rng(seed ^ UINT64_C(0x9e3779b97f4a7c15));
+    generation.SeekWork = 2u;
+    Rng source_rng(
+        RowStreamSeed(seed, row_index, kSourceRowStreamSalt),
+        &generation.SourceRandomDraws);
+    Rng mix_rng(
+        RowStreamSeed(seed, row_index, kMixRowStreamSalt),
+        &generation.MixRandomDraws);
     const DegreeSampler degrees(codec, source_count);
-    std::vector<uint32_t> row;
-    for (uint32_t r = 0; r <= row_index; ++r)
-    {
-        row = DrawRecoveryRow(
-            degrees, source_count, precode_count, mix_count,
-            source_rng, mix_rng);
-    }
-    return row;
+    return DrawRecoveryRow(
+        degrees, source_count, precode_count, mix_count,
+        source_rng, mix_rng);
 }
 
 PeelEvaluation EvaluatePeeling(

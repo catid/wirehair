@@ -1,5 +1,6 @@
 #include <wirehair/wirehair.h>
 
+#include "../WirehairEnvironment.h"
 #include "SiameseTools.h"
 
 #include <cerrno>
@@ -23,9 +24,24 @@ static const unsigned kExtraWarnThreshold = 4;
 
 static const uint8_t kPadChar = (uint8_t)0xee;
 
-static bool ReadEnvUnsigned(const char* name, unsigned& out)
+class ScopedCodec
 {
-    const char* value = getenv(name);
+public:
+    explicit ScopedCodec(WirehairCodec codec) : Codec(codec) {}
+    ~ScopedCodec() { wirehair_free(Codec); }
+
+    ScopedCodec(const ScopedCodec&) = delete;
+    ScopedCodec& operator=(const ScopedCodec&) = delete;
+
+private:
+    WirehairCodec Codec;
+};
+
+static bool ParseEnvUnsigned(
+    const char* name,
+    const char* value,
+    unsigned& out)
+{
     if (!value || !value[0]) {
         return true;
     }
@@ -47,9 +63,17 @@ static bool ReadEnvUnsigned(const char* name, unsigned& out)
     return true;
 }
 
-static bool ReadEnvU64(const char* name, uint64_t& out)
+static bool ReadEnvUnsigned(const char* name, unsigned& out)
 {
-    const char* value = getenv(name);
+    const wirehair::EnvironmentValue environment(name);
+    return ParseEnvUnsigned(name, environment.Get(), out);
+}
+
+static bool ParseEnvU64(
+    const char* name,
+    const char* value,
+    uint64_t& out)
+{
     if (!value || !value[0]) {
         return true;
     }
@@ -71,10 +95,96 @@ static bool ReadEnvU64(const char* name, uint64_t& out)
     return true;
 }
 
+static bool ReadEnvU64(const char* name, uint64_t& out)
+{
+    const wirehair::EnvironmentValue environment(name);
+    return ParseEnvU64(name, environment.Get(), out);
+}
+
+static bool EnvFlagEnabled(const char* value)
+{
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
 static bool ReadEnvFlag(const char* name)
 {
-    const char* value = getenv(name);
-    return value && value[0] && strcmp(value, "0") != 0;
+    const wirehair::EnvironmentValue environment(name);
+    return EnvFlagEnabled(environment.Get());
+}
+
+static bool TestEnvironmentParsing()
+{
+    unsigned unsigned_value = 17;
+    uint64_t wide_value = UINT64_C(19);
+    if (!ParseEnvUnsigned("test", nullptr, unsigned_value) ||
+        unsigned_value != 17 ||
+        !ParseEnvUnsigned("test", "", unsigned_value) ||
+        unsigned_value != 17 ||
+        !ParseEnvUnsigned("test", "123", unsigned_value) ||
+        unsigned_value != 123 ||
+        !ParseEnvUnsigned("test", "0x20", unsigned_value) ||
+        unsigned_value != 32 ||
+        !ParseEnvU64("test", nullptr, wide_value) ||
+        wide_value != UINT64_C(19) ||
+        !ParseEnvU64("test", "", wide_value) ||
+        wide_value != UINT64_C(19) ||
+        !ParseEnvU64("test", "18446744073709551615", wide_value) ||
+        wide_value != UINT64_MAX)
+    {
+        return false;
+    }
+
+    unsigned_value = 37;
+    wide_value = UINT64_C(41);
+    if (ParseEnvUnsigned("test", "-1", unsigned_value) ||
+        unsigned_value != 37 ||
+        ParseEnvUnsigned("test", "4294967296", unsigned_value) ||
+        unsigned_value != 37 ||
+        ParseEnvUnsigned("test", "12tail", unsigned_value) ||
+        unsigned_value != 37 ||
+        ParseEnvU64("test", "18446744073709551616", wide_value) ||
+        wide_value != UINT64_C(41) ||
+        ParseEnvU64("test", "12tail", wide_value) ||
+        wide_value != UINT64_C(41))
+    {
+        return false;
+    }
+
+    return !EnvFlagEnabled(nullptr) &&
+        !EnvFlagEnabled("") &&
+        !EnvFlagEnabled("0") &&
+        EnvFlagEnabled("1");
+}
+
+static bool DecodeResultIsTerminal(WirehairResult result)
+{
+    return result != Wirehair_NeedMore && result != Wirehair_Success;
+}
+
+static bool TestDecodeResultPolicy()
+{
+    const WirehairResult terminal[] = {
+        Wirehair_InvalidInput,
+        Wirehair_BadDenseSeed,
+        Wirehair_BadPeelSeed,
+        Wirehair_BadInput_SmallN,
+        Wirehair_BadInput_LargeN,
+        Wirehair_ExtraInsufficient,
+        Wirehair_Error,
+        Wirehair_OOM,
+        Wirehair_UnsupportedPlatform
+    };
+    if (DecodeResultIsTerminal(Wirehair_NeedMore) ||
+        DecodeResultIsTerminal(Wirehair_Success))
+    {
+        return false;
+    }
+    for (WirehairResult result : terminal) {
+        if (!DecodeResultIsTerminal(result)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void FillMessage(uint8_t* message, unsigned bytes, siamese::PCGRandom& prng)
@@ -98,13 +208,15 @@ static void FillMessage(uint8_t* message, unsigned bytes, siamese::PCGRandom& pr
     }
 }
 
+#ifdef _MSC_VER
 #pragma warning(disable: 4505)
+#endif
 
 static bool Test_EncoderProducesOriginals(
     WirehairCodec encoder,
     unsigned N,
     uint8_t* block,
-    uint8_t* message,
+    const uint8_t* message,
     unsigned blockBytes,
     unsigned finalBytes)
 {
@@ -497,10 +609,11 @@ static bool Test_DecodeAllRecovery(
         return false;
     }
 
-    if (!DoesCodecProduceOriginals(decoder, N, blockBytes, finalBytes, message, decodedMessage, messageBytes))
+    if (!Test_EncoderProducesOriginals(
+        decoder, N, decodedMessage, message, blockBytes, finalBytes))
     {
         SIAMESE_DEBUG_BREAK();
-        cout << "!! Converted Decoder failed to produce originals" << endl;
+        cout << "!! Converted decoder failed to encode originals" << endl;
         return false;
     }
 
@@ -578,25 +691,22 @@ static bool Test_DecodeRandomLosses(
         }
 
         WirehairResult decodeResult = wirehair_decode(decoder, blockId, decodedMessage, writeLen);
+        if (ReadEnvFlag("WIREHAIR_UNIT_INJECT_TERMINAL")) {
+            decodeResult = Wirehair_ExtraInsufficient;
+        }
 
-        if (decodeResult != Wirehair_NeedMore)
+        if (DecodeResultIsTerminal(decodeResult))
         {
-            if (decodeResult == Wirehair_Success) {
-                break;
-            }
-
             if (decodeResult == Wirehair_ExtraInsufficient)
             {
-                // The decoder has a fixed extra-row budget; exhausting it is
-                // the same nonfatal overhead class as the warning below.
                 const unsigned extra = needed > N ? needed - N : 0;
-                cout << "Test_DecodeRandomLosses: Too much overhead: decoder exhausted extra rows after "
+                cout << "Test_DecodeRandomLosses: Terminal decoder exhaustion after "
                     << extra << " extra for N=" << N
                     << " Seed=" << seed
                     << " BlockBytes=" << blockBytes
                     << " blockId=" << blockId << endl;
                 cleanup();
-                return true;
+                return false;
             }
 
             SIAMESE_DEBUG_BREAK();
@@ -606,6 +716,9 @@ static bool Test_DecodeRandomLosses(
                 << ", result = " << wirehair_result_string(decodeResult) << endl;
             cleanup();
             return false;
+        }
+        if (decodeResult == Wirehair_Success) {
+            break;
         }
     }
 
@@ -660,6 +773,7 @@ static void TestN(uint64_t seed, int N, unsigned blockBytes)
         TestFailed = true;
         return;
     }
+    ScopedCodec encoderOwner(encoder);
 
     // Verify that encoder produces original blocks
 
@@ -697,7 +811,6 @@ static void TestN(uint64_t seed, int N, unsigned blockBytes)
         return;
     }
 
-    wirehair_free(encoder);
 }
 
 
@@ -733,7 +846,7 @@ static bool ReadmeExample()
         return false;
     }
 
-    unsigned blockId = 0, needed = 0;
+    unsigned blockId = 0;
 
     for (;;)
     {
@@ -746,9 +859,6 @@ static bool ReadmeExample()
         if (blockId % 10 == 0) {
             continue;
         }
-
-        // Keep track of how many pieces were needed
-        ++needed;
 
         vector<uint8_t> block(kPacketSize);
 
@@ -987,6 +1097,11 @@ static const unsigned kBenchmarkNList[] = {
 
 int main()
 {
+    if (!TestEnvironmentParsing()) {
+        cout << "Environment parsing self-test failed" << endl;
+        return 1;
+    }
+
     unsigned minN = kMinN;
     unsigned maxN = kMaxN;
     unsigned minBlockBytes = 1;
@@ -1021,6 +1136,11 @@ int main()
         SIAMESE_DEBUG_BREAK();
         cout << "!!! Wirehair initialization failed: " << initResult << endl;
         return -1;
+    }
+
+    if (!TestDecodeResultPolicy()) {
+        cout << "!!! Decode result policy test failed" << endl;
+        return -7;
     }
 
     if (!ReadmeExample())
@@ -1072,6 +1192,9 @@ int main()
 
         if (TestFailed) {
             cout << "A test failed for N = " << N << endl;
+            if (ReadEnvFlag("WIREHAIR_UNIT_INJECT_TERMINAL")) {
+                return 4;
+            }
             return -4;
         }
 

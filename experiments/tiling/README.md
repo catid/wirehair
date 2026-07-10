@@ -49,6 +49,16 @@ Replay the captured schedule in this harness:
 ./experiments/tiling/rowop_tiling --schedule /tmp/wirehair_oplog.csv --block-bytes 102400 --tiles 4096,8192,16384,32768,65536 --repeats 5
 ```
 
+Trace replay validates its peak simultaneous storage before allocating replay
+buffers or printing a CSV header.  The default `--max-memory-mib 256` aggregate
+policy includes the operation-vector capacity, timing samples, input, and base,
+untiled, and tiled recovery copies.  It also reserves 1 MiB for the bounded CSV
+parser, stream buffer, and allocator metadata.  Adjust the policy explicitly
+for a known larger workload.  Trace lines above 4096 bytes and traces above one
+million operations are rejected so malformed input cannot grow parser storage,
+the replay schedule, or the byte ledger without bound; `--max-operations` can
+lower the operation ceiling for constrained validation runs.
+
 The CSV columns are:
 
 ```text
@@ -60,3 +70,20 @@ Logged stages are `InitializeColumnValues`, `MultiplyDenseValues`,
 `op_type` includes `zero`, `memcpy`, `xor`, `addset`, `add2`, `muladd`, and
 `div`.  The offset fields are needed for final-block padding and partial final
 block operations.
+
+## Byte-accounting schema
+
+Schema-v2 result rows preserve `logical_gib`, `memory_gib_3stream`, and
+`gib_per_s` for historical readers, then append explicit logical-work,
+estimated-read, estimated-write, and estimated-total-traffic columns.  The
+per-operation ledger distinguishes zero, memcpy, XOR, addset, add2, muladd,
+and divide instead of applying three streams to every trace operation.
+
+Logical work is the destination span processed.  Estimated traffic counts
+explicit operands and destination writes but excludes write-allocate,
+cache-line rounding, prefetching, and cache effects; it is not measured DRAM
+bandwidth.  Validate old and new outputs with:
+
+```bash
+python3 experiments/validate_byte_metrics.py result.csv
+```

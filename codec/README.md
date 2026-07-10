@@ -56,14 +56,16 @@ base profile with real trials, or `seedtable` for offline diagnostics.
 combines `PeelingCodec` + `SeedProfile` into a deterministic matrix seed,
 generates rows, and runs the selected peel solver/evaluator.  The seed-table
 and benchmark commands use this path so matrix statistics stay consistent.
-`GeneratePeelMatrixRow()` replays the same deterministic stream to return one
-zero-based row, which is useful for block-id-indexed encoder paths.
+`GeneratePeelMatrixRow()` uses the version-2 row-index-addressable stream to
+return any uint32 zero-based row without replaying earlier rows.
 `GenerateRecoveryMatrixRows()` is the corresponding V2 recovery-row helper for
 the real precode path: it keeps the source-column prefix identical to
 `GeneratePeelMatrixRows()` for the same seed, then appends distinct columns from
 the intermediate precode range `[K, K + S + D2 + H)`.
-`GenerateRecoveryMatrixRow()` provides the matching single-row lookup for one
-recovery block index; use the batch form for adjacent rows.
+`GenerateRecoveryMatrixRow()` provides the matching constant-time seek for one
+recovery block index.  Batch and single generation are bit-identical, the
+source and precode-mix streams are independently keyed, and the source prefix
+continues to match the corresponding peel row.
 `ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
 intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full
@@ -86,6 +88,11 @@ report overhead.  Both modes report `-1` for mean overhead when every trial
 failed, and `densetune` compares candidates for explicit N/block-byte lists.
 `densecount` sweeps dense row-count deltas with paired trial seeds, and
 `densegrid` sweeps dense row-count deltas plus dense seed candidates.
+All loss-driven modes accept loss probabilities only in `[0, 0.99]` and print
+the exact parsed value they execute.  `seedtable` accepts trial counts in
+`[1, 1000000]` and records requested and completed counts in each output row.
+Allocating modes validate widened message sizes and configured caps before
+emitting result headers.
 
 `peelcost` is an offline scoring helper for degree-distribution retuning.  It
 keeps the production codec untouched, generates policy or named experimental

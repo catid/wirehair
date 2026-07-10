@@ -44,6 +44,7 @@ MOST_DENSE_INDEX_HI=${MOST_DENSE_INDEX_HI:-13}
 SMALL_DENSE_TRIALS=${SMALL_DENSE_TRIALS:-1}
 SMALL_DENSE_NLO=${SMALL_DENSE_NLO:-17}
 SMALL_DENSE_NHI=${SMALL_DENSE_NHI:-17}
+SMALL_DENSE_NLIST=${SMALL_DENSE_NLIST:-}
 
 GEN_TABLES_NO_BENCHMARKS=${GEN_TABLES_NO_BENCHMARKS:-1}
 HEAVY_TRIALS=${HEAVY_TRIALS:-0}
@@ -123,6 +124,9 @@ run_step() {
     echo "dcount_nhi=$DCOUNT_NHI"
     echo "dcount_max_failures=$DCOUNT_MAX_FAILURES"
     echo "dcount_low_count_run=$DCOUNT_LOW_COUNT_RUN"
+    echo "small_dense_nlo=$SMALL_DENSE_NLO"
+    echo "small_dense_nhi=$SMALL_DENSE_NHI"
+    echo "small_dense_nlist=$SMALL_DENSE_NLIST"
     echo
 } > "$MANIFEST"
 
@@ -167,12 +171,17 @@ if [[ "$RUN_MOST_DENSE_SEEDS" == 1 ]]; then
 fi
 
 if [[ "$RUN_SMALL_DENSE_SEEDS" == 1 ]]; then
-    run_step small_dense_seeds \
-        "$BUILD_DIR/gen_small_dseeds" \
-        --seed "$SEED" \
-        --trials "$SMALL_DENSE_TRIALS" \
-        --nlo "$SMALL_DENSE_NLO" \
+    small_dense_cmd=(
+        "$BUILD_DIR/gen_small_dseeds"
+        --seed "$SEED"
+        --trials "$SMALL_DENSE_TRIALS"
+        --nlo "$SMALL_DENSE_NLO"
         --nhi "$SMALL_DENSE_NHI"
+    )
+    if [[ -n "$SMALL_DENSE_NLIST" ]]; then
+        small_dense_cmd+=(--nlist "$SMALL_DENSE_NLIST")
+    fi
+    run_step small_dense_seeds "${small_dense_cmd[@]}"
 fi
 
 if [[ "$RUN_GEN_TABLES" == 1 ]]; then

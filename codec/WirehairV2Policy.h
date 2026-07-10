@@ -46,26 +46,26 @@ enum class DegreeFamily
 
 struct PeelingCodec
 {
-    PeelSolver Solver;
-    PeelStructure Structure;
-    DegreeFamily Family;
-    uint16_t MinDegree;
-    uint16_t MaxDegree;
-    uint16_t SolverCandidateLimit;
-    double Degree1Mass;
-    double Degree2Mass;
-    double RobustC;
-    double RobustDelta;
-    bool FullyRandomRows;
+    PeelSolver Solver = PeelSolver::RqccLowref;
+    PeelStructure Structure = PeelStructure::LtM1C16;
+    DegreeFamily Family = DegreeFamily::Lt;
+    uint16_t MinDegree = 0;
+    uint16_t MaxDegree = 0;
+    uint16_t SolverCandidateLimit = 0;
+    double Degree1Mass = 0.0;
+    double Degree2Mass = 0.0;
+    double RobustC = 0.0;
+    double RobustDelta = 0.0;
+    bool FullyRandomRows = false;
 };
 
 struct PeelPolicy
 {
-    PeelSolver Solver;
-    PeelStructure Structure;
-    BlockByteClass ByteClass;
-    BlockCountBand CountBand;
-    PeelingCodec Codec;
+    PeelSolver Solver = PeelSolver::RqccLowref;
+    PeelStructure Structure = PeelStructure::LtM1C16;
+    BlockByteClass ByteClass = BlockByteClass::Small;
+    BlockCountBand CountBand = BlockCountBand::UpTo1000;
+    PeelingCodec Codec = {};
 };
 
 BlockByteClass ClassifyBlockBytes(uint32_t block_bytes);

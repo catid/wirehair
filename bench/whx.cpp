@@ -9,6 +9,7 @@
 
 #include "wirehair/wirehair.h"
 #include "WirehairCodec.h"
+#include "WirehairEnvironment.h"
 #include "gf256.h"
 
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 using namespace std;
 using Clock = std::chrono::steady_clock;
@@ -124,21 +126,26 @@ static void* xaligned(size_t bytes) {
 static int g_threads = 0;
 // Safety cap: never oversubscribe the machine (running >HW threads, or stacking campaigns,
 // previously drove the box into a hardware reset). Leave clear headroom.
-static int kThreadCap() {
-    int hw = (int)std::thread::hardware_concurrency();
+static int thread_cap_for_hw(int hw) {
     if (hw <= 0) hw = 8;
     int cap = hw - 16;          // leave 16 HW threads free
     if (cap > 104) cap = 104;   // and never exceed 104 regardless
     if (cap < 1) cap = 1;
     return cap;
 }
-static int default_threads() {
-    int hw = (int)std::thread::hardware_concurrency();
+static int default_threads_for_hw(int hw) {
     if (hw <= 0) hw = 8;
     int t = (hw * 3) / 4; // ~75%
-    if (t > kThreadCap()) t = kThreadCap();
+    const int cap = thread_cap_for_hw(hw);
+    if (t > cap) t = cap;
     if (t < 1) t = 1;
     return t;
+}
+static int kThreadCap() {
+    return thread_cap_for_hw((int)std::thread::hardware_concurrency());
+}
+static int default_threads() {
+    return default_threads_for_hw((int)std::thread::hardware_concurrency());
 }
 // resolve requested thread count with the hard cap applied
 static int resolve_threads() {
@@ -356,23 +363,92 @@ static int cmd_micro(int argc, char** argv) {
 // ============================================================================
 // Round-trip core (shared by fuzz + bench)
 // ============================================================================
+static uint64_t saturating_add_u64(uint64_t a, uint64_t b) {
+    return b > std::numeric_limits<uint64_t>::max() - a ?
+        std::numeric_limits<uint64_t>::max() : a + b;
+}
+
+static uint64_t nearest_rank_index(uint64_t count, long double p) {
+    if (count == 0) return 0;
+    uint64_t rank;
+    if (!(p > 0)) rank = 1;
+    else if (p >= 1) rank = count;
+    else {
+        const long double scaled = p * (long double)count;
+        if (scaled >= (long double)count) rank = count;
+        else {
+            rank = (uint64_t)scaled;
+            if ((long double)rank < scaled) ++rank;
+        }
+        if (rank < 1) rank = 1;
+    }
+    return rank - 1;
+}
+
+// Nearest-rank quantile for a histogram.  Ranks are one-based (ceil(p * n));
+// p <= 0 selects the first observation, p >= 1 selects the last, and an empty
+// histogram returns zero.  Saturating accumulation prevents a wrapped rank
+// if synthetic/test histograms exceed uint64_t's representable total.
+static size_t histogram_quantile(const vector<uint64_t>& histogram, long double p) {
+    uint64_t total = 0;
+    bool overflow = false;
+    for (uint64_t count : histogram) {
+        if (count > std::numeric_limits<uint64_t>::max() - total) overflow = true;
+        total = saturating_add_u64(total, count);
+    }
+    if (total == 0 || histogram.empty()) return 0;
+
+    // This path is only reachable for synthetic histograms: Stat::trials and
+    // its bins share the same uint64_t sample-count bound.  Long double avoids
+    // wrap and preserves coherent ordering if a caller constructs larger data.
+    if (overflow) {
+        long double wide_total = 0;
+        for (uint64_t count : histogram) wide_total += (long double)count;
+        long double target;
+        if (!(p > 0)) target = 1;
+        else if (p >= 1) target = wide_total;
+        else target = ceill(p * wide_total);
+        long double cumulative = 0;
+        for (size_t i = 0; i < histogram.size(); ++i) {
+            cumulative += (long double)histogram[i];
+            if (cumulative >= target) return i;
+        }
+        return histogram.size() - 1;
+    }
+
+    const uint64_t target = nearest_rank_index(total, p) + 1;
+
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < histogram.size(); ++i) {
+        cumulative = saturating_add_u64(cumulative, histogram[i]);
+        if (cumulative >= target) return i;
+    }
+    return histogram.size() - 1;
+}
+
 struct Stat {
     uint64_t trials = 0;
     uint64_t overhead_sum = 0;       // sum of (needed - N)
     uint64_t overhead_sq = 0;
     uint32_t overhead_max = 0;
-    vector<uint32_t> overhead_hist;  // index = extra blocks, capped
+    vector<uint64_t> overhead_hist;  // index = extra blocks, capped
     Stat() : overhead_hist(64, 0) {}
     void add_overhead(uint32_t extra) {
-        overhead_sum += extra; overhead_sq += (uint64_t)extra * extra;
+        overhead_sum = saturating_add_u64(overhead_sum, extra);
+        overhead_sq = saturating_add_u64(overhead_sq, (uint64_t)extra * extra);
         if (extra > overhead_max) overhead_max = extra;
-        overhead_hist[extra < 64 ? extra : 63]++;
-        trials++;
+        const size_t bin = extra < 64 ? extra : 63;
+        overhead_hist[bin] = saturating_add_u64(overhead_hist[bin], 1);
+        trials = saturating_add_u64(trials, 1);
     }
     void merge(const Stat& o) {
-        trials += o.trials; overhead_sum += o.overhead_sum; overhead_sq += o.overhead_sq;
+        trials = saturating_add_u64(trials, o.trials);
+        overhead_sum = saturating_add_u64(overhead_sum, o.overhead_sum);
+        overhead_sq = saturating_add_u64(overhead_sq, o.overhead_sq);
         if (o.overhead_max > overhead_max) overhead_max = o.overhead_max;
-        for (size_t i = 0; i < overhead_hist.size(); ++i) overhead_hist[i] += o.overhead_hist[i];
+        for (size_t i = 0; i < overhead_hist.size(); ++i) {
+            overhead_hist[i] = saturating_add_u64(overhead_hist[i], o.overhead_hist[i]);
+        }
     }
 };
 
@@ -574,6 +650,50 @@ static bool parse_positive_int_list(const string& list, vector<int>& values) {
     return !values.empty();
 }
 
+static bool read_n_file_strict(const string& path, const char* command, vector<int>& values) {
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) {
+        fprintf(stderr, "%s: cannot open --nfile %s\n", command, path.c_str());
+        return false;
+    }
+    char linebuf[512];
+    int lineno = 0;
+    while (fgets(linebuf, sizeof(linebuf), f)) {
+        ++lineno;
+        const size_t length = strlen(linebuf);
+        if (length == sizeof(linebuf) - 1 && linebuf[length - 1] != '\n' && !feof(f)) {
+            fprintf(stderr, "%s: overlong line at %s:%d\n", command, path.c_str(), lineno);
+            fclose(f);
+            return false;
+        }
+        const char* s = linebuf;
+        while (*s == ' ' || *s == '\t') ++s;
+        if (*s == '\0' || *s == '\n' || *s == '#') continue;
+        errno = 0;
+        char* end = nullptr;
+        long n = strtol(s, &end, 10);
+        while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
+        if (errno != 0 || end == s || *end != '\0' || n < 2 || n > 64000) {
+            fprintf(stderr, "%s: bad N at %s:%d: %s", command, path.c_str(), lineno, linebuf);
+            if (length == 0 || linebuf[length - 1] != '\n') fputc('\n', stderr);
+            fclose(f);
+            return false;
+        }
+        values.push_back((int)n);
+    }
+    if (ferror(f)) {
+        fprintf(stderr, "%s: read failed for --nfile %s\n", command, path.c_str());
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    if (values.empty()) {
+        fprintf(stderr, "%s: --nfile %s has no N values\n", command, path.c_str());
+        return false;
+    }
+    return true;
+}
+
 static bool validate_n_bb_lists(const vector<int>& Ns, const vector<int>& BBs, const char* cmd) {
     if (Ns.empty() || BBs.empty()) {
         fprintf(stderr, "%s requires non-empty --N and --bb/--bb-list positive integer lists\n", cmd);
@@ -604,10 +724,10 @@ static bool option_in(const char* arg, const char* const* options) {
 static bool validate_mode_options(const string& mode, int argc, char** argv) {
     static const char* none[] = { nullptr };
     static const char* micro_values[] = { "--secs", nullptr };
-    static const char* bench_values[] = { "--bb", "--bb-list", "--loss", "--N", "--rounds", nullptr };
+    static const char* bench_values[] = { "--bb", "--bb-list", "--loss", "--N", "--rounds", "--memory-mib", nullptr };
     static const char* fuzz_values[] = { "--secs", "--nmax", "--seed", nullptr };
-    static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", nullptr };
-    static const char* scan_values[] = { "--nlo", "--nhi", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
+    static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", "--samples-out", nullptr };
+    static const char* scan_values[] = { "--nlo", "--nhi", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
 #ifdef WH_SEED_KNOBS
     static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
     static const char* seedsearch_values[] = { "--nlist", "--nfile", "--tsearch", "--tverify", "--nseeds", "--bb", "--loss", "--startmode", "--dseeds", "--goodthr", nullptr };
@@ -716,35 +836,207 @@ static int cmd_fuzz(int argc, char** argv) {
     double dt = now_sec() - start;
     uint64_t trials = g_fuzz_trials.load(), fails = g_fuzz_fail.load();
     double mean = global.trials ? (double)global.overhead_sum / global.trials : 0.0;
-    // overhead percentiles from histogram
-    auto pct = [&](double p) -> int {
-        uint64_t target = (uint64_t)(p * global.trials);
-        uint64_t cum = 0;
-        for (int i = 0; i < (int)global.overhead_hist.size(); ++i) { cum += global.overhead_hist[i]; if (cum >= target) return i; }
-        return (int)global.overhead_hist.size() - 1;
-    };
     printf("# fuzz done: %.1fs trials=%llu fails=%llu rate=%.0f trials/s\n",
            dt, (unsigned long long)trials, (unsigned long long)fails, trials / dt);
     printf("# overhead(success trials=%llu): mean=%.4f p50=%d p99=%d p999=%d max=%u\n",
-           (unsigned long long)global.trials, mean, pct(0.50), pct(0.99), pct(0.999), global.overhead_max);
+           (unsigned long long)global.trials, mean,
+           (int)histogram_quantile(global.overhead_hist, 0.50L),
+           (int)histogram_quantile(global.overhead_hist, 0.99L),
+           (int)histogram_quantile(global.overhead_hist, 0.999L),
+           global.overhead_max);
     return fails ? 1 : 0;
 }
 
 // ============================================================================
 // bench (end-to-end), parallel across threads, fixed work per (N)
 // ============================================================================
+static bool checked_mul_u64(uint64_t a, uint64_t b, uint64_t& out) {
+    if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) return false;
+    out = a * b;
+    return true;
+}
+
+static bool checked_add_u64(uint64_t a, uint64_t b, uint64_t& out) {
+    if (b > std::numeric_limits<uint64_t>::max() - a) return false;
+    out = a + b;
+    return true;
+}
+
+static bool checked_add_product_u64(uint64_t& total, uint64_t a, uint64_t b) {
+    uint64_t product = 0;
+    return checked_mul_u64(a, b, product) &&
+        checked_add_u64(total, product, total);
+}
+
+struct BenchWorkerPlan {
+    int active_workers = 0;
+    uint64_t bytes_per_worker = 0;
+};
+
+// Bound one encoder, one decoder, and the three explicit benchmark buffers.
+// Codec matrices depend on peeling, so use the largest legal deferred/dense
+// dimensions.  This intentionally overestimates normal runs but makes the
+// configured budget a real upper bound rather than an N*blockBytes proxy that
+// severely undercounts small-block workloads.
+static bool estimate_bench_worker_bytes(uint64_t N, uint64_t block_bytes,
+                                        uint64_t& bytes) {
+    const uint64_t max_mix = CAT_MAX_DENSE_ROWS + wirehair::kHeavyRows;
+
+    auto add_codec = [&](uint64_t extra_rows, bool decoder) -> bool {
+        uint64_t recovery_rows = 0;
+        if (!checked_add_u64(N, max_mix + 1, recovery_rows)) return false;
+        uint64_t recovery_bytes = 0;
+        if (!checked_mul_u64(recovery_rows, block_bytes, recovery_bytes)) return false;
+        uint64_t peel_offset = 0;
+        if (!checked_add_u64(recovery_bytes, 7, peel_offset)) return false;
+        peel_offset &= ~UINT64_C(7);
+        if (!checked_add_u64(bytes, peel_offset, bytes)) return false;
+
+        uint64_t row_count = 0;
+        if (!checked_add_u64(N, extra_rows, row_count) ||
+            !checked_add_product_u64(bytes, row_count, sizeof(wirehair::PeelRow)) ||
+            !checked_add_product_u64(bytes, N, sizeof(wirehair::PeelColumn)) ||
+            !checked_add_product_u64(bytes, N, sizeof(wirehair::PeelRefs)) ||
+            !checked_add_product_u64(bytes, N, sizeof(uint16_t)) ||
+            !checked_add_u64(bytes, row_count, bytes))
+        {
+            return false;
+        }
+
+        uint64_t ge_cols = 0;
+        if (!checked_add_u64(N, max_mix, ge_cols)) return false;
+        uint64_t rounded_cols = 0;
+        if (!checked_add_u64(ge_cols, 63, rounded_cols)) return false;
+        uint64_t ge_pitch = rounded_cols / 64;
+#if defined(WH_ALIGN64) && (WH_ALIGN64+0)
+        uint64_t aligned_pitch = 0;
+        if (!checked_add_u64(ge_pitch, 7, aligned_pitch)) return false;
+        ge_pitch = aligned_pitch & ~UINT64_C(7);
+#endif
+        uint64_t ge_rows = 0;
+        if (!checked_add_u64(N, CAT_MAX_DENSE_ROWS + extra_rows + 1, ge_rows)) {
+            return false;
+        }
+        uint64_t matrix_rows = 0;
+        uint64_t matrix_words = 0;
+        if (!checked_add_u64(N, ge_rows, matrix_rows) ||
+            !checked_mul_u64(matrix_rows, ge_pitch, matrix_words)) return false;
+        if (!checked_add_product_u64(bytes, matrix_words, sizeof(uint64_t))) return false;
+
+        const uint64_t heavy_cols = wirehair::kHeavyCols;
+        const uint64_t heavy_pitch = (heavy_cols + 6) & ~UINT64_C(3);
+        if (!checked_add_product_u64(
+                bytes, heavy_pitch, wirehair::kHeavyRows + extra_rows))
+        {
+            return false;
+        }
+        uint64_t pivot_count = 0;
+        if (!checked_add_u64(ge_cols, extra_rows, pivot_count)) return false;
+        uint64_t pivot_words = 0;
+        if (!checked_mul_u64(pivot_count, 2, pivot_words) ||
+            !checked_add_u64(pivot_words, ge_cols, pivot_words) ||
+            !checked_add_product_u64(bytes, pivot_words, sizeof(uint16_t)))
+        {
+            return false;
+        }
+
+        if (decoder &&
+            !checked_add_product_u64(bytes, row_count, block_bytes))
+        {
+            return false;
+        }
+        return checked_add_u64(bytes, sizeof(wirehair::Codec), bytes);
+    };
+
+    bytes = 0;
+    if (!checked_add_product_u64(bytes, N, block_bytes) ||
+        !checked_add_product_u64(bytes, N, block_bytes) ||
+        !checked_add_u64(bytes, block_bytes, bytes) ||
+        !add_codec(0, false) ||
+        !add_codec(CAT_MAX_EXTRA_ROWS, true))
+    {
+        return false;
+    }
+    return bytes != 0;
+}
+
+static bool plan_bench_workers(int requested_threads, uint64_t total_rounds,
+                               uint64_t N, uint64_t block_bytes,
+                               uint64_t memory_budget, BenchWorkerPlan& plan) {
+    uint64_t per_worker = 0;
+    if (requested_threads < 1 || total_rounds == 0 || N == 0 || block_bytes == 0 ||
+        !estimate_bench_worker_bytes(N, block_bytes, per_worker))
+    {
+        return false;
+    }
+    const uint64_t budget_workers = memory_budget / per_worker;
+    if (budget_workers == 0) return false;
+    uint64_t active = (uint64_t)requested_threads;
+    if (active > total_rounds) active = total_rounds;
+    if (active > budget_workers) active = budget_workers;
+    if (active == 0 || active > (uint64_t)std::numeric_limits<int>::max()) return false;
+    plan.active_workers = (int)active;
+    plan.bytes_per_worker = per_worker;
+    return true;
+}
+
+static bool verify_recovered_bytes(const uint8_t* expected, const uint8_t* actual,
+                                   uint64_t bytes, uint64_t& mismatch_offset) {
+    if (bytes == 0 || memcmp(expected, actual, (size_t)bytes) == 0) {
+        mismatch_offset = bytes;
+        return true;
+    }
+    uint64_t i = 0;
+    while (i < bytes && expected[i] == actual[i]) ++i;
+    mismatch_offset = i;
+    return false;
+}
+
+enum BenchFaultLocation { BENCH_FAULT_NONE, BENCH_FAULT_FIRST, BENCH_FAULT_MIDDLE,
+                          BENCH_FAULT_LAST, BENCH_FAULT_ABSOLUTE };
+static BenchFaultLocation g_bench_fault_location = BENCH_FAULT_NONE;
+static uint64_t g_bench_fault_offset = 0;
+
+static bool configure_bench_fault() {
+    const wirehair::EnvironmentValue environment("WHX_BENCH_CORRUPT");
+    const char* value = environment.Get();
+    if (!value || !*value) return true;
+    if (!strcmp(value, "first")) g_bench_fault_location = BENCH_FAULT_FIRST;
+    else if (!strcmp(value, "middle")) g_bench_fault_location = BENCH_FAULT_MIDDLE;
+    else if (!strcmp(value, "last")) g_bench_fault_location = BENCH_FAULT_LAST;
+    else {
+        if (!parse_u64_strict(value, g_bench_fault_offset)) {
+            fprintf(stderr, "WHX_BENCH_CORRUPT must be first, middle, last, or a byte offset\n");
+            return false;
+        }
+        g_bench_fault_location = BENCH_FAULT_ABSOLUTE;
+    }
+    return true;
+}
+
+static bool bench_fault_offset(uint64_t bytes, uint64_t& offset) {
+    if (g_bench_fault_location == BENCH_FAULT_NONE || bytes == 0) return false;
+    if (g_bench_fault_location == BENCH_FAULT_FIRST) offset = 0;
+    else if (g_bench_fault_location == BENCH_FAULT_MIDDLE) offset = bytes / 2;
+    else if (g_bench_fault_location == BENCH_FAULT_LAST) offset = bytes - 1;
+    else offset = g_bench_fault_offset;
+    return offset < bytes;
+}
+
 struct BenchAccum {
     double enc_create_us = 0; uint64_t enc_create_n = 0;
     double encode_us = 0; uint64_t encode_n = 0; uint64_t encode_bytes = 0;
     double decode_us = 0; uint64_t decode_n = 0; uint64_t decode_bytes = 0;
     double recover_us = 0; uint64_t recover_n = 0; uint64_t recover_bytes = 0;
     uint64_t overhead_sum = 0; uint64_t rounds = 0; uint64_t fails = 0;
+    uint64_t mismatches = 0;
     void merge(const BenchAccum& o){
         enc_create_us+=o.enc_create_us; enc_create_n+=o.enc_create_n;
         encode_us+=o.encode_us; encode_n+=o.encode_n; encode_bytes+=o.encode_bytes;
         decode_us+=o.decode_us; decode_n+=o.decode_n; decode_bytes+=o.decode_bytes;
         recover_us+=o.recover_us; recover_n+=o.recover_n; recover_bytes+=o.recover_bytes;
         overhead_sum+=o.overhead_sum; rounds+=o.rounds; fails+=o.fails;
+        mismatches+=o.mismatches;
     }
 };
 
@@ -757,7 +1049,7 @@ struct BenchWorker {
     ~BenchWorker() { if (enc) wirehair_free(enc); if (dec) wirehair_free(dec); }
 };
 
-static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRate, uint64_t seed,
+static bool bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRate, uint64_t seed,
                             BenchAccum& a, bool timed) {
     Rng rng(seed);
     uint64_t messageBytes = (uint64_t)N * blockBytes; // full blocks for clean throughput accounting
@@ -767,11 +1059,11 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
     double t0 = now_sec();
     w.enc = wirehair_encoder_create(w.enc, w.message.data(), messageBytes, blockBytes); // reuse
     double t1 = now_sec();
-    if (!w.enc) { if (timed) a.fails++; return; }
+    if (!w.enc) { if (timed) a.fails++; return false; }
     if (timed) { a.enc_create_us += (t1 - t0) * 1e6; a.enc_create_n++; }
 
     w.dec = wirehair_decoder_create(w.dec, messageBytes, blockBytes); // reuse
-    if (!w.dec) { if (timed) a.fails++; return; }
+    if (!w.dec) { if (timed) a.fails++; return false; }
 
     // measure encode of repair blocks (ids N..N+enc_count-1)
     const int enc_count = 64;
@@ -782,7 +1074,7 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
             Wirehair_Success)
         {
             if (timed) a.fails++;
-            return;
+            return false;
         }
     }
     double e1 = now_sec();
@@ -817,31 +1109,65 @@ static void bench_one_round(BenchWorker& w, int N, int blockBytes, double lossRa
         double r0 = now_sec();
         WirehairResult rr = wirehair_recover(w.dec, w.decoded.data(), messageBytes);
         double r1 = now_sec();
-        if (timed && rr == Wirehair_Success) {
-            a.recover_us += (r1 - r0) * 1e6;
-            a.recover_n++;
-            a.recover_bytes += messageBytes;
-            a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0;
-            a.rounds++;
+        if (rr == Wirehair_Success) {
+            uint64_t injected_offset = 0;
+            if (timed && bench_fault_offset(messageBytes, injected_offset)) {
+                w.decoded[(size_t)injected_offset] ^= 1;
+            }
+            uint64_t mismatch_offset = 0;
+            const bool exact = verify_recovered_bytes(
+                w.message.data(), w.decoded.data(), messageBytes, mismatch_offset);
+            if (!exact) {
+                if (timed) {
+                    a.fails++;
+                    a.mismatches++;
+                }
+                std::lock_guard<std::mutex> lk(g_print_mu);
+                fprintf(stderr,
+                        "BENCH_MISMATCH seed=0x%llx N=%d bb=%d bytes=%llu offset=%llu timed=%d\n",
+                        (unsigned long long)seed, N, blockBytes,
+                        (unsigned long long)messageBytes,
+                        (unsigned long long)mismatch_offset, timed ? 1 : 0);
+                return false;
+            }
+            if (timed) {
+                // Exact comparison is intentionally after r1, outside recover timing.
+                a.recover_us += (r1 - r0) * 1e6;
+                a.recover_n++;
+                a.recover_bytes += messageBytes;
+                a.overhead_sum += (needed >= (unsigned)N) ? (needed - N) : 0;
+                a.rounds++;
+            }
+            return true;
         }
-        else if (timed) {
+        if (timed) {
             a.fails++;
         }
+        return false;
     }
     else if (timed) {
         // Failed rounds are counted separately; folding their capped "needed"
         // into overhead_sum would silently shift the overhead statistic.
         a.fails++;
     }
+    return false;
 }
 
 static int cmd_bench(int argc, char** argv) {
     int threads = resolve_threads();
     string bblist = "1300";
     double lossRate = 0.10;
+    uint64_t memory_mib = 4096;
     int rounds_per_N = 0; // 0 => auto by N
     bool rounds_set = false;
     string nlist = "32,128,512,1024,2048,8192,32000";
+    const wirehair::EnvironmentValue memory_environment(
+        "WHX_BENCH_MEMORY_MIB");
+    const char* memory_env = memory_environment.Get();
+    if (memory_env && !parse_u64_strict(memory_env, memory_mib)) {
+        fprintf(stderr, "invalid WHX_BENCH_MEMORY_MIB\n");
+        return 2;
+    }
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i], "--bb") && i + 1 < argc) bblist = argv[++i];
         else if (!strcmp(argv[i], "--bb-list") && i + 1 < argc) bblist = argv[++i];
@@ -853,6 +1179,9 @@ static int cmd_bench(int argc, char** argv) {
             if (!parse_int_strict(argv[++i], rounds_per_N)) return 2;
             rounds_set = true;
         }
+        else if (!strcmp(argv[i], "--memory-mib") && i + 1 < argc) {
+            if (!parse_u64_strict(argv[++i], memory_mib)) return 2;
+        }
     }
     vector<int> Ns;
     vector<int> BBs;
@@ -862,14 +1191,30 @@ static int cmd_bench(int argc, char** argv) {
     {
         return 2;
     }
+    uint64_t memory_budget = 0;
     if (!std::isfinite(lossRate) || lossRate < 0.0 || lossRate >= 1.0 ||
+        memory_mib == 0 || !checked_mul_u64(memory_mib, 1024ull * 1024ull, memory_budget) ||
         (rounds_set && rounds_per_N < 1))
     {
-        fprintf(stderr, "bench requires 0 <= --loss < 1 and positive --rounds when specified\n");
+        fprintf(stderr, "bench requires 0 <= --loss < 1, positive --rounds when specified, and a representable positive --memory-mib\n");
         return 2;
     }
+    if (!configure_bench_fault()) return 2;
+    if (g_bench_fault_location == BENCH_FAULT_ABSOLUTE) {
+        for (int blockBytes : BBs) for (int N : Ns) {
+            const uint64_t message_bytes = (uint64_t)N * (uint64_t)blockBytes;
+            if (g_bench_fault_offset >= message_bytes) {
+                fprintf(stderr,
+                        "WHX_BENCH_CORRUPT offset %llu is outside N=%d bb=%d message (%llu bytes)\n",
+                        (unsigned long long)g_bench_fault_offset, N, blockBytes,
+                        (unsigned long long)message_bytes);
+                return 2;
+            }
+        }
+    }
     const bool matrix = BBs.size() > 1;
-    printf("# bench: threads=%d bb=%s loss=%.2f\n", threads, bblist.c_str(), lossRate);
+    printf("# bench: requested_threads=%d bb=%s loss=%.2f memory_mib=%llu verify=exact(outside_timing)\n",
+           threads, bblist.c_str(), lossRate, (unsigned long long)memory_mib);
     if (matrix)
         printf("%-8s %-8s %10s %14s %14s %14s %14s %10s\n", "N", "bb", "msg_MiB", "create_MBPS", "encode_MBPS", "decode_MBPS", "recover_MBPS", "overhead");
     else
@@ -891,10 +1236,19 @@ static int cmd_bench(int argc, char** argv) {
                 total_rounds = (int)scaled;
             }
         }
-        std::atomic<int> next{0};
+        BenchWorkerPlan plan;
+        if (!plan_bench_workers(threads, (uint64_t)total_rounds, (uint64_t)N,
+                                (uint64_t)blockBytes, memory_budget, plan))
+        {
+            fprintf(stderr,
+                    "bench memory budget cannot support one worker: N=%d bb=%d rounds=%d memory_mib=%llu\n",
+                    N, blockBytes, total_rounds, (unsigned long long)memory_mib);
+            return 2;
+        }
+        std::atomic<uint64_t> next{0};
         BenchAccum global; std::mutex mu;
         vector<thread> ts;
-        for (int t = 0; t < threads; ++t) {
+        for (int t = 0; t < plan.active_workers; ++t) {
             ts.emplace_back([&, t]() {
                 BenchWorker w;
                 uint64_t mb = (uint64_t)N * blockBytes;
@@ -903,10 +1257,16 @@ static int cmd_bench(int argc, char** argv) {
                 w.block.assign(blockBytes, 0);
                 BenchAccum a;
                 // warmup (untimed): allocate codecs + pre-fault all pages
-                bench_one_round(w, N, blockBytes, lossRate, 0x9999ULL + (uint64_t)N * 131 + t, a, false);
+                if (!bench_one_round(w, N, blockBytes, lossRate,
+                                     0x9999ULL + (uint64_t)N * 131 + t, a, false))
+                {
+                    a.fails++;
+                    std::lock_guard<std::mutex> lk(mu); global.merge(a);
+                    return;
+                }
                 for (;;) {
-                    int idx = next.fetch_add(1);
-                    if (idx >= total_rounds) break;
+                    const uint64_t idx = next.fetch_add(1);
+                    if (idx >= (uint64_t)total_rounds) break;
                     bench_one_round(w, N, blockBytes, lossRate, 0x9999ULL + (uint64_t)N * 131 + idx * 2654435761ULL, a, true);
                 }
                 std::lock_guard<std::mutex> lk(mu); global.merge(a);
@@ -931,6 +1291,10 @@ static int cmd_bench(int argc, char** argv) {
                    N, create_MBPS, encode_MBPS, decode_MBPS, recover_MBPS, overhead);
         }
         if (global.fails) printf("  FAILS=%llu", (unsigned long long)global.fails);
+        if (global.mismatches) printf(" MISMATCHES=%llu", (unsigned long long)global.mismatches);
+        printf("  workers=%d worker_MiB=%.2f verified=%llu",
+               plan.active_workers, (double)plan.bytes_per_worker / 1048576.0,
+               (unsigned long long)global.rounds);
         if (global.fails || global.rounds == 0) {
             failed = true;
         }
@@ -1011,6 +1375,7 @@ static int cmd_ohead(int argc, char** argv) {
     int startMode = 1;                   // repair-only: pure code overhead (most seed-sensitive)
     double loss = 0.10;
     uint64_t baseSeed = 0xACE0;
+    string samples_path;
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i], "--nlo") && i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; }
         else if (!strcmp(argv[i], "--nhi") && i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; }
@@ -1020,6 +1385,7 @@ static int cmd_ohead(int argc, char** argv) {
         else if (!strcmp(argv[i], "--startmode") && i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
         else if (!strcmp(argv[i], "--loss") && i+1<argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
         else if (!strcmp(argv[i], "--seed") && i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
+        else if (!strcmp(argv[i], "--samples-out") && i+1<argc) samples_path = argv[++i];
     }
     if (nlo < 2 || nhi > 64000 || nlo > nhi || nstep < 0 ||
         trials < 1 || !valid_seedcheck_args(nlo, bb, startMode, loss))
@@ -1028,34 +1394,79 @@ static int cmd_ohead(int argc, char** argv) {
         return 2;
     }
     vector<int> Ns;
-    if (nstep > 0) { for (int n = nlo; n <= nhi; n += nstep) Ns.push_back(n); }
-    else { int pts = 64; double lo=log((double)nlo), hi=log((double)nhi); for (int i=0;i<pts;++i){int n=(int)exp(lo+(hi-lo)*i/(pts-1)); if(Ns.empty()||n>Ns.back()) Ns.push_back(n);} }
+    if (nstep > 0) {
+        for (int64_t n = nlo; n <= nhi; n += (int64_t)nstep) Ns.push_back((int)n);
+    }
+    else if (nlo == nhi) { Ns.push_back(nlo); }
+    else {
+        const int pts = 64;
+        const double lo = log((double)nlo), hi = log((double)nhi);
+        for (int i = 0; i < pts; ++i) {
+            int n = (int)llround(exp(lo + (hi - lo) * i / (pts - 1)));
+            if (i == 0) n = nlo;
+            if (i == pts - 1) n = nhi;
+            if (n < nlo) n = nlo;
+            if (n > nhi) n = nhi;
+            if (Ns.empty() || n > Ns.back()) Ns.push_back(n);
+        }
+    }
+    FILE* samples_file = nullptr;
+    if (!samples_path.empty()) {
+        samples_file = fopen(samples_path.c_str(), "w");
+        if (!samples_file) {
+            fprintf(stderr, "ohead: cannot open --samples-out %s\n", samples_path.c_str());
+            return 2;
+        }
+        fprintf(samples_file, "# whx-ohead-samples-v1 columns=N trial extra\n");
+    }
     printf("# ohead: threads=%d trials/N=%ld bb=%d startMode=%d loss=%.2f Ns=%zu range[%d,%d]\n",
            threads, trials, bb, startMode, loss, Ns.size(), nlo, nhi);
     printf("%-8s %10s %6s %6s %6s %6s %10s\n", "N", "mean", "p50", "p99", "p999", "max", "fail");
     for (int N : Ns) {
-        std::atomic<long> next{0};
+        std::atomic<uint64_t> next{0};
         Stat global; std::mutex mu; std::atomic<long> fails{0};
+        vector<uint32_t> raw_samples;
+        if (samples_file) raw_samples.assign((size_t)trials, UINT32_MAX);
         vector<thread> ts;
         for (int t = 0; t < threads; ++t) {
             ts.emplace_back([&, t]() {
                 Stat loc; long lf = 0;
                 for (;;) {
-                    long idx = next.fetch_add(1);
-                    if (idx >= trials) break;
+                    const uint64_t idx = next.fetch_add(1);
+                    if (idx >= (uint64_t)trials) break;
                     uint32_t extra = 0;
                     uint64_t s = baseSeed + (uint64_t)N * 0x9E3779B1u + (uint64_t)idx * 0xD1B54A32D192ED03ull; // distinct strides: equal strides made seed(N, idx) == seed(N+d, idx-d)
                     int rc = roundtrip(s, N, bb, startMode, loss, &extra, nullptr);
-                    if (rc == 0) loc.add_overhead(extra); else lf++;
+                    if (rc == 0) {
+                        loc.add_overhead(extra);
+                        if (samples_file) raw_samples[(size_t)idx] = extra;
+                    }
+                    else lf++;
                 }
                 std::lock_guard<std::mutex> lk(mu); global.merge(loc); fails += lf;
             });
         }
         for (auto& th : ts) th.join();
-        auto pct = [&](double p)->int{ uint64_t tgt=(uint64_t)(p*global.trials),c=0; for(int i=0;i<(int)global.overhead_hist.size();++i){c+=global.overhead_hist[i]; if(c>=tgt) return i;} return 63; };
         double mean = global.trials ? (double)global.overhead_sum/global.trials : 0;
-        printf("%-8d %10.4f %6d %6d %6d %6u %10ld\n", N, mean, pct(0.5), pct(0.99), pct(0.999), global.overhead_max, fails.load());
+        printf("%-8d %10.4f %6d %6d %6d %6u %10ld\n", N, mean,
+               (int)histogram_quantile(global.overhead_hist, 0.50L),
+               (int)histogram_quantile(global.overhead_hist, 0.99L),
+               (int)histogram_quantile(global.overhead_hist, 0.999L),
+               global.overhead_max, fails.load());
+        if (samples_file) {
+            for (uint64_t idx = 0; idx < (uint64_t)trials; ++idx) {
+                const uint32_t extra = raw_samples[(size_t)idx];
+                if (extra != UINT32_MAX) {
+                    fprintf(samples_file, "%d %llu %u\n", N,
+                            (unsigned long long)idx, extra);
+                }
+            }
+        }
         fflush(stdout);
+    }
+    if (samples_file && fclose(samples_file) != 0) {
+        fprintf(stderr, "ohead: failed writing --samples-out %s\n", samples_path.c_str());
+        return 1;
     }
     return 0;
 }
@@ -1098,9 +1509,14 @@ static double seed_mean(int N, int bb, int startMode, double loss, int pseed, in
 }
 
 // Parallel version: split `trials` across `threads` (each sets its own thread-local override).
+static const uint64_t kValidationTrialStride = 2654435761ull;
+static uint64_t validation_trial_seed(uint64_t base, uint64_t trial) {
+    return base + trial * kValidationTrialStride;
+}
+
 static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed, int dseed, long trials,
                             uint64_t base, int threads) {
-    std::atomic<long> idx{0};
+    std::atomic<uint64_t> idx{0};
     std::atomic<uint64_t> osum{0};
     std::atomic<long> fail{0};
     std::atomic<bool> stop{false};
@@ -1119,19 +1535,20 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
         }
         for (;;) {
             if (stop.load()) break;
-            long k = idx.fetch_add(128);
-            if (k >= trials) break;
-            long end = k + 128; if (end > trials) end = trials;
-            for (long j = k; j < end; ++j) {
+            const uint64_t k = idx.fetch_add(128);
+            if (k >= (uint64_t)trials) break;
+            uint64_t end = k + 128;
+            if (end > (uint64_t)trials) end = (uint64_t)trials;
+            for (uint64_t j = k; j < end; ++j) {
                 if (stop.load()) break;
                 uint32_t extra = 0;
                 int rc;
                 if (bb == 0) {
-                    rc = matrix_decode_roundtrip(base + (uint64_t)j * 2654435761ull, N, startMode, loss, &extra, nullptr);
+                    rc = matrix_decode_roundtrip(validation_trial_seed(base, j), N, startMode, loss, &extra, nullptr);
                 }
                 else {
                     wh_set_override(ovrN, -1, pseed, dseed);
-                    rc = roundtrip(base + (uint64_t)j * 2654435761ull, N, bb, startMode, loss, &extra, nullptr);
+                    rc = roundtrip(validation_trial_seed(base, j), N, bb, startMode, loss, &extra, nullptr);
                 }
                 if (rc == 0) lsum += extra;
                 else {
@@ -1146,6 +1563,33 @@ static double seed_mean_par(int N, int bb, int startMode, double loss, int pseed
     });
     for (auto& th : ts) th.join();
     return fail.load() ? 1e9 : (double)osum.load() / trials;
+}
+
+struct FinalistValidationPlan {
+    double primary_loss;
+    double secondary_loss;
+    uint64_t primary_base;
+    uint64_t secondary_base;
+};
+
+struct FinalistScores {
+    double primary;
+    double secondary;
+};
+
+template <typename Scorer>
+static FinalistScores validate_finalist(const FinalistValidationPlan& plan,
+                                        int pseed, int dseed, Scorer scorer) {
+    FinalistScores result;
+    result.primary = scorer(plan.primary_loss, pseed, dseed, plan.primary_base);
+    result.secondary = scorer(plan.secondary_loss, pseed, dseed, plan.secondary_base);
+    return result;
+}
+
+static bool finalist_is_strictly_better(const FinalistScores& candidate,
+                                        const FinalistScores& incumbent) {
+    return std::max(candidate.primary, candidate.secondary) <
+           std::max(incumbent.primary, incumbent.secondary);
 }
 
 static int cmd_seedmean(int argc, char** argv) {
@@ -1207,30 +1651,7 @@ static int cmd_seedsearch(int argc, char** argv) {
     if (nseeds > 256) nseeds = 256;
     vector<int> Ns;
     if (!nfile.empty()) {
-        // Loud failure on a bad path or malformed file: the old fscanf loop
-        // silently produced an empty/truncated N list and the campaign
-        // exited 0 looking like a complete search with no weak N.
-        FILE* f = fopen(nfile.c_str(), "r");
-        if (!f) { fprintf(stderr, "seedsearch: cannot open --nfile %s\n", nfile.c_str()); return 2; }
-        char linebuf[512];
-        int lineno = 0;
-        while (fgets(linebuf, sizeof(linebuf), f)) {
-            ++lineno;
-            const char* s = linebuf;
-            while (*s == ' ' || *s == '\t') ++s;
-            if (*s == '\0' || *s == '\n' || *s == '#') continue; // blank/comment
-            char* end = nullptr;
-            long n = strtol(s, &end, 10);
-            while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') ++end;
-            if (end == s || *end != '\0' || n < 2 || n > 64000) {
-                fprintf(stderr, "seedsearch: bad N at %s:%d: %s", nfile.c_str(), lineno, linebuf);
-                fclose(f);
-                return 2;
-            }
-            Ns.push_back((int)n);
-        }
-        fclose(f);
-        if (Ns.empty()) { fprintf(stderr, "seedsearch: --nfile %s has no N values\n", nfile.c_str()); return 2; }
+        if (!read_n_file_strict(nfile, "seedsearch", Ns)) return 2;
     }
     if (!nlist.empty()) {
         vector<int> listed;
@@ -1247,11 +1668,11 @@ static int cmd_seedsearch(int argc, char** argv) {
         else if (!strcmp(argv[i],"--goodthr")&&i+1<argc) { if (!parse_double_strict(argv[++i], goodthr)) return 2; }
     }
     if (Ns.empty() || tsearch < 1 || tverify < 1 || bb < 0 ||
-        !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        !std::isfinite(loss) || loss != 0.10 ||
         (startMode != 0 && startMode != 1) ||
         dseeds < 0 || !std::isfinite(goodthr) || goodthr < 0.0)
     {
-        fprintf(stderr, "seedsearch: invalid parameters\n");
+        fprintf(stderr, "seedsearch: invalid parameters (legacy output requires --loss exactly 0.10)\n");
         return 2;
     }
     for (int N : Ns) {
@@ -1261,8 +1682,11 @@ static int cmd_seedsearch(int argc, char** argv) {
         }
     }
     if (dseeds > 256) dseeds = 256;
-    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu bb=%d nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f\n",
+    fprintf(stderr,"# seedsearch: threads=%d Ns=%zu bb=%d nseeds=%d dseeds=%d tsearch=%ld tverify=%ld goodthr=%.3f primary_loss=0.10 secondary_loss=0.30 pairing=paired\n",
             threads,Ns.size(),bb,nseeds,dseeds,tsearch,tverify,goodthr);
+    printf("# schema=whx-seedsearch-v1 primary_loss=0.10 secondary_loss=0.30 finalist_trials=paired tie_break=peel_then_lowest_seed\n");
+    printf("# pairing=paired validation_trials=%ld trial_stride=%llu primary_base=0xBEE5+N*577 secondary_base=0xF00D+N*331\n",
+           tverify, (unsigned long long)kValidationTrialStride);
     printf("# N  best_pseed  best_dseed  default_mean  best_mean@0.10  best_mean@0.30\n");
     for (int N : Ns) {
         // Stage 1: search peel seeds (default dense). One thread per candidate seed.
@@ -1277,15 +1701,27 @@ static int cmd_seedsearch(int argc, char** argv) {
         for(auto&th:ts) th.join();
         int bestP=0; for(int s=1;s<nseeds;++s) if(sm[s]<sm[bestP]) bestP=s;
         int bestD=-1;
-        double defMean = seed_mean_par(N, bb, startMode, loss, -1, -1, tverify, 0xD00D + (uint64_t)N*131, threads);
-        double v10 = seed_mean_par(N, bb, startMode, loss, bestP, -1, tverify, 0xBEE5 + (uint64_t)N*577, threads);
-        double v30 = seed_mean_par(N, bb, startMode, 0.30, bestP, -1, tverify, 0xF00D + (uint64_t)N*331, threads);
+        const FinalistValidationPlan validation = {
+            loss, 0.30,
+            0xBEE5 + (uint64_t)N * 577,
+            0xF00D + (uint64_t)N * 331
+        };
+        auto scorer = [&](double validation_loss, int pseed, int dseed, uint64_t base) {
+            return seed_mean_par(N, bb, startMode, validation_loss, pseed, dseed,
+                                 tverify, base, threads);
+        };
+        double defMean = scorer(validation.primary_loss, -1, -1, validation.primary_base);
+        FinalistScores peel_scores = validate_finalist(validation, bestP, -1, scorer);
+        double v10 = peel_scores.primary;
+        double v30 = peel_scores.secondary;
 
         // Stage 2 (Task5): peel-only insufficient -> joint (peel,dense) search over top-K peels x dense seeds.
         if (dseeds > 0 && (v10 >= goodthr || v30 >= goodthr)) {
             // top-K peels by stage-1 @0.10 mean
             vector<int> order(nseeds); for(int s=0;s<nseeds;++s) order[s]=s;
-            std::sort(order.begin(), order.end(), [&](int a,int b){return sm[a]<sm[b];});
+            std::sort(order.begin(), order.end(), [&](int a,int b){
+                return sm[a] < sm[b] || (sm[a] == sm[b] && a < b);
+            });
             const int K = order.size() < 4 ? (int)order.size() : 4;
             vector<int> peels(order.begin(), order.begin()+K);
             // score each (peel,dense) by the harder loss (0.30); parallelize across combos
@@ -1302,10 +1738,13 @@ static int cmd_seedsearch(int argc, char** argv) {
             for(auto&th:ts2) th.join();
             int bc=0; for(int c=1;c<ncomb;++c) if(cs[c]<cs[bc]) bc=c;
             int jp=peels[bc/dseeds], jd=bc%dseeds;
-            double jv10 = seed_mean_par(N, bb, startMode, loss, jp, jd, tverify, 0xAB12 + (uint64_t)N*457, threads);
-            double jv30 = seed_mean_par(N, bb, startMode, 0.30, jp, jd, tverify, 0xCD34 + (uint64_t)N*149, threads);
+            const FinalistScores joint_scores = validate_finalist(validation, jp, jd, scorer);
+            double jv10 = joint_scores.primary;
+            double jv30 = joint_scores.secondary;
             // keep joint result if it beats peel-only on the harder metric
-            if (std::max(jv10,jv30) < std::max(v10,v30)) { bestP=jp; bestD=jd; v10=jv10; v30=jv30; }
+            if (finalist_is_strictly_better(joint_scores, peel_scores)) {
+                bestP=jp; bestD=jd; v10=jv10; v30=jv30;
+            }
         }
         printf("%-6d %4d %5d %12.4f %14.4f %14.4f\n", N, bestP, bestD, defMean, v10, v30);
         fflush(stdout);
@@ -1319,13 +1758,16 @@ static int cmd_seedsearch(int argc, char** argv) {
 static int cmd_scan(int argc, char** argv) {
     int threads = resolve_threads();
     int nlo = 2048, nhi = 64000;
+    string nfile;
+    bool range_explicit = false;
     long trials = 800;
     int bb = 64, startMode = 0;
     double loss = 0.10, thresh = 0.08;
     uint64_t baseSeed = 0x5CA4;
     for (int i = 0; i < argc; ++i) {
-        if (!strcmp(argv[i],"--nlo")&&i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; }
-        else if (!strcmp(argv[i],"--nhi")&&i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; }
+        if (!strcmp(argv[i],"--nlo")&&i+1<argc) { if (!parse_int_strict(argv[++i], nlo)) return 2; range_explicit = true; }
+        else if (!strcmp(argv[i],"--nhi")&&i+1<argc) { if (!parse_int_strict(argv[++i], nhi)) return 2; range_explicit = true; }
+        else if (!strcmp(argv[i],"--nfile")&&i+1<argc) nfile = argv[++i];
         else if (!strcmp(argv[i],"--trials")&&i+1<argc) { if (!parse_long_strict(argv[++i], trials)) return 2; }
         else if (!strcmp(argv[i],"--bb")&&i+1<argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
         else if (!strcmp(argv[i],"--startmode")&&i+1<argc) { if (!parse_int_strict(argv[++i], startMode)) return 2; }
@@ -1333,24 +1775,52 @@ static int cmd_scan(int argc, char** argv) {
         else if (!strcmp(argv[i],"--thresh")&&i+1<argc) { if (!parse_double_strict(argv[++i], thresh)) return 2; }
         else if (!strcmp(argv[i],"--seed")&&i+1<argc) { if (!parse_u64_strict(argv[++i], baseSeed)) return 2; }
     }
-    if (nlo < 2 || nhi > 64000 || nlo > nhi || trials < 1 ||
-        !valid_seedcheck_args(nlo, bb, startMode, loss) ||
+    if ((!nfile.empty() && range_explicit) || trials < 1 || bb < 0 ||
+        (startMode != 0 && startMode != 1) ||
+        loss < 0.0 || loss > 0.99 || !std::isfinite(loss) ||
         thresh < 0.0 || !std::isfinite(thresh))
     {
-        fprintf(stderr, "scan: invalid range or parameters\n");
+        fprintf(stderr, "scan: invalid parameters (--nfile cannot be combined with --nlo/--nhi)\n");
         return 2;
     }
-    printf("# scan: threads=%d N=[%d,%d] trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
-           threads, nlo, nhi, trials, bb, startMode, loss, thresh);
-    std::atomic<int> nextN{nlo};
+    vector<int> Ns;
+    if (!nfile.empty()) {
+        if (!read_n_file_strict(nfile, "scan", Ns)) return 2;
+        sort(Ns.begin(), Ns.end());
+        if (adjacent_find(Ns.begin(), Ns.end()) != Ns.end()) {
+            fprintf(stderr, "scan: duplicate N in --nfile %s\n", nfile.c_str());
+            return 2;
+        }
+    }
+    else {
+        if (nlo < 2 || nhi > 64000 || nlo > nhi ||
+            !valid_seedcheck_args(nlo, bb, startMode, loss))
+        {
+            fprintf(stderr, "scan: invalid range or parameters\n");
+            return 2;
+        }
+        Ns.reserve((size_t)(nhi - nlo + 1));
+        for (int N = nlo; N <= nhi; ++N) Ns.push_back(N);
+    }
+    const int active_threads = std::min<int>(threads, (int)Ns.size());
+    if (!nfile.empty()) {
+        printf("# scan: threads=%d source=%s count=%zu trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
+               active_threads, nfile.c_str(), Ns.size(), trials, bb, startMode, loss, thresh);
+    }
+    else {
+        printf("# scan: threads=%d N=[%d,%d] trials/N=%ld bb=%d startMode=%d loss=%.2f thresh=%.3f\n",
+               active_threads, nlo, nhi, trials, bb, startMode, loss, thresh);
+    }
+    std::atomic<size_t> next_index{0};
     std::mutex pmu;
     std::atomic<long> scanned{0};
     vector<thread> ts;
-    for (int t = 0; t < threads; ++t) {
+    for (int t = 0; t < active_threads; ++t) {
         ts.emplace_back([&]() {
             for (;;) {
-                int N = nextN.fetch_add(1);
-                if (N > nhi) break;
+                const size_t index = next_index.fetch_add(1);
+                if (index >= Ns.size()) break;
+                const int N = Ns[index];
                 uint64_t osum = 0; uint32_t omax = 0; long fail = 0;
                 for (long k = 0; k < trials; ++k) {
                     uint32_t extra = 0;
@@ -1383,9 +1853,7 @@ unsigned wh_graph_max_component(); uint64_t wh_graph_component_sum_squares();
 
 static unsigned percentile_value(const vector<unsigned>& sorted, double p) {
     if (sorted.empty()) return 0;
-    size_t idx = (size_t)(p * (double)(sorted.size() - 1) + 0.5);
-    if (idx >= sorted.size()) idx = sorted.size() - 1;
-    return sorted[idx];
+    return sorted[(size_t)nearest_rank_index((uint64_t)sorted.size(), (long double)p)];
 }
 
 static void summarize_values(const vector<unsigned>& values, double& mean, double& sd,
@@ -1451,7 +1919,8 @@ static int cmd_peelstat(int argc, char** argv) {
         return 2;
     }
 
-    const char* mode = getenv("WH_PEEL_MODE");
+    const wirehair::EnvironmentValue mode_environment("WH_PEEL_MODE");
+    const char* mode = mode_environment.Get();
     if (!mode) mode = "0";
     printf("# peelstat: mode=%s threads=%d trials=%d loss=%.2f startMode=%d seed=0x%llx\n",
            mode, threads, trials, loss, startMode, (unsigned long long)baseSeed);
@@ -1598,23 +2067,134 @@ static int cmd_count(int argc, char** argv) {
 }
 #endif
 
+static int cmd_selftest(int argc, char**) {
+    if (argc != 0) {
+        fprintf(stderr, "selftest takes no options\n");
+        return 2;
+    }
+    int assertions = 0;
+    auto expect = [&](bool condition, const char* what) {
+        ++assertions;
+        if (!condition) fprintf(stderr, "SELFTEST FAIL: %s\n", what);
+        return condition;
+    };
+    bool ok = true;
+
+    vector<uint64_t> hist;
+    ok &= expect(histogram_quantile(hist, 0.5L) == 0, "empty histogram");
+    hist.assign(4, 0); hist[1] = 1;
+    ok &= expect(histogram_quantile(hist, 0.0L) == 1, "single sample p0");
+    ok &= expect(histogram_quantile(hist, 0.5L) == 1, "single sample p50");
+    ok &= expect(histogram_quantile(hist, 0.999L) == 1, "single sample p999");
+    hist.assign(5, 0); hist[1] = 1; hist[3] = 1;
+    ok &= expect(histogram_quantile(hist, 0.5L) == 1, "two sample p50 boundary");
+    ok &= expect(histogram_quantile(hist, 0.5001L) == 3, "two sample above p50");
+    ok &= expect(histogram_quantile(hist, 1.0L) == 3, "two sample p100");
+    hist.assign(7, 0); hist[2] = 2; hist[5] = 3;
+    ok &= expect(histogram_quantile(hist, 0.4L) == 2, "repeated bin boundary");
+    ok &= expect(histogram_quantile(hist, 0.4001L) == 5, "repeated bin next rank");
+    hist.assign(2, 0); hist[0] = std::numeric_limits<uint64_t>::max(); hist[1] = 2;
+    ok &= expect(histogram_quantile(hist, 0.5L) == 0, "overflow-safe histogram accumulation");
+    ok &= expect(histogram_quantile(hist, 1.0L) == 1, "overflow-safe histogram final rank");
+
+    Stat capped;
+    capped.add_overhead(1); capped.add_overhead(63); capped.add_overhead(64); capped.add_overhead(999);
+    ok &= expect(histogram_quantile(capped.overhead_hist, 0.25L) == 1, "capped tail first rank");
+    ok &= expect(histogram_quantile(capped.overhead_hist, 0.5L) == 63, "capped tail median");
+    ok &= expect(histogram_quantile(capped.overhead_hist, 1.0L) == 63, "capped tail maximum bin");
+
+    vector<unsigned> samples = {9, 1, 9, 4, 4, 9, 2};
+    vector<uint64_t> oracle_hist(10, 0);
+    for (unsigned value : samples) oracle_hist[value]++;
+    sort(samples.begin(), samples.end());
+    const long double probabilities[] = {0.0L, 0.01L, 0.5L, 0.99L, 0.999L, 1.0L};
+    for (long double p : probabilities) {
+        const size_t oracle = samples[(size_t)nearest_rank_index(samples.size(), p)];
+        ok &= expect(histogram_quantile(oracle_hist, p) == oracle, "histogram sorted-sample oracle");
+    }
+
+    uint8_t expected[10], actual[10];
+    for (size_t i = 0; i < sizeof(expected); ++i) expected[i] = actual[i] = (uint8_t)i;
+    uint64_t mismatch = 0;
+    ok &= expect(verify_recovered_bytes(expected, actual, sizeof(expected), mismatch) && mismatch == sizeof(expected),
+                 "exact recovered bytes");
+    const size_t corruptions[] = {0, 5, 9};
+    for (size_t offset : corruptions) {
+        memcpy(actual, expected, sizeof(expected)); actual[offset] ^= 1;
+        ok &= expect(!verify_recovered_bytes(expected, actual, sizeof(expected), mismatch) && mismatch == offset,
+                     "first/middle/final corruption in partial-final-block message");
+    }
+
+    BenchWorkerPlan plan;
+    ok &= expect(!plan_bench_workers(4, 0, 10, 10, 10000, plan), "zero rounds rejected");
+    ok &= expect(plan_bench_workers(8, 1, 10, 10, std::numeric_limits<uint64_t>::max(), plan) &&
+                 plan.active_workers == 1,
+                 "one round uses one worker");
+    const uint64_t exact_worker_bytes = plan.bytes_per_worker;
+    ok &= expect(plan_bench_workers(8, 20, 10, 10, exact_worker_bytes * 3, plan) &&
+                 plan.active_workers == 3 && plan.bytes_per_worker == exact_worker_bytes,
+                 "budget bounds many rounds");
+    ok &= expect(plan_bench_workers(2, 20, 10, 10, exact_worker_bytes * 10, plan) && plan.active_workers == 2,
+                 "requested thread boundary");
+    ok &= expect(plan_bench_workers(8, 8, 10, 10, exact_worker_bytes, plan) && plan.active_workers == 1,
+                 "exact one-worker budget");
+    ok &= expect(!plan_bench_workers(8, 8, 10, 10, exact_worker_bytes - 1, plan),
+                 "insufficient budget rejected");
+    ok &= expect(!plan_bench_workers(1, 1, std::numeric_limits<uint64_t>::max(), 2,
+                                     std::numeric_limits<uint64_t>::max(), plan),
+                 "worker size overflow rejected");
+    ok &= expect(plan_bench_workers(1, 1, 64000, 1,
+                                    std::numeric_limits<uint64_t>::max(), plan) &&
+                 plan.bytes_per_worker > 4 * UINT64_C(64000) + 1,
+                 "small-block plan includes codec metadata and matrices");
+    ok &= expect(default_threads_for_hw(0) >= 1 && thread_cap_for_hw(0) >= 1,
+                 "hardware-thread fallback");
+
+#ifdef WH_SEED_KNOBS
+    const FinalistValidationPlan validation = {0.10, 0.30, 111, 222};
+    vector<vector<uint64_t> > seen_trials;
+    auto fake_scorer = [&](double, int pseed, int dseed, uint64_t base) {
+        vector<uint64_t> ids;
+        for (uint64_t trial = 0; trial < 3; ++trial) {
+            ids.push_back(validation_trial_seed(base, trial));
+        }
+        seen_trials.push_back(ids);
+        return (double)(pseed + dseed + 10) / 100.0;
+    };
+    const FinalistScores peel = validate_finalist(validation, 1, -1, fake_scorer);
+    const FinalistScores joint = validate_finalist(validation, 1, 0, fake_scorer);
+    ok &= expect(seen_trials.size() == 4 && seen_trials[0] == seen_trials[2] &&
+                 seen_trials[1] == seen_trials[3], "finalists use identical validation trial IDs");
+    const FinalistScores tied = {peel.primary, peel.secondary};
+    ok &= expect(!finalist_is_strictly_better(tied, peel), "finalist ties retain peel-only");
+    const FinalistScores better = {joint.primary - 1.0, joint.secondary - 1.0};
+    ok &= expect(finalist_is_strictly_better(better, peel), "strictly better finalist selected");
+#endif
+
+    if (!ok) return 1;
+    printf("# selftest passed assertions=%d\n", assertions);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (wirehair_init() != Wirehair_Success) { fprintf(stderr, "wirehair_init failed\n"); return 2; }
     if (argc < 2) {
 #ifdef WH_COUNT
 #ifdef WH_SEED_KNOBS
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch|peelstat] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch|peelstat] [--threads T] [opts]\n");
 #else
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|peelstat] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|peelstat] [--threads T] [opts]\n");
 #endif
         fprintf(stderr, "  bench/count/peelstat accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+        fprintf(stderr, "  bench memory is capped by --memory-mib (default 4096; env WHX_BENCH_MEMORY_MIB)\n");
 #else
 #ifdef WH_SEED_KNOBS
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch] [--threads T] [opts]\n");
 #else
-        fprintf(stderr, "usage: whx [micro|bench|fuzz|repro|ohead|scan] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan] [--threads T] [opts]\n");
 #endif
         fprintf(stderr, "  bench accepts --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
+        fprintf(stderr, "  bench memory is capped by --memory-mib (default 4096; env WHX_BENCH_MEMORY_MIB)\n");
 #endif
         return 1;
     }
@@ -1644,6 +2224,7 @@ int main(int argc, char** argv) {
     if (mode == "seedsearch") return cmd_seedsearch(ac, av);
 #endif
     if (mode == "micro") return cmd_micro(ac, av);
+    if (mode == "selftest") return cmd_selftest(ac, av);
     if (mode == "bench") return cmd_bench(ac, av);
     if (mode == "fuzz")  return cmd_fuzz(ac, av);
     if (mode == "ohead") return cmd_ohead(ac, av);

@@ -56,6 +56,51 @@ bool TestParams()
         std::fprintf(stderr, "K=64001 must fail to build\n");
         return false;
     }
+
+    wirehair_v2::PrecodeSystem sentinel;
+    sentinel.Params.BlockCount = 7u;
+    sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
+    sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
+
+    std::vector<wirehair_v2::PrecodeParams> invalid_params;
+    wirehair_v2::PrecodeParams invalid =
+        wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseRows = 65u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.HeavyRows = 129u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(64000u, 1u);
+    invalid.Staircase = 1500u;
+    invalid.DenseRows = 36u;
+    invalid.HeavyRows = 0u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(64000u, 1u);
+    invalid.Staircase = 1500u;
+    invalid.DenseRows = 0u;
+    invalid.HeavyRows = 36u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(2u, 1u);
+    invalid.Staircase = 1u;
+    invalid.DenseRows = 4u;
+    invalid.HeavyRows = 0u;
+    invalid.DenseIdentityCorner = true;
+    invalid_params.push_back(invalid);
+
+    for (size_t i = 0; i < invalid_params.size(); ++i)
+    {
+        wirehair_v2::PrecodeSystem out = sentinel;
+        if (wirehair_v2::BuildPrecodeSystem(invalid_params[i], out) ||
+            out.Params.BlockCount != sentinel.Params.BlockCount ||
+            out.StaircaseRows != sentinel.StaircaseRows ||
+            out.DenseRowColumns != sentinel.DenseRowColumns)
+        {
+            std::fprintf(stderr,
+                "invalid parameter case %zu must fail before modifying output\n",
+                i);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -431,6 +476,35 @@ int main()
                 std::fprintf(stderr,
                     "K=%u: ic rows %u->%u differ in %zu columns, want 4\n",
                     K, r - 1u, r, sym.size());
+                return 1;
+            }
+        }
+    }
+
+    wirehair::PCGRandom random;
+    random.Seed(UINT64_C(0x51a1d5eed), UINT64_C(0xb00d));
+    for (uint32_t trial = 0; trial < 96u; ++trial)
+    {
+        const uint32_t K = 2u + random.Next() % 63999u;
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(K, random.Next());
+        wirehair_v2::PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::ValidatePrecodeSystem(system))
+        {
+            std::fprintf(stderr,
+                "random builder validation failed at K=%u trial=%u\n",
+                K, trial);
+            return 1;
+        }
+        if (K + params.Staircase >= 2u * (params.DenseRows >> 1))
+        {
+            params.DenseIdentityCorner = true;
+            if (!BuildPrecodeSystem(params, system) ||
+                !wirehair_v2::ValidatePrecodeSystem(system))
+            {
+                std::fprintf(stderr,
+                    "random identity builder validation failed at K=%u\n", K);
                 return 1;
             }
         }

@@ -1710,6 +1710,27 @@ static bool MakeScheme(const std::string& token, unsigned K, Scheme& out)
         return false;
     }
 
+    // Keep the simulator inside the production 16-bit column domain.  Apart
+    // from preventing arithmetic wrap, these caps stop a malformed CLI token
+    // from turning into an unbounded allocation before any CSV row is emitted.
+    const uint64_t binary_columns =
+        (uint64_t)out.D + (uint64_t)out.Dense2;
+    const uint64_t total_columns =
+        (uint64_t)K + binary_columns + (uint64_t)out.H;
+    static const uint64_t kMaxModelPrecodeColumns = 4096;
+    if (binary_columns > kMaxModelPrecodeColumns ||
+        out.H > 128u ||
+        total_columns > UINT16_MAX)
+    {
+        return false;
+    }
+
+    if (out.Kind == SchemeKind::DenseSparse &&
+        (out.Weight == 0u || (uint64_t)out.Weight > (uint64_t)K + out.D))
+    {
+        return false;
+    }
+
     // The LDPC family indexes parity buckets with rng.Below(S); S == 0 would
     // write through an empty checks vector in GenerateSystem
     if (out.D == 0u &&
@@ -1875,16 +1896,73 @@ static bool SelfTest()
         "ldpcdense_n14_s5_d4_s2", "ldpcdense_n12_s6_d3_s2_h8",
         "codecport", "codecport_ic", "codecport_n13_ic"
     };
-    const char* invalid_tokens[] = {
-        "ldpc_s0", "ldpctri_s0", "ldpcdense_s0_d4", "ldpcdense_s0_d4_s2",
-        "ldpcdense_n11_s5_d4", "ldpcdense_n15_s5_d4", "ldpcdense_n1_s5_d4",
-        "ldpcdense_n13_d4"
+    struct ParseCase
+    {
+        const char* Token;
+        unsigned K;
+        bool Valid;
     };
-    for (const char* token : invalid_tokens)
+    const ParseCase parse_cases[] = {
+        { "none_h0", 32, true },
+        { "none_h128", 32, true },
+        { "none_h129", 32, false },
+        { "none_h4294967295", 32, false },
+        { "none_h4294967296", 32, false },
+        { "dense_d0", 32, true },
+        { "dense_d4096", 32, true },
+        { "dense_d4097", 32, false },
+        { "dense_d4294967295", 32, false },
+        { "dense_d4294967296", 32, false },
+        { "dense_d4096", 61433, true },
+        { "dense_d4096", 61434, false },
+        { "dense_d1529", 64000, true },
+        { "dense_d1530", 64000, false },
+        { "densesparse_w0_d8", 32, false },
+        { "densesparse_w1_d0", 32, true },
+        { "densesparse_w40_d8", 32, true },
+        { "densesparse_w41_d8", 32, false },
+        { "densesparse_w4294967295_d8", 32, false },
+        { "ldpc_s0", 32, false },
+        { "ldpc_s1", 32, true },
+        { "ldpc_s4096", 32, true },
+        { "ldpc_s4097", 32, false },
+        { "ldpctri_s0", 32, false },
+        { "ldpctri_s1", 32, true },
+        { "ldpctri_s4096", 32, true },
+        { "ldpctri_s4097", 32, false },
+        { "ldpcdense_s0_d4", 32, false },
+        { "ldpcdense_s1_d4095", 32, true },
+        { "ldpcdense_s1_d4096", 32, false },
+        { "ldpcdense_s4096_d0", 32, true },
+        { "ldpcdense_s4096_d1", 32, false },
+        { "ldpcdense_s0_d4_s2", 32, false },
+        { "ldpcdense_s1_d4095_s2", 32, true },
+        { "ldpcdense_n11_s5_d4", 32, false },
+        { "ldpcdense_n12_s1_d4095", 32, true },
+        { "ldpcdense_n14_s1_d4096", 32, false },
+        { "ldpcdense_n15_s5_d4", 32, false },
+        { "ldpcdense_n1_s5_d4", 32, false },
+        { "ldpcdense_n13_d4", 32, false },
+        { "heavyonly_h0", 32, true },
+        { "heavyonly_h128", 32, true },
+        { "heavyonly_h129", 32, false },
+        { "codecport_n11", 32, true },
+        { "codecport_n18_ic", 32, true },
+        { "codecport_n10", 32, false },
+        { "codecport_n19", 32, false },
+        { "codecport_h128", 32, true },
+        { "codecport_h129", 32, false },
+    };
+    for (const ParseCase& test : parse_cases)
     {
         Scheme scheme;
-        if (MakeScheme(token, 32, scheme)) {
-            fprintf(stderr, "self-test: invalid scheme %s was accepted\n", token);
+        const bool valid = MakeScheme(test.Token, test.K, scheme);
+        if (valid != test.Valid) {
+            fprintf(stderr,
+                "self-test: scheme %s at K=%u was unexpectedly %s\n",
+                test.Token,
+                test.K,
+                valid ? "accepted" : "rejected");
             return false;
         }
     }
@@ -2662,6 +2740,33 @@ int main(int argc, char** argv)
         }
     }
 
+    // Validate every model shape before printing the CSV header or starting
+    // workers.  Result pipelines can therefore treat any stdout header as a
+    // promise that the complete requested experiment was syntactically valid.
+    for (unsigned K : k_list)
+    {
+        for (const std::string& token : scheme_tokens)
+        {
+            Scheme scheme;
+            if (!MakeScheme(token, K, scheme))
+            {
+                fprintf(stderr, "bad or out-of-range scheme token %s for K=%u\n",
+                    token.c_str(), K);
+                return 1;
+            }
+        }
+        for (unsigned oh : oh_list)
+        {
+            if ((uint64_t)K + oh > UINT16_MAX)
+            {
+                fprintf(stderr,
+                    "bad --oh value %u for K=%u: received-row count exceeds %u\n",
+                    oh, K, (unsigned)UINT16_MAX);
+                return 1;
+            }
+        }
+    }
+
     printf("K,scheme,D,H,oh,trials,fail_rate,fail_rate_noheavy,def_mu,def_max,"
            "def_pdf,inact_mu,inact_sd,inact_max,rank_mu,peeled_mu,"
            "residual_rows_mu,recv_xors_per_packet,precode_gen_xors_mu,"
@@ -2687,12 +2792,6 @@ int main(int argc, char** argv)
             }
             for (unsigned oh : oh_list)
             {
-                if (oh > 0xffffffffu - K)
-                {
-                    fprintf(stderr, "bad --oh value %u for K=%u: K + oh overflows\n",
-                        oh, K);
-                    return 1;
-                }
                 Aggregate agg;
                 std::mutex agg_mutex;
                 std::atomic<unsigned> next_trial(0);

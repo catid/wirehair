@@ -8,6 +8,7 @@
 #include "../WirehairTools.h"
 #include <wirehair/wirehair.h>
 
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -416,6 +417,10 @@ void CheckGeneratedRecoveryRows()
     {
         Check(no_precode[i].size() == source_rows[i].size(),
             "zero-precode recovery rows should have only source columns");
+        for (size_t j = 0; j < source_rows[i].size(); ++j) {
+            Check(no_precode[i][j] == source_rows[i][j],
+                "mix stream changes must not retune source rows");
+        }
     }
 
     const std::vector<std::vector<uint32_t> > capped_mix =
@@ -427,6 +432,10 @@ void CheckGeneratedRecoveryRows()
     {
         Check(capped_mix[i].size() == source_rows[i].size() + 2u,
             "recovery row mix count should cap at precode column count");
+        for (size_t j = 0; j < source_rows[i].size(); ++j) {
+            Check(capped_mix[i][j] == source_rows[i][j],
+                "separate mix RNG must preserve the source prefix");
+        }
     }
 
     Check(wirehair_v2::GenerateRecoveryMatrixRows(
@@ -443,10 +452,133 @@ void CheckGeneratedRecoveryRows()
             codec, K, precode_count, wirehair_v2::kMaxPeelMatrixRows + 1u,
             mix_count, seed).empty(),
         "recovery row generator should reject unrepresentable row counts");
-    Check(wirehair_v2::GenerateRecoveryMatrixRow(
-            codec, K, precode_count, wirehair_v2::kMaxPeelMatrixRows,
-            mix_count, seed).empty(),
-        "single recovery row generator should reject unrepresentable index");
+    const uint32_t shuffled_ids[] = {
+        65536u, UINT32_C(0xf1234567), UINT32_MAX, 7u
+    };
+    for (uint32_t row_id : shuffled_ids)
+    {
+        wirehair_v2::RecoveryRowGenerationStats stats;
+        const std::vector<uint32_t> high_row =
+            wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, precode_count, row_id, mix_count, seed, &stats);
+        const std::vector<uint32_t> repeated =
+            wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, precode_count, row_id, mix_count, seed);
+        const std::vector<uint16_t> source =
+            wirehair_v2::GeneratePeelMatrixRow(codec, K, row_id, seed);
+        Check(!high_row.empty() && high_row == repeated,
+            "arbitrary uint32 recovery rows should be deterministic");
+        Check(stats.ContractVersion ==
+                wirehair_v2::kRecoveryRowContractVersion &&
+                stats.SeekWork == 2u &&
+                stats.SourceRandomDraws > 0u &&
+                stats.MixRandomDraws >= mix_count,
+            "recovery row work counters should report constant seek work");
+        Check(high_row.size() == source.size() + mix_count,
+            "high recovery row should retain the peel source prefix");
+        for (size_t i = 0; i < source.size(); ++i) {
+            Check(high_row[i] == source[i],
+                "high recovery source prefix should match peel row");
+        }
+    }
+
+    struct GoldenRow
+    {
+        uint32_t Id;
+        std::vector<uint32_t> Columns;
+    };
+    const GoldenRow golden[] = {
+        { 0u, {485u, 591u, 873u, 952u, 972u, 159u, 441u,
+            1058u, 1054u, 1015u} },
+        { 1u, {131u, 517u, 1020u, 1024u, 1010u} },
+        { 65536u, {852u, 457u, 1030u, 1049u, 1045u} },
+        { UINT32_C(0xf1234567), {418u, 272u, 1041u, 1022u, 1012u} },
+        { UINT32_MAX, {970u, 530u, 388u, 112u, 975u, 603u,
+            1035u, 1026u, 1064u} },
+    };
+    for (const GoldenRow& expected : golden)
+    {
+        Check(wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, 81u, expected.Id, 3u, seed) == expected.Columns,
+            "recovery row contract-v2 golden vector changed");
+    }
+}
+
+void CheckRecoveryRowScaling()
+{
+    using Clock = std::chrono::steady_clock;
+    const uint32_t K = 1000u;
+    const uint32_t precode_count = 81u;
+    const uint32_t count = 4096u;
+    const uint64_t seed = UINT64_C(0x5ca1ab1e);
+    const wirehair_v2::PeelingCodec codec =
+        wirehair_v2::MakePeelingCodec(
+            wirehair_v2::PeelStructure::LtM1C32,
+            wirehair_v2::PeelSolver::KsBmaxTop16);
+
+    const Clock::time_point batch_start = Clock::now();
+    const std::vector<std::vector<uint32_t> > batch =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            codec, K, precode_count, count, 5u, seed);
+    const Clock::time_point batch_end = Clock::now();
+
+    uint64_t sequential_work = 0u;
+    uint64_t first_quarter_work = 0u;
+    const Clock::time_point sequential_start = Clock::now();
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        wirehair_v2::RecoveryRowGenerationStats stats;
+        const std::vector<uint32_t> row =
+            wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, precode_count, i, 5u, seed, &stats);
+        Check(row == batch[i],
+            "4096-row batch/single recovery identity failed");
+        const uint64_t work = stats.SeekWork + stats.SourceRandomDraws +
+            stats.MixRandomDraws;
+        sequential_work += work;
+        if (i < count / 4u) {
+            first_quarter_work += work;
+        }
+    }
+    const Clock::time_point sequential_end = Clock::now();
+
+    uint64_t shuffled_work = 0u;
+    const Clock::time_point shuffled_start = Clock::now();
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint32_t row_id =
+            i * UINT32_C(2654435761) + UINT32_C(0x80000000);
+        wirehair_v2::RecoveryRowGenerationStats stats;
+        const std::vector<uint32_t> row =
+            wirehair_v2::GenerateRecoveryMatrixRow(
+                codec, K, precode_count, row_id, 5u, seed, &stats);
+        Check(!row.empty() && stats.SeekWork == 2u,
+            "shuffled uint32 recovery generation failed");
+        shuffled_work += stats.SeekWork + stats.SourceRandomDraws +
+            stats.MixRandomDraws;
+    }
+    const Clock::time_point shuffled_end = Clock::now();
+
+    Check(batch.size() == count,
+        "4096-row recovery scaling batch failed");
+    Check(sequential_work > first_quarter_work * 3u &&
+            sequential_work < first_quarter_work * 5u,
+        "recovery row deterministic work did not scale near-linearly");
+    Check(shuffled_work * 4u > sequential_work * 3u &&
+            shuffled_work * 3u < sequential_work * 4u,
+        "shuffled high IDs changed recovery generation work materially");
+
+    const double batch_ms = std::chrono::duration<double, std::milli>(
+        batch_end - batch_start).count();
+    const double sequential_ms = std::chrono::duration<double, std::milli>(
+        sequential_end - sequential_start).count();
+    const double shuffled_ms = std::chrono::duration<double, std::milli>(
+        shuffled_end - shuffled_start).count();
+    std::cout << "recovery-row scaling: batch=" << batch_ms
+              << "ms sequential=" << sequential_ms
+              << "ms shuffled=" << shuffled_ms
+              << "ms deterministic_work=" << sequential_work << '/'
+              << shuffled_work << std::endl;
 }
 
 void CheckPeelRowCountBounds()
@@ -463,12 +595,12 @@ void CheckPeelRowCountBounds()
     Check(too_many_generated.empty(),
         "peel row generation should reject unrepresentable row indexes");
 
-    const std::vector<uint16_t> bad_single =
+    const std::vector<uint16_t> high_single =
         wirehair_v2::GeneratePeelMatrixRow(
-            codec, 2u, wirehair_v2::kMaxPeelMatrixRows,
+            codec, 2u, UINT32_MAX,
             UINT64_C(0x1234));
-    Check(bad_single.empty(),
-        "single peel row generation should reject unrepresentable row index");
+    Check(!high_single.empty(),
+        "single peel row generation should support every uint32 row index");
 
     std::vector<std::vector<uint16_t> > too_many_rows(
         wirehair_v2::kMaxPeelMatrixRows + 1u);
@@ -962,6 +1094,7 @@ int main()
             UINT64_C(0x1234) ^ ((uint64_t)i * UINT64_C(0x9e3779b97f4a7c15)));
     }
     CheckGeneratedRecoveryRows();
+    CheckRecoveryRowScaling();
     CheckPeelRowCountBounds();
 
     const PeelEvaluation eval_a =

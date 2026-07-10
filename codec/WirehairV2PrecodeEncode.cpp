@@ -7,10 +7,29 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace wirehair_v2 {
 namespace {
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local int64_t AllocationFailureCountdown = -1;
+
+void GuardedAllocation()
+{
+    if (AllocationFailureCountdown == 0) {
+        throw std::bad_alloc();
+    }
+    if (AllocationFailureCountdown > 0) {
+        --AllocationFailureCountdown;
+    }
+}
+#else
+void GuardedAllocation() {}
+#endif
 
 /**
     Block accumulator: first term is a copy, later terms XOR, an empty sum
@@ -136,14 +155,21 @@ bool DenseColumnMask(
 
 } // namespace
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void SetAllocationFailureCountdownForTesting(int64_t countdown)
+{
+    AllocationFailureCountdown = countdown;
+}
+#endif
+
 bool DenseCornerInvertible(const PrecodeSystem& system)
 {
     const uint32_t D2 = system.Params.DenseRows;
+    if (!ValidatePrecodeSystem(system)) {
+        return false;
+    }
     if (D2 == 0u) {
         return true;
-    }
-    if (D2 > 64u || system.DenseRowColumns.size() != D2) {
-        return false;
     }
 
     const uint32_t dense_base =
@@ -166,29 +192,23 @@ bool ComputePrecodeValues(
     uint8_t* parity_blocks,
     PrecodeEncodeStats* stats)
 {
-    const uint32_t K = system.Params.BlockCount;
-    const uint32_t S = system.Params.Staircase;
-    const uint32_t D2 = system.Params.DenseRows;
-    const uint32_t H = system.Params.HeavyRows;
-    const uint32_t dense_base = K + S;
-    const uint32_t heavy_base = K + S + D2;
-
     PrecodeEncodeStats local_stats = {};
     PrecodeEncodeStats& st = stats ? *stats : local_stats;
     st = PrecodeEncodeStats{};
 
     if (!source_blocks || !parity_blocks ||
-        block_bytes == 0u || block_bytes > 0x7fffffffu)
+        block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        !ValidatePrecodeSystem(system))
     {
         return false;
     }
-    // Dense masks live in uint64_t; HeavyCoefficient requires H <= 128
-    if (D2 > 64u || H > 128u ||
-        system.StaircaseRows.size() != S ||
-        system.DenseRowColumns.size() != D2)
-    {
-        return false;
-    }
+
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t S = system.Params.Staircase;
+    const uint32_t D2 = system.Params.DenseRows;
+    const uint32_t H = system.Params.HeavyRows;
+    const uint32_t dense_base = K + S;
+    const uint32_t heavy_base = dense_base + D2;
 
     const int bytes = (int)block_bytes;
 
@@ -490,14 +510,15 @@ bool ComputePrecodeValues(
     return true;
 }
 
-bool ComputeRecoveryBlock(
+static bool ComputeRecoveryBlockImpl(
     const PrecodeSystem& system,
     const uint8_t* source_blocks,
     const uint8_t* parity_blocks,
     uint32_t block_bytes,
     const std::vector<uint32_t>& row_columns,
     uint8_t* block_out,
-    uint64_t* block_ops_out)
+    uint64_t* block_ops_out,
+    bool validate_system)
 {
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
@@ -511,14 +532,8 @@ bool ComputeRecoveryBlock(
     ops = 0;
 
     if (!source_blocks || !parity_blocks || !block_out ||
-        block_bytes == 0u || block_bytes > 0x7fffffffu)
-    {
-        return false;
-    }
-    if (K == 0u || K > UINT16_MAX || D2 > 64u || H > 128u ||
-        total_columns > UINT16_MAX ||
-        system.StaircaseRows.size() != S ||
-        system.DenseRowColumns.size() != D2)
+        block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        (validate_system && !ValidatePrecodeSystem(system)))
     {
         return false;
     }
@@ -544,7 +559,21 @@ bool ComputeRecoveryBlock(
     return true;
 }
 
-bool ComputeEncodedBlock(
+bool ComputeRecoveryBlock(
+    const PrecodeSystem& system,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    const std::vector<uint32_t>& row_columns,
+    uint8_t* block_out,
+    uint64_t* block_ops_out)
+{
+    return ComputeRecoveryBlockImpl(
+        system, source_blocks, parity_blocks, block_bytes, row_columns,
+        block_out, block_ops_out, true);
+}
+
+static bool ComputeEncodedBlockImpl(
     const PrecodeSystem& system,
     const PeelingCodec& codec,
     uint64_t row_seed,
@@ -554,7 +583,8 @@ bool ComputeEncodedBlock(
     uint32_t block_bytes,
     uint32_t block_id,
     uint8_t* block_out,
-    uint64_t* block_ops_out)
+    uint64_t* block_ops_out,
+    bool validate_system)
 {
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
@@ -567,12 +597,8 @@ bool ComputeEncodedBlock(
     ops = 0;
 
     if (!source_blocks || !block_out ||
-        block_bytes == 0u || block_bytes > 0x7fffffffu)
-    {
-        return false;
-    }
-    if (K == 0u || K > UINT16_MAX || D2 > 64u || H > 128u ||
-        precode_count > UINT16_MAX - K)
+        block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        (validate_system && !ValidatePrecodeSystem(system)))
     {
         return false;
     }
@@ -591,9 +617,6 @@ bool ComputeEncodedBlock(
         return false;
     }
     const uint32_t recovery_index = block_id - K;
-    if (recovery_index >= kMaxPeelMatrixRows) {
-        return false;
-    }
 
     const std::vector<uint32_t> row = GenerateRecoveryMatrixRow(
         codec, K, (uint32_t)precode_count, recovery_index, mix_count,
@@ -601,13 +624,46 @@ bool ComputeEncodedBlock(
     if (row.empty()) {
         return false;
     }
-    return ComputeRecoveryBlock(
+    return ComputeRecoveryBlockImpl(
         system, source_blocks, parity_blocks, block_bytes, row, block_out,
-        &ops);
+        &ops, false);
+}
+
+bool ComputeEncodedBlock(
+    const PrecodeSystem& system,
+    const PeelingCodec& codec,
+    uint64_t row_seed,
+    uint32_t mix_count,
+    const uint8_t* source_blocks,
+    const uint8_t* parity_blocks,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out)
+{
+    return ComputeEncodedBlockImpl(
+        system, codec, row_seed, mix_count, source_blocks, parity_blocks,
+        block_bytes, block_id, block_out, block_ops_out, true);
 }
 
 PrecodeEncoder::PrecodeEncoder()
 {
+}
+
+void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
+{
+    using std::swap;
+    swap(SystemValue.Params, other.SystemValue.Params);
+    SystemValue.StaircaseRows.swap(other.SystemValue.StaircaseRows);
+    SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
+    swap(CodecValue, other.CodecValue);
+    swap(RowSeed, other.RowSeed);
+    swap(MixCount, other.MixCount);
+    swap(SourceBlocks, other.SourceBlocks);
+    swap(BlockBytesValue, other.BlockBytesValue);
+    ParityBlockStorage.swap(other.ParityBlockStorage);
+    swap(StatsValue, other.StatsValue);
+    swap(Initialized, other.Initialized);
 }
 
 bool PrecodeEncoder::Initialize(
@@ -618,54 +674,70 @@ bool PrecodeEncoder::Initialize(
     const uint8_t* source_blocks,
     uint32_t block_bytes)
 {
-    Initialized = false;
-    SystemValue = PrecodeSystem();
-    CodecValue = PeelingCodec();
-    RowSeed = 0;
-    MixCount = 0;
-    SourceBlocks = nullptr;
-    BlockBytesValue = 0;
-    ParityBlockStorage.clear();
-    StatsValue = PrecodeEncodeStats{};
+    return InitializeResult(
+        system, codec, row_seed, mix_count, source_blocks, block_bytes) ==
+        Wirehair_Success;
+}
 
-    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu) {
-        return false;
-    }
-
-    const uint32_t K = system.Params.BlockCount;
-    const uint64_t parity_count_wide =
-        (uint64_t)system.Params.Staircase +
-        system.Params.DenseRows +
-        system.Params.HeavyRows;
-    if (K == 0u ||
-        K > UINT16_MAX ||
-        parity_count_wide == 0u ||
-        parity_count_wide > UINT16_MAX - K ||
-        parity_count_wide > (size_t)-1 / (size_t)block_bytes)
+WirehairResult PrecodeEncoder::InitializeResult(
+    const PrecodeSystem& system,
+    const PeelingCodec& codec,
+    uint64_t row_seed,
+    uint32_t mix_count,
+    const uint8_t* source_blocks,
+    uint32_t block_bytes)
+{
+    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu)
     {
-        return false;
+        return Wirehair_InvalidInput;
     }
-    const uint32_t parity_count = (uint32_t)parity_count_wide;
 
-    std::vector<uint8_t> parity(
-        (size_t)parity_count * (size_t)block_bytes);
-    PrecodeEncodeStats stats = {};
-    if (!ComputePrecodeValues(
-            system, source_blocks, block_bytes, parity.data(), &stats))
+    try
     {
-        return false;
-    }
+        if (!ValidatePrecodeSystem(system)) {
+            return Wirehair_InvalidInput;
+        }
+        const uint64_t parity_count_wide =
+            (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        if (parity_count_wide == 0u ||
+            parity_count_wide > (uint64_t)(size_t)-1 / block_bytes)
+        {
+            return Wirehair_InvalidInput;
+        }
 
-    SystemValue = system;
-    CodecValue = codec;
-    RowSeed = row_seed;
-    MixCount = mix_count;
-    SourceBlocks = source_blocks;
-    BlockBytesValue = block_bytes;
-    ParityBlockStorage.swap(parity);
-    StatsValue = stats;
-    Initialized = true;
-    return true;
+        GuardedAllocation();
+        std::vector<uint8_t> parity(
+            (size_t)parity_count_wide * (size_t)block_bytes);
+        PrecodeEncodeStats stats = {};
+        GuardedAllocation();
+        if (!ComputePrecodeValues(
+                system, source_blocks, block_bytes, parity.data(), &stats))
+        {
+            return Wirehair_BadDenseSeed;
+        }
+
+        GuardedAllocation();
+        PrecodeSystem next_system = system;
+        PrecodeEncoder next;
+        next.SystemValue = std::move(next_system);
+        next.CodecValue = codec;
+        next.RowSeed = row_seed;
+        next.MixCount = mix_count;
+        next.SourceBlocks = source_blocks;
+        next.BlockBytesValue = block_bytes;
+        next.ParityBlockStorage.swap(parity);
+        next.StatsValue = stats;
+        next.Initialized = true;
+        Swap(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
 }
 
 bool PrecodeEncoder::Encode(
@@ -673,23 +745,49 @@ bool PrecodeEncoder::Encode(
     uint8_t* block_out,
     uint64_t* block_ops_out) const
 {
+    return EncodeResult(block_id, block_out, block_ops_out) == Wirehair_Success;
+}
+
+WirehairResult PrecodeEncoder::EncodeResult(
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out) const
+{
     if (!Initialized || !block_out) {
-        if (block_ops_out) {
-            *block_ops_out = 0;
-        }
-        return false;
+        return Wirehair_InvalidInput;
     }
-    return ComputeEncodedBlock(
-        SystemValue,
-        CodecValue,
-        RowSeed,
-        MixCount,
-        SourceBlocks,
-        ParityBlockStorage.data(),
-        BlockBytesValue,
-        block_id,
-        block_out,
-        block_ops_out);
+    try
+    {
+        if (block_id >= SystemValue.Params.BlockCount) {
+            GuardedAllocation();
+        }
+        uint64_t local_ops = 0;
+        if (!ComputeEncodedBlockImpl(
+                SystemValue,
+                CodecValue,
+                RowSeed,
+                MixCount,
+                SourceBlocks,
+                ParityBlockStorage.data(),
+                BlockBytesValue,
+                block_id,
+                block_out,
+                &local_ops,
+                false))
+        {
+            return Wirehair_InvalidInput;
+        }
+        if (block_ops_out) {
+            *block_ops_out = local_ops;
+        }
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
 }
 
 bool PrecodeEncoder::IsInitialized() const
@@ -713,6 +811,16 @@ uint32_t PrecodeEncoder::ParityBlockCount() const
 uint32_t PrecodeEncoder::BlockBytes() const
 {
     return Initialized ? BlockBytesValue : 0u;
+}
+
+uint64_t PrecodeEncoder::RecoveryRowSeed() const
+{
+    return Initialized ? RowSeed : 0u;
+}
+
+uint32_t PrecodeEncoder::RecoveryMixCount() const
+{
+    return Initialized ? MixCount : 0u;
 }
 
 const PrecodeEncodeStats& PrecodeEncoder::EncodeStats() const
@@ -741,19 +849,23 @@ bool MessagePrecodeEncoder::Initialize(
     const SeedProfile* seed_override,
     const MessagePrecodeEncoderOptions* options)
 {
-    Initialized = false;
-    ProfileValue = SeedProfile();
-    OptionsValue = MessagePrecodeEncoderOptions();
-    EncoderValue = PrecodeEncoder();
-    SourceBlockStorage.clear();
-    MessageBytesValue = 0;
-    BlockBytesValue = 0;
+    return InitializeResult(
+        message, message_bytes, block_bytes, seed_override, options) ==
+        Wirehair_Success;
+}
 
+WirehairResult MessagePrecodeEncoder::InitializeResult(
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const SeedProfile* seed_override,
+    const MessagePrecodeEncoderOptions* options)
+{
     uint32_t block_count = 0u;
     if (!message ||
         !MessageBlockCount(message_bytes, block_bytes, block_count))
     {
-        return false;
+        return Wirehair_InvalidInput;
     }
 
     const SeedProfile profile = seed_override ? *seed_override :
@@ -761,7 +873,7 @@ bool MessagePrecodeEncoder::Initialize(
     if (profile.BlockCount != block_count ||
         profile.BlockBytes != block_bytes)
     {
-        return false;
+        return Wirehair_InvalidInput;
     }
     const MessagePrecodeEncoderOptions opts =
         options ? *options : MessagePrecodeEncoderOptions();
@@ -769,43 +881,54 @@ bool MessagePrecodeEncoder::Initialize(
     const uint64_t source_bytes =
         (uint64_t)block_count * (uint64_t)block_bytes;
     if (source_bytes > (uint64_t)((size_t)-1)) {
-        return false;
+        return Wirehair_InvalidInput;
     }
-    std::vector<uint8_t> source_storage((size_t)source_bytes, 0u);
-    std::memcpy(source_storage.data(), message, (size_t)message_bytes);
+    try
+    {
+        GuardedAllocation();
+        std::vector<uint8_t> source_storage((size_t)source_bytes, 0u);
+        std::memcpy(source_storage.data(), message, (size_t)message_bytes);
 
-    PrecodeParams params = MakeCertifiedParams(
-        block_count,
-        MatrixSeedFromProfile(profile, 0u, opts.PrecodeSeedSalt));
-    params.DenseIdentityCorner = opts.DenseIdentityCorner;
+        PrecodeParams params = MakeCertifiedParams(
+            block_count,
+            MatrixSeedFromProfile(profile, 0u, opts.PrecodeSeedSalt));
+        params.DenseIdentityCorner = opts.DenseIdentityCorner;
 
-    PrecodeSystem system;
-    if (!BuildPrecodeSystem(params, system)) {
-        return false;
-    }
+        GuardedAllocation();
+        PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system)) {
+            return Wirehair_InvalidInput;
+        }
 
-    const uint64_t row_seed = MatrixSeedFromProfile(
-        profile, kMaxPeelMatrixRows, opts.RecoveryRowSeedSalt);
-    SourceBlockStorage.swap(source_storage);
-    if (!EncoderValue.Initialize(
+        const uint64_t row_seed = MatrixSeedFromProfile(
+            profile, kMaxPeelMatrixRows, opts.RecoveryRowSeedSalt);
+        PrecodeEncoder next_encoder;
+        const WirehairResult encoder_result = next_encoder.InitializeResult(
             system,
             profile.Policy.Codec,
             row_seed,
             opts.RecoveryMixCount,
-            SourceBlockStorage.data(),
-            block_bytes))
-    {
-        SourceBlockStorage.clear();
-        EncoderValue = PrecodeEncoder();
-        return false;
-    }
+            source_storage.data(),
+            block_bytes);
+        if (encoder_result != Wirehair_Success) {
+            return encoder_result;
+        }
 
-    ProfileValue = profile;
-    OptionsValue = opts;
-    MessageBytesValue = message_bytes;
-    BlockBytesValue = block_bytes;
-    Initialized = true;
-    return true;
+        SourceBlockStorage.swap(source_storage);
+        EncoderValue.Swap(next_encoder);
+        ProfileValue = profile;
+        OptionsValue = opts;
+        MessageBytesValue = message_bytes;
+        BlockBytesValue = block_bytes;
+        Initialized = true;
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
+        return Wirehair_InvalidInput;
+    }
 }
 
 bool MessagePrecodeEncoder::Encode(
@@ -815,14 +938,20 @@ bool MessagePrecodeEncoder::Encode(
     uint32_t* data_bytes_out,
     uint64_t* block_ops_out) const
 {
-    if (data_bytes_out) {
-        *data_bytes_out = 0u;
-    }
-    if (block_ops_out) {
-        *block_ops_out = 0u;
-    }
+    return EncodeResult(
+        block_id, block_out, out_bytes, data_bytes_out, block_ops_out) ==
+        Wirehair_Success;
+}
+
+WirehairResult MessagePrecodeEncoder::EncodeResult(
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint32_t out_bytes,
+    uint32_t* data_bytes_out,
+    uint64_t* block_ops_out) const
+{
     if (!Initialized || !block_out || !data_bytes_out) {
-        return false;
+        return Wirehair_InvalidInput;
     }
 
     const uint32_t K = ProfileValue.BlockCount;
@@ -831,7 +960,7 @@ bool MessagePrecodeEncoder::Encode(
         const uint32_t bytes = SourceBlockBytes(
             MessageBytesValue, BlockBytesValue, K, block_id);
         if (out_bytes < bytes) {
-            return false;
+            return Wirehair_InvalidInput;
         }
         std::memcpy(
             block_out,
@@ -841,17 +970,19 @@ bool MessagePrecodeEncoder::Encode(
         if (block_ops_out) {
             *block_ops_out = 1u;
         }
-        return true;
+        return Wirehair_Success;
     }
 
     if (out_bytes < BlockBytesValue) {
-        return false;
+        return Wirehair_InvalidInput;
     }
-    if (!EncoderValue.Encode(block_id, block_out, block_ops_out)) {
-        return false;
+    const WirehairResult result =
+        EncoderValue.EncodeResult(block_id, block_out, block_ops_out);
+    if (result != Wirehair_Success) {
+        return result;
     }
     *data_bytes_out = BlockBytesValue;
-    return true;
+    return Wirehair_Success;
 }
 
 bool MessagePrecodeEncoder::IsInitialized() const

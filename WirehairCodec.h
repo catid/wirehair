@@ -303,6 +303,18 @@ struct PeelRefs
 
 class Codec
 {
+public:
+    enum class Mode : uint8_t
+    {
+        Uninitialized,
+        Encoder,
+        Decoder,
+        DecodeComplete,
+        Converted,
+        Failed
+    };
+
+private:
     //--------------------------------------------------------------------------
     // Parameters
 
@@ -340,6 +352,9 @@ class Codec
     /// original blocks) before GE state existed; later feeds must not resume
     bool _decode_failed = false;
 
+    /// Public API lifecycle state
+    Mode _mode = Mode::Uninitialized;
+
     /// Number of mix columns
     uint16_t _mix_count = 0;
 
@@ -370,6 +385,9 @@ class Codec
 #endif
 
     uint8_t * GF256_RESTRICT _copied_original = nullptr;
+
+    /// Decoder original block id -> input staging row, or LIST_TERM
+    uint16_t * GF256_RESTRICT _original_row = nullptr;
 
     /// Boolean: Original blocks are out of order?
     bool _original_out_of_order = false;
@@ -871,15 +889,12 @@ class Codec
     the number of heavy rows.  The result is that we can assume missing
     pivots occur near the end.
 
-    The number of heavy rows required is at least 5.  This is because
-    the heavy rows are used to fill in for missing pivots in the GE matrix
-    and the miss rate is about 1/2 because it's random and binary.  The odds
-    of the last 5 columns all being zero in the binary rows is 1/32.
-    And the odds of a random GF(256) matrix not being invertible is also
-    around 1/32, therefore it needs at least 5 heavy rows.  With less than 5
-    rows, the binary matrix fail rate would dominate the overall rate of
-    invertibility.  After 5 heavy rows, less likely problems can be overcome,
-    so 6 heavy rows were chosen for the baseline version.
+    Six heavy rows were selected empirically to cover the usual cluster of
+    missing binary pivots at low constant cost.  They are not a proof of
+    invertibility: after binary-row mixing, the shipped matrix's right corner
+    is singular in roughly 1/256 perturbation trials.  See
+    tables/HEAVY_MATRIX.md and HeavyRowGenerator.cpp for the compatibility
+    contract and deterministic measurement.
 
     An important realization is that almost all of the missing pivots occur
     within the last M columns of the GE matrix, even for large matrices.
@@ -1282,6 +1297,21 @@ public:
     GF256_FORCE_INLINE uint32_t PSeed() const { return _p_seed; }
     GF256_FORCE_INLINE uint32_t CSeed() const { return _d_seed; }
     GF256_FORCE_INLINE uint32_t BlockCount() const { return _block_count; }
+    GF256_FORCE_INLINE uint32_t BlockBytes() const { return static_cast<uint32_t>(_block_bytes); }
+    GF256_FORCE_INLINE uint32_t FinalBytes() const { return _output_final_bytes; }
+    GF256_FORCE_INLINE Mode GetMode() const { return _mode; }
+    GF256_FORCE_INLINE bool CanEncode() const
+    {
+        return _mode == Mode::Encoder || _mode == Mode::Converted;
+    }
+    GF256_FORCE_INLINE bool CanDecode() const
+    {
+        return _mode == Mode::Decoder || _mode == Mode::DecodeComplete;
+    }
+    GF256_FORCE_INLINE bool CanRecover() const
+    {
+        return _mode == Mode::DecodeComplete;
+    }
 
 
     //--------------------------------------------------------------------------
@@ -1310,7 +1340,9 @@ public:
         encoder should be looking up its matrix parameters from a
         table, which guarantees the matrix is invertible.
     */
-    WirehairResult EncodeFeed(const void * GF256_RESTRICT message_in);
+    WirehairResult EncodeFeed(
+        const void * GF256_RESTRICT message_in,
+        bool copy_input = false);
 
     /// Benchmark/test hook: validate the encoder matrix without row values.
     WirehairResult EncodeFeedMatrixOnly();
@@ -1416,6 +1448,7 @@ public:
     WirehairResult ReconstructBlock(
         const uint16_t block_id, ///< Block identifier
         void * GF256_RESTRICT block_out, ///< Output block memory
+        uint32_t output_capacity, ///< Writable bytes in block_out
         uint32_t* bytes_out ///< Bytes written to output
     );
 

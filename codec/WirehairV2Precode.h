@@ -38,11 +38,11 @@ namespace wirehair_v2 {
 
 struct PrecodeParams
 {
-    uint32_t BlockCount;   ///< K: source blocks
-    uint32_t Staircase;    ///< S: staircase parity columns
-    uint32_t DenseRows;    ///< D2: Shuffle-2 dense binary rows
-    uint32_t HeavyRows;    ///< H: Cauchy heavy rows
-    uint32_t SourceHits;   ///< N1: staircase parities per source column
+    uint32_t BlockCount = 0;   ///< K: source blocks
+    uint32_t Staircase = 0;    ///< S: staircase parity columns
+    uint32_t DenseRows = 0;    ///< D2: Shuffle-2 dense binary rows
+    uint32_t HeavyRows = 0;    ///< H: Cauchy heavy rows
+    uint32_t SourceHits = 0;   ///< N1: staircase parities per source column
 
     /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
@@ -59,9 +59,9 @@ struct PrecodeParams
         generation).  Changes the linear system: requires recertification
         before shipping.
     */
-    bool DenseIdentityCorner;
+    bool DenseIdentityCorner = false;
 
-    uint64_t Seed;         ///< constraint-generation seed
+    uint64_t Seed = 0;         ///< constraint-generation seed
 };
 
 /// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12,
@@ -70,7 +70,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 
 struct PrecodeSystem
 {
-    PrecodeParams Params;
+    PrecodeParams Params = {};
 
     /**
         Staircase parity rows.
@@ -110,11 +110,18 @@ struct PrecodeSystem
 /**
     Build the staircase + Shuffle-2 constraint structure.
 
-    Returns false only for invalid parameters (BlockCount outside
-    [2, 64000], Staircase == 0, SourceHits outside [1, 8], or a span that
-    does not fit the 16-bit deck domain).
+    Returns false for invalid parameters (BlockCount outside [2, 64000],
+    Staircase == 0, SourceHits outside [1, 8], DenseRows > 64,
+    HeavyRows > 128, or a full symbol domain that does not fit uint16) or if
+    the generated structure fails ValidatePrecodeSystem().
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
+
+/**
+    Validate every structural invariant consumed by the encoder.  Validation
+    uses widened arithmetic and performs no writes to block data.
+*/
+bool ValidatePrecodeSystem(const PrecodeSystem& system);
 
 /**
     GF(256) coefficient of heavy row r at GE column c.

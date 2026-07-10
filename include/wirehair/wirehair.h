@@ -46,11 +46,10 @@
 
 #define WIREHAIR_VERSION 2
 
-// Tweak if the functions are exported or statically linked
-//#define WIREHAIR_DLL /* Defined when building/linking as DLL */
-//#define WIREHAIR_BUILDING /* Defined by the library makefile */
-
-#if defined(WIREHAIR_BUILDING)
+// CMake propagates WIREHAIR_DLL or WIREHAIR_STATIC to installed consumers.
+#if defined(WIREHAIR_STATIC)
+    #define WIREHAIR_EXPORT extern
+#elif defined(WIREHAIR_BUILDING)
 # if defined(WIREHAIR_DLL) && defined(_WIN32)
     #define WIREHAIR_EXPORT __declspec(dllexport)
 # else
@@ -133,6 +132,11 @@ WIREHAIR_EXPORT const char *wirehair_result_string(
 
     Verify binary compatibility with the API on startup.
 
+    Initialization is thread-safe.  Concurrent callers observe the same cached
+    success or permanent platform/self-test failure.  A version mismatch is
+    rejected for that caller and does not affect later calls using the correct
+    version.
+
     Example:
         if (wirehair_init()) {
             exit(1);
@@ -147,11 +151,24 @@ WIREHAIR_EXPORT WirehairResult wirehair_init_(int expected_version);
 /// WirehairCodec: From wirehair_encoder_create() or wirehair_decoder_create()
 typedef struct WirehairCodec_t { char impl; }* WirehairCodec;
 
+/*
+    A codec has one checked lifecycle: encoder, active decoder, completed
+    decoder, or converted encoder.  Encoder operations are accepted only by an
+    encoder/converted encoder.  Decode is accepted by active/completed decoders;
+    recovery before completion returns Wirehair_NeedMore.  Conversion is valid
+    exactly once after decode completion.  Other mode mismatches return
+    Wirehair_InvalidInput without writing caller data.
+*/
+
 
 /**
     wirehair_encoder_create()
 
     Encode the given message into blocks of size blockBytes.
+
+    This zero-copy entry point borrows message.  The buffer must remain alive
+    and immutable until the encoder is freed or successfully reused.  Use
+    wirehair_encoder_create_owned() when that lifetime cannot be guaranteed.
 
     The number of blocks in the message:
         N = (bytes + (blockBytes-1)) / blockBytes
@@ -179,6 +196,47 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
     const void*    message, ///< Pointer to message
     uint64_t  messageBytes, ///< Bytes in the message
     uint32_t    blockBytes  ///< Bytes in an output block
+);
+
+/**
+    Result-preserving form of wirehair_encoder_create().
+
+    The input message is borrowed for the lifetime of the encoder and must stay
+    allocated and immutable until wirehair_free() or successful codec reuse.
+    On success codecOut receives the encoder.  On failure codecOut is set to
+    null and reuseOpt is consumed, except that a null codecOut is rejected
+    without consuming reuseOpt.  Before initialization it returns Wirehair_Error;
+    after a cached initialization failure it returns that platform error.
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut
+);
+
+/**
+    Owning form of wirehair_encoder_create().
+
+    The message is copied before this function returns.  The caller may modify
+    or release its buffer after success.  This costs messageBytes additional
+    storage and O(messageBytes) copy time during creation.
+*/
+WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create_owned(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes
+);
+
+/// Result-preserving form of wirehair_encoder_create_owned().
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_owned_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut
 );
 
 /**
@@ -223,6 +281,21 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
     WirehairCodec reuseOpt, ///< Codec object to reuse
     uint64_t  messageBytes, ///< Bytes in the message to decode
     uint32_t    blockBytes  ///< Bytes in each encoded block
+);
+
+/**
+    Result-preserving form of wirehair_decoder_create().
+
+    On success codecOut receives the decoder.  On failure codecOut is set to
+    null and reuseOpt is consumed, except that a null codecOut is rejected
+    without consuming reuseOpt.  Before initialization it returns Wirehair_Error;
+    after a cached initialization failure it returns that platform error.
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_ex(
+    WirehairCodec reuseOpt,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    WirehairCodec* codecOut
 );
 
 /**
@@ -275,6 +348,9 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover(
     Preconditions:
     Block ptr buffer contains enough space to hold the block (blockBytes)
 
+    This legacy entry point cannot verify the output capacity.  New code should
+    use wirehair_recover_block_ex().
+
     May return non-zero to indicate a failure.
 
     Returns Wirehair_Success if the block was recovered.
@@ -285,6 +361,20 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
     unsigned    blockId, ///< ID of the block to reconstruct between 0..N-1
     void*     blockData, ///< Pointer to block data
     uint32_t*  bytesOut  ///< Set to the number of data bytes in the block
+);
+
+/**
+    Capacity-checked form of wirehair_recover_block().
+
+    outputCapacity is the number of writable bytes at blockData.  On failure,
+    blockData is unchanged and bytesOut is set to zero when it is non-null.
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_recover_block_ex(
+    WirehairCodec codec,
+    unsigned blockId,
+    void* blockData,
+    uint32_t outputCapacity,
+    uint32_t* bytesOut
 );
 
 /**

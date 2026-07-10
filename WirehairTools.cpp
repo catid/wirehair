@@ -28,6 +28,8 @@
 */
 
 #include "WirehairTools.h"
+#include "WirehairCompiler.h"
+#include "WirehairEnvironment.h"
 #if defined(WH_HUGEPAGE) && defined(__linux__)
 #include <sys/mman.h>
 #endif
@@ -442,15 +444,18 @@ void ShuffleDeck16(
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
                 ++ii;
+                WIREHAIR_FALLTHROUGH;
             case 2:
                 jj = (uint8_t)(rv >> 8) % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
                 ++ii;
+                WIREHAIR_FALLTHROUGH;
             case 1:
                 jj = (uint8_t)(rv >> 16) % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
+                WIREHAIR_FALLTHROUGH;
             case 0:
                 return;
             }
@@ -481,6 +486,7 @@ void ShuffleDeck16(
                 jj = (uint16_t)rv % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
+                WIREHAIR_FALLTHROUGH;
             case 0:
                 return;
             }
@@ -546,7 +552,8 @@ static const uint8_t kPeelWeightFirstByTopByte[256] = {
 #ifdef WH_SEED_KNOBS
 static int ReadPeelCap()
 {
-    const char* value = ::getenv("WH_PEELCAP");
+    const EnvironmentValue environment("WH_PEELCAP");
+    const char* value = environment.Get();
     if (!value || !*value) {
         return -1;
     }

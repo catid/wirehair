@@ -8,6 +8,15 @@
 namespace wirehair_v2 {
 
 static const uint32_t kMaxPeelMatrixRows = 65536u;
+static const uint32_t kRecoveryRowContractVersion = 2u;
+
+struct RecoveryRowGenerationStats
+{
+    uint32_t ContractVersion = kRecoveryRowContractVersion;
+    uint64_t SeekWork = 0;
+    uint64_t SourceRandomDraws = 0;
+    uint64_t MixRandomDraws = 0;
+};
 
 struct PeelEvaluation
 {
@@ -28,9 +37,8 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
     uint64_t seed);
 
 /**
-    Generate one peel row by replaying the same deterministic row stream used
-    by GeneratePeelMatrixRows().  `row_index` is zero-based and must be below
-    kMaxPeelMatrixRows.
+    Generate one row from the version-2 row-index-addressable stream used by
+    GeneratePeelMatrixRows().  Every uint32 row index is valid.
 */
 std::vector<uint16_t> GeneratePeelMatrixRow(
     const PeelingCodec& codec,
@@ -57,10 +65,9 @@ std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
     uint64_t seed);
 
 /**
-    Generate one recovery row by replaying the same deterministic row stream
-    used by GenerateRecoveryMatrixRows().  This is the encoder-facing mapping
-    from recovery block index to the V2 intermediate-symbol row; callers that
-    need many adjacent rows should use the batch API above.
+    Generate one recovery row from the version-2 row-index-addressable stream.
+    Every uint32 row index is valid and lookup work is independent of earlier
+    row IDs.  `stats` reports deterministic stream-seek and draw counts.
 */
 std::vector<uint32_t> GenerateRecoveryMatrixRow(
     const PeelingCodec& codec,
@@ -68,7 +75,8 @@ std::vector<uint32_t> GenerateRecoveryMatrixRow(
     uint32_t precode_count,
     uint32_t row_index,
     uint32_t mix_count,
-    uint64_t seed);
+    uint64_t seed,
+    RecoveryRowGenerationStats* stats = nullptr);
 
 PeelEvaluation EvaluatePeeling(
     const PeelingCodec& codec,

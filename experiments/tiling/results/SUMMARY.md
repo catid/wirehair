@@ -16,9 +16,14 @@ Validation:
 Aggregate CSV:
 `experiments/tiling/results/rowop_tiling_1280_100k_1m.csv`.
 
+This persisted file is schema v1.  Its GiB/s field is a three-stream
+operation estimate, not measured DRAM bandwidth.  All synthetic operations are
+XORs, so the estimate corresponds to two explicit reads plus one write; timing,
+checksums, and within-case speedups remain valid.
+
 Best tile by block size:
 
-| case | block bytes | untiled GiB/s | best tile | tiled GiB/s | speedup |
+| case | block bytes | untiled estimated-traffic GiB/s | best tile | tiled estimated-traffic GiB/s | speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | mtu1280 | 1280 | 57.614 | 16 KiB | 57.254 | 0.994x |
 | kib100 | 102400 | 70.086 | 16 KiB | 90.032 | 1.285x |
@@ -59,6 +64,12 @@ stored next to this summary:
 Aggregate replay CSV:
 `experiments/tiling/results/rowop_tiling_real_oplog_20260703.csv`.
 
+This is also schema v1.  Its hard-coded three-stream rate is only a legacy
+normalization for mixed operation traces: zero, memcpy, addset, add2, muladd,
+and divide have different read/write ledgers.  The recorded times, checksums,
+and speedup ratios remain comparable because both replay arms use the same
+schedule and denominator.  Schema v2 reports the mixed ledger explicitly.
+
 Validation:
 
 - `bash experiments/tiling/build.sh`
@@ -74,7 +85,7 @@ Validation:
 
 Best real-schedule replay results:
 
-| case | block bytes | ops | untiled GiB/s | best tile | tiled GiB/s | speedup |
+| case | block bytes | ops | untiled legacy normalized GiB/s | best tile | tiled legacy normalized GiB/s | speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | WH_OPLOG N=128 full | 1280 | 4125 | 254.062 | 512 B | 180.402 | 0.710x |
 | WH_OPLOG N=128 full | 102400 | 4172 | 193.461 | 16 KiB | 238.516 | 1.233x |

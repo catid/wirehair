@@ -9,6 +9,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <string>
 #include <vector>
 #include <atomic>
 using namespace std;
@@ -47,13 +48,9 @@ static const int N_List[] = {
 
     Heavy Rows:
 
-    The heavy rows make up a special 6x18 Cauchy matrix with the property
-    that any disturbance from the binary rows above does not affect the
-    100% invertibility of the matrix.  Since these rows are not affected
-    by any of the rows above, we just pick one of these special matrices
-    and use it for all values of N original blocks.
-
-    The code to generate this is in HeavyRowGenerator.cpp
+    The fixed 6x18 GF(256) matrix improves rank recovery but has an empirical
+    singular floor after binary-row mixing.  Its bytes and limits are
+    documented in HEAVY_MATRIX.md and reproduced by HeavyRowGenerator.cpp.
 
 
     Dense Rows:
@@ -423,11 +420,128 @@ static bool ParseUnsigned(const char* text, unsigned& out)
     return true;
 }
 
+static bool ParseNList(
+    const char* text,
+    vector<unsigned>& values,
+    string& error)
+{
+    values.clear();
+    const string input = text ? text : "";
+    if (input.empty() || input.back() == ',')
+    {
+        error = "--nlist must not be empty or end with a comma";
+        return false;
+    }
+    size_t begin = 0;
+    while (begin < input.size())
+    {
+        const size_t comma = input.find(',', begin);
+        const string item = input.substr(
+            begin,
+            comma == string::npos ? string::npos : comma - begin);
+        unsigned value = 0;
+        if (!ParseUnsigned(item.c_str(), value))
+        {
+            error = "--nlist must contain comma-separated unsigned integers";
+            return false;
+        }
+        for (unsigned previous : values)
+        {
+            if (previous == value)
+            {
+                error = "--nlist contains duplicate N=" + to_string(value);
+                return false;
+            }
+        }
+        values.push_back(value);
+        if (comma == string::npos) {
+            break;
+        }
+        begin = comma + 1u;
+    }
+    return true;
+}
+
+static bool PlanSelection(
+    unsigned nlo,
+    unsigned nhi,
+    const vector<unsigned>& candidates,
+    vector<unsigned>& selected,
+    string& error)
+{
+    const unsigned maxN = kTinyTableCount + kSmallTableCount - 1u;
+    selected.clear();
+    if (nlo < 2u || nhi > maxN || nlo > nhi)
+    {
+        error = "N range must be in [2, " + to_string(maxN) + "]";
+        return false;
+    }
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        const unsigned value = candidates[i];
+        if (value < 2u || value > maxN)
+        {
+            error = "candidate N=" + to_string(value) + " is outside the table domain";
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j)
+        {
+            if (candidates[j] == value)
+            {
+                error = "candidate list contains duplicate N=" + to_string(value);
+                return false;
+            }
+        }
+        if (value >= nlo && value <= nhi) {
+            selected.push_back(value);
+        }
+    }
+    if (selected.empty())
+    {
+        error = "requested N range selects no configured candidates";
+        return false;
+    }
+    return true;
+}
+
+static bool SelectionSelfTest()
+{
+    const vector<unsigned> configured = { 17, 19, 21 };
+    vector<unsigned> selected;
+    string error;
+    if (!PlanSelection(17, 17, configured, selected, error) ||
+        selected != vector<unsigned>{ 17 }) {
+        return false;
+    }
+    if (!PlanSelection(18, 20, configured, selected, error) ||
+        selected != vector<unsigned>{ 19 }) {
+        return false;
+    }
+    if (PlanSelection(18, 18, configured, selected, error) ||
+        PlanSelection(20, 19, configured, selected, error) ||
+        PlanSelection(1, 17, configured, selected, error)) {
+        return false;
+    }
+
+    vector<unsigned> explicit_values;
+    if (!ParseNList("17,18,20", explicit_values, error) ||
+        explicit_values != vector<unsigned>({ 17, 18, 20 }) ||
+        !PlanSelection(18, 20, explicit_values, selected, error) ||
+        selected != vector<unsigned>({ 18, 20 })) {
+        return false;
+    }
+    return !ParseNList("", explicit_values, error) &&
+        !ParseNList("17,17", explicit_values, error) &&
+        !ParseNList("17,,18", explicit_values, error) &&
+        !ParseNList("17,", explicit_values, error);
+}
+
 static void Usage(const char* program)
 {
     cerr
         << "usage: " << program << " [--seed U64] [--trials N] "
-        << "[--nlo N] [--nhi N]\n";
+        << "[--nlo N] [--nhi N] [--nlist N[,N...]] "
+        << "[--selection-self-test]\n";
 }
 
 int main(int argc, char** argv)
@@ -436,6 +550,9 @@ int main(int argc, char** argv)
     unsigned trials = 3500;
     unsigned nlo = 2;
     unsigned nhi = kTinyTableCount + kSmallTableCount - 1u;
+    vector<unsigned> explicit_candidates;
+    bool has_explicit_candidates = false;
+    bool selection_self_test = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -474,6 +591,17 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!strcmp(arg, "--nlist")) {
+            string error;
+            if (!ParseNList(next(), explicit_candidates, error)) {
+                cerr << error << endl;
+                return 1;
+            }
+            has_explicit_candidates = true;
+        }
+        else if (!strcmp(arg, "--selection-self-test")) {
+            selection_self_test = true;
+        }
         else if (!strcmp(arg, "--help")) {
             Usage(argv[0]);
             return 0;
@@ -485,9 +613,44 @@ int main(int argc, char** argv)
         }
     }
 
-    const unsigned maxN = kTinyTableCount + kSmallTableCount - 1u;
-    if (nlo < 2u || nhi > maxN || nlo > nhi) {
-        cerr << "N range must be in [2, " << maxN << "]" << endl;
+    if (selection_self_test)
+    {
+        if (!SelectionSelfTest()) {
+            cerr << "selection planner self-test failed" << endl;
+            return 1;
+        }
+        cout << "selection planner self-test passed" << endl;
+        return 0;
+    }
+
+    vector<unsigned> candidates;
+    const char* selection_source = nullptr;
+    if (has_explicit_candidates) {
+        candidates = explicit_candidates;
+        selection_source = "explicit";
+    }
+#ifdef ENABLE_FULL_SEARCH
+    else {
+        const unsigned maxN = kTinyTableCount + kSmallTableCount - 1u;
+        for (unsigned N = 2; N <= maxN; ++N) {
+            candidates.push_back(N);
+        }
+        selection_source = "full";
+    }
+#else
+    else {
+        const size_t count = sizeof(N_List) / sizeof(N_List[0]);
+        for (size_t i = 0; i < count; ++i) {
+            candidates.push_back((unsigned)N_List[i]);
+        }
+        selection_source = "configured";
+    }
+#endif
+
+    vector<unsigned> selected;
+    string selection_error;
+    if (!PlanSelection(nlo, nhi, candidates, selected, selection_error)) {
+        cerr << selection_error << endl;
         return 1;
     }
 
@@ -510,28 +673,15 @@ int main(int argc, char** argv)
         << "# GenerateSmallDenseSeeds seed=0x" << hex << seed << dec
         << " trials=" << trials
         << " nlo=" << nlo
-        << " nhi=" << nhi << endl;
+        << " nhi=" << nhi
+        << " selected=" << selected.size()
+        << " source=" << selection_source
+        << endl;
 
-#ifdef ENABLE_FULL_SEARCH
-    static const int N_Min = 2;
-    static const int N_Max = kTinyTableCount + kSmallTableCount - 1;
-    for (int N = N_Min; N <= N_Max; ++N)
+    unsigned processed = 0;
+    for (unsigned selected_n : selected)
     {
-        if ((unsigned)N < nlo || (unsigned)N > nhi) {
-            continue;
-        }
-#else
-    // This allows me to run the Unit Test to evaluate seeds, and then
-    // the ones that tend to fail too much can be put in this list and
-    // refined further.
-    const int nListCount = (int)(sizeof(N_List) / sizeof(N_List[0]));
-    for (int N_i = 0; N_i < nListCount; ++N_i)
-    {
-        int N = N_List[N_i];
-        if ((unsigned)N < nlo || (unsigned)N > nhi) {
-            continue;
-        }
-#endif
+        const int N = (int)selected_n;
 
         int countGuess = (int)GetDenseCountGuess(N);
         int countGuessMin = countGuess - 2;
@@ -654,7 +804,10 @@ int main(int argc, char** argv)
             kSmallDenseSeeds[N - kTinyTableCount] = (uint8_t)best_seed;
         }
         kSmallPeelSeeds[N] = (uint8_t)bestPeelSeed;
+        ++processed;
     }
+
+    cerr << "# processed_candidates=" << processed << endl;
 
     cout << "static const unsigned kTinyTableCount = " << kTinyTableCount << ";" << endl;
     cout << "static const unsigned kSmallTableCount = " << kSmallTableCount << ";" << endl;

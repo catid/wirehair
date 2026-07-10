@@ -16,12 +16,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
+static const uint32_t kMaxSeedTableTrials = 1000000u;
 
 double NowSeconds()
 {
@@ -156,6 +163,11 @@ struct Rng
         return (Next() >> 11) * (1.0 / 9007199254740992.0);
     }
 };
+
+bool ShouldDrop(Rng& rng, double loss_rate)
+{
+    return rng.Unit() < loss_rate;
+}
 
 struct TrialResult
 {
@@ -346,6 +358,111 @@ bool ValidateBlockCounts(const std::vector<int>& Ns, const char* command)
     return true;
 }
 
+bool ValidateLoss(double loss, const char* command)
+{
+    if (!std::isfinite(loss) || loss < 0.0 || loss > 0.99)
+    {
+        std::fprintf(stderr,
+            "%s --loss must be finite and in [0,0.99], got %.17g\n",
+            command, loss);
+        return false;
+    }
+    return true;
+}
+
+bool ValidateMessageDimensions(
+    uint32_t N,
+    uint32_t block_bytes,
+    const char* command,
+    uint64_t max_message_bytes = 0u)
+{
+    const uint64_t message_bytes = (uint64_t)N * block_bytes;
+    if (N < 2u || N > 64000u || block_bytes == 0u ||
+        block_bytes > 0x7fffffffu || message_bytes > (uint64_t)SIZE_MAX)
+    {
+        std::fprintf(stderr,
+            "%s message dimensions are unsupported: N=%u bb=%u\n",
+            command, N, block_bytes);
+        return false;
+    }
+    if (max_message_bytes > 0u && message_bytes > max_message_bytes)
+    {
+        std::fprintf(stderr,
+            "%s message (%llu bytes) exceeds configured cap (%llu bytes)\n",
+            command,
+            (unsigned long long)message_bytes,
+            (unsigned long long)max_message_bytes);
+        return false;
+    }
+    const uint64_t metadata_bytes = (uint64_t)N * 4096u;
+    if (message_bytes >
+        (UINT64_MAX - metadata_bytes - block_bytes) / 2u)
+    {
+        std::fprintf(stderr, "%s working-set size overflows\n", command);
+        return false;
+    }
+    const uint64_t working_bytes =
+        2u * message_bytes + block_bytes + metadata_bytes;
+    static const uint64_t kMaxBenchmarkWorkingBytes = UINT64_C(1) << 39;
+    if (working_bytes > (uint64_t)SIZE_MAX ||
+        working_bytes > kMaxBenchmarkWorkingBytes)
+    {
+        std::fprintf(stderr,
+            "%s working set exceeds the supported benchmark limit\n",
+            command);
+        return false;
+    }
+#if defined(__unix__) || defined(__APPLE__)
+    struct rlimit address_space_limit = {};
+    if (getrlimit(RLIMIT_AS, &address_space_limit) == 0 &&
+        address_space_limit.rlim_cur != RLIM_INFINITY &&
+        working_bytes > (uint64_t)address_space_limit.rlim_cur)
+    {
+        std::fprintf(stderr,
+            "%s working set cannot be allocated for N=%u bb=%u\n",
+            command, N, block_bytes);
+        return false;
+    }
+#endif
+    try
+    {
+        // Reserve without touching pages so impossible/RLIMIT-constrained
+        // workloads fail before any result header is emitted.
+        std::vector<uint8_t> allocation_probe;
+        allocation_probe.reserve((size_t)working_bytes);
+    }
+    catch (const std::bad_alloc&)
+    {
+        std::fprintf(stderr,
+            "%s working set cannot be allocated for N=%u bb=%u\n",
+            command, N, block_bytes);
+        return false;
+    }
+    catch (const std::length_error&)
+    {
+        std::fprintf(stderr,
+            "%s working set exceeds container limits for N=%u bb=%u\n",
+            command, N, block_bytes);
+        return false;
+    }
+    return true;
+}
+
+bool ValidateMessageInputs(
+    const std::vector<int>& Ns,
+    const std::vector<int>& BBs,
+    const char* command)
+{
+    for (int n : Ns) for (int bb : BBs) {
+        if (!ValidateMessageDimensions(
+                (uint32_t)n, (uint32_t)bb, command))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ValidateDenseDeltas(const std::vector<int>& deltas, const char* command)
 {
     for (int delta : deltas)
@@ -454,11 +571,6 @@ TrialResult RunBaselineTrial(
     double loss_rate,
     uint64_t seed)
 {
-    // The delivery loop only advances on delivered blocks; loss at or near
-    // 1.0 would spin forever.
-    if (loss_rate > 0.99) {
-        loss_rate = 0.99;
-    }
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
     std::vector<uint8_t> message((size_t)message_bytes);
@@ -491,7 +603,7 @@ TrialResult RunBaselineTrial(
     const uint32_t max_delivered = N * 2u + 512u;
     while (delivered < max_delivered)
     {
-        const bool drop = rng.Unit() < loss_rate;
+        const bool drop = ShouldDrop(rng, loss_rate);
         const uint32_t this_id = block_id++;
         if (drop) {
             continue;
@@ -545,11 +657,6 @@ TrialResult RunV2Trial(
     uint64_t seed,
     const wirehair_v2::SeedProfile* profile)
 {
-    // The delivery loop only advances on delivered blocks; loss at or near
-    // 1.0 would spin forever.
-    if (loss_rate > 0.99) {
-        loss_rate = 0.99;
-    }
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
     std::vector<uint8_t> message((size_t)message_bytes);
@@ -578,7 +685,7 @@ TrialResult RunV2Trial(
     const uint32_t max_delivered = N * 2u + 512u;
     while (delivered < max_delivered)
     {
-        const bool drop = rng.Unit() < loss_rate;
+        const bool drop = ShouldDrop(rng, loss_rate);
         const uint32_t this_id = block_id++;
         if (drop) {
             continue;
@@ -1352,6 +1459,27 @@ int CmdCompare(int argc, char** argv)
         std::fprintf(stderr, "invalid compare arguments\n");
         return 1;
     }
+    if (!ValidateLoss(loss, "compare")) {
+        return 1;
+    }
+    const uint64_t max_message_bytes = max_message_mib > 0u ?
+        (uint64_t)max_message_mib * 1024u * 1024u : 0u;
+    for (int bb_value : block_bytes_list)
+    {
+        const uint64_t largest_n = max_message_bytes > 0u ?
+            std::min<uint64_t>(
+                nhi, max_message_bytes / (uint32_t)bb_value) : nhi;
+        if (largest_n < nlo ||
+            !ValidateMessageDimensions(
+                (uint32_t)largest_n, (uint32_t)bb_value, "compare",
+                max_message_bytes))
+        {
+            std::fprintf(stderr,
+                "compare cap cannot accommodate the requested N range for "
+                "bb=%d\n", bb_value);
+            return 1;
+        }
+    }
     if (compare_options.PeelCandidates < 1u) {
         compare_options.PeelCandidates = 1u;
     }
@@ -1396,7 +1524,7 @@ int CmdCompare(int argc, char** argv)
         compare_options.ProfileMode == CompareProfileAuto && nlo == nhi;
 
     std::printf(
-        "# compare: N=[%u,%u] trials/bb=%u loss=%.2f seed=0x%llx "
+        "# compare: N=[%u,%u] trials/bb=%u loss=%.17g seed=0x%llx "
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
@@ -1445,21 +1573,12 @@ int CmdCompare(int argc, char** argv)
         uint32_t capped_nhi = nhi;
         if (max_message_mib > 0u)
         {
-            const uint64_t max_bytes =
-                (uint64_t)max_message_mib * 1024u * 1024u;
-            uint32_t max_n = (uint32_t)(max_bytes / block_bytes);
-            if (max_n < 2u) {
-                max_n = 2u;
-            }
+            const uint64_t max_bytes = max_message_bytes;
+            const uint32_t max_n = (uint32_t)std::min<uint64_t>(
+                64000u, max_bytes / block_bytes);
             if (capped_nhi > max_n) {
                 capped_nhi = max_n;
             }
-            if (sample_nlo > max_n) {
-                sample_nlo = max_n;
-            }
-        }
-        if (capped_nhi < sample_nlo) {
-            capped_nhi = sample_nlo;
         }
 
         Accum baseline;
@@ -1530,8 +1649,11 @@ int CmdSeedTable(int argc, char** argv)
     if (peel_candidates > 256u) {
         peel_candidates = 256u;
     }
-    if (trials < 1u) {
-        trials = 1u;
+    if (trials < 1u || trials > kMaxSeedTableTrials) {
+        std::fprintf(stderr,
+            "seedtable --trials must be in [1,%u]\n",
+            kMaxSeedTableTrials);
+        return 1;
     }
 
     const std::vector<int> Ns = ParseIntList(nlist);
@@ -1551,14 +1673,15 @@ int CmdSeedTable(int argc, char** argv)
         (unsigned long long)seed);
     std::printf(
         "N,bb,solver,structure,bucket,base_peel,tuned_peel,dense,"
-        "resid_mean,resid_max,xor_cost,used_peel_fixup,used_dense_fixup\n");
+        "requested_trials,completed_trials,resid_mean,resid_max,xor_cost,"
+        "used_peel_fixup,used_dense_fixup\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
         wirehair_v2::SeedTuningOptions options =
             wirehair_v2::DefaultSeedTuningOptions();
         options.PeelCandidates = (uint16_t)peel_candidates;
-        options.TrialsPerCandidate = (uint16_t)trials;
+        options.TrialsPerCandidate = trials;
         options.Seed = seed;
 
         const wirehair_v2::SeedProfile base =
@@ -1567,7 +1690,7 @@ int CmdSeedTable(int argc, char** argv)
             wirehair_v2::TuneSeedProfile((uint32_t)n_value, (uint32_t)bb_value,
                 options);
         std::printf(
-            "%d,%d,%s,%s,%u,%u,%u,%u,%.4f,%u,%llu,%u,%u\n",
+            "%d,%d,%s,%s,%u,%u,%u,%u,%u,%u,%.4f,%u,%llu,%u,%u\n",
             n_value,
             bb_value,
             wirehair_v2::ToString(tuned.Policy.Solver),
@@ -1576,6 +1699,8 @@ int CmdSeedTable(int argc, char** argv)
             base.PeelSeed,
             tuned.PeelSeed,
             tuned.DenseSeed,
+            trials,
+            tuned.TuningTrials,
             tuned.TuningResidualMean,
             tuned.TuningResidualColumns,
             (unsigned long long)tuned.TuningXorCost,
@@ -1701,6 +1826,57 @@ int CmdPeelCost(int argc, char** argv)
         precodes.push_back(model);
     }
 
+    for (int bb_value : BBs) for (int n_value : Ns)
+    {
+        const uint32_t N = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+        if (N < 2u || N > 65535u || block_bytes < 1u)
+        {
+            std::fprintf(stderr,
+                "peelcost N must be in [2,65535] and bb must be positive\n");
+            return 1;
+        }
+        for (const PrecodeModel& precode : precodes)
+        {
+            if (IsCodecPortPrecode(precode) && N > CAT_WIREHAIR_MAX_N)
+            {
+                std::fprintf(stderr,
+                    "peelcost precode %s requires N in [%u,%u]\n",
+                    precode.Name.c_str(),
+                    (unsigned)CAT_WIREHAIR_MIN_N,
+                    (unsigned)CAT_WIREHAIR_MAX_N);
+                return 1;
+            }
+        }
+        for (int overhead_value : Overheads)
+        {
+            if (overhead_value < 0 ||
+                (uint64_t)N + (uint32_t)overhead_value > UINT16_MAX)
+            {
+                std::fprintf(stderr,
+                    "peelcost overhead must be non-negative and N+overhead "
+                    "must be <= 65535\n");
+                return 1;
+            }
+        }
+    }
+
+    std::vector<wirehair_v2::PeelEvaluation> evals;
+    try {
+        evals.reserve(trials);
+    }
+    catch (const std::bad_alloc&) {
+        std::fprintf(stderr,
+            "peelcost evaluation storage cannot be allocated for %u trials\n",
+            trials);
+        return 1;
+    }
+    catch (const std::length_error&) {
+        std::fprintf(stderr,
+            "peelcost trial count exceeds evaluation container limits\n");
+        return 1;
+    }
+
     std::printf(
         "# peelcost: trials=%u solver=%s heavy=%u seed=0x%llx\n",
         trials,
@@ -1728,36 +1904,8 @@ int CmdPeelCost(int argc, char** argv)
         const uint32_t N = (uint32_t)n_value;
         const uint32_t block_bytes = (uint32_t)bb_value;
 
-        if (N < 2u || N > 65535u || block_bytes < 1u)
-        {
-            std::fprintf(stderr,
-                "peelcost N must be in [2,65535] and bb must be positive\n");
-            return 1;
-        }
-        for (size_t p = 0; p < precodes.size(); ++p)
-        {
-            if (IsCodecPortPrecode(precodes[p]) &&
-                N > CAT_WIREHAIR_MAX_N)
-            {
-                std::fprintf(stderr,
-                    "peelcost precode %s requires N in [%u,%u]\n",
-                    precodes[p].Name.c_str(),
-                    (unsigned)CAT_WIREHAIR_MIN_N,
-                    (unsigned)CAT_WIREHAIR_MAX_N);
-                return 1;
-            }
-        }
-
         for (int overhead_value : Overheads)
         {
-            if (overhead_value < 0 ||
-                N + (uint32_t)overhead_value > 65535u)
-            {
-                std::fprintf(stderr,
-                    "peelcost overhead must be non-negative and N+overhead "
-                    "must be <= 65535\n");
-                return 1;
-            }
             const uint32_t overhead = (uint32_t)overhead_value;
             for (size_t c = 0; c < candidates.size(); ++c)
             {
@@ -1769,8 +1917,7 @@ int CmdPeelCost(int argc, char** argv)
                 codec.SolverCandidateLimit =
                     solver == wirehair_v2::PeelSolver::KsBmaxTop16 ? 16u : 0u;
 
-                std::vector<wirehair_v2::PeelEvaluation> evals;
-                evals.reserve(trials);
+                evals.clear();
                 for (uint32_t trial = 0; trial < trials; ++trial)
                 {
                     const uint64_t matrix_seed =
@@ -1877,16 +2024,17 @@ int CmdDenseCheck(int argc, char** argv)
     if (trials < 1u) {
         trials = 1u;
     }
-    if (N < 2u || N > 64000u || block_bytes < 1u) {
-        std::fprintf(stderr,
-            "densecheck requires --N in [2,64000] and positive --bb\n");
+    if (!ValidateLoss(loss, "densecheck") ||
+        !ValidateMessageDimensions(N, block_bytes, "densecheck"))
+    {
         return 1;
     }
     const wirehair_v2::SeedProfile base =
         wirehair_v2::SelectSeedProfile(N, block_bytes);
     std::printf(
-        "# densecheck: N=%u bb=%u base_dense=%u candidates=%u trials=%u\n",
-        N, block_bytes, base.DenseSeed, candidates, trials);
+        "# densecheck: N=%u bb=%u base_dense=%u candidates=%u trials=%u "
+        "loss=%.17g\n",
+        N, block_bytes, base.DenseSeed, candidates, trials, loss);
     std::printf("%-8s %-8s %-10s %-8s\n",
         "dense", "fail", "OH_mean", "OH_max");
 
@@ -1974,9 +2122,14 @@ int CmdDenseTune(int argc, char** argv)
     if (!ValidateBlockCounts(Ns, "densetune")) {
         return 1;
     }
+    if (!ValidateLoss(loss, "densetune") ||
+        !ValidateMessageInputs(Ns, BBs, "densetune"))
+    {
+        return 1;
+    }
 
     std::printf(
-        "# densetune: candidates=%u trials=%u loss=%.2f seed=0x%llx\n",
+        "# densetune: candidates=%u trials=%u loss=%.17g seed=0x%llx\n",
         candidates,
         trials,
         loss,
@@ -2115,9 +2268,14 @@ int CmdDenseCount(int argc, char** argv)
     if (!ValidateDenseCountsForInputs(Ns, BBs, Deltas, "densecount")) {
         return 1;
     }
+    if (!ValidateLoss(loss, "densecount") ||
+        !ValidateMessageInputs(Ns, BBs, "densecount"))
+    {
+        return 1;
+    }
 
     std::printf(
-        "# densecount: trials=%u loss=%.2f seed=0x%llx\n",
+        "# densecount: trials=%u loss=%.17g seed=0x%llx\n",
         trials,
         loss,
         (unsigned long long)seed);
@@ -2255,9 +2413,14 @@ int CmdDenseGrid(int argc, char** argv)
     if (!ValidateDenseCountsForInputs(Ns, BBs, Deltas, "densegrid")) {
         return 1;
     }
+    if (!ValidateLoss(loss, "densegrid") ||
+        !ValidateMessageInputs(Ns, BBs, "densegrid"))
+    {
+        return 1;
+    }
 
     std::printf(
-        "# densegrid: candidates=%u trials=%u loss=%.2f seed=0x%llx\n",
+        "# densegrid: candidates=%u trials=%u loss=%.17g seed=0x%llx\n",
         candidates,
         trials,
         loss,
@@ -2332,6 +2495,29 @@ int CmdDenseGrid(int argc, char** argv)
     return 0;
 }
 
+int CmdSelfTest()
+{
+    const double losses[] = {0.0, 0.99};
+    const uint32_t expected_drops[] = {0u, 9890u};
+    for (size_t case_index = 0; case_index < 2u; ++case_index)
+    {
+        Rng rng(UINT64_C(0x123456789abcdef0));
+        uint32_t drops = 0u;
+        for (uint32_t i = 0; i < 10000u; ++i) {
+            drops += ShouldDrop(rng, losses[case_index]) ? 1u : 0u;
+        }
+        if (drops != expected_drops[case_index])
+        {
+            std::fprintf(stderr,
+                "loss oracle mismatch at %.17g: got %u, expected %u\n",
+                losses[case_index], drops, expected_drops[case_index]);
+            return 1;
+        }
+    }
+    std::printf("loss boundary oracle: PASS\n");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -2343,29 +2529,52 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: wirehair_v2_bench compare|seedtable|peelcost|densecheck|densetune|densecount|densegrid [opts]\n");
+            "usage: wirehair_v2_bench compare|seedtable|peelcost|densecheck|"
+            "densetune|densecount|densegrid|selftest [opts]\n");
         return 1;
     }
-    if (!std::strcmp(argv[1], "compare")) {
-        return CmdCompare(argc - 2, argv + 2);
+    try
+    {
+        if (!std::strcmp(argv[1], "compare")) {
+            return CmdCompare(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "seedtable")) {
+            return CmdSeedTable(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "peelcost")) {
+            return CmdPeelCost(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "densecheck")) {
+            return CmdDenseCheck(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "densetune")) {
+            return CmdDenseTune(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "densecount")) {
+            return CmdDenseCount(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "densegrid")) {
+            return CmdDenseGrid(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "selftest")) {
+            if (argc != 2) {
+                std::fprintf(stderr, "selftest takes no options\n");
+                return 1;
+            }
+            return CmdSelfTest();
+        }
     }
-    if (!std::strcmp(argv[1], "seedtable")) {
-        return CmdSeedTable(argc - 2, argv + 2);
+    catch (const std::bad_alloc&)
+    {
+        std::fprintf(stderr,
+            "wirehair_v2_bench: allocation failed for requested workload\n");
+        return 2;
     }
-    if (!std::strcmp(argv[1], "peelcost")) {
-        return CmdPeelCost(argc - 2, argv + 2);
-    }
-    if (!std::strcmp(argv[1], "densecheck")) {
-        return CmdDenseCheck(argc - 2, argv + 2);
-    }
-    if (!std::strcmp(argv[1], "densetune")) {
-        return CmdDenseTune(argc - 2, argv + 2);
-    }
-    if (!std::strcmp(argv[1], "densecount")) {
-        return CmdDenseCount(argc - 2, argv + 2);
-    }
-    if (!std::strcmp(argv[1], "densegrid")) {
-        return CmdDenseGrid(argc - 2, argv + 2);
+    catch (const std::length_error&)
+    {
+        std::fprintf(stderr,
+            "wirehair_v2_bench: requested workload exceeds container limits\n");
+        return 2;
     }
     std::fprintf(stderr, "unknown mode: %s\n", argv[1]);
     return 1;

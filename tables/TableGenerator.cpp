@@ -28,6 +28,7 @@
 */
 
 #include "HeavyRowGenerator.h"
+#include "../WirehairCompiler.h"
 
 #include "../test/SiameseTools.h"
 using namespace siamese;
@@ -1071,15 +1072,18 @@ void ShuffleDeck16(
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
                 ++ii;
+                WIREHAIR_FALLTHROUGH;
             case 2:
                 jj = (uint8_t)(rv >> 8) % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
                 ++ii;
+                WIREHAIR_FALLTHROUGH;
             case 1:
                 jj = (uint8_t)(rv >> 16) % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
+                WIREHAIR_FALLTHROUGH;
             case 0:
                 return;
             }
@@ -1110,6 +1114,7 @@ void ShuffleDeck16(
                 jj = (uint16_t)rv % ii;
                 deck[ii] = deck[jj];
                 deck[jj] = (uint16_t)ii;
+                WIREHAIR_FALLTHROUGH;
             case 0:
                 return;
             }
@@ -1740,7 +1745,7 @@ static uint16_t FindDenseCount_Ref(unsigned N)
 {
     SIAMESE_DEBUG_ASSERT(N >= 2048 && N <= 64000);
 
-    for (unsigned i = 0; i < kDensePointCount; ++i)
+    for (unsigned i = 0; i + 1 < kDensePointCount; ++i)
     {
         DensePoint lowPoint = kDensePoints[i];
         DensePoint highPoint = kDensePoints[i + 1];
@@ -1798,7 +1803,7 @@ static uint16_t FindDenseCount(unsigned N)
 
 static bool Validate_DenseSeedCount()
 {
-    for (unsigned N = 2048; N < 64000; ++N)
+    for (unsigned N = 2048; N <= 64000; ++N)
     {
         const uint16_t ref = FindDenseCount_Ref(N);
         const uint16_t count = FindDenseCount(N);

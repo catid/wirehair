@@ -9,15 +9,26 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "gf256.h"
+#include "../ByteLedger.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+static const size_t kDefaultTraceMemoryMiB = 256u;
+static const size_t kDefaultMaxTraceOperations = 1000000u;
+static const size_t kMaxTraceLineBytes = 4096u;
+static const size_t kTraceFixedOverheadBytes = 1024u * 1024u;
+static const char kTraceCsvHeader[] =
+    "stage,op_type,dst_kind,dst_block,dst_offset,src0_kind,src0_block,"
+    "src0_offset,src1_kind,src1_block,src1_offset,scalar,bytes";
 
 struct Rng
 {
@@ -86,9 +97,119 @@ struct TraceSchedule
     size_t BlockBytes = 0;
     uint32_t RecoveryBlocks = 0;
     uint32_t InputBlocks = 0;
-    uint64_t LogicalBytes = 0;
+    wirehair_experiments::ByteLedger Ledger;
     std::vector<TraceOp> Ops;
 };
+
+static bool checked_size_add(size_t a, size_t b, size_t* result)
+{
+    if (a > (size_t)-1 - b) {
+        return false;
+    }
+    *result = a + b;
+    return true;
+}
+
+static bool checked_size_multiply(size_t a, size_t b, size_t* result)
+{
+    if (a != 0u && b > (size_t)-1 / a) {
+        return false;
+    }
+    *result = a * b;
+    return true;
+}
+
+static bool trace_persistent_storage_bytes(
+    const TraceSchedule& schedule,
+    unsigned repeats,
+    size_t* result)
+{
+    size_t operation_bytes = 0;
+    size_t sample_bytes = 0;
+    size_t name_bytes = 0;
+    size_t total = kTraceFixedOverheadBytes;
+    if (!checked_size_multiply(
+            schedule.Ops.capacity(), sizeof(TraceOp), &operation_bytes) ||
+        !checked_size_multiply(
+            (size_t)repeats, sizeof(double), &sample_bytes) ||
+        !checked_size_add(schedule.Name.capacity(), 1u, &name_bytes) ||
+        !checked_size_add(total, operation_bytes, &total) ||
+        !checked_size_add(total, name_bytes, &total) ||
+        !checked_size_add(total, sample_bytes, &total))
+    {
+        return false;
+    }
+    *result = total;
+    return true;
+}
+
+static bool reserve_for_trace_op(
+    TraceSchedule* schedule,
+    size_t max_operations,
+    size_t max_memory_bytes)
+{
+    if (schedule->Ops.size() < schedule->Ops.capacity()) {
+        return true;
+    }
+
+    const size_t old_capacity = schedule->Ops.capacity();
+    size_t new_capacity = old_capacity == 0u ? 1024u : old_capacity;
+    if (new_capacity > max_operations) {
+        new_capacity = max_operations;
+    }
+    if (new_capacity < max_operations)
+    {
+        if (new_capacity > max_operations - new_capacity) {
+            new_capacity = max_operations;
+        }
+        else {
+            new_capacity += new_capacity;
+        }
+    }
+    if (new_capacity <= old_capacity ||
+        new_capacity > schedule->Ops.max_size())
+    {
+        std::fprintf(stderr,
+            "schedule operation storage exceeds container limits\n");
+        return false;
+    }
+
+    size_t old_bytes = 0;
+    size_t new_bytes = 0;
+    size_t name_bytes = 0;
+    size_t transient_bytes = kTraceFixedOverheadBytes;
+    if (!checked_size_multiply(old_capacity, sizeof(TraceOp), &old_bytes) ||
+        !checked_size_multiply(new_capacity, sizeof(TraceOp), &new_bytes) ||
+        !checked_size_add(schedule->Name.capacity(), 1u, &name_bytes) ||
+        !checked_size_add(transient_bytes, old_bytes, &transient_bytes) ||
+        !checked_size_add(transient_bytes, new_bytes, &transient_bytes) ||
+        !checked_size_add(transient_bytes, name_bytes, &transient_bytes) ||
+        transient_bytes > max_memory_bytes)
+    {
+        std::fprintf(stderr,
+            "schedule operation storage exceeds --max-memory-mib policy\n");
+        return false;
+    }
+
+    schedule->Ops.reserve(new_capacity);
+    return true;
+}
+
+static wirehair_experiments::ByteOperation ledger_operation(TraceOpKind kind)
+{
+    using wirehair_experiments::ByteOperation;
+    switch (kind)
+    {
+    case TraceOpKind::Zero: return ByteOperation::Zero;
+    case TraceOpKind::Memcpy: return ByteOperation::Memcpy;
+    case TraceOpKind::Xor: return ByteOperation::Xor;
+    case TraceOpKind::Addset: return ByteOperation::Addset;
+    case TraceOpKind::Add2: return ByteOperation::Add2;
+    case TraceOpKind::Muladd: return ByteOperation::Muladd;
+    case TraceOpKind::Div: return ByteOperation::Div;
+    }
+    return ByteOperation::Zero;
+}
 
 struct Case
 {
@@ -236,6 +357,43 @@ static std::vector<std::string> split_csv(const std::string& line)
     return fields;
 }
 
+enum class TraceLineResult
+{
+    Line,
+    End,
+    TooLong,
+    ReadError
+};
+
+static TraceLineResult read_trace_line(
+    std::istream& in,
+    std::string* line)
+{
+    line->clear();
+    for (;;)
+    {
+        const int next = in.get();
+        if (next == std::char_traits<char>::eof())
+        {
+            if (in.bad()) {
+                return TraceLineResult::ReadError;
+            }
+            return line->empty() ? TraceLineResult::End : TraceLineResult::Line;
+        }
+        if (next == '\n')
+        {
+            if (!line->empty() && line->back() == '\r') {
+                line->pop_back();
+            }
+            return TraceLineResult::Line;
+        }
+        if (line->size() >= kMaxTraceLineBytes) {
+            return TraceLineResult::TooLong;
+        }
+        line->push_back((char)next);
+    }
+}
+
 static bool parse_u32(const std::string& s, uint32_t* out)
 {
     if (s.empty() || s[0] < '0' || s[0] > '9') {
@@ -256,9 +414,10 @@ static bool parse_int_field(const std::string& s, int* out)
     if (s.empty()) {
         return false;
     }
+    errno = 0;
     char* end = nullptr;
     const long v = std::strtol(s.c_str(), &end, 0);
-    if (!end || *end || v < INT_MIN || v > INT_MAX) {
+    if (!end || *end || errno == ERANGE || v < INT_MIN || v > INT_MAX) {
         return false;
     }
     *out = (int)v;
@@ -398,9 +557,51 @@ static bool validate_ref_bounds(
     return ref.Block < input_blocks;
 }
 
+static bool trace_ref_ranges_overlap(
+    const TraceRef& a,
+    const TraceRef& b,
+    uint32_t bytes)
+{
+    if (bytes == 0u || a.Kind == BlockKind::None ||
+        a.Kind != b.Kind || a.Block != b.Block)
+    {
+        return false;
+    }
+    const uint64_t a_begin = a.Offset;
+    const uint64_t b_begin = b.Offset;
+    return a_begin < b_begin + bytes && b_begin < a_begin + bytes;
+}
+
+static bool trace_op_has_unsupported_overlap(const TraceOp& op)
+{
+    const bool dst_src0_overlap =
+        trace_ref_ranges_overlap(op.Dst, op.Src0, op.Bytes);
+    const bool dst_src1_overlap =
+        trace_ref_ranges_overlap(op.Dst, op.Src1, op.Bytes);
+    const bool src0_src1_overlap =
+        trace_ref_ranges_overlap(op.Src0, op.Src1, op.Bytes);
+
+    // gf256_div_mem explicitly supports exact in-place operation.  The other
+    // replay kernels use memcpy or restrict-qualified operands.
+    if (op.Kind == TraceOpKind::Div)
+    {
+        const bool exact_in_place =
+            op.Dst.Kind == op.Src0.Kind &&
+            op.Dst.Block == op.Src0.Block &&
+            op.Dst.Offset == op.Src0.Offset;
+        return dst_src0_overlap && !exact_in_place;
+    }
+    if (op.Kind == TraceOpKind::Addset || op.Kind == TraceOpKind::Add2) {
+        return dst_src0_overlap || dst_src1_overlap || src0_src1_overlap;
+    }
+    return dst_src0_overlap;
+}
+
 static bool load_trace_schedule(
     const std::string& path,
     size_t requested_block_bytes,
+    size_t max_operations,
+    size_t max_memory_bytes,
     TraceSchedule* schedule)
 {
     std::ifstream in(path.c_str());
@@ -413,21 +614,56 @@ static bool load_trace_schedule(
     schedule->BlockBytes = requested_block_bytes;
     schedule->RecoveryBlocks = 0;
     schedule->InputBlocks = 0;
-    schedule->LogicalBytes = 0;
+    schedule->Ledger = wirehair_experiments::ByteLedger();
     schedule->Ops.clear();
 
     std::string line;
-    if (!std::getline(in, line))
+    const TraceLineResult header_result = read_trace_line(in, &line);
+    if (header_result == TraceLineResult::End)
     {
         std::fprintf(stderr, "empty schedule: %s\n", path.c_str());
+        return false;
+    }
+    if (header_result == TraceLineResult::TooLong)
+    {
+        std::fprintf(stderr,
+            "%s:1: schedule line exceeds %zu-byte limit\n",
+            path.c_str(), kMaxTraceLineBytes);
+        return false;
+    }
+    if (header_result == TraceLineResult::ReadError)
+    {
+        std::fprintf(stderr, "failed to read schedule: %s\n", path.c_str());
+        return false;
+    }
+    if (line != kTraceCsvHeader)
+    {
+        std::fprintf(stderr, "%s:1: unexpected trace CSV header\n", path.c_str());
         return false;
     }
 
     size_t max_bytes = 0;
     unsigned line_no = 1;
-    while (std::getline(in, line))
+    for (;;)
     {
+        const TraceLineResult line_result = read_trace_line(in, &line);
+        if (line_result == TraceLineResult::End) {
+            break;
+        }
         ++line_no;
+        if (line_result == TraceLineResult::TooLong)
+        {
+            std::fprintf(stderr,
+                "%s:%u: schedule line exceeds %zu-byte limit\n",
+                path.c_str(), line_no, kMaxTraceLineBytes);
+            return false;
+        }
+        if (line_result == TraceLineResult::ReadError)
+        {
+            std::fprintf(stderr,
+                "%s:%u: failed to read schedule\n", path.c_str(), line_no);
+            return false;
+        }
         if (line.empty()) {
             continue;
         }
@@ -495,6 +731,13 @@ static bool load_trace_schedule(
                 path.c_str(), line_no, fields[1].c_str());
             return false;
         }
+        if (trace_op_has_unsupported_overlap(op))
+        {
+            std::fprintf(stderr,
+                "%s:%u: overlapping operands are unsupported for op_type=%s\n",
+                path.c_str(), line_no, fields[1].c_str());
+            return false;
+        }
 
         const TraceRef refs[] = {op.Dst, op.Src0, op.Src1};
         for (const TraceRef& ref : refs)
@@ -508,7 +751,26 @@ static bool load_trace_schedule(
         }
 
         max_bytes = std::max(max_bytes, (size_t)op.Bytes);
-        schedule->LogicalBytes += op.Bytes;
+        if (schedule->Ops.size() >= max_operations)
+        {
+            std::fprintf(stderr,
+                "schedule exceeds the %zu-operation replay limit\n",
+                max_operations);
+            return false;
+        }
+        const wirehair_experiments::ByteLedger operation_ledger =
+            wirehair_experiments::LedgerFor(
+                ledger_operation(op.Kind), op.Bytes);
+        if (!wirehair_experiments::TryAccumulateByteLedger(
+                schedule->Ledger, operation_ledger))
+        {
+            std::fprintf(stderr, "schedule byte ledger overflows uint64_t\n");
+            return false;
+        }
+        if (!reserve_for_trace_op(
+                schedule, max_operations, max_memory_bytes)) {
+            return false;
+        }
         schedule->Ops.push_back(op);
     }
 
@@ -641,7 +903,7 @@ static void replay_trace_tiled(
     }
 }
 
-static double median(std::vector<double> values)
+static double median(std::vector<double>& values)
 {
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
@@ -706,52 +968,135 @@ static double time_tiled(
     return median(samples);
 }
 
-static void make_trace_base(
+static bool make_trace_base(
     const TraceSchedule& schedule,
+    size_t max_memory_bytes,
+    unsigned repeats,
     std::vector<uint8_t>* recovery,
     std::vector<uint8_t>* input)
 {
-    recovery->resize((size_t)schedule.RecoveryBlocks * schedule.BlockBytes);
-    input->resize((size_t)schedule.InputBlocks * schedule.BlockBytes);
+    size_t recovery_bytes = 0;
+    size_t input_bytes = 0;
+    if ((schedule.RecoveryBlocks != 0u &&
+         schedule.BlockBytes > (size_t)-1 / schedule.RecoveryBlocks) ||
+        (schedule.InputBlocks != 0u &&
+         schedule.BlockBytes > (size_t)-1 / schedule.InputBlocks))
+    {
+        std::fprintf(stderr, "schedule storage size overflows size_t\n");
+        return false;
+    }
+    recovery_bytes = (size_t)schedule.RecoveryBlocks * schedule.BlockBytes;
+    input_bytes = (size_t)schedule.InputBlocks * schedule.BlockBytes;
+    if (recovery_bytes > (size_t)-1 - input_bytes)
+    {
+        std::fprintf(stderr, "schedule aggregate storage size overflows size_t\n");
+        return false;
+    }
+    if (recovery_bytes > ((size_t)-1 - input_bytes) / 3u)
+    {
+        std::fprintf(stderr, "schedule peak replay storage size overflows size_t\n");
+        return false;
+    }
+    const size_t peak_bytes = 3u * recovery_bytes + input_bytes;
+    size_t persistent_bytes = 0;
+    size_t aggregate_peak_bytes = 0;
+    if (!trace_persistent_storage_bytes(
+            schedule, repeats, &persistent_bytes) ||
+        !checked_size_add(
+            persistent_bytes, peak_bytes, &aggregate_peak_bytes))
+    {
+        std::fprintf(stderr,
+            "schedule aggregate replay storage size overflows size_t\n");
+        return false;
+    }
+    if (aggregate_peak_bytes > max_memory_bytes)
+    {
+        std::fprintf(stderr,
+            "schedule aggregate storage exceeds --max-memory-mib policy\n");
+        return false;
+    }
+    if (recovery_bytes > recovery->max_size() || input_bytes > input->max_size())
+    {
+        std::fprintf(stderr, "schedule storage size exceeds container limits\n");
+        return false;
+    }
+    try
+    {
+        recovery->resize(recovery_bytes);
+        input->resize(input_bytes);
+    }
+    catch (const std::bad_alloc&)
+    {
+        std::fprintf(stderr, "schedule storage allocation failed\n");
+        return false;
+    }
+    catch (const std::length_error&)
+    {
+        std::fprintf(stderr, "schedule storage size exceeds container limits\n");
+        return false;
+    }
     fill_bytes(*recovery, UINT64_C(0x7265636f76657279) ^ schedule.BlockBytes);
     fill_bytes(*input, UINT64_C(0x696e7075745f5f5f) ^ schedule.BlockBytes);
+    return true;
 }
 
 static bool verify_trace_schedule(
     const TraceSchedule& schedule,
-    const std::vector<size_t>& tiles)
+    const std::vector<size_t>& tiles,
+    size_t max_memory_bytes,
+    unsigned repeats)
 {
-    std::vector<uint8_t> recovery_base;
-    std::vector<uint8_t> input;
-    make_trace_base(schedule, &recovery_base, &input);
-
-    std::vector<uint8_t> untiled = recovery_base;
-    replay_trace_untiled(untiled, input, schedule);
-
-    bool checked_tile = false;
-    for (size_t tile : tiles)
+    try
     {
-        if (tile >= schedule.BlockBytes) {
-            continue;
-        }
-        checked_tile = true;
-        std::vector<uint8_t> tiled = recovery_base;
-        replay_trace_tiled(tiled, input, schedule, tile);
-        if (tiled != untiled)
-        {
-            std::fprintf(stderr, "schedule verification failed for tile=%zu\n", tile);
+        std::vector<uint8_t> recovery_base;
+        std::vector<uint8_t> input;
+        if (!make_trace_base(
+                schedule, max_memory_bytes, repeats,
+                &recovery_base, &input)) {
             return false;
         }
-    }
 
-    if (!checked_tile)
+        std::vector<uint8_t> untiled = recovery_base;
+        replay_trace_untiled(untiled, input, schedule);
+
+        bool checked_tile = false;
+        for (size_t tile : tiles)
+        {
+            if (tile >= schedule.BlockBytes) {
+                continue;
+            }
+            checked_tile = true;
+            std::vector<uint8_t> tiled = recovery_base;
+            replay_trace_tiled(tiled, input, schedule, tile);
+            if (tiled != untiled)
+            {
+                std::fprintf(stderr,
+                    "schedule verification failed for tile=%zu\n", tile);
+                return false;
+            }
+        }
+
+        if (!checked_tile)
+        {
+            std::fprintf(stderr,
+                "no tile size below block_bytes=%zu was provided\n",
+                schedule.BlockBytes);
+            return false;
+        }
+
+        return true;
+    }
+    catch (const std::bad_alloc&)
     {
-        std::fprintf(stderr, "no tile size below block_bytes=%zu was provided\n",
-            schedule.BlockBytes);
+        std::fprintf(stderr, "schedule verification allocation failed\n");
         return false;
     }
-
-    return true;
+    catch (const std::length_error&)
+    {
+        std::fprintf(stderr,
+            "schedule verification storage exceeds container limits\n");
+        return false;
+    }
 }
 
 static double time_trace_untiled(
@@ -759,14 +1104,14 @@ static double time_trace_untiled(
     const std::vector<uint8_t>& input,
     const TraceSchedule& schedule,
     unsigned repeats,
+    std::vector<uint8_t>& recovery,
+    std::vector<double>& samples,
     uint64_t* checksum)
 {
-    std::vector<double> samples;
-    samples.reserve(repeats);
-    std::vector<uint8_t> recovery;
+    samples.clear();
     for (unsigned repeat = 0; repeat < repeats; ++repeat)
     {
-        recovery = recovery_base;
+        std::copy(recovery_base.begin(), recovery_base.end(), recovery.begin());
         const double start = now_sec();
         replay_trace_untiled(recovery, input, schedule);
         samples.push_back(now_sec() - start);
@@ -781,14 +1126,14 @@ static double time_trace_tiled(
     const TraceSchedule& schedule,
     size_t tile_bytes,
     unsigned repeats,
+    std::vector<uint8_t>& recovery,
+    std::vector<double>& samples,
     uint64_t* checksum)
 {
-    std::vector<double> samples;
-    samples.reserve(repeats);
-    std::vector<uint8_t> recovery;
+    samples.clear();
     for (unsigned repeat = 0; repeat < repeats; ++repeat)
     {
-        recovery = recovery_base;
+        std::copy(recovery_base.begin(), recovery_base.end(), recovery.begin());
         const double start = now_sec();
         replay_trace_tiled(recovery, input, schedule, tile_bytes);
         samples.push_back(now_sec() - start);
@@ -805,12 +1150,21 @@ static void print_result(
     double seconds,
     uint64_t checksum)
 {
-    const double logical_gib =
-        (double)op_count * (double)c.BlockBytes / 1073741824.0;
+    wirehair_experiments::ByteLedger ledger =
+        wirehair_experiments::LedgerFor(
+            wirehair_experiments::ByteOperation::Xor, c.BlockBytes);
+    ledger.LogicalBytes *= op_count;
+    ledger.ReadBytes *= op_count;
+    ledger.WriteBytes *= op_count;
+    const double logical_gib = (double)ledger.LogicalBytes / 1073741824.0;
     const double memory_gib_3stream = 3.0 * logical_gib;
     const double gib_per_s = memory_gib_3stream / seconds;
+    const double read_gib = (double)ledger.ReadBytes / 1073741824.0;
+    const double write_gib = (double)ledger.WriteBytes / 1073741824.0;
+    const double traffic_gib = read_gib + write_gib;
     std::printf(
-        "%s,%zu,%u,%zu,%s,%zu,%.6f,%.6f,%.6f,%.3f,0x%016llx\n",
+        "%s,%zu,%u,%zu,%s,%zu,%.6f,%.6f,%.6f,%.3f,0x%016llx,"
+        "2,%.9f,%.9f,%.9f,%.9f,%.3f,%.3f\n",
         c.Name,
         c.BlockBytes,
         c.Blocks,
@@ -821,7 +1175,13 @@ static void print_result(
         logical_gib,
         memory_gib_3stream,
         gib_per_s,
-        (unsigned long long)checksum);
+        (unsigned long long)checksum,
+        logical_gib,
+        read_gib,
+        write_gib,
+        traffic_gib,
+        logical_gib / seconds,
+        traffic_gib / seconds);
 }
 
 static void print_trace_result(
@@ -832,11 +1192,17 @@ static void print_trace_result(
     uint64_t checksum)
 {
     const double logical_gib =
-        (double)schedule.LogicalBytes / 1073741824.0;
+        (double)schedule.Ledger.LogicalBytes / 1073741824.0;
     const double memory_gib_3stream = 3.0 * logical_gib;
     const double gib_per_s = seconds > 0.0 ? memory_gib_3stream / seconds : 0.0;
+    const double read_gib =
+        (double)schedule.Ledger.ReadBytes / 1073741824.0;
+    const double write_gib =
+        (double)schedule.Ledger.WriteBytes / 1073741824.0;
+    const double traffic_gib = read_gib + write_gib;
     std::printf(
-        "%s,%zu,%u,%u,%zu,%s,%zu,%.6f,%.6f,%.6f,%.3f,0x%016llx\n",
+        "%s,%zu,%u,%u,%zu,%s,%zu,%.6f,%.6f,%.6f,%.3f,0x%016llx,"
+        "2,%.9f,%.9f,%.9f,%.9f,%.3f,%.3f\n",
         schedule.Name.c_str(),
         schedule.BlockBytes,
         schedule.RecoveryBlocks,
@@ -848,7 +1214,13 @@ static void print_trace_result(
         logical_gib,
         memory_gib_3stream,
         gib_per_s,
-        (unsigned long long)checksum);
+        (unsigned long long)checksum,
+        logical_gib,
+        read_gib,
+        write_gib,
+        traffic_gib,
+        seconds > 0.0 ? logical_gib / seconds : 0.0,
+        seconds > 0.0 ? traffic_gib / seconds : 0.0);
 }
 
 } // namespace
@@ -860,6 +1232,12 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "gf256_init failed\n");
         return 2;
     }
+    if (!wirehair_experiments::VerifyByteLedger())
+    {
+        std::fprintf(stderr, "byte-ledger self-check failed\n");
+        return 2;
+    }
+    std::fprintf(stderr, "byte-ledger self-check passed\n");
 
     const Case cases[] = {
         {"mtu1280", 1280, 32768, 8, 1},
@@ -880,6 +1258,8 @@ int main(int argc, char** argv)
     bool verify_only = false;
     std::string schedule_path;
     size_t schedule_block_bytes = 0;
+    size_t max_memory_mib = kDefaultTraceMemoryMiB;
+    size_t max_operations = kDefaultMaxTraceOperations;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -916,22 +1296,64 @@ int main(int argc, char** argv)
             }
             repeats = (unsigned)parsed;
         }
+        else if (!std::strcmp(argv[i], "--max-memory-mib") && i + 1 < argc)
+        {
+            if (!parse_size_field(argv[++i], &max_memory_mib) ||
+                max_memory_mib == 0u ||
+                max_memory_mib > (size_t)-1 / (1024u * 1024u))
+            {
+                std::fprintf(stderr,
+                    "--max-memory-mib requires a representable positive integer\n");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--max-operations") && i + 1 < argc)
+        {
+            if (!parse_size_field(argv[++i], &max_operations) ||
+                max_operations == 0u ||
+                max_operations > kDefaultMaxTraceOperations)
+            {
+                std::fprintf(stderr,
+                    "--max-operations requires an integer in [1,%zu]\n",
+                    kDefaultMaxTraceOperations);
+                return 1;
+            }
+        }
         else
         {
             std::fprintf(stderr,
                 "usage: rowop_tiling [--verify-only] [--schedule CSV] "
-                "[--block-bytes N] [--tiles csv] [--repeats N]\n");
+                "[--block-bytes N] [--tiles csv] [--repeats N] "
+                "[--max-memory-mib N] [--max-operations N]\n");
             return 1;
         }
     }
 
+    const size_t max_memory_bytes = max_memory_mib * 1024u * 1024u;
+
     if (!schedule_path.empty())
     {
         TraceSchedule schedule;
-        if (!load_trace_schedule(schedule_path, schedule_block_bytes, &schedule)) {
+        bool loaded = false;
+        try {
+            loaded = load_trace_schedule(
+                schedule_path, schedule_block_bytes, max_operations,
+                max_memory_bytes, &schedule);
+        }
+        catch (const std::bad_alloc&) {
+            std::fprintf(stderr, "schedule operation storage allocation failed\n");
             return 1;
         }
-        if (!verify_trace_schedule(schedule, tiles)) {
+        catch (const std::length_error&) {
+            std::fprintf(stderr,
+                "schedule operation storage exceeds container limits\n");
+            return 1;
+        }
+        if (!loaded) {
+            return 1;
+        }
+        if (!verify_trace_schedule(
+                schedule, tiles, max_memory_bytes, repeats)) {
             return 1;
         }
         if (verify_only)
@@ -940,27 +1362,53 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        std::vector<uint8_t> recovery_base;
-        std::vector<uint8_t> input;
-        make_trace_base(schedule, &recovery_base, &input);
-
-        std::printf(
-            "case,block_bytes,recovery_blocks,input_blocks,ops,mode,tile_bytes,"
-            "median_ms,logical_gib,memory_gib_3stream,gib_per_s,checksum\n");
-
-        uint64_t checksum = 0;
-        const double untiled = time_trace_untiled(
-            recovery_base, input, schedule, repeats, &checksum);
-        print_trace_result(schedule, "untiled", 0, untiled, checksum);
-
-        for (size_t tile : tiles)
+        try
         {
-            if (tile >= schedule.BlockBytes) {
-                continue;
+            std::vector<uint8_t> recovery_base;
+            std::vector<uint8_t> input;
+            if (!make_trace_base(
+                    schedule, max_memory_bytes, repeats,
+                    &recovery_base, &input)) {
+                return 1;
             }
-            const double tiled = time_trace_tiled(
-                recovery_base, input, schedule, tile, repeats, &checksum);
-            print_trace_result(schedule, "tiled", tile, tiled, checksum);
+            std::vector<uint8_t> replay_recovery(recovery_base.size());
+            std::vector<double> samples;
+            samples.reserve(repeats);
+
+            std::printf(
+                "case,block_bytes,recovery_blocks,input_blocks,ops,mode,tile_bytes,"
+                "median_ms,logical_gib,memory_gib_3stream,gib_per_s,checksum,"
+                "schema_version,logical_work_gib,estimated_read_gib,"
+                "estimated_write_gib,estimated_traffic_gib,logical_work_gib_per_s,"
+                "estimated_traffic_gib_per_s\n");
+
+            uint64_t checksum = 0;
+            const double untiled = time_trace_untiled(
+                recovery_base, input, schedule, repeats,
+                replay_recovery, samples, &checksum);
+            print_trace_result(schedule, "untiled", 0, untiled, checksum);
+
+            for (size_t tile : tiles)
+            {
+                if (tile >= schedule.BlockBytes) {
+                    continue;
+                }
+                const double tiled = time_trace_tiled(
+                    recovery_base, input, schedule, tile, repeats,
+                    replay_recovery, samples, &checksum);
+                print_trace_result(schedule, "tiled", tile, tiled, checksum);
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            std::fprintf(stderr, "schedule replay allocation failed\n");
+            return 1;
+        }
+        catch (const std::length_error&)
+        {
+            std::fprintf(stderr,
+                "schedule replay storage exceeds container limits\n");
+            return 1;
         }
 
         return 0;
@@ -992,7 +1440,10 @@ int main(int argc, char** argv)
 
     std::printf(
         "case,block_bytes,blocks,ops,mode,tile_bytes,median_ms,"
-        "logical_gib,memory_gib_3stream,gib_per_s,checksum\n");
+        "logical_gib,memory_gib_3stream,gib_per_s,checksum,schema_version,"
+        "logical_work_gib,estimated_read_gib,estimated_write_gib,"
+        "estimated_traffic_gib,logical_work_gib_per_s,"
+        "estimated_traffic_gib_per_s\n");
 
     for (const Case& c : cases)
     {

@@ -15,8 +15,11 @@ Calibration files:
 - `fanin_gather.csv`: chained pairwise XORs vs fused k-ary gather XOR.
 
 Protocol: `xor_bench`, 4 GiB cold pool, `--target-gib 32`, 5 repeats, seed 1,
-single-core `taskset -c 8`.  The cold XOR baseline reports 15.2 GiB/s at
-1280-byte blocks, 33.7 GiB/s at 100 KiB, and 35.1 GiB/s at 1 MiB.
+single-core `taskset -c 8`.  These schema-v1 files report the historical
+2-bytes-per-XOR normalized rate: 15.2 GiB/s at 1280-byte blocks, 33.7 GiB/s at
+100 KiB, and 35.1 GiB/s at 1 MiB.  That denominator omits the destination read
+and is not an absolute memory-traffic measurement.  Schema v2 separates one
+logical destination byte from two estimated reads plus one write.
 
 `gf256_muladd_mem` is much slower than XOR only for 1280-byte blocks
 (`muladd_xor_ratio=1.83`).  At 100 KiB it is close to XOR (`1.10`), and at
@@ -756,7 +759,7 @@ overhead `0,1,2`.  Aggregate CSV:
 XOR calibration used a solve-like random block-XOR benchmark:
 `./experiments/peeling/xor_bench --sizes 1280,102400,1048576 --target-gib 32 --repeats 5`.
 
-| block bytes | median us per block XOR | median GiB/s |
+| block bytes | median us per block XOR | legacy normalized GiB/s |
 | ---: | ---: | ---: |
 | 1280 | 0.022577343 | 105.601 |
 | 102400 | 4.309740442 | 44.257 |
@@ -1106,7 +1109,7 @@ baseline from the previous pass, the same case moved from 121.65s to 51.35s
 taskset, 32 GiB target, 5-repeat medians
 (`cold_xor_calibration.csv`, `muladd_calibration.csv`, `fanin_gather.csv`):
 
-| block | cold XOR us/op | GiB/s | muladd:xor | add8 fused:chained |
+| block | cold XOR us/op | legacy normalized GiB/s | muladd:xor | add8 fused:chained |
 | ---: | ---: | ---: | ---: | ---: |
 | 1280 B | 0.157 | 15.2 | 1.83 | 2.22 |
 | 100 KiB | 5.66 | 33.7 | 1.10 | 1.34 |

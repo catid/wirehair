@@ -310,9 +310,11 @@ bool Generate_HeavyRows(unsigned perturbationTrials)
     cout << "* ColWiggle = " << params.ColWiggle << endl;
     if (perturbationTrials != 0)
     {
-        cout << "* Perturbation singular rate: " << failures << " / "
+        cout << "* Empirical perturbation singular rate: " << failures << " / "
             << perturbationTrials << " (expected ~1/256 = "
             << perturbationTrials / 256 << ")" << endl;
+        cout << "* Informational measurement only; not a reliability guarantee"
+            << endl;
     }
     else
     {

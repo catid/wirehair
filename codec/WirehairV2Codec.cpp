@@ -3,6 +3,7 @@
 #include "../WirehairTools.h"
 #include "../gf256.h"
 
+#include <new>
 #include <utility>
 
 namespace wirehair_v2 {
@@ -127,16 +128,23 @@ WirehairResult Codec::InitializePrecodeEncoder(
         return Wirehair_InvalidInput;
     }
 
-    std::unique_ptr<MessagePrecodeEncoder> next(new MessagePrecodeEncoder());
-    if (!next->Initialize(
-            message, message_bytes, block_bytes, seed_override, options))
+    try
     {
-        return Wirehair_BadDenseSeed;
-    }
+        std::unique_ptr<MessagePrecodeEncoder> next(
+            new MessagePrecodeEncoder());
+        const WirehairResult result = next->InitializeResult(
+            message, message_bytes, block_bytes, seed_override, options);
+        if (result != Wirehair_Success) {
+            return result;
+        }
 
-    CurrentProfile = next->Profile();
-    PrecodeImpl = std::move(next);
-    return Wirehair_Success;
+        CurrentProfile = next->Profile();
+        PrecodeImpl = std::move(next);
+        return Wirehair_Success;
+    }
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult Codec::InitializeDecoder(
@@ -190,13 +198,11 @@ WirehairResult Codec::Encode(
     }
     if (PrecodeImpl && PrecodeImpl->IsInitialized())
     {
-        return PrecodeImpl->Encode(
+        return PrecodeImpl->EncodeResult(
             block_id,
             static_cast<uint8_t*>(block_out),
             out_bytes,
-            data_bytes_out) ?
-            Wirehair_Success :
-            Wirehair_InvalidInput;
+            data_bytes_out);
     }
     const uint32_t written = Impl.Encode(block_id, block_out, out_bytes);
     *data_bytes_out = written;

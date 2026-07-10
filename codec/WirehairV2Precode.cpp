@@ -4,6 +4,7 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace wirehair_v2 {
 namespace {
@@ -56,6 +57,80 @@ void UnbiasedShuffleDeck(
     }
 }
 
+bool IsStrictlyIncreasingBelow(
+    const std::vector<uint32_t>& row,
+    uint64_t limit)
+{
+    uint32_t previous = 0;
+    bool have_previous = false;
+    for (uint32_t column : row)
+    {
+        if ((uint64_t)column >= limit ||
+            (have_previous && column <= previous))
+        {
+            return false;
+        }
+        previous = column;
+        have_previous = true;
+    }
+    return true;
+}
+
+size_t SymmetricDifferenceCountBelow(
+    const std::vector<uint32_t>& a,
+    const std::vector<uint32_t>& b,
+    uint32_t limit)
+{
+    size_t ai = 0, bi = 0, count = 0;
+    while (ai < a.size() || bi < b.size())
+    {
+        while (ai < a.size() && a[ai] >= limit) {
+            ++ai;
+        }
+        while (bi < b.size() && b[bi] >= limit) {
+            ++bi;
+        }
+        if (ai >= a.size() && bi >= b.size()) {
+            break;
+        }
+        if (bi >= b.size() || (ai < a.size() && a[ai] < b[bi])) {
+            ++ai;
+            ++count;
+        }
+        else if (ai >= a.size() || b[bi] < a[ai]) {
+            ++bi;
+            ++count;
+        }
+        else {
+            ++ai;
+            ++bi;
+        }
+    }
+    return count;
+}
+
+bool ValidatePrecodeParams(const PrecodeParams& params)
+{
+    const uint64_t binary_span =
+        (uint64_t)params.BlockCount + params.Staircase + params.DenseRows;
+    const uint64_t total_span = binary_span + params.HeavyRows;
+
+    if (params.BlockCount < 2u || params.BlockCount > 64000u ||
+        params.Staircase == 0u ||
+        params.SourceHits == 0u || params.SourceHits > 8u ||
+        params.DenseRows > 64u || params.HeavyRows > 128u ||
+        binary_span > UINT16_MAX || total_span > UINT16_MAX)
+    {
+        return false;
+    }
+
+    // Identity-corner flips address both halves of the K + S deck.
+    const uint64_t known_span =
+        (uint64_t)params.BlockCount + params.Staircase;
+    return !params.DenseIdentityCorner ||
+        known_span >= 2u * (uint64_t)(params.DenseRows >> 1);
+}
+
 } // namespace
 
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
@@ -79,28 +154,13 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     const uint32_t S = params.Staircase;
     const uint32_t D2 = params.DenseRows;
     const uint32_t N1 = params.SourceHits;
-    // Widen before summing: caller-supplied S or D2 near 2^32 would wrap
-    // span back into the accepted range and defeat the rejection below
+    // Reject the complete parameter domain before modifying `out` or
+    // allocating row/deck storage.
+    if (!ValidatePrecodeParams(params)) {
+        return false;
+    }
     const uint64_t span_wide = (uint64_t)K + S + D2;
-
-    // N1 is capped at 8 like the simulator's n1 clamp (and the picks
-    // scratch array below)
-    if (K < 2u || K > 64000u || S == 0u || N1 == 0u || N1 > 8u) {
-        return false;
-    }
-    // Deck entries are uint16_t.  Checked at 64-bit width and before the
-    // K + S comparison below so wrapped sums cannot sneak past either.
-    if (span_wide > 65535u) {
-        return false;
-    }
     const uint32_t span = (uint32_t)span_wide;
-    // Identity-corner flips draw deck positions up to
-    // set_count + D2/2 - 1, so the K + S deck must cover both halves
-    // (rejects only tiny K: the production table gives K + S >= 14 from
-    // K = 8 upward)
-    if (params.DenseIdentityCorner && K + S < 2u * (D2 >> 1)) {
-        return false;
-    }
 
     out.Params = params;
     out.StaircaseRows.assign(S, std::vector<uint32_t>());
@@ -216,6 +276,118 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         }
     }
 
+    return ValidatePrecodeSystem(out);
+}
+
+bool ValidatePrecodeSystem(const PrecodeSystem& system)
+{
+    const PrecodeParams& params = system.Params;
+    const uint32_t K = params.BlockCount;
+    const uint32_t S = params.Staircase;
+    const uint32_t D2 = params.DenseRows;
+    const uint64_t binary_span = (uint64_t)K + S + D2;
+
+    if (!ValidatePrecodeParams(params) ||
+        system.StaircaseRows.size() != S ||
+        system.DenseRowColumns.size() != D2)
+    {
+        return false;
+    }
+
+    const uint32_t staircase_end = K + S;
+    std::vector<uint8_t> source_hits(K, 0u);
+    for (uint32_t row_index = 0; row_index < S; ++row_index)
+    {
+        const std::vector<uint32_t>& row = system.StaircaseRows[row_index];
+        if (!IsStrictlyIncreasingBelow(row, staircase_end)) {
+            return false;
+        }
+        const uint32_t own = K + row_index;
+        const uint32_t link = own - 1u;
+        bool have_own = false;
+        bool have_link = row_index == 0u;
+        for (uint32_t column : row)
+        {
+            if (column < K)
+            {
+                if (source_hits[column] == UINT8_MAX) {
+                    return false;
+                }
+                ++source_hits[column];
+            }
+            else if (column == own) {
+                have_own = true;
+            }
+            else if (row_index > 0u && column == link) {
+                have_link = true;
+            }
+            else {
+                return false;
+            }
+        }
+        if (!have_own || !have_link) {
+            return false;
+        }
+    }
+    const uint8_t expected_hits = (uint8_t)std::min(params.SourceHits, S);
+    for (uint8_t hits : source_hits) {
+        if (hits != expected_hits) {
+            return false;
+        }
+    }
+
+    if (D2 == 0u) {
+        return true;
+    }
+
+    const uint32_t known_span = staircase_end;
+    const size_t first_expected = params.DenseIdentityCorner ?
+        (known_span + 1u) / 2u : ((size_t)binary_span + 1u) / 2u;
+    for (uint32_t row_index = 0; row_index < D2; ++row_index)
+    {
+        const std::vector<uint32_t>& row = system.DenseRowColumns[row_index];
+        if (!IsStrictlyIncreasingBelow(row, binary_span)) {
+            return false;
+        }
+
+        size_t known_count = 0;
+        size_t dense_count = 0;
+        bool have_own = false;
+        for (uint32_t column : row)
+        {
+            if (column < known_span) {
+                ++known_count;
+            }
+            else {
+                ++dense_count;
+                have_own = have_own || column == known_span + row_index;
+            }
+        }
+        if (params.DenseIdentityCorner &&
+            (dense_count != 1u || !have_own))
+        {
+            return false;
+        }
+        if (row_index == 0u)
+        {
+            const size_t first_count = params.DenseIdentityCorner ?
+                known_count : row.size();
+            if (first_count != first_expected) {
+                return false;
+            }
+        }
+        else
+        {
+            const uint32_t difference_limit = params.DenseIdentityCorner ?
+                known_span : (uint32_t)binary_span;
+            if (SymmetricDifferenceCountBelow(
+                    system.DenseRowColumns[row_index - 1u], row,
+                    difference_limit) != 2u)
+            {
+                return false;
+            }
+        }
+    }
     return true;
 }
 

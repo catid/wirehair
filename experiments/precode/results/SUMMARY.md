@@ -6,7 +6,8 @@ are block-size independent.  Failure model: decode fails when binary rank
 deficiency `def` exceeds the heavy row count `H` (full-coverage MDS heavy
 patch, i.e. an explicit Cauchy heavy solve as in `wirehair-wuw`; production's
 18-column heavy band can only be worse, so production fail rates upper-bound
-the `dense` rows here).
+the `dense` rows here).  This is a model assumption; the shipped legacy matrix
+has the empirical perturbation limit documented in `../../../tables/HEAVY_MATRIX.md`.
 
 Correctness: the projection replay is proven by a rank-invariance self-test
 (`peeled + residual_rank == brute-force GE rank` over thousands of instances
@@ -309,7 +310,12 @@ is a bounded paired screen of the degree-distribution retune shortlist
 `codecport_n13`).  `degree_rowdist_{wirehair,lt_m2_c1024}_K64000_t100_20260708.csv`
 adds a max-K smoke for the only non-production rowdist that survived the broad
 screen.  `degree_rowdist_rank_K10000_32000_t500_K64000_t100_20260708.txt`
-is the `rank_total.py` total-block-op report using the calibration CSVs.
+is the original cost-only `rank_total.py` report using the calibration CSVs.
+The current ranking regression automates the decision below with modeled H,
+`min_trials=100`, observed failure `<=0.005`, and the 95% one-sided Wilson
+upper bound `<=0.05`; its deterministic JSON confirms the production
+`wirehair` source has lower codecport cost than `lt_m2_c1024` at both
+K=32000/OH0 and K=64000/OH0.
 
 Verdict: do not promote any rowdist from this shortlist.  The cost-only
 ranking is not a promotion criterion because it puts unreliable low-degree

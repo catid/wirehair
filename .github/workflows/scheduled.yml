@@ -1,0 +1,68 @@
+name: Scheduled correctness
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-correctness
+  cancel-in-progress: false
+
+jobs:
+  deterministic-e2e:
+    name: Small, medium, maximum-N, large-block, and fuzz E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic scheduled coverage
+        env:
+          CC: gcc
+          CXX: g++
+        run: >-
+          python3 ci/run_ci.py scheduled
+          --build-dir build/ci-scheduled
+          --generator Ninja
+          --cmake-arg=-DCMAKE_C_COMPILER=gcc
+          --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+          --jobs 2
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-correctness-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/ci-scheduled/ci-logs/**
+            build/ci-scheduled/CMakeCache.txt
+            build/ci-scheduled/CMakeFiles/CMake*.log
+            build/ci-scheduled/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-scheduled/Testing/Temporary/**
+
+  portable-qemu:
+    name: Clang portable/AVX2 builds on emulated lower-feature x86 CPUs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install user-mode QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+      - name: Run Conroe and Haswell end-to-end tests
+        env:
+          CXX: clang++
+        run: python3 ci/run_ci.py qemu --build-dir build/ci-qemu --jobs 2
+      - name: Upload portability logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-portability-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/ci-qemu/ci-logs/**

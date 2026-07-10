@@ -2,10 +2,112 @@
 
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <vector>
+
+namespace {
+
+bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
+{
+    return profile.BlockCount == 0u && profile.BlockBytes == 0u &&
+        profile.DenseCount == 0u && profile.PeelSeed == 0u &&
+        profile.DenseSeed == 0u && profile.PeelSeedBucket == 0u &&
+        !profile.UsedPeelFixup && !profile.UsedDenseFixup && !profile.Tuned &&
+        profile.TuningResidualMean == 0.0 &&
+        profile.TuningResidualColumns == 0u &&
+        profile.TuningXorCost == 0u && profile.TuningTrials == 0u &&
+        profile.Policy.Solver == wirehair_v2::PeelSolver::RqccLowref &&
+        profile.Policy.Structure == wirehair_v2::PeelStructure::LtM1C16 &&
+        profile.Policy.ByteClass == wirehair_v2::BlockByteClass::Small &&
+        profile.Policy.CountBand == wirehair_v2::BlockCountBand::UpTo1000 &&
+        profile.Policy.Codec.MinDegree == 0u &&
+        profile.Policy.Codec.MaxDegree == 0u &&
+        profile.Policy.Codec.Degree1Mass == 0.0 &&
+        profile.Policy.Codec.Degree2Mass == 0.0 &&
+        profile.Policy.Codec.RobustC == 0.0 &&
+        profile.Policy.Codec.RobustDelta == 0.0 &&
+        !profile.Policy.Codec.FullyRandomRows;
+}
+
+bool CheckPatternInitializedAccessors()
+{
+    using wirehair_v2::Codec;
+    using wirehair_v2::MessagePrecodeEncoder;
+    using wirehair_v2::PrecodeEncoder;
+
+    alignas(Codec) unsigned char codec_storage[sizeof(Codec)];
+    std::memset(codec_storage, 0xfe, sizeof(codec_storage));
+    Codec* codec = new (codec_storage) Codec;
+    if (!IsDefaultProfile(codec->Profile())) {
+        std::fprintf(stderr, "pattern Codec profile was not value-initialized\n");
+        codec->~Codec();
+        return false;
+    }
+    codec->~Codec();
+
+    alignas(PrecodeEncoder)
+        unsigned char encoder_storage[sizeof(PrecodeEncoder)];
+    std::memset(encoder_storage, 0xfe, sizeof(encoder_storage));
+    PrecodeEncoder* encoder = new (encoder_storage) PrecodeEncoder;
+    const wirehair_v2::PrecodeSystem& system = encoder->System();
+    const wirehair_v2::PrecodeEncodeStats& stats = encoder->EncodeStats();
+    if (encoder->IsInitialized() || encoder->SourceBlockCount() != 0u ||
+        encoder->ParityBlockCount() != 0u || encoder->BlockBytes() != 0u ||
+        encoder->RecoveryRowSeed() != 0u ||
+        encoder->RecoveryMixCount() != 0u ||
+        encoder->ParityBlocks() != nullptr ||
+        system.Params.BlockCount != 0u || system.Params.Staircase != 0u ||
+        system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
+        system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
+        system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
+        !system.DenseRowColumns.empty() || stats.StaircaseBlockOps != 0u ||
+        stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||
+        stats.HeavyBucketXors != 0u || stats.HeavyMulAdds != 0u ||
+        stats.HeavySolveBlockOps != 0u)
+    {
+        std::fprintf(stderr,
+            "pattern PrecodeEncoder accessors were not value-initialized\n");
+        encoder->~PrecodeEncoder();
+        return false;
+    }
+    encoder->~PrecodeEncoder();
+
+    alignas(MessagePrecodeEncoder)
+        unsigned char message_storage[sizeof(MessagePrecodeEncoder)];
+    std::memset(message_storage, 0xfe, sizeof(message_storage));
+    MessagePrecodeEncoder* message_encoder =
+        new (message_storage) MessagePrecodeEncoder;
+    const wirehair_v2::MessagePrecodeEncoderOptions& options =
+        message_encoder->Options();
+    if (message_encoder->IsInitialized() ||
+        message_encoder->MessageBytes() != 0u ||
+        message_encoder->SourceBlockCount() != 0u ||
+        message_encoder->BlockBytes() != 0u ||
+        message_encoder->SourceBlocks() != nullptr ||
+        !IsDefaultProfile(message_encoder->Profile()) ||
+        options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
+        options.DenseIdentityCorner ||
+        options.PrecodeSeedSalt != wirehair_v2::kMessagePrecodeSeedSalt ||
+        options.RecoveryRowSeedSalt !=
+            wirehair_v2::kMessageRecoveryRowSeedSalt ||
+        message_encoder->BlockEncoder().IsInitialized())
+    {
+        std::fprintf(stderr,
+            "pattern MessagePrecodeEncoder accessors were not initialized\n");
+        message_encoder->~MessagePrecodeEncoder();
+        return false;
+    }
+    message_encoder->~MessagePrecodeEncoder();
+    return true;
+}
+
+} // namespace
 
 int main()
 {
+    if (!CheckPatternInitializedAccessors()) {
+        return 1;
+    }
     const uint32_t N = 4u;
     const uint32_t block_bytes = 16u;
     const uint64_t message_bytes = (uint64_t)N * block_bytes;

@@ -30,10 +30,9 @@
 /**
     Generate_HeavyRows()
 
-    This generates a heavy matrix that is very likely to be invertible even
-    when its values are perturbed randomly.  The way this matrix is used in
-    Wirehair is for the heavy submatrix in the lower right of the matrix that
-    the solver is designed to invert.
+    This reproduces the fixed heavy matrix shipped in Wirehair and optionally
+    measures its empirical behavior under random binary perturbation.  See
+    HEAVY_MATRIX.md for the compatibility contract and reliability limits.
 
     For context, before the heavy rows come into play the overall matrix has
     been subject to the peel solver, which has solved most of the rows, leaving

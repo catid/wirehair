@@ -33,6 +33,20 @@ can convert `peel_sweep` timing columns into block-XOR-equivalent cost. It uses
 a 256 MiB working set by default so small block sizes do not benchmark a
 cache-resident buffer; use `--working-mib` for quick local smoke runs.
 
+## Byte-accounting schema
+
+New `xor_bench` output is schema v2.  It preserves the historical normalized
+GiB/s columns and appends logical destination bytes, estimated operand reads,
+estimated destination writes, and rates for logical work and total estimated
+traffic.  For `dst ^= src`, one byte of logical work reads two bytes and writes
+one.  Fused fan-in reads the destination plus K sources and writes once;
+chained fan-in rereads and rewrites the destination K times.
+
+The traffic estimate excludes write-allocate, cache-line rounding, prefetching,
+and cache hits.  It is an operation ledger, not measured DRAM bandwidth.  Use
+`../validate_byte_metrics.py` to validate both historical schema-v1 artifacts
+and new schema-v2 output.
+
 Example sweep:
 
 ```bash

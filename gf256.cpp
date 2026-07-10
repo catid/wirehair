@@ -28,8 +28,11 @@
 */
 
 #include "gf256.h"
+#include "WirehairEnvironment.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #ifdef WH_COUNT
 // Task 6a: thread-local per-op byte/call counters.
@@ -67,7 +70,7 @@ static GF256_FORCE_INLINE void gf256_storeu32(void* p, uint32_t v)
     std::memcpy(p, &v, sizeof(v));
 }
 
-#if defined(__has_cpp_attribute)
+#if __cplusplus >= 201703L && defined(__has_cpp_attribute)
 # if __has_cpp_attribute(fallthrough)
 #  define GF256_FALLTHROUGH [[fallthrough]]
 # endif
@@ -307,14 +310,11 @@ static bool gf256_self_test()
 # if defined(IOS) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
 // Requires iPhone 5S or newer
 static const bool CpuHasNeon = true;
-static const bool CpuHasNeon64 = true;
 # else // ANDROID or LINUX_ARM
 #  if defined(__aarch64__)
 static bool CpuHasNeon = true;      // if AARCH64, then we have NEON for sure...
-static bool CpuHasNeon64 = true;    // And we have ASIMD
 #  else
 static bool CpuHasNeon = false;     // if not, then we have to check at runtime.
-static bool CpuHasNeon64 = false;   // And we don't have ASIMD
 #  endif
 # endif
 #endif
@@ -347,7 +347,7 @@ static bool CpuHasSSSE3 = false;
 static void _cpuid(unsigned int cpu_info[4U], const unsigned int cpu_info_type)
 {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || defined(_M_IX86))
-    __cpuid((int *) cpu_info, cpu_info_type);
+    __cpuidex((int *) cpu_info, cpu_info_type, 0);
 #else //if defined(HAVE_CPUID)
     cpu_info[0] = cpu_info[1] = cpu_info[2] = cpu_info[3] = 0;
 # ifdef __i386__
@@ -378,6 +378,20 @@ static void _cpuid(unsigned int cpu_info[4U], const unsigned int cpu_info_type)
                           "=c" (cpu_info[2]), "=d" (cpu_info[3]) :
                           "0" (cpu_info_type), "2" (0U));
 # endif
+#endif
+}
+
+static uint64_t _xgetbv0()
+{
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || defined(_M_IX86))
+    return _xgetbv(0);
+#elif defined(__i386__) || defined(__x86_64__)
+    uint32_t eax, edx;
+    __asm__ __volatile__ (".byte 0x0f, 0x01, 0xd0" :
+                          "=a" (eax), "=d" (edx) : "c" (0));
+    return (static_cast<uint64_t>(edx) << 32) | eax;
+#else
+    return 0;
 #endif
 }
 
@@ -415,6 +429,65 @@ static void checkLinuxARMNeonCapabilities( bool& cpuHasNeon )
 #endif
 #endif // defined(GF256_TARGET_MOBILE)
 
+extern "C" void gf256_select_x86_cpu_features(
+    const gf256_x86_cpu_snapshot* snapshot,
+    gf256_x86_cpu_features* features)
+{
+    if (!features) {
+        return;
+    }
+    std::memset(features, 0, sizeof(*features));
+    if (!snapshot) {
+        return;
+    }
+
+    const bool has_leaf1 = snapshot->MaxBasicLeaf >= 1;
+    const bool has_leaf7 = snapshot->MaxBasicLeaf >= 7;
+    const bool osxsave = has_leaf1 && (snapshot->Leaf1ECX & (1u << 27)) != 0;
+    const bool cpu_avx = has_leaf1 && (snapshot->Leaf1ECX & (1u << 28)) != 0;
+    const bool ymm_state = osxsave && cpu_avx &&
+        (snapshot->XCR0 & UINT64_C(0x6)) == UINT64_C(0x6);
+    const bool zmm_state = ymm_state &&
+        (snapshot->XCR0 & UINT64_C(0xe6)) == UINT64_C(0xe6);
+
+    features->SSSE3 = has_leaf1 &&
+        (snapshot->Leaf1ECX & (1u << 9)) != 0;
+    features->AVX2 = has_leaf7 && ymm_state &&
+        (snapshot->Leaf7EBX & (1u << 5)) != 0;
+    features->AVX512 = has_leaf7 && zmm_state &&
+        (snapshot->Leaf7EBX & (1u << 16)) != 0;
+    features->GFNI = has_leaf7 && zmm_state &&
+        (snapshot->Leaf7EBX & (1u << 16)) != 0 &&
+        (snapshot->Leaf7EBX & (1u << 30)) != 0 &&
+        (snapshot->Leaf7ECX & (1u << 8)) != 0;
+}
+
+extern "C" void gf256_get_active_x86_cpu_features(
+    gf256_x86_cpu_features* features)
+{
+    if (!features) {
+        return;
+    }
+    std::memset(features, 0, sizeof(*features));
+    if (gf256_init() != 0) {
+        return;
+    }
+#if !defined(GF256_TARGET_MOBILE)
+# if defined(GF256_TRY_SSSE3)
+    features->SSSE3 = CpuHasSSSE3;
+# endif
+# if defined(GF256_TRY_AVX2)
+    features->AVX2 = CpuHasAVX2;
+# endif
+# if defined(GF256_TRY_GFNI)
+    features->GFNI = CpuHasGFNI;
+# endif
+# if defined(GF256_TRY_AVX512)
+    features->AVX512 = CpuHasAVX512;
+# endif
+#endif
+}
+
 static void gf256_architecture_init()
 {
 #if defined(GF256_TRY_NEON)
@@ -430,8 +503,6 @@ static void gf256_architecture_init()
     else if (family == ANDROID_CPU_FAMILY_ARM64)
     {
         CpuHasNeon = true;
-        if (android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_ASIMD)
-            CpuHasNeon64 = true;
     }
 #endif
 
@@ -443,32 +514,42 @@ static void gf256_architecture_init()
 #endif //GF256_TRY_NEON
 
 #if !defined(GF256_TARGET_MOBILE)
-    unsigned int cpu_info[4];
+    unsigned int cpu_info[4] = { 0, 0, 0, 0 };
+    gf256_x86_cpu_snapshot snapshot = {};
+    _cpuid(cpu_info, 0);
+    snapshot.MaxBasicLeaf = cpu_info[0];
+    if (snapshot.MaxBasicLeaf >= 1)
+    {
+        _cpuid(cpu_info, 1);
+        snapshot.Leaf1ECX = cpu_info[2];
+        const uint32_t xsave_mask = (1u << 27) | (1u << 28);
+        if ((snapshot.Leaf1ECX & xsave_mask) == xsave_mask) {
+            snapshot.XCR0 = _xgetbv0();
+        }
+    }
+    if (snapshot.MaxBasicLeaf >= 7)
+    {
+        _cpuid(cpu_info, 7);
+        snapshot.Leaf7EBX = cpu_info[1];
+        snapshot.Leaf7ECX = cpu_info[2];
+    }
 
-    _cpuid(cpu_info, 1);
+    gf256_x86_cpu_features features;
+    gf256_select_x86_cpu_features(&snapshot, &features);
 #if defined(GF256_TRY_SSSE3)
-    CpuHasSSSE3 = ((cpu_info[2] & CPUID_ECX_SSSE3) != 0);
+    CpuHasSSSE3 = features.SSSE3 != 0;
 #endif
 
 #if defined(GF256_TRY_AVX2)
-    _cpuid(cpu_info, 7);
-    CpuHasAVX2 = ((cpu_info[1] & CPUID_EBX_AVX2) != 0);
+    CpuHasAVX2 = features.AVX2 != 0;
 #endif // GF256_TRY_AVX2
 
 #if defined(GF256_TRY_GFNI)
-    // leaf 7, subleaf 0: EBX bit16=AVX512F, bit30=AVX512BW; ECX bit8=GFNI.
-    _cpuid(cpu_info, 7);
-    {
-        const bool has_avx512f  = (cpu_info[1] & (1u << 16)) != 0;
-        const bool has_avx512bw = (cpu_info[1] & (1u << 30)) != 0;
-        const bool has_gfni     = (cpu_info[2] & (1u << 8))  != 0;
-        CpuHasGFNI = has_avx512f && has_avx512bw && has_gfni;
-    }
+    CpuHasGFNI = features.GFNI != 0;
 #endif // GF256_TRY_GFNI
 
 #if defined(GF256_TRY_AVX512)
-    _cpuid(cpu_info, 7);
-    CpuHasAVX512 = (cpu_info[1] & (1u << 16)) != 0; // AVX512F
+    CpuHasAVX512 = features.AVX512 != 0;
 #endif // GF256_TRY_AVX512
 
     // When AVX2 and SSSE3 are unavailable at compile or run time, Siamese
@@ -486,7 +567,8 @@ static void gf256_architecture_init()
 
 // Context object for GF(2^^8) math
 GF256_ALIGNED gf256_ctx GF256Ctx;
-static bool Initialized = false;
+static std::once_flag InitOnce;
+static int InitResult = -3;
 
 
 //------------------------------------------------------------------------------
@@ -796,31 +878,44 @@ extern "C" int gf256_init_(int version)
     if (version != GF256_VERSION)
         return -1; // User's header does not match library version.
 
-    // Avoid multiple initialization.
-    // Only latch success: a failed init must stay failed on retry, or a
-    // caller that retries would get success with unusable (zeroed) tables.
-    if (Initialized)
-        return 0;
+    std::call_once(InitOnce, []() {
+#if defined(WIREHAIR_TESTING)
+        const wirehair::EnvironmentValue environment(
+            "WIREHAIR_GF256_TEST_INIT_RESULT");
+        const char* injected = environment.Get();
+        if (injected && *injected) {
+            const int result = std::atoi(injected);
+            if (result != 0) {
+                InitResult = result;
+                return;
+            }
+        }
+#endif
+        if (!IsExpectedEndian()) {
+            InitResult = -2;
+            return;
+        }
 
-    if (!IsExpectedEndian())
-        return -2; // Unexpected byte order.
-
-    gf256_architecture_init();
-    gf256_poly_init(kDefaultPolynomialIndex);
-    gf256_explog_init();
-    gf256_muldiv_init();
-    gf256_inv_init();
-    gf256_sqr_init();
-    gf256_mul_mem_init();
+        gf256_architecture_init();
+        gf256_poly_init(kDefaultPolynomialIndex);
+        gf256_explog_init();
+        gf256_muldiv_init();
+        gf256_inv_init();
+        gf256_sqr_init();
+        gf256_mul_mem_init();
 #ifdef GF256_TRY_GFNI
-    gf256_gfni_init();
+        gf256_gfni_init();
 #endif
 
-    if (!gf256_self_test())
-        return -3; // Self-test failed (perhaps untested configuration)
+        if (!gf256_self_test()) {
+            InitResult = -3;
+            return;
+        }
 
-    Initialized = true;
-    return 0;
+        InitResult = 0;
+    });
+
+    return InitResult;
 }
 
 

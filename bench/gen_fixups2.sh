@@ -7,8 +7,14 @@ set -euo pipefail
 GOOD=${GOOD:-0.05}
 GOOD30=${GOOD30:-0.10}
 DEFTHRESH=${DEFTHRESH:-0.05}
+PEEL_OUT=${PEEL_OUT:-WirehairPeelFixups.inc}
+DENSE_OUT=${DENSE_OUT:-WirehairDenseFixups.inc}
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
+bash bench/validate_seedsearch.sh "$@"
 TMP="$(mktemp)"
+PEEL_TMP="$(mktemp "${PEEL_OUT}.tmp.XXXXXX")"
+DENSE_TMP="$(mktemp "${DENSE_OUT}.tmp.XXXXXX")"
+trap 'rm -f "$TMP" "$PEEL_TMP" "$DENSE_TMP"' EXIT
 
 cat "$@" | awk -v dt="$DEFTHRESH" -v g="$GOOD" -v g3="$GOOD30" '
   function uint(x){ return x ~ /^[0-9]+$/ }
@@ -40,15 +46,18 @@ cat "$@" | awk -v dt="$DEFTHRESH" -v g="$GOOD" -v g3="$GOOD30" '
   echo "// Peel-seed corrections (bench/whx seedsearch + gen_fixups2.sh; best combo per N)."
   echo "// Sorted ascending by N (binary search). Format: { N, seed }"
   awk '{printf "    { %5d, %3d },\n", $1, $2}' "$TMP"
-} > WirehairPeelFixups.inc
+} > "$PEEL_TMP"
 
 {
   echo "// Dense-seed corrections (joint peel+dense search, Task5). Paired with the peel"
   echo "// correction for the same N. Sorted ascending by N (binary search). Format: { N, seed }"
   awk '$3>=0 {printf "    { %5d, %3d },\n", $1, $3}' "$TMP"
-} > WirehairDenseFixups.inc
+} > "$DENSE_TMP"
 
-grep -q '^    {' WirehairPeelFixups.inc  || echo "    { 1, 0 }," >> WirehairPeelFixups.inc
-grep -q '^    {' WirehairDenseFixups.inc || echo "    { 1, 0 }," >> WirehairDenseFixups.inc
+grep -q '^    {' "$PEEL_TMP" || echo "    { 1, 0 }," >> "$PEEL_TMP"
+grep -q '^    {' "$DENSE_TMP" || echo "    { 1, 0 }," >> "$DENSE_TMP"
+mv -f "$PEEL_TMP" "$PEEL_OUT"
+mv -f "$DENSE_TMP" "$DENSE_OUT"
 rm -f "$TMP"
-echo "peel corrections: $(grep -c '^    {' WirehairPeelFixups.inc) | dense corrections: $(grep -c '^    {' WirehairDenseFixups.inc)"
+trap - EXIT
+echo "peel corrections: $(grep -c '^    {' "$PEEL_OUT") | dense corrections: $(grep -c '^    {' "$DENSE_OUT")"

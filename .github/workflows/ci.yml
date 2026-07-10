@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-install:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.linkage }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
+            linkage: static
+            generator: Ninja
+            architecture_args: ""
+            cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+          - os: ubuntu-latest
+            compiler: gcc
+            linkage: shared
+            generator: Ninja
+            architecture_args: ""
+            cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+          - os: ubuntu-latest
+            compiler: clang
+            linkage: static
+            generator: Ninja
+            architecture_args: ""
+            cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+          - os: ubuntu-latest
+            compiler: clang
+            linkage: shared
+            generator: Ninja
+            architecture_args: ""
+            cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+          - os: windows-2022
+            compiler: msvc
+            linkage: static
+            generator: Visual Studio 17 2022
+            architecture_args: --architecture x64
+            cmake_compilers: ""
+          - os: windows-2022
+            compiler: msvc
+            linkage: shared
+            generator: Visual Studio 17 2022
+            architecture_args: --architecture x64
+            cmake_compilers: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build, test, install, and consume
+        shell: bash
+        run: >-
+          python ci/run_ci.py matrix
+          --linkage "${{ matrix.linkage }}"
+          --strict
+          --build-dir "build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}"
+          --install-dir "build/install-${{ matrix.compiler }}-${{ matrix.linkage }}"
+          --generator "${{ matrix.generator }}"
+          ${{ matrix.architecture_args }}
+          ${{ matrix.cmake_compilers }}
+          --jobs 2
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.linkage }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/CMakeCache.txt
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/CMakeFiles/CMake*.log
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/ci-logs/**
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/Testing/Temporary/**
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-consumer/CMakeCache.txt
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-consumer/Testing/Temporary/**
+
+  asan-ubsan:
+    name: Linux Clang / ASan+UBSan+LSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run instrumented suite
+        run: >-
+          python3 ci/run_ci.py sanitizer
+          --build-dir build/ci-asan-ubsan
+          --config Debug
+          --generator Ninja
+          --cmake-arg=-DCMAKE_C_COMPILER=clang
+          --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+          --jobs 2
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-asan-ubsan
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-asan-ubsan/CMakeCache.txt
+            build/ci-asan-ubsan/CMakeFiles/CMake*.log
+            build/ci-asan-ubsan/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-asan-ubsan/Testing/Temporary/**
+
+  thread-sanitizer:
+    name: Linux GCC / TSan cold-start concurrency
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run thread sanitizer gate
+        run: >-
+          python3 ci/run_ci.py tsan
+          --build-dir build/ci-tsan
+          --config Debug
+          --generator Ninja
+          --cmake-arg=-DCMAKE_C_COMPILER=gcc
+          --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+          --jobs 2
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-tsan
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-tsan/CMakeCache.txt
+            build/ci-tsan/CMakeFiles/CMake*.log
+            build/ci-tsan/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-tsan/Testing/Temporary/**
+
+  mingw-cross:
+    name: MinGW-w64 / static+shared package ABI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+      - name: Cross-build and inspect PE artifacts
+        run: >-
+          python3 ci/run_ci.py mingw
+          --build-dir build/ci-mingw
+          --install-dir build/install-mingw
+          --generator Ninja
+          --jobs 2
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-mingw
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-mingw/**/CMakeCache.txt
+            build/ci-mingw/**/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-mingw/**/ci-logs/**

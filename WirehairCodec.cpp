@@ -28,6 +28,7 @@
 */
 
 #include "WirehairCodec.h"
+#include "WirehairEnvironment.h"
 
 
 //------------------------------------------------------------------------------
@@ -109,10 +110,17 @@ void OpLogClose()
 void OpLogInit()
 {
     FILE*& file = OpLogFileRef();
-    const char* path = getenv("WH_OPLOG_PATH");
+    const EnvironmentValue environment("WH_OPLOG_PATH");
+    const char* path = environment.Get();
     if (path && path[0])
     {
+#if defined(_MSC_VER)
+        if (::fopen_s(&file, path, "w") != 0) {
+            file = nullptr;
+        }
+#else
         file = fopen(path, "w");
+#endif
         if (file)
         {
             fputs(
@@ -3504,8 +3512,8 @@ WirehairResult Codec::ChooseMatrix(
     // Validate before narrowing to 16 bits: truncating first would wrap large
     // counts into the accepted range and silently encode the wrong message.
     _block_bytes = block_bytes;
-    const uint64_t block_count_wide =
-        (message_bytes + _block_bytes - 1) / _block_bytes;
+    const uint64_t block_count_wide = message_bytes / _block_bytes +
+        (message_bytes % _block_bytes != 0 ? 1 : 0);
 
     // Validate block count
     if (block_count_wide < CAT_WIREHAIR_MIN_N) {
@@ -3555,22 +3563,26 @@ WirehairResult Codec::ChooseMatrix(
             if (t_ovr_pseed >= 0) _p_seed = (uint32_t)t_ovr_pseed;
             if (t_ovr_dseed >= 0) _d_seed = (uint32_t)t_ovr_dseed;
         } else {
-            const char* ovN = ::getenv("WH_OVR_N");
+            const EnvironmentValue override_n_environment("WH_OVR_N");
+            const char* ovN = override_n_environment.Get();
             int override_n = 0;
             if (ovN && !ParseKnobInt(ovN, override_n)) {
                 return Wirehair_InvalidInput;
             }
             if (!ovN || override_n == (int)_block_count) {
                 uint32_t seed_value = 0;
-                const char* ps = ::getenv("WH_PSEED");
+                const EnvironmentValue peel_seed_environment("WH_PSEED");
+                const char* ps = peel_seed_environment.Get();
                 if (ps) {
                     if (!ParseKnobU32(ps, seed_value)) {
                         return Wirehair_InvalidInput;
                     }
                     _p_seed = seed_value;
                 }
-                const char* dd = ::getenv("WH_DENSE");
-                const char* ds = ::getenv("WH_DSEED");
+                const EnvironmentValue dense_environment("WH_DENSE");
+                const EnvironmentValue dense_seed_environment("WH_DSEED");
+                const char* dd = dense_environment.Get();
+                const char* ds = dense_seed_environment.Get();
                 if (dd) {
                     int dense_value = 0;
                     if (!ParseKnobInt(dd, dense_value)) {
@@ -3739,10 +3751,12 @@ WirehairResult Codec::ResumeSolveMatrixInternal(
     }
 
     unsigned row_i, ge_row_i, new_pivot_i;
+    bool replacing_row = false;
 
     // If there is no room for it:
     if (_row_count >= _block_count + _extra_count)
     {
+        replacing_row = true;
         const uint16_t first_heavy_row = _defer_count + _dense_count;
 
         new_pivot_i = 0;
@@ -3795,7 +3809,19 @@ WirehairResult Codec::ResumeSolveMatrixInternal(
 
     // Update row data needed at this point
     PeelRow * GF256_RESTRICT row = &_peel_rows[row_i];
+    if (replacing_row)
+    {
+        const uint32_t replaced_id = row->RecoveryId;
+        if (replaced_id < _block_count &&
+            _original_row[replaced_id] == row_i)
+        {
+            _original_row[replaced_id] = LIST_TERM;
+        }
+    }
     row->RecoveryId = id;
+    if (id < _block_count) {
+        _original_row[id] = static_cast<uint16_t>(row_i);
+    }
 
     if (copy_data)
     {
@@ -4080,6 +4106,7 @@ bool Codec::IsAllOriginalData()
 WirehairResult Codec::ReconstructBlock(
     const uint16_t block_id, ///< Block identifier
     void * GF256_RESTRICT block_out, ///< Output block memory
+    uint32_t output_capacity, ///< Writable bytes in block_out
     uint32_t* bytes_out ///< Bytes written to output
 )
 {
@@ -4093,6 +4120,11 @@ WirehairResult Codec::ReconstructBlock(
         }
         return Wirehair_InvalidInput;
     }
+    if (_mode != Mode::DecodeComplete)
+    {
+        *bytes_out = 0;
+        return _mode == Mode::Decoder ? Wirehair_NeedMore : Wirehair_InvalidInput;
+    }
     if (_decode_failed)
     {
         *bytes_out = 0;
@@ -4104,41 +4136,30 @@ WirehairResult Codec::ReconstructBlock(
         return Wirehair_NeedMore;
     }
 
-    // If this original block was received directly, copy it from the input
-    // staging area instead of regenerating it from the solved columns.
+    const uint32_t block_bytes = block_id + 1 == _block_count ?
+        _output_final_bytes : static_cast<uint32_t>(_block_bytes);
+    if (output_capacity < block_bytes)
     {
-        PeelRow * GF256_RESTRICT row = _peel_rows;
-        const uint8_t * GF256_RESTRICT src = _input_blocks;
+        *bytes_out = 0;
+        return Wirehair_InvalidInput;
+    }
 
-        // For each row that was received:
-        for (uint16_t row_i = 0, count = _row_count; row_i < count; ++row_i)
-        {
-            const uint32_t id = row[row_i].RecoveryId;
-
-            // If this is the id we seek:
-            if (id == block_id)
-            {
-                CAT_IF_DUMP(cout << "Copying received row " << id << endl;)
-
-                const unsigned bytes = (id != (unsigned)_block_count - 1) ? _block_bytes : _output_final_bytes;
-
-                memcpy(block_out, src + row_i * _block_bytes, bytes);
-
-                *bytes_out = (uint32_t)bytes;
-
-                return Wirehair_Success;
-            }
-        }
+    // If this original block was received directly, copy it from the indexed
+    // input staging row instead of scanning all received rows.
+    const uint16_t original_row = _original_row[block_id];
+    if (original_row != LIST_TERM)
+    {
+        CAT_DEBUG_ASSERT(original_row < _row_count);
+        CAT_IF_DUMP(cout << "Copying received row " << block_id << endl;)
+        memcpy(
+            block_out,
+            _input_blocks + static_cast<size_t>(original_row) * _block_bytes,
+            block_bytes);
+        *bytes_out = block_bytes;
+        return Wirehair_Success;
     }
 
     // Regenerate any single row that got lost:
-
-    uint32_t block_bytes = _block_bytes;
-
-    // For last row, use final byte count
-    if (block_id == _block_count - 1) {
-        block_bytes = _output_final_bytes;
-    }
 
     CAT_IF_DUMP(cout << "Regenerating row " << block_id << ":";)
 
@@ -4236,6 +4257,9 @@ WirehairResult Codec::ReconstructOutput(
     // Validate input
     if (!message_out) {
         return Wirehair_InvalidInput;
+    }
+    if (_mode != Mode::DecodeComplete) {
+        return _mode == Mode::Decoder ? Wirehair_NeedMore : Wirehair_InvalidInput;
     }
     if (message_bytes != _block_bytes * (_block_count - 1) + _output_final_bytes) {
         CAT_DEBUG_BREAK();
@@ -4568,6 +4592,7 @@ bool Codec::AllocateWorkspace()
         + sizeof(PeelRow) * row_count
         + sizeof(PeelColumn) * column_count
         + sizeof(PeelRefs) * column_count
+        + sizeof(uint16_t) * column_count
         + row_count;
 
     if (_workspace_allocated < sizeBytes)
@@ -4594,7 +4619,8 @@ bool Codec::AllocateWorkspace()
     _peel_rows = reinterpret_cast<PeelRow *>( _recovery_blocks + peelOffsetBytes );
     _peel_cols = reinterpret_cast<PeelColumn *>( _peel_rows + row_count );
     _peel_col_refs = reinterpret_cast<PeelRefs *>( _peel_cols + column_count );
-    _copied_original = reinterpret_cast<uint8_t *>( _peel_col_refs + column_count );
+    _original_row = reinterpret_cast<uint16_t *>( _peel_col_refs + column_count );
+    _copied_original = reinterpret_cast<uint8_t *>( _original_row + column_count );
 
     _recovery_rows = recovery_rows;
 
@@ -4606,6 +4632,7 @@ bool Codec::AllocateWorkspace()
         _peel_col_refs[ii].RowCount = 0;
         _peel_cols[ii].Weight2Refs = 0;
         _peel_cols[ii].Mark = MARK_TODO;
+        _original_row[ii] = LIST_TERM;
     }
 
     return true;
@@ -4618,6 +4645,12 @@ void Codec::FreeWorkspace()
         SIMDSafeFree(_recovery_blocks);
         _recovery_blocks = nullptr;
     }
+
+    _peel_rows = nullptr;
+    _peel_cols = nullptr;
+    _peel_col_refs = nullptr;
+    _original_row = nullptr;
+    _copied_original = nullptr;
 
     _workspace_allocated = 0;
 }
@@ -4798,6 +4831,7 @@ WirehairResult Codec::InitializeEncoder(
     uint64_t message_bytes,
     unsigned block_bytes)
 {
+    _mode = Mode::Failed;
     WirehairResult result = ChooseMatrix(message_bytes, block_bytes);
 
     if (result == Wirehair_Success)
@@ -4819,25 +4853,52 @@ WirehairResult Codec::InitializeEncoder(
         if (!AllocateWorkspace()) {
             result = Wirehair_OOM;
         }
+        else {
+            _mode = Mode::Encoder;
+        }
     }
 
     return result;
 }
 
-WirehairResult Codec::EncodeFeed(const void * GF256_RESTRICT message_in)
+WirehairResult Codec::EncodeFeed(
+    const void * GF256_RESTRICT message_in,
+    bool copy_input)
 {
     CAT_IF_DUMP(cout << endl << "---- EncodeFeed ----" << endl << endl;)
 
     // Validate input
-    if (message_in == nullptr) {
+    if (message_in == nullptr || _mode != Mode::Encoder) {
+        _mode = Mode::Failed;
         return Wirehair_InvalidInput;
     }
 
-    SetInput(message_in);
+    if (copy_input)
+    {
+        if (!AllocateInput()) {
+            _mode = Mode::Failed;
+            return Wirehair_OOM;
+        }
+
+        const uint64_t message_bytes =
+            static_cast<uint64_t>(_block_count - 1) * _block_bytes +
+            _input_final_bytes;
+        memcpy(_input_blocks, message_in, static_cast<size_t>(message_bytes));
+        if (_input_final_bytes < _block_bytes) {
+            memset(
+                _input_blocks + message_bytes,
+                0,
+                _block_bytes - _input_final_bytes);
+        }
+    }
+    else {
+        SetInput(message_in);
+    }
 
     // For each input row:
     for (uint16_t id = 0; id < _block_count; ++id) {
         if (!OpportunisticPeeling(id, id)) {
+            _mode = Mode::Failed;
             return Wirehair_BadPeelSeed;
         }
     }
@@ -4850,9 +4911,11 @@ WirehairResult Codec::EncodeFeed(const void * GF256_RESTRICT message_in)
         return Wirehair_Success;
     }
     else if (result == Wirehair_NeedMore) {
+        _mode = Mode::Failed;
         return Wirehair_BadPeelSeed;
     }
     else {
+        _mode = Mode::Failed;
         return result;
     }
 }
@@ -4897,7 +4960,7 @@ uint32_t Codec::Encode(
     uint32_t out_buffer_bytes ///< Bytes in block
 )
 {
-    if (!block_out) {
+    if (!block_out || !CanEncode()) {
         return 0;
     }
 
@@ -5097,6 +5160,7 @@ WirehairResult Codec::InitializeDecoder(
     uint64_t message_bytes,
     uint32_t block_bytes)
 {
+    _mode = Mode::Failed;
     const WirehairResult result = ChooseMatrix(message_bytes, block_bytes);
 
     if (result != Wirehair_Success) {
@@ -5137,12 +5201,15 @@ WirehairResult Codec::InitializeDecoder(
         return Wirehair_OOM;
     }
 
+    _mode = Mode::Decoder;
     return result;
 }
 
 WirehairResult Codec::InitializeEncoderFromDecoder()
 {
-    CAT_DEBUG_ASSERT(_row_count >= _block_count);
+    if (_mode != Mode::DecodeComplete || _row_count < _block_count) {
+        return Wirehair_InvalidInput;
+    }
 
 #if defined(CAT_ALL_ORIGINAL)
     // If all original data, return success (common case)
@@ -5163,6 +5230,7 @@ WirehairResult Codec::InitializeEncoderFromDecoder()
             if (result == Wirehair_NeedMore) {
                 result = Wirehair_BadPeelSeed;
             }
+            _mode = Mode::Failed;
             return result;
         }
 
@@ -5172,6 +5240,10 @@ WirehairResult Codec::InitializeEncoderFromDecoder()
 
     // Set input final bytes to output final bytes
     _input_final_bytes = _output_final_bytes;
+    for (uint16_t id = 0; id < _block_count; ++id) {
+        _original_row[id] = LIST_TERM;
+    }
+    _mode = Mode::Converted;
 
     return Wirehair_Success;
 }
@@ -5181,6 +5253,10 @@ WirehairResult Codec::DecodeFeed(
     const void * GF256_RESTRICT block_in,
     const unsigned block_bytes)
 {
+    if (_mode != Mode::Decoder && _mode != Mode::DecodeComplete) {
+        return Wirehair_InvalidInput;
+    }
+
     // Validate input
     if (!block_in) {
         return Wirehair_InvalidInput;
@@ -5207,7 +5283,7 @@ WirehairResult Codec::DecodeFeed(
 
     // Once decoding has succeeded, later valid packets cannot improve state.
     // Avoid resuming GE after the all-original fast path, which has no GE rows.
-    if (_decode_complete) {
+    if (_mode == Mode::DecodeComplete || _decode_complete) {
         return Wirehair_Success;
     }
 
@@ -5215,6 +5291,14 @@ WirehairResult Codec::DecodeFeed(
     // (duplicate original blocks on the all-original path), the decoder has
     // N stored rows but no GE matrix; resuming would write through null maps.
     if (_decode_failed) {
+        _mode = Mode::Failed;
+        return Wirehair_InvalidInput;
+    }
+
+    if (block_id < _block_count && _original_row[block_id] != LIST_TERM)
+    {
+        _decode_failed = true;
+        _mode = Mode::Failed;
         return Wirehair_InvalidInput;
     }
 
@@ -5236,6 +5320,11 @@ WirehairResult Codec::DecodeFeed(
         if (result == Wirehair_Success) {
             GenerateRecoveryBlocks();
             _decode_complete = true;
+            _mode = Mode::DecodeComplete;
+        }
+        else if (result != Wirehair_NeedMore) {
+            _decode_failed = true;
+            _mode = Mode::Failed;
         }
 
         return result;
@@ -5270,6 +5359,10 @@ WirehairResult Codec::DecodeFeed(
         memcpy(dest, block_in, _block_bytes);
     }
 
+    if (block_id < _block_count) {
+        _original_row[block_id] = row_i;
+    }
+
     ++_row_count;
     CAT_DEBUG_ASSERT(_row_count <= _block_count);
 
@@ -5289,9 +5382,11 @@ WirehairResult Codec::DecodeFeed(
             CAT_DEBUG_BREAK();
             _all_original = false;
             _decode_failed = true;
+            _mode = Mode::Failed;
             return Wirehair_InvalidInput;
         }
         _decode_complete = true;
+        _mode = Mode::DecodeComplete;
         return Wirehair_Success;
     }
 #endif
@@ -5303,6 +5398,11 @@ WirehairResult Codec::DecodeFeed(
     if (result == Wirehair_Success) {
         GenerateRecoveryBlocks();
         _decode_complete = true;
+        _mode = Mode::DecodeComplete;
+    }
+    else if (result != Wirehair_NeedMore) {
+        _decode_failed = true;
+        _mode = Mode::Failed;
     }
 
     return result;

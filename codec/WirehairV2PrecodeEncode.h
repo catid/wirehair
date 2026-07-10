@@ -4,6 +4,8 @@
 #include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
 
+#include <wirehair/wirehair.h>
+
 #include <stdint.h>
 #include <vector>
 
@@ -51,32 +53,37 @@ static const uint64_t kMessagePrecodeSeedSalt =
 static const uint64_t kMessageRecoveryRowSeedSalt =
     UINT64_C(0x76327265636f7665);
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+// Fails the next guarded allocation when countdown is zero; negative disables.
+void SetAllocationFailureCountdownForTesting(int64_t countdown);
+#endif
+
 struct PrecodeEncodeStats
 {
     /// Staircase forward pass block ops
     /// (certified model: min(N1,S)*K + S - 1)
-    uint64_t StaircaseBlockOps;
+    uint64_t StaircaseBlockOps = 0;
 
     /// Dense difference-row known-part block ops
     /// (certified model: ceil(span/2) + 2*(D2 - 1), counted even when the
     /// dense corner turns out singular)
-    uint64_t DenseKnownBlockOps;
+    uint64_t DenseKnownBlockOps = 0;
 
     /// GF(2) Gauss-Jordan block XORs + solution copies for the dense corner
-    uint64_t DenseSolveBlockOps;
+    uint64_t DenseSolveBlockOps = 0;
 
     /// Plain block XORs folding same-residue known columns into the
     /// mod-(256 - H) residue buckets before the heavy accumulation
     /// (model: K + S + D2 when the bucketed path is taken, else 0)
-    uint64_t HeavyBucketXors;
+    uint64_t HeavyBucketXors = 0;
 
     /// GF(256) muladd-class block ops accumulating the heavy known parts
     /// (model: H * min(K + S + D2, 256 - H) bucketed, H * (K + S + D2)
     /// direct)
-    uint64_t HeavyMulAdds;
+    uint64_t HeavyMulAdds = 0;
 
     /// GF(256) block ops (muladd/div/copy) solving the H x H Cauchy corner
-    uint64_t HeavySolveBlockOps;
+    uint64_t HeavySolveBlockOps = 0;
 };
 
 /**
@@ -165,6 +172,8 @@ bool ComputeEncodedBlock(
     this object.  Initialize returns false for invalid arguments or
     encoder-infeasible precode systems, e.g. a singular dense corner.
     Accessors return zero/null/default state until initialization succeeds.
+    A failed reinitialization preserves the last successfully initialized
+    state and its accessors.
 */
 class PrecodeEncoder
 {
@@ -179,7 +188,21 @@ public:
         const uint8_t* source_blocks,
         uint32_t block_bytes);
 
+    WirehairResult InitializeResult(
+        const PrecodeSystem& system,
+        const PeelingCodec& codec,
+        uint64_t row_seed,
+        uint32_t mix_count,
+        const uint8_t* source_blocks,
+        uint32_t block_bytes);
+
     bool Encode(
+        uint32_t block_id,
+        uint8_t* block_out,
+        uint64_t* block_ops_out = nullptr) const;
+
+    /// On failure block_out and block_ops_out are left unchanged.
+    WirehairResult EncodeResult(
         uint32_t block_id,
         uint8_t* block_out,
         uint64_t* block_ops_out = nullptr) const;
@@ -188,13 +211,18 @@ public:
     uint32_t SourceBlockCount() const;
     uint32_t ParityBlockCount() const;
     uint32_t BlockBytes() const;
+    uint64_t RecoveryRowSeed() const;
+    uint32_t RecoveryMixCount() const;
     const PrecodeEncodeStats& EncodeStats() const;
     const uint8_t* ParityBlocks() const;
     const PrecodeSystem& System() const;
 
 private:
-    PrecodeSystem SystemValue;
-    PeelingCodec CodecValue;
+    friend class MessagePrecodeEncoder;
+    void Swap(PrecodeEncoder& other) noexcept;
+
+    PrecodeSystem SystemValue = {};
+    PeelingCodec CodecValue = {};
     uint64_t RowSeed = 0;
     uint32_t MixCount = 0;
     const uint8_t* SourceBlocks = nullptr;
@@ -225,6 +253,9 @@ struct MessagePrecodeEncoderOptions
     directly encoder-feasible for phased parity precomputation.  Set
     DenseIdentityCorner=true only for explicit encoder-feasibility experiments
     pending recertification of that variant.
+
+    Initialization is transactional: any invalid, singular, or allocation
+    failure preserves the last successfully initialized encoder.
 */
 class MessagePrecodeEncoder
 {
@@ -240,7 +271,22 @@ public:
         const SeedProfile* seed_override = nullptr,
         const MessagePrecodeEncoderOptions* options = nullptr);
 
+    WirehairResult InitializeResult(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const SeedProfile* seed_override = nullptr,
+        const MessagePrecodeEncoderOptions* options = nullptr);
+
     bool Encode(
+        uint32_t block_id,
+        uint8_t* block_out,
+        uint32_t out_bytes,
+        uint32_t* data_bytes_out,
+        uint64_t* block_ops_out = nullptr) const;
+
+    /// On failure all output buffers and output counters are left unchanged.
+    WirehairResult EncodeResult(
         uint32_t block_id,
         uint8_t* block_out,
         uint32_t out_bytes,
@@ -259,7 +305,7 @@ public:
 
 private:
     SeedProfile ProfileValue = {};
-    MessagePrecodeEncoderOptions OptionsValue;
+    MessagePrecodeEncoderOptions OptionsValue = {};
     PrecodeEncoder EncoderValue;
     std::vector<uint8_t> SourceBlockStorage;
     uint64_t MessageBytesValue = 0;

@@ -25,6 +25,8 @@ same `def` distribution.  Heavy GF(256) costs are reported separately as
 block-unit muladd counts (`heavy_muladds_mu = H*inact + H^2`, `heavy_divs_mu =
 H`); `rank_total.py` folds them into a single XOR-equivalent total using the
 measured muladd:xor ratio per block size.
+This full-coverage patch is a simulator assumption, not a guarantee of the
+legacy shipped matrix; see `../../tables/HEAVY_MATRIX.md`.
 
 `N` in other harnesses is `K` here; payload bytes scale as `K * block_bytes`.
 All cost columns are counted in block units (block-size independent); convert
@@ -116,27 +118,59 @@ CRN-paired.  Exactly what is and is not paired:
 - NOT PAIRED, by design: the binary precode constraint rows (LDPC parity
   assignments, dense row bits), which remain a function of the scheme token.
 
-## `rank_total.py`: heavy-aware total-cost ranking
+## `rank_total.py`: reliability-gated total-cost ranking
 
 Folds the per-scheme XOR ledger and the GF(256) heavy ledger into one
-calibrated `total_block_ops(bb)` per block size and prints a ranked table per
-`(K, oh, bb)`, re-scoring failure for alternative heavy counts
-`H' in {6,8,12,16}` from `def_pdf` (asserting per row that re-scoring at the
-modeled H reproduces `fail_rate`), plus the muladd:xor crossover ratio at
-which the ldpcdense H=12 scheme stops beating the dense H=6 baseline.
-`--pessimistic` doubles the heavy term.  Old CSVs without the heavy/replay
-columns are accepted (heavy is derived as `H*inact_mu + H^2`, GE falls back to
-the `R^2/2` estimate).
+calibrated `total_block_ops(bb)` per block size.  Every `(K, oh, bb)` report
+contains the reliability-filtered cost ranking, cost-vs-failure Pareto front,
+and winner (or an explicit `no feasible scheme`).  Rejected rows are retained
+with their gate failures, but are never labeled winners.  The legacy
+modeled-H ldpcdense/dense muladd:xor crossovers are retained as a separate
+section.
+
+`--reliability-h modeled` evaluates each row at the H that produced its cost
+ledger; an integer in `[0,128]` re-scores the empirical `def_pdf` at that
+alternative H.  Independent gates cover minimum sample size, observed failure
+rate, and the one-sided Wilson score upper confidence bound:
+
+`(p + z^2/(2n) + z*sqrt((p*(1-p) + z^2/(4n))/n)) / (1 + z^2/n)`,
+
+where `z` is the standard-normal quantile for `--confidence` (default 0.95).
+This method has defined behavior for zero observed failures and small samples;
+`--min-trials`, `--max-observed-fail`, and `--max-upper-fail` make the chosen
+policy explicit in both reports.  Their defaults are 100, 0.005, and 0.05,
+respectively, matching the bounded row-distribution screen below; pass 1 for
+all three to request the historical permissive cost-only eligibility policy.
+
+Cost defaults to the complete ledger recorded at modeled H, even when
+reliability is evaluated at another H.  `--cost-h reliability` instead
+recomputes the known heavy term as `H*inact_mu + H^2` using the modeled-H
+`inact_mu`; all other cost terms remain measured at modeled H.  Both the human
+and JSON reports label this assumption.  `--pessimistic` doubles the heavy
+term.  Old CSVs without the heavy/replay columns remain supported (heavy is
+derived and GE uses the `R^2/2` estimate).
 
 ```bash
 python3 experiments/precode/rank_total.py results/hybrid_K*.csv \
     --xor-csv experiments/peeling/results/cold_xor_calibration.csv \
     --muladd-csv experiments/peeling/results/muladd_calibration.csv \
-    --bb 1280,102400,1048576
+    --bb 1280,102400,1048576 \
+    --min-trials 100 --max-observed-fail 0.005 \
+    --max-upper-fail 0.05 --json-out /tmp/precode-ranking.json
 ```
 
-Missing/empty calibration files are skipped gracefully (`--assume-ratio`,
-default 4.0, fills in).
+Result and calibration inputs use exact documented CSV schemas.  Every numeric
+field must be finite and in-domain.  `def_pdf` bins must be unique,
+nonnegative, and normalized within `2e-5 + bins*1e-6`, the simulator's
+six-decimal output tolerance.  Each probability must recover an integer count
+at the recorded `trials`; those exact counts drive confidence bounds.  All
+inputs are validated before output, so malformed input produces no partial
+ranking and cannot replace `--json-out`.  An omitted calibration flag or an
+unmeasured requested block size uses the positive `--assume-ratio` (default
+4.0); an explicitly named missing or malformed calibration file is an error.
+Generated report `.txt` files are not result inputs.  JSON uses the stable
+`wirehair.precode-ranking.v1` schema with sorted keys and deterministic row
+ordering.
 
 ## Schemes
 

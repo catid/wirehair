@@ -2,23 +2,31 @@
 set -u
 set -o pipefail
 
-cd /home/catid/wirehair
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 1
 FAIL_FILE=/tmp/queue_fail
 RESULT_DIR=experiments/precode/results
 SIM=./experiments/precode/precode_sim
-rm -f "$FAIL_FILE" /tmp/e5small_done /tmp/e3abig_done /tmp/e1bbig_done /tmp/e5big_done /tmp/queue_done
-mkdir -p "$RESULT_DIR"
+VALIDATOR=./experiments/precode/validate_results.py
 
-if ! OUT="$SIM" bash experiments/precode/build.sh; then
-  echo "FAIL build precode_sim" >> "$FAIL_FILE"
-  cat "$FAIL_FILE" >&2
-  exit 1
-fi
-if [ ! -x "$SIM" ] || [ "$SIM" -ot experiments/precode/precode_sim.cpp ]; then
-  echo "FAIL precode_sim missing or stale after build" >> "$FAIL_FILE"
-  cat "$FAIL_FILE" >&2
-  exit 1
-fi
+build_sim() {
+  if ! OUT="$SIM" bash experiments/precode/build.sh; then
+    echo "FAIL build precode_sim" >> "$FAIL_FILE"
+    cat "$FAIL_FILE" >&2
+    exit 1
+  fi
+  if [ ! -x "$SIM" ] || [ "$SIM" -ot experiments/precode/precode_sim.cpp ]; then
+    echo "FAIL precode_sim missing or stale after build" >> "$FAIL_FILE"
+    cat "$FAIL_FILE" >&2
+    exit 1
+  fi
+}
+
+prepare_queue() {
+  rm -f "$FAIL_FILE" /tmp/e5small_done /tmp/e3abig_done /tmp/e1bbig_done /tmp/e5big_done /tmp/queue_done
+  mkdir -p "$RESULT_DIR"
+  build_sim
+}
 
 run_csv() {
   local out="$1"
@@ -32,7 +40,31 @@ run_csv() {
     exit 1
   }
 
-  if "$@" > "$tmp_csv" 2> "$tmp_err"; then
+  "$@" > "$tmp_csv" 2> "$tmp_err"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    local expect_k="" expect_oh="" expect_schemes="" expect_trials=""
+    local previous=""
+    for argument in "$@"; do
+      case "$previous" in
+        --K) expect_k="$argument" ;;
+        --oh) expect_oh="$argument" ;;
+        --schemes) expect_schemes="$argument" ;;
+        --trials) expect_trials="$argument" ;;
+      esac
+      previous="$argument"
+    done
+    local validation=(python3 "$VALIDATOR" "$tmp_csv")
+    [ -n "$expect_k" ] && validation+=(--expect-k "$expect_k")
+    [ -n "$expect_oh" ] && validation+=(--expect-oh "$expect_oh")
+    [ -n "$expect_schemes" ] && validation+=(--expect-schemes "$expect_schemes")
+    [ -n "$expect_trials" ] && validation+=(--expect-trials "$expect_trials")
+    if ! "${validation[@]}" > /dev/null 2>> "$tmp_err"; then
+      mv -f "$tmp_csv" "${out}.invalid"
+      mv -f "$tmp_err" "$err"
+      echo "FAIL $out validation" >> "$FAIL_FILE"
+      return 1
+    fi
     if [ -s "$tmp_err" ]; then
       mv -f "$tmp_err" "$err"
       rm -f "$tmp_csv"
@@ -44,7 +76,6 @@ run_csv() {
     return 0
   fi
 
-  local rc=$?
   if [ -s "$tmp_err" ]; then
     mv -f "$tmp_err" "$err"
   else
@@ -65,6 +96,59 @@ mark_done() {
   fi
   echo OK > "$marker"
 }
+
+queue_self_test() {
+  local test_dir
+  test_dir="$(mktemp -d)" || exit 1
+  # Capture the local path now; it is out of scope when the EXIT trap runs.
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '$test_dir'" EXIT
+  FAIL_FILE="$test_dir/failures"
+
+  local valid="$test_dir/valid.csv"
+  if ! run_csv "$valid" "$SIM" --K 32 --oh 0,1 --trials 2 --threads 1 \
+      --paired --seed 123 --schemes dense; then
+    echo "queue self-test: valid result was not promoted" >&2
+    exit 1
+  fi
+  if [ ! -s "$valid" ] || [ -e "${valid}.err" ] ||
+      find "$test_dir" -type f -name '*.tmp.*' -print -quit | grep -q .; then
+    echo "queue self-test: valid promotion left missing or stale artifacts" >&2
+    exit 1
+  fi
+
+  local invalid="$test_dir/invalid.csv"
+  if run_csv "$invalid" bash -c 'printf "K,scheme\n32,dense\nBROKEN\n"' \
+      queue-fixture --K 32 --oh 0 --trials 2 --schemes dense; then
+    echo "queue self-test: malformed result was promoted" >&2
+    exit 1
+  fi
+  if [ -e "$invalid" ] || [ ! -s "${invalid}.invalid" ] ||
+      [ ! -s "${invalid}.err" ] || [ ! -s "$FAIL_FILE" ]; then
+    echo "queue self-test: malformed result was not quarantined" >&2
+    exit 1
+  fi
+
+  local failed="$test_dir/failed.csv"
+  if run_csv "$failed" bash -c 'exit 37' queue-fixture; then
+    echo "queue self-test: failing command was promoted" >&2
+    exit 1
+  fi
+  if [ -e "$failed" ] || [ -e "${failed}.invalid" ] ||
+      ! grep -q 'rc=37' "$FAIL_FILE" ||
+      ! grep -q 'exit 37' "${failed}.err"; then
+    echo "queue self-test: command failure status was not preserved" >&2
+    exit 1
+  fi
+  echo "queue result promotion self-test passed"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  build_sim
+  queue_self_test
+  exit 0
+fi
+prepare_queue
 
 run_csv "$RESULT_DIR/e5_K1000.csv" "$SIM" --K 1000 --oh 0,1,2 --trials 20000 --threads 116 \
   --paired --seed 24414209 \

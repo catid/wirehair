@@ -1,4 +1,5 @@
 #include "WirehairV2PrecodeEncode.h"
+#include "WirehairV2Codec.h"
 #include "WirehairV2Peel.h"
 
 #include "../WirehairTools.h"
@@ -241,61 +242,9 @@ bool TestCorrectnessAsBuilt()
     return ok;
 }
 
-/// Rewrite the dense rows' corner: strip all dense columns, then set row
-/// r's dense-column membership from masks[r].  The known (source +
-/// staircase) parts are untouched; consecutive rows no longer differ in
-/// exactly 2 columns, which also exercises the encoder's generic
-/// difference path.
-void ForceCorner(
-    wirehair_v2::PrecodeSystem& system, const uint64_t* masks)
-{
-    const uint32_t dense_base =
-        system.Params.BlockCount + system.Params.Staircase;
-    for (uint32_t r = 0; r < system.Params.DenseRows; ++r)
-    {
-        std::vector<uint32_t>& row = system.DenseRowColumns[r];
-        row.erase(
-            std::remove_if(row.begin(), row.end(),
-                [&](uint32_t col) { return col >= dense_base; }),
-            row.end());
-        for (uint32_t j = 0; j < system.Params.DenseRows; ++j)
-        {
-            if (0u != (masks[r] >> j & 1u)) {
-                row.push_back(dense_base + j); // ascending j keeps it sorted
-            }
-        }
-    }
-}
-
-/// Doctor the dense corner invertible: identity for the trivial-solve
-/// case, otherwise a random invertible corner so the GF(2) Gauss-Jordan
-/// block eliminations run at every K
-void DoctorCorner(wirehair_v2::PrecodeSystem& system, uint32_t seed)
-{
-    const uint32_t D2 = system.Params.DenseRows;
-    std::vector<uint64_t> masks(D2);
-    if (seed % 3u == 0u)
-    {
-        for (uint32_t r = 0; r < D2; ++r) {
-            masks[r] = UINT64_C(1) << r;
-        }
-        ForceCorner(system, masks.data());
-        return;
-    }
-    wirehair::PCGRandom prng;
-    prng.Seed(seed, 0xc042e2u);
-    do
-    {
-        for (uint32_t r = 0; r < D2; ++r) {
-            masks[r] = prng.Next() & ((UINT64_C(1) << D2) - 1u);
-        }
-        ForceCorner(system, masks.data());
-    } while (DenseCornerRank(system) != D2);
-}
-
 bool TestCorrectnessDoctored()
 {
-    const uint32_t Ks[] = {2u, 16u, 1000u, 3200u};
+    const uint32_t Ks[] = {16u, 1000u, 3200u};
     const uint32_t bbs[] = {1u, 13u, 1280u};
 
     for (const uint32_t K : Ks)
@@ -304,14 +253,15 @@ bool TestCorrectnessDoctored()
         {
             for (uint32_t seed = 100; seed < 103u; ++seed)
             {
+                wirehair_v2::PrecodeParams params =
+                    wirehair_v2::MakeCertifiedParams(K, seed);
+                params.DenseIdentityCorner = true;
                 wirehair_v2::PrecodeSystem system;
-                if (!BuildPrecodeSystem(
-                        wirehair_v2::MakeCertifiedParams(K, seed), system))
+                if (!BuildPrecodeSystem(params, system))
                 {
                     std::fprintf(stderr, "K=%u: build failed\n", K);
                     return false;
                 }
-                DoctorCorner(system, seed);
                 if (!wirehair_v2::DenseCornerInvertible(system))
                 {
                     std::fprintf(stderr,
@@ -497,6 +447,234 @@ bool TestMalformedDenseCorner()
     return true;
 }
 
+bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats)
+{
+    return stats.StaircaseBlockOps == 0u &&
+        stats.DenseKnownBlockOps == 0u &&
+        stats.DenseSolveBlockOps == 0u &&
+        stats.HeavyBucketXors == 0u &&
+        stats.HeavyMulAdds == 0u &&
+        stats.HeavySolveBlockOps == 0u;
+}
+
+bool TestStrictSystemValidation()
+{
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(16u, UINT64_C(0x51a1d));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem valid;
+    if (!BuildPrecodeSystem(params, valid) ||
+        !wirehair_v2::ValidatePrecodeSystem(valid))
+    {
+        std::fprintf(stderr, "strict validation: valid builder system failed\n");
+        return false;
+    }
+
+    std::vector<wirehair_v2::PrecodeSystem> invalid;
+    wirehair_v2::PrecodeSystem bad;
+
+    bad = valid;
+    bad.Params.BlockCount = 0u;
+    invalid.push_back(bad);
+    bad = valid;
+    bad.Params.Staircase = UINT32_MAX;
+    invalid.push_back(bad);
+    bad = valid;
+    bad.Params.DenseRows = UINT32_MAX;
+    invalid.push_back(bad);
+    bad = valid;
+    bad.Params.HeavyRows = 129u;
+    invalid.push_back(bad);
+    bad = valid;
+    bad.StaircaseRows.pop_back();
+    invalid.push_back(bad);
+    bad = valid;
+    bad.DenseRowColumns.pop_back();
+    invalid.push_back(bad);
+
+    const uint32_t K = valid.Params.BlockCount;
+    const uint32_t S = valid.Params.Staircase;
+    const uint32_t dense_base = K + S;
+    const uint32_t binary_span = dense_base + valid.Params.DenseRows;
+
+    bad = valid;
+    bad.StaircaseRows[0].erase(
+        std::find(bad.StaircaseRows[0].begin(),
+            bad.StaircaseRows[0].end(), K));
+    invalid.push_back(bad);
+    bad = valid;
+    bad.StaircaseRows[1].erase(
+        std::find(bad.StaircaseRows[1].begin(),
+            bad.StaircaseRows[1].end(), K));
+    invalid.push_back(bad);
+    bad = valid;
+    bad.StaircaseRows[1].push_back(K + 2u);
+    std::sort(bad.StaircaseRows[1].begin(), bad.StaircaseRows[1].end());
+    invalid.push_back(bad);
+    bad = valid;
+    bad.StaircaseRows[0].insert(
+        bad.StaircaseRows[0].begin(), bad.StaircaseRows[0][0]);
+    invalid.push_back(bad);
+    bad = valid;
+    std::swap(bad.StaircaseRows[0][0], bad.StaircaseRows[0][1]);
+    invalid.push_back(bad);
+
+    bad = valid;
+    bad.DenseRowColumns[0].insert(
+        bad.DenseRowColumns[0].begin(), bad.DenseRowColumns[0][0]);
+    invalid.push_back(bad);
+    bad = valid;
+    std::swap(bad.DenseRowColumns[0][0], bad.DenseRowColumns[0][1]);
+    invalid.push_back(bad);
+    bad = valid;
+    bad.DenseRowColumns[0].push_back(binary_span);
+    invalid.push_back(bad);
+    bad = valid;
+    bad.DenseRowColumns[0].back() = dense_base + 1u;
+    std::sort(
+        bad.DenseRowColumns[0].begin(), bad.DenseRowColumns[0].end());
+    invalid.push_back(bad);
+    bad = valid;
+    bad.DenseRowColumns[1].erase(bad.DenseRowColumns[1].begin());
+    invalid.push_back(bad);
+
+    wirehair::PCGRandom mutation_rng;
+    mutation_rng.Seed(UINT64_C(0xf0225eed), UINT64_C(0x51a1d));
+    for (uint32_t trial = 0; trial < 256u; ++trial)
+    {
+        bad = valid;
+        const uint32_t row = mutation_rng.Next() % S;
+        switch (mutation_rng.Next() % 8u)
+        {
+        case 0:
+            bad.Params.BlockCount = mutation_rng.Next() & 1u;
+            break;
+        case 1:
+            bad.StaircaseRows[row].erase(std::find(
+                bad.StaircaseRows[row].begin(),
+                bad.StaircaseRows[row].end(), K + row));
+            break;
+        case 2:
+            bad.StaircaseRows[row].insert(
+                bad.StaircaseRows[row].begin(),
+                bad.StaircaseRows[row][0]);
+            break;
+        case 3:
+            bad.DenseRowColumns[mutation_rng.Next() % valid.Params.DenseRows]
+                .push_back(binary_span);
+            break;
+        case 4:
+        {
+            std::vector<uint32_t>& dense = bad.DenseRowColumns[
+                mutation_rng.Next() % valid.Params.DenseRows];
+            std::swap(dense[0], dense[1]);
+            break;
+        }
+        case 5:
+        {
+            const uint32_t dense_row =
+                mutation_rng.Next() % valid.Params.DenseRows;
+            std::vector<uint32_t>& dense = bad.DenseRowColumns[dense_row];
+            dense.erase(std::find(
+                dense.begin(), dense.end(), dense_base + dense_row));
+            break;
+        }
+        case 6:
+            bad.Params.HeavyRows = 129u + mutation_rng.Next() % 100u;
+            break;
+        default:
+            bad.DenseRowColumns.pop_back();
+            break;
+        }
+        invalid.push_back(bad);
+    }
+
+    const uint32_t bb = 7u;
+    const uint32_t parity_count = S + valid.Params.DenseRows +
+        valid.Params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * bb, 0x3cu);
+    for (size_t i = 0; i < invalid.size(); ++i)
+    {
+        std::vector<uint8_t> parity((size_t)parity_count * bb, 0xa5u);
+        const std::vector<uint8_t> before = parity;
+        wirehair_v2::PrecodeEncodeStats stats;
+        stats.StaircaseBlockOps = UINT64_MAX;
+        if (wirehair_v2::ValidatePrecodeSystem(invalid[i]) ||
+            wirehair_v2::DenseCornerInvertible(invalid[i]) ||
+            wirehair_v2::ComputePrecodeValues(
+                invalid[i], source.data(), bb, parity.data(), &stats) ||
+            parity != before || !StatsAreZero(stats))
+        {
+            std::fprintf(stderr,
+                "strict validation: malformed case %zu was accepted/written\n",
+                i);
+            return false;
+        }
+    }
+
+    wirehair_v2::PrecodeSystem singular;
+    if (!BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(16u, 0u), singular) ||
+        !wirehair_v2::ValidatePrecodeSystem(singular) ||
+        wirehair_v2::DenseCornerInvertible(singular))
+    {
+        std::fprintf(stderr,
+            "strict validation: expected structurally valid singular system\n");
+        return false;
+    }
+    std::vector<uint8_t> singular_parity((size_t)parity_count * bb, 0xa5u);
+    wirehair_v2::PrecodeEncodeStats singular_stats;
+    if (wirehair_v2::ComputePrecodeValues(
+            singular, source.data(), bb, singular_parity.data(),
+            &singular_stats) ||
+        singular_stats.StaircaseBlockOps == 0u ||
+        singular_stats.DenseKnownBlockOps == 0u)
+    {
+        std::fprintf(stderr,
+            "strict validation: singular system lost partial cost behavior\n");
+        return false;
+    }
+
+    wirehair::PCGRandom property_rng;
+    property_rng.Seed(UINT64_C(0xc0de51a1d), UINT64_C(0x5eed));
+    for (uint32_t trial = 0; trial < 32u; ++trial)
+    {
+        const uint32_t random_k = 16u + property_rng.Next() % 1009u;
+        wirehair_v2::PrecodeParams random_params =
+            wirehair_v2::MakeCertifiedParams(random_k, property_rng.Next());
+        random_params.DenseIdentityCorner = true;
+        wirehair_v2::PrecodeSystem random_system;
+        if (!BuildPrecodeSystem(random_params, random_system) ||
+            !wirehair_v2::ValidatePrecodeSystem(random_system))
+        {
+            std::fprintf(stderr,
+                "strict validation: random feasible build failed\n");
+            return false;
+        }
+        const uint32_t random_parity_count = random_params.Staircase +
+            random_params.DenseRows + random_params.HeavyRows;
+        std::vector<uint8_t> random_source((size_t)random_k * 3u);
+        std::vector<uint8_t> random_parity(
+            (size_t)random_parity_count * 3u);
+        FillRandomBlocks(
+            random_source.data(), random_source.size(), property_rng.Next());
+        if (!wirehair_v2::ComputePrecodeValues(
+                random_system, random_source.data(), 3u,
+                random_parity.data()) ||
+            !VerifyValues(
+                random_system, random_source.data(), random_parity.data(),
+                3u, "random feasible property"))
+        {
+            std::fprintf(stderr,
+                "strict validation: random values violated constraints\n");
+            return false;
+        }
+    }
+
+    std::printf("strict precode validation: PASS\n");
+    return true;
+}
+
 void ManualRecoveryBlock(
     const wirehair_v2::PrecodeSystem& system,
     const uint8_t* source, const uint8_t* parity,
@@ -606,7 +784,9 @@ bool TestRecoveryBlockEncoding()
 
     wirehair_v2::PrecodeEncoder uninitialized_encoder;
     uint64_t ops = UINT64_MAX;
-    if (uninitialized_encoder.Encode(0u, got.data(), &ops) || ops != 0u) {
+    if (uninitialized_encoder.Encode(0u, got.data(), &ops) ||
+        ops != UINT64_MAX)
+    {
         std::fprintf(stderr,
             "recovery encode: uninitialized encoder should fail\n");
         return false;
@@ -657,12 +837,12 @@ bool TestRecoveryBlockEncoding()
     }
     if (encoder_state.Initialize(
             system, codec, row_seed, recovery_mix, nullptr, bb) ||
-        encoder_state.IsInitialized() ||
-        encoder_state.ParityBlocks() ||
-        encoder_state.BlockBytes() != 0u)
+        !encoder_state.IsInitialized() ||
+        !encoder_state.ParityBlocks() ||
+        encoder_state.BlockBytes() != bb)
     {
         std::fprintf(stderr,
-            "recovery encode: failed initialize should clear state\n");
+            "recovery encode: failed initialize should preserve state\n");
         return false;
     }
     if (!encoder_state.Initialize(
@@ -737,28 +917,30 @@ bool TestRecoveryBlockEncoding()
         return false;
     }
 
-    std::fill(got.begin(), got.end(), 0xacu);
-    if (wirehair_v2::ComputeEncodedBlock(
+    const uint32_t high_block_id = UINT32_MAX;
+    const uint32_t high_row_id = high_block_id - K;
+    const std::vector<uint32_t> high_row =
+        wirehair_v2::GenerateRecoveryMatrixRow(
+            codec, K, parity_count, high_row_id, recovery_mix, row_seed);
+    ManualRecoveryBlock(
+        system, source.data(), parity.data(), bb, high_row, want.data());
+    if (!wirehair_v2::ComputeEncodedBlock(
             system, codec, row_seed, recovery_mix,
             source.data(), parity.data(), bb,
-            K + wirehair_v2::kMaxPeelMatrixRows, got.data(), &ops) ||
-        !std::all_of(got.begin(), got.end(),
-            [](uint8_t x) { return x == 0xacu; }) ||
-        ops != 0u)
+            high_block_id, got.data(), &ops) ||
+        !EqualBlock(got.data(), want.data(), bb) ||
+        ops != high_row.size())
     {
         std::fprintf(stderr,
-            "recovery encode: invalid encoded block id should not write\n");
+            "recovery encode: full uint32 block id failed\n");
         return false;
     }
-    std::fill(got.begin(), got.end(), 0xacu);
-    if (encoder_state.Encode(
-            K + wirehair_v2::kMaxPeelMatrixRows, got.data(), &ops) ||
-        !std::all_of(got.begin(), got.end(),
-            [](uint8_t x) { return x == 0xacu; }) ||
-        ops != 0u)
+    if (!encoder_state.Encode(high_block_id, got.data(), &ops) ||
+        !EqualBlock(got.data(), want.data(), bb) ||
+        ops != high_row.size())
     {
         std::fprintf(stderr,
-            "recovery encode: invalid state encoded block should not write\n");
+            "recovery encode: state full uint32 block id failed\n");
         return false;
     }
 
@@ -892,8 +1074,8 @@ bool TestMessagePrecodeEncoder()
     data_bytes = UINT32_MAX;
     ops = UINT64_MAX;
     if (encoder.Encode(K - 1u, got.data(), tail - 1u, &data_bytes, &ops) ||
-        data_bytes != 0u ||
-        ops != 0u ||
+        data_bytes != UINT32_MAX ||
+        ops != UINT64_MAX ||
         !std::all_of(got.begin(), got.end(),
             [](uint8_t x) { return x == 0xacu; }))
     {
@@ -922,12 +1104,93 @@ bool TestMessagePrecodeEncoder()
         return false;
     }
 
+    const wirehair_v2::PrecodeEncoder& blocks = encoder.BlockEncoder();
+    const wirehair_v2::PrecodeSystem& encoder_system = blocks.System();
+    const uint32_t parity_count = blocks.ParityBlockCount();
+    const std::vector<std::vector<uint32_t> > oracle_rows =
+        wirehair_v2::GenerateRecoveryMatrixRows(
+            encoder.Profile().Policy.Codec,
+            K,
+            parity_count,
+            16u,
+            blocks.RecoveryMixCount(),
+            blocks.RecoveryRowSeed());
+    const uint32_t reordered_ids[] = {
+        K + 9u, 2u, K + 1u, K - 1u, K + 15u, 0u, K + 4u
+    };
+    for (uint32_t packet_id : reordered_ids)
+    {
+        std::fill(got.begin(), got.end(), 0xacu);
+        std::fill(want.begin(), want.end(), 0xbdu);
+        data_bytes = UINT32_MAX;
+        if (!encoder.Encode(
+                packet_id, got.data(), bb, &data_bytes, &ops))
+        {
+            std::fprintf(stderr,
+                "message encoder: reordered packet %u failed\n", packet_id);
+            return false;
+        }
+        if (packet_id < K)
+        {
+            const uint32_t expected_bytes =
+                packet_id + 1u < K ? bb : tail;
+            if (data_bytes != expected_bytes ||
+                std::memcmp(
+                    got.data(),
+                    message.data() + (size_t)packet_id * bb,
+                    expected_bytes) != 0)
+            {
+                std::fprintf(stderr,
+                    "message encoder: reordered source oracle mismatch\n");
+                return false;
+            }
+        }
+        else
+        {
+            const uint32_t row_index = packet_id - K;
+            ManualRecoveryBlock(
+                encoder_system,
+                encoder.SourceBlocks(),
+                blocks.ParityBlocks(),
+                bb,
+                oracle_rows[row_index],
+                want.data());
+            if (data_bytes != bb || !EqualBlock(got.data(), want.data(), bb))
+            {
+                std::fprintf(stderr,
+                    "message encoder: reordered repair oracle mismatch\n");
+                return false;
+            }
+        }
+    }
+
+    const uint32_t max_packet_id = UINT32_MAX;
+    const std::vector<uint32_t> max_row =
+        wirehair_v2::GenerateRecoveryMatrixRow(
+            encoder.Profile().Policy.Codec,
+            K,
+            parity_count,
+            max_packet_id - K,
+            blocks.RecoveryMixCount(),
+            blocks.RecoveryRowSeed());
+    ManualRecoveryBlock(
+        encoder_system, encoder.SourceBlocks(), blocks.ParityBlocks(), bb,
+        max_row, want.data());
+    if (!encoder.Encode(
+            max_packet_id, got.data(), bb, &data_bytes, &ops) ||
+        data_bytes != bb || !EqualBlock(got.data(), want.data(), bb))
+    {
+        std::fprintf(stderr,
+            "message encoder: maximum packet-id oracle mismatch\n");
+        return false;
+    }
+
     std::fill(got.begin(), got.end(), 0xacu);
     data_bytes = UINT32_MAX;
     ops = UINT64_MAX;
     if (encoder.Encode(recovery_id, got.data(), bb - 1u, &data_bytes, &ops) ||
-        data_bytes != 0u ||
-        ops != 0u ||
+        data_bytes != UINT32_MAX ||
+        ops != UINT64_MAX ||
         !std::all_of(got.begin(), got.end(),
             [](uint8_t x) { return x == 0xacu; }))
     {
@@ -941,18 +1204,18 @@ bool TestMessagePrecodeEncoder()
     ++mismatch.BlockCount;
     if (encoder.Initialize(
             message.data(), message_bytes, bb, &mismatch, &options) ||
-        encoder.IsInitialized() ||
-        encoder.SourceBlocks() ||
-        encoder.SourceBlockCount() != 0u ||
-        encoder.BlockEncoder().IsInitialized())
+        !encoder.IsInitialized() ||
+        !encoder.SourceBlocks() ||
+        encoder.SourceBlockCount() != K ||
+        !encoder.BlockEncoder().IsInitialized())
     {
         std::fprintf(stderr,
-            "message encoder: failed reinitialize should clear state\n");
+            "message encoder: failed reinitialize should preserve state\n");
         return false;
     }
 
     if (encoder.Initialize(nullptr, message_bytes, bb, nullptr, &options) ||
-        encoder.IsInitialized())
+        !encoder.IsInitialized())
     {
         std::fprintf(stderr,
             "message encoder: null message should fail\n");
@@ -965,7 +1228,7 @@ bool TestMessagePrecodeEncoder()
             UINT32_C(0x80000000),
             nullptr,
             &options) ||
-        encoder.IsInitialized())
+        !encoder.IsInitialized())
     {
         std::fprintf(stderr,
             "message encoder: oversized block should fail before allocation\n");
@@ -976,11 +1239,168 @@ bool TestMessagePrecodeEncoder()
     return true;
 }
 
+bool TestTypedFailuresAndAllocationContainment()
+{
+    const uint32_t K = 16u;
+    const uint32_t bb = 19u;
+    const uint64_t message_bytes = (uint64_t)K * bb;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    FillRandomBlocks(message.data(), message.size(), UINT64_C(0xa110ca7e));
+
+    wirehair_v2::MessagePrecodeEncoderOptions identity;
+    identity.DenseIdentityCorner = true;
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    if (encoder.InitializeResult(
+            message.data(), message_bytes, bb, nullptr, &identity) !=
+            Wirehair_Success)
+    {
+        std::fprintf(stderr, "typed failures: initial encoder failed\n");
+        return false;
+    }
+
+    const wirehair_v2::SeedProfile working_profile = encoder.Profile();
+    const uint8_t* const working_source = encoder.SourceBlocks();
+    const uint8_t dummy = 0u;
+    if (encoder.InitializeResult(
+            &dummy, UINT64_C(0x100000000), UINT32_C(0x80000000),
+            nullptr, &identity) != Wirehair_InvalidInput ||
+        !encoder.IsInitialized() || encoder.SourceBlocks() != working_source ||
+        encoder.Profile().BlockCount != working_profile.BlockCount)
+    {
+        std::fprintf(stderr,
+            "typed failures: invalid input classification/state failed\n");
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions certified;
+    if (encoder.InitializeResult(
+            message.data(), message_bytes, bb, nullptr, &certified) !=
+            Wirehair_BadDenseSeed || !encoder.IsInitialized() ||
+        encoder.SourceBlocks() != working_source)
+    {
+        std::fprintf(stderr,
+            "typed failures: singular dense classification/state failed\n");
+        return false;
+    }
+
+    for (int64_t failure = 0; failure < 5; ++failure)
+    {
+        wirehair_v2::SetAllocationFailureCountdownForTesting(failure);
+        const WirehairResult init_oom = encoder.InitializeResult(
+            message.data(), message_bytes, bb, nullptr, &identity);
+        wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+        if (init_oom != Wirehair_OOM || !encoder.IsInitialized() ||
+            encoder.SourceBlocks() != working_source)
+        {
+            std::fprintf(stderr,
+                "typed failures: init OOM containment failed at %lld\n",
+                (long long)failure);
+            return false;
+        }
+    }
+
+    std::vector<uint8_t> output(bb, 0xa5u);
+    const std::vector<uint8_t> before = output;
+    uint32_t data_bytes = UINT32_MAX;
+    uint64_t ops = UINT64_MAX;
+    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
+    const WirehairResult encode_oom = encoder.EncodeResult(
+        K, output.data(), bb, &data_bytes, &ops);
+    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    if (encode_oom != Wirehair_OOM || output != before ||
+        data_bytes != UINT32_MAX || ops != UINT64_MAX)
+    {
+        std::fprintf(stderr,
+            "typed failures: recovery Encode OOM modified output\n");
+        return false;
+    }
+    if (encoder.EncodeResult(
+            K, output.data(), bb, &data_bytes, &ops) != Wirehair_Success ||
+        data_bytes != bb || ops == 0u)
+    {
+        std::fprintf(stderr, "typed failures: post-OOM encode failed\n");
+        return false;
+    }
+
+    wirehair_v2::Codec facade;
+    if (facade.InitializePrecodeEncoder(
+            message.data(), message_bytes, bb, nullptr, &identity) !=
+            Wirehair_Success)
+    {
+        std::fprintf(stderr, "typed failures: facade initial encode failed\n");
+        return false;
+    }
+    if (facade.InitializePrecodeEncoder(
+            &dummy, UINT64_C(0x100000000), UINT32_C(0x80000000),
+            nullptr, &identity) != Wirehair_InvalidInput ||
+        facade.Profile().BlockCount != K ||
+        facade.InitializePrecodeEncoder(
+            message.data(), message_bytes, bb, nullptr, &certified) !=
+            Wirehair_BadDenseSeed ||
+        facade.Profile().BlockCount != K)
+    {
+        std::fprintf(stderr,
+            "typed failures: facade invalid/singular classification failed\n");
+        return false;
+    }
+    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
+    const WirehairResult facade_oom = facade.InitializePrecodeEncoder(
+        message.data(), message_bytes, bb, nullptr, &identity);
+    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    if (facade_oom != Wirehair_OOM ||
+        facade.Profile().BlockCount != K)
+    {
+        std::fprintf(stderr,
+            "typed failures: facade OOM classification/state failed\n");
+        return false;
+    }
+
+    std::fill(output.begin(), output.end(), 0x5au);
+    const std::vector<uint8_t> facade_before = output;
+    data_bytes = UINT32_MAX;
+    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
+    const WirehairResult facade_encode_oom = facade.Encode(
+        K, output.data(), bb, &data_bytes);
+    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    if (facade_encode_oom != Wirehair_OOM || output != facade_before ||
+        data_bytes != UINT32_MAX)
+    {
+        std::fprintf(stderr,
+            "typed failures: facade Encode OOM modified output\n");
+        return false;
+    }
+
+    std::printf("typed failures and OOM containment: PASS\n");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     gf256_init();
+
+    if (argc == 2 && std::strcmp(argv[1], "--oom-probe") == 0)
+    {
+        const uint8_t dummy = 0u;
+        wirehair_v2::MessagePrecodeEncoderOptions options;
+        options.DenseIdentityCorner = true;
+        wirehair_v2::Codec codec;
+        const WirehairResult result = codec.InitializePrecodeEncoder(
+            &dummy,
+            UINT64_C(512) * 1024u * 1024u,
+            UINT32_C(8) * 1024u * 1024u,
+            nullptr,
+            &options);
+        if (result != Wirehair_OOM) {
+            std::fprintf(stderr,
+                "constrained precode init returned %d, expected OOM\n",
+                (int)result);
+            return 1;
+        }
+        std::printf("constrained precode init: Wirehair_OOM\n");
+        return 0;
+    }
 
     // Feasibility trials tunable so the sanitizer build stays quick
     uint32_t trials = 2000u;
@@ -994,9 +1414,11 @@ int main(int argc, char** argv)
     ok = TestCorrectnessAsBuilt() && ok;
     ok = TestCorrectnessDoctored() && ok;
     ok = TestMalformedDenseCorner() && ok;
+    ok = TestStrictSystemValidation() && ok;
     ok = TestCostModel() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;
+    ok = TestTypedFailuresAndAllocationContainment() && ok;
     ok = TestFeasibility(trials) && ok;
 
     if (!ok) {

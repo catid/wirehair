@@ -10,36 +10,37 @@ static const uint16_t kSeedTreeSubdivisions = 2048;
 
 struct SeedProfile
 {
-    uint32_t BlockCount;
-    uint32_t BlockBytes;
-    PeelPolicy Policy;
-    uint16_t DenseCount;
-    uint16_t PeelSeed;
-    uint16_t DenseSeed;
-    uint16_t PeelSeedBucket;
-    bool UsedPeelFixup;
-    bool UsedDenseFixup;
-    bool Tuned;
-    double TuningResidualMean;
-    uint32_t TuningResidualColumns;
-    uint64_t TuningXorCost;
+    uint32_t BlockCount = 0;
+    uint32_t BlockBytes = 0;
+    PeelPolicy Policy = {};
+    uint16_t DenseCount = 0;
+    uint16_t PeelSeed = 0;
+    uint16_t DenseSeed = 0;
+    uint16_t PeelSeedBucket = 0;
+    bool UsedPeelFixup = false;
+    bool UsedDenseFixup = false;
+    bool Tuned = false;
+    double TuningResidualMean = 0.0;
+    uint32_t TuningResidualColumns = 0;
+    uint64_t TuningXorCost = 0;
+    uint32_t TuningTrials = 0;
 };
 
 struct SeedTuningOptions
 {
-    uint16_t PeelCandidates;
-    uint16_t TrialsPerCandidate;
-    uint64_t Seed;
+    uint16_t PeelCandidates = 0;
+    uint32_t TrialsPerCandidate = 0;
+    uint64_t Seed = 0;
 };
 
 struct SeedTuningCandidate
 {
-    uint16_t PeelSeed;
-    uint16_t DenseSeed;
-    double ResidualMean;
-    uint32_t ResidualMax;
-    uint64_t XorCostMean;
-    double Score;
+    uint16_t PeelSeed = 0;
+    uint16_t DenseSeed = 0;
+    double ResidualMean = 0.0;
+    uint32_t ResidualMax = 0;
+    uint64_t XorCostMean = 0;
+    double Score = 0.0;
 };
 
 SeedTuningOptions DefaultSeedTuningOptions();

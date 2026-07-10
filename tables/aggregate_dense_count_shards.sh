@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHON=${PYTHON:-python3}
 
 inputs=()
 if [[ "$#" -gt 0 ]]; then
@@ -32,29 +33,8 @@ tmp=$(mktemp)
 aggregate=$(mktemp)
 trap 'rm -f "$tmp" "$aggregate"' EXIT
 
-for input in "${inputs[@]}"; do
-    awk -v source="$input" '
-        function is_uint(value) {
-            return value ~ /^[0-9]+$/
-        }
-
-        function is_number(value) {
-            return value ~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/
-        }
-
-        FNR == 1 { next }
-        NF == 0 { next }
-        NF >= 3 && is_uint($1) && is_uint($2) && is_number($3) {
-            printf "%s\t%s\t%s\t%s\n", $1, $2, $3, source
-            next
-        }
-        {
-            printf "malformed dense-count row: %s:%u: %s\n",
-                source, FNR, $0 > "/dev/stderr"
-            exit 1
-        }
-    ' "$input" >> "$tmp"
-done
+"$PYTHON" "$ROOT_DIR/tables/dense_count_validate.py" shards \
+    "${inputs[@]}" > "$tmp"
 
 awk -F '\t' '
     NF >= 4 {

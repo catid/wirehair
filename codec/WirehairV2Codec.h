@@ -51,7 +51,7 @@ public:
 private:
     wirehair::Codec Impl;
     std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;
-    SeedProfile CurrentProfile;
+    SeedProfile CurrentProfile = {};
 };
 
 } // namespace wirehair_v2

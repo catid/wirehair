@@ -47,13 +47,9 @@ static const float targetMsec = 5000; // msec
 
     Heavy Rows:
 
-    The heavy rows make up a special 6x18 Cauchy matrix with the property
-    that any disturbance from the binary rows above does not affect the
-    100% invertibility of the matrix.  Since these rows are not affected
-    by any of the rows above, we just pick one of these special matrices
-    and use it for all values of N original blocks.
-
-    The code to generate this is in HeavyRowGenerator.cpp
+    The fixed 6x18 GF(256) matrix improves rank recovery but has an empirical
+    singular floor after binary-row mixing.  Its bytes and limits are
+    documented in HEAVY_MATRIX.md and reproduced by HeavyRowGenerator.cpp.
 
 
     Dense Rows:
