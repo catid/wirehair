@@ -58,6 +58,15 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_noinit_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_noinit_test COMMAND wirehair_v2_noinit_test)
 
+    add_executable(wirehair_v2_transactional_test V2TransactionalTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_transactional_test)
+    target_link_libraries(wirehair_v2_transactional_test
+        wirehair_v2_policy Threads::Threads)
+    add_test(NAME wirehair_v2_transactional_test
+        COMMAND wirehair_v2_transactional_test)
+    set_tests_properties(wirehair_v2_transactional_test
+        PROPERTIES LABELS "state-machine;transactional;v2" TIMEOUT 180)
+
     add_executable(wirehair_v2_precode_test PrecodeTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_test)
     target_link_libraries(wirehair_v2_precode_test wirehair_v2_policy)

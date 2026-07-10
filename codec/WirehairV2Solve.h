@@ -17,6 +17,8 @@ static const uint32_t kPrecodeContractVersion = 2u;
 static const uint32_t kCertifiedPacketMixCount = 3u;
 static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;
+static const uint32_t kMinPacketPrecodeCount = 2u;
+static const uint32_t kMaxPacketPrecodeCount = 65521u;
 
 struct PacketRowConfig
 {
@@ -50,12 +52,30 @@ struct PrecodeSolveStats
 };
 
 /**
+    Return whether the exact version-4 packet-row iterator supports this
+    domain and mix count.
+
+    This is deliberately narrower than BuildPrecodeSystem()'s structural
+    domain.  Packet rows require at least two precode columns for parameter
+    generation and use NextPrime16(), whose largest supported input is 65521.
+    A structurally valid system outside this range may still be inspected or
+    used by structure-only tooling, but it cannot be evaluated or solved as a
+    version-4 packet profile.
+*/
+bool IsPacketRowDomainValid(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t mix_count);
+
+/**
     Generate the version-4 packet equation for a public block id.
 
     The source prefix is contractually bound to production Wirehair's integer
     GeneratePeelRowWeight()/PeelRowIterator rule.  Exactly MixCount distinct
     precode columns are added with RowMixIterator.  Addressing by the public
     block id keeps systematic equations [0,K) disjoint from repair equations.
+    Unsupported packet domains return an empty row without invoking either
+    iterator.
 */
 std::vector<uint32_t> GeneratePacketMatrixRow(
     uint32_t source_count,

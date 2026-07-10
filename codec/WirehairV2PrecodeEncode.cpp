@@ -701,8 +701,15 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
     std::vector<uint8_t>& intermediate_blocks,
     uint32_t block_bytes)
 {
-    if (!ValidatePrecodeSystem(system) ||
-        packet_config.MixCount == 0u || packet_config.MixCount > 3u ||
+    const uint64_t precode_count_wide =
+        (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    if (precode_count_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(
+            system.Params.BlockCount,
+            (uint32_t)precode_count_wide,
+            packet_config.MixCount) ||
+        !ValidatePrecodeSystem(system) ||
         block_bytes == 0u || block_bytes > 0x7fffffffu)
     {
         return Wirehair_InvalidInput;
@@ -719,6 +726,7 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
     try
     {
         PrecodeEncoder next;
+        GuardedAllocation();
         next.SystemValue = system;
         next.RowSeed = packet_config.PeelSeed;
         next.MixCount = packet_config.MixCount;
@@ -1085,18 +1093,26 @@ bool ResolveMessagePrecodeConfiguration(
         }
         params = expected;
         packet_config = expected_packet;
-        return true;
+    }
+    else
+    {
+        params = MakeCertifiedParams(
+            profile.BlockCount,
+            MessagePrecodeMatrixSeed(profile, validated_options));
+        params.Staircase = profile.DenseCount;
+        params.DenseIdentityCorner = validated_options.DenseIdentityCorner;
+        packet_config.PeelSeed = MessagePacketPeelSeed(
+            profile, validated_options);
+        packet_config.MixCount = validated_options.RecoveryMixCount;
     }
 
-    params = MakeCertifiedParams(
-        profile.BlockCount,
-        MessagePrecodeMatrixSeed(profile, validated_options));
-    params.Staircase = profile.DenseCount;
-    params.DenseIdentityCorner = validated_options.DenseIdentityCorner;
-    packet_config.PeelSeed = MessagePacketPeelSeed(
-        profile, validated_options);
-    packet_config.MixCount = validated_options.RecoveryMixCount;
-    return true;
+    const uint64_t precode_count_wide = (uint64_t)params.Staircase +
+        params.DenseRows + params.HeavyRows;
+    return precode_count_wide <= UINT32_MAX &&
+        IsPacketRowDomainValid(
+            params.BlockCount,
+            (uint32_t)precode_count_wide,
+            packet_config.MixCount);
 }
 
 void BindMessagePrecodeProfile(

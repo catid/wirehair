@@ -6,6 +6,7 @@
 
 #include "../gf256.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -372,6 +373,305 @@ bool CheckMixDomainValidation()
     return true;
 }
 
+bool PacketRowHasDistinctMix(
+    const std::vector<uint32_t>& row,
+    uint32_t K,
+    uint32_t P,
+    uint32_t mix_count)
+{
+    if (row.size() <= mix_count) {
+        return false;
+    }
+    const size_t mix_begin = row.size() - mix_count;
+    for (size_t i = 0; i < mix_begin; ++i) {
+        if (row[i] >= K) {
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (row[j] == row[i]) {
+                return false;
+            }
+        }
+    }
+    for (size_t i = mix_begin; i < row.size(); ++i)
+    {
+        if (row[i] < K || (uint64_t)row[i] >= (uint64_t)K + P) {
+            return false;
+        }
+        for (size_t j = mix_begin; j < i; ++j) {
+            if (row[j] == row[i]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckPacketRowDomainBoundaries()
+{
+    static_assert(
+        wirehair_v2::kMaxPacketPrecodeCount == 65521u,
+        "packet domain must track the last 16-bit prime");
+    struct BoundaryCase
+    {
+        uint32_t K;
+        uint32_t P;
+        uint32_t MixCount;
+        bool PacketValid;
+    };
+    const BoundaryCase cases[] = {
+        { 2u, 1u, 1u, false },
+        { 2u, 2u, 2u, true },
+        { 2u, 65521u, 3u, true },
+        { 2u, 65522u, 3u, false },
+        // Both sides of the maximum uint16 structural-span boundary.
+        { 14u, 65521u, 3u, true },
+        { 2u, 65533u, 3u, false }
+    };
+    const uint32_t sample_ids[] = {
+        0u, 1u, 13u, 65521u, 153334u, UINT32_MAX
+    };
+
+    for (const BoundaryCase& test : cases)
+    {
+        wirehair_v2::PrecodeParams params;
+        params.BlockCount = test.K;
+        params.Staircase = test.P;
+        params.DenseRows = 0u;
+        params.HeavyRows = 0u;
+        params.SourceHits = 1u;
+        params.Seed = UINT64_C(0x5041434b4554444f) ^ test.P;
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::ValidatePrecodeSystem(system))
+        {
+            std::fprintf(stderr,
+                "solve: structure boundary rejected K=%u P=%u\n",
+                test.K, test.P);
+            return false;
+        }
+
+        wirehair_v2::PacketRowConfig config;
+        // Seed/id pair pins the original P=65522 duplicate-column
+        // reproducer in Release builds; rejection now precedes generation.
+        config.PeelSeed = 1u;
+        config.MixCount = test.MixCount;
+        if (wirehair_v2::IsPacketRowDomainValid(
+                test.K, test.P, test.MixCount) != test.PacketValid)
+        {
+            std::fprintf(stderr,
+                "solve: packet-domain predicate mismatch K=%u P=%u\n",
+                test.K, test.P);
+            return false;
+        }
+
+        for (uint32_t id : sample_ids)
+        {
+            const std::vector<uint32_t> row =
+                wirehair_v2::GeneratePacketMatrixRow(
+                    test.K, test.P, id, config);
+            if (test.PacketValid ?
+                    !PacketRowHasDistinctMix(
+                        row, test.K, test.P, test.MixCount) :
+                    !row.empty())
+            {
+                std::fprintf(stderr,
+                    "solve: packet row boundary mismatch K=%u P=%u id=%u\n",
+                    test.K, test.P, id);
+                return false;
+            }
+        }
+
+        std::vector<uint8_t> intermediate(
+            (size_t)test.K + test.P, 0u);
+        for (size_t i = 0; i < intermediate.size(); ++i) {
+            intermediate[i] = (uint8_t)(i * 29u + test.P * 7u + 3u);
+        }
+        uint8_t output = 0xa5u;
+        uint64_t operations = UINT64_C(0xfeedfacecafebeef);
+        const uint32_t evaluation_id = 153334u;
+        const bool evaluated = wirehair_v2::EvaluatePacketBlock(
+            system, config, intermediate.data(), 1u, evaluation_id,
+            &output, &operations);
+        if (evaluated != test.PacketValid)
+        {
+            std::fprintf(stderr,
+                "solve: packet evaluation boundary mismatch K=%u P=%u\n",
+                test.K, test.P);
+            return false;
+        }
+        if (test.PacketValid)
+        {
+            const std::vector<uint32_t> row =
+                wirehair_v2::GeneratePacketMatrixRow(
+                    test.K, test.P, evaluation_id, config);
+            uint8_t expected = 0u;
+            for (uint32_t column : row) {
+                expected ^= intermediate[column];
+            }
+            if (output != expected || operations != row.size()) {
+                std::fprintf(stderr,
+                    "solve: accepted packet evaluation mismatch K=%u P=%u\n",
+                    test.K, test.P);
+                return false;
+            }
+        }
+        else
+        {
+            if (output != 0xa5u ||
+                operations != UINT64_C(0xfeedfacecafebeef))
+            {
+                std::fprintf(stderr,
+                    "solve: rejected packet evaluation wrote output K=%u "
+                    "P=%u\n", test.K, test.P);
+                return false;
+            }
+            output = 0x5au;
+            operations = UINT64_C(0x0123456789abcdef);
+            if (wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                    system, config, intermediate.data(), 1u, evaluation_id,
+                    &output, &operations) ||
+                output != 0x5au ||
+                operations != UINT64_C(0x0123456789abcdef))
+            {
+                std::fprintf(stderr,
+                    "solve: rejected fast packet evaluation wrote output "
+                    "K=%u P=%u\n", test.K, test.P);
+                return false;
+            }
+
+            const uint8_t zero = 0u;
+            std::vector<wirehair_v2::SolvePacket> packets(test.K);
+            for (uint32_t id = 0; id < test.K; ++id) {
+                packets[id].BlockId = id;
+                packets[id].Data = &zero;
+            }
+            std::vector<uint8_t> solved(7u, 0xccu);
+            const std::vector<uint8_t> before = solved;
+            wirehair_v2::PrecodeSolveStats stats;
+            stats.PacketRows = UINT32_MAX;
+            if (wirehair_v2::SolvePrecodeSystem(
+                    system, config, packets, 1u, solved, &stats) !=
+                    Wirehair_InvalidInput ||
+                solved != before || stats.PacketRows != UINT32_MAX ||
+                wirehair_v2::VerifyPrecodeSolution(
+                    system, config, packets, intermediate.data(), 1u))
+            {
+                std::fprintf(stderr,
+                    "solve: rejected packet solve/verify contract failed "
+                    "K=%u P=%u\n", test.K, test.P);
+                return false;
+            }
+
+            wirehair_v2::PacketRowConfig selected;
+            selected.PeelSeed = UINT32_C(0xdecafbad);
+            selected.MixCount = UINT32_MAX;
+            uint32_t attempt = UINT32_MAX;
+            if (wirehair_v2::SelectSystematicPacketConfig(
+                    system, config, selected, &attempt) !=
+                    Wirehair_InvalidInput ||
+                selected.PeelSeed != UINT32_C(0xdecafbad) ||
+                selected.MixCount != UINT32_MAX || attempt != UINT32_MAX)
+            {
+                std::fprintf(stderr,
+                    "solve: rejected packet selector wrote output K=%u "
+                    "P=%u\n", test.K, test.P);
+                return false;
+            }
+
+            wirehair_v2::PrecodeSystem selected_system;
+            selected_system.Params.BlockCount = UINT32_MAX;
+            if (wirehair_v2::SelectSystematicConfiguration(
+                    params, config, selected_system, selected, &attempt) !=
+                    Wirehair_InvalidInput ||
+                selected_system.Params.BlockCount != UINT32_MAX ||
+                selected.PeelSeed != UINT32_C(0xdecafbad) ||
+                selected.MixCount != UINT32_MAX || attempt != UINT32_MAX)
+            {
+                std::fprintf(stderr,
+                    "solve: rejected joint selector wrote output K=%u P=%u\n",
+                    test.K, test.P);
+                return false;
+            }
+        }
+    }
+
+    // Exhaust the 16-bit public-id sample domain at a tiny span, then pin
+    // high-bit IDs separately above.  Every accepted row must retain exactly
+    // two distinct in-range precode columns.
+    wirehair_v2::PacketRowConfig small_config;
+    small_config.PeelSeed = UINT32_C(0x6f726163);
+    small_config.MixCount = 2u;
+    for (uint32_t id = 0; id <= UINT16_MAX; ++id)
+    {
+        const std::vector<uint32_t> row =
+            wirehair_v2::GeneratePacketMatrixRow(
+                2u, 2u, id, small_config);
+        if (!PacketRowHasDistinctMix(row, 2u, 2u, 2u)) {
+            std::fprintf(stderr,
+                "solve: tiny packet-id sweep failed id=%u\n", id);
+            return false;
+        }
+    }
+
+    // Fixed-seed property samples cover the full accepted P range and both
+    // low/high public block-id bits.  This complements the exhaustive tiny
+    // sweep without turning the ordinary test lane into a multi-billion-row
+    // job over the complete uint32 id space.
+    uint64_t random_state = UINT64_C(0x8b79d42f6a1ce503);
+    const auto next_random = [&random_state]() -> uint32_t {
+        random_state ^= random_state >> 12;
+        random_state ^= random_state << 25;
+        random_state ^= random_state >> 27;
+        return (uint32_t)(
+            random_state * UINT64_C(0x2545f4914f6cdd1d) >> 32);
+    };
+    for (uint32_t trial = 0; trial < 100000u; ++trial)
+    {
+        const uint32_t P = 2u +
+            next_random() % (wirehair_v2::kMaxPacketPrecodeCount - 1u);
+        const uint32_t max_k =
+            std::min<uint32_t>(64000u, UINT16_MAX - P);
+        const uint32_t K = 2u + next_random() % (max_k - 1u);
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = next_random();
+        config.MixCount = 1u + next_random() %
+            std::min<uint32_t>(wirehair_v2::kCertifiedPacketMixCount, P);
+        const uint32_t id = next_random();
+        const std::vector<uint32_t> row =
+            wirehair_v2::GeneratePacketMatrixRow(K, P, id, config);
+        if (!PacketRowHasDistinctMix(row, K, P, config.MixCount))
+        {
+            std::fprintf(stderr,
+                "solve: fixed property failed trial=%u K=%u P=%u id=%u\n",
+                trial, K, P, id);
+            return false;
+        }
+    }
+
+    // The certified profile rule stays wholly inside the narrower packet
+    // domain for every supported source count, so message facades cannot
+    // select a structurally valid but unevaluable packet profile.
+    for (uint32_t K = 2u; K <= 64000u; ++K)
+    {
+        const wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(K, 0u);
+        const uint32_t P = params.Staircase +
+            params.DenseRows + params.HeavyRows;
+        if (!wirehair_v2::IsPacketRowDomainValid(
+                K, P, wirehair_v2::kCertifiedPacketMixCount))
+        {
+            std::fprintf(stderr,
+                "solve: certified packet profile escaped domain K=%u P=%u\n",
+                K, P);
+            return false;
+        }
+    }
+
+    std::printf("packet row domain boundaries: PASS\n");
+    return true;
+}
+
 bool CheckLargePacketEvaluationWork()
 {
     const uint32_t K = 64000u;
@@ -655,6 +955,7 @@ int main(int argc, char** argv)
     bool ok = true;
     ok = CheckTinyDenseOracle() && ok;
     ok = CheckMixDomainValidation() && ok;
+    ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;
     ok = CheckLargePacketEvaluationWork() && ok;
     ok = RunCase(64u, 17u, 7u) && ok;

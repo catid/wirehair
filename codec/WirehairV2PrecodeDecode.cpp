@@ -143,6 +143,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
             profile.V2SeedAttempt : 0u;
         if (profile.V2SeedSelected)
         {
+            GuardedDecoderAllocation();
             if (!BuildPrecodeSystem(params, system))
             {
                 return Wirehair_InvalidInput;
@@ -151,6 +152,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         }
         else
         {
+            GuardedDecoderAllocation();
             const WirehairResult select_result =
                 SelectSystematicConfiguration(
                     params,
@@ -174,6 +176,7 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         next.OptionsValue = opts;
         next.PacketConfigValue = selected_config;
         next.SystemValue = std::move(system);
+        GuardedDecoderAllocation();
         next.ReceivedBlockIds.reserve((size_t)block_count + 32u);
         const uint64_t receive_capacity =
             ((uint64_t)block_count + 32u) * block_bytes;
@@ -182,7 +185,9 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         {
             return Wirehair_InvalidInput;
         }
+        GuardedDecoderAllocation();
         next.ReceivedBlockStorage.reserve((size_t)receive_capacity);
+        GuardedDecoderAllocation();
         next.ReceivedIds.reserve((size_t)block_count + 32u);
         next.MessageBytesValue = message_bytes;
         next.BlockBytesValue = block_bytes;

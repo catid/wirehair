@@ -73,7 +73,15 @@ separate version-4 path below.
 production Wirehair's integer `GeneratePeelRowWeight()` and row iterators,
 adds exactly three precode columns, and addresses the generator with the
 public packet ID.  Encoder, decoder, selected profile, golden tests, and
-benchmarks all share this one mapping.
+benchmarks all share this one mapping.  Its evaluation domain is intentionally
+narrower than the structure builder's domain: `BuildPrecodeSystem()` can
+represent any valid 16-bit total span (including one precode column and
+precode spans above 65521), while exact packet generation/evaluation/solving
+requires `2 <= P <= 65521`, `K + P <= 65535`, and a mix count no larger than
+both three and `P`.  This upper bound is the last prime supported by the
+version-4 `NextPrime16()` distinct-column iterator.  Structure-only tooling
+may retain systems outside it, but message facades and packet APIs reject them
+before evaluating a row or writing packet/solve output.
 `ComputePrecodeValues()` computes the concrete staircase, dense, and heavy
 intermediate block values for encoder-feasible precode systems, and
 `ComputeRecoveryBlock()` evaluates one generated recovery row over the full

@@ -254,6 +254,19 @@ uint32_t LowestSetBitIndex(uint64_t word)
 
 } // namespace
 
+bool IsPacketRowDomainValid(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t mix_count)
+{
+    return source_count >= 2u && source_count <= 64000u &&
+        precode_count >= kMinPacketPrecodeCount &&
+        precode_count <= kMaxPacketPrecodeCount &&
+        (uint64_t)source_count + precode_count <= UINT16_MAX &&
+        mix_count >= 1u && mix_count <= kCertifiedPacketMixCount &&
+        mix_count <= precode_count;
+}
+
 std::vector<uint32_t> GeneratePacketMatrixRow(
     uint32_t source_count,
     uint32_t precode_count,
@@ -261,11 +274,8 @@ std::vector<uint32_t> GeneratePacketMatrixRow(
     const PacketRowConfig& config)
 {
     std::vector<uint32_t> row;
-    if (source_count < 2u || source_count > 64000u ||
-        precode_count < 2u ||
-        (uint64_t)source_count + precode_count > UINT16_MAX ||
-        config.MixCount == 0u || config.MixCount > 3u ||
-        config.MixCount > precode_count)
+    if (!IsPacketRowDomainValid(
+            source_count, precode_count, config.MixCount))
     {
         return row;
     }
@@ -333,20 +343,21 @@ static bool EvaluatePacketBlockImpl(
     bool validate_system)
 {
     const uint32_t K = system.Params.BlockCount;
-    const uint32_t P = system.Params.Staircase +
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
-    if ((validate_system && !ValidatePrecodeSystem(system)) ||
-        !intermediate_blocks ||
+    if (!intermediate_blocks ||
         !block_out || block_bytes == 0u || block_bytes > 0x7fffffffu ||
-        K < 2u || K > 64000u || P < 2u ||
-        (uint64_t)K + P > UINT16_MAX ||
-        ((uint64_t)K + P) * block_bytes >
-            (uint64_t)std::numeric_limits<size_t>::max() ||
-        config.MixCount == 0u || config.MixCount > 3u ||
-        config.MixCount > P)
+        P_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
+        ((uint64_t)K + P_wide) * block_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max())
     {
         return false;
     }
+    if (validate_system && !ValidatePrecodeSystem(system)) {
+        return false;
+    }
+    const uint32_t P = (uint32_t)P_wide;
 
     wirehair::PeelRowParameters params;
     params.Initialize(
@@ -424,20 +435,21 @@ WirehairResult SolvePrecodeSystem(
     PrecodeSolveStats* stats)
 {
     PrecodeSolveStats st = {};
-    if (!ValidatePrecodeSystem(system) ||
-        config.MixCount == 0u || config.MixCount > 3u)
-    {
-        return Wirehair_InvalidInput;
-    }
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
     const uint32_t D2 = system.Params.DenseRows;
     const uint32_t H = system.Params.HeavyRows;
-    const uint32_t P = S + D2 + H;
+    const uint64_t P_wide = (uint64_t)S + D2 + H;
+    if (P_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
+        !ValidatePrecodeSystem(system))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const uint32_t P = (uint32_t)P_wide;
     const uint32_t L = K + P;
     size_t value_bytes = 0u;
-    if (config.MixCount > P ||
-        !CheckedBlockStorage(L, block_bytes, value_bytes))
+    if (!CheckedBlockStorage(L, block_bytes, value_bytes))
     {
         return Wirehair_InvalidInput;
     }
@@ -934,14 +946,13 @@ WirehairResult SelectSystematicPacketConfig(
     PacketRowConfig& selected_config,
     uint32_t* attempt_out)
 {
-    if (!ValidatePrecodeSystem(system)) {
-        return Wirehair_InvalidInput;
-    }
     const uint32_t K = system.Params.BlockCount;
-    const uint32_t P = system.Params.Staircase +
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
-    if (base_config.MixCount == 0u || base_config.MixCount > 3u ||
-        base_config.MixCount > P)
+    if (P_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(
+            K, (uint32_t)P_wide, base_config.MixCount) ||
+        !ValidatePrecodeSystem(system))
     {
         return Wirehair_InvalidInput;
     }
@@ -996,12 +1007,11 @@ WirehairResult SelectSystematicConfiguration(
     try
     {
         const uint32_t K = base_params.BlockCount;
-        const uint32_t P = base_params.Staircase +
+        const uint64_t P_wide = (uint64_t)base_params.Staircase +
             base_params.DenseRows + base_params.HeavyRows;
-        if (K < 2u || K > 64000u ||
-            base_config.MixCount == 0u ||
-            base_config.MixCount > 3u ||
-            base_config.MixCount > P)
+        if (P_wide > UINT32_MAX ||
+            !IsPacketRowDomainValid(
+                K, (uint32_t)P_wide, base_config.MixCount))
         {
             return Wirehair_InvalidInput;
         }
@@ -1058,25 +1068,30 @@ bool VerifyPrecodeSolution(
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes)
 {
-    if (!ValidatePrecodeSystem(system) || !intermediate_blocks ||
+    if (!intermediate_blocks ||
         block_bytes == 0u || block_bytes > 0x7fffffffu)
     {
-        return false;
-    }
-    if (gf256_init() != 0) {
         return false;
     }
     const uint32_t K = system.Params.BlockCount;
     const uint32_t S = system.Params.Staircase;
     const uint32_t D2 = system.Params.DenseRows;
     const uint32_t H = system.Params.HeavyRows;
-    const uint32_t P = S + D2 + H;
+    const uint64_t P_wide = (uint64_t)S + D2 + H;
+    if (P_wide > UINT32_MAX ||
+        !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
+        !ValidatePrecodeSystem(system))
+    {
+        return false;
+    }
+    const uint32_t P = (uint32_t)P_wide;
     const uint32_t L = K + P;
-    if (config.MixCount == 0u || config.MixCount > 3u ||
-        config.MixCount > P ||
-        (uint64_t)L * block_bytes >
+    if ((uint64_t)L * block_bytes >
             (uint64_t)std::numeric_limits<size_t>::max())
     {
+        return false;
+    }
+    if (gf256_init() != 0) {
         return false;
     }
     std::vector<uint8_t> value(block_bytes, 0u);

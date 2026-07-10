@@ -9,6 +9,22 @@
 namespace wirehair_v2 {
 namespace {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local int64_t CodecAllocationFailureCountdown = -1;
+
+void GuardedCodecAllocation()
+{
+    if (CodecAllocationFailureCountdown == 0) {
+        throw std::bad_alloc();
+    }
+    if (CodecAllocationFailureCountdown > 0) {
+        --CodecAllocationFailureCountdown;
+    }
+}
+#else
+void GuardedCodecAllocation() {}
+#endif
+
 uint64_t BlockCountWideFor(uint64_t message_bytes, uint32_t block_bytes)
 {
     // Divide before adding the round-up so the sum cannot wrap uint64
@@ -45,6 +61,13 @@ WirehairResult EnsureGf256Initialized()
 }
 
 } // namespace
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void SetCodecAllocationFailureCountdownForTesting(int64_t countdown)
+{
+    CodecAllocationFailureCountdown = countdown;
+}
+#endif
 
 Codec::Codec()
 {
@@ -84,22 +107,41 @@ WirehairResult Codec::InitializeEncoder(
     const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
-    Impl.OverrideSeeds(
-        profile.DenseCount,
-        profile.PeelSeed,
-        profile.DenseSeed);
+    try
+    {
+        GuardedCodecAllocation();
+        std::unique_ptr<wirehair::Codec> next(new wirehair::Codec());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        next->SetAllocationFailureCountdownForTesting(
+            CodecAllocationFailureCountdown);
+#endif
+        next->OverrideSeeds(
+            profile.DenseCount,
+            profile.PeelSeed,
+            profile.DenseSeed);
 
-    WirehairResult result = Impl.InitializeEncoder(message_bytes, block_bytes);
-    if (result == Wirehair_Success) {
-        result = Impl.EncodeFeed(message);
-    }
-    if (result == Wirehair_Success) {
-        // Only publish the profile for initializations that succeeded
+        WirehairResult result =
+            next->InitializeEncoder(message_bytes, block_bytes);
+        if (result == Wirehair_Success) {
+            result = next->EncodeFeed(message);
+        }
+        if (result != Wirehair_Success) {
+            return result;
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        // The countdown scopes this initialization attempt only.
+        next->SetAllocationFailureCountdownForTesting(-1);
+#endif
+
         CurrentProfile = profile;
+        Impl = std::move(next);
         PrecodeImpl.reset();
         PrecodeDecoderImpl.reset();
+        return Wirehair_Success;
     }
-    return result;
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult Codec::InitializePrecodeEncoder(
@@ -132,6 +174,7 @@ WirehairResult Codec::InitializePrecodeEncoder(
 
     try
     {
+        GuardedCodecAllocation();
         std::unique_ptr<MessagePrecodeEncoder> next(
             new MessagePrecodeEncoder());
         const WirehairResult result = next->InitializeResult(
@@ -143,6 +186,7 @@ WirehairResult Codec::InitializePrecodeEncoder(
         CurrentProfile = next->Profile();
         PrecodeImpl = std::move(next);
         PrecodeDecoderImpl.reset();
+        Impl.reset();
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
@@ -176,20 +220,38 @@ WirehairResult Codec::InitializeDecoder(
     const SeedProfile profile = seed_override ? *seed_override :
         SelectSeedProfile(block_count, block_bytes);
 
-    Impl.OverrideSeeds(
-        profile.DenseCount,
-        profile.PeelSeed,
-        profile.DenseSeed);
+    try
+    {
+        GuardedCodecAllocation();
+        std::unique_ptr<wirehair::Codec> next(new wirehair::Codec());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        next->SetAllocationFailureCountdownForTesting(
+            CodecAllocationFailureCountdown);
+#endif
+        next->OverrideSeeds(
+            profile.DenseCount,
+            profile.PeelSeed,
+            profile.DenseSeed);
 
-    const WirehairResult result =
-        Impl.InitializeDecoder(message_bytes, block_bytes);
-    if (result == Wirehair_Success) {
-        // Only publish the profile for initializations that succeeded
+        const WirehairResult result =
+            next->InitializeDecoder(message_bytes, block_bytes);
+        if (result != Wirehair_Success) {
+            return result;
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        // Do not leak an exhausted initialization hook into later decoding.
+        next->SetAllocationFailureCountdownForTesting(-1);
+#endif
+
         CurrentProfile = profile;
+        Impl = std::move(next);
         PrecodeImpl.reset();
         PrecodeDecoderImpl.reset();
+        return Wirehair_Success;
     }
-    return result;
+    catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
 }
 
 WirehairResult Codec::InitializePrecodeDecoder(
@@ -217,6 +279,7 @@ WirehairResult Codec::InitializePrecodeDecoder(
 
     try
     {
+        GuardedCodecAllocation();
         std::unique_ptr<MessagePrecodeDecoder> next(
             new MessagePrecodeDecoder());
         const WirehairResult result = next->InitializeResult(
@@ -227,6 +290,7 @@ WirehairResult Codec::InitializePrecodeDecoder(
         CurrentProfile = next->Profile();
         PrecodeDecoderImpl = std::move(next);
         PrecodeImpl.reset();
+        Impl.reset();
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
@@ -254,7 +318,11 @@ WirehairResult Codec::Encode(
     if (PrecodeDecoderImpl && PrecodeDecoderImpl->IsInitialized()) {
         return Wirehair_InvalidInput;
     }
-    const uint32_t written = Impl.Encode(block_id, block_out, out_bytes);
+    if (!Impl) {
+        *data_bytes_out = 0u;
+        return Wirehair_InvalidInput;
+    }
+    const uint32_t written = Impl->Encode(block_id, block_out, out_bytes);
     *data_bytes_out = written;
     if (written == 0u) {
         return Wirehair_InvalidInput;
@@ -277,7 +345,10 @@ WirehairResult Codec::Decode(
         return PrecodeDecoderImpl->DecodeResult(
             block_id, block_in, block_bytes);
     }
-    return Impl.DecodeFeed(block_id, block_in, block_bytes);
+    if (!Impl) {
+        return Wirehair_InvalidInput;
+    }
+    return Impl->DecodeFeed(block_id, block_in, block_bytes);
 }
 
 WirehairResult Codec::Recover(void* message_out, uint64_t message_bytes)
@@ -291,7 +362,10 @@ WirehairResult Codec::Recover(void* message_out, uint64_t message_bytes)
     if (PrecodeDecoderImpl && PrecodeDecoderImpl->IsInitialized()) {
         return PrecodeDecoderImpl->RecoverResult(message_out, message_bytes);
     }
-    return Impl.ReconstructOutput(message_out, message_bytes);
+    if (!Impl) {
+        return Wirehair_InvalidInput;
+    }
+    return Impl->ReconstructOutput(message_out, message_bytes);
 }
 
 const SeedProfile& Codec::Profile() const

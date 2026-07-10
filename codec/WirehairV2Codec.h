@@ -10,6 +10,11 @@
 
 namespace wirehair_v2 {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/// Fails the next facade/core allocation when countdown is zero.
+void SetCodecAllocationFailureCountdownForTesting(int64_t countdown);
+#endif
+
 class Codec
 {
 public:
@@ -56,7 +61,7 @@ public:
     const SeedProfile& Profile() const;
 
 private:
-    wirehair::Codec Impl;
+    std::unique_ptr<wirehair::Codec> Impl;
     std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;
     std::unique_ptr<MessagePrecodeDecoder> PrecodeDecoderImpl;
     SeedProfile CurrentProfile = {};
