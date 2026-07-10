@@ -297,9 +297,32 @@ struct PeelRefs
     uint16_t Rows[CAT_REF_LIST_MAX];
 };
 
+/// Explicit call frame for the iterative peeling avalanche.
+/// There can be at most one active frame per peeling column.
+struct PeelAvalancheFrame
+{
+    /// Column whose reference list is being traversed
+    uint16_t Column;
+
+    /// Row that solved Column, or LIST_TERM for a deferred root
+    uint16_t SolvedRow;
+
+    /// Next entry to visit in Column's reference list
+    uint16_t NextRef;
+
+    /// Reference count snapshotted when the frame is pushed
+    uint16_t RefCount;
+};
+
 
 //------------------------------------------------------------------------------
 // Codec
+
+enum class WireProfile : uint8_t
+{
+    LegacyPreFixup,
+    LegacyCurrent
+};
 
 class Codec
 {
@@ -355,6 +378,13 @@ private:
     /// Public API lifecycle state
     Mode _mode = Mode::Uninitialized;
 
+    /// Immutable equation profile selected before initialization
+    WireProfile _wire_profile = WireProfile::LegacyCurrent;
+
+    /// Test-only failure countdown consumed by actual core allocations.
+    /// Negative disables; zero rejects the next allocation.
+    int64_t _testing_allocation_failure_countdown = -1;
+
     /// Number of mix columns
     uint16_t _mix_count = 0;
 
@@ -404,6 +434,13 @@ private:
 
     /// List of column references
     PeelRefs * GF256_RESTRICT _peel_col_refs = nullptr;
+
+    /// Bounded DFS worklist used while processing peeling avalanches
+    PeelAvalancheFrame * GF256_RESTRICT _peel_avalanche = nullptr;
+
+    /// Test diagnostics for validating avalanche depth and DFS order
+    uint64_t _testing_peel_order_hash = UINT64_C(14695981039346656037);
+    unsigned _testing_peel_max_depth = 0;
 
     /// Tail of peeling solved rows list
     PeelRow * GF256_RESTRICT _peel_tail_rows = nullptr;
@@ -564,9 +601,25 @@ private:
         OpportunisticPeeling() and PeelAvalancheOnSolve() are split up into
         two functions because I found that the PeelAvalancheOnSolve() function
         can be reused later during GreedyPeeling().
+
+        Returns false only if the bounded worklist invariant is violated.
     */
-    void PeelAvalancheOnSolve(
-        uint16_t column_i ///< Column that was solved
+    bool PeelAvalancheOnSolve(
+        uint16_t column_i, ///< Column that was solved or deferred
+        uint16_t solved_row_i = LIST_TERM ///< Solving row, or deferred root
+    );
+
+    /**
+        BeginPeelSolution()
+
+        Records a peeled row and column without traversing the avalanche.
+        The iterative avalanche driver uses this split operation to push a
+        child frame while retaining the exact recursive depth-first order.
+    */
+    void BeginPeelSolution(
+        PeelRow * GF256_RESTRICT row, ///< Pointer to row data
+        uint16_t row_i,   ///< Row index
+        uint16_t column_i ///< Column that this solves
     );
 
     /**
@@ -575,8 +628,10 @@ private:
         This function is called exclusively by OpportunisticPeeling()
         to take care of marking columns solved when a row is able to
         solve a column during the peeling process.
+
+        Returns false only if the bounded worklist invariant is violated.
     */
-    void SolveWithPeel(
+    bool SolveWithPeel(
         PeelRow * GF256_RESTRICT row, ///< Pointer to row data
         uint16_t row_i,   ///< Row index
         uint16_t column_i ///< Column that this solves
@@ -603,8 +658,10 @@ private:
         In practice with a well-designed (good distribution) peeling matrix,
         about sqrt(N) + N/150 columns must be deferred to Gaussian elimination
         using this greedy approach.
+
+        Returns false only if the bounded worklist invariant is violated.
     */
-    void GreedyPeeling();
+    bool GreedyPeeling();
 
     /** \page Peeling Solver Output
 
@@ -1288,6 +1345,8 @@ private:
     bool AllocateWorkspace();
     void FreeWorkspace();
 
+    bool TestingAllowAllocation();
+
 public:
     Codec();
     ~Codec();
@@ -1313,6 +1372,28 @@ public:
     GF256_FORCE_INLINE bool CanRecover() const
     {
         return _mode == Mode::DecodeComplete;
+    }
+
+    GF256_FORCE_INLINE void SetWireProfile(WireProfile profile)
+    {
+        _wire_profile = profile;
+    }
+    GF256_FORCE_INLINE WireProfile GetWireProfile() const
+    {
+        return _wire_profile;
+    }
+    GF256_FORCE_INLINE void SetAllocationFailureCountdownForTesting(
+        int64_t countdown)
+    {
+        _testing_allocation_failure_countdown = countdown;
+    }
+    GF256_FORCE_INLINE uint64_t TestingPeelOrderHash() const
+    {
+        return _testing_peel_order_hash;
+    }
+    GF256_FORCE_INLINE unsigned TestingPeelMaxDepth() const
+    {
+        return _testing_peel_max_depth;
     }
 
 

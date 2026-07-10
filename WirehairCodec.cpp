@@ -29,6 +29,7 @@
 
 #include "WirehairCodec.h"
 #include "WirehairEnvironment.h"
+#include "WirehairHeavy.h"
 
 #include <climits>
 
@@ -378,10 +379,13 @@ bool Codec::OpportunisticPeeling(
 
     case 1:
         // Solve only unmarked column with this row
-        SolveWithPeel(
+        if (!SolveWithPeel(
             row,
             row_i,
-            unmarked[0]);
+            unmarked[0]))
+        {
+            return false;
+        }
         break;
 
     case 2:
@@ -428,21 +432,60 @@ void Codec::FixPeelFailure(
     CAT_IF_DUMP(cout << endl;)
 }
 
-void Codec::PeelAvalancheOnSolve(
-    uint16_t column_i ///< Column that was solved
+bool Codec::PeelAvalancheOnSolve(
+    uint16_t column_i, ///< Column that was solved or deferred
+    uint16_t solved_row_i ///< Solving row, or LIST_TERM for deferred root
 )
 {
-    PeelRefs * GF256_RESTRICT refs = &_peel_col_refs[column_i];
-    uint16_t ref_row_count = refs->RowCount;
-    uint16_t * GF256_RESTRICT ref_rows = refs->Rows;
+    CAT_DEBUG_ASSERT(_peel_avalanche != nullptr);
+    CAT_DEBUG_ASSERT(column_i < _block_count);
+    CAT_DEBUG_ASSERT(
+        solved_row_i == LIST_TERM ||
+        solved_row_i < static_cast<unsigned>(_block_count) + _extra_count);
 
-    // Walk list of peeled rows referenced by this newly solved column
-    while (ref_row_count--)
+    // This explicit stack reproduces the old recursive DFS exactly: A parent
+    // reference-list cursor is advanced before a child frame is pushed, and
+    // traversal resumes at that cursor only after the child has completed.
+    // Each pushed child transitions a distinct TODO column to MARK_PEEL, so
+    // no valid avalanche can need more than one frame per peeling column.
+    unsigned stack_count = 1;
+    _peel_avalanche[0].Column = column_i;
+    _peel_avalanche[0].SolvedRow = solved_row_i;
+    _peel_avalanche[0].NextRef = 0;
+    _peel_avalanche[0].RefCount = _peel_col_refs[column_i].RowCount;
+#if defined(WIREHAIR_TESTING)
+    if (_testing_peel_max_depth < stack_count) {
+        _testing_peel_max_depth = stack_count;
+    }
+#endif
+
+    while (stack_count > 0)
     {
+        PeelAvalancheFrame * GF256_RESTRICT frame =
+            &_peel_avalanche[stack_count - 1];
+        CAT_DEBUG_ASSERT(frame->Column < _block_count);
+
+        PeelRefs * GF256_RESTRICT refs =
+            &_peel_col_refs[frame->Column];
+        CAT_DEBUG_ASSERT(frame->RefCount <= refs->RowCount);
+        CAT_DEBUG_ASSERT(frame->NextRef <= frame->RefCount);
+
+        // Finish this simulated recursive call.
+        if (frame->NextRef >= frame->RefCount)
+        {
+            if (frame->SolvedRow != LIST_TERM) {
+                _peel_cols[frame->Column].PeelRow = frame->SolvedRow;
+            }
+            --stack_count;
+            continue;
+        }
+
+        const uint16_t active_column_i = frame->Column;
+
         // Update unmarked row count for this referenced row
-        uint16_t ref_row_i = *ref_rows++;
+        const uint16_t ref_row_i = refs->Rows[frame->NextRef++];
         PeelRow * GF256_RESTRICT ref_row = &_peel_rows[ref_row_i];
-        uint16_t unmarked_count = --ref_row->UnmarkedCount;
+        const uint16_t unmarked_count = --ref_row->UnmarkedCount;
 
         // If row may be solving a column now:
         if (unmarked_count == 1)
@@ -450,7 +493,7 @@ void Codec::PeelAvalancheOnSolve(
             uint16_t new_column_i = ref_row->Marks.Unmarked[0];
 
             // If that is this column:
-            if (new_column_i == column_i) {
+            if (new_column_i == active_column_i) {
                 new_column_i = ref_row->Marks.Unmarked[1];
             }
 
@@ -463,15 +506,30 @@ void Codec::PeelAvalancheOnSolve(
             // If column is already solved:
             if (_peel_cols[new_column_i].Mark == MARK_TODO)
             {
-                SolveWithPeel(
-                    ref_row,
-                    ref_row_i,
-                    new_column_i);
+                CAT_DEBUG_ASSERT(stack_count < _block_count);
+                if (CAT_UNLIKELY(stack_count >= _block_count)) {
+                    CAT_DEBUG_BREAK();
+                    return false;
+                }
+                BeginPeelSolution(ref_row, ref_row_i, new_column_i);
+
+                PeelAvalancheFrame * GF256_RESTRICT child =
+                    &_peel_avalanche[stack_count++];
+                child->Column = new_column_i;
+                child->SolvedRow = ref_row_i;
+                child->NextRef = 0;
+                child->RefCount =
+                    _peel_col_refs[new_column_i].RowCount;
+#if defined(WIREHAIR_TESTING)
+                if (_testing_peel_max_depth < stack_count) {
+                    _testing_peel_max_depth = stack_count;
+                }
+#endif
                 continue;
             }
 
             CAT_IF_DUMP(cout << "PeelAvalancheOnSolve: Deferred(1) with column " <<
-                column_i << " at row " << ref_row_i << endl;)
+                active_column_i << " at row " << ref_row_i << endl;)
 
             // Link at head of defer list
             ref_row->NextRow = _defer_head_rows;
@@ -515,14 +573,31 @@ void Codec::PeelAvalancheOnSolve(
                 // If row is to be deferred:
                 if (store_count == 1)
                 {
-                    SolveWithPeel(
-                        ref_row,
-                        ref_row_i,
-                        ref_row->Marks.Unmarked[0]);
+                    const uint16_t new_column_i =
+                        ref_row->Marks.Unmarked[0];
+                    CAT_DEBUG_ASSERT(stack_count < _block_count);
+                    if (CAT_UNLIKELY(stack_count >= _block_count)) {
+                        CAT_DEBUG_BREAK();
+                        return false;
+                    }
+                    BeginPeelSolution(ref_row, ref_row_i, new_column_i);
+
+                    PeelAvalancheFrame * GF256_RESTRICT child =
+                        &_peel_avalanche[stack_count++];
+                    child->Column = new_column_i;
+                    child->SolvedRow = ref_row_i;
+                    child->NextRef = 0;
+                    child->RefCount =
+                        _peel_col_refs[new_column_i].RowCount;
+#if defined(WIREHAIR_TESTING)
+                    if (_testing_peel_max_depth < stack_count) {
+                        _testing_peel_max_depth = stack_count;
+                    }
+#endif
                     continue;
                 }
 
-                CAT_IF_DUMP(cout << "PeelAvalancheOnSolve: Deferred(2) with column " << column_i << " at row " << ref_row_i << endl;)
+                CAT_IF_DUMP(cout << "PeelAvalancheOnSolve: Deferred(2) with column " << active_column_i << " at row " << ref_row_i << endl;)
 
                 // Link at head of defer list
                 ref_row->NextRow = _defer_head_rows;
@@ -530,9 +605,11 @@ void Codec::PeelAvalancheOnSolve(
             }
         }
     }
+
+    return true;
 }
 
-void Codec::SolveWithPeel(
+void Codec::BeginPeelSolution(
     PeelRow * GF256_RESTRICT row, ///< Pointer to row data
     uint16_t row_i,   ///< Row index
     uint16_t column_i ///< Column that this solves
@@ -561,14 +638,34 @@ void Codec::SolveWithPeel(
     // Indicate that this row hasn't been copied yet
     row->Marks.Result.IsCopied = 0;
 
-    // Attempt to avalanche and solve other columns
-    PeelAvalancheOnSolve(column_i);
-
-    // Remember which row solves the column, after done with rows list
-    column->PeelRow = row_i;
+#if defined(WIREHAIR_TESTING)
+    const uint16_t values[2] = { row_i, column_i };
+    for (unsigned value_i = 0; value_i < 2; ++value_i)
+    {
+        const uint16_t value = values[value_i];
+        _testing_peel_order_hash =
+            (_testing_peel_order_hash ^ static_cast<uint8_t>(value)) *
+            UINT64_C(1099511628211);
+        _testing_peel_order_hash =
+            (_testing_peel_order_hash ^ static_cast<uint8_t>(value >> 8)) *
+            UINT64_C(1099511628211);
+    }
+#endif
 }
 
-void Codec::GreedyPeeling()
+bool Codec::SolveWithPeel(
+    PeelRow * GF256_RESTRICT row, ///< Pointer to row data
+    uint16_t row_i,   ///< Row index
+    uint16_t column_i ///< Column that this solves
+)
+{
+    BeginPeelSolution(row, row_i, column_i);
+
+    // Attempt to avalanche and solve other columns
+    return PeelAvalancheOnSolve(column_i, row_i);
+}
+
+bool Codec::GreedyPeeling()
 {
     CAT_IF_DUMP(cout << endl << "---- GreedyPeeling ----" << endl << endl;)
 
@@ -632,8 +729,12 @@ void Codec::GreedyPeeling()
             " weight-2 row references" << endl;)
 
         // Peel resuming from where this column left off
-        PeelAvalancheOnSolve(best_column_i);
+        if (!PeelAvalancheOnSolve(best_column_i)) {
+            return false;
+        }
     }
+
+    return true;
 }
 
 
@@ -1497,32 +1598,6 @@ bool Codec::TriangleNonHeavy()
 }
 
 
-#if defined(CAT_HEAVY_WIN_MULT)
-
-#if defined(CAT_ENDIAN_BIG)
-
-// Flip endianness at compile time if possible
-static uint32_t GF256_MULT_LOOKUP[16] = {
-    0x00000000, 0x01000000, 0x00010000, 0x01010000, 
-    0x00000100, 0x01000100, 0x00010100, 0x01010100, 
-    0x00000001, 0x01000001, 0x00010001, 0x01010001, 
-    0x00000101, 0x01000101, 0x00010101, 0x01010101, 
-};
-
-#else
-
-// Little-endian or unknown bit order:
-static uint32_t GF256_MULT_LOOKUP[16] = {
-    0x00000000, 0x00000001, 0x00000100, 0x00000101, 
-    0x00010000, 0x00010001, 0x00010100, 0x00010101, 
-    0x01000000, 0x01000001, 0x01000100, 0x01000101, 
-    0x01010000, 0x01010001, 0x01010100, 0x01010101, 
-};
-#endif
-
-#endif // CAT_HEAVY_WIN_MULT
-
-
 bool Codec::Triangle()
 {
     CAT_IF_DUMP(cout << endl << "---- Triangle ----" << endl << endl;)
@@ -1683,18 +1758,12 @@ bool Codec::Triangle()
                 {
                     // Look up 4 bit window
                     const uint32_t bits = (uint32_t)(pivot_row[ge_column_i >> 6] >> (ge_column_i & 63)) & 15;
-#if defined(CAT_ENDIAN_UNKNOWN)
-                    const uint32_t window = getLE(GF256_MULT_LOOKUP[bits]);
-#else
-                    const uint32_t window = GF256_MULT_LOOKUP[bits];
-#endif
 
-                    CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex << setw(8) << setfill('0') << window << dec;)
+                    CAT_IF_DUMP(cout << " " << ge_column_i << "x" << hex
+                        << setw(8) << setfill('0') << HeavyWindowWord(bits)
+                        << dec;)
 
-                    uint32_t word;
-                    memcpy(&word, word_ptr, sizeof(word));
-                    word ^= window * code_value;
-                    memcpy(word_ptr, &word, sizeof(word));
+                    AddHeavyWindow(word_ptr, bits, code_value);
                 }
 #endif // CAT_HEAVY_WIN_MULT
                 CAT_IF_DUMP(cout << endl;)
@@ -3551,8 +3620,16 @@ WirehairResult Codec::ChooseMatrix(
     {
         // Pick dense row count, dense row seed, and peel row seed
         _dense_count = GetDenseCount(_block_count);
-        _d_seed = GetDenseSeed(_block_count, _dense_count);
-        _p_seed = GetPeelSeed(_block_count);
+        if (_wire_profile == WireProfile::LegacyPreFixup)
+        {
+            _d_seed = GetDenseSeedPreFixup(_block_count, _dense_count);
+            _p_seed = GetPeelSeedPreFixup(_block_count);
+        }
+        else
+        {
+            _d_seed = GetDenseSeed(_block_count, _dense_count);
+            _p_seed = GetPeelSeed(_block_count);
+        }
 #ifdef WH_SEED_KNOBS
         // Experiment-only (compile with -DWH_SEED_KNOBS). Thread-local override (for parallel
         // seed search) takes precedence; env override is a fallback for manual single-N checks.
@@ -3665,7 +3742,11 @@ WirehairResult Codec::SolveMatrix()
 {
     // (1) Peeling
 
-    WH_STAGE("GreedyPeeling", GreedyPeeling());
+    bool peel_ok;
+    WH_STAGE("GreedyPeeling", peel_ok = GreedyPeeling());
+    if (!peel_ok) {
+        return Wirehair_Error;
+    }
 
     CAT_IF_DUMP( PrintPeeled(); )
     CAT_IF_DUMP( PrintDeferredRows(); )
@@ -4416,6 +4497,17 @@ Codec::~Codec()
     FreeInput();
 }
 
+bool Codec::TestingAllowAllocation()
+{
+    if (_testing_allocation_failure_countdown == 0) {
+        return false;
+    }
+    if (_testing_allocation_failure_countdown > 0) {
+        --_testing_allocation_failure_countdown;
+    }
+    return true;
+}
+
 void Codec::SetInput(const void * GF256_RESTRICT message_in)
 {
     FreeInput();
@@ -4442,6 +4534,9 @@ bool Codec::AllocateInput()
         }
 
         // Allocate input blocks
+        if (!TestingAllowAllocation()) {
+            return false;
+        }
         _input_blocks = SIMDSafeAllocate((size_t)sizeBytes);
         if (!_input_blocks) {
             return false;
@@ -4509,6 +4604,9 @@ bool Codec::AllocateMatrix()
             return false;
         }
 
+        if (!TestingAllowAllocation()) {
+            return false;
+        }
         uint8_t * GF256_RESTRICT matrix = SIMDSafeAllocate((size_t)sizeBytes);
         if (!matrix) {
             return false;
@@ -4603,6 +4701,7 @@ bool Codec::AllocateWorkspace()
         + sizeof(PeelRow) * row_count
         + sizeof(PeelColumn) * column_count
         + sizeof(PeelRefs) * column_count
+        + sizeof(PeelAvalancheFrame) * column_count
         + sizeof(uint16_t) * column_count
         + row_count;
 
@@ -4611,7 +4710,7 @@ bool Codec::AllocateWorkspace()
         FreeWorkspace();
 
         // The ChooseMatrix() 32-bit guard covers only the recovery blocks;
-        // peel structures add ~96 bytes/row on top, and OverrideSeeds() can
+        // peel structures add ~104 bytes/row on top, and OverrideSeeds() can
         // raise the dense count past the default slack.  Reject any size the
         // platform size_t cannot represent instead of truncating it.
         if (sizeBytes != (uint64_t)(size_t)sizeBytes) {
@@ -4619,6 +4718,9 @@ bool Codec::AllocateWorkspace()
         }
 
         // Allocate workspace
+        if (!TestingAllowAllocation()) {
+            return false;
+        }
         _recovery_blocks = SIMDSafeAllocate((size_t)sizeBytes);
         if (!_recovery_blocks) {
             return false;
@@ -4630,10 +4732,15 @@ bool Codec::AllocateWorkspace()
     _peel_rows = reinterpret_cast<PeelRow *>( _recovery_blocks + peelOffsetBytes );
     _peel_cols = reinterpret_cast<PeelColumn *>( _peel_rows + row_count );
     _peel_col_refs = reinterpret_cast<PeelRefs *>( _peel_cols + column_count );
-    _original_row = reinterpret_cast<uint16_t *>( _peel_col_refs + column_count );
+    _peel_avalanche = reinterpret_cast<PeelAvalancheFrame *>(
+        _peel_col_refs + column_count );
+    _original_row = reinterpret_cast<uint16_t *>(
+        _peel_avalanche + column_count );
     _copied_original = reinterpret_cast<uint8_t *>( _original_row + column_count );
 
     _recovery_rows = recovery_rows;
+    _testing_peel_order_hash = UINT64_C(14695981039346656037);
+    _testing_peel_max_depth = 0;
 
     CAT_IF_DUMP(cout << "Memory overhead for workspace = " << sizeBytes << " bytes" << endl;)
 
@@ -4660,6 +4767,7 @@ void Codec::FreeWorkspace()
     _peel_rows = nullptr;
     _peel_cols = nullptr;
     _peel_col_refs = nullptr;
+    _peel_avalanche = nullptr;
     _original_row = nullptr;
     _copied_original = nullptr;
 

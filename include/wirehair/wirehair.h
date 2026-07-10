@@ -151,6 +151,61 @@ WIREHAIR_EXPORT WirehairResult wirehair_init_(int expected_version);
 /// WirehairCodec: From wirehair_encoder_create() or wirehair_decoder_create()
 typedef struct WirehairCodec_t { char impl; }* WirehairCodec;
 
+//------------------------------------------------------------------------------
+// Legacy wire-profile contract
+
+/** Version of WirehairWireProfile, independent from the library ABI version. */
+#define WIREHAIR_WIRE_PROFILE_VERSION 1u
+
+/**
+    Legacy-v2 equation profile immediately before exact-N seed fixups.
+
+    This identifier is the first 64 bits of SHA-256 over the canonical profile
+    name recorded in LEGACY_WIRE_PROFILES.md.  It is a compatibility identifier,
+    not a security primitive.
+*/
+#define WIREHAIR_LEGACY_PROFILE_PRE_FIXUP UINT64_C(0xe1b9f77f1c90f680)
+
+/** Legacy-v2 profile containing the frozen 2026-07 seed-fixup set. */
+#define WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07 UINT64_C(0x4d241359db07bb07)
+
+/**
+    Profile used by the unframed legacy API.  This alias is frozen for ABI-v2;
+    future equation profiles must receive new names and explicit selection.
+*/
+#define WIREHAIR_LEGACY_PROFILE_CURRENT WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07
+
+/** Ask wirehair_encoder_create_profile_ex() to copy the input message. */
+#define WIREHAIR_ENCODER_OWN_INPUT 1u
+
+/**
+    Identifies every equation-affecting choice used by a legacy codec.
+
+    The structure itself is an in-process API object, not a byte serialization.
+    Carry profile_id in authenticated or otherwise trusted application framing,
+    using an application-defined byte order, then validate it with
+    wirehair_wire_profile_init().  A profile identifier does not authenticate
+    packet contents; callers still need an application digest or MAC.
+*/
+typedef struct WirehairWireProfile_t
+{
+    uint32_t struct_bytes;       ///< Must equal sizeof(WirehairWireProfile)
+    uint32_t profile_version;    ///< WIREHAIR_WIRE_PROFILE_VERSION
+    uint64_t profile_id;         ///< One of WIREHAIR_LEGACY_PROFILE_*
+} WirehairWireProfile;
+
+/**
+    Initialize and validate a supported legacy wire profile descriptor.
+
+    profileOut is cleared on failure.  This function is stateless and may be
+    called before wirehair_init().  Unknown identifiers return
+    Wirehair_InvalidInput.  Builds with private equation experiment knobs
+    return Wirehair_UnsupportedPlatform for otherwise supported identifiers.
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
+    uint64_t profileId,
+    WirehairWireProfile* profileOut);
+
 /*
     A codec has one checked lifecycle: encoder, active decoder, completed
     decoder, or converted encoder.  Encoder operations are accepted only by an
@@ -240,6 +295,26 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_owned_ex(
 );
 
 /**
+    Create an encoder for an explicit, trusted wire profile.
+
+    flags may be zero (borrow message) or WIREHAIR_ENCODER_OWN_INPUT (copy it).
+    Unknown/malformed profiles and unknown flags return Wirehair_InvalidInput
+    before any packet can be emitted.  Private equation experiment builds
+    return Wirehair_UnsupportedPlatform for a valid named profile.  As with the
+    other result-preserving create APIs, reuseOpt is consumed on failure unless
+    codecOut is null.
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_profile_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairWireProfile* profile,
+    uint32_t flags,
+    WirehairCodec* codecOut
+);
+
+/**
     wirehair_encode()
 
     Write an error correction block.
@@ -295,6 +370,20 @@ WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_ex(
     WirehairCodec reuseOpt,
     uint64_t messageBytes,
     uint32_t blockBytes,
+    WirehairCodec* codecOut
+);
+
+/**
+    Create a decoder for an explicit, trusted wire profile.
+
+    Descriptor and experiment-build failure behavior matches
+    wirehair_encoder_create_profile_ex().
+*/
+WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_profile_ex(
+    WirehairCodec reuseOpt,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairWireProfile* profile,
     WirehairCodec* codecOut
 );
 

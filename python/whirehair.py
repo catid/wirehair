@@ -11,6 +11,11 @@ import weakref
 
 
 WIREHAIR_VERSION = 2
+WIREHAIR_WIRE_PROFILE_VERSION = 1
+WIREHAIR_LEGACY_PROFILE_PRE_FIXUP = 0xe1b9f77f1c90f680
+WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07 = 0x4d241359db07bb07
+WIREHAIR_LEGACY_PROFILE_CURRENT = WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07
+WIREHAIR_ENCODER_OWN_INPUT = 1
 
 Wirehair_Success = 0
 Wirehair_NeedMore = 1
@@ -27,6 +32,16 @@ WirehairResult_Count = 11
 WirehairResult_Padding = 0x7fffffff
 
 _default_library = None
+
+
+class WirehairWireProfile(ctypes.Structure):
+    """In-process descriptor for a trusted legacy equation profile."""
+
+    _fields_ = [
+        ("struct_bytes", ctypes.c_uint32),
+        ("profile_version", ctypes.c_uint32),
+        ("profile_id", ctypes.c_uint64),
+    ]
 
 
 class WirehairError(RuntimeError):
@@ -102,8 +117,11 @@ def configure_library(library):
     result = ctypes.c_int32
     u32p = ctypes.POINTER(ctypes.c_uint32)
     codecpp = ctypes.POINTER(codec)
+    profilep = ctypes.POINTER(WirehairWireProfile)
     _prototype(library, "wirehair_result_string", [result], ctypes.c_char_p)
     _prototype(library, "wirehair_init_", [ctypes.c_int32], result)
+    _prototype(library, "wirehair_wire_profile_init",
+               [ctypes.c_uint64, profilep], result)
     _prototype(library, "wirehair_encoder_create",
                [codec, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32], codec)
     _prototype(library, "wirehair_encoder_create_ex",
@@ -112,12 +130,17 @@ def configure_library(library):
                [codec, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32], codec)
     _prototype(library, "wirehair_encoder_create_owned_ex",
                [codec, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, codecpp], result)
+    _prototype(library, "wirehair_encoder_create_profile_ex",
+               [codec, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32,
+                profilep, ctypes.c_uint32, codecpp], result)
     _prototype(library, "wirehair_encode",
                [codec, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, u32p], result)
     _prototype(library, "wirehair_decoder_create",
                [codec, ctypes.c_uint64, ctypes.c_uint32], codec)
     _prototype(library, "wirehair_decoder_create_ex",
                [codec, ctypes.c_uint64, ctypes.c_uint32, codecpp], result)
+    _prototype(library, "wirehair_decoder_create_profile_ex",
+               [codec, ctypes.c_uint64, ctypes.c_uint32, profilep, codecpp], result)
     _prototype(library, "wirehair_decode",
                [codec, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32], result)
     _prototype(library, "wirehair_recover",
@@ -190,6 +213,15 @@ def _check(operation, result, library):
         raise WirehairError(operation, result, library)
 
 
+def _profile_descriptor(profile_id, library):
+    profile_id = _bounded_integer(profile_id, "profile_id", 0xffffffffffffffff)
+    profile = WirehairWireProfile()
+    result = library.wirehair_wire_profile_init(
+        profile_id, ctypes.byref(profile))
+    _check("wirehair_wire_profile_init", result, library)
+    return profile
+
+
 def _release_codec(library, pointer_value):
     library.wirehair_free(ctypes.c_void_p(pointer_value))
 
@@ -238,6 +270,15 @@ def _construct_owned_codec(wrapper_type, library, pointer, message_bytes,
     except BaseException:
         if release_on_failure:
             owner.release()
+        else:
+            try:
+                _Codec._relinquish(wrapper)
+            except BaseException:
+                # A prepared transfer wrapper must never retain a finalizer
+                # that can later free the decoder's still-shared handle.  If
+                # detaching that finalizer itself fails, close the shared
+                # owner so neither wrapper can advertise a usable codec.
+                owner.release()
         raise
     return wrapper
 
@@ -269,11 +310,11 @@ class _Codec:
         self._finalizer = finalizer
 
     def _relinquish(self):
-        finalizer = self._owner_finalizer
-        if finalizer is not None and finalizer.alive:
-            finalizer.detach()
         self._owns_codec = False
         self._pointer_value = None
+        finalizer = getattr(self, "_owner_finalizer", None)
+        if finalizer is not None and finalizer.alive:
+            finalizer.detach()
 
     @property
     def closed(self):
@@ -311,12 +352,15 @@ class Encoder(_Codec):
     """Context-managed Wirehair encoder."""
 
     @classmethod
-    def create(cls, message, block_bytes, library=None, owned=True):
+    def create(cls, message, block_bytes, library=None, owned=True,
+               profile_id=None):
         """Create an encoder.
 
         ``owned=True`` asks the C library to copy the message.  With
         ``owned=False`` the binding retains a writable view, or a stable
         snapshot for read-only inputs, for the complete encoder lifetime.
+        ``profile_id`` selects a trusted legacy equation profile; ``None``
+        uses the raw API's frozen current profile.
         """
         library = initialize(library)
         block_bytes = _bounded_integer(block_bytes, "block_bytes", 0x7fffffff)
@@ -324,10 +368,18 @@ class Encoder(_Codec):
             raise ValueError("block_bytes must be positive")
         view, buffer = _input_buffer(message)
         output = ctypes.c_void_p()
-        create = (library.wirehair_encoder_create_owned_ex if owned else
-                  library.wirehair_encoder_create_ex)
-        result = create(None, ctypes.cast(buffer, ctypes.c_void_p), len(view),
-                        block_bytes, ctypes.byref(output))
+        if profile_id is None:
+            create = (library.wirehair_encoder_create_owned_ex if owned else
+                      library.wirehair_encoder_create_ex)
+            result = create(None, ctypes.cast(buffer, ctypes.c_void_p),
+                            len(view), block_bytes, ctypes.byref(output))
+        else:
+            profile = _profile_descriptor(profile_id, library)
+            flags = WIREHAIR_ENCODER_OWN_INPUT if owned else 0
+            result = library.wirehair_encoder_create_profile_ex(
+                None, ctypes.cast(buffer, ctypes.c_void_p), len(view),
+                block_bytes, ctypes.byref(profile), flags,
+                ctypes.byref(output))
         _check("wirehair_encoder_create", result, library)
         encoder = _construct_owned_codec(
             cls, library, output, len(view), block_bytes)
@@ -363,15 +415,22 @@ class Decoder(_Codec):
     """Context-managed Wirehair decoder."""
 
     @classmethod
-    def create(cls, message_bytes, block_bytes, library=None):
+    def create(cls, message_bytes, block_bytes, library=None, profile_id=None):
+        """Create a decoder, optionally for a trusted legacy profile id."""
         library = initialize(library)
         message_bytes = _bounded_integer(message_bytes, "message_bytes", 0xffffffffffffffff)
         block_bytes = _bounded_integer(block_bytes, "block_bytes", 0x7fffffff)
         if message_bytes == 0 or block_bytes == 0:
             raise ValueError("message_bytes and block_bytes must be positive")
         output = ctypes.c_void_p()
-        result = library.wirehair_decoder_create_ex(
-            None, message_bytes, block_bytes, ctypes.byref(output))
+        if profile_id is None:
+            result = library.wirehair_decoder_create_ex(
+                None, message_bytes, block_bytes, ctypes.byref(output))
+        else:
+            profile = _profile_descriptor(profile_id, library)
+            result = library.wirehair_decoder_create_profile_ex(
+                None, message_bytes, block_bytes, ctypes.byref(profile),
+                ctypes.byref(output))
         _check("wirehair_decoder_create", result, library)
         return _construct_owned_codec(
             cls, library, output, message_bytes, block_bytes)
@@ -413,16 +472,52 @@ class Decoder(_Codec):
         return bytes(output[:written.value])
 
     def become_encoder(self):
-        """Convert a completed decoder, transferring its ownership."""
-        result = self._library.wirehair_decoder_becomes_encoder(self.pointer)
-        _check("wirehair_decoder_becomes_encoder", result, self._library)
+        """Convert a completed decoder, transferring its ownership.
+
+        The replacement Python wrapper is fully allocated before the native
+        codec is irreversibly converted.  Ordinary allocation failures leave
+        this decoder usable; if even failure cleanup cannot safely detach the
+        candidate, the shared owner is closed instead.  Once native conversion
+        succeeds, any exceptional transfer failure also closes the shared
+        native owner instead of leaving a decoder wrapper that points at an
+        encoder-mode codec.
+        """
+        pointer = self.pointer
         owner = self._owner
         encoder = Encoder._from_pointer(
-            self._library, self.pointer, self.message_bytes, self.block_bytes,
+            self._library, pointer, self.message_bytes, self.block_bytes,
             owner=owner)
         if encoder._owner is not owner or encoder.closed:
+            encoder.close()
             raise RuntimeError("converted encoder did not adopt native ownership")
-        self._relinquish()
+
+        try:
+            result = self._library.wirehair_decoder_becomes_encoder(pointer)
+        except BaseException:
+            # A foreign-function call that raises has unknown native state.
+            # Conservatively close both wrappers through their shared owner.
+            encoder.close()
+            raise
+
+        if result != Wirehair_Success:
+            if result == Wirehair_InvalidInput:
+                # The native entry point validates this precondition before
+                # mutating the decoder, so discard only the prepared wrapper.
+                try:
+                    _Codec._relinquish(encoder)
+                except BaseException:
+                    owner.release()
+            else:
+                # Other native failures may leave a failed/partially converted
+                # codec and cannot be rolled back safely.
+                encoder.close()
+            _check("wirehair_decoder_becomes_encoder", result, self._library)
+
+        try:
+            self._relinquish()
+        except BaseException:
+            encoder.close()
+            raise
         return encoder
 
 

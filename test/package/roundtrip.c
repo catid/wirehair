@@ -16,6 +16,7 @@ int wirehair_package_round_trip(void)
     uint8_t block[BlockBytes];
     WirehairCodec encoder = 0;
     WirehairCodec decoder = 0;
+    WirehairWireProfile profile;
     WirehairResult decode_result = Wirehair_NeedMore;
     uint32_t i;
     size_t order_i;
@@ -27,10 +28,15 @@ int wirehair_package_round_trip(void)
         message[i] = (uint8_t)(i * 29u + 11u);
     }
 
-    encoder = wirehair_encoder_create(
-        0, message, MessageBytes, BlockBytes);
-    decoder = wirehair_decoder_create(0, MessageBytes, BlockBytes);
-    if (!encoder || !decoder) {
+    if (wirehair_wire_profile_init(
+            WIREHAIR_LEGACY_PROFILE_CURRENT, &profile) != Wirehair_Success ||
+        wirehair_encoder_create_profile_ex(
+            0, message, MessageBytes, BlockBytes, &profile, 0, &encoder) !=
+            Wirehair_Success ||
+        wirehair_decoder_create_profile_ex(
+            0, MessageBytes, BlockBytes, &profile, &decoder) !=
+            Wirehair_Success)
+    {
         wirehair_free(encoder);
         wirehair_free(decoder);
         return 2;

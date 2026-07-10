@@ -41,6 +41,47 @@ std::once_flag InitOnce;
 std::atomic<int> PublishedInitResult(Wirehair_Error);
 WirehairResult InitResult = Wirehair_Error;
 
+static_assert(sizeof(WirehairWireProfile) == 16,
+    "WirehairWireProfile is a fixed C ABI descriptor");
+
+bool ResolveWireProfileId(uint64_t profile_id, wirehair::WireProfile& profile)
+{
+    switch (profile_id)
+    {
+    case WIREHAIR_LEGACY_PROFILE_PRE_FIXUP:
+        profile = wirehair::WireProfile::LegacyPreFixup;
+        return true;
+    case WIREHAIR_LEGACY_PROFILE_CURRENT:
+        profile = wirehair::WireProfile::LegacyCurrent;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ResolveWireProfileDescriptor(
+    const WirehairWireProfile* descriptor,
+    wirehair::WireProfile& profile)
+{
+    return descriptor &&
+        descriptor->struct_bytes == sizeof(WirehairWireProfile) &&
+        descriptor->profile_version == WIREHAIR_WIRE_PROFILE_VERSION &&
+        ResolveWireProfileId(descriptor->profile_id, profile);
+}
+
+bool NamedLegacyWireProfilesAvailable()
+{
+    // These private experiment knobs alter packet equations.  Raw APIs remain
+    // available to experiment binaries, but such binaries must not claim one
+    // of the immutable named profiles through the explicit descriptor path.
+#if defined(WH_SEED_KNOBS) || defined(CAT_IDENTITY_LOWER_RIGHT) || \
+    WH_HEAVY_ROWS != 6 || WH_HEAVY_COLS != 18
+    return false;
+#else
+    return true;
+#endif
+}
+
 WirehairResult GetPublishedInitResult()
 {
     return static_cast<WirehairResult>(
@@ -81,6 +122,7 @@ WirehairResult CreateEncoder(
     uint64_t messageBytes,
     uint32_t blockBytes,
     bool copyInput,
+    wirehair::WireProfile profile,
     WirehairCodec* codecOut)
 {
     if (!codecOut) {
@@ -115,6 +157,7 @@ WirehairResult CreateEncoder(
         }
     }
 
+    codec->SetWireProfile(profile);
     WirehairResult result = codec->InitializeEncoder(messageBytes, blockBytes);
     if (result == Wirehair_Success) {
         result = codec->EncodeFeed(message, copyInput);
@@ -132,6 +175,7 @@ WirehairResult CreateDecoder(
     WirehairCodec reuseOpt,
     uint64_t messageBytes,
     uint32_t blockBytes,
+    wirehair::WireProfile profile,
     WirehairCodec* codecOut)
 {
     if (!codecOut) {
@@ -166,6 +210,7 @@ WirehairResult CreateDecoder(
         }
     }
 
+    codec->SetWireProfile(profile);
     const WirehairResult result =
         codec->InitializeDecoder(messageBytes, blockBytes);
     if (result != Wirehair_Success) {
@@ -228,6 +273,32 @@ WIREHAIR_EXPORT WirehairResult wirehair_init_(int expected_version)
     return InitResult;
 }
 
+WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
+    uint64_t profileId,
+    WirehairWireProfile* profileOut)
+{
+    if (!profileOut) {
+        return Wirehair_InvalidInput;
+    }
+
+    profileOut->struct_bytes = 0;
+    profileOut->profile_version = 0;
+    profileOut->profile_id = 0;
+
+    wirehair::WireProfile ignored;
+    if (!ResolveWireProfileId(profileId, ignored)) {
+        return Wirehair_InvalidInput;
+    }
+    if (!NamedLegacyWireProfilesAvailable()) {
+        return Wirehair_UnsupportedPlatform;
+    }
+
+    profileOut->struct_bytes = sizeof(WirehairWireProfile);
+    profileOut->profile_version = WIREHAIR_WIRE_PROFILE_VERSION;
+    profileOut->profile_id = profileId;
+    return Wirehair_Success;
+}
+
 WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
     WirehairCodec reuseOpt, ///< [Optional] Pointer to prior codec object
     const void*    message, ///< Pointer to message
@@ -237,7 +308,8 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create(
 {
     WirehairCodec codec = nullptr;
     (void)CreateEncoder(
-        reuseOpt, message, messageBytes, blockBytes, false, &codec);
+        reuseOpt, message, messageBytes, blockBytes, false,
+        wirehair::WireProfile::LegacyCurrent, &codec);
     return codec;
 }
 
@@ -249,7 +321,8 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_ex(
     WirehairCodec* codecOut)
 {
     return CreateEncoder(
-        reuseOpt, message, messageBytes, blockBytes, false, codecOut);
+        reuseOpt, message, messageBytes, blockBytes, false,
+        wirehair::WireProfile::LegacyCurrent, codecOut);
 }
 
 WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create_owned(
@@ -260,7 +333,8 @@ WIREHAIR_EXPORT WirehairCodec wirehair_encoder_create_owned(
 {
     WirehairCodec codec = nullptr;
     (void)CreateEncoder(
-        reuseOpt, message, messageBytes, blockBytes, true, &codec);
+        reuseOpt, message, messageBytes, blockBytes, true,
+        wirehair::WireProfile::LegacyCurrent, &codec);
     return codec;
 }
 
@@ -272,7 +346,39 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_owned_ex(
     WirehairCodec* codecOut)
 {
     return CreateEncoder(
-        reuseOpt, message, messageBytes, blockBytes, true, codecOut);
+        reuseOpt, message, messageBytes, blockBytes, true,
+        wirehair::WireProfile::LegacyCurrent, codecOut);
+}
+
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_profile_ex(
+    WirehairCodec reuseOpt,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairWireProfile* profile,
+    uint32_t flags,
+    WirehairCodec* codecOut)
+{
+    if (!codecOut) {
+        return Wirehair_InvalidInput;
+    }
+    wirehair::WireProfile resolved;
+    if ((flags & ~WIREHAIR_ENCODER_OWN_INPUT) != 0 ||
+        !ResolveWireProfileDescriptor(profile, resolved))
+    {
+        *codecOut = nullptr;
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
+        return Wirehair_InvalidInput;
+    }
+    if (!NamedLegacyWireProfilesAvailable()) {
+        *codecOut = nullptr;
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
+        return Wirehair_UnsupportedPlatform;
+    }
+    return CreateEncoder(
+        reuseOpt, message, messageBytes, blockBytes,
+        (flags & WIREHAIR_ENCODER_OWN_INPUT) != 0,
+        resolved, codecOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_encode(
@@ -312,7 +418,9 @@ WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
 )
 {
     WirehairCodec codec = nullptr;
-    (void)CreateDecoder(reuseOpt, messageBytes, blockBytes, &codec);
+    (void)CreateDecoder(
+        reuseOpt, messageBytes, blockBytes,
+        wirehair::WireProfile::LegacyCurrent, &codec);
     return codec;
 }
 
@@ -322,7 +430,35 @@ WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_ex(
     uint32_t blockBytes,
     WirehairCodec* codecOut)
 {
-    return CreateDecoder(reuseOpt, messageBytes, blockBytes, codecOut);
+    return CreateDecoder(
+        reuseOpt, messageBytes, blockBytes,
+        wirehair::WireProfile::LegacyCurrent, codecOut);
+}
+
+WIREHAIR_EXPORT WirehairResult wirehair_decoder_create_profile_ex(
+    WirehairCodec reuseOpt,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    const WirehairWireProfile* profile,
+    WirehairCodec* codecOut)
+{
+    if (!codecOut) {
+        return Wirehair_InvalidInput;
+    }
+    wirehair::WireProfile resolved;
+    if (!ResolveWireProfileDescriptor(profile, resolved))
+    {
+        *codecOut = nullptr;
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
+        return Wirehair_InvalidInput;
+    }
+    if (!NamedLegacyWireProfilesAvailable()) {
+        *codecOut = nullptr;
+        delete reinterpret_cast<wirehair::Codec*>(reuseOpt);
+        return Wirehair_UnsupportedPlatform;
+    }
+    return CreateDecoder(
+        reuseOpt, messageBytes, blockBytes, resolved, codecOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_decode(

@@ -1623,8 +1623,12 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         return;
     }
 
-    GF256_M128 * GF256_RESTRICT z16 = reinterpret_cast<GF256_M128 *>(vz);
-    const GF256_M128 * GF256_RESTRICT x16 = reinterpret_cast<const GF256_M128 *>(vx);
+    // Every pointer view in this function must preserve the documented
+    // vz == vx contract.  In particular, do not add restrict to these
+    // derived source/destination pointers: they are simultaneously live in
+    // the supported in-place case.
+    GF256_M128 * z16 = reinterpret_cast<GF256_M128 *>(vz);
+    const GF256_M128 * x16 = reinterpret_cast<const GF256_M128 *>(vx);
 
 #if defined(GF256_TARGET_MOBILE)
 #if defined(GF256_TRY_NEON)
@@ -1691,8 +1695,8 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         // clr_mask = 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
         const GF256_M256 clr_mask = _mm256_set1_epi8(0x0f);
 
-        GF256_M256 * GF256_RESTRICT z32 = reinterpret_cast<GF256_M256 *>(vz);
-        const GF256_M256 * GF256_RESTRICT x32 = reinterpret_cast<const GF256_M256 *>(vx);
+        GF256_M256 * z32 = reinterpret_cast<GF256_M256 *>(vz);
+        const GF256_M256 * x32 = reinterpret_cast<const GF256_M256 *>(vx);
 
         // Handle multiples of 32 bytes
         do
@@ -1741,8 +1745,8 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 # endif // GF256_TRY_SSSE3
 #endif
 
-    uint8_t * GF256_RESTRICT z1 = reinterpret_cast<uint8_t*>(z16);
-    const uint8_t * GF256_RESTRICT x1 = reinterpret_cast<const uint8_t*>(x16);
+    uint8_t * z1 = reinterpret_cast<uint8_t*>(z16);
+    const uint8_t * x1 = reinterpret_cast<const uint8_t*>(x16);
     const uint8_t * GF256_RESTRICT table = GF256Ctx.GF256_MUL_TABLE + ((unsigned)y << 8);
 
     // Handle blocks of 8 bytes

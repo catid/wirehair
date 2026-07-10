@@ -2,9 +2,12 @@
 """Native-library E2E for the installed ctypes binding."""
 
 import argparse
+import gc
 import os
 from pathlib import Path
 import sys
+from unittest import mock
+import weakref
 
 
 def parse_args():
@@ -38,6 +41,190 @@ def expect_value_error(function, required_text):
         raise AssertionError("expected wrapper validation to fail")
 
 
+def expect_memory_error(function, required_text):
+    try:
+        function()
+    except MemoryError as error:
+        if required_text not in str(error):
+            raise AssertionError(
+                "allocation error did not contain %r: %s" %
+                (required_text, error))
+    else:
+        raise AssertionError("expected injected allocation failure")
+
+
+def complete_systematic_decoder(wh, library, encoder, original, block_bytes):
+    decoder = wh.Decoder.create(
+        len(original), block_bytes, library=library,
+        profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT)
+    block_count = (len(original) + block_bytes - 1) // block_bytes
+    complete = False
+    for block_id in range(block_count):
+        complete = decoder.decode(block_id, encoder.encode(block_id))
+    if not complete or decoder.recover() != original:
+        decoder.close()
+        raise AssertionError("systematic native decoder did not recover")
+    return decoder
+
+
+def exercise_conversion_failure_atomicity(
+        wh, library, encoder, original, block_bytes):
+    """Inject Python allocation/commit failures around the real native call."""
+    native_become = library.wirehair_decoder_becomes_encoder
+    native_release = wh._release_codec
+    releases = {}
+
+    def tracked_release(native_library, pointer_value):
+        releases[pointer_value] = releases.get(pointer_value, 0) + 1
+        return native_release(native_library, pointer_value)
+
+    original_finish = wh._Codec._finish_construction
+
+    def fail_after_finalizer(instance):
+        original_finish(instance)
+        raise MemoryError("injected after-finalizer failure")
+
+    failure_patches = (
+        ("new failure", lambda: mock.patch.object(
+            wh.Encoder, "__new__",
+            side_effect=MemoryError("injected new failure"))),
+        ("init failure", lambda: mock.patch.object(
+            wh.Encoder, "__init__",
+            side_effect=MemoryError("injected init failure"))),
+        ("finalizer failure", lambda: mock.patch.object(
+            wh.weakref, "finalize",
+            side_effect=MemoryError("injected finalizer failure"))),
+        ("after-finalizer failure", lambda: mock.patch.object(
+            wh._Codec, "_finish_construction", new=fail_after_finalizer)),
+    )
+
+    with mock.patch.object(wh, "_release_codec", new=tracked_release):
+        for required_text, failure_patch in failure_patches:
+            decoder = complete_systematic_decoder(
+                wh, library, encoder, original, block_bytes)
+            pointer_value = decoder.pointer.value
+            release_before = releases.get(pointer_value, 0)
+            conversion_calls = []
+
+            def counting_become(pointer):
+                conversion_calls.append(pointer.value)
+                return native_become(pointer)
+
+            with mock.patch.object(
+                    library, "wirehair_decoder_becomes_encoder",
+                    new=counting_become), failure_patch():
+                expect_memory_error(decoder.become_encoder, required_text)
+            gc.collect()
+            if decoder.closed or decoder.recover() != original:
+                raise AssertionError(
+                    "%s did not preserve a usable native decoder" %
+                    required_text)
+            if conversion_calls:
+                raise AssertionError(
+                    "%s reached irreversible native conversion" %
+                    required_text)
+            if releases.get(pointer_value, 0) != release_before:
+                raise AssertionError("pre-conversion failure freed the decoder")
+            decoder.close()
+            gc.collect()
+            if releases.get(pointer_value, 0) != release_before + 1:
+                raise AssertionError(
+                    "%s did not free exactly once" % required_text)
+
+        decoder = wh.Decoder.create(
+            len(original), block_bytes, library=library,
+            profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT)
+        pointer_value = decoder.pointer.value
+        release_before = releases.get(pointer_value, 0)
+        expect_wirehair_error(
+            wh, "wirehair_decoder_becomes_encoder", wh.Wirehair_InvalidInput,
+            decoder.become_encoder)
+        if decoder.closed:
+            raise AssertionError("precondition failure closed the native decoder")
+        block_count = (len(original) + block_bytes - 1) // block_bytes
+        complete = False
+        for block_id in range(block_count):
+            complete = decoder.decode(block_id, encoder.encode(block_id))
+        if not complete or decoder.recover() != original:
+            raise AssertionError(
+                "decoder was not usable after native precondition failure")
+        decoder.close()
+        if releases.get(pointer_value, 0) != release_before + 1:
+            raise AssertionError("precondition failure cleanup was not exact")
+
+        decoder = complete_systematic_decoder(
+            wh, library, encoder, original, block_bytes)
+        pointer_value = decoder.pointer.value
+        release_before = releases.get(pointer_value, 0)
+
+        def convert_then_raise(pointer):
+            result = native_become(pointer)
+            if result != wh.Wirehair_Success:
+                raise AssertionError(
+                    "native conversion failed before injected exception: %d" %
+                    result)
+            raise MemoryError("injected post-conversion failure")
+
+        with mock.patch.object(
+                library, "wirehair_decoder_becomes_encoder",
+                new=convert_then_raise):
+            expect_memory_error(decoder.become_encoder, "post-conversion")
+        if (not decoder.closed or
+                releases.get(pointer_value, 0) != release_before + 1):
+            raise AssertionError(
+                "post-conversion exception left a live or multiply-owned codec")
+        try:
+            decoder.recover()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("post-conversion source remained callable")
+        decoder.close()
+        gc.collect()
+        if releases.get(pointer_value, 0) != release_before + 1:
+            raise AssertionError("post-conversion cleanup freed more than once")
+
+        decoder = complete_systematic_decoder(
+            wh, library, encoder, original, block_bytes)
+        pointer_value = decoder.pointer.value
+        release_before = releases.get(pointer_value, 0)
+
+        def fail_commit():
+            raise MemoryError("injected ownership commit failure")
+
+        decoder._relinquish = fail_commit
+        expect_memory_error(decoder.become_encoder, "ownership commit")
+        if (not decoder.closed or
+                releases.get(pointer_value, 0) != release_before + 1):
+            raise AssertionError(
+                "commit failure left the converted source apparently usable")
+        try:
+            decoder.recover()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("commit-failure source remained callable")
+        decoder.close()
+        gc.collect()
+        if releases.get(pointer_value, 0) != release_before + 1:
+            raise AssertionError("commit-failure cleanup freed more than once")
+
+        decoder = complete_systematic_decoder(
+            wh, library, encoder, original, block_bytes)
+        pointer_value = decoder.pointer.value
+        release_before = releases.get(pointer_value, 0)
+        converted = decoder.become_encoder()
+        converted_reference = weakref.ref(converted)
+        del converted
+        gc.collect()
+        if converted_reference() is not None:
+            raise AssertionError("converted encoder was not finalized")
+        if (not decoder.closed or
+                releases.get(pointer_value, 0) != release_before + 1):
+            raise AssertionError("converted encoder GC did not free exactly once")
+        decoder.close()
+
+
 def main():
     args = parse_args()
     module_dir = args.module_dir.resolve()
@@ -52,6 +239,14 @@ def main():
     import whirehair as wh
 
     library = wh.initialize()
+    expect_wirehair_error(
+        wh,
+        "wirehair_wire_profile_init",
+        wh.Wirehair_InvalidInput,
+        lambda: wh.Encoder.create(
+            b"profile-check", 4, library=library,
+            profile_id=0x123456789abcdef0),
+    )
     original = bytes((index * 73 + index // 11 + 19) & 0xff for index in range(4099))
     mutable = bytearray(original)
     block_bytes = 113
@@ -70,9 +265,13 @@ def main():
         lambda: wh.Decoder.create(block_bytes, block_bytes, library=library),
     )
 
-    with wh.Encoder.create(mutable, block_bytes, library=library, owned=True) as encoder:
+    with wh.Encoder.create(
+            mutable, block_bytes, library=library, owned=True,
+            profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as encoder:
         mutable[:] = b"\0" * len(mutable)
-        with wh.Decoder.create(len(original), block_bytes, library=library) as decoder:
+        with wh.Decoder.create(
+                len(original), block_bytes, library=library,
+                profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as decoder:
             expect_wirehair_error(
                 wh,
                 "wirehair_encode",
@@ -138,6 +337,35 @@ def main():
                             "decoder-to-encoder conversion mismatch at %d" % block_id)
             finally:
                 converted.close()
+
+        exercise_conversion_failure_atomicity(
+            wh, library, encoder, original, block_bytes)
+
+    # Exercise the native borrowed-buffer path and the historical equation
+    # profile with repair packets only; systematic packets would not
+    # distinguish profiles.
+    pre_source = bytearray(
+        (index * 41 + index // 7 + 5) & 0xff for index in range(257))
+    pre_expected = bytes(pre_source)
+    pre_block_bytes = 31
+    pre_block_count = (
+        len(pre_source) + pre_block_bytes - 1) // pre_block_bytes
+    with wh.Encoder.create(
+            pre_source, pre_block_bytes, library=library, owned=False,
+            profile_id=wh.WIREHAIR_LEGACY_PROFILE_PRE_FIXUP) as pre_encoder:
+        with wh.Decoder.create(
+                len(pre_source), pre_block_bytes, library=library,
+                profile_id=wh.WIREHAIR_LEGACY_PROFILE_PRE_FIXUP) as pre_decoder:
+            pre_complete = False
+            for packet_id in range(
+                    pre_block_count, pre_block_count * 2 + 128):
+                if pre_decoder.decode(
+                        packet_id, pre_encoder.encode(packet_id)):
+                    pre_complete = True
+                    break
+            if not pre_complete or pre_decoder.recover() != pre_expected:
+                raise AssertionError(
+                    "borrowed PRE_FIXUP repair-only round trip failed")
 
     print(
         "native Python E2E passed: bytes=%d blocks=%d delivered=%d library=%s" %

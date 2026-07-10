@@ -939,25 +939,6 @@ static const DensePoint kDensePoints[kDensePointCount] = {
     { 64000, 345 },
 };
 
-/// Interpolate between two values of N and corresponding counts.
-/// It works for Count1 < Count0
-static uint16_t LinearInterpolate(
-    int N0, int N1,
-    int Count0, int Count1,
-    int N)
-{
-    CAT_DEBUG_ASSERT(N >= N0 && N <= N1);
-
-    const int numerator = (N - N0) * (Count1 - Count0);
-    const int denominator = N1 - N0;
-
-    const int count = Count0 + (unsigned)(numerator / denominator);
-
-    CAT_DEBUG_ASSERT(count > 0);
-
-    return static_cast<uint16_t>(count);
-}
-
 uint16_t GetDenseCount(unsigned N)
 {
     DensePoint lowPoint, highPoint;
@@ -1019,7 +1000,7 @@ uint16_t GetDenseCount(unsigned N)
     CAT_DEBUG_ASSERT(lowPoint.N <= N);
     CAT_DEBUG_ASSERT(highPoint.N >= N);
 
-    uint16_t dense_count = LinearInterpolate(
+    uint16_t dense_count = detail::InterpolateDenseCount(
         lowPoint.N,
         highPoint.N,
         lowPoint.DenseCount,
@@ -1060,6 +1041,27 @@ static const DenseSeedFixup kDenseSeedFixups[] = {
 static const unsigned kDenseSeedFixupCount =
     (unsigned)(sizeof(kDenseSeedFixups) / sizeof(kDenseSeedFixups[0]));
 
+uint16_t GetDenseSeedPreFixup(unsigned N, unsigned dense_count)
+{
+    if (N < kTinyTableCount) {
+        // Get seed from tiny table (16-bit)
+        return kTinyDenseSeeds[N];
+    }
+    else if (N < (kTinyTableCount + kSmallTableCount)) {
+        // Get seed from small table (8-bit)
+        return kSmallDenseSeeds[N - kTinyTableCount];
+    }
+
+    CAT_DEBUG_ASSERT(N >= kSmallTableCount && N <= 64000);
+    CAT_DEBUG_ASSERT(dense_count % 4 == 2);
+
+    const unsigned tableIndex = dense_count / 4;
+
+    CAT_DEBUG_ASSERT(tableIndex < kDenseSeedCount);
+
+    return kDenseSeeds[tableIndex];
+}
+
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
 {
     // Correction table first (binary search).  These per-N fixups are tuned
@@ -1079,23 +1081,7 @@ uint16_t GetDenseSeed(unsigned N, unsigned dense_count)
         }
     }
 
-    if (N < kTinyTableCount) {
-        // Get seed from tiny table (16-bit)
-        return kTinyDenseSeeds[N];
-    }
-    else if (N < (kTinyTableCount + kSmallTableCount)) {
-        // Get seed from small table (8-bit)
-        return kSmallDenseSeeds[N - kTinyTableCount];
-    }
-
-    CAT_DEBUG_ASSERT(N >= kSmallTableCount && N <= 64000);
-    CAT_DEBUG_ASSERT(dense_count % 4 == 2);
-
-    const unsigned tableIndex = dense_count / 4;
-
-    CAT_DEBUG_ASSERT(tableIndex < kDenseSeedCount);
-
-    return kDenseSeeds[tableIndex];
+    return GetDenseSeedPreFixup(N, dense_count);
 }
 
 
@@ -1179,6 +1165,20 @@ static const PeelSeedFixup kPeelSeedFixups[] = {
 static const unsigned kPeelSeedFixupCount =
     (unsigned)(sizeof(kPeelSeedFixups) / sizeof(kPeelSeedFixups[0]));
 
+uint16_t GetPeelSeedPreFixup(unsigned N)
+{
+    if (N < (kTinyTableCount + kSmallTableCount)) {
+        return kSmallPeelSeeds[N];
+    }
+
+    CAT_DEBUG_ASSERT(N >= kSmallTableCount && N <= 64000);
+
+    const unsigned subdivision = N % kPeelSeedSubdivisions;
+
+    // Get seed from subdivided table
+    return kPeelSeeds[subdivision];
+}
+
 uint16_t GetPeelSeed(unsigned N)
 {
     // Check the correction table first (binary search).
@@ -1194,16 +1194,7 @@ uint16_t GetPeelSeed(unsigned N)
         }
     }
 
-    if (N < (kTinyTableCount + kSmallTableCount)) {
-        return kSmallPeelSeeds[N];
-    }
-
-    CAT_DEBUG_ASSERT(N >= kSmallTableCount && N <= 64000);
-
-    const unsigned subdivision = N % kPeelSeedSubdivisions;
-
-    // Get seed from subdivided table
-    return kPeelSeeds[subdivision];
+    return GetPeelSeedPreFixup(N);
 }
 
 

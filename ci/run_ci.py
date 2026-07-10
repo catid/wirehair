@@ -17,17 +17,20 @@ WIREHAIR_C_API_EXPORTS = frozenset({
     "wirehair_decoder_becomes_encoder",
     "wirehair_decoder_create",
     "wirehair_decoder_create_ex",
+    "wirehair_decoder_create_profile_ex",
     "wirehair_encode",
     "wirehair_encoder_create",
     "wirehair_encoder_create_ex",
     "wirehair_encoder_create_owned",
     "wirehair_encoder_create_owned_ex",
+    "wirehair_encoder_create_profile_ex",
     "wirehair_free",
     "wirehair_init_",
     "wirehair_recover",
     "wirehair_recover_block",
     "wirehair_recover_block_ex",
     "wirehair_result_string",
+    "wirehair_wire_profile_init",
 })
 
 

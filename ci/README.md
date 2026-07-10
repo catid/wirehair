@@ -14,7 +14,7 @@ library and installed consumer builds. Native shared-library coverage includes
 structured creation, encode, and premature-recovery failures in addition to
 the successful loss/reorder/conversion round trip. The strict Visual Studio
 shared lane also runs the Visual Studio 2022 `dumpbin /exports` tool against
-the installed DLL and requires exactly all 15 public `wirehair_*` C entry
+the installed DLL and requires exactly the checked-in public `wirehair_*` C entry
 points. Its complete export table is retained in `ci-logs` for failure
 diagnostics. These VS17 jobs are pinned to the `windows-2022` runner image so
 the image and requested Visual Studio generator cannot drift apart.

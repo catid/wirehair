@@ -42,6 +42,8 @@ class FakeLibrary:
         self.always_need_more = False
         self.recover_result = wh.Wirehair_Success
         self.become_encoder_result = wh.Wirehair_Success
+        self.become_encoder_calls = 0
+        self.raise_after_become_encoder = False
         self.corrupt_recovery = False
         self.raise_encode = False
         self.raise_recover = False
@@ -49,9 +51,12 @@ class FakeLibrary:
 
         for name in (
             "wirehair_result_string", "wirehair_init_", "wirehair_encoder_create",
+            "wirehair_wire_profile_init",
             "wirehair_encoder_create_ex", "wirehair_encoder_create_owned",
-            "wirehair_encoder_create_owned_ex", "wirehair_encode",
+            "wirehair_encoder_create_owned_ex",
+            "wirehair_encoder_create_profile_ex", "wirehair_encode",
             "wirehair_decoder_create", "wirehair_decoder_create_ex",
+            "wirehair_decoder_create_profile_ex",
             "wirehair_decode", "wirehair_recover", "wirehair_recover_block",
             "wirehair_recover_block_ex", "wirehair_decoder_becomes_encoder",
             "wirehair_free",
@@ -74,6 +79,19 @@ class FakeLibrary:
 
     def _wirehair_init_(self, _version):
         return self.init_result
+
+    def _wirehair_wire_profile_init(self, profile_id, output):
+        profile_id = number(profile_id)
+        if profile_id not in (
+                wh.WIREHAIR_LEGACY_PROFILE_PRE_FIXUP,
+                wh.WIREHAIR_LEGACY_PROFILE_CURRENT):
+            return wh.Wirehair_InvalidInput
+        profile = ctypes.cast(
+            output, ctypes.POINTER(wh.WirehairWireProfile))[0]
+        profile.struct_bytes = ctypes.sizeof(wh.WirehairWireProfile)
+        profile.profile_version = wh.WIREHAIR_WIRE_PROFILE_VERSION
+        profile.profile_id = profile_id
+        return wh.Wirehair_Success
 
     def _encoder_state(self, data, size, block, owned):
         size = number(size)
@@ -104,6 +122,15 @@ class FakeLibrary:
         if self.encoder_result != wh.Wirehair_Success:
             return self.encoder_result
         self._new(self._encoder_state(data, size, block, True), output)
+        return wh.Wirehair_Success
+
+    def _wirehair_encoder_create_profile_ex(
+            self, _reuse, data, size, block, _profile, flags, output):
+        if self.encoder_result != wh.Wirehair_Success:
+            return self.encoder_result
+        self._new(self._encoder_state(
+            data, size, block,
+            bool(number(flags) & wh.WIREHAIR_ENCODER_OWN_INPUT)), output)
         return wh.Wirehair_Success
 
     def _encoder_message(self, state):
@@ -142,6 +169,10 @@ class FakeLibrary:
         self._new({"kind": "decoder", "size": number(size),
                    "block": number(block), "packets": {}}, output)
         return wh.Wirehair_Success
+
+    def _wirehair_decoder_create_profile_ex(
+            self, reuse, size, block, _profile, output):
+        return self._wirehair_decoder_create_ex(reuse, size, block, output)
 
     def _wirehair_decode(self, pointer, block_id, data, size):
         if self.decode_terminal is not None:
@@ -194,11 +225,14 @@ class FakeLibrary:
         return wh.Wirehair_Success
 
     def _wirehair_decoder_becomes_encoder(self, pointer):
+        self.become_encoder_calls += 1
         if self.become_encoder_result != wh.Wirehair_Success:
             return self.become_encoder_result
         state = self._state(pointer)
         state["message"] = self._original_message(state)
         state["kind"] = "encoder"
+        if self.raise_after_become_encoder:
+            raise MemoryError("injected post-conversion failure")
         return wh.Wirehair_Success
 
     def _wirehair_free(self, pointer):
@@ -211,6 +245,20 @@ class BindingTests(unittest.TestCase):
     def setUp(self):
         self.library = FakeLibrary()
 
+    def completed_decoder(self, message=b"abcdefgh", block_bytes=4):
+        decoder = wh.Decoder.create(len(message), block_bytes, self.library)
+        block_count = (len(message) + block_bytes - 1) // block_bytes
+        for block_id in range(block_count):
+            start = block_id * block_bytes
+            decoder.decode(block_id, message[start:start + block_bytes])
+        self.assertEqual(message, decoder.recover())
+        return decoder
+
+    def assert_decoder_usable(self, decoder, message=b"abcdefgh"):
+        self.assertFalse(decoder.closed)
+        self.assertEqual("decoder", self.library._state(decoder.pointer)["kind"])
+        self.assertEqual(message, decoder.recover())
+
     def test_import_is_lazy_and_prototypes_preserve_pointer_width(self):
         self.assertIsNone(wh._default_library)
         wh.configure_library(self.library)
@@ -219,6 +267,25 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(ctypes.c_void_p,
                          self.library.wirehair_encoder_create_ex.argtypes[-1]._type_)
         self.assertEqual("fake result 9", wh.result_string(9, self.library))
+        self.assertEqual(16, ctypes.sizeof(wh.WirehairWireProfile))
+
+    def test_explicit_wire_profiles(self):
+        message = b"abcdefgh"
+        with wh.Encoder.create(
+                message, 4, self.library, owned=True,
+                profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as encoder:
+            with wh.Decoder.create(
+                    len(message), 4, self.library,
+                    profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as decoder:
+                self.assertFalse(decoder.decode(0, encoder.encode(0)))
+                self.assertTrue(decoder.decode(1, encoder.encode(1)))
+                self.assertEqual(message, decoder.recover())
+
+        with self.assertRaises(wh.WirehairError) as caught:
+            wh.Encoder.create(
+                message, 4, self.library, profile_id=0x123456789abcdef0)
+        self.assertEqual("wirehair_wire_profile_init", caught.exception.operation)
+        self.assertEqual(wh.Wirehair_InvalidInput, caught.exception.result)
 
     def test_windows_install_discovers_prefix_bin(self):
         prefix = os.path.abspath(os.path.join(os.path.dirname(wh.__file__), os.pardir))
@@ -298,7 +365,7 @@ class BindingTests(unittest.TestCase):
                 "replace_finalizer"):
             with self.subTest(failure_point=failure_point):
                 self.library = FakeLibrary()
-                decoder = wh.Decoder.create(8, 4, self.library)
+                decoder = self.completed_decoder()
                 pointer = decoder.pointer.value
 
                 def fail(instance, *arguments, **keywords):
@@ -324,23 +391,135 @@ class BindingTests(unittest.TestCase):
                     self.assertTrue(decoder.closed)
                     self.assertEqual([pointer], self.library.freed)
                 else:
-                    self.assertFalse(decoder.closed)
+                    self.assert_decoder_usable(decoder)
                     self.assertEqual([], self.library.freed)
+                self.assertEqual(0, self.library.become_encoder_calls)
                 decoder.close()
                 gc.collect()
                 self.assertEqual(1, self.library.freed.count(pointer))
 
-    def test_conversion_native_failure_retains_cleanup_ownership(self):
-        decoder = wh.Decoder.create(8, 4, self.library)
+    def test_conversion_finalizer_failures_happen_before_native_mutation(self):
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+        with mock.patch.object(
+                wh.weakref, "finalize",
+                side_effect=MemoryError("injected finalizer allocation failure")):
+            with self.assertRaisesRegex(MemoryError, "finalizer allocation"):
+                decoder.become_encoder()
+        gc.collect()
+        self.assert_decoder_usable(decoder)
+        self.assertEqual(0, self.library.become_encoder_calls)
+        self.assertEqual([], self.library.freed)
+        decoder.close()
+        self.assertEqual([pointer], self.library.freed)
+
+        self.library = FakeLibrary()
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+        original_finish = wh._Codec._finish_construction
+
+        def fail_after_finalizer(instance):
+            original_finish(instance)
+            raise MemoryError("injected failure after finalizer allocation")
+
+        with mock.patch.object(
+                wh._Codec, "_finish_construction", new=fail_after_finalizer):
+            with self.assertRaisesRegex(MemoryError, "after finalizer"):
+                decoder.become_encoder()
+        gc.collect()
+        self.assert_decoder_usable(decoder)
+        self.assertEqual(0, self.library.become_encoder_calls)
+        self.assertEqual([], self.library.freed)
+        decoder.close()
+        self.assertEqual([pointer], self.library.freed)
+
+    def test_conversion_failed_finalizer_detach_closes_shared_owner(self):
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+
+        class UndetachableFinalizer:
+            alive = True
+
+            def detach(self):
+                raise MemoryError("injected finalizer detach failure")
+
+        def fail_with_undetachable_finalizer(instance):
+            finalizer = UndetachableFinalizer()
+            instance._owner_finalizer = finalizer
+            instance._finalizer = finalizer
+            raise MemoryError("injected wrapper finalization failure")
+
+        with mock.patch.object(
+                wh._Codec, "_finish_construction",
+                new=fail_with_undetachable_finalizer):
+            with self.assertRaisesRegex(MemoryError, "wrapper finalization"):
+                decoder.become_encoder()
+        self.assertEqual(0, self.library.become_encoder_calls)
+        self.assertTrue(decoder.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover()
+        self.assertEqual([pointer], self.library.freed)
+        decoder.close()
+        gc.collect()
+        self.assertEqual(1, self.library.freed.count(pointer))
+
+    def test_conversion_native_failure_leaves_truthful_source_state(self):
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+        self.library.become_encoder_result = wh.Wirehair_InvalidInput
+        with self.assertRaises(wh.WirehairError) as caught:
+            decoder.become_encoder()
+        self.assertEqual(wh.Wirehair_InvalidInput, caught.exception.result)
+        self.assert_decoder_usable(decoder)
+        self.assertEqual([], self.library.freed)
+        decoder.close()
+        self.assertEqual([pointer], self.library.freed)
+
+        self.library = FakeLibrary()
+        decoder = self.completed_decoder()
         pointer = decoder.pointer.value
         self.library.become_encoder_result = wh.Wirehair_Error
         with self.assertRaises(wh.WirehairError) as caught:
             decoder.become_encoder()
         self.assertEqual(wh.Wirehair_Error, caught.exception.result)
-        self.assertFalse(decoder.closed)
-        self.assertEqual([], self.library.freed)
-        decoder.close()
+        self.assertTrue(decoder.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover()
         self.assertEqual([pointer], self.library.freed)
+        decoder.close()
+        self.assertEqual(1, self.library.freed.count(pointer))
+
+    def test_post_native_conversion_exceptions_close_exactly_once(self):
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+        self.library.raise_after_become_encoder = True
+        with self.assertRaisesRegex(MemoryError, "post-conversion"):
+            decoder.become_encoder()
+        self.assertTrue(decoder.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover()
+        self.assertEqual([pointer], self.library.freed)
+        decoder.close()
+        gc.collect()
+        self.assertEqual(1, self.library.freed.count(pointer))
+
+        self.library = FakeLibrary()
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+
+        def fail_commit():
+            raise MemoryError("injected ownership commit failure")
+
+        decoder._relinquish = fail_commit
+        with self.assertRaisesRegex(MemoryError, "ownership commit"):
+            decoder.become_encoder()
+        self.assertTrue(decoder.closed)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover()
+        self.assertEqual([pointer], self.library.freed)
+        decoder.close()
+        gc.collect()
+        self.assertEqual(1, self.library.freed.count(pointer))
 
     def test_wrapper_new_failures_preserve_exact_ownership(self):
         for wrapper, create in (
@@ -360,17 +539,31 @@ class BindingTests(unittest.TestCase):
                 self.assertEqual([pointer], self.library.freed)
 
         self.library = FakeLibrary()
-        decoder = wh.Decoder.create(8, 4, self.library)
+        decoder = self.completed_decoder()
         pointer = decoder.pointer.value
         with mock.patch.object(
                 wh.Encoder, "__new__",
                 side_effect=RuntimeError("injected new failure")):
             with self.assertRaisesRegex(RuntimeError, "injected new failure"):
                 decoder.become_encoder()
-        self.assertFalse(decoder.closed)
+        self.assert_decoder_usable(decoder)
+        self.assertEqual(0, self.library.become_encoder_calls)
         self.assertEqual([], self.library.freed)
         decoder.close()
         self.assertEqual([pointer], self.library.freed)
+
+    def test_converted_encoder_gc_frees_shared_owner_once(self):
+        decoder = self.completed_decoder()
+        pointer = decoder.pointer.value
+        converted = decoder.become_encoder()
+        self.assertTrue(decoder.closed)
+        reference = weakref.ref(converted)
+        del converted
+        gc.collect()
+        self.assertIsNone(reference())
+        self.assertEqual(1, self.library.freed.count(pointer))
+        decoder.close()
+        self.assertEqual(1, self.library.freed.count(pointer))
 
     def test_creation_wrapper_failure_releases_native_handle(self):
         for wrapper, create in (

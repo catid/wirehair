@@ -490,6 +490,48 @@ extern const uint8_t kPeelSeeds[kPeelSeedSubdivisions];
 
 static const unsigned kMaxDenseCount = 400;
 
+namespace detail {
+
+/**
+    Interpolate a dense-row count between two graph points.
+
+    This is exposed only through the internal tools header so the signed
+    interpolation contract can be covered directly.  The calculation uses a
+    signed width large enough for the full uint16_t input domain, including
+    descending segments whose intermediate numerator and quotient are
+    negative.
+
+    Preconditions: N0 < N1 and N is in the closed interval [N0, N1].
+*/
+static inline uint16_t InterpolateDenseCount(
+    uint16_t N0,
+    uint16_t N1,
+    uint16_t Count0,
+    uint16_t Count1,
+    unsigned N)
+{
+    CAT_DEBUG_ASSERT(N0 < N1);
+    CAT_DEBUG_ASSERT(N >= N0 && N <= N1);
+
+    const int64_t offset =
+        static_cast<int64_t>(N) - static_cast<int64_t>(N0);
+    const int64_t count_delta =
+        static_cast<int64_t>(Count1) - static_cast<int64_t>(Count0);
+    const int64_t numerator = offset * count_delta;
+    const int64_t denominator =
+        static_cast<int64_t>(N1) - static_cast<int64_t>(N0);
+
+    const int64_t count =
+        static_cast<int64_t>(Count0) + numerator / denominator;
+
+    CAT_DEBUG_ASSERT(count > 0);
+    CAT_DEBUG_ASSERT(count <= UINT16_MAX);
+
+    return static_cast<uint16_t>(count);
+}
+
+} // namespace detail
+
 /**
     This function returns the number of dense rows in the matrix given the
     number of input blocks (N).  The dense rows are supposed to make a random
@@ -528,6 +570,12 @@ uint16_t GetDenseCount(unsigned N);
 */
 uint16_t GetDenseSeed(unsigned N, unsigned dense_count);
 
+/**
+    Return the dense seed from the original legacy-v2 tables, before the
+    exact-N compatibility-breaking fixup campaign.
+*/
+uint16_t GetDenseSeedPreFixup(unsigned N, unsigned dense_count);
+
 
 //------------------------------------------------------------------------------
 // PeelSeed
@@ -536,6 +584,9 @@ uint16_t GetDenseSeed(unsigned N, unsigned dense_count);
     This function returns the seed to use for the peel rows.
 */
 uint16_t GetPeelSeed(unsigned N);
+
+/** Return the peel seed from the original legacy-v2 tables. */
+uint16_t GetPeelSeedPreFixup(unsigned N);
 
 
 } // namespace wirehair

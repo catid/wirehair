@@ -43,6 +43,7 @@ set(LIB_SOURCE_FILES
         WirehairCodec.h
         WirehairCompiler.h
         WirehairEnvironment.h
+        WirehairHeavy.h
         WirehairTools.cpp
         WirehairTools.h
         )
@@ -245,7 +246,11 @@ else()
         else()
             add_library(wirehair_shared SHARED ${LIB_SOURCE_FILES})
             set_target_properties(wirehair_shared PROPERTIES
-                OUTPUT_NAME wirehair_shared)
+                OUTPUT_NAME wirehair_shared
+                # Keep the import library distinct from the primary static
+                # archive, while giving the DLL the standard name searched by
+                # the installed ctypes binding.
+                RUNTIME_OUTPUT_NAME wirehair)
             wirehair_configure_library(wirehair_shared SHARED)
             list(APPEND WIREHAIR_INSTALL_TARGETS wirehair_shared)
         endif()
@@ -295,6 +300,30 @@ if (BUILD_TESTS)
     add_test(NAME legacy_core_preinit_test COMMAND legacy_core_test --preinit)
     add_test(NAME legacy_core_init_failure_test COMMAND legacy_core_test --init-failure)
     add_test(NAME legacy_core_cold_start_test COMMAND legacy_core_test --cold-start)
+
+    add_executable(peel_avalanche_test test/PeelAvalancheTest.cpp)
+    wirehair_apply_project_options(peel_avalanche_test)
+    target_link_libraries(peel_avalanche_test
+        wirehair_test_support Threads::Threads)
+    add_test(NAME peel_avalanche_small_stack
+        COMMAND peel_avalanche_test --small-stack)
+    set_tests_properties(peel_avalanche_small_stack PROPERTIES
+        LABELS "decoder;peeling;memory-safety;e2e"
+        TIMEOUT 120
+        PROCESSORS 1)
+
+    add_executable(gf256_inplace_test test/GF256InPlaceTest.cpp)
+    wirehair_apply_project_options(gf256_inplace_test)
+    target_link_libraries(gf256_inplace_test wirehair_test_support)
+    add_test(NAME gf256_inplace_test COMMAND gf256_inplace_test)
+    set_tests_properties(gf256_inplace_test PROPERTIES
+        LABELS "gf256;simd;undefined-behavior")
+
+    add_executable(heavy_window_test test/HeavyWindowTest.cpp)
+    wirehair_apply_project_options(heavy_window_test)
+    add_test(NAME heavy_window_test COMMAND heavy_window_test)
+    set_tests_properties(heavy_window_test PROPERTIES
+        LABELS "heavy;portability;property")
 
     add_executable(legacy_c_consumer test/LegacyCConsumer.c)
     set_target_properties(legacy_c_consumer PROPERTIES LINKER_LANGUAGE CXX)
@@ -451,7 +480,11 @@ install(TARGETS ${WIREHAIR_INSTALL_TARGETS}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES python/whirehair.py DESTINATION python)
+# The ctypes binding cannot use a static archive.  Install it only when this
+# package also contains a shared library that it can load at runtime.
+if(BUILD_SHARED_LIBS OR WIREHAIR_BUILD_BOTH)
+    install(FILES python/whirehair.py DESTINATION python)
+endif()
 
 set(WIREHAIR_PACKAGE_INSTALL_DIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/wirehair")
@@ -473,13 +506,20 @@ install(FILES
     DESTINATION "${WIREHAIR_PACKAGE_INSTALL_DIR}")
 
 if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
     get_property(WIREHAIR_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-    foreach(_wirehair_package_variant IN ITEMS static shared)
+    foreach(_wirehair_package_variant IN ITEMS static shared both)
         if(_wirehair_package_variant STREQUAL "shared")
             set(_wirehair_package_shared ON)
+            set(_wirehair_package_both OFF)
             set(_wirehair_package_config Release)
+        elseif(_wirehair_package_variant STREQUAL "both")
+            set(_wirehair_package_shared OFF)
+            set(_wirehair_package_both ON)
+            set(_wirehair_package_config RelWithDebInfo)
         else()
             set(_wirehair_package_shared OFF)
+            set(_wirehair_package_both OFF)
             set(_wirehair_package_config Debug)
         endif()
         add_test(
@@ -493,8 +533,10 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
                 -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
                 -DTEST_SHARED=${_wirehair_package_shared}
+                -DTEST_BOTH=${_wirehair_package_both}
                 -DTEST_CONFIG=${_wirehair_package_config}
                 -DTEST_STRICT=${WIREHAIR_STRICT_WARNINGS}
+                -DTEST_PYTHON_EXECUTABLE=${Python3_EXECUTABLE}
                 -P ${PROJECT_SOURCE_DIR}/test/package/RunPackageE2E.cmake)
         set_tests_properties(package_${_wirehair_package_variant}_e2e
             PROPERTIES TIMEOUT 240)

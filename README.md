@@ -5,6 +5,11 @@ Wirehair produces a stream of error correction blocks from a data source
 using an erasure code.  When enough of these blocks are received,
 the original data can be recovered.
 
+Packet equations are versioned separately from the C ABI.  Applications that
+persist or exchange packets across builds should use the explicit legacy wire
+profile APIs and follow [LEGACY_WIRE_PROFILES.md](LEGACY_WIRE_PROFILES.md).
+Raw packets do not authenticate their profile or recovered payload.
+
 As compared to other similar libraries, an unlimited number of error
 correction blocks can be produced, and much larger block counts are supported.
 Furthermore, it gets slower as O(N) in the amount of input data rather
@@ -51,6 +56,9 @@ Useful build options are:
 * `BUILD_SHARED_LIBS=ON` selects the shared library instead.
 * `WIREHAIR_BUILD_BOTH=ON` explicitly produces static and shared variants.  On
   Unix-like platforms they share one PIC object compilation.
+* The `whirehair.py` ctypes binding is installed only by shared or dual builds,
+  because it requires a loadable Wirehair dynamic library.  Static-only
+  installs deliberately omit the unusable wrapper.
 * `WIREHAIR_STATIC_PIC=OFF` disables PIC for a static-only build.  It defaults
   to `ON`, so the installed archive can be embedded in plugins/shared objects.
 * `MARCH_NATIVE=ON` opts into `-march=native` after a compiler capability

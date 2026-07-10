@@ -20,7 +20,26 @@ static int check_round_trip(int use_new_api)
     }
     memcpy(expected, message, sizeof(expected));
 
-    if (use_new_api)
+    if (use_new_api == 2)
+    {
+        WirehairWireProfile profile;
+        if (wirehair_wire_profile_init(
+                WIREHAIR_LEGACY_PROFILE_CURRENT, &profile) !=
+                Wirehair_Success ||
+            wirehair_encoder_create_profile_ex(
+                0, message, MessageBytes, BlockBytes, &profile,
+                WIREHAIR_ENCODER_OWN_INPUT, &encoder) != Wirehair_Success ||
+            wirehair_decoder_create_profile_ex(
+                0, MessageBytes, BlockBytes, &profile, &decoder) !=
+                Wirehair_Success)
+        {
+            wirehair_free(encoder);
+            wirehair_free(decoder);
+            return 1;
+        }
+        memset(message, 0, sizeof(message));
+    }
+    else if (use_new_api)
     {
         if (wirehair_encoder_create_owned_ex(
                 0, message, MessageBytes, BlockBytes, &encoder) !=
@@ -115,6 +134,9 @@ int main(void)
     }
     if (check_round_trip(1) != 0) {
         return 12;
+    }
+    if (check_round_trip(2) != 0) {
+        return 13;
     }
     return 0;
 }
