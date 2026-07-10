@@ -652,8 +652,16 @@ if(IS_ABSOLUTE "${WIREHAIR_PKGCONFIG_INSTALL_DIR}")
     set(WIREHAIR_PC_PREFIX "${CMAKE_INSTALL_PREFIX}")
     set(WIREHAIR_PC_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
 else()
+    # file(RELATIVE_PATH) requires native absolute paths.  A Unix-rooted
+    # synthetic path is not absolute on Windows (it has no drive), so anchor
+    # both operands beneath this configure tree on every host.  The anchor
+    # need not exist; only the lexical relative path is used in wirehair.pc.
+    set(_wirehair_pc_prefix_anchor
+        "${CMAKE_CURRENT_BINARY_DIR}/wirehair-pc-prefix-anchor")
     file(RELATIVE_PATH WIREHAIR_PC_PREFIX_RELATIVE
-        "/${WIREHAIR_PKGCONFIG_INSTALL_DIR}" "/")
+        "${_wirehair_pc_prefix_anchor}/${WIREHAIR_PKGCONFIG_INSTALL_DIR}"
+        "${_wirehair_pc_prefix_anchor}")
+    unset(_wirehair_pc_prefix_anchor)
     set(WIREHAIR_PC_PREFIX
         "\${pcfiledir}/${WIREHAIR_PC_PREFIX_RELATIVE}")
     set(WIREHAIR_PC_LIBDIR "\${pcfiledir}/..")
