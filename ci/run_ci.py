@@ -174,7 +174,10 @@ def build(args, targets=()):
     ]
     if targets:
         command.extend(["--target", *targets])
-    run(command)
+    run(
+        command,
+        log_path=Path(args.build_dir) / "ci-logs" / "build.log",
+    )
 
 
 def ctest(args, *, regex=None, label=None, env=None, prefix=()):

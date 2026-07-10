@@ -112,6 +112,23 @@ class RunnerTests(unittest.TestCase):
             for argument in run_ci.strict_cmake_args(msvc)
         ))
 
+    def test_build_captures_output_in_failure_artifact_log(self):
+        args = mock.Mock(
+            build_dir=Path("build/ci-test"),
+            config="Release",
+            jobs=2,
+        )
+        with mock.patch.object(run_ci, "run") as run:
+            run_ci.build(args, targets=("unit_test",))
+        run.assert_called_once_with(
+            [
+                "cmake", "--build", args.build_dir,
+                "--config", "Release", "--parallel", "2",
+                "--target", "unit_test",
+            ],
+            log_path=args.build_dir / "ci-logs" / "build.log",
+        )
+
     def test_msvc_strict_matrix_enables_and_smokes_explicit_tools(self):
         args = mock.Mock(
             linkage="static",

@@ -535,7 +535,7 @@ WirehairResult SolvePrecodeSystem(
         // block stored in values[column] is the constant term.
         for (uint32_t column : peel.PeelOrder)
         {
-            std::fill(accumulator.begin(), accumulator.end(), 0u);
+            std::fill(accumulator.begin(), accumulator.end(), uint64_t{0});
             uint8_t* constant =
                 values.data() + (size_t)column * block_bytes;
             const BinaryEquation& equation = rows[peel.SolveRow[column]];
@@ -720,8 +720,8 @@ WirehairResult SolvePrecodeSystem(
                 continue;
             }
             ++st.ResidualRows;
-            std::fill(coeff.begin(), coeff.end(), 0u);
-            std::fill(rhs.begin(), rhs.end(), 0u);
+            std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+            std::fill(rhs.begin(), rhs.end(), uint8_t{0});
             if (rows[r].Data) {
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
@@ -780,7 +780,8 @@ WirehairResult SolvePrecodeSystem(
         {
             for (uint32_t column = 0; column < L; ++column)
             {
-                std::fill(packed_heavy.begin(), packed_heavy.end(), 0u);
+                std::fill(
+                    packed_heavy.begin(), packed_heavy.end(), uint64_t{0});
                 for (uint32_t heavy = 0; heavy < H; ++heavy) {
                     packed_heavy[heavy >> 3] |=
                         (uint64_t)HeavyCoefficient(heavy, column, H) <<
@@ -820,7 +821,8 @@ WirehairResult SolvePrecodeSystem(
         std::vector<uint8_t> residue_bucket(block_bytes, 0u);
         for (uint32_t residue = 0; residue < window; ++residue)
         {
-            std::fill(residue_bucket.begin(), residue_bucket.end(), 0u);
+            std::fill(
+                residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
             for (uint32_t column = residue; column < L; column += window)
             {
                 gf256_add_mem(
@@ -841,7 +843,7 @@ WirehairResult SolvePrecodeSystem(
         for (uint32_t heavy = 0; heavy < H; ++heavy)
         {
             ++st.ResidualRows;
-            std::fill(coeff.begin(), coeff.end(), 0u);
+            std::fill(coeff.begin(), coeff.end(), uint8_t{0});
             std::memcpy(
                 rhs.data(),
                 heavy_rhs.data() + (size_t)heavy * block_bytes,
@@ -1081,7 +1083,7 @@ bool VerifyPrecodeSolution(
 
     const auto verify_binary = [&](const std::vector<uint32_t>& columns,
                                    const uint8_t* expected) {
-        std::fill(value.begin(), value.end(), 0u);
+        std::fill(value.begin(), value.end(), uint8_t{0});
         for (uint32_t column : columns) {
             gf256_add_mem(
                 value.data(),
@@ -1117,7 +1119,7 @@ bool VerifyPrecodeSolution(
     }
     for (uint32_t heavy = 0; heavy < H; ++heavy)
     {
-        std::fill(value.begin(), value.end(), 0u);
+        std::fill(value.begin(), value.end(), uint8_t{0});
         for (uint32_t column = 0; column < L; ++column)
         {
             const uint8_t scale = HeavyCoefficient(heavy, column, H);
