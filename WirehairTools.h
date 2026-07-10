@@ -442,6 +442,20 @@ public:
 //------------------------------------------------------------------------------
 // SIMD-Safe Aligned Memory Allocations
 
+namespace detail {
+
+/// Calculate the calloc size needed by SIMDSafeAllocate without wrapping.
+/// allocation_size is reset to zero when the requested size cannot be padded.
+bool GetSIMDSafeAllocationSize(size_t size, size_t& allocation_size);
+
+#if defined(WIREHAIR_TESTING)
+/// Test-only seam used to prove overflow is rejected before calling calloc.
+typedef void* (*SIMDSafeCallocForTesting)(size_t count, size_t size);
+void SetSIMDSafeCallocForTesting(SIMDSafeCallocForTesting callback);
+#endif
+
+} // namespace detail
+
 /// Allocate memory and return a pointer aligned to the size used for SIMD ops
 uint8_t* SIMDSafeAllocate(size_t size);
 

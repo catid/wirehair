@@ -5,6 +5,7 @@
 
 #include <wirehair/wirehair.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <vector>
 
@@ -52,6 +53,38 @@ struct PrecodeSolveStats
 };
 
 /**
+    Algebraic checkpoint for appending packet equations after a rank-deficient
+    solve.  This is an internal movable value: callers should use
+    ResumePrecodeSystem() rather than mutate its fields.
+*/
+struct PrecodeSolveResumeState
+{
+    uint32_t SourceCount = 0u;
+    uint32_t PrecodeCount = 0u;
+    uint32_t ColumnCount = 0u;
+    uint32_t BlockBytes = 0u;
+    uint32_t InactiveCount = 0u;
+    uint32_t ProjectionWords = 0u;
+    uint32_t Rank = 0u;
+    PacketRowConfig Config = {};
+    PrecodeSolveStats Stats = {};
+    std::vector<uint32_t> InactiveIndex;
+    std::vector<uint32_t> InactiveColumns;
+    std::vector<uint64_t> Projection;
+    std::vector<uint8_t> Values;
+    std::vector<uint8_t> PivotCoefficients;
+    std::vector<uint8_t> PivotRhs;
+    std::vector<uint8_t> HavePivot;
+    std::vector<uint8_t> CoefficientScratch;
+    std::vector<uint8_t> RhsScratch;
+    bool Active = false;
+
+    void Clear();
+    void Swap(PrecodeSolveResumeState& other) noexcept;
+    size_t PersistentBytes() const;
+};
+
+/**
     Return whether the exact version-4 packet-row iterator supports this
     domain and mix count.
 
@@ -95,7 +128,13 @@ PrecodeParams PrecodeParamsForAttempt(
     const PrecodeParams& base,
     uint32_t attempt);
 
-/** Evaluate one packet row over all intermediate blocks. */
+/**
+    Evaluate one packet row over all intermediate blocks.
+
+    `block_out[0, block_bytes)` must not overlap any byte in the complete
+    `(K + P) * block_bytes` intermediate-block array.  Overlap is rejected
+    before writing either `block_out` or `block_ops_out`.
+*/
 bool EvaluatePacketBlock(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -105,7 +144,12 @@ bool EvaluatePacketBlock(
     uint8_t* block_out,
     uint64_t* block_ops_out = nullptr);
 
-/** Internal fast path for an already validated immutable system/config. */
+/**
+    Internal fast path for an already validated immutable system/config.
+
+    The same non-overlap and failure no-write contract as
+    EvaluatePacketBlock() applies.
+*/
 bool EvaluatePacketBlockForValidatedSystem(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -126,7 +170,9 @@ bool EvaluatePacketBlockForValidatedSystem(
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
     supplied equations were rank deficient or exceeded that bound; additional
     independent packets can reduce the residual.  Output remains unchanged on
-    every failure.
+    every failure.  When resume_state is non-null, a rank-deficient residual
+    within the cap atomically replaces it with an active affine/pivot
+    checkpoint; cap failures leave it unchanged and require a cold retry.
 */
 WirehairResult SolvePrecodeSystem(
     const PrecodeSystem& system,
@@ -134,7 +180,29 @@ WirehairResult SolvePrecodeSystem(
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
-    PrecodeSolveStats* stats = nullptr);
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr);
+
+/**
+    Append one packet equation to a rank-deficient solve checkpoint.
+
+    With allow_insert=false this performs a non-mutating duplicate consistency
+    check.  With allow_insert=true an independent row is committed and Success
+    is returned as soon as the complete intermediate vector is reconstructed.
+    Allocations finish before an inserting call changes the algebraic state, so
+    OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
+    when non-null.  Output remains unchanged on NeedMore and every failure.
+*/
+WirehairResult ResumePrecodeSystem(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    uint32_t block_id,
+    const uint8_t* block_data,
+    uint32_t block_bytes,
+    PrecodeSolveResumeState& resume_state,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    bool allow_insert = true);
 
 /** Select the first deterministic packet seed whose K systematic rows rank. */
 WirehairResult SelectSystematicPacketConfig(

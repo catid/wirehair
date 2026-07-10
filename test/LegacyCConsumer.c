@@ -67,6 +67,16 @@ static int check_round_trip(int use_new_api)
         }
     }
 
+    if (wirehair_encoder_detach_input(encoder) != Wirehair_Success ||
+        wirehair_encoder_detach_input(encoder) != Wirehair_Success ||
+        wirehair_encoder_detach_input(decoder) != Wirehair_InvalidInput)
+    {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return 14;
+    }
+    memset(message, 0, sizeof(message));
+
     for (id = 0; id < BlockCount + 40u; ++id)
     {
         uint32_t written = 0;

@@ -134,6 +134,9 @@ bool SameProfile(
         a.TuningResidualMean == b.TuningResidualMean &&
         a.TuningResidualColumns == b.TuningResidualColumns &&
         a.TuningXorCost == b.TuningXorCost &&
+        a.TuningCandidatesRequested == b.TuningCandidatesRequested &&
+        a.TuningCandidatesUnique == b.TuningCandidatesUnique &&
+        a.TuningCandidatesCompleted == b.TuningCandidatesCompleted &&
         a.TuningTrials == b.TuningTrials;
 }
 

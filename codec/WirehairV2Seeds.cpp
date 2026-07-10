@@ -87,6 +87,15 @@ double CandidateScore(
     return outlier * outlier * 1000000.0 + (double)xor_cost;
 }
 
+uint16_t PermutationStep(uint32_t key)
+{
+    // Every odd value is invertible modulo 256.  Holding this keyed step
+    // constant while the candidate index advances therefore enumerates the
+    // complete byte domain exactly once instead of sampling it with
+    // replacement.
+    return (uint16_t)((Hash32(key) | 1u) & 0xffu);
+}
+
 } // namespace
 
 SeedTuningOptions DefaultSeedTuningOptions()
@@ -108,12 +117,12 @@ uint16_t CandidatePeelSeed(uint16_t bucket, uint16_t base_seed, uint16_t index)
     if (index == 0) {
         return (uint16_t)(base_seed & 0xffu);
     }
-    const uint32_t h = Hash32(
+    const uint16_t step = PermutationStep(
         ((uint32_t)bucket << 16) ^
         ((uint32_t)base_seed << 8) ^
-        (uint32_t)index ^
         UINT32_C(0x7065656c));
-    return (uint16_t)(h & 0xffu);
+    return (uint16_t)(((base_seed & 0xffu) +
+        (uint32_t)step * index) & 0xffu);
 }
 
 uint16_t CandidateDenseSeed(uint16_t base_seed, uint16_t index)
@@ -124,11 +133,10 @@ uint16_t CandidateDenseSeed(uint16_t base_seed, uint16_t index)
     if (index == 0) {
         return base_seed;
     }
-    const uint32_t h = Hash32(
-        ((uint32_t)base_seed << 9) ^
-        (uint32_t)index ^
-        UINT32_C(0x64656e73));
-    return (uint16_t)(h & 0xffu);
+    const uint16_t step = PermutationStep(
+        (uint32_t)base_seed ^ UINT32_C(0x64656e73));
+    return (uint16_t)(((base_seed & 0xffu) +
+        (uint32_t)step * index) & 0xffu);
 }
 
 SeedProfile SelectSeedProfile(uint32_t block_count, uint32_t block_bytes)
@@ -146,8 +154,9 @@ SeedProfile TuneSeedProfile(
         return base;
     }
 
+    const uint16_t requested_candidates = options.PeelCandidates;
     uint16_t peel_candidates =
-        options.PeelCandidates > 0u ? options.PeelCandidates : 1u;
+        requested_candidates > 0u ? requested_candidates : 1u;
     if (peel_candidates > 256u) {
         peel_candidates = 256u;
     }
@@ -155,6 +164,7 @@ SeedProfile TuneSeedProfile(
         options.TrialsPerCandidate > 0u ? options.TrialsPerCandidate : 1u;
 
     SeedTuningCandidate candidates[256];
+    uint16_t completed_candidates = 0;
     double residual_sum = 0.0;
     double residual_sq = 0.0;
     for (uint16_t i = 0; i < peel_candidates; ++i)
@@ -190,6 +200,7 @@ SeedProfile TuneSeedProfile(
         residual_sum += candidate.ResidualMean;
         residual_sq += candidate.ResidualMean * candidate.ResidualMean;
         candidates[i] = candidate;
+        ++completed_candidates;
     }
 
     const double population_mean = residual_sum / (double)peel_candidates;
@@ -222,6 +233,11 @@ SeedProfile TuneSeedProfile(
     base.TuningResidualMean = candidates[best_i].ResidualMean;
     base.TuningResidualColumns = candidates[best_i].ResidualMax;
     base.TuningXorCost = candidates[best_i].XorCostMean;
+    base.TuningCandidatesRequested = requested_candidates;
+    // CandidatePeelSeed is a permutation over the executed prefix, so all
+    // completed candidates are distinct even when a larger request is capped.
+    base.TuningCandidatesUnique = completed_candidates;
+    base.TuningCandidatesCompleted = completed_candidates;
     base.TuningTrials = trials;
     return base;
 }

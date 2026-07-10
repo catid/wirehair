@@ -37,6 +37,9 @@ struct SeedProfile
     double TuningResidualMean = 0.0;
     uint32_t TuningResidualColumns = 0;
     uint64_t TuningXorCost = 0;
+    uint16_t TuningCandidatesRequested = 0;
+    uint16_t TuningCandidatesUnique = 0;
+    uint16_t TuningCandidatesCompleted = 0;
     uint32_t TuningTrials = 0;
 };
 
@@ -66,7 +69,13 @@ SeedProfile TuneSeedProfile(
     const SeedTuningOptions& options);
 
 uint16_t PeelSeedBucket(uint32_t block_count);
+
+/// Indices 0..255 enumerate the byte seed domain exactly once, starting at
+/// base_seed & 0xff.  Callers must keep index within that domain.
 uint16_t CandidatePeelSeed(uint16_t bucket, uint16_t base_seed, uint16_t index);
+
+/// Index zero preserves the full base_seed.  Indices 1..255 are unique byte
+/// seeds; when base_seed is itself a byte, 0..255 form a full permutation.
 uint16_t CandidateDenseSeed(uint16_t base_seed, uint16_t index);
 
 } // namespace wirehair_v2

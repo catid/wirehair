@@ -1,0 +1,7 @@
+# The leading ASCII digit selects each state-machine scenario modulo six.
+general.seed
+duplicates.seed
+oom-retry.seed
+post-complete.seed
+reuse.seed
+profile-retry.seed

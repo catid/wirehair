@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wirehair-fec"
+version = "2.0.0"
+description = "Safe Python ctypes bindings for the Wirehair erasure-code library"
+readme = { file = "python/README.md", content-type = "text/markdown" }
+requires-python = ">=3.8"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Christopher A. Taylor" },
+    { name = "Daniel Norte de Moraes" },
+]
+keywords = ["erasure-code", "fec", "wirehair"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/catid/wirehair"
+Source = "https://github.com/catid/wirehair"
+Issues = "https://github.com/catid/wirehair/issues"
+
+[tool.hatch.build]
+reproducible = true
+ignore-vcs = true
+exclude = [
+    "**/__pycache__",
+    "**/*.py[cod]",
+    "**/*.so",
+    "**/*.dylib",
+    "**/*.dll",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.gitignore",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/python/README.md",
+    "/python/benchmark_buffers.py",
+    "/python/whirehair.py",
+    "/python/wirehair",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/wirehair"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"python/whirehair.py" = "whirehair.py"

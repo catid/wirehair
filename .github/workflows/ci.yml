@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - master
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +17,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  data-integrity:
+    name: Repository data integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate tables, tracked results, and byte metrics
+        run: python3 ci/run_ci.py data-integrity
+
   build-test-install:
     name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.linkage }}
     runs-on: ${{ matrix.os }}
@@ -27,36 +43,48 @@ jobs:
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+            repository_args: ""
+            tool_args: ""
           - os: ubuntu-latest
             compiler: gcc
             linkage: shared
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=gcc --cmake-arg=-DCMAKE_CXX_COMPILER=g++
+            repository_args: --repository-gates
+            tool_args: ""
           - os: ubuntu-latest
             compiler: clang
             linkage: static
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+            repository_args: ""
+            tool_args: ""
           - os: ubuntu-latest
             compiler: clang
             linkage: shared
             generator: Ninja
             architecture_args: ""
             cmake_compilers: --cmake-arg=-DCMAKE_C_COMPILER=clang --cmake-arg=-DCMAKE_CXX_COMPILER=clang++
+            repository_args: ""
+            tool_args: ""
           - os: windows-2022
             compiler: msvc
             linkage: static
             generator: Visual Studio 17 2022
             architecture_args: --architecture x64
             cmake_compilers: ""
+            repository_args: ""
+            tool_args: --tool-smoke
           - os: windows-2022
             compiler: msvc
             linkage: shared
             generator: Visual Studio 17 2022
             architecture_args: --architecture x64
             cmake_compilers: ""
+            repository_args: ""
+            tool_args: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,6 +101,8 @@ jobs:
           --generator "${{ matrix.generator }}"
           ${{ matrix.architecture_args }}
           ${{ matrix.cmake_compilers }}
+          ${{ matrix.repository_args }}
+          ${{ matrix.tool_args }}
           --jobs 2
       - name: Upload failure diagnostics
         if: failure()
@@ -89,6 +119,14 @@ jobs:
             build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/Testing/Temporary/**
             build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-consumer/CMakeCache.txt
             build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-consumer/Testing/Temporary/**
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-*/**/CMakeCache.txt
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-*/**/CMakeFiles/CMake*.log
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-*/**/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/package-*/**/Testing/Temporary/**
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/build-policy/**/CMakeCache.txt
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/build-policy/**/CMakeFiles/CMake*.log
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/build-policy/**/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-${{ matrix.compiler }}-${{ matrix.linkage }}/build-policy/**/Testing/Temporary/**
 
   asan-ubsan:
     name: Linux Clang / ASan+UBSan+LSan
@@ -179,3 +217,63 @@ jobs:
             build/ci-mingw/**/CMakeCache.txt
             build/ci-mingw/**/CMakeFiles/CMakeConfigureLog.yaml
             build/ci-mingw/**/ci-logs/**
+
+  linux-arm64-portability:
+    name: Linux ARM64 / NEON / installed consumer
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned-major native toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13 ninja-build
+      - name: Run strict NEON, golden, and package gates
+        run: >-
+          python3 ci/run_portability.py native-arm64
+          --build-dir build/ci-portability-arm64
+          --install-dir build/install-portability-arm64
+          --jobs 2
+      - name: Upload ARM64 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-portability-arm64
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-portability-arm64/CMakeCache.txt
+            build/ci-portability-arm64/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-portability-arm64/ci-logs/**
+            build/ci-portability-arm64/Testing/Temporary/**
+            build/ci-portability-arm64/package-consumer/Testing/Temporary/**
+
+  linux-i686-portability:
+    name: Linux i686 / allocation boundaries / round trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned-major i686 toolchain and QEMU 8.2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-13-i686-linux-gnu g++-13-i686-linux-gnu qemu-user
+      - name: Run strict 32-bit allocation and golden gates
+        run: >-
+          python3 ci/run_portability.py cross --target i686
+          --build-dir build/ci-portability-i686
+          --install-dir build/install-portability-i686
+          --jobs 2
+      - name: Upload i686 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-portability-i686
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/ci-portability-i686/CMakeCache.txt
+            build/ci-portability-i686/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-portability-i686/ci-logs/**
+            build/ci-portability-i686/Testing/Temporary/**

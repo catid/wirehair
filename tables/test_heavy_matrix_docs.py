@@ -35,7 +35,10 @@ def main():
             if re.search(pattern, text):
                 failures.append("%s: matches %s" % (path.relative_to(ROOT), pattern))
 
-    authority = (ROOT / "tables" / "HEAVY_MATRIX.md").read_text(encoding="utf-8").lower()
+    authority = " ".join(
+        (ROOT / "tables" / "HEAVY_MATRIX.md").read_text(
+            encoding="utf-8").split()
+    ).lower()
     for phrase in ("wire format", "empirical", "1/256", "not a reliability guarantee",
                    "additional recovery rows"):
         if phrase not in authority:

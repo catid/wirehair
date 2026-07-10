@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -116,6 +117,15 @@ uint64_t Fnv1aU32(uint64_t hash, uint32_t value)
 {
     hash = Fnv1aU16(hash, static_cast<uint16_t>(value));
     return Fnv1aU16(hash, static_cast<uint16_t>(value >> 16));
+}
+
+uint64_t TestOnlyMessageFingerprint(const std::vector<uint8_t>& message)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint8_t value : message) {
+        hash = Fnv1aByte(hash, value);
+    }
+    return hash;
 }
 
 uint64_t DenseCountFingerprint()
@@ -461,15 +471,17 @@ void TestLegacyWireProfiles()
     const std::vector<uint8_t> message = MakeMessage(block_count, 77);
     WirehairCodec base_encoder = nullptr;
     WirehairCodec base_decoder = nullptr;
-    WirehairCodec mismatched_decoder = nullptr;
+    WirehairCodec raw_mismatched_decoder = nullptr;
     CHECK(wirehair_encoder_create_profile_ex(
         nullptr, message.data(), message.size(), 1, &base,
         WIREHAIR_ENCODER_OWN_INPUT, &base_encoder) == Wirehair_Success);
     CHECK(wirehair_decoder_create_profile_ex(
         nullptr, message.size(), 1, &base, &base_decoder) == Wirehair_Success);
-    CHECK(wirehair_decoder_create_profile_ex(
-        nullptr, message.size(), 1, &current, &mismatched_decoder) ==
-        Wirehair_Success);
+    // Model a receiver that did not carry the profile in trusted framing and
+    // therefore used the raw API's frozen current profile.
+    raw_mismatched_decoder = wirehair_decoder_create(
+        nullptr, message.size(), 1);
+    CHECK(raw_mismatched_decoder != nullptr);
 
     uint64_t base_packet_hash = UINT64_C(14695981039346656037);
     WirehairResult base_result = Wirehair_NeedMore;
@@ -486,7 +498,7 @@ void TestLegacyWireProfiles()
         base_packet_hash = Fnv1aByte(base_packet_hash, packet);
         base_result = wirehair_decode(base_decoder, id, &packet, written);
         mismatch_result = wirehair_decode(
-            mismatched_decoder, id, &packet, written);
+            raw_mismatched_decoder, id, &packet, written);
     }
     CHECK(base_result == Wirehair_Success);
     CHECK(mismatch_result == Wirehair_Success);
@@ -496,10 +508,16 @@ void TestLegacyWireProfiles()
         base_decoder, base_recovered.data(), base_recovered.size()) ==
         Wirehair_Success);
     CHECK(wirehair_recover(
-        mismatched_decoder, mismatch_recovered.data(),
+        raw_mismatched_decoder, mismatch_recovered.data(),
         mismatch_recovered.size()) == Wirehair_Success);
     CHECK(base_recovered == message);
     CHECK(mismatch_recovered != message);
+    // FNV is only a deterministic test stand-in.  Production callers need a
+    // cryptographic digest/MAC obtained independently from trusted metadata.
+    const uint64_t trusted_fingerprint = TestOnlyMessageFingerprint(message);
+    CHECK(TestOnlyMessageFingerprint(base_recovered) == trusted_fingerprint);
+    CHECK(TestOnlyMessageFingerprint(mismatch_recovered) !=
+        trusted_fingerprint);
     CHECK(base_packet_hash == UINT64_C(0xa6c1a4d75faec4d8));
     std::printf("Legacy pre-fixup N=2373 repair hash: %016llx\n",
         static_cast<unsigned long long>(base_packet_hash));
@@ -603,7 +621,7 @@ void TestLegacyWireProfiles()
 
     wirehair_free(base_encoder);
     wirehair_free(base_decoder);
-    wirehair_free(mismatched_decoder);
+    wirehair_free(raw_mismatched_decoder);
     wirehair_free(current_encoder);
     wirehair_free(raw_encoder);
     wirehair_free(current_decoder);
@@ -1162,24 +1180,30 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(wirehair_encode(
         decoder, 3, output.data(), block_bytes, &bytes) == Wirehair_Success);
 
-    WirehairCodec failed = wirehair_decoder_create(
+    WirehairCodec duplicate_decoder = wirehair_decoder_create(
         nullptr, message.size(), block_bytes);
-    CHECK(failed != nullptr);
+    CHECK(duplicate_decoder != nullptr);
     CHECK(wirehair_encode(
         encoder, 0, output.data(), block_bytes, &bytes) == Wirehair_Success);
-    CHECK(wirehair_decode(failed, 0, output.data(), bytes) == Wirehair_NeedMore);
-    CHECK(wirehair_decode(failed, 0, output.data(), bytes) ==
-        Wirehair_InvalidInput);
-    CHECK(wirehair_decode(failed, 1, output.data(), bytes) ==
-        Wirehair_InvalidInput);
+    CHECK(wirehair_decode(
+        duplicate_decoder, 0, output.data(), bytes) == Wirehair_NeedMore);
+    CHECK(wirehair_decode(
+        duplicate_decoder, 0, output.data(), bytes) == Wirehair_NeedMore);
+    CHECK(wirehair_encode(
+        encoder, 1, output.data(), block_bytes, &bytes) == Wirehair_Success);
+    CHECK(wirehair_decode(
+        duplicate_decoder, 1, output.data(), bytes) == Wirehair_Success);
     CHECK(wirehair_recover(
-        failed, recovered.data(), recovered.size()) == Wirehair_InvalidInput);
-    CHECK(wirehair_decoder_becomes_encoder(failed) == Wirehair_InvalidInput);
+        duplicate_decoder, recovered.data(), recovered.size()) ==
+        Wirehair_Success);
+    CHECK(recovered == message);
+    CHECK(wirehair_decoder_becomes_encoder(duplicate_decoder) ==
+        Wirehair_Success);
     bytes = 77;
     CHECK(wirehair_encode(
-        failed, 0, output.data(), block_bytes, &bytes) ==
-        Wirehair_InvalidInput);
-    CHECK(bytes == 0);
+        duplicate_decoder, 0, output.data(), block_bytes, &bytes) ==
+        Wirehair_Success);
+    CHECK(bytes == block_bytes);
 
     WirehairCodec reused = nullptr;
     CHECK(wirehair_decoder_create_ex(
@@ -1192,9 +1216,671 @@ void TestLifecycleAndBorrowedMutation()
     CHECK(bytes == 0);
 
     wirehair_free(reused);
-    wirehair_free(failed);
+    wirehair_free(duplicate_decoder);
     wirehair_free(decoder);
     wirehair_free(nullptr);
+}
+
+void TestPacketFingerprintVectors()
+{
+    // Independently generated with a compact reference SipHash-2-4
+    // implementation.  These pin keys, rounds, byte order, tail packing, and
+    // both halves of the fixed duplicate-equality contract.
+    struct Vector
+    {
+        uint32_t Bytes;
+        uint64_t Hash0;
+        uint64_t Hash1;
+    };
+    static const Vector vectors[] = {
+        {   0, UINT64_C(0x751bf6774078774a), UINT64_C(0xf591d34bdde27228) },
+        {   1, UINT64_C(0x2447d1d7f46786aa), UINT64_C(0xd415a66f30deb419) },
+        {   7, UINT64_C(0x223c277ec6187d37), UINT64_C(0x31ac659a8c7ebd32) },
+        {   8, UINT64_C(0x63a02fa1962d9e59), UINT64_C(0xd160a0d3392fe438) },
+        {   9, UINT64_C(0x4be6afd93cfbb34d), UINT64_C(0x1274f83d0918ff39) },
+        {  15, UINT64_C(0xed73050006ce018d), UINT64_C(0xfe836b9cc5cb8a44) },
+        {  16, UINT64_C(0x846186dbdd674086), UINT64_C(0x062cd0618c4507f9) },
+        {  31, UINT64_C(0x2e09bdda950ba278), UINT64_C(0xf4135c3d74122e53) },
+        {  63, UINT64_C(0xd8e3e83994fd5d43), UINT64_C(0x521cc2869b7a8186) },
+        {  64, UINT64_C(0x28f561b0b4bf7938), UINT64_C(0x61fd47bf6a3e9b8a) },
+        {  65, UINT64_C(0x54e3457ba238d8b9), UINT64_C(0x9c481d1302a967fa) },
+        { 257, UINT64_C(0x1983e075a1af665e), UINT64_C(0xe8b76cac6ac432f2) }
+    };
+    uint8_t data[257];
+    for (uint32_t i = 0; i < sizeof(data); ++i) {
+        data[i] = static_cast<uint8_t>(i * 37u + 11u);
+    }
+    for (const Vector& vector : vectors)
+    {
+        uint64_t hash0 = 0;
+        uint64_t hash1 = 0;
+        wirehair::Codec::TestingPacketFingerprint128(
+            data, vector.Bytes, hash0, hash1);
+        CHECK(hash0 == vector.Hash0);
+        CHECK(hash1 == vector.Hash1);
+    }
+}
+
+void TestDuplicatePacketIdentity()
+{
+    const uint32_t block_bytes = 17;
+    const uint32_t block_count = 8;
+    const size_t message_bytes = block_bytes * block_count - 5;
+    const std::vector<uint8_t> message = MakeMessage(message_bytes, 53);
+    WirehairCodec encoder = wirehair_encoder_create(
+        nullptr, message.data(), message.size(), block_bytes);
+    WirehairCodec decoder = wirehair_decoder_create(
+        nullptr, message.size(), block_bytes);
+    CHECK(encoder != nullptr && decoder != nullptr);
+    if (!encoder || !decoder) {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return;
+    }
+
+    const wirehair::Codec* internal =
+        reinterpret_cast<const wirehair::Codec*>(decoder);
+    const uint32_t expected_limit = block_count + 1024;
+    uint32_t expected_slots = 1;
+    while (expected_slots < expected_limit * 2) {
+        expected_slots <<= 1;
+    }
+    CHECK(internal->TestingReceivedPacketLimit() == expected_limit);
+    CHECK(internal->TestingReceivedPacketSlots() == expected_slots);
+    CHECK(internal->TestingReceivedPacketMemoryBytes() ==
+        static_cast<uint64_t>(expected_slots) * 24);
+
+    std::vector<uint8_t> packet(block_bytes, uint8_t{0xa5});
+    uint32_t written = 0;
+    CHECK(wirehair_encode(
+        encoder, 0, packet.data(), block_bytes, &written) ==
+        Wirehair_Success);
+    CHECK(written == block_bytes);
+    const std::vector<uint8_t> systematic_packet = packet;
+    CHECK(wirehair_decode(
+        decoder, 0, packet.data(), written) == Wirehair_NeedMore);
+    CHECK(internal->TestingDecoderRowCount() == 1);
+    CHECK(internal->TestingReceivedPacketCount() == 1);
+
+    for (unsigned repeat = 0; repeat < 512; ++repeat) {
+        CHECK(wirehair_decode(
+            decoder, 0, systematic_packet.data(), written) ==
+            Wirehair_NeedMore);
+    }
+    CHECK(internal->TestingDecoderRowCount() == 1);
+    CHECK(internal->TestingReceivedPacketCount() == 1);
+
+    std::vector<uint8_t> conflict = systematic_packet;
+    conflict[3] ^= 0x80;
+    CHECK(wirehair_decode(
+        decoder, 0, conflict.data(), written) == Wirehair_InvalidInput);
+    CHECK(wirehair_decode(
+        decoder, 0, conflict.data(), written) == Wirehair_InvalidInput);
+    CHECK(internal->TestingDecoderRowCount() == 1);
+    CHECK(internal->TestingReceivedPacketCount() == 1);
+
+    uint32_t repair_id = block_count + 17;
+    std::vector<uint8_t> repair_packet;
+    const uint32_t before_repair_count =
+        internal->TestingReceivedPacketCount();
+    for (unsigned attempt = 0; attempt < 64; ++attempt, ++repair_id)
+    {
+        packet.assign(block_bytes, uint8_t{0});
+        CHECK(wirehair_encode(
+            encoder, repair_id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        CHECK(wirehair_decode(
+            decoder, repair_id, packet.data(), written) == Wirehair_NeedMore);
+        if (internal->TestingReceivedPacketCount() > before_repair_count) {
+            repair_packet = packet;
+            break;
+        }
+    }
+    CHECK(!repair_packet.empty());
+    if (!repair_packet.empty())
+    {
+        CHECK(wirehair_decode(
+            decoder, repair_id, repair_packet.data(), block_bytes) ==
+            Wirehair_NeedMore);
+        conflict = repair_packet;
+        conflict[0] ^= 1;
+        CHECK(wirehair_decode(
+            decoder, repair_id, conflict.data(), block_bytes) ==
+            Wirehair_InvalidInput);
+    }
+
+    const uint32_t final_id = block_count - 1;
+    packet.assign(block_bytes, uint8_t{0x11});
+    CHECK(wirehair_encode(
+        encoder, final_id, packet.data(), block_bytes, &written) ==
+        Wirehair_Success);
+    CHECK(written == block_bytes - 5);
+    std::vector<uint8_t> final_packet = packet;
+    CHECK(wirehair_decode(
+        decoder, final_id, final_packet.data(), written) ==
+        Wirehair_NeedMore);
+    std::fill(
+        final_packet.begin() + written, final_packet.end(), uint8_t{0xee});
+    CHECK(wirehair_decode(
+        decoder, final_id, final_packet.data(), block_bytes) ==
+        Wirehair_NeedMore);
+    conflict = final_packet;
+    conflict[written - 1] ^= 1;
+    CHECK(wirehair_decode(
+        decoder, final_id, conflict.data(), block_bytes) ==
+        Wirehair_InvalidInput);
+
+    WirehairResult result = Wirehair_NeedMore;
+    for (uint32_t id = 1; id + 1 < block_count && result != Wirehair_Success;
+         ++id)
+    {
+        packet.assign(block_bytes, uint8_t{0});
+        CHECK(wirehair_encode(
+            encoder, id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        result = wirehair_decode(decoder, id, packet.data(), written);
+        CHECK(result == Wirehair_NeedMore || result == Wirehair_Success);
+    }
+    for (uint32_t id = 1000;
+         result == Wirehair_NeedMore && id < 1200;
+         ++id)
+    {
+        packet.assign(block_bytes, uint8_t{0});
+        CHECK(wirehair_encode(
+            encoder, id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        result = wirehair_decode(decoder, id, packet.data(), written);
+        CHECK(result == Wirehair_NeedMore || result == Wirehair_Success);
+    }
+    CHECK(result == Wirehair_Success);
+
+    std::vector<uint8_t> recovered(message.size());
+    CHECK(wirehair_recover(
+        decoder, recovered.data(), recovered.size()) == Wirehair_Success);
+    CHECK(recovered == message);
+    const uint32_t completed_rows = internal->TestingDecoderRowCount();
+    const uint32_t completed_rank = internal->TestingDecoderRank();
+
+    CHECK(wirehair_decode(
+        decoder, 0, systematic_packet.data(), block_bytes) ==
+        Wirehair_Success);
+    std::vector<uint8_t> completed_conflict = systematic_packet;
+    completed_conflict[3] ^= 0x80;
+    CHECK(wirehair_decode(
+        decoder, 0, completed_conflict.data(), block_bytes) ==
+        Wirehair_InvalidInput);
+    CHECK(internal->TestingDecoderRowCount() == completed_rows);
+    CHECK(internal->TestingDecoderRank() == completed_rank);
+
+    std::vector<uint8_t> max_id_packet(block_bytes, uint8_t{0x5a});
+    CHECK(wirehair_decode(
+        decoder, UINT32_MAX, max_id_packet.data(), block_bytes) ==
+        Wirehair_Success);
+    CHECK(wirehair_decode(
+        decoder, UINT32_MAX, max_id_packet.data(), block_bytes) ==
+        Wirehair_Success);
+    max_id_packet[0] ^= 1;
+    CHECK(wirehair_decode(
+        decoder, UINT32_MAX, max_id_packet.data(), block_bytes) ==
+        Wirehair_InvalidInput);
+
+    uint32_t last_id = 0;
+    std::vector<uint8_t> last_packet(block_bytes);
+    for (uint32_t sequence = 0;
+         internal->TestingReceivedPacketCount() < expected_limit;
+         ++sequence)
+    {
+        last_id = UINT32_C(0x40000000) + sequence;
+        for (uint32_t i = 0; i < block_bytes; ++i) {
+            last_packet[i] = static_cast<uint8_t>(
+                last_id * 29u + i * 71u + 3u);
+        }
+        CHECK(wirehair_decode(
+            decoder, last_id, last_packet.data(), block_bytes) ==
+            Wirehair_Success);
+    }
+    CHECK(internal->TestingReceivedPacketCount() == expected_limit);
+    CHECK(internal->TestingDecoderRowCount() == completed_rows);
+    CHECK(internal->TestingDecoderRank() == completed_rank);
+
+    CHECK(wirehair_decode(
+        decoder, last_id, last_packet.data(), block_bytes) ==
+        Wirehair_Success);
+    conflict = last_packet;
+    conflict[5] ^= 1;
+    CHECK(wirehair_decode(
+        decoder, last_id, conflict.data(), block_bytes) ==
+        Wirehair_InvalidInput);
+    CHECK(wirehair_decode(
+        decoder, UINT32_C(0x70000000), last_packet.data(), block_bytes) ==
+        Wirehair_ExtraInsufficient);
+    CHECK(wirehair_decode(
+        decoder, UINT32_C(0x70000000), last_packet.data(), block_bytes) ==
+        Wirehair_ExtraInsufficient);
+    CHECK(wirehair_decode(
+        decoder, 0, systematic_packet.data(), block_bytes) ==
+        Wirehair_Success);
+    CHECK(internal->TestingReceivedPacketCount() == expected_limit);
+    CHECK(internal->TestingDecoderRowCount() == completed_rows);
+    CHECK(internal->TestingDecoderRank() == completed_rank);
+    CHECK(wirehair_recover(
+        decoder, recovered.data(), recovered.size()) == Wirehair_Success);
+    CHECK(recovered == message);
+
+    WirehairCodec reused = nullptr;
+    CHECK(wirehair_decoder_create_ex(
+        decoder, message.size(), block_bytes, &reused) == Wirehair_Success);
+    decoder = nullptr;
+    CHECK(reused != nullptr);
+    if (reused)
+    {
+        const wirehair::Codec* reused_internal =
+            reinterpret_cast<const wirehair::Codec*>(reused);
+        CHECK(reused_internal->TestingReceivedPacketCount() == 0);
+        packet.assign(block_bytes, uint8_t{0});
+        CHECK(wirehair_encode(
+            encoder, 0, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        CHECK(wirehair_decode(
+            reused, 0, packet.data(), written) == Wirehair_NeedMore);
+        CHECK(reused_internal->TestingReceivedPacketCount() == 1);
+    }
+
+    wirehair_free(reused);
+    wirehair_free(decoder);
+    wirehair_free(encoder);
+}
+
+void TestDuplicatePacketDuringExtraResume()
+{
+    const uint32_t block_bytes = 23;
+    const uint32_t block_count = 32;
+    const std::vector<uint8_t> message =
+        MakeMessage(block_bytes * block_count, 67);
+    WirehairCodec encoder = wirehair_encoder_create(
+        nullptr, message.data(), message.size(), block_bytes);
+    CHECK(encoder != nullptr);
+    if (!encoder) {
+        return;
+    }
+
+    WirehairCodec decoder = wirehair_decoder_create(
+        nullptr, message.size(), block_bytes);
+    CHECK(decoder != nullptr);
+    if (!decoder) {
+        wirehair_free(encoder);
+        return;
+    }
+    const wirehair::Codec* internal =
+        reinterpret_cast<const wirehair::Codec*>(decoder);
+
+    // Find two distinct repair IDs that generate exactly the same equation.
+    // Feeding both makes the first N-row solve rank-deficient by construction,
+    // so the next unique packet necessarily exercises extra-row resume.
+    typedef std::pair<uint64_t, uint16_t> ParameterKey;
+    std::map<ParameterKey, uint32_t> seen;
+    uint32_t collision_a = 0;
+    uint32_t collision_b = 0;
+    const uint16_t mix_count =
+        static_cast<uint16_t>(wirehair::GetDenseCount(block_count) + 6);
+    for (uint32_t id = block_count; id < 200000 && collision_a == 0; ++id)
+    {
+        wirehair::PeelRowParameters params;
+        params.Initialize(
+            id, internal->PSeed(), block_count, mix_count);
+        const uint64_t packed =
+            static_cast<uint64_t>(params.PeelCount) |
+            (static_cast<uint64_t>(params.PeelFirst) << 16) |
+            (static_cast<uint64_t>(params.PeelAdd) << 32) |
+            (static_cast<uint64_t>(params.MixFirst) << 48);
+        const ParameterKey key(packed, params.MixAdd);
+        const std::map<ParameterKey, uint32_t>::const_iterator prior =
+            seen.find(key);
+        if (prior != seen.end()) {
+            collision_a = prior->second;
+            collision_b = id;
+        }
+        else {
+            seen.insert(std::make_pair(key, id));
+        }
+    }
+    CHECK(collision_a >= block_count && collision_b > collision_a);
+
+    std::vector<uint8_t> packet(block_bytes);
+    std::vector<uint8_t> collision_packet_a(block_bytes);
+    std::vector<uint8_t> collision_packet_b(block_bytes);
+    uint32_t written = 0;
+    WirehairResult result = Wirehair_NeedMore;
+    for (uint32_t id = 0; id + 2 < block_count; ++id)
+    {
+        CHECK(wirehair_encode(
+            encoder, id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        result = wirehair_decode(decoder, id, packet.data(), written);
+        CHECK(result == Wirehair_NeedMore);
+    }
+    CHECK(wirehair_encode(
+        encoder, collision_a, collision_packet_a.data(), block_bytes,
+        &written) == Wirehair_Success);
+    CHECK(wirehair_decode(
+        decoder, collision_a, collision_packet_a.data(), written) ==
+        Wirehair_NeedMore);
+    CHECK(wirehair_encode(
+        encoder, collision_b, collision_packet_b.data(), block_bytes,
+        &written) == Wirehair_Success);
+    CHECK(collision_packet_a == collision_packet_b);
+    result = wirehair_decode(
+        decoder, collision_b, collision_packet_b.data(), written);
+    CHECK(result == Wirehair_NeedMore);
+    CHECK(internal->TestingDecoderRowCount() == block_count);
+
+    const uint32_t rows_before = internal->TestingDecoderRowCount();
+    const uint32_t rank_before = internal->TestingDecoderRank();
+    const uint32_t packets_before = internal->TestingReceivedPacketCount();
+    for (unsigned repeat = 0; repeat < 256; ++repeat) {
+        CHECK(wirehair_decode(
+            decoder, collision_b, collision_packet_b.data(), block_bytes) ==
+            Wirehair_NeedMore);
+    }
+    CHECK(internal->TestingDecoderRowCount() == rows_before);
+    CHECK(internal->TestingDecoderRank() == rank_before);
+    CHECK(internal->TestingReceivedPacketCount() == packets_before);
+    std::vector<uint8_t> conflict_packet = collision_packet_b;
+    conflict_packet[7] ^= 1;
+    CHECK(wirehair_decode(
+        decoder, collision_b, conflict_packet.data(), block_bytes) ==
+        Wirehair_InvalidInput);
+
+    for (uint32_t id = block_count - 2;
+         id < block_count && result == Wirehair_NeedMore;
+         ++id)
+    {
+        CHECK(wirehair_encode(
+            encoder, id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        result = wirehair_decode(decoder, id, packet.data(), written);
+        CHECK(result == Wirehair_NeedMore || result == Wirehair_Success);
+    }
+    for (uint32_t id = 300000;
+         result == Wirehair_NeedMore && id < 300256;
+         ++id)
+    {
+        CHECK(wirehair_encode(
+            encoder, id, packet.data(), block_bytes, &written) ==
+            Wirehair_Success);
+        result = wirehair_decode(decoder, id, packet.data(), written);
+        CHECK(result == Wirehair_NeedMore || result == Wirehair_Success);
+    }
+    CHECK(result == Wirehair_Success);
+    CHECK(internal->TestingDecoderRowCount() > rows_before);
+    std::vector<uint8_t> recovered(message.size());
+    CHECK(wirehair_recover(
+        decoder, recovered.data(), recovered.size()) == Wirehair_Success);
+    CHECK(recovered == message);
+
+    wirehair_free(decoder);
+    wirehair_free(encoder);
+}
+
+void TestDuplicatePacketActiveCapacity()
+{
+    const uint32_t block_count = 2;
+    const uint32_t block_bytes = 1;
+    const std::vector<uint8_t> message = MakeMessage(block_count, 79);
+    WirehairCodec encoder = wirehair_encoder_create(
+        nullptr, message.data(), message.size(), block_bytes);
+    WirehairCodec decoder = wirehair_decoder_create(
+        nullptr, message.size(), block_bytes);
+    CHECK(encoder != nullptr && decoder != nullptr);
+    if (!encoder || !decoder) {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return;
+    }
+
+    const wirehair::Codec* internal =
+        reinterpret_cast<const wirehair::Codec*>(decoder);
+    const uint32_t limit = block_count + 1024;
+    CHECK(internal->TestingReceivedPacketLimit() == limit);
+    CHECK(internal->TestingReceivedPacketSlots() == 4096);
+    CHECK(internal->TestingReceivedPacketMemoryBytes() ==
+        UINT64_C(4096) * 24);
+
+    const uint16_t mix_count =
+        static_cast<uint16_t>(wirehair::GetDenseCount(block_count) + 6);
+    wirehair::PeelRowParameters target;
+    target.Initialize(2, internal->PSeed(), block_count, mix_count);
+    std::vector<uint32_t> equivalent_ids;
+    equivalent_ids.push_back(2);
+    for (uint32_t id = 3;
+         id < 4000000 && equivalent_ids.size() < limit + 1;
+         ++id)
+    {
+        wirehair::PeelRowParameters params;
+        params.Initialize(
+            id, internal->PSeed(), block_count, mix_count);
+        if (params.PeelCount == target.PeelCount &&
+            params.PeelFirst == target.PeelFirst &&
+            params.PeelAdd == target.PeelAdd &&
+            params.MixFirst == target.MixFirst &&
+            params.MixAdd == target.MixAdd)
+        {
+            equivalent_ids.push_back(id);
+        }
+    }
+    CHECK(equivalent_ids.size() == limit + 1);
+    if (equivalent_ids.size() != limit + 1) {
+        wirehair_free(decoder);
+        wirehair_free(encoder);
+        return;
+    }
+
+    uint8_t packet = 0;
+    uint8_t first_packet = 0;
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < limit; ++i)
+    {
+        CHECK(wirehair_encode(
+            encoder, equivalent_ids[i], &packet, sizeof(packet), &written) ==
+            Wirehair_Success);
+        CHECK(written == 1);
+        if (i == 0) {
+            first_packet = packet;
+        }
+        else {
+            CHECK(packet == first_packet);
+        }
+        CHECK(wirehair_decode(
+            decoder, equivalent_ids[i], &packet, written) ==
+            Wirehair_NeedMore);
+    }
+    CHECK(internal->TestingReceivedPacketCount() == limit);
+    const uint32_t rows = internal->TestingDecoderRowCount();
+    const uint32_t rank = internal->TestingDecoderRank();
+
+    for (unsigned repeat = 0; repeat < 256; ++repeat) {
+        CHECK(wirehair_decode(
+            decoder, equivalent_ids[0], &first_packet, 1) ==
+            Wirehair_NeedMore);
+    }
+    CHECK(internal->TestingDecoderRowCount() == rows);
+    CHECK(internal->TestingDecoderRank() == rank);
+    CHECK(internal->TestingReceivedPacketCount() == limit);
+
+    uint8_t conflict = static_cast<uint8_t>(first_packet ^ 1);
+    CHECK(wirehair_decode(
+        decoder, equivalent_ids[0], &conflict, 1) ==
+        Wirehair_InvalidInput);
+    CHECK(wirehair_decode(
+        decoder, equivalent_ids[limit], &first_packet, 1) ==
+        Wirehair_ExtraInsufficient);
+    CHECK(wirehair_decode(
+        decoder, equivalent_ids[limit], &first_packet, 1) ==
+        Wirehair_ExtraInsufficient);
+    CHECK(wirehair_decode(
+        decoder, equivalent_ids[0], &first_packet, 1) ==
+        Wirehair_NeedMore);
+    CHECK(internal->TestingDecoderRowCount() == rows);
+    CHECK(internal->TestingDecoderRank() == rank);
+    CHECK(internal->TestingReceivedPacketCount() == limit);
+
+    wirehair_free(decoder);
+    wirehair_free(encoder);
+}
+
+void TestEncoderDetachCore()
+{
+    CHECK(wirehair_encoder_detach_input(nullptr) == Wirehair_InvalidInput);
+
+    const uint32_t block_bytes = 31;
+    const uint32_t block_count = 65;
+    const size_t message_bytes = block_bytes * block_count - 7;
+    const std::vector<uint8_t> expected = MakeMessage(message_bytes, 83);
+
+    typedef std::pair<uint32_t, std::vector<uint8_t> > Packet;
+    std::vector<uint32_t> ids;
+    for (uint32_t id = 0; id < block_count; ++id) {
+        ids.push_back(id);
+    }
+    ids.push_back(block_count);
+    ids.push_back(block_count + 1);
+    ids.push_back(block_count + 37);
+    ids.push_back(UINT32_MAX);
+
+    const auto capture = [&](WirehairCodec encoder) {
+        std::vector<Packet> packets;
+        for (uint32_t id : ids)
+        {
+            std::vector<uint8_t> data(block_bytes, uint8_t{0xa5});
+            uint32_t written = 0;
+            CHECK(wirehair_encode(
+                encoder, id, data.data(), data.size(), &written) ==
+                Wirehair_Success);
+            CHECK(written > 0 && written <= block_bytes);
+            data.resize(written);
+            packets.push_back(Packet(id, data));
+        }
+        return packets;
+    };
+    const auto compare = [&](WirehairCodec encoder,
+                             const std::vector<Packet>& packets) {
+        for (const Packet& packet : packets)
+        {
+            std::vector<uint8_t> actual(block_bytes, uint8_t{0x5a});
+            uint32_t written = 0;
+            CHECK(wirehair_encode(
+                encoder, packet.first, actual.data(), actual.size(),
+                &written) == Wirehair_Success);
+            actual.resize(written);
+            CHECK(actual == packet.second);
+        }
+    };
+
+    std::vector<uint8_t> borrowed_source = expected;
+    WirehairCodec borrowed = wirehair_encoder_create(
+        nullptr, borrowed_source.data(), borrowed_source.size(), block_bytes);
+    CHECK(borrowed != nullptr);
+    if (!borrowed) {
+        return;
+    }
+    wirehair::Codec* borrowed_internal =
+        reinterpret_cast<wirehair::Codec*>(borrowed);
+    CHECK(borrowed_internal->TestingRecoveryReady());
+    CHECK(borrowed_internal->TestingInputAttached());
+    CHECK(borrowed_internal->TestingInputAllocatedBytes() == 0);
+    const std::vector<Packet> borrowed_packets = capture(borrowed);
+    CHECK(wirehair_encoder_detach_input(borrowed) == Wirehair_Success);
+    CHECK(wirehair_encoder_detach_input(borrowed) == Wirehair_Success);
+    CHECK(!borrowed_internal->TestingInputAttached());
+    CHECK(borrowed_internal->TestingInputAllocatedBytes() == 0);
+
+    // Release the actual borrowed allocation before asking for any packet.
+    // ASan therefore catches even a systematic fast-path use-after-free.
+    std::fill(borrowed_source.begin(), borrowed_source.end(), uint8_t{0xcc});
+    std::vector<uint8_t>().swap(borrowed_source);
+    compare(borrowed, borrowed_packets);
+
+    WirehairCodec owned = wirehair_encoder_create_owned(
+        nullptr, expected.data(), expected.size(), block_bytes);
+    CHECK(owned != nullptr);
+    if (!owned) {
+        wirehair_free(borrowed);
+        return;
+    }
+    wirehair::Codec* owned_internal =
+        reinterpret_cast<wirehair::Codec*>(owned);
+    CHECK(owned_internal->TestingRecoveryReady());
+    CHECK(owned_internal->TestingInputAttached());
+    CHECK(owned_internal->TestingInputAllocatedBytes() ==
+        static_cast<uint64_t>(block_count) * block_bytes);
+    const std::vector<Packet> owned_packets = capture(owned);
+    CHECK(wirehair_encoder_detach_input(owned) == Wirehair_Success);
+    CHECK(!owned_internal->TestingInputAttached());
+    CHECK(owned_internal->TestingInputAllocatedBytes() == 0);
+    compare(owned, owned_packets);
+
+    wirehair::Codec unmaterialized;
+    CHECK(unmaterialized.InitializeEncoder(message_bytes, block_bytes) ==
+        Wirehair_Success);
+    CHECK(!unmaterialized.TestingRecoveryReady());
+    CHECK(unmaterialized.DetachInput() == Wirehair_InvalidInput);
+
+    WirehairCodec decoder = wirehair_decoder_create(
+        nullptr, expected.size(), block_bytes);
+    CHECK(decoder != nullptr);
+    if (decoder)
+    {
+        wirehair::Codec* decoder_internal =
+            reinterpret_cast<wirehair::Codec*>(decoder);
+        CHECK(wirehair_encoder_detach_input(decoder) == Wirehair_InvalidInput);
+        WirehairResult result = Wirehair_NeedMore;
+        std::vector<uint8_t> packet(block_bytes);
+        for (uint32_t id = 0; id < block_count; ++id)
+        {
+            uint32_t written = 0;
+            CHECK(wirehair_encode(
+                owned, id, packet.data(), packet.size(), &written) ==
+                Wirehair_Success);
+            result = wirehair_decode(
+                decoder, id, packet.data(), written);
+        }
+        CHECK(result == Wirehair_Success);
+        CHECK(decoder_internal->TestingInputAllocatedBytes() ==
+            static_cast<uint64_t>(block_count + CAT_MAX_EXTRA_ROWS) *
+                block_bytes);
+        CHECK(wirehair_encoder_detach_input(decoder) == Wirehair_InvalidInput);
+        CHECK(wirehair_decoder_becomes_encoder(decoder) == Wirehair_Success);
+        CHECK(decoder_internal->TestingRecoveryReady());
+        const std::vector<Packet> converted_packets = capture(decoder);
+        CHECK(wirehair_encoder_detach_input(decoder) == Wirehair_Success);
+        CHECK(!decoder_internal->TestingInputAttached());
+        CHECK(decoder_internal->TestingInputAllocatedBytes() == 0);
+        compare(decoder, converted_packets);
+    }
+
+    std::vector<uint8_t> replacement = MakeMessage(message_bytes, 97);
+    WirehairCodec reused = nullptr;
+    CHECK(wirehair_encoder_create_owned_ex(
+        owned, replacement.data(), replacement.size(), block_bytes,
+        &reused) == Wirehair_Success);
+    owned = nullptr;
+    CHECK(reused != nullptr);
+    if (reused)
+    {
+        wirehair::Codec* reused_internal =
+            reinterpret_cast<wirehair::Codec*>(reused);
+        CHECK(reused_internal->TestingInputAllocatedBytes() ==
+            static_cast<uint64_t>(block_count) * block_bytes);
+        const std::vector<Packet> replacement_packets = capture(reused);
+        CHECK(wirehair_encoder_detach_input(reused) == Wirehair_Success);
+        std::fill(replacement.begin(), replacement.end(), uint8_t{0x33});
+        compare(reused, replacement_packets);
+    }
+
+    wirehair_free(reused);
+    wirehair_free(decoder);
+    wirehair_free(owned);
+    wirehair_free(borrowed);
 }
 
 void TestHighNRecoveryIndex()
@@ -1211,6 +1897,12 @@ void TestHighNRecoveryIndex()
     if (!decoder) {
         return;
     }
+    const wirehair::Codec* internal =
+        reinterpret_cast<const wirehair::Codec*>(decoder);
+    CHECK(internal->TestingReceivedPacketLimit() == block_count + 1024);
+    CHECK(internal->TestingReceivedPacketSlots() == 131072);
+    CHECK(internal->TestingReceivedPacketMemoryBytes() ==
+        UINT64_C(131072) * 24);
     WirehairResult result = Wirehair_NeedMore;
     for (unsigned id = block_count; id-- > 0;) {
         result = wirehair_decode(decoder, id, &message[id], 1);
@@ -1270,6 +1962,60 @@ void BenchmarkOwnedCreationCost()
         message_bytes, borrowed_us, owned_us);
 }
 
+void BenchmarkDetachTradeoff()
+{
+    const uint32_t block_bytes = 1200;
+    const uint32_t block_count = 1024;
+    const std::vector<uint8_t> message =
+        MakeMessage(static_cast<size_t>(block_bytes) * block_count, 101);
+    WirehairCodec encoder = wirehair_encoder_create_owned(
+        nullptr, message.data(), message.size(), block_bytes);
+    CHECK(encoder != nullptr);
+    if (!encoder) {
+        return;
+    }
+    wirehair::Codec* internal = reinterpret_cast<wirehair::Codec*>(encoder);
+    const uint64_t released_bytes = internal->TestingInputAllocatedBytes();
+    std::vector<uint8_t> packet(block_bytes);
+
+    const auto measure = [&](uint64_t& checksum) {
+        checksum = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned repeat = 0; repeat < 2; ++repeat)
+        {
+            for (uint32_t id = 0; id < block_count; ++id)
+            {
+                uint32_t written = 0;
+                CHECK(wirehair_encode(
+                    encoder, id, packet.data(), packet.size(), &written) ==
+                    Wirehair_Success);
+                checksum += packet[0];
+                checksum += packet[written - 1];
+            }
+        }
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+
+    uint64_t attached_checksum = 0;
+    uint64_t detached_checksum = 0;
+    const long long attached_us = measure(attached_checksum);
+    CHECK(wirehair_encoder_detach_input(encoder) == Wirehair_Success);
+    const long long detached_us = measure(detached_checksum);
+    CHECK(attached_checksum == detached_checksum);
+    CHECK(released_bytes == message.size());
+    CHECK(internal->TestingInputAllocatedBytes() == 0);
+    std::printf(
+        "Encoder detach tradeoff (2 x %u systematic, %u bytes): "
+        "attached=%lld us detached=%lld us released=%llu bytes\n",
+        block_count,
+        block_bytes,
+        attached_us,
+        detached_us,
+        static_cast<unsigned long long>(released_bytes));
+    wirehair_free(encoder);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1282,6 +2028,34 @@ int main(int argc, char** argv)
     }
     if (argc == 2 && std::strcmp(argv[1], "--cold-start") == 0) {
         return RunColdStart();
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--duplicates") == 0)
+    {
+        CHECK(wirehair_init() == Wirehair_Success);
+        TestPacketFingerprintVectors();
+        TestDuplicatePacketIdentity();
+        TestDuplicatePacketDuringExtraResume();
+        TestDuplicatePacketActiveCapacity();
+        if (Failures != 0) {
+            std::fprintf(stderr,
+                "Legacy duplicate packet test failed: %d checks\n", Failures);
+            return 1;
+        }
+        std::puts("Legacy duplicate packet test passed");
+        return 0;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--detach") == 0)
+    {
+        CHECK(wirehair_init() == Wirehair_Success);
+        TestEncoderDetachCore();
+        BenchmarkDetachTradeoff();
+        if (Failures != 0) {
+            std::fprintf(stderr,
+                "Legacy encoder detach test failed: %d checks\n", Failures);
+            return 1;
+        }
+        std::puts("Legacy encoder detach test passed");
+        return 0;
     }
 
     TestEnvironmentValue();
@@ -1305,8 +2079,14 @@ int main(int argc, char** argv)
     TestCreationResultsAndBoundaries();
     TestOwnedInputAndRecoverBlock();
     TestLifecycleAndBorrowedMutation();
+    TestPacketFingerprintVectors();
+    TestDuplicatePacketIdentity();
+    TestDuplicatePacketDuringExtraResume();
+    TestDuplicatePacketActiveCapacity();
+    TestEncoderDetachCore();
     TestHighNRecoveryIndex();
     BenchmarkOwnedCreationCost();
+    BenchmarkDetachTradeoff();
 
     if (Failures != 0) {
         std::fprintf(stderr, "Legacy core test failed: %d checks\n", Failures);

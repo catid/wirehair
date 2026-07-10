@@ -31,6 +31,8 @@
 #include "WirehairEnvironment.h"
 #include "WirehairHeavy.h"
 
+#include <atomic>
+#include <chrono>
 #include <climits>
 
 
@@ -87,6 +89,142 @@ static GF256_FORCE_INLINE int Gf256ByteCount(size_t bytes)
     // ChooseMatrix rejects block sizes that exceed the GF256 API's int range.
     CAT_DEBUG_ASSERT(bytes <= static_cast<size_t>(INT_MAX));
     return static_cast<int>(bytes);
+}
+
+static GF256_FORCE_INLINE void SipRound(
+    uint64_t& v0,
+    uint64_t& v1,
+    uint64_t& v2,
+    uint64_t& v3)
+{
+    v0 += v1;
+    v1 = CAT_ROL64(v1, 13);
+    v1 ^= v0;
+    v0 = CAT_ROL64(v0, 32);
+    v2 += v3;
+    v3 = CAT_ROL64(v3, 16);
+    v3 ^= v2;
+    v0 += v3;
+    v3 = CAT_ROL64(v3, 21);
+    v3 ^= v0;
+    v2 += v1;
+    v1 = CAT_ROL64(v1, 17);
+    v1 ^= v2;
+    v2 = CAT_ROL64(v2, 32);
+}
+
+static GF256_FORCE_INLINE uint64_t ReadLittleEndian64(const uint8_t* data)
+{
+    return static_cast<uint64_t>(data[0]) |
+        (static_cast<uint64_t>(data[1]) << 8) |
+        (static_cast<uint64_t>(data[2]) << 16) |
+        (static_cast<uint64_t>(data[3]) << 24) |
+        (static_cast<uint64_t>(data[4]) << 32) |
+        (static_cast<uint64_t>(data[5]) << 40) |
+        (static_cast<uint64_t>(data[6]) << 48) |
+        (static_cast<uint64_t>(data[7]) << 56);
+}
+
+static void PacketFingerprint128(
+    const void* data,
+    uint32_t bytes,
+    uint64_t& hash0,
+    uint64_t& hash1)
+{
+    // Two independent SipHash-2-4 instances are updated in one input pass.
+    // The keys are intentionally fixed: This fingerprint defines duplicate
+    // equality and collision behavior, but is not a MAC or integrity check.
+    const uint64_t key00 = UINT64_C(0x8f3f73b5cf1c9ade);
+    const uint64_t key01 = UINT64_C(0x2d4b6a9817e5c043);
+    const uint64_t key10 = UINT64_C(0xc6a4a7935bd1e995);
+    const uint64_t key11 = UINT64_C(0x9e3779b97f4a7c15);
+
+    uint64_t a0 = UINT64_C(0x736f6d6570736575) ^ key00;
+    uint64_t a1 = UINT64_C(0x646f72616e646f6d) ^ key01;
+    uint64_t a2 = UINT64_C(0x6c7967656e657261) ^ key00;
+    uint64_t a3 = UINT64_C(0x7465646279746573) ^ key01;
+    uint64_t b0 = UINT64_C(0x736f6d6570736575) ^ key10;
+    uint64_t b1 = UINT64_C(0x646f72616e646f6d) ^ key11;
+    uint64_t b2 = UINT64_C(0x6c7967656e657261) ^ key10;
+    uint64_t b3 = UINT64_C(0x7465646279746573) ^ key11;
+
+    const uint8_t* input = static_cast<const uint8_t*>(data);
+    const uint8_t* const end = input + (bytes & ~uint32_t{7});
+    while (input != end)
+    {
+        const uint64_t word = ReadLittleEndian64(input);
+        a3 ^= word;
+        SipRound(a0, a1, a2, a3);
+        SipRound(a0, a1, a2, a3);
+        a0 ^= word;
+        b3 ^= word;
+        SipRound(b0, b1, b2, b3);
+        SipRound(b0, b1, b2, b3);
+        b0 ^= word;
+        input += 8;
+    }
+
+    uint64_t tail = static_cast<uint64_t>(bytes) << 56;
+    const uint32_t tail_bytes = bytes & 7;
+    for (uint32_t i = 0; i < tail_bytes; ++i) {
+        tail |= static_cast<uint64_t>(input[i]) << (i * 8);
+    }
+
+    a3 ^= tail;
+    SipRound(a0, a1, a2, a3);
+    SipRound(a0, a1, a2, a3);
+    a0 ^= tail;
+    a2 ^= UINT64_C(0xff);
+    SipRound(a0, a1, a2, a3);
+    SipRound(a0, a1, a2, a3);
+    SipRound(a0, a1, a2, a3);
+    SipRound(a0, a1, a2, a3);
+    hash0 = a0 ^ a1 ^ a2 ^ a3;
+
+    b3 ^= tail;
+    SipRound(b0, b1, b2, b3);
+    SipRound(b0, b1, b2, b3);
+    b0 ^= tail;
+    b2 ^= UINT64_C(0xff);
+    SipRound(b0, b1, b2, b3);
+    SipRound(b0, b1, b2, b3);
+    SipRound(b0, b1, b2, b3);
+    SipRound(b0, b1, b2, b3);
+    hash1 = b0 ^ b1 ^ b2 ^ b3;
+}
+
+static GF256_FORCE_INLINE uint64_t MixPacketIdHash(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31;
+    return value;
+}
+
+static uint64_t NewPacketIdHashSalt(const void* codec)
+{
+    // Bucket placement is process-local and deliberately varies for each
+    // decoder so a remote sender cannot precompute long linear-probe clusters.
+    // This salt is a denial-of-service hardening measure, not a secret key or
+    // an authentication primitive.
+    static std::atomic<uint32_t> sequence(UINT32_C(0x6a09e667));
+    const uint64_t serial = sequence.fetch_add(
+        UINT32_C(0x9e3779b9), std::memory_order_relaxed);
+    const uint64_t ticks = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const uint64_t address = static_cast<uint64_t>(
+        reinterpret_cast<uintptr_t>(codec));
+    return MixPacketIdHash(serial ^ ticks ^ CAT_ROL64(address, 23));
+}
+
+static GF256_FORCE_INLINE uint32_t PacketIdHash(
+    uint32_t id,
+    uint64_t salt)
+{
+    return static_cast<uint32_t>(
+        MixPacketIdHash(static_cast<uint64_t>(id) ^ salt));
 }
 
 
@@ -3808,6 +3946,7 @@ void Codec::GenerateRecoveryBlocks()
     WH_STAGE("AddSubdiagonalValues", AddSubdiagonalValues());
     WH_STAGE("BackSubstituteAboveDiagonal", BackSubstituteAboveDiagonal());
     WH_STAGE("Substitute", Substitute());
+    _recovery_ready = true;
 }
 
 WirehairResult Codec::ResumeSolveMatrix(
@@ -4554,9 +4693,9 @@ void Codec::FreeInput()
         _input_blocks != nullptr)
     {
         SIMDSafeFree(_input_blocks);
-        _input_blocks = nullptr;
     }
 
+    _input_blocks = nullptr;
     _input_allocated = 0;
 }
 
@@ -4696,8 +4835,8 @@ bool Codec::AllocateWorkspace()
     const uint32_t row_count = _block_count + _extra_count;
     const uint32_t column_count = _block_count;
 
-    // Calculate size
-    const uint64_t sizeBytes = peelOffsetBytes
+    // Calculate the base size used by both encoders and decoders.
+    const uint64_t baseSizeBytes = peelOffsetBytes
         + sizeof(PeelRow) * row_count
         + sizeof(PeelColumn) * column_count
         + sizeof(PeelRefs) * column_count
@@ -4705,6 +4844,23 @@ bool Codec::AllocateWorkspace()
         + sizeof(uint16_t) * column_count
         + row_count;
 
+    uint32_t received_packet_slots = 0;
+    uint64_t receivedPacketOffsetBytes = baseSizeBytes;
+    uint64_t sizeBytes = baseSizeBytes;
+    if (_received_packet_limit > 0)
+    {
+        received_packet_slots = 1;
+        const uint32_t minimum_slots = _received_packet_limit * 2;
+        while (received_packet_slots < minimum_slots) {
+            received_packet_slots <<= 1;
+        }
+        receivedPacketOffsetBytes = (baseSizeBytes + 7) & ~UINT64_C(7);
+        sizeBytes = receivedPacketOffsetBytes +
+            static_cast<uint64_t>(received_packet_slots) *
+                sizeof(ReceivedPacketRecord);
+    }
+
+    bool fresh_workspace = false;
     if (_workspace_allocated < sizeBytes)
     {
         FreeWorkspace();
@@ -4726,6 +4882,7 @@ bool Codec::AllocateWorkspace()
             return false;
         }
         _workspace_allocated = sizeBytes;
+        fresh_workspace = true;
     }
 
     // Set pointers
@@ -4737,6 +4894,25 @@ bool Codec::AllocateWorkspace()
     _original_row = reinterpret_cast<uint16_t *>(
         _peel_avalanche + column_count );
     _copied_original = reinterpret_cast<uint8_t *>( _original_row + column_count );
+    _received_packet_slots = received_packet_slots;
+    _received_packet_count = 0;
+    if (received_packet_slots > 0)
+    {
+        _received_packets = reinterpret_cast<ReceivedPacketRecord *>(
+            _recovery_blocks + receivedPacketOffsetBytes);
+        // SIMDSafeAllocate uses calloc, so only a reused workspace needs its
+        // prior decoder identities cleared.
+        if (!fresh_workspace) {
+            memset(
+                _received_packets,
+                0,
+                static_cast<size_t>(received_packet_slots) *
+                    sizeof(ReceivedPacketRecord));
+        }
+    }
+    else {
+        _received_packets = nullptr;
+    }
 
     _recovery_rows = recovery_rows;
     _testing_peel_order_hash = UINT64_C(14695981039346656037);
@@ -4770,8 +4946,74 @@ void Codec::FreeWorkspace()
     _peel_avalanche = nullptr;
     _original_row = nullptr;
     _copied_original = nullptr;
+    _received_packets = nullptr;
+    _received_packet_slots = 0;
+    _received_packet_count = 0;
 
     _workspace_allocated = 0;
+}
+
+Codec::ReceivedPacketLookup Codec::FindReceivedPacket(
+    uint32_t block_id,
+    ReceivedPacketRecord *& record_out)
+{
+    record_out = nullptr;
+
+    if (!_received_packets || _received_packet_slots == 0) {
+        return ReceivedPacketLookup::Full;
+    }
+
+    const uint32_t mask = _received_packet_slots - 1;
+    uint32_t slot = PacketIdHash(block_id, _received_id_hash_salt) & mask;
+    for (uint32_t probe = 0; probe < _received_packet_slots; ++probe)
+    {
+        ReceivedPacketRecord* record = &_received_packets[slot];
+        if (!record->Occupied)
+        {
+            record_out = record;
+            return _received_packet_count >= _received_packet_limit ?
+                ReceivedPacketLookup::Full : ReceivedPacketLookup::New;
+        }
+        if (record->BlockId == block_id)
+        {
+            record_out = record;
+            return ReceivedPacketLookup::Existing;
+        }
+        slot = (slot + 1) & mask;
+    }
+
+    return ReceivedPacketLookup::Full;
+}
+
+void Codec::TestingPacketFingerprint128(
+    const void* data,
+    uint32_t bytes,
+    uint64_t& hash0,
+    uint64_t& hash1)
+{
+    PacketFingerprint128(data, bytes, hash0, hash1);
+}
+
+void Codec::RememberReceivedPacket(
+    ReceivedPacketRecord * record,
+    uint32_t block_id,
+    uint64_t hash0,
+    uint64_t hash1)
+{
+    CAT_DEBUG_ASSERT(record != nullptr);
+    CAT_DEBUG_ASSERT(record && !record->Occupied);
+    CAT_DEBUG_ASSERT(_received_packet_count < _received_packet_limit);
+    if (!record || record->Occupied ||
+        _received_packet_count >= _received_packet_limit)
+    {
+        return;
+    }
+
+    record->Hash0 = hash0;
+    record->Hash1 = hash1;
+    record->BlockId = block_id;
+    record->Occupied = 1;
+    ++_received_packet_count;
 }
 
 
@@ -4965,9 +5207,11 @@ WirehairResult Codec::InitializeEncoder(
         // Encoder-specific
         _decode_complete = false;
         _decode_failed = false;
+        _recovery_ready = false;
         _input_final_bytes = partial_final_bytes;
         _output_final_bytes = BlockBytes();
         _extra_count = 0;
+        _received_packet_limit = 0;
         _original_out_of_order = false;
 
         if (!AllocateWorkspace()) {
@@ -5273,6 +5517,23 @@ uint32_t Codec::Encode(
     return copyBytes;
 }
 
+WirehairResult Codec::DetachInput()
+{
+    if (!CanEncode() || !_recovery_ready) {
+        return Wirehair_InvalidInput;
+    }
+
+    // Free owned encoder input or converted-decoder staging.  FreeInput also
+    // nulls a borrowed pointer without attempting to free it.
+    FreeInput();
+
+    // Disable CAT_COPY_FIRST_N's systematic memcpy path.  Future systematic
+    // packets are regenerated from the materialized recovery columns exactly
+    // as they are for a decoder-converted encoder.
+    _original_out_of_order = true;
+    return Wirehair_Success;
+}
+
 
 //// Decoder Mode
 
@@ -5298,6 +5559,7 @@ WirehairResult Codec::InitializeDecoder(
     _row_count = 0;
     _decode_complete = false;
     _decode_failed = false;
+    _recovery_ready = false;
     _output_final_bytes = partial_final_bytes;
 
     // Hack: Prevents row-based ids from causing partial copies when they
@@ -5307,18 +5569,19 @@ WirehairResult Codec::InitializeDecoder(
     _input_final_bytes = BlockBytes();
 
     _extra_count = CAT_MAX_EXTRA_ROWS;
+    _received_packet_limit =
+        static_cast<uint32_t>(_block_count) + kReceivedPacketExtraLimit;
+    _received_id_hash_salt = NewPacketIdHashSalt(this);
 #if defined(CAT_ALL_ORIGINAL)
     _all_original = true;
 #endif
     _original_out_of_order = true;
 
     if (!AllocateInput()) {
-        CAT_DEBUG_BREAK();
         return Wirehair_OOM;
     }
 
     if (!AllocateWorkspace()) {
-        CAT_DEBUG_BREAK();
         return Wirehair_OOM;
     }
 
@@ -5402,25 +5665,52 @@ WirehairResult Codec::DecodeFeed(
         }
     }
 
-    // Once decoding has succeeded, later valid packets cannot improve state.
-    // Avoid resuming GE after the all-original fast path, which has no GE rows.
-    if (_mode == Mode::DecodeComplete || _decode_complete) {
-        return Wirehair_Success;
-    }
-
-    // After a precondition violation detected before GE state existed
-    // (duplicate original blocks on the all-original path), the decoder has
-    // N stored rows but no GE matrix; resuming would write through null maps.
+    // A matrix-only test feed can detect duplicate original rows before GE
+    // state exists.  Mixing that failed test path with payload feeding must
+    // not attempt to resume through null matrix maps.
     if (_decode_failed) {
         _mode = Mode::Failed;
         return Wirehair_InvalidInput;
     }
 
-    if (block_id < _block_count && _original_row[block_id] != LIST_TERM)
+    // Equality for the partial final systematic block covers only bytes that
+    // belong to the message.  Extra caller-buffer bytes have never affected
+    // decoding and intentionally do not affect duplicate identity either.
+    const uint32_t identity_bytes = isFinalBlock ?
+        _output_final_bytes : static_cast<uint32_t>(_block_bytes);
+    ReceivedPacketRecord* packet_record = nullptr;
+    const ReceivedPacketLookup packet_lookup = FindReceivedPacket(
+        block_id,
+        packet_record);
+    if (packet_lookup == ReceivedPacketLookup::Full) {
+        return Wirehair_ExtraInsufficient;
+    }
+
+    // Probe by ID before reading the payload.  In particular, a novel ID at
+    // capacity fails in bounded time even when block_bytes is very large.
+    uint64_t packet_hash0 = 0;
+    uint64_t packet_hash1 = 0;
+    PacketFingerprint128(
+        block_in, identity_bytes, packet_hash0, packet_hash1);
+    if (packet_lookup == ReceivedPacketLookup::Existing)
     {
-        _decode_failed = true;
-        _mode = Mode::Failed;
-        return Wirehair_InvalidInput;
+        if (packet_record->Hash0 != packet_hash0 ||
+            packet_record->Hash1 != packet_hash1)
+        {
+            return Wirehair_InvalidInput;
+        }
+        return _mode == Mode::DecodeComplete || _decode_complete ?
+            Wirehair_Success : Wirehair_NeedMore;
+    }
+
+    // Once decoding has succeeded, later valid packets cannot improve the
+    // matrix, but their first payload still establishes the packet ID's
+    // identity until the documented table limit is reached.
+    if (_mode == Mode::DecodeComplete || _decode_complete)
+    {
+        RememberReceivedPacket(
+            packet_record, block_id, packet_hash0, packet_hash1);
+        return Wirehair_Success;
     }
 
 #if defined(CAT_ALL_ORIGINAL)
@@ -5437,6 +5727,11 @@ WirehairResult Codec::DecodeFeed(
     {
         // Resume GE from this row
         const WirehairResult result = ResumeSolveMatrix(block_id, block_in);
+
+        if (result == Wirehair_Success || result == Wirehair_NeedMore) {
+            RememberReceivedPacket(
+                packet_record, block_id, packet_hash0, packet_hash1);
+        }
 
         if (result == Wirehair_Success) {
             GenerateRecoveryBlocks();
@@ -5486,6 +5781,8 @@ WirehairResult Codec::DecodeFeed(
 
     ++_row_count;
     CAT_DEBUG_ASSERT(_row_count <= _block_count);
+    RememberReceivedPacket(
+        packet_record, block_id, packet_hash0, packet_hash1);
 
     // If not enough blocks yet:
     if (_row_count != _block_count) {
@@ -5497,9 +5794,9 @@ WirehairResult Codec::DecodeFeed(
     if (_all_original) {
         // Check input:
         if (!IsAllOriginalData()) {
-            // Application violated precondition that all inputs must be unique.
-            // SolveMatrix never ran, so no GE state exists; mark the decode
-            // failed so later feeds do not try to resume GE.
+            // Payload identity tracking makes this a defensive consistency
+            // check.  SolveMatrix never ran, so fail closed rather than allow
+            // a later feed to resume through null matrix maps.
             CAT_DEBUG_BREAK();
             _all_original = false;
             _decode_failed = true;
@@ -5542,9 +5839,8 @@ WirehairResult Codec::DecodeFeedMatrixOnly(
         return Wirehair_Success;
     }
 
-    // After a precondition violation detected before GE state existed
-    // (duplicate original blocks on the all-original path), the decoder has
-    // N stored rows but no GE matrix; resuming would write through null maps.
+    // Duplicate original IDs in this payload-free test hook can leave N rows
+    // without GE state; do not attempt to resume through null matrix maps.
     if (_decode_failed) {
         return Wirehair_InvalidInput;
     }

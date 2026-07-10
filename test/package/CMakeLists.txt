@@ -4,7 +4,25 @@ project(wirehair_package_consumer LANGUAGES C CXX)
 option(WIREHAIR_STRICT_WARNINGS
     "Treat compiler warnings as errors for package consumers" OFF)
 
-find_package(wirehair CONFIG REQUIRED)
+if(DEFINED EXPECTED_WIREHAIR_VERSION)
+    find_package(wirehair ${EXPECTED_WIREHAIR_VERSION} EXACT CONFIG REQUIRED)
+    if(NOT wirehair_VERSION VERSION_EQUAL EXPECTED_WIREHAIR_VERSION)
+        message(FATAL_ERROR
+            "CMake package version ${wirehair_VERSION} does not match "
+            "${EXPECTED_WIREHAIR_VERSION}")
+    endif()
+else()
+    find_package(wirehair CONFIG REQUIRED)
+endif()
+get_target_property(
+    wirehair_interface_features
+    wirehair::wirehair
+    INTERFACE_COMPILE_FEATURES)
+if(NOT "cxx_std_11" IN_LIST wirehair_interface_features)
+    message(FATAL_ERROR
+        "wirehair::wirehair does not publish its C++11 header requirement: "
+        "${wirehair_interface_features}")
+endif()
 enable_testing()
 
 add_executable(package_c_consumer consumer.c roundtrip.c)
@@ -13,6 +31,10 @@ target_link_libraries(package_c_consumer PRIVATE wirehair::wirehair)
 add_test(NAME package_c_consumer COMMAND package_c_consumer)
 
 add_executable(package_cpp_consumer consumer.cpp roundtrip.c)
+set_target_properties(package_cpp_consumer PROPERTIES
+    CXX_STANDARD 98
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS OFF)
 target_link_libraries(package_cpp_consumer PRIVATE wirehair::wirehair)
 add_test(NAME package_cpp_consumer COMMAND package_cpp_consumer)
 

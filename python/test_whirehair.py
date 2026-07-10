@@ -6,6 +6,8 @@ import gc
 import io
 import os
 import sys
+import tempfile
+import threading
 import unittest
 import weakref
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,6 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import whirehair as wh
+import wirehair as canonical
 
 
 class FakeFunction:
@@ -38,6 +41,8 @@ class FakeLibrary:
         self.encoder_result = wh.Wirehair_Success
         self.decoder_result = wh.Wirehair_Success
         self.encode_result = wh.Wirehair_Success
+        self.detach_result = wh.Wirehair_Success
+        self.detach_calls = 0
         self.decode_terminal = None
         self.always_need_more = False
         self.recover_result = wh.Wirehair_Success
@@ -48,6 +53,10 @@ class FakeLibrary:
         self.raise_encode = False
         self.raise_recover = False
         self.last_recover_capacity = None
+        self.encode_calls = 0
+        self.recover_calls = 0
+        self.recover_block_calls = 0
+        self.before_encode = None
 
         for name in (
             "wirehair_result_string", "wirehair_init_", "wirehair_encoder_create",
@@ -55,6 +64,7 @@ class FakeLibrary:
             "wirehair_encoder_create_ex", "wirehair_encoder_create_owned",
             "wirehair_encoder_create_owned_ex",
             "wirehair_encoder_create_profile_ex", "wirehair_encode",
+            "wirehair_encoder_detach_input",
             "wirehair_decoder_create", "wirehair_decoder_create_ex",
             "wirehair_decoder_create_profile_ex",
             "wirehair_decode", "wirehair_recover", "wirehair_recover_block",
@@ -139,6 +149,9 @@ class FakeLibrary:
         return ctypes.string_at(state["source"], state["size"])
 
     def _wirehair_encode(self, pointer, block_id, output, capacity, written):
+        self.encode_calls += 1
+        if self.before_encode is not None:
+            self.before_encode()
         if self.raise_encode:
             raise RuntimeError("injected encode exception")
         if self.encode_result != wh.Wirehair_Success:
@@ -155,6 +168,17 @@ class FakeLibrary:
         packet = packet[:number(capacity)]
         ctypes.memmove(output, packet, len(packet))
         ctypes.cast(written, ctypes.POINTER(ctypes.c_uint32))[0] = len(packet)
+        return wh.Wirehair_Success
+
+    def _wirehair_encoder_detach_input(self, pointer):
+        self.detach_calls += 1
+        if self.detach_result != wh.Wirehair_Success:
+            return self.detach_result
+        state = self._state(pointer)
+        if state.get("kind") != "encoder":
+            return wh.Wirehair_InvalidInput
+        state["message"] = self._encoder_message(state)
+        state.pop("source", None)
         return wh.Wirehair_Success
 
     def _wirehair_decoder_create(self, _reuse, size, block):
@@ -194,6 +218,7 @@ class FakeLibrary:
         return b"".join(chunks)[:state["size"]]
 
     def _wirehair_recover(self, pointer, output, size):
+        self.recover_calls += 1
         if self.raise_recover:
             raise RuntimeError("injected recover exception")
         if self.recover_result != wh.Wirehair_Success:
@@ -206,10 +231,12 @@ class FakeLibrary:
         return wh.Wirehair_Success
 
     def _wirehair_recover_block(self, pointer, block_id, output, written):
+        self.recover_block_calls += 1
         state = self._state(pointer)
         return self._recover_block(state, block_id, output, state["block"], written)
 
     def _wirehair_recover_block_ex(self, pointer, block_id, output, capacity, written):
+        self.recover_block_calls += 1
         state = self._state(pointer)
         self.last_recover_capacity = number(capacity)
         return self._recover_block(state, block_id, output, number(capacity), written)
@@ -266,8 +293,20 @@ class BindingTests(unittest.TestCase):
         self.assertIs(self.library.wirehair_decoder_create.restype, ctypes.c_void_p)
         self.assertEqual(ctypes.c_void_p,
                          self.library.wirehair_encoder_create_ex.argtypes[-1]._type_)
+        self.assertEqual(
+            [ctypes.c_void_p],
+            self.library.wirehair_encoder_detach_input.argtypes)
         self.assertEqual("fake result 9", wh.result_string(9, self.library))
         self.assertEqual(16, ctypes.sizeof(wh.WirehairWireProfile))
+
+    def test_canonical_and_compatibility_imports_share_public_objects(self):
+        self.assertEqual("2.0.0", wh.__version__)
+        self.assertEqual(wh.__version__, canonical.__version__)
+        self.assertIs(wh.Encoder, canonical.Encoder)
+        self.assertIs(wh.Decoder, canonical.Decoder)
+        self.assertIs(wh.initialize, canonical.initialize)
+        self.assertEqual(wh.__all__, canonical.__all__)
+        self.assertNotIn("ctypes", wh.__all__)
 
     def test_explicit_wire_profiles(self):
         message = b"abcdefgh"
@@ -300,12 +339,109 @@ class BindingTests(unittest.TestCase):
             raise OSError("not this candidate")
 
         with mock.patch.object(sys, "platform", "win32"), \
-                mock.patch.dict(os.environ, {"WIREHAIR_LIBRARY": ""}), \
+                mock.patch.dict(
+                    os.environ,
+                    {"WIREHAIR_LIBRARY": "", "WIREHAIR_PREFIX": ""}), \
                 mock.patch.object(wh.ctypes.util, "find_library", return_value=None), \
                 mock.patch.object(wh.os.path, "isdir", return_value=False), \
                 mock.patch.object(wh.ctypes, "CDLL", side_effect=load):
             self.assertIs(loaded, wh._load_wirehair())
         self.assertIn(expected, attempted)
+
+    def test_platform_library_names_and_authoritative_overrides(self):
+        self.assertEqual(
+            ("wirehair.dll", "libwirehair.dll"),
+            wh._library_names("win32"))
+        self.assertEqual(
+            ("libwirehair.dylib", "libwirehair.2.dylib"),
+            wh._library_names("darwin"))
+        self.assertEqual(
+            ("libwirehair.so", "libwirehair.so.2"),
+            wh._library_names("linux"))
+
+        intended = os.path.abspath("missing-intended-wirehair.so")
+        with mock.patch.dict(
+                os.environ,
+                {"WIREHAIR_LIBRARY": intended,
+                 "WIREHAIR_PREFIX": "/must/not/fallback"},
+                clear=True), \
+                mock.patch.object(wh.ctypes, "CDLL", side_effect=OSError("missing")) \
+                as load, \
+                mock.patch.object(wh.ctypes.util, "find_library") as find, \
+                self.assertRaisesRegex(OSError, "WIREHAIR_LIBRARY"):
+            wh._load_wirehair()
+        load.assert_called_once_with(intended)
+        find.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.dict(
+                    os.environ,
+                    {"WIREHAIR_LIBRARY": "",
+                     "WIREHAIR_PREFIX": temporary},
+                    clear=True), \
+                mock.patch.object(
+                    wh.ctypes, "CDLL", side_effect=OSError("missing")), \
+                mock.patch.object(wh.ctypes.util, "find_library") as find, \
+                self.assertRaisesRegex(OSError, "WIREHAIR_PREFIX"):
+            wh._load_wirehair()
+        find.assert_not_called()
+
+    def test_authoritative_prefix_finds_nested_platform_library_only(self):
+        loaded = object()
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = os.path.abspath(temporary)
+            nested = os.path.join(
+                prefix, "lib64", "custom", "libwirehair.so.2")
+            os.makedirs(os.path.dirname(nested))
+            with open(nested, "wb"):
+                pass
+            attempted = []
+
+            def load(candidate):
+                attempted.append(candidate)
+                if candidate == nested:
+                    return loaded
+                raise OSError("not this candidate")
+
+            with mock.patch.object(sys, "platform", "linux"), \
+                    mock.patch.dict(
+                        os.environ,
+                        {"WIREHAIR_LIBRARY": "",
+                         "WIREHAIR_PREFIX": prefix},
+                        clear=True), \
+                    mock.patch.object(wh.ctypes, "CDLL", side_effect=load), \
+                    mock.patch.object(wh.ctypes.util, "find_library") as find:
+                self.assertIs(loaded, wh._load_wirehair())
+            self.assertIn(nested, attempted)
+            find.assert_not_called()
+
+    def test_macos_authoritative_prefix_discovers_versioned_dylib(self):
+        loaded = object()
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = os.path.abspath(temporary)
+            expected = os.path.join(
+                prefix, "lib", "libwirehair.2.dylib")
+            os.makedirs(os.path.dirname(expected))
+            with open(expected, "wb"):
+                pass
+
+            def load(candidate):
+                if candidate == expected:
+                    return loaded
+                raise OSError("not this candidate")
+
+            with mock.patch.object(sys, "platform", "darwin"), \
+                    mock.patch.dict(
+                        os.environ,
+                        {"WIREHAIR_LIBRARY": "",
+                         "WIREHAIR_PREFIX": prefix},
+                        clear=True), \
+                    mock.patch.object(wh.ctypes, "CDLL", side_effect=load), \
+                    mock.patch.object(wh.os, "walk") as walk, \
+                    mock.patch.object(wh.ctypes.util, "find_library") as find:
+                self.assertIs(loaded, wh._load_wirehair())
+            walk.assert_not_called()
+            find.assert_not_called()
 
     def test_context_close_double_close_and_finalizer(self):
         encoder = wh.Encoder.create(b"abcdefgh", 4, self.library)
@@ -327,17 +463,220 @@ class BindingTests(unittest.TestCase):
     def test_owned_and_borrowed_encoder_lifetimes(self):
         source = bytearray(b"abcdefgh")
         encoder = wh.Encoder.create(source, 4, self.library, owned=False)
-        del source
-        gc.collect()
         self.assertEqual(b"abcd", encoder.encode(0))
         self.assertTrue(hasattr(encoder, "_borrowed_source"))
+        with self.assertRaises(BufferError):
+            source.extend(b"!")
         encoder.close()
+        self.assertFalse(hasattr(encoder, "_borrowed_source"))
+        source.extend(b"!")
+        self.assertEqual(b"abcdefgh!", bytes(source))
 
         source = bytearray(b"abcdefgh")
         encoder = wh.Encoder.create(source, 4, self.library, owned=True)
         source[:] = b"XXXXXXXX"
         self.assertEqual(b"abcd", encoder.encode(0))
         encoder.close()
+
+    def test_encoder_detach_input_releases_borrow_and_is_idempotent(self):
+        source = bytearray(b"abcdefghij")
+        encoder = wh.Encoder.create(source, 4, self.library, owned=False)
+        self.assertTrue(hasattr(encoder, "_borrowed_source"))
+        self.assertIsNone(encoder.detach_input())
+        self.assertFalse(hasattr(encoder, "_borrowed_source"))
+        source[:] = b"XXXXXXXXXX"
+        self.assertEqual(b"abcd", encoder.encode(0))
+        self.assertEqual(b"ij", encoder.encode(2))
+        self.assertIsNone(encoder.detach_input())
+        self.assertEqual(2, self.library.detach_calls)
+
+        self.library.detach_result = wh.Wirehair_InvalidInput
+        with self.assertRaises(wh.WirehairError):
+            encoder.detach_input()
+        encoder.close()
+        with self.assertRaises(RuntimeError):
+            encoder.detach_input()
+
+    def test_encoder_detach_failure_retains_borrowed_source_pin(self):
+        source = bytearray(b"abcdefghij")
+        encoder = wh.Encoder.create(source, 4, self.library, owned=False)
+        self.library.detach_result = wh.Wirehair_InvalidInput
+        with self.assertRaises(wh.WirehairError):
+            encoder.detach_input()
+        self.assertTrue(hasattr(encoder, "_borrowed_source"))
+        with self.assertRaises(BufferError):
+            source.extend(b"!")
+
+        self.library.detach_result = wh.Wirehair_Success
+        self.assertIsNone(encoder.detach_input())
+        source.extend(b"!")
+        self.assertEqual(b"abcdefghij!", bytes(source))
+        encoder.close()
+
+    def test_reusable_output_buffers_exact_counts_and_tail_preservation(self):
+        message = b"abcdefghij"
+        with wh.Encoder.create(message, 4, self.library) as encoder:
+            packet = bytearray(b"\xa5" * 9)
+            self.assertEqual(4, encoder.encode_into(0, memoryview(packet)[2:]))
+            self.assertEqual(b"\xa5\xa5abcd\xa5\xa5\xa5", bytes(packet))
+
+            final = bytearray(2)
+            self.assertEqual(2, encoder.encode_into(2, final))
+            self.assertEqual(b"ij", bytes(final))
+            final.extend(b"!")
+            self.assertEqual(b"ij!", bytes(final))
+
+            repair = bytearray(b"\xa5" * 8)
+            self.assertEqual(4, encoder.encode_into(3, memoryview(repair)[1:5]))
+            self.assertEqual(b"\xa5", bytes(repair[:1]))
+            self.assertEqual(b"\xa5\xa5\xa5", bytes(repair[5:]))
+
+            with wh.Decoder.create(len(message), 4, self.library) as decoder:
+                self.assertFalse(decoder.decode(0, encoder.encode(0)))
+                self.assertFalse(decoder.decode(1, encoder.encode(1)))
+                self.assertTrue(decoder.decode(2, encoder.encode(2)))
+
+                recovered = bytearray(b"\xa5" * (len(message) + 5))
+                self.assertEqual(len(message), decoder.recover_into(recovered))
+                self.assertEqual(message, bytes(recovered[:len(message)]))
+                self.assertEqual(b"\xa5" * 5, bytes(recovered[len(message):]))
+                recovered.extend(b"!")
+
+                block = bytearray(b"\xa5" * 6)
+                self.assertEqual(
+                    4, decoder.recover_block_into(1, memoryview(block)[1:5]))
+                self.assertEqual(b"\xa5efgh\xa5", bytes(block))
+
+                final_block = bytearray(2)
+                self.assertEqual(
+                    2, decoder.recover_block_into(2, final_block))
+                self.assertEqual(b"ij", bytes(final_block))
+
+                self.assertEqual(message, decoder.recover())
+                self.assertEqual(b"ij", decoder.recover_block(2, capacity=2))
+
+    def test_output_buffer_rejections_happen_before_native_calls(self):
+        message = b"abcdefghij"
+        encoder = wh.Encoder.create(message, 4, self.library)
+        decoder = wh.Decoder.create(len(message), 4, self.library)
+
+        def assert_encode_rejected(output, exception):
+            calls = self.library.encode_calls
+            with self.assertRaises(exception):
+                encoder.encode_into(0, output)
+            self.assertEqual(calls, self.library.encode_calls)
+
+        readonly = memoryview(b"readonly")
+        noncontiguous = memoryview(bytearray(8))[::2]
+        released = memoryview(bytearray(4))
+        released.release()
+        assert_encode_rejected(readonly, TypeError)
+        assert_encode_rejected(noncontiguous, ValueError)
+        assert_encode_rejected(released, ValueError)
+        undersized = bytearray(b"xyz")
+        assert_encode_rejected(undersized, ValueError)
+        self.assertEqual(b"xyz", bytes(undersized))
+        assert_encode_rejected(None, TypeError)
+
+        class HugeView:
+            readonly = False
+            c_contiguous = True
+
+            def __init__(self, size):
+                self.nbytes = size
+
+            def cast(self, _format):
+                return self
+
+        with mock.patch.object(
+                wh, "memoryview", return_value=HugeView(0x100000000),
+                create=True):
+            assert_encode_rejected(object(), OverflowError)
+
+        recover_calls = self.library.recover_calls
+        with self.assertRaises(ValueError):
+            decoder.recover_into(bytearray(len(message) - 1))
+        self.assertEqual(recover_calls, self.library.recover_calls)
+        with mock.patch.object(
+                wh, "memoryview", return_value=HugeView(0x10000000000000000),
+                create=True):
+            with self.assertRaises(OverflowError):
+                decoder.recover_into(object())
+        self.assertEqual(recover_calls, self.library.recover_calls)
+
+        block_calls = self.library.recover_block_calls
+        with self.assertRaises(ValueError):
+            decoder.recover_block_into(0, bytearray(3))
+        with self.assertRaises(ValueError):
+            decoder.recover_block_into(3, bytearray(4))
+        self.assertEqual(block_calls, self.library.recover_block_calls)
+
+        sentinel = bytearray(b"KEEP")
+        encode_calls = self.library.encode_calls
+        encoder.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            encoder.encode_into(0, sentinel)
+        self.assertEqual(b"KEEP", bytes(sentinel))
+        self.assertEqual(encode_calls, self.library.encode_calls)
+
+        decoder.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover_into(bytearray(len(message)))
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            decoder.recover_block_into(0, sentinel)
+
+    def test_output_buffer_is_pinned_only_for_native_call(self):
+        entered = threading.Event()
+        release = threading.Event()
+        output = bytearray(4)
+        errors = []
+
+        def block_native_call():
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("test did not release fake native call")
+
+        self.library.before_encode = block_native_call
+        with wh.Encoder.create(b"abcdefgh", 4, self.library) as encoder:
+            def run_encode():
+                try:
+                    encoder.encode_into(0, output)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run_encode)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                with self.assertRaises(BufferError):
+                    output.extend(b"!")
+            finally:
+                release.set()
+                worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([], errors)
+            self.assertEqual(b"abcd", bytes(output))
+            output.extend(b"!")
+            self.assertEqual(b"abcd!", bytes(output))
+
+    def test_output_buffer_pin_is_released_after_call_exception(self):
+        output = bytearray(4)
+        with wh.Encoder.create(b"abcdefgh", 4, self.library) as encoder:
+            self.library.raise_encode = True
+            with self.assertRaisesRegex(RuntimeError, "injected encode"):
+                encoder.encode_into(0, output)
+            output.extend(b"!")
+            self.assertEqual(5, len(output))
+
+        self.library = FakeLibrary()
+        decoder = self.completed_decoder()
+        recovered = bytearray(8)
+        self.library.raise_recover = True
+        with self.assertRaisesRegex(RuntimeError, "injected recover"):
+            decoder.recover_into(recovered)
+        recovered.extend(b"!")
+        self.assertEqual(9, len(recovered))
+        decoder.close()
 
     def test_decode_recover_block_and_conversion_transfer_ownership(self):
         message = b"abcdefgh"
@@ -348,11 +687,18 @@ class BindingTests(unittest.TestCase):
             self.assertEqual(message, decoder.recover())
             self.assertEqual(b"efgh", decoder.recover_block(1, capacity=4))
             self.assertEqual(4, self.library.last_recover_capacity)
-            with self.assertRaises(wh.WirehairError):
+            calls = self.library.recover_block_calls
+            with self.assertRaises(ValueError):
                 decoder.recover_block(0, capacity=3)
+            self.assertEqual(calls, self.library.recover_block_calls)
             converted_pointer = decoder.pointer.value
             converted = decoder.become_encoder()
             self.assertTrue(decoder.closed)
+            self.assertEqual(b"abcd", converted.encode(0))
+            converted_output = bytearray(4)
+            self.assertEqual(4, converted.encode_into(1, converted_output))
+            self.assertEqual(b"efgh", bytes(converted_output))
+            self.assertIsNone(converted.detach_input())
             self.assertEqual(b"abcd", converted.encode(0))
             decoder.close()
             converted.close()
@@ -651,7 +997,7 @@ class BindingTests(unittest.TestCase):
         self.library.corrupt_recovery = True
         result, _, error = self.run_example(message=b"abcdefgh", block_size=4)
         self.assertEqual(1, result)
-        self.assertIn("differs", error)
+        self.assertIn("digest verification", error)
         self.assertEqual(2, len(self.library.freed))
 
     def test_example_exceptions_and_decoder_creation_failure_cleanup(self):

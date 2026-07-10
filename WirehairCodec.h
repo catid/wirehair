@@ -371,9 +371,45 @@ private:
     /// Boolean: Decoder has already recovered enough rows
     bool _decode_complete = false;
 
-    /// Boolean: Decoder detected a precondition violation (e.g. duplicate
-    /// original blocks) before GE state existed; later feeds must not resume
+    /// Boolean: Recovery columns have been fully materialized and no longer
+    /// depend on source/input staging bytes.
+    bool _recovery_ready = false;
+
+    /// Boolean: Matrix-only test feeding detected duplicate original rows
+    /// before GE state existed; later feeds must not resume
     bool _decode_failed = false;
+
+    /// First-packet-wins identity record for one accepted decoder packet.
+    /// Payload equality is defined by the 128-bit fixed-key fingerprint; this
+    /// is duplicate detection, not integrity checking or authentication.
+    struct ReceivedPacketRecord
+    {
+        uint64_t Hash0;
+        uint64_t Hash1;
+        uint32_t BlockId;
+        uint32_t Occupied;
+    };
+
+    static_assert(sizeof(ReceivedPacketRecord) == 24,
+        "duplicate identity record size is part of the memory bound");
+
+    enum class ReceivedPacketLookup : uint8_t
+    {
+        New,
+        Existing,
+        Full
+    };
+
+    /// Decoder identity table.  The accepted-ID limit is N + 1024 and the
+    /// open-addressed table has the next power-of-two at or above twice that
+    /// limit, keeping successful probes at or below a 50 percent load factor.
+    ReceivedPacketRecord * _received_packets = nullptr;
+    uint32_t _received_packet_slots = 0;
+    uint32_t _received_packet_count = 0;
+    uint32_t _received_packet_limit = 0;
+    uint64_t _received_id_hash_salt = 0;
+
+    enum : uint32_t { kReceivedPacketExtraLimit = 1024 };
 
     /// Public API lifecycle state
     Mode _mode = Mode::Uninitialized;
@@ -1345,6 +1381,15 @@ private:
     bool AllocateWorkspace();
     void FreeWorkspace();
 
+    ReceivedPacketLookup FindReceivedPacket(
+        uint32_t block_id,
+        ReceivedPacketRecord *& record);
+    void RememberReceivedPacket(
+        ReceivedPacketRecord * record,
+        uint32_t block_id,
+        uint64_t hash0,
+        uint64_t hash1);
+
     bool TestingAllowAllocation();
 
 public:
@@ -1395,6 +1440,48 @@ public:
     {
         return _testing_peel_max_depth;
     }
+    GF256_FORCE_INLINE uint32_t TestingDecoderRowCount() const
+    {
+        return _row_count;
+    }
+    GF256_FORCE_INLINE uint32_t TestingDecoderRank() const
+    {
+        return _next_pivot;
+    }
+    GF256_FORCE_INLINE uint32_t TestingReceivedPacketCount() const
+    {
+        return _received_packet_count;
+    }
+    GF256_FORCE_INLINE uint32_t TestingReceivedPacketLimit() const
+    {
+        return _received_packet_limit;
+    }
+    GF256_FORCE_INLINE uint32_t TestingReceivedPacketSlots() const
+    {
+        return _received_packet_slots;
+    }
+    GF256_FORCE_INLINE uint64_t TestingReceivedPacketMemoryBytes() const
+    {
+        return static_cast<uint64_t>(_received_packet_slots) *
+            sizeof(ReceivedPacketRecord);
+    }
+    GF256_FORCE_INLINE uint64_t TestingInputAllocatedBytes() const
+    {
+        return _input_allocated;
+    }
+    GF256_FORCE_INLINE bool TestingInputAttached() const
+    {
+        return _input_blocks != nullptr;
+    }
+    GF256_FORCE_INLINE bool TestingRecoveryReady() const
+    {
+        return _recovery_ready;
+    }
+    static void TestingPacketFingerprint128(
+        const void* data,
+        uint32_t bytes,
+        uint64_t& hash0,
+        uint64_t& hash1);
 
 
     //--------------------------------------------------------------------------
@@ -1444,6 +1531,9 @@ public:
         uint32_t out_buffer_bytes ///< Output buffer bytes
     );
 
+    /// Release borrowed/owned source storage after recovery materialization.
+    WirehairResult DetachInput();
+
 
     //--------------------------------------------------------------------------
     // Decoder API
@@ -1460,8 +1550,10 @@ public:
         This function accumulates the new block in a large staging buffer.
         As soon as N blocks are collected, SolveMatrix() is run.
         After N blocks, ResumeSolveMatrix() is run.
-        After decoding succeeds, later valid blocks return success without
-        changing decoder state.
+        Accepted packet identities are retained under a bounded first-packet-
+        wins policy.  Identical duplicates never change matrix state.  After
+        decoding succeeds, a new identity is retained and returns success
+        without changing matrix state until the identity limit is reached.
     */
     WirehairResult DecodeFeed(
         const unsigned block_id,

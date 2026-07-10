@@ -411,6 +411,17 @@ WIREHAIR_EXPORT WirehairResult wirehair_encode(
     return Wirehair_Success;
 }
 
+WIREHAIR_EXPORT WirehairResult wirehair_encoder_detach_input(
+    WirehairCodec codec)
+{
+    if (!codec) {
+        return Wirehair_InvalidInput;
+    }
+
+    wirehair::Codec* encoder = reinterpret_cast<wirehair::Codec*>(codec);
+    return encoder->DetachInput();
+}
+
 WIREHAIR_EXPORT WirehairCodec wirehair_decoder_create(
     WirehairCodec reuseOpt, ///< Codec object to reuse
     uint64_t  messageBytes, ///< Bytes in the message to decode

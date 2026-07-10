@@ -53,15 +53,26 @@
 //------------------------------------------------------------------------------
 // Platform/Architecture
 
-#if defined(__ARM_ARCH) || defined(__ARM_NEON) || defined(__ARM_NEON__)
-    #if !defined IOS
-        #define LINUX_ARM
-    #endif
+// The optimized non-ARM implementation requires SSE2.  Treat every other
+// target (including baseline i686 and less common RISC architectures) as a
+// portable scalar target instead of assuming that "not ARM" means x86/SSE2.
+#if defined(ANDROID) || defined(IOS)
+    #define GF256_TARGET_MOBILE
+#elif defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64) || \
+    (defined(__i386__) && defined(__SSE2__)) || \
+    (defined(_M_IX86) && defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+    #define GF256_TARGET_X86_SIMD
+#else
+    #define GF256_TARGET_MOBILE
 #endif
 
-#if defined(ANDROID) || defined(IOS) || defined(LINUX_ARM) || defined(__powerpc__) || defined(__s390__)
-    #define GF256_TARGET_MOBILE
-#endif // ANDROID
+// Linux ARM runtime feature probing uses ELF auxiliary vectors.  Do not infer
+// Linux merely from the ARM ISA: Apple arm64 has NEON but no Linux headers.
+#if defined(__linux__) && \
+    (defined(__arm__) || defined(__aarch64__) || defined(__ARM_ARCH) || \
+     defined(__ARM_NEON) || defined(__ARM_NEON__))
+    #define LINUX_ARM
+#endif
 
 #if defined(__AVX2__) && (!defined (_MSC_VER) || _MSC_VER >= 1900)
     #define GF256_TRY_AVX2 /* 256-bit */

@@ -15,7 +15,8 @@ find_package(Threads REQUIRED)
 
 option(BUILD_SHARED_LIBS "Build Wirehair as a shared library" OFF)
 option(BUILD_TESTS "Build and register the correctness tests" ON)
-option(BUILD_CODEC_V2 "Build the isolated v2 codec scaffold" ON)
+option(BUILD_CODEC_V2
+    "Build internal V2 tests, fuzz targets, benchmarks, and tools" ON)
 option(MARCH_NATIVE "Tune Wirehair for the build host (non-portable)" OFF)
 option(WIREHAIR_BUILD_BOTH "Build both static and shared library variants" OFF)
 option(WIREHAIR_STATIC_PIC
@@ -26,6 +27,8 @@ option(WIREHAIR_BUILD_BENCHMARKS
     "Include benchmark executables in the default build" OFF)
 option(WIREHAIR_ENABLE_SCHEDULED_TESTS
     "Register resource-bounded scheduled large-message profiles" OFF)
+option(WIREHAIR_ENABLE_LIBFUZZER
+    "Build V2 fuzz entry points with Clang libFuzzer main/coverage" OFF)
 option(WIREHAIR_STRICT_WARNINGS
     "Treat compiler warnings as errors for Wirehair targets" OFF)
 set(WH_LTO "OFF" CACHE STRING "Link-time optimization mode: OFF, ON, AUTO, or THIN")
@@ -34,9 +37,62 @@ set(WH_PGO_MODE "OFF" CACHE STRING "Profile-guided optimization mode: OFF, GENER
 set_property(CACHE WH_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
 set(WH_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Profile data directory for WH_PGO_MODE")
 
+set(WIREHAIR_ELF_EXPORT_MAP
+    "${PROJECT_SOURCE_DIR}/abi/wirehair.map")
+set(WIREHAIR_MACHO_EXPORT_LIST "")
+if(APPLE)
+    # Keep ELF, PE, and Mach-O on the same versioned C-ABI source of truth.
+    # Darwin's linker expects leading underscores in its exported-symbol list.
+    file(STRINGS "${WIREHAIR_ELF_EXPORT_MAP}"
+        _wirehair_export_lines REGEX "^[ \t]*wirehair_[A-Za-z0-9_]+;")
+    if(NOT _wirehair_export_lines)
+        message(FATAL_ERROR
+            "No public symbols found in ${WIREHAIR_ELF_EXPORT_MAP}")
+    endif()
+    set(WIREHAIR_MACHO_EXPORT_LIST
+        "${CMAKE_CURRENT_BINARY_DIR}/wirehair-macho.exports")
+    file(WRITE "${WIREHAIR_MACHO_EXPORT_LIST}" "")
+    foreach(_wirehair_export_line IN LISTS _wirehair_export_lines)
+        string(STRIP "${_wirehair_export_line}" _wirehair_export_line)
+        if(NOT _wirehair_export_line MATCHES
+           "^wirehair_[A-Za-z0-9_]+;$")
+            message(FATAL_ERROR
+                "Malformed public export: '${_wirehair_export_line}'")
+        endif()
+        string(REGEX REPLACE ";$" "" _wirehair_export_symbol
+            "${_wirehair_export_line}")
+        file(APPEND "${WIREHAIR_MACHO_EXPORT_LIST}"
+            "_${_wirehair_export_symbol}\n")
+    endforeach()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${WIREHAIR_ELF_EXPORT_MAP}")
+endif()
+
+set(WIREHAIR_V2_PUBLIC_SOURCE_FILES
+        codec/WirehairV2Codec.cpp
+        codec/WirehairV2Codec.h
+        codec/WirehairV2Peel.cpp
+        codec/WirehairV2Peel.h
+        codec/WirehairV2Plan.cpp
+        codec/WirehairV2Plan.h
+        codec/WirehairV2Policy.cpp
+        codec/WirehairV2Policy.h
+        codec/WirehairV2Precode.cpp
+        codec/WirehairV2Precode.h
+        codec/WirehairV2PrecodeDecode.cpp
+        codec/WirehairV2PrecodeDecode.h
+        codec/WirehairV2PrecodeEncode.cpp
+        codec/WirehairV2PrecodeEncode.h
+        codec/WirehairV2Profile.cpp
+        codec/WirehairV2Seeds.cpp
+        codec/WirehairV2Seeds.h
+        codec/WirehairV2Solve.cpp
+        codec/WirehairV2Solve.h)
+
 set(LIB_SOURCE_FILES
         wirehair.cpp
         include/wirehair/wirehair.h
+        include/wirehair/wirehair.hpp
         gf256.cpp
         gf256.h
         WirehairCodec.cpp
@@ -46,6 +102,7 @@ set(LIB_SOURCE_FILES
         WirehairHeavy.h
         WirehairTools.cpp
         WirehairTools.h
+        ${WIREHAIR_V2_PUBLIC_SOURCE_FILES}
         )
 
 set(UNIT_TEST_SOURCE_FILES
@@ -184,11 +241,37 @@ function(wirehair_configure_library target variant)
     target_include_directories(${target} PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    # The installed C++ convenience header uses C++11 language/library
+    # features.  Publish that requirement so consumers are upgraded even when
+    # their project starts from an older CXX_STANDARD.
+    target_compile_features(${target} PUBLIC cxx_std_11)
     target_link_libraries(${target} PRIVATE Threads::Threads)
+    if(UNIX)
+        # The public V2 policy uses libm.  Static archives must publish that
+        # dependency to CMake consumers; shared objects resolve it themselves
+        # without making downstream applications overlink it.
+        if(variant STREQUAL "STATIC")
+            target_link_libraries(${target} PUBLIC m)
+        else()
+            target_link_libraries(${target} PRIVATE m)
+        endif()
+    endif()
     if(variant STREQUAL "SHARED")
         target_compile_definitions(${target}
             PRIVATE WIREHAIR_BUILDING=1 WIREHAIR_DLL=1
             INTERFACE WIREHAIR_DLL=1)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_link_options(${target} PRIVATE
+                "LINKER:--version-script=${WIREHAIR_ELF_EXPORT_MAP}")
+            set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+                "${WIREHAIR_ELF_EXPORT_MAP}")
+        elseif(APPLE)
+            target_link_options(${target} PRIVATE
+                "LINKER:-exported_symbols_list,${WIREHAIR_MACHO_EXPORT_LIST}")
+            set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+                "${WIREHAIR_ELF_EXPORT_MAP}"
+                "${WIREHAIR_MACHO_EXPORT_LIST}")
+        endif()
     else()
         target_compile_definitions(${target}
             PRIVATE WIREHAIR_BUILDING=1
@@ -300,6 +383,14 @@ if (BUILD_TESTS)
     add_test(NAME legacy_core_preinit_test COMMAND legacy_core_test --preinit)
     add_test(NAME legacy_core_init_failure_test COMMAND legacy_core_test --init-failure)
     add_test(NAME legacy_core_cold_start_test COMMAND legacy_core_test --cold-start)
+    add_test(NAME legacy_duplicate_packet_test COMMAND legacy_core_test --duplicates)
+    set_tests_properties(legacy_duplicate_packet_test PROPERTIES
+        LABELS "decoder;duplicates;networking;e2e"
+        TIMEOUT 120)
+    add_test(NAME legacy_encoder_detach_test COMMAND legacy_core_test --detach)
+    set_tests_properties(legacy_encoder_detach_test PROPERTIES
+        LABELS "encoder;lifetime;memory;e2e"
+        TIMEOUT 120)
 
     add_executable(peel_avalanche_test test/PeelAvalancheTest.cpp)
     wirehair_apply_project_options(peel_avalanche_test)
@@ -325,6 +416,28 @@ if (BUILD_TESTS)
     set_tests_properties(heavy_window_test PROPERTIES
         LABELS "heavy;portability;property")
 
+    add_executable(portability_roundtrip_test
+        test/PortabilityRoundTripTest.cpp)
+    wirehair_apply_project_options(portability_roundtrip_test)
+    target_link_libraries(portability_roundtrip_test wirehair)
+    add_test(NAME portability_roundtrip_test
+        COMMAND portability_roundtrip_test)
+    set_tests_properties(portability_roundtrip_test PROPERTIES
+        LABELS "portability;golden;e2e"
+        TIMEOUT 60)
+
+    add_executable(allocation_overflow_test test/AllocationOverflowTest.cpp)
+    wirehair_apply_project_options(allocation_overflow_test)
+    target_compile_definitions(allocation_overflow_test
+        PRIVATE WIREHAIR_TESTING=1)
+    target_link_libraries(allocation_overflow_test
+        wirehair_test_support Threads::Threads)
+    add_test(NAME allocation_overflow_test COMMAND allocation_overflow_test)
+    set_tests_properties(allocation_overflow_test PROPERTIES
+        LABELS "allocation;memory-safety;32-bit"
+        ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=1:halt_on_error=1:strict_string_checks=1;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
+        TIMEOUT 60)
+
     add_executable(legacy_c_consumer test/LegacyCConsumer.c)
     set_target_properties(legacy_c_consumer PROPERTIES LINKER_LANGUAGE CXX)
     wirehair_apply_project_options(legacy_c_consumer)
@@ -340,6 +453,40 @@ if (BUILD_TESTS)
         wirehair_apply_project_options(legacy_c_consumer_shared)
         target_link_libraries(legacy_c_consumer_shared wirehair_shared)
         add_test(NAME legacy_c_consumer_shared_test COMMAND legacy_c_consumer_shared)
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(WIREHAIR_ELF_SHARED_TARGET "")
+        if(WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+            set(WIREHAIR_ELF_SHARED_TARGET wirehair)
+        elseif(TARGET wirehair_shared)
+            set(WIREHAIR_ELF_SHARED_TARGET wirehair_shared)
+        endif()
+        if(WIREHAIR_ELF_SHARED_TARGET)
+            add_test(
+                NAME elf_public_exports
+                COMMAND ${CMAKE_COMMAND}
+                    -DLIBRARY=$<TARGET_FILE:${WIREHAIR_ELF_SHARED_TARGET}>
+                    -DMANIFEST=${WIREHAIR_ELF_EXPORT_MAP}
+                    -DNM=${CMAKE_NM}
+                    -P ${PROJECT_SOURCE_DIR}/test/cmake/CheckElfExports.cmake)
+            set_tests_properties(elf_public_exports PROPERTIES
+                LABELS "abi;elf;exports"
+                TIMEOUT 30)
+            add_test(
+                NAME elf_public_exports_negative
+                COMMAND ${CMAKE_COMMAND}
+                    -DCHECKER=${PROJECT_SOURCE_DIR}/test/cmake/CheckElfExports.cmake
+                    -DLIBRARY=$<TARGET_FILE:${WIREHAIR_ELF_SHARED_TARGET}>
+                    -DMANIFEST=${WIREHAIR_ELF_EXPORT_MAP}
+                    -DNM=${CMAKE_NM}
+                    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/elf-export-negative
+                    -P ${PROJECT_SOURCE_DIR}/test/cmake/CheckElfExportsSelfTest.cmake)
+            set_tests_properties(elf_public_exports_negative PROPERTIES
+                DEPENDS elf_public_exports
+                LABELS "abi;elf;exports;negative"
+                TIMEOUT 30)
+        endif()
     endif()
 
     add_executable(large_message_test ${LARGE_MESSAGE_TEST_SOURCE_FILES})
@@ -437,13 +584,15 @@ endif()
 # These targets remain directly buildable even when excluded from `all`.
 find_package(OpenMP QUIET)
 set(WIREHAIR_INTERNAL_LIBRARY wirehair)
-if(WIN32 AND WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+if(WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
     if(TARGET wirehair_static)
         set(WIREHAIR_INTERNAL_LIBRARY wirehair_static)
     else()
-        # The DLL exposes the public C ABI only; V2 and offline generators use
-        # internal C++ codec types.  Their support stays out of routine builds
-        # unless an internal target needs it.
+        # Shared libraries expose the public C ABI only.  V2 and offline
+        # generators use internal C++ codec types, so give those targets an
+        # explicit static implementation rather than relying on leaked DSO
+        # symbols.  It stays out of routine builds unless an internal target
+        # needs it.
         add_library(wirehair_internal_support STATIC EXCLUDE_FROM_ALL
             ${LIB_SOURCE_FILES})
         wirehair_configure_library(wirehair_internal_support STATIC)
@@ -484,10 +633,72 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 # package also contains a shared library that it can load at runtime.
 if(BUILD_SHARED_LIBS OR WIREHAIR_BUILD_BOTH)
     install(FILES python/whirehair.py DESTINATION python)
+    install(DIRECTORY python/wirehair DESTINATION python
+        FILES_MATCHING
+        PATTERN "*.py"
+        PATTERN "__pycache__" EXCLUDE)
 endif()
 
 set(WIREHAIR_PACKAGE_INSTALL_DIR
     "${CMAKE_INSTALL_LIBDIR}/cmake/wirehair")
+
+# Generate a relocatable pkg-config file beside the installed library.  The
+# path from <libdir>/pkgconfig back to the prefix depends on how deeply a
+# caller nests CMAKE_INSTALL_LIBDIR, so calculate it instead of assuming
+# "lib/pkgconfig".
+set(WIREHAIR_PKGCONFIG_INSTALL_DIR
+    "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+if(IS_ABSOLUTE "${WIREHAIR_PKGCONFIG_INSTALL_DIR}")
+    set(WIREHAIR_PC_PREFIX "${CMAKE_INSTALL_PREFIX}")
+    set(WIREHAIR_PC_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
+else()
+    file(RELATIVE_PATH WIREHAIR_PC_PREFIX_RELATIVE
+        "/${WIREHAIR_PKGCONFIG_INSTALL_DIR}" "/")
+    set(WIREHAIR_PC_PREFIX
+        "\${pcfiledir}/${WIREHAIR_PC_PREFIX_RELATIVE}")
+    set(WIREHAIR_PC_LIBDIR "\${pcfiledir}/..")
+endif()
+if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(WIREHAIR_PC_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
+else()
+    set(WIREHAIR_PC_INCLUDEDIR
+        "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
+
+# Static consumers compiling as C must pull in the C++ runtime, threading, and
+# math libraries used by the implementation.  Keep those dependencies private
+# for shared/dual installs; a static-only install exposes them in Libs because
+# even plain `--libs` can only select the archive in that package.
+list(FIND CMAKE_CXX_IMPLICIT_LINK_LIBRARIES "stdc++"
+    WIREHAIR_PC_LIBSTDCXX_INDEX)
+list(FIND CMAKE_CXX_IMPLICIT_LINK_LIBRARIES "c++"
+    WIREHAIR_PC_LIBCXX_INDEX)
+if(NOT WIREHAIR_PC_LIBSTDCXX_INDEX EQUAL -1)
+    set(WIREHAIR_PC_RUNTIME_LIBS "-lstdc++ -pthread -lm")
+elseif(NOT WIREHAIR_PC_LIBCXX_INDEX EQUAL -1)
+    set(WIREHAIR_PC_RUNTIME_LIBS "-lc++ -pthread -lm")
+elseif(APPLE)
+    set(WIREHAIR_PC_RUNTIME_LIBS "-lc++ -pthread -lm")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
+    set(WIREHAIR_PC_RUNTIME_LIBS "-lstdc++ -pthread -lm")
+elseif(UNIX OR MINGW)
+    message(FATAL_ERROR
+        "Cannot determine the C++ runtime needed by static pkg-config users; "
+        "implicit libraries are '${CMAKE_CXX_IMPLICIT_LINK_LIBRARIES}'")
+else()
+    set(WIREHAIR_PC_RUNTIME_LIBS "")
+endif()
+if(NOT BUILD_SHARED_LIBS AND NOT WIREHAIR_BUILD_BOTH)
+    set(WIREHAIR_PC_PUBLIC_RUNTIME_LIBS "${WIREHAIR_PC_RUNTIME_LIBS}")
+    set(WIREHAIR_PC_PRIVATE_RUNTIME_LIBS "")
+else()
+    set(WIREHAIR_PC_PUBLIC_RUNTIME_LIBS "")
+    set(WIREHAIR_PC_PRIVATE_RUNTIME_LIBS "${WIREHAIR_PC_RUNTIME_LIBS}")
+endif()
+configure_file(
+    cmake/wirehair.pc.in
+    "${CMAKE_CURRENT_BINARY_DIR}/wirehair.pc"
+    @ONLY)
 configure_package_config_file(
     cmake/wirehairConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/wirehairConfig.cmake"
@@ -504,9 +715,18 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/wirehairConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/wirehairConfigVersion.cmake"
     DESTINATION "${WIREHAIR_PACKAGE_INSTALL_DIR}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/wirehair.pc"
+    DESTINATION "${WIREHAIR_PKGCONFIG_INSTALL_DIR}")
+install(FILES LICENSE
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/wirehair")
+install(FILES
+    LEGACY_WIRE_PROFILES.md
+    V2_WIRE_PROFILE.md
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/wirehair")
 
 if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
+    find_package(PkgConfig QUIET)
     get_property(WIREHAIR_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     foreach(_wirehair_package_variant IN ITEMS static shared both)
         if(_wirehair_package_variant STREQUAL "shared")
@@ -536,10 +756,15 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 -DTEST_BOTH=${_wirehair_package_both}
                 -DTEST_CONFIG=${_wirehair_package_config}
                 -DTEST_STRICT=${WIREHAIR_STRICT_WARNINGS}
+                -DTEST_NM=${CMAKE_NM}
+                -DTEST_PKG_CONFIG=${PKG_CONFIG_EXECUTABLE}
+                -DTEST_PROJECT_VERSION=${PROJECT_VERSION}
                 -DTEST_PYTHON_EXECUTABLE=${Python3_EXECUTABLE}
                 -P ${PROJECT_SOURCE_DIR}/test/package/RunPackageE2E.cmake)
         set_tests_properties(package_${_wirehair_package_variant}_e2e
-            PROPERTIES TIMEOUT 240)
+            PROPERTIES
+                TIMEOUT 240
+                LABELS "package;cmake;e2e;ci-once")
     endforeach()
     if(UNIX AND NOT MSVC)
         if(APPLE)
@@ -572,6 +797,6 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
         set_tests_properties(build_policy_e2e PROPERTIES
             TIMEOUT 240
             RUN_SERIAL TRUE
-            LABELS "build;cmake;e2e")
+            LABELS "build;cmake;e2e;ci-once")
     endif()
 endif()

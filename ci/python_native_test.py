@@ -2,6 +2,7 @@
 """Native-library E2E for the installed ctypes binding."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import os
 from pathlib import Path
@@ -39,6 +40,18 @@ def expect_value_error(function, required_text):
                 (required_text, error))
     else:
         raise AssertionError("expected wrapper validation to fail")
+
+
+def expect_exception(exception_type, function, required_text):
+    try:
+        function()
+    except exception_type as error:
+        if required_text not in str(error):
+            raise AssertionError(
+                "validation error did not contain %r: %s" %
+                (required_text, error))
+    else:
+        raise AssertionError("expected %s" % exception_type.__name__)
 
 
 def expect_memory_error(function, required_text):
@@ -269,15 +282,46 @@ def main():
             mutable, block_bytes, library=library, owned=True,
             profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as encoder:
         mutable[:] = b"\0" * len(mutable)
+        final_expected = original[(block_count - 1) * block_bytes:]
+        final_output = bytearray(len(final_expected))
+        if (encoder.encode_into(block_count - 1, final_output) !=
+                len(final_expected) or bytes(final_output) != final_expected):
+            raise AssertionError("exact-size final systematic encode_into failed")
+        final_output.extend(b"!")
+
+        guarded_packet = bytearray(b"\xa5" * (block_bytes + 4))
+        packet_view = memoryview(guarded_packet)[2:2 + block_bytes]
+        if encoder.encode_into(block_count + 7, packet_view) != block_bytes:
+            raise AssertionError("repair encode_into returned the wrong count")
+        if (guarded_packet[:2] != b"\xa5\xa5" or
+                guarded_packet[-2:] != b"\xa5\xa5"):
+            raise AssertionError("encode_into modified bytes outside its view")
+        packet_view.release()
+        guarded_packet.extend(b"!")
+
+        expect_exception(
+            TypeError, lambda: encoder.encode_into(0, bytes(block_bytes)),
+            "writable")
+        noncontiguous = memoryview(bytearray(block_bytes * 2))[::2]
+        expect_value_error(
+            lambda: encoder.encode_into(0, noncontiguous), "contiguous")
+        noncontiguous.release()
+        released = memoryview(bytearray(block_bytes))
+        released.release()
+        expect_value_error(
+            lambda: encoder.encode_into(0, released), "released")
+        too_small = bytearray(b"K" * (block_bytes - 1))
+        expect_value_error(
+            lambda: encoder.encode_into(0, too_small), "at least")
+        if too_small != b"K" * (block_bytes - 1):
+            raise AssertionError("rejected encode_into buffer was modified")
+
         with wh.Decoder.create(
                 len(original), block_bytes, library=library,
                 profile_id=wh.WIREHAIR_LEGACY_PROFILE_CURRENT) as decoder:
-            expect_wirehair_error(
-                wh,
-                "wirehair_encode",
-                wh.Wirehair_InvalidInput,
+            expect_value_error(
                 lambda: encoder.encode(0, capacity=block_bytes - 1),
-            )
+                "at least")
             expect_wirehair_error(
                 wh,
                 "wirehair_recover",
@@ -314,11 +358,48 @@ def main():
             if decoder.recover() != original:
                 raise AssertionError("native full-message recovery mismatch")
 
+            guarded_message = bytearray(b"\xa5" * (len(original) + 9))
+            if decoder.recover_into(guarded_message) != len(original):
+                raise AssertionError("recover_into returned the wrong count")
+            if (bytes(guarded_message[:len(original)]) != original or
+                    guarded_message[len(original):] != b"\xa5" * 9):
+                raise AssertionError("recover_into data or tail mismatch")
+            guarded_message.extend(b"!")
+
+            short_recovery = bytearray(b"K" * (len(original) - 1))
+            expect_value_error(
+                lambda: decoder.recover_into(short_recovery), "at least")
+            if short_recovery != b"K" * (len(original) - 1):
+                raise AssertionError("rejected recover_into buffer was modified")
+
             for block_id in (0, block_count // 2, block_count - 1):
                 expected = original[block_id * block_bytes:(block_id + 1) * block_bytes]
                 actual = decoder.recover_block(block_id, capacity=len(expected))
                 if actual != expected:
                     raise AssertionError("native block recovery mismatch at %d" % block_id)
+                guarded = bytearray(b"\xa5" * (len(expected) + 4))
+                view = memoryview(guarded)[2:2 + len(expected)]
+                if decoder.recover_block_into(block_id, view) != len(expected):
+                    raise AssertionError(
+                        "recover_block_into count mismatch at %d" % block_id)
+                if (bytes(view) != expected or guarded[:2] != b"\xa5\xa5" or
+                        guarded[-2:] != b"\xa5\xa5"):
+                    raise AssertionError(
+                        "recover_block_into guard mismatch at %d" % block_id)
+                view.release()
+                guarded.extend(b"!")
+
+            rejected_block = bytearray(b"K" * (block_bytes - 1))
+            expect_value_error(
+                lambda: decoder.recover_block_into(0, rejected_block),
+                "at least")
+            if rejected_block != b"K" * (block_bytes - 1):
+                raise AssertionError(
+                    "rejected recover_block_into buffer was modified")
+            expect_value_error(
+                lambda: decoder.recover_block_into(
+                    block_count, bytearray(block_bytes)),
+                "original block range")
 
             converted = decoder.become_encoder()
             try:
@@ -332,14 +413,84 @@ def main():
                 else:
                     raise AssertionError("closed source decoder remained usable")
                 for block_id in (0, block_count - 1, block_count, block_count + 17):
-                    if converted.encode(block_id) != encoder.encode(block_id):
+                    expected = encoder.encode(block_id)
+                    converted_output = bytearray(len(expected))
+                    written = converted.encode_into(block_id, converted_output)
+                    if (written != len(expected) or
+                            bytes(converted_output) != expected):
                         raise AssertionError(
                             "decoder-to-encoder conversion mismatch at %d" % block_id)
+                converted.detach_input()
+                converted.detach_input()
+                if converted.encode(0) != encoder.encode(0):
+                    raise AssertionError(
+                        "detached converted encoder systematic mismatch")
             finally:
                 converted.close()
 
         exercise_conversion_failure_atomicity(
             wh, library, encoder, original, block_bytes)
+
+    closed_encoder = wh.Encoder.create(
+        original, block_bytes, library=library, owned=True)
+    closed_encoder.close()
+    closed_output = bytearray(b"K" * block_bytes)
+    expect_exception(
+        RuntimeError, lambda: closed_encoder.encode_into(0, closed_output),
+        "closed")
+    if closed_output != b"K" * block_bytes:
+        raise AssertionError("closed encoder modified output")
+
+    close_source = bytearray(original)
+    close_borrowed = wh.Encoder.create(
+        close_source, block_bytes, library=library, owned=False)
+    try:
+        close_source.extend(b"!")
+    except BufferError:
+        pass
+    else:
+        raise AssertionError("borrowed source was not pinned before close")
+    close_borrowed.close()
+    close_source.extend(b"!")
+
+    closed_decoder = wh.Decoder.create(
+        len(original), block_bytes, library=library)
+    closed_decoder.close()
+    expect_exception(
+        RuntimeError,
+        lambda: closed_decoder.recover_into(bytearray(len(original))),
+        "closed")
+    expect_exception(
+        RuntimeError,
+        lambda: closed_decoder.recover_block_into(0, bytearray(block_bytes)),
+        "closed")
+
+    # CDLL calls release the GIL.  Exercise that path with independent codec
+    # instances: Wirehair codec objects themselves still require caller-side
+    # synchronization when shared between threads.
+    reference_ids = tuple(range(block_count, block_count + 32))
+    with wh.Encoder.create(
+            original, block_bytes, library=library, owned=True) as reference:
+        expected_packets = [reference.encode(packet_id)
+                            for packet_id in reference_ids]
+
+    def threaded_encode(worker_id):
+        with wh.Encoder.create(
+                original, block_bytes, library=library, owned=True) as local:
+            output = bytearray(block_bytes)
+            for repeat in range(8):
+                for offset, packet_id in enumerate(reference_ids):
+                    written = local.encode_into(packet_id, output)
+                    if (written != block_bytes or
+                            bytes(output) != expected_packets[offset]):
+                        raise AssertionError(
+                            "thread %d packet mismatch in repeat %d" %
+                            (worker_id, repeat))
+            return worker_id
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        if sorted(executor.map(threaded_encode, range(16))) != list(range(16)):
+            raise AssertionError("threaded native encode result mismatch")
 
     # Exercise the native borrowed-buffer path and the historical equation
     # profile with repair packets only; systematic packets would not
@@ -353,8 +504,24 @@ def main():
     with wh.Encoder.create(
             pre_source, pre_block_bytes, library=library, owned=False,
             profile_id=wh.WIREHAIR_LEGACY_PROFILE_PRE_FIXUP) as pre_encoder:
+        detach_ids = (0, pre_block_count - 1, pre_block_count + 17)
+        before_detach = [pre_encoder.encode(packet_id)
+                         for packet_id in detach_ids]
+        try:
+            pre_source.extend(b"!")
+        except BufferError:
+            pass
+        else:
+            raise AssertionError("borrowed source was not pinned before detach")
+        pre_encoder.detach_input()
+        pre_encoder.detach_input()
+        pre_source[:] = b"\0" * len(pre_source)
+        pre_source.extend(b"!")
+        if [pre_encoder.encode(packet_id) for packet_id in detach_ids] != before_detach:
+            raise AssertionError("detached borrowed encoder changed packets")
+
         with wh.Decoder.create(
-                len(pre_source), pre_block_bytes, library=library,
+                len(pre_expected), pre_block_bytes, library=library,
                 profile_id=wh.WIREHAIR_LEGACY_PROFILE_PRE_FIXUP) as pre_decoder:
             pre_complete = False
             for packet_id in range(

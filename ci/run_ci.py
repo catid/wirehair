@@ -2,6 +2,7 @@
 """Reusable local entry points for Wirehair's CI lanes."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -12,26 +13,54 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WIREHAIR_C_API_EXPORTS = frozenset({
-    "wirehair_decode",
-    "wirehair_decoder_becomes_encoder",
-    "wirehair_decoder_create",
-    "wirehair_decoder_create_ex",
-    "wirehair_decoder_create_profile_ex",
-    "wirehair_encode",
-    "wirehair_encoder_create",
-    "wirehair_encoder_create_ex",
-    "wirehair_encoder_create_owned",
-    "wirehair_encoder_create_owned_ex",
-    "wirehair_encoder_create_profile_ex",
-    "wirehair_free",
-    "wirehair_init_",
-    "wirehair_recover",
-    "wirehair_recover_block",
-    "wirehair_recover_block_ex",
-    "wirehair_result_string",
-    "wirehair_wire_profile_init",
+WIREHAIR_EXPORT_MAP = ROOT / "abi" / "wirehair.map"
+WIREHAIR_PUBLIC_HEADER = ROOT / "include" / "wirehair" / "wirehair.h"
+CI_ONCE_LABEL = r"^ci-once$"
+CI_ONCE_PACKAGE_TESTS = frozenset({
+    "package_static_e2e",
+    "package_shared_e2e",
+    "package_both_e2e",
 })
+
+
+def load_wirehair_export_map(path=WIREHAIR_EXPORT_MAP):
+    text = Path(path).read_text(encoding="ascii")
+    match = re.fullmatch(
+        r"\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\{\s*"
+        r"global:\s*"
+        r"((?:wirehair_[A-Za-z0-9_]+\s*;\s*)+)"
+        r"local:\s*\*\s*;\s*\}\s*;\s*",
+        text,
+    )
+    if not match:
+        raise RuntimeError("malformed Wirehair ELF export map: " + str(path))
+
+    version = match.group(1)
+    ordered_symbols = re.findall(
+        r"(wirehair_[A-Za-z0-9_]+)\s*;", match.group(2))
+    if len(ordered_symbols) != len(set(ordered_symbols)):
+        raise RuntimeError(
+            "duplicate symbol in Wirehair ELF export map: " + str(path))
+    if ordered_symbols != sorted(ordered_symbols):
+        raise RuntimeError("Wirehair ELF export map is not sorted: " + str(path))
+    return version, frozenset(ordered_symbols)
+
+
+def load_wirehair_header_exports(path=WIREHAIR_PUBLIC_HEADER):
+    text = Path(path).read_text(encoding="utf-8")
+    symbols = re.findall(
+        r"\bWIREHAIR_EXPORT\b(?:(?!;).)*?\b"
+        r"(wirehair_[A-Za-z0-9_]+)\s*\(",
+        text,
+        flags=re.DOTALL,
+    )
+    if len(symbols) != len(set(symbols)):
+        raise RuntimeError(
+            "duplicate WIREHAIR_EXPORT declaration in " + str(path))
+    return frozenset(symbols)
+
+
+WIREHAIR_ABI_VERSION, WIREHAIR_C_API_EXPORTS = load_wirehair_export_map()
 
 
 def display_command(command):
@@ -183,7 +212,9 @@ def build(args, targets=()):
     )
 
 
-def ctest(args, *, regex=None, label=None, env=None, prefix=()):
+def ctest(
+        args, *, regex=None, label=None, exclude_label=None, env=None,
+        prefix=()):
     command = [
         *prefix,
         "ctest",
@@ -191,12 +222,45 @@ def ctest(args, *, regex=None, label=None, env=None, prefix=()):
         "--build-config", args.config,
         "--output-on-failure",
         "--no-tests=error",
+        "--parallel", str(args.jobs),
     ]
     if regex:
         command.extend(["--tests-regex", regex])
     if label:
         command.extend(["--label-regex", label])
+    if exclude_label:
+        command.extend(["--label-exclude", exclude_label])
     run(command, env=env)
+
+
+def validate_ci_once_inventory(args):
+    output = capture_output([
+        "ctest",
+        "--test-dir", args.build_dir,
+        "--build-config", args.config,
+        "--show-only=json-v1",
+    ])
+    try:
+        inventory = json.loads(output)
+        tests = inventory["tests"]
+        owned = {
+            test["name"]
+            for test in tests
+            if any(
+                prop.get("name") == "LABELS" and
+                "ci-once" in prop.get("value", [])
+                for prop in test.get("properties", []))
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("CTest returned a malformed JSON inventory") from exc
+
+    expected = set(CI_ONCE_PACKAGE_TESTS)
+    if os.name != "nt":
+        expected.add("build_policy_e2e")
+    if owned != expected:
+        raise RuntimeError(
+            "ci-once CTest ownership mismatch: missing=%s extra=%s" %
+            (sorted(expected - owned), sorted(owned - expected)))
 
 
 def install(args):
@@ -484,21 +548,78 @@ def should_validate_msvc_exports(args):
 
 
 def python_unit_tests():
-    run([sys.executable, "-m", "unittest", "-v", "ci.test_run_ci"])
+    run([
+        sys.executable, "-m", "unittest", "-v",
+        "ci.test_run_ci", "ci.test_run_portability",
+    ])
     run([sys.executable, str(ROOT / "python" / "test_whirehair.py"), "-v"])
+
+
+def run_data_integrity(args):
+    del args
+    bash = shutil.which("bash")
+    if not bash:
+        raise RuntimeError("bash is required for repository data-integrity validation")
+
+    # Keep this list explicit: ci/test_run_ci.py pins every hosted validator so
+    # a renamed, omitted, or accidentally matrix-multiplied gate is visible in
+    # review rather than being hidden behind broad test discovery.
+    commands = (
+        [
+            sys.executable, "-m", "unittest", "-v",
+            "tables.test_dense_count_validate",
+            "experiments.precode.test_validate_results",
+            "experiments.precode.test_rank_total",
+            "experiments.test_validate_byte_metrics",
+        ],
+        [sys.executable, str(ROOT / "tables" / "test_heavy_matrix_docs.py")],
+        [bash, str(ROOT / "experiments" / "precode" /
+                   "check_results_integrity.sh")],
+        [bash, str(ROOT / "experiments" / "test_byte_metrics.sh")],
+    )
+    for command in commands:
+        run(command)
 
 
 def python_native_test(args):
     module = find_python_module(args.install_dir)
     library = find_shared_library(args.install_dir)
     env = runtime_env(args.install_dir)
-    env["WIREHAIR_LIBRARY"] = str(library)
+    env.pop("WIREHAIR_LIBRARY", None)
+    env.pop("WIREHAIR_PREFIX", None)
+    auto_code = """
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import wirehair
+native = wirehair.initialize()
+assert Path(wirehair.__file__).resolve().parent == Path(sys.argv[1]).resolve() / 'wirehair'
+assert Path(native._name).resolve() == Path(sys.argv[2]).resolve()
+"""
+    run([
+        sys.executable, "-I", "-c", auto_code,
+        module.parent, library,
+    ], env=env)
+    explicit_env = env.copy()
+    explicit_env["WIREHAIR_LIBRARY"] = str(library)
     run([
         sys.executable,
         str(ROOT / "ci" / "python_native_test.py"),
         "--module-dir", module.parent,
         "--library", library,
-    ], env=env)
+    ], env=explicit_env)
+
+
+def python_distribution_test(args):
+    library = find_shared_library(args.install_dir)
+    run([
+        sys.executable,
+        str(ROOT / "ci" / "python_package_test.py"),
+        "--source-dir", ROOT,
+        "--library", library,
+        "--native-prefix", args.install_dir,
+        "--work-dir", Path(args.build_dir) / "python-package-e2e",
+    ], log_path=Path(args.build_dir) / "ci-logs" / "python-package-e2e.log")
 
 
 def large_message_profiles(args, mode):
@@ -560,20 +681,30 @@ def explicit_tools_smoke(args):
 
 def run_matrix(args):
     shared = args.linkage == "shared"
-    explicit_tools = args.strict and is_msvc_generator(args.generator)
-    python_unit_tests()
+    if args.repository_gates and not shared:
+        raise RuntimeError("--repository-gates requires a shared-library cell")
+    explicit_tools = args.tool_smoke
+    if args.repository_gates:
+        python_unit_tests()
     configure(args, shared=shared, explicit_tools=explicit_tools)
     build(args)
-    if explicit_tools:
+    validate_ci_once_inventory(args)
+    if args.tool_smoke:
         explicit_tools_smoke(args)
     large_message_profiles(args, "quick")
-    ctest(args)
+    if args.repository_gates:
+        ctest(args)
+    else:
+        ctest(args, exclude_label=CI_ONCE_LABEL)
     install(args)
     if should_validate_msvc_exports(args):
         validate_msvc_exports(args)
     package_consumer(args)
     if shared:
-        python_native_test(args)
+        if args.repository_gates:
+            python_distribution_test(args)
+        else:
+            python_native_test(args)
 
 
 def sanitizer_flags(kind):
@@ -591,8 +722,13 @@ def sanitizer_flags(kind):
 def run_sanitizer(args):
     configure(args, shared=False, extra_args=sanitizer_flags("asan-ubsan"))
     build(args)
+    validate_ci_once_inventory(args)
     large_message_profiles(args, "quick")
-    ctest(args, env=os.environ.copy())
+    ctest(
+        args,
+        exclude_label=CI_ONCE_LABEL,
+        env=os.environ.copy(),
+    )
 
 
 def run_tsan(args):
@@ -919,7 +1055,25 @@ def parse_args(argv=None):
         action="store_true",
         help="treat portable compiler warnings as errors",
     )
+    matrix.add_argument(
+        "--repository-gates",
+        action="store_true",
+        help=("own pure-Python tests plus nested package/build-policy CTests; "
+              "enable in exactly one representative matrix cell"),
+    )
+    matrix.add_argument(
+        "--tool-smoke",
+        action="store_true",
+        help=("build and smoke offline tools; enable in one representative "
+              "compiler cell"),
+    )
     matrix.set_defaults(function=run_matrix)
+
+    data_integrity = subparsers.add_parser(
+        "data-integrity",
+        help="repository table, result, and byte-metric integrity lane",
+    )
+    data_integrity.set_defaults(function=run_data_integrity)
 
     sanitizer = subparsers.add_parser("sanitizer", help="ASan+UBSan CTest lane")
     add_common_arguments(sanitizer, "build/ci-asan-ubsan")
@@ -945,10 +1099,11 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.jobs < 1:
-        raise SystemExit("--jobs must be positive")
-    args.build_dir = args.build_dir.resolve()
-    args.install_dir = args.install_dir.resolve()
+    if hasattr(args, "jobs"):
+        if args.jobs < 1:
+            raise SystemExit("--jobs must be positive")
+        args.build_dir = args.build_dir.resolve()
+        args.install_dir = args.install_dir.resolve()
     args.function(args)
     return 0
 

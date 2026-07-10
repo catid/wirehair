@@ -6,9 +6,12 @@ using an erasure code.  When enough of these blocks are received,
 the original data can be recovered.
 
 Packet equations are versioned separately from the C ABI.  Applications that
-persist or exchange packets across builds should use the explicit legacy wire
+persist or exchange legacy packets across builds should use the explicit wire
 profile APIs and follow [LEGACY_WIRE_PROFILES.md](LEGACY_WIRE_PROFILES.md).
-Raw packets do not authenticate their profile or recovered payload.
+The public V2 API instead emits a canonical endian-stable descriptor documented
+in [V2_WIRE_PROFILE.md](V2_WIRE_PROFILE.md); a decoder is created from that
+descriptor alone. Raw packets and profile IDs do not authenticate either their
+contract or recovered payload.
 
 As compared to other similar libraries, an unlimited number of error
 correction blocks can be produced, and much larger block counts are supported.
@@ -20,6 +23,15 @@ This is not an ideal MDS code, so sometimes it will fail to recover N
 original data packets from N symbol packets.  It may take N + 1 or N + 2 or more.
 On average it takes about N + 0.02 packets to recover.  Overall the overhead
 from the code inefficiency is low, compared to LDPC and many other fountain codes.
+
+Legacy decoders are safe to use with datagram retransmission: the first
+accepted payload for a packet ID wins, identical duplicates are idempotent,
+and conflicting duplicates are rejected.  Identity tracking is bounded to
+`N + 1024` accepted IDs with no silent eviction; a novel ID beyond that limit
+returns `Wirehair_ExtraInsufficient`.  Equality uses a fixed-key 128-bit
+fingerprint (and only meaningful bytes of a partial final block), so it is a
+duplicate detector rather than authentication.  Applications must still
+verify their own trusted digest or MAC before accepting recovered data.
 
 A simple C API is provided to make it easy to incorporate into existing
 projects.  No external dependencies are required.
@@ -56,18 +68,21 @@ Useful build options are:
 * `BUILD_SHARED_LIBS=ON` selects the shared library instead.
 * `WIREHAIR_BUILD_BOTH=ON` explicitly produces static and shared variants.  On
   Unix-like platforms they share one PIC object compilation.
-* The `whirehair.py` ctypes binding is installed only by shared or dual builds,
-  because it requires a loadable Wirehair dynamic library.  Static-only
-  installs deliberately omit the unusable wrapper.
+* The canonical `wirehair` Python package and compatible `whirehair` module are
+  installed only by shared or dual builds, because they require a loadable
+  Wirehair dynamic library. Static-only installs deliberately omit them.
 * `WIREHAIR_STATIC_PIC=OFF` disables PIC for a static-only build.  It defaults
   to `ON`, so the installed archive can be embedded in plugins/shared objects.
 * `MARCH_NATIVE=ON` opts into `-march=native` after a compiler capability
   check.  Such a build is host-specific and must not be deployed to older or
   otherwise different CPUs; the default is `OFF`.
 * `BUILD_TESTS`, `BUILD_CODEC_V2`, `WIREHAIR_BUILD_TOOLS`, and
-  `WIREHAIR_BUILD_BENCHMARKS` control their named groups.  Offline generators
-  and the V2 benchmark remain available as explicit targets when their options
-  are `OFF`, but are excluded from the default build.
+  `WIREHAIR_BUILD_BENCHMARKS` control their named developer/test groups. The
+  public V2 C/C++ API remains part of the library when `BUILD_CODEC_V2=OFF`;
+  that option controls internal V2 tests, fuzz targets, and benchmarks.
+  Offline generators and the V2 benchmark remain available as explicit
+  targets when their options are `OFF`, but are excluded from the default
+  build.
 * `WIREHAIR_ENABLE_SCHEDULED_TESTS=ON` registers resource-bounded high-N,
   packet-size, and large-block E2E profiles in addition to the fast tests.
 * `WH_LTO` and `WH_PGO_MODE` add target-scoped optimization flags without
@@ -91,15 +106,115 @@ find_package(wirehair CONFIG REQUIRED)
 target_link_libraries(my_target PRIVATE wirehair::wirehair)
 ~~~
 
+C consumers include `<wirehair/wirehair.h>`. C++ consumers may use the same C
+API or include `<wirehair/wirehair.hpp>` for move-only RAII V2 encoder/decoder
+wrappers and the fixed-size serialized profile owner.
+
 `CMAKE_INSTALL_PREFIX` and `CMAKE_INSTALL_LIBDIR` may both be customized.  The
 imported target supplies include paths, thread linkage, and the Windows
 DLL/static API definitions; consumers should not define Wirehair export macros
 manually.
 
+Non-CMake Unix consumers can use the relocatable pkg-config metadata installed
+beside the library:
+
+~~~sh
+cc app.c $(pkg-config --cflags --libs wirehair)
+cc app.c $(pkg-config --static --cflags --libs wirehair)
+~~~
+
+The static query adds Wirehair's private C++ runtime and threading
+dependencies.  Static-only packages include those unavoidable flags in the
+normal query as well.  Binary installs also carry the exact project license at
+`share/licenses/wirehair/LICENSE` and both normative wire-profile documents at
+`share/doc/wirehair`; the CMake and pkg-config metadata report the project
+version.
+
+The public shared-library ABI is recorded in the versioned
+[`abi/wirehair.map`](abi/wirehair.map) allowlist.  Linux shared builds assign
+those C entry points to the `WIREHAIR_2.0` symbol version and hide every
+unlisted implementation symbol.  An intentional public API addition must
+update that manifest; CI compares it with both the public header and the
+complete dynamic export table.  The same manifest drives the exact Windows
+DLL and MinGW import-library checks.
+
+#### Standard Python distribution
+
+The `wirehair-fec` PEP 517 distribution provides the canonical
+`import wirehair` name while preserving `import whirehair` compatibility:
+
+~~~sh
+python -m pip install .
+python -m pip install -e .
+~~~
+
+Its portable `py3-none-any` wheel contains no native binary. Deploy the
+Wirehair shared library from the same release separately; major API version 2
+alone does not guarantee that an older library exports every required symbol.
+`WIREHAIR_LIBRARY` selects an exact file and `WIREHAIR_PREFIX` selects an exact
+installation prefix. Both are authoritative and never silently fall back to
+another copy. Normal CMake-
+prefix and operating-system loader discovery remain available when neither is
+set. The complete installation and platform-name contract is in the
+[Python distribution README](python/README.md).
+
+#### Python reusable output buffers
+
+The Python binding provides `Encoder.encode_into`,
+`Decoder.recover_into`, and `Decoder.recover_block_into` for packet loops that
+reuse application storage.  Each method accepts a `bytearray` or writable,
+C-contiguous `memoryview` and returns the exact number of bytes written.  For
+example:
+
+~~~python
+packet = bytearray(1200)
+written = encoder.encode_into(packet_id, packet)
+send(packet_id, memoryview(packet)[:written])
+
+message = bytearray(decoder.message_bytes)
+assert decoder.recover_into(message) == len(message)
+~~~
+
+Repair packets require `block_bytes` capacity.  Systematic packets and
+`recover_block_into` require only the original block's exact length, so the
+final partial block can use a smaller buffer.  `recover_into` requires at least
+`message_bytes`, writes exactly that prefix, and preserves any larger-buffer
+tail.  Read-only, released, noncontiguous, undersized, or native-size-
+overflowing buffers are rejected before the C function is called.  The older
+`encode`, `recover`, and `recover_block` methods remain convenient
+bytes-returning wrappers over the same checks.
+
+The binding pins the output buffer only for the duration of each call; it can
+be resized again when the method returns.  A `ctypes.CDLL` foreign call
+releases the Python GIL, while validation before it and result handling after
+it hold the GIL.  Use independent codec objects for parallel work, or provide
+your own lock around a shared codec and its output buffer: neither a codec nor
+a buffer may be mutated concurrently by another thread during a native call.
+
+Legacy encoders materialize their recovery columns during creation. After
+that succeeds, `wirehair_encoder_detach_input()` (or Python
+`Encoder.detach_input()`) can release an owned message copy or end the lifetime
+requirement for a borrowed message. The call is idempotent and all later
+packets remain byte-identical. It trades memory for CPU: systematic packets
+must then be regenerated from recovery columns instead of copied from the
+source. Do not race detach with encoding, reuse, conversion, or destruction.
+
+To compare steady-state Python allocation peaks and throughput on a particular
+interpreter and Wirehair build, run:
+
+~~~sh
+python3 python/benchmark_buffers.py --library build/libwirehair.so
+~~~
+
+The report excludes reusable buffers allocated before tracing and includes
+the small `memoryview`/`ctypes` call scaffolding.  The `into` methods avoid the
+packet- or message-sized output allocation and copy; exact throughput varies
+with interpreter, block size, and CPU.
+
 
 #### Example Usage
 
-Here's an example program using Wirehair.  It's included in the UnitTest project and demonstrates both the sender and receiver, which are normally separate programs.  For example the data sender might be a file server and the data receiver might be downloading a file from the sender.
+Here's an example program using Wirehair.  It's included in the UnitTest project and demonstrates both the sender and receiver, which are normally separate programs.  For example the data sender might be a file server and the data receiver might be downloading a file from the sender.  `ApplicationSha256` and `ApplicationDigestMatches` below stand for the application's cryptographic implementation; a real receiver obtains the expected digest through authenticated or otherwise trusted metadata, not from the unauthenticated FEC packet stream.
 
 ~~~
 #include <wirehair/wirehair.h>
@@ -116,6 +231,10 @@ static bool ReadmeExample()
 
     // Fill message contents
     memset(&message[0], 1, message.size());
+
+    // Sender metadata.  A real receiver gets this value through a trusted or
+    // authenticated channel, independently of the Wirehair packet equations.
+    const auto trustedDigest = ApplicationSha256(message);
 
     // Create encoder
     WirehairCodec encoder = wirehair_encoder_create(nullptr, &message[0], kMessageBytes, kPacketSize);
@@ -201,6 +320,15 @@ static bool ReadmeExample()
     if (decodeResult != Wirehair_Success)
     {
         cout << "wirehair_recover failed: " << decodeResult << endl;
+        return false;
+    }
+
+    // FEC success proves only that the equations were solvable.  A corrupt,
+    // mixed-profile, or adversarially self-consistent stream can recover the
+    // wrong bytes successfully, so authenticate the result before using it.
+    if (!ApplicationDigestMatches(decoded, trustedDigest))
+    {
+        cout << "recovered message failed application digest" << endl;
         return false;
     }
 

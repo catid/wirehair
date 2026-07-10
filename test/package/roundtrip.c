@@ -5,6 +5,86 @@
 #include <stdint.h>
 #include <string.h>
 
+typedef char WirehairV2ProfileAbiSizeCheck[
+    sizeof(WirehairV2Profile) == 32 ? 1 : -1];
+
+static int wirehair_package_v2_round_trip(
+    const uint8_t* message,
+    uint32_t message_bytes,
+    uint32_t block_bytes,
+    uint32_t block_count)
+{
+    uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    uint8_t block[32];
+    uint8_t recreated_block[32];
+    uint8_t recovered[257];
+    uint32_t profile_bytes = 0;
+    uint64_t recovered_bytes = 0;
+    WirehairV2Codec encoder = 0;
+    WirehairV2Codec recreated = 0;
+    WirehairV2Codec decoder = 0;
+    WirehairV2Result decode_result = WirehairV2_NeedMore;
+    uint32_t id;
+
+    if (block_bytes > sizeof(block) || message_bytes > sizeof(recovered) ||
+        wirehair_v2_encoder_create(
+            message, message_bytes, block_bytes,
+            profile, sizeof(profile), &profile_bytes, &encoder) !=
+                WirehairV2_Success ||
+        profile_bytes != sizeof(profile) ||
+        wirehair_v2_encoder_create_profile(
+            message, profile, profile_bytes, &recreated) !=
+                WirehairV2_Success ||
+        wirehair_v2_decoder_create(
+            profile, profile_bytes, &decoder) != WirehairV2_Success)
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        return 1;
+    }
+
+    for (id = block_count;
+         id < block_count + 64u && decode_result == WirehairV2_NeedMore;
+         ++id)
+    {
+        uint32_t written = 0;
+        uint32_t recreated_written = 0;
+        if (wirehair_v2_encode(
+                encoder, id, block, sizeof(block), &written) !=
+                    WirehairV2_Success ||
+            wirehair_v2_encode(
+                recreated, id, recreated_block, sizeof(recreated_block),
+                &recreated_written) != WirehairV2_Success ||
+            written != recreated_written ||
+            memcmp(block, recreated_block, written) != 0)
+        {
+            wirehair_v2_free(encoder);
+            wirehair_v2_free(recreated);
+            wirehair_v2_free(decoder);
+            return 2;
+        }
+        decode_result = wirehair_v2_decode(decoder, id, block, written);
+    }
+    if (decode_result != WirehairV2_Success ||
+        wirehair_v2_recover(
+            decoder, recovered, sizeof(recovered), &recovered_bytes) !=
+                WirehairV2_Success ||
+        recovered_bytes != message_bytes ||
+        memcmp(recovered, message, message_bytes) != 0)
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        return 3;
+    }
+
+    wirehair_v2_free(encoder);
+    wirehair_v2_free(recreated);
+    wirehair_v2_free(decoder);
+    return 0;
+}
+
 int wirehair_package_round_trip(void)
 {
     enum { MessageBytes = 257, BlockBytes = 32, BlockCount = 9 };
@@ -40,6 +120,13 @@ int wirehair_package_round_trip(void)
         wirehair_free(encoder);
         wirehair_free(decoder);
         return 2;
+    }
+    if (wirehair_encoder_detach_input(encoder) != Wirehair_Success ||
+        wirehair_encoder_detach_input(encoder) != Wirehair_Success)
+    {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return 8;
     }
 
     for (order_i = 0;
@@ -121,5 +208,10 @@ int wirehair_package_round_trip(void)
 
     wirehair_free(encoder);
     wirehair_free(decoder);
+    if (wirehair_package_v2_round_trip(
+            message, MessageBytes, BlockBytes, BlockCount) != 0)
+    {
+        return 9;
+    }
     return 0;
 }

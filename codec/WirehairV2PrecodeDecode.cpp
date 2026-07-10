@@ -4,6 +4,7 @@
 #include "../gf256.h"
 #include "WirehairV2Plan.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -15,6 +16,7 @@ namespace {
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local int64_t DecoderAllocationFailureCountdown = -1;
+thread_local bool DecoderIncrementalResumeEnabled = true;
 
 void GuardedDecoderAllocation()
 {
@@ -25,8 +27,14 @@ void GuardedDecoderAllocation()
         --DecoderAllocationFailureCountdown;
     }
 }
+
+bool IncrementalResumeEnabled()
+{
+    return DecoderIncrementalResumeEnabled;
+}
 #else
 void GuardedDecoderAllocation() {}
+bool IncrementalResumeEnabled() { return true; }
 #endif
 
 bool MessageBlockCount(
@@ -63,12 +71,48 @@ uint32_t PacketDataBytes(
     return remaining < block_bytes ? (uint32_t)remaining : block_bytes;
 }
 
+bool ResumeFitsMemoryPolicy(
+    const PrecodeSolveResumeState& state,
+    size_t receive_block_capacity,
+    size_t receive_id_capacity,
+    size_t pending_block_capacity)
+{
+    if (!state.Active ||
+        receive_id_capacity >
+            std::numeric_limits<size_t>::max() / sizeof(uint32_t))
+    {
+        return false;
+    }
+    const size_t id_bytes = receive_id_capacity * sizeof(uint32_t);
+    if (receive_block_capacity >
+        std::numeric_limits<size_t>::max() - id_bytes)
+    {
+        return false;
+    }
+    const size_t released_bytes = receive_block_capacity + id_bytes;
+    const size_t allowed_extra = released_bytes / 4u;
+    const size_t checkpoint_bytes = state.PersistentBytes();
+    if (checkpoint_bytes >
+        std::numeric_limits<size_t>::max() - pending_block_capacity)
+    {
+        return false;
+    }
+    const size_t retained_bytes = checkpoint_bytes + pending_block_capacity;
+    return retained_bytes <= released_bytes ||
+        retained_bytes - released_bytes <= allowed_extra;
+}
+
 } // namespace
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown)
 {
     DecoderAllocationFailureCountdown = countdown;
+}
+
+void SetDecoderIncrementalResumeEnabledForTesting(bool enabled)
+{
+    DecoderIncrementalResumeEnabled = enabled;
 }
 #endif
 
@@ -88,6 +132,9 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
     ReceivedBlockIds.swap(other.ReceivedBlockIds);
     ReceivedBlockStorage.swap(other.ReceivedBlockStorage);
     ReceivedIds.swap(other.ReceivedIds);
+    ResumeState.Swap(other.ResumeState);
+    PendingPacketStorage.swap(other.PendingPacketStorage);
+    swap(PendingPacketId, other.PendingPacketId);
     IntermediateBlockStorage.swap(other.IntermediateBlockStorage);
     swap(SolveStatsValue, other.SolveStatsValue);
     swap(MessageBytesValue, other.MessageBytesValue);
@@ -96,6 +143,7 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
     swap(SolveAttemptCountValue, other.SolveAttemptCountValue);
     swap(PacketSeedAttemptValue, other.PacketSeedAttemptValue);
     swap(LastSolveResult, other.LastSolveResult);
+    swap(PendingPacket, other.PendingPacket);
     swap(Initialized, other.Initialized);
     swap(Decoded, other.Decoded);
 }
@@ -210,13 +258,57 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
     if (Decoded) {
         return Wirehair_Success;
     }
-    if (ReceivedBlockIds.size() < K) {
+    if (ReceivedIds.size() < K) {
         LastSolveResult = Wirehair_NeedMore;
         return Wirehair_NeedMore;
     }
 
     try
     {
+        if (ResumeState.Active)
+        {
+            if (!PendingPacket ||
+                PendingPacketStorage.size() != BlockBytesValue)
+            {
+                return LastSolveResult;
+            }
+            std::vector<uint8_t> intermediate;
+            // Seed from the last committed attempt as a defense for every
+            // early-return path.  ResumePrecodeSystem also republishes the
+            // checkpoint counters on allocation failure, so a retryable OOM
+            // cannot erase diagnostics while the algebra remains unchanged.
+            PrecodeSolveStats solve_stats = SolveStatsValue;
+            ++SolveAttemptCountValue;
+            GuardedDecoderAllocation();
+            const WirehairResult result = ResumePrecodeSystem(
+                SystemValue,
+                PacketConfigValue,
+                PendingPacketId,
+                PendingPacketStorage.data(),
+                BlockBytesValue,
+                ResumeState,
+                intermediate,
+                &solve_stats,
+                true);
+            solve_stats.PacketSeedAttempt = PacketSeedAttemptValue;
+            SolveStatsValue = solve_stats;
+            if (result == Wirehair_Success)
+            {
+                IntermediateBlockStorage.swap(intermediate);
+                Decoded = true;
+                ReceivedCountValue = (uint32_t)ReceivedIds.size();
+                std::unordered_set<uint32_t>().swap(ReceivedIds);
+                std::vector<uint8_t>().swap(PendingPacketStorage);
+                PendingPacket = false;
+            }
+            else if (result == Wirehair_NeedMore)
+            {
+                PendingPacket = false;
+            }
+            LastSolveResult = result;
+            return result;
+        }
+
         std::vector<SolvePacket> packets;
         packets.reserve(ReceivedBlockIds.size());
         for (size_t i = 0; i < ReceivedBlockIds.size(); ++i)
@@ -228,7 +320,10 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             packets.push_back(packet);
         }
         std::vector<uint8_t> intermediate;
-        PrecodeSolveStats solve_stats;
+        // A cold solve has the same transactional stats contract: preserve
+        // the last committed counters if the solver cannot allocate.
+        PrecodeSolveStats solve_stats = SolveStatsValue;
+        PrecodeSolveResumeState resume_state;
         ++SolveAttemptCountValue;
         // Keep the deterministic failure point at the solve boundary so the
         // test hook models a transient solver OOM (and counts as an attempt).
@@ -239,7 +334,8 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             packets,
             BlockBytesValue,
             intermediate,
-            &solve_stats);
+            &solve_stats,
+            IncrementalResumeEnabled() ? &resume_state : nullptr);
         solve_stats.PacketSeedAttempt = PacketSeedAttemptValue;
         SolveStatsValue = solve_stats;
         if (result == Wirehair_Success)
@@ -250,6 +346,26 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             std::vector<uint32_t>().swap(ReceivedBlockIds);
             std::vector<uint8_t>().swap(ReceivedBlockStorage);
             std::unordered_set<uint32_t>().swap(ReceivedIds);
+        }
+        else if (result == Wirehair_NeedMore && resume_state.Active)
+        {
+            // Allocate the sole pending-packet slot before releasing the cold
+            // receive buffers.  The allocator-selected capacity, rather than
+            // an assumed size, is included in the 25% policy.  Failure leaves
+            // the complete cold state available for an identical retry.
+            GuardedDecoderAllocation();
+            std::vector<uint8_t> pending_storage(BlockBytesValue, 0u);
+            if (ResumeFitsMemoryPolicy(
+                    resume_state,
+                    ReceivedBlockStorage.capacity(),
+                    ReceivedBlockIds.capacity(),
+                    pending_storage.capacity()))
+            {
+                ResumeState.Swap(resume_state);
+                PendingPacketStorage.swap(pending_storage);
+                std::vector<uint32_t>().swap(ReceivedBlockIds);
+                std::vector<uint8_t>().swap(ReceivedBlockStorage);
+            }
         }
         LastSolveResult = result;
         return result;
@@ -304,6 +420,118 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
         }
     }
 
+    if (ResumeState.Active)
+    {
+        const bool duplicate =
+            ReceivedIds.find(block_id) != ReceivedIds.end();
+        if (duplicate)
+        {
+            if (PendingPacket && block_id == PendingPacketId)
+            {
+                if (std::memcmp(
+                        PendingPacketStorage.data(),
+                        block_in,
+                        data_bytes) != 0)
+                {
+                    return Wirehair_InvalidInput;
+                }
+            }
+            else
+            {
+                try
+                {
+                    std::vector<uint8_t> duplicate_data(
+                        BlockBytesValue, 0u);
+                    std::memcpy(
+                        duplicate_data.data(), block_in, data_bytes);
+                    std::vector<uint8_t> ignored;
+                    const WirehairResult consistency = ResumePrecodeSystem(
+                        SystemValue,
+                        PacketConfigValue,
+                        block_id,
+                        duplicate_data.data(),
+                        BlockBytesValue,
+                        ResumeState,
+                        ignored,
+                        nullptr,
+                        false);
+                    if (consistency == Wirehair_OOM) {
+                        return Wirehair_OOM;
+                    }
+                    if (consistency != Wirehair_NeedMore) {
+                        return Wirehair_InvalidInput;
+                    }
+                }
+                catch (const std::bad_alloc&) {
+                    return Wirehair_OOM;
+                }
+                catch (const std::length_error&) {
+                    return Wirehair_OOM;
+                }
+            }
+            if (LastSolveResult == Wirehair_OOM && PendingPacket) {
+                return AttemptSolve();
+            }
+            return LastSolveResult;
+        }
+
+        if (LastSolveResult == Wirehair_Error) {
+            return Wirehair_Error;
+        }
+        // A transient solve OOM leaves exactly one accepted equation pending.
+        // Before accepting a different id, retry that equation so it cannot be
+        // overwritten while its id remains in ReceivedIds.  If it completes
+        // the decode, recursively validate the current packet against the
+        // completed solution; this recursion is bounded to one level because
+        // successful completion clears ResumeState.  Terminal Error keeps the
+        // pending bytes only to distinguish an exact retry from a conflict and
+        // is handled above without re-running the poisoned solve.
+        if (PendingPacket)
+        {
+            const WirehairResult pending_result = AttemptSolve();
+            if (pending_result == Wirehair_Success) {
+                return DecodeResult(block_id, block_in, data_bytes);
+            }
+            if (pending_result != Wirehair_NeedMore) {
+                return pending_result;
+            }
+        }
+        if (ReceivedIds.size() >=
+            (size_t)ProfileValue.BlockCount + 1024u)
+        {
+            return Wirehair_ExtraInsufficient;
+        }
+        try
+        {
+            if (PendingPacketStorage.size() != BlockBytesValue) {
+                return Wirehair_Error;
+            }
+            std::fill(
+                PendingPacketStorage.begin(),
+                PendingPacketStorage.end(),
+                uint8_t{0});
+            std::memcpy(
+                PendingPacketStorage.data(), block_in, data_bytes);
+            const std::pair<
+                std::unordered_set<uint32_t>::iterator, bool> inserted =
+                    ReceivedIds.insert(block_id);
+            if (!inserted.second) {
+                return LastSolveResult;
+            }
+            PendingPacketId = block_id;
+            PendingPacket = true;
+            return AttemptSolve();
+        }
+        catch (const std::bad_alloc&) {
+            PendingPacket = false;
+            return Wirehair_OOM;
+        }
+        catch (const std::length_error&) {
+            PendingPacket = false;
+            return Wirehair_OOM;
+        }
+    }
+
     if (ReceivedIds.find(block_id) != ReceivedIds.end())
     {
         for (size_t i = 0; i < ReceivedBlockIds.size(); ++i)
@@ -329,6 +557,14 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                 return LastSolveResult;
             }
         }
+        return Wirehair_Error;
+    }
+
+    // An inconsistent accepted equation set cannot be repaired by adding more
+    // equations.  Freeze the terminal set on the cold fallback too, matching
+    // the checkpoint path while still validating duplicates above.  This also
+    // prevents pointless K-sized re-solves after a terminal Error.
+    if (LastSolveResult == Wirehair_Error) {
         return Wirehair_Error;
     }
 
@@ -424,7 +660,7 @@ bool MessagePrecodeDecoder::IsDecoded() const { return Decoded; }
 uint32_t MessagePrecodeDecoder::ReceivedCount() const
 {
     return Decoded ? ReceivedCountValue :
-        (uint32_t)ReceivedBlockIds.size();
+        (uint32_t)ReceivedIds.size();
 }
 uint32_t MessagePrecodeDecoder::SolveAttemptCount() const
 {
@@ -466,5 +702,24 @@ const uint8_t* MessagePrecodeDecoder::IntermediateBlocks() const
 {
     return Decoded ? IntermediateBlockStorage.data() : nullptr;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool MessagePrecodeDecoder::HasIncrementalResumeStateForTesting() const
+{
+    return ResumeState.Active;
+}
+
+size_t MessagePrecodeDecoder::IncrementalResumeBytesForTesting() const
+{
+    return ResumeState.Active ?
+        ResumeState.PersistentBytes() + PendingPacketStorage.capacity() : 0u;
+}
+
+size_t MessagePrecodeDecoder::ColdReceiveCapacityBytesForTesting() const
+{
+    return ReceivedBlockStorage.capacity() +
+        ReceivedBlockIds.capacity() * sizeof(uint32_t);
+}
+#endif
 
 } // namespace wirehair_v2

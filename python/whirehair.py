@@ -1,14 +1,23 @@
 # Copyleft (c) 2019 Daniel Norte de Moraes <danielcheagle@gmail.com>.
 # This code is placed in the public domain and provided without warranty.
 
-"""Safe ctypes bindings and a bounded Wirehair round-trip example."""
+"""Safe ctypes bindings and a bounded Wirehair round-trip example.
+
+Decode/recover success means the FEC equations were solvable; it does not
+authenticate packets or recovered bytes.  Applications must verify a
+cryptographic digest or MAC obtained from trusted metadata.
+"""
 
 import ctypes
 import ctypes.util
+import hashlib
+import hmac
 import os
 import sys
 import weakref
 
+
+__version__ = "2.0.0"
 
 WIREHAIR_VERSION = 2
 WIREHAIR_WIRE_PROFILE_VERSION = 1
@@ -30,6 +39,37 @@ Wirehair_OOM = 9
 Wirehair_UnsupportedPlatform = 10
 WirehairResult_Count = 11
 WirehairResult_Padding = 0x7fffffff
+
+__all__ = [
+    "__version__",
+    "WIREHAIR_VERSION",
+    "WIREHAIR_WIRE_PROFILE_VERSION",
+    "WIREHAIR_LEGACY_PROFILE_PRE_FIXUP",
+    "WIREHAIR_LEGACY_PROFILE_FIXUPS_2026_07",
+    "WIREHAIR_LEGACY_PROFILE_CURRENT",
+    "WIREHAIR_ENCODER_OWN_INPUT",
+    "Wirehair_Success",
+    "Wirehair_NeedMore",
+    "Wirehair_InvalidInput",
+    "Wirehair_BadDenseSeed",
+    "Wirehair_BadPeelSeed",
+    "Wirehair_BadInput_SmallN",
+    "Wirehair_BadInput_LargeN",
+    "Wirehair_ExtraInsufficient",
+    "Wirehair_Error",
+    "Wirehair_OOM",
+    "Wirehair_UnsupportedPlatform",
+    "WirehairResult_Count",
+    "WirehairResult_Padding",
+    "WirehairWireProfile",
+    "WirehairError",
+    "configure_library",
+    "get_library",
+    "result_string",
+    "initialize",
+    "Encoder",
+    "Decoder",
+]
 
 _default_library = None
 
@@ -57,38 +97,35 @@ class WirehairError(RuntimeError):
         super().__init__("%s failed: %s" % (operation, description))
 
 
-def _load_wirehair():
-    if sys.platform.startswith("win"):
-        names = ["wirehair.dll", "libwirehair.dll"]
-    elif sys.platform == "darwin":
-        names = ["libwirehair.dylib", "libwirehair.2.dylib"]
-    else:
-        names = ["libwirehair.so", "libwirehair.so.2"]
+def _library_names(platform=None):
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("win"):
+        return ("wirehair.dll", "libwirehair.dll")
+    if platform == "darwin":
+        return ("libwirehair.dylib", "libwirehair.2.dylib")
+    return ("libwirehair.so", "libwirehair.so.2")
 
-    candidates = []
-    env_path = os.environ.get("WIREHAIR_LIBRARY")
-    if env_path:
-        candidates.append(env_path)
 
-    here = os.path.abspath(os.path.dirname(__file__))
-    prefix = os.path.abspath(os.path.join(here, os.pardir))
-    roots = (os.path.join(prefix, "bin"), os.path.join(prefix, "lib"),
-             os.path.join(prefix, "lib64"))
-    for directory in (here,) + roots:
-        for name in names:
-            candidates.append(os.path.join(directory, name))
+def _prefix_candidates(prefix, names):
+    prefix = os.path.abspath(os.fspath(prefix))
+    roots = tuple(
+        os.path.join(prefix, directory)
+        for directory in ("bin", "lib", "lib64"))
     for root in roots:
-        if os.path.isdir(root):
-            for directory, _, files in os.walk(root):
-                for name in names:
-                    if name in files:
-                        candidates.append(os.path.join(directory, name))
+        for name in names:
+            yield os.path.join(root, name)
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for directory, subdirectories, files in os.walk(root):
+            subdirectories.sort()
+            available = set(files)
+            for name in names:
+                if name in available:
+                    yield os.path.join(directory, name)
 
-    found = ctypes.util.find_library("wirehair")
-    if found:
-        candidates.append(found)
-    candidates.extend(names)
 
+def _load_candidates(candidates, context):
     errors = []
     seen = set()
     for candidate in candidates:
@@ -99,8 +136,43 @@ def _load_wirehair():
             return ctypes.CDLL(candidate)
         except OSError as exc:
             errors.append("%s: %s" % (candidate, exc))
-    raise OSError("Unable to load Wirehair shared library. Tried:\n" +
-                  "\n".join(errors))
+    detail = "\n".join(errors) if errors else "no candidate files"
+    raise OSError(
+        "Unable to load Wirehair shared library from %s. Tried:\n%s" %
+        (context, detail))
+
+
+def _load_wirehair():
+    names = _library_names()
+    env_path = os.environ.get("WIREHAIR_LIBRARY")
+    if env_path:
+        return _load_candidates(
+            [env_path], "WIREHAIR_LIBRARY=%s" % env_path)
+
+    env_prefix = os.environ.get("WIREHAIR_PREFIX")
+    if env_prefix:
+        return _load_candidates(
+            _prefix_candidates(env_prefix, names),
+            "WIREHAIR_PREFIX=%s" % env_prefix)
+
+    here = os.path.abspath(os.path.dirname(__file__))
+    module_prefix = os.path.abspath(os.path.join(here, os.pardir))
+
+    def automatic_candidates():
+        for name in names:
+            yield os.path.join(here, name)
+        prefixes = []
+        for prefix in (module_prefix, sys.prefix):
+            normalized = os.path.abspath(prefix)
+            if normalized not in prefixes:
+                prefixes.append(normalized)
+                yield from _prefix_candidates(normalized, names)
+        found = ctypes.util.find_library("wirehair")
+        if found:
+            yield found
+        yield from names
+
+    return _load_candidates(automatic_candidates(), "automatic discovery")
 
 
 def _prototype(library, name, argtypes, restype):
@@ -135,6 +207,7 @@ def configure_library(library):
                 profilep, ctypes.c_uint32, codecpp], result)
     _prototype(library, "wirehair_encode",
                [codec, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, u32p], result)
+    _prototype(library, "wirehair_encoder_detach_input", [codec], result)
     _prototype(library, "wirehair_decoder_create",
                [codec, ctypes.c_uint64, ctypes.c_uint32], codec)
     _prototype(library, "wirehair_decoder_create_ex",
@@ -206,6 +279,37 @@ def _input_buffer(data):
     else:
         array = array_type.from_buffer(view)
     return view, array
+
+
+def _output_buffer(data, required, maximum):
+    """Pin a writable C-contiguous buffer and expose its byte capacity."""
+    try:
+        view = memoryview(data)
+    except TypeError as exc:
+        raise TypeError("output must be a writable bytes-like object") from exc
+    except ValueError as exc:
+        # Creating a new view from a released memoryview raises ValueError.
+        raise ValueError("output buffer is released") from exc
+    if view.readonly:
+        raise TypeError("output buffer must be writable")
+    if not view.c_contiguous:
+        raise ValueError("output buffer must be C-contiguous")
+    try:
+        view = view.cast("B")
+    except (TypeError, ValueError) as exc:
+        raise TypeError("output must expose a contiguous byte buffer") from exc
+    capacity = view.nbytes
+    if capacity > maximum:
+        raise OverflowError("output buffer exceeds the native capacity range")
+    if capacity < required:
+        raise ValueError(
+            "output buffer requires at least %d bytes (got %d)" %
+            (required, capacity))
+    try:
+        anchor = ctypes.c_uint8.from_buffer(view)
+    except (TypeError, ValueError, BufferError) as exc:
+        raise TypeError("output must expose a writable contiguous byte buffer") from exc
+    return view, anchor, capacity
 
 
 def _check(operation, result, library):
@@ -296,6 +400,7 @@ class _Codec:
         self._pointer_value = owner.pointer_value
         self.message_bytes = message_bytes
         self.block_bytes = block_bytes
+        self._block_count = (message_bytes + block_bytes - 1) // block_bytes
         self._owner_finalizer = None
         self._finalizer = None
         if not deferred:
@@ -347,6 +452,13 @@ class _Codec:
         self.close()
         return False
 
+    def _original_block_bytes(self, block_id):
+        if block_id >= self._block_count:
+            raise ValueError("block_id is outside the original block range")
+        if block_id + 1 == self._block_count:
+            return self.message_bytes - block_id * self.block_bytes
+        return self.block_bytes
+
 
 class Encoder(_Codec):
     """Context-managed Wirehair encoder."""
@@ -358,7 +470,8 @@ class Encoder(_Codec):
 
         ``owned=True`` asks the C library to copy the message.  With
         ``owned=False`` the binding retains a writable view, or a stable
-        snapshot for read-only inputs, for the complete encoder lifetime.
+        snapshot for read-only inputs, until :meth:`detach_input` succeeds or
+        the encoder is closed.
         ``profile_id`` selects a trusted legacy equation profile; ``None``
         uses the raw API's frozen current profile.
         """
@@ -367,19 +480,25 @@ class Encoder(_Codec):
         if block_bytes == 0:
             raise ValueError("block_bytes must be positive")
         view, buffer = _input_buffer(message)
+        # Build a value-only pointer.  ctypes.cast(buffer, c_void_p) retains
+        # the exporting array through a GC-tracked _objects graph, which can
+        # keep a bytearray non-resizable even after detach_input() releases
+        # the binding's explicit view.
+        address = ctypes.c_void_p(ctypes.addressof(buffer))
         output = ctypes.c_void_p()
         if profile_id is None:
             create = (library.wirehair_encoder_create_owned_ex if owned else
                       library.wirehair_encoder_create_ex)
-            result = create(None, ctypes.cast(buffer, ctypes.c_void_p),
+            result = create(None, address,
                             len(view), block_bytes, ctypes.byref(output))
         else:
             profile = _profile_descriptor(profile_id, library)
             flags = WIREHAIR_ENCODER_OWN_INPUT if owned else 0
             result = library.wirehair_encoder_create_profile_ex(
-                None, ctypes.cast(buffer, ctypes.c_void_p), len(view),
+                None, address, len(view),
                 block_bytes, ctypes.byref(profile), flags,
                 ctypes.byref(output))
+        del address
         _check("wirehair_encoder_create", result, library)
         encoder = _construct_owned_codec(
             cls, library, output, len(view), block_bytes)
@@ -393,6 +512,33 @@ class Encoder(_Codec):
         return _construct_owned_codec(
             cls, library, pointer, message_bytes, block_bytes, owner=owner)
 
+    def _release_borrowed_source(self):
+        source = self.__dict__.pop("_borrowed_source", None)
+        if source is None:
+            return
+        view, buffer = source
+        # Drop the ctypes exporter before releasing the view it was built
+        # from.  Both references must disappear synchronously so a caller's
+        # bytearray can be resized as soon as detach/close returns.
+        del source, buffer
+        view.release()
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            self._release_borrowed_source()
+
+    def detach_input(self):
+        """Release source storage while retaining a usable encoder.
+
+        Systematic packets are regenerated after this call and may be slower.
+        Do not call concurrently with encoding, reuse, conversion, or close.
+        """
+        result = self._library.wirehair_encoder_detach_input(self.pointer)
+        _check("wirehair_encoder_detach_input", result, self._library)
+        self._release_borrowed_source()
+
     def encode(self, block_id, capacity=None):
         block_id = _bounded_integer(block_id, "block_id", 0xffffffff)
         if capacity is None:
@@ -400,15 +546,40 @@ class Encoder(_Codec):
         capacity = _bounded_integer(capacity, "capacity", 0xffffffff)
         if capacity == 0:
             raise ValueError("capacity must be positive")
-        output = (ctypes.c_uint8 * capacity)()
+        output = bytearray(capacity)
+        written = self.encode_into(block_id, output)
+        return bytes(output[:written])
+
+    def encode_into(self, block_id, output):
+        """Encode into a reusable writable buffer and return bytes written.
+
+        Systematic packets, including the partial final packet, require only
+        their exact length.  Repair packets require ``block_bytes`` capacity.
+        The buffer remains pinned for the complete native call.
+        """
+        block_id = _bounded_integer(block_id, "block_id", 0xffffffff)
+        pointer = self.pointer
+        required = (self._original_block_bytes(block_id)
+                    if block_id < self._block_count else self.block_bytes)
+        view, buffer, capacity = _output_buffer(
+            output, required, 0xffffffff)
+        address = ctypes.c_void_p(ctypes.addressof(buffer))
         written = ctypes.c_uint32()
-        result = self._library.wirehair_encode(
-            self.pointer, block_id, ctypes.cast(output, ctypes.c_void_p),
-            capacity, ctypes.byref(written))
+        try:
+            result = self._library.wirehair_encode(
+                pointer, block_id, address,
+                capacity, ctypes.byref(written))
+        finally:
+            # Release our exports promptly even when an injected/native call
+            # raises, so the caller can resize its bytearray after return.
+            del address, buffer
+            view.release()
         _check("wirehair_encode", result, self._library)
-        if written.value > capacity:
-            raise RuntimeError("wirehair_encode returned an invalid length")
-        return bytes(output[:written.value])
+        if written.value != required:
+            raise RuntimeError(
+                "wirehair_encode returned %d bytes; expected %d" %
+                (written.value, required))
+        return written.value
 
 
 class Decoder(_Codec):
@@ -436,43 +607,89 @@ class Decoder(_Codec):
             cls, library, output, message_bytes, block_bytes)
 
     def decode(self, block_id, data):
+        """Accept one packet; True means solvable, not authenticated."""
         block_id = _bounded_integer(block_id, "block_id", 0xffffffff)
         view, buffer = _input_buffer(data)
         if len(view) > self.block_bytes:
             raise ValueError("encoded block exceeds block_bytes")
+        address = ctypes.c_void_p(ctypes.addressof(buffer))
         result = self._library.wirehair_decode(
-            self.pointer, block_id, ctypes.cast(buffer, ctypes.c_void_p), len(view))
+            self.pointer, block_id, address, len(view))
         if result == Wirehair_NeedMore:
             return False
         _check("wirehair_decode", result, self._library)
         return True
 
     def recover(self):
-        output = (ctypes.c_uint8 * self.message_bytes)()
-        result = self._library.wirehair_recover(
-            self.pointer, ctypes.cast(output, ctypes.c_void_p), self.message_bytes)
-        _check("wirehair_recover", result, self._library)
+        """Reconstruct bytes; the caller must verify trusted integrity metadata."""
+        output = bytearray(self.message_bytes)
+        self.recover_into(output)
         return bytes(output)
 
+    def recover_into(self, output):
+        """Reconstruct into reusable storage and return ``message_bytes``.
+
+        A larger buffer is accepted, but bytes beyond ``message_bytes`` are
+        never passed to the native library and remain unchanged.
+        """
+        pointer = self.pointer
+        view, buffer, _ = _output_buffer(
+            output, self.message_bytes, 0xffffffffffffffff)
+        address = ctypes.c_void_p(ctypes.addressof(buffer))
+        try:
+            result = self._library.wirehair_recover(
+                pointer, address, self.message_bytes)
+        finally:
+            del address, buffer
+            view.release()
+        _check("wirehair_recover", result, self._library)
+        return self.message_bytes
+
     def recover_block(self, block_id, capacity=None):
+        """Reconstruct one block without authenticating its contents."""
         block_id = _bounded_integer(block_id, "block_id", 0xffffffff)
         if capacity is None:
             capacity = self.block_bytes
         capacity = _bounded_integer(capacity, "capacity", 0xffffffff)
         if capacity == 0:
             raise ValueError("capacity must be positive")
-        output = (ctypes.c_uint8 * capacity)()
+        output = bytearray(capacity)
+        written = self.recover_block_into(block_id, output)
+        return bytes(output[:written])
+
+    def recover_block_into(self, block_id, output):
+        """Recover one original block into reusable storage.
+
+        Returns the exact original byte count.  The final block accepts a
+        buffer sized to its partial length rather than requiring
+        ``block_bytes`` bytes.
+        """
+        block_id = _bounded_integer(block_id, "block_id", 0xffffffff)
+        pointer = self.pointer
+        required = self._original_block_bytes(block_id)
+        view, buffer, capacity = _output_buffer(
+            output, required, 0xffffffff)
+        address = ctypes.c_void_p(ctypes.addressof(buffer))
         written = ctypes.c_uint32()
-        result = self._library.wirehair_recover_block_ex(
-            self.pointer, block_id, ctypes.cast(output, ctypes.c_void_p),
-            capacity, ctypes.byref(written))
+        try:
+            result = self._library.wirehair_recover_block_ex(
+                pointer, block_id, address,
+                capacity, ctypes.byref(written))
+        finally:
+            del address, buffer
+            view.release()
         _check("wirehair_recover_block", result, self._library)
-        if written.value > capacity:
-            raise RuntimeError("wirehair_recover_block returned an invalid length")
-        return bytes(output[:written.value])
+        if written.value != required:
+            raise RuntimeError(
+                "wirehair_recover_block returned %d bytes; expected %d" %
+                (written.value, required))
+        return written.value
 
     def become_encoder(self):
         """Convert a completed decoder, transferring its ownership.
+
+        Verify trusted application integrity metadata before converting and
+        retransmitting recovered state.
 
         The replacement Python wrapper is fully allocated before the native
         codec is irreversibly converted.  Ordinary allocation failures leave
@@ -522,7 +739,7 @@ class Decoder(_Codec):
 
 
 def _run_example(message=None, block_size=32, library=None, max_packets=None):
-    """Run a bounded loss/reorder recovery example; return a process status."""
+    """Run bounded recovery plus trusted-digest verification."""
     if message is None:
         message = ("Wirehair Python example: loss recovery with UTF-8 data. "
                    "Zażółć gęślą jaźń. ").encode("utf-8") * 3
@@ -530,6 +747,9 @@ def _run_example(message=None, block_size=32, library=None, max_packets=None):
         message = bytes(memoryview(message))
         if not message:
             raise ValueError("message must not be empty")
+        # This models authenticated/trusted sender metadata.  A real receiver
+        # must not take the expected digest from the unauthenticated packets.
+        trusted_digest = hashlib.sha256(message).digest()
         block_size = _bounded_integer(block_size, "block_size", 0x7fffffff)
         if block_size == 0:
             raise ValueError("block_size must be positive")
@@ -555,8 +775,10 @@ def _run_example(message=None, block_size=32, library=None, max_packets=None):
                         "decoder still needs data after %d packet identifiers" %
                         max_packets)
                 recovered = decoder.recover()
-                if recovered != message:
-                    raise RuntimeError("recovered message differs from input")
+                recovered_digest = hashlib.sha256(recovered).digest()
+                if not hmac.compare_digest(recovered_digest, trusted_digest):
+                    raise RuntimeError(
+                        "recovered message failed trusted digest verification")
         print("Wirehair recovery succeeded (%d bytes)" % len(message))
         return 0
     except Exception as exc:

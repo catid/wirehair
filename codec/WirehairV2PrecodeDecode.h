@@ -5,6 +5,7 @@
 
 #include <wirehair/wirehair.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <unordered_set>
 #include <vector>
@@ -13,15 +14,18 @@ namespace wirehair_v2 {
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown);
+void SetDecoderIncrementalResumeEnabledForTesting(bool enabled);
 #endif
 
 /**
     Incremental message decoder for the version-4 packet/precode path.
 
-    NeedMore preserves received packets so later calls can resume.  The current
-    prototype rebuilds the sparse solve when an extra packet follows a rank
-    failure; precodefail/compare report that real cost rather than claiming a
-    persistent factorization.  Packet authentication is a caller concern:
+    NeedMore preserves an algebraically exact sparse-projection and reduced
+    residual checkpoint when it fits the decoder memory policy.  Later unique
+    packets are projected and inserted without rebuilding the original solve.
+    Oversized residuals or checkpoints that would exceed the bounded memory
+    policy fall back to cold re-solves.  Packet authentication is a caller
+    concern:
     exactly K independent equations with altered payloads can define another
     valid message.  Duplicates and packets checked against a completed or
     overdetermined solution are validated for consistency.  An inconsistent
@@ -67,6 +71,12 @@ public:
     const PrecodeSystem& System() const;
     const uint8_t* IntermediateBlocks() const;
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    bool HasIncrementalResumeStateForTesting() const;
+    size_t IncrementalResumeBytesForTesting() const;
+    size_t ColdReceiveCapacityBytesForTesting() const;
+#endif
+
 private:
     WirehairResult AttemptSolve();
     void Swap(MessagePrecodeDecoder& other) noexcept;
@@ -78,6 +88,9 @@ private:
     std::vector<uint32_t> ReceivedBlockIds;
     std::vector<uint8_t> ReceivedBlockStorage;
     std::unordered_set<uint32_t> ReceivedIds;
+    PrecodeSolveResumeState ResumeState;
+    std::vector<uint8_t> PendingPacketStorage;
+    uint32_t PendingPacketId = 0u;
     std::vector<uint8_t> IntermediateBlockStorage;
     PrecodeSolveStats SolveStatsValue = {};
     uint64_t MessageBytesValue = 0;
@@ -86,6 +99,7 @@ private:
     uint32_t SolveAttemptCountValue = 0;
     uint32_t PacketSeedAttemptValue = 0;
     WirehairResult LastSolveResult = Wirehair_NeedMore;
+    bool PendingPacket = false;
     bool Initialized = false;
     bool Decoded = false;
 };

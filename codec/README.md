@@ -100,17 +100,27 @@ short byte count; repair packets remain full blocks.
 `MessagePrecodeDecoder` incrementally collects the same equations, peels the
 binary system, projects the unresolved residual, and solves it exactly over
 GF(256), including the Cauchy heavy coefficients and block right-hand sides.
-It retains packets across `Wirehair_NeedMore`, rejects conflicting duplicates,
-and permits an identical packet to retry a transient solve OOM.  The selected
-profile binds the precode and packet contract versions, exact dimensions,
-seeds, seed-attempt index, salts, dense-corner choice, and mix count; V1 modes
-reject profiles carrying any V2 contract state.  Deterministic seed selection
-supports K=2..64000; tests exhaust K=2..2048 and pin representative large-K
-attempts through K=64000.
+After a bounded rank failure it retains the peeled-column affine projection and
+reduced GF(256) pivots, then projects each new equation into that fixed basis.
+This is equivalent to a cold solve even when the added row would change the
+peeling order, because the checkpoint represents the complete original row
+space rather than assuming that order remains optimal.  The receive payload
+buffer is released only when the checkpoint plus one retry packet is no more
+than 25% larger; residuals over `kMaxInactiveColumns` and checkpoints outside
+that policy use the original cold re-solve fallback.  Both paths remain bounded
+by K+1024 accepted packet ids.  Conflicting duplicates are rejected, and an
+identical packet retries a transient solve OOM without allowing a later packet
+to overwrite the pending equation.  The selected profile binds the precode and
+packet contract versions, exact dimensions, seeds, seed-attempt index, salts,
+dense-corner choice, and mix count; V1 modes reject profiles carrying any V2
+contract state.  Deterministic seed selection supports K=2..64000; tests
+exhaust K=2..2048 and pin representative large-K attempts through K=64000.
 
 This is an erasure codec, not packet authentication.  Altered independent
 equations can define a different valid message, so applications must verify a
-cryptographic digest/MAC or authenticate packets.  Duplicate and
+cryptographic digest/MAC obtained from authenticated or otherwise trusted
+metadata, or authenticate packets directly.  The expected value must not come
+from the unauthenticated FEC packet stream.  Duplicate and
 overdetermined consistency checks are useful diagnostics, not an integrity
 substitute.
 
@@ -120,6 +130,12 @@ throughput over a K/block-byte grid.  `compare --precode` adds the same V2 path
 beside production and the V1-compatible wrapper arms.  `precodefail` runs a
 threaded fixed-overhead V2 rank/failure grid and reports inactivation and solve
 cost rather than relying on a peel-only proxy.
+`wirehair_v2_resume_bench` pins itself to the first available CPU and runs 20
+alternating cold/warm samples at K=1000 and K=10000.  Its fixed deficient
+K-packet stream becomes full rank across exactly eight appended equations; the
+executable fails unless cumulative resume time saves at least 50%, initial
+K-packet time stays within 5%, and checkpoint memory stays within 25% of the
+replaced receive payload/id buffers.
 
 Dense-seed checks are handled by the benchmark's `densecheck` and `densetune`
 modes, which run real encode/decode trials with candidate dense seeds and
@@ -130,6 +146,13 @@ failed, and `densetune` compares candidates for explicit N/block-byte lists.
 All loss-driven modes accept loss probabilities only in `[0, 0.99]` and print
 the exact parsed value they execute.  `seedtable` accepts trial counts in
 `[1, 1000000]` and records requested and completed counts in each output row.
+Peel and dense candidate indices traverse keyed odd-step permutations of the
+8-bit seed domain, so prefixes contain no repeated work and indices 0..255
+enumerate every byte seed exactly once.  Tuning CSV rows report requested,
+unique, and completed candidate counts explicitly; tiny-N dense candidate zero
+retains its full 16-bit shipped seed before later candidates enter the byte
+domain.  Requests above the 256-value domain remain visible as requested while
+unique/completed counts report the bounded 256 candidates actually evaluated.
 Allocating modes validate widened message sizes and configured caps before
 emitting result headers.
 
@@ -162,6 +185,13 @@ facade through the matching experimental V2 packet format.  V1 and V2 modes
 remain deliberately separate, successful mode changes discard the prior
 mode's state, and failed changes preserve the last valid mode.
 
+The installed API exposes only the precode/packet V2 mode through the separate
+opaque `WirehairV2Codec` handle. `wirehair_v2_encoder_create()` publishes the
+selected canonical 32-byte profile; `wirehair_v2_decoder_create()` reconstructs
+all internal `SeedProfile` state from those bytes. The C++ RAII facade is in
+`<wirehair/wirehair.hpp>`. The byte layout, typed parse errors, frozen profile
+rules, and migration policy are specified in `V2_WIRE_PROFILE.md`.
+
 Validation:
 
 ```bash
@@ -174,12 +204,15 @@ cmake --build build --target wirehair_v2_precode_decode_test
 ./build/codec/wirehair_v2_precode_solve_test
 ./build/codec/wirehair_v2_precode_roundtrip_test
 ./build/codec/wirehair_v2_precode_seed_selection_test
+./build/codec/wirehair_v2_profile_test
 ```
 
 Benchmark smoke checks:
 
 ```bash
 cmake --build build --target wirehair_v2_bench
+cmake --build build --target wirehair_v2_resume_bench
+./build/codec/wirehair_v2_resume_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
 ./build/codec/wirehair_v2_bench precodecheck --N 64,320,1000 --bb-list 16,1280 --trials 10 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 3200 --trials 10 --bb-list 17,1280,102400 --max-message-mib 128 --loss 0.10 --precode

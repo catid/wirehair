@@ -28,7 +28,11 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         !profile.Tuned &&
         profile.TuningResidualMean == 0.0 &&
         profile.TuningResidualColumns == 0u &&
-        profile.TuningXorCost == 0u && profile.TuningTrials == 0u &&
+        profile.TuningXorCost == 0u &&
+        profile.TuningCandidatesRequested == 0u &&
+        profile.TuningCandidatesUnique == 0u &&
+        profile.TuningCandidatesCompleted == 0u &&
+        profile.TuningTrials == 0u &&
         profile.Policy.Solver == wirehair_v2::PeelSolver::RqccLowref &&
         profile.Policy.Structure == wirehair_v2::PeelStructure::LtM1C16 &&
         profile.Policy.ByteClass == wirehair_v2::BlockByteClass::Small &&

@@ -13,6 +13,60 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  v2-randomized-state-soak:
+    name: V2 randomized profile and state-sequence sanitizer soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Clang coverage-guided property targets
+        run: >-
+          cmake -S . -B build/ci-v2-property-soak -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DBUILD_TESTS=ON
+          -DWIREHAIR_ENABLE_LIBFUZZER=ON
+          "-DCMAKE_C_FLAGS=-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          "-DCMAKE_CXX_FLAGS=-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+      - name: Build V2 property targets
+        run: >-
+          cmake --build build/ci-v2-property-soak --parallel 2
+          --target wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz
+      - name: Prepare preserved-input directories
+        run: mkdir -p build/ci-v2-property-soak/fuzz-artifacts/profile build/ci-v2-property-soak/fuzz-artifacts/stateful
+      - name: Run profile/property target for 30 minutes
+        timeout-minutes: 32
+        run: >-
+          build/ci-v2-property-soak/codec/wirehair_v2_profile_fuzz
+          -seed=608135816 -max_total_time=1800 -max_len=65536 -timeout=5
+          -rss_limit_mb=1024
+          -artifact_prefix=build/ci-v2-property-soak/fuzz-artifacts/profile/
+          codec/fuzz/corpus/profile
+      - name: Run state-sequence target for 30 minutes
+        timeout-minutes: 32
+        run: >-
+          build/ci-v2-property-soak/codec/wirehair_v2_stateful_fuzz
+          -seed=3221344269 -max_total_time=1800 -max_len=65536 -timeout=5
+          -rss_limit_mb=1024
+          -artifact_prefix=build/ci-v2-property-soak/fuzz-artifacts/stateful/
+          codec/fuzz/corpus/stateful
+      - name: Upload preserved inputs and sanitizer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-randomized-state-soak
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/ci-v2-property-soak/fuzz-artifacts/**
+            build/ci-v2-property-soak/CMakeCache.txt
+            build/ci-v2-property-soak/CMakeFiles/CMakeConfigureLog.yaml
+
   deterministic-e2e:
     name: Small, medium, maximum-N, large-block, and fuzz E2E
     runs-on: ubuntu-latest
@@ -66,3 +120,74 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           path: build/ci-qemu/ci-logs/**
+
+  non-x86-cross-portability:
+    name: s390x big-endian and RISC-V scalar QEMU gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned-major cross toolchains and QEMU 8.2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-13-s390x-linux-gnu g++-13-s390x-linux-gnu \
+            gcc-13-riscv64-linux-gnu g++-13-riscv64-linux-gnu \
+            qemu-user
+      - name: Run big-endian heavy oracle and golden round trip
+        run: >-
+          python3 ci/run_portability.py cross --target s390x
+          --build-dir build/ci-portability-s390x
+          --install-dir build/install-portability-s390x
+          --jobs 2
+      - name: Run scalar RISC-V compile and smoke round trip
+        run: >-
+          python3 ci/run_portability.py cross --target riscv64
+          --build-dir build/ci-portability-riscv64
+          --install-dir build/install-portability-riscv64
+          --jobs 2
+      - name: Upload non-x86 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-x86-portability-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/ci-portability-s390x/CMakeCache.txt
+            build/ci-portability-s390x/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-portability-s390x/ci-logs/**
+            build/ci-portability-s390x/Testing/Temporary/**
+            build/ci-portability-riscv64/CMakeCache.txt
+            build/ci-portability-riscv64/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-portability-riscv64/ci-logs/**
+            build/ci-portability-riscv64/Testing/Temporary/**
+
+  macos-arm64-portability:
+    name: macOS ARM64 / Mach-O ABI / installed consumer
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select pinned Xcode 16.4 toolchain
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      - name: Run Mach-O ABI and package gates
+        run: >-
+          python3 ci/run_portability.py macos-arm64
+          --xcode-version 16.4 --xcode-build 16F6
+          --build-dir build/ci-portability-macos-arm64
+          --install-dir build/install-portability-macos-arm64
+          --jobs 2
+      - name: Upload macOS diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-portability-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/ci-portability-macos-arm64/CMakeCache.txt
+            build/ci-portability-macos-arm64/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci-portability-macos-arm64/ci-logs/**
+            build/ci-portability-macos-arm64/Testing/Temporary/**
+            build/ci-portability-macos-arm64/package-consumer/Testing/Temporary/**

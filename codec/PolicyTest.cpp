@@ -27,6 +27,69 @@ void Check(bool condition, const char* message)
     }
 }
 
+void CheckSeedCandidatePermutations()
+{
+    uint32_t seen[256] = {};
+    uint32_t stamp = 0;
+
+    // Exhaust every valid peel bucket and every byte-sized shipped base.
+    for (uint16_t bucket = 0; bucket < wirehair_v2::kSeedTreeSubdivisions;
+        ++bucket)
+    {
+        for (unsigned base = 0; base < 256u; ++base)
+        {
+            ++stamp;
+            for (unsigned index = 0; index < 256u; ++index)
+            {
+                const uint16_t seed = wirehair_v2::CandidatePeelSeed(
+                    bucket, (uint16_t)base, (uint16_t)index);
+                if (seed >= 256u || seen[seed] == stamp)
+                {
+                    std::cerr << "FAIL: duplicate peel candidate bucket="
+                        << bucket << " base=" << base << " index=" << index
+                        << " seed=" << seed << std::endl;
+                    ++Failures;
+                    return;
+                }
+                seen[seed] = stamp;
+            }
+        }
+    }
+
+    // Also exhaust the complete 16-bit dense-base input domain.  Byte bases
+    // enumerate all 256 values; wider tiny-N bases remain index zero while the
+    // 255 subsequent byte-domain candidates stay distinct.
+    for (uint32_t base = 0; base <= UINT16_MAX; ++base)
+    {
+        ++stamp;
+        const uint16_t first = wirehair_v2::CandidateDenseSeed(
+            (uint16_t)base, 0u);
+        if (first != base)
+        {
+            std::cerr << "FAIL: dense candidate zero changed base=" << base
+                << " to " << first << std::endl;
+            ++Failures;
+            return;
+        }
+        if (base < 256u) {
+            seen[first] = stamp;
+        }
+        for (unsigned index = 1; index < 256u; ++index)
+        {
+            const uint16_t seed = wirehair_v2::CandidateDenseSeed(
+                (uint16_t)base, (uint16_t)index);
+            if (seed >= 256u || seen[seed] == stamp)
+            {
+                std::cerr << "FAIL: duplicate dense candidate base=" << base
+                    << " index=" << index << " seed=" << seed << std::endl;
+                ++Failures;
+                return;
+            }
+            seen[seed] = stamp;
+        }
+    }
+}
+
 void CheckPolicy(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -788,7 +851,7 @@ void CheckDecodeAfterAllOriginalSuccess()
     wirehair_free(decoder);
 }
 
-void CheckDecodeAfterDuplicateOriginalFailure()
+void CheckDecodeAfterDuplicateOriginalIsIdempotent()
 {
     const uint32_t N = 16u;
     const uint32_t block_bytes = 16u;
@@ -796,7 +859,7 @@ void CheckDecodeAfterDuplicateOriginalFailure()
 
     std::vector<uint8_t> message((size_t)message_bytes);
     std::vector<uint8_t> recovered((size_t)message_bytes, 0xa5);
-    std::vector<uint8_t> repair(block_bytes);
+    std::vector<uint8_t> block(block_bytes);
     for (size_t i = 0; i < message.size(); ++i) {
         message[i] = (uint8_t)(i * 17u + 3u);
     }
@@ -813,8 +876,8 @@ void CheckDecodeAfterDuplicateOriginalFailure()
         return;
     }
 
-    // Feed N original-range ids with one duplicate (0 twice, N-1 missing):
-    // the all-original check fails on the Nth feed before GE state exists.
+    // Feed N calls with one identical duplicate (0 twice, id 1 missing).
+    // The duplicate must not consume a row or poison the decoder.
     WirehairResult result = Wirehair_NeedMore;
     for (uint32_t feed = 0; feed < N; ++feed)
     {
@@ -825,27 +888,25 @@ void CheckDecodeAfterDuplicateOriginalFailure()
             &message[(size_t)block_id * block_bytes],
             block_bytes);
     }
-    Check(result == Wirehair_InvalidInput,
-        "duplicate original set should be rejected as invalid input");
+    Check(result == Wirehair_NeedMore,
+        "identical duplicate original should be idempotent");
 
-    // Later packets must return an error instead of resuming missing GE state
-    uint32_t written = 0;
-    Check(wirehair_encode(
-            encoder, N + 2u, &repair[0], block_bytes, &written) ==
+    Check(wirehair_decode(
+            decoder, 1u, &message[block_bytes], block_bytes) ==
             Wirehair_Success,
-        "dup-test encoder should generate a repair block");
-    Check(wirehair_decode(decoder, N + 2u, &repair[0], written) ==
-            Wirehair_InvalidInput,
-        "feeds after duplicate-original failure should error, not crash");
+        "missing original after duplicate should complete decoding");
     Check(wirehair_recover(decoder, &recovered[0], message_bytes) ==
-            Wirehair_InvalidInput,
-        "recover after duplicate-original failure should report invalid input");
+            Wirehair_Success,
+        "recover after idempotent duplicate should succeed");
+    Check(std::memcmp(&recovered[0], &message[0], (size_t)message_bytes) == 0,
+        "recovery after idempotent duplicate should match input");
     uint32_t bytes_out = 0x12345678u;
-    Check(wirehair_recover_block(decoder, 0u, &repair[0], &bytes_out) ==
-            Wirehair_InvalidInput,
-        "recover_block after duplicate-original failure should report invalid input");
-    Check(bytes_out == 0u,
-        "recover_block after duplicate-original failure should clear byte count");
+    Check(wirehair_recover_block(decoder, 0u, &block[0], &bytes_out) ==
+            Wirehair_Success,
+        "recover_block after idempotent duplicate should succeed");
+    Check(bytes_out == block_bytes &&
+            std::memcmp(&block[0], &message[0], block_bytes) == 0,
+        "recover_block after idempotent duplicate should match input");
 
     // Reuse must clear the failed state
     decoder = wirehair_decoder_create(decoder, message_bytes, block_bytes);
@@ -1029,7 +1090,7 @@ int main()
     Check(wirehair_init() == Wirehair_Success, "wirehair_init should succeed");
     CheckCoreSeedHelpers();
     CheckDecodeAfterAllOriginalSuccess();
-    CheckDecodeAfterDuplicateOriginalFailure();
+    CheckDecodeAfterDuplicateOriginalIsIdempotent();
     CheckBlockBytesUpperBound();
     CheckRecoverBeforeDecodeComplete();
     CheckGf256RejectsNonPositiveLengths();
@@ -1128,6 +1189,13 @@ int main()
     Check(CandidatePeelSeed(17u, 5u, 1u) ==
             CandidatePeelSeed(17u, 5u, 1u),
         "candidate peel seed should be deterministic");
+    Check(CandidatePeelSeed(17u, 5u, 1u) == 94u &&
+            CandidatePeelSeed(17u, 5u, 2u) == 183u,
+        "candidate peel permutation version changed");
+    Check(CandidateDenseSeed(5u, 1u) == 192u &&
+            CandidateDenseSeed(UINT16_C(0x1234), 1u) == 153u,
+        "candidate dense permutation version changed");
+    CheckSeedCandidatePermutations();
 
     const PeelingCodec eval_codec =
         MakePeelingCodec(PeelStructure::LtM1C16, PeelSolver::KsBmaxTop16);
@@ -1196,10 +1264,32 @@ int main()
     const SeedProfile tuned = TuneSeedProfile(80u, 1280u, tuning);
     Check(tuned.Tuned, "seed tuner should mark tuned profiles");
     Check(tuned.TuningXorCost > 0u, "seed tuner should report xor cost");
+    Check(tuned.TuningCandidatesRequested == tuning.PeelCandidates &&
+            tuned.TuningCandidatesUnique == tuning.PeelCandidates &&
+            tuned.TuningCandidatesCompleted == tuning.PeelCandidates,
+        "seed tuner should report requested/unique/completed candidates");
     if (tuned.PeelSeed != base80.PeelSeed) {
         Check(tuned.UsedPeelFixup,
             "seed tuner should update peel fixup metadata after tuning");
     }
+
+    SeedTuningOptions capped_tuning = tuning;
+    capped_tuning.PeelCandidates = 300u;
+    const SeedProfile capped_tuned =
+        TuneSeedProfile(8u, 64u, capped_tuning);
+    Check(capped_tuned.TuningCandidatesRequested == 300u &&
+            capped_tuned.TuningCandidatesUnique == 256u &&
+            capped_tuned.TuningCandidatesCompleted == 256u,
+        "seed tuner should report requested work separately from domain cap");
+
+    SeedTuningOptions minimum_tuning = tuning;
+    minimum_tuning.PeelCandidates = 0u;
+    const SeedProfile minimum_tuned =
+        TuneSeedProfile(8u, 64u, minimum_tuning);
+    Check(minimum_tuned.TuningCandidatesRequested == 0u &&
+            minimum_tuned.TuningCandidatesUnique == 1u &&
+            minimum_tuned.TuningCandidatesCompleted == 1u,
+        "seed tuner should report a zero request separately from minimum work");
 
     CheckV2RoundTrip();
     CheckV2PrecodeEncoderFacade();

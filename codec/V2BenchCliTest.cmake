@@ -62,6 +62,17 @@ expect_failure("trials must be" seedtable --N 2 --bb-list 1
 expect_failure("bad --trials value" seedtable --N 2 --bb-list 1
     --peel-candidates 1 --trials 4294967296)
 
+# Candidate work accounting preserves the raw request while reporting the
+# bounded, duplicate-free byte-domain work actually completed.
+expect_success(",300,256,256,1,1," seedtable --N 2 --bb-list 1
+    --peel-candidates 300 --trials 1)
+expect_success(",0,1,1,1,1," seedtable --N 2 --bb-list 1
+    --peel-candidates 0 --trials 1)
+expect_success("2,1,300,256,256," densetune --N 2 --bb-list 1
+    --candidates 300 --trials 1 --loss 0)
+expect_success("2,1,0,1,1," densetune --N 2 --bb-list 1
+    --candidates 0 --trials 1 --loss 0)
+
 # Every loss-accepting mode rejects values above the shared boundary.
 expect_failure("loss must be" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 1 --max-message-mib 1 --loss 0.9900001)

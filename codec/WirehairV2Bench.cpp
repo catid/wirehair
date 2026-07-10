@@ -1750,6 +1750,7 @@ int CmdSeedTable(int argc, char** argv)
         }
     }
 
+    const uint32_t requested_peel_candidates = peel_candidates;
     if (peel_candidates < 1u) {
         peel_candidates = 1u;
     }
@@ -1774,12 +1775,15 @@ int CmdSeedTable(int argc, char** argv)
     }
 
     std::printf(
-        "# seedtable: peel_candidates=%u trials=%u seed=0x%llx\n",
+        "# seedtable: requested_candidates=%u completed_candidates=%u "
+        "trials=%u seed=0x%llx\n",
+        requested_peel_candidates,
         peel_candidates,
         trials,
         (unsigned long long)seed);
     std::printf(
         "N,bb,solver,structure,bucket,base_peel,tuned_peel,dense,"
+        "requested_candidates,unique_candidates,completed_candidates,"
         "requested_trials,completed_trials,resid_mean,resid_max,xor_cost,"
         "used_peel_fixup,used_dense_fixup\n");
 
@@ -1797,7 +1801,7 @@ int CmdSeedTable(int argc, char** argv)
             wirehair_v2::TuneSeedProfile((uint32_t)n_value, (uint32_t)bb_value,
                 options);
         std::printf(
-            "%d,%d,%s,%s,%u,%u,%u,%u,%u,%u,%.4f,%u,%llu,%u,%u\n",
+            "%d,%d,%s,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.4f,%u,%llu,%u,%u\n",
             n_value,
             bb_value,
             wirehair_v2::ToString(tuned.Policy.Solver),
@@ -1806,6 +1810,9 @@ int CmdSeedTable(int argc, char** argv)
             base.PeelSeed,
             tuned.PeelSeed,
             tuned.DenseSeed,
+            requested_peel_candidates,
+            (unsigned)tuned.TuningCandidatesUnique,
+            (unsigned)tuned.TuningCandidatesCompleted,
             trials,
             tuned.TuningTrials,
             tuned.TuningResidualMean,
@@ -2355,6 +2362,7 @@ int CmdDenseTune(int argc, char** argv)
         }
     }
 
+    const uint32_t requested_candidates = candidates;
     if (candidates < 1u) {
         candidates = 1u;
     }
@@ -2381,13 +2389,16 @@ int CmdDenseTune(int argc, char** argv)
     }
 
     std::printf(
-        "# densetune: candidates=%u trials=%u loss=%.17g seed=0x%llx\n",
+        "# densetune: requested_candidates=%u completed_candidates=%u "
+        "trials=%u loss=%.17g seed=0x%llx\n",
+        requested_candidates,
         candidates,
         trials,
         loss,
         (unsigned long long)seed);
     std::printf(
-        "N,bb,base_dense,best_dense,best_fail,best_oh_mean,best_oh_max,"
+        "N,bb,requested_candidates,unique_candidates,completed_candidates,"
+        "base_dense,best_dense,best_fail,best_oh_mean,best_oh_max,"
         "base_fail,base_oh_mean,base_oh_max\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
@@ -2443,9 +2454,12 @@ int CmdDenseTune(int argc, char** argv)
         const double base_mean = MeanOverheadOrFailure(base_acc);
         const double best_mean = MeanOverheadOrFailure(best_acc);
         std::printf(
-            "%d,%d,%u,%u,%llu,%.4f,%u,%llu,%.4f,%u\n",
+            "%d,%d,%u,%u,%u,%u,%u,%llu,%.4f,%u,%llu,%.4f,%u\n",
             n_value,
             bb_value,
+            requested_candidates,
+            candidates,
+            candidates,
             base.DenseSeed,
             best_dense,
             (unsigned long long)best_acc.Failures,

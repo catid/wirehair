@@ -663,10 +663,50 @@ static const unsigned kSIMDSafeAlignBytes = 64;
 #else
 static const unsigned kSIMDSafeAlignBytes = GF256_ALIGN_BYTES;
 #endif
+static_assert(kSIMDSafeAlignBytes > 0,
+    "SIMD-safe allocation alignment must be non-zero");
+static_assert(kSIMDSafeAlignBytes <= UINT8_MAX + 1u,
+    "SIMD-safe allocation alignment metadata must fit in one byte");
+
+bool detail::GetSIMDSafeAllocationSize(
+    size_t size,
+    size_t& allocation_size)
+{
+    allocation_size = 0;
+    if (size > SIZE_MAX - kSIMDSafeAlignBytes) {
+        return false;
+    }
+
+    allocation_size = size + kSIMDSafeAlignBytes;
+    return true;
+}
+
+#if defined(WIREHAIR_TESTING)
+static thread_local detail::SIMDSafeCallocForTesting
+    t_SIMDSafeCallocForTesting = nullptr;
+
+void detail::SetSIMDSafeCallocForTesting(
+    SIMDSafeCallocForTesting callback)
+{
+    t_SIMDSafeCallocForTesting = callback;
+}
+#endif
 
 uint8_t* SIMDSafeAllocate(size_t size)
 {
-    uint8_t* data = (uint8_t*)calloc(1, kSIMDSafeAlignBytes + size);
+    size_t allocation_size = 0;
+    if (!detail::GetSIMDSafeAllocationSize(size, allocation_size)) {
+        return nullptr;
+    }
+
+#if defined(WIREHAIR_TESTING)
+    void* allocation = t_SIMDSafeCallocForTesting ?
+        t_SIMDSafeCallocForTesting(1, allocation_size) :
+        calloc(1, allocation_size);
+#else
+    void* allocation = calloc(1, allocation_size);
+#endif
+    uint8_t* data = static_cast<uint8_t*>(allocation);
     if (!data) {
         return nullptr;
     }
@@ -676,8 +716,8 @@ uint8_t* SIMDSafeAllocate(size_t size)
     if (size >= (256u * 1024)) {
         const uintptr_t pg = 4096;
         const uintptr_t aligned = ((uintptr_t)data + pg - 1) & ~(pg - 1);
-        const size_t total = kSIMDSafeAlignBytes + size;
-        const size_t len = (total - (size_t)(aligned - (uintptr_t)data)) & ~(pg - 1);
+        const size_t len = (allocation_size -
+            (size_t)(aligned - (uintptr_t)data)) & ~(pg - 1);
         if (len >= (2u * 1024 * 1024)) {
             madvise((void*)aligned, len, MADV_HUGEPAGE);
         }

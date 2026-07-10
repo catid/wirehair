@@ -82,7 +82,10 @@ if (BUILD_TESTS)
     target_link_libraries(wirehair_v2_precode_decode_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_decode_test COMMAND wirehair_v2_precode_decode_test)
 
-    add_executable(wirehair_v2_precode_solve_test PrecodeSolveTest.cpp)
+    add_executable(wirehair_v2_precode_solve_test
+        PrecodeSolveTest.cpp
+        V2TinyDenseOracle.cpp
+        V2TinyDenseOracle.h)
     wirehair_apply_project_options(wirehair_v2_precode_solve_test)
     target_link_libraries(wirehair_v2_precode_solve_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_solve_test
@@ -109,6 +112,78 @@ if (BUILD_TESTS)
             ${_wirehair_v2_seed_selection_args})
     set_tests_properties(wirehair_v2_precode_seed_selection_test
         PROPERTIES TIMEOUT 180)
+
+    add_executable(wirehair_v2_profile_test V2ProfileTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_profile_test)
+    target_link_libraries(wirehair_v2_profile_test wirehair)
+    add_test(NAME wirehair_v2_profile_test COMMAND wirehair_v2_profile_test)
+    set_tests_properties(wirehair_v2_profile_test PROPERTIES
+        LABELS "v2;profile;serialization;golden;e2e;abi"
+        TIMEOUT 120)
+
+    set(_wirehair_v2_fuzz_common
+        fuzz/V2FuzzDriver.cpp
+        fuzz/V2FuzzDriver.h)
+    add_executable(wirehair_v2_profile_fuzz
+        fuzz/V2ProfileFuzz.cpp
+        V2TinyDenseOracle.cpp
+        V2TinyDenseOracle.h
+        ${_wirehair_v2_fuzz_common})
+    target_compile_definitions(wirehair_v2_profile_fuzz PRIVATE
+        "WIREHAIR_FUZZ_TARGET_NAME=\"profile\""
+        "WIREHAIR_FUZZ_CORPUS_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/profile/manifest.txt\"")
+    target_link_libraries(wirehair_v2_profile_fuzz wirehair_v2_policy)
+    wirehair_apply_project_options(wirehair_v2_profile_fuzz)
+
+    add_executable(wirehair_v2_stateful_fuzz
+        fuzz/V2StatefulFuzz.cpp
+        ${_wirehair_v2_fuzz_common})
+    target_compile_definitions(wirehair_v2_stateful_fuzz PRIVATE
+        "WIREHAIR_FUZZ_TARGET_NAME=\"stateful\""
+        "WIREHAIR_FUZZ_CORPUS_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/stateful/manifest.txt\"")
+    target_link_libraries(wirehair_v2_stateful_fuzz wirehair_v2_policy)
+    wirehair_apply_project_options(wirehair_v2_stateful_fuzz)
+
+    if(WIREHAIR_ENABLE_LIBFUZZER)
+        if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR
+                "WIREHAIR_ENABLE_LIBFUZZER requires Clang")
+        endif()
+        foreach(_wirehair_v2_fuzz_target IN ITEMS
+                wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz)
+            target_compile_definitions(${_wirehair_v2_fuzz_target}
+                PRIVATE WIREHAIR_ENABLE_LIBFUZZER=1)
+            target_compile_options(${_wirehair_v2_fuzz_target}
+                PRIVATE -fsanitize=fuzzer)
+            target_link_options(${_wirehair_v2_fuzz_target}
+                PRIVATE -fsanitize=fuzzer)
+        endforeach()
+    else()
+        set(_wirehair_v2_fuzz_artifacts
+            "${CMAKE_BINARY_DIR}/Testing/Temporary/v2-fuzz-artifacts")
+        file(MAKE_DIRECTORY "${_wirehair_v2_fuzz_artifacts}")
+        add_test(NAME wirehair_v2_profile_fuzz_test
+            COMMAND wirehair_v2_profile_fuzz
+                --mutations 10000
+                --max-seconds 55
+                --seed 0x243f6a8885a308d3
+                --trace-current
+                --artifact-dir "${_wirehair_v2_fuzz_artifacts}")
+        add_test(NAME wirehair_v2_stateful_fuzz_test
+            COMMAND wirehair_v2_stateful_fuzz
+                --mutations 10000
+                --max-seconds 55
+                --seed 0x13198a2e03707344
+                --trace-current
+                --artifact-dir "${_wirehair_v2_fuzz_artifacts}")
+        set_tests_properties(
+            wirehair_v2_profile_fuzz_test
+            wirehair_v2_stateful_fuzz_test
+            PROPERTIES
+                LABELS "fuzz;sanitizer;v2"
+                TIMEOUT 60
+                PROCESSORS 1)
+    endif()
 
     if(WIREHAIR_ENABLE_SCHEDULED_TESTS)
         add_test(
@@ -141,6 +216,17 @@ add_executable(wirehair_v2_bench ${WIREHAIR_BENCH_EXCLUDE}
     WirehairV2Bench.cpp)
 target_link_libraries(wirehair_v2_bench wirehair_v2_policy Threads::Threads)
 wirehair_apply_project_options(wirehair_v2_bench)
+
+add_executable(wirehair_v2_packet_eval_bench ${WIREHAIR_BENCH_EXCLUDE}
+    ${PROJECT_SOURCE_DIR}/experiments/v2_packet_eval_bench.cpp)
+target_link_libraries(wirehair_v2_packet_eval_bench wirehair_v2_policy)
+wirehair_apply_project_options(wirehair_v2_packet_eval_bench)
+
+add_executable(wirehair_v2_resume_bench ${WIREHAIR_BENCH_EXCLUDE}
+    V2ResumeBench.cpp)
+target_link_libraries(wirehair_v2_resume_bench wirehair_v2_policy)
+wirehair_apply_project_options(wirehair_v2_resume_bench)
+
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
     add_test(
         NAME wirehair_v2_bench_cli_test

@@ -1,0 +1,11 @@
+prefix=@WIREHAIR_PC_PREFIX@
+exec_prefix=${prefix}
+libdir=@WIREHAIR_PC_LIBDIR@
+includedir=@WIREHAIR_PC_INCLUDEDIR@
+
+Name: wirehair
+Description: Fast portable fountain erasure code
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lwirehair @WIREHAIR_PC_PUBLIC_RUNTIME_LIBS@
+Libs.private: @WIREHAIR_PC_PRIVATE_RUNTIME_LIBS@
+Cflags: -I${includedir}

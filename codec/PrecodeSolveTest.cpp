@@ -3,10 +3,12 @@
 #include "WirehairV2PrecodeDecode.h"
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Solve.h"
+#include "V2TinyDenseOracle.h"
 
 #include "../gf256.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -14,6 +16,272 @@
 #include <vector>
 
 namespace {
+
+std::vector<uint8_t> ReferencePacket(
+    uint32_t K,
+    uint32_t P,
+    uint32_t block_id,
+    const wirehair_v2::PacketRowConfig& config,
+    const uint8_t* intermediate,
+    uint32_t block_bytes)
+{
+    std::vector<uint8_t> expected(block_bytes, 0u);
+    const std::vector<uint32_t> row =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+    for (uint32_t column : row) {
+        const uint8_t* source =
+            intermediate + (size_t)column * block_bytes;
+        for (uint32_t i = 0; i < block_bytes; ++i) {
+            expected[i] ^= source[i];
+        }
+    }
+    return expected;
+}
+
+bool CheckPacketEvaluationCase(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_id,
+    uint32_t block_bytes,
+    unsigned input_offset,
+    unsigned output_offset,
+    bool fast_path)
+{
+    static const size_t kGuardBytes = 64u;
+    const uint32_t K = system.Params.BlockCount;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const size_t intermediate_bytes = (size_t)(K + P) * block_bytes;
+    std::vector<uint8_t> input_storage(
+        intermediate_bytes + 2u * kGuardBytes + 128u, 0xc7u);
+    const uintptr_t input_start = reinterpret_cast<uintptr_t>(
+        input_storage.data() + kGuardBytes);
+    uint8_t* intermediate = reinterpret_cast<uint8_t*>(
+        (input_start + 63u) & ~uintptr_t(63u)) + input_offset;
+    for (size_t i = 0; i < intermediate_bytes; ++i) {
+        intermediate[i] = (uint8_t)(
+            i * 131u + (i >> 7) + block_id * 17u + block_bytes);
+    }
+    const std::vector<uint8_t> input_before = input_storage;
+
+    std::vector<uint8_t> output_storage(
+        block_bytes + 2u * kGuardBytes + 128u, 0xa5u);
+    const uintptr_t output_start = reinterpret_cast<uintptr_t>(
+        output_storage.data() + kGuardBytes);
+    uint8_t* output = reinterpret_cast<uint8_t*>(
+        (output_start + 63u) & ~uintptr_t(63u)) + output_offset;
+    std::vector<uint8_t> expected_storage = output_storage;
+    const std::vector<uint8_t> expected = ReferencePacket(
+        K, P, block_id, config, intermediate, block_bytes);
+    std::memcpy(
+        expected_storage.data() + (output - output_storage.data()),
+        expected.data(),
+        block_bytes);
+
+    uint64_t operations = UINT64_C(0xfedcba9876543210);
+    const bool evaluated = fast_path ?
+        wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+            system, config, intermediate, block_bytes, block_id,
+            output, &operations) :
+        wirehair_v2::EvaluatePacketBlock(
+            system, config, intermediate, block_bytes, block_id,
+            output, &operations);
+    const size_t row_size = wirehair_v2::GeneratePacketMatrixRow(
+        K, P, block_id, config).size();
+    if (!evaluated || operations != row_size ||
+        output_storage != expected_storage || input_storage != input_before)
+    {
+        std::fprintf(stderr,
+            "solve: packet evaluation mismatch id=%u bb=%u inoff=%u "
+            "outoff=%u mix=%u fast=%u operations=%" PRIu64
+            " expected=%zu\n",
+            block_id, block_bytes, input_offset, output_offset,
+            config.MixCount, fast_path ? 1u : 0u,
+            operations, row_size);
+        return false;
+    }
+    return true;
+}
+
+bool CheckPacketEvaluationFusion()
+{
+    const uint32_t K = 128u;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                K, UINT64_C(0x786f72667573696f)),
+            system))
+    {
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x4d241359);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+
+    // Pin examples from the complete source-weight shape: singleton, the two
+    // common low weights, a mid-weight row, and the capped heavy tail.
+    uint32_t ids[5] = {
+        UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX
+    };
+    for (uint32_t id = 0u; id < 1000000u; ++id)
+    {
+        const size_t row_size = wirehair_v2::GeneratePacketMatrixRow(
+            K, P, id, config).size();
+        const uint32_t degree =
+            (uint32_t)row_size - config.MixCount;
+        unsigned slot = 5u;
+        if (degree == 1u) slot = 0u;
+        else if (degree == 2u) slot = 1u;
+        else if (degree == 3u) slot = 2u;
+        else if (degree >= 8u && degree <= 16u) slot = 3u;
+        else if (degree >= 32u) slot = 4u;
+        if (slot < 5u && ids[slot] == UINT32_MAX) {
+            ids[slot] = id;
+        }
+        if (ids[0] != UINT32_MAX && ids[1] != UINT32_MAX &&
+            ids[2] != UINT32_MAX && ids[3] != UINT32_MAX &&
+            ids[4] != UINT32_MAX)
+        {
+            break;
+        }
+    }
+    for (unsigned i = 0; i < 5u; ++i) {
+        if (ids[i] == UINT32_MAX) {
+            std::fprintf(stderr,
+                "solve: packet evaluation source-weight fixture %u missing\n",
+                i);
+            return false;
+        }
+    }
+
+    static const uint32_t kLengths[] = {
+        1u, 2u, 3u, 7u, 15u, 16u, 17u, 31u, 32u, 33u,
+        63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u, 1280u
+    };
+    static const unsigned kOffsets[] = { 0u, 1u, 7u, 15u, 31u, 63u };
+    for (unsigned weight_i = 0; weight_i < 5u; ++weight_i)
+    {
+        for (unsigned length_i = 0;
+             length_i < sizeof(kLengths) / sizeof(kLengths[0]);
+             ++length_i)
+        {
+            const unsigned offset_i =
+                (weight_i * 3u + length_i) %
+                (sizeof(kOffsets) / sizeof(kOffsets[0]));
+            if (!CheckPacketEvaluationCase(
+                    system, config, ids[weight_i], kLengths[length_i],
+                    kOffsets[offset_i],
+                    kOffsets[(offset_i * 5u + 1u) %
+                        (sizeof(kOffsets) / sizeof(kOffsets[0]))],
+                    ((weight_i + length_i) & 1u) != 0u))
+            {
+                return false;
+            }
+        }
+    }
+
+    // Experimental one- and two-mix rows use the explicit generic fallback.
+    for (uint32_t mix_count = 1u; mix_count < 3u; ++mix_count)
+    {
+        wirehair_v2::PacketRowConfig fallback = config;
+        fallback.MixCount = mix_count;
+        if (!CheckPacketEvaluationCase(
+                system, fallback, UINT32_C(0xf1234567), 257u,
+                mix_count * 7u, mix_count * 13u, false))
+        {
+            return false;
+        }
+    }
+
+    // Hard-coded packet bytes guard the shipping equation and fused schedule
+    // independently of the row-column golden vectors in PolicyTest.
+    {
+        static const uint32_t block_bytes = 32u;
+        const size_t intermediate_bytes = (size_t)(K + P) * block_bytes;
+        std::vector<uint8_t> intermediate(intermediate_bytes);
+        for (size_t i = 0; i < intermediate.size(); ++i) {
+            intermediate[i] = (uint8_t)(i * 131u + (i >> 7) + 0x5du);
+        }
+        uint8_t output[block_bytes] = {};
+        if (!wirehair_v2::EvaluatePacketBlock(
+                system, config, intermediate.data(), block_bytes,
+                UINT32_C(0xf1234567), output))
+        {
+            return false;
+        }
+        static const uint8_t expected[block_bytes] = {
+            0xbd, 0xd8, 0xbb, 0x46, 0x29, 0xc4, 0xa7, 0x32,
+            0x95, 0x70, 0xf3, 0x5e, 0xc1, 0x5c, 0xff, 0x4a,
+            0xed, 0x48, 0xab, 0x36, 0x99, 0x74, 0x97, 0x62,
+            0x05, 0xe0, 0x63, 0x0e, 0xf1, 0x4c, 0x2f, 0xba
+        };
+        if (std::memcmp(output, expected, block_bytes) != 0)
+        {
+            std::fprintf(stderr, "solve: packet byte golden changed:");
+            for (uint8_t byte : output) {
+                std::fprintf(stderr, " %02x", (unsigned)byte);
+            }
+            std::fprintf(stderr, "\n");
+            return false;
+        }
+    }
+
+    // The API rejects every overlap shape before touching output/work count.
+    {
+        static const uint32_t block_bytes = 17u;
+        const size_t intermediate_bytes = (size_t)(K + P) * block_bytes;
+        std::vector<uint8_t> storage(
+            intermediate_bytes + 2u * block_bytes + 2u, 0x6bu);
+        uint8_t* intermediate = storage.data() + block_bytes + 1u;
+        for (size_t i = 0; i < intermediate_bytes; ++i) {
+            intermediate[i] = (uint8_t)(i * 29u + 7u);
+        }
+        uint8_t* overlap_outputs[] = {
+            intermediate,
+            intermediate - 1u,
+            intermediate + intermediate_bytes - 1u
+        };
+        for (unsigned i = 0; i < 3u; ++i)
+        {
+            const std::vector<uint8_t> before = storage;
+            uint64_t operations = UINT64_C(0x0123456789abcdef);
+            const bool evaluated = i == 1u ?
+                wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                    system, config, intermediate, block_bytes, 17u,
+                    overlap_outputs[i], &operations) :
+                wirehair_v2::EvaluatePacketBlock(
+                    system, config, intermediate, block_bytes, 17u,
+                    overlap_outputs[i], &operations);
+            if (evaluated || storage != before ||
+                operations != UINT64_C(0x0123456789abcdef))
+            {
+                std::fprintf(stderr,
+                    "solve: packet overlap shape %u was not no-write\n", i);
+                return false;
+            }
+        }
+
+        // Exact endpoint adjacency is non-overlap and remains supported.
+        uint8_t* adjacent_output = intermediate + intermediate_bytes;
+        const std::vector<uint8_t> expected = ReferencePacket(
+            K, P, 17u, config, intermediate, block_bytes);
+        if (!wirehair_v2::EvaluatePacketBlock(
+                system, config, intermediate, block_bytes, 17u,
+                adjacent_output) ||
+            std::memcmp(
+                adjacent_output, expected.data(), block_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "solve: adjacent packet output was rejected or incorrect\n");
+            return false;
+        }
+    }
+
+    std::printf("packet evaluation fusion/alias contract: PASS\n");
+    return true;
+}
 
 bool CheckTinyDenseOracle()
 {
@@ -48,116 +316,147 @@ bool CheckTinyDenseOracle()
         std::fprintf(stderr, "solve: tiny sparse solve failed\n");
         return false;
     }
-
-    const uint32_t S = system.Params.Staircase;
-    const uint32_t D2 = system.Params.DenseRows;
-    const uint32_t H = system.Params.HeavyRows;
-    const uint32_t P = S + D2 + H;
-    const uint32_t L = K + P;
-    std::vector<uint8_t> matrix((size_t)L * L, 0u);
-    std::vector<uint8_t> rhs((size_t)L * block_bytes, 0u);
-    uint32_t row = 0u;
-    const auto add_binary = [&](const std::vector<uint32_t>& columns,
-                                const uint8_t* data) {
-        for (const uint32_t column : columns) {
-            matrix[(size_t)row * L + column] ^= 1u;
-        }
-        if (data) {
-            std::memcpy(
-                rhs.data() + (size_t)row * block_bytes,
-                data,
-                block_bytes);
-        }
-        ++row;
-    };
-    for (const std::vector<uint32_t>& columns : system.StaircaseRows) {
-        add_binary(columns, nullptr);
-    }
-    for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
-        add_binary(columns, nullptr);
-    }
-    for (uint32_t heavy = 0; heavy < H; ++heavy)
-    {
-        for (uint32_t column = 0; column < L; ++column) {
-            matrix[(size_t)row * L + column] =
-                wirehair_v2::HeavyCoefficient(heavy, column, H);
-        }
-        ++row;
-    }
-    for (const wirehair_v2::SolvePacket& packet : packets) {
-        add_binary(
-            wirehair_v2::GeneratePacketMatrixRow(
-                K, P, packet.BlockId, config),
-            packet.Data);
-    }
-    if (row != L) {
-        return false;
-    }
-
-    for (uint32_t column = 0; column < L; ++column)
-    {
-        uint32_t pivot = column;
-        while (pivot < L && matrix[(size_t)pivot * L + column] == 0u) {
-            ++pivot;
-        }
-        if (pivot >= L) {
-            std::fprintf(stderr, "solve: tiny dense oracle was singular\n");
-            return false;
-        }
-        if (pivot != column)
-        {
-            for (uint32_t j = 0; j < L; ++j) {
-                std::swap(
-                    matrix[(size_t)column * L + j],
-                    matrix[(size_t)pivot * L + j]);
-            }
-            for (uint32_t b = 0; b < block_bytes; ++b) {
-                std::swap(
-                    rhs[(size_t)column * block_bytes + b],
-                    rhs[(size_t)pivot * block_bytes + b]);
-            }
-        }
-        const uint8_t pivot_value = matrix[(size_t)column * L + column];
-        if (pivot_value != 1u)
-        {
-            const uint8_t inverse = gf256_inv(pivot_value);
-            for (uint32_t j = 0; j < L; ++j) {
-                matrix[(size_t)column * L + j] =
-                    gf256_mul(matrix[(size_t)column * L + j], inverse);
-            }
-            gf256_div_mem(
-                rhs.data() + (size_t)column * block_bytes,
-                rhs.data() + (size_t)column * block_bytes,
-                pivot_value,
-                (int)block_bytes);
-        }
-        for (uint32_t target = 0; target < L; ++target)
-        {
-            if (target == column) {
-                continue;
-            }
-            const uint8_t scale = matrix[(size_t)target * L + column];
-            if (scale == 0u) {
-                continue;
-            }
-            for (uint32_t j = 0; j < L; ++j) {
-                matrix[(size_t)target * L + j] ^= gf256_mul(
-                    scale, matrix[(size_t)column * L + j]);
-            }
-            gf256_muladd_mem(
-                rhs.data() + (size_t)target * block_bytes,
-                scale,
-                rhs.data() + (size_t)column * block_bytes,
-                (int)block_bytes);
-        }
-    }
-    if (rhs != solved)
+    std::vector<uint8_t> oracle;
+    const WirehairResult oracle_result =
+        wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+            system, config, packets, block_bytes, oracle);
+    if (oracle_result != Wirehair_Success || oracle != solved)
     {
         std::fprintf(stderr,
-            "solve: tiny dense Gaussian oracle mismatch attempt=%u\n",
-            attempt);
+            "solve: extracted tiny dense oracle mismatch attempt=%u result=%d\n",
+            attempt, (int)oracle_result);
         return false;
     }
+    return true;
+}
+
+bool CheckIncrementalResume()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 17u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(
+            K, UINT64_C(0x524553554d455354));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x91e10da5);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr, "solve: resume configuration failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 197u + (i >> 3) + 41u);
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0; id < K; ++id) {
+        systematic[id].BlockId = id;
+        systematic[id].Data =
+            message.data() + (size_t)id * block_bytes;
+    }
+    std::vector<uint8_t> expected;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes, expected) !=
+            Wirehair_Success)
+    {
+        return false;
+    }
+
+    std::vector<wirehair_v2::SolvePacket> deficient(K);
+    for (wirehair_v2::SolvePacket& packet : deficient) {
+        packet.BlockId = 0u;
+        packet.Data = message.data();
+    }
+    std::vector<uint8_t> output(11u, 0xa5u);
+    const std::vector<uint8_t> sentinel = output;
+    wirehair_v2::PrecodeSolveResumeState resume;
+    wirehair_v2::PrecodeSolveStats stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, block_bytes,
+            output, &stats, &resume) != Wirehair_NeedMore ||
+        !resume.Active || output != sentinel ||
+        resume.Rank >= resume.InactiveCount)
+    {
+        std::fprintf(stderr, "solve: rank-deficient checkpoint missing\n");
+        return false;
+    }
+
+    const uint32_t rank_before = resume.Rank;
+    const size_t bytes_before = resume.PersistentBytes();
+    const std::vector<uint8_t> coefficient_scratch_before =
+        resume.CoefficientScratch;
+    const std::vector<uint8_t> rhs_scratch_before = resume.RhsScratch;
+    const std::vector<uint8_t> pivot_coefficients_before =
+        resume.PivotCoefficients;
+    const std::vector<uint8_t> pivot_rhs_before = resume.PivotRhs;
+    const std::vector<uint8_t> have_pivot_before = resume.HavePivot;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 0u, message.data(), block_bytes,
+            resume, output, nullptr, false) != Wirehair_NeedMore ||
+        resume.Rank != rank_before ||
+        resume.PersistentBytes() != bytes_before ||
+        resume.CoefficientScratch != coefficient_scratch_before ||
+        resume.RhsScratch != rhs_scratch_before ||
+        resume.PivotCoefficients != pivot_coefficients_before ||
+        resume.PivotRhs != pivot_rhs_before ||
+        resume.HavePivot != have_pivot_before ||
+        output != sentinel)
+    {
+        std::fprintf(stderr, "solve: exact checkpoint duplicate changed state\n");
+        return false;
+    }
+    std::vector<uint8_t> corrupt(message.begin(), message.begin() + block_bytes);
+    corrupt[0] ^= 1u;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 0u, corrupt.data(), block_bytes,
+            resume, output, nullptr, false) != Wirehair_Error ||
+        resume.Rank != rank_before ||
+        resume.CoefficientScratch != coefficient_scratch_before ||
+        resume.RhsScratch != rhs_scratch_before ||
+        resume.PivotCoefficients != pivot_coefficients_before ||
+        resume.PivotRhs != pivot_rhs_before ||
+        resume.HavePivot != have_pivot_before ||
+        output != sentinel)
+    {
+        std::fprintf(stderr,
+            "solve: conflicting checkpoint duplicate was accepted\n");
+        return false;
+    }
+
+    WirehairResult result = Wirehair_NeedMore;
+    for (uint32_t id = 1u; id < K; ++id)
+    {
+        result = wirehair_v2::ResumePrecodeSystem(
+            system,
+            config,
+            id,
+            message.data() + (size_t)id * block_bytes,
+            block_bytes,
+            resume,
+            output,
+            &stats,
+            true);
+        if (id + 1u < K && result != Wirehair_NeedMore) {
+            std::fprintf(stderr,
+                "solve: checkpoint completed early id=%u result=%d\n",
+                id, (int)result);
+            return false;
+        }
+    }
+    if (result != Wirehair_Success || resume.Active || output != expected ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, systematic,
+            output.data(), block_bytes))
+    {
+        std::fprintf(stderr, "solve: resumed solution mismatch\n");
+        return false;
+    }
+    std::printf("incremental rank-deficient resume: PASS\n");
     return true;
 }
 
@@ -953,7 +1252,9 @@ int main(int argc, char** argv)
         return 2;
     }
     bool ok = true;
+    ok = CheckPacketEvaluationFusion() && ok;
     ok = CheckTinyDenseOracle() && ok;
+    ok = CheckIncrementalResume() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;

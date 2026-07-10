@@ -1,0 +1,7 @@
+# Raw seed files, one repository-relative filename per line.
+params.seed
+system.seed
+profile.seed
+packet.seed
+oracle.seed
+boundaries.seed
