@@ -467,11 +467,9 @@ bool CheckInactiveResidualCap()
 
 int main(int argc, char** argv)
 {
-    if (wirehair_v2::kPacketRowContractVersion != 4u) {
-        std::fprintf(stderr,
-            "solve: shipping packet-row contract is not version 4\n");
-        return 1;
-    }
+    static_assert(
+        wirehair_v2::kPacketRowContractVersion == 4u,
+        "shipping packet-row contract must be version 4");
     if (argc == 3)
     {
         const uint32_t K = (uint32_t)std::strtoul(argv[1], nullptr, 10);
