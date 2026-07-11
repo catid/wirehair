@@ -34,6 +34,10 @@
 #include "gf256.h"
 #include <new> // std::nothrow
 
+#if defined(_MSC_VER)
+    #include <intrin.h>
+#endif
+
 // Compiler-specific debug break
 #if defined(_DEBUG) || defined(DEBUG)
     #define CAT_DEBUG
@@ -137,6 +141,33 @@ public:
 /// These bit rotations only work for uint64_t
 #define CAT_ROL64(n, r) ( ((uint64_t)(n) << (r)) | ((uint64_t)(n) >> (64 - (r))) )
 #define CAT_ROR64(n, r) ( ((uint64_t)(n) >> (r)) | ((uint64_t)(n) << (64 - (r))) )
+
+/** Return the index of the least-significant set bit.  `x` must be nonzero. */
+GF256_FORCE_INLINE unsigned NonzeroLowestBitIndex64(uint64_t x)
+{
+    CAT_DEBUG_ASSERT(x != 0u);
+#if defined(_MSC_VER) && \
+    (defined(_M_X64) || defined(_M_AMD64) || defined(_M_ARM64))
+    unsigned long index;
+    (void)_BitScanForward64(&index, x);
+    return (unsigned)index;
+#elif defined(_MSC_VER)
+    unsigned long index;
+    if (_BitScanForward(&index, (unsigned long)x)) {
+        return (unsigned)index;
+    }
+    (void)_BitScanForward(&index, (unsigned long)(x >> 32));
+    return (unsigned)index + 32u;
+#elif UINTPTR_MAX == UINT32_MAX
+    const uint32_t low = (uint32_t)x;
+    if (low != 0u) {
+        return (unsigned)__builtin_ctz(low);
+    }
+    return 32u + (unsigned)__builtin_ctz((uint32_t)(x >> 32));
+#else
+    return (unsigned)__builtin_ctzll(x);
+#endif
+}
 
 
 //------------------------------------------------------------------------------

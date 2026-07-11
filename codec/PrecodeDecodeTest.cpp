@@ -29,6 +29,11 @@ bool SameStats(
         a.ResidualRank == b.ResidualRank &&
         a.BinaryResidualRank == b.BinaryResidualRank &&
         a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
         a.BlockXors == b.BlockXors &&
         a.BlockMulAdds == b.BlockMulAdds &&
         a.BuildNanoseconds == b.BuildNanoseconds &&
@@ -707,6 +712,90 @@ bool CheckIncrementalDecoderParity()
 #endif
 }
 
+bool CheckColdDuplicateSlotLookup()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 37u;
+    const uint32_t tail_bytes = 11u;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    const std::vector<uint8_t> message = MakeMessage((size_t)message_bytes);
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    if (!Check(
+            encoder.InitializeResult(
+                message.data(), message_bytes, block_bytes) ==
+                Wirehair_Success &&
+            decoder.InitializeResult(message_bytes, block_bytes) ==
+                Wirehair_Success,
+            "cold duplicate slot fixture initialization failed"))
+    {
+        return false;
+    }
+
+    PacketFixture packet;
+    for (uint32_t id = 0u; id + 3u < K; ++id)
+    {
+        if (!EncodePacket(encoder, block_bytes, id, packet) ||
+            decoder.DecodeResult(
+                packet.Id, packet.Data.data(), packet.Bytes) !=
+                Wirehair_NeedMore)
+        {
+            return false;
+        }
+    }
+
+    PacketFixture high;
+    PacketFixture partial;
+    if (!EncodePacket(encoder, block_bytes, UINT32_MAX, high) ||
+        decoder.DecodeResult(high.Id, high.Data.data(), high.Bytes) !=
+            Wirehair_NeedMore ||
+        !EncodePacket(encoder, block_bytes, K - 1u, partial) ||
+        partial.Bytes != tail_bytes ||
+        decoder.DecodeResult(
+            partial.Id, partial.Data.data(), partial.Bytes) !=
+            Wirehair_NeedMore ||
+        decoder.ReceivedCount() != K - 1u)
+    {
+        std::fprintf(stderr, "cold duplicate slot fixture feed failed\n");
+        return false;
+    }
+
+    if (!Check(
+            decoder.DecodeResult(
+                high.Id, high.Data.data(), high.Bytes) == Wirehair_NeedMore &&
+            decoder.DecodeResult(
+                partial.Id, partial.Data.data(), partial.Bytes) ==
+                Wirehair_NeedMore &&
+            decoder.ReceivedCount() == K - 1u,
+            "cold duplicate slot lookup changed accepted state"))
+    {
+        return false;
+    }
+
+    PacketFixture high_conflict = high;
+    PacketFixture partial_conflict = partial;
+    high_conflict.Data[high_conflict.Bytes - 1u] ^= 0x80u;
+    partial_conflict.Data[partial_conflict.Bytes - 1u] ^= 0x40u;
+    if (!Check(
+            decoder.DecodeResult(
+                high_conflict.Id,
+                high_conflict.Data.data(),
+                high_conflict.Bytes) == Wirehair_InvalidInput &&
+            decoder.DecodeResult(
+                partial_conflict.Id,
+                partial_conflict.Data.data(),
+                partial_conflict.Bytes) == Wirehair_InvalidInput &&
+            decoder.ReceivedCount() == K - 1u,
+            "cold duplicate slot conflict was not rejected"))
+    {
+        return false;
+    }
+
+    std::printf("cold duplicate slot lookup: PASS\n");
+    return true;
+}
+
 bool RunDecodeCase(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -1070,7 +1159,8 @@ int main(int argc, char** argv)
     }
     if (!CheckInvalidAndOom() ||
         !CheckFacadeModeTransitions() ||
-        !CheckIncrementalDecoderParity())
+        !CheckIncrementalDecoderParity() ||
+        !CheckColdDuplicateSlotLookup())
     {
         return 1;
     }

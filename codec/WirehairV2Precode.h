@@ -36,6 +36,15 @@
 
 namespace wirehair_v2 {
 
+enum class HeavyCoefficientFamily : uint32_t
+{
+    PeriodicCauchy = 0,
+    /// Experiment-only full-column hash family.  Named/public profiles never
+    /// select this; it distinguishes a periodic-coefficient artifact from the
+    /// generic GF(256) square-completion floor in actual-solver trials.
+    HashedNonzero = 1
+};
+
 struct PrecodeParams
 {
     uint32_t BlockCount = 0;   ///< K: source blocks
@@ -63,6 +72,9 @@ struct PrecodeParams
         encoder-feasible.
     */
     bool DenseIdentityCorner = false;
+
+    HeavyCoefficientFamily HeavyFamily =
+        HeavyCoefficientFamily::PeriodicCauchy;
 
     uint64_t Seed = 0;         ///< constraint-generation seed
 };
@@ -140,5 +152,12 @@ uint8_t HeavyCoefficient(
     uint32_t heavy_row,
     uint32_t ge_column,
     uint32_t heavy_rows);
+
+/// Coefficient dispatch for actual encoder/decoder equations.  Alternate
+/// families are confined to explicitly constructed experiment systems.
+uint8_t HeavyCoefficientForParams(
+    const PrecodeParams& params,
+    uint32_t heavy_row,
+    uint32_t ge_column);
 
 } // namespace wirehair_v2

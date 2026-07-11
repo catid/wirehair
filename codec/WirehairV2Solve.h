@@ -20,11 +20,42 @@ static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;
 static const uint32_t kMinPacketPrecodeCount = 2u;
 static const uint32_t kMaxPacketPrecodeCount = 65521u;
+static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
 
 struct PacketRowConfig
 {
     uint32_t PeelSeed = 0;
     uint32_t MixCount = kCertifiedPacketMixCount;
+};
+
+/**
+    Validated process-local invariants for one packet-row domain.
+
+    Prime values are deliberately private and are derived only by Initialize;
+    matching counts/config therefore prove cached iterators are equation-identical
+    to the generic helpers.  This state is never serialized into a V2 profile.
+*/
+class PacketRowRuntime
+{
+public:
+    bool Initialize(
+        uint32_t source_count,
+        uint32_t precode_count,
+        uint32_t mix_count);
+    bool IsValidFor(
+        uint32_t source_count,
+        uint32_t precode_count,
+        uint32_t mix_count) const;
+
+    uint16_t SourcePrime() const { return SourcePrimeValue; }
+    uint16_t PrecodePrime() const { return PrecodePrimeValue; }
+
+private:
+    uint32_t SourceCount = 0u;
+    uint32_t PrecodeCount = 0u;
+    uint32_t MixCount = 0u;
+    uint16_t SourcePrimeValue = 0u;
+    uint16_t PrecodePrimeValue = 0u;
 };
 
 struct SolvePacket
@@ -42,6 +73,10 @@ struct PrecodeSolveStats
     uint32_t ResidualRank = 0;
     uint32_t BinaryResidualRank = 0;
     uint64_t BinaryRowReferences = 0;
+    uint64_t BinaryRowStorageBytes = 0;
+    uint64_t BinaryAdjacencyStorageBytes = 0;
+    uint32_t BinaryRowStorageAllocations = 0;
+    uint32_t BinaryAdjacencyStorageAllocations = 0;
     uint64_t BlockXors = 0;
     uint64_t BlockMulAdds = 0;
     uint64_t BuildNanoseconds = 0;
@@ -67,6 +102,7 @@ struct PrecodeSolveResumeState
     uint32_t ProjectionWords = 0u;
     uint32_t Rank = 0u;
     PacketRowConfig Config = {};
+    PacketRowRuntime Runtime = {};
     PrecodeSolveStats Stats = {};
     std::vector<uint32_t> InactiveIndex;
     std::vector<uint32_t> InactiveColumns;
@@ -116,6 +152,14 @@ std::vector<uint32_t> GeneratePacketMatrixRow(
     uint32_t block_id,
     const PacketRowConfig& config);
 
+/** Internal row generator using a validated process-local prime cache. */
+std::vector<uint32_t> GeneratePacketMatrixRowWithRuntime(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime);
+
 uint32_t PacketPeelSeedFromProfile(
     const SeedProfile& profile,
     uint64_t salt);
@@ -159,6 +203,17 @@ bool EvaluatePacketBlockForValidatedSystem(
     uint8_t* block_out,
     uint64_t* block_ops_out = nullptr);
 
+/** Validated-system evaluator using process-local cached packet primes. */
+bool EvaluatePacketBlockForValidatedSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out = nullptr);
+
 /**
     Solve the complete V2 system over GF(256).
 
@@ -173,10 +228,26 @@ bool EvaluatePacketBlockForValidatedSystem(
     every failure.  When resume_state is non-null, a rank-deficient residual
     within the cap atomically replaces it with an active affine/pivot
     checkpoint; cap failures leave it unchanged and require a cold retry.
+    `stats` is diagnostic rather than transactional output: completed algebraic
+    outcomes publish their counters, while validation failures and allocation
+    failures before a resumable checkpoint may leave the caller's prior value
+    unchanged.  This lets stateful decoders preserve their last committed
+    counters when a cold retry cannot be constructed.
 */
 WirehairResult SolvePrecodeSystem(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr);
+
+/** Internal cold solve using a validated process-local packet prime cache. */
+WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,

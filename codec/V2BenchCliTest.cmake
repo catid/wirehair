@@ -145,6 +145,8 @@ expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8
     --trials 1 --loss 0)
 expect_success("v2_precode[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode)
+expect_success("v2_cached[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode-cache)
 expect_success("# densetune:" densetune --N 2 --bb-list 8 --candidates 1
     --trials 1 --loss 0)
 expect_success("# densecount:" densecount --N 2 --bb-list 8 --deltas 0
@@ -155,6 +157,41 @@ expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
 expect_success("# precodefail:" precodefail --N 64 --bb-list 8
     --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+
+# Common packet schedules are accepted by both E2E comparison entry points.
+foreach(schedule IN ITEMS iid burst permutation systematic-first repair-only
+        adversarial)
+    expect_success("schedule=${schedule}" compare --nlo 64 --nhi 64
+        --trials 1 --bb-list 8 --max-message-mib 1 --loss 0.1
+        --schedule ${schedule} --precode)
+    expect_success("schedule=${schedule}" precodecheck --N 64 --bb-list 8
+        --trials 1 --loss 0.1 --schedule ${schedule})
+endforeach()
+expect_success("paired_trial: schedule=burst" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0.1
+    --schedule burst --precode --trial-details)
+expect_success("cached_ok=1.*cached_oh=[0-9]+.*cached_delta=" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0.1 --schedule iid --precode-cache --trial-details)
+expect_success("precode_trial: schedule=permutation" precodecheck --N 64
+    --bb-list 8 --trials 1 --loss 0.1 --schedule permutation
+    --trial-details)
+# High burst loss used to clamp its start probability to one and drop forever.
+# Exercise both consumers at the accepted loss boundary.
+expect_success("schedule=burst" compare --nlo 8 --nhi 8 --trials 1
+    --bb-list 8 --max-message-mib 1 --loss 0.99 --schedule burst --precode)
+expect_success("schedule=burst" precodecheck --N 64 --bb-list 8
+    --trials 1 --loss 0.99 --schedule burst)
+expect_failure("unknown compare schedule" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --schedule unknown)
+expect_failure("unknown precodecheck schedule" precodecheck --N 64
+    --bb-list 8 --trials 1 --schedule unknown)
+expect_success("hashed" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --heavy-family periodic,hashed)
+expect_failure("unknown --heavy-family" precodefail --N 64 --bb-list 1
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --heavy-family unknown)
 
 # Thread parsing and the partially-launched worker cleanup path.
 expect_failure("bad --threads value" precodefail --N 64 --bb-list 8

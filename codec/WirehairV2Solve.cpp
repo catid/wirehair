@@ -16,11 +16,145 @@
 namespace wirehair_v2 {
 namespace {
 
-struct BinaryEquation
+struct ColumnSpan
 {
-    std::vector<uint32_t> Columns;
+    const uint32_t* First = nullptr;
+    const uint32_t* Last = nullptr;
+
+    const uint32_t* begin() const { return First; }
+    const uint32_t* end() const { return Last; }
+    size_t size() const { return (size_t)(Last - First); }
+};
+
+struct BinaryEquationView
+{
+    ColumnSpan Columns;
     const uint8_t* Data = nullptr;
 };
+
+class BinaryEquationArena
+{
+public:
+    void Initialize(size_t row_count, size_t reference_count)
+    {
+        RowOffsets.resize(row_count + 1u);
+        RowData.resize(row_count);
+        Columns.reserve(reference_count);
+        RowOffsets[0] = 0u;
+    }
+
+    void BeginRow(const uint8_t* data)
+    {
+        RowData[NextRow] = data;
+    }
+
+    void AppendColumn(uint32_t column)
+    {
+        Columns.push_back(column);
+    }
+
+    void AppendRow(
+        const std::vector<uint32_t>& columns,
+        const uint8_t* data)
+    {
+        BeginRow(data);
+        Columns.insert(Columns.end(), columns.begin(), columns.end());
+        EndRow();
+    }
+
+    void EndRow()
+    {
+        ++NextRow;
+        RowOffsets[NextRow] = Columns.size();
+    }
+
+    bool IsComplete(size_t row_count, size_t reference_count) const
+    {
+        return NextRow == row_count && Columns.size() == reference_count;
+    }
+
+    size_t size() const { return RowData.size(); }
+
+    uint64_t StorageBytes() const
+    {
+        return (uint64_t)RowOffsets.capacity() * sizeof(size_t) +
+            (uint64_t)Columns.capacity() * sizeof(uint32_t) +
+            (uint64_t)RowData.capacity() * sizeof(const uint8_t*);
+    }
+
+    uint32_t StorageAllocations() const
+    {
+        return (RowOffsets.capacity() != 0u ? 1u : 0u) +
+            (Columns.capacity() != 0u ? 1u : 0u) +
+            (RowData.capacity() != 0u ? 1u : 0u);
+    }
+
+    BinaryEquationView operator[](size_t row) const
+    {
+        BinaryEquationView view;
+        view.Columns.First = Columns.data() + RowOffsets[row];
+        view.Columns.Last = Columns.data() + RowOffsets[row + 1u];
+        view.Data = RowData[row];
+        return view;
+    }
+
+private:
+    std::vector<size_t> RowOffsets;
+    std::vector<uint32_t> Columns;
+    std::vector<const uint8_t*> RowData;
+    size_t NextRow = 0u;
+};
+
+bool InitializePacketRowParameters(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    wirehair::PeelRowParameters& params)
+{
+    if (!runtime.IsValidFor(
+            source_count, precode_count, config.MixCount))
+    {
+        return false;
+    }
+    params.Initialize(
+        block_id,
+        config.PeelSeed,
+        (uint16_t)source_count,
+        (uint16_t)precode_count);
+    return true;
+}
+
+template<class Prepare, class Append>
+bool ForEachPacketMatrixColumn(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const Prepare& prepare,
+    const Append& append)
+{
+    wirehair::PeelRowParameters params;
+    if (!InitializePacketRowParameters(
+            source_count, precode_count, block_id, config, runtime, params))
+    {
+        return false;
+    }
+    prepare((size_t)params.PeelCount + config.MixCount);
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)source_count, runtime.SourcePrime());
+    const wirehair::RowMixIterator mix(
+        params, (uint16_t)precode_count, runtime.PrecodePrime());
+    do {
+        append(source.GetColumn());
+    } while (source.Iterate());
+    for (uint32_t i = 0; i < config.MixCount; ++i) {
+        append(source_count + mix.Columns[i]);
+    }
+    return true;
+}
 
 struct PeelResult
 {
@@ -28,6 +162,8 @@ struct PeelResult
     std::vector<uint32_t> PeelOrder;
     std::vector<uint32_t> InactiveOrder;
     std::vector<uint8_t> UsedRows;
+    uint64_t AdjacencyStorageBytes = 0u;
+    uint32_t AdjacencyStorageAllocations = 0u;
 };
 
 struct ColumnCandidate
@@ -106,6 +242,31 @@ void AddScaledBlock(
         gf256_muladd_mem(dst, scale, src, (int)block_bytes);
         ++stats.BlockMulAdds;
     }
+}
+
+void AddScaledBlocks(
+    void* const* destinations,
+    const uint8_t* scales,
+    uint32_t destination_count,
+    const uint8_t* source,
+    uint32_t block_bytes,
+    PrecodeSolveStats& stats)
+{
+    for (uint32_t i = 0; i < destination_count; ++i)
+    {
+        if (scales[i] == 1u) {
+            ++stats.BlockXors;
+        }
+        else if (scales[i] > 1u) {
+            ++stats.BlockMulAdds;
+        }
+    }
+    gf256_muladd_multi_mem(
+        destinations,
+        scales,
+        (int)destination_count,
+        source,
+        (int)block_bytes);
 }
 
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
@@ -210,14 +371,14 @@ ResidualInsertResult InsertResidualRow(
 
 PeelResult PeelBinaryRows(
     uint32_t column_count,
-    const std::vector<BinaryEquation>& rows)
+    const BinaryEquationArena& rows)
 {
     PeelResult out;
     out.SolveRow.assign(column_count, UINT32_MAX);
     out.UsedRows.assign(rows.size(), 0u);
 
     std::vector<uint32_t> live(rows.size(), 0u);
-    std::vector<std::vector<uint32_t> > column_rows(column_count);
+    std::vector<size_t> column_offsets((size_t)column_count + 1u, 0u);
     std::vector<uint8_t> resolved(column_count, 0u);
     std::vector<uint32_t> queue;
     std::vector<uint32_t> degree_two_refs(column_count, 0u);
@@ -231,13 +392,36 @@ PeelResult PeelBinaryRows(
             queue.push_back(r);
         }
         for (uint32_t column : rows[r].Columns) {
-            column_rows[column].push_back(r);
+            ++column_offsets[(size_t)column + 1u];
         }
     }
 
     for (uint32_t column = 0; column < column_count; ++column) {
+        column_offsets[(size_t)column + 1u] += column_offsets[column];
+    }
+    std::vector<uint32_t> column_rows(column_offsets[column_count]);
+    out.AdjacencyStorageBytes =
+        (uint64_t)column_offsets.capacity() * sizeof(size_t) +
+        (uint64_t)column_rows.capacity() * sizeof(uint32_t);
+    out.AdjacencyStorageAllocations =
+        (column_offsets.capacity() != 0u ? 1u : 0u) +
+        (column_rows.capacity() != 0u ? 1u : 0u);
+    for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
+    {
+        for (uint32_t column : rows[r].Columns)
+        {
+            const size_t destination =
+                column_offsets[column] + degree_two_refs[column]++;
+            column_rows[destination] = r;
+        }
+    }
+    std::fill(degree_two_refs.begin(), degree_two_refs.end(), 0u);
+
+    for (uint32_t column = 0; column < column_count; ++column)
+    {
         ColumnCandidate candidate;
-        candidate.Primary = (uint32_t)column_rows[column].size();
+        candidate.Primary = (uint32_t)(
+            column_offsets[(size_t)column + 1u] - column_offsets[column]);
         candidate.References = candidate.Primary;
         candidate.ReverseColumn = UINT32_MAX - column;
         reference_queue.push(candidate);
@@ -261,8 +445,9 @@ PeelResult PeelBinaryRows(
             if (degree_two_refs[column] > 0u) {
                 ColumnCandidate candidate;
                 candidate.Primary = degree_two_refs[column];
-                candidate.References =
-                    (uint32_t)column_rows[column].size();
+                candidate.References = (uint32_t)(
+                    column_offsets[(size_t)column + 1u] -
+                    column_offsets[column]);
                 candidate.ReverseColumn = UINT32_MAX - column;
                 degree_two_queue.push(candidate);
             }
@@ -274,8 +459,11 @@ PeelResult PeelBinaryRows(
 
     const auto resolve = [&](uint32_t column) {
         resolved[column] = 1u;
-        for (uint32_t row : column_rows[column])
+        for (size_t ref = column_offsets[column];
+             ref < column_offsets[(size_t)column + 1u];
+             ++ref)
         {
+            const uint32_t row = column_rows[ref];
             if (live[row] == 0u) {
                 continue;
             }
@@ -363,17 +551,6 @@ bool RowIsZero(const uint8_t* data, uint32_t bytes)
     return true;
 }
 
-uint32_t LowestSetBitIndex(uint64_t word)
-{
-    uint32_t index = 0u;
-    while ((word & 1u) == 0u)
-    {
-        word >>= 1;
-        ++index;
-    }
-    return index;
-}
-
 } // namespace
 
 void PrecodeSolveResumeState::Clear()
@@ -394,6 +571,7 @@ void PrecodeSolveResumeState::Swap(
     swap(ProjectionWords, other.ProjectionWords);
     swap(Rank, other.Rank);
     swap(Config, other.Config);
+    swap(Runtime, other.Runtime);
     swap(Stats, other.Stats);
     InactiveIndex.swap(other.InactiveIndex);
     InactiveColumns.swap(other.InactiveColumns);
@@ -445,42 +623,80 @@ bool IsPacketRowDomainValid(
         mix_count <= precode_count;
 }
 
+bool PacketRowRuntime::Initialize(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t mix_count)
+{
+    if (!IsPacketRowDomainValid(source_count, precode_count, mix_count))
+    {
+        *this = PacketRowRuntime();
+        return false;
+    }
+    const uint16_t source_prime =
+        wirehair::NextPrime16((uint16_t)source_count);
+    const uint16_t precode_prime =
+        wirehair::NextPrime16((uint16_t)precode_count);
+    if (source_prime == 0u || precode_prime == 0u)
+    {
+        *this = PacketRowRuntime();
+        return false;
+    }
+    SourceCount = source_count;
+    PrecodeCount = precode_count;
+    MixCount = mix_count;
+    SourcePrimeValue = source_prime;
+    PrecodePrimeValue = precode_prime;
+    return true;
+}
+
+bool PacketRowRuntime::IsValidFor(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t mix_count) const
+{
+    return SourcePrimeValue != 0u && PrecodePrimeValue != 0u &&
+        SourceCount == source_count && PrecodeCount == precode_count &&
+        MixCount == mix_count;
+}
+
+std::vector<uint32_t> GeneratePacketMatrixRowWithRuntime(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime)
+{
+    std::vector<uint32_t> row;
+    const bool generated = ForEachPacketMatrixColumn(
+        source_count,
+        precode_count,
+        block_id,
+        config,
+        runtime,
+        [&row](size_t count) { row.reserve(count); },
+        [&row](uint32_t column) { row.push_back(column); });
+    if (!generated) {
+        row.clear();
+        return row;
+    }
+    return row;
+}
+
 std::vector<uint32_t> GeneratePacketMatrixRow(
     uint32_t source_count,
     uint32_t precode_count,
     uint32_t block_id,
     const PacketRowConfig& config)
 {
-    std::vector<uint32_t> row;
-    if (!IsPacketRowDomainValid(
+    PacketRowRuntime runtime;
+    if (!runtime.Initialize(
             source_count, precode_count, config.MixCount))
     {
-        return row;
+        return std::vector<uint32_t>();
     }
-
-    wirehair::PeelRowParameters params;
-    params.Initialize(
-        block_id,
-        config.PeelSeed,
-        (uint16_t)source_count,
-        (uint16_t)precode_count);
-    const uint16_t source_prime =
-        wirehair::NextPrime16((uint16_t)source_count);
-    const uint16_t precode_prime =
-        wirehair::NextPrime16((uint16_t)precode_count);
-    wirehair::PeelRowIterator source(
-        params, (uint16_t)source_count, source_prime);
-    const wirehair::RowMixIterator mix(
-        params, (uint16_t)precode_count, precode_prime);
-
-    row.reserve((size_t)params.PeelCount + config.MixCount);
-    do {
-        row.push_back(source.GetColumn());
-    } while (source.Iterate());
-    for (uint32_t i = 0; i < config.MixCount; ++i) {
-        row.push_back(source_count + mix.Columns[i]);
-    }
-    return row;
+    return GeneratePacketMatrixRowWithRuntime(
+        source_count, precode_count, block_id, config, runtime);
 }
 
 uint32_t PacketPeelSeedFromProfile(
@@ -518,6 +734,7 @@ static_assert(
 static bool EvaluatePacketBlockImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes,
     uint32_t block_id,
@@ -531,7 +748,7 @@ static bool EvaluatePacketBlockImpl(
     if (!intermediate_blocks ||
         !block_out || block_bytes == 0u || block_bytes > 0x7fffffffu ||
         P_wide > UINT32_MAX ||
-        !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount))
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
     {
         return false;
     }
@@ -561,9 +778,9 @@ static bool EvaluatePacketBlockImpl(
     params.Initialize(
         block_id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
     wirehair::PeelRowIterator source(
-        params, (uint16_t)K, wirehair::NextPrime16((uint16_t)K));
+        params, (uint16_t)K, runtime.SourcePrime());
     const wirehair::RowMixIterator mix(
-        params, (uint16_t)P, wirehair::NextPrime16((uint16_t)P));
+        params, (uint16_t)P, runtime.PrecodePrime());
     uint64_t operations = 1u;
     const uint8_t* first_source =
         intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
@@ -662,8 +879,19 @@ bool EvaluatePacketBlock(
     if (gf256_init() != 0) {
         return false;
     }
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    PacketRowRuntime runtime;
+    if (P_wide > UINT32_MAX ||
+        !runtime.Initialize(
+            system.Params.BlockCount,
+            (uint32_t)P_wide,
+            config.MixCount))
+    {
+        return false;
+    }
     return EvaluatePacketBlockImpl(
-        system, config, intermediate_blocks, block_bytes, block_id,
+        system, config, runtime, intermediate_blocks, block_bytes, block_id,
         block_out, block_ops_out, true);
 }
 
@@ -676,14 +904,66 @@ bool EvaluatePacketBlockForValidatedSystem(
     uint8_t* block_out,
     uint64_t* block_ops_out)
 {
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    PacketRowRuntime runtime;
+    if (P_wide > UINT32_MAX ||
+        !runtime.Initialize(
+            system.Params.BlockCount,
+            (uint32_t)P_wide,
+            config.MixCount))
+    {
+        return false;
+    }
+    return EvaluatePacketBlockForValidatedSystemWithRuntime(
+        system, config, runtime, intermediate_blocks, block_bytes, block_id,
+        block_out, block_ops_out);
+}
+
+bool EvaluatePacketBlockForValidatedSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* block_out,
+    uint64_t* block_ops_out)
+{
     return EvaluatePacketBlockImpl(
-        system, config, intermediate_blocks, block_bytes, block_id,
+        system, config, runtime, intermediate_blocks, block_bytes, block_id,
         block_out, block_ops_out, false);
 }
 
 WirehairResult SolvePrecodeSystem(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    PacketRowRuntime runtime;
+    if (P_wide > UINT32_MAX ||
+        !runtime.Initialize(
+            system.Params.BlockCount,
+            (uint32_t)P_wide,
+            config.MixCount))
+    {
+        return Wirehair_InvalidInput;
+    }
+    return SolvePrecodeSystemWithRuntime(
+        system, config, runtime, packets, block_bytes,
+        intermediate_blocks_out, stats, resume_state);
+}
+
+WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
     const std::vector<SolvePacket>& packets,
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
@@ -697,7 +977,7 @@ WirehairResult SolvePrecodeSystem(
     const uint32_t H = system.Params.HeavyRows;
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
-        !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
         !ValidatePrecodeSystem(system))
     {
         return Wirehair_InvalidInput;
@@ -732,34 +1012,79 @@ WirehairResult SolvePrecodeSystem(
     {
         typedef std::chrono::steady_clock SolveClock;
         SolveClock::time_point phase_start = SolveClock::now();
-        std::vector<BinaryEquation> rows;
-        rows.reserve((size_t)S + D2 + packets.size());
-        for (const std::vector<uint32_t>& columns : system.StaircaseRows)
-        {
-            BinaryEquation equation;
-            equation.Columns = columns;
-            st.BinaryRowReferences += columns.size();
-            rows.push_back(std::move(equation));
+        const uint64_t row_count_wide =
+            (uint64_t)S + D2 + packets.size();
+        if (row_count_wide > UINT32_MAX) {
+            return Wirehair_OOM;
         }
-        for (const std::vector<uint32_t>& columns : system.DenseRowColumns)
-        {
-            BinaryEquation equation;
-            equation.Columns = columns;
-            st.BinaryRowReferences += columns.size();
-            rows.push_back(std::move(equation));
+        const size_t row_count = (size_t)row_count_wide;
+        size_t reference_count = 0u;
+        const auto add_references = [&reference_count](size_t count) {
+            if (count > std::numeric_limits<size_t>::max() - reference_count) {
+                return false;
+            }
+            reference_count += count;
+            return true;
+        };
+        for (const std::vector<uint32_t>& columns : system.StaircaseRows) {
+            if (!add_references(columns.size())) {
+                return Wirehair_OOM;
+            }
+        }
+        for (const std::vector<uint32_t>& columns : system.DenseRowColumns) {
+            if (!add_references(columns.size())) {
+                return Wirehair_OOM;
+            }
         }
         for (const SolvePacket& packet : packets)
         {
-            BinaryEquation equation;
-            equation.Columns = GeneratePacketMatrixRow(
-                K, P, packet.BlockId, config);
-            if (equation.Columns.empty()) {
+            wirehair::PeelRowParameters params;
+            if (!InitializePacketRowParameters(
+                    K, P, packet.BlockId, config, runtime, params) ||
+                !add_references(
+                    (size_t)params.PeelCount + config.MixCount))
+            {
+                return Wirehair_OOM;
+            }
+        }
+
+        BinaryEquationArena rows;
+        rows.Initialize(row_count, reference_count);
+        for (const std::vector<uint32_t>& columns : system.StaircaseRows)
+        {
+            rows.AppendRow(columns, nullptr);
+            st.BinaryRowReferences += columns.size();
+        }
+        for (const std::vector<uint32_t>& columns : system.DenseRowColumns)
+        {
+            rows.AppendRow(columns, nullptr);
+            st.BinaryRowReferences += columns.size();
+        }
+        for (const SolvePacket& packet : packets)
+        {
+            size_t packet_references = 0u;
+            rows.BeginRow(packet.Data);
+            const bool generated = ForEachPacketMatrixColumn(
+                K,
+                P,
+                packet.BlockId,
+                config,
+                runtime,
+                [&packet_references](size_t count) {
+                    packet_references = count;
+                },
+                [&rows](uint32_t column) { rows.AppendColumn(column); });
+            if (!generated || packet_references == 0u) {
                 return Wirehair_InvalidInput;
             }
-            equation.Data = packet.Data;
-            st.BinaryRowReferences += equation.Columns.size();
-            rows.push_back(std::move(equation));
+            rows.EndRow();
+            st.BinaryRowReferences += packet_references;
         }
+        if (!rows.IsComplete(row_count, reference_count)) {
+            return Wirehair_Error;
+        }
+        st.BinaryRowStorageBytes = rows.StorageBytes();
+        st.BinaryRowStorageAllocations = rows.StorageAllocations();
         st.PacketRows = (uint32_t)packets.size();
         SolveClock::time_point phase_end = SolveClock::now();
         st.BuildNanoseconds = (uint64_t)
@@ -768,6 +1093,9 @@ WirehairResult SolvePrecodeSystem(
 
         phase_start = phase_end;
         PeelResult peel = PeelBinaryRows(L, rows);
+        st.BinaryAdjacencyStorageBytes = peel.AdjacencyStorageBytes;
+        st.BinaryAdjacencyStorageAllocations =
+            peel.AdjacencyStorageAllocations;
         if (peel.PeelOrder.size() + peel.InactiveOrder.size() != L) {
             return terminal_error();
         }
@@ -813,7 +1141,8 @@ WirehairResult SolvePrecodeSystem(
             std::fill(accumulator.begin(), accumulator.end(), uint64_t{0});
             uint8_t* constant =
                 values.data() + (size_t)column * block_bytes;
-            const BinaryEquation& equation = rows[peel.SolveRow[column]];
+            const BinaryEquationView equation =
+                rows[peel.SolveRow[column]];
             if (equation.Data) {
                 std::memcpy(constant, equation.Data, block_bytes);
             }
@@ -939,7 +1268,8 @@ WirehairResult SolvePrecodeSystem(
                         uint64_t word = bits[w];
                         while (word != 0u)
                         {
-                            const uint32_t bit = LowestSetBitIndex(word);
+                            const uint32_t bit =
+                                wirehair::NonzeroLowestBitIndex64(word);
                             const uint32_t projected = (w << 6) + bit;
                             if (projected < R) {
                                 coeff[projected] ^= 1u;
@@ -988,7 +1318,8 @@ WirehairResult SolvePrecodeSystem(
                     packed_heavy.begin(), packed_heavy.end(), uint64_t{0});
                 for (uint32_t heavy = 0; heavy < H; ++heavy) {
                     packed_heavy[heavy >> 3] |=
-                        (uint64_t)HeavyCoefficient(heavy, column, H) <<
+                        (uint64_t)HeavyCoefficientForParams(
+                            system.Params, heavy, column) <<
                         ((heavy & 7u) * 8u);
                 }
                 const auto xor_packed = [&](uint32_t index) {
@@ -1010,7 +1341,8 @@ WirehairResult SolvePrecodeSystem(
                     uint64_t word = bits[w];
                     while (word != 0u)
                     {
-                        const uint32_t bit = LowestSetBitIndex(word);
+                        const uint32_t bit =
+                            wirehair::NonzeroLowestBitIndex64(word);
                         const uint32_t projected = (w << 6) + bit;
                         if (projected < R) {
                             xor_packed(projected);
@@ -1022,53 +1354,225 @@ WirehairResult SolvePrecodeSystem(
         }
 
         std::vector<uint8_t> heavy_rhs((size_t)H * block_bytes, 0u);
-        std::vector<uint8_t> residue_bucket(block_bytes, 0u);
-        for (uint32_t residue = 0; residue < window; ++residue)
+        void* heavy_destinations[128];
+        uint8_t heavy_scales[128];
+        for (uint32_t heavy = 0; heavy < H; ++heavy) {
+            heavy_destinations[heavy] =
+                heavy_rhs.data() + (size_t)heavy * block_bytes;
+        }
+        if (system.Params.HeavyFamily ==
+            HeavyCoefficientFamily::PeriodicCauchy)
         {
-            std::fill(
-                residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
-            for (uint32_t column = residue; column < L; column += window)
+            std::vector<uint8_t> residue_bucket(block_bytes, 0u);
+            // Residues at or above L cannot contain a column when L is smaller
+            // than the coefficient period.  Processing those empty buckets
+            // would issue H full-block muladds from an all-zero source, which
+            // is especially expensive for tiny messages and cannot affect the
+            // RHS.
+            const uint32_t populated_residues = std::min(window, L);
+            for (uint32_t residue = 0;
+                 residue < populated_residues;
+                 ++residue)
             {
-                gf256_add_mem(
+                std::fill(
+                    residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+                for (uint32_t column = residue; column < L; column += window)
+                {
+                    gf256_add_mem(
+                        residue_bucket.data(),
+                        values.data() + (size_t)column * block_bytes,
+                        (int)block_bytes);
+                    ++st.BlockXors;
+                }
+                for (uint32_t heavy = 0; heavy < H; ++heavy) {
+                    heavy_scales[heavy] = HeavyCoefficientForParams(
+                        system.Params, heavy, residue);
+                }
+                AddScaledBlocks(
+                    heavy_destinations,
+                    heavy_scales,
+                    H,
                     residue_bucket.data(),
-                    values.data() + (size_t)column * block_bytes,
-                    (int)block_bytes);
-                ++st.BlockXors;
-            }
-            for (uint32_t heavy = 0; heavy < H; ++heavy)
-            {
-                AddScaledBlock(
-                    heavy_rhs.data() + (size_t)heavy * block_bytes,
-                    HeavyCoefficient(heavy, residue, H),
-                    residue_bucket.data(),
-                    block_bytes, st);
+                    block_bytes,
+                    st);
             }
         }
-        for (uint32_t heavy = 0; heavy < H; ++heavy)
+        else
         {
-            ++st.ResidualRows;
-            std::fill(coeff.begin(), coeff.end(), uint8_t{0});
-            std::memcpy(
-                rhs.data(),
-                heavy_rhs.data() + (size_t)heavy * block_bytes,
-                block_bytes);
-            for (uint32_t index = 0; index < R; ++index) {
-                coeff[index] = (uint8_t)(
-                    projected_heavy[
-                        (size_t)index * heavy_words + (heavy >> 3)] >>
-                    ((heavy & 7u) * 8u));
-            }
-            if (InsertResidualRow(
-                    coeff, rhs, R, block_bytes,
-                    pivot_coeff, pivot_rhs, have_pivot,
-                    rank, st, true) ==
-                ResidualInsertResult::Inconsistent)
+            // Experiment families may depend on the complete column id and
+            // therefore cannot use the periodic residue-bucket optimization.
+            for (uint32_t column = 0; column < L; ++column)
             {
-                return terminal_error();
+                for (uint32_t heavy = 0; heavy < H; ++heavy) {
+                    heavy_scales[heavy] = HeavyCoefficientForParams(
+                        system.Params, heavy, column);
+                }
+                AddScaledBlocks(
+                    heavy_destinations,
+                    heavy_scales,
+                    H,
+                    values.data() + (size_t)column * block_bytes,
+                    block_bytes,
+                    st);
             }
+        }
+        // The rows inserted so far are binary.  Keep that GF(2) factorization
+        // intact and solve the heavy equations only on its free-variable
+        // quotient.  Updating all binary pivots with each heavy pivot would
+        // turn cheap XOR relationships into an R-wide GF(256) Gauss-Jordan
+        // solve.  The quotient has at most H columns in the useful regime.
+        const uint32_t binary_rank = rank;
+        // The quotient replaces GF(256) block operations with a few more
+        // scalar coefficient passes.  Keep the original insertion strategy
+        // for MTU-sized blocks where measurements show that trade is neutral
+        // or slightly negative; large blocks receive the material win.
+        const bool use_binary_quotient =
+            block_bytes >= kBinaryQuotientMinBlockBytes;
+        std::vector<uint32_t> free_columns;
+        if (use_binary_quotient)
+        {
+            free_columns.reserve(R - binary_rank);
+            for (uint32_t column = 0; column < R; ++column) {
+                if (!have_pivot[column]) {
+                    free_columns.push_back(column);
+                }
+            }
+        }
+        const uint32_t quotient_columns =
+            (uint32_t)free_columns.size();
+        if (use_binary_quotient &&
+            binary_rank + quotient_columns != R)
+        {
+            return terminal_error();
         }
 
+        std::vector<uint8_t> quotient_pivot_coeff(
+            (size_t)quotient_columns * quotient_columns, 0u);
+        size_t quotient_value_bytes = 0u;
+        if (quotient_columns != 0u &&
+            !CheckedBlockStorage(
+                quotient_columns, block_bytes, quotient_value_bytes))
+        {
+            return Wirehair_OOM;
+        }
+        std::vector<uint8_t> quotient_pivot_rhs(
+            quotient_value_bytes, 0u);
+        std::vector<uint8_t> quotient_have_pivot(
+            quotient_columns, 0u);
+        std::vector<uint8_t> quotient_coeff(quotient_columns, 0u);
+        std::vector<uint8_t> quotient_rhs(
+            use_binary_quotient ? block_bytes : 0u, 0u);
+        uint32_t quotient_rank = 0u;
+
+        if (use_binary_quotient)
+        {
+            for (uint32_t heavy = 0; heavy < H; ++heavy)
+            {
+                ++st.ResidualRows;
+                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                std::memcpy(
+                    rhs.data(),
+                    heavy_rhs.data() + (size_t)heavy * block_bytes,
+                    block_bytes);
+                for (uint32_t index = 0; index < R; ++index) {
+                    coeff[index] = (uint8_t)(
+                        projected_heavy[
+                            (size_t)index * heavy_words + (heavy >> 3)] >>
+                        ((heavy & 7u) * 8u));
+                }
+
+                // Reduce by the binary basis without inserting into it.  This
+                // leaves coefficients and RHS for the free-variable system.
+                const ResidualInsertResult reduced = InsertResidualRow(
+                    coeff, rhs, R, block_bytes,
+                    pivot_coeff, pivot_rhs, have_pivot,
+                    rank, st, false);
+                if (reduced == ResidualInsertResult::Inconsistent) {
+                    return terminal_error();
+                }
+                for (uint32_t i = 0; i < quotient_columns; ++i) {
+                    quotient_coeff[i] = coeff[free_columns[i]];
+                }
+                std::memcpy(
+                    quotient_rhs.data(), rhs.data(), block_bytes);
+                if (InsertResidualRow(
+                        quotient_coeff,
+                        quotient_rhs,
+                        quotient_columns,
+                        block_bytes,
+                        quotient_pivot_coeff,
+                        quotient_pivot_rhs,
+                        quotient_have_pivot,
+                        quotient_rank,
+                        st,
+                        true) == ResidualInsertResult::Inconsistent)
+                {
+                    return terminal_error();
+                }
+            }
+            rank = binary_rank + quotient_rank;
+        }
+        else
+        {
+            for (uint32_t heavy = 0; heavy < H; ++heavy)
+            {
+                ++st.ResidualRows;
+                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                std::memcpy(
+                    rhs.data(),
+                    heavy_rhs.data() + (size_t)heavy * block_bytes,
+                    block_bytes);
+                for (uint32_t index = 0; index < R; ++index) {
+                    coeff[index] = (uint8_t)(
+                        projected_heavy[
+                            (size_t)index * heavy_words + (heavy >> 3)] >>
+                        ((heavy & 7u) * 8u));
+                }
+                if (InsertResidualRow(
+                        coeff, rhs, R, block_bytes,
+                        pivot_coeff, pivot_rhs, have_pivot,
+                        rank, st, true) ==
+                    ResidualInsertResult::Inconsistent)
+                {
+                    return terminal_error();
+                }
+            }
+        }
         st.ResidualRank = rank;
+
+        // ResumePrecodeSystem accepts arbitrary new binary packet rows in the
+        // original R-column coordinates.  A rare deficient cold solve must
+        // therefore materialize the legacy combined pivot form before it can
+        // publish a checkpoint.  Successful solves stay on the fast quotient
+        // path, and callers that do not request resume avoid this fallback.
+        if (rank < R && resume_state && use_binary_quotient)
+        {
+            rank = binary_rank;
+            for (uint32_t heavy = 0; heavy < H; ++heavy)
+            {
+                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                std::memcpy(
+                    rhs.data(),
+                    heavy_rhs.data() + (size_t)heavy * block_bytes,
+                    block_bytes);
+                for (uint32_t index = 0; index < R; ++index) {
+                    coeff[index] = (uint8_t)(
+                        projected_heavy[
+                            (size_t)index * heavy_words + (heavy >> 3)] >>
+                        ((heavy & 7u) * 8u));
+                }
+                if (InsertResidualRow(
+                        coeff, rhs, R, block_bytes,
+                        pivot_coeff, pivot_rhs, have_pivot,
+                        rank, st, true) ==
+                    ResidualInsertResult::Inconsistent)
+                {
+                    return terminal_error();
+                }
+            }
+            st.ResidualRank = rank;
+        }
+
         phase_end = SolveClock::now();
         st.ResidualNanoseconds = (uint64_t)
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1085,6 +1589,7 @@ WirehairResult SolvePrecodeSystem(
                 checkpoint.ProjectionWords = words;
                 checkpoint.Rank = rank;
                 checkpoint.Config = config;
+                checkpoint.Runtime = runtime;
                 checkpoint.Stats = st;
                 checkpoint.InactiveIndex.swap(inactive_index);
                 checkpoint.InactiveColumns.swap(peel.InactiveOrder);
@@ -1104,16 +1609,60 @@ WirehairResult SolvePrecodeSystem(
             return Wirehair_NeedMore;
         }
 
-        for (uint32_t i = 0; i < R; ++i)
+        // Full quotient rank gives each free variable directly.  Reconstruct
+        // the binary pivots with XORs from their preserved GF(2) relations.
+        if (!use_binary_quotient)
         {
-            if (!have_pivot[i]) {
-                return Wirehair_NeedMore;
+            for (uint32_t i = 0; i < R; ++i)
+            {
+                if (!have_pivot[i]) {
+                    return Wirehair_NeedMore;
+                }
+                std::memcpy(
+                    values.data() +
+                        (size_t)peel.InactiveOrder[i] * block_bytes,
+                    pivot_rhs.data() + (size_t)i * block_bytes,
+                    block_bytes);
             }
-            std::memcpy(
-                values.data() +
-                    (size_t)peel.InactiveOrder[i] * block_bytes,
-                pivot_rhs.data() + (size_t)i * block_bytes,
-                block_bytes);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < quotient_columns; ++i)
+            {
+                if (!quotient_have_pivot[i]) {
+                    return Wirehair_NeedMore;
+                }
+                std::memcpy(
+                    values.data() + (size_t)peel.InactiveOrder[
+                        free_columns[i]] * block_bytes,
+                    quotient_pivot_rhs.data() + (size_t)i * block_bytes,
+                    block_bytes);
+            }
+            for (uint32_t pivot = 0; pivot < R; ++pivot)
+            {
+                if (!have_pivot[pivot]) {
+                    continue;
+                }
+                uint8_t* value = values.data() +
+                    (size_t)peel.InactiveOrder[pivot] * block_bytes;
+                std::memcpy(
+                    value,
+                    pivot_rhs.data() + (size_t)pivot * block_bytes,
+                    block_bytes);
+                const uint8_t* relation =
+                    pivot_coeff.data() + (size_t)pivot * R;
+                for (uint32_t i = 0; i < quotient_columns; ++i)
+                {
+                    const uint8_t scale = relation[free_columns[i]];
+                    AddScaledBlock(
+                        value,
+                        scale,
+                        values.data() + (size_t)peel.InactiveOrder[
+                            free_columns[i]] * block_bytes,
+                        block_bytes,
+                        st);
+                }
+            }
         }
         phase_start = phase_end;
 
@@ -1123,7 +1672,8 @@ WirehairResult SolvePrecodeSystem(
         {
             uint8_t* value =
                 values.data() + (size_t)column * block_bytes;
-            const BinaryEquation& equation = rows[peel.SolveRow[column]];
+            const BinaryEquationView equation =
+                rows[peel.SolveRow[column]];
             if (equation.Data) {
                 std::memcpy(value, equation.Data, block_bytes);
             }
@@ -1181,6 +1731,8 @@ WirehairResult ResumePrecodeSystem(
         state.BlockBytes != block_bytes || block_bytes == 0u ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
+        !state.Runtime.IsValidFor(
+            K, (uint32_t)P_wide, config.MixCount) ||
         state.InactiveCount == 0u ||
         state.Rank >= state.InactiveCount ||
         state.ProjectionWords != (state.InactiveCount + 63u) / 64u ||
@@ -1204,8 +1756,9 @@ WirehairResult ResumePrecodeSystem(
     {
         typedef std::chrono::steady_clock SolveClock;
         const SolveClock::time_point build_start = SolveClock::now();
-        const std::vector<uint32_t> columns = GeneratePacketMatrixRow(
-            K, (uint32_t)P_wide, block_id, config);
+        const std::vector<uint32_t> columns =
+            GeneratePacketMatrixRowWithRuntime(
+                K, (uint32_t)P_wide, block_id, config, state.Runtime);
         if (columns.empty()) {
             return Wirehair_InvalidInput;
         }
@@ -1248,7 +1801,8 @@ WirehairResult ResumePrecodeSystem(
                     uint64_t word = bits[word_i];
                     while (word != 0u)
                     {
-                        const uint32_t bit = LowestSetBitIndex(word);
+                        const uint32_t bit =
+                            wirehair::NonzeroLowestBitIndex64(word);
                         const uint32_t index = (word_i << 6) + bit;
                         if (index < state.InactiveCount) {
                             coeff[index] ^= 1u;
@@ -1342,7 +1896,8 @@ WirehairResult ResumePrecodeSystem(
                 uint64_t word = bits[word_i];
                 while (word != 0u)
                 {
-                    const uint32_t bit = LowestSetBitIndex(word);
+                    const uint32_t bit =
+                        wirehair::NonzeroLowestBitIndex64(word);
                     const uint32_t index = (word_i << 6) + bit;
                     if (index < state.InactiveCount) {
                         gf256_add_mem(
@@ -1579,7 +2134,8 @@ bool VerifyPrecodeSolution(
         std::fill(value.begin(), value.end(), uint8_t{0});
         for (uint32_t column = 0; column < L; ++column)
         {
-            const uint8_t scale = HeavyCoefficient(heavy, column, H);
+            const uint8_t scale = HeavyCoefficientForParams(
+                system.Params, heavy, column);
             if (scale == 1u) {
                 gf256_add_mem(
                     value.data(),

@@ -128,7 +128,8 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
             uint8_t* coefficients = matrix.data() + (size_t)row * L;
             for (uint32_t column = 0; column < L; ++column) {
                 coefficients[column] =
-                    HeavyCoefficient(heavy, column, H);
+                    HeavyCoefficientForParams(
+                        system.Params, heavy, column);
             }
             ++row;
         }

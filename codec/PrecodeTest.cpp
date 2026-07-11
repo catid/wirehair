@@ -38,6 +38,8 @@ bool TestParams()
         if (params.Staircase != wirehair::GetDenseCount(c.K) ||
             params.DenseRows != 12u ||
             params.HeavyRows != 12u ||
+            params.HeavyFamily !=
+                wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
             params.SourceHits != c.SourceHits)
         {
             std::fprintf(stderr,
@@ -71,6 +73,10 @@ bool TestParams()
     invalid_params.push_back(invalid);
     invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
     invalid.HeavyRows = 129u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.HeavyFamily =
+        static_cast<wirehair_v2::HeavyCoefficientFamily>(UINT32_MAX);
     invalid_params.push_back(invalid);
     invalid = wirehair_v2::MakeCertifiedParams(64000u, 1u);
     invalid.Staircase = 1500u;

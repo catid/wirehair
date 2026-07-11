@@ -203,6 +203,8 @@ bool ComputePrecodeValues(
     }
     if (!source_blocks || !parity_blocks ||
         block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        system.Params.HeavyFamily !=
+            HeavyCoefficientFamily::PeriodicCauchy ||
         !ValidatePrecodeSystem(system))
     {
         return false;
@@ -374,6 +376,12 @@ bool ComputePrecodeValues(
         // bucket buffer costs window*block_bytes, so huge blocks fall back
         // to the direct path rather than allocating hundreds of MB.
         std::vector<uint8_t> rhs((size_t)H * block_bytes, 0);
+        void* heavy_destinations[128];
+        uint8_t heavy_scales[128];
+        for (uint32_t r = 0; r < H; ++r) {
+            heavy_destinations[r] =
+                rhs.data() + (size_t)r * block_bytes;
+        }
         const bool bucketed =
             heavy_base >= 2u * window &&
             (uint64_t)window * block_bytes <= (UINT64_C(64) << 20);
@@ -392,22 +400,19 @@ bool ComputePrecodeValues(
                     m = 0;
                 }
             }
-            for (uint32_t r = 0; r < H; ++r)
+            for (uint32_t mm = 0; mm < window; ++mm)
             {
-                uint8_t* dst = rhs.data() + (size_t)r * block_bytes;
-                for (uint32_t mm = 0; mm < window; ++mm)
-                {
-                    const uint8_t y = coef[(size_t)r * window + mm];
-                    const uint8_t* v =
-                        bucket.data() + (size_t)mm * block_bytes;
-                    if (y == 1u) {
-                        gf256_add_mem(dst, v, bytes);
-                    }
-                    else {
-                        gf256_muladd_mem(dst, y, v, bytes);
-                    }
-                    ++st.HeavyMulAdds;
+                for (uint32_t r = 0; r < H; ++r) {
+                    heavy_scales[r] =
+                        coef[(size_t)r * window + mm];
                 }
+                gf256_muladd_multi_mem(
+                    heavy_destinations,
+                    heavy_scales,
+                    (int)H,
+                    bucket.data() + (size_t)mm * block_bytes,
+                    bytes);
+                st.HeavyMulAdds += H;
             }
         }
         else
@@ -418,16 +423,16 @@ bool ComputePrecodeValues(
                 const uint8_t* v = column_value(c);
                 for (uint32_t r = 0; r < H; ++r)
                 {
-                    const uint8_t y = coef[(size_t)r * window + m];
-                    uint8_t* dst = rhs.data() + (size_t)r * block_bytes;
-                    if (y == 1u) {
-                        gf256_add_mem(dst, v, bytes);
-                    }
-                    else {
-                        gf256_muladd_mem(dst, y, v, bytes);
-                    }
-                    ++st.HeavyMulAdds;
+                    heavy_scales[r] =
+                        coef[(size_t)r * window + m];
                 }
+                gf256_muladd_multi_mem(
+                    heavy_destinations,
+                    heavy_scales,
+                    (int)H,
+                    v,
+                    bytes);
+                st.HeavyMulAdds += H;
                 if (++m >= window) {
                     m = 0;
                 }
@@ -690,6 +695,7 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
     ParityBlockStorage.swap(other.ParityBlockStorage);
     SolvedIntermediateStorage.swap(other.SolvedIntermediateStorage);
     swap(PacketConfigValue, other.PacketConfigValue);
+    swap(PacketRuntimeValue, other.PacketRuntimeValue);
     swap(StatsValue, other.StatsValue);
     swap(UsesPacketContract, other.UsesPacketContract);
     swap(Initialized, other.Initialized);
@@ -732,6 +738,13 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
         next.MixCount = packet_config.MixCount;
         next.BlockBytesValue = block_bytes;
         next.PacketConfigValue = packet_config;
+        if (!next.PacketRuntimeValue.Initialize(
+                system.Params.BlockCount,
+                (uint32_t)precode_count_wide,
+                packet_config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
         next.SolvedIntermediateStorage.swap(intermediate_blocks);
         next.SourceBlocks = next.SolvedIntermediateStorage.data();
         next.UsesPacketContract = true;
@@ -845,9 +858,10 @@ WirehairResult PrecodeEncoder::EncodeResult(
         {
             GuardedAllocation();
             uint64_t local_ops = 0u;
-            if (!EvaluatePacketBlockForValidatedSystem(
+            if (!EvaluatePacketBlockForValidatedSystemWithRuntime(
                     SystemValue,
                     PacketConfigValue,
+                    PacketRuntimeValue,
                     SolvedIntermediateStorage.data(),
                     BlockBytesValue,
                     block_id,
@@ -1039,6 +1053,11 @@ bool ResolveMessagePrecodeOptions(
     {
         return false;
     }
+    // This controls only local encoder storage and never changes a matrix,
+    // packet row, seed, or emitted byte.  Preserve the caller's policy while
+    // validating only the serialized wire contract above.
+    bound.CacheSystematicSource = requested_options &&
+        requested_options->CacheSystematicSource;
     resolved_options = bound;
     return true;
 }
@@ -1177,16 +1196,40 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         return Wirehair_InvalidInput;
     }
 
-    const uint64_t source_bytes =
+    const uint64_t padded_source_bytes =
         (uint64_t)block_count * (uint64_t)block_bytes;
-    if (source_bytes > (uint64_t)((size_t)-1)) {
+    if (padded_source_bytes > (uint64_t)((size_t)-1)) {
         return Wirehair_InvalidInput;
     }
     try
     {
-        GuardedAllocation();
-        std::vector<uint8_t> source_storage((size_t)source_bytes, 0u);
-        std::memcpy(source_storage.data(), message, (size_t)message_bytes);
+        // SolvePrecodeSystem consumes every packet synchronously, and the
+        // completed encoder owns only the solved intermediate vector.  Borrow
+        // the caller's complete blocks during that call instead of copying a
+        // full padded message that would be discarded immediately afterwards.
+        // A partial final block is the sole exception: own one zero-filled
+        // block so the solver cannot read beyond message_bytes and the padding
+        // remains deterministic.
+        const uint8_t* const message_data =
+            static_cast<const uint8_t*>(message);
+        std::vector<uint8_t> systematic_source_cache;
+        if (opts.CacheSystematicSource)
+        {
+            GuardedAllocation();
+            systematic_source_cache.assign(
+                message_data, message_data + (size_t)message_bytes);
+        }
+        const uint32_t final_bytes = (uint32_t)(message_bytes % block_bytes);
+        std::vector<uint8_t> padded_final_block;
+        if (final_bytes != 0u)
+        {
+            GuardedAllocation();
+            padded_final_block.assign(block_bytes, uint8_t{0});
+            std::memcpy(
+                padded_final_block.data(),
+                message_data + (size_t)(block_count - 1u) * block_bytes,
+                final_bytes);
+        }
 
         PrecodeParams base_params;
         PacketRowConfig base_config;
@@ -1205,6 +1248,17 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         if (!BuildPrecodeSystem(params, system)) {
             return Wirehair_InvalidInput;
         }
+        const uint64_t precode_count_wide = (uint64_t)params.Staircase +
+            params.DenseRows + params.HeavyRows;
+        PacketRowRuntime solve_runtime;
+        if (precode_count_wide > UINT32_MAX ||
+            !solve_runtime.Initialize(
+                block_count,
+                (uint32_t)precode_count_wide,
+                packet_config.MixCount))
+        {
+            return Wirehair_InvalidInput;
+        }
 
         GuardedAllocation();
         std::vector<SolvePacket> packets;
@@ -1213,16 +1267,18 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         {
             SolvePacket packet;
             packet.BlockId = block_id;
-            packet.Data = source_storage.data() +
-                (size_t)block_id * block_bytes;
+            packet.Data = final_bytes != 0u && block_id + 1u == block_count ?
+                padded_final_block.data() :
+                message_data + (size_t)block_id * block_bytes;
             packets.push_back(packet);
         }
         GuardedAllocation();
         std::vector<uint8_t> intermediate_blocks;
         PrecodeSolveStats solve_stats;
-        WirehairResult solve_result = SolvePrecodeSystem(
+        WirehairResult solve_result = SolvePrecodeSystemWithRuntime(
             system,
             packet_config,
+            solve_runtime,
             packets,
             block_bytes,
             intermediate_blocks,
@@ -1250,9 +1306,10 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
             }
             intermediate_blocks.clear();
             system = std::move(selected_system);
-            solve_result = SolvePrecodeSystem(
+            solve_result = SolvePrecodeSystemWithRuntime(
                 system,
                 selected_config,
+                solve_runtime,
                 packets,
                 block_bytes,
                 intermediate_blocks,
@@ -1286,6 +1343,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         SolveStatsValue = solve_stats;
         MessageBytesValue = message_bytes;
         BlockBytesValue = block_bytes;
+        SystematicSourceCache.swap(systematic_source_cache);
         Initialized = true;
         return Wirehair_Success;
     }
@@ -1327,6 +1385,19 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
             MessageBytesValue, BlockBytesValue, K, block_id);
         if (out_bytes < bytes) {
             return Wirehair_InvalidInput;
+        }
+        if (!SystematicSourceCache.empty())
+        {
+            std::memcpy(
+                block_out,
+                SystematicSourceCache.data() +
+                    (size_t)block_id * BlockBytesValue,
+                bytes);
+            if (block_ops_out) {
+                *block_ops_out = 0u;
+            }
+            *data_bytes_out = bytes;
+            return Wirehair_Success;
         }
         if (bytes == BlockBytesValue)
         {
@@ -1420,6 +1491,23 @@ const uint8_t* MessagePrecodeEncoder::IntermediateBlocks() const
 const PrecodeEncoder& MessagePrecodeEncoder::BlockEncoder() const
 {
     return EncoderValue;
+}
+
+void MessagePrecodeEncoder::ReleaseSystematicSourceCache() noexcept
+{
+    std::vector<uint8_t> empty;
+    SystematicSourceCache.swap(empty);
+    OptionsValue.CacheSystematicSource = false;
+}
+
+bool MessagePrecodeEncoder::HasSystematicSourceCache() const
+{
+    return !SystematicSourceCache.empty();
+}
+
+size_t MessagePrecodeEncoder::SystematicSourceCacheBytes() const
+{
+    return SystematicSourceCache.size();
 }
 
 } // namespace wirehair_v2

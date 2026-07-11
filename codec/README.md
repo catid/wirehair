@@ -226,3 +226,16 @@ cmake --build build --target wirehair_v2_resume_bench
 ./build/codec/wirehair_v2_bench densecount --N 320,1000 --bb-list 1280 --deltas -8,0,8 --trials 20
 ./build/codec/wirehair_v2_bench densegrid --N 320 --bb-list 102400 --deltas -16,0,4 --candidates 8 --trials 20
 ```
+
+`precodefail` reports the actual production solver's binary-deficiency and
+heavy-rank-gain histograms.  Its optional
+`--heavy-family periodic,hashed` comparison replays identical packet schedules
+against the frozen periodic Cauchy coefficients and an experiment-only
+non-periodic full-column hash family.  `hashed` is diagnostic only: named and
+serialized V2 profiles always use `periodic`.
+
+`compare` and `precodecheck` accept deterministic common packet schedules via
+`--schedule iid|burst|permutation|systematic-first|repair-only|adversarial`.
+The reported schedule seed reproduces the exact candidate-compatible ID
+stream; `--trial-details` prints each arm's success, overhead, and paired
+overhead delta.  Schedule construction is bounded even at high requested loss.

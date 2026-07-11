@@ -330,6 +330,15 @@ WirehairResult Codec::Encode(
     return Wirehair_Success;
 }
 
+WirehairResult Codec::ReleasePrecodeEncoderSystematicCache()
+{
+    if (!PrecodeImpl || !PrecodeImpl->IsInitialized()) {
+        return Wirehair_InvalidInput;
+    }
+    PrecodeImpl->ReleaseSystematicSourceCache();
+    return Wirehair_Success;
+}
+
 WirehairResult Codec::Decode(
     uint32_t block_id,
     const void* block_in,

@@ -7,6 +7,7 @@
 
 #include <wirehair/wirehair.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <vector>
 
@@ -237,6 +238,7 @@ private:
     std::vector<uint8_t> ParityBlockStorage;
     std::vector<uint8_t> SolvedIntermediateStorage;
     PacketRowConfig PacketConfigValue = {};
+    PacketRowRuntime PacketRuntimeValue = {};
     PrecodeEncodeStats StatsValue = {};
     bool UsesPacketContract = false;
     bool Initialized = false;
@@ -251,6 +253,11 @@ struct MessagePrecodeEncoderOptions
     bool DenseIdentityCorner = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
+
+    // Local encoder policy, deliberately excluded from the serialized packet
+    // contract.  When enabled the encoder retains the exact message bytes so
+    // systematic packets can be copied without evaluating their equations.
+    bool CacheSystematicSource = false;
 };
 
 /** True when any selected or mixed V2 precode contract state is present. */
@@ -286,9 +293,15 @@ void BindMessagePrecodeProfile(
 /**
     Message-level adapter for the V2 precode encoder.
 
-    This zero-pads the arbitrary byte-length message while solving, owns the
-    resulting full intermediate vector, derives the certified precode system
-    and packet seed from a SeedProfile, and exposes V1-style encode semantics:
+    This borrows complete caller-owned message blocks only for the duration of
+    synchronous initialization, owns and zero-pads at most one partial final
+    block while solving, and owns the resulting full intermediate vector.
+    The initialized encoder is therefore independent of the message buffer
+    after Initialize returns.  By default it keeps no source copy; the
+    runtime-only CacheSystematicSource option retains exact message bytes for
+    direct systematic copies until ReleaseSystematicSourceCache is called.
+    It derives the certified precode system and
+    packet seed from a SeedProfile and exposes V1-style encode semantics:
     systematic block ids emit only the original byte count for the final
     partial block, while recovery block ids emit a full block.
 
@@ -352,6 +365,11 @@ public:
     const uint8_t* IntermediateBlocks() const;
     const PrecodeEncoder& BlockEncoder() const;
 
+    /** Release the optional source cache.  Safe to call repeatedly. */
+    void ReleaseSystematicSourceCache() noexcept;
+    bool HasSystematicSourceCache() const;
+    size_t SystematicSourceCacheBytes() const;
+
 private:
     SeedProfile ProfileValue = {};
     MessagePrecodeEncoderOptions OptionsValue = {};
@@ -359,6 +377,7 @@ private:
     PrecodeSolveStats SolveStatsValue = {};
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;
+    std::vector<uint8_t> SystematicSourceCache;
     bool Initialized = false;
 };
 

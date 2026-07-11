@@ -175,6 +175,162 @@ bool ShouldDrop(Rng& rng, double loss_rate)
     return rng.Unit() < loss_rate;
 }
 
+enum class PacketScheduleKind
+{
+    Iid,
+    Burst,
+    Permutation,
+    SystematicFirst,
+    RepairOnly,
+    Adversarial
+};
+
+const char* PacketScheduleName(PacketScheduleKind kind)
+{
+    switch (kind)
+    {
+    case PacketScheduleKind::Iid:             return "iid";
+    case PacketScheduleKind::Burst:           return "burst";
+    case PacketScheduleKind::Permutation:     return "permutation";
+    case PacketScheduleKind::SystematicFirst: return "systematic-first";
+    case PacketScheduleKind::RepairOnly:      return "repair-only";
+    case PacketScheduleKind::Adversarial:     return "adversarial";
+    }
+    return "unknown";
+}
+
+bool ParsePacketSchedule(const char* text, PacketScheduleKind& kind)
+{
+    if (!std::strcmp(text, "iid")) {
+        kind = PacketScheduleKind::Iid;
+    }
+    else if (!std::strcmp(text, "burst")) {
+        kind = PacketScheduleKind::Burst;
+    }
+    else if (!std::strcmp(text, "permutation")) {
+        kind = PacketScheduleKind::Permutation;
+    }
+    else if (!std::strcmp(text, "systematic-first")) {
+        kind = PacketScheduleKind::SystematicFirst;
+    }
+    else if (!std::strcmp(text, "repair-only")) {
+        kind = PacketScheduleKind::RepairOnly;
+    }
+    else if (!std::strcmp(text, "adversarial")) {
+        kind = PacketScheduleKind::Adversarial;
+    }
+    else {
+        return false;
+    }
+    return true;
+}
+
+Rng MakeCompareLossRng(uint64_t seed);
+
+std::vector<uint32_t> BuildPacketSchedule(
+    uint32_t N,
+    uint32_t delivered_count,
+    double loss_rate,
+    uint64_t seed,
+    PacketScheduleKind kind)
+{
+    std::vector<uint32_t> output;
+    output.reserve(delivered_count);
+    Rng rng = MakeCompareLossRng(seed);
+    uint64_t candidate_index = 0u;
+    uint32_t burst_remaining = 0u;
+    std::vector<uint32_t> permutation;
+    size_t permutation_index = 0u;
+    uint32_t permutation_base = 0u;
+
+    const auto next_candidate = [&]() -> uint32_t {
+        if (kind == PacketScheduleKind::RepairOnly) {
+            return N + (uint32_t)candidate_index++;
+        }
+        if (kind == PacketScheduleKind::Adversarial) {
+            return UINT32_MAX - (uint32_t)(candidate_index++ * 2u);
+        }
+        if (kind == PacketScheduleKind::Permutation)
+        {
+            if (permutation_index >= permutation.size())
+            {
+                const uint32_t count = std::min<uint32_t>(N + 512u, 65536u);
+                permutation.resize(count);
+                for (uint32_t i = 0; i < count; ++i) {
+                    permutation[i] = permutation_base + i;
+                }
+                for (uint32_t i = count; i > 1u; --i) {
+                    std::swap(permutation[i - 1u],
+                        permutation[rng.U32() % i]);
+                }
+                permutation_base += count;
+                permutation_index = 0u;
+            }
+            return permutation[permutation_index++];
+        }
+        if (kind == PacketScheduleKind::SystematicFirst &&
+            candidate_index < N)
+        {
+            if (permutation.empty())
+            {
+                permutation.resize(N);
+                for (uint32_t i = 0; i < N; ++i) {
+                    permutation[i] = i;
+                }
+                for (uint32_t i = N; i > 1u; --i) {
+                    std::swap(permutation[i - 1u],
+                        permutation[rng.U32() % i]);
+                }
+            }
+            return permutation[(size_t)candidate_index++];
+        }
+        if (kind == PacketScheduleKind::SystematicFirst) {
+            return (uint32_t)candidate_index++;
+        }
+        return (uint32_t)candidate_index++;
+    };
+
+    const uint64_t candidate_limit =
+        (uint64_t)delivered_count * 256u + 65536u;
+    uint64_t candidates = 0u;
+    while (output.size() < delivered_count && candidates++ < candidate_limit)
+    {
+        const uint32_t id = next_candidate();
+        bool drop = false;
+        if (kind == PacketScheduleKind::Burst)
+        {
+            static const uint32_t kBurstLength = 8u;
+            if (burst_remaining > 0u) {
+                --burst_remaining;
+                drop = true;
+            }
+            else
+            {
+                // An idle candidate starts an eight-packet drop burst with
+                // probability p.  Each renewal cycle then has eight drops
+                // and (1-p)/p delivered idle candidates, so its stationary
+                // loss fraction is 8p/(1+7p).  Inverting that expression
+                // keeps the requested loss rate exact and p < 1 for every
+                // accepted loss_rate < 1, including the 0.99 CLI boundary.
+                const double start_probability = loss_rate /
+                    (kBurstLength -
+                        (kBurstLength - 1u) * loss_rate);
+                if (rng.Unit() < start_probability) {
+                    burst_remaining = kBurstLength - 1u;
+                    drop = true;
+                }
+            }
+        }
+        else {
+            drop = ShouldDrop(rng, loss_rate);
+        }
+        if (!drop) {
+            output.push_back(id);
+        }
+    }
+    return output;
+}
+
 struct TrialResult
 {
     bool Ok;
@@ -572,11 +728,22 @@ void FillMessage(std::vector<uint8_t>& message, uint64_t seed)
     }
 }
 
+static const uint64_t kCompareLossTraceSalt = UINT64_C(0x10fade);
+
+Rng MakeCompareLossRng(uint64_t seed)
+{
+    // BuildPacketSchedule uses this stream to construct one common delivered-
+    // id prefix per trial, which every comparison arm then replays unchanged.
+    // The trial helpers also retain it for their schedule-free IID fallback.
+    return Rng(seed ^ kCompareLossTraceSalt);
+}
+
 TrialResult RunBaselineTrial(
     uint32_t N,
     uint32_t block_bytes,
     double loss_rate,
-    uint64_t seed)
+    uint64_t seed,
+    const std::vector<uint32_t>* packet_schedule = nullptr)
 {
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
@@ -584,7 +751,7 @@ TrialResult RunBaselineTrial(
     std::vector<uint8_t> decoded((size_t)message_bytes, 0);
     std::vector<uint8_t> block(block_bytes);
     FillMessage(message, seed);
-    Rng rng(seed ^ UINT64_C(0x10fade));
+    Rng rng = MakeCompareLossRng(seed);
 
     const double c0 = NowSeconds();
     WirehairCodec enc =
@@ -606,14 +773,24 @@ TrialResult RunBaselineTrial(
 
     uint32_t delivered = 0;
     uint32_t block_id = 0;
+    size_t schedule_index = 0u;
     uint32_t write_bytes = 0;
     const uint32_t max_delivered = N * 2u + 512u;
     while (delivered < max_delivered)
     {
-        const bool drop = ShouldDrop(rng, loss_rate);
-        const uint32_t this_id = block_id++;
-        if (drop) {
-            continue;
+        uint32_t this_id = 0u;
+        if (packet_schedule) {
+            if (schedule_index >= packet_schedule->size()) {
+                break;
+            }
+            this_id = (*packet_schedule)[schedule_index++];
+        }
+        else {
+            const bool drop = ShouldDrop(rng, loss_rate);
+            this_id = block_id++;
+            if (drop) {
+                continue;
+            }
         }
         const double e0 = NowSeconds();
         const WirehairResult er =
@@ -662,7 +839,8 @@ TrialResult RunV2Trial(
     uint32_t block_bytes,
     double loss_rate,
     uint64_t seed,
-    const wirehair_v2::SeedProfile* profile)
+    const wirehair_v2::SeedProfile* profile,
+    const std::vector<uint32_t>* packet_schedule = nullptr)
 {
     TrialResult tr = {};
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
@@ -670,7 +848,7 @@ TrialResult RunV2Trial(
     std::vector<uint8_t> decoded((size_t)message_bytes, 0);
     std::vector<uint8_t> block(block_bytes);
     FillMessage(message, seed);
-    Rng rng(seed ^ UINT64_C(0x10fade));
+    Rng rng = MakeCompareLossRng(seed);
 
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
@@ -688,14 +866,24 @@ TrialResult RunV2Trial(
 
     uint32_t delivered = 0;
     uint32_t block_id = 0;
+    size_t schedule_index = 0u;
     uint32_t write_bytes = 0;
     const uint32_t max_delivered = N * 2u + 512u;
     while (delivered < max_delivered)
     {
-        const bool drop = ShouldDrop(rng, loss_rate);
-        const uint32_t this_id = block_id++;
-        if (drop) {
-            continue;
+        uint32_t this_id = 0u;
+        if (packet_schedule) {
+            if (schedule_index >= packet_schedule->size()) {
+                break;
+            }
+            this_id = (*packet_schedule)[schedule_index++];
+        }
+        else {
+            const bool drop = ShouldDrop(rng, loss_rate);
+            this_id = block_id++;
+            if (drop) {
+                continue;
+            }
         }
         const double e0 = NowSeconds();
         const WirehairResult er =
@@ -739,7 +927,9 @@ TrialResult RunV2PrecodeTrial(
     uint32_t N,
     uint32_t block_bytes,
     double loss_rate,
-    uint64_t seed)
+    uint64_t seed,
+    const std::vector<uint32_t>* packet_schedule = nullptr,
+    bool cache_systematic_source = false)
 {
     TrialResult tr = {};
     tr.TerminalResult = Wirehair_Error;
@@ -748,13 +938,16 @@ TrialResult RunV2PrecodeTrial(
     std::vector<uint8_t> decoded((size_t)message_bytes, 0u);
     std::vector<uint8_t> block(block_bytes);
     FillMessage(message, seed);
-    Rng rng(seed ^ UINT64_C(0x7632707265636f64));
+    Rng rng = MakeCompareLossRng(seed);
 
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
+    wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
+    encoder_options.CacheSystematicSource = cache_systematic_source;
     const double c0 = NowSeconds();
     WirehairResult result = enc.InitializePrecodeEncoder(
-        message.data(), message_bytes, block_bytes);
+        message.data(), message_bytes, block_bytes, nullptr,
+        cache_systematic_source ? &encoder_options : nullptr);
     if (result == Wirehair_Success) {
         result = dec.InitializePrecodeDecoder(message_bytes, block_bytes);
     }
@@ -766,15 +959,25 @@ TrialResult RunV2PrecodeTrial(
 
     uint32_t delivered = 0u;
     uint32_t block_id = 0u;
+    size_t schedule_index = 0u;
     uint32_t write_bytes = 0u;
     const uint32_t max_delivered = N * 2u + 512u;
     result = Wirehair_NeedMore;
     while (delivered < max_delivered)
     {
-        const bool drop = ShouldDrop(rng, loss_rate);
-        const uint32_t this_id = block_id++;
-        if (drop) {
-            continue;
+        uint32_t this_id = 0u;
+        if (packet_schedule) {
+            if (schedule_index >= packet_schedule->size()) {
+                break;
+            }
+            this_id = (*packet_schedule)[schedule_index++];
+        }
+        else {
+            const bool drop = ShouldDrop(rng, loss_rate);
+            this_id = block_id++;
+            if (drop) {
+                continue;
+            }
         }
         const double e0 = NowSeconds();
         result = enc.Encode(
@@ -1436,6 +1639,9 @@ int CmdCompare(int argc, char** argv)
     uint64_t seed = UINT64_C(0xc0decafe);
     std::string bb_list = "1280,102400";
     bool include_precode = false;
+    bool include_precode_cache = false;
+    bool trial_details = false;
+    PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
 
     for (int i = 0; i < argc; ++i)
@@ -1471,6 +1677,23 @@ int CmdCompare(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--precode")) {
             include_precode = true;
+        }
+        else if (!std::strcmp(argv[i], "--precode-cache")) {
+            include_precode_cache = true;
+        }
+        else if (!std::strcmp(argv[i], "--trial-details")) {
+            trial_details = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!TakeArg("compare", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule_kind))
+            {
+                std::fprintf(stderr,
+                    "unknown compare schedule (expected iid, burst, "
+                    "permutation, systematic-first, repair-only, or "
+                    "adversarial)\n");
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--v2-profile")) {
             if (!TakeArg("compare", "--v2-profile", argc, argv, i, value)) return 1;
@@ -1623,7 +1846,8 @@ int CmdCompare(int argc, char** argv)
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
-        "dense_candidate=%u precode=%u\n",
+        "dense_candidate=%u precode=%u precode_cache=%u schedule=%s "
+        "schedule_seed=0x%llx loss_trace=common-id-v2\n",
         nlo,
         nhi,
         trials,
@@ -1640,7 +1864,10 @@ int CmdCompare(int argc, char** argv)
         compare_options.DenseOverride ? 1u : 0u,
         compare_options.DenseDelta,
         compare_options.DenseCandidate,
-        include_precode ? 1u : 0u);
+        include_precode ? 1u : 0u,
+        include_precode_cache ? 1u : 0u,
+        PacketScheduleName(schedule_kind),
+        (unsigned long long)seed);
     std::printf(
         "%-9s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -1680,6 +1907,7 @@ int CmdCompare(int argc, char** argv)
         Accum baseline;
         Accum v2;
         Accum precode;
+        Accum precode_cache;
         std::map<uint64_t, CachedCompareProfile> profile_cache;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
@@ -1689,16 +1917,74 @@ int CmdCompare(int argc, char** argv)
             const wirehair_v2::SeedProfile* profile =
                 SelectCompareProfile(
                     N, block_bytes, loss, compare_options, profile_cache);
-            AddTrial(baseline, N,
-                RunBaselineTrial(N, block_bytes, loss, trial_seed));
-            AddTrial(v2, N,
-                RunV2Trial(N, block_bytes, loss, trial_seed, profile));
+            const std::vector<uint32_t> packet_schedule = BuildPacketSchedule(
+                N, N * 2u + 512u, loss, trial_seed, schedule_kind);
+            if (packet_schedule.size() != (size_t)N * 2u + 512u)
+            {
+                std::fprintf(stderr,
+                    "compare schedule generation exceeded its bounded "
+                    "candidate budget schedule=%s seed=0x%llx\n",
+                    PacketScheduleName(schedule_kind),
+                    (unsigned long long)trial_seed);
+                return 1;
+            }
+            const TrialResult baseline_result = RunBaselineTrial(
+                N, block_bytes, loss, trial_seed, &packet_schedule);
+            const TrialResult v2_result = RunV2Trial(
+                N, block_bytes, loss, trial_seed, profile, &packet_schedule);
+            TrialResult precode_result = {};
+            TrialResult precode_cache_result = {};
             if (include_precode) {
                 // This arm intentionally exercises the production defaults,
                 // independent of compare's optional experimental V2 profile.
-                AddTrial(precode, N,
-                    RunV2PrecodeTrial(
-                        N, block_bytes, loss, trial_seed));
+                precode_result = RunV2PrecodeTrial(
+                    N, block_bytes, loss, trial_seed, &packet_schedule);
+            }
+            if (include_precode_cache) {
+                precode_cache_result = RunV2PrecodeTrial(
+                    N, block_bytes, loss, trial_seed, &packet_schedule, true);
+            }
+            AddTrial(baseline, N, baseline_result);
+            AddTrial(v2, N, v2_result);
+            if (include_precode) {
+                AddTrial(precode, N, precode_result);
+            }
+            if (include_precode_cache) {
+                AddTrial(precode_cache, N, precode_cache_result);
+            }
+            if (trial_details)
+            {
+                const int baseline_oh = baseline_result.Ok ?
+                    (int)baseline_result.Extra : -1;
+                const int v2_oh = v2_result.Ok ?
+                    (int)v2_result.Extra : -1;
+                const int precode_oh = include_precode && precode_result.Ok ?
+                    (int)precode_result.Extra : -1;
+                const int cached_oh =
+                    include_precode_cache && precode_cache_result.Ok ?
+                        (int)precode_cache_result.Extra : -1;
+                std::printf(
+                    "# paired_trial: schedule=%s seed=0x%llx bb=%u "
+                    "trial=%u N=%u baseline_ok=%u baseline_oh=%d "
+                    "v2_ok=%u v2_oh=%d v2_delta=%d precode_ok=%u "
+                    "precode_oh=%d precode_delta=%d cached_ok=%u "
+                    "cached_oh=%d cached_delta=%d\n",
+                    PacketScheduleName(schedule_kind),
+                    (unsigned long long)trial_seed,
+                    block_bytes, trial, N,
+                    baseline_result.Ok ? 1u : 0u, baseline_oh,
+                    v2_result.Ok ? 1u : 0u, v2_oh,
+                    baseline_result.Ok && v2_result.Ok ?
+                        v2_oh - baseline_oh : 0,
+                    include_precode && precode_result.Ok ? 1u : 0u,
+                    precode_oh,
+                    include_precode && baseline_result.Ok && precode_result.Ok ?
+                        precode_oh - baseline_oh : 0,
+                    include_precode_cache && precode_cache_result.Ok ? 1u : 0u,
+                    cached_oh,
+                    include_precode_cache && baseline_result.Ok &&
+                        precode_cache_result.Ok ?
+                            cached_oh - baseline_oh : 0);
             }
         }
         PrintAccum("baseline", block_bytes, baseline);
@@ -1709,6 +1995,9 @@ int CmdCompare(int argc, char** argv)
             v2);
         if (include_precode) {
             PrintAccum("v2_precode", block_bytes, precode);
+        }
+        if (include_precode_cache) {
+            PrintAccum("v2_cached", block_bytes, precode_cache);
         }
     }
     return 0;
@@ -2095,6 +2384,8 @@ int CmdPrecodeCheck(int argc, char** argv)
     uint32_t trials = 10u;
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x7632707265636f64);
+    bool trial_details = false;
+    PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
 
     for (int i = 0; i < argc; ++i)
     {
@@ -2137,6 +2428,21 @@ int CmdPrecodeCheck(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--trial-details")) {
+            trial_details = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!TakeArg(
+                    "precodecheck", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule_kind))
+            {
+                std::fprintf(stderr,
+                    "unknown precodecheck schedule (expected iid, burst, "
+                    "permutation, systematic-first, repair-only, or "
+                    "adversarial)\n");
+                return 1;
+            }
+        }
         else if (!UnknownArg("precodecheck", argv[i])) {
             return 1;
         }
@@ -2159,12 +2465,15 @@ int CmdPrecodeCheck(int argc, char** argv)
     const wirehair_v2::MessagePrecodeEncoderOptions production_options;
     std::printf(
         "# precodecheck: trials=%u loss=%.17g seed=0x%llx "
-        "identity_corner=%u rowdist=wirehair mix=%u\n",
+        "identity_corner=%u rowdist=wirehair mix=%u schedule=%s "
+        "schedule_seed=0x%llx\n",
         trials,
         loss,
         (unsigned long long)seed,
         production_options.DenseIdentityCorner ? 1u : 0u,
-        production_options.RecoveryMixCount);
+        production_options.RecoveryMixCount,
+        PacketScheduleName(schedule_kind),
+        (unsigned long long)seed);
     std::printf(
         "N,bb,trials,success,fail,terminal_need_more,terminal_invalid,"
         "terminal_extra_insufficient,terminal_other,OH_mean,OH_sd,OH50,"
@@ -2185,9 +2494,31 @@ int CmdPrecodeCheck(int argc, char** argv)
                 ((uint64_t)N * UINT64_C(0x9e3779b97f4a7c15)) ^
                 ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
                 ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+            const std::vector<uint32_t> packet_schedule = BuildPacketSchedule(
+                N, N * 2u + 512u, loss, trial_seed, schedule_kind);
+            if (packet_schedule.size() != (size_t)N * 2u + 512u)
+            {
+                std::fprintf(stderr,
+                    "precodecheck schedule generation exceeded its bounded "
+                    "candidate budget schedule=%s seed=0x%llx\n",
+                    PacketScheduleName(schedule_kind),
+                    (unsigned long long)trial_seed);
+                return 1;
+            }
             const TrialResult result = RunV2PrecodeTrial(
-                N, block_bytes, loss, trial_seed);
+                N, block_bytes, loss, trial_seed, &packet_schedule);
             AddTrial(acc, N, result);
+            if (trial_details)
+            {
+                std::printf(
+                    "# precode_trial: schedule=%s seed=0x%llx bb=%u "
+                    "trial=%u N=%u ok=%u overhead=%d terminal=%d\n",
+                    PacketScheduleName(schedule_kind),
+                    (unsigned long long)trial_seed,
+                    block_bytes, trial, N, result.Ok ? 1u : 0u,
+                    result.Ok ? (int)result.Extra : -1,
+                    (int)result.TerminalResult);
+            }
             if (result.Ok) {
                 continue;
             }
@@ -2766,8 +3097,154 @@ struct MatrixFailureTrial
     WirehairResult Result = Wirehair_Error;
     uint32_t Inactivated = 0u;
     uint32_t Rank = 0u;
+    uint32_t BinaryRank = 0u;
+    uint64_t BlockXors = 0u;
+    uint64_t BlockMulAdds = 0u;
     uint64_t SolveNanoseconds = 0u;
 };
+
+const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family)
+{
+    return family == wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ?
+        "periodic" : "hashed";
+}
+
+bool ParseHeavyFamilies(
+    const std::string& text,
+    std::vector<wirehair_v2::HeavyCoefficientFamily>& families)
+{
+    families.clear();
+    for (const std::string& token : ParseStringList(text))
+    {
+        wirehair_v2::HeavyCoefficientFamily family;
+        if (token == "periodic") {
+            family = wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+        }
+        else if (token == "hashed") {
+            family = wirehair_v2::HeavyCoefficientFamily::HashedNonzero;
+        }
+        else {
+            std::fprintf(stderr,
+                "precodefail unknown --heavy-family token %s\n",
+                token.c_str());
+            return false;
+        }
+        if (std::find(families.begin(), families.end(), family) ==
+            families.end())
+        {
+            families.push_back(family);
+        }
+    }
+    return !families.empty();
+}
+
+std::string CountHistogram(const std::map<uint32_t, uint32_t>& histogram)
+{
+    std::string out;
+    for (const std::pair<const uint32_t, uint32_t>& bin : histogram)
+    {
+        if (!out.empty()) {
+            out += '|';
+        }
+        out += std::to_string(bin.first);
+        out += ':';
+        out += std::to_string(bin.second);
+    }
+    return out;
+}
+
+bool RunPrecodeFailPayloadE2E(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_bytes,
+    double loss,
+    uint64_t seed)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint64_t message_bytes_wide = (uint64_t)K * block_bytes;
+    const uint64_t delivered_bytes_wide =
+        ((uint64_t)K + 32u) * block_bytes;
+    if (block_bytes == 0u || block_bytes > UINT32_C(0x7fffffff) ||
+        message_bytes_wide > (uint64_t)SIZE_MAX ||
+        delivered_bytes_wide > (uint64_t)SIZE_MAX)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)message_bytes_wide);
+    Rng data_rng(seed ^ UINT64_C(0x7061796c6f616432));
+    for (uint8_t& byte : message) {
+        byte = (uint8_t)data_rng.U32();
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0; id < K; ++id)
+    {
+        systematic[id].BlockId = id;
+        systematic[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+    std::vector<uint8_t> intermediate;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes, intermediate) !=
+        Wirehair_Success)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> delivered_storage((size_t)delivered_bytes_wide);
+    std::vector<wirehair_v2::SolvePacket> delivered;
+    delivered.reserve((size_t)K + 32u);
+    std::vector<uint8_t> recovered;
+    Rng loss_rng(seed ^ UINT64_C(0x6c6f737370617932));
+    WirehairResult result = Wirehair_NeedMore;
+    uint32_t block_id = 0u;
+    while (delivered.size() < (size_t)K + 32u &&
+           result == Wirehair_NeedMore)
+    {
+        const uint32_t id = block_id++;
+        if (ShouldDrop(loss_rng, loss)) {
+            continue;
+        }
+        uint8_t* block = delivered_storage.data() +
+            delivered.size() * block_bytes;
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, intermediate.data(), block_bytes, id, block))
+        {
+            return false;
+        }
+        wirehair_v2::SolvePacket packet;
+        packet.BlockId = id;
+        packet.Data = block;
+        delivered.push_back(packet);
+        if (delivered.size() >= K) {
+            result = wirehair_v2::SolvePrecodeSystem(
+                system, config, delivered, block_bytes, recovered);
+        }
+    }
+    if (result != Wirehair_Success ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, delivered, recovered.data(), block_bytes))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> block(block_bytes);
+    for (uint32_t id = 0; id < K; ++id)
+    {
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, recovered.data(), block_bytes,
+                id, block.data()) ||
+            std::memcmp(
+                block.data(), message.data() + (size_t)id * block_bytes,
+                block_bytes) != 0)
+        {
+            return false;
+        }
+    }
+    std::printf(
+        "# payload_e2e: N=%u bb=%u mix_count=%u delivered=%zu PASS\n",
+        K, block_bytes, config.MixCount, delivered.size());
+    return true;
+}
 
 class ThreadJoinGuard
 {
@@ -2811,6 +3288,9 @@ int CmdPrecodeFail(int argc, char** argv)
     std::string nlist = "1000,3200,10000,32000,64000";
     std::string bb_list = "1280";
     std::string overhead_list = "0,1";
+    std::string heavy_family_list = "periodic";
+    std::string mix_count_list = "3";
+    bool payload_e2e = false;
     uint32_t trials = 100u;
     uint32_t threads = 1u;
     double loss = 0.10;
@@ -2843,6 +3323,25 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             overhead_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--heavy-family")) {
+            if (!TakeArg(
+                    "precodefail", "--heavy-family", argc, argv, i, value))
+            {
+                return 1;
+            }
+            heavy_family_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--mix-count")) {
+            if (!TakeArg(
+                    "precodefail", "--mix-count", argc, argv, i, value))
+            {
+                return 1;
+            }
+            mix_count_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--payload-e2e")) {
+            payload_e2e = true;
         }
         else if (!std::strcmp(argv[i], "--trials")) {
             if (!TakeArg(
@@ -2897,7 +3396,10 @@ int CmdPrecodeFail(int argc, char** argv)
     const std::vector<int> Ns = ParseIntList(nlist);
     const std::vector<int> BBs = ParseIntList(bb_list);
     const std::vector<int> overheads = ParseSignedIntList(overhead_list);
-    if (Ns.empty() || BBs.empty() || overheads.empty()) {
+    const std::vector<int> mix_counts = ParseIntList(mix_count_list);
+    std::vector<wirehair_v2::HeavyCoefficientFamily> heavy_families;
+    if (Ns.empty() || BBs.empty() || overheads.empty() || mix_counts.empty() ||
+        !ParseHeavyFamilies(heavy_family_list, heavy_families)) {
         std::fprintf(stderr,
             "precodefail requires non-empty integer lists\n");
         return 1;
@@ -2925,13 +3427,27 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
     }
+    for (int mix_count : mix_counts) {
+        if (mix_count < 1 ||
+            mix_count > (int)wirehair_v2::kCertifiedPacketMixCount)
+        {
+            std::fprintf(stderr,
+                "precodefail mix count must be in [1,%u]\n",
+                wirehair_v2::kCertifiedPacketMixCount);
+            return 1;
+        }
+    }
 
     std::printf(
         "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx\n",
         trials, threads, loss, (unsigned long long)seed);
     std::printf(
-        "N,bb,overhead,trials,success,rank_fail,error,fail_rate,"
-        "inact_mu,inact_max,solve_ms_mu,seed_attempt,first_rank_fail\n");
+        "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
+        "fail_rate,"
+        "inact_mu,inact_max,binary_def_mu,binary_def_max,heavy_gain_mu,"
+        "heavy_gain_min,heavy_shortfall,solve_ms_mu,seed_attempt,"
+        "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
+        "heavy_gain_hist,failure_trials\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
@@ -2939,7 +3455,7 @@ int CmdPrecodeFail(int argc, char** argv)
         const uint32_t bb = (uint32_t)bb_value;
         const wirehair_v2::SeedProfile profile =
             wirehair_v2::SelectSeedProfile(K, bb);
-        const wirehair_v2::PrecodeParams base_params =
+        const wirehair_v2::PrecodeParams canonical_params =
             wirehair_v2::MakeCertifiedParams(
                 K,
                 wirehair_v2::MatrixSeedFromProfile(
@@ -2947,19 +3463,39 @@ int CmdPrecodeFail(int argc, char** argv)
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
             profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
-        base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
-        wirehair_v2::PrecodeSystem system;
-        wirehair_v2::PacketRowConfig config;
-        uint32_t seed_attempt = 0u;
-        const WirehairResult select_result =
-            wirehair_v2::SelectSystematicConfiguration(
-                base_params, base_config, system, config, &seed_attempt);
-        if (select_result != Wirehair_Success) {
-            std::fprintf(stderr,
-                "precodefail seed selection failed N=%u bb=%u result=%d\n",
-                K, bb, (int)select_result);
-            return 2;
-        }
+        for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
+        {
+        for (int mix_count_value : mix_counts)
+        {
+            base_config.MixCount = (uint32_t)mix_count_value;
+            wirehair_v2::PrecodeParams base_params = canonical_params;
+            base_params.HeavyFamily = heavy_family;
+            wirehair_v2::PrecodeSystem system;
+            wirehair_v2::PacketRowConfig config;
+            uint32_t seed_attempt = 0u;
+            const WirehairResult select_result =
+                wirehair_v2::SelectSystematicConfiguration(
+                    base_params, base_config, system, config, &seed_attempt);
+            if (select_result != Wirehair_Success) {
+                std::fprintf(stderr,
+                    "precodefail seed selection failed N=%u bb=%u "
+                    "heavy_family=%s mix_count=%u result=%d\n",
+                    K, bb, HeavyFamilyName(heavy_family),
+                    (uint32_t)mix_count_value,
+                    (int)select_result);
+                return 2;
+            }
+            if (payload_e2e && !RunPrecodeFailPayloadE2E(
+                    system, config, bb, loss,
+                    seed ^ ((uint64_t)K << 32) ^ mix_count_value))
+            {
+                std::fprintf(stderr,
+                    "precodefail payload E2E failed N=%u bb=%u "
+                    "heavy_family=%s mix_count=%u\n",
+                    K, bb, HeavyFamilyName(heavy_family),
+                    (uint32_t)mix_count_value);
+                return 2;
+            }
 
         for (int overhead_value : overheads)
         {
@@ -3032,6 +3568,10 @@ int CmdPrecodeFail(int argc, char** argv)
                                 result.Inactivated =
                                     solve_stats.InactivatedColumns;
                                 result.Rank = solve_stats.ResidualRank;
+                                result.BinaryRank =
+                                    solve_stats.BinaryResidualRank;
+                                result.BlockXors = solve_stats.BlockXors;
+                                result.BlockMulAdds = solve_stats.BlockMulAdds;
                                 result.SolveNanoseconds =
                                     solve_stats.BuildNanoseconds +
                                     solve_stats.PeelNanoseconds +
@@ -3066,7 +3606,17 @@ int CmdPrecodeFail(int argc, char** argv)
             uint32_t first_rank_failure = UINT32_MAX;
             uint64_t inact_sum = 0u;
             uint64_t solve_ns_sum = 0u;
+            uint64_t block_xors_sum = 0u;
+            uint64_t block_muladds_sum = 0u;
             uint32_t inact_max = 0u;
+            uint64_t binary_def_sum = 0u;
+            uint32_t binary_def_max = 0u;
+            uint64_t heavy_gain_sum = 0u;
+            uint32_t heavy_gain_min = UINT32_MAX;
+            uint32_t heavy_shortfalls = 0u;
+            std::map<uint32_t, uint32_t> binary_def_hist;
+            std::map<uint32_t, uint32_t> heavy_gain_hist;
+            std::string failure_trials;
             for (const MatrixFailureTrial& result : results)
             {
                 if (result.Result == Wirehair_Success) {
@@ -3082,20 +3632,64 @@ int CmdPrecodeFail(int argc, char** argv)
                 else {
                     ++errors;
                 }
+                if (result.Result != Wirehair_Success)
+                {
+                    if (!failure_trials.empty()) {
+                        failure_trials += '|';
+                    }
+                    failure_trials += std::to_string(
+                        (uint32_t)(&result - results.data()));
+                }
                 inact_sum += result.Inactivated;
                 solve_ns_sum += result.SolveNanoseconds;
+                block_xors_sum += result.BlockXors;
+                block_muladds_sum += result.BlockMulAdds;
                 inact_max = std::max(inact_max, result.Inactivated);
+                const uint32_t binary_def = result.Inactivated >=
+                    result.BinaryRank ?
+                    result.Inactivated - result.BinaryRank : 0u;
+                const uint32_t heavy_gain = result.Rank >= result.BinaryRank ?
+                    result.Rank - result.BinaryRank : 0u;
+                binary_def_sum += binary_def;
+                binary_def_max = std::max(binary_def_max, binary_def);
+                heavy_gain_sum += heavy_gain;
+                heavy_gain_min = std::min(heavy_gain_min, heavy_gain);
+                ++binary_def_hist[binary_def];
+                ++heavy_gain_hist[heavy_gain];
+                if (result.Result == Wirehair_NeedMore &&
+                    binary_def <= system.Params.HeavyRows &&
+                    heavy_gain < binary_def)
+                {
+                    ++heavy_shortfalls;
+                }
             }
+            const std::string binary_hist_text =
+                CountHistogram(binary_def_hist);
+            const std::string heavy_hist_text = CountHistogram(heavy_gain_hist);
             std::printf(
-                "%u,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%d\n",
-                K, bb, overhead, trials, successes, rank_failures, errors,
+                "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
+                "%u,%u,%.3f,%u,%.3f,%.3f,%d,%s,%s,%s\n",
+                K, bb, HeavyFamilyName(heavy_family),
+                (uint32_t)mix_count_value, overhead, trials,
+                successes, rank_failures, errors,
                 (double)(rank_failures + errors) / trials,
                 (double)inact_sum / trials,
                 inact_max,
+                (double)binary_def_sum / trials,
+                binary_def_max,
+                (double)heavy_gain_sum / trials,
+                heavy_gain_min == UINT32_MAX ? 0u : heavy_gain_min,
+                heavy_shortfalls,
                 (double)solve_ns_sum / trials / 1000000.0,
                 seed_attempt,
+                (double)block_xors_sum / trials,
+                (double)block_muladds_sum / trials,
                 first_rank_failure == UINT32_MAX ?
-                    -1 : (int)first_rank_failure);
+                    -1 : (int)first_rank_failure,
+                binary_hist_text.c_str(), heavy_hist_text.c_str(),
+                failure_trials.c_str());
+        }
+        }
         }
     }
     return 0;

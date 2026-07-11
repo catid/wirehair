@@ -119,6 +119,8 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         params.Staircase == 0u ||
         params.SourceHits == 0u || params.SourceHits > 8u ||
         params.DenseRows > 64u || params.HeavyRows > 128u ||
+        (params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy &&
+         params.HeavyFamily != HeavyCoefficientFamily::HashedNonzero) ||
         binary_span > UINT16_MAX || total_span > UINT16_MAX)
     {
         return false;
@@ -407,6 +409,31 @@ uint8_t HeavyCoefficient(
     const uint32_t x = heavy_rows + (ge_column % (256u - heavy_rows));
     const uint32_t y = heavy_row;
     return gf256_inv((uint8_t)(x ^ y));
+}
+
+uint8_t HeavyCoefficientForParams(
+    const PrecodeParams& params,
+    uint32_t heavy_row,
+    uint32_t ge_column)
+{
+    if (params.HeavyFamily == HeavyCoefficientFamily::PeriodicCauchy) {
+        return HeavyCoefficient(heavy_row, ge_column, params.HeavyRows);
+    }
+
+    // SplitMix64 finalizer over the complete column and row ids.  Mapping zero
+    // to one keeps this comparable to the nonzero Cauchy coefficients while
+    // removing their 244-column periodicity entirely.
+    uint64_t x = params.Seed ^
+        ((uint64_t)ge_column * UINT64_C(0x9e3779b97f4a7c15)) ^
+        ((uint64_t)heavy_row * UINT64_C(0xd6e8feb86659fd93)) ^
+        UINT64_C(0x6865617679686173);
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x *= UINT64_C(0x94d049bb133111eb);
+    x ^= x >> 31;
+    const uint8_t coefficient = (uint8_t)x;
+    return coefficient != 0u ? coefficient : 1u;
 }
 
 } // namespace wirehair_v2

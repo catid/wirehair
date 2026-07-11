@@ -7,7 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace wirehair_v2 {
@@ -84,10 +84,15 @@ private:
     SeedProfile ProfileValue = {};
     MessagePrecodeEncoderOptions OptionsValue = {};
     PacketRowConfig PacketConfigValue = {};
+    PacketRowRuntime PacketRuntimeValue = {};
     PrecodeSystem SystemValue = {};
     std::vector<uint32_t> ReceivedBlockIds;
     std::vector<uint8_t> ReceivedBlockStorage;
-    std::unordered_set<uint32_t> ReceivedIds;
+    // Cold receive payloads are stored in fixed-width slots.  Mapping packet
+    // id directly to its slot keeps duplicate validation O(1); after checkpoint
+    // adoption the keys remain as the bounded received-id set while the slot
+    // values are no longer dereferenced.
+    std::unordered_map<uint32_t, uint32_t> ReceivedSlots;
     PrecodeSolveResumeState ResumeState;
     std::vector<uint8_t> PendingPacketStorage;
     uint32_t PendingPacketId = 0u;

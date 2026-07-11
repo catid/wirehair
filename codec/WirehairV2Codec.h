@@ -51,6 +51,9 @@ public:
         uint32_t out_bytes,
         uint32_t* data_bytes_out);
 
+    /** Drop an enabled precode encoder source cache; idempotent. */
+    WirehairResult ReleasePrecodeEncoderSystematicCache();
+
     WirehairResult Decode(
         uint32_t block_id,
         const void* block_in,

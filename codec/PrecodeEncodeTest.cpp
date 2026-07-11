@@ -1284,6 +1284,320 @@ bool TestMessagePrecodeEncoder()
     return true;
 }
 
+bool TestBorrowedMessageLifetime()
+{
+    const uint32_t K = 64u;
+    const uint32_t bb = 67u;
+    const uint32_t final_sizes[] = { bb, 13u };
+    const uint32_t packet_ids[] = { 0u, K - 1u, K + 7u };
+
+    for (uint32_t final_bytes : final_sizes)
+    {
+        const uint64_t message_bytes =
+            (uint64_t)(K - 1u) * bb + final_bytes;
+        std::vector<uint8_t> message((size_t)message_bytes);
+        FillRandomBlocks(
+            message.data(), message.size(),
+            UINT64_C(0xb0770ed) ^ final_bytes);
+
+        wirehair_v2::MessagePrecodeEncoder encoder;
+        if (encoder.InitializeResult(
+                message.data(), message_bytes, bb) != Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "borrowed lifetime: initialize failed for final=%u\n",
+                final_bytes);
+            return false;
+        }
+
+        std::vector<std::vector<uint8_t> > expected;
+        std::vector<uint32_t> expected_bytes;
+        for (uint32_t packet_id : packet_ids)
+        {
+            expected.push_back(std::vector<uint8_t>(bb, 0xa5u));
+            uint32_t data_bytes = UINT32_MAX;
+            if (encoder.EncodeResult(
+                    packet_id, expected.back().data(), bb, &data_bytes) !=
+                    Wirehair_Success)
+            {
+                std::fprintf(stderr,
+                    "borrowed lifetime: initial encode failed id=%u\n",
+                    packet_id);
+                return false;
+            }
+            expected_bytes.push_back(data_bytes);
+        }
+
+        if (final_bytes != bb)
+        {
+            std::vector<uint8_t> padded(bb, 0xa5u);
+            uint64_t ops = UINT64_MAX;
+            if (!encoder.BlockEncoder().Encode(
+                    K - 1u, padded.data(), &ops) ||
+                std::memcmp(
+                    padded.data(),
+                    message.data() + (size_t)(K - 1u) * bb,
+                    final_bytes) != 0 ||
+                !std::all_of(
+                    padded.begin() + final_bytes, padded.end(),
+                    [](uint8_t value) { return value == 0u; }))
+            {
+                std::fprintf(stderr,
+                    "borrowed lifetime: partial final padding was not zero\n");
+                return false;
+            }
+        }
+
+        // Release the caller allocation completely.  ASan will catch any
+        // post-return read through a stale borrowed pointer; byte comparisons
+        // also cover builds without sanitizers.
+        std::vector<uint8_t>().swap(message);
+        for (size_t i = 0; i <
+                sizeof(packet_ids) / sizeof(packet_ids[0]); ++i)
+        {
+            std::vector<uint8_t> actual(bb, 0x5au);
+            uint32_t data_bytes = UINT32_MAX;
+            if (encoder.EncodeResult(
+                    packet_ids[i], actual.data(), bb, &data_bytes) !=
+                    Wirehair_Success ||
+                data_bytes != expected_bytes[i] ||
+                std::memcmp(
+                    actual.data(), expected[i].data(), expected_bytes[i]) != 0 ||
+                !std::all_of(
+                    actual.begin() + expected_bytes[i], actual.end(),
+                    [](uint8_t value) { return value == 0x5au; }))
+            {
+                std::fprintf(stderr,
+                    "borrowed lifetime: encoder retained caller storage "
+                    "for final=%u id=%u\n",
+                    final_bytes, packet_ids[i]);
+                return false;
+            }
+        }
+    }
+
+    std::printf("borrowed message lifetime: PASS\n");
+    return true;
+}
+
+bool TestSystematicSourceCache()
+{
+    const uint32_t K = 64u;
+    const uint32_t bb = 67u;
+    const uint32_t tail = 13u;
+    const uint64_t message_bytes = (uint64_t)(K - 1u) * bb + tail;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    FillRandomBlocks(message.data(), message.size(), UINT64_C(0xca5ced));
+    const std::vector<uint8_t> original = message;
+
+    wirehair_v2::MessagePrecodeEncoder uncached;
+    if (uncached.InitializeResult(
+            message.data(), message_bytes, bb) != Wirehair_Success ||
+        uncached.HasSystematicSourceCache() ||
+        uncached.SystematicSourceCacheBytes() != 0u)
+    {
+        std::fprintf(stderr, "systematic cache: default path retained source\n");
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions cached_options;
+    cached_options.CacheSystematicSource = true;
+    wirehair_v2::MessagePrecodeEncoder cached;
+    const wirehair_v2::SeedProfile selected_profile = uncached.Profile();
+    if (cached.InitializeResult(
+            message.data(), message_bytes, bb,
+            &selected_profile, &cached_options) != Wirehair_Success ||
+        !cached.Options().CacheSystematicSource ||
+        !cached.HasSystematicSourceCache() ||
+        cached.SystematicSourceCacheBytes() != message_bytes)
+    {
+        std::fprintf(stderr,
+            "systematic cache: selected-profile opt-in failed\n");
+        return false;
+    }
+
+    // A local storage policy must not alter any serialized matrix or packet
+    // contract field selected by the uncached encoder.
+    const wirehair_v2::SeedProfile& cached_profile = cached.Profile();
+    if (cached_profile.BlockCount != selected_profile.BlockCount ||
+        cached_profile.BlockBytes != selected_profile.BlockBytes ||
+        cached_profile.DenseCount != selected_profile.DenseCount ||
+        cached_profile.V2SeedAttempt != selected_profile.V2SeedAttempt ||
+        cached_profile.V2PrecodeContractVersion !=
+            selected_profile.V2PrecodeContractVersion ||
+        cached_profile.V2PacketRowContractVersion !=
+            selected_profile.V2PacketRowContractVersion ||
+        cached_profile.V2StaircaseCount !=
+            selected_profile.V2StaircaseCount ||
+        cached_profile.V2DenseRowCount != selected_profile.V2DenseRowCount ||
+        cached_profile.V2HeavyRowCount != selected_profile.V2HeavyRowCount ||
+        cached_profile.V2SourceHits != selected_profile.V2SourceHits ||
+        cached_profile.V2PrecodeSeed != selected_profile.V2PrecodeSeed ||
+        cached_profile.V2PacketPeelSeed !=
+            selected_profile.V2PacketPeelSeed ||
+        cached_profile.V2RecoveryMixCount !=
+            selected_profile.V2RecoveryMixCount ||
+        cached_profile.V2DenseIdentityCorner !=
+            selected_profile.V2DenseIdentityCorner ||
+        cached_profile.V2PrecodeSeedSalt !=
+            selected_profile.V2PrecodeSeedSalt ||
+        cached_profile.V2RecoveryRowSeedSalt !=
+            selected_profile.V2RecoveryRowSeedSalt)
+    {
+        std::fprintf(stderr,
+            "systematic cache: local option changed selected profile\n");
+        return false;
+    }
+
+    const uint32_t packet_ids[] = { 0u, K - 1u, K + 7u };
+    std::vector<std::vector<uint8_t> > expected;
+    std::vector<uint32_t> expected_bytes;
+    for (const uint32_t packet_id : packet_ids)
+    {
+        expected.push_back(std::vector<uint8_t>(bb, 0xa5u));
+        uint32_t bytes = UINT32_MAX;
+        uint64_t uncached_ops = UINT64_MAX;
+        if (uncached.EncodeResult(
+                packet_id, expected.back().data(), bb,
+                &bytes, &uncached_ops) != Wirehair_Success ||
+            uncached_ops == 0u)
+        {
+            std::fprintf(stderr,
+                "systematic cache: uncached reference encode failed\n");
+            return false;
+        }
+        expected_bytes.push_back(bytes);
+
+        std::vector<uint8_t> actual(bb, 0xa5u);
+        uint32_t actual_bytes = UINT32_MAX;
+        uint64_t cached_ops = UINT64_MAX;
+        if (cached.EncodeResult(
+                packet_id, actual.data(), bb,
+                &actual_bytes, &cached_ops) != Wirehair_Success ||
+            actual_bytes != bytes || actual != expected.back() ||
+            (packet_id < K ? cached_ops != 0u : cached_ops != uncached_ops))
+        {
+            std::fprintf(stderr,
+                "systematic cache: attached wire mismatch id=%u\n",
+                packet_id);
+            return false;
+        }
+    }
+
+    // The cache is an owned byte-for-byte snapshot, not another borrowed
+    // view of the caller allocation.
+    std::fill(message.begin(), message.end(), uint8_t{0x5a});
+    for (size_t i = 0u; i < 2u; ++i)
+    {
+        std::vector<uint8_t> actual(bb, 0xa5u);
+        uint32_t bytes = UINT32_MAX;
+        uint64_t ops = UINT64_MAX;
+        if (cached.EncodeResult(
+                packet_ids[i], actual.data(), bb, &bytes, &ops) !=
+                Wirehair_Success ||
+            bytes != expected_bytes[i] || actual != expected[i] || ops != 0u)
+        {
+            std::fprintf(stderr,
+                "systematic cache: caller mutation changed cached bytes\n");
+            return false;
+        }
+    }
+
+    cached.ReleaseSystematicSourceCache();
+    cached.ReleaseSystematicSourceCache();
+    if (cached.HasSystematicSourceCache() ||
+        cached.SystematicSourceCacheBytes() != 0u ||
+        cached.Options().CacheSystematicSource)
+    {
+        std::fprintf(stderr, "systematic cache: release was not idempotent\n");
+        return false;
+    }
+    for (size_t i = 0u; i < 3u; ++i)
+    {
+        std::vector<uint8_t> actual(bb, 0xa5u);
+        uint32_t bytes = UINT32_MAX;
+        uint64_t ops = UINT64_MAX;
+        if (cached.EncodeResult(
+                packet_ids[i], actual.data(), bb, &bytes, &ops) !=
+                Wirehair_Success ||
+            bytes != expected_bytes[i] || actual != expected[i] || ops == 0u)
+        {
+            std::fprintf(stderr,
+                "systematic cache: detached fallback mismatch id=%u\n",
+                packet_ids[i]);
+            return false;
+        }
+    }
+
+    // Failed cached initialization is transactional, including cache state.
+    message = original;
+    if (cached.InitializeResult(
+            message.data(), message_bytes, bb,
+            &selected_profile, &cached_options) != Wirehair_Success)
+    {
+        std::fprintf(stderr, "systematic cache: reattach initialize failed\n");
+        return false;
+    }
+    const uint8_t* const working_intermediate = cached.IntermediateBlocks();
+    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
+    const WirehairResult cache_oom = cached.InitializeResult(
+        message.data(), message_bytes, bb,
+        &selected_profile, &cached_options);
+    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    if (cache_oom != Wirehair_OOM ||
+        cached.IntermediateBlocks() != working_intermediate ||
+        !cached.HasSystematicSourceCache() ||
+        cached.SystematicSourceCacheBytes() != message_bytes)
+    {
+        std::fprintf(stderr,
+            "systematic cache: OOM did not preserve active encoder\n");
+        return false;
+    }
+
+    // A successful default reinitialization returns to x8rs.4's zero-copy
+    // source-lifetime policy and releases the prior opt-in cache.
+    if (cached.InitializeResult(
+            message.data(), message_bytes, bb,
+            &selected_profile, nullptr) != Wirehair_Success ||
+        cached.HasSystematicSourceCache() ||
+        cached.Options().CacheSystematicSource)
+    {
+        std::fprintf(stderr,
+            "systematic cache: default reinitialize retained cache\n");
+        return false;
+    }
+
+    wirehair_v2::Codec facade;
+    if (facade.ReleasePrecodeEncoderSystematicCache() !=
+            Wirehair_InvalidInput ||
+        facade.InitializePrecodeEncoder(
+            message.data(), message_bytes, bb,
+            &selected_profile, &cached_options) != Wirehair_Success ||
+        facade.ReleasePrecodeEncoderSystematicCache() != Wirehair_Success ||
+        facade.ReleasePrecodeEncoderSystematicCache() != Wirehair_Success)
+    {
+        std::fprintf(stderr, "systematic cache: facade detach failed\n");
+        return false;
+    }
+    std::vector<uint8_t> facade_block(bb, 0xa5u);
+    uint32_t facade_bytes = UINT32_MAX;
+    if (facade.Encode(
+            K - 1u, facade_block.data(), bb, &facade_bytes) !=
+            Wirehair_Success ||
+        facade_bytes != tail ||
+        std::memcmp(
+            facade_block.data(), original.data() + (size_t)(K - 1u) * bb,
+            tail) != 0)
+    {
+        std::fprintf(stderr,
+            "systematic cache: facade fallback changed systematic bytes\n");
+        return false;
+    }
+
+    std::printf("systematic source cache: PASS\n");
+    return true;
+}
+
 bool TestTypedFailuresAndAllocationContainment()
 {
     const uint32_t K = 16u;
@@ -1344,6 +1658,20 @@ bool TestTypedFailuresAndAllocationContainment()
                 (long long)failure);
             return false;
         }
+    }
+
+    // A partial input owns exactly one padded tail during the synchronous
+    // solve.  Failure of that allocation must preserve the prior encoder.
+    wirehair_v2::SetAllocationFailureCountdownForTesting(0);
+    const WirehairResult tail_oom = encoder.InitializeResult(
+        message.data(), message_bytes - 1u, bb, nullptr, &identity);
+    wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+    if (tail_oom != Wirehair_OOM || !encoder.IsInitialized() ||
+        encoder.IntermediateBlocks() != working_source)
+    {
+        std::fprintf(stderr,
+            "typed failures: padded-tail OOM containment failed\n");
+        return false;
     }
 
     std::vector<uint8_t> output(bb, 0xa5u);
@@ -1465,6 +1793,8 @@ int main(int argc, char** argv)
     ok = TestCostModel() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;
+    ok = TestBorrowedMessageLifetime() && ok;
+    ok = TestSystematicSourceCache() && ok;
     ok = TestTypedFailuresAndAllocationContainment() && ok;
     ok = TestFeasibility(trials) && ok;
 

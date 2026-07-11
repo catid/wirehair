@@ -348,6 +348,21 @@ extern void gf256_mul_mem(void * vz,
 extern void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
                              const void * GF256_RESTRICT vx, int bytes);
 
+/**
+    Update several independent destinations from the same source block:
+    `destinations[j][] += source[] * scales[j]`.
+
+    The destination ranges must not overlap each other or the source range.
+    Fusing these updates reuses each source load and nibble split across the
+    constant multipliers.  Non-positive counts and byte lengths are no-ops.
+*/
+extern void gf256_muladd_multi_mem(
+    void * const * GF256_RESTRICT destinations,
+    const uint8_t * GF256_RESTRICT scales,
+    int destination_count,
+    const void * GF256_RESTRICT source,
+    int bytes);
+
 /// Performs "x[] /= y" bulk memory operation.  vz == vx is supported.
 static GF256_FORCE_INLINE void gf256_div_mem(void * vz,
                                              const void * vx, uint8_t y, int bytes)
