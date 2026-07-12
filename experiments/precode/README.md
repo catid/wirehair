@@ -61,8 +61,32 @@ is scheme-independent (see below).  Further clauses:
 ```bash
 bash experiments/precode/build.sh
 ./experiments/precode/precode_sim --self-test
+./experiments/precode/gf16_mixed
 python3 experiments/precode/rank_total.py --self-test
 ```
+
+### Mixed GF(256) / GF(2^16) payload prototype
+
+`gf16_mixed` is a self-contained, benchmark-only prototype for a future WH2
+completion profile.  It keeps the current 12 completion variables and rows,
+but uses 10 periodic GF(256) Cauchy rows followed by two rows in the quadratic
+extension `GF(256)[u]/(u^2 + u + 32)`.  The extension coordinates use pinned
+generator 266 and the same 244-column coefficient period as the current heavy
+rows.  It is deliberately not wired into production profile serialization.
+
+The first prototype accepts only even block sizes: every adjacent byte pair is
+one complete extension-field element.  Its test executable exhaustively checks
+all nonzero inverses, checks random field laws, differentially compares the
+interleaved oracle with the planar constant-muladd kernel (including unaligned
+buffers and odd-length failure/no-write), roundtrips projected payload systems
+at quotient widths 1, 2, 10, and 12, rejects width 13, certifies all 244
+consecutive completion-parity corners plus 10,000 non-consecutive subsets, and
+compares direct RHS generation with the bounded 244-residue path.  The final two output lines time
+the current 12-row GF(256) kernel against the proposed 10+2 kernel at MTU and
+large block sizes; these are heavy-phase microbenchmarks, not whole-codec
+throughput.
+Pass `--test-only` to run every algebra, kernel, payload, and RHS check while
+skipping the timing loops (useful under emulation and sanitizers).
 
 ## `--ge-replay`: real GE elimination replay
 

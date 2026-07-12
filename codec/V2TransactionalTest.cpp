@@ -480,7 +480,10 @@ unsigned ExpectedAllocationFailures(AllocationHook hook, State target_state)
         // object only; the implementation allocations have their own hook.
         return IsPrecode(target_state) ? 1u : 3u;
     }
-    return hook == AllocationHook::PrecodeEncoder ? 5u : 4u;
+    // The solved precode encoder validates but no longer copies the complete
+    // nested row graph during ownership transfer, removing one real guarded
+    // allocation point from this transactional sweep.
+    return 4u;
 }
 
 bool CheckAllocationHook(

@@ -929,7 +929,8 @@ TrialResult RunV2PrecodeTrial(
     double loss_rate,
     uint64_t seed,
     const std::vector<uint32_t>* packet_schedule = nullptr,
-    bool cache_systematic_source = false)
+    bool cache_encoder_source = false,
+    bool cache_decoder_systematic = false)
 {
     TrialResult tr = {};
     tr.TerminalResult = Wirehair_Error;
@@ -943,13 +944,29 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
     wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
-    encoder_options.CacheSystematicSource = cache_systematic_source;
+    encoder_options.CacheSystematicSource = cache_encoder_source;
+    encoder_options.CacheReceivedSystematicPackets = cache_decoder_systematic;
     const double c0 = NowSeconds();
     WirehairResult result = enc.InitializePrecodeEncoder(
         message.data(), message_bytes, block_bytes, nullptr,
-        cache_systematic_source ? &encoder_options : nullptr);
-    if (result == Wirehair_Success) {
-        result = dec.InitializePrecodeDecoder(message_bytes, block_bytes);
+        cache_encoder_source ? &encoder_options : nullptr);
+    if (result == Wirehair_Success)
+    {
+        // The public wire protocol serializes the encoder-selected seed
+        // attempt in its profile descriptor.  Reuse that exact descriptor
+        // here instead of charging compare for an artificial second seed
+        // search in the decoder.
+        result = dec.InitializePrecodeDecoder(
+            message_bytes, block_bytes, &enc.Profile(),
+            cache_decoder_systematic ? &encoder_options : nullptr);
+        if (result == Wirehair_Success &&
+            (dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
+             dec.Profile().V2PacketPeelSeed !=
+                enc.Profile().V2PacketPeelSeed ||
+             dec.Profile().V2PrecodeSeed != enc.Profile().V2PrecodeSeed))
+        {
+            result = Wirehair_Error;
+        }
     }
     tr.CreateSeconds = NowSeconds() - c0;
     if (result != Wirehair_Success) {
@@ -1640,6 +1657,8 @@ int CmdCompare(int argc, char** argv)
     std::string bb_list = "1280,102400";
     bool include_precode = false;
     bool include_precode_cache = false;
+    bool cache_encoder_source = false;
+    bool cache_decoder_systematic = false;
     bool trial_details = false;
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
@@ -1680,6 +1699,16 @@ int CmdCompare(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--precode-cache")) {
             include_precode_cache = true;
+            cache_encoder_source = true;
+            cache_decoder_systematic = true;
+        }
+        else if (!std::strcmp(argv[i], "--precode-encoder-cache")) {
+            include_precode_cache = true;
+            cache_encoder_source = true;
+        }
+        else if (!std::strcmp(argv[i], "--precode-decoder-cache")) {
+            include_precode_cache = true;
+            cache_decoder_systematic = true;
         }
         else if (!std::strcmp(argv[i], "--trial-details")) {
             trial_details = true;
@@ -1846,8 +1875,10 @@ int CmdCompare(int argc, char** argv)
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
-        "dense_candidate=%u precode=%u precode_cache=%u schedule=%s "
-        "schedule_seed=0x%llx loss_trace=common-id-v2\n",
+        "dense_candidate=%u precode=%u precode_cache=%u "
+        "encoder_cache=%u decoder_cache=%u schedule=%s "
+        "schedule_seed=0x%llx loss_trace=common-id-v2 "
+        "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
         nhi,
         trials,
@@ -1866,6 +1897,8 @@ int CmdCompare(int argc, char** argv)
         compare_options.DenseCandidate,
         include_precode ? 1u : 0u,
         include_precode_cache ? 1u : 0u,
+        cache_encoder_source ? 1u : 0u,
+        cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed);
     std::printf(
@@ -1942,7 +1975,8 @@ int CmdCompare(int argc, char** argv)
             }
             if (include_precode_cache) {
                 precode_cache_result = RunV2PrecodeTrial(
-                    N, block_bytes, loss, trial_seed, &packet_schedule, true);
+                    N, block_bytes, loss, trial_seed, &packet_schedule,
+                    cache_encoder_source, cache_decoder_systematic);
             }
             AddTrial(baseline, N, baseline_result);
             AddTrial(v2, N, v2_result);

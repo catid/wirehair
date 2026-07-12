@@ -58,6 +58,8 @@ static const uint64_t kMessageRecoveryRowSeedSalt =
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 // Fails the next guarded allocation when countdown is zero; negative disables.
 void SetAllocationFailureCountdownForTesting(int64_t countdown);
+// Overrides the full residue-bucket scratch cap; production defaults to 64 MiB.
+void SetHeavyBucketStorageLimitForTesting(uint64_t bytes);
 #endif
 
 struct PrecodeEncodeStats
@@ -218,6 +220,22 @@ public:
     const PrecodeEncodeStats& EncodeStats() const;
     const uint8_t* ParityBlocks() const;
     const uint8_t* IntermediateBlocks() const;
+
+    /**
+        True when System() retains the complete validated row graph.
+
+        The older direct InitializeResult path needs those rows for recovery
+        encoding and preserves the original complete-System contract.  The
+        solved packet-contract path used by MessagePrecodeEncoder needs only
+        Params after validation and deliberately releases the row graph.
+    */
+    bool HasCompleteSystem() const;
+
+    /**
+        Returns the retained system descriptor.  Params are complete for every
+        initialized encoder; StaircaseRows and DenseRowColumns are complete
+        only when HasCompleteSystem() is true.
+    */
     const PrecodeSystem& System() const;
 
 private:
@@ -254,10 +272,12 @@ struct MessagePrecodeEncoderOptions
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
 
-    // Local encoder policy, deliberately excluded from the serialized packet
-    // contract.  When enabled the encoder retains the exact message bytes so
-    // systematic packets can be copied without evaluating their equations.
+    // Local codec policy, deliberately excluded from the serialized packet
+    // contract.  The encoder retains exact message bytes for direct packet
+    // copies.  The decoder retains accepted systematic payloads so Recover
+    // evaluates only missing source ids.  Either cache may be released.
     bool CacheSystematicSource = false;
+    bool CacheReceivedSystematicPackets = false;
 };
 
 /** True when any selected or mixed V2 precode contract state is present. */

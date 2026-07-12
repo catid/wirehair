@@ -54,6 +54,9 @@ public:
     /** Drop an enabled precode encoder source cache; idempotent. */
     WirehairResult ReleasePrecodeEncoderSystematicCache();
 
+    /** Drop an enabled precode decoder systematic cache; idempotent. */
+    WirehairResult ReleasePrecodeDecoderSystematicCache();
+
     WirehairResult Decode(
         uint32_t block_id,
         const void* block_in,

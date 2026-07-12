@@ -19,6 +19,7 @@ namespace {
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local int64_t AllocationFailureCountdown = -1;
+thread_local uint64_t HeavyBucketStorageLimit = UINT64_C(64) << 20;
 
 void GuardedAllocation()
 {
@@ -29,8 +30,17 @@ void GuardedAllocation()
         --AllocationFailureCountdown;
     }
 }
+
+uint64_t GetHeavyBucketStorageLimit()
+{
+    return HeavyBucketStorageLimit;
+}
 #else
 void GuardedAllocation() {}
+uint64_t GetHeavyBucketStorageLimit()
+{
+    return UINT64_C(64) << 20;
+}
 #endif
 
 /**
@@ -161,6 +171,11 @@ bool DenseColumnMask(
 void SetAllocationFailureCountdownForTesting(int64_t countdown)
 {
     AllocationFailureCountdown = countdown;
+}
+
+void SetHeavyBucketStorageLimitForTesting(uint64_t bytes)
+{
+    HeavyBucketStorageLimit = bytes;
 }
 #endif
 
@@ -373,8 +388,11 @@ bool ComputePrecodeValues(
         // cheaper to XOR same-residue columns into buckets first and
         // muladd each bucket once per row: L XORs + H*window muladds
         // instead of H*L muladds (~6x fewer block ops at K=3200).  The
-        // bucket buffer costs window*block_bytes, so huge blocks fall back
-        // to the direct path rather than allocating hundreds of MB.
+        // A full bucket buffer gives sequential source reads when it fits a
+        // bounded allocation.  For huge blocks, stream one residue bucket at
+        // a time instead: this retains the same L XORs + H*window muladds
+        // while requiring only one block of scratch.  The direct H*L path is
+        // useful only before there are enough columns to amortize bucketing.
         std::vector<uint8_t> rhs((size_t)H * block_bytes, 0);
         void* heavy_destinations[128];
         uint8_t heavy_scales[128];
@@ -382,10 +400,12 @@ bool ComputePrecodeValues(
             heavy_destinations[r] =
                 rhs.data() + (size_t)r * block_bytes;
         }
-        const bool bucketed =
-            heavy_base >= 2u * window &&
-            (uint64_t)window * block_bytes <= (UINT64_C(64) << 20);
-        if (bucketed)
+        const bool use_residue_buckets = heavy_base >= 2u * window;
+        const bool use_full_bucket_storage =
+            use_residue_buckets &&
+            (uint64_t)window * block_bytes <=
+                GetHeavyBucketStorageLimit();
+        if (use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0);
             uint32_t m = 0;
@@ -411,6 +431,29 @@ bool ComputePrecodeValues(
                     heavy_scales,
                     (int)H,
                     bucket.data() + (size_t)mm * block_bytes,
+                    bytes);
+                st.HeavyMulAdds += H;
+            }
+        }
+        else if (use_residue_buckets)
+        {
+            std::vector<uint8_t> bucket(block_bytes, 0);
+            for (uint32_t m = 0; m < window; ++m)
+            {
+                std::fill(bucket.begin(), bucket.end(), uint8_t{0});
+                for (uint32_t c = m; c < heavy_base; c += window)
+                {
+                    gf256_add_mem(bucket.data(), column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                for (uint32_t r = 0; r < H; ++r) {
+                    heavy_scales[r] = coef[(size_t)r * window + m];
+                }
+                gf256_muladd_multi_mem(
+                    heavy_destinations,
+                    heavy_scales,
+                    (int)H,
+                    bucket.data(),
                     bytes);
                 st.HeavyMulAdds += H;
             }
@@ -729,32 +772,29 @@ WirehairResult PrecodeEncoder::InitializeSolvedSystem(
         return Wirehair_InvalidInput;
     }
 
-    try
+    PrecodeEncoder next;
+    // The complete graph was required by the solve and validated above, but
+    // packet evaluation consumes only its immutable dimensions/seed params.
+    // Retaining thousands of nested row allocations here would duplicate a
+    // graph that can never be consulted by this encoder mode.
+    next.SystemValue.Params = system.Params;
+    next.RowSeed = packet_config.PeelSeed;
+    next.MixCount = packet_config.MixCount;
+    next.BlockBytesValue = block_bytes;
+    next.PacketConfigValue = packet_config;
+    if (!next.PacketRuntimeValue.Initialize(
+            system.Params.BlockCount,
+            (uint32_t)precode_count_wide,
+            packet_config.MixCount))
     {
-        PrecodeEncoder next;
-        GuardedAllocation();
-        next.SystemValue = system;
-        next.RowSeed = packet_config.PeelSeed;
-        next.MixCount = packet_config.MixCount;
-        next.BlockBytesValue = block_bytes;
-        next.PacketConfigValue = packet_config;
-        if (!next.PacketRuntimeValue.Initialize(
-                system.Params.BlockCount,
-                (uint32_t)precode_count_wide,
-                packet_config.MixCount))
-        {
-            return Wirehair_InvalidInput;
-        }
-        next.SolvedIntermediateStorage.swap(intermediate_blocks);
-        next.SourceBlocks = next.SolvedIntermediateStorage.data();
-        next.UsesPacketContract = true;
-        next.Initialized = true;
-        Swap(next);
-        return Wirehair_Success;
+        return Wirehair_InvalidInput;
     }
-    catch (const std::bad_alloc&) {
-        return Wirehair_OOM;
-    }
+    next.SolvedIntermediateStorage.swap(intermediate_blocks);
+    next.SourceBlocks = next.SolvedIntermediateStorage.data();
+    next.UsesPacketContract = true;
+    next.Initialized = true;
+    Swap(next);
+    return Wirehair_Success;
 }
 
 bool PrecodeEncoder::Initialize(
@@ -963,6 +1003,11 @@ const uint8_t* PrecodeEncoder::IntermediateBlocks() const
         SolvedIntermediateStorage.data() : nullptr;
 }
 
+bool PrecodeEncoder::HasCompleteSystem() const
+{
+    return Initialized && !UsesPacketContract;
+}
+
 const PrecodeSystem& PrecodeEncoder::System() const
 {
     return SystemValue;
@@ -1058,6 +1103,8 @@ bool ResolveMessagePrecodeOptions(
     // validating only the serialized wire contract above.
     bound.CacheSystematicSource = requested_options &&
         requested_options->CacheSystematicSource;
+    bound.CacheReceivedSystematicPackets = requested_options &&
+        requested_options->CacheReceivedSystematicPackets;
     resolved_options = bound;
     return true;
 }

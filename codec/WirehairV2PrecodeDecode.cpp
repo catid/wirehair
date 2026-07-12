@@ -104,6 +104,205 @@ bool ResumeFitsMemoryPolicy(
 
 } // namespace
 
+uint32_t PacketSlotTable::Hash(uint32_t packet_id)
+{
+    uint32_t x = packet_id;
+    x ^= x >> 16;
+    x *= UINT32_C(0x7feb352d);
+    x ^= x >> 15;
+    x *= UINT32_C(0x846ca68b);
+    x ^= x >> 16;
+    return x;
+}
+
+bool PacketSlotTable::Initialize(
+    size_t initial_entries,
+    size_t max_entries)
+{
+    if (initial_entries == 0u || initial_entries > max_entries ||
+        max_entries > std::numeric_limits<size_t>::max() / 2u)
+    {
+        return false;
+    }
+    const size_t minimum_capacity = initial_entries * 2u;
+    size_t capacity = 1u;
+    while (capacity < minimum_capacity)
+    {
+        if (capacity > std::numeric_limits<size_t>::max() / 2u) {
+            return false;
+        }
+        capacity *= 2u;
+    }
+
+    try
+    {
+        PacketSlotTable next;
+        next.Keys.resize(capacity);
+        next.Slots.resize(capacity);
+        next.Occupied.assign(capacity, uint8_t{0});
+        next.EntryLimit = max_entries;
+        Swap(next);
+        return true;
+    }
+    catch (const std::bad_alloc&) {
+        return false;
+    }
+    catch (const std::length_error&) {
+        return false;
+    }
+}
+
+void PacketSlotTable::Grow()
+{
+    if (Keys.empty() || Keys.size() >
+            std::numeric_limits<size_t>::max() / 2u)
+    {
+        throw std::length_error("packet slot table capacity overflow");
+    }
+    PacketSlotTable next;
+    const size_t capacity = Keys.size() * 2u;
+    next.Keys.resize(capacity);
+    next.Slots.resize(capacity);
+    next.Occupied.assign(capacity, uint8_t{0});
+    next.EntryLimit = EntryLimit;
+    const size_t mask = capacity - 1u;
+    for (size_t i = 0u; i < Keys.size(); ++i)
+    {
+        if (!Occupied[i]) {
+            continue;
+        }
+        size_t index = (size_t)Hash(Keys[i]) & mask;
+        while (next.Occupied[index]) {
+            index = (index + 1u) & mask;
+        }
+        next.Keys[index] = Keys[i];
+        next.Slots[index] = Slots[i];
+        next.Occupied[index] = 1u;
+        ++next.EntryCount;
+    }
+    Swap(next);
+}
+
+bool PacketSlotTable::Find(uint32_t packet_id, uint32_t* slot_out) const
+{
+    if (Keys.empty()) {
+        return false;
+    }
+    const size_t mask = Keys.size() - 1u;
+    size_t index = (size_t)Hash(packet_id) & mask;
+    for (size_t probes = 0u; probes < Keys.size(); ++probes)
+    {
+        if (!Occupied[index]) {
+            return false;
+        }
+        if (Keys[index] == packet_id)
+        {
+            if (slot_out) {
+                *slot_out = Slots[index];
+            }
+            return true;
+        }
+        index = (index + 1u) & mask;
+    }
+    return false;
+}
+
+bool PacketSlotTable::Insert(uint32_t packet_id, uint32_t slot)
+{
+    if (Keys.empty() || EntryCount >= EntryLimit) {
+        return false;
+    }
+    if (EntryCount >= Keys.size() / 2u)
+    {
+        if (Find(packet_id)) {
+            return false;
+        }
+        GuardedDecoderAllocation();
+        Grow();
+    }
+    const size_t mask = Keys.size() - 1u;
+    size_t index = (size_t)Hash(packet_id) & mask;
+    for (size_t probes = 0u; probes < Keys.size(); ++probes)
+    {
+        if (!Occupied[index])
+        {
+            Keys[index] = packet_id;
+            Slots[index] = slot;
+            Occupied[index] = 1u;
+            ++EntryCount;
+            return true;
+        }
+        if (Keys[index] == packet_id) {
+            return false;
+        }
+        index = (index + 1u) & mask;
+    }
+    return false;
+}
+
+bool PacketSlotTable::Erase(uint32_t packet_id)
+{
+    if (Keys.empty()) {
+        return false;
+    }
+    const size_t mask = Keys.size() - 1u;
+    size_t hole = (size_t)Hash(packet_id) & mask;
+    for (size_t probes = 0u; probes < Keys.size(); ++probes)
+    {
+        if (!Occupied[hole]) {
+            return false;
+        }
+        if (Keys[hole] == packet_id) {
+            break;
+        }
+        hole = (hole + 1u) & mask;
+    }
+    if (!Occupied[hole] || Keys[hole] != packet_id) {
+        return false;
+    }
+
+    // Backward-shift deletion preserves every probe chain without tombstones.
+    size_t scan = (hole + 1u) & mask;
+    while (Occupied[scan])
+    {
+        const size_t home = (size_t)Hash(Keys[scan]) & mask;
+        const size_t scan_distance = (scan - home) & mask;
+        const size_t hole_distance = (scan - hole) & mask;
+        if (scan_distance >= hole_distance)
+        {
+            Keys[hole] = Keys[scan];
+            Slots[hole] = Slots[scan];
+            Occupied[hole] = 1u;
+            hole = scan;
+        }
+        scan = (scan + 1u) & mask;
+    }
+    Occupied[hole] = 0u;
+    --EntryCount;
+    return true;
+}
+
+void PacketSlotTable::ClearAndRelease() noexcept
+{
+    PacketSlotTable empty;
+    Swap(empty);
+}
+
+void PacketSlotTable::Swap(PacketSlotTable& other) noexcept
+{
+    Keys.swap(other.Keys);
+    Slots.swap(other.Slots);
+    Occupied.swap(other.Occupied);
+    std::swap(EntryCount, other.EntryCount);
+    std::swap(EntryLimit, other.EntryLimit);
+}
+
+size_t PacketSlotTable::StorageBytes() const
+{
+    return Keys.capacity() * sizeof(uint32_t) +
+        Slots.capacity() * sizeof(uint32_t) + Occupied.capacity();
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown)
 {
@@ -132,11 +331,16 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
     SystemValue.DenseRowColumns.swap(other.SystemValue.DenseRowColumns);
     ReceivedBlockIds.swap(other.ReceivedBlockIds);
     ReceivedBlockStorage.swap(other.ReceivedBlockStorage);
-    ReceivedSlots.swap(other.ReceivedSlots);
+    ReceivedSlots.Swap(other.ReceivedSlots);
     ResumeState.Swap(other.ResumeState);
     PendingPacketStorage.swap(other.PendingPacketStorage);
     swap(PendingPacketId, other.PendingPacketId);
     IntermediateBlockStorage.swap(other.IntermediateBlockStorage);
+    SystematicPacketCache.swap(other.SystematicPacketCache);
+    swap(SystematicPacketCacheSize, other.SystematicPacketCacheSize);
+    HaveSystematicPacket.swap(other.HaveSystematicPacket);
+    swap(CachedSystematicPacketCountValue,
+        other.CachedSystematicPacketCountValue);
     swap(SolveStatsValue, other.SolveStatsValue);
     swap(MessageBytesValue, other.MessageBytesValue);
     swap(BlockBytesValue, other.BlockBytesValue);
@@ -249,7 +453,21 @@ WirehairResult MessagePrecodeDecoder::InitializeResult(
         GuardedDecoderAllocation();
         next.ReceivedBlockStorage.reserve((size_t)receive_capacity);
         GuardedDecoderAllocation();
-        next.ReceivedSlots.reserve((size_t)block_count + 32u);
+        if (!next.ReceivedSlots.Initialize(
+                (size_t)block_count + 32u,
+                (size_t)block_count + 1024u))
+        {
+            return Wirehair_OOM;
+        }
+        if (opts.CacheReceivedSystematicPackets)
+        {
+            GuardedDecoderAllocation();
+            next.SystematicPacketCache.reset(
+                new uint8_t[(size_t)message_bytes]);
+            next.SystematicPacketCacheSize = (size_t)message_bytes;
+            GuardedDecoderAllocation();
+            next.HaveSystematicPacket.assign(block_count, uint8_t{0});
+        }
         next.MessageBytesValue = message_bytes;
         next.BlockBytesValue = block_bytes;
         next.PacketSeedAttemptValue = packet_seed_attempt;
@@ -271,7 +489,7 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
     if (Decoded) {
         return Wirehair_Success;
     }
-    if (ReceivedSlots.size() < K) {
+    if (ReceivedSlots.Size() < K) {
         LastSolveResult = Wirehair_NeedMore;
         return Wirehair_NeedMore;
     }
@@ -309,8 +527,8 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             {
                 IntermediateBlockStorage.swap(intermediate);
                 Decoded = true;
-                ReceivedCountValue = (uint32_t)ReceivedSlots.size();
-                std::unordered_map<uint32_t, uint32_t>().swap(ReceivedSlots);
+                ReceivedCountValue = (uint32_t)ReceivedSlots.Size();
+                ReceivedSlots.ClearAndRelease();
                 std::vector<uint8_t>().swap(PendingPacketStorage);
                 PendingPacket = false;
             }
@@ -359,7 +577,7 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
             ReceivedCountValue = (uint32_t)ReceivedBlockIds.size();
             std::vector<uint32_t>().swap(ReceivedBlockIds);
             std::vector<uint8_t>().swap(ReceivedBlockStorage);
-            std::unordered_map<uint32_t, uint32_t>().swap(ReceivedSlots);
+            ReceivedSlots.ClearAndRelease();
         }
         else if (result == Wirehair_NeedMore && resume_state.Active)
         {
@@ -438,7 +656,7 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
     if (ResumeState.Active)
     {
         const bool duplicate =
-            ReceivedSlots.find(block_id) != ReceivedSlots.end();
+            ReceivedSlots.Find(block_id);
         if (duplicate)
         {
             if (PendingPacket && block_id == PendingPacketId)
@@ -511,7 +729,7 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                 return pending_result;
             }
         }
-        if (ReceivedSlots.size() >=
+        if (ReceivedSlots.Size() >=
             (size_t)ProfileValue.BlockCount + 1024u)
         {
             return Wirehair_ExtraInsufficient;
@@ -530,12 +748,22 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                 PendingPacketStorage.begin() + data_bytes,
                 PendingPacketStorage.end(),
                 uint8_t{0});
-            const std::pair<
-                std::unordered_map<uint32_t, uint32_t>::iterator, bool>
-                    inserted = ReceivedSlots.insert(std::make_pair(
-                        block_id, UINT32_MAX));
-            if (!inserted.second) {
+            if (!ReceivedSlots.Insert(block_id, UINT32_MAX)) {
                 return LastSolveResult;
+            }
+            if (SystematicPacketCache && block_id <
+                    ProfileValue.BlockCount)
+            {
+                std::memcpy(
+                    SystematicPacketCache.get() +
+                        (size_t)block_id * BlockBytesValue,
+                    block_in,
+                    data_bytes);
+                if (!HaveSystematicPacket[block_id])
+                {
+                    HaveSystematicPacket[block_id] = 1u;
+                    ++CachedSystematicPacketCountValue;
+                }
             }
             PendingPacketId = block_id;
             PendingPacket = true;
@@ -551,11 +779,10 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
         }
     }
 
-    const std::unordered_map<uint32_t, uint32_t>::const_iterator duplicate =
-        ReceivedSlots.find(block_id);
-    if (duplicate != ReceivedSlots.end())
+    uint32_t duplicate_slot = 0u;
+    if (ReceivedSlots.Find(block_id, &duplicate_slot))
     {
-        const uint32_t slot = duplicate->second;
+        const uint32_t slot = duplicate_slot;
         if (slot >= ReceivedBlockIds.size() ||
             slot >= ReceivedBlockStorage.size() / BlockBytesValue ||
             ReceivedBlockIds[slot] != block_id)
@@ -603,10 +830,7 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
     try
     {
         const uint32_t slot = (uint32_t)ReceivedBlockIds.size();
-        const std::pair<
-            std::unordered_map<uint32_t, uint32_t>::iterator, bool> inserted =
-                ReceivedSlots.insert(std::make_pair(block_id, slot));
-        if (!inserted.second) {
+        if (!ReceivedSlots.Insert(block_id, slot)) {
             return LastSolveResult;
         }
         const size_t old_storage_size = ReceivedBlockStorage.size();
@@ -621,11 +845,25 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
                     old_storage_size + BlockBytesValue, 0u);
             }
             ReceivedBlockIds.push_back(block_id);
+            if (SystematicPacketCache && block_id <
+                    ProfileValue.BlockCount)
+            {
+                std::memcpy(
+                    SystematicPacketCache.get() +
+                        (size_t)block_id * BlockBytesValue,
+                    block_in,
+                    data_bytes);
+                if (!HaveSystematicPacket[block_id])
+                {
+                    HaveSystematicPacket[block_id] = 1u;
+                    ++CachedSystematicPacketCountValue;
+                }
+            }
         }
         catch (...)
         {
             ReceivedBlockStorage.resize(old_storage_size);
-            ReceivedSlots.erase(inserted.first);
+            ReceivedSlots.Erase(block_id);
             throw;
         }
         return AttemptSolve();
@@ -651,11 +889,29 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
     try
     {
         GuardedDecoderAllocation();
+        const uint32_t K = ProfileValue.BlockCount;
+        const bool cache_enabled = SystematicPacketCache != nullptr;
+        if (cache_enabled &&
+            (SystematicPacketCacheSize != (size_t)MessageBytesValue ||
+             HaveSystematicPacket.size() != K))
+        {
+            return Wirehair_Error;
+        }
         std::vector<uint8_t> block(BlockBytesValue, 0u);
         uint8_t* output = static_cast<uint8_t*>(message_out);
-        const uint32_t K = ProfileValue.BlockCount;
         for (uint32_t block_id = 0; block_id < K; ++block_id)
         {
+            const uint32_t bytes = PacketDataBytes(
+                MessageBytesValue, BlockBytesValue, K, block_id);
+            if (cache_enabled && HaveSystematicPacket[block_id])
+            {
+                std::memcpy(
+                    output + (size_t)block_id * BlockBytesValue,
+                    SystematicPacketCache.get() +
+                        (size_t)block_id * BlockBytesValue,
+                    bytes);
+                continue;
+            }
             if (!EvaluatePacketBlockForValidatedSystemWithRuntime(
                     SystemValue,
                     PacketConfigValue,
@@ -667,8 +923,6 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
             {
                 return Wirehair_Error;
             }
-            const uint32_t bytes = PacketDataBytes(
-                MessageBytesValue, BlockBytesValue, K, block_id);
             std::memcpy(
                 output + (size_t)block_id * BlockBytesValue,
                 block.data(),
@@ -681,12 +935,36 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
     }
 }
 
+void MessagePrecodeDecoder::ReleaseSystematicPacketCache() noexcept
+{
+    SystematicPacketCache.reset();
+    SystematicPacketCacheSize = 0u;
+    std::vector<uint8_t>().swap(HaveSystematicPacket);
+    CachedSystematicPacketCountValue = 0u;
+    OptionsValue.CacheReceivedSystematicPackets = false;
+}
+
+bool MessagePrecodeDecoder::HasSystematicPacketCache() const
+{
+    return SystematicPacketCache != nullptr;
+}
+
+size_t MessagePrecodeDecoder::SystematicPacketCacheBytes() const
+{
+    return SystematicPacketCacheSize + HaveSystematicPacket.size();
+}
+
+uint32_t MessagePrecodeDecoder::CachedSystematicPacketCount() const
+{
+    return CachedSystematicPacketCountValue;
+}
+
 bool MessagePrecodeDecoder::IsInitialized() const { return Initialized; }
 bool MessagePrecodeDecoder::IsDecoded() const { return Decoded; }
 uint32_t MessagePrecodeDecoder::ReceivedCount() const
 {
     return Decoded ? ReceivedCountValue :
-        (uint32_t)ReceivedSlots.size();
+        (uint32_t)ReceivedSlots.Size();
 }
 uint32_t MessagePrecodeDecoder::SolveAttemptCount() const
 {

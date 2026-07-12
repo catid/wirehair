@@ -448,6 +448,59 @@ bool TestCostModel()
     return ok;
 }
 
+bool TestHeavyResidueDispatch()
+{
+    const uint32_t K = 500u;
+    const uint32_t bb = 37u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(K, UINT64_C(0x57ea4));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildPrecodeSystem(params, system)) {
+        std::fprintf(stderr, "heavy residue dispatch: build failed\n");
+        return false;
+    }
+    const uint32_t parity_count = params.Staircase + params.DenseRows +
+        params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * bb);
+    std::vector<uint8_t> full((size_t)parity_count * bb);
+    std::vector<uint8_t> streamed(full.size());
+    FillRandomBlocks(source.data(), source.size(), UINT64_C(0x57ea45eed));
+
+    wirehair_v2::PrecodeEncodeStats full_stats;
+    wirehair_v2::PrecodeEncodeStats streamed_stats;
+    wirehair_v2::SetHeavyBucketStorageLimitForTesting(UINT64_MAX);
+    const bool full_ok = wirehair_v2::ComputePrecodeValues(
+        system, source.data(), bb, full.data(), &full_stats);
+    wirehair_v2::SetHeavyBucketStorageLimitForTesting(0u);
+    const bool streamed_ok = wirehair_v2::ComputePrecodeValues(
+        system, source.data(), bb, streamed.data(), &streamed_stats);
+    wirehair_v2::SetHeavyBucketStorageLimitForTesting(UINT64_C(64) << 20);
+
+    const bool stats_equal =
+        full_stats.StaircaseBlockOps == streamed_stats.StaircaseBlockOps &&
+        full_stats.DenseKnownBlockOps == streamed_stats.DenseKnownBlockOps &&
+        full_stats.DenseSolveBlockOps == streamed_stats.DenseSolveBlockOps &&
+        full_stats.HeavyBucketXors == streamed_stats.HeavyBucketXors &&
+        full_stats.HeavyMulAdds == streamed_stats.HeavyMulAdds &&
+        full_stats.HeavySolveBlockOps == streamed_stats.HeavySolveBlockOps;
+    const uint32_t heavy_base = K + params.Staircase + params.DenseRows;
+    const uint32_t window = 256u - params.HeavyRows;
+    if (!full_ok || !streamed_ok || full != streamed || !stats_equal ||
+        streamed_stats.HeavyBucketXors != heavy_base ||
+        streamed_stats.HeavyMulAdds != (uint64_t)params.HeavyRows * window ||
+        !VerifyValues(
+            system, source.data(), streamed.data(), bb,
+            "heavy residue streaming"))
+    {
+        std::fprintf(stderr,
+            "heavy residue dispatch: full/streaming mismatch\n");
+        return false;
+    }
+    std::printf("heavy residue full/streaming differential: PASS\n");
+    return true;
+}
+
 bool TestMalformedDenseCorner()
 {
     wirehair_v2::PrecodeSystem system;
@@ -817,7 +870,8 @@ bool TestRecoveryBlockEncoding()
 
     wirehair_v2::PrecodeEncoder uninitialized_encoder;
     uint64_t ops = UINT64_MAX;
-    if (uninitialized_encoder.Encode(0u, got.data(), &ops) ||
+    if (uninitialized_encoder.HasCompleteSystem() ||
+        uninitialized_encoder.Encode(0u, got.data(), &ops) ||
         ops != UINT64_MAX)
     {
         std::fprintf(stderr,
@@ -834,6 +888,10 @@ bool TestRecoveryBlockEncoding()
         return false;
     }
     if (!encoder_state.IsInitialized() ||
+        !encoder_state.HasCompleteSystem() ||
+        !wirehair_v2::ValidatePrecodeSystem(encoder_state.System()) ||
+        encoder_state.System().StaircaseRows != system.StaircaseRows ||
+        encoder_state.System().DenseRowColumns != system.DenseRowColumns ||
         encoder_state.SourceBlockCount() != K ||
         encoder_state.ParityBlockCount() != parity_count ||
         encoder_state.BlockBytes() != bb ||
@@ -871,6 +929,8 @@ bool TestRecoveryBlockEncoding()
     if (encoder_state.Initialize(
             system, codec, row_seed, recovery_mix, nullptr, bb) ||
         !encoder_state.IsInitialized() ||
+        !encoder_state.HasCompleteSystem() ||
+        !wirehair_v2::ValidatePrecodeSystem(encoder_state.System()) ||
         !encoder_state.ParityBlocks() ||
         encoder_state.BlockBytes() != bb)
     {
@@ -1154,9 +1214,16 @@ bool TestMessagePrecodeEncoder()
     wirehair_v2::PacketRowConfig packet_config;
     packet_config.PeelSeed = (uint32_t)blocks.RecoveryRowSeed();
     packet_config.MixCount = blocks.RecoveryMixCount();
-    if (!blocks.IntermediateBlocks()) {
+    if (!blocks.IntermediateBlocks() || blocks.HasCompleteSystem() ||
+        !encoder_system.StaircaseRows.empty() ||
+        !encoder_system.DenseRowColumns.empty() ||
+        encoder_system.Params.BlockCount != K ||
+        encoder_system.Params.Staircase != encoder.Profile().V2StaircaseCount ||
+        encoder_system.Params.DenseRows != encoder.Profile().V2DenseRowCount ||
+        encoder_system.Params.HeavyRows != encoder.Profile().V2HeavyRowCount)
+    {
         std::fprintf(stderr,
-            "message encoder: solved intermediate storage unavailable\n");
+            "message encoder: solved state retained or lost system data\n");
         return false;
     }
     const uint32_t reordered_ids[] = {
@@ -1251,6 +1318,9 @@ bool TestMessagePrecodeEncoder()
             message.data(), message_bytes, bb, &mismatch, &options) ||
         !encoder.IsInitialized() ||
         !encoder.IntermediateBlocks() ||
+        encoder.BlockEncoder().HasCompleteSystem() ||
+        !encoder.BlockEncoder().System().StaircaseRows.empty() ||
+        !encoder.BlockEncoder().System().DenseRowColumns.empty() ||
         encoder.SourceBlockCount() != K ||
         !encoder.BlockEncoder().IsInitialized())
     {
@@ -1644,7 +1714,9 @@ bool TestTypedFailuresAndAllocationContainment()
     }
     working_source = encoder.IntermediateBlocks();
 
-    for (int64_t failure = 0; failure < 4; ++failure)
+    // The solved encoder no longer copies the nested precode row graph, so
+    // only the three real guarded allocations before ownership transfer remain.
+    for (int64_t failure = 0; failure < 3; ++failure)
     {
         wirehair_v2::SetAllocationFailureCountdownForTesting(failure);
         const WirehairResult init_oom = encoder.InitializeResult(
@@ -1791,6 +1863,7 @@ int main(int argc, char** argv)
     ok = TestMalformedDenseCorner() && ok;
     ok = TestStrictSystemValidation() && ok;
     ok = TestCostModel() && ok;
+    ok = TestHeavyResidueDispatch() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;
     ok = TestBorrowedMessageLifetime() && ok;

@@ -7,10 +7,43 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <unordered_map>
+#include <memory>
 #include <vector>
 
 namespace wirehair_v2 {
+
+/**
+    Bounded flat hash table used by the decoder's accepted-packet set.
+
+    Every uint32_t value is a valid public packet id, so occupancy is stored
+    separately rather than stealing a key as an empty sentinel.  Initialize()
+    provisions the normal receive window; rare tail growth is transactional
+    and bounded by the decoder's maximum accepted-equation count.
+*/
+class PacketSlotTable
+{
+public:
+    bool Initialize(size_t initial_entries, size_t max_entries);
+    bool Find(uint32_t packet_id, uint32_t* slot_out = nullptr) const;
+    bool Insert(uint32_t packet_id, uint32_t slot);
+    bool Erase(uint32_t packet_id);
+    void ClearAndRelease() noexcept;
+    void Swap(PacketSlotTable& other) noexcept;
+
+    size_t Size() const { return EntryCount; }
+    size_t Capacity() const { return Keys.size(); }
+    size_t StorageBytes() const;
+
+private:
+    static uint32_t Hash(uint32_t packet_id);
+    void Grow();
+
+    std::vector<uint32_t> Keys;
+    std::vector<uint32_t> Slots;
+    std::vector<uint8_t> Occupied;
+    size_t EntryCount = 0u;
+    size_t EntryLimit = 0u;
+};
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 void SetDecoderAllocationFailureCountdownForTesting(int64_t countdown);
@@ -71,6 +104,12 @@ public:
     const PrecodeSystem& System() const;
     const uint8_t* IntermediateBlocks() const;
 
+    /** Release the optional received-systematic cache; idempotent. */
+    void ReleaseSystematicPacketCache() noexcept;
+    bool HasSystematicPacketCache() const;
+    size_t SystematicPacketCacheBytes() const;
+    uint32_t CachedSystematicPacketCount() const;
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool HasIncrementalResumeStateForTesting() const;
     size_t IncrementalResumeBytesForTesting() const;
@@ -92,11 +131,15 @@ private:
     // id directly to its slot keeps duplicate validation O(1); after checkpoint
     // adoption the keys remain as the bounded received-id set while the slot
     // values are no longer dereferenced.
-    std::unordered_map<uint32_t, uint32_t> ReceivedSlots;
+    PacketSlotTable ReceivedSlots;
     PrecodeSolveResumeState ResumeState;
     std::vector<uint8_t> PendingPacketStorage;
     uint32_t PendingPacketId = 0u;
     std::vector<uint8_t> IntermediateBlockStorage;
+    std::unique_ptr<uint8_t[]> SystematicPacketCache;
+    size_t SystematicPacketCacheSize = 0u;
+    std::vector<uint8_t> HaveSystematicPacket;
+    uint32_t CachedSystematicPacketCountValue = 0u;
     PrecodeSolveStats SolveStatsValue = {};
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;

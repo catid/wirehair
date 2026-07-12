@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,208 @@ bool Check(bool condition, const char* message)
         return false;
     }
     return true;
+}
+
+bool CheckPacketSlotTable()
+{
+    wirehair_v2::PacketSlotTable table;
+    if (!Check(table.Initialize(37u, 37u),
+            "packet slot table init failed") ||
+        !Check(table.Size() == 0u && table.Capacity() >= 74u,
+            "packet slot table initial shape mismatch") ||
+        !Check(table.Insert(UINT32_MAX, 7u),
+            "packet slot table rejected UINT32_MAX") ||
+        !Check(table.Insert(0u, UINT32_MAX),
+            "packet slot table rejected UINT32_MAX slot") ||
+        !Check(!table.Insert(UINT32_MAX, 8u),
+            "packet slot table accepted duplicate"))
+    {
+        return false;
+    }
+    uint32_t slot = 0u;
+    if (!Check(table.Find(UINT32_MAX, &slot) && slot == 7u,
+            "packet slot table lost maximum id") ||
+        !Check(table.Find(0u, &slot) && slot == UINT32_MAX,
+            "packet slot table lost maximum slot"))
+    {
+        return false;
+    }
+
+    if (!Check(table.Initialize(2u, 8u),
+            "packet slot growth fixture init failed") ||
+        !Check(table.Insert(11u, 1u) && table.Insert(22u, 2u),
+            "packet slot growth fixture fill failed"))
+    {
+        return false;
+    }
+    const size_t before_duplicate_capacity = table.Capacity();
+    if (!Check(!table.Insert(11u, 3u) &&
+            table.Capacity() == before_duplicate_capacity,
+            "half-full duplicate grew packet slot table"))
+    {
+        return false;
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    bool growth_oom = false;
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+    try {
+        (void)table.Insert(33u, 3u);
+    }
+    catch (const std::bad_alloc&) {
+        growth_oom = true;
+    }
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    if (!Check(growth_oom && table.Size() == 2u &&
+            table.Capacity() == before_duplicate_capacity &&
+            !table.Find(33u),
+            "packet slot growth OOM mutated table"))
+    {
+        return false;
+    }
+#endif
+    if (!Check(table.Insert(33u, 3u) &&
+            table.Capacity() > before_duplicate_capacity,
+            "packet slot table did not grow transactionally"))
+    {
+        return false;
+    }
+
+    if (!Check(table.Initialize(37u, 37u),
+            "packet slot oracle reinit failed") ||
+        !Check(table.Insert(UINT32_MAX, 7u) &&
+            table.Insert(0u, UINT32_MAX),
+            "packet slot oracle seed failed"))
+    {
+        return false;
+    }
+
+    std::map<uint32_t, uint32_t> oracle;
+    oracle[UINT32_MAX] = 7u;
+    oracle[0u] = UINT32_MAX;
+    uint32_t random = UINT32_C(0x8f31a25c);
+    for (uint32_t step = 0u; step < 20000u; ++step)
+    {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        const uint32_t id = random;
+        if ((step % 3u) == 0u)
+        {
+            const bool expected = oracle.erase(id) != 0u;
+            if (!Check(table.Erase(id) == expected,
+                    "packet slot table erase disagreed with oracle"))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            const bool existed = oracle.find(id) != oracle.end();
+            const bool room = oracle.size() < 37u;
+            const bool inserted = table.Insert(id, step);
+            if (!Check(inserted == (!existed && room),
+                    "packet slot table insert disagreed with oracle"))
+            {
+                return false;
+            }
+            if (inserted) {
+                oracle[id] = step;
+            }
+        }
+        if ((step % 29u) == 0u)
+        {
+            for (const std::pair<const uint32_t, uint32_t>& entry : oracle)
+            {
+                if (!Check(
+                        table.Find(entry.first, &slot) &&
+                            slot == entry.second,
+                        "packet slot table lookup disagreed with oracle"))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    if (!Check(table.Size() == oracle.size(),
+            "packet slot table size disagreed with oracle"))
+    {
+        return false;
+    }
+    if (!Check(table.Initialize(4u, 37u),
+            "packet slot table reinit failed"))
+    {
+        return false;
+    }
+    for (uint32_t id = 0u; id < 37u; ++id) {
+        if (!Check(table.Insert(id, id ^ UINT32_C(0xa5a5a5a5)),
+                "packet slot table failed bounded fill"))
+        {
+            return false;
+        }
+    }
+    if (!Check(!table.Insert(1000u, 1u),
+            "packet slot table exceeded entry bound"))
+    {
+        return false;
+    }
+    for (uint32_t id = 0u; id < 37u; id += 2u) {
+        if (!Check(table.Erase(id),
+                "packet slot table failed clustered erase"))
+        {
+            return false;
+        }
+    }
+    for (uint32_t id = 1u; id < 37u; id += 2u) {
+        if (!Check(
+                table.Find(id, &slot) &&
+                    slot == (id ^ UINT32_C(0xa5a5a5a5)),
+                "packet slot table erase broke probe chain"))
+        {
+            return false;
+        }
+    }
+    if (!Check(table.Initialize(4u, 4u),
+            "packet slot wraparound init failed"))
+    {
+        return false;
+    }
+    std::vector<uint32_t> wrapping_ids;
+    for (uint32_t id = 0u; wrapping_ids.size() < 4u; ++id)
+    {
+        uint32_t hash = id;
+        hash ^= hash >> 16;
+        hash *= UINT32_C(0x7feb352d);
+        hash ^= hash >> 15;
+        hash *= UINT32_C(0x846ca68b);
+        hash ^= hash >> 16;
+        if ((hash & 7u) == 7u) {
+            wrapping_ids.push_back(id);
+        }
+    }
+    for (uint32_t i = 0u; i < wrapping_ids.size(); ++i) {
+        if (!Check(table.Insert(wrapping_ids[i], i + 100u),
+                "packet slot wraparound insert failed"))
+        {
+            return false;
+        }
+    }
+    if (!Check(table.Erase(wrapping_ids[0]),
+            "packet slot wraparound erase failed"))
+    {
+        return false;
+    }
+    for (uint32_t i = 1u; i < wrapping_ids.size(); ++i) {
+        if (!Check(table.Find(wrapping_ids[i], &slot) && slot == i + 100u,
+                "packet slot wraparound erase broke probe chain"))
+        {
+            return false;
+        }
+    }
+    table.ClearAndRelease();
+    return Check(
+        table.Size() == 0u && table.Capacity() == 0u &&
+            !table.Find(UINT32_MAX),
+        "packet slot table clear retained state");
 }
 
 bool SameStats(
@@ -796,6 +999,339 @@ bool CheckColdDuplicateSlotLookup()
     return true;
 }
 
+bool CheckSystematicRecoverCache()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 37u;
+    const uint32_t tail_bytes = 11u;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    const std::vector<uint8_t> message = MakeMessage((size_t)message_bytes);
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    if (!Check(
+            encoder.InitializeResult(
+                message.data(), message_bytes, block_bytes) ==
+                Wirehair_Success,
+            "recover-cache encoder initialization failed"))
+    {
+        return false;
+    }
+    const wirehair_v2::SeedProfile profile = encoder.Profile();
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.CacheReceivedSystematicPackets = true;
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    for (int64_t countdown = 4; countdown <= 5; ++countdown)
+    {
+        wirehair_v2::MessagePrecodeDecoder failed;
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(
+            countdown);
+        const WirehairResult result = failed.InitializeResult(
+            message_bytes, block_bytes, &profile, &options);
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        if (!Check(result == Wirehair_OOM && !failed.IsInitialized() &&
+                !failed.HasSystematicPacketCache(),
+                "recover-cache initialization OOM was not transactional"))
+        {
+            return false;
+        }
+    }
+#endif
+
+    wirehair_v2::MessagePrecodeDecoder defaults;
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    if (!Check(
+            defaults.InitializeResult(
+                message_bytes, block_bytes, &profile) == Wirehair_Success &&
+            !defaults.HasSystematicPacketCache() &&
+            defaults.SystematicPacketCacheBytes() == 0u,
+            "default decoder allocated systematic cache") ||
+        !Check(
+            decoder.InitializeResult(
+                message_bytes, block_bytes, &profile, &options) ==
+                Wirehair_Success &&
+            decoder.HasSystematicPacketCache() &&
+            decoder.SystematicPacketCacheBytes() == message_bytes + K &&
+            decoder.CachedSystematicPacketCount() == 0u,
+            "enabled decoder cache shape mismatch"))
+    {
+        return false;
+    }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const size_t cache_bytes_before_reinit =
+        decoder.SystematicPacketCacheBytes();
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(4);
+    const WirehairResult reinit_oom = decoder.InitializeResult(
+        message_bytes, block_bytes, &profile, &options);
+    wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+    if (!Check(reinit_oom == Wirehair_OOM && decoder.IsInitialized() &&
+            decoder.HasSystematicPacketCache() &&
+            decoder.SystematicPacketCacheBytes() ==
+                cache_bytes_before_reinit &&
+            decoder.CachedSystematicPacketCount() == 0u,
+            "recover-cache failed reinit changed active decoder"))
+    {
+        return false;
+    }
+#endif
+
+    PacketFixture packet;
+    WirehairResult result = Wirehair_NeedMore;
+    uint32_t expected_cached = 0u;
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if ((id % 5u) == 0u) {
+            continue;
+        }
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        result = decoder.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+        if (!Check(result == Wirehair_NeedMore,
+                "recover-cache systematic feed ended early"))
+        {
+            return false;
+        }
+        ++expected_cached;
+    }
+    if (!EncodePacket(encoder, block_bytes, K - 1u, packet) ||
+        !Check(packet.Bytes == tail_bytes &&
+            decoder.DecodeResult(
+                packet.Id, packet.Data.data(), packet.Bytes) ==
+                Wirehair_NeedMore &&
+            decoder.CachedSystematicPacketCount() == expected_cached,
+            "recover-cache duplicate/partial handling changed cache count"))
+    {
+        return false;
+    }
+    packet.Data[packet.Bytes - 1u] ^= 0x80u;
+    if (!Check(decoder.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes) ==
+            Wirehair_InvalidInput &&
+            decoder.CachedSystematicPacketCount() == expected_cached,
+            "recover-cache conflicting duplicate mutated cache"))
+    {
+        return false;
+    }
+    packet.Data[packet.Bytes - 1u] ^= 0x80u;
+    for (uint32_t repair = 0u;
+         repair < K + 512u && result == Wirehair_NeedMore;
+         ++repair)
+    {
+        if (!EncodePacket(encoder, block_bytes, K + repair, packet)) {
+            return false;
+        }
+        result = decoder.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+    }
+    std::vector<uint8_t> recovered((size_t)message_bytes, 0u);
+    if (!Check(result == Wirehair_Success &&
+            decoder.CachedSystematicPacketCount() == expected_cached,
+            "recover-cache decode did not preserve cache count") ||
+        !Check(decoder.RecoverResult(
+                recovered.data(), message_bytes) == Wirehair_Success &&
+            recovered == message,
+            "recover-cache partial-tail recovery mismatch"))
+    {
+        return false;
+    }
+
+    decoder.ReleaseSystematicPacketCache();
+    decoder.ReleaseSystematicPacketCache();
+    std::fill(recovered.begin(), recovered.end(), uint8_t{0});
+    if (!Check(!decoder.HasSystematicPacketCache() &&
+            decoder.SystematicPacketCacheBytes() == 0u &&
+            decoder.CachedSystematicPacketCount() == 0u &&
+            !decoder.Options().CacheReceivedSystematicPackets,
+            "recover-cache release was not idempotent") ||
+        !Check(decoder.RecoverResult(
+                recovered.data(), message_bytes) == Wirehair_Success &&
+            recovered == message,
+            "recovery after cache release changed payload"))
+    {
+        return false;
+    }
+    wirehair_v2::Codec facade;
+    if (!Check(facade.ReleasePrecodeDecoderSystematicCache() ==
+            Wirehair_InvalidInput,
+            "recover-cache facade release accepted empty codec") ||
+        !Check(facade.InitializePrecodeDecoder(
+                message_bytes, block_bytes, &profile, &options) ==
+                Wirehair_Success &&
+            facade.ReleasePrecodeDecoderSystematicCache() ==
+                Wirehair_Success &&
+            facade.ReleasePrecodeDecoderSystematicCache() ==
+                Wirehair_Success,
+            "recover-cache facade release was not idempotent"))
+    {
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeDecoder released_before_recover;
+    if (!Check(released_before_recover.InitializeResult(
+            message_bytes, block_bytes, &profile, &options) ==
+            Wirehair_Success,
+            "release-before-recover decoder init failed"))
+    {
+        return false;
+    }
+    result = Wirehair_NeedMore;
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        result = released_before_recover.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+    }
+    released_before_recover.ReleaseSystematicPacketCache();
+    std::fill(recovered.begin(), recovered.end(), uint8_t{0});
+    if (!Check(result == Wirehair_Success &&
+            released_before_recover.RecoverResult(
+                recovered.data(), message_bytes) == Wirehair_Success &&
+            recovered == message,
+            "release-before-recover fallback changed payload"))
+    {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeDecoder repair_only;
+    if (!Check(repair_only.InitializeResult(
+            message_bytes, block_bytes, &profile, &options) ==
+            Wirehair_Success,
+            "recover-cache repair-only decoder init failed"))
+    {
+        return false;
+    }
+    result = Wirehair_NeedMore;
+    for (uint32_t repair = 0u;
+         repair < K + 512u && result == Wirehair_NeedMore;
+         ++repair)
+    {
+        if (!EncodePacket(
+                encoder, block_bytes, K + repair, packet))
+        {
+            return false;
+        }
+        result = repair_only.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+    }
+    std::fill(recovered.begin(), recovered.end(), uint8_t{0});
+    if (!Check(result == Wirehair_Success &&
+            repair_only.CachedSystematicPacketCount() == 0u &&
+            repair_only.RecoverResult(
+                recovered.data(), message_bytes) == Wirehair_Success &&
+            recovered == message,
+            "recover-cache repair-only fallback changed payload"))
+    {
+        return false;
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Force the K-th accepted equation to duplicate another repair row.  The
+    // deficient cold solve must publish a resume checkpoint; only then append
+    // a partial systematic packet and verify the resume receive branch caches
+    // its exact bytes before completing recovery.
+    const uint32_t resume_K = 1000u;
+    const uint32_t resume_bb = 257u;
+    const uint64_t resume_bytes =
+        (uint64_t)resume_K * resume_bb - resume_bb / 2u;
+    const std::vector<uint8_t> resume_message =
+        MakeMessage((size_t)resume_bytes);
+    wirehair_v2::MessagePrecodeEncoder resume_encoder;
+    if (!Check(resume_encoder.InitializeResult(
+            resume_message.data(), resume_bytes, resume_bb) ==
+            Wirehair_Success,
+            "resume recover-cache encoder init failed"))
+    {
+        return false;
+    }
+    wirehair_v2::PacketRowConfig resume_config;
+    resume_config.PeelSeed = resume_encoder.Profile().V2PacketPeelSeed;
+    resume_config.MixCount = resume_encoder.Profile().V2RecoveryMixCount;
+    std::vector<uint32_t> collision_ids;
+    if (!Check(FindRepairRowCollisions(
+            resume_encoder.BlockEncoder().System(),
+            resume_config,
+            collision_ids),
+            "resume recover-cache collision search failed"))
+    {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeDecoder resume_decoder;
+    if (!Check(resume_decoder.InitializeResult(
+            resume_bytes,
+            resume_bb,
+            &resume_encoder.Profile(),
+            &options) == Wirehair_Success,
+            "resume recover-cache decoder init failed"))
+    {
+        return false;
+    }
+    PacketFixture resume_packet;
+    for (uint32_t id = 0u; id + 2u < resume_K; ++id)
+    {
+        if (!EncodePacket(resume_encoder, resume_bb, id, resume_packet) ||
+            resume_decoder.DecodeResult(
+                resume_packet.Id,
+                resume_packet.Data.data(),
+                resume_packet.Bytes) != Wirehair_NeedMore)
+        {
+            return false;
+        }
+    }
+    for (uint32_t i = 0u; i < 2u; ++i)
+    {
+        if (!EncodePacket(
+                resume_encoder, resume_bb, collision_ids[i], resume_packet) ||
+            resume_decoder.DecodeResult(
+                resume_packet.Id,
+                resume_packet.Data.data(),
+                resume_packet.Bytes) != Wirehair_NeedMore)
+        {
+            return false;
+        }
+    }
+    if (!Check(resume_decoder.HasIncrementalResumeStateForTesting() &&
+            resume_decoder.CachedSystematicPacketCount() == resume_K - 2u,
+            "recover-cache fixture did not enter resume state"))
+    {
+        return false;
+    }
+    if (!EncodePacket(
+            resume_encoder, resume_bb, resume_K - 1u, resume_packet) ||
+        !Check(resume_packet.Bytes == resume_bb - resume_bb / 2u,
+            "resume recover-cache partial packet size mismatch"))
+    {
+        return false;
+    }
+    WirehairResult resume_result = resume_decoder.DecodeResult(
+        resume_packet.Id, resume_packet.Data.data(), resume_packet.Bytes);
+    for (uint32_t repair = 0u;
+         repair < 512u && resume_result == Wirehair_NeedMore;
+         ++repair)
+    {
+        const uint32_t id = resume_K + 1000000u + repair;
+        if (!EncodePacket(resume_encoder, resume_bb, id, resume_packet)) {
+            return false;
+        }
+        resume_result = resume_decoder.DecodeResult(
+            resume_packet.Id, resume_packet.Data.data(), resume_packet.Bytes);
+    }
+    std::vector<uint8_t> resume_recovered((size_t)resume_bytes, 0u);
+    if (!Check(resume_result == Wirehair_Success &&
+            resume_decoder.CachedSystematicPacketCount() == resume_K - 1u &&
+            resume_decoder.RecoverResult(
+                resume_recovered.data(), resume_bytes) == Wirehair_Success &&
+            resume_recovered == resume_message,
+            "systematic append after resume was not cached exactly"))
+    {
+        return false;
+    }
+#endif
+    return true;
+}
+
 bool RunDecodeCase(
     uint32_t block_count,
     uint32_t block_bytes,
@@ -1157,10 +1693,12 @@ int main(int argc, char** argv)
             stderr, "usage: %s [--large|--large-recovery]\n", argv[0]);
         return 2;
     }
-    if (!CheckInvalidAndOom() ||
+    if (!CheckPacketSlotTable() ||
+        !CheckInvalidAndOom() ||
         !CheckFacadeModeTransitions() ||
         !CheckIncrementalDecoderParity() ||
-        !CheckColdDuplicateSlotLookup())
+        !CheckColdDuplicateSlotLookup() ||
+        !CheckSystematicRecoverCache())
     {
         return 1;
     }

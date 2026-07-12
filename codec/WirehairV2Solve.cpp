@@ -1161,12 +1161,16 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                         accumulator[w] ^=
                             projection[(size_t)other * words + w];
                     }
+                    // Inactive value slots are still the zero constant at
+                    // this stage.  Only peeled columns can contribute to the
+                    // affine RHS; XORing an inactive slot would be a full-
+                    // block read/write pass with no algebraic effect.
+                    gf256_add_mem(
+                        constant,
+                        values.data() + (size_t)other * block_bytes,
+                        (int)block_bytes);
+                    ++st.BlockXors;
                 }
-                gf256_add_mem(
-                    constant,
-                    values.data() + (size_t)other * block_bytes,
-                    (int)block_bytes);
-                ++st.BlockXors;
             }
             for (uint32_t w = 0; w < words; ++w) {
                 projection[(size_t)column * words + w] = accumulator[w];
@@ -1277,12 +1281,12 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                             word &= word - 1u;
                         }
                     }
+                    gf256_add_mem(
+                        rhs.data(),
+                        values.data() + (size_t)column * block_bytes,
+                        (int)block_bytes);
+                    ++st.BlockXors;
                 }
-                gf256_add_mem(
-                    rhs.data(),
-                    values.data() + (size_t)column * block_bytes,
-                    (int)block_bytes);
-                ++st.BlockXors;
             }
             if (InsertResidualRow(
                     coeff, rhs, R, block_bytes,
@@ -1378,6 +1382,9 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
                 for (uint32_t column = residue; column < L; column += window)
                 {
+                    if (inactive_index[column] != UINT32_MAX) {
+                        continue;
+                    }
                     gf256_add_mem(
                         residue_bucket.data(),
                         values.data() + (size_t)column * block_bytes,
@@ -1403,6 +1410,9 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             // therefore cannot use the periodic residue-bucket optimization.
             for (uint32_t column = 0; column < L; ++column)
             {
+                if (inactive_index[column] != UINT32_MAX) {
+                    continue;
+                }
                 for (uint32_t heavy = 0; heavy < H; ++heavy) {
                     heavy_scales[heavy] = HeavyCoefficientForParams(
                         system.Params, heavy, column);

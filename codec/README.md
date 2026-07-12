@@ -130,6 +130,18 @@ throughput over a K/block-byte grid.  `compare --precode` adds the same V2 path
 beside production and the V1-compatible wrapper arms.  `precodefail` runs a
 threaded fixed-overhead V2 rank/failure grid and reports inactivation and solve
 cost rather than relying on a peel-only proxy.
+
+The `compare` cached arm has separate default-off local storage controls.  Use
+`--precode-encoder-cache` to retain one exact message copy for direct
+systematic encoding, or `--precode-decoder-cache` to retain accepted
+systematic payloads and evaluate only missing source IDs during `Recover()`.
+The decoder option reserves one message-sized address range and touches the
+pages for received systematic packets, so common 10% loss costs roughly 90%
+of a message in resident memory and adds one receive-side copy in exchange for
+substantially faster recovery.  `--precode-cache` enables both controls.  All
+three flags affect only the benchmark's `v2_cached` arm: they do not alter
+packet bytes or serialized profiles, and the installed public C API remains
+default-off pending a versioned options surface.
 `wirehair_v2_resume_bench` pins itself to the first available CPU and runs 20
 alternating cold/warm samples at K=1000 and K=10000.  Its fixed deficient
 K-packet stream becomes full rank across exactly eight appended equations; the
@@ -216,6 +228,9 @@ cmake --build build --target wirehair_v2_resume_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
 ./build/codec/wirehair_v2_bench precodecheck --N 64,320,1000 --bb-list 16,1280 --trials 10 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 3200 --trials 10 --bb-list 17,1280,102400 --max-message-mib 128 --loss 0.10 --precode
+./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-encoder-cache
+./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-decoder-cache
+./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-cache
 ./build/codec/wirehair_v2_bench precodefail --N 1000,3200,10000,32000,64000 --bb-list 1280 --overhead 0,1 --trials 100 --threads 16 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
