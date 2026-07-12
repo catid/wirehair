@@ -49,6 +49,7 @@ WirehairResult SolvePrecodeSystemTinyDenseOracle(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (K < 2u || K > kTinyOracleMaxSourceBlocks ||
         block_bytes == 0u || block_bytes > kTinyOracleMaxBlockBytes ||
+        system.Params.Field != CompletionField::GF256 ||
         P_wide > UINT32_MAX ||
         !IsPacketRowDomainValid(K, (uint32_t)P_wide, config.MixCount) ||
         !ValidatePrecodeSystem(system))

@@ -139,20 +139,36 @@ bool VerifyValues(
         }
     }
 
-    // Heavy rows: GF(256) weighted sum over ALL L columns
+    // Completion rows: legacy uses GF(256) throughout; the mixed profile
+    // embeds its first ten rows in the subfield and uses GF(2^16) for two.
     for (uint32_t r = 0; r < H; ++r)
     {
         std::memset(acc.data(), 0, block_bytes);
         for (uint32_t c = 0; c < L; ++c)
         {
-            const uint8_t y = wirehair_v2::HeavyCoefficient(r, c, H);
             const uint8_t* v =
                 ColumnValue(system, source, parity, block_bytes, c);
-            if (y == 1u) {
-                gf256_add_mem(acc.data(), v, (int)block_bytes);
+            if (system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 &&
+                r >= wirehair_v2::kMixedGF256Rows)
+            {
+                const uint16_t y = wirehair_v2::MixedGF16Coefficient(
+                    r - wirehair_v2::kMixedGF256Rows, c);
+                if (!wirehair_v2::GF16MulAddMem(
+                        acc.data(), y, v, block_bytes))
+                {
+                    return false;
+                }
             }
-            else {
-                gf256_muladd_mem(acc.data(), y, v, (int)block_bytes);
+            else
+            {
+                const uint8_t y = wirehair_v2::HeavyCoefficient(r, c, H);
+                if (y == 1u) {
+                    gf256_add_mem(acc.data(), v, (int)block_bytes);
+                }
+                else {
+                    gf256_muladd_mem(acc.data(), y, v, (int)block_bytes);
+                }
             }
         }
         if (!is_zero())
@@ -174,6 +190,104 @@ void FillRandomBlocks(
     for (size_t i = 0; i < bytes; ++i) {
         blocks[i] = (uint8_t)prng.Next();
     }
+}
+
+uint32_t MixedCornerRank(const std::vector<uint32_t>& columns)
+{
+    const uint32_t H = wirehair_v2::kMixedGF256Rows +
+        wirehair_v2::kMixedGF16Rows;
+    if (columns.size() != H) return 0u;
+    std::vector<uint16_t> matrix((size_t)H * H);
+    for (uint32_t r = 0; r < wirehair_v2::kMixedGF256Rows; ++r) {
+        for (uint32_t j = 0; j < H; ++j) {
+            matrix[(size_t)r * H + j] = wirehair_v2::HeavyCoefficient(
+                r, columns[j], H);
+        }
+    }
+    for (uint32_t er = 0; er < wirehair_v2::kMixedGF16Rows; ++er) {
+        const uint32_t r = wirehair_v2::kMixedGF256Rows + er;
+        for (uint32_t j = 0; j < H; ++j) {
+            matrix[(size_t)r * H + j] =
+                wirehair_v2::MixedGF16Coefficient(er, columns[j]);
+        }
+    }
+
+    uint32_t rank = 0u;
+    for (uint32_t col = 0; col < H; ++col)
+    {
+        uint32_t pivot = rank;
+        while (pivot < H && matrix[(size_t)pivot * H + col] == 0u) {
+            ++pivot;
+        }
+        if (pivot >= H) continue;
+        for (uint32_t k = 0; k < H; ++k) {
+            std::swap(
+                matrix[(size_t)rank * H + k],
+                matrix[(size_t)pivot * H + k]);
+        }
+        const uint16_t inverse = wirehair_v2::GF16Inverse(
+            matrix[(size_t)rank * H + col]);
+        for (uint32_t k = 0; k < H; ++k) {
+            matrix[(size_t)rank * H + k] = wirehair_v2::GF16Multiply(
+                matrix[(size_t)rank * H + k], inverse);
+        }
+        for (uint32_t r = 0; r < H; ++r)
+        {
+            if (r == rank) continue;
+            const uint16_t scale = matrix[(size_t)r * H + col];
+            for (uint32_t k = 0; k < H; ++k) {
+                matrix[(size_t)r * H + k] ^=
+                    wirehair_v2::GF16Multiply(
+                        scale, matrix[(size_t)rank * H + k]);
+            }
+        }
+        ++rank;
+    }
+    return rank;
+}
+
+bool TestMixedCornerRank()
+{
+    const uint32_t H = wirehair_v2::kMixedGF256Rows +
+        wirehair_v2::kMixedGF16Rows;
+    std::vector<uint32_t> columns(H);
+    for (uint32_t start = 0;
+         start < wirehair_v2::kMixedCoefficientPeriod; ++start)
+    {
+        for (uint32_t j = 0; j < H; ++j) {
+            columns[j] =
+                (start + j) % wirehair_v2::kMixedCoefficientPeriod;
+        }
+        if (MixedCornerRank(columns) != H) {
+            std::fprintf(stderr,
+                "mixed corner: consecutive start %u is singular\n", start);
+            return false;
+        }
+    }
+
+    wirehair::PCGRandom prng;
+    prng.Seed(UINT64_C(0x16c0a4e7), UINT64_C(0x244));
+    std::vector<uint32_t> deck(wirehair_v2::kMixedCoefficientPeriod);
+    for (uint32_t trial = 0; trial < 10000u; ++trial)
+    {
+        for (uint32_t i = 0;
+             i < wirehair_v2::kMixedCoefficientPeriod; ++i) deck[i] = i;
+        for (uint32_t i = 0; i < H; ++i)
+        {
+            const uint32_t pick = i + prng.Next() %
+                (wirehair_v2::kMixedCoefficientPeriod - i);
+            std::swap(deck[i], deck[pick]);
+            columns[i] = deck[i];
+        }
+        if (MixedCornerRank(columns) != H) {
+            std::fprintf(stderr,
+                "mixed corner: nonconsecutive trial %u is singular\n",
+                trial);
+            return false;
+        }
+    }
+    std::printf("mixed 12x12 corner rank (244 starts + 10000 samples): PASS\n");
+    return true;
 }
 
 /// GF(2) rank of the D2 x D2 dense corner (structure only)
@@ -501,6 +615,182 @@ bool TestHeavyResidueDispatch()
     return true;
 }
 
+bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats);
+
+bool TestMixedCompletion()
+{
+    // Exercise the exact production geometry (default full-span dense
+    // corner).  Most such direct-source corners are singular by design, so
+    // select a deterministically feasible tiny seed; the public packet solve
+    // covers larger systems independently.
+    bool production_geometry_checked = false;
+    for (uint64_t seed = 0; seed < 1000u && !production_geometry_checked;
+         ++seed)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(2u, seed);
+        wirehair_v2::PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::DenseCornerInvertible(system))
+        {
+            continue;
+        }
+        const uint32_t bb = 16u;
+        const uint32_t parity_count = params.Staircase +
+            params.DenseRows + params.HeavyRows;
+        std::vector<uint8_t> source((size_t)params.BlockCount * bb);
+        std::vector<uint8_t> parity((size_t)parity_count * bb);
+        FillRandomBlocks(source.data(), source.size(), seed ^ UINT64_C(0xcafe));
+        if (!wirehair_v2::ComputePrecodeValues(
+                system, source.data(), bb, parity.data()) ||
+            !VerifyValues(
+                system, source.data(), parity.data(), bb,
+                "mixed production geometry"))
+        {
+            std::fprintf(stderr,
+                "mixed completion: production geometry oracle failed\n");
+            return false;
+        }
+        production_geometry_checked = true;
+    }
+    if (!production_geometry_checked) {
+        std::fprintf(stderr,
+            "mixed completion: no feasible production geometry seed\n");
+        return false;
+    }
+
+    const uint32_t Ks[] = {16u, 500u, 1000u};
+    const uint32_t bbs[] = {2u, 16u, 1280u};
+    for (uint32_t K : Ks)
+    {
+        for (uint32_t bb : bbs)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeMixedParams(K, UINT64_C(0x16c0de) + K + bb);
+            params.DenseIdentityCorner = true;
+            wirehair_v2::PrecodeSystem system;
+            if (!BuildPrecodeSystem(params, system)) {
+                std::fprintf(stderr, "mixed completion: build failed\n");
+                return false;
+            }
+            const uint32_t parity_count = params.Staircase +
+                params.DenseRows + params.HeavyRows;
+            std::vector<uint8_t> source((size_t)K * bb);
+            std::vector<uint8_t> full((size_t)parity_count * bb, 0xa5u);
+            std::vector<uint8_t> streamed(full.size(), 0x5au);
+            FillRandomBlocks(
+                source.data(), source.size(), UINT64_C(0x16f1e1d) ^ K ^ bb);
+
+            wirehair_v2::PrecodeEncodeStats full_stats;
+            wirehair_v2::PrecodeEncodeStats streamed_stats;
+            wirehair_v2::SetHeavyBucketStorageLimitForTesting(UINT64_MAX);
+            const bool full_ok = wirehair_v2::ComputePrecodeValues(
+                system, source.data(), bb, full.data(), &full_stats);
+            wirehair_v2::SetHeavyBucketStorageLimitForTesting(0u);
+            const bool streamed_ok = wirehair_v2::ComputePrecodeValues(
+                system, source.data(), bb, streamed.data(), &streamed_stats);
+            wirehair_v2::SetHeavyBucketStorageLimitForTesting(
+                UINT64_C(64) << 20);
+
+            const uint32_t heavy_base =
+                K + params.Staircase + params.DenseRows;
+            const bool bucketed =
+                heavy_base >= 2u * wirehair_v2::kMixedCoefficientPeriod;
+            const uint64_t residues = bucketed ?
+                wirehair_v2::kMixedCoefficientPeriod : heavy_base;
+            if (!full_ok || !streamed_ok || full != streamed ||
+                !VerifyValues(
+                    system, source.data(), streamed.data(), bb, "mixed") ||
+                full_stats.HeavyBucketXors !=
+                    (bucketed ? heavy_base : 0u) ||
+                full_stats.HeavyMulAdds != params.HeavyRows * residues ||
+                full_stats.MixedGF16MulAdds !=
+                    wirehair_v2::kMixedGF16Rows * residues ||
+                full_stats.MixedPlaneConversions !=
+                    residues + wirehair_v2::kMixedGF256Rows +
+                        params.HeavyRows ||
+                full_stats.HeavyBucketXors !=
+                    streamed_stats.HeavyBucketXors ||
+                full_stats.HeavyMulAdds != streamed_stats.HeavyMulAdds ||
+                full_stats.HeavySolveBlockOps !=
+                    streamed_stats.HeavySolveBlockOps ||
+                full_stats.MixedGF16MulAdds !=
+                    streamed_stats.MixedGF16MulAdds ||
+                full_stats.MixedGF16SolveBlockOps !=
+                    streamed_stats.MixedGF16SolveBlockOps ||
+                full_stats.MixedPlaneConversions !=
+                    streamed_stats.MixedPlaneConversions)
+            {
+                std::fprintf(stderr,
+                    "mixed completion: K=%u bb=%u differential/oracle failed\n",
+                    K, bb);
+                return false;
+            }
+
+            if (K == 16u && bb == 16u)
+            {
+                const wirehair_v2::PeelingCodec codec =
+                    wirehair_v2::MakePeelingCodec(
+                        wirehair_v2::PeelStructure::LtM1C32,
+                        wirehair_v2::PeelSolver::KsBmaxTop16);
+                wirehair_v2::PrecodeEncoder encoder;
+                if (encoder.InitializeResult(
+                        system, codec, UINT64_C(0x51eed), 5u,
+                        source.data(), bb) != Wirehair_Success ||
+                    encoder.System().Params.Field !=
+                        wirehair_v2::CompletionField::MixedGF256GF16 ||
+                    std::memcmp(
+                        encoder.ParityBlocks(), full.data(), full.size()) != 0 ||
+                    encoder.EncodeStats().MixedGF16MulAdds !=
+                        full_stats.MixedGF16MulAdds ||
+                    encoder.EncodeStats().MixedGF16SolveBlockOps !=
+                        full_stats.MixedGF16SolveBlockOps)
+                {
+                    std::fprintf(stderr,
+                        "mixed completion: stateful encoder mismatch\n");
+                    return false;
+                }
+            }
+        }
+    }
+
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeMixedParams(16u, UINT64_C(0x0dd));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildPrecodeSystem(params, system)) return false;
+    const uint32_t parity_count =
+        params.Staircase + params.DenseRows + params.HeavyRows;
+    std::vector<uint8_t> source((size_t)params.BlockCount * 3u, 0x11u);
+    std::vector<uint8_t> parity((size_t)parity_count * 3u, 0x5au);
+    const std::vector<uint8_t> before = parity;
+    wirehair_v2::PrecodeEncodeStats stats;
+    if (wirehair_v2::ComputePrecodeValues(
+            system, source.data(), 3u, parity.data(), &stats) ||
+        parity != before || !StatsAreZero(stats))
+    {
+        std::fprintf(stderr,
+            "mixed completion: odd block rejection was not transactional\n");
+        return false;
+    }
+    const wirehair_v2::PeelingCodec codec = wirehair_v2::MakePeelingCodec(
+        wirehair_v2::PeelStructure::LtM1C32,
+        wirehair_v2::PeelSolver::KsBmaxTop16);
+    wirehair_v2::PrecodeEncoder encoder;
+    if (encoder.InitializeResult(
+            system, codec, UINT64_C(0x51eed), 5u,
+            source.data(), 3u) != Wirehair_InvalidInput ||
+        encoder.IsInitialized())
+    {
+        std::fprintf(stderr,
+            "mixed completion: odd stateful encoder classification failed\n");
+        return false;
+    }
+
+    std::printf("mixed completion scalar/full/streamed oracle: PASS\n");
+    return true;
+}
+
 bool TestMalformedDenseCorner()
 {
     wirehair_v2::PrecodeSystem system;
@@ -540,7 +830,10 @@ bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats)
         stats.DenseSolveBlockOps == 0u &&
         stats.HeavyBucketXors == 0u &&
         stats.HeavyMulAdds == 0u &&
-        stats.HeavySolveBlockOps == 0u;
+        stats.HeavySolveBlockOps == 0u &&
+        stats.MixedGF16MulAdds == 0u &&
+        stats.MixedGF16SolveBlockOps == 0u &&
+        stats.MixedPlaneConversions == 0u;
 }
 
 bool TestStrictSystemValidation()
@@ -1501,6 +1794,8 @@ bool TestSystematicSourceCache()
             selected_profile.V2StaircaseCount ||
         cached_profile.V2DenseRowCount != selected_profile.V2DenseRowCount ||
         cached_profile.V2HeavyRowCount != selected_profile.V2HeavyRowCount ||
+        cached_profile.V2CompletionField !=
+            selected_profile.V2CompletionField ||
         cached_profile.V2SourceHits != selected_profile.V2SourceHits ||
         cached_profile.V2PrecodeSeed != selected_profile.V2PrecodeSeed ||
         cached_profile.V2PacketPeelSeed !=
@@ -1864,6 +2159,8 @@ int main(int argc, char** argv)
     ok = TestStrictSystemValidation() && ok;
     ok = TestCostModel() && ok;
     ok = TestHeavyResidueDispatch() && ok;
+    ok = TestMixedCornerRank() && ok;
+    ok = TestMixedCompletion() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;
     ok = TestBorrowedMessageLifetime() && ok;

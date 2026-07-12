@@ -28,9 +28,11 @@ def base_row(scheme="dense", heavy_rows=6, trials=100,
             for item in pdf.split("|")}
     fail_rate = sum(p for d, p in bins.items() if d > heavy_rows)
     noheavy = sum(p for d, p in bins.items() if d > 0)
-    completed = [d for d in bins if d != 999999]
-    completed_mass = sum(p for d, p in bins.items() if d != 999999)
-    def_mu = (sum(d * p for d, p in bins.items() if d != 999999)
+    completed = [d for d in bins if d not in (999998, 999999)]
+    completed_mass = sum(
+        p for d, p in bins.items() if d not in (999998, 999999))
+    def_mu = (sum(
+        d * p for d, p in bins.items() if d not in (999998, 999999))
               / completed_mass if completed_mass else 0.0)
     return {
         "K": "100", "scheme": scheme, "D": "4", "H": str(heavy_rows),
@@ -45,6 +47,17 @@ def base_row(scheme="dense", heavy_rows=6, trials=100,
         "precode_gen_xors_mu": "100.0", "sparse_solve_xors_mu": "200.0",
         "backsub_xors_mu": "300.0", "ge_block_xors_mu": "50.0",
         "ge_bitops_mu": "999.0",
+    }
+
+
+def run_metadata_row():
+    return {
+        "packet_schedule_exhausted_rate": "0.000000",
+        "rowdist": "fixed44", "packet_schedule": "iid", "loss": "0.1",
+        "identity_systematic": "1", "mix": "3", "base_seed": "12345",
+        "paired": "1", "max_inact": "0", "max_row_seconds": "0",
+        "requested_trials": "100", "threads": "8", "ge_replay": "0",
+        "ge_replay_reverse": "0", "ge_pivot_window": "0",
     }
 
 
@@ -255,6 +268,32 @@ class ParserAndCostTests(unittest.TestCase):
         with self.assertRaisesRegex(rank_total.RankError,
                                     r"runaway_mismatch.csv:2: runaway_rate"):
             rank_total.load_rows([str(mismatch_path)])
+
+    def test_self_describing_schema_and_schedule_exhaustion(self):
+        header = (rank_total.BASE_FIELDS + rank_total.HEAVY_FIELDS
+                  + ("runaway_rate",) + rank_total.RUN_METADATA_FIELDS)
+        row = base_row(pdf="0:1.000000")
+        row.update({"heavy_muladds_mu": "156", "heavy_divs_mu": "6",
+                    "runaway_rate": "0.000000"})
+        row.update(run_metadata_row())
+        path = self.directory / "metadata.csv"
+        write_result(path, [row], header)
+        parsed = rank_total.load_rows([str(path)])[0]
+        self.assertEqual(parsed["packet_schedule_exhausted_rate"], 0.0)
+
+        exhausted = base_row(pdf="999998:1.000000")
+        exhausted.update({"heavy_muladds_mu": "0", "heavy_divs_mu": "0",
+                          "runaway_rate": "0.000000"})
+        exhausted.update(run_metadata_row())
+        exhausted["packet_schedule_exhausted_rate"] = "1.000000"
+        exhausted_path = self.directory / "exhausted.csv"
+        write_result(exhausted_path, [exhausted], header)
+        parsed = rank_total.load_rows([str(exhausted_path)])[0]
+        evaluated = rank_total.evaluate_row(
+            parsed, 1280, 1.0, default_options())
+        self.assertIsNone(evaluated["total_ops"])
+        self.assertIn("packet_schedule_exhausted_rate>0",
+                      evaluated["rejection_reasons"])
 
     def test_strict_calibration_schemas_and_preamble(self):
         path = self.directory / "xor.csv"

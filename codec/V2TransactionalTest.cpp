@@ -123,6 +123,7 @@ bool SameProfile(
         a.V2StaircaseCount == b.V2StaircaseCount &&
         a.V2DenseRowCount == b.V2DenseRowCount &&
         a.V2HeavyRowCount == b.V2HeavyRowCount &&
+        a.V2CompletionField == b.V2CompletionField &&
         a.V2SourceHits == b.V2SourceHits &&
         a.V2PrecodeSeed == b.V2PrecodeSeed &&
         a.V2PacketPeelSeed == b.V2PacketPeelSeed &&

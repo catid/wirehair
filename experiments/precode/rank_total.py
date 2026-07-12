@@ -34,6 +34,7 @@ import tempfile
 DEFAULT_BB = "1280,102400,1048576"
 H_PRIMES = (6, 8, 12, 16)
 MAX_UINT32 = (1 << 32) - 1
+MAX_UINT64 = (1 << 64) - 1
 MAX_TRIALS = 1000000
 DISPLAY_TOLERANCE = 0.500001e-6
 
@@ -50,6 +51,12 @@ REPLAY_FIELDS = (
     "ge_real_bitops_mu", "ge_real_rowops_mu", "fill_in_mu",
     "def_outside_w18_rate", "def_band_w95", "def_band_w99",
 )
+RUN_METADATA_FIELDS = (
+    "packet_schedule_exhausted_rate", "rowdist", "packet_schedule", "loss",
+    "identity_systematic", "mix", "base_seed", "paired", "max_inact",
+    "max_row_seconds", "requested_trials", "threads", "ge_replay",
+    "ge_replay_reverse", "ge_pivot_window",
+)
 RESULT_SCHEMAS = {
     BASE_FIELDS,
     BASE_FIELDS + HEAVY_FIELDS,
@@ -58,15 +65,31 @@ RESULT_SCHEMAS = {
     BASE_FIELDS + HEAVY_FIELDS + REPLAY_FIELDS + ("runaway_rate",),
     ("pivot_window",) + BASE_FIELDS + HEAVY_FIELDS + REPLAY_FIELDS
     + ("runaway_rate",),
+    BASE_FIELDS + HEAVY_FIELDS + ("runaway_rate",) + RUN_METADATA_FIELDS,
+    BASE_FIELDS + HEAVY_FIELDS + REPLAY_FIELDS + ("runaway_rate",)
+    + RUN_METADATA_FIELDS,
 }
 
 INTEGER_FIELDS = {
     "pivot_window", "K", "D", "H", "oh", "trials", "def_max",
     "inact_max", "def_band_w95", "def_band_w99",
+    "identity_systematic", "mix", "paired", "max_inact",
+    "requested_trials", "threads", "ge_replay", "ge_replay_reverse",
+    "ge_pivot_window",
 }
 RATE_FIELDS = {
     "fail_rate", "fail_rate_noheavy", "def_outside_w18_rate",
-    "runaway_rate",
+    "runaway_rate", "packet_schedule_exhausted_rate", "loss",
+}
+TEXT_FIELDS = {"scheme", "def_pdf", "rowdist", "packet_schedule"}
+ROWDIST_NAMES = {
+    "wirehair", "lt_m1_c64", "lt_m1_c16", "lt_m2_c1024",
+    "rs_c001_d50_c128", "fixed32", "fixed36", "fixed40", "fixed44",
+    "fixed48", "fixed64", "fixed80", "fixed96", "fixed128", "fixed256",
+    "mix32_128", "mix36_80_p10", "mix36_80_p25", "mix36_128_p10",
+    "mix8_64_p50", "mix8_48_p75", "mix12_64_p50", "mix16_64_p50",
+    "mix16_96_p25", "staged44_16_p125", "staged44_16_p167",
+    "staged44_16_p25", "staged44_12_p167", "log6", "log8",
 }
 
 XOR_CALIBRATION_FIELDS = (
@@ -148,7 +171,7 @@ def parse_def_pdf(text, source="def_pdf", line=None, trials=None):
         if len(parts) != 2 or not parts[0] or not parts[1]:
             fail(source, line, "malformed def_pdf item %r" % item)
         deficit = parse_uint(parts[0], source, line, "def_pdf deficit", 0, 999999)
-        if deficit > 65535 and deficit != 999999:
+        if deficit > 65535 and deficit not in (999998, 999999):
             fail(source, line, "def_pdf deficit %d outside model domain" % deficit)
         probability = parse_finite(
             parts[1], source, line, "def_pdf probability", 0.0, 1.0)
@@ -308,11 +331,15 @@ def score_result_row(raw, header, source, line):
         fail(source, line, "invalid scheme %r" % raw["scheme"])
     values = {}
     for name in header:
-        if name in {"scheme", "def_pdf"}:
+        if name in TEXT_FIELDS:
             continue
-        if name in INTEGER_FIELDS:
-            minimum = 1 if name == "trials" else 0
-            maximum = MAX_TRIALS if name == "trials" else MAX_UINT32
+        if name == "base_seed":
+            values[name] = parse_uint(
+                raw[name], source, line, name, 0, MAX_UINT64)
+        elif name in INTEGER_FIELDS:
+            minimum = 1 if name in {"trials", "requested_trials", "threads"} else 0
+            maximum = (MAX_TRIALS if name in {"trials", "requested_trials"}
+                       else MAX_UINT32)
             values[name] = parse_uint(raw[name], source, line, name,
                                       minimum, maximum)
         elif name in RATE_FIELDS:
@@ -320,11 +347,35 @@ def score_result_row(raw, header, source, line):
         else:
             values[name] = parse_finite(raw[name], source, line, name, 0.0)
     _validate_result_domains(values, source, line)
+    if "rowdist" in raw:
+        if raw["rowdist"] not in ROWDIST_NAMES:
+            fail(source, line, "invalid rowdist %r" % raw["rowdist"])
+        if raw["packet_schedule"] not in {
+                "none", "iid", "burst", "permutation", "repair-only"}:
+            fail(source, line,
+                 "invalid packet_schedule %r" % raw["packet_schedule"])
+        for name in ("identity_systematic", "paired", "ge_replay",
+                     "ge_replay_reverse"):
+            if values[name] not in (0, 1):
+                fail(source, line, "%s must be 0 or 1" % name)
+        if values["loss"] > 0.99:
+            fail(source, line, "loss exceeds simulator maximum 0.99")
+        if raw["packet_schedule"] == "none" and values["loss"] != 0.0:
+            fail(source, line, "loss requires a packet schedule")
+        has_replay_columns = "ge_real_rowops_mu" in header
+        if bool(values["ge_replay"]) != has_replay_columns:
+            fail(source, line, "ge_replay metadata disagrees with CSV schema")
+        if values["ge_replay_reverse"] and not values["ge_replay"]:
+            fail(source, line, "ge_replay_reverse requires ge_replay")
+        if values["ge_pivot_window"] and not values["ge_replay"]:
+            fail(source, line, "ge_pivot_window requires ge_replay")
+        if values["trials"] > values["requested_trials"]:
+            fail(source, line, "trials exceeds requested_trials")
 
     pdf, counts, _tolerance = parse_def_pdf(
         raw["def_pdf"], source, line, values["trials"])
     completed = [(deficit, count) for deficit, count in counts.items()
-                 if deficit != 999999]
+                 if deficit not in (999998, 999999)]
     observed_max = max((deficit for deficit, count in completed if count > 0),
                        default=0)
     if values["def_max"] != observed_max:
@@ -346,6 +397,21 @@ def score_result_row(raw, header, source, line):
     if abs(runaway_rate - runaway_empirical) > DISPLAY_TOLERANCE:
         fail(source, line, "runaway_rate %.9g != def_pdf empirical rate %.9g" %
              (runaway_rate, runaway_empirical))
+
+    exhausted_count = counts.get(999998, 0)
+    exhausted_empirical = exhausted_count / float(values["trials"])
+    exhausted_rate = values.get("packet_schedule_exhausted_rate", 0.0)
+    if "packet_schedule_exhausted_rate" not in values and exhausted_count != 0:
+        fail(source, line,
+             "def_pdf schedule-exhaustion sentinel requires "
+             "packet_schedule_exhausted_rate")
+    if abs(exhausted_rate - exhausted_empirical) > DISPLAY_TOLERANCE:
+        fail(source, line,
+             "packet_schedule_exhausted_rate %.9g != def_pdf empirical "
+             "rate %.9g" % (exhausted_rate, exhausted_empirical))
+    if exhausted_count and raw.get("packet_schedule") == "none":
+        fail(source, line,
+             "schedule-exhaustion sentinel requires a packet schedule")
 
     failures = fail_count_at(counts, values["H"])
     noheavy_failures = fail_count_at(counts, 0)
@@ -411,6 +477,7 @@ def score_result_row(raw, header, source, line):
         "inact_mu": values["inact_mu"],
         "ge_source": ge_source,
         "runaway_rate": runaway_empirical,
+        "packet_schedule_exhausted_rate": exhausted_empirical,
         "pdf": pdf,
         "def_counts": counts,
     }
@@ -526,6 +593,8 @@ def evaluate_row(row, block_bytes, ratio, options):
     reasons = []
     if row["runaway_rate"] > 0.0:
         reasons.append("runaway_rate>0")
+    if row["packet_schedule_exhausted_rate"] > 0.0:
+        reasons.append("packet_schedule_exhausted_rate>0")
     if row["trials"] < options["min_trials"]:
         reasons.append("trials<%d" % options["min_trials"])
     if observed > options["max_observed_fail"]:
@@ -558,10 +627,13 @@ def evaluate_row(row, block_bytes, ratio, options):
         "failure_by_h": failure_by_h,
         "base_ops": row["base_ops"],
         "heavy_muladds": heavy,
-        "total_ops": None if row["runaway_rate"] > 0.0 else total,
+        "total_ops": (None if row["runaway_rate"] > 0.0 or
+                       row["packet_schedule_exhausted_rate"] > 0.0 else total),
         "ge_source": row["ge_source"],
         "heavy_source": heavy_source,
         "runaway_rate": row["runaway_rate"],
+        "packet_schedule_exhausted_rate":
+            row["packet_schedule_exhausted_rate"],
         "eligible": not reasons,
         "rejection_reasons": reasons,
         "eligible_rank": None,

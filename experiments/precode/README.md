@@ -56,7 +56,10 @@ is scheme-independent (see below).  Further clauses:
   flag it as a runaway failure, capping at exactly the natural count must
   reproduce the unlimited result bit-for-bit;
 - determinism of the new kinds (Shuffle-2 D2 rows, n1 variants, robust
-  soliton rowdist).
+  soliton rowdist), including prefix identity when an overhead sweep extends
+  the same trial's received-packet trace;
+- bounded packet-schedule exhaustion is returned as trial data rather than
+  terminating a worker process.
 
 ```bash
 bash experiments/precode/build.sh
@@ -67,12 +70,15 @@ python3 experiments/precode/rank_total.py --self-test
 
 ### Mixed GF(256) / GF(2^16) payload prototype
 
-`gf16_mixed` is a self-contained, benchmark-only prototype for a future WH2
-completion profile.  It keeps the current 12 completion variables and rows,
-but uses 10 periodic GF(256) Cauchy rows followed by two rows in the quadratic
-extension `GF(256)[u]/(u^2 + u + 32)`.  The extension coordinates use pinned
-generator 266 and the same 244-column coefficient period as the current heavy
-rows.  It is deliberately not wired into production profile serialization.
+`gf16_mixed` is the original self-contained experiment and independent oracle
+for the opt-in mixed WH2 completion profile now implemented in production.  It
+keeps 12 completion variables and rows, but uses 10 periodic GF(256) Cauchy
+rows followed by two rows in the quadratic extension
+`GF(256)[u]/(u^2 + u + 32)`.  The extension coordinates use pinned generator
+266 and the same 244-column coefficient period as the current heavy rows.
+Production profile identity, serialization, kernels, and end-to-end tests live
+under `codec/`; this standalone harness remains useful as an independent math
+and performance cross-check.
 
 The first prototype accepts only even block sizes: every adjacent byte pair is
 one complete extension-field element.  Its test executable exhaustively checks
@@ -125,9 +131,11 @@ heavy matrix covers only the last 18 GE columns):
 ## `--paired`: common-random-number trials across schemes
 
 `--paired` generates received rows from a second RNG whose per-trial seed
-omits the scheme token (constraint rows keep the scheme-dependent stream), so
-cross-scheme fail-rate deltas at the same `(K, oh, trial, --seed)` are
-CRN-paired.  Exactly what is and is not paired:
+omits both the scheme token and overhead (constraint rows keep the
+scheme-dependent stream).  The scheme-specific precode seed also omits
+overhead.  Thus each overhead point extends the same precode system and
+received-packet trace, while cross-scheme fail-rate deltas at the same
+`(K, oh, trial, --seed)` are CRN-paired.  Exactly what is and is not paired:
 
 - PAIRED for any two schemes at the same `(K, oh, trial, --seed, --rowdist,
   --mix)`: the per-row peel degree sequence and the source-column sets
@@ -141,6 +149,15 @@ CRN-paired.  Exactly what is and is not paired:
   the RNG stream itself never diverges.
 - NOT PAIRED, by design: the binary precode constraint rows (LDPC parity
   assignments, dense row bits), which remain a function of the scheme token.
+
+Packet-loss schedules accept `--loss` from 0 through 0.99.  Larger values are
+rejected before the CSV header because the bounded schedule generator is not
+intended to model such extreme loss.  Any unexpected exhaustion inside the
+supported range is recorded in `packet_schedule_exhausted_rate` (and the
+failure rate) instead of terminating a worker.  CSV rows also carry the full
+run-defining configuration: row distribution, packet schedule, loss,
+identity-systematic flag, mix, base seed, paired flag, inactivation/time
+bounds, requested trials, thread count, and GE replay mode/window.
 
 ## `rank_total.py`: reliability-gated total-cost ranking
 
@@ -328,7 +345,9 @@ pattern): K in {1000, 3200, 10000, 32000, 64000}, 14 schemes, OH in {0,1,2,5}.
 - `def_pdf`: empirical def distribution (`value:probability`), enough to
   re-evaluate any alternative heavy-row count after the fact.  Normalized
   over ALL trials; `--max-inact` runaways show up as a `999999:<rate>`
-  sentinel bucket (fails at every H), keeping `P(def > H) == fail_rate`.
+  sentinel bucket and bounded packet-schedule exhaustion as `999998:<rate>`.
+  Both fail at every H and are excluded from completed-trial means, keeping
+  `P(def > H) == fail_rate`.
 - `inact_*`: inactivated column count (GE width).
 - `backsub_xors_mu`: sum of popcount(projection) over peeled columns — the
   block-XOR cost of pushing inactivated solutions back into peeled columns;
@@ -344,10 +363,14 @@ pattern): K in {1000, 3200, 10000, 32000, 64000}, 14 schemes, OH in {0,1,2,5}.
   `ge_real_bitops_mu` (measured 64-bit word XORs), `ge_real_rowops_mu`
   (measured row eliminations = real GE block XORs), `fill_in_mu`,
   `def_outside_w18_rate`, `def_band_w95`, `def_band_w99` (see above).
-- `runaway_rate` (always present, last column): fraction of trials aborted by
+- `runaway_rate` (always present): fraction of trials aborted by
   `--max-inact` (0 when the guard is off).  Runaway trials are inside
   `fail_rate`/`fail_rate_noheavy` but outside every mean column, whose
   denominators are the completed trials only.
+- `packet_schedule_exhausted_rate` and the run-defining metadata described
+  above follow `runaway_rate`.
 
 Existing column order is unchanged; new columns are appended at the end so
-old CSV parsers keep working.
+positional readers keep their historical indices.  The repository's strict
+`validate_results.py` and `rank_total.py` readers accept both old and new
+schemas.

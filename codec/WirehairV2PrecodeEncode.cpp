@@ -218,6 +218,8 @@ bool ComputePrecodeValues(
     }
     if (!source_blocks || !parity_blocks ||
         block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        (system.Params.Field == CompletionField::MixedGF256GF16 &&
+         (block_bytes & 1u) != 0u) ||
         system.Params.HeavyFamily !=
             HeavyCoefficientFamily::PeriodicCauchy ||
         !ValidatePrecodeSystem(system))
@@ -366,6 +368,254 @@ bool ComputePrecodeValues(
                 block_bytes);
             ++st.DenseSolveBlockOps;
         }
+    }
+
+    // --- Mixed 10 x GF(256) + 2 x GF(2^16) completion rows ---
+    if (H > 0u &&
+        system.Params.Field == CompletionField::MixedGF256GF16)
+    {
+        if (H != kMixedGF256Rows + kMixedGF16Rows ||
+            !InitializeGF16())
+        {
+            return false;
+        }
+        const uint32_t window = kMixedCoefficientPeriod;
+        const uint32_t elements = block_bytes / 2u;
+        const int plane_bytes = (int)elements;
+
+        std::vector<uint8_t> gf8_coef((size_t)kMixedGF256Rows * window);
+        std::vector<uint16_t> gf16_coef((size_t)kMixedGF16Rows * window);
+        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+            for (uint32_t m = 0; m < window; ++m) {
+                gf8_coef[(size_t)r * window + m] =
+                    HeavyCoefficient(r, m, H);
+            }
+        }
+        for (uint32_t r = 0; r < kMixedGF16Rows; ++r) {
+            for (uint32_t m = 0; m < window; ++m) {
+                gf16_coef[(size_t)r * window + m] =
+                    MixedGF16Coefficient(r, m);
+            }
+        }
+
+        // Accumulate the subfield rows interleaved: one GF(256) scale acts
+        // on both bytes of each extension element.  Keep all quotient RHS
+        // rows planar for the extension operations and the corner solve.
+        std::vector<uint8_t> gf8_rhs(
+            (size_t)kMixedGF256Rows * block_bytes, 0u);
+        std::vector<uint8_t> rhs_low((size_t)H * elements, 0u);
+        std::vector<uint8_t> rhs_high((size_t)H * elements, 0u);
+        std::vector<uint8_t> source_low(elements);
+        std::vector<uint8_t> source_high(elements);
+        void* gf8_destinations[kMixedGF256Rows];
+        uint8_t gf8_scales[kMixedGF256Rows];
+        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+            gf8_destinations[r] =
+                gf8_rhs.data() + (size_t)r * block_bytes;
+        }
+
+        const auto accumulate_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+                gf8_scales[r] = gf8_coef[(size_t)r * window + m];
+            }
+            gf256_muladd_multi_mem(
+                gf8_destinations, gf8_scales,
+                (int)kMixedGF256Rows, value, bytes);
+            st.HeavyMulAdds += kMixedGF256Rows;
+
+            if (!GF16Deinterleave(
+                    value, source_low.data(), source_high.data(), block_bytes))
+            {
+                return false;
+            }
+            ++st.MixedPlaneConversions;
+            for (uint32_t r = 0; r < kMixedGF16Rows; ++r)
+            {
+                const uint32_t row = kMixedGF256Rows + r;
+                if (!GF16MulAddPlanar(
+                        rhs_low.data() + (size_t)row * elements,
+                        rhs_high.data() + (size_t)row * elements,
+                        gf16_coef[(size_t)r * window + m],
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return false;
+                }
+                ++st.HeavyMulAdds;
+                ++st.MixedGF16MulAdds;
+            }
+            return true;
+        };
+
+        const bool use_residue_buckets = heavy_base >= 2u * window;
+        const bool use_full_bucket_storage =
+            use_residue_buckets &&
+            (uint64_t)window * block_bytes <=
+                GetHeavyBucketStorageLimit();
+        if (use_full_bucket_storage)
+        {
+            std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
+            uint32_t m = 0u;
+            for (uint32_t c = 0; c < heavy_base; ++c)
+            {
+                gf256_add_mem(
+                    bucket.data() + (size_t)m * block_bytes,
+                    column_value(c), bytes);
+                ++st.HeavyBucketXors;
+                if (++m >= window) m = 0u;
+            }
+            for (m = 0u; m < window; ++m) {
+                if (!accumulate_residue(
+                        m, bucket.data() + (size_t)m * block_bytes))
+                {
+                    return false;
+                }
+            }
+        }
+        else if (use_residue_buckets)
+        {
+            std::vector<uint8_t> bucket(block_bytes, 0u);
+            for (uint32_t m = 0; m < window; ++m)
+            {
+                std::fill(bucket.begin(), bucket.end(), uint8_t{0});
+                for (uint32_t c = m; c < heavy_base; c += window)
+                {
+                    gf256_add_mem(bucket.data(), column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                if (!accumulate_residue(m, bucket.data())) return false;
+            }
+        }
+        else
+        {
+            uint32_t m = 0u;
+            for (uint32_t c = 0; c < heavy_base; ++c)
+            {
+                if (!accumulate_residue(m, column_value(c))) return false;
+                if (++m >= window) m = 0u;
+            }
+        }
+
+        // Convert the ten GF(256) row RHS blocks once, after their fast
+        // interleaved accumulation.  The two extension rows are already in
+        // their final planar representation.
+        for (uint32_t r = 0; r < kMixedGF256Rows; ++r)
+        {
+            if (!GF16Deinterleave(
+                    gf8_rhs.data() + (size_t)r * block_bytes,
+                    rhs_low.data() + (size_t)r * elements,
+                    rhs_high.data() + (size_t)r * elements,
+                    block_bytes))
+            {
+                return false;
+            }
+            ++st.MixedPlaneConversions;
+        }
+
+        std::vector<uint16_t> corner((size_t)H * H);
+        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+            for (uint32_t j = 0; j < H; ++j) {
+                corner[(size_t)r * H + j] =
+                    gf8_coef[(size_t)r * window +
+                        (heavy_base + j) % window];
+            }
+        }
+        for (uint32_t er = 0; er < kMixedGF16Rows; ++er) {
+            const uint32_t r = kMixedGF256Rows + er;
+            for (uint32_t j = 0; j < H; ++j) {
+                corner[(size_t)r * H + j] =
+                    gf16_coef[(size_t)er * window +
+                        (heavy_base + j) % window];
+            }
+        }
+
+        std::vector<uint32_t> pivot_row(H);
+        std::vector<uint8_t> used(H, 0u);
+        std::vector<uint8_t> scale_scratch(elements);
+        for (uint32_t j = 0; j < H; ++j)
+        {
+            uint32_t p = H;
+            for (uint32_t r = 0; r < H; ++r) {
+                if (!used[r] && corner[(size_t)r * H + j] != 0u) {
+                    p = r;
+                    break;
+                }
+            }
+            if (p >= H) return false;
+            used[p] = 1u;
+            pivot_row[j] = p;
+
+            const uint16_t pivot = corner[(size_t)p * H + j];
+            if (pivot != 1u)
+            {
+                const uint16_t inv = GF16InverseInitialized(pivot);
+                if (inv == 0u) return false;
+                for (uint32_t k = 0; k < H; ++k) {
+                    corner[(size_t)p * H + k] = GF16MultiplyInitialized(
+                        corner[(size_t)p * H + k], inv);
+                }
+                if (!GF16ScalePlanar(
+                        rhs_low.data() + (size_t)p * elements,
+                        rhs_high.data() + (size_t)p * elements,
+                        inv, scale_scratch.data(), elements))
+                {
+                    return false;
+                }
+                ++st.HeavySolveBlockOps;
+                ++st.MixedGF16SolveBlockOps;
+            }
+
+            for (uint32_t r = 0; r < H; ++r)
+            {
+                const uint16_t scale = corner[(size_t)r * H + j];
+                if (r == p || scale == 0u) continue;
+                for (uint32_t k = 0; k < H; ++k) {
+                    corner[(size_t)r * H + k] ^= GF16MultiplyInitialized(
+                        scale, corner[(size_t)p * H + k]);
+                }
+                uint8_t* const destination_low =
+                    rhs_low.data() + (size_t)r * elements;
+                uint8_t* const destination_high =
+                    rhs_high.data() + (size_t)r * elements;
+                const uint8_t* const source_low_row =
+                    rhs_low.data() + (size_t)p * elements;
+                const uint8_t* const source_high_row =
+                    rhs_high.data() + (size_t)p * elements;
+                if (scale == 1u)
+                {
+                    gf256_add_mem(
+                        destination_low, source_low_row, plane_bytes);
+                    gf256_add_mem(
+                        destination_high, source_high_row, plane_bytes);
+                }
+                else if (!GF16MulAddPlanar(
+                        destination_low, destination_high, scale,
+                        source_low_row, source_high_row, elements))
+                {
+                    return false;
+                }
+                ++st.HeavySolveBlockOps;
+                ++st.MixedGF16SolveBlockOps;
+            }
+        }
+
+        for (uint32_t j = 0; j < H; ++j)
+        {
+            const uint32_t p = pivot_row[j];
+            if (!GF16Interleave(
+                    rhs_low.data() + (size_t)p * elements,
+                    rhs_high.data() + (size_t)p * elements,
+                    parity_blocks + (size_t)(S + D2 + j) * block_bytes,
+                    block_bytes))
+            {
+                return false;
+            }
+            ++st.HeavySolveBlockOps;
+            ++st.MixedGF16SolveBlockOps;
+            ++st.MixedPlaneConversions;
+        }
+        return true;
     }
 
     // --- Cauchy heavy rows ---
@@ -821,7 +1071,9 @@ WirehairResult PrecodeEncoder::InitializeResult(
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
-    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu)
+    if (!source_blocks || block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        (system.Params.Field == CompletionField::MixedGF256GF16 &&
+         (block_bytes & 1u) != 0u))
     {
         return Wirehair_InvalidInput;
     }
@@ -1037,6 +1289,16 @@ uint32_t MessagePacketPeelSeed(
     return PacketPeelSeedFromProfile(profile, options.RecoveryRowSeedSalt);
 }
 
+PrecodeParams MakeMessagePrecodeParams(
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options)
+{
+    const uint64_t seed = MessagePrecodeMatrixSeed(profile, options);
+    return options.Completion == CompletionField::MixedGF256GF16 ?
+        MakeMixedParams(profile.BlockCount, seed) :
+        MakeCertifiedParams(profile.BlockCount, seed);
+}
+
 } // namespace
 
 bool HasMessagePrecodeContractState(const SeedProfile& profile)
@@ -1047,6 +1309,7 @@ bool HasMessagePrecodeContractState(const SeedProfile& profile)
         profile.V2StaircaseCount != 0u ||
         profile.V2DenseRowCount != 0u ||
         profile.V2HeavyRowCount != 0u ||
+        profile.V2CompletionField != CompletionField::GF256 ||
         profile.V2SourceHits != 0u ||
         profile.V2PrecodeSeed != 0u ||
         profile.V2PacketPeelSeed != 0u ||
@@ -1069,11 +1332,17 @@ bool ResolveMessagePrecodeOptions(
         resolved_options = requested_options ? *requested_options :
             MessagePrecodeEncoderOptions();
         return resolved_options.RecoveryMixCount ==
-            kCertifiedPacketMixCount;
+            kCertifiedPacketMixCount &&
+            (resolved_options.Completion == CompletionField::GF256 ||
+             resolved_options.Completion ==
+                CompletionField::MixedGF256GF16);
     }
 
     if (profile.V2SeedAttempt >= kMaxPacketSeedAttempts ||
-        profile.V2PrecodeContractVersion != kPrecodeContractVersion ||
+        (profile.V2CompletionField != CompletionField::GF256 &&
+         profile.V2CompletionField != CompletionField::MixedGF256GF16) ||
+        profile.V2PrecodeContractVersion !=
+            PrecodeContractVersion(profile.V2CompletionField) ||
         profile.V2PacketRowContractVersion != kPacketRowContractVersion ||
         profile.V2StaircaseCount == 0u ||
         profile.V2StaircaseCount != profile.DenseCount ||
@@ -1090,11 +1359,17 @@ bool ResolveMessagePrecodeOptions(
     bound.DenseIdentityCorner = profile.V2DenseIdentityCorner;
     bound.PrecodeSeedSalt = profile.V2PrecodeSeedSalt;
     bound.RecoveryRowSeedSalt = profile.V2RecoveryRowSeedSalt;
+    bound.Completion = profile.V2CompletionField;
     if (requested_options &&
         (requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
          requested_options->DenseIdentityCorner != bound.DenseIdentityCorner ||
          requested_options->PrecodeSeedSalt != bound.PrecodeSeedSalt ||
          requested_options->RecoveryRowSeedSalt != bound.RecoveryRowSeedSalt))
+    {
+        return false;
+    }
+    if (requested_options &&
+        requested_options->Completion != bound.Completion)
     {
         return false;
     }
@@ -1121,6 +1396,12 @@ bool ResolveMessagePrecodeConfiguration(
     {
         return false;
     }
+    if (validated_options.Completion ==
+            CompletionField::MixedGF256GF16 &&
+        (profile.BlockBytes & 1u) != 0u)
+    {
+        return false;
+    }
     if (profile.DenseCount == 0u ||
         profile.DenseCount > wirehair::kMaxDenseCount ||
         (profile.BlockCount >= wirehair::kTinyTableCount &&
@@ -1130,9 +1411,8 @@ bool ResolveMessagePrecodeConfiguration(
     }
     if (profile.V2SeedSelected)
     {
-        PrecodeParams expected = MakeCertifiedParams(
-            profile.BlockCount,
-            MessagePrecodeMatrixSeed(profile, validated_options));
+        PrecodeParams expected = MakeMessagePrecodeParams(
+            profile, validated_options);
         expected.Staircase = profile.DenseCount;
         expected.DenseIdentityCorner = validated_options.DenseIdentityCorner;
         expected = PrecodeParamsForAttempt(
@@ -1148,6 +1428,7 @@ bool ResolveMessagePrecodeConfiguration(
         if (profile.V2StaircaseCount != expected.Staircase ||
             profile.V2DenseRowCount != expected.DenseRows ||
             profile.V2HeavyRowCount != expected.HeavyRows ||
+            profile.V2CompletionField != expected.Field ||
             profile.V2SourceHits != expected.SourceHits ||
             profile.V2PrecodeSeed != expected.Seed ||
             profile.V2PacketPeelSeed != expected_packet.PeelSeed ||
@@ -1162,9 +1443,7 @@ bool ResolveMessagePrecodeConfiguration(
     }
     else
     {
-        params = MakeCertifiedParams(
-            profile.BlockCount,
-            MessagePrecodeMatrixSeed(profile, validated_options));
+        params = MakeMessagePrecodeParams(profile, validated_options);
         params.Staircase = profile.DenseCount;
         params.DenseIdentityCorner = validated_options.DenseIdentityCorner;
         packet_config.PeelSeed = MessagePacketPeelSeed(
@@ -1191,11 +1470,13 @@ void BindMessagePrecodeProfile(
     profile.DenseCount = (uint16_t)system.Params.Staircase;
     profile.V2SeedSelected = true;
     profile.V2SeedAttempt = packet_seed_attempt;
-    profile.V2PrecodeContractVersion = kPrecodeContractVersion;
+    profile.V2PrecodeContractVersion =
+        PrecodeContractVersion(system.Params.Field);
     profile.V2PacketRowContractVersion = kPacketRowContractVersion;
     profile.V2StaircaseCount = system.Params.Staircase;
     profile.V2DenseRowCount = system.Params.DenseRows;
     profile.V2HeavyRowCount = system.Params.HeavyRows;
+    profile.V2CompletionField = system.Params.Field;
     profile.V2SourceHits = system.Params.SourceHits;
     profile.V2PrecodeSeed = system.Params.Seed;
     profile.V2PacketPeelSeed = packet_config.PeelSeed;

@@ -51,6 +51,28 @@ bool NamedV2ProfileAvailable()
 #endif
 }
 
+bool SupportedProfileId(uint64_t profile_id)
+{
+    return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 ||
+        profile_id == WIREHAIR_V2_PROFILE_MIXED_2026_07;
+}
+
+wirehair_v2::CompletionField CompletionForProfileId(uint64_t profile_id)
+{
+    return profile_id == WIREHAIR_V2_PROFILE_MIXED_2026_07 ?
+        wirehair_v2::CompletionField::MixedGF256GF16 :
+        wirehair_v2::CompletionField::GF256;
+}
+
+uint64_t ProfileIdForCompletion(wirehair_v2::CompletionField field)
+{
+    if (field == wirehair_v2::CompletionField::GF256)
+        return WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
+    if (field == wirehair_v2::CompletionField::MixedGF256GF16)
+        return WIREHAIR_V2_PROFILE_MIXED_2026_07;
+    return 0u;
+}
+
 uint16_t Load16LE(const uint8_t* data)
 {
     return (uint16_t)((uint16_t)data[0] |
@@ -139,13 +161,24 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     {
         return WirehairV2_ReservedNonzero;
     }
-    if (profile.profile_id != WIREHAIR_V2_PROFILE_CURRENT) {
+    if (!SupportedProfileId(profile.profile_id)) {
         return WirehairV2_UnsupportedProfile;
     }
     if (!NamedV2ProfileAvailable()) {
         return WirehairV2_UnsupportedPlatform;
     }
-    return ValidateDimensions(profile.message_bytes, profile.block_bytes);
+    const WirehairV2Result dimensions =
+        ValidateDimensions(profile.message_bytes, profile.block_bytes);
+    if (dimensions != WirehairV2_Success) {
+        return dimensions;
+    }
+    if (CompletionForProfileId(profile.profile_id) ==
+            wirehair_v2::CompletionField::MixedGF256GF16 &&
+        (profile.block_bytes & 1u) != 0u)
+    {
+        return WirehairV2_InvalidDimensions;
+    }
+    return WirehairV2_Success;
 }
 
 WirehairV2Result MapResult(WirehairResult result)
@@ -190,12 +223,20 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
         (uint32_t)BlockCountWide(profile.message_bytes, profile.block_bytes);
     wirehair_v2::SeedProfile expanded =
         wirehair_v2::SelectSeedProfile(block_count, profile.block_bytes);
-    const wirehair_v2::MessagePrecodeEncoderOptions options;
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.Completion = CompletionForProfileId(profile.profile_id);
 
-    wirehair_v2::PrecodeParams params = wirehair_v2::MakeCertifiedParams(
-        block_count,
-        wirehair_v2::MatrixSeedFromProfile(
-            expanded, 0u, options.PrecodeSeedSalt));
+    wirehair_v2::PrecodeParams params =
+        options.Completion ==
+                wirehair_v2::CompletionField::MixedGF256GF16 ?
+            wirehair_v2::MakeMixedParams(
+                block_count,
+                wirehair_v2::MatrixSeedFromProfile(
+                    expanded, 0u, options.PrecodeSeedSalt)) :
+            wirehair_v2::MakeCertifiedParams(
+                block_count,
+                wirehair_v2::MatrixSeedFromProfile(
+                    expanded, 0u, options.PrecodeSeedSalt));
     params.Staircase = expanded.DenseCount;
     params.DenseIdentityCorner = options.DenseIdentityCorner;
     params = wirehair_v2::PrecodeParamsForAttempt(
@@ -223,7 +264,8 @@ WirehairV2Result MakePublicProfile(
     if (!expanded.V2SeedSelected ||
         expanded.V2SeedAttempt >= wirehair_v2::kMaxPacketSeedAttempts ||
         expanded.V2PrecodeContractVersion !=
-            wirehair_v2::kPrecodeContractVersion ||
+            wirehair_v2::PrecodeContractVersion(
+                expanded.V2CompletionField) ||
         expanded.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion)
     {
@@ -232,7 +274,8 @@ WirehairV2Result MakePublicProfile(
     profile = WirehairV2Profile{};
     profile.struct_bytes = (uint32_t)sizeof(WirehairV2Profile);
     profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    profile.profile_id = WIREHAIR_V2_PROFILE_CURRENT;
+    profile.profile_id = ProfileIdForCompletion(
+        expanded.V2CompletionField);
     profile.message_bytes = message_bytes;
     profile.block_bytes = expanded.BlockBytes;
     profile.seed_attempt = (uint8_t)expanded.V2SeedAttempt;
@@ -259,6 +302,7 @@ WirehairV2Result MakePublicProfile(
         canonical.V2StaircaseCount != expanded.V2StaircaseCount ||
         canonical.V2DenseRowCount != expanded.V2DenseRowCount ||
         canonical.V2HeavyRowCount != expanded.V2HeavyRowCount ||
+        canonical.V2CompletionField != expanded.V2CompletionField ||
         canonical.V2SourceHits != expanded.V2SourceHits ||
         canonical.V2PrecodeSeed != expanded.V2PrecodeSeed ||
         canonical.V2PacketPeelSeed != expanded.V2PacketPeelSeed ||
@@ -502,6 +546,93 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     }
     if (result != WirehairV2_Success ||
         encoded_bytes != WIREHAIR_V2_PROFILE_SERIALIZED_BYTES)
+    {
+        delete codec;
+        return result == WirehairV2_Success ? WirehairV2_Error : result;
+    }
+
+    codec->MessageBytes = messageBytes;
+    codec->BlockBytes = blockBytes;
+    codec->Mode = CodecMode::Encoder;
+    codec->Decoded = false;
+    std::memcpy(serializedProfileOut, encoded, sizeof(encoded));
+    *codecOut = ToHandle(codec);
+    return WirehairV2_Success;
+}
+
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
+    uint64_t profileId,
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut)
+{
+    if (serializedProfileBytesOut) {
+        *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    }
+    if (!codecOut) {
+        return WirehairV2_InvalidInput;
+    }
+    *codecOut = nullptr;
+    if (!serializedProfileBytesOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (serializedProfileCapacity < WIREHAIR_V2_PROFILE_SERIALIZED_BYTES ||
+        !serializedProfileOut)
+    {
+        return WirehairV2_BufferTooSmall;
+    }
+    if (!SupportedProfileId(profileId)) {
+        return WirehairV2_UnsupportedProfile;
+    }
+    if (!NamedV2ProfileAvailable()) {
+        return WirehairV2_UnsupportedPlatform;
+    }
+    WirehairV2Profile requested = {};
+    requested.struct_bytes = (uint32_t)sizeof(requested);
+    requested.profile_version = WIREHAIR_V2_PROFILE_VERSION;
+    requested.profile_id = profileId;
+    requested.message_bytes = messageBytes;
+    requested.block_bytes = blockBytes;
+    const WirehairV2Result dimensions = ValidateHostProfile(requested);
+    if (dimensions != WirehairV2_Success) {
+        return dimensions;
+    }
+    if (!message) {
+        return WirehairV2_InvalidInput;
+    }
+    if (messageBytes > (uint64_t)std::numeric_limits<size_t>::max()) {
+        return WirehairV2_UnsupportedPlatform;
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.Completion = CompletionForProfileId(profileId);
+    PublicCodec* codec = new (std::nothrow) PublicCodec;
+    if (!codec) {
+        return WirehairV2_OOM;
+    }
+    const WirehairResult create_result = codec->Impl.InitializePrecodeEncoder(
+        message, messageBytes, blockBytes, nullptr, &options);
+    if (create_result != Wirehair_Success) {
+        delete codec;
+        return MapResult(create_result);
+    }
+
+    WirehairV2Profile profile = {};
+    WirehairV2Result result = MakePublicProfile(
+        codec->Impl.Profile(), messageBytes, profile);
+    uint8_t encoded[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    uint32_t encoded_bytes = 0u;
+    if (result == WirehairV2_Success) {
+        result = wirehair_v2_profile_serialize(
+            &profile, encoded, sizeof(encoded), &encoded_bytes);
+    }
+    if (result != WirehairV2_Success ||
+        encoded_bytes != WIREHAIR_V2_PROFILE_SERIALIZED_BYTES ||
+        profile.profile_id != profileId)
     {
         delete codec;
         return result == WirehairV2_Success ? WirehairV2_Error : result;

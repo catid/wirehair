@@ -128,9 +128,72 @@ enum class RowDist
     LtM1C64,      // soliton-ish truncated LT, min degree 1, cap 64
     LtM1C16,      // same LT family, min degree 1, cap 16
     LtM2C1024,    // min degree 2, cap 1024 (residual-quality frontier family)
-    RsC001D50C128 // robust soliton c=0.01 delta=0.50, min degree 1, cap 128
+    RsC001D50C128, // robust soliton c=0.01 delta=0.50, min degree 1, cap 128
                   // (peel_sweep robust_soliton_weight law, renormalized)
+    Fixed32,
+    Fixed36,
+    Fixed40,
+    Fixed44,
+    Fixed48,
+    Fixed64,
+    Fixed80,
+    Fixed96,
+    Fixed128,
+    Fixed256,
+    Mix32_128,
+    Mix36_80P10,
+    Mix36_80P25,
+    Mix36_128P10,
+    Mix8_64P50,
+    Mix8_48P75,
+    Mix12_64P50,
+    Mix16_64P50,
+    Mix16_96P25,
+    Staged44_16P125,
+    Staged44_16P167,
+    Staged44_16P25,
+    Staged44_12P167,
+    Log6,
+    Log8
 };
+
+static const char* RowDistName(RowDist dist)
+{
+    switch (dist)
+    {
+    case RowDist::Wirehair: return "wirehair";
+    case RowDist::LtM1C64: return "lt_m1_c64";
+    case RowDist::LtM1C16: return "lt_m1_c16";
+    case RowDist::LtM2C1024: return "lt_m2_c1024";
+    case RowDist::RsC001D50C128: return "rs_c001_d50_c128";
+    case RowDist::Fixed32: return "fixed32";
+    case RowDist::Fixed36: return "fixed36";
+    case RowDist::Fixed40: return "fixed40";
+    case RowDist::Fixed44: return "fixed44";
+    case RowDist::Fixed48: return "fixed48";
+    case RowDist::Fixed64: return "fixed64";
+    case RowDist::Fixed80: return "fixed80";
+    case RowDist::Fixed96: return "fixed96";
+    case RowDist::Fixed128: return "fixed128";
+    case RowDist::Fixed256: return "fixed256";
+    case RowDist::Mix32_128: return "mix32_128";
+    case RowDist::Mix36_80P10: return "mix36_80_p10";
+    case RowDist::Mix36_80P25: return "mix36_80_p25";
+    case RowDist::Mix36_128P10: return "mix36_128_p10";
+    case RowDist::Mix8_64P50: return "mix8_64_p50";
+    case RowDist::Mix8_48P75: return "mix8_48_p75";
+    case RowDist::Mix12_64P50: return "mix12_64_p50";
+    case RowDist::Mix16_64P50: return "mix16_64_p50";
+    case RowDist::Mix16_96P25: return "mix16_96_p25";
+    case RowDist::Staged44_16P125: return "staged44_16_p125";
+    case RowDist::Staged44_16P167: return "staged44_16_p167";
+    case RowDist::Staged44_16P25: return "staged44_16_p25";
+    case RowDist::Staged44_12P167: return "staged44_12_p167";
+    case RowDist::Log6: return "log6";
+    case RowDist::Log8: return "log8";
+    }
+    return "unknown";
+}
 
 struct DegreeSampler
 {
@@ -145,6 +208,82 @@ struct DegreeSampler
         : Dist(dist), K(k), Total(0.0), MinDegree(1), MaxDegree(1)
     {
         if (dist == RowDist::Wirehair) {
+            return;
+        }
+        unsigned fixed = 0u;
+        switch (dist)
+        {
+        case RowDist::Fixed32: fixed = 32u; break;
+        case RowDist::Fixed36: fixed = 36u; break;
+        case RowDist::Fixed40: fixed = 40u; break;
+        case RowDist::Fixed44: fixed = 44u; break;
+        case RowDist::Fixed48: fixed = 48u; break;
+        case RowDist::Fixed64: fixed = 64u; break;
+        case RowDist::Fixed80: fixed = 80u; break;
+        case RowDist::Fixed96: fixed = 96u; break;
+        case RowDist::Fixed128: fixed = 128u; break;
+        case RowDist::Fixed256: fixed = 256u; break;
+        case RowDist::Log6:
+            fixed = (unsigned)std::ceil(6.0 * std::log2((double)k));
+            break;
+        case RowDist::Log8:
+            fixed = (unsigned)std::ceil(8.0 * std::log2((double)k));
+            break;
+        default: break;
+        }
+        if (fixed != 0u)
+        {
+            MinDegree = std::min(fixed, k);
+            MaxDegree = MinDegree;
+            return;
+        }
+        if (dist == RowDist::Mix32_128)
+        {
+            MinDegree = std::min(32u, k);
+            MaxDegree = std::min(128u, k);
+            return;
+        }
+        if (dist == RowDist::Mix36_80P10 ||
+            dist == RowDist::Mix36_80P25 ||
+            dist == RowDist::Mix36_128P10)
+        {
+            MinDegree = std::min(36u, k);
+            MaxDegree = std::min(
+                dist == RowDist::Mix36_128P10 ? 128u : 80u, k);
+            return;
+        }
+        if (dist == RowDist::Mix8_64P50 ||
+            dist == RowDist::Mix8_48P75 ||
+            dist == RowDist::Mix12_64P50 ||
+            dist == RowDist::Mix16_64P50 ||
+            dist == RowDist::Mix16_96P25)
+        {
+            unsigned low = 16u, high = 64u;
+            if (dist == RowDist::Mix8_64P50 ||
+                dist == RowDist::Mix8_48P75) {
+                low = 8u;
+            }
+            else if (dist == RowDist::Mix12_64P50) {
+                low = 12u;
+            }
+            if (dist == RowDist::Mix8_48P75) {
+                high = 48u;
+            }
+            else if (dist == RowDist::Mix16_96P25) {
+                high = 96u;
+            }
+            MinDegree = std::min(low, k);
+            MaxDegree = std::min(high, k);
+            return;
+        }
+        if (dist == RowDist::Staged44_16P125 ||
+            dist == RowDist::Staged44_16P167 ||
+            dist == RowDist::Staged44_16P25 ||
+            dist == RowDist::Staged44_12P167)
+        {
+            MinDegree = std::min(
+                dist == RowDist::Staged44_12P167 ? 12u : 16u, k);
+            MaxDegree = std::min(44u, k);
             return;
         }
         unsigned min_d = 1, cap = 64;
@@ -243,6 +382,41 @@ struct DegreeSampler
             }
             return degree;
         }
+        if (MinDegree == MaxDegree) {
+            return MinDegree;
+        }
+        if (Dist == RowDist::Mix32_128) {
+            return rng.Unit() < 0.5 ? MinDegree : MaxDegree;
+        }
+        if (Dist == RowDist::Mix36_80P10 ||
+            Dist == RowDist::Mix36_80P25 ||
+            Dist == RowDist::Mix36_128P10)
+        {
+            const double high_mass =
+                Dist == RowDist::Mix36_80P25 ? 0.25 : 0.10;
+            return rng.Unit() < high_mass ? MaxDegree : MinDegree;
+        }
+        if (Dist == RowDist::Mix8_64P50 ||
+            Dist == RowDist::Mix8_48P75 ||
+            Dist == RowDist::Mix12_64P50 ||
+            Dist == RowDist::Mix16_64P50 ||
+            Dist == RowDist::Mix16_96P25)
+        {
+            double high_mass = 0.50;
+            if (Dist == RowDist::Mix8_48P75) {
+                high_mass = 0.75;
+            }
+            else if (Dist == RowDist::Mix16_96P25) {
+                high_mass = 0.25;
+            }
+            return rng.Unit() < high_mass ? MaxDegree : MinDegree;
+        }
+        if (Dist == RowDist::Staged44_16P125 ||
+            Dist == RowDist::Staged44_16P167 ||
+            Dist == RowDist::Staged44_16P25 ||
+            Dist == RowDist::Staged44_12P167) {
+            return MaxDegree;
+        }
         const double target = rng.Unit() * Total;
         for (size_t i = 0; i < Cumulative.size(); ++i)
         {
@@ -253,6 +427,107 @@ struct DegreeSampler
         return MaxDegree;
     }
 };
+
+enum class PacketSchedule
+{
+    None,
+    Iid,
+    Burst,
+    Permutation,
+    RepairOnly
+};
+
+static const double kMaximumSupportedLoss = 0.99;
+
+static const char* PacketScheduleName(PacketSchedule schedule)
+{
+    switch (schedule)
+    {
+    case PacketSchedule::None: return "none";
+    case PacketSchedule::Iid: return "iid";
+    case PacketSchedule::Burst: return "burst";
+    case PacketSchedule::Permutation: return "permutation";
+    case PacketSchedule::RepairOnly: return "repair-only";
+    }
+    return "unknown";
+}
+
+static std::vector<uint32_t> BuildPacketIds(
+    uint32_t K,
+    uint32_t delivered_count,
+    double loss,
+    uint64_t seed,
+    PacketSchedule schedule)
+{
+    std::vector<uint32_t> output;
+    output.reserve(delivered_count);
+    Rng rng(seed ^ UINT64_C(0x10fade));
+    uint64_t candidate = 0u;
+    uint32_t burst_remaining = 0u;
+    std::vector<uint32_t> permutation;
+    size_t permutation_index = 0u;
+    uint32_t permutation_base = 0u;
+    const uint64_t candidate_limit =
+        (uint64_t)delivered_count * 256u + 65536u;
+    for (uint64_t attempts = 0u;
+         output.size() < delivered_count && attempts < candidate_limit;
+         ++attempts)
+    {
+        uint32_t id;
+        if (schedule == PacketSchedule::RepairOnly) {
+            id = K + (uint32_t)candidate++;
+        }
+        else if (schedule == PacketSchedule::Permutation)
+        {
+            if (permutation_index >= permutation.size())
+            {
+                const uint32_t count = std::min<uint32_t>(K + 512u, 65536u);
+                permutation.resize(count);
+                for (uint32_t i = 0u; i < count; ++i) {
+                    permutation[i] = permutation_base + i;
+                }
+                for (uint32_t i = count; i > 1u; --i) {
+                    std::swap(permutation[i - 1u],
+                        permutation[rng.U32() % i]);
+                }
+                permutation_base += count;
+                permutation_index = 0u;
+            }
+            id = permutation[permutation_index++];
+        }
+        else {
+            id = (uint32_t)candidate++;
+        }
+
+        bool drop = false;
+        if (schedule == PacketSchedule::Burst)
+        {
+            static const uint32_t kBurstLength = 8u;
+            if (burst_remaining != 0u)
+            {
+                --burst_remaining;
+                drop = true;
+            }
+            else
+            {
+                const double start_probability = loss /
+                    (kBurstLength - (kBurstLength - 1u) * loss);
+                if (rng.Unit() < start_probability)
+                {
+                    burst_remaining = kBurstLength - 1u;
+                    drop = true;
+                }
+            }
+        }
+        else {
+            drop = rng.Unit() < loss;
+        }
+        if (!drop) {
+            output.push_back(id);
+        }
+    }
+    return output;
+}
 
 //------------------------------------------------------------------------------
 // Precode schemes
@@ -415,6 +690,7 @@ struct GeneratedSystem
     std::vector<SparseRow> Rows;     // binary rows only (constraints first)
     uint64_t RecvRowGenXors;
     uint64_t PrecodeGenXors;
+    bool PacketScheduleExhausted;
 };
 
 // paired_recv_seed (optional, --paired): seed for a SECOND RNG dedicated to
@@ -428,7 +704,10 @@ static GeneratedSystem GenerateSystem(
     RowDist dist,
     unsigned mix,
     uint64_t seed,
-    const uint64_t* paired_recv_seed = nullptr)
+    const uint64_t* paired_recv_seed = nullptr,
+    PacketSchedule packet_schedule = PacketSchedule::None,
+    double loss = 0.0,
+    bool identity_systematic = false)
 {
     GeneratedSystem sys;
     sys.K = K;
@@ -437,6 +716,7 @@ static GeneratedSystem GenerateSystem(
     sys.L = K + sys.D + scheme.H;
     sys.RecvRowGenXors = 0;
     sys.PrecodeGenXors = 0;
+    sys.PacketScheduleExhausted = false;
 
     Rng rng(seed);
     const unsigned precode_space = sys.D + scheme.H;
@@ -748,18 +1028,55 @@ static GeneratedSystem GenerateSystem(
     const DegreeSampler degrees(dist, K);
     Rng paired_rng(paired_recv_seed ? *paired_recv_seed : 0);
     Rng& recv_rng = paired_recv_seed ? paired_rng : rng;
+    const uint64_t packet_seed = paired_recv_seed ? *paired_recv_seed : seed;
+    const std::vector<uint32_t> packet_ids =
+        packet_schedule == PacketSchedule::None ? std::vector<uint32_t>() :
+        BuildPacketIds(K, received, loss, packet_seed, packet_schedule);
+    if (packet_schedule != PacketSchedule::None &&
+        packet_ids.size() != received)
+    {
+        sys.PacketScheduleExhausted = true;
+        return sys;
+    }
     for (unsigned r = 0; r < received; ++r)
     {
         SparseRow row;
         row.IsConstraint = false;
-        const unsigned degree = degrees.Sample(recv_rng);
-        AddDistinctColumns(row.Columns, 0, K, degree, recv_rng);
+        const uint32_t packet_id = packet_ids.empty() ? r : packet_ids[r];
+        if (identity_systematic && packet_id < K)
+        {
+            row.Columns.push_back(packet_id);
+            sys.Rows.push_back(std::move(row));
+            continue;
+        }
+        Rng packet_rng(Mix64(
+            packet_seed ^
+            (uint64_t)packet_id * UINT64_C(0xd6e8feb86659fd93)));
+        Rng& row_rng = packet_ids.empty() ? recv_rng : packet_rng;
+        unsigned degree = degrees.Sample(row_rng);
+        if (dist == RowDist::Staged44_16P125 ||
+            dist == RowDist::Staged44_16P167 ||
+            dist == RowDist::Staged44_16P25 ||
+            dist == RowDist::Staged44_12P167)
+        {
+            const uint32_t repair_ordinal = packet_id >= K ? packet_id - K : 0u;
+            uint32_t high_count = (K + 5u) / 6u;
+            if (dist == RowDist::Staged44_16P125) {
+                high_count = (K + 7u) / 8u;
+            }
+            else if (dist == RowDist::Staged44_16P25) {
+                high_count = (K + 3u) / 4u;
+            }
+            degree = repair_ordinal < high_count ?
+                degrees.MaxDegree : degrees.MinDegree;
+        }
+        AddDistinctColumns(row.Columns, 0, K, degree, row_rng);
         if (paired_recv_seed)
         {
             const size_t mix_start = row.Columns.size();
             for (unsigned m = 0; m < mix; ++m)
             {
-                const uint64_t draw = recv_rng.Next();
+                const uint64_t draw = row_rng.Next();
                 if (precode_space == 0u ||
                     row.Columns.size() - mix_start >= precode_space) {
                     continue; // draw consumed anyway: keep streams in lockstep
@@ -787,7 +1104,7 @@ static GeneratedSystem GenerateSystem(
             }
         }
         else if (precode_space > 0u) {
-            AddDistinctColumns(row.Columns, K, precode_space, mix, rng);
+            AddDistinctColumns(row.Columns, K, precode_space, mix, row_rng);
         }
         if (row.Columns.size() > 1u) {
             sys.RecvRowGenXors += row.Columns.size() - 1u;
@@ -1366,7 +1683,10 @@ static TrialResult RunTrial(
     bool ge_replay = false,
     bool ge_replay_reverse = false,
     unsigned ge_pivot_window = 0,
-    unsigned max_inact = 0)
+    unsigned max_inact = 0,
+    PacketSchedule packet_schedule = PacketSchedule::None,
+    double loss = 0.0,
+    bool identity_systematic = false)
 {
     TrialResult t;
     std::memset(&t, 0, sizeof(t));
@@ -1376,7 +1696,11 @@ static TrialResult RunTrial(
     // (K + overhead + D) rows over L = K + D + H columns, and L - K of the
     // unknowns are precode blocks the decoder does not return to the caller.
     const GeneratedSystem sys = GenerateSystem(
-        scheme, K, K + overhead, dist, mix, seed, paired_recv_seed);
+        scheme, K, K + overhead, dist, mix, seed, paired_recv_seed,
+        packet_schedule, loss, identity_systematic);
+    if (sys.PacketScheduleExhausted) {
+        return t;
+    }
 
     const PeelOutcome peel = PeelSolver(sys.L, sys.Rows).Run(max_inact);
     if (peel.Aborted)
@@ -1755,6 +2079,7 @@ struct Aggregate
     uint64_t Fails = 0;
     uint64_t FailsNoHeavy = 0;
     uint64_t Runaways = 0;  // --max-inact aborts: in fail_rate, out of means
+    uint64_t ScheduleExhaustions = 0; // bounded loss generator, out of means
     double DefSum = 0, DefMax = 0;
     double InactSum = 0, InactSqSum = 0, InactMax = 0;
     double RankSum = 0;
@@ -1778,6 +2103,13 @@ struct Aggregate
     void Add(const TrialResult& t)
     {
         ++Trials;
+        if (!t.Ok)
+        {
+            ++Fails;
+            ++FailsNoHeavy;
+            ++ScheduleExhaustions;
+            return;
+        }
         if (!t.Success) {
             ++Fails;
         }
@@ -2193,6 +2525,327 @@ static bool SelfTest()
         }
     }
 
+    // Packet-ID schedules are part of the paired experiment contract: an
+    // identical seed must reproduce the exact delivered-ID trace.  Every
+    // schedule is duplicate-free here, IID with zero loss is sequential, and
+    // repair-only must never expose a systematic ID.
+    {
+        const unsigned schedule_k = 1000;
+        const unsigned delivered = 1100;
+        const uint64_t schedule_seed = UINT64_C(0x1d5ced01);
+        const PacketSchedule schedules[] = {
+            PacketSchedule::Iid,
+            PacketSchedule::Burst,
+            PacketSchedule::Permutation,
+            PacketSchedule::RepairOnly,
+        };
+        for (PacketSchedule schedule : schedules)
+        {
+            const double schedule_loss =
+                schedule == PacketSchedule::RepairOnly ? 0.0 : 0.3;
+            const std::vector<uint32_t> a = BuildPacketIds(
+                schedule_k, delivered, schedule_loss, schedule_seed,
+                schedule);
+            const std::vector<uint32_t> b = BuildPacketIds(
+                schedule_k, delivered, schedule_loss, schedule_seed,
+                schedule);
+            std::vector<uint32_t> sorted = a;
+            std::sort(sorted.begin(), sorted.end());
+            if (a != b || a.size() != delivered ||
+                std::adjacent_find(sorted.begin(), sorted.end()) !=
+                    sorted.end())
+            {
+                fprintf(stderr,
+                    "self-test: packet schedule determinism/uniqueness broke\n");
+                return false;
+            }
+            if (schedule == PacketSchedule::RepairOnly &&
+                sorted.front() < schedule_k)
+            {
+                fprintf(stderr,
+                    "self-test: repair-only schedule emitted source ID\n");
+                return false;
+            }
+        }
+        const std::vector<uint32_t> sequential = BuildPacketIds(
+            schedule_k, delivered, 0.0, schedule_seed, PacketSchedule::Iid);
+        for (unsigned i = 0; i < delivered; ++i)
+        {
+            if (sequential[i] != i)
+            {
+                fprintf(stderr,
+                    "self-test: zero-loss IID schedule is not sequential\n");
+                return false;
+            }
+        }
+        const std::vector<uint32_t> extended = BuildPacketIds(
+            schedule_k, delivered + 17u, 0.3, schedule_seed,
+            PacketSchedule::Iid);
+        const std::vector<uint32_t> prefix = BuildPacketIds(
+            schedule_k, delivered, 0.3, schedule_seed,
+            PacketSchedule::Iid);
+        if (prefix.size() != delivered || extended.size() != delivered + 17u ||
+            !std::equal(prefix.begin(), prefix.end(), extended.begin()))
+        {
+            fprintf(stderr,
+                "self-test: overhead extension changed packet-ID prefix\n");
+            return false;
+        }
+
+        Scheme prefix_scheme;
+        if (!MakeScheme("codecport_ic", schedule_k, prefix_scheme)) {
+            fprintf(stderr, "self-test: prefix scheme setup broke\n");
+            return false;
+        }
+        const uint64_t system_seed = UINT64_C(0xc011ec7);
+        const uint64_t receive_seed = UINT64_C(0xfacefeed);
+        const GeneratedSystem short_system = GenerateSystem(
+            prefix_scheme, schedule_k, delivered, RowDist::Fixed44, 3,
+            system_seed, &receive_seed, PacketSchedule::Iid, 0.3, true);
+        const GeneratedSystem long_system = GenerateSystem(
+            prefix_scheme, schedule_k, delivered + 17u, RowDist::Fixed44, 3,
+            system_seed, &receive_seed, PacketSchedule::Iid, 0.3, true);
+        if (short_system.PacketScheduleExhausted ||
+            long_system.PacketScheduleExhausted ||
+            long_system.Rows.size() != short_system.Rows.size() + 17u)
+        {
+            fprintf(stderr, "self-test: overhead-prefix system setup broke\n");
+            return false;
+        }
+        for (size_t i = 0; i < short_system.Rows.size(); ++i)
+        {
+            if (short_system.Rows[i].IsConstraint !=
+                    long_system.Rows[i].IsConstraint ||
+                short_system.Rows[i].Columns != long_system.Rows[i].Columns)
+            {
+                fprintf(stderr,
+                    "self-test: overhead extension changed system prefix\n");
+                return false;
+            }
+        }
+
+        const GeneratedSystem exhausted = GenerateSystem(
+            prefix_scheme, schedule_k, delivered, RowDist::Fixed44, 3,
+            system_seed, &receive_seed, PacketSchedule::Iid, 1.0, true);
+        const TrialResult exhausted_trial = RunTrial(
+            prefix_scheme, schedule_k, 0u, RowDist::Fixed44, 3,
+            system_seed, &receive_seed, false, false, 0u, 0u,
+            PacketSchedule::Iid, 1.0, true);
+        if (!exhausted.PacketScheduleExhausted || exhausted_trial.Ok)
+        {
+            fprintf(stderr,
+                "self-test: exhausted packet schedule was not structured\n");
+            return false;
+        }
+    }
+
+    // Identity-systematic packet rows must be unit rows for source IDs and
+    // must use the requested repair law for repair IDs.  Also exercise the
+    // production PeelRowIterator with an overridden fixed degree: it must be
+    // deterministic and visit distinct in-range columns for every packet ID.
+    {
+        const unsigned identity_k = 1000;
+        const unsigned received = 1100;
+        const uint64_t recv_seed = UINT64_C(0x1d3a71c0);
+        Scheme scheme;
+        if (!MakeScheme("codecport_ic", identity_k, scheme))
+        {
+            fprintf(stderr, "self-test: identity scheme setup broke\n");
+            return false;
+        }
+        const GeneratedSystem sys = GenerateSystem(
+            scheme, identity_k, received, RowDist::Fixed44, 3,
+            UINT64_C(0x51757e), &recv_seed, PacketSchedule::Iid, 0.0, true);
+        unsigned packet_row = 0;
+        for (const SparseRow& row : sys.Rows)
+        {
+            if (row.IsConstraint) {
+                continue;
+            }
+            unsigned source_refs = 0;
+            std::vector<uint32_t> source_columns;
+            for (uint32_t column : row.Columns)
+            {
+                if (column < identity_k)
+                {
+                    ++source_refs;
+                    source_columns.push_back(column);
+                }
+            }
+            std::sort(source_columns.begin(), source_columns.end());
+            if (packet_row < identity_k)
+            {
+                if (row.Columns.size() != 1u ||
+                    row.Columns.front() != packet_row)
+                {
+                    fprintf(stderr,
+                        "self-test: identity source row %u is not singleton\n",
+                        packet_row);
+                    return false;
+                }
+            }
+            else if (source_refs != 44u ||
+                std::adjacent_find(source_columns.begin(),
+                    source_columns.end()) != source_columns.end())
+            {
+                fprintf(stderr,
+                    "self-test: fixed44 repair row %u is malformed\n",
+                    packet_row);
+                return false;
+            }
+            ++packet_row;
+        }
+        if (packet_row != received)
+        {
+            fprintf(stderr, "self-test: identity packet row count broke\n");
+            return false;
+        }
+
+        const GeneratedSystem staged = GenerateSystem(
+            scheme, identity_k, identity_k, RowDist::Staged44_16P167, 3,
+            UINT64_C(0x51757e), &recv_seed,
+            PacketSchedule::RepairOnly, 0.0, true);
+        packet_row = 0;
+        const unsigned staged_high_count = (identity_k + 5u) / 6u;
+        for (const SparseRow& row : staged.Rows)
+        {
+            if (row.IsConstraint) {
+                continue;
+            }
+            unsigned source_refs = 0;
+            for (uint32_t column : row.Columns) {
+                source_refs += column < identity_k;
+            }
+            const unsigned expected =
+                packet_row < staged_high_count ? 44u : 16u;
+            if (source_refs != expected)
+            {
+                fprintf(stderr,
+                    "self-test: staged repair row %u has degree %u, want %u\n",
+                    packet_row, source_refs, expected);
+                return false;
+            }
+            ++packet_row;
+        }
+
+        const uint16_t source_prime = wirehair::NextPrime16(identity_k);
+        std::vector<uint64_t> marginal_hits(identity_k, 0u);
+        for (uint32_t packet_id = 0; packet_id < 20000u; ++packet_id)
+        {
+            wirehair::PeelRowParameters a, b;
+            a.Initialize(packet_id, 0x9e3779b9u, identity_k, 18u);
+            b.Initialize(packet_id, 0x9e3779b9u, identity_k, 18u);
+            a.PeelCount = b.PeelCount = 44u;
+            wirehair::PeelRowIterator ia(a, identity_k, source_prime);
+            wirehair::PeelRowIterator ib(b, identity_k, source_prime);
+            std::vector<uint16_t> columns;
+            do {
+                if (ia.GetColumn() != ib.GetColumn() ||
+                    ia.GetColumn() >= identity_k)
+                {
+                    fprintf(stderr,
+                        "self-test: production fixed44 iterator compatibility "
+                        "broke at packet %u\n", packet_id);
+                    return false;
+                }
+                columns.push_back(ia.GetColumn());
+                ++marginal_hits[ia.GetColumn()];
+                const bool more_a = ia.Iterate();
+                const bool more_b = ib.Iterate();
+                if (more_a != more_b)
+                {
+                    fprintf(stderr,
+                        "self-test: production iterator length mismatch\n");
+                    return false;
+                }
+                if (!more_a) {
+                    break;
+                }
+            } while (true);
+            std::sort(columns.begin(), columns.end());
+            if (columns.size() != 44u ||
+                std::adjacent_find(columns.begin(), columns.end()) !=
+                    columns.end())
+            {
+                fprintf(stderr,
+                    "self-test: production fixed44 iterator repeated a column\n");
+                return false;
+            }
+        }
+        const double expected_hits = 20000.0 * 44.0 / identity_k;
+        double marginal_chi2 = 0.0;
+        for (uint64_t hits : marginal_hits)
+        {
+            const double delta = (double)hits - expected_hits;
+            marginal_chi2 += delta * delta / expected_hits;
+        }
+        // df=999: this generous cutoff is over 20 standard deviations above
+        // the uniform expectation, so it catches column-selection bias without
+        // making the deterministic self-test sensitive to normal variance.
+        if (marginal_chi2 > 2000.0)
+        {
+            fprintf(stderr,
+                "self-test: production fixed44 marginal chi2 %.1f is biased\n",
+                marginal_chi2);
+            return false;
+        }
+    }
+
+    // Fixed and mixture degree samplers must stay within their declared
+    // supports.  Mixture mass checks are intentionally loose enough to avoid
+    // flaky sampling failures while detecting parser/profile wiring errors.
+    {
+        struct DegreeCase
+        {
+            RowDist Dist;
+            unsigned Low;
+            unsigned High;
+            double HighMass;
+        };
+        const DegreeCase cases[] = {
+            { RowDist::Fixed44, 44, 44, 0.0 },
+            { RowDist::Fixed48, 48, 48, 0.0 },
+            { RowDist::Mix36_80P10, 36, 80, 0.10 },
+            { RowDist::Mix36_80P25, 36, 80, 0.25 },
+            { RowDist::Mix36_128P10, 36, 128, 0.10 },
+            { RowDist::Mix8_64P50, 8, 64, 0.50 },
+            { RowDist::Mix8_48P75, 8, 48, 0.75 },
+            { RowDist::Mix12_64P50, 12, 64, 0.50 },
+            { RowDist::Mix16_64P50, 16, 64, 0.50 },
+            { RowDist::Mix16_96P25, 16, 96, 0.25 },
+        };
+        const unsigned samples = 100000;
+        for (const DegreeCase& dc : cases)
+        {
+            const DegreeSampler sampler(dc.Dist, 3200);
+            Rng rng(UINT64_C(0xd36e5eed) + (unsigned)dc.Dist);
+            unsigned high_count = 0;
+            for (unsigned i = 0; i < samples; ++i)
+            {
+                const unsigned degree = sampler.Sample(rng);
+                if (degree != dc.Low && degree != dc.High)
+                {
+                    fprintf(stderr,
+                        "self-test: fixed/mixture sampler emitted degree %u\n",
+                        degree);
+                    return false;
+                }
+                high_count += degree == dc.High && dc.High != dc.Low;
+            }
+            if (dc.High != dc.Low)
+            {
+                const double observed = (double)high_count / samples;
+                if (std::fabs(observed - dc.HighMass) > 0.01)
+                {
+                    fprintf(stderr,
+                        "self-test: mixture mass %.4f differs from %.4f\n",
+                        observed, dc.HighMass);
+                    return false;
+                }
+            }
+        }
+    }
+
     // _s2 schemes: the D2 dense rows must follow the documented Shuffle-2
     // rule exactly -- first row has ceil(span/2) columns; every subsequent
     // row differs from its predecessor in EXACTLY 2 columns.
@@ -2578,6 +3231,9 @@ int main(int argc, char** argv)
     bool ge_replay = false;
     bool ge_replay_reverse = false;
     bool paired = false;
+    PacketSchedule packet_schedule = PacketSchedule::None;
+    double loss = 0.0;
+    bool identity_systematic = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -2661,6 +3317,55 @@ int main(int argc, char** argv)
             else if (v == "rs_c001_d50_c128") {
                 dist = RowDist::RsC001D50C128;
             }
+            else if (v == "fixed32") { dist = RowDist::Fixed32; }
+            else if (v == "fixed36") { dist = RowDist::Fixed36; }
+            else if (v == "fixed40") { dist = RowDist::Fixed40; }
+            else if (v == "fixed44") { dist = RowDist::Fixed44; }
+            else if (v == "fixed48") { dist = RowDist::Fixed48; }
+            else if (v == "fixed64") { dist = RowDist::Fixed64; }
+            else if (v == "fixed80") { dist = RowDist::Fixed80; }
+            else if (v == "fixed96") { dist = RowDist::Fixed96; }
+            else if (v == "fixed128") { dist = RowDist::Fixed128; }
+            else if (v == "fixed256") { dist = RowDist::Fixed256; }
+            else if (v == "mix32_128") { dist = RowDist::Mix32_128; }
+            else if (v == "mix36_80_p10") {
+                dist = RowDist::Mix36_80P10;
+            }
+            else if (v == "mix36_80_p25") {
+                dist = RowDist::Mix36_80P25;
+            }
+            else if (v == "mix36_128_p10") {
+                dist = RowDist::Mix36_128P10;
+            }
+            else if (v == "mix8_64_p50") {
+                dist = RowDist::Mix8_64P50;
+            }
+            else if (v == "mix8_48_p75") {
+                dist = RowDist::Mix8_48P75;
+            }
+            else if (v == "mix12_64_p50") {
+                dist = RowDist::Mix12_64P50;
+            }
+            else if (v == "mix16_64_p50") {
+                dist = RowDist::Mix16_64P50;
+            }
+            else if (v == "mix16_96_p25") {
+                dist = RowDist::Mix16_96P25;
+            }
+            else if (v == "staged44_16_p125") {
+                dist = RowDist::Staged44_16P125;
+            }
+            else if (v == "staged44_16_p167") {
+                dist = RowDist::Staged44_16P167;
+            }
+            else if (v == "staged44_16_p25") {
+                dist = RowDist::Staged44_16P25;
+            }
+            else if (v == "staged44_12_p167") {
+                dist = RowDist::Staged44_12P167;
+            }
+            else if (v == "log6") { dist = RowDist::Log6; }
+            else if (v == "log8") { dist = RowDist::Log8; }
             else {
                 fprintf(stderr, "unknown rowdist %s\n", v.c_str());
                 return 1;
@@ -2698,6 +3403,36 @@ int main(int argc, char** argv)
         else if (arg == "--paired") {
             paired = true;
         }
+        else if (arg == "--packet-schedule")
+        {
+            const std::string v = next();
+            if (v == "iid") { packet_schedule = PacketSchedule::Iid; }
+            else if (v == "burst") {
+                packet_schedule = PacketSchedule::Burst;
+            }
+            else if (v == "permutation") {
+                packet_schedule = PacketSchedule::Permutation;
+            }
+            else if (v == "repair-only") {
+                packet_schedule = PacketSchedule::RepairOnly;
+            }
+            else {
+                fprintf(stderr, "unknown packet schedule %s\n", v.c_str());
+                return 1;
+            }
+        }
+        else if (arg == "--loss")
+        {
+            const std::string v = next();
+            if (!ParseNonNegativeDouble(v, loss) ||
+                loss > kMaximumSupportedLoss) {
+                fprintf(stderr, "bad --loss value %s\n", v.c_str());
+                return 1;
+            }
+        }
+        else if (arg == "--identity-systematic") {
+            identity_systematic = true;
+        }
         else if (arg == "--self-test") {
             self_test = true;
         }
@@ -2725,6 +3460,12 @@ int main(int argc, char** argv)
     }
     if (trials == 0u) {
         fprintf(stderr, "--trials must be positive\n");
+        return 1;
+    }
+    if (packet_schedule == PacketSchedule::None && loss != 0.0)
+    {
+        fprintf(stderr,
+            "--loss requires --packet-schedule so it is not silently ignored\n");
         return 1;
     }
     for (unsigned K : k_list)
@@ -2776,7 +3517,12 @@ int main(int argc, char** argv)
         printf(",ge_real_bitops_mu,ge_real_rowops_mu,fill_in_mu,"
                "def_outside_w18_rate,def_band_w95,def_band_w99");
     }
-    printf(",runaway_rate");
+    // Preserve every historical column position and append run metadata so
+    // positional consumers continue to work while new CSVs self-describe.
+    printf(",runaway_rate,packet_schedule_exhausted_rate,rowdist,"
+           "packet_schedule,loss,identity_systematic,mix,base_seed,paired,"
+           "max_inact,max_row_seconds,requested_trials,threads,ge_replay,"
+           "ge_replay_reverse,ge_pivot_window");
     printf("\n");
     fflush(stdout);
 
@@ -2827,19 +3573,22 @@ int main(int argc, char** argv)
                             base_seed ^
                             Mix64((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
                             Mix64(HashString64(token)) ^
-                            Mix64((uint64_t)oh * UINT64_C(0xd6e8feb86659fd93)) ^
                             Mix64((uint64_t)trial * UINT64_C(0xbf58476d1ce4e5b9)));
-                        // --paired: received-row seed omits the scheme token
+                        // --paired: received-row seed omits both scheme and
+                        // overhead.  K+OH rows are therefore a prefix of the
+                        // same trial trace at every overhead point, while the
+                        // system seed above keeps the scheme-specific precode
+                        // fixed throughout that sweep.
                         const uint64_t recv_seed = Mix64(
                             base_seed ^
                             Mix64((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
-                            Mix64((uint64_t)oh * UINT64_C(0xd6e8feb86659fd93)) ^
                             Mix64((uint64_t)trial * UINT64_C(0xbf58476d1ce4e5b9)));
                         const TrialResult t = RunTrial(
                             scheme, K, oh, dist, mix, seed,
                             paired ? &recv_seed : nullptr,
                             ge_replay, ge_replay_reverse, ge_pivot_window,
-                            max_inact);
+                            max_inact, packet_schedule, loss,
+                            identity_systematic);
                         std::lock_guard<std::mutex> lock(agg_mutex);
                         agg.Add(t);
                     }
@@ -2869,7 +3618,8 @@ int main(int argc, char** argv)
                 const double n = (double)(agg.Trials ? agg.Trials : 1u);
                 // Runaway trials (--max-inact) are in fail_rate but have no
                 // def/inact/cost statistics: means use completed trials only
-                const uint64_t completed = agg.Trials - agg.Runaways;
+                const uint64_t completed = agg.Trials - agg.Runaways -
+                    agg.ScheduleExhaustions;
                 const double m = (double)(completed ? completed : 1u);
                 const double inact_mu = agg.InactSum / m;
                 const double inact_var =
@@ -2897,6 +3647,14 @@ int main(int argc, char** argv)
                     snprintf(buf, sizeof(buf), "%s999999:%.6f",
                         def_pdf.empty() ? "" : "|",
                         agg.Runaways / n);
+                    def_pdf += buf;
+                }
+                if (agg.ScheduleExhaustions > 0u)
+                {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%s999998:%.6f",
+                        def_pdf.empty() ? "" : "|",
+                        agg.ScheduleExhaustions / n);
                     def_pdf += buf;
                 }
                 printf("%u,%s,%u,%u,%u,%llu,%.6f,%.6f,%.4f,%.0f,%s,"
@@ -2934,7 +3692,16 @@ int main(int argc, char** argv)
                         PercentileSorted(agg.DefBands, 0.95),
                         PercentileSorted(agg.DefBands, 0.99));
                 }
-                printf(",%.6f", agg.Runaways / n);
+                printf(",%.6f,%.6f,%s,%s,%.17g,%u,%u,%llu,%u,%u,%.17g,%u,%u,"
+                       "%u,%u,%u",
+                    agg.Runaways / n,
+                    agg.ScheduleExhaustions / n,
+                    RowDistName(dist), PacketScheduleName(packet_schedule),
+                    loss, identity_systematic ? 1u : 0u, mix,
+                    (unsigned long long)base_seed, paired ? 1u : 0u,
+                    max_inact, max_row_seconds, trials, threads,
+                    ge_replay ? 1u : 0u, ge_replay_reverse ? 1u : 0u,
+                    ge_pivot_window);
                 printf("\n");
                 fflush(stdout);
             }

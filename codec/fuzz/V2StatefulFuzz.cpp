@@ -481,13 +481,17 @@ bool MalformedProfileRetry(
     wirehair_v2::MessagePrecodeDecoder decoder;
     if (!InitializeDecoder(fixture, encoder, decoder, failure)) return false;
     wirehair_v2::SeedProfile bad = encoder.Profile();
-    switch (input.U8() % 6u)
+    switch (input.U8() % 7u)
     {
     case 0: ++bad.V2PrecodeContractVersion; break;
     case 1: ++bad.V2PacketRowContractVersion; break;
-    case 2: bad.V2PrecodeSeedSalt ^= 1u; break;
-    case 3: bad.V2RecoveryRowSeedSalt ^= 1u; break;
-    case 4: bad.V2RecoveryMixCount = 0u; break;
+    case 2:
+        bad.V2CompletionField =
+            static_cast<wirehair_v2::CompletionField>(UINT32_MAX);
+        break;
+    case 3: bad.V2PrecodeSeedSalt ^= 1u; break;
+    case 4: bad.V2RecoveryRowSeedSalt ^= 1u; break;
+    case 5: bad.V2RecoveryMixCount = 0u; break;
     default: ++bad.V2StaircaseCount; break;
     }
     if (decoder.InitializeResult(

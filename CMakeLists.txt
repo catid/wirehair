@@ -69,6 +69,8 @@ if(APPLE)
 endif()
 
 set(WIREHAIR_V2_PUBLIC_SOURCE_FILES
+        codec/WirehairV2GF16.cpp
+        codec/WirehairV2GF16.h
         codec/WirehairV2Codec.cpp
         codec/WirehairV2Codec.h
         codec/WirehairV2Peel.cpp

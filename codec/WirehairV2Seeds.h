@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WirehairV2Policy.h"
+#include "WirehairV2GF16.h"
 
 #include <stdint.h>
 
@@ -26,6 +27,7 @@ struct SeedProfile
     uint32_t V2StaircaseCount = 0;
     uint32_t V2DenseRowCount = 0;
     uint32_t V2HeavyRowCount = 0;
+    CompletionField V2CompletionField = CompletionField::GF256;
     uint32_t V2SourceHits = 0;
     uint64_t V2PrecodeSeed = 0;
     uint32_t V2PacketPeelSeed = 0;

@@ -9,11 +9,13 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -868,6 +870,281 @@ bool CheckIncrementalResume()
             wirehair_v2::kBinaryQuotientMinBlockBytes);
 }
 
+bool CheckMixedSystematicSolve()
+{
+    const uint32_t K = 64u;
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x6d697865);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    uint32_t selected_attempt = 0u;
+    bool found_nonzero_attempt = false;
+    for (uint32_t trial = 0; trial < 128u; ++trial)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(
+                K, UINT64_C(0x6d69786564000000) + trial);
+        base_config.PeelSeed = UINT32_C(0x6d697865) + trial;
+        if (wirehair_v2::SelectSystematicConfiguration(
+                params, base_config, system, config,
+                &selected_attempt) == Wirehair_Success &&
+            selected_attempt != 0u)
+        {
+            found_nonzero_attempt = true;
+            break;
+        }
+    }
+    if (!found_nonzero_attempt) {
+        std::fprintf(stderr,
+            "solve: mixed nonzero systematic attempt fixture missing\n");
+        return false;
+    }
+
+    const uint32_t block_sizes[] = {2u, 16u, 1280u, 2048u};
+    for (uint32_t block_bytes : block_sizes)
+    {
+        std::vector<uint8_t> message((size_t)K * block_bytes);
+        for (size_t i = 0; i < message.size(); ++i) {
+            message[i] = (uint8_t)(i * 113u + block_bytes + selected_attempt);
+        }
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t id = 0; id < K; ++id) {
+            packets[id].BlockId = id;
+            packets[id].Data = message.data() + (size_t)id * block_bytes;
+        }
+        std::vector<uint8_t> output;
+        wirehair_v2::PrecodeSolveStats stats;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes, output, &stats) !=
+                Wirehair_Success ||
+            stats.ResidualRank != stats.InactivatedColumns ||
+            stats.BinaryResidualRank > stats.ResidualRank ||
+            stats.ResidualRank - stats.BinaryResidualRank >
+                wirehair_v2::kMixedGF256Rows +
+                    wirehair_v2::kMixedGF16Rows ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, packets, output.data(), block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: mixed systematic failed bb=%u q=%u\n",
+                block_bytes,
+                stats.ResidualRank - stats.BinaryResidualRank);
+            return false;
+        }
+    }
+
+    // Exercise exact mixed quotient widths through the production packet
+    // projection.  Consistent repair equations reduce the 12-column base
+    // quotient one binary rank at a time.
+    const uint32_t boundary_bytes = 16u;
+    std::vector<uint8_t> boundary_message((size_t)K * boundary_bytes);
+    for (size_t i = 0; i < boundary_message.size(); ++i) {
+        boundary_message[i] = (uint8_t)(i * 71u + selected_attempt);
+    }
+    std::vector<wirehair_v2::SolvePacket> boundary_packets(K);
+    for (uint32_t id = 0; id < K; ++id) {
+        boundary_packets[id].BlockId = id;
+        boundary_packets[id].Data =
+            boundary_message.data() + (size_t)id * boundary_bytes;
+    }
+    std::vector<uint8_t> boundary_intermediate;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, boundary_packets, boundary_bytes,
+            boundary_intermediate) != Wirehair_Success)
+    {
+        return false;
+    }
+    std::vector<uint8_t> mixed_oracle_output(7u, 0xa5u);
+    const std::vector<uint8_t> mixed_oracle_before = mixed_oracle_output;
+    if (wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+            system, config, boundary_packets, boundary_bytes,
+            mixed_oracle_output) != Wirehair_InvalidInput ||
+        mixed_oracle_output != mixed_oracle_before)
+    {
+        std::fprintf(stderr,
+            "solve: GF256 tiny oracle accepted mixed coefficients\n");
+        return false;
+    }
+    static const uint32_t target_q[] = {0u, 1u, 2u, 10u, 12u};
+    bool saw_q[sizeof(target_q) / sizeof(target_q[0])] = {};
+    std::vector<std::vector<uint8_t> > repair_blocks(
+        20u, std::vector<uint8_t>(boundary_bytes));
+    for (uint32_t i = 0; i < repair_blocks.size(); ++i)
+    {
+        uint64_t operations = 0u;
+        const uint32_t id = K + i;
+        if (!wirehair_v2::EvaluatePacketBlock(
+                system, config, boundary_intermediate.data(),
+                boundary_bytes, id, repair_blocks[i].data(), &operations) ||
+            operations == 0u)
+        {
+            return false;
+        }
+    }
+    for (uint32_t overhead = 0u; overhead <= repair_blocks.size();
+         ++overhead)
+    {
+        if (overhead != 0u) {
+            wirehair_v2::SolvePacket packet;
+            packet.BlockId = K + overhead - 1u;
+            packet.Data = repair_blocks[overhead - 1u].data();
+            boundary_packets.push_back(packet);
+        }
+        std::vector<uint8_t> output(9u, 0xabu);
+        wirehair_v2::PrecodeSolveStats stats;
+        const WirehairResult result = wirehair_v2::SolvePrecodeSystem(
+            system, config, boundary_packets, boundary_bytes,
+            output, &stats);
+        const uint32_t q =
+            stats.InactivatedColumns - stats.BinaryResidualRank;
+        if (result != Wirehair_Success ||
+            output != boundary_intermediate)
+        {
+            std::fprintf(stderr,
+                "solve: mixed quotient overhead=%u failed result=%d q=%u\n",
+                overhead, (int)result, q);
+            return false;
+        }
+        for (uint32_t t = 0;
+             t < sizeof(target_q) / sizeof(target_q[0]); ++t) {
+            if (q == target_q[t]) saw_q[t] = true;
+        }
+    }
+    for (uint32_t t = 0;
+         t < sizeof(target_q) / sizeof(target_q[0]); ++t) {
+        if (!saw_q[t]) {
+            std::fprintf(stderr,
+                "solve: mixed quotient q=%u fixture missing\n", target_q[t]);
+            return false;
+        }
+    }
+
+    for (uint32_t corrupt_byte = 0u; corrupt_byte < 2u; ++corrupt_byte)
+    {
+        std::vector<wirehair_v2::SolvePacket> inconsistent(
+            boundary_packets.begin(), boundary_packets.begin() + K + 1u);
+        std::vector<uint8_t> corrupt_repair = repair_blocks[0];
+        corrupt_repair[corrupt_byte] ^= 1u;
+        inconsistent.back().Data = corrupt_repair.data();
+        std::vector<uint8_t> inconsistent_output(9u, 0xedu);
+        const std::vector<uint8_t> inconsistent_before =
+            inconsistent_output;
+        wirehair_v2::PrecodeSolveStats inconsistent_stats;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, inconsistent, boundary_bytes,
+                inconsistent_output, &inconsistent_stats) !=
+                Wirehair_Error ||
+            inconsistent_stats.InactivatedColumns -
+                inconsistent_stats.BinaryResidualRank != 11u ||
+            inconsistent_output != inconsistent_before)
+        {
+            std::fprintf(stderr,
+                "solve: mixed zero-coeff inconsistency byte=%u failed\n",
+                corrupt_byte);
+            return false;
+        }
+    }
+    for (uint32_t corrupt_byte = 0u; corrupt_byte < 2u; ++corrupt_byte)
+    {
+        std::vector<uint8_t> corrupt_intermediate = boundary_intermediate;
+        corrupt_intermediate[corrupt_byte] ^= 1u;
+        if (wirehair_v2::VerifyPrecodeSolution(
+                system, config, boundary_packets,
+                corrupt_intermediate.data(), boundary_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: mixed verifier accepted byte=%u corruption\n",
+                corrupt_byte);
+            return false;
+        }
+    }
+
+    std::vector<wirehair_v2::SolvePacket> q13_packets(
+        boundary_packets.begin(), boundary_packets.begin() + (K - 1u));
+    q13_packets.push_back(boundary_packets[0]);
+    std::vector<uint8_t> q13_output(9u, 0xcdu);
+    const std::vector<uint8_t> q13_before = q13_output;
+    wirehair_v2::PrecodeSolveStats q13_stats;
+    wirehair_v2::PrecodeSolveResumeState q13_resume;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, q13_packets, boundary_bytes,
+            q13_output, &q13_stats, &q13_resume) != Wirehair_NeedMore ||
+        q13_stats.InactivatedColumns - q13_stats.BinaryResidualRank != 13u ||
+        q13_stats.ResidualRank != q13_stats.BinaryResidualRank ||
+        q13_output != q13_before || q13_resume.Active)
+    {
+        std::fprintf(stderr,
+            "solve: mixed q13 boundary failed q=%u\n",
+            q13_stats.InactivatedColumns - q13_stats.BinaryResidualRank);
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState prior_resume;
+    prior_resume.Active = true;
+    prior_resume.SourceCount = UINT32_C(0x12345678);
+    prior_resume.CoefficientScratch.assign(3u, 0xa5u);
+    std::vector<uint8_t> prior_output = q13_before;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, q13_packets, boundary_bytes,
+            prior_output, nullptr, &prior_resume) != Wirehair_NeedMore ||
+        !prior_resume.Active ||
+        prior_resume.SourceCount != UINT32_C(0x12345678) ||
+        prior_resume.CoefficientScratch !=
+            std::vector<uint8_t>(3u, 0xa5u) ||
+        prior_output != q13_before)
+    {
+        std::fprintf(stderr,
+            "solve: mixed q13 changed caller resume/output state\n");
+        return false;
+    }
+
+    std::vector<uint8_t> odd_output(17u, 0xa5u);
+    const std::vector<uint8_t> odd_before = odd_output;
+    uint8_t odd_data[3] = {};
+    std::vector<wirehair_v2::SolvePacket> odd_packets(K);
+    for (wirehair_v2::SolvePacket& packet : odd_packets) {
+        packet.BlockId = 0u;
+        packet.Data = odd_data;
+    }
+    wirehair_v2::PrecodeSolveResumeState resume;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, odd_packets, 3u, odd_output, nullptr, &resume) !=
+            Wirehair_InvalidInput ||
+        odd_output != odd_before || resume.Active)
+    {
+        std::fprintf(stderr, "solve: mixed odd rejection failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> deficient_output(17u, 0x5au);
+    const std::vector<uint8_t> deficient_before = deficient_output;
+    uint8_t duplicate[16] = {};
+    std::vector<wirehair_v2::SolvePacket> deficient(K);
+    for (wirehair_v2::SolvePacket& packet : deficient) {
+        packet.BlockId = 0u;
+        packet.Data = duplicate;
+    }
+    wirehair_v2::PrecodeSolveStats deficient_stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, deficient, sizeof(duplicate),
+            deficient_output, &deficient_stats, &resume) !=
+            Wirehair_NeedMore ||
+        deficient_output != deficient_before || resume.Active ||
+        wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u, duplicate, sizeof(duplicate),
+            resume, deficient_output) != Wirehair_InvalidInput ||
+        deficient_output != deficient_before || resume.Active)
+    {
+        std::fprintf(stderr,
+            "solve: mixed deficient/no-resume contract failed\n");
+        return false;
+    }
+    std::printf(
+        "mixed systematic solve/nonzero attempt=%u/no-resume: PASS\n",
+        selected_attempt);
+    return true;
+}
+
 bool RunCase(
     uint32_t K,
     uint32_t block_bytes,
@@ -1512,6 +1789,138 @@ bool CheckInactiveResidualCap()
     return true;
 }
 
+uint64_t RecoveryMix64(uint64_t x)
+{
+    x += UINT64_C(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return x ^ (x >> 31);
+}
+
+bool RunMixedRecoveryBenchmark(uint32_t trials)
+{
+    const uint32_t Ks[] = {1000u, 10000u};
+    const uint32_t overheads[] = {0u, 1u, 2u};
+    for (uint32_t K : Ks)
+    {
+        for (uint32_t field = 0; field < 2u; ++field)
+        {
+            const bool mixed = field != 0u;
+            const uint32_t block_bytes = 2u;
+            std::vector<uint8_t> message((size_t)K * block_bytes, 0u);
+            wirehair_v2::MessagePrecodeEncoderOptions options;
+            if (mixed) {
+                options.Completion =
+                    wirehair_v2::CompletionField::MixedGF256GF16;
+            }
+            wirehair_v2::MessagePrecodeEncoder encoder;
+            if (encoder.InitializeResult(
+                    message.data(), message.size(), block_bytes,
+                    nullptr, &options) != Wirehair_Success)
+            {
+                return false;
+            }
+            wirehair_v2::MessagePrecodeDecoder decoder;
+            if (decoder.InitializeResult(
+                    message.size(), block_bytes, &encoder.Profile()) !=
+                    Wirehair_Success)
+            {
+                return false;
+            }
+            wirehair_v2::PacketRowConfig config;
+            config.PeelSeed = decoder.PacketPeelSeed();
+            config.MixCount = options.RecoveryMixCount;
+            const wirehair_v2::PrecodeSystem& system = decoder.System();
+            for (uint32_t mode = 0; mode < 2u; ++mode)
+            {
+                for (uint32_t overhead : overheads)
+                {
+                    std::atomic<uint32_t> next_trial(0u);
+                    std::atomic<uint32_t> failures(0u);
+                    std::atomic<uint32_t> errors(0u);
+                    const uint32_t hardware = std::max(
+                        1u, std::thread::hardware_concurrency());
+                    const uint32_t worker_count = std::min(trials, hardware);
+                    std::vector<std::thread> workers;
+                    workers.reserve(worker_count);
+                    const std::chrono::steady_clock::time_point begin =
+                        std::chrono::steady_clock::now();
+                    for (uint32_t worker = 0;
+                         worker < worker_count; ++worker)
+                    {
+                        workers.push_back(std::thread([&]() {
+                            const uint8_t zero[2] = {0u, 0u};
+                            std::vector<wirehair_v2::SolvePacket> packets;
+                            std::vector<uint8_t> output;
+                            for (;;)
+                            {
+                                const uint32_t trial = next_trial.fetch_add(1u);
+                                if (trial >= trials) break;
+                                packets.clear();
+                                packets.reserve((size_t)K + overhead);
+                                if (mode == 0u)
+                                {
+                                    uint32_t id = 0u;
+                                    while (packets.size() <
+                                           (size_t)K + overhead)
+                                    {
+                                        const uint64_t random = RecoveryMix64(
+                                            ((uint64_t)trial << 32) ^ id);
+                                        if (random % 10u != 0u) {
+                                            wirehair_v2::SolvePacket packet;
+                                            packet.BlockId = id;
+                                            packet.Data = zero;
+                                            packets.push_back(packet);
+                                        }
+                                        ++id;
+                                    }
+                                }
+                                else
+                                {
+                                    const uint32_t start = K +
+                                        (uint32_t)RecoveryMix64(trial) * 2u;
+                                    for (uint32_t i = 0;
+                                         i < K + overhead; ++i)
+                                    {
+                                        wirehair_v2::SolvePacket packet;
+                                        packet.BlockId = start + i;
+                                        packet.Data = zero;
+                                        packets.push_back(packet);
+                                    }
+                                }
+                                output.clear();
+                                const WirehairResult result =
+                                    wirehair_v2::SolvePrecodeSystem(
+                                        system, config, packets, block_bytes,
+                                        output);
+                                if (result == Wirehair_NeedMore) {
+                                    failures.fetch_add(1u);
+                                }
+                                else if (result != Wirehair_Success) {
+                                    errors.fetch_add(1u);
+                                }
+                            }
+                        }));
+                    }
+                    for (std::thread& worker : workers) worker.join();
+                    const double seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - begin).count();
+                    if (errors.load() != 0u) return false;
+                    std::printf(
+                        "mixed_recovery_bench,profile=%s,K=%u,mode=%s,"
+                        "overhead=%u,trials=%u,failures=%u,attempt=%u,"
+                        "seconds=%.3f\n",
+                        mixed ? "mixed" : "certified", K,
+                        mode == 0u ? "loss10" : "repair-only",
+                        overhead, trials, failures.load(),
+                        encoder.Profile().V2SeedAttempt, seconds);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1519,6 +1928,13 @@ int main(int argc, char** argv)
     static_assert(
         wirehair_v2::kPacketRowContractVersion == 4u,
         "shipping packet-row contract must be version 4");
+    if (argc == 3 &&
+        std::strcmp(argv[1], "--recovery-benchmark") == 0)
+    {
+        const uint32_t trials =
+            (uint32_t)std::strtoul(argv[2], nullptr, 10);
+        return trials == 0u || !RunMixedRecoveryBenchmark(trials) ? 1 : 0;
+    }
     if (argc == 3)
     {
         const uint32_t K = (uint32_t)std::strtoul(argv[1], nullptr, 10);
@@ -1715,6 +2131,7 @@ int main(int argc, char** argv)
     ok = CheckTinyDenseOracle() && ok;
     ok = CheckBinaryQuotientBoundary() && ok;
     ok = CheckIncrementalResume() && ok;
+    ok = CheckMixedSystematicSolve() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;

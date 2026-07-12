@@ -86,8 +86,21 @@ struct PrecodeEncodeStats
     /// direct)
     uint64_t HeavyMulAdds = 0;
 
-    /// GF(256) block ops (muladd/div/copy) solving the H x H Cauchy corner
+    /// Row-level block ops (muladd/div/copy) solving the H x H completion
+    /// corner.  These are GF(256) for the legacy profile and planar
+    /// GF(2^16) for the mixed profile.
     uint64_t HeavySolveBlockOps = 0;
+
+    /// Subset of HeavyMulAdds evaluated with extension-field coefficients.
+    /// The other mixed-profile rows are ordinary GF(256) muladds.
+    uint64_t MixedGF16MulAdds = 0;
+
+    /// Mixed-profile planar GF(2^16) scale/muladd/copy operations used by
+    /// the 12 x 12 completion solve.
+    uint64_t MixedGF16SolveBlockOps = 0;
+
+    /// Full-block deinterleave/interleave conversions in the mixed path.
+    uint64_t MixedPlaneConversions = 0;
 };
 
 /**
@@ -271,6 +284,7 @@ struct MessagePrecodeEncoderOptions
     bool DenseIdentityCorner = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
+    CompletionField Completion = CompletionField::GF256;
 
     // Local codec policy, deliberately excluded from the serialized packet
     // contract.  The encoder retains exact message bytes for direct packet

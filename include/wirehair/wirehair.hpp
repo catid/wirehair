@@ -90,6 +90,24 @@ public:
     }
 
     Result Create(
+        std::uint64_t profileId,
+        const void* message,
+        std::uint64_t messageBytes,
+        std::uint32_t blockBytes,
+        SerializedProfile& profile) noexcept
+    {
+        WirehairV2Codec next = nullptr;
+        std::uint32_t written = 0;
+        const Result result = wirehair_v2_encoder_create_profile_id(
+            profileId, message, messageBytes, blockBytes,
+            profile.data(), profile.size(), &written, &next);
+        if (result == WirehairV2_Success) {
+            Reset(next);
+        }
+        return result;
+    }
+
+    Result Create(
         const void* message,
         const SerializedProfile& profile) noexcept
     {

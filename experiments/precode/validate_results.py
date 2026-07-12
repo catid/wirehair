@@ -23,19 +23,41 @@ REPLAY = [
     "ge_real_bitops_mu", "ge_real_rowops_mu", "fill_in_mu",
     "def_outside_w18_rate", "def_band_w95", "def_band_w99",
 ]
+RUN_METADATA = [
+    "packet_schedule_exhausted_rate", "rowdist", "packet_schedule", "loss",
+    "identity_systematic", "mix", "base_seed", "paired", "max_inact",
+    "max_row_seconds", "requested_trials", "threads", "ge_replay",
+    "ge_replay_reverse", "ge_pivot_window",
+]
 SCHEMAS = {
     tuple(BASE),
     tuple(BASE + HEAVY + REPLAY),
     tuple(BASE + HEAVY + REPLAY + ["runaway_rate"]),
     tuple(BASE + HEAVY + ["runaway_rate"]),
     tuple(["pivot_window"] + BASE + HEAVY + REPLAY + ["runaway_rate"]),
+    tuple(BASE + HEAVY + ["runaway_rate"] + RUN_METADATA),
+    tuple(BASE + HEAVY + REPLAY + ["runaway_rate"] + RUN_METADATA),
 }
 INTEGER_FIELDS = {
     "pivot_window", "K", "D", "H", "oh", "trials", "def_max",
     "inact_max", "def_band_w95", "def_band_w99",
+    "identity_systematic", "mix", "base_seed", "paired", "max_inact",
+    "requested_trials", "threads", "ge_replay", "ge_replay_reverse",
+    "ge_pivot_window",
 }
 RATE_FIELDS = {
     "fail_rate", "fail_rate_noheavy", "def_outside_w18_rate", "runaway_rate",
+    "packet_schedule_exhausted_rate", "loss",
+}
+TEXT_FIELDS = {"scheme", "def_pdf", "rowdist", "packet_schedule"}
+ROWDIST_NAMES = {
+    "wirehair", "lt_m1_c64", "lt_m1_c16", "lt_m2_c1024",
+    "rs_c001_d50_c128", "fixed32", "fixed36", "fixed40", "fixed44",
+    "fixed48", "fixed64", "fixed80", "fixed96", "fixed128", "fixed256",
+    "mix32_128", "mix36_80_p10", "mix36_80_p25", "mix36_128_p10",
+    "mix8_64_p50", "mix8_48_p75", "mix12_64_p50", "mix16_64_p50",
+    "mix16_96_p25", "staged44_16_p125", "staged44_16_p167",
+    "staged44_16_p25", "staged44_12_p167", "log6", "log8",
 }
 
 
@@ -99,24 +121,73 @@ def validate_file(path, seen=None):
                 raise ValidationError(f"{source}:{line}: invalid scheme {row['scheme']!r}")
             values = {}
             for name, text in row.items():
-                if name == "scheme" or name == "def_pdf":
+                if name in TEXT_FIELDS:
                     continue
                 if name in INTEGER_FIELDS:
-                    minimum = 1 if name == "trials" else 0
-                    maximum = 64000 if name == "K" else None
+                    minimum = 1 if name in {"trials", "requested_trials", "threads"} else 0
+                    maximum = ((1 << 64) - 1 if name == "base_seed" else
+                               64000 if name == "K" else
+                               1000000 if name in {"trials", "requested_trials"} else
+                               (1 << 32) - 1)
                     values[name] = uint(text, source, line, name, minimum, maximum)
                 elif name in RATE_FIELDS:
                     values[name] = finite(text, source, line, name, 0.0, 1.0)
                 else:
                     values[name] = finite(text, source, line, name)
+            if "rowdist" in row:
+                if row["rowdist"] not in ROWDIST_NAMES:
+                    raise ValidationError(
+                        f"{source}:{line}: invalid rowdist {row['rowdist']!r}"
+                    )
+                if row["packet_schedule"] not in {
+                        "none", "iid", "burst", "permutation", "repair-only"}:
+                    raise ValidationError(
+                        f"{source}:{line}: invalid packet_schedule "
+                        f"{row['packet_schedule']!r}"
+                    )
+                for name in ("identity_systematic", "paired", "ge_replay",
+                             "ge_replay_reverse"):
+                    if values[name] not in (0, 1):
+                        raise ValidationError(
+                            f"{source}:{line}: {name} must be 0 or 1"
+                        )
+                if values["loss"] > 0.99:
+                    raise ValidationError(
+                        f"{source}:{line}: loss exceeds simulator maximum 0.99"
+                    )
+                if row["packet_schedule"] == "none" and values["loss"] != 0.0:
+                    raise ValidationError(
+                        f"{source}:{line}: loss requires a packet schedule"
+                    )
+                has_replay_columns = "ge_real_rowops_mu" in row
+                if bool(values["ge_replay"]) != has_replay_columns:
+                    raise ValidationError(
+                        f"{source}:{line}: ge_replay metadata disagrees with "
+                        "CSV schema"
+                    )
+                if values["ge_replay_reverse"] and not values["ge_replay"]:
+                    raise ValidationError(
+                        f"{source}:{line}: ge_replay_reverse requires ge_replay"
+                    )
+                if values["ge_pivot_window"] and not values["ge_replay"]:
+                    raise ValidationError(
+                        f"{source}:{line}: ge_pivot_window requires ge_replay"
+                    )
+                if values["trials"] > values["requested_trials"]:
+                    raise ValidationError(
+                        f"{source}:{line}: trials exceeds requested_trials"
+                    )
             if (values["K"] < 2 or values["D"] > 4096 or values["H"] > 128 or
                     values["K"] + values["D"] + values["H"] > 65535 or
                     values["K"] + values["oh"] > 65535):
                 raise ValidationError(f"{source}:{line}: K/D/H/oh outside model domain")
             pdf, tolerance = deficit_pdf(row["def_pdf"], source, line)
-            if any(deficit > 65535 and deficit != 999999 for deficit in pdf):
+            if any(deficit > 65535 and deficit not in (999998, 999999)
+                   for deficit in pdf):
                 raise ValidationError(f"{source}:{line}: def_pdf deficit outside model domain")
-            completed_deficits = [deficit for deficit in pdf if deficit != 999999]
+            completed_deficits = [
+                deficit for deficit in pdf if deficit not in (999998, 999999)
+            ]
             observed_max = max(completed_deficits, default=0)
             if values["def_max"] != observed_max:
                 raise ValidationError(
@@ -133,6 +204,26 @@ def validate_file(path, seen=None):
                 raise ValidationError(
                     f"{source}:{line}: runaway_rate {values['runaway_rate']} != "
                     f"def_pdf sentinel probability {runaway_probability}"
+                )
+            exhausted_probability = pdf.get(999998, 0.0)
+            if ("packet_schedule_exhausted_rate" not in values and
+                    exhausted_probability > 0.0):
+                raise ValidationError(
+                    f"{source}:{line}: schedule-exhaustion sentinel requires "
+                    "packet_schedule_exhausted_rate"
+                )
+            if ("packet_schedule_exhausted_rate" in values and
+                    abs(values["packet_schedule_exhausted_rate"] -
+                        exhausted_probability) > tolerance):
+                raise ValidationError(
+                    f"{source}:{line}: packet_schedule_exhausted_rate "
+                    f"{values['packet_schedule_exhausted_rate']} != def_pdf "
+                    f"sentinel probability {exhausted_probability}"
+                )
+            if exhausted_probability > 0.0 and row.get("packet_schedule") == "none":
+                raise ValidationError(
+                    f"{source}:{line}: schedule-exhaustion sentinel requires "
+                    "a packet schedule"
                 )
             fail = sum(probability for deficit, probability in pdf.items() if deficit > values["H"])
             noheavy = sum(probability for deficit, probability in pdf.items() if deficit > 0)

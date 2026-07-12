@@ -231,6 +231,10 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 \
     UINT64_C(0x4b295bbb47f4f9c9)
 
+/** Even-block mixed 10xGF(256) + 2xGF(2^16) completion profile. */
+#define WIREHAIR_V2_PROFILE_MIXED_2026_07 \
+    UINT64_C(0xe161ce5d456f9bb7)
+
 /** Current serialized V2 equation profile. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
@@ -329,6 +333,24 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_validate(
     every failure.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
+    const void* message,
+    uint64_t messageBytes,
+    uint32_t blockBytes,
+    void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    uint32_t* serializedProfileBytesOut,
+    WirehairV2Codec* codecOut);
+
+/**
+    Select an explicit supported V2 equation profile and create an encoder.
+
+    The current/default profile remains available through
+    wirehair_v2_encoder_create().  The mixed profile requires a positive even
+    blockBytes value.  Unknown IDs and invalid mixed dimensions are rejected
+    before codec allocation or serialized-profile output writes.
+*/
+WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
+    uint64_t profileId,
     const void* message,
     uint64_t messageBytes,
     uint32_t blockBytes,

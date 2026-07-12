@@ -12,7 +12,8 @@ static int wirehair_package_v2_round_trip(
     const uint8_t* message,
     uint32_t message_bytes,
     uint32_t block_bytes,
-    uint32_t block_count)
+    uint32_t block_count,
+    uint64_t profile_id)
 {
     uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint8_t block[32];
@@ -25,13 +26,17 @@ static int wirehair_package_v2_round_trip(
     WirehairV2Codec decoder = 0;
     WirehairV2Result decode_result = WirehairV2_NeedMore;
     uint32_t id;
+    WirehairV2Profile parsed;
 
     if (block_bytes > sizeof(block) || message_bytes > sizeof(recovered) ||
-        wirehair_v2_encoder_create(
-            message, message_bytes, block_bytes,
+        wirehair_v2_encoder_create_profile_id(
+            profile_id, message, message_bytes, block_bytes,
             profile, sizeof(profile), &profile_bytes, &encoder) !=
                 WirehairV2_Success ||
         profile_bytes != sizeof(profile) ||
+        wirehair_v2_profile_deserialize(
+            profile, profile_bytes, &parsed) != WirehairV2_Success ||
+        parsed.profile_id != profile_id ||
         wirehair_v2_encoder_create_profile(
             message, profile, profile_bytes, &recreated) !=
                 WirehairV2_Success ||
@@ -82,6 +87,45 @@ static int wirehair_package_v2_round_trip(
     wirehair_v2_free(encoder);
     wirehair_v2_free(recreated);
     wirehair_v2_free(decoder);
+    return 0;
+}
+
+static int wirehair_package_v2_selector_failures(
+    const uint8_t* message,
+    uint32_t message_bytes)
+{
+    uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    uint32_t profile_bytes = 0;
+    WirehairV2Codec codec;
+    uint32_t i;
+
+    memset(profile, 0xa5, sizeof(profile));
+    codec = (WirehairV2Codec)(uintptr_t)1u;
+    if (wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_2026_07,
+            message, message_bytes, 31u,
+            profile, sizeof(profile), &profile_bytes, &codec) !=
+                WirehairV2_InvalidDimensions || codec != 0)
+    {
+        return 1;
+    }
+    for (i = 0; i < sizeof(profile); ++i) {
+        if (profile[i] != 0xa5u) return 2;
+    }
+
+    memset(profile, 0x5a, sizeof(profile));
+    codec = (WirehairV2Codec)(uintptr_t)1u;
+    if (wirehair_v2_encoder_create_profile_id(
+            UINT64_C(0x0123456789abcdef),
+            message, message_bytes, 32u,
+            profile, sizeof(profile), &profile_bytes, &codec) !=
+                WirehairV2_UnsupportedProfile || codec != 0)
+    {
+        return 3;
+    }
+    for (i = 0; i < sizeof(profile); ++i) {
+        if (profile[i] != 0x5au) return 4;
+    }
     return 0;
 }
 
@@ -209,9 +253,21 @@ int wirehair_package_round_trip(void)
     wirehair_free(encoder);
     wirehair_free(decoder);
     if (wirehair_package_v2_round_trip(
-            message, MessageBytes, BlockBytes, BlockCount) != 0)
+            message, MessageBytes, BlockBytes, BlockCount,
+            WIREHAIR_V2_PROFILE_CERTIFIED_2026_07) != 0)
     {
         return 9;
+    }
+    if (wirehair_package_v2_round_trip(
+            message, MessageBytes, BlockBytes, BlockCount,
+            WIREHAIR_V2_PROFILE_MIXED_2026_07) != 0)
+    {
+        return 10;
+    }
+    if (wirehair_package_v2_selector_failures(
+            message, MessageBytes) != 0)
+    {
+        return 11;
     }
     return 0;
 }

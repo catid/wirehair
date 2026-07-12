@@ -14,7 +14,16 @@ namespace wirehair_v2 {
 // Message packets use a distinct final contract number so they cannot be
 // confused with the separately versioned experimental recovery-row helper.
 static const uint32_t kPacketRowContractVersion = 4u;
-static const uint32_t kPrecodeContractVersion = 2u;
+static const uint32_t kPrecodeContractVersion = 2u; // existing/default alias
+static const uint32_t kMixedPrecodeContractVersion = 3u;
+
+inline uint32_t PrecodeContractVersion(CompletionField field)
+{
+    if (field == CompletionField::GF256) return kPrecodeContractVersion;
+    if (field == CompletionField::MixedGF256GF16)
+        return kMixedPrecodeContractVersion;
+    return 0u;
+}
 static const uint32_t kCertifiedPacketMixCount = 3u;
 static const uint32_t kMaxPacketSeedAttempts = 256u;
 static const uint32_t kMaxInactiveColumns = 4096u;

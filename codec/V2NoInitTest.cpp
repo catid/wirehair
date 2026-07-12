@@ -19,6 +19,8 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         profile.V2StaircaseCount == 0u &&
         profile.V2DenseRowCount == 0u &&
         profile.V2HeavyRowCount == 0u &&
+        profile.V2CompletionField ==
+            wirehair_v2::CompletionField::GF256 &&
         profile.V2SourceHits == 0u && profile.V2PrecodeSeed == 0u &&
         profile.V2PacketPeelSeed == 0u &&
         profile.V2RecoveryMixCount == 0u &&

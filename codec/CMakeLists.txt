@@ -1,4 +1,6 @@
 add_library(wirehair_v2_policy STATIC
+    WirehairV2GF16.cpp
+    WirehairV2GF16.h
     WirehairV2Codec.cpp
     WirehairV2Codec.h
     WirehairV2Peel.cpp
@@ -71,6 +73,11 @@ if (BUILD_TESTS)
     wirehair_apply_project_options(wirehair_v2_precode_test)
     target_link_libraries(wirehair_v2_precode_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_test COMMAND wirehair_v2_precode_test)
+
+    add_executable(wirehair_v2_gf16_test GF16MixedTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_gf16_test)
+    target_link_libraries(wirehair_v2_gf16_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_gf16_test COMMAND wirehair_v2_gf16_test)
 
     add_executable(wirehair_v2_precode_encode_test PrecodeEncodeTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_encode_test)

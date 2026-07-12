@@ -16,6 +16,7 @@ except ImportError:
 
 
 HEADER = validator.BASE + validator.HEAVY + ["runaway_rate"]
+NEW_HEADER = HEADER + validator.RUN_METADATA
 
 
 def valid_row(**changes):
@@ -31,6 +32,20 @@ def valid_row(**changes):
         "fail_rate_noheavy": "0.5",
         "def_max": "7",
         "def_pdf": "0:0.5|1:0.3|7:0.2",
+    })
+    row.update({name: str(value) for name, value in changes.items()})
+    return row
+
+
+def valid_metadata_row(**changes):
+    row = valid_row()
+    row.update({
+        "packet_schedule_exhausted_rate": "0.0", "rowdist": "fixed44",
+        "packet_schedule": "iid", "loss": "0.1",
+        "identity_systematic": "1", "mix": "3", "base_seed": "12345",
+        "paired": "1", "max_inact": "0", "max_row_seconds": "0",
+        "requested_trials": "10", "threads": "8", "ge_replay": "0",
+        "ge_replay_reverse": "0", "ge_pivot_window": "0",
     })
     row.update({name: str(value) for name, value in changes.items()})
     return row
@@ -72,6 +87,29 @@ class ValidateResultsTests(unittest.TestCase):
         rows = validator.validate_file(self.write_csv())
         self.assertEqual(1, len(rows))
         self.assertEqual("dense", rows[0]["scheme"])
+
+    def test_new_metadata_schema_and_exhaustion_sentinel(self):
+        rows = validator.validate_file(self.write_csv(
+            "metadata.csv", rows=[valid_metadata_row()], header=NEW_HEADER))
+        self.assertEqual(0.0, rows[0]["packet_schedule_exhausted_rate"])
+
+        exhausted = valid_metadata_row(
+            fail_rate="1.0", fail_rate_noheavy="1.0", def_mu="0",
+            def_max="0", def_pdf="999998:1.0",
+            packet_schedule_exhausted_rate="1.0", heavy_divs_mu="0",
+        )
+        rows = validator.validate_file(self.write_csv(
+            "exhausted.csv", rows=[exhausted], header=NEW_HEADER))
+        self.assertEqual(1.0, rows[0]["packet_schedule_exhausted_rate"])
+
+        mismatch = dict(exhausted)
+        mismatch["packet_schedule_exhausted_rate"] = "0.0"
+        with self.assertRaisesRegex(
+                validator.ValidationError,
+                "packet_schedule_exhausted_rate"):
+            validator.validate_file(self.write_csv(
+                "exhausted_mismatch.csv", rows=[mismatch],
+                header=NEW_HEADER))
 
     def test_invalid_headers_and_field_counts(self):
         wrong_header = self.write_csv("header.csv", header=HEADER[:-1])

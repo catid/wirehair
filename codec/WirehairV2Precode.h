@@ -1,5 +1,7 @@
 #pragma once
 
+#include "WirehairV2GF16.h"
+
 #include <stdint.h>
 
 #include <vector>
@@ -52,6 +54,7 @@ struct PrecodeParams
     uint32_t DenseRows = 0;    ///< D2: Shuffle-2 dense binary rows
     uint32_t HeavyRows = 0;    ///< H: Cauchy heavy rows
     uint32_t SourceHits = 0;   ///< N1: staircase parities per source column
+    CompletionField Field = CompletionField::GF256;
 
     /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
@@ -82,6 +85,9 @@ struct PrecodeParams
 /// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12,
 /// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
+
+/// Versioned mixed 10-row GF(256) + 2-row GF(2^16) completion rule.
+PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed);
 
 struct PrecodeSystem
 {

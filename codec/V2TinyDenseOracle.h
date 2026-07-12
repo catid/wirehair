@@ -14,7 +14,9 @@ static const size_t kTinyOracleMaxAllocationBytes =
     (size_t)64u * 1024u * 1024u;
 
 /**
-    Independent bounded dense GF(256) oracle for the V2 precode equations.
+    Independent bounded dense GF(256) oracle for the GF256-only V2 precode
+    equations. MixedGF256GF16 systems are rejected as InvalidInput; their
+    coefficients cannot be represented by this oracle's byte matrix.
 
     It accepts arbitrary packet ids, duplicate/conflicting equations, and
     overdetermined inputs.  Success, rank deficiency, and inconsistency map to

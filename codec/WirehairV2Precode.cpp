@@ -119,6 +119,8 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         params.Staircase == 0u ||
         params.SourceHits == 0u || params.SourceHits > 8u ||
         params.DenseRows > 64u || params.HeavyRows > 128u ||
+        (params.Field != CompletionField::GF256 &&
+         params.Field != CompletionField::MixedGF256GF16) ||
         (params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy &&
          params.HeavyFamily != HeavyCoefficientFamily::HashedNonzero) ||
         binary_span > UINT16_MAX || total_span > UINT16_MAX)
@@ -129,6 +131,12 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     // Identity-corner flips address both halves of the K + S deck.
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
+    if (params.Field == CompletionField::MixedGF256GF16 &&
+        (params.HeavyRows != kMixedGF256Rows + kMixedGF16Rows ||
+         params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy))
+    {
+        return false;
+    }
     return !params.DenseIdentityCorner ||
         known_span >= 2u * (uint64_t)(params.DenseRows >> 1);
 }
@@ -147,6 +155,13 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.SourceHits = CertifiedSourceHits(block_count);
     params.DenseIdentityCorner = false;
     params.Seed = seed;
+    return params;
+}
+
+PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed)
+{
+    PrecodeParams params = MakeCertifiedParams(block_count, seed);
+    params.Field = CompletionField::MixedGF256GF16;
     return params;
 }
 
