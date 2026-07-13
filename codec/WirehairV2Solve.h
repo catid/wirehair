@@ -96,6 +96,16 @@ struct PrecodeSolveStats
     uint32_t PacketSeedAttempt = 0;
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/**
+    Enable an independent dense-expansion oracle for mixed completion
+    coefficient projection.  Balanced enable/disable calls are nestable.  Test
+    code uses this to compare the optimized residue-bucket projection against
+    the original L-by-R expansion exactly.
+*/
+void SetMixedProjectionOracleForTesting(bool enabled);
+#endif
+
 /**
     Algebraic checkpoint for appending packet equations after a rank-deficient
     solve.  This is an internal movable value: callers should use

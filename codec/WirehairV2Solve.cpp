@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -146,11 +147,18 @@ bool ForEachPacketMatrixColumn(
     prepare((size_t)params.PeelCount + config.MixCount);
     wirehair::PeelRowIterator source(
         params, (uint16_t)source_count, runtime.SourcePrime());
-    const wirehair::RowMixIterator mix(
-        params, (uint16_t)precode_count, runtime.PrecodePrime());
     do {
         append(source.GetColumn());
     } while (source.Iterate());
+    if (config.MixCount == 1u)
+    {
+        // RowMixIterator's first output is exactly MixFirst.  Avoid producing
+        // its unused second and third columns for the one-mix experiment.
+        append(source_count + params.MixFirst);
+        return true;
+    }
+    const wirehair::RowMixIterator mix(
+        params, (uint16_t)precode_count, runtime.PrecodePrime());
     for (uint32_t i = 0; i < config.MixCount; ++i) {
         append(source_count + mix.Columns[i]);
     }
@@ -197,6 +205,10 @@ struct PeelRowState
 static_assert(
     sizeof(PeelRowState) == sizeof(uint32_t),
     "peel row state must not increase scratch storage");
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+std::atomic<uint32_t> MixedProjectionOracleUsers(0u);
+#endif
 
 bool CheckedBlockStorage(
     uint32_t block_count,
@@ -507,6 +519,233 @@ ResidualInsertResult InsertResidualRow(
     return ResidualInsertResult::Inserted;
 }
 
+bool ProjectMixedCompletionCoefficientsByResidueBuckets(
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t projection_words,
+    const std::vector<uint32_t>& inactive_index,
+    std::vector<uint64_t>& projection,
+    const MixedPackedCoefficients& cached_packed,
+    std::vector<uint64_t>& projected)
+{
+    const uint32_t packed_words = kMixedPackedCoefficientWords;
+    static_assert(
+        kMixedPackedCoefficientWords == 3u,
+        "mixed completion packing changed unexpectedly");
+    const uint32_t expected_projection_words =
+        inactive_count / 64u + ((inactive_count & 63u) != 0u ? 1u : 0u);
+    const uint32_t populated_residues =
+        std::min(kMixedCoefficientPeriod, column_count);
+    const uint64_t projection_elements =
+        (uint64_t)column_count * projection_words;
+    const uint64_t projected_elements =
+        (uint64_t)inactive_count * packed_words;
+    if (inactive_index.size() != column_count ||
+        projection_words != expected_projection_words ||
+        projection_words == 0u ||
+        projection_elements > projection.max_size() ||
+        projection.size() != (size_t)projection_elements ||
+        projected_elements > projected.max_size())
+    {
+        return false;
+    }
+
+    projected.assign((size_t)projected_elements, uint64_t{0});
+    const auto xor_projected = [&](uint32_t index,
+                                   const uint64_t* coefficients) {
+        uint64_t* destination =
+            projected.data() + (size_t)index * packed_words;
+        destination[0] ^= coefficients[0];
+        destination[1] ^= coefficients[1];
+        destination[2] ^= coefficients[2];
+    };
+
+    // At or below one complete coefficient period, no two columns share a
+    // coefficient vector.  Retain the direct expansion so tiny systems pay no
+    // bucket setup cost.
+    if (column_count <= kMixedCoefficientPeriod)
+    {
+        for (uint32_t column = 0; column < column_count; ++column)
+        {
+            const uint64_t* coefficients =
+                cached_packed.ByResidue[column];
+            const uint32_t inactive = inactive_index[column];
+            if (inactive != UINT32_MAX)
+            {
+                if (inactive >= inactive_count) {
+                    return false;
+                }
+                xor_projected(inactive, coefficients);
+                continue;
+            }
+            const uint64_t* bits =
+                projection.data() + (size_t)column * projection_words;
+            for (uint32_t word_index = 0;
+                 word_index < projection_words; ++word_index)
+            {
+                uint64_t word = bits[word_index];
+                while (word != 0u)
+                {
+                    const uint32_t bit =
+                        wirehair::NonzeroLowestBitIndex64(word);
+                    const uint32_t index = (word_index << 6) + bit;
+                    if (index < inactive_count) {
+                        xor_projected(index, coefficients);
+                    }
+                    word &= word - 1u;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Mixed completion coefficients repeat every 244 columns.  Transpose the
+    // projection by coefficient residue before expanding any bits: each of
+    // the first 244 projection rows becomes the parity bucket for that
+    // residue.  Those rows already contain the first affine vector, and all
+    // remaining source rows are at columns >= 244, so no source can alias a
+    // destination.  The caller has finished all other uses of the projection.
+    // This is algebraically identical to dense per-column expansion, costs
+    // (L-244)*projection_words sequential XORs plus 244 final bit scans, and
+    // requires no additional bucket allocation.
+    for (uint32_t initial = 0;
+         initial < kMixedCoefficientPeriod; ++initial)
+    {
+        const uint32_t inactive = inactive_index[initial];
+        if (inactive == UINT32_MAX) {
+            continue;
+        }
+        if (inactive >= inactive_count) {
+            return false;
+        }
+        uint64_t* bucket = projection.data() +
+            (size_t)initial * projection_words;
+        std::fill(bucket, bucket + projection_words, uint64_t{0});
+        bucket[inactive >> 6] =
+            UINT64_C(1) << (inactive & 63u);
+    }
+
+    uint32_t residue = 0u;
+    for (uint32_t column = kMixedCoefficientPeriod;
+         column < column_count; ++column)
+    {
+        uint64_t* bucket = projection.data() +
+            (size_t)residue * projection_words;
+        const uint32_t inactive = inactive_index[column];
+        if (inactive != UINT32_MAX)
+        {
+            if (inactive >= inactive_count) {
+                return false;
+            }
+            bucket[inactive >> 6] ^=
+                UINT64_C(1) << (inactive & 63u);
+        }
+        else
+        {
+            const uint64_t* bits =
+                projection.data() + (size_t)column * projection_words;
+            for (uint32_t word = 0; word < projection_words; ++word) {
+                bucket[word] ^= bits[word];
+            }
+        }
+        if (++residue == kMixedCoefficientPeriod) {
+            residue = 0u;
+        }
+    }
+
+    for (residue = 0u; residue < populated_residues; ++residue)
+    {
+        const uint64_t* coefficients = cached_packed.ByResidue[residue];
+        const uint64_t* bucket = projection.data() +
+            (size_t)residue * projection_words;
+        for (uint32_t word_index = 0;
+             word_index < projection_words; ++word_index)
+        {
+            uint64_t word = bucket[word_index];
+            while (word != 0u)
+            {
+                const uint32_t bit =
+                    wirehair::NonzeroLowestBitIndex64(word);
+                const uint32_t index = (word_index << 6) + bit;
+                if (index < inactive_count)
+                {
+                    xor_projected(index, coefficients);
+                }
+                word &= word - 1u;
+            }
+        }
+    }
+    return true;
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ProjectMixedCompletionCoefficientsByDenseExpansion(
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t projection_words,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint64_t>& projection,
+    const MixedPackedCoefficients& cached_packed,
+    std::vector<uint64_t>& projected)
+{
+    const uint32_t packed_words = kMixedPackedCoefficientWords;
+    const uint64_t projection_elements =
+        (uint64_t)column_count * projection_words;
+    const uint64_t projected_elements =
+        (uint64_t)inactive_count * packed_words;
+    if (inactive_index.size() != column_count ||
+        projection_elements > projection.max_size() ||
+        projection.size() != (size_t)projection_elements ||
+        projected_elements > projected.max_size())
+    {
+        return false;
+    }
+    projected.assign((size_t)projected_elements, uint64_t{0});
+    uint32_t residue = 0u;
+    for (uint32_t column = 0; column < column_count; ++column)
+    {
+        const uint64_t* column_coefficients = cached_packed.ByResidue[residue];
+        if (++residue == kMixedCoefficientPeriod) {
+            residue = 0u;
+        }
+        const auto xor_projected = [&](uint32_t index) {
+            uint64_t* destination =
+                projected.data() + (size_t)index * packed_words;
+            for (uint32_t word = 0; word < packed_words; ++word) {
+                destination[word] ^= column_coefficients[word];
+            }
+        };
+        const uint32_t inactive = inactive_index[column];
+        if (inactive != UINT32_MAX)
+        {
+            if (inactive >= inactive_count) {
+                return false;
+            }
+            xor_projected(inactive);
+            continue;
+        }
+        const uint64_t* bits =
+            projection.data() + (size_t)column * projection_words;
+        for (uint32_t word_index = 0;
+             word_index < projection_words; ++word_index)
+        {
+            uint64_t word = bits[word_index];
+            while (word != 0u)
+            {
+                const uint32_t bit =
+                    wirehair::NonzeroLowestBitIndex64(word);
+                const uint32_t index = (word_index << 6) + bit;
+                if (index < inactive_count) {
+                    xor_projected(index);
+                }
+                word &= word - 1u;
+            }
+        }
+    }
+    return true;
+}
+#endif
+
 WirehairResult SolveMixedCompletionQuotient(
     const PrecodeSystem& system,
     uint32_t column_count,
@@ -515,7 +754,7 @@ WirehairResult SolveMixedCompletionQuotient(
     uint32_t block_bytes,
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint32_t>& inactive_columns,
-    const std::vector<uint64_t>& projection,
+    std::vector<uint64_t>& projection,
     const std::vector<uint8_t>& binary_pivot_coeff,
     const std::vector<uint8_t>& binary_pivot_rhs,
     const std::vector<uint8_t>& binary_have_pivot,
@@ -524,11 +763,24 @@ WirehairResult SolveMixedCompletionQuotient(
     PrecodeSolveStats& stats)
 {
     const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+    const uint64_t projection_elements =
+        (uint64_t)column_count * projection_words;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
         system.Params.HeavyRows != H || (block_bytes & 1u) != 0u ||
-        binary_rank > inactive_count)
+        binary_rank > inactive_count ||
+        inactive_index.size() != column_count ||
+        inactive_columns.size() != inactive_count ||
+        projection_elements > projection.max_size() ||
+        projection.size() != (size_t)projection_elements)
     {
         return Wirehair_InvalidInput;
+    }
+    for (uint32_t index = 0; index < inactive_count; ++index)
+    {
+        const uint32_t column = inactive_columns[index];
+        if (column >= column_count || inactive_index[column] != index) {
+            return Wirehair_InvalidInput;
+        }
     }
     stats.BinaryResidualRank = binary_rank;
     stats.ResidualRank = binary_rank;
@@ -565,45 +817,31 @@ WirehairResult SolveMixedCompletionQuotient(
     {
         return Wirehair_OOM;
     }
-    std::vector<uint64_t> projected(
-        (size_t)inactive_count * packed_words, 0u);
-    uint32_t rolling_residue = 0u;
-    for (uint32_t column = 0; column < column_count; ++column)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const bool check_projection_oracle =
+        MixedProjectionOracleUsers.load(std::memory_order_relaxed) != 0u;
+    std::vector<uint64_t> dense_projected;
+    if (check_projection_oracle &&
+        !ProjectMixedCompletionCoefficientsByDenseExpansion(
+            column_count, inactive_count, projection_words,
+            inactive_index, projection, *cached_packed, dense_projected))
     {
-        const uint32_t residue = rolling_residue;
-        if (++rolling_residue == kMixedCoefficientPeriod) {
-            rolling_residue = 0u;
-        }
-        const uint64_t* column_coefficients =
-            cached_packed->ByResidue[residue];
-        const auto xor_projected = [&](uint32_t index) {
-            uint64_t* destination =
-                projected.data() + (size_t)index * packed_words;
-            for (uint32_t word = 0; word < packed_words; ++word) {
-                destination[word] ^= column_coefficients[word];
-            }
-        };
-        const uint32_t inactive = inactive_index[column];
-        if (inactive != UINT32_MAX) {
-            xor_projected(inactive);
-            continue;
-        }
-        const uint64_t* bits =
-            projection.data() + (size_t)column * projection_words;
-        for (uint32_t word_index = 0;
-             word_index < projection_words; ++word_index)
-        {
-            uint64_t word = bits[word_index];
-            while (word != 0u)
-            {
-                const uint32_t bit =
-                    wirehair::NonzeroLowestBitIndex64(word);
-                const uint32_t index = (word_index << 6) + bit;
-                if (index < inactive_count) xor_projected(index);
-                word &= word - 1u;
-            }
-        }
+        return Wirehair_Error;
     }
+#endif
+    std::vector<uint64_t> projected;
+    if (!ProjectMixedCompletionCoefficientsByResidueBuckets(
+            column_count, inactive_count, projection_words,
+            inactive_index, projection, *cached_packed, projected) ||
+        projected.size() != (size_t)inactive_count * packed_words)
+    {
+        return Wirehair_Error;
+    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (check_projection_oracle && dense_projected != projected) {
+        return Wirehair_Error;
+    }
+#endif
 
     std::vector<uint8_t> subfield_coeff(
         (size_t)kMixedGF256Rows * inactive_count, 0u);
@@ -1238,6 +1476,26 @@ bool RowIsZero(const uint8_t* data, uint32_t bytes)
 
 } // namespace
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void SetMixedProjectionOracleForTesting(bool enabled)
+{
+    if (enabled) {
+        MixedProjectionOracleUsers.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    uint32_t users =
+        MixedProjectionOracleUsers.load(std::memory_order_relaxed);
+    while (users != 0u &&
+           !MixedProjectionOracleUsers.compare_exchange_weak(
+               users, users - 1u,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed))
+    {
+    }
+    CAT_DEBUG_ASSERT(users != 0u);
+}
+#endif
+
 void PrecodeSolveResumeState::Clear()
 {
     PrecodeSolveResumeState empty;
@@ -1464,13 +1722,13 @@ static bool EvaluatePacketBlockImpl(
         block_id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
     wirehair::PeelRowIterator source(
         params, (uint16_t)K, runtime.SourcePrime());
-    const wirehair::RowMixIterator mix(
-        params, (uint16_t)P, runtime.PrecodePrime());
     uint64_t operations = 1u;
     const uint8_t* first_source =
         intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
     if (config.MixCount == kCertifiedPacketMixCount)
     {
+        const wirehair::RowMixIterator mix(
+            params, (uint16_t)P, runtime.PrecodePrime());
         // The certified three-mix contract mirrors the production codec's
         // fused evaluation schedule: initialize from two sources with addset
         // (or source 0 + mix 0 for a weight-one row), then consume the final
@@ -1522,6 +1780,8 @@ static bool EvaluatePacketBlockImpl(
     }
     else if (config.MixCount == 2u)
     {
+        const wirehair::RowMixIterator mix(
+            params, (uint16_t)P, runtime.PrecodePrime());
         // The two-mix packet contract has the same fused opportunities:
         // initialize from two sources when possible, then consume both mix
         // terms in one destination pass.  A weight-one source row instead
@@ -1572,28 +1832,59 @@ static bool EvaluatePacketBlockImpl(
     }
     else
     {
-        // Other experiment configurations retain the generic loop.
-        std::memcpy(
-            block_out,
-            first_source,
-            block_bytes);
-        while (source.Iterate())
+        // Runtime validation leaves exactly the one-mix experiment here.
+        // RowMixIterator's first output is MixFirst, so avoid producing the
+        // unused second and third columns.
+        const uint8_t* const mix_source = intermediate_blocks +
+            (size_t)(K + params.MixFirst) * block_bytes;
+        if (params.PeelCount == 1u)
         {
-            gf256_add_mem(
+            gf256_addset_mem(
+                block_out, first_source, mix_source, (int)block_bytes);
+            ++operations;
+        }
+        else
+        {
+            // Initialize from the first two source terms.  For three or more
+            // sources, leave the final source pending so it can be consumed
+            // with the mix term in one destination pass.
+            (void)source.Iterate();
+            gf256_addset_mem(
                 block_out,
+                first_source,
                 intermediate_blocks +
                     (size_t)source.GetColumn() * block_bytes,
                 (int)block_bytes);
             ++operations;
-        }
-        for (uint32_t i = 0; i < config.MixCount; ++i)
-        {
-            gf256_add_mem(
-                block_out,
-                intermediate_blocks +
-                    (size_t)(K + mix.Columns[i]) * block_bytes,
-                (int)block_bytes);
-            ++operations;
+            if (params.PeelCount == 2u)
+            {
+                gf256_add_mem(
+                    block_out, mix_source, (int)block_bytes);
+                ++operations;
+            }
+            else
+            {
+                for (uint32_t source_index = 2u;
+                     source_index + 1u < params.PeelCount;
+                     ++source_index)
+                {
+                    (void)source.Iterate();
+                    gf256_add_mem(
+                        block_out,
+                        intermediate_blocks +
+                            (size_t)source.GetColumn() * block_bytes,
+                        (int)block_bytes);
+                    ++operations;
+                }
+                (void)source.Iterate();
+                gf256_add2_mem(
+                    block_out,
+                    intermediate_blocks +
+                        (size_t)source.GetColumn() * block_bytes,
+                    mix_source,
+                    (int)block_bytes);
+                operations += 2u;
+            }
         }
     }
     if (block_ops_out) {

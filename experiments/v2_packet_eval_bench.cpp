@@ -186,6 +186,177 @@ bool RunColdSolveRowBuild(unsigned samples, uint32_t mix_count)
     return true;
 }
 
+void AddSourcesPaired(
+    uint8_t* destination,
+    const void* const* sources,
+    uint32_t source_count,
+    uint32_t block_bytes)
+{
+    uint32_t source = 0u;
+    for (; source + 1u < source_count; source += 2u) {
+        gf256_add2_mem(
+            destination, sources[source], sources[source + 1u],
+            (int)block_bytes);
+    }
+    if (source < source_count) {
+        gf256_add_mem(destination, sources[source], (int)block_bytes);
+    }
+}
+
+bool RunGatherXorSize(
+    uint32_t block_bytes,
+    uint32_t source_count,
+    unsigned samples)
+{
+    if (block_bytes == 0u || block_bytes > 0x7fffffffu ||
+        source_count < 3u || source_count > 8u ||
+        block_bytes > std::numeric_limits<size_t>::max() / source_count)
+    {
+        return false;
+    }
+    const size_t source_bytes = (size_t)source_count * block_bytes;
+    AlignedStorage source_storage(source_bytes);
+    AlignedStorage initial(block_bytes);
+    AlignedStorage reference_output(block_bytes);
+    AlignedStorage paired_output(block_bytes);
+    AlignedStorage gather_output(block_bytes);
+    const void* sources[8] = {};
+    for (uint32_t source = 0u; source < source_count; ++source) {
+        sources[source] = source_storage.Data + (size_t)source * block_bytes;
+    }
+    for (size_t i = 0u; i < source_bytes; ++i) {
+        source_storage.Data[i] = (uint8_t)(i * 193u + (i >> 9) + 0x6du);
+    }
+    for (uint32_t i = 0u; i < block_bytes; ++i) {
+        initial.Data[i] = (uint8_t)(i * 131u + (i >> 3) + 0x27u);
+    }
+
+    // Use an independent byte oracle through both repetition parities.
+    // Checking only the result after the adaptive repetition count is
+    // insufficient: an even count cancels every XOR term and could conceal a
+    // broken kernel.
+    static const unsigned kOracleRepetitions[] = { 1u, 2u, 3u };
+    for (unsigned oracle_repetitions : kOracleRepetitions)
+    {
+        std::memcpy(reference_output.Data, initial.Data, block_bytes);
+        std::memcpy(paired_output.Data, initial.Data, block_bytes);
+        std::memcpy(gather_output.Data, initial.Data, block_bytes);
+        for (unsigned repetition = 0u;
+             repetition < oracle_repetitions;
+             ++repetition)
+        {
+            for (uint32_t source = 0u; source < source_count; ++source) {
+                const uint8_t* const input = static_cast<const uint8_t*>(
+                    sources[source]);
+                for (uint32_t i = 0u; i < block_bytes; ++i) {
+                    reference_output.Data[i] ^= input[i];
+                }
+            }
+            AddSourcesPaired(
+                paired_output.Data, sources, source_count, block_bytes);
+            gf256_add_multi_mem(
+                gather_output.Data, sources,
+                (int)source_count, (int)block_bytes);
+        }
+        if (std::memcmp(
+                paired_output.Data, reference_output.Data, block_bytes) != 0 ||
+            std::memcmp(
+                gather_output.Data, reference_output.Data, block_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "XOR oracle mismatch bb=%u sources=%u repetitions=%u\n",
+                block_bytes, source_count, oracle_repetitions);
+            return false;
+        }
+    }
+
+    const uint64_t target_source_bytes = UINT64_C(32) << 20;
+    uint64_t repetitions_wide = target_source_bytes /
+        ((uint64_t)source_count * block_bytes);
+    repetitions_wide = std::max<uint64_t>(1u, repetitions_wide);
+    repetitions_wide = std::min<uint64_t>(UINT64_C(262144), repetitions_wide);
+    const unsigned repetitions = (unsigned)repetitions_wide;
+    volatile uint64_t sink = 0u;
+    const auto measure = [&](bool gather) {
+        uint8_t* const output = gather ?
+            gather_output.Data : paired_output.Data;
+        std::memcpy(output, initial.Data, block_bytes);
+        const Clock::time_point start = Clock::now();
+        for (unsigned repetition = 0u;
+             repetition < repetitions; ++repetition)
+        {
+            if (gather) {
+                gf256_add_multi_mem(
+                    output, sources, (int)source_count, (int)block_bytes);
+            }
+            else {
+                AddSourcesPaired(
+                    output, sources, source_count, block_bytes);
+            }
+        }
+        const double elapsed =
+            std::chrono::duration<double>(Clock::now() - start).count();
+        sink ^= output[(uint32_t)(
+            ((uint64_t)repetitions * 257u + source_count) % block_bytes)];
+        return elapsed;
+    };
+
+    // Warm both real kernels and verify the algebra before timing.
+    (void)measure(false);
+    (void)measure(true);
+    if (std::memcmp(
+            paired_output.Data, gather_output.Data, block_bytes) != 0)
+    {
+        std::fprintf(stderr,
+            "paired/gather XOR mismatch bb=%u sources=%u\n",
+            block_bytes, source_count);
+        return false;
+    }
+
+    std::vector<double> paired_seconds;
+    std::vector<double> gather_seconds;
+    std::vector<double> ratios;
+    paired_seconds.reserve(samples);
+    gather_seconds.reserve(samples);
+    ratios.reserve(samples);
+    for (unsigned sample = 0u; sample < samples; ++sample)
+    {
+        double paired;
+        double gather;
+        if ((sample & 1u) == 0u) {
+            paired = measure(false);
+            gather = measure(true);
+        }
+        else {
+            gather = measure(true);
+            paired = measure(false);
+        }
+        if (std::memcmp(
+                paired_output.Data, gather_output.Data, block_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "timed paired/gather XOR mismatch bb=%u sources=%u "
+                "sample=%u\n",
+                block_bytes, source_count, sample);
+            return false;
+        }
+        paired_seconds.push_back(paired);
+        gather_seconds.push_back(gather);
+        ratios.push_back(gather / paired);
+    }
+    const double ratio = Median(ratios);
+    std::printf(
+        "paired_gather bb=%u sources=%u reps=%u samples=%u "
+        "paired_median_ms=%.6f gather_median_ms=%.6f "
+        "gather_over_paired_ratio=%.6f gather_improvement=%.3f%% "
+        "sink=%" PRIu64 "\n",
+        block_bytes, source_count, repetitions, samples,
+        Median(paired_seconds) * 1000.0,
+        Median(gather_seconds) * 1000.0,
+        ratio, (1.0 - ratio) * 100.0, (uint64_t)sink);
+    return true;
+}
+
 bool RunSize(
     const wirehair_v2::PrecodeSystem& system,
     const wirehair_v2::PacketRowConfig& config,
@@ -204,7 +375,33 @@ bool RunSize(
     for (size_t i = 0; i < total_bytes; ++i) {
         intermediate.Data[i] = (uint8_t)(i * 131u + (i >> 13) + 17u);
     }
-    const std::vector<uint32_t> rows = FixedRows(K);
+    std::vector<uint32_t> rows = FixedRows(K);
+    if (config.MixCount == 1u)
+    {
+        // FixedRows represents the common distribution but happens not to
+        // contain the singleton peel shape.  Add one deterministic singleton
+        // so the production addset(source, mix) branch is covered by both the
+        // byte oracle and the timed workload.
+        bool found_singleton = false;
+        for (uint32_t id = 0u; id < 1000000u; ++id)
+        {
+            wirehair::PeelRowParameters params;
+            params.Initialize(
+                id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+            if (params.PeelCount == 1u)
+            {
+                if (std::find(rows.begin(), rows.end(), id) == rows.end()) {
+                    rows.push_back(id);
+                }
+                found_singleton = true;
+                break;
+            }
+        }
+        if (!found_singleton) {
+            std::fprintf(stderr, "mix1 singleton fixture not found\n");
+            return false;
+        }
+    }
     wirehair_v2::PacketRowRuntime runtime;
     if (!runtime.Initialize(K, P, config.MixCount)) {
         return false;
@@ -231,6 +428,9 @@ bool RunSize(
         }
         else if (config.MixCount == 2u) {
             fused_traffic_reduction += source_degree == 1u ? 2u : 4u;
+        }
+        else if (config.MixCount == 1u) {
+            fused_traffic_reduction += source_degree <= 2u ? 2u : 4u;
         }
         EvaluateBaseline(
             system, config, intermediate.Data, block_bytes, id,
@@ -364,30 +564,60 @@ int main(int argc, char** argv)
 {
     unsigned samples = 40u;
     uint32_t mix_count = wirehair_v2::kCertifiedPacketMixCount;
+    bool run_packet = true;
+    bool run_gather = false;
     if (argc >= 2) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(argv[1], &end, 10);
         if (!end || *end != '\0' || parsed < 30u || parsed > 1000u) {
             std::fprintf(stderr,
-                "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
+                "usage: %s [samples=30..1000] [mix_count=1|2|3] "
+                "[mode=packet|gather|all]\n",
+                argv[0]);
             return 2;
         }
         samples = (unsigned)parsed;
     }
-    if (argc == 3)
+    if (argc >= 3)
     {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(argv[2], &end, 10);
-        if (!end || *end != '\0' || (parsed != 2u && parsed != 3u)) {
+        if (!end || *end != '\0' || parsed < 1u || parsed > 3u) {
             std::fprintf(stderr,
-                "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
+                "usage: %s [samples=30..1000] [mix_count=1|2|3] "
+                "[mode=packet|gather|all]\n",
+                argv[0]);
             return 2;
         }
         mix_count = (uint32_t)parsed;
     }
-    else if (argc > 3) {
+    if (argc == 4)
+    {
+        if (std::strcmp(argv[3], "packet") == 0) {
+            run_packet = true;
+            run_gather = false;
+        }
+        else if (std::strcmp(argv[3], "gather") == 0) {
+            run_packet = false;
+            run_gather = true;
+        }
+        else if (std::strcmp(argv[3], "all") == 0) {
+            run_packet = true;
+            run_gather = true;
+        }
+        else {
+            std::fprintf(stderr,
+                "usage: %s [samples=30..1000] [mix_count=1|2|3] "
+                "[mode=packet|gather|all]\n",
+                argv[0]);
+            return 2;
+        }
+    }
+    else if (argc > 4) {
         std::fprintf(stderr,
-            "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
+            "usage: %s [samples=30..1000] [mix_count=1|2|3] "
+            "[mode=packet|gather|all]\n",
+            argv[0]);
         return 2;
     }
     if (gf256_init() != 0) {
@@ -417,16 +647,39 @@ int main(int argc, char** argv)
     }
 
     bool ok = true;
-    ok = RunColdSolveRowBuild(samples, mix_count) && ok;
-    ok = RunSize(system, config, 1u, 4096u, samples) && ok;
-    // The mixed completion candidate requires even block bytes.  Keep a
-    // short sub-cacheline sweep so wrapper overhead at bb=1 cannot conceal a
-    // regression (or win) in the smallest reachable production packets.
-    ok = RunSize(system, config, 2u, 4096u, samples) && ok;
-    ok = RunSize(system, config, 8u, 4096u, samples) && ok;
-    ok = RunSize(system, config, 32u, 4096u, samples) && ok;
-    ok = RunSize(system, config, 1280u, 2048u, samples) && ok;
-    ok = RunSize(system, config, 100u * 1024u, 32u, samples) && ok;
-    ok = RunSize(system, config, 1024u * 1024u, 3u, samples) && ok;
+    if (run_packet) {
+        ok = RunColdSolveRowBuild(samples, mix_count) && ok;
+    }
+    if (run_gather)
+    {
+        static const uint32_t kGatherSizes[] = {
+            1u, 2u, 7u, 8u, 15u, 16u, 17u, 31u, 32u, 33u,
+            63u, 64u, 65u, 127u, 128u, 129u,
+            255u, 256u, 257u, 511u, 512u, 513u,
+            1023u, 1024u, 1025u, 1279u, 1280u, 1281u, 4096u,
+            16u * 1024u, 64u * 1024u, 100u * 1024u,
+            128u * 1024u - 1u, 128u * 1024u, 128u * 1024u + 1u,
+            256u * 1024u, 1024u * 1024u
+        };
+        for (uint32_t source_count = 3u; source_count <= 8u; ++source_count) {
+            for (uint32_t block_bytes : kGatherSizes) {
+                ok = RunGatherXorSize(
+                    block_bytes, source_count, samples) && ok;
+            }
+        }
+    }
+    if (run_packet)
+    {
+        ok = RunSize(system, config, 1u, 4096u, samples) && ok;
+        // The mixed completion candidate requires even block bytes.  Keep a
+        // short sub-cacheline sweep so wrapper overhead at bb=1 cannot conceal
+        // a regression (or win) in the smallest reachable production packets.
+        ok = RunSize(system, config, 2u, 4096u, samples) && ok;
+        ok = RunSize(system, config, 8u, 4096u, samples) && ok;
+        ok = RunSize(system, config, 32u, 4096u, samples) && ok;
+        ok = RunSize(system, config, 1280u, 2048u, samples) && ok;
+        ok = RunSize(system, config, 100u * 1024u, 32u, samples) && ok;
+        ok = RunSize(system, config, 1024u * 1024u, 3u, samples) && ok;
+    }
     return ok ? 0 : 1;
 }

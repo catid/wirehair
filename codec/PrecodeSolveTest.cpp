@@ -20,6 +20,20 @@
 
 namespace {
 
+class MixedProjectionOracleScope
+{
+public:
+    MixedProjectionOracleScope()
+    {
+        wirehair_v2::SetMixedProjectionOracleForTesting(true);
+    }
+
+    ~MixedProjectionOracleScope()
+    {
+        wirehair_v2::SetMixedProjectionOracleForTesting(false);
+    }
+};
+
 bool CheckLowestBitIndex()
 {
     for (unsigned bit = 0u; bit < 64u; ++bit)
@@ -58,6 +72,30 @@ bool CheckLowestBitIndex()
     return true;
 }
 
+std::vector<uint32_t> ReferencePacketRow(
+    uint32_t K,
+    uint32_t P,
+    uint32_t block_id,
+    const wirehair_v2::PacketRowConfig& config)
+{
+    wirehair::PeelRowParameters params;
+    params.Initialize(
+        block_id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+    std::vector<uint32_t> row;
+    row.reserve((size_t)params.PeelCount + config.MixCount);
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)K, wirehair::NextPrime16((uint16_t)K));
+    do {
+        row.push_back(source.GetColumn());
+    } while (source.Iterate());
+    const wirehair::RowMixIterator mix(
+        params, (uint16_t)P, wirehair::NextPrime16((uint16_t)P));
+    for (uint32_t i = 0u; i < config.MixCount; ++i) {
+        row.push_back(K + mix.Columns[i]);
+    }
+    return row;
+}
+
 std::vector<uint8_t> ReferencePacket(
     uint32_t K,
     uint32_t P,
@@ -68,7 +106,7 @@ std::vector<uint8_t> ReferencePacket(
 {
     std::vector<uint8_t> expected(block_bytes, 0u);
     const std::vector<uint32_t> row =
-        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+        ReferencePacketRow(K, P, block_id, config);
     for (uint32_t column : row) {
         const uint8_t* source =
             intermediate + (size_t)column * block_bytes;
@@ -114,6 +152,17 @@ bool CheckPacketEvaluationCase(
     std::vector<uint8_t> expected_storage = output_storage;
     const std::vector<uint8_t> expected = ReferencePacket(
         K, P, block_id, config, intermediate, block_bytes);
+    const std::vector<uint32_t> expected_row =
+        ReferencePacketRow(K, P, block_id, config);
+    const std::vector<uint32_t> generated_row =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+    if (generated_row != expected_row)
+    {
+        std::fprintf(stderr,
+            "solve: packet row/reference mismatch id=%u mix=%u\n",
+            block_id, config.MixCount);
+        return false;
+    }
     std::memcpy(
         expected_storage.data() + (output - output_storage.data()),
         expected.data(),
@@ -127,8 +176,7 @@ bool CheckPacketEvaluationCase(
         wirehair_v2::EvaluatePacketBlock(
             system, config, intermediate, block_bytes, block_id,
             output, &operations);
-    const size_t row_size = wirehair_v2::GeneratePacketMatrixRow(
-        K, P, block_id, config).size();
+    const size_t row_size = expected_row.size();
     if (!evaluated || operations != row_size ||
         output_storage != expected_storage || input_storage != input_before)
     {
@@ -181,9 +229,13 @@ bool CheckPacketEvaluationFusion()
     config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
 
     // Pin examples from the complete source-weight shape: singleton, the two
-    // common low weights, a mid-weight row, and the capped heavy tail.
-    uint32_t ids[5] = {
-        UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX
+    // common low weights, a mid-weight row, and the capped heavy tail.  A
+    // high-bit public id separately guards the full repair-id domain.
+    static const unsigned kWeightFixtureCount = 5u;
+    static const unsigned kFixtureCount = kWeightFixtureCount + 1u;
+    uint32_t ids[kFixtureCount] = {
+        UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+        UINT32_C(0xf1234567)
     };
     for (uint32_t id = 0u; id < 1000000u; ++id)
     {
@@ -191,13 +243,13 @@ bool CheckPacketEvaluationFusion()
             K, P, id, config).size();
         const uint32_t degree =
             (uint32_t)row_size - config.MixCount;
-        unsigned slot = 5u;
+        unsigned slot = kWeightFixtureCount;
         if (degree == 1u) slot = 0u;
         else if (degree == 2u) slot = 1u;
         else if (degree == 3u) slot = 2u;
         else if (degree >= 8u && degree <= 16u) slot = 3u;
         else if (degree >= 32u) slot = 4u;
-        if (slot < 5u && ids[slot] == UINT32_MAX) {
+        if (slot < kWeightFixtureCount && ids[slot] == UINT32_MAX) {
             ids[slot] = id;
         }
         if (ids[0] != UINT32_MAX && ids[1] != UINT32_MAX &&
@@ -207,7 +259,7 @@ bool CheckPacketEvaluationFusion()
             break;
         }
     }
-    for (unsigned i = 0; i < 5u; ++i) {
+    for (unsigned i = 0; i < kWeightFixtureCount; ++i) {
         if (ids[i] == UINT32_MAX) {
             std::fprintf(stderr,
                 "solve: packet evaluation source-weight fixture %u missing\n",
@@ -222,13 +274,13 @@ bool CheckPacketEvaluationFusion()
     };
     static const unsigned kOffsets[] = { 0u, 1u, 7u, 15u, 31u, 63u };
     static const uint32_t kFusedMixCounts[] = {
-        wirehair_v2::kCertifiedPacketMixCount, 2u
+        wirehair_v2::kCertifiedPacketMixCount, 2u, 1u
     };
     for (uint32_t mix_count : kFusedMixCounts)
     {
         wirehair_v2::PacketRowConfig fused = config;
         fused.MixCount = mix_count;
-        for (unsigned weight_i = 0; weight_i < 5u; ++weight_i)
+        for (unsigned weight_i = 0; weight_i < kFixtureCount; ++weight_i)
         {
             for (unsigned length_i = 0;
                  length_i < sizeof(kLengths) / sizeof(kLengths[0]);
@@ -248,16 +300,6 @@ bool CheckPacketEvaluationFusion()
                 }
             }
         }
-    }
-
-    // A one-mix row still exercises the generic loop after both fused paths.
-    wirehair_v2::PacketRowConfig fallback = config;
-    fallback.MixCount = 1u;
-    if (!CheckPacketEvaluationCase(
-            system, fallback, UINT32_C(0xf1234567), 257u,
-            7u, 13u, false))
-    {
-        return false;
     }
 
     // Hard-coded packet bytes guard the shipping equation and fused schedule
@@ -950,6 +992,107 @@ bool CheckIncrementalResume()
     return CheckIncrementalResumeCase(17u) &&
         CheckIncrementalResumeCase(
             wirehair_v2::kBinaryQuotientMinBlockBytes);
+}
+
+bool CheckMixedProjectionResidueBucketsOracle()
+{
+    MixedProjectionOracleScope oracle_scope;
+    static const uint32_t kBlockCounts[] = {
+        2u, 3u, 10u, 63u, 64u, 127u, 128u,
+        // S=30 and D2+H=24, so these exercise exact total-column counts
+        // L=243, 244, and 245 around the coefficient-period transition.
+        189u, 190u, 191u,
+        243u, 244u, 245u, 320u, 1000u
+    };
+    for (size_t case_index = 0;
+         case_index < sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
+         ++case_index)
+    {
+        const uint32_t K = kBlockCounts[case_index];
+        const uint32_t block_bytes = (case_index & 1u) == 0u ? 2u : 6u;
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(
+                K,
+                UINT64_C(0x70726f6a65637400) ^
+                    ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)));
+        wirehair_v2::PacketRowConfig base_config;
+        base_config.PeelSeed =
+            UINT32_C(0x6f72636c) ^ K * UINT32_C(0x9e3779b9);
+        base_config.MixCount = (case_index & 1u) == 0u ? 2u : 3u;
+        wirehair_v2::PrecodeSystem system;
+        wirehair_v2::PacketRowConfig config;
+        if (wirehair_v2::SelectSystematicConfiguration(
+                params, base_config, system, config) != Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "solve: mixed projection oracle selection failed K=%u\n", K);
+            return false;
+        }
+
+        std::vector<uint8_t> message((size_t)K * block_bytes);
+        for (size_t i = 0; i < message.size(); ++i) {
+            message[i] = (uint8_t)(
+                i * 157u + (i >> 3) + K * 29u + case_index);
+        }
+        std::vector<wirehair_v2::SolvePacket> systematic(K);
+        for (uint32_t id = 0u; id < K; ++id) {
+            systematic[id].BlockId = id;
+            systematic[id].Data =
+                message.data() + (size_t)id * block_bytes;
+        }
+        std::vector<uint8_t> expected;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, systematic, block_bytes, expected) !=
+                Wirehair_Success ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, systematic, expected.data(), block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: mixed projection systematic oracle failed K=%u\n", K);
+            return false;
+        }
+
+        // Replay a deterministic lossy schedule containing repair ids.  This
+        // changes the peel graph while preserving one exact expected solution;
+        // the enabled hook independently compares every packed inactive
+        // coefficient against the original dense projection expansion.
+        const size_t delivered_count = (size_t)K + 20u;
+        std::vector<uint8_t> delivered_storage(
+            delivered_count * block_bytes);
+        std::vector<wirehair_v2::SolvePacket> delivered;
+        delivered.reserve(delivered_count);
+        for (uint32_t id = 0u; delivered.size() < delivered_count; ++id)
+        {
+            if ((id + (uint32_t)case_index) % 11u == 0u) {
+                continue;
+            }
+            uint8_t* block = delivered_storage.data() +
+                delivered.size() * block_bytes;
+            if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                    system, config, expected.data(), block_bytes, id, block))
+            {
+                return false;
+            }
+            wirehair_v2::SolvePacket packet;
+            packet.BlockId = id;
+            packet.Data = block;
+            delivered.push_back(packet);
+        }
+        std::vector<uint8_t> recovered;
+        if (wirehair_v2::SolvePrecodeSystem(
+                system, config, delivered, block_bytes, recovered) !=
+                Wirehair_Success ||
+            recovered != expected ||
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, delivered, recovered.data(), block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: mixed projection repair oracle failed K=%u\n", K);
+            return false;
+        }
+    }
+    std::printf("mixed residue-bucket projection oracle: PASS\n");
+    return true;
 }
 
 bool CheckMixedSystematicSolve()
@@ -2224,6 +2367,11 @@ int main(int argc, char** argv)
     static_assert(
         wirehair_v2::kPacketRowContractVersion == 4u,
         "shipping packet-row contract must be version 4");
+    if (argc == 2 &&
+        std::strcmp(argv[1], "--mixed-projection-oracle") == 0)
+    {
+        return CheckMixedProjectionResidueBucketsOracle() ? 0 : 1;
+    }
     if (argc == 3 &&
         std::strcmp(argv[1], "--recovery-benchmark") == 0)
     {
@@ -2429,6 +2577,7 @@ int main(int argc, char** argv)
     ok = CheckBinaryQuotientBoundary() && ok;
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
+    ok = CheckMixedProjectionResidueBucketsOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
