@@ -370,6 +370,35 @@ enum CompareProfileMode
     CompareProfileAuto
 };
 
+enum PrecodeProfileMode
+{
+    PrecodeProfileCertified,
+    PrecodeProfileMixed,
+    PrecodeProfileBoth
+};
+
+const char* PrecodeProfileModeName(PrecodeProfileMode mode)
+{
+    switch (mode)
+    {
+    case PrecodeProfileCertified: return "certified";
+    case PrecodeProfileMixed:     return "mixed";
+    case PrecodeProfileBoth:      return "both";
+    }
+    return "unknown";
+}
+
+bool PrecodeProfileIncludes(
+    PrecodeProfileMode mode,
+    wirehair_v2::CompletionField completion)
+{
+    if (mode == PrecodeProfileBoth) {
+        return true;
+    }
+    return completion == wirehair_v2::CompletionField::MixedGF256GF16 ?
+        mode == PrecodeProfileMixed : mode == PrecodeProfileCertified;
+}
+
 struct CompareOptions
 {
     CompareProfileMode ProfileMode = CompareProfileBase;
@@ -929,6 +958,8 @@ TrialResult RunV2PrecodeTrial(
     double loss_rate,
     uint64_t seed,
     const std::vector<uint32_t>* packet_schedule = nullptr,
+    wirehair_v2::CompletionField completion =
+        wirehair_v2::CompletionField::GF256,
     bool cache_encoder_source = false,
     bool cache_decoder_systematic = false)
 {
@@ -944,12 +975,16 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
     wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
+    encoder_options.Completion = completion;
     encoder_options.CacheSystematicSource = cache_encoder_source;
     encoder_options.CacheReceivedSystematicPackets = cache_decoder_systematic;
+    const bool use_encoder_options =
+        completion != wirehair_v2::CompletionField::GF256 ||
+        cache_encoder_source;
     const double c0 = NowSeconds();
     WirehairResult result = enc.InitializePrecodeEncoder(
         message.data(), message_bytes, block_bytes, nullptr,
-        cache_encoder_source ? &encoder_options : nullptr);
+        use_encoder_options ? &encoder_options : nullptr);
     if (result == Wirehair_Success)
     {
         // The public wire protocol serializes the encoder-selected seed
@@ -960,7 +995,9 @@ TrialResult RunV2PrecodeTrial(
             message_bytes, block_bytes, &enc.Profile(),
             cache_decoder_systematic ? &encoder_options : nullptr);
         if (result == Wirehair_Success &&
-            (dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
+            (enc.Profile().V2CompletionField != completion ||
+             dec.Profile().V2CompletionField != completion ||
+             dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
              dec.Profile().V2PacketPeelSeed !=
                 enc.Profile().V2PacketPeelSeed ||
              dec.Profile().V2PrecodeSeed != enc.Profile().V2PrecodeSeed))
@@ -1626,7 +1663,7 @@ void PrintAccum(const char* name, uint32_t block_bytes, const Accum& acc)
         }
     }
     std::printf(
-        "%-9s %-8u %-7llu %-7llu %-10.1f %-10.4f %-8.4f "
+        "%-15s %-8u %-7llu %-7llu %-10.1f %-10.4f %-8.4f "
         "%-6u %-6u %-6u %-8u "
         "%12.1f %12.1f %12.1f %12.1f\n",
         name,
@@ -1660,6 +1697,8 @@ int CmdCompare(int argc, char** argv)
     bool cache_encoder_source = false;
     bool cache_decoder_systematic = false;
     bool trial_details = false;
+    PrecodeProfileMode precode_profile = PrecodeProfileCertified;
+    bool precode_profile_explicit = false;
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
 
@@ -1709,6 +1748,31 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--precode-decoder-cache")) {
             include_precode_cache = true;
             cache_decoder_systematic = true;
+        }
+        else if (!std::strcmp(argv[i], "--precode-profile")) {
+            if (!TakeArg(
+                    "compare", "--precode-profile", argc, argv, i, value))
+            {
+                return 1;
+            }
+            precode_profile_explicit = true;
+            if (!std::strcmp(value, "certified")) {
+                precode_profile = PrecodeProfileCertified;
+            }
+            else if (!std::strcmp(value, "mixed")) {
+                precode_profile = PrecodeProfileMixed;
+            }
+            else if (!std::strcmp(value, "both")) {
+                precode_profile = PrecodeProfileBoth;
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "unknown --precode-profile '%s' "
+                    "(expected certified, mixed, or both)\n",
+                    value);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--trial-details")) {
             trial_details = true;
@@ -1809,6 +1873,31 @@ int CmdCompare(int argc, char** argv)
     if (!ValidateLoss(loss, "compare")) {
         return 1;
     }
+    if (precode_profile_explicit &&
+        !include_precode && !include_precode_cache)
+    {
+        std::fprintf(stderr,
+            "--precode-profile requires --precode or a precode cache arm\n");
+        return 1;
+    }
+    const bool include_mixed = PrecodeProfileIncludes(
+        precode_profile, wirehair_v2::CompletionField::MixedGF256GF16);
+    const bool include_certified = PrecodeProfileIncludes(
+        precode_profile, wirehair_v2::CompletionField::GF256);
+    if (include_mixed)
+    {
+        for (int bb_value : block_bytes_list)
+        {
+            if ((bb_value & 1) != 0)
+            {
+                std::fprintf(stderr,
+                    "compare mixed precode profile requires even block bytes "
+                    "(odd bb=%d)\n",
+                    bb_value);
+                return 1;
+            }
+        }
+    }
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
     for (int bb_value : block_bytes_list)
@@ -1876,7 +1965,7 @@ int CmdCompare(int argc, char** argv)
         "auto_trials=%u auto_min_delta=%.4f tune_seed=0x%llx "
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
         "dense_candidate=%u precode=%u precode_cache=%u "
-        "encoder_cache=%u decoder_cache=%u schedule=%s "
+        "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
         "schedule_seed=0x%llx loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -1897,12 +1986,13 @@ int CmdCompare(int argc, char** argv)
         compare_options.DenseCandidate,
         include_precode ? 1u : 0u,
         include_precode_cache ? 1u : 0u,
+        PrecodeProfileModeName(precode_profile),
         cache_encoder_source ? 1u : 0u,
         cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed);
     std::printf(
-        "%-9s %-8s %-7s %-7s %-10s %-10s %-8s "
+        "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
         "%12s %12s %12s %12s\n",
         "codec",
@@ -1939,8 +2029,10 @@ int CmdCompare(int argc, char** argv)
 
         Accum baseline;
         Accum v2;
-        Accum precode;
-        Accum precode_cache;
+        Accum certified_precode;
+        Accum mixed_precode;
+        Accum certified_precode_cache;
+        Accum mixed_precode_cache;
         std::map<uint64_t, CachedCompareProfile> profile_cache;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
@@ -1965,26 +2057,65 @@ int CmdCompare(int argc, char** argv)
                 N, block_bytes, loss, trial_seed, &packet_schedule);
             const TrialResult v2_result = RunV2Trial(
                 N, block_bytes, loss, trial_seed, profile, &packet_schedule);
-            TrialResult precode_result = {};
-            TrialResult precode_cache_result = {};
-            if (include_precode) {
-                // This arm intentionally exercises the production defaults,
-                // independent of compare's optional experimental V2 profile.
-                precode_result = RunV2PrecodeTrial(
-                    N, block_bytes, loss, trial_seed, &packet_schedule);
+            TrialResult certified_precode_result = {};
+            TrialResult mixed_precode_result = {};
+            TrialResult certified_cache_result = {};
+            TrialResult mixed_cache_result = {};
+            const auto run_precode_profile = [&](
+                wirehair_v2::CompletionField completion,
+                TrialResult& precode_result,
+                TrialResult& cache_result)
+            {
+                if (include_precode) {
+                    precode_result = RunV2PrecodeTrial(
+                        N, block_bytes, loss, trial_seed, &packet_schedule,
+                        completion);
+                }
+                if (include_precode_cache) {
+                    cache_result = RunV2PrecodeTrial(
+                        N, block_bytes, loss, trial_seed, &packet_schedule,
+                        completion,
+                        cache_encoder_source, cache_decoder_systematic);
+                }
+            };
+            const bool mixed_first =
+                precode_profile == PrecodeProfileBoth && (trial & 1u) != 0u;
+            if (mixed_first)
+            {
+                run_precode_profile(
+                    wirehair_v2::CompletionField::MixedGF256GF16,
+                    mixed_precode_result, mixed_cache_result);
+                run_precode_profile(
+                    wirehair_v2::CompletionField::GF256,
+                    certified_precode_result, certified_cache_result);
             }
-            if (include_precode_cache) {
-                precode_cache_result = RunV2PrecodeTrial(
-                    N, block_bytes, loss, trial_seed, &packet_schedule,
-                    cache_encoder_source, cache_decoder_systematic);
+            else
+            {
+                if (include_certified) {
+                    run_precode_profile(
+                        wirehair_v2::CompletionField::GF256,
+                        certified_precode_result, certified_cache_result);
+                }
+                if (include_mixed) {
+                    run_precode_profile(
+                        wirehair_v2::CompletionField::MixedGF256GF16,
+                        mixed_precode_result, mixed_cache_result);
+                }
             }
             AddTrial(baseline, N, baseline_result);
             AddTrial(v2, N, v2_result);
-            if (include_precode) {
-                AddTrial(precode, N, precode_result);
+            if (include_precode && include_certified) {
+                AddTrial(certified_precode, N, certified_precode_result);
             }
-            if (include_precode_cache) {
-                AddTrial(precode_cache, N, precode_cache_result);
+            if (include_precode && include_mixed) {
+                AddTrial(mixed_precode, N, mixed_precode_result);
+            }
+            if (include_precode_cache && include_certified) {
+                AddTrial(
+                    certified_precode_cache, N, certified_cache_result);
+            }
+            if (include_precode_cache && include_mixed) {
+                AddTrial(mixed_precode_cache, N, mixed_cache_result);
             }
             if (trial_details)
             {
@@ -1992,33 +2123,49 @@ int CmdCompare(int argc, char** argv)
                     (int)baseline_result.Extra : -1;
                 const int v2_oh = v2_result.Ok ?
                     (int)v2_result.Extra : -1;
-                const int precode_oh = include_precode && precode_result.Ok ?
-                    (int)precode_result.Extra : -1;
-                const int cached_oh =
-                    include_precode_cache && precode_cache_result.Ok ?
-                        (int)precode_cache_result.Extra : -1;
-                std::printf(
-                    "# paired_trial: schedule=%s seed=0x%llx bb=%u "
-                    "trial=%u N=%u baseline_ok=%u baseline_oh=%d "
-                    "v2_ok=%u v2_oh=%d v2_delta=%d precode_ok=%u "
-                    "precode_oh=%d precode_delta=%d cached_ok=%u "
-                    "cached_oh=%d cached_delta=%d\n",
-                    PacketScheduleName(schedule_kind),
-                    (unsigned long long)trial_seed,
-                    block_bytes, trial, N,
-                    baseline_result.Ok ? 1u : 0u, baseline_oh,
-                    v2_result.Ok ? 1u : 0u, v2_oh,
-                    baseline_result.Ok && v2_result.Ok ?
-                        v2_oh - baseline_oh : 0,
-                    include_precode && precode_result.Ok ? 1u : 0u,
-                    precode_oh,
-                    include_precode && baseline_result.Ok && precode_result.Ok ?
-                        precode_oh - baseline_oh : 0,
-                    include_precode_cache && precode_cache_result.Ok ? 1u : 0u,
-                    cached_oh,
-                    include_precode_cache && baseline_result.Ok &&
-                        precode_cache_result.Ok ?
-                            cached_oh - baseline_oh : 0);
+                const auto print_precode_detail = [&](
+                    const char* profile_name,
+                    const TrialResult& precode_result,
+                    const TrialResult& cache_result)
+                {
+                    const int precode_oh =
+                        include_precode && precode_result.Ok ?
+                            (int)precode_result.Extra : -1;
+                    const int cached_oh =
+                        include_precode_cache && cache_result.Ok ?
+                            (int)cache_result.Extra : -1;
+                    std::printf(
+                        "# paired_trial: schedule=%s seed=0x%llx bb=%u "
+                        "trial=%u N=%u precode_profile=%s "
+                        "baseline_ok=%u baseline_oh=%d "
+                        "v2_ok=%u v2_oh=%d v2_delta=%d precode_ok=%u "
+                        "precode_oh=%d precode_delta=%d cached_ok=%u "
+                        "cached_oh=%d cached_delta=%d\n",
+                        PacketScheduleName(schedule_kind),
+                        (unsigned long long)trial_seed,
+                        block_bytes, trial, N, profile_name,
+                        baseline_result.Ok ? 1u : 0u, baseline_oh,
+                        v2_result.Ok ? 1u : 0u, v2_oh,
+                        baseline_result.Ok && v2_result.Ok ?
+                            v2_oh - baseline_oh : 0,
+                        include_precode && precode_result.Ok ? 1u : 0u,
+                        precode_oh,
+                        include_precode && baseline_result.Ok &&
+                            precode_result.Ok ? precode_oh - baseline_oh : 0,
+                        include_precode_cache && cache_result.Ok ? 1u : 0u,
+                        cached_oh,
+                        include_precode_cache && baseline_result.Ok &&
+                            cache_result.Ok ? cached_oh - baseline_oh : 0);
+                };
+                if (include_certified) {
+                    print_precode_detail(
+                        "certified", certified_precode_result,
+                        certified_cache_result);
+                }
+                if (include_mixed) {
+                    print_precode_detail(
+                        "mixed", mixed_precode_result, mixed_cache_result);
+                }
             }
         }
         PrintAccum("baseline", block_bytes, baseline);
@@ -2027,11 +2174,19 @@ int CmdCompare(int argc, char** argv)
             "v2_auto",
             block_bytes,
             v2);
-        if (include_precode) {
-            PrintAccum("v2_precode", block_bytes, precode);
+        if (include_precode && include_certified) {
+            PrintAccum("v2_precode", block_bytes, certified_precode);
         }
-        if (include_precode_cache) {
-            PrintAccum("v2_cached", block_bytes, precode_cache);
+        if (include_precode && include_mixed) {
+            PrintAccum("v2_mixed", block_bytes, mixed_precode);
+        }
+        if (include_precode_cache && include_certified) {
+            PrintAccum(
+                "v2_cached", block_bytes, certified_precode_cache);
+        }
+        if (include_precode_cache && include_mixed) {
+            PrintAccum(
+                "v2_mixed_cached", block_bytes, mixed_precode_cache);
         }
     }
     return 0;

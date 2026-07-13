@@ -999,6 +999,199 @@ bool CheckColdDuplicateSlotLookup()
     return true;
 }
 
+bool InitializeCompletedRecoveryFixture(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t tail_bytes,
+    bool cache_systematic,
+    bool omit_final_systematic,
+    wirehair_v2::CompletionField completion,
+    std::vector<uint8_t>& message,
+    wirehair_v2::MessagePrecodeEncoder& encoder,
+    wirehair_v2::MessagePrecodeDecoder& decoder)
+{
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    message = MakeMessage((size_t)message_bytes);
+    wirehair_v2::MessagePrecodeEncoderOptions options;
+    options.CacheReceivedSystematicPackets = cache_systematic;
+    options.Completion = completion;
+    if (encoder.InitializeResult(
+            message.data(), message_bytes, block_bytes, nullptr, &options) !=
+                Wirehair_Success ||
+        decoder.InitializeResult(
+            message_bytes, block_bytes, &encoder.Profile(), &options) !=
+                Wirehair_Success)
+    {
+        return false;
+    }
+
+    WirehairResult result = Wirehair_NeedMore;
+    PacketFixture packet;
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if (omit_final_systematic && id + 1u == K) {
+            continue;
+        }
+        if (!EncodePacket(encoder, block_bytes, id, packet)) {
+            return false;
+        }
+        result = decoder.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+        if (result != Wirehair_NeedMore && result != Wirehair_Success) {
+            return false;
+        }
+    }
+    for (uint32_t repair = 0u;
+         repair < K + 512u && result == Wirehair_NeedMore;
+         ++repair)
+    {
+        if (!EncodePacket(encoder, block_bytes, K + repair, packet)) {
+            return false;
+        }
+        result = decoder.DecodeResult(
+            packet.Id, packet.Data.data(), packet.Bytes);
+    }
+    const uint32_t expected_cached = !cache_systematic ? 0u :
+        K - (omit_final_systematic ? 1u : 0u);
+    return result == Wirehair_Success &&
+        decoder.CachedSystematicPacketCount() == expected_cached;
+}
+
+bool CheckDirectRecoveryOutput()
+{
+    const uint32_t K = 64u;
+    const uint32_t block_bytes = 38u;
+    struct RecoveryCase
+    {
+        uint32_t TailBytes;
+        bool CacheSystematic;
+        bool OmitFinalSystematic;
+        bool ReleaseCacheBeforeRecover;
+        wirehair_v2::CompletionField Completion;
+        bool ExpectScratchAllocation;
+        const char* Name;
+    };
+    const RecoveryCase cases[] = {
+        {block_bytes, false, false, false,
+            wirehair_v2::CompletionField::GF256,
+            false, "uncached exact"},
+        {11u, false, false, false,
+            wirehair_v2::CompletionField::GF256,
+            true, "uncached partial"},
+        {block_bytes, true, false, false,
+            wirehair_v2::CompletionField::GF256,
+            false, "cached exact"},
+        {11u, true, false, false,
+            wirehair_v2::CompletionField::GF256,
+            false, "cached partial"},
+        {11u, true, true, false,
+            wirehair_v2::CompletionField::GF256,
+            true, "cached missing partial"},
+        {11u, true, false, true,
+            wirehair_v2::CompletionField::GF256,
+            true, "cached partial after release"},
+        {11u, true, false, false,
+            wirehair_v2::CompletionField::MixedGF256GF16,
+            false, "mixed cached partial"},
+        {11u, true, true, false,
+            wirehair_v2::CompletionField::MixedGF256GF16,
+            true, "mixed cached missing partial"}
+    };
+
+    for (const RecoveryCase& c : cases)
+    {
+        std::vector<uint8_t> message;
+        wirehair_v2::MessagePrecodeEncoder encoder;
+        wirehair_v2::MessagePrecodeDecoder decoder;
+        if (!InitializeCompletedRecoveryFixture(
+                K, block_bytes, c.TailBytes, c.CacheSystematic,
+                c.OmitFinalSystematic, c.Completion,
+                message, encoder, decoder))
+        {
+            std::fprintf(stderr,
+                "direct recovery fixture failed: %s\n", c.Name);
+            return false;
+        }
+
+        const wirehair_v2::PrecodeParams& params = decoder.System().Params;
+        const size_t intermediate_bytes = (size_t)(
+            (uint64_t)params.BlockCount + params.Staircase +
+            params.DenseRows + params.HeavyRows) * block_bytes;
+        const uint8_t* const intermediate = decoder.IntermediateBlocks();
+        if (!intermediate || intermediate_bytes <= message.size()) {
+            std::fprintf(stderr,
+                "direct recovery intermediate shape failed: %s\n", c.Name);
+            return false;
+        }
+        const std::vector<uint8_t> intermediate_before(
+            intermediate, intermediate + intermediate_bytes);
+        const size_t overlap_offsets[] = {
+            0u, 1u, intermediate_bytes - 1u
+        };
+        WirehairResult result = Wirehair_Error;
+        for (size_t overlap_offset : overlap_offsets)
+        {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+#endif
+            result = decoder.RecoverResult(
+                const_cast<uint8_t*>(intermediate) + overlap_offset,
+                message.size());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+#endif
+            if (!Check(result == Wirehair_InvalidInput &&
+                    std::equal(
+                        intermediate_before.begin(), intermediate_before.end(),
+                        intermediate),
+                    "overlapping recovery output was not rejected/no-write"))
+            {
+                return false;
+            }
+        }
+
+        std::vector<uint8_t> recovered(message.size(), 0xa7u);
+        const std::vector<uint8_t> before = recovered;
+        result = decoder.RecoverResult(
+            recovered.data(), recovered.size() - 1u);
+        if (!Check(result == Wirehair_InvalidInput && recovered == before,
+                "wrong-size recovery was not rejected/no-write"))
+        {
+            return false;
+        }
+        if (c.ReleaseCacheBeforeRecover) {
+            decoder.ReleaseSystematicPacketCache();
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(0);
+#endif
+        result = decoder.RecoverResult(recovered.data(), recovered.size());
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        if (c.ExpectScratchAllocation)
+        {
+            if (!Check(result == Wirehair_OOM && recovered == before,
+                    "partial recovery scratch OOM was not no-write"))
+            {
+                return false;
+            }
+            wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(1);
+            result = decoder.RecoverResult(
+                recovered.data(), recovered.size());
+            wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        }
+#endif
+        if (!Check(result == Wirehair_Success && recovered == message,
+                "direct recovery payload/allocation contract mismatch"))
+        {
+            std::fprintf(stderr, "direct recovery case: %s\n", c.Name);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool CheckSystematicRecoverCache()
 {
     const uint32_t K = 64u;
@@ -1698,6 +1891,7 @@ int main(int argc, char** argv)
         !CheckFacadeModeTransitions() ||
         !CheckIncrementalDecoderParity() ||
         !CheckColdDuplicateSlotLookup() ||
+        !CheckDirectRecoveryOutput() ||
         !CheckSystematicRecoverCache())
     {
         return 1;

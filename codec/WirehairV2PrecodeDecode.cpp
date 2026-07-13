@@ -102,6 +102,27 @@ bool ResumeFitsMemoryPolicy(
         retained_bytes - released_bytes <= allowed_extra;
 }
 
+bool MemoryRangesOverlap(
+    const void* first,
+    size_t first_bytes,
+    const void* second,
+    size_t second_bytes)
+{
+    const uintptr_t first_begin = reinterpret_cast<uintptr_t>(first);
+    const uintptr_t second_begin = reinterpret_cast<uintptr_t>(second);
+    const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+    if (first_bytes > limit - first_begin ||
+        second_bytes > limit - second_begin)
+    {
+        // Fail closed on artificial pointer/length pairs that wrap the address
+        // space.  Real live objects cannot have wrapping ranges.
+        return true;
+    }
+    const uintptr_t first_end = first_begin + first_bytes;
+    const uintptr_t second_end = second_begin + second_bytes;
+    return first_begin < second_end && second_begin < first_end;
+}
+
 } // namespace
 
 uint32_t PacketSlotTable::Hash(uint32_t packet_id)
@@ -888,7 +909,6 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
     }
     try
     {
-        GuardedDecoderAllocation();
         const uint32_t K = ProfileValue.BlockCount;
         const bool cache_enabled = SystematicPacketCache != nullptr;
         if (cache_enabled &&
@@ -897,7 +917,57 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
         {
             return Wirehair_Error;
         }
-        std::vector<uint8_t> block(BlockBytesValue, 0u);
+
+        // Preflight every condition under which the validated packet evaluator
+        // can reject.  Recovery writes complete blocks directly to the caller,
+        // so all rejectable state and alias errors must be found before the
+        // first byte is published.
+        const uint64_t P_wide =
+            (uint64_t)SystemValue.Params.Staircase +
+            SystemValue.Params.DenseRows + SystemValue.Params.HeavyRows;
+        const uint64_t intermediate_block_count =
+            (uint64_t)SystemValue.Params.BlockCount + P_wide;
+        uint32_t checked_block_count = 0u;
+        if (MessageBytesValue >
+                (uint64_t)std::numeric_limits<size_t>::max() ||
+            !MessageBlockCount(
+                MessageBytesValue, BlockBytesValue, checked_block_count) ||
+            checked_block_count != K || SystemValue.Params.BlockCount != K ||
+            P_wide > UINT32_MAX ||
+            intermediate_block_count >
+                (uint64_t)std::numeric_limits<size_t>::max() /
+                    BlockBytesValue ||
+            !PacketRuntimeValue.IsValidFor(
+                K, (uint32_t)P_wide, PacketConfigValue.MixCount))
+        {
+            return Wirehair_Error;
+        }
+        const size_t intermediate_bytes =
+            (size_t)intermediate_block_count * BlockBytesValue;
+        if (IntermediateBlockStorage.size() != intermediate_bytes) {
+            return Wirehair_Error;
+        }
+        if (MemoryRangesOverlap(
+                message_out, (size_t)message_bytes,
+                IntermediateBlockStorage.data(), intermediate_bytes))
+        {
+            return Wirehair_InvalidInput;
+        }
+
+        const uint32_t final_bytes = PacketDataBytes(
+            MessageBytesValue, BlockBytesValue, K, K - 1u);
+        const bool final_is_partial = final_bytes < BlockBytesValue;
+        const bool final_is_cached = cache_enabled &&
+            HaveSystematicPacket[K - 1u] != 0u;
+        std::vector<uint8_t> final_block;
+        if (final_is_partial && !final_is_cached)
+        {
+            // Allocate before writing any complete blocks.  An OOM therefore
+            // retains RecoverResult's failure/no-write guarantee.
+            GuardedDecoderAllocation();
+            final_block.resize(BlockBytesValue);
+        }
+
         uint8_t* output = static_cast<uint8_t*>(message_out);
         for (uint32_t block_id = 0; block_id < K; ++block_id)
         {
@@ -912,6 +982,10 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
                     bytes);
                 continue;
             }
+            uint8_t* const block_out =
+                final_is_partial && block_id + 1u == K ?
+                    final_block.data() :
+                    output + (size_t)block_id * BlockBytesValue;
             if (!EvaluatePacketBlockForValidatedSystemWithRuntime(
                     SystemValue,
                     PacketConfigValue,
@@ -919,18 +993,25 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
                     IntermediateBlockStorage.data(),
                     BlockBytesValue,
                     block_id,
-                    block.data()))
+                    block_out))
             {
+                // The static evaluator predicates were checked above for the
+                // complete output range.  Reaching this branch would indicate
+                // corrupted immutable decoder state.
                 return Wirehair_Error;
             }
-            std::memcpy(
-                output + (size_t)block_id * BlockBytesValue,
-                block.data(),
-                bytes);
+            if (final_is_partial && block_id + 1u == K) {
+                std::memcpy(
+                    output + (size_t)block_id * BlockBytesValue,
+                    final_block.data(), bytes);
+            }
         }
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
+        return Wirehair_OOM;
+    }
+    catch (const std::length_error&) {
         return Wirehair_OOM;
     }
 }

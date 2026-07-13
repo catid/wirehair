@@ -431,20 +431,24 @@ bool ComputePrecodeValues(
                 return false;
             }
             ++st.MixedPlaneConversions;
-            for (uint32_t r = 0; r < kMixedGF16Rows; ++r)
+            static_assert(
+                kMixedGF16Rows == 2u,
+                "mixed completion pair kernel requires two GF16 rows");
+            const uint32_t row0 = kMixedGF256Rows;
+            const uint32_t row1 = row0 + 1u;
+            if (!GF16MulAddPlanar2(
+                    rhs_low.data() + (size_t)row0 * elements,
+                    rhs_high.data() + (size_t)row0 * elements,
+                    gf16_coef[m],
+                    rhs_low.data() + (size_t)row1 * elements,
+                    rhs_high.data() + (size_t)row1 * elements,
+                    gf16_coef[window + m],
+                    source_low.data(), source_high.data(), elements))
             {
-                const uint32_t row = kMixedGF256Rows + r;
-                if (!GF16MulAddPlanar(
-                        rhs_low.data() + (size_t)row * elements,
-                        rhs_high.data() + (size_t)row * elements,
-                        gf16_coef[(size_t)r * window + m],
-                        source_low.data(), source_high.data(), elements))
-                {
-                    return false;
-                }
-                ++st.HeavyMulAdds;
-                ++st.MixedGF16MulAdds;
+                return false;
             }
+            st.HeavyMulAdds += 2u;
+            st.MixedGF16MulAdds += 2u;
             return true;
         };
 
@@ -566,6 +570,9 @@ bool ComputePrecodeValues(
                 ++st.MixedGF16SolveBlockOps;
             }
 
+            uint8_t* pending_low = nullptr;
+            uint8_t* pending_high = nullptr;
+            uint16_t pending_scale = 0u;
             for (uint32_t r = 0; r < H; ++r)
             {
                 const uint16_t scale = corner[(size_t)r * H + j];
@@ -582,15 +589,41 @@ bool ComputePrecodeValues(
                     rhs_low.data() + (size_t)p * elements;
                 const uint8_t* const source_high_row =
                     rhs_high.data() + (size_t)p * elements;
-                if (scale == 1u)
+                if (!pending_low)
+                {
+                    pending_low = destination_low;
+                    pending_high = destination_high;
+                    pending_scale = scale;
+                }
+                else
+                {
+                    if (!GF16MulAddPlanar2(
+                            pending_low, pending_high, pending_scale,
+                            destination_low, destination_high, scale,
+                            source_low_row, source_high_row, elements))
+                    {
+                        return false;
+                    }
+                    pending_low = nullptr;
+                    st.HeavySolveBlockOps += 2u;
+                    st.MixedGF16SolveBlockOps += 2u;
+                }
+            }
+            if (pending_low)
+            {
+                const uint8_t* const source_low_row =
+                    rhs_low.data() + (size_t)p * elements;
+                const uint8_t* const source_high_row =
+                    rhs_high.data() + (size_t)p * elements;
+                if (pending_scale == 1u)
                 {
                     gf256_add_mem(
-                        destination_low, source_low_row, plane_bytes);
+                        pending_low, source_low_row, plane_bytes);
                     gf256_add_mem(
-                        destination_high, source_high_row, plane_bytes);
+                        pending_high, source_high_row, plane_bytes);
                 }
                 else if (!GF16MulAddPlanar(
-                        destination_low, destination_high, scale,
+                        pending_low, pending_high, pending_scale,
                         source_low_row, source_high_row, elements))
                 {
                     return false;

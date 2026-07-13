@@ -1,6 +1,7 @@
 #include <wirehair/wirehair.h>
 #include <wirehair/wirehair.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -848,6 +849,35 @@ int main()
             "descriptor message recover") ||
         !Check(recovered_bytes == message.size() && recovered == message,
             "descriptor recovered message"))
+    {
+        return fail_after_create();
+    }
+
+    std::vector<uint64_t> aliased_words(
+        (message.size() + sizeof(uint64_t) - 1u) / sizeof(uint64_t),
+        UINT64_C(0xa5a5a5a5a5a5a5a5));
+    const std::vector<uint64_t> aliased_before = aliased_words;
+    if (!Check(wirehair_v2_recover(
+            decoder, aliased_words.data(), message.size(),
+            aliased_words.data()) == WirehairV2_InvalidInput,
+            "aliased recovery size output rejection") ||
+        !Check(aliased_words == aliased_before,
+            "aliased recovery size output was not no-write"))
+    {
+        return fail_after_create();
+    }
+
+    std::vector<uint8_t> unaligned(message.size() + 2u, 0x5au);
+    recovered_bytes = 0u;
+    if (!Check(wirehair_v2_recover(
+            decoder, unaligned.data() + 1u, message.size(),
+            &recovered_bytes) == WirehairV2_Success,
+            "unaligned descriptor message recover") ||
+        !Check(recovered_bytes == message.size() &&
+            unaligned.front() == 0x5au && unaligned.back() == 0x5au &&
+            std::equal(
+                message.begin(), message.end(), unaligned.begin() + 1u),
+            "unaligned recovery payload/bounds"))
     {
         return fail_after_create();
     }

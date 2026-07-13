@@ -211,13 +211,70 @@ bool GF16MulAddPlanar(
         return true;
     }
     const uint8_t a = (uint8_t)scale, b = (uint8_t)(scale >> 8);
-    gf256_muladd_mem(destination_low, a, source_low, (int)elements);
-    gf256_muladd_mem(
-        destination_low, gf256_mul(kGF16Lambda, b),
-        source_high, (int)elements);
-    gf256_muladd_mem(destination_high, b, source_low, (int)elements);
-    gf256_muladd_mem(
-        destination_high, (uint8_t)(a ^ b), source_high, (int)elements);
+    void* destinations[2] = {destination_low, destination_high};
+    const uint8_t low_scales[2] = {a, b};
+    const uint8_t high_scales[2] = {
+        gf256_mul(kGF16Lambda, b), (uint8_t)(a ^ b)
+    };
+    gf256_muladd_multi_mem(
+        destinations, low_scales, 2, source_low, (int)elements);
+    gf256_muladd_multi_mem(
+        destinations, high_scales, 2, source_high, (int)elements);
+    return true;
+}
+
+bool GF16MulAddPlanar2(
+    void* destination0_low,
+    void* destination0_high,
+    uint16_t scale0,
+    void* destination1_low,
+    void* destination1_high,
+    uint16_t scale1,
+    const void* source_low,
+    const void* source_high,
+    uint32_t elements)
+{
+    void* destinations[4] = {
+        destination0_low, destination0_high,
+        destination1_low, destination1_high
+    };
+    if (!InitializeGF16() || !source_low || !source_high || elements == 0u ||
+        elements > (uint32_t)std::numeric_limits<int>::max() ||
+        RangesOverlap(source_low, elements, source_high, elements))
+    {
+        return false;
+    }
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        if (!destinations[i] ||
+            RangesOverlap(destinations[i], elements, source_low, elements) ||
+            RangesOverlap(destinations[i], elements, source_high, elements))
+        {
+            return false;
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            if (RangesOverlap(
+                    destinations[i], elements, destinations[j], elements))
+            {
+                return false;
+            }
+        }
+    }
+    if (scale0 == 0u && scale1 == 0u) return true;
+
+    const uint8_t a0 = (uint8_t)scale0;
+    const uint8_t b0 = (uint8_t)(scale0 >> 8);
+    const uint8_t a1 = (uint8_t)scale1;
+    const uint8_t b1 = (uint8_t)(scale1 >> 8);
+    const uint8_t low_scales[4] = {a0, b0, a1, b1};
+    const uint8_t high_scales[4] = {
+        gf256_mul(kGF16Lambda, b0), (uint8_t)(a0 ^ b0),
+        gf256_mul(kGF16Lambda, b1), (uint8_t)(a1 ^ b1)
+    };
+    gf256_muladd_multi_mem(
+        destinations, low_scales, 4, source_low, (int)elements);
+    gf256_muladd_multi_mem(
+        destinations, high_scales, 4, source_high, (int)elements);
     return true;
 }
 

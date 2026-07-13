@@ -76,7 +76,9 @@ bool KernelTest()
 {
     using namespace wirehair_v2;
     const uint32_t lengths[] = {2u, 4u, 30u, 128u, 1280u};
-    const uint16_t scales[] = {0u, 1u, 0x00d3u, 0xc753u, 0xffffu};
+    const uint16_t scales[] = {
+        0u, 1u, 0x00d3u, 0x0100u, 0x0101u, 0xc753u, 0xffffu
+    };
     for (uint32_t bytes : lengths) for (uint16_t scale : scales)
     {
         std::vector<uint8_t> source(bytes + 2u, 0xa5u);
@@ -137,6 +139,47 @@ bool KernelTest()
         }
     }
 
+    for (uint32_t bytes : lengths) for (uint16_t scale0 : scales)
+        for (uint16_t scale1 : scales)
+    {
+        const uint32_t elements = bytes / 2u;
+        std::vector<uint8_t> source_low(elements);
+        std::vector<uint8_t> source_high(elements);
+        std::vector<uint8_t> separate0_low(elements);
+        std::vector<uint8_t> separate0_high(elements);
+        std::vector<uint8_t> separate1_low(elements);
+        std::vector<uint8_t> separate1_high(elements);
+        for (uint32_t i = 0; i < elements; ++i) {
+            source_low[i] = (uint8_t)Mix64(i + bytes);
+            source_high[i] = (uint8_t)Mix64(i + bytes + 1u);
+            separate0_low[i] = (uint8_t)Mix64(i + scale0);
+            separate0_high[i] = (uint8_t)Mix64(i + scale0 + 1u);
+            separate1_low[i] = (uint8_t)Mix64(i + scale1 + 2u);
+            separate1_high[i] = (uint8_t)Mix64(i + scale1 + 3u);
+        }
+        std::vector<uint8_t> paired0_low = separate0_low;
+        std::vector<uint8_t> paired0_high = separate0_high;
+        std::vector<uint8_t> paired1_low = separate1_low;
+        std::vector<uint8_t> paired1_high = separate1_high;
+        if (!GF16MulAddPlanar(
+                separate0_low.data(), separate0_high.data(), scale0,
+                source_low.data(), source_high.data(), elements) ||
+            !GF16MulAddPlanar(
+                separate1_low.data(), separate1_high.data(), scale1,
+                source_low.data(), source_high.data(), elements) ||
+            !GF16MulAddPlanar2(
+                paired0_low.data(), paired0_high.data(), scale0,
+                paired1_low.data(), paired1_high.data(), scale1,
+                source_low.data(), source_high.data(), elements) ||
+            separate0_low != paired0_low ||
+            separate0_high != paired0_high ||
+            separate1_low != paired1_low ||
+            separate1_high != paired1_high)
+        {
+            return false;
+        }
+    }
+
     uint8_t source[4] = {1u, 2u, 3u, 4u};
     uint8_t destination[4] = {9u, 8u, 7u, 6u};
     const uint8_t snapshot[4] = {9u, 8u, 7u, 6u};
@@ -174,9 +217,66 @@ bool KernelTest()
         GF16MulAddPlanar(
             overlap, overlap + 4u, 7u,
             overlap + 2u, overlap + 12u, 4u) ||
+        GF16MulAddPlanar2(
+            overlap, overlap + 4u, 7u,
+            overlap + 8u, overlap + 12u, 11u,
+            overlap + 2u, overlap + 6u, 4u) ||
         GF16ScalePlanar(
             overlap, overlap + 4u, 7u, overlap + 2u, 4u) ||
         std::memcmp(overlap, overlap_snapshot, sizeof(overlap)) != 0)
+    {
+        return false;
+    }
+
+    // Endpoint-adjacent planes are valid, while every invalid pair-kernel
+    // shape below must be rejected before a zero scale can short-circuit.
+    uint8_t adjacent[24];
+    for (uint32_t i = 0; i < sizeof(adjacent); ++i) {
+        adjacent[i] = (uint8_t)(0x80u + i);
+    }
+    uint8_t adjacent_snapshot[24];
+    std::memcpy(adjacent_snapshot, adjacent, sizeof(adjacent));
+    if (!GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            nullptr, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, nullptr, 0u,
+            adjacent + 16u, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            nullptr, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, nullptr, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 20u, 0u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 20u, UINT32_C(0x80000000)) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 2u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 16u, 0u,
+            adjacent + 16u, adjacent + 20u, 4u) ||
+        GF16MulAddPlanar2(
+            adjacent, adjacent + 4u, 0u,
+            adjacent + 8u, adjacent + 12u, 0u,
+            adjacent + 16u, adjacent + 16u, 4u) ||
+        std::memcmp(adjacent, adjacent_snapshot, sizeof(adjacent)) != 0)
     {
         return false;
     }

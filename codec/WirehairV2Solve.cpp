@@ -269,6 +269,45 @@ void AddScaledBlocks(
         (int)block_bytes);
 }
 
+class PairedBlockXorAccumulator
+{
+public:
+    PairedBlockXorAccumulator(uint8_t* destination, uint32_t block_bytes)
+        : Destination(destination)
+        , BlockBytes(block_bytes)
+    {
+    }
+
+    void Add(const uint8_t* source)
+    {
+        if (!PendingSource) {
+            PendingSource = source;
+            return;
+        }
+        // Equal sources cancel.  Avoid passing aliased restrict-qualified
+        // source pointers to gf256_add2_mem in that unusual case.
+        if (PendingSource != source) {
+            gf256_add2_mem(
+                Destination, PendingSource, source, (int)BlockBytes);
+        }
+        PendingSource = nullptr;
+    }
+
+    void Flush()
+    {
+        if (!PendingSource) {
+            return;
+        }
+        gf256_add_mem(Destination, PendingSource, (int)BlockBytes);
+        PendingSource = nullptr;
+    }
+
+private:
+    uint8_t* Destination;
+    uint32_t BlockBytes;
+    const uint8_t* PendingSource = nullptr;
+};
+
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
 
 enum class ResidualInsertResult
@@ -278,6 +317,37 @@ enum class ResidualInsertResult
     Inconsistent,
     Independent
 };
+
+constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
+
+void AddScaledResidualCoefficients(
+    uint8_t* destination,
+    uint8_t scale,
+    const uint8_t* source,
+    uint32_t count)
+{
+    if (count >= kResidualCoefficientBulkThreshold) {
+        gf256_muladd_mem(destination, scale, source, (int)count);
+        return;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        destination[i] ^= gf256_mul(source[i], scale);
+    }
+}
+
+void ScaleResidualCoefficients(
+    uint8_t* coefficients,
+    uint8_t scale,
+    uint32_t count)
+{
+    if (count >= kResidualCoefficientBulkThreshold) {
+        gf256_mul_mem(coefficients, coefficients, scale, (int)count);
+        return;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        coefficients[i] = gf256_mul(coefficients[i], scale);
+    }
+}
 
 ResidualInsertResult InsertResidualRow(
     std::vector<uint8_t>& coeff,
@@ -299,8 +369,13 @@ ResidualInsertResult InsertResidualRow(
         }
         const uint8_t* pivot =
             pivot_coeff.data() + (size_t)j * R;
-        for (uint32_t k = j; k < R; ++k) {
-            coeff[k] ^= gf256_mul(scale, pivot[k]);
+        if (scale == 1u) {
+            gf256_add_mem(
+                coeff.data() + j, pivot + j, (int)(R - j));
+        }
+        else {
+            AddScaledResidualCoefficients(
+                coeff.data() + j, scale, pivot + j, R - j);
         }
         AddScaledBlock(
             rhs.data(), scale,
@@ -331,9 +406,8 @@ ResidualInsertResult InsertResidualRow(
     if (pivot_value != 1u)
     {
         const uint8_t inverse = gf256_inv(pivot_value);
-        for (uint32_t k = pivot_column; k < R; ++k) {
-            coeff[k] = gf256_mul(coeff[k], inverse);
-        }
+        ScaleResidualCoefficients(
+            coeff.data() + pivot_column, inverse, R - pivot_column);
         gf256_div_mem(
             rhs.data(), rhs.data(), pivot_value, (int)block_bytes);
         ++stats.BlockMulAdds;
@@ -350,8 +424,16 @@ ResidualInsertResult InsertResidualRow(
         if (scale == 0u) {
             continue;
         }
-        for (uint32_t k = pivot_column; k < R; ++k) {
-            existing_coeff[k] ^= gf256_mul(scale, coeff[k]);
+        if (scale == 1u) {
+            gf256_add_mem(
+                existing_coeff + pivot_column,
+                coeff.data() + pivot_column,
+                (int)(R - pivot_column));
+        }
+        else {
+            AddScaledResidualCoefficients(
+                existing_coeff + pivot_column, scale,
+                coeff.data() + pivot_column, R - pivot_column);
         }
         AddScaledBlock(
             pivot_rhs.data() + (size_t)existing * block_bytes,
@@ -504,27 +586,37 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint8_t> source_high(elements);
     std::vector<uint8_t> residue_bucket(block_bytes, 0u);
     void* subfield_destinations[kMixedGF256Rows];
+    void* subfield_coefficient_destinations[kMixedGF256Rows];
     uint8_t subfield_scales[kMixedGF256Rows];
     for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
         subfield_destinations[row] =
             subfield_rhs.data() + (size_t)row * block_bytes;
+        subfield_coefficient_destinations[row] =
+            subfield_coeff.data() + (size_t)row * inactive_count;
     }
+#if defined(GF256_TRY_AVX2) || defined(GF256_TRY_SSSE3) || \
+    defined(GF256_TRY_GFNI) || defined(GF256_TRY_NEON)
+    const bool use_bulk_subfield_coefficients = inactive_count >= 64u;
+#else
+    const bool use_bulk_subfield_coefficients = false;
+#endif
     const uint32_t populated_residues =
         std::min(kMixedCoefficientPeriod, column_count);
     for (uint32_t residue = 0; residue < populated_residues; ++residue)
     {
         std::fill(
             residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+        PairedBlockXorAccumulator bucket_xor(
+            residue_bucket.data(), block_bytes);
         for (uint32_t column = residue;
              column < column_count; column += kMixedCoefficientPeriod)
         {
             if (inactive_index[column] != UINT32_MAX) continue;
-            gf256_add_mem(
-                residue_bucket.data(),
-                values.data() + (size_t)column * block_bytes,
-                (int)block_bytes);
+            bucket_xor.Add(
+                values.data() + (size_t)column * block_bytes);
             ++stats.BlockXors;
         }
+        bucket_xor.Flush();
         for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
             subfield_scales[row] = subfield_table[row][residue];
         }
@@ -537,19 +629,23 @@ WirehairResult SolveMixedCompletionQuotient(
         {
             return Wirehair_Error;
         }
-        for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
+        static_assert(
+            kMixedGF16Rows == 2u,
+            "mixed completion pair kernel requires two GF16 rows");
+        const uint32_t row0 = kMixedGF256Rows;
+        const uint32_t row1 = row0 + 1u;
+        if (!GF16MulAddPlanar2(
+                rhs_low.data() + (size_t)row0 * elements,
+                rhs_high.data() + (size_t)row0 * elements,
+                extension_table[0][residue],
+                rhs_low.data() + (size_t)row1 * elements,
+                rhs_high.data() + (size_t)row1 * elements,
+                extension_table[1][residue],
+                source_low.data(), source_high.data(), elements))
         {
-            const uint32_t row = kMixedGF256Rows + er;
-            if (!GF16MulAddPlanar(
-                    rhs_low.data() + (size_t)row * elements,
-                    rhs_high.data() + (size_t)row * elements,
-                    extension_table[er][residue],
-                    source_low.data(), source_high.data(), elements))
-            {
-                return Wirehair_Error;
-            }
-            ++stats.BlockMulAdds;
+            return Wirehair_Error;
         }
+        stats.BlockMulAdds += 2u;
     }
 
     // Reduce all completion rows through each binary pivot together.  The
@@ -565,14 +661,33 @@ WirehairResult SolveMixedCompletionQuotient(
         }
         for (uint32_t row = 0; row < kMixedGF256Rows; ++row)
         {
-            const uint8_t scale =
+            subfield_scales[row] =
                 subfield_coeff[(size_t)row * inactive_count + pivot];
-            subfield_scales[row] = scale;
-            if (scale == 0u) continue;
-            for (uint32_t k = 0; k < inactive_count; ++k) {
-                if (relation[k]) {
-                    subfield_coeff[(size_t)row * inactive_count + k] ^=
-                        scale;
+        }
+        if (use_bulk_subfield_coefficients)
+        {
+            // The relation is binary, so multiplying it by each pivot scale
+            // exactly reproduces the conditional XOR below while sharing the
+            // relation scan across all ten coefficient rows where supported.
+            gf256_muladd_multi_mem(
+                subfield_coefficient_destinations,
+                subfield_scales,
+                (int)kMixedGF256Rows,
+                relation,
+                (int)inactive_count);
+        }
+        else
+        {
+            for (uint32_t row = 0; row < kMixedGF256Rows; ++row)
+            {
+                const uint8_t scale = subfield_scales[row];
+                if (scale == 0u) continue;
+                uint8_t* coefficients =
+                    subfield_coeff.data() + (size_t)row * inactive_count;
+                for (uint32_t k = 0; k < inactive_count; ++k) {
+                    if (relation[k]) {
+                        coefficients[k] ^= scale;
+                    }
                 }
             }
         }
@@ -614,20 +729,22 @@ WirehairResult SolveMixedCompletionQuotient(
             {
                 return Wirehair_Error;
             }
-            for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
+            if (!GF16MulAddPlanar2(
+                    rhs_low.data() + (size_t)kMixedGF256Rows * elements,
+                    rhs_high.data() + (size_t)kMixedGF256Rows * elements,
+                    extension_scales[0],
+                    rhs_low.data() +
+                        (size_t)(kMixedGF256Rows + 1u) * elements,
+                    rhs_high.data() +
+                        (size_t)(kMixedGF256Rows + 1u) * elements,
+                    extension_scales[1],
+                    source_low.data(), source_high.data(), elements))
             {
-                if (extension_scales[er] == 0u) continue;
-                const uint32_t row = kMixedGF256Rows + er;
-                if (!GF16MulAddPlanar(
-                        rhs_low.data() + (size_t)row * elements,
-                        rhs_high.data() + (size_t)row * elements,
-                        extension_scales[er],
-                        source_low.data(), source_high.data(), elements))
-                {
-                    return Wirehair_Error;
-                }
-                ++stats.BlockMulAdds;
+                return Wirehair_Error;
             }
+            stats.BlockMulAdds +=
+                (extension_scales[0] != 0u ? 1u : 0u) +
+                (extension_scales[1] != 0u ? 1u : 0u);
         }
     }
 
@@ -743,6 +860,9 @@ WirehairResult SolveMixedCompletionQuotient(
             }
             ++stats.BlockMulAdds;
         }
+        uint8_t* pending_existing_low = nullptr;
+        uint8_t* pending_existing_high = nullptr;
+        uint16_t pending_existing_scale = 0u;
         for (uint32_t existing = 0;
              existing < quotient_columns; ++existing)
         {
@@ -761,14 +881,43 @@ WirehairResult SolveMixedCompletionQuotient(
                 pivot_low.data() + (size_t)existing * elements;
             uint8_t* existing_high =
                 pivot_high.data() + (size_t)existing * elements;
-            if (scale == 1u) {
-                gf256_add_mem(existing_low, low, (int)elements);
-                gf256_add_mem(existing_high, high, (int)elements);
+            if (!pending_existing_low)
+            {
+                pending_existing_low = existing_low;
+                pending_existing_high = existing_high;
+                pending_existing_scale = scale;
+            }
+            else
+            {
+                if (!GF16MulAddPlanar2(
+                        pending_existing_low, pending_existing_high,
+                        pending_existing_scale,
+                        existing_low, existing_high, scale,
+                        low, high, elements))
+                {
+                    return Wirehair_Error;
+                }
+                stats.BlockXors +=
+                    (pending_existing_scale == 1u ? 1u : 0u) +
+                    (scale == 1u ? 1u : 0u);
+                stats.BlockMulAdds +=
+                    (pending_existing_scale != 1u ? 1u : 0u) +
+                    (scale != 1u ? 1u : 0u);
+                pending_existing_low = nullptr;
+            }
+        }
+        if (pending_existing_low)
+        {
+            if (pending_existing_scale == 1u) {
+                gf256_add_mem(
+                    pending_existing_low, low, (int)elements);
+                gf256_add_mem(
+                    pending_existing_high, high, (int)elements);
                 ++stats.BlockXors;
             }
             else if (!GF16MulAddPlanar(
-                    existing_low, existing_high, scale,
-                    low, high, elements))
+                    pending_existing_low, pending_existing_high,
+                    pending_existing_scale, low, high, elements))
             {
                 return Wirehair_Error;
             }
@@ -1614,6 +1763,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             if (equation.Data) {
                 std::memcpy(constant, equation.Data, block_bytes);
             }
+            PairedBlockXorAccumulator constant_xor(constant, block_bytes);
             for (uint32_t other : equation.Columns)
             {
                 if (other == column) {
@@ -1633,13 +1783,12 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                     // this stage.  Only peeled columns can contribute to the
                     // affine RHS; XORing an inactive slot would be a full-
                     // block read/write pass with no algebraic effect.
-                    gf256_add_mem(
-                        constant,
-                        values.data() + (size_t)other * block_bytes,
-                        (int)block_bytes);
+                    constant_xor.Add(
+                        values.data() + (size_t)other * block_bytes);
                     ++st.BlockXors;
                 }
             }
+            constant_xor.Flush();
             for (uint32_t w = 0; w < words; ++w) {
                 projection[(size_t)column * words + w] = accumulator[w];
             }
@@ -1663,12 +1812,13 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                 if (rows[r].Data) {
                     std::memcpy(rhs.data(), rows[r].Data, block_bytes);
                 }
+                PairedBlockXorAccumulator rhs_xor(
+                    rhs.data(), block_bytes);
                 for (uint32_t column : rows[r].Columns) {
-                    gf256_add_mem(
-                        rhs.data(),
-                        values.data() + (size_t)column * block_bytes,
-                        (int)block_bytes);
+                    rhs_xor.Add(
+                        values.data() + (size_t)column * block_bytes);
                 }
+                rhs_xor.Flush();
                 if (!RowIsZero(rhs.data(), block_bytes)) {
                     return terminal_error();
                 }
@@ -1725,6 +1875,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             if (rows[r].Data) {
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
+            PairedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
             for (uint32_t column : rows[r].Columns)
             {
                 const uint32_t index = inactive_index[column];
@@ -1749,13 +1900,12 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                             word &= word - 1u;
                         }
                     }
-                    gf256_add_mem(
-                        rhs.data(),
-                        values.data() + (size_t)column * block_bytes,
-                        (int)block_bytes);
+                    rhs_xor.Add(
+                        values.data() + (size_t)column * block_bytes);
                     ++st.BlockXors;
                 }
             }
+            rhs_xor.Flush();
             if (InsertResidualRow(
                     coeff, rhs, R, block_bytes,
                     pivot_coeff, pivot_rhs, have_pivot,
@@ -1869,17 +2019,18 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             {
                 std::fill(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+                PairedBlockXorAccumulator bucket_xor(
+                    residue_bucket.data(), block_bytes);
                 for (uint32_t column = residue; column < L; column += window)
                 {
                     if (inactive_index[column] != UINT32_MAX) {
                         continue;
                     }
-                    gf256_add_mem(
-                        residue_bucket.data(),
-                        values.data() + (size_t)column * block_bytes,
-                        (int)block_bytes);
+                    bucket_xor.Add(
+                        values.data() + (size_t)column * block_bytes);
                     ++st.BlockXors;
                 }
+                bucket_xor.Flush();
                 for (uint32_t heavy = 0; heavy < H; ++heavy) {
                     heavy_scales[heavy] = HeavyCoefficientForParams(
                         system.Params, heavy, residue);
@@ -2180,17 +2331,17 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             else {
                 std::memset(value, 0, block_bytes);
             }
+            PairedBlockXorAccumulator value_xor(value, block_bytes);
             for (uint32_t other : equation.Columns)
             {
                 if (other == column) {
                     continue;
                 }
-                gf256_add_mem(
-                    value,
-                    values.data() + (size_t)other * block_bytes,
-                    (int)block_bytes);
+                value_xor.Add(
+                    values.data() + (size_t)other * block_bytes);
                 ++st.BlockXors;
             }
+            value_xor.Flush();
         }
         phase_end = SolveClock::now();
         st.BackSubNanoseconds = (uint64_t)

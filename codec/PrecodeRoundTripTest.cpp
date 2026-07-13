@@ -148,10 +148,18 @@ bool RunFacadeLossCase(
     const WirehairResult recover_oom =
         decoder.Recover(recovered.data(), message_bytes);
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
-    if (recover_oom != Wirehair_OOM || recovered != before_oom)
+    if (tail_bytes < block_bytes &&
+        (recover_oom != Wirehair_OOM || recovered != before_oom))
     {
         std::fprintf(stderr,
             "roundtrip: Recover OOM partially modified output\n");
+        return false;
+    }
+    if (tail_bytes == block_bytes &&
+        (recover_oom != Wirehair_Success || recovered != message))
+    {
+        std::fprintf(stderr,
+            "roundtrip: exact Recover hit guarded decoder allocation\n");
         return false;
     }
     wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(1);

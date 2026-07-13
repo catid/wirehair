@@ -38,14 +38,28 @@ bool GF16Deinterleave(
 bool GF16Interleave(
     const void* low, const void* high, void* destination, uint32_t bytes);
 
-// Each plane contains elements bytes.  This uses four optimized GF(256)
-// bulk operations for one extension-field constant muladd.  All plane
-// buffers and all conversion inputs/outputs must be pairwise non-overlapping;
-// overlap is rejected before writing.
+// Each plane contains elements bytes.  This uses two shared-source GF(256)
+// multi-destination operations for one extension-field constant muladd.  All
+// plane buffers and all conversion inputs/outputs must be pairwise
+// non-overlapping; overlap is rejected before writing.
 bool GF16MulAddPlanar(
     void* destination_low,
     void* destination_high,
     uint16_t scale,
+    const void* source_low,
+    const void* source_high,
+    uint32_t elements);
+// Update two independent planar destinations from one source.  Fusing the
+// two extension-field operations lets the GF(256) kernels reuse each source
+// load across four destination planes.  All six planes must be pairwise
+// non-overlapping; rejected arguments leave every destination untouched.
+bool GF16MulAddPlanar2(
+    void* destination0_low,
+    void* destination0_high,
+    uint16_t scale0,
+    void* destination1_low,
+    void* destination1_high,
+    uint16_t scale1,
     const void* source_low,
     const void* source_high,
     uint32_t elements);

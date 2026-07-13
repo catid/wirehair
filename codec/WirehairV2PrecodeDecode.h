@@ -85,7 +85,12 @@ public:
         const void* block_in,
         uint32_t data_bytes);
 
-    /** Recover requires the exact initialized message size. */
+    /**
+        Recover requires the exact initialized message size.  The output range
+        must not overlap the decoder's intermediate-block storage; overlap is
+        rejected before writing.  Allocation failure for a partial final block
+        also leaves the complete output range untouched.
+    */
     WirehairResult RecoverResult(
         void* message_out,
         uint64_t message_bytes) const;

@@ -406,10 +406,14 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decode(
 /**
     Recover the exact message described by the serialized profile.
 
-    outputCapacity is checked before writing.  bytesOut receives the required
-    message size whenever it is non-null.  Recovery reconstructs bytes but does
-    not authenticate them; applications must verify trusted framing, a digest,
-    or a MAC before accepting output.
+    outputCapacity and all other caller-visible failure conditions are checked
+    before writing.  Any partial-final-block scratch is also allocated before
+    output begins, so ordinary failure returns leave messageOut unchanged.
+    A non-null bytesOut must not overlap the message output range; otherwise
+    recovery returns WirehairV2_InvalidInput without writing either range.
+    A valid bytesOut receives the required message size.  Recovery reconstructs
+    bytes but does not authenticate them; applications must verify trusted
+    framing, a digest, or a MAC before accepting output.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_recover(
     WirehairV2Codec codec,

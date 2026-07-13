@@ -7,11 +7,11 @@
 
 #include "../WirehairTools.h"
 
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <new>
 #include <stdexcept>
-#include <vector>
 
 namespace {
 
@@ -215,6 +215,25 @@ PublicCodec* FromHandle(WirehairV2Codec codec)
 WirehairV2Codec ToHandle(PublicCodec* codec)
 {
     return reinterpret_cast<WirehairV2Codec>(codec);
+}
+
+bool MemoryRangesOverlap(
+    const void* first,
+    size_t firstBytes,
+    const void* second,
+    size_t secondBytes)
+{
+    const uintptr_t firstBegin = reinterpret_cast<uintptr_t>(first);
+    const uintptr_t secondBegin = reinterpret_cast<uintptr_t>(second);
+    const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+    if (firstBytes > limit - firstBegin ||
+        secondBytes > limit - secondBegin)
+    {
+        return true;
+    }
+    const uintptr_t firstEnd = firstBegin + firstBytes;
+    const uintptr_t secondEnd = secondBegin + secondBytes;
+    return firstBegin < secondEnd && secondBegin < firstEnd;
 }
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
@@ -774,6 +793,17 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_recover(
         }
         return WirehairV2_InvalidInput;
     }
+    if (impl->MessageBytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return WirehairV2_UnsupportedPlatform;
+    }
+    if (messageOut && bytesOut && MemoryRangesOverlap(
+            messageOut, (size_t)impl->MessageBytes,
+            bytesOut, sizeof(*bytesOut)))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (bytesOut) {
         *bytesOut = impl->MessageBytes;
     }
@@ -786,24 +816,14 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_recover(
     if (!impl->Decoded) {
         return WirehairV2_NeedMore;
     }
-    if (impl->MessageBytes >
-        (uint64_t)std::numeric_limits<size_t>::max())
-    {
-        return WirehairV2_UnsupportedPlatform;
-    }
 
     try
     {
-        // Recover transactionally: the internal decoder may allocate while
-        // evaluating later rows, so stage the full message before publishing.
-        std::vector<uint8_t> recovered((size_t)impl->MessageBytes);
-        const WirehairV2Result result = MapResult(impl->Impl.Recover(
-            recovered.data(), impl->MessageBytes));
-        if (result != WirehairV2_Success) {
-            return result;
-        }
-        std::memcpy(messageOut, recovered.data(), recovered.size());
-        return WirehairV2_Success;
+        // Public V2 decoders always use MessagePrecodeDecoder.  Its recovery
+        // path validates the complete operation and allocates any partial-tail
+        // scratch before publishing directly to the caller's output range.
+        return MapResult(impl->Impl.Recover(
+            messageOut, impl->MessageBytes));
     }
     catch (const std::bad_alloc&) {
         return WirehairV2_OOM;

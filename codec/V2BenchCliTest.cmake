@@ -145,14 +145,60 @@ expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8
     --trials 1 --loss 0)
 expect_success("v2_precode[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode)
+expect_success("precode_profile=certified" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode)
 expect_success("precode_profile_handoff=encoder-selected-v1" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode)
+expect_success("v2_mixed[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed)
+expect_success("v2_mixed_cached[ ]+8[ ]+1[ ]+0" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode-cache --precode-profile mixed)
+expect_success("v2_precode[ ]+17[ ]+1[ ]+0" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 17 --max-message-mib 1 --loss 0 --precode
+    --precode-profile certified)
 expect_success("v2_cached[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode-cache)
 expect_success("encoder_cache=0 decoder_cache=1" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode-decoder-cache)
+run_bench(result out err compare --nlo 64 --nhi 64 --trials 2
+    --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile both --trial-details)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "precode_profile=both" OR
+    NOT out MATCHES "v2_precode[ ]+8[ ]+2[ ]+0" OR
+    NOT out MATCHES "v2_mixed[ ]+8[ ]+2[ ]+0" OR
+    NOT out MATCHES
+        "paired_trial:.*precode_profile=certified.*precode_ok=1" OR
+    NOT out MATCHES "paired_trial:.*precode_profile=mixed.*precode_ok=1")
+    message(FATAL_ERROR
+        "paired certified/mixed precode comparison failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "paired certified/mixed precode comparison")
+expect_failure("unknown --precode-profile" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile unknown)
+expect_failure("--precode-profile requires" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
+    --precode-profile mixed)
+run_bench(result out err compare --nlo 64 --nhi 64 --trials 1
+    --bb-list 17 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 1 OR
+    NOT out STREQUAL "" OR
+    NOT err MATCHES "mixed precode profile requires even block bytes")
+    message(FATAL_ERROR
+        "mixed odd-byte rejection emitted partial output or wrong status\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "mixed odd-byte rejection")
+expect_failure("mixed precode profile requires even block bytes" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8,17 --max-message-mib 1
+    --loss 0 --precode --precode-profile both)
 expect_success("# densetune:" densetune --N 2 --bb-list 8 --candidates 1
     --trials 1 --loss 0)
 expect_success("# densecount:" densecount --N 2 --bb-list 8 --deltas 0

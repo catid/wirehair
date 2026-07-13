@@ -131,6 +131,16 @@ beside production and the V1-compatible wrapper arms.  `precodefail` runs a
 threaded fixed-overhead V2 rank/failure grid and reports inactivation and solve
 cost rather than relying on a peel-only proxy.
 
+`compare --precode-profile certified|mixed|both` selects the WH2 equation
+profile for the precode and cached-precode arms; the default is `certified`.
+`both` replays the same message seed and packet-ID schedule through both WH2
+profiles, alternates their execution order by trial, and emits separate
+`v2_precode` and `v2_mixed` rows.  This option is deliberately distinct from
+`--v2-profile`, which controls the older
+V1-compatible wrapper comparison rather than WH2.  The mixed profile represents
+payloads as byte pairs, so `mixed` and `both` reject any odd block-byte entry
+before printing benchmark results.
+
 The `compare` cached arm has separate default-off local storage controls.  Use
 `--precode-encoder-cache` to retain one exact message copy for direct
 systematic encoding, or `--precode-decoder-cache` to retain accepted
@@ -139,9 +149,10 @@ The decoder option reserves one message-sized address range and touches the
 pages for received systematic packets, so common 10% loss costs roughly 90%
 of a message in resident memory and adds one receive-side copy in exchange for
 substantially faster recovery.  `--precode-cache` enables both controls.  All
-three flags affect only the benchmark's `v2_cached` arm: they do not alter
-packet bytes or serialized profiles, and the installed public C API remains
-default-off pending a versioned options surface.
+three flags affect only the benchmark's cached-precode arm(s), `v2_cached`
+and/or `v2_mixed_cached`: they do not alter packet bytes or serialized
+profiles, and the installed public C API remains default-off pending a
+versioned options surface.
 `wirehair_v2_resume_bench` pins itself to the first available CPU and runs 20
 alternating cold/warm samples at K=1000 and K=10000.  Its fixed deficient
 K-packet stream becomes full rank across exactly eight appended equations; the
@@ -228,6 +239,8 @@ cmake --build build --target wirehair_v2_resume_bench
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 256 --trials 2 --bb-list 1280,102400,1048576 --max-message-mib 96
 ./build/codec/wirehair_v2_bench precodecheck --N 64,320,1000 --bb-list 16,1280 --trials 10 --loss 0.10
 ./build/codec/wirehair_v2_bench compare --nlo 64 --nhi 3200 --trials 10 --bb-list 17,1280,102400 --max-message-mib 128 --loss 0.10 --precode
+./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 30 --bb-list 1280,102400 --loss 0.10 --precode --precode-profile both --trial-details
+./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode --precode-profile mixed
 ./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-encoder-cache
 ./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-decoder-cache
 ./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-cache
