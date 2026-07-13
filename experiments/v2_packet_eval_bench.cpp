@@ -7,7 +7,7 @@
 //
 //   cmake -S . -B build -DWIREHAIR_BUILD_BENCHMARKS=ON
 //   cmake --build build --target wirehair_v2_packet_eval_bench
-//   taskset -c 2 build/codec/wirehair_v2_packet_eval_bench 40
+//   taskset -c 2 build/codec/wirehair_v2_packet_eval_bench 40 2
 
 #include "../codec/WirehairV2Precode.h"
 #include "../codec/WirehairV2Solve.h"
@@ -122,13 +122,13 @@ std::vector<uint32_t> FixedRows(uint32_t K)
     return rows;
 }
 
-bool RunColdSolveRowBuild(unsigned samples)
+bool RunColdSolveRowBuild(unsigned samples, uint32_t mix_count)
 {
     const uint32_t K = 10000u;
     const uint32_t P = 211u;
     wirehair_v2::PacketRowConfig config;
     config.PeelSeed = UINT32_C(0x4d241359);
-    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    config.MixCount = mix_count;
     wirehair_v2::PacketRowRuntime runtime;
     if (!runtime.Initialize(K, P, config.MixCount)) {
         return false;
@@ -173,11 +173,11 @@ bool RunColdSolveRowBuild(unsigned samples)
         ratios.push_back(cached_seconds / wrapper_seconds);
     }
     std::printf(
-        "cold_solve_row_build K=%u P=%u rows=%u samples=%u "
+        "cold_solve_row_build K=%u P=%u mix_count=%u rows=%u samples=%u "
         "wrapper_median_ms=%.6f cached_median_ms=%.6f "
         "paired_ratio_median=%.6f cache_improvement=%.3f%% "
         "sink=%" PRIu64 "\n",
-        K, P, K, samples,
+        K, P, mix_count, K, samples,
         Median(wrapper_samples) * 1000.0,
         Median(cached_samples) * 1000.0,
         Median(ratios),
@@ -212,6 +212,9 @@ bool RunSize(
 
     uint32_t degree_histogram[65] = {};
     uint64_t degree_sum = 0u;
+    uint64_t baseline_destination_traffic = 0u;
+    uint64_t baseline_total_traffic = 0u;
+    uint64_t fused_traffic_reduction = 0u;
     for (uint32_t id : rows) {
         const std::vector<uint32_t> row =
             wirehair_v2::GeneratePacketMatrixRow(K, P, id, config);
@@ -219,6 +222,16 @@ bool RunSize(
             (uint32_t)row.size() - config.MixCount;
         ++degree_histogram[std::min<uint32_t>(source_degree, 64u)];
         degree_sum += source_degree;
+        baseline_destination_traffic +=
+            2u * source_degree + 2u * config.MixCount - 1u;
+        baseline_total_traffic +=
+            3u * source_degree + 3u * config.MixCount - 1u;
+        if (config.MixCount == 3u) {
+            fused_traffic_reduction += 4u;
+        }
+        else if (config.MixCount == 2u) {
+            fused_traffic_reduction += source_degree == 1u ? 2u : 4u;
+        }
         EvaluateBaseline(
             system, config, intermediate.Data, block_bytes, id,
             baseline_output.Data);
@@ -278,11 +291,13 @@ bool RunSize(
     std::vector<double> cached_samples;
     std::vector<double> paired_ratios;
     std::vector<double> cached_ratios;
+    std::vector<double> production_ratios;
     baseline_samples.reserve(samples);
     fused_samples.reserve(samples);
     cached_samples.reserve(samples);
     paired_ratios.reserve(samples);
     cached_ratios.reserve(samples);
+    production_ratios.reserve(samples);
     for (unsigned sample = 0; sample < samples; ++sample) {
         double timings[3] = {};
         if (sample % 3u == 0u) {
@@ -305,16 +320,19 @@ bool RunSize(
         cached_samples.push_back(timings[2]);
         paired_ratios.push_back(timings[1] / timings[0]);
         cached_ratios.push_back(timings[2] / timings[1]);
+        production_ratios.push_back(timings[2] / timings[0]);
     }
 
     std::printf(
-        "bb=%u rows=%zu reps=%u samples=%u mean_source_degree=%.3f "
+        "bb=%u mix_count=%u rows=%zu reps=%u samples=%u "
+        "mean_source_degree=%.3f "
         "baseline_median_ms=%.6f fused_median_ms=%.6f cached_median_ms=%.6f "
         "paired_ratio_median=%.6f improvement=%.3f%% "
         "cached_vs_wrapper_ratio=%.6f cache_improvement=%.3f%% "
+        "production_ratio_median=%.6f production_improvement=%.3f%% "
         "destination_traffic_reduction=%.3f%% "
         "total_traffic_reduction=%.3f%% sink=%" PRIu64 "\n",
-        block_bytes, rows.size(), repetitions, samples,
+        block_bytes, config.MixCount, rows.size(), repetitions, samples,
         (double)degree_sum / rows.size(),
         Median(baseline_samples) * 1000.0,
         Median(fused_samples) * 1000.0,
@@ -323,10 +341,12 @@ bool RunSize(
         (1.0 - Median(paired_ratios)) * 100.0,
         Median(cached_ratios),
         (1.0 - Median(cached_ratios)) * 100.0,
-        100.0 * (double)(4u * rows.size()) /
-            (double)(2u * degree_sum + 5u * rows.size()),
-        100.0 * (double)(4u * rows.size()) /
-            (double)(3u * degree_sum + 8u * rows.size()),
+        Median(production_ratios),
+        (1.0 - Median(production_ratios)) * 100.0,
+        100.0 * fused_traffic_reduction /
+            (double)baseline_destination_traffic,
+        100.0 * fused_traffic_reduction /
+            (double)baseline_total_traffic,
         (uint64_t)sink);
     std::printf("degree_histogram:");
     for (unsigned degree = 0; degree < 65u; ++degree) {
@@ -343,17 +363,31 @@ bool RunSize(
 int main(int argc, char** argv)
 {
     unsigned samples = 40u;
-    if (argc == 2) {
+    uint32_t mix_count = wirehair_v2::kCertifiedPacketMixCount;
+    if (argc >= 2) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(argv[1], &end, 10);
         if (!end || *end != '\0' || parsed < 30u || parsed > 1000u) {
-            std::fprintf(stderr, "usage: %s [samples>=30]\n", argv[0]);
+            std::fprintf(stderr,
+                "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
             return 2;
         }
         samples = (unsigned)parsed;
     }
-    else if (argc != 1) {
-        std::fprintf(stderr, "usage: %s [samples>=30]\n", argv[0]);
+    if (argc == 3)
+    {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(argv[2], &end, 10);
+        if (!end || *end != '\0' || (parsed != 2u && parsed != 3u)) {
+            std::fprintf(stderr,
+                "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
+            return 2;
+        }
+        mix_count = (uint32_t)parsed;
+    }
+    else if (argc > 3) {
+        std::fprintf(stderr,
+            "usage: %s [samples=30..1000] [mix_count=2|3]\n", argv[0]);
         return 2;
     }
     if (gf256_init() != 0) {
@@ -371,7 +405,7 @@ int main(int argc, char** argv)
     }
     wirehair_v2::PacketRowConfig config;
     config.PeelSeed = UINT32_C(0x4d241359);
-    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    config.MixCount = mix_count;
     if (!wirehair_v2::ValidatePrecodeSystem(system) ||
         !wirehair_v2::IsPacketRowDomainValid(
             K,
@@ -383,8 +417,14 @@ int main(int argc, char** argv)
     }
 
     bool ok = true;
-    ok = RunColdSolveRowBuild(samples) && ok;
+    ok = RunColdSolveRowBuild(samples, mix_count) && ok;
     ok = RunSize(system, config, 1u, 4096u, samples) && ok;
+    // The mixed completion candidate requires even block bytes.  Keep a
+    // short sub-cacheline sweep so wrapper overhead at bb=1 cannot conceal a
+    // regression (or win) in the smallest reachable production packets.
+    ok = RunSize(system, config, 2u, 4096u, samples) && ok;
+    ok = RunSize(system, config, 8u, 4096u, samples) && ok;
+    ok = RunSize(system, config, 32u, 4096u, samples) && ok;
     ok = RunSize(system, config, 1280u, 2048u, samples) && ok;
     ok = RunSize(system, config, 100u * 1024u, 32u, samples) && ok;
     ok = RunSize(system, config, 1024u * 1024u, 3u, samples) && ok;

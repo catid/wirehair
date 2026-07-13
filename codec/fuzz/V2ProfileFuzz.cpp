@@ -175,14 +175,20 @@ bool FuzzProfileContract(
     std::string& failure)
 {
     const uint32_t K = 16u + input.U8() % 17u;
-    const uint32_t block_bytes = 1u + input.U8() % 64u;
+    uint32_t block_bytes = 1u + input.U8() % 64u;
+    const bool mixed = input.Bool();
+    if (mixed) block_bytes += block_bytes & 1u;
     wirehair_v2::SeedProfile profile =
         wirehair_v2::SelectSeedProfile(K, block_bytes);
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.PrecodeSeedSalt = input.U64();
     options.RecoveryRowSeedSalt = input.U64();
     options.DenseIdentityCorner = input.Bool();
-    options.RecoveryMixCount = wirehair_v2::kCertifiedPacketMixCount;
+    options.Completion = mixed ?
+        wirehair_v2::CompletionField::MixedGF256GF16 :
+        wirehair_v2::CompletionField::GF256;
+    options.RecoveryMixCount = mixed && input.Bool() ? 2u :
+        wirehair_v2::kCertifiedPacketMixCount;
 
     wirehair_v2::MessagePrecodeEncoderOptions resolved;
     wirehair_v2::PrecodeParams params;
@@ -244,7 +250,9 @@ bool FuzzProfileContract(
         requested.PrecodeSeedSalt ^= 1u;
         break;
     default:
-        requested.Completion =
+        requested.Completion = requested.Completion ==
+                wirehair_v2::CompletionField::MixedGF256GF16 ?
+            wirehair_v2::CompletionField::GF256 :
             wirehair_v2::CompletionField::MixedGF256GF16;
         break;
     }

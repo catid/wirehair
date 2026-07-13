@@ -685,7 +685,7 @@ bool RunBoundContractCases()
             &variant) != Wirehair_InvalidInput)
     {
         std::fprintf(stderr,
-            "contract: non-certified packet mix count was accepted\n");
+            "contract: GF256/mix2 option pair was accepted\n");
         return false;
     }
     variant = defaults;
@@ -707,6 +707,11 @@ bool RunBoundContractCases()
     variant.Completion =
         wirehair_v2::CompletionField::MixedGF256GF16;
     if (!RunOptionContractCase("mixed-completion", variant, defaults)) {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoderOptions mixed_mix3 = variant;
+    variant.RecoveryMixCount = 2u;
+    if (!RunOptionContractCase("mixed-mix2", variant, mixed_mix3)) {
         return false;
     }
 

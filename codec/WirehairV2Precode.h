@@ -159,6 +159,31 @@ uint8_t HeavyCoefficient(
     uint32_t ge_column,
     uint32_t heavy_rows);
 
+static const uint32_t kMixedPackedCoefficientWords =
+    (kMixedGF256Rows + kMixedGF16Rows + 3u) / 4u;
+
+/// Immutable row-major coefficient period shared by mixed encode, solve, and
+/// verification paths.  The accessor initializes both fields and returns null
+/// only if their arithmetic tables could not be initialized.
+struct MixedCoefficientRows
+{
+    uint8_t Subfield[kMixedGF256Rows][kMixedCoefficientPeriod];
+    uint16_t Extension[kMixedGF16Rows][kMixedCoefficientPeriod];
+};
+
+const MixedCoefficientRows* GetMixedCoefficientRows();
+
+/// The same mixed coefficient period packed as four uint16 lanes per word,
+/// residue-major.  This separate lazy cache prevents encode/verify callers
+/// from paying the solve-only packing cost on first use.
+struct MixedPackedCoefficients
+{
+    uint64_t ByResidue[
+        kMixedCoefficientPeriod][kMixedPackedCoefficientWords];
+};
+
+const MixedPackedCoefficients* GetMixedPackedCoefficients();
+
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate
 /// families are confined to explicitly constructed experiment systems.
 uint8_t HeavyCoefficientForParams(

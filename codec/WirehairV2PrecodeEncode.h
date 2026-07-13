@@ -277,9 +277,10 @@ private:
 
 struct MessagePrecodeEncoderOptions
 {
-    // The shipping version-4 packet contract accepts exactly the certified
-    // mix count.  This remains a field so an explicitly supplied option set
-    // can be checked against a selected profile rather than silently ignored.
+    // Named version-4 packet contracts bind this value together with the
+    // completion field: three columns for the original profiles, or two for
+    // the opt-in mixed/mix2 profile.  Keep it explicit so supplied options can
+    // be checked against a selected profile rather than silently ignored.
     uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
     bool DenseIdentityCorner = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
@@ -340,9 +341,10 @@ void BindMessagePrecodeProfile(
     partial block, while recovery block ids emit a full block.
 
     The packet degree distribution is fixed by the version-4 contract to the
-    production Wirehair integer sampler with exactly three precode columns;
-    it is not a runtime policy toggle.  The default path preserves the
-    certified full-span dense rows.  It solves
+    production Wirehair integer sampler.  Each named profile also binds its
+    precode mix count: three for the original profiles and two for the opt-in
+    mixed/mix2 profile, rather than an unbound runtime policy.  The default
+    path preserves the certified full-span dense rows.  It solves
     K deterministic systematic packet equations together with all precode
     constraints for the complete intermediate vector, so it does not require
     the dense parity corner to be independently invertible.  The

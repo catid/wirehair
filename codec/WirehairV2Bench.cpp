@@ -566,7 +566,8 @@ bool ValidateMessageDimensions(
     uint32_t N,
     uint32_t block_bytes,
     const char* command,
-    uint64_t max_message_bytes = 0u)
+    uint64_t max_message_bytes = 0u,
+    uint64_t working_block_count = 0u)
 {
     const uint64_t message_bytes = (uint64_t)N * block_bytes;
     if (N < 2u || N > 64000u || block_bytes == 0u ||
@@ -587,14 +588,17 @@ bool ValidateMessageDimensions(
         return false;
     }
     const uint64_t metadata_bytes = (uint64_t)N * 4096u;
-    if (message_bytes >
-        (UINT64_MAX - metadata_bytes - block_bytes) / 2u)
+    if (working_block_count == 0u) {
+        working_block_count = 2u * (uint64_t)N + 1u;
+    }
+    if (working_block_count >
+        (UINT64_MAX - metadata_bytes) / block_bytes)
     {
         std::fprintf(stderr, "%s working-set size overflows\n", command);
         return false;
     }
     const uint64_t working_bytes =
-        2u * message_bytes + block_bytes + metadata_bytes;
+        working_block_count * block_bytes + metadata_bytes;
     static const uint64_t kMaxBenchmarkWorkingBytes = UINT64_C(1) << 39;
     if (working_bytes > (uint64_t)SIZE_MAX ||
         working_bytes > kMaxBenchmarkWorkingBytes)
@@ -648,6 +652,47 @@ bool ValidateMessageInputs(
     for (int n : Ns) for (int bb : BBs) {
         if (!ValidateMessageDimensions(
                 (uint32_t)n, (uint32_t)bb, command))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidatePayloadE2EInputs(
+    const std::vector<int>& Ns,
+    const std::vector<int>& BBs,
+    const char* command)
+{
+    for (int n : Ns) for (int bb : BBs)
+    {
+        if (n < 2 || n > 64000 || bb <= 0 ||
+            (uint32_t)bb > UINT32_C(0x7fffffff))
+        {
+            return ValidateMessageDimensions(
+                (uint32_t)n, (uint32_t)bb, command);
+        }
+
+        // Payload E2E keeps the source message, encoded intermediate values,
+        // and delivered packet storage alive while a second solve allocates
+        // its output and residual scratch.  Bound all block-sized storage:
+        // 2*K covers message+delivery, 2*L covers the retained intermediate
+        // and active solve values, 2*R covers the main and deficient-quotient
+        // pivot RHS buffers, and the fixed margin covers successful mixed
+        // quotient RHS, heavy buckets, and block temporaries.
+        const wirehair_v2::SeedProfile profile =
+            wirehair_v2::SelectSeedProfile((uint32_t)n, (uint32_t)bb);
+        const uint64_t L = (uint64_t)n + profile.DenseCount + 24u;
+        const uint64_t max_inactive = std::min<uint64_t>(
+            L, wirehair_v2::kMaxInactiveColumns);
+        const uint64_t working_blocks =
+            2u * (uint64_t)n + 2u * L + 2u * max_inactive + 96u;
+        if (!ValidateMessageDimensions(
+                (uint32_t)n,
+                (uint32_t)bb,
+                command,
+                0u,
+                working_blocks))
         {
             return false;
         }
@@ -3292,6 +3337,146 @@ struct MatrixFailureTrial
     uint64_t SolveNanoseconds = 0u;
 };
 
+const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family);
+
+enum class PrecodeFailCompletion
+{
+    Certified,
+    Mixed
+};
+
+const char* PrecodeFailCompletionName(PrecodeFailCompletion completion)
+{
+    return completion == PrecodeFailCompletion::Mixed ?
+        "mixed" : "certified";
+}
+
+bool ParsePrecodeFailCompletion(
+    const char* text,
+    PrecodeFailCompletion& completion)
+{
+    if (!std::strcmp(text, "certified")) {
+        completion = PrecodeFailCompletion::Certified;
+        return true;
+    }
+    if (!std::strcmp(text, "mixed")) {
+        completion = PrecodeFailCompletion::Mixed;
+        return true;
+    }
+    return false;
+}
+
+struct PairedMixOutcomes
+{
+    std::vector<bool> Mix2Failures;
+    std::vector<bool> Mix3Failures;
+    uint32_t Mix2SeedAttempt = UINT32_MAX;
+    uint32_t Mix3SeedAttempt = UINT32_MAX;
+};
+
+void Wilson95(
+    uint32_t failures,
+    uint32_t trials,
+    double& lower,
+    double& upper)
+{
+    if (trials == 0u) {
+        lower = upper = 0.0;
+        return;
+    }
+    static const double z = 1.959963984540054;
+    const double n = (double)trials;
+    const double p = (double)failures / n;
+    const double z2_over_n = z * z / n;
+    const double center = (p + z2_over_n / 2.0) / (1.0 + z2_over_n);
+    const double radius = z * std::sqrt(
+        (p * (1.0 - p) / n) + z * z / (4.0 * n * n)) /
+        (1.0 + z2_over_n);
+    lower = std::max(0.0, center - radius);
+    upper = std::min(1.0, center + radius);
+}
+
+double ExactMcNemarP(uint32_t first_only, uint32_t second_only)
+{
+    const uint32_t discordant = first_only + second_only;
+    if (discordant == 0u) {
+        return 1.0;
+    }
+    const uint32_t tail = std::min(first_only, second_only);
+    const long double n = (long double)discordant;
+    const long double k = (long double)tail;
+    const long double log_probability_at_tail =
+        std::lgamma(n + 1.0L) - std::lgamma(k + 1.0L) -
+        std::lgamma(n - k + 1.0L) - n * std::log(2.0L);
+    long double relative_sum = 1.0L;
+    long double relative_term = 1.0L;
+    for (uint32_t j = tail; j > 0u; --j)
+    {
+        relative_term *= (long double)j /
+            (long double)(discordant - j + 1u);
+        relative_sum += relative_term;
+    }
+    const long double doubled_tail = 2.0L * std::exp(
+        log_probability_at_tail + std::log(relative_sum));
+    return (double)std::min(1.0L, doubled_tail);
+}
+
+void PrintPairedMixOutcomes(
+    uint32_t K,
+    uint32_t block_bytes,
+    PrecodeFailCompletion completion,
+    wirehair_v2::HeavyCoefficientFamily heavy_family,
+    uint32_t overhead,
+    const PairedMixOutcomes& outcomes)
+{
+    if (outcomes.Mix2Failures.empty() ||
+        outcomes.Mix2Failures.size() != outcomes.Mix3Failures.size())
+    {
+        return;
+    }
+    uint32_t both_success = 0u;
+    uint32_t both_failure = 0u;
+    uint32_t mix2_only = 0u;
+    uint32_t mix3_only = 0u;
+    for (size_t i = 0; i < outcomes.Mix2Failures.size(); ++i)
+    {
+        const bool mix2_failed = outcomes.Mix2Failures[i] != 0u;
+        const bool mix3_failed = outcomes.Mix3Failures[i] != 0u;
+        if (mix2_failed && mix3_failed) {
+            ++both_failure;
+        }
+        else if (mix2_failed) {
+            ++mix2_only;
+        }
+        else if (mix3_failed) {
+            ++mix3_only;
+        }
+        else {
+            ++both_success;
+        }
+    }
+    const uint32_t trials = (uint32_t)outcomes.Mix2Failures.size();
+    const uint32_t mix2_failures = both_failure + mix2_only;
+    const uint32_t mix3_failures = both_failure + mix3_only;
+    double mix2_lower = 0.0, mix2_upper = 0.0;
+    double mix3_lower = 0.0, mix3_upper = 0.0;
+    Wilson95(mix2_failures, trials, mix2_lower, mix2_upper);
+    Wilson95(mix3_failures, trials, mix3_lower, mix3_upper);
+    std::printf(
+        "# precodefail_paired: N=%u bb=%u completion=%s heavy_family=%s "
+        "overhead=%u trials=%u mix2_fail=%u mix3_fail=%u both_fail=%u "
+        "mix2_only=%u mix3_only=%u both_success=%u mcnemar_p=%.12g "
+        "mix2_seed_attempt=%u mix3_seed_attempt=%u "
+        "mix2_wilson95=[%.8f,%.8f] mix3_wilson95=[%.8f,%.8f]\n",
+        K, block_bytes, PrecodeFailCompletionName(completion),
+        HeavyFamilyName(heavy_family), overhead, trials,
+        mix2_failures, mix3_failures, both_failure,
+        mix2_only, mix3_only, both_success,
+        ExactMcNemarP(mix2_only, mix3_only),
+        outcomes.Mix2SeedAttempt, outcomes.Mix3SeedAttempt,
+        mix2_lower, mix2_upper, mix3_lower, mix3_upper);
+}
+
 const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family)
 {
     return family == wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ?
@@ -3479,6 +3664,7 @@ int CmdPrecodeFail(int argc, char** argv)
     std::string overhead_list = "0,1";
     std::string heavy_family_list = "periodic";
     std::string mix_count_list = "3";
+    PrecodeFailCompletion completion = PrecodeFailCompletion::Certified;
     bool payload_e2e = false;
     uint32_t trials = 100u;
     uint32_t threads = 1u;
@@ -3528,6 +3714,21 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             mix_count_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--completion")) {
+            if (!TakeArg(
+                    "precodefail", "--completion", argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!ParsePrecodeFailCompletion(value, completion))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --completion token %s "
+                    "(expected certified or mixed)\n",
+                    value);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--payload-e2e")) {
             payload_e2e = true;
@@ -3594,7 +3795,9 @@ int CmdPrecodeFail(int argc, char** argv)
         return 1;
     }
     if (!ValidateBlockCounts(Ns, "precodefail") ||
-        !ValidateLoss(loss, "precodefail"))
+        !ValidateLoss(loss, "precodefail") ||
+        (payload_e2e &&
+         !ValidatePayloadE2EInputs(Ns, BBs, "precodefail")))
     {
         return 1;
     }
@@ -3626,10 +3829,51 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
     }
+    const bool pair_mix_counts =
+        std::find(mix_counts.begin(), mix_counts.end(), 2) !=
+            mix_counts.end() &&
+        std::find(mix_counts.begin(), mix_counts.end(), 3) !=
+            mix_counts.end();
+    if (completion == PrecodeFailCompletion::Mixed)
+    {
+        for (int bb : BBs)
+        {
+            if ((bb & 1) != 0)
+            {
+                std::fprintf(stderr,
+                    "precodefail mixed completion requires even block bytes, "
+                    "got %d\n",
+                    bb);
+                return 1;
+            }
+        }
+        for (wirehair_v2::HeavyCoefficientFamily family : heavy_families)
+        {
+            if (family !=
+                wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy)
+            {
+                std::fprintf(stderr,
+                    "precodefail mixed completion requires periodic "
+                    "heavy family\n");
+                return 1;
+            }
+        }
+    }
 
-    std::printf(
-        "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx\n",
-        trials, threads, loss, (unsigned long long)seed);
+    if (completion == PrecodeFailCompletion::Certified)
+    {
+        std::printf(
+            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx\n",
+            trials, threads, loss, (unsigned long long)seed);
+    }
+    else
+    {
+        std::printf(
+            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
+            "completion=%s\n",
+            trials, threads, loss, (unsigned long long)seed,
+            PrecodeFailCompletionName(completion));
+    }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -3644,16 +3888,18 @@ int CmdPrecodeFail(int argc, char** argv)
         const uint32_t bb = (uint32_t)bb_value;
         const wirehair_v2::SeedProfile profile =
             wirehair_v2::SelectSeedProfile(K, bb);
+        const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+            profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
         const wirehair_v2::PrecodeParams canonical_params =
-            wirehair_v2::MakeCertifiedParams(
-                K,
-                wirehair_v2::MatrixSeedFromProfile(
-                    profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+            completion == PrecodeFailCompletion::Mixed ?
+                wirehair_v2::MakeMixedParams(K, matrix_seed) :
+                wirehair_v2::MakeCertifiedParams(K, matrix_seed);
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
             profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
+        std::map<uint32_t, PairedMixOutcomes> paired_outcomes;
         for (int mix_count_value : mix_counts)
         {
             base_config.MixCount = (uint32_t)mix_count_value;
@@ -3674,9 +3920,11 @@ int CmdPrecodeFail(int argc, char** argv)
                     (int)select_result);
                 return 2;
             }
+            // Exclude the mix count so E2E arms share the message and loss
+            // stream just like the rank trials below.
             if (payload_e2e && !RunPrecodeFailPayloadE2E(
                     system, config, bb, loss,
-                    seed ^ ((uint64_t)K << 32) ^ mix_count_value))
+                    seed ^ ((uint64_t)K << 32) ^ bb))
             {
                 std::fprintf(stderr,
                     "precodefail payload E2E failed N=%u bb=%u "
@@ -3713,7 +3961,10 @@ int CmdPrecodeFail(int argc, char** argv)
                     workers.push_back(std::thread([&, overhead]() {
                         try
                         {
-                            const uint8_t zero = 0u;
+                            const uint8_t zero[2] = { 0u, 0u };
+                            const uint32_t solve_block_bytes =
+                                completion == PrecodeFailCompletion::Mixed ?
+                                    2u : 1u;
                             for (;;)
                             {
                                 if (cancel_workers.load()) {
@@ -3723,6 +3974,8 @@ int CmdPrecodeFail(int argc, char** argv)
                                 if (trial >= trials) {
                                     break;
                                 }
+                                // Keep the delivered packet IDs paired across
+                                // completion, heavy-family, and mix-count arms.
                                 Rng rng(
                                     seed ^
                                     ((uint64_t)K *
@@ -3744,7 +3997,7 @@ int CmdPrecodeFail(int argc, char** argv)
                                     }
                                     wirehair_v2::SolvePacket packet;
                                     packet.BlockId = id;
-                                    packet.Data = &zero;
+                                    packet.Data = zero;
                                     packets.push_back(packet);
                                 }
                                 std::vector<uint8_t> intermediate;
@@ -3752,7 +4005,8 @@ int CmdPrecodeFail(int argc, char** argv)
                                 MatrixFailureTrial& result = results[trial];
                                 result.Result =
                                     wirehair_v2::SolvePrecodeSystem(
-                                        system, config, packets, 1u,
+                                        system, config, packets,
+                                        solve_block_bytes,
                                         intermediate, &solve_stats);
                                 result.Inactivated =
                                     solve_stats.InactivatedColumns;
@@ -3852,6 +4106,21 @@ int CmdPrecodeFail(int argc, char** argv)
                     ++heavy_shortfalls;
                 }
             }
+            if (pair_mix_counts &&
+                (mix_count_value == 2 || mix_count_value == 3))
+            {
+                PairedMixOutcomes& paired = paired_outcomes[overhead];
+                std::vector<bool>& failures = mix_count_value == 2 ?
+                    paired.Mix2Failures : paired.Mix3Failures;
+                uint32_t& paired_seed_attempt = mix_count_value == 2 ?
+                    paired.Mix2SeedAttempt : paired.Mix3SeedAttempt;
+                paired_seed_attempt = seed_attempt;
+                failures.resize(trials);
+                for (uint32_t trial = 0; trial < trials; ++trial) {
+                    failures[trial] = results[trial].Result ==
+                        Wirehair_Success ? 0u : 1u;
+                }
+            }
             const std::string binary_hist_text =
                 CountHistogram(binary_def_hist);
             const std::string heavy_hist_text = CountHistogram(heavy_gain_hist);
@@ -3879,6 +4148,12 @@ int CmdPrecodeFail(int argc, char** argv)
                 failure_trials.c_str());
         }
         }
+        for (const std::pair<const uint32_t, PairedMixOutcomes>& paired :
+            paired_outcomes)
+        {
+            PrintPairedMixOutcomes(
+                K, bb, completion, heavy_family, paired.first, paired.second);
+        }
         }
     }
     return 0;
@@ -3886,6 +4161,22 @@ int CmdPrecodeFail(int argc, char** argv)
 
 int CmdSelfTest()
 {
+    double wilson_lower = 0.0;
+    double wilson_upper = 0.0;
+    Wilson95(0u, 4u, wilson_lower, wilson_upper);
+    const double mcnemar_02 = ExactMcNemarP(0u, 2u);
+    const double mcnemar_15 = ExactMcNemarP(1u, 5u);
+    if (!std::isfinite(mcnemar_02) || !std::isfinite(mcnemar_15) ||
+        !std::isfinite(wilson_lower) || !std::isfinite(wilson_upper) ||
+        std::fabs(mcnemar_02 - 0.5) > 1e-12 ||
+        std::fabs(mcnemar_15 - 0.21875) > 1e-12 ||
+        std::fabs(wilson_lower) > 1e-12 ||
+        std::fabs(wilson_upper - 0.4898908364545973) > 1e-12)
+    {
+        std::fprintf(stderr, "paired-statistics oracle mismatch\n");
+        return 1;
+    }
+
     const double losses[] = {0.0, 0.99};
     const uint32_t expected_drops[] = {0u, 9890u};
     for (size_t case_index = 0; case_index < 2u; ++case_index)

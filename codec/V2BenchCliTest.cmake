@@ -209,6 +209,29 @@ expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
 expect_success("# precodefail:" precodefail --N 64 --bb-list 8
     --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+string(CONCAT precodefail_paired_pattern
+    "precodefail_paired:.*completion=mixed.*mix2_fail=.*mix3_fail=.*"
+    "both_fail=.*mix2_only=.*mix3_only=.*both_success=.*mcnemar_p=.*"
+    "mix2_seed_attempt=.*mix3_seed_attempt=.*mix2_wilson95=.*"
+    "mix3_wilson95=")
+expect_success("${precodefail_paired_pattern}" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 4 --threads 2 --loss 0.1
+    --mix-count 2,3 --completion mixed --payload-e2e)
+expect_failure("unknown --completion" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion unknown)
+expect_failure("mixed completion requires even block bytes" precodefail --N 64
+    --bb-list 7 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed)
+expect_failure("mixed completion requires periodic heavy family" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --heavy-family hashed)
+expect_failure("working set exceeds|message dimensions are unsupported" precodefail --N 64000
+    --bb-list 2147483647 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --payload-e2e)
+expect_failure("working set exceeds|message dimensions are unsupported" precodefail --N 64000
+    --bb-list 2200000 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --payload-e2e)
 
 # Common packet schedules are accepted by both E2E comparison entry points.
 foreach(schedule IN ITEMS iid burst permutation systematic-first repair-only

@@ -221,38 +221,43 @@ bool CheckPacketEvaluationFusion()
         63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u, 1280u
     };
     static const unsigned kOffsets[] = { 0u, 1u, 7u, 15u, 31u, 63u };
-    for (unsigned weight_i = 0; weight_i < 5u; ++weight_i)
+    static const uint32_t kFusedMixCounts[] = {
+        wirehair_v2::kCertifiedPacketMixCount, 2u
+    };
+    for (uint32_t mix_count : kFusedMixCounts)
     {
-        for (unsigned length_i = 0;
-             length_i < sizeof(kLengths) / sizeof(kLengths[0]);
-             ++length_i)
+        wirehair_v2::PacketRowConfig fused = config;
+        fused.MixCount = mix_count;
+        for (unsigned weight_i = 0; weight_i < 5u; ++weight_i)
         {
-            const unsigned offset_i =
-                (weight_i * 3u + length_i) %
-                (sizeof(kOffsets) / sizeof(kOffsets[0]));
-            if (!CheckPacketEvaluationCase(
-                    system, config, ids[weight_i], kLengths[length_i],
-                    kOffsets[offset_i],
-                    kOffsets[(offset_i * 5u + 1u) %
-                        (sizeof(kOffsets) / sizeof(kOffsets[0]))],
-                    ((weight_i + length_i) & 1u) != 0u))
+            for (unsigned length_i = 0;
+                 length_i < sizeof(kLengths) / sizeof(kLengths[0]);
+                 ++length_i)
             {
-                return false;
+                const unsigned offset_i =
+                    (weight_i * 3u + length_i) %
+                    (sizeof(kOffsets) / sizeof(kOffsets[0]));
+                if (!CheckPacketEvaluationCase(
+                        system, fused, ids[weight_i], kLengths[length_i],
+                        kOffsets[offset_i],
+                        kOffsets[(offset_i * 5u + 1u) %
+                            (sizeof(kOffsets) / sizeof(kOffsets[0]))],
+                        ((weight_i + length_i) & 1u) != 0u))
+                {
+                    return false;
+                }
             }
         }
     }
 
-    // Experimental one- and two-mix rows use the explicit generic fallback.
-    for (uint32_t mix_count = 1u; mix_count < 3u; ++mix_count)
+    // A one-mix row still exercises the generic loop after both fused paths.
+    wirehair_v2::PacketRowConfig fallback = config;
+    fallback.MixCount = 1u;
+    if (!CheckPacketEvaluationCase(
+            system, fallback, UINT32_C(0xf1234567), 257u,
+            7u, 13u, false))
     {
-        wirehair_v2::PacketRowConfig fallback = config;
-        fallback.MixCount = mix_count;
-        if (!CheckPacketEvaluationCase(
-                system, fallback, UINT32_C(0xf1234567), 257u,
-                mix_count * 7u, mix_count * 13u, false))
-        {
-            return false;
-        }
+        return false;
     }
 
     // Hard-coded packet bytes guard the shipping equation and fused schedule
@@ -303,39 +308,47 @@ bool CheckPacketEvaluationFusion()
             intermediate - 1u,
             intermediate + intermediate_bytes - 1u
         };
-        for (unsigned i = 0; i < 3u; ++i)
+        for (uint32_t mix_count : kFusedMixCounts)
         {
-            const std::vector<uint8_t> before = storage;
-            uint64_t operations = UINT64_C(0x0123456789abcdef);
-            const bool evaluated = i == 1u ?
-                wirehair_v2::EvaluatePacketBlockForValidatedSystem(
-                    system, config, intermediate, block_bytes, 17u,
-                    overlap_outputs[i], &operations) :
-                wirehair_v2::EvaluatePacketBlock(
-                    system, config, intermediate, block_bytes, 17u,
-                    overlap_outputs[i], &operations);
-            if (evaluated || storage != before ||
-                operations != UINT64_C(0x0123456789abcdef))
+            wirehair_v2::PacketRowConfig fused = config;
+            fused.MixCount = mix_count;
+            for (unsigned i = 0; i < 3u; ++i)
+            {
+                const std::vector<uint8_t> before = storage;
+                uint64_t operations = UINT64_C(0x0123456789abcdef);
+                const bool evaluated = i == 1u ?
+                    wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                        system, fused, intermediate, block_bytes, 17u,
+                        overlap_outputs[i], &operations) :
+                    wirehair_v2::EvaluatePacketBlock(
+                        system, fused, intermediate, block_bytes, 17u,
+                        overlap_outputs[i], &operations);
+                if (evaluated || storage != before ||
+                    operations != UINT64_C(0x0123456789abcdef))
+                {
+                    std::fprintf(stderr,
+                        "solve: packet overlap shape %u mix=%u was not "
+                        "no-write\n",
+                        i, mix_count);
+                    return false;
+                }
+            }
+
+            // Exact endpoint adjacency is non-overlap and remains supported.
+            uint8_t* adjacent_output = intermediate + intermediate_bytes;
+            const std::vector<uint8_t> expected = ReferencePacket(
+                K, P, 17u, fused, intermediate, block_bytes);
+            if (!wirehair_v2::EvaluatePacketBlock(
+                    system, fused, intermediate, block_bytes, 17u,
+                    adjacent_output) ||
+                std::memcmp(
+                    adjacent_output, expected.data(), block_bytes) != 0)
             {
                 std::fprintf(stderr,
-                    "solve: packet overlap shape %u was not no-write\n", i);
+                    "solve: adjacent packet output failed mix=%u\n",
+                    mix_count);
                 return false;
             }
-        }
-
-        // Exact endpoint adjacency is non-overlap and remains supported.
-        uint8_t* adjacent_output = intermediate + intermediate_bytes;
-        const std::vector<uint8_t> expected = ReferencePacket(
-            K, P, 17u, config, intermediate, block_bytes);
-        if (!wirehair_v2::EvaluatePacketBlock(
-                system, config, intermediate, block_bytes, 17u,
-                adjacent_output) ||
-            std::memcmp(
-                adjacent_output, expected.data(), block_bytes) != 0)
-        {
-            std::fprintf(stderr,
-                "solve: adjacent packet output was rejected or incorrect\n");
-            return false;
         }
     }
 
@@ -594,6 +607,75 @@ bool CheckTinyDenseOracle()
         return false;
     }
     std::printf("tiny hashed-family dense oracle: PASS\n");
+    return true;
+}
+
+bool CheckHeavyCoefficientBoundaryOracle()
+{
+    static const uint32_t kHeavyRows[] = {0u, 1u, 12u, 128u};
+    static const wirehair_v2::HeavyCoefficientFamily kFamilies[] = {
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy,
+        wirehair_v2::HeavyCoefficientFamily::HashedNonzero
+    };
+    const uint32_t K = 8u;
+    const uint32_t block_bytes = 5u;
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 97u + (i >> 2) + 41u);
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+
+    for (wirehair_v2::HeavyCoefficientFamily family : kFamilies)
+    {
+        for (uint32_t heavy_rows : kHeavyRows)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(
+                    K,
+                    UINT64_C(0x4845415659424f55) ^
+                        ((uint64_t)heavy_rows << 8) ^ (uint32_t)family);
+            params.HeavyRows = heavy_rows;
+            params.HeavyFamily = family;
+            wirehair_v2::PacketRowConfig base_config;
+            base_config.PeelSeed =
+                UINT32_C(0xa17e31d9) ^ heavy_rows ^ (uint32_t)family;
+            base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+            wirehair_v2::PrecodeSystem system;
+            wirehair_v2::PacketRowConfig config;
+            if (wirehair_v2::SelectSystematicConfiguration(
+                    params, base_config, system, config) != Wirehair_Success)
+            {
+                std::fprintf(stderr,
+                    "solve: heavy boundary configuration failed H=%u "
+                    "family=%u\n",
+                    heavy_rows, (unsigned)family);
+                return false;
+            }
+
+            std::vector<uint8_t> solved;
+            std::vector<uint8_t> oracle;
+            if (wirehair_v2::SolvePrecodeSystem(
+                    system, config, packets, block_bytes, solved) !=
+                    Wirehair_Success ||
+                wirehair_v2::test::SolvePrecodeSystemTinyDenseOracle(
+                    system, config, packets, block_bytes, oracle) !=
+                    Wirehair_Success ||
+                solved != oracle ||
+                !wirehair_v2::VerifyPrecodeSolution(
+                    system, config, packets, solved.data(), block_bytes))
+            {
+                std::fprintf(stderr,
+                    "solve: heavy boundary oracle mismatch H=%u family=%u\n",
+                    heavy_rows, (unsigned)family);
+                return false;
+            }
+        }
+    }
+    std::printf("heavy H=0/1/12/128 periodic/hashed dense oracle: PASS\n");
     return true;
 }
 
@@ -1388,6 +1470,24 @@ bool CheckMixDomainValidation()
             "solve: oversized mix verified an empty packet equation\n");
         return false;
     }
+    config.MixCount = 2u;
+    const std::vector<uint32_t> boundary_row =
+        wirehair_v2::GeneratePacketMatrixRow(2u, 2u, 0u, config);
+    const std::vector<uint8_t> boundary_expected = ReferencePacket(
+        2u, 2u, 0u, config, intermediate, 1u);
+    uint64_t boundary_operations = 0u;
+    output = 0xa5u;
+    if (boundary_row.empty() || boundary_expected.size() != 1u ||
+        !wirehair_v2::EvaluatePacketBlock(
+            system, config, intermediate, 1u, 0u,
+            &output, &boundary_operations) ||
+        output != boundary_expected[0] ||
+        boundary_operations != boundary_row.size())
+    {
+        std::fprintf(stderr,
+            "solve: P=2 two-mix fused boundary mismatch\n");
+        return false;
+    }
     config.MixCount = 0u;
     if (wirehair_v2::VerifyPrecodeSolution(
             system, config, packets, zero_intermediate, 1u))
@@ -1396,6 +1496,202 @@ bool CheckMixDomainValidation()
             "solve: zero mix verified an empty packet equation\n");
         return false;
     }
+    return true;
+}
+
+bool CheckConcurrentMixedCoefficientTable()
+{
+    static const uint32_t kThreadCount = 16u;
+    const wirehair_v2::MixedPackedCoefficients* tables[kThreadCount] = {};
+    std::vector<std::thread> workers;
+    workers.reserve(kThreadCount);
+    std::atomic<uint32_t> ready(0u);
+    std::atomic<bool> start(false);
+    try
+    {
+        for (uint32_t thread = 0u; thread < kThreadCount; ++thread)
+        {
+            workers.push_back(std::thread([&, thread]() {
+                ready.fetch_add(1u, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                tables[thread] =
+                    wirehair_v2::GetMixedPackedCoefficients();
+            }));
+        }
+    }
+    catch (...)
+    {
+        start.store(true, std::memory_order_release);
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        std::fprintf(stderr,
+            "solve: concurrent mixed table thread launch failed\n");
+        return false;
+    }
+    while (ready.load(std::memory_order_acquire) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    for (uint32_t thread = 0u; thread < kThreadCount; ++thread) {
+        if (!tables[thread] || tables[thread] != tables[0]) {
+            std::fprintf(stderr,
+                "solve: concurrent mixed table publication mismatch\n");
+            return false;
+        }
+    }
+
+    const wirehair_v2::MixedCoefficientRows* rows =
+        wirehair_v2::GetMixedCoefficientRows();
+    const uint32_t H =
+        wirehair_v2::kMixedGF256Rows + wirehair_v2::kMixedGF16Rows;
+    if (!rows) {
+        return false;
+    }
+    for (uint32_t residue = 0u;
+         residue < wirehair_v2::kMixedCoefficientPeriod;
+         ++residue)
+    {
+        for (uint32_t row = 0u; row < H; ++row)
+        {
+            const uint16_t expected =
+                row < wirehair_v2::kMixedGF256Rows ?
+                    wirehair_v2::HeavyCoefficient(row, residue, H) :
+                    wirehair_v2::MixedGF16Coefficient(
+                        row - wirehair_v2::kMixedGF256Rows, residue);
+            const uint16_t row_value =
+                row < wirehair_v2::kMixedGF256Rows ?
+                    rows->Subfield[row][residue] :
+                    rows->Extension[
+                        row - wirehair_v2::kMixedGF256Rows][residue];
+            const uint16_t packed_value = (uint16_t)(
+                tables[0]->ByResidue[residue][row >> 2] >>
+                ((row & 3u) * 16u));
+            if (row_value != expected || packed_value != expected)
+            {
+                std::fprintf(stderr,
+                    "solve: mixed coefficient cache mismatch r=%u m=%u\n",
+                    row, residue);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool CheckConcurrentCoefficientCacheCase(bool mixed)
+{
+    const uint32_t K = 320u;
+    const uint32_t block_bytes = mixed ? 38u : 37u;
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(K, block_bytes);
+    const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+        profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+    wirehair_v2::PrecodeParams params = mixed ?
+        wirehair_v2::MakeMixedParams(K, matrix_seed) :
+        wirehair_v2::MakeCertifiedParams(K, matrix_seed);
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+        return false;
+    }
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
+        profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 89u + (i >> 3) + 17u);
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+
+    static const uint32_t kThreadCount = 16u;
+    std::vector<std::vector<uint8_t> > outputs(kThreadCount);
+    std::vector<std::thread> workers;
+    workers.reserve(kThreadCount);
+    std::atomic<uint32_t> ready(0u);
+    std::atomic<bool> start(false);
+    std::atomic<bool> failed(false);
+    try
+    {
+        for (uint32_t thread = 0u; thread < kThreadCount; ++thread)
+        {
+            workers.push_back(std::thread([&, thread]() {
+                ready.fetch_add(1u, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                wirehair_v2::PrecodeSolveStats stats;
+                if (wirehair_v2::SolvePrecodeSystem(
+                        system, config, packets, block_bytes,
+                        outputs[thread], &stats) != Wirehair_Success ||
+                    !wirehair_v2::VerifyPrecodeSolution(
+                        system, config, packets,
+                        outputs[thread].data(), block_bytes))
+                {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }));
+        }
+    }
+    catch (...)
+    {
+        start.store(true, std::memory_order_release);
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        std::fprintf(stderr,
+            "solve: concurrent %s cache thread launch failed\n",
+            mixed ? "mixed" : "H12");
+        return false;
+    }
+    while (ready.load(std::memory_order_acquire) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    if (failed.load(std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+            "solve: concurrent %s coefficient-cache solve failed\n",
+            mixed ? "mixed" : "H12");
+        return false;
+    }
+    for (uint32_t thread = 1u; thread < kThreadCount; ++thread)
+    {
+        if (outputs[thread] != outputs[0]) {
+            std::fprintf(stderr,
+                "solve: concurrent %s coefficient-cache mismatch\n",
+                mixed ? "mixed" : "H12");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CheckConcurrentCoefficientCaches()
+{
+    // Publish both mixed tables under contention, verify every coefficient
+    // against its independent generator, then exercise cached mixed solving.
+    // The certified case independently covers first use of the H12 table.
+    if (!CheckConcurrentMixedCoefficientTable() ||
+        !CheckConcurrentCoefficientCacheCase(true) ||
+        !CheckConcurrentCoefficientCacheCase(false))
+    {
+        return false;
+    }
+    std::printf(
+        "concurrent mixed/H12 coefficient-cache first use: PASS\n");
     return true;
 }
 
@@ -2129,7 +2425,9 @@ int main(int argc, char** argv)
     ok = CheckPacketEvaluationFusion() && ok;
     ok = CheckPacketRuntimeBoundaries() && ok;
     ok = CheckTinyDenseOracle() && ok;
+    ok = CheckHeavyCoefficientBoundaryOracle() && ok;
     ok = CheckBinaryQuotientBoundary() && ok;
+    ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckMixDomainValidation() && ok;

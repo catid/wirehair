@@ -51,26 +51,60 @@ bool NamedV2ProfileAvailable()
 #endif
 }
 
-bool SupportedProfileId(uint64_t profile_id)
+struct V2ProfileContract
 {
-    return profile_id == WIREHAIR_V2_PROFILE_CERTIFIED_2026_07 ||
-        profile_id == WIREHAIR_V2_PROFILE_MIXED_2026_07;
+    uint64_t Id;
+    wirehair_v2::CompletionField Completion;
+    uint32_t RecoveryMixCount;
+};
+
+const V2ProfileContract kV2ProfileContracts[] = {
+    {
+        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
+        wirehair_v2::CompletionField::GF256,
+        wirehair_v2::kCertifiedPacketMixCount
+    },
+    {
+        WIREHAIR_V2_PROFILE_MIXED_2026_07,
+        wirehair_v2::CompletionField::MixedGF256GF16,
+        wirehair_v2::kCertifiedPacketMixCount
+    },
+    {
+        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
+        wirehair_v2::CompletionField::MixedGF256GF16,
+        2u
+    }
+};
+
+const V2ProfileContract* ProfileContractForId(uint64_t profile_id)
+{
+    for (const V2ProfileContract& contract : kV2ProfileContracts) {
+        if (contract.Id == profile_id) return &contract;
+    }
+    return nullptr;
 }
 
-wirehair_v2::CompletionField CompletionForProfileId(uint64_t profile_id)
+const V2ProfileContract* ProfileContractForConfiguration(
+    wirehair_v2::CompletionField completion,
+    uint32_t recovery_mix_count)
 {
-    return profile_id == WIREHAIR_V2_PROFILE_MIXED_2026_07 ?
-        wirehair_v2::CompletionField::MixedGF256GF16 :
-        wirehair_v2::CompletionField::GF256;
+    for (const V2ProfileContract& contract : kV2ProfileContracts) {
+        if (contract.Completion == completion &&
+            contract.RecoveryMixCount == recovery_mix_count)
+        {
+            return &contract;
+        }
+    }
+    return nullptr;
 }
 
-uint64_t ProfileIdForCompletion(wirehair_v2::CompletionField field)
+uint64_t ProfileIdForConfiguration(
+    wirehair_v2::CompletionField completion,
+    uint32_t recovery_mix_count)
 {
-    if (field == wirehair_v2::CompletionField::GF256)
-        return WIREHAIR_V2_PROFILE_CERTIFIED_2026_07;
-    if (field == wirehair_v2::CompletionField::MixedGF256GF16)
-        return WIREHAIR_V2_PROFILE_MIXED_2026_07;
-    return 0u;
+    const V2ProfileContract* contract = ProfileContractForConfiguration(
+        completion, recovery_mix_count);
+    return contract ? contract->Id : 0u;
 }
 
 uint16_t Load16LE(const uint8_t* data)
@@ -161,7 +195,9 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     {
         return WirehairV2_ReservedNonzero;
     }
-    if (!SupportedProfileId(profile.profile_id)) {
+    const V2ProfileContract* contract =
+        ProfileContractForId(profile.profile_id);
+    if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
     if (!NamedV2ProfileAvailable()) {
@@ -172,7 +208,7 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     if (dimensions != WirehairV2_Success) {
         return dimensions;
     }
-    if (CompletionForProfileId(profile.profile_id) ==
+    if (contract->Completion ==
             wirehair_v2::CompletionField::MixedGF256GF16 &&
         (profile.block_bytes & 1u) != 0u)
     {
@@ -238,12 +274,17 @@ bool MemoryRangesOverlap(
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 {
+    const V2ProfileContract* contract =
+        ProfileContractForId(profile.profile_id);
+    if (!contract) return wirehair_v2::SeedProfile{};
+
     const uint32_t block_count =
         (uint32_t)BlockCountWide(profile.message_bytes, profile.block_bytes);
     wirehair_v2::SeedProfile expanded =
         wirehair_v2::SelectSeedProfile(block_count, profile.block_bytes);
     wirehair_v2::MessagePrecodeEncoderOptions options;
-    options.Completion = CompletionForProfileId(profile.profile_id);
+    options.Completion = contract->Completion;
+    options.RecoveryMixCount = contract->RecoveryMixCount;
 
     wirehair_v2::PrecodeParams params =
         options.Completion ==
@@ -293,8 +334,8 @@ WirehairV2Result MakePublicProfile(
     profile = WirehairV2Profile{};
     profile.struct_bytes = (uint32_t)sizeof(WirehairV2Profile);
     profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
-    profile.profile_id = ProfileIdForCompletion(
-        expanded.V2CompletionField);
+    profile.profile_id = ProfileIdForConfiguration(
+        expanded.V2CompletionField, expanded.V2RecoveryMixCount);
     profile.message_bytes = message_bytes;
     profile.block_bytes = expanded.BlockBytes;
     profile.seed_attempt = (uint8_t)expanded.V2SeedAttempt;
@@ -604,7 +645,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     {
         return WirehairV2_BufferTooSmall;
     }
-    if (!SupportedProfileId(profileId)) {
+    const V2ProfileContract* contract = ProfileContractForId(profileId);
+    if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
     if (!NamedV2ProfileAvailable()) {
@@ -628,7 +670,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     }
 
     wirehair_v2::MessagePrecodeEncoderOptions options;
-    options.Completion = CompletionForProfileId(profileId);
+    options.Completion = contract->Completion;
+    options.RecoveryMixCount = contract->RecoveryMixCount;
     PublicCodec* codec = new (std::nothrow) PublicCodec;
     if (!codec) {
         return WirehairV2_OOM;

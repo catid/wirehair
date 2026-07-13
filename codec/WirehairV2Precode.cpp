@@ -426,6 +426,62 @@ uint8_t HeavyCoefficient(
     return gf256_inv((uint8_t)(x ^ y));
 }
 
+const MixedCoefficientRows* GetMixedCoefficientRows()
+{
+    if (!InitializeGF16()) {
+        return nullptr;
+    }
+    static const MixedCoefficientRows rows = []() {
+        MixedCoefficientRows result = {};
+        const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+        for (uint32_t residue = 0;
+             residue < kMixedCoefficientPeriod;
+             ++residue)
+        {
+            for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
+                result.Subfield[row][residue] =
+                    HeavyCoefficient(row, residue, H);
+            }
+            for (uint32_t row = 0; row < kMixedGF16Rows; ++row) {
+                result.Extension[row][residue] =
+                    MixedGF16Coefficient(row, residue);
+            }
+        }
+        return result;
+    }();
+    return &rows;
+}
+
+const MixedPackedCoefficients* GetMixedPackedCoefficients()
+{
+    const MixedCoefficientRows* rows = GetMixedCoefficientRows();
+    if (!rows) {
+        return nullptr;
+    }
+    static const MixedPackedCoefficients packed = [rows]() {
+        MixedPackedCoefficients result = {};
+        for (uint32_t residue = 0;
+             residue < kMixedCoefficientPeriod;
+             ++residue)
+        {
+            for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
+                result.ByResidue[residue][row >> 2] |=
+                    (uint64_t)rows->Subfield[row][residue] <<
+                    ((row & 3u) * 16u);
+            }
+            for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
+            {
+                const uint32_t row = kMixedGF256Rows + er;
+                result.ByResidue[residue][row >> 2] |=
+                    (uint64_t)rows->Extension[er][residue] <<
+                    ((row & 3u) * 16u);
+            }
+        }
+        return result;
+    }();
+    return &packed;
+}
+
 uint8_t HeavyCoefficientForParams(
     const PrecodeParams& params,
     uint32_t heavy_row,

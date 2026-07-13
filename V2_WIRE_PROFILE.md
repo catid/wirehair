@@ -106,6 +106,9 @@ staircase/dense geometry, but replaces the 12-row completion contract with:
 - precode contract 3, which binds this mixed coefficient family and field
   representation.
 
+Like the original certified profile, this profile selects exactly three
+distinct precode mix columns in every recovery packet.
+
 The mixed profile therefore requires a positive even block size. Serialization,
 encoder creation, and decoder creation reject odd block sizes as
 `WirehairV2_InvalidDimensions` before writing descriptor output or publishing a
@@ -130,7 +133,30 @@ paired recovery, throughput, and memory measurements belong to the release
 certification record rather than the wire contract; applications should
 benchmark their own block-size and loss distribution.
 
-### Non-normative July 2026 certification snapshot
+`WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07` has numeric ID
+`20a4f27a870612a2`. The ID is the first 64 bits of SHA-256 over this exact
+canonical UTF-8/ASCII input, with no newline:
+
+```text
+wirehair:v2:precode-v3-mixed10gf256-2gf65536-even:packet-v4-mix2:certified-2026-07
+```
+
+The full digest is
+`20a4f27a870612a27da6e07009acc2d55cb6460b7d15f6ea75cc04b588ad7f99`.
+This second opt-in mixed profile freezes the same precode-v3 coefficient
+family, even-byte field representation, seeds, salts, and packet-row-v4 rules
+as `WIREHAIR_V2_PROFILE_MIXED_2026_07`, but selects exactly two distinct
+precode mix columns in every recovery packet. The mix count changes packet
+equations and is therefore bound by a distinct profile ID rather than inferred
+from the completion field.
+
+The two mixed IDs remain independently decodable. Implementations map a
+profile ID to the exact `(completion field, recovery mix count)` pair and map
+expanded encoder state back through that same pair before publishing a
+descriptor. A field-only mapping would incorrectly relabel mix2 equations as
+the older mix3 profile and is not conforming.
+
+### Non-normative July 2026 mixed/mix3 certification snapshot
 
 The production solver was screened with 100,000 common deterministic packet
 schedules per profile at two-byte blocks. At zero packet overhead, certified
@@ -154,6 +180,34 @@ and
 `wirehair_v2_precode_roundtrip_test --benchmark-{certified,mixed}` and are not
 part of the compatibility contract.
 
+### Non-normative July 2026 mixed/mix2 certification snapshot
+
+Mix2 and the frozen mixed/mix3 profile were compared with common packet traces
+through the actual solver. An initial 100,000-trial screen at K=1,000, 10,000,
+32,000, and 64,000 and a second independent boundary screen at K=1,000 and
+10,000 found no consistent failure-rate difference. The second seed had zero
+failures in every one- and two-packet-overhead arm; the first had only the
+K=32,000 cells nonzero (2/0 at one and 2/2 at two overhead). One of ten
+simultaneous zero-overhead cells was nominally worse for mix2 (33 versus 17
+failures, McNemar `p=0.03284`), but it did not survive a simple Bonferroni `0.005`
+multiple-test threshold and the adjacent block-size cell was 15 versus 17
+(`p=0.86005`).
+
+A predeclared confirmation then ran 1,000,000 paired trials under each of two
+new seeds at both adjacent block sizes. At 327,678-byte blocks, combined
+mix2/mix3 failures were 534/546 (exact paired `p=0.73785`); at 327,680 bytes
+they were 483/509 (`p=0.42735`). The four per-seed exact tests ranged from
+`p=0.09776` to `p=0.70067`, with mixed direction. This classified the isolated
+screening result as a multiple-testing fluctuation and established recovery
+consistency rather than a claim that either mixed packet count has a better
+tail.
+
+Frozen-code packet-evaluation A/B tests found the fused mix2 schedule faster at
+every measured payload size: median gains were 5.56% at two bytes, 9.89% at
+1,280 bytes, 3.96% at 100 KiB, and 3.13% at 1 MiB. Packet bytes and operation
+counts remained exact. These measurements supported a separate opt-in
+profile; they do not alter either older profile or the current default.
+
 ## APIs and errors
 
 `wirehair_v2_encoder_create()` copies the message, chooses the deterministic
@@ -169,10 +223,10 @@ implementation copies those bytes before returning.
 explicit supported profile ID. `WIREHAIR_V2_PROFILE_CURRENT` deliberately
 remains an alias for `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07`; existing callers
 and `wirehair_v2_encoder_create()` continue to emit the original GF(256)-only
-equations byte-for-byte. Mixed encoding is an explicit opt-in through the new
-selector (or the corresponding C++ `Encoder::Create(profileId, ...)` overload).
-Unknown IDs return `WirehairV2_UnsupportedProfile` without falling back to the
-current profile.
+equations byte-for-byte. Both mixed/mix3 and mixed/mix2 encoding are explicit
+opt-ins through the selector (or the corresponding C++
+`Encoder::Create(profileId, ...)` overload). Unknown IDs return
+`WirehairV2_UnsupportedProfile` without falling back to the current profile.
 
 `wirehair_v2_encode()` reports `WirehairV2_BufferTooSmall` and the exact
 required packet size without modifying a short non-null output buffer.

@@ -383,19 +383,19 @@ bool ComputePrecodeValues(
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
-        std::vector<uint8_t> gf8_coef((size_t)kMixedGF256Rows * window);
-        std::vector<uint16_t> gf16_coef((size_t)kMixedGF16Rows * window);
+        // Every mixed encoder needs the same complete coefficient period.
+        // Publish it once instead of rebuilding it for each message.
+        const MixedCoefficientRows* cached_rows = GetMixedCoefficientRows();
+        if (!cached_rows) {
+            return false;
+        }
+        const uint8_t* gf8_coefficient_rows[kMixedGF256Rows];
+        const uint16_t* gf16_coefficient_rows[kMixedGF16Rows];
         for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
-            for (uint32_t m = 0; m < window; ++m) {
-                gf8_coef[(size_t)r * window + m] =
-                    HeavyCoefficient(r, m, H);
-            }
+            gf8_coefficient_rows[r] = cached_rows->Subfield[r];
         }
         for (uint32_t r = 0; r < kMixedGF16Rows; ++r) {
-            for (uint32_t m = 0; m < window; ++m) {
-                gf16_coef[(size_t)r * window + m] =
-                    MixedGF16Coefficient(r, m);
-            }
+            gf16_coefficient_rows[r] = cached_rows->Extension[r];
         }
 
         // Accumulate the subfield rows interleaved: one GF(256) scale acts
@@ -418,7 +418,7 @@ bool ComputePrecodeValues(
             uint32_t m, const uint8_t* value) -> bool
         {
             for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
-                gf8_scales[r] = gf8_coef[(size_t)r * window + m];
+                gf8_scales[r] = gf8_coefficient_rows[r][m];
             }
             gf256_muladd_multi_mem(
                 gf8_destinations, gf8_scales,
@@ -439,10 +439,10 @@ bool ComputePrecodeValues(
             if (!GF16MulAddPlanar2(
                     rhs_low.data() + (size_t)row0 * elements,
                     rhs_high.data() + (size_t)row0 * elements,
-                    gf16_coef[m],
+                    gf16_coefficient_rows[0][m],
                     rhs_low.data() + (size_t)row1 * elements,
                     rhs_high.data() + (size_t)row1 * elements,
-                    gf16_coef[window + m],
+                    gf16_coefficient_rows[1][m],
                     source_low.data(), source_high.data(), elements))
             {
                 return false;
@@ -521,16 +521,14 @@ bool ComputePrecodeValues(
         for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
-                    gf8_coef[(size_t)r * window +
-                        (heavy_base + j) % window];
+                    gf8_coefficient_rows[r][(heavy_base + j) % window];
             }
         }
         for (uint32_t er = 0; er < kMixedGF16Rows; ++er) {
             const uint32_t r = kMixedGF256Rows + er;
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
-                    gf16_coef[(size_t)er * window +
-                        (heavy_base + j) % window];
+                    gf16_coefficient_rows[er][(heavy_base + j) % window];
             }
         }
 
@@ -1304,6 +1302,15 @@ MessagePrecodeEncoder::MessagePrecodeEncoder()
 
 namespace {
 
+bool IsSupportedMessagePrecodeContract(
+    CompletionField completion,
+    uint32_t recovery_mix_count)
+{
+    return recovery_mix_count == kCertifiedPacketMixCount ||
+        (completion == CompletionField::MixedGF256GF16 &&
+         recovery_mix_count == 2u);
+}
+
 uint64_t MessagePrecodeMatrixSeed(
     const SeedProfile& profile,
     const MessagePrecodeEncoderOptions& options)
@@ -1364,11 +1371,12 @@ bool ResolveMessagePrecodeOptions(
         }
         resolved_options = requested_options ? *requested_options :
             MessagePrecodeEncoderOptions();
-        return resolved_options.RecoveryMixCount ==
-            kCertifiedPacketMixCount &&
-            (resolved_options.Completion == CompletionField::GF256 ||
-             resolved_options.Completion ==
-                CompletionField::MixedGF256GF16);
+        return (resolved_options.Completion == CompletionField::GF256 ||
+                resolved_options.Completion ==
+                    CompletionField::MixedGF256GF16) &&
+            IsSupportedMessagePrecodeContract(
+                resolved_options.Completion,
+                resolved_options.RecoveryMixCount);
     }
 
     if (profile.V2SeedAttempt >= kMaxPacketSeedAttempts ||
@@ -1382,7 +1390,8 @@ bool ResolveMessagePrecodeOptions(
         profile.V2DenseRowCount == 0u ||
         profile.V2HeavyRowCount == 0u ||
         profile.V2SourceHits == 0u ||
-        profile.V2RecoveryMixCount != kCertifiedPacketMixCount)
+        !IsSupportedMessagePrecodeContract(
+            profile.V2CompletionField, profile.V2RecoveryMixCount))
     {
         return false;
     }

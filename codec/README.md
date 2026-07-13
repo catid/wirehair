@@ -71,10 +71,11 @@ separate version-4 path below.
 
 `GeneratePacketMatrixRow()` defines that version-4 packet equation.  It uses
 production Wirehair's integer `GeneratePeelRowWeight()` and row iterators,
-adds exactly three precode columns, and addresses the generator with the
-public packet ID.  Encoder, decoder, selected profile, golden tests, and
-benchmarks all share this one mapping.  Its evaluation domain is intentionally
-narrower than the structure builder's domain: `BuildPrecodeSystem()` can
+adds the named profile's two or three distinct precode columns, and addresses
+the generator with the public packet ID.  Encoder, decoder, selected profile,
+golden tests, and benchmarks all share this one mapping.  Its evaluation
+domain is intentionally narrower than the structure builder's domain:
+`BuildPrecodeSystem()` can
 represent any valid 16-bit total span (including one precode column and
 precode spans above 65521), while exact packet generation/evaluation/solving
 requires `2 <= P <= 65521`, `K + P <= 65535`, and a mix count no larger than
@@ -245,6 +246,7 @@ cmake --build build --target wirehair_v2_resume_bench
 ./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-decoder-cache
 ./build/codec/wirehair_v2_bench compare --nlo 1000 --nhi 1000 --trials 10 --bb-list 1280 --loss 0.10 --precode-cache
 ./build/codec/wirehair_v2_bench precodefail --N 1000,3200,10000,32000,64000 --bb-list 1280 --overhead 0,1 --trials 100 --threads 16 --loss 0.10
+./build/codec/wirehair_v2_bench precodefail --N 1000,3200,10000,32000,64000 --bb-list 1280 --overhead 0,1 --trials 100 --threads 16 --loss 0.10 --completion mixed --mix-count 2,3 --payload-e2e
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 1280 --v2-profile auto --auto-trials 8 --auto-min-delta 0.10
 ./build/codec/wirehair_v2_bench seedtable --N 320,1000,3200 --bb-list 1280,102400 --peel-candidates 8 --trials 2
 ./build/codec/wirehair_v2_bench compare --nlo 320 --nhi 320 --trials 20 --bb-list 102400 --dense-delta 4 --dense-candidate 6
@@ -261,6 +263,21 @@ heavy-rank-gain histograms.  Its optional
 against the frozen periodic Cauchy coefficients and an experiment-only
 non-periodic full-column hash family.  `hashed` is diagnostic only: named and
 serialized V2 profiles always use `periodic`.
+
+The default `precodefail` completion is `certified`.  The `--completion mixed`
+arm exercises the mixed GF(256)/GF(2^16) H12 solver and requires even block
+bytes and the `periodic` heavy family.  Mix count 3 corresponds to
+`WIREHAIR_V2_PROFILE_MIXED_2026_07`; mix count 2 corresponds to the distinct
+opt-in `WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07`.  Neither changes the default
+`WIREHAIR_V2_PROFILE_CURRENT`.  With `--mix-count 2,3`, both selected candidate
+profiles receive the same packet-ID trace for each trial; optional payload E2E
+checks also share their message and loss stream.  The
+`precodefail_paired` comment reports all four paired outcome cells, the exact
+two-sided McNemar p-value, marginal Wilson 95% intervals, and each arm's
+systematic seed-attempt index.  Systematic selection is intentionally performed
+per candidate, so differing attempt indices mean the result compares two valid
+selected profiles rather than isolating only the mix-count variable.  The CSV
+`failure_trials` field retains the corresponding per-arm trial indices.
 
 `compare` and `precodecheck` accept deterministic common packet schedules via
 `--schedule iid|burst|permutation|systematic-first|repair-only|adversarial`.
