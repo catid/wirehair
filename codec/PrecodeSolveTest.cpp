@@ -34,6 +34,20 @@ public:
     }
 };
 
+class BinaryPeelOracleScope
+{
+public:
+    BinaryPeelOracleScope()
+    {
+        wirehair_v2::SetBinaryPeelOracleForTesting(true);
+    }
+
+    ~BinaryPeelOracleScope()
+    {
+        wirehair_v2::SetBinaryPeelOracleForTesting(false);
+    }
+};
+
 bool CheckLowestBitIndex()
 {
     for (unsigned bit = 0u; bit < 64u; ++bit)
@@ -996,6 +1010,7 @@ bool CheckIncrementalResume()
 
 bool CheckMixedProjectionResidueBucketsOracle()
 {
+    wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
     MixedProjectionOracleScope oracle_scope;
     static const uint32_t kBlockCounts[] = {
         2u, 3u, 10u, 63u, 64u, 127u, 128u,
@@ -1028,6 +1043,16 @@ bool CheckMixedProjectionResidueBucketsOracle()
                 "solve: mixed projection oracle selection failed K=%u\n", K);
             return false;
         }
+        const uint32_t column_count = K + system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        if (K >= 189u && K <= 191u &&
+            column_count != 243u + (K - 189u))
+        {
+            std::fprintf(stderr,
+                "solve: mixed projection boundary K=%u produced L=%u\n",
+                K, column_count);
+            return false;
+        }
 
         std::vector<uint8_t> message((size_t)K * block_bytes);
         for (size_t i = 0; i < message.size(); ++i) {
@@ -1041,9 +1066,16 @@ bool CheckMixedProjectionResidueBucketsOracle()
                 message.data() + (size_t)id * block_bytes;
         }
         std::vector<uint8_t> expected;
-        if (wirehair_v2::SolvePrecodeSystem(
-                system, config, systematic, block_bytes, expected) !=
-                Wirehair_Success ||
+        const uint64_t systematic_comparisons_before =
+            wirehair_v2::MixedProjectionOracleComparisonsForTesting();
+        const WirehairResult systematic_result =
+            wirehair_v2::SolvePrecodeSystem(
+                system, config, systematic, block_bytes, expected);
+        const uint64_t systematic_comparisons_after =
+            wirehair_v2::MixedProjectionOracleComparisonsForTesting();
+        if (systematic_result != Wirehair_Success ||
+            systematic_comparisons_after !=
+                systematic_comparisons_before + 1u ||
             !wirehair_v2::VerifyPrecodeSolution(
                 system, config, systematic, expected.data(), block_bytes))
         {
@@ -1079,9 +1111,14 @@ bool CheckMixedProjectionResidueBucketsOracle()
             delivered.push_back(packet);
         }
         std::vector<uint8_t> recovered;
-        if (wirehair_v2::SolvePrecodeSystem(
-                system, config, delivered, block_bytes, recovered) !=
-                Wirehair_Success ||
+        const uint64_t repair_comparisons_before =
+            wirehair_v2::MixedProjectionOracleComparisonsForTesting();
+        const WirehairResult repair_result = wirehair_v2::SolvePrecodeSystem(
+                system, config, delivered, block_bytes, recovered);
+        const uint64_t repair_comparisons_after =
+            wirehair_v2::MixedProjectionOracleComparisonsForTesting();
+        if (repair_result != Wirehair_Success ||
+            repair_comparisons_after != repair_comparisons_before + 1u ||
             recovered != expected ||
             !wirehair_v2::VerifyPrecodeSolution(
                 system, config, delivered, recovered.data(), block_bytes))
@@ -1091,7 +1128,202 @@ bool CheckMixedProjectionResidueBucketsOracle()
             return false;
         }
     }
-    std::printf("mixed residue-bucket projection oracle: PASS\n");
+    const uint64_t comparisons =
+        wirehair_v2::MixedProjectionOracleComparisonsForTesting();
+    if (comparisons < 2u *
+            (sizeof(kBlockCounts) / sizeof(kBlockCounts[0])))
+    {
+        std::fprintf(stderr,
+            "solve: mixed projection oracle comparison count=%llu\n",
+            (unsigned long long)comparisons);
+        return false;
+    }
+    std::printf(
+        "mixed residue-bucket projection oracle comparisons=%llu: PASS\n",
+        (unsigned long long)comparisons);
+    return true;
+}
+
+bool CheckMixedMix1EndToEnd()
+{
+    const uint32_t K = 320u;
+    const uint32_t block_bytes = 1280u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0x6d697831656e6432));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x6d697831);
+    base_config.MixCount = 1u;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success ||
+        config.MixCount != 1u)
+    {
+        std::fprintf(stderr, "solve: mixed mix1 configuration failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 149u + (i >> 5) + 0x31u);
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        systematic[id].BlockId = id;
+        systematic[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+    std::vector<uint8_t> expected;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, systematic, block_bytes, expected) !=
+            Wirehair_Success ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, systematic, expected.data(), block_bytes))
+    {
+        std::fprintf(stderr, "solve: mixed mix1 systematic solve failed\n");
+        return false;
+    }
+
+    const size_t delivered_count = (size_t)K + 16u;
+    std::vector<uint8_t> delivered_storage(
+        delivered_count * block_bytes);
+    std::vector<wirehair_v2::SolvePacket> delivered;
+    delivered.reserve(delivered_count);
+    for (uint32_t id = 0u; delivered.size() < delivered_count; ++id)
+    {
+        if (id % 9u == 4u) {
+            continue;
+        }
+        uint8_t* block = delivered_storage.data() +
+            delivered.size() * block_bytes;
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, expected.data(), block_bytes, id, block))
+        {
+            return false;
+        }
+        wirehair_v2::SolvePacket packet;
+        packet.BlockId = id;
+        packet.Data = block;
+        delivered.push_back(packet);
+    }
+
+    std::vector<uint8_t> recovered;
+    wirehair_v2::PrecodeSolveStats stats;
+    if (wirehair_v2::SolvePrecodeSystem(
+            system, config, delivered, block_bytes, recovered, &stats) !=
+            Wirehair_Success ||
+        recovered != expected ||
+        stats.PacketRows != delivered_count ||
+        stats.ResidualRank != stats.InactivatedColumns ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, delivered, recovered.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: mixed mix1 repair solve failed rows=%u R=%u rank=%u\n",
+            stats.PacketRows, stats.InactivatedColumns, stats.ResidualRank);
+        return false;
+    }
+    std::vector<uint8_t> recovered_message(message.size());
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, recovered.data(), block_bytes, id,
+                recovered_message.data() + (size_t)id * block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: mixed mix1 source evaluation failed id=%u\n", id);
+            return false;
+        }
+    }
+    if (recovered_message != message)
+    {
+        std::fprintf(stderr,
+            "solve: mixed mix1 recovered source bytes differ\n");
+        return false;
+    }
+    std::printf("mixed mix1 encode/loss/decode/verify: PASS\n");
+    return true;
+}
+
+bool CheckBinaryPeelLowDegreeXorOracle()
+{
+    const uint32_t K = 64000u;
+    const uint32_t block_bytes = 2u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0x7065656c786f7231));
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x786f7231);
+    base_config.MixCount = 1u;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: binary peel oracle configuration failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 173u + (i >> 7) + 0x5bu);
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id) {
+        packets[id].BlockId = id;
+        packets[id].Data = message.data() + (size_t)id * block_bytes;
+    }
+
+    wirehair_v2::ResetBinaryPeelOracleComparisonsForTesting();
+    std::vector<uint8_t> intermediate;
+    wirehair_v2::PrecodeSolveStats stats;
+    WirehairResult result = Wirehair_Error;
+    {
+        BinaryPeelOracleScope oracle_scope;
+        result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes, intermediate, &stats);
+    }
+    const uint64_t comparisons =
+        wirehair_v2::BinaryPeelOracleComparisonsForTesting();
+    const uint32_t L = K + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    if (result != Wirehair_Success || comparisons != 1u ||
+        stats.PacketRows != K ||
+        stats.PeeledColumns + stats.InactivatedColumns != L ||
+        stats.ResidualRank != stats.InactivatedColumns ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, packets, intermediate.data(), block_bytes))
+    {
+        std::fprintf(stderr,
+            "solve: binary peel oracle failed result=%d comparisons=%llu "
+            "peeled=%u inactive=%u rank=%u L=%u\n",
+            (int)result, (unsigned long long)comparisons,
+            stats.PeeledColumns, stats.InactivatedColumns,
+            stats.ResidualRank, L);
+        return false;
+    }
+
+    std::vector<uint8_t> recovered_message(message.size());
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, intermediate.data(), block_bytes, id,
+                recovered_message.data() + (size_t)id * block_bytes))
+        {
+            std::fprintf(stderr,
+                "solve: binary peel oracle source evaluation failed id=%u\n",
+                id);
+            return false;
+        }
+    }
+    if (recovered_message != message)
+    {
+        std::fprintf(stderr,
+            "solve: binary peel oracle source bytes differ\n");
+        return false;
+    }
+    std::printf(
+        "K=64000 low-degree-XOR/scan peel oracle comparisons=%llu: PASS\n",
+        (unsigned long long)comparisons);
     return true;
 }
 
@@ -2578,6 +2810,8 @@ int main(int argc, char** argv)
     ok = CheckConcurrentCoefficientCaches() && ok;
     ok = CheckIncrementalResume() && ok;
     ok = CheckMixedProjectionResidueBucketsOracle() && ok;
+    ok = CheckMixedMix1EndToEnd() && ok;
+    ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;

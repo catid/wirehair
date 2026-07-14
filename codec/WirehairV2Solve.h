@@ -104,6 +104,20 @@ struct PrecodeSolveStats
     the original L-by-R expansion exactly.
 */
 void SetMixedProjectionOracleForTesting(bool enabled);
+
+/** Reset/read the number of successful optimized-versus-dense comparisons. */
+void ResetMixedProjectionOracleComparisonsForTesting();
+uint64_t MixedProjectionOracleComparisonsForTesting();
+
+/**
+    Enable an exact comparison between low-degree-XOR and row-scan binary
+    peeling.  The oracle also rejects duplicate columns within any equation.
+*/
+void SetBinaryPeelOracleForTesting(bool enabled);
+
+/** Reset/read the number of successful optimized-versus-scan comparisons. */
+void ResetBinaryPeelOracleComparisonsForTesting();
+uint64_t BinaryPeelOracleComparisonsForTesting();
 #endif
 
 /**

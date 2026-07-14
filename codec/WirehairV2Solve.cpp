@@ -196,10 +196,12 @@ struct ColumnCandidate
 struct PeelRowState
 {
     // Validated WH2 systems have at most UINT16_MAX columns, so the live
-    // degree and the XOR of a degree-two row's column ids fit in the same
-    // four bytes previously used by the live-degree vector.
+    // degree and XOR of the live column ids at degree one or two fit in the
+    // same four bytes previously used by the live-degree vector.  The XOR is
+    // first recorded by the existing degree-two scan, then reduced to the
+    // sole live column when the degree falls to one.
     uint16_t Live = 0u;
-    uint16_t DegreeTwoXor = 0u;
+    uint16_t LowDegreeXor = 0u;
 };
 
 static_assert(
@@ -208,6 +210,9 @@ static_assert(
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 std::atomic<uint32_t> MixedProjectionOracleUsers(0u);
+std::atomic<uint64_t> MixedProjectionOracleComparisons(0u);
+std::atomic<uint32_t> BinaryPeelOracleUsers(0u);
+std::atomic<uint64_t> BinaryPeelOracleComparisons(0u);
 #endif
 
 bool CheckedBlockStorage(
@@ -838,8 +843,13 @@ WirehairResult SolveMixedCompletionQuotient(
         return Wirehair_Error;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (check_projection_oracle && dense_projected != projected) {
-        return Wirehair_Error;
+    if (check_projection_oracle)
+    {
+        if (dense_projected != projected) {
+            return Wirehair_Error;
+        }
+        MixedProjectionOracleComparisons.fetch_add(
+            1u, std::memory_order_relaxed);
     }
 #endif
 
@@ -1263,7 +1273,8 @@ WirehairResult SolveMixedCompletionQuotient(
     return Wirehair_Success;
 }
 
-PeelResult PeelBinaryRows(
+template<bool UseLowDegreeXor>
+PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
     const BinaryEquationArena& rows)
 {
@@ -1285,8 +1296,11 @@ PeelResult PeelBinaryRows(
         row_state[r].Live = (uint16_t)rows[r].Columns.size();
         if (row_state[r].Live == 1u) {
             queue.push_back(r);
+            row_state[r].LowDegreeXor =
+                (uint16_t)*rows[r].Columns.begin();
         }
         for (uint32_t column : rows[r].Columns) {
+            CAT_DEBUG_ASSERT(column < column_count);
             ++column_offsets[(size_t)column + 1u];
         }
     }
@@ -1349,7 +1363,7 @@ PeelResult PeelBinaryRows(
         }
         (void)pair_count;
         CAT_DEBUG_ASSERT(pair_count == 2u && pair_xor <= UINT16_MAX);
-        state.DegreeTwoXor = (uint16_t)pair_xor;
+        state.LowDegreeXor = (uint16_t)pair_xor;
     };
     const auto remove_degree_two = [&](
         uint32_t row,
@@ -1360,7 +1374,7 @@ PeelResult PeelBinaryRows(
             return;
         }
         const uint32_t other =
-            (uint32_t)state.DegreeTwoXor ^ resolved_column;
+            (uint32_t)state.LowDegreeXor ^ resolved_column;
         CAT_DEBUG_ASSERT(other < column_count && !resolved[other]);
         if (degree_two_refs[other] > 0u) {
             --degree_two_refs[other];
@@ -1374,7 +1388,7 @@ PeelResult PeelBinaryRows(
             candidate.ReverseColumn = UINT32_MAX - other;
             degree_two_queue.push(candidate);
         }
-        state.DegreeTwoXor = 0u;
+        state.LowDegreeXor = (uint16_t)other;
     };
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r) {
         add_degree_two(r);
@@ -1410,15 +1424,23 @@ PeelResult PeelBinaryRows(
                 continue;
             }
             uint32_t column = UINT32_MAX;
-            for (uint32_t candidate : rows[row].Columns)
-            {
-                if (!resolved[candidate]) {
-                    column = candidate;
-                    break;
-                }
+            if (UseLowDegreeXor) {
+                column = row_state[row].LowDegreeXor;
+                CAT_DEBUG_ASSERT(
+                    column < column_count && !resolved[column]);
             }
-            if (column == UINT32_MAX) {
-                continue;
+            else
+            {
+                for (uint32_t candidate : rows[row].Columns)
+                {
+                    if (!resolved[candidate]) {
+                        column = candidate;
+                        break;
+                    }
+                }
+                if (column == UINT32_MAX) {
+                    continue;
+                }
             }
             out.UsedRows[row] = 1u;
             out.SolveRow[column] = row;
@@ -1464,6 +1486,56 @@ PeelResult PeelBinaryRows(
     return out;
 }
 
+PeelResult PeelBinaryRows(
+    uint32_t column_count,
+    const BinaryEquationArena& rows)
+{
+    PeelResult out = PeelBinaryRowsImplementation<true>(column_count, rows);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (BinaryPeelOracleUsers.load(std::memory_order_relaxed) != 0u)
+    {
+        const PeelResult reference =
+            PeelBinaryRowsImplementation<false>(column_count, rows);
+        std::vector<uint32_t> last_row(column_count, UINT32_MAX);
+        bool duplicate_free = true;
+        for (uint32_t row = 0u; row < (uint32_t)rows.size(); ++row)
+        {
+            for (uint32_t column : rows[row].Columns)
+            {
+                if (column >= column_count || last_row[column] == row) {
+                    duplicate_free = false;
+                    break;
+                }
+                last_row[column] = row;
+            }
+            if (!duplicate_free) {
+                break;
+            }
+        }
+        if (!duplicate_free || out.SolveRow != reference.SolveRow ||
+            out.PeelOrder != reference.PeelOrder ||
+            out.InactiveOrder != reference.InactiveOrder ||
+            out.UsedRows != reference.UsedRows ||
+            out.AdjacencyStorageBytes !=
+                reference.AdjacencyStorageBytes ||
+            out.AdjacencyStorageAllocations !=
+                reference.AdjacencyStorageAllocations)
+        {
+            // Valid systems have at least two columns, so clearing both order
+            // vectors turns an oracle disagreement into a terminal solve
+            // error at the caller's existing completeness check.
+            out.PeelOrder.clear();
+            out.InactiveOrder.clear();
+        }
+        else {
+            BinaryPeelOracleComparisons.fetch_add(
+                1u, std::memory_order_relaxed);
+        }
+    }
+#endif
+    return out;
+}
+
 bool RowIsZero(const uint8_t* data, uint32_t bytes)
 {
     for (uint32_t i = 0; i < bytes; ++i) {
@@ -1493,6 +1565,43 @@ void SetMixedProjectionOracleForTesting(bool enabled)
     {
     }
     CAT_DEBUG_ASSERT(users != 0u);
+}
+
+void ResetMixedProjectionOracleComparisonsForTesting()
+{
+    MixedProjectionOracleComparisons.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t MixedProjectionOracleComparisonsForTesting()
+{
+    return MixedProjectionOracleComparisons.load(std::memory_order_relaxed);
+}
+
+void SetBinaryPeelOracleForTesting(bool enabled)
+{
+    if (enabled) {
+        BinaryPeelOracleUsers.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    uint32_t users = BinaryPeelOracleUsers.load(std::memory_order_relaxed);
+    while (users != 0u &&
+           !BinaryPeelOracleUsers.compare_exchange_weak(
+               users, users - 1u,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed))
+    {
+    }
+    CAT_DEBUG_ASSERT(users != 0u);
+}
+
+void ResetBinaryPeelOracleComparisonsForTesting()
+{
+    BinaryPeelOracleComparisons.store(0u, std::memory_order_relaxed);
+}
+
+uint64_t BinaryPeelOracleComparisonsForTesting()
+{
+    return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
 }
 #endif
 
