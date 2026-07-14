@@ -300,10 +300,10 @@ void AddScaledBlocks(
         (int)block_bytes);
 }
 
-class PairedBlockXorAccumulator
+class BatchedBlockXorAccumulator
 {
 public:
-    PairedBlockXorAccumulator(uint8_t* destination, uint32_t block_bytes)
+    BatchedBlockXorAccumulator(uint8_t* destination, uint32_t block_bytes)
         : Destination(destination)
         , BlockBytes(block_bytes)
     {
@@ -311,32 +311,29 @@ public:
 
     void Add(const uint8_t* source)
     {
-        if (!PendingSource) {
-            PendingSource = source;
-            return;
+        // All callers traverse validated equation columns or residue buckets,
+        // whose source blocks are distinct within one accumulator.
+        PendingSources[PendingCount++] = source;
+        if (PendingCount == kBatchSize) {
+            Flush();
         }
-        // Equal sources cancel.  Avoid passing aliased restrict-qualified
-        // source pointers to gf256_add2_mem in that unusual case.
-        if (PendingSource != source) {
-            gf256_add2_mem(
-                Destination, PendingSource, source, (int)BlockBytes);
-        }
-        PendingSource = nullptr;
     }
 
     void Flush()
     {
-        if (!PendingSource) {
-            return;
-        }
-        gf256_add_mem(Destination, PendingSource, (int)BlockBytes);
-        PendingSource = nullptr;
+        if (PendingCount == 0u) return;
+        gf256_add_multi_mem(
+            Destination, PendingSources, (int)PendingCount,
+            (int)BlockBytes);
+        PendingCount = 0u;
     }
 
 private:
+    static const uint32_t kBatchSize = 8u;
     uint8_t* Destination;
     uint32_t BlockBytes;
-    const uint8_t* PendingSource = nullptr;
+    const void* PendingSources[kBatchSize] = {};
+    uint32_t PendingCount = 0u;
 };
 
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
@@ -916,7 +913,7 @@ WirehairResult SolveMixedCompletionQuotient(
     {
         std::fill(
             residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
-        PairedBlockXorAccumulator bucket_xor(
+        BatchedBlockXorAccumulator bucket_xor(
             residue_bucket.data(), block_bytes);
         for (uint32_t column = residue;
              column < column_count; column += coefficient_period)
@@ -2422,7 +2419,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             if (equation.Data) {
                 std::memcpy(constant, equation.Data, block_bytes);
             }
-            PairedBlockXorAccumulator constant_xor(constant, block_bytes);
+            BatchedBlockXorAccumulator constant_xor(constant, block_bytes);
             for (uint32_t other : equation.Columns)
             {
                 if (other == column) {
@@ -2471,7 +2468,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
                 if (rows[r].Data) {
                     std::memcpy(rhs.data(), rows[r].Data, block_bytes);
                 }
-                PairedBlockXorAccumulator rhs_xor(
+                BatchedBlockXorAccumulator rhs_xor(
                     rhs.data(), block_bytes);
                 for (uint32_t column : rows[r].Columns) {
                     rhs_xor.Add(
@@ -2535,7 +2532,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             if (rows[r].Data) {
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
-            PairedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
+            BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
             for (uint32_t column : rows[r].Columns)
             {
                 const uint32_t index = inactive_index[column];
@@ -2716,7 +2713,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             {
                 std::fill(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
-                PairedBlockXorAccumulator bucket_xor(
+                BatchedBlockXorAccumulator bucket_xor(
                     residue_bucket.data(), block_bytes);
                 for (uint32_t column = residue; column < L; column += window)
                 {
@@ -3041,7 +3038,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
             else {
                 std::memset(value, 0, block_bytes);
             }
-            PairedBlockXorAccumulator value_xor(value, block_bytes);
+            BatchedBlockXorAccumulator value_xor(value, block_bytes);
             for (uint32_t other : equation.Columns)
             {
                 if (other == column) {

@@ -1346,6 +1346,78 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
 {
     unsigned offset = 0;
 
+#if defined(GF256_TARGET_MOBILE)
+# if defined(GF256_TRY_NEON)
+    if (CpuHasNeon)
+    {
+        while (bytes >= 16)
+        {
+            uint8x16_t acc = vld1q_u8(z + offset);
+            for (unsigned j = 0; j < SrcCount; ++j) {
+                acc = veorq_u8(acc, vld1q_u8(srcs[j] + offset));
+            }
+            vst1q_u8(z + offset, acc);
+            offset += 16u;
+            bytes -= 16;
+        }
+    }
+# endif
+#else
+# if defined(GF256_TRY_AVX512)
+    if (CpuHasAVX512)
+    {
+        while (bytes >= 64)
+        {
+            __m512i acc = _mm512_loadu_si512((const void*)(z + offset));
+            for (unsigned j = 0; j < SrcCount; ++j) {
+                acc = _mm512_xor_si512(
+                    acc,
+                    _mm512_loadu_si512((const void*)(srcs[j] + offset)));
+            }
+            _mm512_storeu_si512((void*)(z + offset), acc);
+            offset += 64u;
+            bytes -= 64;
+        }
+    }
+# endif
+# if defined(GF256_TRY_AVX2)
+    if (CpuHasAVX2)
+    {
+        while (bytes >= 32)
+        {
+            __m256i acc = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(z + offset));
+            for (unsigned j = 0; j < SrcCount; ++j) {
+                acc = _mm256_xor_si256(
+                    acc,
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(
+                            srcs[j] + offset)));
+            }
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(z + offset), acc);
+            offset += 32u;
+            bytes -= 32;
+        }
+    }
+# endif
+    while (bytes >= 16)
+    {
+        __m128i acc = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(z + offset));
+        for (unsigned j = 0; j < SrcCount; ++j) {
+            acc = _mm_xor_si128(
+                acc,
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(srcs[j] + offset)));
+        }
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(z + offset), acc);
+        offset += 16u;
+        bytes -= 16;
+    }
+#endif
+
     while (bytes >= 8)
     {
         uint64_t acc = gf256_loadu64(z + offset);

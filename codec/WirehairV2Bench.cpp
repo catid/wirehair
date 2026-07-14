@@ -3442,6 +3442,11 @@ struct MatrixFailureTrial
     uint64_t BlockXors = 0u;
     uint64_t BlockMulAdds = 0u;
     uint64_t SolveNanoseconds = 0u;
+    uint64_t BuildNanoseconds = 0u;
+    uint64_t PeelNanoseconds = 0u;
+    uint64_t ProjectNanoseconds = 0u;
+    uint64_t ResidualNanoseconds = 0u;
+    uint64_t BackSubNanoseconds = 0u;
 };
 
 const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family);
@@ -4073,7 +4078,8 @@ int CmdPrecodeFail(int argc, char** argv)
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
         "inact_mu,inact_max,binary_def_mu,binary_def_max,heavy_gain_mu,"
-        "heavy_gain_min,heavy_shortfall,solve_ms_mu,seed_attempt,"
+        "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
+        "project_ms_mu,residual_ms_mu,backsub_ms_mu,seed_attempt,"
         "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
         "heavy_gain_hist,failure_trials\n");
 
@@ -4243,6 +4249,16 @@ int CmdPrecodeFail(int argc, char** argv)
                                     solve_stats.ProjectNanoseconds +
                                     solve_stats.ResidualNanoseconds +
                                     solve_stats.BackSubNanoseconds;
+                                result.BuildNanoseconds =
+                                    solve_stats.BuildNanoseconds;
+                                result.PeelNanoseconds =
+                                    solve_stats.PeelNanoseconds;
+                                result.ProjectNanoseconds =
+                                    solve_stats.ProjectNanoseconds;
+                                result.ResidualNanoseconds =
+                                    solve_stats.ResidualNanoseconds;
+                                result.BackSubNanoseconds =
+                                    solve_stats.BackSubNanoseconds;
                             }
                         }
                         catch (...) {
@@ -4271,6 +4287,11 @@ int CmdPrecodeFail(int argc, char** argv)
             uint32_t first_rank_failure = UINT32_MAX;
             uint64_t inact_sum = 0u;
             uint64_t solve_ns_sum = 0u;
+            uint64_t build_ns_sum = 0u;
+            uint64_t peel_ns_sum = 0u;
+            uint64_t project_ns_sum = 0u;
+            uint64_t residual_ns_sum = 0u;
+            uint64_t backsub_ns_sum = 0u;
             uint64_t block_xors_sum = 0u;
             uint64_t block_muladds_sum = 0u;
             uint32_t inact_max = 0u;
@@ -4307,6 +4328,11 @@ int CmdPrecodeFail(int argc, char** argv)
                 }
                 inact_sum += result.Inactivated;
                 solve_ns_sum += result.SolveNanoseconds;
+                build_ns_sum += result.BuildNanoseconds;
+                peel_ns_sum += result.PeelNanoseconds;
+                project_ns_sum += result.ProjectNanoseconds;
+                residual_ns_sum += result.ResidualNanoseconds;
+                backsub_ns_sum += result.BackSubNanoseconds;
                 block_xors_sum += result.BlockXors;
                 block_muladds_sum += result.BlockMulAdds;
                 inact_max = std::max(inact_max, result.Inactivated);
@@ -4348,7 +4374,8 @@ int CmdPrecodeFail(int argc, char** argv)
             const std::string heavy_hist_text = CountHistogram(heavy_gain_hist);
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
-                "%u,%u,%.3f,%u,%.3f,%.3f,%d,%s,%s,%s\n",
+                "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
+                "%s,%s,%s\n",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -4361,6 +4388,11 @@ int CmdPrecodeFail(int argc, char** argv)
                 heavy_gain_min == UINT32_MAX ? 0u : heavy_gain_min,
                 heavy_shortfalls,
                 (double)solve_ns_sum / trials / 1000000.0,
+                (double)build_ns_sum / trials / 1000000.0,
+                (double)peel_ns_sum / trials / 1000000.0,
+                (double)project_ns_sum / trials / 1000000.0,
+                (double)residual_ns_sum / trials / 1000000.0,
+                (double)backsub_ns_sum / trials / 1000000.0,
                 seed_attempt,
                 (double)block_xors_sum / trials,
                 (double)block_muladds_sum / trials,

@@ -303,6 +303,85 @@ static bool TestMultiDestination()
     return true;
 }
 
+static bool TestMultiSource()
+{
+    static const unsigned kLengths[] = {
+        0, 1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33,
+        63, 64, 65, 127, 128, 129, 255, 256, 257, 1023
+    };
+    static const int kCounts[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 17
+    };
+    for (unsigned length_i = 0;
+         length_i < sizeof(kLengths) / sizeof(kLengths[0]); ++length_i)
+    {
+        const unsigned bytes = kLengths[length_i];
+        for (unsigned offset = 0; offset < 4u; ++offset)
+        {
+            for (int count : kCounts)
+            {
+                std::vector<uint8_t> destination(
+                    bytes + 2u * kGuardBytes + 16u);
+                for (size_t i = 0; i < destination.size(); ++i) {
+                    destination[i] = (uint8_t)(
+                        i * 29u + bytes + offset + (unsigned)count);
+                }
+                std::vector<uint8_t> expected = destination;
+                uint8_t* const destination_data =
+                    destination.data() + kGuardBytes + offset;
+                const size_t destination_start = kGuardBytes + offset;
+
+                std::vector<std::vector<uint8_t> > sources((size_t)count);
+                std::vector<std::vector<uint8_t> > source_before(
+                    (size_t)count);
+                std::vector<const void*> pointers((size_t)count);
+                for (int source = 0; source < count; ++source)
+                {
+                    const unsigned source_offset =
+                        (offset + (unsigned)source * 5u + 1u) & 15u;
+                    sources[(size_t)source].resize(
+                        bytes + 2u * kGuardBytes + 16u);
+                    for (size_t i = 0;
+                         i < sources[(size_t)source].size(); ++i)
+                    {
+                        sources[(size_t)source][i] = (uint8_t)(
+                            i * 37u + (unsigned)source * 61u + bytes);
+                    }
+                    const uint8_t* const source_data =
+                        sources[(size_t)source].data() + kGuardBytes +
+                        source_offset;
+                    pointers[(size_t)source] = source_data;
+                    source_before[(size_t)source] = sources[(size_t)source];
+                    for (unsigned i = 0; i < bytes; ++i) {
+                        expected[destination_start + i] ^= source_data[i];
+                    }
+                }
+
+                gf256_add_multi_mem(
+                    destination_data,
+                    count == 0 ? nullptr : pointers.data(),
+                    count, (int)bytes);
+                if (destination != expected)
+                {
+                    std::fprintf(stderr,
+                        "multi-source mismatch bytes=%u offset=%u count=%d\n",
+                        bytes, offset, count);
+                    return false;
+                }
+                if (sources != source_before)
+                {
+                    std::fprintf(stderr,
+                        "multi-source input changed bytes=%u offset=%u "
+                        "count=%d\n",
+                        bytes, offset, count);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static void RunBenchmark()
 {
     static const size_t kBytes = 4u * 1024u * 1024u;
@@ -400,6 +479,7 @@ int main(int argc, char** argv)
 
     if (!TestOperation(Operation::Multiply) ||
         !TestOperation(Operation::Divide) ||
+        !TestMultiSource() ||
         !TestMultiDestination())
     {
         return 1;

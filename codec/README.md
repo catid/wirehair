@@ -290,6 +290,10 @@ and rank to be swept without changing a named or serialized profile.
 `precodefail --full-payload-solve`
 uses each requested `--bb-list` value in the solver instead of the default
 one- or two-byte rank proxy, making `solve_ms_mu` include the real RHS cost.
+The adjacent `build_ms_mu`, `peel_ms_mu`, `project_ms_mu`,
+`residual_ms_mu`, and `backsub_ms_mu` columns split that solve time into its
+major phases so payload-size bottlenecks can be distinguished from matrix
+construction and peeling costs.
 These flags are benchmarking hooks, not wire-format selection controls.
 
 `compare` and `precodecheck` accept deterministic common packet schedules via
