@@ -255,6 +255,33 @@ static bool gf256_self_test()
             return false;
     }
 
+    // Test gf256_addset_multi_mem()
+    for (unsigned i = 0; i < kTestBufferBytes; ++i) {
+        m_SelfTestBuffers.A[i] = (uint8_t)(i * 19u + 0x7du);
+    }
+    {
+        const void* srcs[] = {
+            m_SelfTestBuffers.B,
+            m_SelfTestBuffers.C,
+            m_SelfTestBuffers.D,
+            m_SelfTestBuffers.E,
+            m_SelfTestBuffers.F
+        };
+        gf256_addset_multi_mem(
+            m_SelfTestBuffers.A, srcs, 5, kTestBufferBytes);
+    }
+    for (unsigned i = 0; i < kTestBufferBytes; ++i)
+    {
+        const uint8_t expected =
+            (uint8_t)(i * 5u + 0x23u) ^
+            (uint8_t)(i * 7u + 0x35u) ^
+            (uint8_t)(i * 11u + 0x47u) ^
+            (uint8_t)(i * 13u + 0x59u) ^
+            (uint8_t)(i * 17u + 0x6bu);
+        if (m_SelfTestBuffers.A[i] != expected)
+            return false;
+    }
+
     // Test gf256_muladd_mem()
     for (unsigned i = 0; i < kTestBufferBytes; ++i)
     {
@@ -1338,8 +1365,8 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
     }
 }
 
-template<unsigned SrcCount>
-static GF256_FORCE_INLINE void gf256_add_multi_fixed(
+template<unsigned SrcCount, bool SetDestination>
+static GF256_FORCE_INLINE void gf256_xor_multi_fixed(
     uint8_t * GF256_RESTRICT z,
     const uint8_t * const * GF256_RESTRICT srcs,
     int bytes)
@@ -1352,8 +1379,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
     {
         while (bytes >= 16)
         {
-            uint8x16_t acc = vld1q_u8(z + offset);
-            for (unsigned j = 0; j < SrcCount; ++j) {
+            uint8x16_t acc = SetDestination ?
+                vld1q_u8(srcs[0] + offset) : vld1q_u8(z + offset);
+            const unsigned first_source = SetDestination ? 1u : 0u;
+            for (unsigned j = first_source; j < SrcCount; ++j) {
                 acc = veorq_u8(acc, vld1q_u8(srcs[j] + offset));
             }
             vst1q_u8(z + offset, acc);
@@ -1368,8 +1397,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
     {
         while (bytes >= 64)
         {
-            __m512i acc = _mm512_loadu_si512((const void*)(z + offset));
-            for (unsigned j = 0; j < SrcCount; ++j) {
+            __m512i acc = _mm512_loadu_si512((const void*)(
+                SetDestination ? srcs[0] + offset : z + offset));
+            const unsigned first_source = SetDestination ? 1u : 0u;
+            for (unsigned j = first_source; j < SrcCount; ++j) {
                 acc = _mm512_xor_si512(
                     acc,
                     _mm512_loadu_si512((const void*)(srcs[j] + offset)));
@@ -1389,10 +1420,14 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
         while (bytes >= 64)
         {
             __m256i acc0 = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i*>(z + offset));
+                reinterpret_cast<const __m256i*>(
+                    SetDestination ? srcs[0] + offset : z + offset));
             __m256i acc1 = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i*>(z + offset + 32u));
-            for (unsigned j = 0; j < SrcCount; ++j)
+                reinterpret_cast<const __m256i*>(
+                    SetDestination ?
+                        srcs[0] + offset + 32u : z + offset + 32u));
+            const unsigned first_source = SetDestination ? 1u : 0u;
+            for (unsigned j = first_source; j < SrcCount; ++j)
             {
                 acc0 = _mm256_xor_si256(
                     acc0,
@@ -1415,8 +1450,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
         while (bytes >= 32)
         {
             __m256i acc = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i*>(z + offset));
-            for (unsigned j = 0; j < SrcCount; ++j) {
+                reinterpret_cast<const __m256i*>(
+                    SetDestination ? srcs[0] + offset : z + offset));
+            const unsigned first_source = SetDestination ? 1u : 0u;
+            for (unsigned j = first_source; j < SrcCount; ++j) {
                 acc = _mm256_xor_si256(
                     acc,
                     _mm256_loadu_si256(
@@ -1433,8 +1470,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
     while (bytes >= 16)
     {
         __m128i acc = _mm_loadu_si128(
-            reinterpret_cast<const __m128i*>(z + offset));
-        for (unsigned j = 0; j < SrcCount; ++j) {
+            reinterpret_cast<const __m128i*>(
+                SetDestination ? srcs[0] + offset : z + offset));
+        const unsigned first_source = SetDestination ? 1u : 0u;
+        for (unsigned j = first_source; j < SrcCount; ++j) {
             acc = _mm_xor_si128(
                 acc,
                 _mm_loadu_si128(
@@ -1449,8 +1488,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
 
     while (bytes >= 8)
     {
-        uint64_t acc = gf256_loadu64(z + offset);
-        for (unsigned j = 0; j < SrcCount; ++j) {
+        uint64_t acc = gf256_loadu64(
+            SetDestination ? srcs[0] + offset : z + offset);
+        const unsigned first_source = SetDestination ? 1u : 0u;
+        for (unsigned j = first_source; j < SrcCount; ++j) {
             acc ^= gf256_loadu64(srcs[j] + offset);
         }
         gf256_storeu64(z + offset, acc);
@@ -1460,15 +1501,17 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
 
     while (bytes-- > 0)
     {
-        uint8_t acc = z[offset];
-        for (unsigned j = 0; j < SrcCount; ++j) {
+        uint8_t acc = SetDestination ? srcs[0][offset] : z[offset];
+        const unsigned first_source = SetDestination ? 1u : 0u;
+        for (unsigned j = first_source; j < SrcCount; ++j) {
             acc ^= srcs[j][offset];
         }
         z[offset++] = acc;
     }
 }
 
-static GF256_FORCE_INLINE void gf256_add_multi_generic(
+template<bool SetDestination>
+static GF256_FORCE_INLINE void gf256_xor_multi_generic(
     uint8_t * GF256_RESTRICT z,
     const uint8_t * const * GF256_RESTRICT srcs,
     int src_count,
@@ -1478,8 +1521,10 @@ static GF256_FORCE_INLINE void gf256_add_multi_generic(
 
     while (bytes >= 8)
     {
-        uint64_t acc = gf256_loadu64(z + offset);
-        for (int j = 0; j < src_count; ++j) {
+        uint64_t acc = gf256_loadu64(
+            SetDestination ? srcs[0] + offset : z + offset);
+        const int first_source = SetDestination ? 1 : 0;
+        for (int j = first_source; j < src_count; ++j) {
             acc ^= gf256_loadu64(srcs[j] + offset);
         }
         gf256_storeu64(z + offset, acc);
@@ -1489,8 +1534,9 @@ static GF256_FORCE_INLINE void gf256_add_multi_generic(
 
     while (bytes-- > 0)
     {
-        uint8_t acc = z[offset];
-        for (int j = 0; j < src_count; ++j) {
+        uint8_t acc = SetDestination ? srcs[0][offset] : z[offset];
+        const int first_source = SetDestination ? 1 : 0;
+        for (int j = first_source; j < src_count; ++j) {
             acc ^= srcs[j][offset];
         }
         z[offset++] = acc;
@@ -1529,16 +1575,16 @@ extern "C" void gf256_add_multi_mem(
 
         switch (src_count)
         {
-        case 3:  gf256_add_multi_fixed<3>(z, srcs, bytes);  return;
-        case 4:  gf256_add_multi_fixed<4>(z, srcs, bytes);  return;
-        case 5:  gf256_add_multi_fixed<5>(z, srcs, bytes);  return;
-        case 6:  gf256_add_multi_fixed<6>(z, srcs, bytes);  return;
-        case 7:  gf256_add_multi_fixed<7>(z, srcs, bytes);  return;
-        case 8:  gf256_add_multi_fixed<8>(z, srcs, bytes);  return;
-        case 12: gf256_add_multi_fixed<12>(z, srcs, bytes); return;
-        case 16: gf256_add_multi_fixed<16>(z, srcs, bytes); return;
+        case 3:  gf256_xor_multi_fixed<3, false>(z, srcs, bytes);  return;
+        case 4:  gf256_xor_multi_fixed<4, false>(z, srcs, bytes);  return;
+        case 5:  gf256_xor_multi_fixed<5, false>(z, srcs, bytes);  return;
+        case 6:  gf256_xor_multi_fixed<6, false>(z, srcs, bytes);  return;
+        case 7:  gf256_xor_multi_fixed<7, false>(z, srcs, bytes);  return;
+        case 8:  gf256_xor_multi_fixed<8, false>(z, srcs, bytes);  return;
+        case 12: gf256_xor_multi_fixed<12, false>(z, srcs, bytes); return;
+        case 16: gf256_xor_multi_fixed<16, false>(z, srcs, bytes); return;
         default:
-            gf256_add_multi_generic(z, srcs, src_count, bytes);
+            gf256_xor_multi_generic<false>(z, srcs, src_count, bytes);
             return;
         }
     }
@@ -1552,7 +1598,81 @@ extern "C" void gf256_add_multi_mem(
         for (int j = 0; j < count; ++j) {
             src_window[j] = reinterpret_cast<const uint8_t *>(next[j]);
         }
-        gf256_add_multi_generic(z, src_window, count, bytes);
+        gf256_xor_multi_generic<false>(z, src_window, count, bytes);
+        next += count;
+        remaining -= count;
+    }
+}
+
+extern "C" void gf256_addset_multi_mem(
+    void * GF256_RESTRICT vz,
+    const void * const * GF256_RESTRICT vsrcs,
+    int src_count,
+    int bytes)
+{
+    if (bytes <= 0 || src_count <= 0) {
+        return;
+    }
+    if (src_count == 1)
+    {
+        std::memcpy(vz, vsrcs[0], (size_t)bytes);
+        return;
+    }
+    if (src_count == 2)
+    {
+        gf256_addset_mem(vz, vsrcs[0], vsrcs[1], bytes);
+        return;
+    }
+
+    WH_BUMP(2, bytes);
+
+    uint8_t * GF256_RESTRICT z = reinterpret_cast<uint8_t *>(vz);
+    const uint8_t * srcs[16];
+    if (src_count <= (int)(sizeof(srcs) / sizeof(srcs[0])))
+    {
+        for (int j = 0; j < src_count; ++j) {
+            srcs[j] = reinterpret_cast<const uint8_t *>(vsrcs[j]);
+        }
+
+        switch (src_count)
+        {
+        case 3:  gf256_xor_multi_fixed<3, true>(z, srcs, bytes);  return;
+        case 4:  gf256_xor_multi_fixed<4, true>(z, srcs, bytes);  return;
+        case 5:  gf256_xor_multi_fixed<5, true>(z, srcs, bytes);  return;
+        case 6:  gf256_xor_multi_fixed<6, true>(z, srcs, bytes);  return;
+        case 7:  gf256_xor_multi_fixed<7, true>(z, srcs, bytes);  return;
+        case 8:  gf256_xor_multi_fixed<8, true>(z, srcs, bytes);  return;
+        case 9:  gf256_xor_multi_fixed<9, true>(z, srcs, bytes);  return;
+        case 10: gf256_xor_multi_fixed<10, true>(z, srcs, bytes); return;
+        case 11: gf256_xor_multi_fixed<11, true>(z, srcs, bytes); return;
+        case 12: gf256_xor_multi_fixed<12, true>(z, srcs, bytes); return;
+        case 13: gf256_xor_multi_fixed<13, true>(z, srcs, bytes); return;
+        case 14: gf256_xor_multi_fixed<14, true>(z, srcs, bytes); return;
+        case 15: gf256_xor_multi_fixed<15, true>(z, srcs, bytes); return;
+        case 16: gf256_xor_multi_fixed<16, true>(z, srcs, bytes); return;
+        default:
+            gf256_xor_multi_generic<true>(z, srcs, src_count, bytes);
+            return;
+        }
+    }
+
+    const uint8_t * src_window[16];
+    int remaining = src_count;
+    const void * const * next = vsrcs;
+    bool initialized = false;
+    while (remaining > 0)
+    {
+        const int count = remaining > 16 ? 16 : remaining;
+        for (int j = 0; j < count; ++j) {
+            src_window[j] = reinterpret_cast<const uint8_t *>(next[j]);
+        }
+        if (initialized) {
+            gf256_xor_multi_generic<false>(z, src_window, count, bytes);
+        }
+        else {
+            gf256_xor_multi_generic<true>(z, src_window, count, bytes);
+            initialized = true;
+        }
         next += count;
         remaining -= count;
     }

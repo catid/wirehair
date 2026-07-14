@@ -1,5 +1,6 @@
 #include "../gf256.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
@@ -310,7 +311,8 @@ static bool TestMultiSource()
         63, 64, 65, 127, 128, 129, 255, 256, 257, 1023
     };
     static const int kCounts[] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 17
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+        31, 32, 33
     };
     for (unsigned length_i = 0;
          length_i < sizeof(kLengths) / sizeof(kLengths[0]); ++length_i)
@@ -327,9 +329,19 @@ static bool TestMultiSource()
                         i * 29u + bytes + offset + (unsigned)count);
                 }
                 std::vector<uint8_t> expected = destination;
+                std::vector<uint8_t> set_destination = destination;
+                std::vector<uint8_t> set_expected = destination;
                 uint8_t* const destination_data =
                     destination.data() + kGuardBytes + offset;
+                uint8_t* const set_destination_data =
+                    set_destination.data() + kGuardBytes + offset;
                 const size_t destination_start = kGuardBytes + offset;
+                if (count > 0) {
+                    std::fill(
+                        set_expected.begin() + destination_start,
+                        set_expected.begin() + destination_start + bytes,
+                        uint8_t{0});
+                }
 
                 std::vector<std::vector<uint8_t> > sources((size_t)count);
                 std::vector<std::vector<uint8_t> > source_before(
@@ -354,6 +366,8 @@ static bool TestMultiSource()
                     source_before[(size_t)source] = sources[(size_t)source];
                     for (unsigned i = 0; i < bytes; ++i) {
                         expected[destination_start + i] ^= source_data[i];
+                        set_expected[destination_start + i] ^=
+                            source_data[i];
                     }
                 }
 
@@ -365,6 +379,18 @@ static bool TestMultiSource()
                 {
                     std::fprintf(stderr,
                         "multi-source mismatch bytes=%u offset=%u count=%d\n",
+                        bytes, offset, count);
+                    return false;
+                }
+                gf256_addset_multi_mem(
+                    set_destination_data,
+                    count == 0 ? nullptr : pointers.data(),
+                    count, (int)bytes);
+                if (set_destination != set_expected)
+                {
+                    std::fprintf(stderr,
+                        "set-multi-source mismatch bytes=%u offset=%u "
+                        "count=%d\n",
                         bytes, offset, count);
                     return false;
                 }

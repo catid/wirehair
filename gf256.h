@@ -334,6 +334,13 @@ extern void gf256_add_multi_mem(void * GF256_RESTRICT vz,
                                 const void * const * GF256_RESTRICT vsrcs,
                                 int src_count, int bytes);
 
+/// Performs "z[] = srcs[0][] + ... + srcs[src_count-1][]" bulk operation.
+/// Destination and source ranges must not overlap.  Non-positive source
+/// counts and byte lengths are no-ops.
+extern void gf256_addset_multi_mem(void * GF256_RESTRICT vz,
+                                   const void * const * GF256_RESTRICT vsrcs,
+                                   int src_count, int bytes);
+
 /// Performs "z[] = x[] + y[]" bulk memory operation
 extern void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                              const void * GF256_RESTRICT vy, int bytes);

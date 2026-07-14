@@ -336,6 +336,112 @@ private:
     uint32_t PendingCount = 0u;
 };
 
+// Initializes the destination from the XOR of its sources.  The first batch
+// uses the set-form SIMD kernel so a packet payload and its dependent values
+// are consumed in one pass rather than memcpy followed by a read/modify/write.
+class BatchedBlockXorInitializer
+{
+public:
+    BatchedBlockXorInitializer(
+        uint8_t* destination,
+        uint32_t block_bytes,
+        const uint8_t* first_source,
+        bool destination_initially_zero = false)
+        : Destination(destination)
+        , BlockBytes(block_bytes)
+        , DestinationInitiallyZero(destination_initially_zero)
+        , BatchCapacity(kFusedBatchSize)
+    {
+        if (first_source) {
+            PendingSources[PendingCount++] = first_source;
+        }
+    }
+
+    void Add(const uint8_t* source)
+    {
+        PendingSources[PendingCount++] = source;
+        if (PendingCount == BatchCapacity) {
+            Flush();
+        }
+    }
+
+    void Flush()
+    {
+        if (!Initialized)
+        {
+            if (PendingCount == 0u) {
+                if (!DestinationInitiallyZero) {
+                    std::memset(Destination, 0, BlockBytes);
+                }
+            }
+            else {
+                gf256_addset_multi_mem(
+                    Destination, PendingSources, (int)PendingCount,
+                    (int)BlockBytes);
+            }
+            Initialized = true;
+            BatchCapacity = kRegularBatchSize;
+        }
+        else if (PendingCount != 0u)
+        {
+            gf256_add_multi_mem(
+                Destination, PendingSources, (int)PendingCount,
+                (int)BlockBytes);
+        }
+        PendingCount = 0u;
+    }
+
+private:
+    static const uint32_t kRegularBatchSize = 8u;
+    static const uint32_t kFusedBatchSize = 16u;
+    uint8_t* Destination;
+    uint32_t BlockBytes;
+    bool DestinationInitiallyZero;
+    const void* PendingSources[kFusedBatchSize] = {};
+    uint32_t PendingCount = 0u;
+    uint32_t BatchCapacity;
+    bool Initialized = false;
+};
+
+template<class XorAccumulator>
+static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
+    uint32_t column,
+    const BinaryEquationView& equation,
+    const std::vector<uint32_t>& inactive_index,
+    uint32_t words,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint8_t>& values,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& accumulator,
+    XorAccumulator& constant_xor,
+    PrecodeSolveStats& stats)
+{
+    for (uint32_t other : equation.Columns)
+    {
+        if (other == column) {
+            continue;
+        }
+        const uint32_t index = inactive_index[other];
+        if (index != UINT32_MAX) {
+            accumulator[index >> 6] ^=
+                UINT64_C(1) << (index & 63u);
+        }
+        else
+        {
+            for (uint32_t w = 0; w < words; ++w) {
+                accumulator[w] ^=
+                    projection[(size_t)other * words + w];
+            }
+            // Inactive value slots are still the zero constant at this
+            // stage.  Only peeled columns can contribute to the affine RHS;
+            // XORing an inactive slot would have no algebraic effect.
+            constant_xor.Add(
+                values.data() + (size_t)other * block_bytes);
+            ++stats.BlockXors;
+        }
+    }
+}
+
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
 
 enum class ResidualInsertResult
@@ -348,6 +454,10 @@ enum class ResidualInsertResult
 
 constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
 constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
+// Paired whole-solver runs show the fused path loses below these scales even
+// though the isolated payload kernel is faster.
+constexpr uint32_t kFusedBlockXorInitMinBlockBytes = 1280u;
+constexpr uint32_t kFusedBlockXorInitMinBlockCount = 10000u;
 
 // The production GF(256) profile fixes H=12, so its periodic coefficient
 // table is immutable across every message.  Keeping that small table in
@@ -2465,6 +2575,9 @@ static WirehairResult SolvePrecodeSystemImpl(
         std::vector<uint64_t> projection(projection_words, 0u);
         std::vector<uint8_t> values(value_bytes, 0u);
         std::vector<uint64_t> accumulator(words, 0u);
+        const bool enable_fused_block_initialization =
+            K >= kFusedBlockXorInitMinBlockCount &&
+            block_bytes >= kFusedBlockXorInitMinBlockBytes;
 
         // Affine projection of peeled columns onto inactive variables.  The
         // block stored in values[column] is the constant term.
@@ -2475,35 +2588,34 @@ static WirehairResult SolvePrecodeSystemImpl(
                 values.data() + (size_t)column * block_bytes;
             const BinaryEquationView equation =
                 rows[peel.SolveRow[column]];
-            if (equation.Data) {
-                std::memcpy(constant, equation.Data, block_bytes);
+            if (equation.Columns.size() == 0u) {
+                return terminal_error();
             }
-            BatchedBlockXorAccumulator constant_xor(constant, block_bytes);
-            for (uint32_t other : equation.Columns)
+            const size_t initialization_sources =
+                equation.Columns.size() - 1u +
+                (equation.Data ? 1u : 0u);
+            if (enable_fused_block_initialization &&
+                initialization_sources <= 16u)
             {
-                if (other == column) {
-                    continue;
-                }
-                const uint32_t index = inactive_index[other];
-                if (index != UINT32_MAX) {
-                    accumulator[index >> 6] ^=
-                        UINT64_C(1) << (index & 63u);
-                }
-                else {
-                    for (uint32_t w = 0; w < words; ++w) {
-                        accumulator[w] ^=
-                            projection[(size_t)other * words + w];
-                    }
-                    // Inactive value slots are still the zero constant at
-                    // this stage.  Only peeled columns can contribute to the
-                    // affine RHS; XORing an inactive slot would be a full-
-                    // block read/write pass with no algebraic effect.
-                    constant_xor.Add(
-                        values.data() + (size_t)other * block_bytes);
-                    ++st.BlockXors;
-                }
+                BatchedBlockXorInitializer constant_xor(
+                    constant, block_bytes, equation.Data, true);
+                AccumulatePeeledProjectionConstant(
+                    column, equation, inactive_index, words, projection,
+                    values, block_bytes, accumulator, constant_xor, st);
+                constant_xor.Flush();
             }
-            constant_xor.Flush();
+            else
+            {
+                if (equation.Data) {
+                    std::memcpy(constant, equation.Data, block_bytes);
+                }
+                BatchedBlockXorAccumulator constant_xor(
+                    constant, block_bytes);
+                AccumulatePeeledProjectionConstant(
+                    column, equation, inactive_index, words, projection,
+                    values, block_bytes, accumulator, constant_xor, st);
+                constant_xor.Flush();
+            }
             for (uint32_t w = 0; w < words; ++w) {
                 projection[(size_t)column * words + w] = accumulator[w];
             }
@@ -3146,23 +3258,45 @@ static WirehairResult SolvePrecodeSystemImpl(
                     continue;
                 }
             }
-            if (equation.Data) {
-                std::memcpy(value, equation.Data, block_bytes);
-            }
-            else {
-                std::memset(value, 0, block_bytes);
-            }
-            BatchedBlockXorAccumulator value_xor(value, block_bytes);
-            for (uint32_t other : equation.Columns)
+            const size_t initialization_sources =
+                equation.Columns.size() - 1u +
+                (equation.Data ? 1u : 0u);
+            if (enable_fused_block_initialization &&
+                initialization_sources <= 16u)
             {
-                if (other == column) {
-                    continue;
+                BatchedBlockXorInitializer value_xor(
+                    value, block_bytes, equation.Data);
+                for (uint32_t other : equation.Columns)
+                {
+                    if (other == column) {
+                        continue;
+                    }
+                    value_xor.Add(
+                        values.data() + (size_t)other * block_bytes);
+                    ++st.BlockXors;
                 }
-                value_xor.Add(
-                    values.data() + (size_t)other * block_bytes);
-                ++st.BlockXors;
+                value_xor.Flush();
             }
-            value_xor.Flush();
+            else
+            {
+                if (equation.Data) {
+                    std::memcpy(value, equation.Data, block_bytes);
+                }
+                else {
+                    std::memset(value, 0, block_bytes);
+                }
+                BatchedBlockXorAccumulator value_xor(value, block_bytes);
+                for (uint32_t other : equation.Columns)
+                {
+                    if (other == column) {
+                        continue;
+                    }
+                    value_xor.Add(
+                        values.data() + (size_t)other * block_bytes);
+                    ++st.BlockXors;
+                }
+                value_xor.Flush();
+            }
         }
         phase_end = SolveClock::now();
         st.BackSubNanoseconds = (uint64_t)

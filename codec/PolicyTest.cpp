@@ -1013,6 +1013,13 @@ void CheckGf256RejectsNonPositiveLengths()
     gf256_addset_mem(z, x, y, -1);
     Check(std::memcmp(z, z0, sizeof(z)) == 0,
         "gf256_addset_mem should ignore negative byte counts");
+    const void* xor_sources[] = { x, y };
+    gf256_addset_multi_mem(z, xor_sources, 2, -1);
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_addset_multi_mem should ignore negative byte counts");
+    gf256_addset_multi_mem(z, nullptr, -1, (int)sizeof(z));
+    Check(std::memcmp(z, z0, sizeof(z)) == 0,
+        "gf256_addset_multi_mem should ignore negative source counts");
     gf256_mul_mem(z, x, 0u, -1);
     Check(std::memcmp(z, z0, sizeof(z)) == 0,
         "gf256_mul_mem should ignore negative byte counts");
@@ -1027,6 +1034,7 @@ void CheckGf256RejectsNonPositiveLengths()
     gf256_add_mem(x, y, 0);
     gf256_add2_mem(z, x, y, 0);
     gf256_addset_mem(z, x, y, 0);
+    gf256_addset_multi_mem(z, xor_sources, 2, 0);
     gf256_mul_mem(z, x, 0u, 0);
     gf256_muladd_mem(z, 1u, x, 0);
     gf256_memswap(x, y, 0);
