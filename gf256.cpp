@@ -1002,6 +1002,128 @@ extern "C" int gf256_init_(int version)
 # define GF256_AVX512_ACTIVE false
 #endif
 
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
+
+static GF256_AVX2_TARGET int gf256_add_mem_avx2_target(
+    void* GF256_RESTRICT vx,
+    const void* GF256_RESTRICT vy,
+    int bytes)
+{
+    uint8_t* const x = reinterpret_cast<uint8_t*>(vx);
+    const uint8_t* const y = reinterpret_cast<const uint8_t*>(vy);
+    const int vector_bytes = bytes & ~31;
+    int offset = 0;
+    for (; vector_bytes - offset >= 128; offset += 128)
+    {
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            const int lane_offset = offset + lane * 32;
+            const __m256i result = _mm256_xor_si256(
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(x + lane_offset)),
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(y + lane_offset)));
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(x + lane_offset), result);
+        }
+    }
+    for (; offset < vector_bytes; offset += 32)
+    {
+        const __m256i result = _mm256_xor_si256(
+            _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(x + offset)),
+            _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(y + offset)));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(x + offset), result);
+    }
+    return vector_bytes;
+}
+
+static GF256_AVX2_TARGET int gf256_add2_mem_avx2_target(
+    void* GF256_RESTRICT vz,
+    const void* GF256_RESTRICT vx,
+    const void* GF256_RESTRICT vy,
+    int bytes)
+{
+    uint8_t* const z = reinterpret_cast<uint8_t*>(vz);
+    const uint8_t* const x = reinterpret_cast<const uint8_t*>(vx);
+    const uint8_t* const y = reinterpret_cast<const uint8_t*>(vy);
+    const int vector_bytes = bytes & ~31;
+    int offset = 0;
+    for (; vector_bytes - offset >= 128; offset += 128)
+    {
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            const int lane_offset = offset + lane * 32;
+            const __m256i result = _mm256_xor_si256(
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(z + lane_offset)),
+                _mm256_xor_si256(
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(x + lane_offset)),
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(y + lane_offset))));
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(z + lane_offset), result);
+        }
+    }
+    for (; offset < vector_bytes; offset += 32)
+    {
+        const __m256i result = _mm256_xor_si256(
+            _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(z + offset)),
+            _mm256_xor_si256(
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(x + offset)),
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(y + offset))));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(z + offset), result);
+    }
+    return vector_bytes;
+}
+
+static GF256_AVX2_TARGET int gf256_addset_mem_avx2_target(
+    void* GF256_RESTRICT vz,
+    const void* GF256_RESTRICT vx,
+    const void* GF256_RESTRICT vy,
+    int bytes)
+{
+    uint8_t* const z = reinterpret_cast<uint8_t*>(vz);
+    const uint8_t* const x = reinterpret_cast<const uint8_t*>(vx);
+    const uint8_t* const y = reinterpret_cast<const uint8_t*>(vy);
+    const int vector_bytes = bytes & ~31;
+    int offset = 0;
+    for (; vector_bytes - offset >= 128; offset += 128)
+    {
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            const int lane_offset = offset + lane * 32;
+            const __m256i result = _mm256_xor_si256(
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(x + lane_offset)),
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(y + lane_offset)));
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(z + lane_offset), result);
+        }
+    }
+    for (; offset < vector_bytes; offset += 32)
+    {
+        const __m256i result = _mm256_xor_si256(
+            _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(x + offset)),
+            _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(y + offset)));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(z + offset), result);
+    }
+    return vector_bytes;
+}
+
+#endif
+
 extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
                               const void * GF256_RESTRICT vy, int bytes)
 {
@@ -1092,6 +1214,16 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
         }
     }
 # endif // GF256_TRY_AVX512
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_AVX512_ACTIVE)
+    {
+        const int vector_bytes =
+            gf256_add_mem_avx2_target(x16, y16, bytes);
+        bytes -= vector_bytes;
+        x16 += vector_bytes / 16;
+        y16 += vector_bytes / 16;
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_AVX2)
     if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
@@ -1289,6 +1421,17 @@ extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_REST
         }
     }
 # endif // GF256_TRY_AVX512
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_AVX512_ACTIVE)
+    {
+        const int vector_bytes =
+            gf256_add2_mem_avx2_target(z16, x16, y16, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
+        y16 += vector_bytes / 16;
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_AVX2)
     if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
@@ -1772,6 +1915,17 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
         }
     }
 # endif // GF256_TRY_AVX512
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_AVX512_ACTIVE)
+    {
+        const int vector_bytes =
+            gf256_addset_mem_avx2_target(z16, x16, y16, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
+        y16 += vector_bytes / 16;
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_AVX2)
     if (CpuHasAVX2 && !GF256_AVX512_ACTIVE)
     {
@@ -1909,7 +2063,7 @@ static GF256_AVX2_TARGET int gf256_muladd_mem_avx2_target(
     const uint8_t* const source = reinterpret_cast<const uint8_t*>(vx);
     uint8_t* const destination = reinterpret_cast<uint8_t*>(vz);
     int offset = 0;
-    for (; offset + 64 <= vector_bytes; offset += 64)
+    for (; vector_bytes - offset >= 64; offset += 64)
     {
         __m256i input0 = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(source + offset));
