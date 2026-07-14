@@ -1782,6 +1782,8 @@ int CmdCompare(int argc, char** argv)
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
         wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
     bool mixed_geometry_explicit = false;
+    uint32_t mixed_residue_skew = 0u;
+    bool mixed_residue_skew_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -1890,6 +1892,17 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
             mixed_geometry_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-skew")) {
+            if (!TakeArg(
+                    "compare", "--mixed-residue-skew",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-skew", value, mixed_residue_skew))
+            {
+                return 1;
+            }
+            mixed_residue_skew_explicit = true;
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
@@ -2015,7 +2028,7 @@ int CmdCompare(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_period_explicit || mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit)
+             mixed_gf16_rows_explicit || mixed_residue_skew_explicit)
     {
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
@@ -2041,6 +2054,12 @@ int CmdCompare(int argc, char** argv)
         return 1;
     }
     if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
+        std::fprintf(stderr,
+            "compare --mixed-residue-skew must be a corner-preserving "
+            "shared-x skew in [0,P-H]\n");
         return 1;
     }
 #endif
@@ -2113,7 +2132,7 @@ int CmdCompare(int argc, char** argv)
         "dense_candidate=%u precode=%u precode_cache=%u "
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
         "schedule_seed=0x%llx mixed_period=%u mixed_gf16_rows=%u "
-        "mixed_geometry=%s "
+        "mixed_geometry=%s mixed_residue_skew=%u "
         "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -2142,7 +2161,8 @@ int CmdCompare(int argc, char** argv)
         wirehair_v2::ActiveMixedCoefficientPeriod(),
         wirehair_v2::ActiveMixedGF16Rows(),
         MixedCoefficientGeometryName(
-            wirehair_v2::ActiveMixedCoefficientGeometry()));
+            wirehair_v2::ActiveMixedCoefficientGeometry()),
+        wirehair_v2::ActiveMixedResidueSkew());
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -3792,6 +3812,8 @@ int CmdPrecodeFail(int argc, char** argv)
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
         wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
     bool mixed_geometry_explicit = false;
+    uint32_t mixed_residue_skew = 0u;
+    bool mixed_residue_skew_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -3923,6 +3945,17 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_geometry_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-residue-skew")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-residue-skew",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-skew", value, mixed_residue_skew))
+            {
+                return 1;
+            }
+            mixed_residue_skew_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -4021,7 +4054,7 @@ int CmdPrecodeFail(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_period_explicit || mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit)
+             mixed_gf16_rows_explicit || mixed_residue_skew_explicit)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -4049,6 +4082,12 @@ int CmdPrecodeFail(int argc, char** argv)
     if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
+    if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
+        std::fprintf(stderr,
+            "precodefail --mixed-residue-skew must be a corner-preserving "
+            "shared-x skew in [0,P-H]\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -4064,7 +4103,7 @@ int CmdPrecodeFail(int argc, char** argv)
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "completion=%s mixed_period=%u mixed_gf16_rows=%u "
-            "mixed_geometry=%s "
+            "mixed_geometry=%s mixed_residue_skew=%u "
             "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
@@ -4072,6 +4111,7 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedGF16Rows(),
             MixedCoefficientGeometryName(
                 wirehair_v2::ActiveMixedCoefficientGeometry()),
+            wirehair_v2::ActiveMixedResidueSkew(),
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4183,6 +4223,13 @@ int CmdPrecodeFail(int argc, char** argv)
                             {
                                 throw std::runtime_error(
                                     "invalid mixed coefficient geometry");
+                            }
+                            if (!wirehair_v2::
+                                    SetMixedResidueSkewForTesting(
+                                        mixed_residue_skew))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed residue skew");
                             }
 #endif
                             uint32_t solve_block_bytes =

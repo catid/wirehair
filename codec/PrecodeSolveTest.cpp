@@ -98,6 +98,27 @@ private:
     bool Valid;
 };
 
+class MixedResidueSkewScope
+{
+public:
+    explicit MixedResidueSkewScope(uint32_t skew)
+        : Previous(wirehair_v2::ActiveMixedResidueSkew())
+        , Valid(wirehair_v2::SetMixedResidueSkewForTesting(skew))
+    {
+    }
+
+    ~MixedResidueSkewScope()
+    {
+        (void)wirehair_v2::SetMixedResidueSkewForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 class BinaryPeelOracleScope
 {
 public:
@@ -1151,13 +1172,15 @@ bool CheckIncrementalResume()
 bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     uint32_t period,
     wirehair_v2::MixedCoefficientGeometry geometry,
-    uint32_t extension_rows)
+    uint32_t extension_rows,
+    uint32_t residue_skew = 0u)
 {
     MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientPeriodScope period_scope(period);
     MixedCoefficientGeometryScope geometry_scope(geometry);
+    MixedResidueSkewScope skew_scope(residue_skew);
     if (!rows_scope.IsValid() || !period_scope.IsValid() ||
-        !geometry_scope.IsValid()) {
+        !geometry_scope.IsValid() || !skew_scope.IsValid()) {
         return false;
     }
     wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
@@ -1291,8 +1314,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     }
     std::printf(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
-        "gf16_rows=%u comparisons=%llu: PASS\n",
+        "gf16_rows=%u skew=%u comparisons=%llu: PASS\n",
         period, (uint32_t)geometry, extension_rows,
+        residue_skew,
         (unsigned long long)comparisons);
     return true;
 }
@@ -1338,6 +1362,19 @@ bool CheckMixedProjectionResidueBucketsOracle()
         {
             return false;
         }
+    }
+    if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+            29u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            14u) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            18u))
+    {
+        return false;
     }
     return true;
 }

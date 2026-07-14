@@ -519,6 +519,7 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static thread_local uint32_t MixedCoefficientPeriodForTesting =
     kMixedCoefficientPeriod;
+static thread_local uint32_t MixedResidueSkewForTesting = 0u;
 static thread_local MixedCoefficientGeometry MixedGeometryForTesting =
     MixedCoefficientGeometry::FrozenPowerX;
 static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
@@ -530,6 +531,23 @@ bool SetMixedCoefficientPeriodForTesting(uint32_t period)
         return false;
     }
     MixedCoefficientPeriodForTesting = period;
+    MixedResidueSkewForTesting = 0u;
+    return true;
+}
+
+bool SetMixedResidueSkewForTesting(uint32_t skew)
+{
+    const uint32_t period = MixedCoefficientPeriodForTesting;
+    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+    if (skew >= period ||
+        (skew != 0u &&
+         (MixedGeometryForTesting !=
+                MixedCoefficientGeometry::SharedCauchyX ||
+          skew > period - H)))
+    {
+        return false;
+    }
+    MixedResidueSkewForTesting = skew;
     return true;
 }
 
@@ -542,6 +560,9 @@ bool SetMixedCoefficientGeometryForTesting(
         return false;
     }
     MixedGeometryForTesting = geometry;
+    if (geometry != MixedCoefficientGeometry::SharedCauchyX) {
+        MixedResidueSkewForTesting = 0u;
+    }
     return true;
 }
 
@@ -553,6 +574,7 @@ bool SetMixedGF16RowsForTesting(uint32_t rows)
         return false;
     }
     MixedGF16RowsForTesting = rows;
+    MixedResidueSkewForTesting = 0u;
     return true;
 }
 #endif
@@ -563,6 +585,29 @@ uint32_t ActiveMixedCoefficientPeriod()
     return MixedCoefficientPeriodForTesting;
 #else
     return kMixedCoefficientPeriod;
+#endif
+}
+
+uint32_t ActiveMixedCoefficientResidue(uint32_t column)
+{
+    const uint32_t period = ActiveMixedCoefficientPeriod();
+    const uint32_t residue = column % period;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t skew = MixedResidueSkewForTesting;
+    if (skew != 0u) {
+        return (uint32_t)(
+            (residue + (uint64_t)(column / period) * skew) % period);
+    }
+#endif
+    return residue;
+}
+
+uint32_t ActiveMixedResidueSkew()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedResidueSkewForTesting;
+#else
+    return 0u;
 #endif
 }
 

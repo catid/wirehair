@@ -608,13 +608,15 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         return true;
     }
 
-    // Mixed completion coefficients repeat every `coefficient_period`
-    // columns.  Transpose the projection by coefficient residue before
-    // expanding any bits: each of the first `coefficient_period` projection
-    // rows becomes the parity bucket for that residue.  Those rows already
-    // contain the first affine vector, and all remaining source rows start at
-    // the period, so no source can alias a destination.  The caller has
-    // finished all other uses of the projection.
+    // Mixed completion coefficients are indexed by a period-sized residue
+    // bucket.  The experiment-only skew rotates the labels of each complete
+    // period block without changing its balance.  Transpose the projection by
+    // the active bucket before expanding any bits: each of the first
+    // `coefficient_period` projection rows becomes the parity bucket for that
+    // residue.  The first block is unrotated, so those rows already contain
+    // the first affine vector.  All remaining source rows start at the period,
+    // so no source can alias a destination.  The caller has finished all other
+    // uses of the projection.
     // This is algebraically identical to dense per-column expansion and
     // requires no additional bucket allocation.
     for (uint32_t initial = 0;
@@ -634,10 +636,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             UINT64_C(1) << (inactive & 63u);
     }
 
-    uint32_t residue = 0u;
-    for (uint32_t column = coefficient_period;
-         column < column_count; ++column)
-    {
+    const uint32_t residue_skew = ActiveMixedResidueSkew();
+    const auto accumulate_column = [&](uint32_t column, uint32_t residue) {
         uint64_t* bucket = projection.data() +
             (size_t)residue * projection_words;
         const uint32_t inactive = inactive_index[column];
@@ -657,12 +657,47 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 bucket[word] ^= bits[word];
             }
         }
-        if (++residue == coefficient_period) {
-            residue = 0u;
+        return true;
+    };
+    if (residue_skew == 0u)
+    {
+        uint32_t residue = 0u;
+        for (uint32_t column = coefficient_period;
+             column < column_count; ++column)
+        {
+            if (!accumulate_column(column, residue)) {
+                return false;
+            }
+            if (++residue == coefficient_period) {
+                residue = 0u;
+            }
+        }
+    }
+    else
+    {
+        uint32_t residue = residue_skew;
+        uint32_t block_column = 0u;
+        for (uint32_t column = coefficient_period;
+             column < column_count; ++column)
+        {
+            if (!accumulate_column(column, residue)) {
+                return false;
+            }
+            if (++block_column == coefficient_period)
+            {
+                block_column = 0u;
+                residue += residue_skew + 1u;
+                if (residue >= coefficient_period) {
+                    residue -= coefficient_period;
+                }
+            }
+            else if (++residue == coefficient_period) {
+                residue = 0u;
+            }
         }
     }
 
-    for (residue = 0u; residue < populated_residues; ++residue)
+    for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
         const uint64_t* coefficients = cached_packed.ByResidue[residue];
         const uint64_t* bucket = projection.data() +
@@ -716,11 +751,23 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     {
         return false;
     }
+    const uint32_t residue_skew = ActiveMixedResidueSkew();
+    uint32_t block_shift = 0u;
+    uint32_t block_column = 0u;
     uint32_t residue = 0u;
     for (uint32_t column = 0; column < column_count; ++column)
     {
         const uint64_t* column_coefficients = cached_packed.ByResidue[residue];
-        if (++residue == coefficient_period) {
+        if (++block_column == coefficient_period)
+        {
+            block_column = 0u;
+            block_shift += residue_skew;
+            if (block_shift >= coefficient_period) {
+                block_shift -= coefficient_period;
+            }
+            residue = block_shift;
+        }
+        else if (++residue == coefficient_period) {
             residue = 0u;
         }
         const auto xor_projected = [&](uint32_t index) {
@@ -907,6 +954,7 @@ WirehairResult SolveMixedCompletionQuotient(
     const bool use_bulk_subfield_coefficients = false;
 #endif
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    const uint32_t residue_skew = ActiveMixedResidueSkew();
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
     for (uint32_t residue = 0; residue < populated_residues; ++residue)
@@ -915,13 +963,39 @@ WirehairResult SolveMixedCompletionQuotient(
             residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
         BatchedBlockXorAccumulator bucket_xor(
             residue_bucket.data(), block_bytes);
-        for (uint32_t column = residue;
-             column < column_count; column += coefficient_period)
+        if (residue_skew == 0u)
         {
-            if (inactive_index[column] != UINT32_MAX) continue;
-            bucket_xor.Add(
-                values.data() + (size_t)column * block_bytes);
-            ++stats.BlockXors;
+            for (uint32_t column = residue;
+                 column < column_count;
+                 column += coefficient_period)
+            {
+                if (inactive_index[column] != UINT32_MAX) continue;
+                bucket_xor.Add(
+                    values.data() + (size_t)column * block_bytes);
+                ++stats.BlockXors;
+            }
+        }
+        else
+        {
+            uint32_t block_shift = 0u;
+            for (uint32_t block_base = 0u;
+                 block_base < column_count;
+                 block_base += coefficient_period)
+            {
+                const uint32_t unshifted = residue >= block_shift ?
+                    residue - block_shift :
+                    residue + coefficient_period - block_shift;
+                const uint32_t column = block_base + unshifted;
+                block_shift += residue_skew;
+                if (block_shift >= coefficient_period) {
+                    block_shift -= coefficient_period;
+                }
+                if (column >= column_count) continue;
+                if (inactive_index[column] != UINT32_MAX) continue;
+                bucket_xor.Add(
+                    values.data() + (size_t)column * block_bytes);
+                ++stats.BlockXors;
+            }
         }
         bucket_xor.Flush();
         for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
@@ -3494,8 +3568,10 @@ bool VerifyPrecodeSolution(
     }
     const bool cached_mixed_coefficients =
         system.Params.Field == CompletionField::MixedGF256GF16;
-    const uint32_t mixed_coefficient_period =
-        ActiveMixedCoefficientPeriod();
+    const uint32_t mixed_coefficient_period = cached_mixed_coefficients ?
+        ActiveMixedCoefficientPeriod() : 0u;
+    const uint32_t mixed_residue_skew = cached_mixed_coefficients ?
+        ActiveMixedResidueSkew() : 0u;
     const MixedCoefficientRows* mixed_rows = cached_mixed_coefficients ?
         GetMixedCoefficientRows() : nullptr;
     if (cached_mixed_coefficients && !mixed_rows) {
@@ -3542,14 +3618,38 @@ bool VerifyPrecodeSolution(
     for (uint32_t heavy = 0; heavy < H; ++heavy)
     {
         std::fill(value.begin(), value.end(), uint8_t{0});
-        uint32_t cached_residue = 0u;
+        uint32_t coefficient_residue = 0u;
+        uint32_t coefficient_block_shift = 0u;
+        uint32_t coefficient_block_column = 0u;
         for (uint32_t column = 0; column < L; ++column)
         {
-            const uint32_t coefficient_residue = cached_residue;
-            if (cached_mixed_coefficients &&
-                ++cached_residue == mixed_coefficient_period)
+            const uint32_t active_coefficient_residue = coefficient_residue;
+            if (cached_mixed_coefficients)
             {
-                cached_residue = 0u;
+                if (mixed_residue_skew == 0u)
+                {
+                    if (++coefficient_residue == mixed_coefficient_period) {
+                        coefficient_residue = 0u;
+                    }
+                }
+                else
+                {
+                    if (++coefficient_block_column == mixed_coefficient_period)
+                    {
+                        coefficient_block_column = 0u;
+                        coefficient_block_shift += mixed_residue_skew;
+                        if (coefficient_block_shift >=
+                                mixed_coefficient_period)
+                        {
+                            coefficient_block_shift -=
+                                mixed_coefficient_period;
+                        }
+                        coefficient_residue = coefficient_block_shift;
+                    }
+                    else if (++coefficient_residue == mixed_coefficient_period) {
+                        coefficient_residue = 0u;
+                    }
+                }
             }
             if (cached_mixed_coefficients &&
                 heavy >= kMixedGF256Rows)
@@ -3557,7 +3657,8 @@ bool VerifyPrecodeSolution(
                 if (!GF16MulAddMem(
                         value.data(),
                         mixed_rows->Extension[
-                            heavy - kMixedGF256Rows][coefficient_residue],
+                            heavy - kMixedGF256Rows][
+                                active_coefficient_residue],
                         intermediate_blocks +
                             (size_t)column * block_bytes,
                         block_bytes))
@@ -3583,7 +3684,8 @@ bool VerifyPrecodeSolution(
             else
             {
                 const uint8_t scale = cached_mixed_coefficients ?
-                    mixed_rows->Subfield[heavy][coefficient_residue] :
+                    mixed_rows->Subfield[heavy][
+                        active_coefficient_residue] :
                     HeavyCoefficientForParams(
                         system.Params, heavy, column);
                 if (scale == 1u) {

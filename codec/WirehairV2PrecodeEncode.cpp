@@ -381,6 +381,7 @@ bool ComputePrecodeValues(
             return false;
         }
         const uint32_t window = ActiveMixedCoefficientPeriod();
+        const uint32_t residue_skew = ActiveMixedResidueSkew();
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
@@ -475,16 +476,40 @@ bool ComputePrecodeValues(
         if (use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
-            uint32_t m = 0u;
-            for (uint32_t c = 0; c < heavy_base; ++c)
+            if (residue_skew == 0u)
             {
-                gf256_add_mem(
-                    bucket.data() + (size_t)m * block_bytes,
-                    column_value(c), bytes);
-                ++st.HeavyBucketXors;
-                if (++m >= window) m = 0u;
+                uint32_t m = 0u;
+                for (uint32_t c = 0; c < heavy_base; ++c)
+                {
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                    if (++m == window) m = 0u;
+                }
             }
-            for (m = 0u; m < window; ++m) {
+            else
+            {
+                uint32_t m = 0u;
+                uint32_t block_shift = 0u;
+                uint32_t block_column = 0u;
+                for (uint32_t c = 0; c < heavy_base; ++c)
+                {
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                    if (++block_column == window)
+                    {
+                        block_column = 0u;
+                        block_shift += residue_skew;
+                        if (block_shift >= window) block_shift -= window;
+                        m = block_shift;
+                    }
+                    else if (++m == window) m = 0u;
+                }
+            }
+            for (uint32_t m = 0u; m < window; ++m) {
                 if (!accumulate_residue(
                         m, bucket.data() + (size_t)m * block_bytes))
                 {
@@ -498,21 +523,62 @@ bool ComputePrecodeValues(
             for (uint32_t m = 0; m < window; ++m)
             {
                 std::fill(bucket.begin(), bucket.end(), uint8_t{0});
-                for (uint32_t c = m; c < heavy_base; c += window)
+                if (residue_skew == 0u)
                 {
-                    gf256_add_mem(bucket.data(), column_value(c), bytes);
-                    ++st.HeavyBucketXors;
+                    for (uint32_t c = m; c < heavy_base; c += window)
+                    {
+                        gf256_add_mem(bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                }
+                else
+                {
+                    uint32_t block_shift = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < heavy_base;
+                         block_base += window)
+                    {
+                        const uint32_t unshifted = m >= block_shift ?
+                            m - block_shift : m + window - block_shift;
+                        const uint32_t c = block_base + unshifted;
+                        block_shift += residue_skew;
+                        if (block_shift >= window) block_shift -= window;
+                        if (c >= heavy_base) continue;
+                        gf256_add_mem(bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
                 }
                 if (!accumulate_residue(m, bucket.data())) return false;
             }
         }
         else
         {
-            uint32_t m = 0u;
-            for (uint32_t c = 0; c < heavy_base; ++c)
+            if (residue_skew == 0u)
             {
-                if (!accumulate_residue(m, column_value(c))) return false;
-                if (++m >= window) m = 0u;
+                uint32_t m = 0u;
+                for (uint32_t c = 0; c < heavy_base; ++c)
+                {
+                    if (!accumulate_residue(m, column_value(c))) return false;
+                    if (++m == window) m = 0u;
+                }
+            }
+            else
+            {
+                uint32_t m = 0u;
+                uint32_t block_shift = 0u;
+                uint32_t block_column = 0u;
+                for (uint32_t c = 0; c < heavy_base; ++c)
+                {
+                    if (!accumulate_residue(m, column_value(c))) return false;
+                    if (++block_column == window)
+                    {
+                        block_column = 0u;
+                        block_shift += residue_skew;
+                        if (block_shift >= window) block_shift -= window;
+                        m = block_shift;
+                    }
+                    else if (++m == window) m = 0u;
+                }
             }
         }
 
@@ -536,14 +602,16 @@ bool ComputePrecodeValues(
         for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
-                    gf8_coefficient_rows[r][(heavy_base + j) % window];
+                    gf8_coefficient_rows[r][
+                        ActiveMixedCoefficientResidue(heavy_base + j)];
             }
         }
         for (uint32_t er = 0; er < extension_rows; ++er) {
             const uint32_t r = kMixedGF256Rows + er;
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
-                    gf16_coefficient_rows[er][(heavy_base + j) % window];
+                    gf16_coefficient_rows[er][
+                        ActiveMixedCoefficientResidue(heavy_base + j)];
             }
         }
 

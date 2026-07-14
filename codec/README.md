@@ -279,11 +279,15 @@ per candidate, so differing attempt indices mean the result compares two valid
 selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
 
-Test builds also expose `--mixed-period P`, `--mixed-gf16-rows 2|3|4`, and
-`--mixed-geometry frozen|shared-x` on the mixed `compare` and `precodefail`
-arms.  The thread-local period override accepts H through 244.  The three- and
-four-row settings are H13/H14 experiments that append one or two GF(2^16)
-completion rows;
+Test builds also expose `--mixed-period P`, `--mixed-gf16-rows 2|3|4`,
+`--mixed-geometry frozen|shared-x`, and `--mixed-residue-skew S` on the mixed
+`compare` and `precodefail` arms.  The thread-local period override accepts H
+through 244.  A nonzero residue skew is restricted to the shared-X range
+`1..P-H`: each successive P-column block rotates its coefficient buckets by S,
+changing cross-block collision groups while keeping the bucket count,
+per-block balance, operation count, and every H-column encoder corner
+invertible.  The three- and four-row settings are H13/H14
+experiments that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12
 profile's coefficients.  Together these hooks allow coefficient-bucket speed

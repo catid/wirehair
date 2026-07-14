@@ -96,6 +96,27 @@ private:
     bool Valid;
 };
 
+class MixedResidueSkewScope
+{
+public:
+    explicit MixedResidueSkewScope(uint32_t skew)
+        : Previous(wirehair_v2::ActiveMixedResidueSkew())
+        , Valid(wirehair_v2::SetMixedResidueSkewForTesting(skew))
+    {
+    }
+
+    ~MixedResidueSkewScope()
+    {
+        (void)wirehair_v2::SetMixedResidueSkewForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 const char* MixedGeometryName(
     wirehair_v2::MixedCoefficientGeometry geometry)
 {
@@ -229,7 +250,7 @@ bool VerifyValues(
             const uint32_t coefficient_column =
                 system.Params.Field ==
                     wirehair_v2::CompletionField::MixedGF256GF16 ?
-                c % wirehair_v2::ActiveMixedCoefficientPeriod() : c;
+                wirehair_v2::ActiveMixedCoefficientResidue(c) : c;
             const uint8_t* v =
                 ColumnValue(system, source, parity, block_bytes, c);
             if (system.Params.Field ==
@@ -446,6 +467,8 @@ bool TestMixedCornerRank()
     const wirehair_v2::MixedCoefficientGeometry original_geometry =
         wirehair_v2::ActiveMixedCoefficientGeometry();
     const uint32_t original_rows = wirehair_v2::ActiveMixedGF16Rows();
+    const uint32_t original_skew =
+        wirehair_v2::ActiveMixedResidueSkew();
     if (wirehair_v2::SetMixedCoefficientPeriodForTesting(
             wirehair_v2::kMixedGF256Rows +
                 wirehair_v2::kMixedGF16Rows - 1u) ||
@@ -469,6 +492,59 @@ bool TestMixedCornerRank()
     {
         std::fprintf(stderr,
             "mixed corner: invalid experiment override was accepted\n");
+        return false;
+    }
+
+    bool skew_corners_ok =
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax) &&
+        wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    static const struct {
+        uint32_t Period;
+        uint32_t Skew;
+    } kSkewCases[] = {
+        { 29u, 1u },
+        { 29u, 14u },
+        { 29u, 15u },
+        { 32u, 1u },
+        { 32u, 18u }
+    };
+    for (const auto& skew_case : kSkewCases)
+    {
+        skew_corners_ok = skew_corners_ok &&
+            wirehair_v2::SetMixedCoefficientPeriodForTesting(
+                skew_case.Period) &&
+            !wirehair_v2::SetMixedResidueSkewForTesting(
+                skew_case.Period - 14u + 1u) &&
+            wirehair_v2::SetMixedResidueSkewForTesting(skew_case.Skew) &&
+            wirehair_v2::ActiveMixedResidueSkew() == skew_case.Skew;
+        for (uint32_t start = 0u;
+             start < skew_case.Period * skew_case.Period && skew_corners_ok;
+             ++start)
+        {
+            bool seen[wirehair_v2::kMixedCoefficientPeriod] = {};
+            for (uint32_t j = 0u; j < 14u; ++j)
+            {
+                const uint32_t residue =
+                    wirehair_v2::ActiveMixedCoefficientResidue(start + j);
+                if (residue >= skew_case.Period || seen[residue]) {
+                    skew_corners_ok = false;
+                    break;
+                }
+                seen[residue] = true;
+            }
+        }
+    }
+    const bool skew_restored =
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(original_period) &&
+        wirehair_v2::SetMixedCoefficientGeometryForTesting(original_geometry) &&
+        wirehair_v2::SetMixedGF16RowsForTesting(original_rows) &&
+        wirehair_v2::SetMixedResidueSkewForTesting(original_skew);
+    if (!skew_corners_ok || !skew_restored)
+    {
+        std::fprintf(stderr,
+            "mixed corner: balanced residue skew invariant failed\n");
         return false;
     }
     return true;
@@ -804,13 +880,15 @@ bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats);
 bool TestMixedCompletionForPeriod(
     uint32_t period,
     wirehair_v2::MixedCoefficientGeometry geometry,
-    uint32_t extension_rows)
+    uint32_t extension_rows,
+    uint32_t residue_skew = 0u)
 {
     MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientPeriodScope period_scope(period);
     MixedCoefficientGeometryScope geometry_scope(geometry);
+    MixedResidueSkewScope skew_scope(residue_skew);
     if (!rows_scope.IsValid() || !period_scope.IsValid() ||
-        !geometry_scope.IsValid()) {
+        !geometry_scope.IsValid() || !skew_scope.IsValid()) {
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
@@ -985,9 +1063,9 @@ bool TestMixedCompletionForPeriod(
 
     std::printf(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
-        "gf16_rows=%u: "
+        "gf16_rows=%u skew=%u: "
         "PASS\n",
-        period, MixedGeometryName(geometry), extension_rows);
+        period, MixedGeometryName(geometry), extension_rows, residue_skew);
     return true;
 }
 
@@ -1040,6 +1118,14 @@ bool TestMixedCompletion()
         {
             return false;
         }
+    }
+    if (!TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            18u))
+    {
+        return false;
     }
     return true;
 }

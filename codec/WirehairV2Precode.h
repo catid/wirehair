@@ -198,6 +198,9 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients();
     tradeoff without changing any named or serialized wire profile.
 */
 uint32_t ActiveMixedCoefficientPeriod();
+/// Coefficient residue for a GE column under the active balanced block skew.
+uint32_t ActiveMixedCoefficientResidue(uint32_t column);
+uint32_t ActiveMixedResidueSkew();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
@@ -205,6 +208,8 @@ uint32_t ActiveMixedPackedCoefficientWords();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
+/// Rotate each period block by a corner-preserving skew in [0, P-H].
+bool SetMixedResidueSkewForTesting(uint32_t skew);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select two (frozen H12), three (H13), or four (H14) extension rows.
