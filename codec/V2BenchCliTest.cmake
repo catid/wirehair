@@ -314,6 +314,12 @@ expect_success("packet_row_seed_multiplier=0x9e3779b1 packet_row_seed_avalanche=
 expect_failure("--packet-row-seed-multiplier must be odd and nonzero"
     precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
     --loss 0.1 --packet-row-seed-multiplier 2)
+expect_success("seed_block_bytes_override=2" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --seed-block-bytes 2 --payload-e2e)
+expect_failure("--seed-block-bytes must be nonzero" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --seed-block-bytes 0)
 expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29

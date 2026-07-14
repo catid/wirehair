@@ -3993,6 +3993,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
+    uint32_t seed_block_bytes_override = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
@@ -4010,6 +4011,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_residue_schedule_explicit = false;
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
+    bool seed_block_bytes_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -4233,6 +4235,18 @@ int CmdPrecodeFail(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--mixed-residue-hash-keyed")) {
             mixed_residue_hash_keyed = true;
         }
+        else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
+            if (!TakeArg(
+                    "precodefail", "--seed-block-bytes",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--seed-block-bytes", value,
+                    seed_block_bytes_override))
+            {
+                return 1;
+            }
+            seed_block_bytes_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -4406,6 +4420,12 @@ int CmdPrecodeFail(int argc, char** argv)
         packet_row_seed_avalanche);
     wirehair_v2::SetOddPacketPeelSeedXorForTesting(
         odd_packet_peel_seed_xor);
+    if (seed_block_bytes_explicit && seed_block_bytes_override == 0u)
+    {
+        std::fprintf(stderr,
+            "precodefail --seed-block-bytes must be nonzero\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -4415,13 +4435,15 @@ int CmdPrecodeFail(int argc, char** argv)
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
-            "packet_row_seed_avalanche=%u full_payload_solve=%u\n",
+            "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
+            "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
+            seed_block_bytes_override,
             full_payload_solve ? 1u : 0u);
     }
     else
@@ -4435,7 +4457,8 @@ int CmdPrecodeFail(int argc, char** argv)
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
-            "packet_row_seed_avalanche=%u full_payload_solve=%u\n",
+            "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
+            "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -4452,6 +4475,7 @@ int CmdPrecodeFail(int argc, char** argv)
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
+            seed_block_bytes_override,
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4482,15 +4506,22 @@ int CmdPrecodeFail(int argc, char** argv)
 #endif
         const wirehair_v2::SeedProfile profile =
             wirehair_v2::SelectSeedProfile(K, bb);
+        // Research graph portability without changing the payload width used
+        // by E2E validation, loss-stream pairing, or full-payload solving.
+        const wirehair_v2::SeedProfile seed_profile =
+            seed_block_bytes_override != 0u ?
+                wirehair_v2::SelectSeedProfile(
+                    K, seed_block_bytes_override) :
+                profile;
         const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
-            profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+            seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
         const wirehair_v2::PrecodeParams canonical_params =
             completion == PrecodeFailCompletion::Mixed ?
                 wirehair_v2::MakeMixedParams(K, matrix_seed) :
                 wirehair_v2::MakeCertifiedParams(K, matrix_seed);
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-            profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
+            seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
             packet_peel_seed_xor;
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
