@@ -242,13 +242,14 @@ bool CheckPacketEvaluationFusion()
     config.PeelSeed = UINT32_C(0x4d241359);
     config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
 
-    // Pin examples from the complete source-weight shape: singleton, the two
-    // common low weights, a mid-weight row, and the capped heavy tail.  A
-    // high-bit public id separately guards the full repair-id domain.
-    static const unsigned kWeightFixtureCount = 5u;
+    // Pin the source-weight transitions used by packet-tail pairing: exact
+    // degrees one through five, a mid-weight row, and the capped heavy tail.
+    // A high-bit public id separately guards the full repair-id domain.
+    static const unsigned kWeightFixtureCount = 7u;
     static const unsigned kFixtureCount = kWeightFixtureCount + 1u;
     uint32_t ids[kFixtureCount] = {
         UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+        UINT32_MAX, UINT32_MAX,
         UINT32_C(0xf1234567)
     };
     for (uint32_t id = 0u; id < 1000000u; ++id)
@@ -261,14 +262,17 @@ bool CheckPacketEvaluationFusion()
         if (degree == 1u) slot = 0u;
         else if (degree == 2u) slot = 1u;
         else if (degree == 3u) slot = 2u;
-        else if (degree >= 8u && degree <= 16u) slot = 3u;
-        else if (degree >= 32u) slot = 4u;
+        else if (degree == 4u) slot = 3u;
+        else if (degree == 5u) slot = 4u;
+        else if (degree >= 8u && degree <= 16u) slot = 5u;
+        else if (degree >= 32u) slot = 6u;
         if (slot < kWeightFixtureCount && ids[slot] == UINT32_MAX) {
             ids[slot] = id;
         }
         if (ids[0] != UINT32_MAX && ids[1] != UINT32_MAX &&
             ids[2] != UINT32_MAX && ids[3] != UINT32_MAX &&
-            ids[4] != UINT32_MAX)
+            ids[4] != UINT32_MAX && ids[5] != UINT32_MAX &&
+            ids[6] != UINT32_MAX)
         {
             break;
         }
@@ -284,7 +288,8 @@ bool CheckPacketEvaluationFusion()
 
     static const uint32_t kLengths[] = {
         1u, 2u, 3u, 7u, 15u, 16u, 17u, 31u, 32u, 33u,
-        63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u, 1280u
+        63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u, 1280u,
+        32767u, 32768u, 32769u
     };
     static const unsigned kOffsets[] = { 0u, 1u, 7u, 15u, 31u, 63u };
     static const uint32_t kFusedMixCounts[] = {
@@ -309,6 +314,65 @@ bool CheckPacketEvaluationFusion()
                         kOffsets[(offset_i * 5u + 1u) %
                             (sizeof(kOffsets) / sizeof(kOffsets[0]))],
                         ((weight_i + length_i) & 1u) != 0u))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // K=64000 removes singleton rows and exercises a very different modulus
+    // and working-set shape.  Check both sides of each mix-count crossover:
+    // total row weight six means d3/m3, d4/m2, and d5/m1 respectively.
+    {
+        static const uint32_t large_K = 64000u;
+        wirehair_v2::PrecodeSystem large_system;
+        if (!wirehair_v2::BuildPrecodeSystem(
+                wirehair_v2::MakeCertifiedParams(
+                    large_K, UINT64_C(0x6b36346b7061636b)),
+                large_system))
+        {
+            return false;
+        }
+        const uint32_t large_P = large_system.Params.Staircase +
+            large_system.Params.DenseRows + large_system.Params.HeavyRows;
+        uint32_t degree_ids[5] = {
+            UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX
+        };
+        for (uint32_t id = 0u; id < 1000000u; ++id)
+        {
+            wirehair::PeelRowParameters params;
+            params.Initialize(
+                id, config.PeelSeed, (uint16_t)large_K, (uint16_t)large_P);
+            if (params.PeelCount >= 2u && params.PeelCount <= 6u) {
+                degree_ids[params.PeelCount - 2u] = id;
+            }
+            bool complete = true;
+            for (uint32_t fixture : degree_ids) {
+                complete = complete && fixture != UINT32_MAX;
+            }
+            if (complete) {
+                break;
+            }
+        }
+        for (uint32_t fixture : degree_ids) {
+            if (fixture == UINT32_MAX) {
+                std::fprintf(stderr,
+                    "solve: K64k packet degree fixture missing\n");
+                return false;
+            }
+        }
+        for (uint32_t mix_count : kFusedMixCounts)
+        {
+            wirehair_v2::PacketRowConfig fused = config;
+            fused.MixCount = mix_count;
+            for (unsigned i = 0u; i < 5u; ++i)
+            {
+                if (!CheckPacketEvaluationCase(
+                        large_system, fused, degree_ids[i], 33u,
+                        (i * 7u + mix_count) & 31u,
+                        (i * 11u + mix_count * 3u) & 31u,
+                        ((i + mix_count) & 1u) != 0u))
                 {
                     return false;
                 }

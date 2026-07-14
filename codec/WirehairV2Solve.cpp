@@ -1783,6 +1783,77 @@ static_assert(
         kCertifiedPacketMixCount == wirehair::RowMixIterator::kColumnCount,
     "the fused packet evaluator requires the certified three-mix contract");
 
+static const uint32_t kPacketTailPairMaxBlockBytes = 32u * 1024u;
+static const uint32_t kPacketTailPairMinTerms = 6u;
+
+#if defined(_MSC_VER)
+#define WH2_PACKET_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_PACKET_NOINLINE __attribute__((noinline))
+#else
+#define WH2_PACKET_NOINLINE
+#endif
+
+// Packet rows contain distinct source columns, and their precode columns live
+// in a disjoint suffix.  Pair the tail directly without the generic
+// accumulator's duplicate-source check.  Keeping this out of line preserves
+// the compact common evaluator when the size/degree gate does not select it.
+static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
+    const wirehair::PeelRowParameters& params,
+    wirehair::PeelRowIterator source,
+    uint32_t source_count,
+    uint32_t precode_count,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes,
+    uint8_t* block_out)
+{
+    const uint8_t* const first_source = intermediate_blocks +
+        (size_t)source.GetColumn() * block_bytes;
+    (void)source.Iterate();
+    gf256_addset_mem(
+        block_out,
+        first_source,
+        intermediate_blocks + (size_t)source.GetColumn() * block_bytes,
+        (int)block_bytes);
+
+    const uint8_t* pending = nullptr;
+    const auto consume = [&](const uint8_t* term) {
+        if (pending)
+        {
+            gf256_add2_mem(block_out, pending, term, (int)block_bytes);
+            pending = nullptr;
+        }
+        else {
+            pending = term;
+        }
+    };
+    while (source.Iterate()) {
+        consume(intermediate_blocks +
+            (size_t)source.GetColumn() * block_bytes);
+    }
+    if (config.MixCount == 1u)
+    {
+        consume(intermediate_blocks +
+            (size_t)(source_count + params.MixFirst) * block_bytes);
+    }
+    else
+    {
+        const wirehair::RowMixIterator mix(
+            params, (uint16_t)precode_count, runtime.PrecodePrime());
+        for (uint32_t i = 0u; i < config.MixCount; ++i) {
+            consume(intermediate_blocks +
+                (size_t)(source_count + mix.Columns[i]) * block_bytes);
+        }
+    }
+    if (pending) {
+        gf256_add_mem(block_out, pending, (int)block_bytes);
+    }
+}
+
+#undef WH2_PACKET_NOINLINE
+
 static bool EvaluatePacketBlockImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -1834,6 +1905,22 @@ static bool EvaluatePacketBlockImpl(
     uint64_t operations = 1u;
     const uint8_t* first_source =
         intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
+    // The existing schedules are already optimal until the row contains six
+    // total terms.  Above that crossover, pairing the complete tail removes
+    // at least one destination read/write pass.
+    if (block_bytes <= kPacketTailPairMaxBlockBytes &&
+        (uint32_t)params.PeelCount + config.MixCount >=
+            kPacketTailPairMinTerms)
+    {
+        EvaluatePacketTailPaired(
+            params, source, K, P, config, runtime, intermediate_blocks,
+            block_bytes, block_out);
+        if (block_ops_out) {
+            *block_ops_out =
+                (uint64_t)params.PeelCount + config.MixCount;
+        }
+        return true;
+    }
     if (config.MixCount == kCertifiedPacketMixCount)
     {
         const wirehair::RowMixIterator mix(

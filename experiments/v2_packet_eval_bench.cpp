@@ -96,11 +96,142 @@ bool EvaluateCached(
     const uint8_t* intermediate,
     uint32_t block_bytes,
     uint32_t block_id,
-    uint8_t* output)
+    uint8_t* output,
+    uint64_t* block_ops_out = nullptr)
 {
     return wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
-        system, config, runtime, intermediate, block_bytes, block_id, output);
+        system, config, runtime, intermediate, block_bytes, block_id, output,
+        block_ops_out);
 }
+
+#if defined(_MSC_VER)
+#define WH2_PACKET_BENCH_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_PACKET_BENCH_NOINLINE __attribute__((noinline))
+#else
+#define WH2_PACKET_BENCH_NOINLINE
+#endif
+
+bool PacketBenchRangesOverlap(
+    const void* first,
+    size_t first_bytes,
+    const void* second,
+    size_t second_bytes)
+{
+    const uintptr_t first_begin = reinterpret_cast<uintptr_t>(first);
+    const uintptr_t second_begin = reinterpret_cast<uintptr_t>(second);
+    const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+    if (first_bytes > limit - first_begin ||
+        second_bytes > limit - second_begin)
+    {
+        return true;
+    }
+    return first_begin < second_begin + second_bytes &&
+        second_begin < first_begin + first_bytes;
+}
+
+// Narrow packet-only candidate: initialize from two terms exactly as the
+// production evaluator does, then consume the remaining source/mix tail two
+// terms per destination pass.  This deliberately uses only the existing
+// addset/add2/add kernels; it is not the rejected general gather integration.
+WH2_PACKET_BENCH_NOINLINE bool EvaluateTailPaired(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const uint8_t* intermediate,
+    uint32_t block_bytes,
+    uint32_t block_id,
+    uint8_t* output,
+    uint64_t* block_ops_out = nullptr)
+{
+    const uint32_t K = system.Params.BlockCount;
+    const uint64_t P_wide = (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    if (!intermediate || !output || block_bytes == 0u ||
+        block_bytes > 0x7fffffffu || P_wide > UINT32_MAX ||
+        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
+    {
+        return false;
+    }
+    const uint64_t intermediate_bytes_wide =
+        ((uint64_t)K + P_wide) * block_bytes;
+    if (intermediate_bytes_wide >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        PacketBenchRangesOverlap(
+            output,
+            block_bytes,
+            intermediate,
+            (size_t)intermediate_bytes_wide))
+    {
+        return false;
+    }
+    const uint32_t P = (uint32_t)P_wide;
+    wirehair::PeelRowParameters params;
+    params.Initialize(block_id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)K, runtime.SourcePrime());
+
+    uint16_t mix_columns[wirehair::RowMixIterator::kColumnCount] = {};
+    if (config.MixCount == 1u) {
+        mix_columns[0] = params.MixFirst;
+    }
+    else
+    {
+        const wirehair::RowMixIterator mix(
+            params, (uint16_t)P, runtime.PrecodePrime());
+        for (uint32_t i = 0u; i < config.MixCount; ++i) {
+            mix_columns[i] = mix.Columns[i];
+        }
+    }
+
+    const uint8_t* const first_source =
+        intermediate + (size_t)source.GetColumn() * block_bytes;
+    uint32_t first_pending_mix = 0u;
+    if (source.Iterate())
+    {
+        gf256_addset_mem(
+            output,
+            first_source,
+            intermediate + (size_t)source.GetColumn() * block_bytes,
+            (int)block_bytes);
+    }
+    else
+    {
+        gf256_addset_mem(
+            output,
+            first_source,
+            intermediate + (size_t)(K + mix_columns[0]) * block_bytes,
+            (int)block_bytes);
+        first_pending_mix = 1u;
+    }
+
+    const uint8_t* pending = nullptr;
+    const auto consume = [&](const uint8_t* term) {
+        if (pending)
+        {
+            gf256_add2_mem(output, pending, term, (int)block_bytes);
+            pending = nullptr;
+        }
+        else {
+            pending = term;
+        }
+    };
+    while (source.Iterate()) {
+        consume(intermediate + (size_t)source.GetColumn() * block_bytes);
+    }
+    for (uint32_t i = first_pending_mix; i < config.MixCount; ++i) {
+        consume(intermediate + (size_t)(K + mix_columns[i]) * block_bytes);
+    }
+    if (pending) {
+        gf256_add_mem(output, pending, (int)block_bytes);
+    }
+    if (block_ops_out) {
+        *block_ops_out = (uint64_t)params.PeelCount + config.MixCount;
+    }
+    return true;
+}
+
+#undef WH2_PACKET_BENCH_NOINLINE
 
 double Median(std::vector<double> values)
 {
@@ -362,27 +493,58 @@ bool RunSize(
     const wirehair_v2::PacketRowConfig& config,
     uint32_t block_bytes,
     unsigned repetitions,
-    unsigned samples)
+    unsigned samples,
+    uint32_t target_source_degree = 0u,
+    bool cached_only = false,
+    size_t row_limit = 0u)
 {
     const uint32_t K = system.Params.BlockCount;
     const uint32_t P = system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
-    const size_t total_bytes = (size_t)(K + P) * block_bytes;
+    const uint64_t total_bytes_wide =
+        ((uint64_t)K + P) * block_bytes;
+    if (total_bytes_wide >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+    const size_t total_bytes = (size_t)total_bytes_wide;
     AlignedStorage intermediate(total_bytes);
     AlignedStorage baseline_output(block_bytes);
     AlignedStorage fused_output(block_bytes);
     AlignedStorage cached_output(block_bytes);
+    AlignedStorage tail_paired_output(block_bytes);
     for (size_t i = 0; i < total_bytes; ++i) {
         intermediate.Data[i] = (uint8_t)(i * 131u + (i >> 13) + 17u);
     }
-    std::vector<uint32_t> rows = FixedRows(K);
-    if (config.MixCount == 1u)
+    std::vector<uint32_t> rows;
+    if (target_source_degree != 0u)
+    {
+        for (uint32_t id = 0u; id < 1000000u && rows.size() < 256u; ++id)
+        {
+            wirehair::PeelRowParameters params;
+            params.Initialize(
+                id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+            if (params.PeelCount == target_source_degree) {
+                rows.push_back(id);
+            }
+        }
+        if (rows.size() != 256u) {
+            std::fprintf(stderr,
+                "degree fixture shortfall K=%u degree=%u rows=%zu\n",
+                K, target_source_degree, rows.size());
+            return false;
+        }
+    }
+    else {
+        rows = FixedRows(K);
+    }
+    if (config.MixCount == 1u && target_source_degree == 0u)
     {
         // FixedRows represents the common distribution but happens not to
         // contain the singleton peel shape.  Add one deterministic singleton
         // so the production addset(source, mix) branch is covered by both the
         // byte oracle and the timed workload.
-        bool found_singleton = false;
         for (uint32_t id = 0u; id < 1000000u; ++id)
         {
             wirehair::PeelRowParameters params;
@@ -393,14 +555,15 @@ bool RunSize(
                 if (std::find(rows.begin(), rows.end(), id) == rows.end()) {
                     rows.push_back(id);
                 }
-                found_singleton = true;
                 break;
             }
         }
-        if (!found_singleton) {
-            std::fprintf(stderr, "mix1 singleton fixture not found\n");
-            return false;
-        }
+        // Production deliberately removes weight-one rows above its tuned K
+        // threshold.  The K=128/1000 screens cover the singleton branch;
+        // larger-K screens correctly retain only their reachable degrees.
+    }
+    if (row_limit != 0u && rows.size() > row_limit) {
+        rows.resize(row_limit);
     }
     wirehair_v2::PacketRowRuntime runtime;
     if (!runtime.Initialize(K, P, config.MixCount)) {
@@ -438,17 +601,27 @@ bool RunSize(
         EvaluateFused(
             system, config, intermediate.Data, block_bytes, id,
             fused_output.Data);
+        uint64_t cached_ops = 0u;
+        uint64_t tail_paired_ops = 0u;
         EvaluateCached(
             system, config, runtime, intermediate.Data, block_bytes, id,
-            cached_output.Data);
+            cached_output.Data, &cached_ops);
+        EvaluateTailPaired(
+            system, config, runtime, intermediate.Data, block_bytes, id,
+            tail_paired_output.Data, &tail_paired_ops);
         if (std::memcmp(
                 baseline_output.Data, fused_output.Data, block_bytes) != 0 ||
             std::memcmp(
-                fused_output.Data, cached_output.Data, block_bytes) != 0)
+                fused_output.Data, cached_output.Data, block_bytes) != 0 ||
+            std::memcmp(
+                cached_output.Data, tail_paired_output.Data, block_bytes) != 0 ||
+            cached_ops != tail_paired_ops)
         {
             std::fprintf(stderr,
-                "packet evaluation mismatch bb=%u id=%u degree=%u\n",
-                block_bytes, id, source_degree);
+                "packet evaluation mismatch bb=%u id=%u degree=%u "
+                "cached_ops=%" PRIu64 " tail_paired_ops=%" PRIu64 "\n",
+                block_bytes, id, source_degree,
+                cached_ops, tail_paired_ops);
             return false;
         }
     }
@@ -459,8 +632,15 @@ bool RunSize(
         for (unsigned rep = 0; rep < repetitions; ++rep) {
             for (size_t i = 0; i < rows.size(); ++i) {
                 uint8_t* output = mode == 0u ? baseline_output.Data :
-                    (mode == 1u ? fused_output.Data : cached_output.Data);
-                if (mode == 2u) {
+                    (mode == 1u ? fused_output.Data :
+                        (mode == 2u ? cached_output.Data :
+                            tail_paired_output.Data));
+                if (mode == 3u) {
+                    EvaluateTailPaired(
+                        system, config, runtime, intermediate.Data,
+                        block_bytes, rows[i], output);
+                }
+                else if (mode == 2u) {
                     EvaluateCached(
                         system, config, runtime, intermediate.Data,
                         block_bytes, rows[i], output);
@@ -481,68 +661,114 @@ bool RunSize(
         return std::chrono::duration<double>(Clock::now() - start).count();
     };
 
+    // Cross-binary production A/B runs need only the cached evaluator after
+    // the byte/work oracle above has checked all implementations.  Avoid
+    // spending three quarters of a long fallback run timing reference paths.
+    if (cached_only)
+    {
+        (void)measure(2u);
+        std::vector<double> cached_samples;
+        cached_samples.reserve(samples);
+        for (unsigned sample = 0u; sample < samples; ++sample) {
+            cached_samples.push_back(measure(2u));
+        }
+        std::printf(
+            "cached_only bb=%u K=%u mix_count=%u "
+            "target_source_degree=%u rows=%zu reps=%u samples=%u "
+            "mean_source_degree=%.3f cached_median_ms=%.6f "
+            "sink=%" PRIu64 "\n",
+            block_bytes, K, config.MixCount, target_source_degree,
+            rows.size(), repetitions, samples,
+            (double)degree_sum / rows.size(),
+            Median(cached_samples) * 1000.0, (uint64_t)sink);
+        return true;
+    }
+
     // Warm all code paths and every reusable source/output page.
     (void)measure(0u);
     (void)measure(1u);
     (void)measure(2u);
+    (void)measure(3u);
 
     std::vector<double> baseline_samples;
     std::vector<double> fused_samples;
     std::vector<double> cached_samples;
+    std::vector<double> tail_paired_samples;
     std::vector<double> paired_ratios;
     std::vector<double> cached_ratios;
     std::vector<double> production_ratios;
+    std::vector<double> tail_paired_ratios;
     baseline_samples.reserve(samples);
     fused_samples.reserve(samples);
     cached_samples.reserve(samples);
+    tail_paired_samples.reserve(samples);
     paired_ratios.reserve(samples);
     cached_ratios.reserve(samples);
     production_ratios.reserve(samples);
+    tail_paired_ratios.reserve(samples);
     for (unsigned sample = 0; sample < samples; ++sample) {
-        double timings[3] = {};
-        if (sample % 3u == 0u) {
+        double timings[4] = {};
+        if (sample % 4u == 0u) {
             timings[0] = measure(0u);
             timings[1] = measure(1u);
             timings[2] = measure(2u);
+            timings[3] = measure(3u);
         }
-        else if (sample % 3u == 1u) {
+        else if (sample % 4u == 1u) {
             timings[1] = measure(1u);
             timings[2] = measure(2u);
+            timings[3] = measure(3u);
             timings[0] = measure(0u);
+        }
+        else if (sample % 4u == 2u) {
+            timings[2] = measure(2u);
+            timings[3] = measure(3u);
+            timings[0] = measure(0u);
+            timings[1] = measure(1u);
         }
         else {
-            timings[2] = measure(2u);
+            timings[3] = measure(3u);
             timings[0] = measure(0u);
             timings[1] = measure(1u);
+            timings[2] = measure(2u);
         }
         baseline_samples.push_back(timings[0]);
         fused_samples.push_back(timings[1]);
         cached_samples.push_back(timings[2]);
+        tail_paired_samples.push_back(timings[3]);
         paired_ratios.push_back(timings[1] / timings[0]);
         cached_ratios.push_back(timings[2] / timings[1]);
         production_ratios.push_back(timings[2] / timings[0]);
+        tail_paired_ratios.push_back(timings[3] / timings[2]);
     }
 
     std::printf(
-        "bb=%u mix_count=%u rows=%zu reps=%u samples=%u "
+        "bb=%u K=%u mix_count=%u target_source_degree=%u "
+        "rows=%zu reps=%u samples=%u "
         "mean_source_degree=%.3f "
         "baseline_median_ms=%.6f fused_median_ms=%.6f cached_median_ms=%.6f "
+        "tail_paired_median_ms=%.6f "
         "paired_ratio_median=%.6f improvement=%.3f%% "
         "cached_vs_wrapper_ratio=%.6f cache_improvement=%.3f%% "
         "production_ratio_median=%.6f production_improvement=%.3f%% "
+        "tail_paired_vs_cached_ratio=%.6f tail_paired_improvement=%.3f%% "
         "destination_traffic_reduction=%.3f%% "
         "total_traffic_reduction=%.3f%% sink=%" PRIu64 "\n",
-        block_bytes, config.MixCount, rows.size(), repetitions, samples,
+        block_bytes, K, config.MixCount, target_source_degree,
+        rows.size(), repetitions, samples,
         (double)degree_sum / rows.size(),
         Median(baseline_samples) * 1000.0,
         Median(fused_samples) * 1000.0,
         Median(cached_samples) * 1000.0,
+        Median(tail_paired_samples) * 1000.0,
         Median(paired_ratios),
         (1.0 - Median(paired_ratios)) * 100.0,
         Median(cached_ratios),
         (1.0 - Median(cached_ratios)) * 100.0,
         Median(production_ratios),
         (1.0 - Median(production_ratios)) * 100.0,
+        Median(tail_paired_ratios),
+        (1.0 - Median(tail_paired_ratios)) * 100.0,
         100.0 * fused_traffic_reduction /
             (double)baseline_destination_traffic,
         100.0 * fused_traffic_reduction /
@@ -564,15 +790,23 @@ int main(int argc, char** argv)
 {
     unsigned samples = 40u;
     uint32_t mix_count = wirehair_v2::kCertifiedPacketMixCount;
+    uint32_t K = 128u;
     bool run_packet = true;
     bool run_gather = false;
+    bool mtu_only = false;
+    bool crossover_only = false;
+    bool boundary_only = false;
+    bool fallback_only = false;
+    bool degrees_only = false;
     if (argc >= 2) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(argv[1], &end, 10);
         if (!end || *end != '\0' || parsed < 30u || parsed > 1000u) {
             std::fprintf(stderr,
                 "usage: %s [samples=30..1000] [mix_count=1|2|3] "
-                "[mode=packet|gather|all]\n",
+                "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
+                "gather|all] "
+                "[K=2..64000]\n",
                 argv[0]);
             return 2;
         }
@@ -585,17 +819,44 @@ int main(int argc, char** argv)
         if (!end || *end != '\0' || parsed < 1u || parsed > 3u) {
             std::fprintf(stderr,
                 "usage: %s [samples=30..1000] [mix_count=1|2|3] "
-                "[mode=packet|gather|all]\n",
+                "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
+                "gather|all] "
+                "[K=2..64000]\n",
                 argv[0]);
             return 2;
         }
         mix_count = (uint32_t)parsed;
     }
-    if (argc == 4)
+    if (argc >= 4)
     {
         if (std::strcmp(argv[3], "packet") == 0) {
             run_packet = true;
             run_gather = false;
+        }
+        else if (std::strcmp(argv[3], "mtu") == 0) {
+            run_packet = true;
+            run_gather = false;
+            mtu_only = true;
+        }
+        else if (std::strcmp(argv[3], "crossover") == 0) {
+            run_packet = true;
+            run_gather = false;
+            crossover_only = true;
+        }
+        else if (std::strcmp(argv[3], "boundary") == 0) {
+            run_packet = true;
+            run_gather = false;
+            boundary_only = true;
+        }
+        else if (std::strcmp(argv[3], "fallback") == 0) {
+            run_packet = true;
+            run_gather = false;
+            fallback_only = true;
+        }
+        else if (std::strcmp(argv[3], "degrees") == 0) {
+            run_packet = true;
+            run_gather = false;
+            degrees_only = true;
         }
         else if (std::strcmp(argv[3], "gather") == 0) {
             run_packet = false;
@@ -608,23 +869,47 @@ int main(int argc, char** argv)
         else {
             std::fprintf(stderr,
                 "usage: %s [samples=30..1000] [mix_count=1|2|3] "
-                "[mode=packet|gather|all]\n",
+                "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
+                "gather|all] "
+                "[K=2..64000]\n",
                 argv[0]);
             return 2;
         }
     }
-    else if (argc > 4) {
+    if (argc == 5)
+    {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(argv[4], &end, 10);
+        if (!end || *end != '\0' || parsed < 2u || parsed > 64000u) {
+            std::fprintf(stderr,
+                "usage: %s [samples=30..1000] [mix_count=1|2|3] "
+                "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
+                "gather|all] "
+                "[K=2..64000]\n",
+                argv[0]);
+            return 2;
+        }
+        K = (uint32_t)parsed;
+    }
+    else if (argc > 5) {
         std::fprintf(stderr,
             "usage: %s [samples=30..1000] [mix_count=1|2|3] "
-            "[mode=packet|gather|all]\n",
+            "[mode=packet|mtu|crossover|boundary|fallback|degrees|"
+            "gather|all] "
+            "[K=2..64000]\n",
             argv[0]);
+        return 2;
+    }
+    if (K != 128u && !mtu_only && !degrees_only)
+    {
+        std::fprintf(stderr,
+            "non-default K is supported only by bounded MTU/degree screens\n");
         return 2;
     }
     if (gf256_init() != 0) {
         return 1;
     }
 
-    const uint32_t K = 128u;
     wirehair_v2::PrecodeSystem system;
     if (!wirehair_v2::BuildPrecodeSystem(
             wirehair_v2::MakeCertifiedParams(
@@ -647,7 +932,9 @@ int main(int argc, char** argv)
     }
 
     bool ok = true;
-    if (run_packet) {
+    if (run_packet && !mtu_only && !crossover_only && !boundary_only &&
+        !fallback_only && !degrees_only)
+    {
         ok = RunColdSolveRowBuild(samples, mix_count) && ok;
     }
     if (run_gather)
@@ -670,6 +957,48 @@ int main(int argc, char** argv)
     }
     if (run_packet)
     {
+        if (mtu_only) {
+            ok = RunSize(
+                system, config, 1280u, 256u, samples, 0u, true) && ok;
+            return ok ? 0 : 1;
+        }
+        if (crossover_only)
+        {
+            ok = RunSize(system, config, 4u * 1024u, 128u, samples) && ok;
+            ok = RunSize(system, config, 16u * 1024u, 32u, samples) && ok;
+            ok = RunSize(system, config, 32u * 1024u, 16u, samples) && ok;
+            ok = RunSize(system, config, 64u * 1024u, 8u, samples) && ok;
+            ok = RunSize(system, config, 100u * 1024u, 5u, samples) && ok;
+            return ok ? 0 : 1;
+        }
+        if (boundary_only)
+        {
+            ok = RunSize(
+                system, config, 32767u, 8u, samples, 0u, true) && ok;
+            ok = RunSize(
+                system, config, 32768u, 8u, samples, 0u, true) && ok;
+            ok = RunSize(
+                system, config, 32769u, 8u, samples, 0u, true) && ok;
+            return ok ? 0 : 1;
+        }
+        if (fallback_only)
+        {
+            ok = RunSize(
+                system, config, 32769u, 8u, samples, 0u, true, 64u) && ok;
+            ok = RunSize(
+                system, config, 100u * 1024u, 8u, samples, 0u, true, 32u) && ok;
+            ok = RunSize(
+                system, config, 1024u * 1024u, 1u, samples, 0u, true, 12u) && ok;
+            return ok ? 0 : 1;
+        }
+        if (degrees_only)
+        {
+            for (uint32_t degree = 2u; degree <= 6u; ++degree) {
+                ok = RunSize(
+                    system, config, 1280u, 256u, samples, degree, true) && ok;
+            }
+            return ok ? 0 : 1;
+        }
         ok = RunSize(system, config, 1u, 4096u, samples) && ok;
         // The mixed completion candidate requires even block bytes.  Keep a
         // short sub-cacheline sweep so wrapper overhead at bb=1 cannot conceal
