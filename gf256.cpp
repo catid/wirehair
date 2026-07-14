@@ -1383,6 +1383,35 @@ static GF256_FORCE_INLINE void gf256_add_multi_fixed(
 # if defined(GF256_TRY_AVX2)
     if (CpuHasAVX2)
     {
+        // Keep two independent dependency chains in flight.  The fixed
+        // source count lets the compiler interleave their loads and XORs,
+        // while one loop branch now covers a full cache line.
+        while (bytes >= 64)
+        {
+            __m256i acc0 = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(z + offset));
+            __m256i acc1 = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(z + offset + 32u));
+            for (unsigned j = 0; j < SrcCount; ++j)
+            {
+                acc0 = _mm256_xor_si256(
+                    acc0,
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(
+                            srcs[j] + offset)));
+                acc1 = _mm256_xor_si256(
+                    acc1,
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(
+                            srcs[j] + offset + 32u)));
+            }
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(z + offset), acc0);
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(z + offset + 32u), acc1);
+            offset += 64u;
+            bytes -= 64;
+        }
         while (bytes >= 32)
         {
             __m256i acc = _mm256_loadu_si256(
