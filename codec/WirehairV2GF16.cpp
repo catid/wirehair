@@ -13,6 +13,10 @@ namespace {
 std::once_flag InitOnce;
 bool InitResult = false;
 uint16_t Coefficients[kMixedGF16Rows][kMixedCoefficientPeriod] = {};
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint16_t SharedXCoefficients[
+    kMixedGF16Rows][kMixedCoefficientPeriod] = {};
+#endif
 
 uint16_t MultiplyUnchecked(uint16_t x, uint16_t y)
 {
@@ -56,11 +60,22 @@ bool InitializeUnchecked()
     }
     for (uint32_t row = 0; row < kMixedGF16Rows; ++row) {
         const uint16_t y = PowerUnchecked(kGF16Generator, 1000u + row);
+        if ((y >> 8) == 0u) return false;
         for (uint32_t column = 0; column < kMixedCoefficientPeriod; ++column) {
             const uint16_t denominator =
                 (uint16_t)(PowerUnchecked(kGF16Generator, column) ^ y);
             if (denominator == 0u) return false;
             Coefficients[row][column] = InverseUnchecked(denominator);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            // The first ten mixed rows use X=12+column and Y=row in the
+            // GF(256) subfield.  Reusing that X here with two Y coordinates
+            // outside the subfield makes all twelve rows one Cauchy matrix.
+            const uint16_t shared_x = (uint16_t)(
+                kMixedGF256Rows + kMixedGF16Rows + column);
+            SharedXCoefficients[row][column] =
+                InverseUnchecked((uint16_t)(shared_x ^ y));
+#endif
         }
     }
     return Coefficients[0][0] == 34916u &&
@@ -115,6 +130,17 @@ uint16_t MixedGF16Coefficient(uint32_t extension_row, uint32_t column)
     if (!InitializeGF16() || extension_row >= kMixedGF16Rows) return 0u;
     return Coefficients[extension_row][column % kMixedCoefficientPeriod];
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint16_t MixedGF16SharedXCoefficient(
+    uint32_t extension_row,
+    uint32_t column)
+{
+    if (!InitializeGF16() || extension_row >= kMixedGF16Rows) return 0u;
+    return SharedXCoefficients[
+        extension_row][column % kMixedCoefficientPeriod];
+}
+#endif
 
 bool GF16MulAddMem(
     void* destination, uint16_t scale, const void* source, uint32_t bytes)

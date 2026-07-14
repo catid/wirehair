@@ -55,6 +55,28 @@ private:
     bool Valid;
 };
 
+class MixedCoefficientGeometryScope
+{
+public:
+    explicit MixedCoefficientGeometryScope(
+        wirehair_v2::MixedCoefficientGeometry geometry)
+        : Previous(wirehair_v2::ActiveMixedCoefficientGeometry())
+        , Valid(wirehair_v2::SetMixedCoefficientGeometryForTesting(geometry))
+    {
+    }
+
+    ~MixedCoefficientGeometryScope()
+    {
+        (void)wirehair_v2::SetMixedCoefficientGeometryForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    wirehair_v2::MixedCoefficientGeometry Previous;
+    bool Valid;
+};
+
 class BinaryPeelOracleScope
 {
 public:
@@ -1093,10 +1115,13 @@ bool CheckIncrementalResume()
             wirehair_v2::kBinaryQuotientMinBlockBytes);
 }
 
-bool CheckMixedProjectionResidueBucketsOracleForPeriod(uint32_t period)
+bool CheckMixedProjectionResidueBucketsOracleForPeriod(
+    uint32_t period,
+    wirehair_v2::MixedCoefficientGeometry geometry)
 {
     MixedCoefficientPeriodScope period_scope(period);
-    if (!period_scope.IsValid()) {
+    MixedCoefficientGeometryScope geometry_scope(geometry);
+    if (!period_scope.IsValid() || !geometry_scope.IsValid()) {
         return false;
     }
     wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
@@ -1228,9 +1253,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(uint32_t period)
         return false;
     }
     std::printf(
-        "mixed residue-bucket projection oracle period=%u comparisons=%llu: "
-        "PASS\n",
-        period, (unsigned long long)comparisons);
+        "mixed residue-bucket projection oracle period=%u geometry=%u "
+        "comparisons=%llu: PASS\n",
+        period, (uint32_t)geometry, (unsigned long long)comparisons);
     return true;
 }
 
@@ -1239,9 +1264,17 @@ bool CheckMixedProjectionResidueBucketsOracle()
     const uint32_t periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u
     };
-    for (const uint32_t period : periods) {
-        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(period)) {
-            return false;
+    const wirehair_v2::MixedCoefficientGeometry geometries[] = {
+        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX
+    };
+    for (const wirehair_v2::MixedCoefficientGeometry geometry : geometries) {
+        for (const uint32_t period : periods) {
+            if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                    period, geometry))
+            {
+                return false;
+            }
         }
     }
     return true;

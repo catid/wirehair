@@ -28,6 +28,15 @@ uint16_t GF16InverseInitialized(uint16_t x);
 // extension_row is 0 or 1. X=g^(column mod 244), Y=g^(1000+row).
 uint16_t MixedGF16Coefficient(uint32_t extension_row, uint32_t column);
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+// Experiment coefficient sharing the GF(256) rows' X=12+column coordinate.
+// Y=g^(1000+row) remains outside the GF(256) subfield, so the combined ten
+// subfield rows plus these two extension rows form one GF(2^16) Cauchy matrix.
+uint16_t MixedGF16SharedXCoefficient(
+    uint32_t extension_row,
+    uint32_t column);
+#endif
+
 // Block operations reject odd/zero sizes before writing.  MulAdd supports
 // exact in-place destination==source, but rejects partial overlap.
 bool GF16MulAddMem(

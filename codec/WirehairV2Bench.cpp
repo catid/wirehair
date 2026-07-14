@@ -399,6 +399,28 @@ bool PrecodeProfileIncludes(
         mode == PrecodeProfileMixed : mode == PrecodeProfileCertified;
 }
 
+const char* MixedCoefficientGeometryName(
+    wirehair_v2::MixedCoefficientGeometry geometry)
+{
+    return geometry == wirehair_v2::MixedCoefficientGeometry::SharedCauchyX ?
+        "shared-x" : "frozen";
+}
+
+bool ParseMixedCoefficientGeometry(
+    const char* text,
+    wirehair_v2::MixedCoefficientGeometry& geometry)
+{
+    if (!std::strcmp(text, "frozen")) {
+        geometry = wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+        return true;
+    }
+    if (!std::strcmp(text, "shared-x")) {
+        geometry = wirehair_v2::MixedCoefficientGeometry::SharedCauchyX;
+        return true;
+    }
+    return false;
+}
+
 struct CompareOptions
 {
     CompareProfileMode ProfileMode = CompareProfileBase;
@@ -1755,6 +1777,9 @@ int CmdCompare(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
+    wirehair_v2::MixedCoefficientGeometry mixed_geometry =
+        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    bool mixed_geometry_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -1841,6 +1866,19 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
             mixed_period_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-geometry")) {
+            if (!TakeArg(
+                    "compare", "--mixed-geometry", argc, argv, i, value) ||
+                !ParseMixedCoefficientGeometry(value, mixed_geometry))
+            {
+                std::fprintf(stderr,
+                    "compare unknown --mixed-geometry token %s "
+                    "(expected frozen or shared-x)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_geometry_explicit = true;
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
@@ -1965,10 +2003,11 @@ int CmdCompare(int argc, char** argv)
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_period_explicit)
+    else if (mixed_period_explicit || mixed_geometry_explicit)
     {
         std::fprintf(stderr,
-            "compare --mixed-period requires a mixed precode profile\n");
+            "compare mixed experiment flags require a mixed precode "
+            "profile\n");
         return 1;
     }
     if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
@@ -1977,6 +2016,9 @@ int CmdCompare(int argc, char** argv)
             "compare --mixed-period must be in [%u,%u]\n",
             wirehair_v2::kMixedGF256Rows + wirehair_v2::kMixedGF16Rows,
             wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
 #endif
@@ -2048,7 +2090,8 @@ int CmdCompare(int argc, char** argv)
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
         "dense_candidate=%u precode=%u precode_cache=%u "
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
-        "schedule_seed=0x%llx mixed_period=%u loss_trace=common-id-v2 "
+        "schedule_seed=0x%llx mixed_period=%u mixed_geometry=%s "
+        "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
         nhi,
@@ -2073,7 +2116,9 @@ int CmdCompare(int argc, char** argv)
         cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed,
-        wirehair_v2::ActiveMixedCoefficientPeriod());
+        wirehair_v2::ActiveMixedCoefficientPeriod(),
+        MixedCoefficientGeometryName(
+            wirehair_v2::ActiveMixedCoefficientGeometry()));
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -3713,6 +3758,9 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
+    wirehair_v2::MixedCoefficientGeometry mixed_geometry =
+        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    bool mixed_geometry_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -3819,6 +3867,20 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_period_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-geometry")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-geometry",
+                    argc, argv, i, value) ||
+                !ParseMixedCoefficientGeometry(value, mixed_geometry))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --mixed-geometry token %s "
+                    "(expected frozen or shared-x)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_geometry_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -3916,10 +3978,11 @@ int CmdPrecodeFail(int argc, char** argv)
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_period_explicit)
+    else if (mixed_period_explicit || mixed_geometry_explicit)
     {
         std::fprintf(stderr,
-            "precodefail --mixed-period requires --completion mixed\n");
+            "precodefail mixed experiment flags require --completion "
+            "mixed\n");
         return 1;
     }
     if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
@@ -3928,6 +3991,9 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --mixed-period must be in [%u,%u]\n",
             wirehair_v2::kMixedGF256Rows + wirehair_v2::kMixedGF16Rows,
             wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
 #endif
@@ -3944,10 +4010,13 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
-            "completion=%s mixed_period=%u full_payload_solve=%u\n",
+            "completion=%s mixed_period=%u mixed_geometry=%s "
+            "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
+            MixedCoefficientGeometryName(
+                wirehair_v2::ActiveMixedCoefficientGeometry()),
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4044,6 +4113,13 @@ int CmdPrecodeFail(int argc, char** argv)
                             {
                                 throw std::runtime_error(
                                     "invalid mixed coefficient period");
+                            }
+                            if (!wirehair_v2::
+                                    SetMixedCoefficientGeometryForTesting(
+                                        mixed_geometry))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed coefficient geometry");
                             }
 #endif
                             uint32_t solve_block_bytes =

@@ -431,7 +431,7 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     if (!InitializeGF16()) {
         return nullptr;
     }
-    static const MixedCoefficientRows rows = []() {
+    const auto build_rows = [](MixedCoefficientGeometry geometry) {
         MixedCoefficientRows result = {};
         const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
         for (uint32_t residue = 0;
@@ -442,14 +442,34 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
                 result.Subfield[row][residue] =
                     HeavyCoefficient(row, residue, H);
             }
-            for (uint32_t row = 0; row < kMixedGF16Rows; ++row) {
-                result.Extension[row][residue] =
-                    MixedGF16Coefficient(row, residue);
+            for (uint32_t row = 0; row < kMixedGF16Rows; ++row)
+            {
+                uint16_t coefficient = MixedGF16Coefficient(row, residue);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                if (geometry == MixedCoefficientGeometry::SharedCauchyX) {
+                    coefficient =
+                        MixedGF16SharedXCoefficient(row, residue);
+                }
+#else
+                (void)geometry;
+#endif
+                result.Extension[row][residue] = coefficient;
             }
         }
         return result;
-    }();
-    return &rows;
+    };
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ActiveMixedCoefficientGeometry() ==
+        MixedCoefficientGeometry::SharedCauchyX)
+    {
+        static const MixedCoefficientRows shared_rows =
+            build_rows(MixedCoefficientGeometry::SharedCauchyX);
+        return &shared_rows;
+    }
+#endif
+    static const MixedCoefficientRows frozen_rows =
+        build_rows(MixedCoefficientGeometry::FrozenPowerX);
+    return &frozen_rows;
 }
 
 const MixedPackedCoefficients* GetMixedPackedCoefficients()
@@ -458,7 +478,7 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     if (!rows) {
         return nullptr;
     }
-    static const MixedPackedCoefficients packed = [rows]() {
+    const auto pack_rows = [](const MixedCoefficientRows* source_rows) {
         MixedPackedCoefficients result = {};
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;
@@ -466,25 +486,37 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
         {
             for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
                 result.ByResidue[residue][row >> 2] |=
-                    (uint64_t)rows->Subfield[row][residue] <<
+                    (uint64_t)source_rows->Subfield[row][residue] <<
                     ((row & 3u) * 16u);
             }
             for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
             {
                 const uint32_t row = kMixedGF256Rows + er;
                 result.ByResidue[residue][row >> 2] |=
-                    (uint64_t)rows->Extension[er][residue] <<
+                    (uint64_t)source_rows->Extension[er][residue] <<
                     ((row & 3u) * 16u);
             }
         }
         return result;
-    }();
-    return &packed;
+    };
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ActiveMixedCoefficientGeometry() ==
+        MixedCoefficientGeometry::SharedCauchyX)
+    {
+        static const MixedPackedCoefficients shared_packed =
+            pack_rows(rows);
+        return &shared_packed;
+    }
+#endif
+    static const MixedPackedCoefficients frozen_packed = pack_rows(rows);
+    return &frozen_packed;
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static thread_local uint32_t MixedCoefficientPeriodForTesting =
     kMixedCoefficientPeriod;
+static thread_local MixedCoefficientGeometry MixedGeometryForTesting =
+    MixedCoefficientGeometry::FrozenPowerX;
 
 bool SetMixedCoefficientPeriodForTesting(uint32_t period)
 {
@@ -495,6 +527,18 @@ bool SetMixedCoefficientPeriodForTesting(uint32_t period)
     MixedCoefficientPeriodForTesting = period;
     return true;
 }
+
+bool SetMixedCoefficientGeometryForTesting(
+    MixedCoefficientGeometry geometry)
+{
+    if (geometry != MixedCoefficientGeometry::FrozenPowerX &&
+        geometry != MixedCoefficientGeometry::SharedCauchyX)
+    {
+        return false;
+    }
+    MixedGeometryForTesting = geometry;
+    return true;
+}
 #endif
 
 uint32_t ActiveMixedCoefficientPeriod()
@@ -503,6 +547,15 @@ uint32_t ActiveMixedCoefficientPeriod()
     return MixedCoefficientPeriodForTesting;
 #else
     return kMixedCoefficientPeriod;
+#endif
+}
+
+MixedCoefficientGeometry ActiveMixedCoefficientGeometry()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedGeometryForTesting;
+#else
+    return MixedCoefficientGeometry::FrozenPowerX;
 #endif
 }
 

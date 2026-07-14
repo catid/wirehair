@@ -41,8 +41,40 @@ bool FieldTest()
         MixedGF16Coefficient(1u, 0u) != 2472u ||
         MixedGF16Coefficient(0u, 243u) != 59155u ||
         MixedGF16Coefficient(0u, 244u) != 34916u ||
-        MixedGF16Coefficient(2u, 0u) != 0u)
+        MixedGF16Coefficient(2u, 0u) != 0u ||
+        MixedGF16SharedXCoefficient(2u, 0u) != 0u)
     {
+        return false;
+    }
+    uint16_t shared_y[kMixedGF16Rows] = {};
+    for (uint32_t row = 0; row < kMixedGF16Rows; ++row)
+    {
+        const uint16_t first = MixedGF16SharedXCoefficient(row, 0u);
+        shared_y[row] = (uint16_t)(
+            (kMixedGF256Rows + kMixedGF16Rows) ^ GF16Inverse(first));
+        if ((shared_y[row] >> 8) == 0u) {
+            return false;
+        }
+        for (uint32_t column = 0;
+             column < kMixedCoefficientPeriod; ++column)
+        {
+            const uint16_t x = (uint16_t)(
+                kMixedGF256Rows + kMixedGF16Rows + column);
+            const uint16_t coefficient =
+                MixedGF16SharedXCoefficient(row, column);
+            if (GF16Multiply(
+                    coefficient, (uint16_t)(x ^ shared_y[row])) != 1u)
+            {
+                return false;
+            }
+        }
+        if (MixedGF16SharedXCoefficient(
+                row, kMixedCoefficientPeriod) != first)
+        {
+            return false;
+        }
+    }
+    if (shared_y[0] == shared_y[1]) {
         return false;
     }
     if (GF16MultiplyInitialized(0x1234u, 0x5678u) !=

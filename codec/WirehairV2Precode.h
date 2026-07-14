@@ -162,6 +162,12 @@ uint8_t HeavyCoefficient(
 static const uint32_t kMixedPackedCoefficientWords =
     (kMixedGF256Rows + kMixedGF16Rows + 3u) / 4u;
 
+enum class MixedCoefficientGeometry : uint32_t
+{
+    FrozenPowerX = 0,
+    SharedCauchyX = 1
+};
+
 /// Immutable row-major coefficient period shared by mixed encode, solve, and
 /// verification paths.  The accessor initializes both fields and returns null
 /// only if their arithmetic tables could not be initialized.
@@ -192,10 +198,13 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients();
     tradeoff without changing any named or serialized wire profile.
 */
 uint32_t ActiveMixedCoefficientPeriod();
+MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
+/// Select frozen or shared-X mixed coefficients on the current test thread.
+bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 #endif
 
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate
