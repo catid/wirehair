@@ -53,6 +53,27 @@ private:
     bool Valid;
 };
 
+class MixedGF16RowsScope
+{
+public:
+    explicit MixedGF16RowsScope(uint32_t rows)
+        : Previous(wirehair_v2::ActiveMixedGF16Rows())
+        , Valid(wirehair_v2::SetMixedGF16RowsForTesting(rows))
+    {
+    }
+
+    ~MixedGF16RowsScope()
+    {
+        (void)wirehair_v2::SetMixedGF16RowsForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 class MixedCoefficientGeometryScope
 {
 public:
@@ -261,7 +282,7 @@ void FillRandomBlocks(
 uint32_t MixedCornerRank(const std::vector<uint32_t>& columns)
 {
     const uint32_t H = wirehair_v2::kMixedGF256Rows +
-        wirehair_v2::kMixedGF16Rows;
+        wirehair_v2::ActiveMixedGF16Rows();
     if (columns.size() != H) return 0u;
     const wirehair_v2::MixedCoefficientRows* rows =
         wirehair_v2::GetMixedCoefficientRows();
@@ -273,7 +294,8 @@ uint32_t MixedCornerRank(const std::vector<uint32_t>& columns)
                 rows->Subfield[r][columns[j]];
         }
     }
-    for (uint32_t er = 0; er < wirehair_v2::kMixedGF16Rows; ++er) {
+    for (uint32_t er = 0;
+         er < wirehair_v2::ActiveMixedGF16Rows(); ++er) {
         const uint32_t r = wirehair_v2::kMixedGF256Rows + er;
         for (uint32_t j = 0; j < H; ++j) {
             matrix[(size_t)r * H + j] =
@@ -317,15 +339,17 @@ uint32_t MixedCornerRank(const std::vector<uint32_t>& columns)
 
 bool TestMixedCornerRankForGeometry(
     wirehair_v2::MixedCoefficientGeometry geometry,
+    uint32_t extension_rows,
     const uint32_t* periods,
     size_t period_count)
 {
+    MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientGeometryScope geometry_scope(geometry);
-    if (!geometry_scope.IsValid()) {
+    if (!rows_scope.IsValid() || !geometry_scope.IsValid()) {
         return false;
     }
     const uint32_t H = wirehair_v2::kMixedGF256Rows +
-        wirehair_v2::kMixedGF16Rows;
+        wirehair_v2::ActiveMixedGF16Rows();
     std::vector<uint32_t> columns(H);
     wirehair::PCGRandom prng;
     prng.Seed(
@@ -369,9 +393,9 @@ bool TestMixedCornerRankForGeometry(
         }
     }
     std::printf(
-        "mixed 12x12 corner rank geometry=%s (%zu periods, all starts + "
+        "mixed %ux%u corner rank geometry=%s (%zu periods, all starts + "
         "10000 samples each): PASS\n",
-        MixedGeometryName(geometry), period_count);
+        H, H, MixedGeometryName(geometry), period_count);
     return true;
 }
 
@@ -387,14 +411,25 @@ bool TestMixedCornerRank()
     const uint32_t shared_periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 16u, 12u
     };
+    const uint32_t shared_h13_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 16u, 13u
+    };
     if (!TestMixedCornerRankForGeometry(
             wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+            wirehair_v2::kMixedGF16Rows,
             frozen_periods,
             sizeof(frozen_periods) / sizeof(frozen_periods[0])) ||
         !TestMixedCornerRankForGeometry(
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
             shared_periods,
-            sizeof(shared_periods) / sizeof(shared_periods[0])))
+            sizeof(shared_periods) / sizeof(shared_periods[0])) ||
+        !TestMixedCornerRankForGeometry(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            shared_h13_periods,
+            sizeof(shared_h13_periods) /
+                sizeof(shared_h13_periods[0])))
     {
         return false;
     }
@@ -403,6 +438,7 @@ bool TestMixedCornerRank()
         wirehair_v2::ActiveMixedCoefficientPeriod();
     const wirehair_v2::MixedCoefficientGeometry original_geometry =
         wirehair_v2::ActiveMixedCoefficientGeometry();
+    const uint32_t original_rows = wirehair_v2::ActiveMixedGF16Rows();
     if (wirehair_v2::SetMixedCoefficientPeriodForTesting(
             wirehair_v2::kMixedGF256Rows +
                 wirehair_v2::kMixedGF16Rows - 1u) ||
@@ -410,8 +446,19 @@ bool TestMixedCornerRank()
             wirehair_v2::kMixedCoefficientPeriod + 1u) ||
         wirehair_v2::SetMixedCoefficientGeometryForTesting(
             static_cast<wirehair_v2::MixedCoefficientGeometry>(2u)) ||
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows - 1u) ||
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax + 1u) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedGF256Rows +
+                wirehair_v2::kMixedGF16Rows) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(original_rows) ||
         wirehair_v2::ActiveMixedCoefficientPeriod() != original_period ||
-        wirehair_v2::ActiveMixedCoefficientGeometry() != original_geometry)
+        wirehair_v2::ActiveMixedCoefficientGeometry() != original_geometry ||
+        wirehair_v2::ActiveMixedGF16Rows() != original_rows)
     {
         std::fprintf(stderr,
             "mixed corner: invalid experiment override was accepted\n");
@@ -749,11 +796,14 @@ bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats);
 
 bool TestMixedCompletionForPeriod(
     uint32_t period,
-    wirehair_v2::MixedCoefficientGeometry geometry)
+    wirehair_v2::MixedCoefficientGeometry geometry,
+    uint32_t extension_rows)
 {
+    MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientPeriodScope period_scope(period);
     MixedCoefficientGeometryScope geometry_scope(geometry);
-    if (!period_scope.IsValid() || !geometry_scope.IsValid()) {
+    if (!rows_scope.IsValid() || !period_scope.IsValid() ||
+        !geometry_scope.IsValid()) {
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
@@ -844,7 +894,7 @@ bool TestMixedCompletionForPeriod(
                     (bucketed ? heavy_base : 0u) ||
                 full_stats.HeavyMulAdds != params.HeavyRows * residues ||
                 full_stats.MixedGF16MulAdds !=
-                    wirehair_v2::kMixedGF16Rows * residues ||
+                    wirehair_v2::ActiveMixedGF16Rows() * residues ||
                 full_stats.MixedPlaneConversions !=
                     residues + wirehair_v2::kMixedGF256Rows +
                         params.HeavyRows ||
@@ -927,9 +977,10 @@ bool TestMixedCompletionForPeriod(
     }
 
     std::printf(
-        "mixed completion scalar/full/streamed oracle period=%u geometry=%s: "
+        "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
+        "gf16_rows=%u: "
         "PASS\n",
-        period, MixedGeometryName(geometry));
+        period, MixedGeometryName(geometry), extension_rows);
     return true;
 }
 
@@ -944,7 +995,8 @@ bool TestMixedCompletion()
     for (const uint32_t period : frozen_periods) {
         if (!TestMixedCompletionForPeriod(
                 period,
-                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX))
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+                wirehair_v2::kMixedGF16Rows))
         {
             return false;
         }
@@ -952,7 +1004,20 @@ bool TestMixedCompletion()
     for (const uint32_t period : shared_periods) {
         if (!TestMixedCompletionForPeriod(
                 period,
-                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX))
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows))
+        {
+            return false;
+        }
+    }
+    const uint32_t shared_h13_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 13u
+    };
+    for (const uint32_t period : shared_h13_periods) {
+        if (!TestMixedCompletionForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16RowsMax))
         {
             return false;
         }

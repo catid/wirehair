@@ -370,11 +370,12 @@ bool ComputePrecodeValues(
         }
     }
 
-    // --- Mixed 10 x GF(256) + 2 x GF(2^16) completion rows ---
+    // --- Mixed 10 x GF(256) + 2/3 x GF(2^16) completion rows ---
     if (H > 0u &&
         system.Params.Field == CompletionField::MixedGF256GF16)
     {
-        if (H != kMixedGF256Rows + kMixedGF16Rows ||
+        const uint32_t extension_rows = ActiveMixedGF16Rows();
+        if (H != kMixedGF256Rows + extension_rows ||
             !InitializeGF16())
         {
             return false;
@@ -390,11 +391,11 @@ bool ComputePrecodeValues(
             return false;
         }
         const uint8_t* gf8_coefficient_rows[kMixedGF256Rows];
-        const uint16_t* gf16_coefficient_rows[kMixedGF16Rows];
+        const uint16_t* gf16_coefficient_rows[kMixedGF16RowsMax];
         for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
             gf8_coefficient_rows[r] = cached_rows->Subfield[r];
         }
-        for (uint32_t r = 0; r < kMixedGF16Rows; ++r) {
+        for (uint32_t r = 0; r < extension_rows; ++r) {
             gf16_coefficient_rows[r] = cached_rows->Extension[r];
         }
 
@@ -432,7 +433,7 @@ bool ComputePrecodeValues(
             }
             ++st.MixedPlaneConversions;
             static_assert(
-                kMixedGF16Rows == 2u,
+                kMixedGF16Rows >= 2u,
                 "mixed completion pair kernel requires two GF16 rows");
             const uint32_t row0 = kMixedGF256Rows;
             const uint32_t row1 = row0 + 1u;
@@ -447,8 +448,22 @@ bool ComputePrecodeValues(
             {
                 return false;
             }
-            st.HeavyMulAdds += 2u;
-            st.MixedGF16MulAdds += 2u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            for (uint32_t er = 2u; er < extension_rows; ++er)
+            {
+                const uint32_t row = kMixedGF256Rows + er;
+                if (!GF16MulAddPlanar(
+                        rhs_low.data() + (size_t)row * elements,
+                        rhs_high.data() + (size_t)row * elements,
+                        gf16_coefficient_rows[er][m],
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return false;
+                }
+            }
+#endif
+            st.HeavyMulAdds += extension_rows;
+            st.MixedGF16MulAdds += extension_rows;
             return true;
         };
 
@@ -502,7 +517,7 @@ bool ComputePrecodeValues(
         }
 
         // Convert the ten GF(256) row RHS blocks once, after their fast
-        // interleaved accumulation.  The two extension rows are already in
+        // interleaved accumulation.  The extension rows are already in
         // their final planar representation.
         for (uint32_t r = 0; r < kMixedGF256Rows; ++r)
         {
@@ -524,7 +539,7 @@ bool ComputePrecodeValues(
                     gf8_coefficient_rows[r][(heavy_base + j) % window];
             }
         }
-        for (uint32_t er = 0; er < kMixedGF16Rows; ++er) {
+        for (uint32_t er = 0; er < extension_rows; ++er) {
             const uint32_t r = kMixedGF256Rows + er;
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =

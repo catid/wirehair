@@ -160,7 +160,7 @@ uint8_t HeavyCoefficient(
     uint32_t heavy_rows);
 
 static const uint32_t kMixedPackedCoefficientWords =
-    (kMixedGF256Rows + kMixedGF16Rows + 3u) / 4u;
+    (kMixedGF256Rows + kMixedGF16RowsMax + 3u) / 4u;
 
 enum class MixedCoefficientGeometry : uint32_t
 {
@@ -174,7 +174,7 @@ enum class MixedCoefficientGeometry : uint32_t
 struct MixedCoefficientRows
 {
     uint8_t Subfield[kMixedGF256Rows][kMixedCoefficientPeriod];
-    uint16_t Extension[kMixedGF16Rows][kMixedCoefficientPeriod];
+    uint16_t Extension[kMixedGF16RowsMax][kMixedCoefficientPeriod];
 };
 
 const MixedCoefficientRows* GetMixedCoefficientRows();
@@ -199,12 +199,16 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients();
 */
 uint32_t ActiveMixedCoefficientPeriod();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
+uint32_t ActiveMixedGF16Rows();
+uint32_t ActiveMixedPackedCoefficientWords();
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
+/// Select two (frozen H12) or three (experimental H13) extension rows.
+bool SetMixedGF16RowsForTesting(uint32_t rows);
 #endif
 
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate

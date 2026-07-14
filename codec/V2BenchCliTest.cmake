@@ -171,6 +171,16 @@ expect_failure("--mixed-period must be in" compare --nlo 64 --nhi 64
 expect_success("mixed_geometry=shared-x" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-period 64 --mixed-geometry shared-x)
+expect_success("mixed_gf16_rows=3.*mixed_geometry=shared-x" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
+    --precode --precode-profile mixed --mixed-gf16-rows 3
+    --mixed-period 64 --mixed-geometry shared-x)
+expect_failure("--mixed-gf16-rows must be in" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 1)
+expect_failure("--mixed-period must be in" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 3 --mixed-period 12)
 expect_failure("unknown --mixed-geometry" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-geometry unknown)
@@ -239,11 +249,22 @@ string(CONCAT precodefail_paired_pattern
 expect_success("${precodefail_paired_pattern}" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 4 --threads 2 --loss 0.1
     --mix-count 2,3 --completion mixed --payload-e2e)
-expect_success("mixed_period=64 mixed_geometry=shared-x.*full_payload_solve=1"
+expect_success("mixed_period=64 mixed_gf16_rows=2 mixed_geometry=shared-x.*full_payload_solve=1"
     precodefail
     --N 64 --bb-list 1280 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-period 64 --mixed-geometry shared-x
     --full-payload-solve)
+expect_success("mixed_period=64 mixed_gf16_rows=3 mixed_geometry=shared-x"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mixed-gf16-rows 3 --mixed-period 64
+    --mixed-geometry shared-x)
+expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
+    --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4)
+expect_failure("--mixed-period must be in" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion mixed
+    --mixed-gf16-rows 3 --mixed-period 12)
 expect_failure("mixed experiment flags require --completion mixed" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --mixed-period 64)

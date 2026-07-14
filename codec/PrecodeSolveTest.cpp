@@ -55,6 +55,27 @@ private:
     bool Valid;
 };
 
+class MixedGF16RowsScope
+{
+public:
+    explicit MixedGF16RowsScope(uint32_t rows)
+        : Previous(wirehair_v2::ActiveMixedGF16Rows())
+        , Valid(wirehair_v2::SetMixedGF16RowsForTesting(rows))
+    {
+    }
+
+    ~MixedGF16RowsScope()
+    {
+        (void)wirehair_v2::SetMixedGF16RowsForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 class MixedCoefficientGeometryScope
 {
 public:
@@ -1117,19 +1138,22 @@ bool CheckIncrementalResume()
 
 bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     uint32_t period,
-    wirehair_v2::MixedCoefficientGeometry geometry)
+    wirehair_v2::MixedCoefficientGeometry geometry,
+    uint32_t extension_rows)
 {
+    MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientPeriodScope period_scope(period);
     MixedCoefficientGeometryScope geometry_scope(geometry);
-    if (!period_scope.IsValid() || !geometry_scope.IsValid()) {
+    if (!rows_scope.IsValid() || !period_scope.IsValid() ||
+        !geometry_scope.IsValid()) {
         return false;
     }
     wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
     MixedProjectionOracleScope oracle_scope;
     static const uint32_t kBlockCounts[] = {
         2u, 3u, 10u, 63u, 64u, 127u, 128u,
-        // S=30 and D2+H=24, so these exercise exact total-column counts
-        // L=243, 244, and 245 around the coefficient-period transition.
+        // With H12, S=30 and D2+H=24, so these exercise exact total-column
+        // counts L=243, 244, and 245 around the full-period transition.
         189u, 190u, 191u,
         243u, 244u, 245u, 320u, 1000u
     };
@@ -1160,7 +1184,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         const uint32_t column_count = K + system.Params.Staircase +
             system.Params.DenseRows + system.Params.HeavyRows;
         if (K >= 189u && K <= 191u &&
-            column_count != 243u + (K - 189u))
+            column_count != 243u + (K - 189u) +
+                (extension_rows - wirehair_v2::kMixedGF16Rows))
         {
             std::fprintf(stderr,
                 "solve: mixed projection boundary K=%u produced L=%u\n",
@@ -1254,8 +1279,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     }
     std::printf(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
-        "comparisons=%llu: PASS\n",
-        period, (uint32_t)geometry, (unsigned long long)comparisons);
+        "gf16_rows=%u comparisons=%llu: PASS\n",
+        period, (uint32_t)geometry, extension_rows,
+        (unsigned long long)comparisons);
     return true;
 }
 
@@ -1271,10 +1297,22 @@ bool CheckMixedProjectionResidueBucketsOracle()
     for (const wirehair_v2::MixedCoefficientGeometry geometry : geometries) {
         for (const uint32_t period : periods) {
             if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
-                    period, geometry))
+                    period, geometry, wirehair_v2::kMixedGF16Rows))
             {
                 return false;
             }
+        }
+    }
+    const uint32_t h13_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 13u
+    };
+    for (const uint32_t period : h13_periods) {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16RowsMax))
+        {
+            return false;
         }
     }
     return true;

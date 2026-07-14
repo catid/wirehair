@@ -132,7 +132,7 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
     if (params.Field == CompletionField::MixedGF256GF16 &&
-        (params.HeavyRows != kMixedGF256Rows + kMixedGF16Rows ||
+        (params.HeavyRows != kMixedGF256Rows + ActiveMixedGF16Rows() ||
          params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy))
     {
         return false;
@@ -162,6 +162,7 @@ PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed)
 {
     PrecodeParams params = MakeCertifiedParams(block_count, seed);
     params.Field = CompletionField::MixedGF256GF16;
+    params.HeavyRows = kMixedGF256Rows + ActiveMixedGF16Rows();
     return params;
 }
 
@@ -433,6 +434,9 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     }
     const auto build_rows = [](MixedCoefficientGeometry geometry) {
         MixedCoefficientRows result = {};
+        // The first ten rows and shared-X extension rows deliberately keep
+        // the frozen H12 X coordinates [12, 256).  H13 appends another Y;
+        // moving X to 13 would rewrite every existing coefficient.
         const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;
@@ -442,7 +446,7 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
                 result.Subfield[row][residue] =
                     HeavyCoefficient(row, residue, H);
             }
-            for (uint32_t row = 0; row < kMixedGF16Rows; ++row)
+            for (uint32_t row = 0; row < kMixedGF16RowsMax; ++row)
             {
                 uint16_t coefficient = MixedGF16Coefficient(row, residue);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -489,7 +493,7 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
                     (uint64_t)source_rows->Subfield[row][residue] <<
                     ((row & 3u) * 16u);
             }
-            for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
+            for (uint32_t er = 0; er < kMixedGF16RowsMax; ++er)
             {
                 const uint32_t row = kMixedGF256Rows + er;
                 result.ByResidue[residue][row >> 2] |=
@@ -517,10 +521,11 @@ static thread_local uint32_t MixedCoefficientPeriodForTesting =
     kMixedCoefficientPeriod;
 static thread_local MixedCoefficientGeometry MixedGeometryForTesting =
     MixedCoefficientGeometry::FrozenPowerX;
+static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 
 bool SetMixedCoefficientPeriodForTesting(uint32_t period)
 {
-    const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
     if (period < H || period > kMixedCoefficientPeriod) {
         return false;
     }
@@ -537,6 +542,17 @@ bool SetMixedCoefficientGeometryForTesting(
         return false;
     }
     MixedGeometryForTesting = geometry;
+    return true;
+}
+
+bool SetMixedGF16RowsForTesting(uint32_t rows)
+{
+    if (rows < kMixedGF16Rows || rows > kMixedGF16RowsMax ||
+        MixedCoefficientPeriodForTesting < kMixedGF256Rows + rows)
+    {
+        return false;
+    }
+    MixedGF16RowsForTesting = rows;
     return true;
 }
 #endif
@@ -557,6 +573,20 @@ MixedCoefficientGeometry ActiveMixedCoefficientGeometry()
 #else
     return MixedCoefficientGeometry::FrozenPowerX;
 #endif
+}
+
+uint32_t ActiveMixedGF16Rows()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedGF16RowsForTesting;
+#else
+    return kMixedGF16Rows;
+#endif
+}
+
+uint32_t ActiveMixedPackedCoefficientWords()
+{
+    return (kMixedGF256Rows + ActiveMixedGF16Rows() + 3u) / 4u;
 }
 
 uint8_t HeavyCoefficientForParams(

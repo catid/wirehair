@@ -533,10 +533,11 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     const MixedPackedCoefficients& cached_packed,
     std::vector<uint64_t>& projected)
 {
-    const uint32_t packed_words = kMixedPackedCoefficientWords;
+    const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     static_assert(
-        kMixedPackedCoefficientWords == 3u,
-        "mixed completion packing changed unexpectedly");
+        kMixedPackedCoefficientWords >= 3u &&
+            kMixedPackedCoefficientWords <= 4u,
+        "mixed completion packing must fit the unrolled projection");
     const uint32_t expected_projection_words =
         inactive_count / 64u + ((inactive_count & 63u) != 0u ? 1u : 0u);
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
@@ -546,7 +547,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         (uint64_t)column_count * projection_words;
     const uint64_t projected_elements =
         (uint64_t)inactive_count * packed_words;
-    if (coefficient_period < kMixedGF256Rows + kMixedGF16Rows ||
+    if (coefficient_period < kMixedGF256Rows + ActiveMixedGF16Rows() ||
         coefficient_period > kMixedCoefficientPeriod ||
         inactive_index.size() != column_count ||
         projection_words != expected_projection_words ||
@@ -566,6 +567,9 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         destination[0] ^= coefficients[0];
         destination[1] ^= coefficients[1];
         destination[2] ^= coefficients[2];
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (packed_words == 4u) destination[3] ^= coefficients[3];
+#endif
     };
 
     // At or below one complete coefficient period, no two columns share a
@@ -696,7 +700,7 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     const MixedPackedCoefficients& cached_packed,
     std::vector<uint64_t>& projected)
 {
-    const uint32_t packed_words = kMixedPackedCoefficientWords;
+    const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
     const uint64_t projected_elements =
@@ -710,7 +714,7 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     }
     projected.assign((size_t)projected_elements, uint64_t{0});
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
-    if (coefficient_period < kMixedGF256Rows + kMixedGF16Rows ||
+    if (coefficient_period < kMixedGF256Rows + ActiveMixedGF16Rows() ||
         coefficient_period > kMixedCoefficientPeriod)
     {
         return false;
@@ -776,7 +780,8 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint8_t>& values,
     PrecodeSolveStats& stats)
 {
-    const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+    const uint32_t extension_rows = ActiveMixedGF16Rows();
+    const uint32_t H = kMixedGF256Rows + extension_rows;
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
@@ -818,9 +823,10 @@ WirehairResult SolveMixedCompletionQuotient(
         return Wirehair_Error;
     }
 
-    const uint32_t packed_words = kMixedPackedCoefficientWords;
+    const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     static_assert(
-        kMixedPackedCoefficientWords == 3u,
+        kMixedPackedCoefficientWords >= 3u &&
+            kMixedPackedCoefficientWords <= 4u,
         "mixed completion packing changed unexpectedly");
     if ((uint64_t)inactive_count * packed_words >
             (uint64_t)std::numeric_limits<size_t>::max() /
@@ -865,7 +871,7 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint8_t> subfield_coeff(
         (size_t)kMixedGF256Rows * inactive_count, 0u);
     std::vector<uint16_t> extension_coeff(
-        (size_t)kMixedGF16Rows * inactive_count, 0u);
+        (size_t)extension_rows * inactive_count, 0u);
     for (uint32_t index = 0; index < inactive_count; ++index) {
         const uint64_t* source =
             projected.data() + (size_t)index * packed_words;
@@ -873,7 +879,7 @@ WirehairResult SolveMixedCompletionQuotient(
             subfield_coeff[(size_t)row * inactive_count + index] =
                 (uint8_t)(source[row >> 2] >> ((row & 3u) * 16u));
         }
-        for (uint32_t er = 0; er < kMixedGF16Rows; ++er) {
+        for (uint32_t er = 0; er < extension_rows; ++er) {
             const uint32_t row = kMixedGF256Rows + er;
             extension_coeff[(size_t)er * inactive_count + index] =
                 (uint16_t)(source[row >> 2] >> ((row & 3u) * 16u));
@@ -934,7 +940,7 @@ WirehairResult SolveMixedCompletionQuotient(
             return Wirehair_Error;
         }
         static_assert(
-            kMixedGF16Rows == 2u,
+            kMixedGF16Rows >= 2u,
             "mixed completion pair kernel requires two GF16 rows");
         const uint32_t row0 = kMixedGF256Rows;
         const uint32_t row1 = row0 + 1u;
@@ -949,11 +955,25 @@ WirehairResult SolveMixedCompletionQuotient(
         {
             return Wirehair_Error;
         }
-        stats.BlockMulAdds += 2u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        for (uint32_t er = 2u; er < extension_rows; ++er)
+        {
+            const uint32_t row = kMixedGF256Rows + er;
+            if (!GF16MulAddPlanar(
+                    rhs_low.data() + (size_t)row * elements,
+                    rhs_high.data() + (size_t)row * elements,
+                    cached_rows->Extension[er][residue],
+                    source_low.data(), source_high.data(), elements))
+            {
+                return Wirehair_Error;
+            }
+        }
+#endif
+        stats.BlockMulAdds += extension_rows;
     }
 
     // Reduce all completion rows through each binary pivot together.  The
-    // first ten stay in the GF(256) subfield; the two extension rows share a
+    // first ten stay in the GF(256) subfield; the extension rows share a
     // single pivot-RHS deinterleave.
     for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
     {
@@ -1008,9 +1028,9 @@ WirehairResult SolveMixedCompletionQuotient(
                 block_bytes, stats);
         }
 
-        uint16_t extension_scales[kMixedGF16Rows];
+        uint16_t extension_scales[kMixedGF16RowsMax] = {};
         bool have_extension_scale = false;
-        for (uint32_t er = 0; er < kMixedGF16Rows; ++er)
+        for (uint32_t er = 0; er < extension_rows; ++er)
         {
             const uint16_t scale =
                 extension_coeff[(size_t)er * inactive_count + pivot];
@@ -1049,6 +1069,23 @@ WirehairResult SolveMixedCompletionQuotient(
             stats.BlockMulAdds +=
                 (extension_scales[0] != 0u ? 1u : 0u) +
                 (extension_scales[1] != 0u ? 1u : 0u);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            for (uint32_t er = 2u; er < extension_rows; ++er)
+            {
+                const uint16_t scale = extension_scales[er];
+                if (scale == 0u) continue;
+                const uint32_t row = kMixedGF256Rows + er;
+                if (!GF16MulAddPlanar(
+                        rhs_low.data() + (size_t)row * elements,
+                        rhs_high.data() + (size_t)row * elements,
+                        scale, source_low.data(), source_high.data(),
+                        elements))
+                {
+                    return Wirehair_Error;
+                }
+                ++stats.BlockMulAdds;
+            }
+#endif
         }
     }
 

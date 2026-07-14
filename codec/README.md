@@ -279,13 +279,15 @@ per candidate, so differing attempt indices mean the result compares two valid
 selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
 
-Test builds also expose `--mixed-period P` and
+Test builds also expose `--mixed-period P`, `--mixed-gf16-rows 2|3`, and
 `--mixed-geometry frozen|shared-x` on the mixed `compare` and `precodefail`
-arms.  The thread-local period override accepts 12 through 244; `shared-x`
-builds the two extension rows from the same Cauchy column coordinates as the
-ten subfield rows, while `frozen` preserves the named profile's coefficients.
-Together they allow coefficient-bucket speed and rank to be swept without
-changing a named or serialized profile.  `precodefail --full-payload-solve`
+arms.  The thread-local period override accepts H through 244.  The three-row
+setting is an H13 experiment that appends a third GF(2^16) completion row;
+`shared-x` builds all active extension rows from the same Cauchy column
+coordinates as the ten subfield rows, while `frozen` preserves the named H12
+profile's coefficients.  Together these hooks allow coefficient-bucket speed
+and rank to be swept without changing a named or serialized profile.
+`precodefail --full-payload-solve`
 uses each requested `--bb-list` value in the solver instead of the default
 one- or two-byte rank proxy, making `solve_ms_mu` include the real RHS cost.
 These flags are benchmarking hooks, not wire-format selection controls.

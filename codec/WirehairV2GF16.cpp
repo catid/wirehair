@@ -12,10 +12,10 @@ namespace {
 
 std::once_flag InitOnce;
 bool InitResult = false;
-uint16_t Coefficients[kMixedGF16Rows][kMixedCoefficientPeriod] = {};
+uint16_t Coefficients[kMixedGF16RowsMax][kMixedCoefficientPeriod] = {};
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 uint16_t SharedXCoefficients[
-    kMixedGF16Rows][kMixedCoefficientPeriod] = {};
+    kMixedGF16RowsMax][kMixedCoefficientPeriod] = {};
 #endif
 
 uint16_t MultiplyUnchecked(uint16_t x, uint16_t y)
@@ -58,7 +58,7 @@ bool InitializeUnchecked()
         if (PowerUnchecked(kGF16Generator, 65535u / factor) == 1u)
             return false;
     }
-    for (uint32_t row = 0; row < kMixedGF16Rows; ++row) {
+    for (uint32_t row = 0; row < kMixedGF16RowsMax; ++row) {
         const uint16_t y = PowerUnchecked(kGF16Generator, 1000u + row);
         if ((y >> 8) == 0u) return false;
         for (uint32_t column = 0; column < kMixedCoefficientPeriod; ++column) {
@@ -127,7 +127,7 @@ uint16_t GF16InverseInitialized(uint16_t x)
 
 uint16_t MixedGF16Coefficient(uint32_t extension_row, uint32_t column)
 {
-    if (!InitializeGF16() || extension_row >= kMixedGF16Rows) return 0u;
+    if (!InitializeGF16() || extension_row >= kMixedGF16RowsMax) return 0u;
     return Coefficients[extension_row][column % kMixedCoefficientPeriod];
 }
 
@@ -136,7 +136,7 @@ uint16_t MixedGF16SharedXCoefficient(
     uint32_t extension_row,
     uint32_t column)
 {
-    if (!InitializeGF16() || extension_row >= kMixedGF16Rows) return 0u;
+    if (!InitializeGF16() || extension_row >= kMixedGF16RowsMax) return 0u;
     return SharedXCoefficients[
         extension_row][column % kMixedCoefficientPeriod];
 }
