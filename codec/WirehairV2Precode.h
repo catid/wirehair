@@ -184,6 +184,20 @@ struct MixedPackedCoefficients
 
 const MixedPackedCoefficients* GetMixedPackedCoefficients();
 
+/**
+    Active mixed coefficient period.
+
+    Production builds always return kMixedCoefficientPeriod.  Test builds may
+    select a smaller period on the current thread to measure the speed/rank
+    tradeoff without changing any named or serialized wire profile.
+*/
+uint32_t ActiveMixedCoefficientPeriod();
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/// Set the current thread's experiment-only period in [H, 244].
+bool SetMixedCoefficientPeriodForTesting(uint32_t period);
+#endif
+
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate
 /// families are confined to explicitly constructed experiment systems.
 uint8_t HeavyCoefficientForParams(

@@ -482,6 +482,30 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     return &packed;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static thread_local uint32_t MixedCoefficientPeriodForTesting =
+    kMixedCoefficientPeriod;
+
+bool SetMixedCoefficientPeriodForTesting(uint32_t period)
+{
+    const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+    if (period < H || period > kMixedCoefficientPeriod) {
+        return false;
+    }
+    MixedCoefficientPeriodForTesting = period;
+    return true;
+}
+#endif
+
+uint32_t ActiveMixedCoefficientPeriod()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedCoefficientPeriodForTesting;
+#else
+    return kMixedCoefficientPeriod;
+#endif
+}
+
 uint8_t HeavyCoefficientForParams(
     const PrecodeParams& params,
     uint32_t heavy_row,

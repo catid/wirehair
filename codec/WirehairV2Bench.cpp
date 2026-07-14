@@ -662,7 +662,8 @@ bool ValidateMessageInputs(
 bool ValidatePayloadE2EInputs(
     const std::vector<int>& Ns,
     const std::vector<int>& BBs,
-    const char* command)
+    const char* command,
+    uint32_t concurrent_copies = 1u)
 {
     for (int n : Ns) for (int bb : BBs)
     {
@@ -687,12 +688,17 @@ bool ValidatePayloadE2EInputs(
             L, wirehair_v2::kMaxInactiveColumns);
         const uint64_t working_blocks =
             2u * (uint64_t)n + 2u * L + 2u * max_inactive + 96u;
+        if (working_blocks > UINT64_MAX / concurrent_copies)
+        {
+            std::fprintf(stderr, "%s working-set size overflows\n", command);
+            return false;
+        }
         if (!ValidateMessageDimensions(
                 (uint32_t)n,
                 (uint32_t)bb,
                 command,
                 0u,
-                working_blocks))
+                working_blocks * concurrent_copies))
         {
             return false;
         }
@@ -1746,6 +1752,10 @@ int CmdCompare(int argc, char** argv)
     bool precode_profile_explicit = false;
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
+    bool mixed_period_explicit = false;
+#endif
 
     for (int i = 0; i < argc; ++i)
     {
@@ -1822,6 +1832,17 @@ int CmdCompare(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--trial-details")) {
             trial_details = true;
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (!std::strcmp(argv[i], "--mixed-period")) {
+            if (!TakeArg(
+                    "compare", "--mixed-period", argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-period", value, mixed_period))
+            {
+                return 1;
+            }
+            mixed_period_explicit = true;
+        }
+#endif
         else if (!std::strcmp(argv[i], "--schedule")) {
             if (!TakeArg("compare", "--schedule", argc, argv, i, value) ||
                 !ParsePacketSchedule(value, schedule_kind))
@@ -1943,6 +1964,22 @@ int CmdCompare(int argc, char** argv)
             }
         }
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    else if (mixed_period_explicit)
+    {
+        std::fprintf(stderr,
+            "compare --mixed-period requires a mixed precode profile\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
+    {
+        std::fprintf(stderr,
+            "compare --mixed-period must be in [%u,%u]\n",
+            wirehair_v2::kMixedGF256Rows + wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+#endif
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
     for (int bb_value : block_bytes_list)
@@ -2011,7 +2048,7 @@ int CmdCompare(int argc, char** argv)
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
         "dense_candidate=%u precode=%u precode_cache=%u "
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
-        "schedule_seed=0x%llx loss_trace=common-id-v2 "
+        "schedule_seed=0x%llx mixed_period=%u loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
         nhi,
@@ -2035,7 +2072,8 @@ int CmdCompare(int argc, char** argv)
         cache_encoder_source ? 1u : 0u,
         cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
-        (unsigned long long)seed);
+        (unsigned long long)seed,
+        wirehair_v2::ActiveMixedCoefficientPeriod());
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -3666,12 +3704,15 @@ int CmdPrecodeFail(int argc, char** argv)
     std::string mix_count_list = "3";
     PrecodeFailCompletion completion = PrecodeFailCompletion::Certified;
     bool payload_e2e = false;
+    bool full_payload_solve = false;
     uint32_t trials = 100u;
     uint32_t threads = 1u;
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
+    bool mixed_period_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -3766,6 +3807,18 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (!std::strcmp(argv[i], "--full-payload-solve")) {
+            full_payload_solve = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-period")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-period", argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-period", value, mixed_period))
+            {
+                return 1;
+            }
+            mixed_period_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -3796,8 +3849,11 @@ int CmdPrecodeFail(int argc, char** argv)
     }
     if (!ValidateBlockCounts(Ns, "precodefail") ||
         !ValidateLoss(loss, "precodefail") ||
-        (payload_e2e &&
-         !ValidatePayloadE2EInputs(Ns, BBs, "precodefail")))
+        ((payload_e2e || full_payload_solve) &&
+         !ValidatePayloadE2EInputs(
+             Ns, BBs, "precodefail",
+             full_payload_solve ?
+                 std::max(1u, std::min(threads, trials)) : 1u)))
     {
         return 1;
     }
@@ -3859,20 +3915,40 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    else if (mixed_period_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-period requires --completion mixed\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-period must be in [%u,%u]\n",
+            wirehair_v2::kMixedGF256Rows + wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+#endif
 
     if (completion == PrecodeFailCompletion::Certified)
     {
         std::printf(
-            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx\n",
-            trials, threads, loss, (unsigned long long)seed);
+            "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
+            "full_payload_solve=%u\n",
+            trials, threads, loss, (unsigned long long)seed,
+            full_payload_solve ? 1u : 0u);
     }
     else
     {
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
-            "completion=%s\n",
+            "completion=%s mixed_period=%u full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
-            PrecodeFailCompletionName(completion));
+            PrecodeFailCompletionName(completion),
+            wirehair_v2::ActiveMixedCoefficientPeriod(),
+            full_payload_solve ? 1u : 0u);
     }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
@@ -3961,10 +4037,23 @@ int CmdPrecodeFail(int argc, char** argv)
                     workers.push_back(std::thread([&, overhead]() {
                         try
                         {
-                            const uint8_t zero[2] = { 0u, 0u };
-                            const uint32_t solve_block_bytes =
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                            if (!wirehair_v2::
+                                    SetMixedCoefficientPeriodForTesting(
+                                        mixed_period))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed coefficient period");
+                            }
+#endif
+                            uint32_t solve_block_bytes =
                                 completion == PrecodeFailCompletion::Mixed ?
                                     2u : 1u;
+                            if (full_payload_solve) {
+                                solve_block_bytes = bb;
+                            }
+                            const std::vector<uint8_t> zero(
+                                solve_block_bytes, uint8_t{0});
                             for (;;)
                             {
                                 if (cancel_workers.load()) {
@@ -3997,7 +4086,7 @@ int CmdPrecodeFail(int argc, char** argv)
                                     }
                                     wirehair_v2::SolvePacket packet;
                                     packet.BlockId = id;
-                                    packet.Data = zero;
+                                    packet.Data = zero.data();
                                     packets.push_back(packet);
                                 }
                                 std::vector<uint8_t> intermediate;

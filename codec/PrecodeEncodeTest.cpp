@@ -32,6 +32,27 @@
 
 namespace {
 
+class MixedCoefficientPeriodScope
+{
+public:
+    explicit MixedCoefficientPeriodScope(uint32_t period)
+        : Previous(wirehair_v2::ActiveMixedCoefficientPeriod())
+        , Valid(wirehair_v2::SetMixedCoefficientPeriodForTesting(period))
+    {
+    }
+
+    ~MixedCoefficientPeriodScope()
+    {
+        (void)wirehair_v2::SetMixedCoefficientPeriodForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 bool ParsePositiveU32(const char* text, uint32_t& out)
 {
     if (!text || !*text || *text < '0' || *text > '9') {
@@ -146,6 +167,10 @@ bool VerifyValues(
         std::memset(acc.data(), 0, block_bytes);
         for (uint32_t c = 0; c < L; ++c)
         {
+            const uint32_t coefficient_column =
+                system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 ?
+                c % wirehair_v2::ActiveMixedCoefficientPeriod() : c;
             const uint8_t* v =
                 ColumnValue(system, source, parity, block_bytes, c);
             if (system.Params.Field ==
@@ -153,7 +178,8 @@ bool VerifyValues(
                 r >= wirehair_v2::kMixedGF256Rows)
             {
                 const uint16_t y = wirehair_v2::MixedGF16Coefficient(
-                    r - wirehair_v2::kMixedGF256Rows, c);
+                    r - wirehair_v2::kMixedGF256Rows,
+                    coefficient_column);
                 if (!wirehair_v2::GF16MulAddMem(
                         acc.data(), y, v, block_bytes))
                 {
@@ -162,7 +188,8 @@ bool VerifyValues(
             }
             else
             {
-                const uint8_t y = wirehair_v2::HeavyCoefficient(r, c, H);
+                const uint8_t y = wirehair_v2::HeavyCoefficient(
+                    r, coefficient_column, H);
                 if (y == 1u) {
                     gf256_add_mem(acc.data(), v, (int)block_bytes);
                 }
@@ -250,43 +277,65 @@ bool TestMixedCornerRank()
 {
     const uint32_t H = wirehair_v2::kMixedGF256Rows +
         wirehair_v2::kMixedGF16Rows;
+    // The smaller periods exercised by the implementation oracles below are
+    // experimental sweep points, not certified coefficient sets.  Only keep
+    // candidates here after they pass this stronger arbitrary-column screen;
+    // period 64 was rejected after producing a singular sampled corner.
+    const uint32_t periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u
+    };
     std::vector<uint32_t> columns(H);
-    for (uint32_t start = 0;
-         start < wirehair_v2::kMixedCoefficientPeriod; ++start)
-    {
-        for (uint32_t j = 0; j < H; ++j) {
-            columns[j] =
-                (start + j) % wirehair_v2::kMixedCoefficientPeriod;
-        }
-        if (MixedCornerRank(columns) != H) {
-            std::fprintf(stderr,
-                "mixed corner: consecutive start %u is singular\n", start);
-            return false;
-        }
-    }
-
     wirehair::PCGRandom prng;
     prng.Seed(UINT64_C(0x16c0a4e7), UINT64_C(0x244));
-    std::vector<uint32_t> deck(wirehair_v2::kMixedCoefficientPeriod);
-    for (uint32_t trial = 0; trial < 10000u; ++trial)
+    for (const uint32_t period : periods)
     {
-        for (uint32_t i = 0;
-             i < wirehair_v2::kMixedCoefficientPeriod; ++i) deck[i] = i;
-        for (uint32_t i = 0; i < H; ++i)
+        for (uint32_t start = 0; start < period; ++start)
         {
-            const uint32_t pick = i + prng.Next() %
-                (wirehair_v2::kMixedCoefficientPeriod - i);
-            std::swap(deck[i], deck[pick]);
-            columns[i] = deck[i];
+            for (uint32_t j = 0; j < H; ++j) {
+                columns[j] = (start + j) % period;
+            }
+            if (MixedCornerRank(columns) != H) {
+                std::fprintf(stderr,
+                    "mixed corner: period %u consecutive start %u is "
+                    "singular\n",
+                    period, start);
+                return false;
+            }
         }
-        if (MixedCornerRank(columns) != H) {
-            std::fprintf(stderr,
-                "mixed corner: nonconsecutive trial %u is singular\n",
-                trial);
-            return false;
+
+        std::vector<uint32_t> deck(period);
+        for (uint32_t trial = 0; trial < 10000u; ++trial)
+        {
+            for (uint32_t i = 0; i < period; ++i) deck[i] = i;
+            for (uint32_t i = 0; i < H; ++i)
+            {
+                const uint32_t pick = i + prng.Next() % (period - i);
+                std::swap(deck[i], deck[pick]);
+                columns[i] = deck[i];
+            }
+            if (MixedCornerRank(columns) != H) {
+                std::fprintf(stderr,
+                    "mixed corner: period %u nonconsecutive trial %u is "
+                    "singular\n",
+                    period, trial);
+                return false;
+            }
         }
     }
-    std::printf("mixed 12x12 corner rank (244 starts + 10000 samples): PASS\n");
+    const uint32_t original_period =
+        wirehair_v2::ActiveMixedCoefficientPeriod();
+    if (wirehair_v2::SetMixedCoefficientPeriodForTesting(H - 1u) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedCoefficientPeriod + 1u) ||
+        wirehair_v2::ActiveMixedCoefficientPeriod() != original_period)
+    {
+        std::fprintf(stderr,
+            "mixed corner: invalid period override was accepted\n");
+        return false;
+    }
+    std::printf(
+        "mixed 12x12 corner rank (periods 244/96, all starts + "
+        "10000 samples each): PASS\n");
     return true;
 }
 
@@ -617,8 +666,12 @@ bool TestHeavyResidueDispatch()
 
 bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats);
 
-bool TestMixedCompletion()
+bool TestMixedCompletionForPeriod(uint32_t period)
 {
+    MixedCoefficientPeriodScope period_scope(period);
+    if (!period_scope.IsValid()) {
+        return false;
+    }
     // Exercise the exact production geometry (default full-span dense
     // corner).  Most such direct-source corners are singular by design, so
     // select a deterministically feasible tiny seed; the public packet solve
@@ -694,10 +747,12 @@ bool TestMixedCompletion()
 
             const uint32_t heavy_base =
                 K + params.Staircase + params.DenseRows;
+            const uint32_t coefficient_period =
+                wirehair_v2::ActiveMixedCoefficientPeriod();
             const bool bucketed =
-                heavy_base >= 2u * wirehair_v2::kMixedCoefficientPeriod;
+                heavy_base >= 2u * coefficient_period;
             const uint64_t residues = bucketed ?
-                wirehair_v2::kMixedCoefficientPeriod : heavy_base;
+                coefficient_period : heavy_base;
             if (!full_ok || !streamed_ok || full != streamed ||
                 !VerifyValues(
                     system, source.data(), streamed.data(), bb, "mixed") ||
@@ -787,7 +842,22 @@ bool TestMixedCompletion()
         return false;
     }
 
-    std::printf("mixed completion scalar/full/streamed oracle: PASS\n");
+    std::printf(
+        "mixed completion scalar/full/streamed oracle period=%u: PASS\n",
+        period);
+    return true;
+}
+
+bool TestMixedCompletion()
+{
+    const uint32_t periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u
+    };
+    for (const uint32_t period : periods) {
+        if (!TestMixedCompletionForPeriod(period)) {
+            return false;
+        }
+    }
     return true;
 }
 

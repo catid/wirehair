@@ -539,13 +539,16 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         "mixed completion packing changed unexpectedly");
     const uint32_t expected_projection_words =
         inactive_count / 64u + ((inactive_count & 63u) != 0u ? 1u : 0u);
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t populated_residues =
-        std::min(kMixedCoefficientPeriod, column_count);
+        std::min(coefficient_period, column_count);
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
     const uint64_t projected_elements =
         (uint64_t)inactive_count * packed_words;
-    if (inactive_index.size() != column_count ||
+    if (coefficient_period < kMixedGF256Rows + kMixedGF16Rows ||
+        coefficient_period > kMixedCoefficientPeriod ||
+        inactive_index.size() != column_count ||
         projection_words != expected_projection_words ||
         projection_words == 0u ||
         projection_elements > projection.max_size() ||
@@ -568,7 +571,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     // At or below one complete coefficient period, no two columns share a
     // coefficient vector.  Retain the direct expansion so tiny systems pay no
     // bucket setup cost.
-    if (column_count <= kMixedCoefficientPeriod)
+    if (column_count <= coefficient_period)
     {
         for (uint32_t column = 0; column < column_count; ++column)
         {
@@ -604,17 +607,17 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         return true;
     }
 
-    // Mixed completion coefficients repeat every 244 columns.  Transpose the
-    // projection by coefficient residue before expanding any bits: each of
-    // the first 244 projection rows becomes the parity bucket for that
-    // residue.  Those rows already contain the first affine vector, and all
-    // remaining source rows are at columns >= 244, so no source can alias a
-    // destination.  The caller has finished all other uses of the projection.
-    // This is algebraically identical to dense per-column expansion, costs
-    // (L-244)*projection_words sequential XORs plus 244 final bit scans, and
+    // Mixed completion coefficients repeat every `coefficient_period`
+    // columns.  Transpose the projection by coefficient residue before
+    // expanding any bits: each of the first `coefficient_period` projection
+    // rows becomes the parity bucket for that residue.  Those rows already
+    // contain the first affine vector, and all remaining source rows start at
+    // the period, so no source can alias a destination.  The caller has
+    // finished all other uses of the projection.
+    // This is algebraically identical to dense per-column expansion and
     // requires no additional bucket allocation.
     for (uint32_t initial = 0;
-         initial < kMixedCoefficientPeriod; ++initial)
+         initial < coefficient_period; ++initial)
     {
         const uint32_t inactive = inactive_index[initial];
         if (inactive == UINT32_MAX) {
@@ -631,7 +634,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     }
 
     uint32_t residue = 0u;
-    for (uint32_t column = kMixedCoefficientPeriod;
+    for (uint32_t column = coefficient_period;
          column < column_count; ++column)
     {
         uint64_t* bucket = projection.data() +
@@ -653,7 +656,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 bucket[word] ^= bits[word];
             }
         }
-        if (++residue == kMixedCoefficientPeriod) {
+        if (++residue == coefficient_period) {
             residue = 0u;
         }
     }
@@ -706,11 +709,17 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
         return false;
     }
     projected.assign((size_t)projected_elements, uint64_t{0});
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    if (coefficient_period < kMixedGF256Rows + kMixedGF16Rows ||
+        coefficient_period > kMixedCoefficientPeriod)
+    {
+        return false;
+    }
     uint32_t residue = 0u;
     for (uint32_t column = 0; column < column_count; ++column)
     {
         const uint64_t* column_coefficients = cached_packed.ByResidue[residue];
-        if (++residue == kMixedCoefficientPeriod) {
+        if (++residue == coefficient_period) {
             residue = 0u;
         }
         const auto xor_projected = [&](uint32_t index) {
@@ -894,8 +903,9 @@ WirehairResult SolveMixedCompletionQuotient(
 #else
     const bool use_bulk_subfield_coefficients = false;
 #endif
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t populated_residues =
-        std::min(kMixedCoefficientPeriod, column_count);
+        std::min(coefficient_period, column_count);
     for (uint32_t residue = 0; residue < populated_residues; ++residue)
     {
         std::fill(
@@ -903,7 +913,7 @@ WirehairResult SolveMixedCompletionQuotient(
         PairedBlockXorAccumulator bucket_xor(
             residue_bucket.data(), block_bytes);
         for (uint32_t column = residue;
-             column < column_count; column += kMixedCoefficientPeriod)
+             column < column_count; column += coefficient_period)
         {
             if (inactive_index[column] != UINT32_MAX) continue;
             bucket_xor.Add(
@@ -3419,6 +3429,8 @@ bool VerifyPrecodeSolution(
     }
     const bool cached_mixed_coefficients =
         system.Params.Field == CompletionField::MixedGF256GF16;
+    const uint32_t mixed_coefficient_period =
+        ActiveMixedCoefficientPeriod();
     const MixedCoefficientRows* mixed_rows = cached_mixed_coefficients ?
         GetMixedCoefficientRows() : nullptr;
     if (cached_mixed_coefficients && !mixed_rows) {
@@ -3470,7 +3482,7 @@ bool VerifyPrecodeSolution(
         {
             const uint32_t coefficient_residue = cached_residue;
             if (cached_mixed_coefficients &&
-                ++cached_residue == kMixedCoefficientPeriod)
+                ++cached_residue == mixed_coefficient_period)
             {
                 cached_residue = 0u;
             }

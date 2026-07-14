@@ -279,6 +279,14 @@ per candidate, so differing attempt indices mean the result compares two valid
 selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
 
+Test builds also expose `--mixed-period P` on the mixed `compare` and
+`precodefail` arms.  This thread-local experiment override accepts periods from
+12 through 244 so coefficient-bucket speed and rank can be swept without
+changing a named or serialized profile.  `precodefail --full-payload-solve`
+uses each requested `--bb-list` value in the solver instead of the default
+one- or two-byte rank proxy, making `solve_ms_mu` include the real RHS cost.
+These flags are benchmarking hooks, not wire-format selection controls.
+
 `compare` and `precodecheck` accept deterministic common packet schedules via
 `--schedule iid|burst|permutation|systematic-first|repair-only|adversarial`.
 The reported schedule seed reproduces the exact candidate-compatible ID

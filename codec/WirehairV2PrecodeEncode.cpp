@@ -379,7 +379,7 @@ bool ComputePrecodeValues(
         {
             return false;
         }
-        const uint32_t window = kMixedCoefficientPeriod;
+        const uint32_t window = ActiveMixedCoefficientPeriod();
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 

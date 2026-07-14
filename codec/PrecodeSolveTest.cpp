@@ -34,6 +34,27 @@ public:
     }
 };
 
+class MixedCoefficientPeriodScope
+{
+public:
+    explicit MixedCoefficientPeriodScope(uint32_t period)
+        : Previous(wirehair_v2::ActiveMixedCoefficientPeriod())
+        , Valid(wirehair_v2::SetMixedCoefficientPeriodForTesting(period))
+    {
+    }
+
+    ~MixedCoefficientPeriodScope()
+    {
+        (void)wirehair_v2::SetMixedCoefficientPeriodForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 class BinaryPeelOracleScope
 {
 public:
@@ -1072,8 +1093,12 @@ bool CheckIncrementalResume()
             wirehair_v2::kBinaryQuotientMinBlockBytes);
 }
 
-bool CheckMixedProjectionResidueBucketsOracle()
+bool CheckMixedProjectionResidueBucketsOracleForPeriod(uint32_t period)
 {
+    MixedCoefficientPeriodScope period_scope(period);
+    if (!period_scope.IsValid()) {
+        return false;
+    }
     wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
     MixedProjectionOracleScope oracle_scope;
     static const uint32_t kBlockCounts[] = {
@@ -1203,8 +1228,22 @@ bool CheckMixedProjectionResidueBucketsOracle()
         return false;
     }
     std::printf(
-        "mixed residue-bucket projection oracle comparisons=%llu: PASS\n",
-        (unsigned long long)comparisons);
+        "mixed residue-bucket projection oracle period=%u comparisons=%llu: "
+        "PASS\n",
+        period, (unsigned long long)comparisons);
+    return true;
+}
+
+bool CheckMixedProjectionResidueBucketsOracle()
+{
+    const uint32_t periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u
+    };
+    for (const uint32_t period : periods) {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(period)) {
+            return false;
+        }
+    }
     return true;
 }
 
