@@ -1306,7 +1306,19 @@ bool CheckMixedProjectionResidueBucketsOracle()
     const uint32_t h13_periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 13u
     };
+    const uint32_t h14_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 14u
+    };
     for (const uint32_t period : h13_periods) {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows + 1u))
+        {
+            return false;
+        }
+    }
+    for (const uint32_t period : h14_periods) {
         if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
                 period,
                 wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

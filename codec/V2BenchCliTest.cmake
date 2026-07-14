@@ -259,9 +259,14 @@ expect_success("mixed_period=64 mixed_gf16_rows=3 mixed_geometry=shared-x"
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 3 --mixed-period 64
     --mixed-geometry shared-x)
+expect_success("mixed_period=32 mixed_gf16_rows=4 mixed_geometry=shared-x"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x)
 expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
-    --completion mixed --mixed-gf16-rows 4)
+    --completion mixed --mixed-gf16-rows 5)
 expect_failure("--mixed-period must be in" precodefail --N 64 --bb-list 8
     --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion mixed
     --mixed-gf16-rows 3 --mixed-period 12)

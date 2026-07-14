@@ -11,7 +11,7 @@ static const uint32_t kMixedCoefficientPeriod = 244u;
 static const uint32_t kMixedGF256Rows = 10u;
 static const uint32_t kMixedGF16Rows = 2u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-static const uint32_t kMixedGF16RowsMax = 3u;
+static const uint32_t kMixedGF16RowsMax = 4u;
 #else
 static const uint32_t kMixedGF16RowsMax = kMixedGF16Rows;
 #endif
@@ -30,8 +30,8 @@ uint16_t GF16Inverse(uint16_t x);
 uint16_t GF16MultiplyInitialized(uint16_t x, uint16_t y);
 uint16_t GF16InverseInitialized(uint16_t x);
 
-// In production extension_row is 0 or 1.  Test builds also precompute row 2
-// for the experiment-only H13 completion. X=g^(column mod 244),
+// In production extension_row is 0 or 1.  Test builds also precompute rows 2
+// and 3 for experiment-only H13/H14 completion. X=g^(column mod 244),
 // Y=g^(1000+row).
 uint16_t MixedGF16Coefficient(uint32_t extension_row, uint32_t column);
 

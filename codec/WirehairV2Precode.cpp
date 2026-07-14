@@ -435,8 +435,8 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     const auto build_rows = [](MixedCoefficientGeometry geometry) {
         MixedCoefficientRows result = {};
         // The first ten rows and shared-X extension rows deliberately keep
-        // the frozen H12 X coordinates [12, 256).  H13 appends another Y;
-        // moving X to 13 would rewrite every existing coefficient.
+        // the frozen H12 X coordinates [12, 256).  H13/H14 append Y values;
+        // moving X with H would rewrite every existing coefficient.
         const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;

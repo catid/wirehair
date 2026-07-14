@@ -69,8 +69,8 @@ bool InitializeUnchecked()
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             // The first ten mixed rows use X=12+column and Y=row in the
-            // GF(256) subfield.  Reusing that X here with two Y coordinates
-            // outside the subfield makes all twelve rows one Cauchy matrix.
+            // GF(256) subfield.  Reusing that X here with Y coordinates
+            // outside the subfield makes every active row one Cauchy matrix.
             const uint16_t shared_x = (uint16_t)(
                 kMixedGF256Rows + kMixedGF16Rows + column);
             SharedXCoefficients[row][column] =

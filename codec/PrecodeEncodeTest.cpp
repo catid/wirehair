@@ -414,6 +414,9 @@ bool TestMixedCornerRank()
     const uint32_t shared_h13_periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 16u, 13u
     };
+    const uint32_t shared_h14_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 16u, 14u
+    };
     if (!TestMixedCornerRankForGeometry(
             wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
             wirehair_v2::kMixedGF16Rows,
@@ -426,10 +429,14 @@ bool TestMixedCornerRank()
             sizeof(shared_periods) / sizeof(shared_periods[0])) ||
         !TestMixedCornerRankForGeometry(
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
-            wirehair_v2::kMixedGF16RowsMax,
+            wirehair_v2::kMixedGF16Rows + 1u,
             shared_h13_periods,
-            sizeof(shared_h13_periods) /
-                sizeof(shared_h13_periods[0])))
+            sizeof(shared_h13_periods) / sizeof(shared_h13_periods[0])) ||
+        !TestMixedCornerRankForGeometry(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            shared_h14_periods,
+            sizeof(shared_h14_periods) / sizeof(shared_h14_periods[0])))
     {
         return false;
     }
@@ -1013,7 +1020,19 @@ bool TestMixedCompletion()
     const uint32_t shared_h13_periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 13u
     };
+    const uint32_t shared_h14_periods[] = {
+        wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 14u
+    };
     for (const uint32_t period : shared_h13_periods) {
+        if (!TestMixedCompletionForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows + 1u))
+        {
+            return false;
+        }
+    }
+    for (const uint32_t period : shared_h14_periods) {
         if (!TestMixedCompletionForPeriod(
                 period,
                 wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

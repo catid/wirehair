@@ -207,7 +207,7 @@ uint32_t ActiveMixedPackedCoefficientWords();
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
-/// Select two (frozen H12) or three (experimental H13) extension rows.
+/// Select two (frozen H12), three (H13), or four (H14) extension rows.
 bool SetMixedGF16RowsForTesting(uint32_t rows);
 #endif
 
