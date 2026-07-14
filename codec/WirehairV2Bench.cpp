@@ -421,6 +421,36 @@ bool ParseMixedCoefficientGeometry(
     return false;
 }
 
+const char* MixedResidueScheduleName(
+    wirehair_v2::MixedResidueSchedule schedule)
+{
+    switch (schedule)
+    {
+    case wirehair_v2::MixedResidueSchedule::Ramp: return "ramp";
+    case wirehair_v2::MixedResidueSchedule::Hashed: return "hashed";
+    default: return "constant";
+    }
+}
+
+bool ParseMixedResidueSchedule(
+    const char* text,
+    wirehair_v2::MixedResidueSchedule& schedule)
+{
+    if (!std::strcmp(text, "constant")) {
+        schedule = wirehair_v2::MixedResidueSchedule::Constant;
+        return true;
+    }
+    if (!std::strcmp(text, "ramp")) {
+        schedule = wirehair_v2::MixedResidueSchedule::Ramp;
+        return true;
+    }
+    if (!std::strcmp(text, "hashed")) {
+        schedule = wirehair_v2::MixedResidueSchedule::Hashed;
+        return true;
+    }
+    return false;
+}
+
 struct CompareOptions
 {
     CompareProfileMode ProfileMode = CompareProfileBase;
@@ -1784,6 +1814,11 @@ int CmdCompare(int argc, char** argv)
     bool mixed_geometry_explicit = false;
     uint32_t mixed_residue_skew = 0u;
     bool mixed_residue_skew_explicit = false;
+    wirehair_v2::MixedResidueSchedule mixed_residue_schedule =
+        wirehair_v2::MixedResidueSchedule::Constant;
+    bool mixed_residue_schedule_explicit = false;
+    uint32_t mixed_residue_hash_seed = 0u;
+    bool mixed_residue_hash_seed_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -1903,6 +1938,32 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
             mixed_residue_skew_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-schedule")) {
+            if (!TakeArg(
+                    "compare", "--mixed-residue-schedule",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueSchedule(value, mixed_residue_schedule))
+            {
+                std::fprintf(stderr,
+                    "compare unknown --mixed-residue-schedule token %s "
+                    "(expected constant, ramp, or hashed)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_schedule_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-hash-seed")) {
+            if (!TakeArg(
+                    "compare", "--mixed-residue-hash-seed",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-hash-seed", value,
+                    mixed_residue_hash_seed))
+            {
+                return 1;
+            }
+            mixed_residue_hash_seed_explicit = true;
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
@@ -2028,7 +2089,9 @@ int CmdCompare(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_period_explicit || mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit || mixed_residue_skew_explicit)
+             mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
+             mixed_residue_schedule_explicit ||
+             mixed_residue_hash_seed_explicit)
     {
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
@@ -2062,6 +2125,24 @@ int CmdCompare(int argc, char** argv)
             "shared-x skew in [0,P-H]\n");
         return 1;
     }
+    if (!wirehair_v2::SetMixedResidueScheduleForTesting(
+            mixed_residue_schedule))
+    {
+        std::fprintf(stderr,
+            "compare nonconstant --mixed-residue-schedule requires shared-x, "
+            "P>H, and zero constant skew\n");
+        return 1;
+    }
+    if (mixed_residue_hash_seed_explicit &&
+        mixed_residue_schedule != wirehair_v2::MixedResidueSchedule::Hashed)
+    {
+        std::fprintf(stderr,
+            "compare --mixed-residue-hash-seed requires hashed "
+            "--mixed-residue-schedule\n");
+        return 1;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(
+        mixed_residue_hash_seed);
 #endif
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
@@ -2133,6 +2214,7 @@ int CmdCompare(int argc, char** argv)
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
         "schedule_seed=0x%llx mixed_period=%u mixed_gf16_rows=%u "
         "mixed_geometry=%s mixed_residue_skew=%u "
+        "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -2162,7 +2244,10 @@ int CmdCompare(int argc, char** argv)
         wirehair_v2::ActiveMixedGF16Rows(),
         MixedCoefficientGeometryName(
             wirehair_v2::ActiveMixedCoefficientGeometry()),
-        wirehair_v2::ActiveMixedResidueSkew());
+        wirehair_v2::ActiveMixedResidueSkew(),
+        MixedResidueScheduleName(
+            wirehair_v2::ActiveMixedResidueSchedule()),
+        wirehair_v2::ActiveMixedResidueHashSeed());
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -3814,6 +3899,11 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_geometry_explicit = false;
     uint32_t mixed_residue_skew = 0u;
     bool mixed_residue_skew_explicit = false;
+    wirehair_v2::MixedResidueSchedule mixed_residue_schedule =
+        wirehair_v2::MixedResidueSchedule::Constant;
+    bool mixed_residue_schedule_explicit = false;
+    uint32_t mixed_residue_hash_seed = 0u;
+    bool mixed_residue_hash_seed_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -3956,6 +4046,32 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_residue_skew_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-residue-schedule")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-residue-schedule",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueSchedule(value, mixed_residue_schedule))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --mixed-residue-schedule token %s "
+                    "(expected constant, ramp, or hashed)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_schedule_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-hash-seed")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-residue-hash-seed",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-hash-seed", value,
+                    mixed_residue_hash_seed))
+            {
+                return 1;
+            }
+            mixed_residue_hash_seed_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -4054,7 +4170,9 @@ int CmdPrecodeFail(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_period_explicit || mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit || mixed_residue_skew_explicit)
+             mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
+             mixed_residue_schedule_explicit ||
+             mixed_residue_hash_seed_explicit)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -4088,6 +4206,25 @@ int CmdPrecodeFail(int argc, char** argv)
             "shared-x skew in [0,P-H]\n");
         return 1;
     }
+    if (!wirehair_v2::SetMixedResidueScheduleForTesting(
+            mixed_residue_schedule))
+    {
+        std::fprintf(stderr,
+            "precodefail nonconstant --mixed-residue-schedule requires "
+            "shared-x, "
+            "P>H, and zero constant skew\n");
+        return 1;
+    }
+    if (mixed_residue_hash_seed_explicit &&
+        mixed_residue_schedule != wirehair_v2::MixedResidueSchedule::Hashed)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-residue-hash-seed requires hashed "
+            "--mixed-residue-schedule\n");
+        return 1;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(
+        mixed_residue_hash_seed);
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -4104,6 +4241,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "completion=%s mixed_period=%u mixed_gf16_rows=%u "
             "mixed_geometry=%s mixed_residue_skew=%u "
+            "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
@@ -4112,6 +4250,9 @@ int CmdPrecodeFail(int argc, char** argv)
             MixedCoefficientGeometryName(
                 wirehair_v2::ActiveMixedCoefficientGeometry()),
             wirehair_v2::ActiveMixedResidueSkew(),
+            MixedResidueScheduleName(
+                wirehair_v2::ActiveMixedResidueSchedule()),
+            wirehair_v2::ActiveMixedResidueHashSeed(),
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4231,6 +4372,15 @@ int CmdPrecodeFail(int argc, char** argv)
                                 throw std::runtime_error(
                                     "invalid mixed residue skew");
                             }
+                            if (!wirehair_v2::
+                                    SetMixedResidueScheduleForTesting(
+                                        mixed_residue_schedule))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed residue schedule");
+                            }
+                            wirehair_v2::SetMixedResidueHashSeedForTesting(
+                                mixed_residue_hash_seed);
 #endif
                             uint32_t solve_block_bytes =
                                 completion == PrecodeFailCompletion::Mixed ?

@@ -280,13 +280,26 @@ selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
 
 Test builds also expose `--mixed-period P`, `--mixed-gf16-rows 2|3|4`,
-`--mixed-geometry frozen|shared-x`, and `--mixed-residue-skew S` on the mixed
+`--mixed-geometry frozen|shared-x`, `--mixed-residue-skew S`, and
+`--mixed-residue-schedule constant|ramp|hashed` on the mixed
 `compare` and `precodefail` arms.  The thread-local period override accepts H
 through 244.  A nonzero residue skew is restricted to the shared-X range
 `1..P-H`: each successive P-column block rotates its coefficient buckets by S,
 changing cross-block collision groups while keeping the bucket count,
 per-block balance, operation count, and every H-column encoder corner
-invertible.  The three- and four-row settings are H13/H14
+invertible.  `--mixed-residue-schedule ramp` instead cycles the safe boundary
+steps through `2,3,...,P-H,1`; its longer block-label sequence targets the
+sharp K-dependent resonances left by every constant skew without changing the
+same balance, operation-count, or corner-rank invariants.  The ramp requires
+shared-X geometry, `P>H`, and zero constant skew.  The `hashed` schedule uses
+the same safe step range in a deterministic 127-step sequence chosen so its
+cumulative shift is coprime to periods 28 through 32; the complete block-label
+cycle therefore extends beyond the supported K=64000 domain.  It has the same
+geometry requirements as the ramp.  Test builds additionally accept
+`--mixed-residue-hash-seed U32` with the hashed schedule to search alternate
+safe step sequences; seed zero selects the long-cycle sequence described
+above.  The three- and four-row settings are
+H13/H14
 experiments that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12

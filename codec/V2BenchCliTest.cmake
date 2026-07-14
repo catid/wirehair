@@ -175,10 +175,30 @@ expect_success("mixed_residue_skew=14" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 29
     --mixed-geometry shared-x --mixed-residue-skew 14)
+expect_success("mixed_residue_schedule=ramp" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 28
+    --mixed-geometry shared-x --mixed-residue-schedule ramp)
+expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7"
+    compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 28
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7)
 expect_failure("--mixed-residue-skew must be a corner-preserving" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 4
     --mixed-period 29 --mixed-geometry shared-x --mixed-residue-skew 16)
+expect_failure("nonconstant --mixed-residue-schedule requires" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
+    --precode --precode-profile mixed --mixed-gf16-rows 4
+    --mixed-period 28 --mixed-geometry shared-x --mixed-residue-skew 1
+    --mixed-residue-schedule ramp)
+expect_failure("--mixed-residue-hash-seed requires hashed" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
+    --precode --precode-profile mixed --mixed-gf16-rows 4
+    --mixed-period 28 --mixed-geometry shared-x
+    --mixed-residue-schedule ramp --mixed-residue-hash-seed 7)
 expect_success("mixed_gf16_rows=3.*mixed_geometry=shared-x" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 3
@@ -276,6 +296,16 @@ expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29
     --mixed-geometry shared-x --mixed-residue-skew 14)
+expect_success("mixed_residue_schedule=ramp" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4 --mixed-period 28
+    --mixed-geometry shared-x --mixed-residue-schedule ramp)
+expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4 --mixed-period 28
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7)
 expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 5)

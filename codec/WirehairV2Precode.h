@@ -168,6 +168,13 @@ enum class MixedCoefficientGeometry : uint32_t
     SharedCauchyX = 1
 };
 
+enum class MixedResidueSchedule : uint32_t
+{
+    Constant = 0,
+    Ramp = 1,
+    Hashed = 2
+};
+
 /// Immutable row-major coefficient period shared by mixed encode, solve, and
 /// verification paths.  The accessor initializes both fields and returns null
 /// only if their arithmetic tables could not be initialized.
@@ -200,7 +207,12 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients();
 uint32_t ActiveMixedCoefficientPeriod();
 /// Coefficient residue for a GE column under the active balanced block skew.
 uint32_t ActiveMixedCoefficientResidue(uint32_t column);
+/// Rotation applied to one complete period-sized block.
+uint32_t ActiveMixedResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedResidueSkew();
+MixedResidueSchedule ActiveMixedResidueSchedule();
+uint32_t ActiveMixedResidueHashSeed();
+bool ActiveMixedResiduesRotated();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
@@ -210,6 +222,10 @@ uint32_t ActiveMixedPackedCoefficientWords();
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
 bool SetMixedResidueSkewForTesting(uint32_t skew);
+/// Select a constant, ramp, or hashed corner-safe residue schedule.
+bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule);
+/// Select the deterministic hashed-schedule sequence (benchmark/test only).
+void SetMixedResidueHashSeedForTesting(uint32_t seed);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select two (frozen H12), three (H13), or four (H14) extension rows.
