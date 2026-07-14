@@ -389,7 +389,7 @@ static bool CpuHasNeon = false;     // if not, then we have to check at runtime.
     #pragma warning(disable: 4752) // found Intel(R) Advanced Vector Extensions; consider using /arch:AVX
 #endif
 
-#ifdef GF256_TRY_AVX2
+#if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
 static bool CpuHasAVX2 = false;
 #endif
 #ifdef GF256_TRY_GFNI
@@ -539,7 +539,7 @@ extern "C" void gf256_get_active_x86_cpu_features(
 # if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     features->SSSE3 = CpuHasSSSE3;
 # endif
-# if defined(GF256_TRY_AVX2)
+# if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
     features->AVX2 = CpuHasAVX2;
 # endif
 # if defined(GF256_TRY_GFNI)
@@ -603,9 +603,9 @@ static void gf256_architecture_init()
     CpuHasSSSE3 = features.SSSE3 != 0;
 #endif
 
-#if defined(GF256_TRY_AVX2)
+#if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
     CpuHasAVX2 = features.AVX2 != 0;
-#endif // GF256_TRY_AVX2
+#endif // GF256_TRY_AVX2 || GF256_TRY_TARGET_AVX2
 
 #if defined(GF256_TRY_GFNI)
     CpuHasGFNI = features.GFNI != 0;
@@ -1862,6 +1862,156 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
     }
 }
 
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
+
+// Runtime AVX2 helpers deliberately broadcast the portable 128-bit tables.
+// This avoids changing gf256_ctx layout in baseline translation units while
+// retaining the 32-byte nibble-shuffle kernels on capable x86 CPUs.
+static GF256_AVX2_TARGET int gf256_mul_mem_avx2_target(
+    void* vz, const void* vx, uint8_t y, int bytes)
+{
+    const __m256i table_low = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y));
+    const __m256i table_high = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y));
+    const __m256i clear_low = _mm256_set1_epi8(0x0f);
+    const int vector_bytes = bytes & ~31;
+    const uint8_t* const source = reinterpret_cast<const uint8_t*>(vx);
+    uint8_t* const destination = reinterpret_cast<uint8_t*>(vz);
+    for (int offset = 0; offset < vector_bytes; offset += 32)
+    {
+        __m256i input = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(source + offset));
+        __m256i low = _mm256_and_si256(input, clear_low);
+        input = _mm256_srli_epi64(input, 4);
+        const __m256i high = _mm256_and_si256(input, clear_low);
+        low = _mm256_shuffle_epi8(table_low, low);
+        const __m256i product = _mm256_xor_si256(
+            low, _mm256_shuffle_epi8(table_high, high));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + offset), product);
+    }
+    return vector_bytes;
+}
+
+static GF256_AVX2_TARGET int gf256_muladd_mem_avx2_target(
+    void* GF256_RESTRICT vz,
+    const void* GF256_RESTRICT vx,
+    uint8_t y,
+    int bytes)
+{
+    const __m256i table_low = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y));
+    const __m256i table_high = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y));
+    const __m256i clear_low = _mm256_set1_epi8(0x0f);
+    const int vector_bytes = bytes & ~31;
+    const uint8_t* const source = reinterpret_cast<const uint8_t*>(vx);
+    uint8_t* const destination = reinterpret_cast<uint8_t*>(vz);
+    int offset = 0;
+    for (; offset + 64 <= vector_bytes; offset += 64)
+    {
+        __m256i input0 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(source + offset));
+        __m256i input1 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(source + offset + 32));
+        __m256i low0 = _mm256_and_si256(input0, clear_low);
+        __m256i low1 = _mm256_and_si256(input1, clear_low);
+        input0 = _mm256_srli_epi64(input0, 4);
+        input1 = _mm256_srli_epi64(input1, 4);
+        const __m256i high0 = _mm256_and_si256(input0, clear_low);
+        const __m256i high1 = _mm256_and_si256(input1, clear_low);
+        low0 = _mm256_shuffle_epi8(table_low, low0);
+        low1 = _mm256_shuffle_epi8(table_low, low1);
+        const __m256i product0 = _mm256_xor_si256(
+            low0, _mm256_shuffle_epi8(table_high, high0));
+        const __m256i product1 = _mm256_xor_si256(
+            low1, _mm256_shuffle_epi8(table_high, high1));
+        __m256i* const destination0 =
+            reinterpret_cast<__m256i*>(destination + offset);
+        __m256i* const destination1 =
+            reinterpret_cast<__m256i*>(destination + offset + 32);
+        _mm256_storeu_si256(
+            destination0,
+            _mm256_xor_si256(
+                _mm256_loadu_si256(destination0), product0));
+        _mm256_storeu_si256(
+            destination1,
+            _mm256_xor_si256(
+                _mm256_loadu_si256(destination1), product1));
+    }
+    if (offset < vector_bytes)
+    {
+        __m256i input = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(source + offset));
+        __m256i low = _mm256_and_si256(input, clear_low);
+        input = _mm256_srli_epi64(input, 4);
+        const __m256i high = _mm256_and_si256(input, clear_low);
+        low = _mm256_shuffle_epi8(table_low, low);
+        const __m256i product = _mm256_xor_si256(
+            low, _mm256_shuffle_epi8(table_high, high));
+        __m256i* const output =
+            reinterpret_cast<__m256i*>(destination + offset);
+        _mm256_storeu_si256(
+            output,
+            _mm256_xor_si256(_mm256_loadu_si256(output), product));
+    }
+    return vector_bytes;
+}
+
+static GF256_AVX2_TARGET int gf256_muladd_multi_mem_avx2_target(
+    void* const* GF256_RESTRICT destinations,
+    const uint8_t* GF256_RESTRICT scales,
+    int destination_count,
+    const uint8_t* GF256_RESTRICT source,
+    int begin,
+    int bytes)
+{
+    const __m256i clear_low = _mm256_set1_epi8(0x0f);
+    const int vector_end = begin + ((bytes - begin) & ~31);
+    for (int base = 0; base < destination_count; base += 4)
+    {
+        const int group_count = destination_count - base < 4 ?
+            destination_count - base : 4;
+        __m256i table_low[4];
+        __m256i table_high[4];
+        for (int local = 0; local < group_count; ++local)
+        {
+            const uint8_t scale = scales[base + local];
+            table_low[local] = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + scale));
+            table_high[local] = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + scale));
+        }
+        for (int offset = begin; offset < vector_end; offset += 32)
+        {
+            __m256i input = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(source + offset));
+            const __m256i low = _mm256_and_si256(input, clear_low);
+            input = _mm256_srli_epi64(input, 4);
+            const __m256i high = _mm256_and_si256(input, clear_low);
+            for (int local = 0; local < group_count; ++local)
+            {
+                if (scales[base + local] == 0u) continue;
+                const __m256i product = _mm256_xor_si256(
+                    _mm256_shuffle_epi8(table_low[local], low),
+                    _mm256_shuffle_epi8(table_high[local], high));
+                __m256i* const destination =
+                    reinterpret_cast<__m256i*>(
+                        reinterpret_cast<uint8_t*>(
+                            destinations[base + local]) + offset);
+                _mm256_storeu_si256(
+                    destination,
+                    _mm256_xor_si256(
+                        _mm256_loadu_si256(destination), product));
+            }
+        }
+    }
+    return vector_end;
+}
+
+#endif
+
 #if !defined(GF256_TARGET_MOBILE) && \
     (defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3))
 
@@ -2137,6 +2287,16 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_GFNI_ACTIVE)
+    {
+        const int vector_bytes =
+            gf256_mul_mem_avx2_target(z16, x16, y, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
@@ -2363,6 +2523,16 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (bytes >= 32 && CpuHasAVX2 && !GF256_GFNI_ACTIVE)
+    {
+        const int vector_bytes =
+            gf256_muladd_mem_avx2_target(z16, x16, y, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
@@ -2574,6 +2744,13 @@ extern "C" void gf256_muladd_multi_mem(
         offset = vector_end;
     }
 # endif
+# if defined(GF256_TRY_TARGET_AVX2)
+    if (CpuHasAVX2 && !GF256_GFNI_ACTIVE)
+    {
+        offset = gf256_muladd_multi_mem_avx2_target(
+            destinations, scales, destination_count, x, offset, bytes);
+    }
+# endif // GF256_TRY_TARGET_AVX2
 # if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (CpuHasSSSE3)
     {

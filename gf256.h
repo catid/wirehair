@@ -80,7 +80,19 @@
     #define GF256_ALIGN_BYTES 32
 #else // __AVX2__
     #define GF256_ALIGN_BYTES 16
+# if (defined(__GNUC__) || defined(__clang__)) && \
+     (defined(__i386__) || defined(__x86_64__))
+    // Keep gf256_ctx at its portable layout while allowing individually
+    // target-qualified AVX2 helpers to reuse the canonical 128-bit tables.
+    #define GF256_TRY_TARGET_AVX2
+    #define GF256_AVX2_TARGET __attribute__((target("avx2")))
+    #include <immintrin.h>
+# endif
 #endif // __AVX2__
+
+#if !defined(GF256_AVX2_TARGET)
+    #define GF256_AVX2_TARGET
+#endif
 
 // Ablation S1 (wirehair-cqu): GFNI gf2p8affineqb constant-multiply for poly 0x14D.
 // Enabled when built with -DWH_GFNI=1 on a target that exposes GFNI+AVX512F/BW.

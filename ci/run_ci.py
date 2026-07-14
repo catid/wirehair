@@ -896,6 +896,12 @@ def run_qemu(args):
             "Active x86 kernels: SSSE3=0 AVX2=0 GFNI=0 AVX512=0",
         ),
         (
+            "haswell-runtime-avx2",
+            "Haswell",
+            [],
+            "Active x86 kernels: SSSE3=1 AVX2=1 GFNI=0 AVX512=0",
+        ),
+        (
             "haswell-avx2",
             "Haswell",
             ["-mavx2"],
