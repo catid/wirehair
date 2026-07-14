@@ -216,6 +216,12 @@ expect_failure("mixed experiment flags require a mixed precode profile" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode --precode-profile certified
     --mixed-geometry shared-x)
+expect_success("mixed_mix_count=2" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-mix-count 2)
+expect_failure("--mixed-mix-count must be in" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-mix-count 1)
 expect_success("v2_precode[ ]+17[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 17 --max-message-mib 1 --loss 0 --precode
     --precode-profile certified)
@@ -292,6 +298,11 @@ expect_success("mixed_period=32 mixed_gf16_rows=4 mixed_geometry=shared-x"
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 32
     --mixed-geometry shared-x)
+expect_success("source_hits_override=2" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 2 --threads 2 --loss 0.1 --source-hits 2)
+expect_success("packet_peel_seed_xor=0x7" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --packet-peel-seed-xor 7)
 expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29
@@ -309,6 +320,8 @@ expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7 mixed_
 expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 5)
+expect_failure("--source-hits must be in" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 1 --loss 0.1 --source-hits 0)
 expect_failure("--mixed-period must be in" precodefail --N 64 --bb-list 8
     --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion mixed
     --mixed-gf16-rows 3 --mixed-period 12)

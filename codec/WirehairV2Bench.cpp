@@ -1105,7 +1105,9 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::CompletionField completion =
         wirehair_v2::CompletionField::GF256,
     bool cache_encoder_source = false,
-    bool cache_decoder_systematic = false)
+    bool cache_decoder_systematic = false,
+    uint32_t recovery_mix_count =
+        wirehair_v2::kCertifiedPacketMixCount)
 {
     TrialResult tr = {};
     tr.TerminalResult = Wirehair_Error;
@@ -1120,6 +1122,7 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::Codec dec;
     wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
     encoder_options.Completion = completion;
+    encoder_options.RecoveryMixCount = recovery_mix_count;
     encoder_options.CacheSystematicSource = cache_encoder_source;
     encoder_options.CacheReceivedSystematicPackets = cache_decoder_systematic;
     const bool use_encoder_options =
@@ -1141,6 +1144,8 @@ TrialResult RunV2PrecodeTrial(
         if (result == Wirehair_Success &&
             (enc.Profile().V2CompletionField != completion ||
              dec.Profile().V2CompletionField != completion ||
+             enc.Profile().V2RecoveryMixCount != recovery_mix_count ||
+             dec.Profile().V2RecoveryMixCount != recovery_mix_count ||
              dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
              dec.Profile().V2PacketPeelSeed !=
                 enc.Profile().V2PacketPeelSeed ||
@@ -1846,7 +1851,9 @@ int CmdCompare(int argc, char** argv)
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
     bool mixed_residue_hash_keyed = false;
+    uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    bool mixed_mix_count_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
@@ -1939,6 +1946,16 @@ int CmdCompare(int argc, char** argv)
             trial_details = true;
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (!std::strcmp(argv[i], "--mixed-mix-count")) {
+            if (!TakeArg(
+                    "compare", "--mixed-mix-count", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-mix-count", value, mixed_mix_count))
+            {
+                return 1;
+            }
+            mixed_mix_count_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
             if (!TakeArg(
                     "compare", "--mixed-gf16-rows", argc, argv, i, value) ||
@@ -2133,7 +2150,8 @@ int CmdCompare(int argc, char** argv)
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_period_explicit || mixed_geometry_explicit ||
+    else if (mixed_mix_count_explicit || mixed_period_explicit ||
+             mixed_geometry_explicit ||
              mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
@@ -2142,6 +2160,14 @@ int CmdCompare(int argc, char** argv)
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
             "profile\n");
+        return 1;
+    }
+    if (mixed_mix_count < 2u ||
+        mixed_mix_count > wirehair_v2::kCertifiedPacketMixCount)
+    {
+        std::fprintf(stderr,
+            "compare --mixed-mix-count must be in [2,%u]\n",
+            wirehair_v2::kCertifiedPacketMixCount);
         return 1;
     }
     if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
@@ -2258,7 +2284,8 @@ int CmdCompare(int argc, char** argv)
         "auto_seed=0x%llx dense_override=%u dense_delta=%d "
         "dense_candidate=%u precode=%u precode_cache=%u "
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
-        "schedule_seed=0x%llx mixed_period=%u mixed_gf16_rows=%u "
+        "schedule_seed=0x%llx mixed_mix_count=%u mixed_period=%u "
+        "mixed_gf16_rows=%u "
         "mixed_geometry=%s mixed_residue_skew=%u "
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
@@ -2287,6 +2314,7 @@ int CmdCompare(int argc, char** argv)
         cache_decoder_systematic ? 1u : 0u,
         PacketScheduleName(schedule_kind),
         (unsigned long long)seed,
+        mixed_mix_count,
         wirehair_v2::ActiveMixedCoefficientPeriod(),
         wirehair_v2::ActiveMixedGF16Rows(),
         MixedCoefficientGeometryName(
@@ -2389,13 +2417,21 @@ int CmdCompare(int argc, char** argv)
                 if (include_precode) {
                     precode_result = RunV2PrecodeTrial(
                         N, block_bytes, loss, trial_seed, &packet_schedule,
-                        completion);
+                        completion, false, false,
+                        completion ==
+                                wirehair_v2::CompletionField::MixedGF256GF16 ?
+                            mixed_mix_count :
+                            wirehair_v2::kCertifiedPacketMixCount);
                 }
                 if (include_precode_cache) {
                     cache_result = RunV2PrecodeTrial(
                         N, block_bytes, loss, trial_seed, &packet_schedule,
                         completion,
-                        cache_encoder_source, cache_decoder_systematic);
+                        cache_encoder_source, cache_decoder_systematic,
+                        completion ==
+                                wirehair_v2::CompletionField::MixedGF256GF16 ?
+                            mixed_mix_count :
+                            wirehair_v2::kCertifiedPacketMixCount);
                 }
             };
             const bool mixed_first =
@@ -3952,8 +3988,11 @@ int CmdPrecodeFail(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
     bool mixed_residue_hash_keyed = false;
+    uint32_t source_hits_override = 0u;
+    uint32_t packet_peel_seed_xor = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    bool source_hits_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
@@ -4064,6 +4103,27 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
+        }
+        else if (!std::strcmp(argv[i], "--source-hits")) {
+            if (!TakeArg(
+                    "precodefail", "--source-hits", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--source-hits", value, source_hits_override))
+            {
+                return 1;
+            }
+            source_hits_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--packet-peel-seed-xor")) {
+            if (!TakeArg(
+                    "precodefail", "--packet-peel-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--packet-peel-seed-xor", value,
+                    packet_peel_seed_xor))
+            {
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
             if (!TakeArg(
@@ -4256,6 +4316,13 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::kMixedGF16RowsMax);
         return 1;
     }
+    if (source_hits_explicit &&
+        (source_hits_override == 0u || source_hits_override > 8u))
+    {
+        std::fprintf(stderr,
+            "precodefail --source-hits must be in [1,8]\n");
+        return 1;
+    }
     if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
     {
         std::fprintf(stderr,
@@ -4299,8 +4366,11 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
+            "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
+            source_hits_override,
+            packet_peel_seed_xor,
             full_payload_solve ? 1u : 0u);
     }
     else
@@ -4311,6 +4381,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_geometry=%s mixed_residue_skew=%u "
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
+            "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
@@ -4323,6 +4394,8 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::ActiveMixedResidueSchedule()),
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
+            source_hits_override,
+            packet_peel_seed_xor,
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4361,7 +4434,8 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::MakeCertifiedParams(K, matrix_seed);
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-            profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+            profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
+            packet_peel_seed_xor;
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
         std::map<uint32_t, PairedMixOutcomes> paired_outcomes;
@@ -4369,6 +4443,9 @@ int CmdPrecodeFail(int argc, char** argv)
         {
             base_config.MixCount = (uint32_t)mix_count_value;
             wirehair_v2::PrecodeParams base_params = canonical_params;
+            if (source_hits_override != 0u) {
+                base_params.SourceHits = source_hits_override;
+            }
             base_params.HeavyFamily = heavy_family;
             wirehair_v2::PrecodeSystem system;
             wirehair_v2::PacketRowConfig config;

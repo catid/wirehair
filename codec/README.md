@@ -141,6 +141,10 @@ profiles, alternates their execution order by trial, and emits separate
 V1-compatible wrapper comparison rather than WH2.  The mixed profile represents
 payloads as byte pairs, so `mixed` and `both` reject any odd block-byte entry
 before printing benchmark results.
+Test builds accept `compare --mixed-mix-count 2|3` with a mixed precode
+profile.  The encoder binds that recovery-row fanout into its serialized
+profile and the decoder consumes the bound value, allowing end-to-end speed
+and recovery comparisons without changing a named profile.
 
 The `compare` cached arm has separate default-off local storage controls.  Use
 `--precode-encoder-cache` to retain one exact message copy for direct
@@ -279,11 +283,16 @@ per candidate, so differing attempt indices mean the result compares two valid
 selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
 
-Test builds also expose `--mixed-period P`, `--mixed-gf16-rows 2|3|4`,
+Test builds also expose `--source-hits N` and
+`--packet-peel-seed-xor U32` on `precodefail`.  The latter perturbs the
+profile-derived sparse-row seed without replacing its K-dependent derivation,
+allowing solve-graph cost and rank to be screened independently of row degree.
+The mixed
+`compare` and `precodefail` arms additionally expose `--mixed-period P`,
+`--mixed-gf16-rows 2|3|4`,
 `--mixed-geometry frozen|shared-x`, `--mixed-residue-skew S`, and
-`--mixed-residue-schedule constant|ramp|hashed` on the mixed
-`compare` and `precodefail` arms.  The thread-local period override accepts H
-through 244.  A nonzero residue skew is restricted to the shared-X range
+`--mixed-residue-schedule constant|ramp|hashed`.  The thread-local period
+override accepts H through 244.  A nonzero residue skew is restricted to the
 `1..P-H`: each successive P-column block rotates its coefficient buckets by S,
 changing cross-block collision groups while keeping the bucket count,
 per-block balance, operation count, and every H-column encoder corner
@@ -302,13 +311,16 @@ above.  `--mixed-residue-hash-keyed` instead derives a distinct sequence from
 the base hash seed and K, then advances to the first sequence whose 127-step
 cumulative shift is coprime to P.  This preserves the full `127*P` block-label
 cycle while breaking the fixed schedule/K coupling that produces sharp
-cross-K resonances.  The three- and four-row settings are
-H13/H14
-experiments that append one or two GF(2^16) completion rows;
+cross-K resonances.  The three- and four-row settings are H13/H14 experiments
+that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12
 profile's coefficients.  Together these hooks allow coefficient-bucket speed
 and rank to be swept without changing a named or serialized profile.
+The source-hit override accepts `[1,8]`; an omitted override is reported as
+zero.  It changes only the experiment's staircase fanout, allowing its rank
+and block-XOR tradeoff to be measured without changing the certified
+block-count policy.
 `precodefail --full-payload-solve`
 uses each requested `--bb-list` value in the solver instead of the default
 one- or two-byte rank proxy, making `solve_ms_mu` include the real RHS cost.
