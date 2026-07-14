@@ -298,7 +298,11 @@ cycle therefore extends beyond the supported K=64000 domain.  It has the same
 geometry requirements as the ramp.  Test builds additionally accept
 `--mixed-residue-hash-seed U32` with the hashed schedule to search alternate
 safe step sequences; seed zero selects the long-cycle sequence described
-above.  The three- and four-row settings are
+above.  `--mixed-residue-hash-keyed` instead derives a distinct sequence from
+the base hash seed and K, then advances to the first sequence whose 127-step
+cumulative shift is coprime to P.  This preserves the full `127*P` block-label
+cycle while breaking the fixed schedule/K coupling that produces sharp
+cross-K resonances.  The three- and four-row settings are
 H13/H14
 experiments that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column

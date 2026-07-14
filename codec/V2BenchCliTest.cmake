@@ -179,12 +179,12 @@ expect_success("mixed_residue_schedule=ramp" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule ramp)
-expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7"
+expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7 mixed_residue_hash_keyed=1"
     compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule hashed
-    --mixed-residue-hash-seed 7)
+    --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed)
 expect_failure("--mixed-residue-skew must be a corner-preserving" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 4
@@ -194,7 +194,7 @@ expect_failure("nonconstant --mixed-residue-schedule requires" compare
     --precode --precode-profile mixed --mixed-gf16-rows 4
     --mixed-period 28 --mixed-geometry shared-x --mixed-residue-skew 1
     --mixed-residue-schedule ramp)
-expect_failure("--mixed-residue-hash-seed requires hashed" compare
+expect_failure("residue hash seed/keying requires hashed" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 4
     --mixed-period 28 --mixed-geometry shared-x
@@ -300,12 +300,12 @@ expect_success("mixed_residue_schedule=ramp" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule ramp)
-expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7"
+expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7 mixed_residue_hash_keyed=1"
     precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule hashed
-    --mixed-residue-hash-seed 7)
+    --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed)
 expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 5)
