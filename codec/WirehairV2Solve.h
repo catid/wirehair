@@ -98,6 +98,25 @@ struct PrecodeSolveStats
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /**
+    Multiply packet ids by an odd 32-bit constant before initializing the row
+    PRNG.  Odd multiplication is a permutation of the complete id domain, so
+    experiments can decorrelate consecutive packet streams without collisions.
+    Returns false without changing the active multiplier for zero/even input.
+*/
+bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier);
+
+/** Apply a bijective 32-bit avalanche permutation after id multiplication. */
+void SetPacketRowSeedAvalancheForTesting(bool enabled);
+
+/**
+    XOR the peel seed for odd packet ids in the calling thread.  This is a
+    test-only control for measuring whether interleaving two deterministic
+    packet-graph phases reduces block-count resonances.  Zero restores the
+    production equation mapping.
+*/
+void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
+
+/**
     Enable an independent dense-expansion oracle for mixed completion
     coefficient projection.  Balanced enable/disable calls are nestable.  Test
     code uses this to compare the optimized residue-bucket projection against

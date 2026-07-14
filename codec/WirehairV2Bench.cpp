@@ -3990,6 +3990,9 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_residue_hash_keyed = false;
     uint32_t source_hits_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
+    uint32_t odd_packet_peel_seed_xor = 0u;
+    uint32_t packet_row_seed_multiplier = 1u;
+    bool packet_row_seed_avalanche = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
@@ -4124,6 +4127,37 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+        }
+        else if (!std::strcmp(
+                     argv[i], "--odd-packet-peel-seed-xor"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--odd-packet-peel-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--odd-packet-peel-seed-xor", value,
+                    odd_packet_peel_seed_xor))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(
+                     argv[i], "--packet-row-seed-multiplier"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--packet-row-seed-multiplier",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--packet-row-seed-multiplier", value,
+                    packet_row_seed_multiplier))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(
+                     argv[i], "--packet-row-seed-avalanche"))
+        {
+            packet_row_seed_avalanche = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
             if (!TakeArg(
@@ -4360,6 +4394,18 @@ int CmdPrecodeFail(int argc, char** argv)
     }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+            packet_row_seed_multiplier))
+    {
+        std::fprintf(stderr,
+            "precodefail --packet-row-seed-multiplier must be odd and "
+            "nonzero\n");
+        return 1;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(
+        packet_row_seed_avalanche);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+        odd_packet_peel_seed_xor);
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -4367,10 +4413,15 @@ int CmdPrecodeFail(int argc, char** argv)
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
-            "full_payload_solve=%u\n",
+            "odd_packet_peel_seed_xor=0x%x "
+            "packet_row_seed_multiplier=0x%x "
+            "packet_row_seed_avalanche=%u full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
+            odd_packet_peel_seed_xor,
+            packet_row_seed_multiplier,
+            packet_row_seed_avalanche ? 1u : 0u,
             full_payload_solve ? 1u : 0u);
     }
     else
@@ -4382,7 +4433,9 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
-            "full_payload_solve=%u\n",
+            "odd_packet_peel_seed_xor=0x%x "
+            "packet_row_seed_multiplier=0x%x "
+            "packet_row_seed_avalanche=%u full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -4396,6 +4449,9 @@ int CmdPrecodeFail(int argc, char** argv)
             mixed_residue_hash_keyed ? 1u : 0u,
             source_hits_override,
             packet_peel_seed_xor,
+            odd_packet_peel_seed_xor,
+            packet_row_seed_multiplier,
+            packet_row_seed_avalanche ? 1u : 0u,
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4560,6 +4616,18 @@ int CmdPrecodeFail(int argc, char** argv)
                             }
                             wirehair_v2::SetMixedResidueHashSeedForTesting(
                                 active_hash_seed);
+                            if (!wirehair_v2::
+                                    SetPacketRowSeedMultiplierForTesting(
+                                        packet_row_seed_multiplier))
+                            {
+                                throw std::runtime_error(
+                                    "invalid packet row seed multiplier");
+                            }
+                            wirehair_v2::
+                                SetPacketRowSeedAvalancheForTesting(
+                                    packet_row_seed_avalanche);
+                            wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+                                odd_packet_peel_seed_xor);
 #endif
                             uint32_t solve_block_bytes =
                                 completion == PrecodeFailCompletion::Mixed ?

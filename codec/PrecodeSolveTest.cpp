@@ -672,6 +672,190 @@ bool CheckPacketEvaluationFusion()
     return true;
 }
 
+bool CheckOddPacketPeelSeedInterleave()
+{
+    static const uint32_t K = 251u;
+    static const uint32_t even_id = 100u;
+    static const uint32_t odd_id = 101u;
+    static const uint32_t seed_xor = 19u;
+    wirehair_v2::PacketRowConfig base;
+    base.PeelSeed = UINT32_C(0x12345678);
+    base.MixCount = 2u;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                K, UINT64_C(0x4f44445041434b54)),
+            system))
+    {
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, base.MixCount)) {
+        return false;
+    }
+
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u)) {
+        return false;
+    }
+    const std::vector<uint32_t> base_even =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, even_id, base);
+    const std::vector<uint32_t> base_odd =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, odd_id, base);
+    wirehair_v2::PacketRowConfig alternate = base;
+    alternate.PeelSeed ^= seed_xor;
+    const std::vector<uint32_t> alternate_odd =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, odd_id, alternate);
+
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(seed_xor);
+    const std::vector<uint32_t> blended_even =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, even_id, base);
+    const std::vector<uint32_t> blended_odd =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, odd_id, base);
+    const std::vector<uint32_t> cached_even =
+        wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+            K, P, even_id, base, runtime);
+    const std::vector<uint32_t> cached_odd =
+        wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+            K, P, odd_id, base, runtime);
+    static const uint32_t block_bytes = 17u;
+    std::vector<uint8_t> intermediate(
+        (size_t)(K + P) * block_bytes);
+    for (size_t i = 0; i < intermediate.size(); ++i) {
+        intermediate[i] = (uint8_t)(i * 131u + (i >> 5));
+    }
+    const std::vector<uint8_t> expected_odd = ReferencePacket(
+        K, P, odd_id, alternate, intermediate.data(), block_bytes);
+    std::vector<uint8_t> evaluated_odd(block_bytes, 0xa5u);
+    uint64_t operations = 0u;
+    const bool evaluated =
+        wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
+            system, base, runtime, intermediate.data(), block_bytes,
+            odd_id, evaluated_odd.data(), &operations);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+
+    if (base_even.empty() || base_odd.empty() || alternate_odd.empty() ||
+        alternate_odd == base_odd || blended_even != base_even ||
+        blended_odd != alternate_odd || cached_even != blended_even ||
+        cached_odd != blended_odd || !evaluated ||
+        evaluated_odd != expected_odd || operations != alternate_odd.size())
+    {
+        std::fprintf(stderr,
+            "solve: odd packet peel-seed interleave mismatch\n");
+        return false;
+    }
+    std::printf("odd packet peel-seed interleave: PASS\n");
+    return true;
+}
+
+bool CheckPacketRowSeedPermutation()
+{
+    static const uint32_t K = 251u;
+    static const uint32_t block_id = 101u;
+    static const uint32_t multiplier = UINT32_C(0x9e3779b1);
+    static const uint32_t block_bytes = 17u;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                K, UINT64_C(0x524f575045524d55)),
+            system))
+    {
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x13579bdf);
+    config.MixCount = 2u;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u)) {
+        return false;
+    }
+    const uint32_t permuted_id = block_id * multiplier;
+    const std::vector<uint32_t> expected_row =
+        wirehair_v2::GeneratePacketMatrixRow(
+            K, P, permuted_id, config);
+    std::vector<uint8_t> intermediate(
+        (size_t)(K + P) * block_bytes);
+    for (size_t i = 0; i < intermediate.size(); ++i) {
+        intermediate[i] = (uint8_t)(i * 67u + (i >> 3));
+    }
+    const std::vector<uint8_t> expected_block = ReferencePacket(
+        K, P, permuted_id, config, intermediate.data(), block_bytes);
+
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(multiplier)) {
+        return false;
+    }
+    const std::vector<uint32_t> actual_row =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+    const std::vector<uint32_t> cached_row =
+        wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+            K, P, block_id, config, runtime);
+    std::vector<uint8_t> actual_block(block_bytes, 0xa5u);
+    uint64_t operations = 0u;
+    const bool evaluated =
+        wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
+            system, config, runtime, intermediate.data(), block_bytes,
+            block_id, actual_block.data(), &operations);
+    const bool invalid_preserved =
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(0u) &&
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(2u) &&
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config) ==
+            actual_row;
+    (void)wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u);
+
+    uint32_t avalanche_id = permuted_id;
+    avalanche_id = (avalanche_id ^ (avalanche_id >> 16)) *
+        UINT32_C(0x7feb352d);
+    avalanche_id = (avalanche_id ^ (avalanche_id >> 15)) *
+        UINT32_C(0x846ca68b);
+    avalanche_id ^= avalanche_id >> 16;
+    const std::vector<uint32_t> expected_avalanche_row =
+        wirehair_v2::GeneratePacketMatrixRow(
+            K, P, avalanche_id, config);
+    const std::vector<uint8_t> expected_avalanche_block = ReferencePacket(
+        K, P, avalanche_id, config, intermediate.data(), block_bytes);
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(multiplier)) {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(true);
+    const std::vector<uint32_t> actual_avalanche_row =
+        wirehair_v2::GeneratePacketMatrixRow(K, P, block_id, config);
+    std::vector<uint8_t> actual_avalanche_block(block_bytes, 0xa5u);
+    uint64_t avalanche_operations = 0u;
+    const bool avalanche_evaluated =
+        wirehair_v2::EvaluatePacketBlockForValidatedSystemWithRuntime(
+            system, config, runtime, intermediate.data(), block_bytes,
+            block_id, actual_avalanche_block.data(), &avalanche_operations);
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    (void)wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u);
+
+    if (expected_row.empty() || actual_row != expected_row ||
+        cached_row != expected_row || !evaluated ||
+        actual_block != expected_block || operations != expected_row.size() ||
+        !invalid_preserved || expected_avalanche_row.empty() ||
+        actual_avalanche_row != expected_avalanche_row ||
+        !avalanche_evaluated ||
+        actual_avalanche_block != expected_avalanche_block ||
+        avalanche_operations != expected_avalanche_row.size())
+    {
+        std::fprintf(stderr,
+            "solve: packet row-seed permutation mismatch\n");
+        return false;
+    }
+    std::printf("packet row-seed permutation: PASS\n");
+    return true;
+}
+
 bool CheckPacketRuntimeBoundaries()
 {
     struct Domain
@@ -3076,6 +3260,8 @@ int main(int argc, char** argv)
     bool ok = true;
     ok = CheckLowestBitIndex() && ok;
     ok = CheckPacketEvaluationFusion() && ok;
+    ok = CheckOddPacketPeelSeedInterleave() && ok;
+    ok = CheckPacketRowSeedPermutation() && ok;
     ok = CheckPacketRuntimeBoundaries() && ok;
     ok = CheckTinyDenseOracle() && ok;
     ok = CheckHeavyCoefficientBoundaryOracle() && ok;

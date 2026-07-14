@@ -18,6 +18,12 @@
 namespace wirehair_v2 {
 namespace {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local uint32_t OddPacketPeelSeedXor = 0u;
+thread_local uint32_t PacketRowSeedMultiplier = 1u;
+thread_local bool PacketRowSeedAvalanche = false;
+#endif
+
 struct ColumnSpan
 {
     const uint32_t* First = nullptr;
@@ -107,6 +113,36 @@ private:
     size_t NextRow = 0u;
 };
 
+inline uint32_t PacketRowSeedForBlockId(uint32_t block_id)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint32_t seed = block_id * PacketRowSeedMultiplier;
+    if (PacketRowSeedAvalanche)
+    {
+        seed = (seed ^ (seed >> 16)) * UINT32_C(0x7feb352d);
+        seed = (seed ^ (seed >> 15)) * UINT32_C(0x846ca68b);
+        seed ^= seed >> 16;
+    }
+    return seed;
+#else
+    return block_id;
+#endif
+}
+
+inline uint32_t PacketPeelSeedForBlockId(
+    uint32_t block_id,
+    const PacketRowConfig& config)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if ((block_id & 1u) != 0u) {
+        return config.PeelSeed ^ OddPacketPeelSeedXor;
+    }
+#else
+    (void)block_id;
+#endif
+    return config.PeelSeed;
+}
+
 bool InitializePacketRowParameters(
     uint32_t source_count,
     uint32_t precode_count,
@@ -121,8 +157,8 @@ bool InitializePacketRowParameters(
         return false;
     }
     params.Initialize(
-        block_id,
-        config.PeelSeed,
+        PacketRowSeedForBlockId(block_id),
+        PacketPeelSeedForBlockId(block_id, config),
         (uint16_t)source_count,
         (uint16_t)precode_count);
     return true;
@@ -1761,6 +1797,25 @@ bool RowIsZero(const uint8_t* data, uint32_t bytes)
 } // namespace
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)
+{
+    if (multiplier == 0u || (multiplier & 1u) == 0u) {
+        return false;
+    }
+    PacketRowSeedMultiplier = multiplier;
+    return true;
+}
+
+void SetPacketRowSeedAvalancheForTesting(bool enabled)
+{
+    PacketRowSeedAvalanche = enabled;
+}
+
+void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor)
+{
+    OddPacketPeelSeedXor = seed_xor;
+}
+
 void SetMixedProjectionOracleForTesting(bool enabled)
 {
     if (enabled) {
@@ -2111,7 +2166,10 @@ static bool EvaluatePacketBlockImpl(
 
     wirehair::PeelRowParameters params;
     params.Initialize(
-        block_id, config.PeelSeed, (uint16_t)K, (uint16_t)P);
+        PacketRowSeedForBlockId(block_id),
+        PacketPeelSeedForBlockId(block_id, config),
+        (uint16_t)K,
+        (uint16_t)P);
     wirehair::PeelRowIterator source(
         params, (uint16_t)K, runtime.SourcePrime());
     uint64_t operations = 1u;

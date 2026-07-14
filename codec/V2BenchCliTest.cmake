@@ -303,6 +303,17 @@ expect_success("source_hits_override=2" precodefail --N 64 --bb-list 8
 expect_success("packet_peel_seed_xor=0x7" precodefail --N 64 --bb-list 8
     --overhead 0 --trials 2 --threads 2 --loss 0.1
     --packet-peel-seed-xor 7)
+expect_success("odd_packet_peel_seed_xor=0x13" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --odd-packet-peel-seed-xor 19 --payload-e2e)
+expect_success("packet_row_seed_multiplier=0x9e3779b1 packet_row_seed_avalanche=1"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --packet-row-seed-multiplier 2654435761
+    --packet-row-seed-avalanche --payload-e2e)
+expect_failure("--packet-row-seed-multiplier must be odd and nonzero"
+    precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --packet-row-seed-multiplier 2)
 expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29
