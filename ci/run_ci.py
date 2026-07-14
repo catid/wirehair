@@ -887,6 +887,12 @@ def run_qemu(args):
             "conroe-portable",
             "Conroe",
             [],
+            "Active x86 kernels: SSSE3=1 AVX2=0 GFNI=0 AVX512=0",
+        ),
+        (
+            "conroe-no-ssse3",
+            "Conroe,-ssse3",
+            [],
             "Active x86 kernels: SSSE3=0 AVX2=0 GFNI=0 AVX512=0",
         ),
         (

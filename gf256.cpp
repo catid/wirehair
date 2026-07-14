@@ -398,12 +398,12 @@ static bool CpuHasGFNI = false;
 #ifdef GF256_TRY_AVX512
 static bool CpuHasAVX512 = false;
 #endif
-#ifdef GF256_TRY_SSSE3
+#if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
 static bool CpuHasSSSE3 = false;
 #endif
 
 #define CPUID_EBX_AVX2    0x00000020
-#ifdef GF256_TRY_SSSE3
+#if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
 #define CPUID_ECX_SSSE3   0x00000200
 #endif
 
@@ -536,7 +536,7 @@ extern "C" void gf256_get_active_x86_cpu_features(
         return;
     }
 #if !defined(GF256_TARGET_MOBILE)
-# if defined(GF256_TRY_SSSE3)
+# if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     features->SSSE3 = CpuHasSSSE3;
 # endif
 # if defined(GF256_TRY_AVX2)
@@ -599,7 +599,7 @@ static void gf256_architecture_init()
 
     gf256_x86_cpu_features features;
     gf256_select_x86_cpu_features(&snapshot, &features);
-#if defined(GF256_TRY_SSSE3)
+#if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     CpuHasSSSE3 = features.SSSE3 != 0;
 #endif
 
@@ -1862,6 +1862,169 @@ extern "C" void gf256_addset_mem(void * GF256_RESTRICT vz, const void * GF256_RE
     }
 }
 
+#if !defined(GF256_TARGET_MOBILE) && \
+    (defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3))
+
+// These helpers are individually target-qualified on baseline GCC/Clang x86
+// builds.  Keeping every SSSE3 instruction in a function reached only after
+// the CPUID check preserves the portable SSE2 fallback.
+static GF256_SSSE3_TARGET int gf256_mul_mem_ssse3(
+    void* vz, const void* vx, uint8_t y, int bytes)
+{
+    GF256_M128* z16 = reinterpret_cast<GF256_M128*>(vz);
+    const GF256_M128* x16 = reinterpret_cast<const GF256_M128*>(vx);
+    const GF256_M128 table_lo_y =
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y);
+    const GF256_M128 table_hi_y =
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y);
+    const GF256_M128 clear_low = _mm_set1_epi8(0x0f);
+    const int vector_bytes = bytes & ~15;
+
+    for (int offset = 0; offset < vector_bytes; offset += 16)
+    {
+        GF256_M128 input = _mm_loadu_si128(
+            reinterpret_cast<const GF256_M128*>(
+                reinterpret_cast<const uint8_t*>(x16) + offset));
+        GF256_M128 low = _mm_and_si128(input, clear_low);
+        input = _mm_srli_epi64(input, 4);
+        const GF256_M128 high = _mm_and_si128(input, clear_low);
+        low = _mm_shuffle_epi8(table_lo_y, low);
+        const GF256_M128 product = _mm_xor_si128(
+            low, _mm_shuffle_epi8(table_hi_y, high));
+        _mm_storeu_si128(
+            reinterpret_cast<GF256_M128*>(
+                reinterpret_cast<uint8_t*>(z16) + offset),
+            product);
+    }
+    return vector_bytes;
+}
+
+static GF256_SSSE3_TARGET int gf256_muladd_mem_ssse3(
+    void* GF256_RESTRICT vz,
+    const void* GF256_RESTRICT vx,
+    uint8_t y,
+    int bytes)
+{
+    GF256_M128* GF256_RESTRICT z16 =
+        reinterpret_cast<GF256_M128*>(vz);
+    const GF256_M128* GF256_RESTRICT x16 =
+        reinterpret_cast<const GF256_M128*>(vx);
+    const GF256_M128 table_lo_y =
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y);
+    const GF256_M128 table_hi_y =
+        _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y);
+    const GF256_M128 clear_low = _mm_set1_epi8(0x0f);
+    const int vector_bytes = bytes & ~15;
+    int offset = 0;
+
+    // Two independent dependency chains improve throughput on the SSE path.
+    for (; offset + 32 <= vector_bytes; offset += 32)
+    {
+        GF256_M128 input0 = _mm_loadu_si128(
+            reinterpret_cast<const GF256_M128*>(
+                reinterpret_cast<const uint8_t*>(x16) + offset));
+        GF256_M128 input1 = _mm_loadu_si128(
+            reinterpret_cast<const GF256_M128*>(
+                reinterpret_cast<const uint8_t*>(x16) + offset + 16));
+        GF256_M128 low0 = _mm_and_si128(input0, clear_low);
+        GF256_M128 low1 = _mm_and_si128(input1, clear_low);
+        input0 = _mm_srli_epi64(input0, 4);
+        input1 = _mm_srli_epi64(input1, 4);
+        const GF256_M128 high0 = _mm_and_si128(input0, clear_low);
+        const GF256_M128 high1 = _mm_and_si128(input1, clear_low);
+        low0 = _mm_shuffle_epi8(table_lo_y, low0);
+        low1 = _mm_shuffle_epi8(table_lo_y, low1);
+        const GF256_M128 product0 = _mm_xor_si128(
+            low0, _mm_shuffle_epi8(table_hi_y, high0));
+        const GF256_M128 product1 = _mm_xor_si128(
+            low1, _mm_shuffle_epi8(table_hi_y, high1));
+        GF256_M128* const destination0 =
+            reinterpret_cast<GF256_M128*>(
+                reinterpret_cast<uint8_t*>(z16) + offset);
+        GF256_M128* const destination1 =
+            reinterpret_cast<GF256_M128*>(
+                reinterpret_cast<uint8_t*>(z16) + offset + 16);
+        _mm_storeu_si128(
+            destination0,
+            _mm_xor_si128(_mm_loadu_si128(destination0), product0));
+        _mm_storeu_si128(
+            destination1,
+            _mm_xor_si128(_mm_loadu_si128(destination1), product1));
+    }
+    if (offset < vector_bytes)
+    {
+        GF256_M128 input = _mm_loadu_si128(
+            reinterpret_cast<const GF256_M128*>(
+                reinterpret_cast<const uint8_t*>(x16) + offset));
+        GF256_M128 low = _mm_and_si128(input, clear_low);
+        input = _mm_srli_epi64(input, 4);
+        const GF256_M128 high = _mm_and_si128(input, clear_low);
+        low = _mm_shuffle_epi8(table_lo_y, low);
+        const GF256_M128 product = _mm_xor_si128(
+            low, _mm_shuffle_epi8(table_hi_y, high));
+        GF256_M128* const destination =
+            reinterpret_cast<GF256_M128*>(
+                reinterpret_cast<uint8_t*>(z16) + offset);
+        _mm_storeu_si128(
+            destination,
+            _mm_xor_si128(_mm_loadu_si128(destination), product));
+    }
+    return vector_bytes;
+}
+
+static GF256_SSSE3_TARGET int gf256_muladd_multi_mem_ssse3(
+    void* const* GF256_RESTRICT destinations,
+    const uint8_t* GF256_RESTRICT scales,
+    int destination_count,
+    const uint8_t* GF256_RESTRICT source,
+    int begin,
+    int bytes)
+{
+    const GF256_M128 clear_low = _mm_set1_epi8(0x0f);
+    const int vector_end = begin + ((bytes - begin) & ~15);
+    for (int base = 0; base < destination_count; base += 4)
+    {
+        const int group_count = destination_count - base < 4 ?
+            destination_count - base : 4;
+        GF256_M128 table_low[4];
+        GF256_M128 table_high[4];
+        for (int local = 0; local < group_count; ++local)
+        {
+            const uint8_t scale = scales[base + local];
+            table_low[local] = _mm_loadu_si128(
+                GF256Ctx.MM128.TABLE_LO_Y + scale);
+            table_high[local] = _mm_loadu_si128(
+                GF256Ctx.MM128.TABLE_HI_Y + scale);
+        }
+        for (int offset = begin; offset < vector_end; offset += 16)
+        {
+            GF256_M128 input = _mm_loadu_si128(
+                reinterpret_cast<const GF256_M128*>(source + offset));
+            const GF256_M128 low = _mm_and_si128(input, clear_low);
+            input = _mm_srli_epi64(input, 4);
+            const GF256_M128 high = _mm_and_si128(input, clear_low);
+            for (int local = 0; local < group_count; ++local)
+            {
+                if (scales[base + local] == 0u) continue;
+                const GF256_M128 product = _mm_xor_si128(
+                    _mm_shuffle_epi8(table_low[local], low),
+                    _mm_shuffle_epi8(table_high[local], high));
+                GF256_M128* const destination =
+                    reinterpret_cast<GF256_M128*>(
+                        reinterpret_cast<uint8_t*>(
+                            destinations[base + local]) + offset);
+                _mm_storeu_si128(
+                    destination,
+                    _mm_xor_si128(
+                        _mm_loadu_si128(destination), product));
+            }
+        }
+    }
+    return vector_end;
+}
+
+#endif
+
 // vz == vx (in-place) is supported: no restrict qualifiers here.
 extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
 {
@@ -1974,32 +2137,15 @@ extern "C" void gf256_mul_mem(void * vz, const void * vx, uint8_t y, int bytes)
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
-# if defined(GF256_TRY_SSSE3)
+# if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
-        // Partial product tables; see above
-        const GF256_M128 table_lo_y = _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y);
-        const GF256_M128 table_hi_y = _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y);
-
-        // clr_mask = 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
-        const GF256_M128 clr_mask = _mm_set1_epi8(0x0f);
-
-        // Handle multiples of 16 bytes
-        do
-        {
-            // See above comments for details
-            GF256_M128 x0 = _mm_loadu_si128(x16);
-            GF256_M128 l0 = _mm_and_si128(x0, clr_mask);
-            x0 = _mm_srli_epi64(x0, 4);
-            GF256_M128 h0 = _mm_and_si128(x0, clr_mask);
-            l0 = _mm_shuffle_epi8(table_lo_y, l0);
-            h0 = _mm_shuffle_epi8(table_hi_y, h0);
-            _mm_storeu_si128(z16, _mm_xor_si128(l0, h0));
-
-            bytes -= 16, ++x16, ++z16;
-        } while (bytes >= 16);
+        const int vector_bytes = gf256_mul_mem_ssse3(z16, x16, y, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
     }
-# endif // GF256_TRY_SSSE3
+# endif // GF256_TRY_SSSE3 || GF256_TRY_TARGET_SSSE3
 #endif
 
     uint8_t * z1 = reinterpret_cast<uint8_t*>(z16);
@@ -2217,64 +2363,16 @@ extern "C" void gf256_muladd_mem(void * GF256_RESTRICT vz, uint8_t y,
         x16 = reinterpret_cast<const GF256_M128 *>(x32);
     }
 # endif // GF256_TRY_AVX2
-# if defined(GF256_TRY_SSSE3)
+# if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (bytes >= 16 && CpuHasSSSE3)
     {
-        // Partial product tables; see above
-        const GF256_M128 table_lo_y = _mm_loadu_si128(GF256Ctx.MM128.TABLE_LO_Y + y);
-        const GF256_M128 table_hi_y = _mm_loadu_si128(GF256Ctx.MM128.TABLE_HI_Y + y);
-
-        // clr_mask = 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
-        const GF256_M128 clr_mask = _mm_set1_epi8(0x0f);
-
-        // This unroll seems to provide about 7% speed boost when AVX2 is disabled
-        while (bytes >= 32)
-        {
-            bytes -= 32;
-
-            GF256_M128 x1 = _mm_loadu_si128(x16 + 1);
-            GF256_M128 l1 = _mm_and_si128(x1, clr_mask);
-            x1 = _mm_srli_epi64(x1, 4);
-            GF256_M128 h1 = _mm_and_si128(x1, clr_mask);
-            l1 = _mm_shuffle_epi8(table_lo_y, l1);
-            h1 = _mm_shuffle_epi8(table_hi_y, h1);
-            const GF256_M128 z1 = _mm_loadu_si128(z16 + 1);
-
-            GF256_M128 x0 = _mm_loadu_si128(x16);
-            GF256_M128 l0 = _mm_and_si128(x0, clr_mask);
-            x0 = _mm_srli_epi64(x0, 4);
-            GF256_M128 h0 = _mm_and_si128(x0, clr_mask);
-            l0 = _mm_shuffle_epi8(table_lo_y, l0);
-            h0 = _mm_shuffle_epi8(table_hi_y, h0);
-            const GF256_M128 z0 = _mm_loadu_si128(z16);
-
-            const GF256_M128 p1 = _mm_xor_si128(l1, h1);
-            _mm_storeu_si128(z16 + 1, _mm_xor_si128(p1, z1));
-
-            const GF256_M128 p0 = _mm_xor_si128(l0, h0);
-            _mm_storeu_si128(z16, _mm_xor_si128(p0, z0));
-
-            x16 += 2, z16 += 2;
-        }
-
-        // Handle multiples of 16 bytes
-        while (bytes >= 16)
-        {
-            // See above comments for details
-            GF256_M128 x0 = _mm_loadu_si128(x16);
-            GF256_M128 l0 = _mm_and_si128(x0, clr_mask);
-            x0 = _mm_srli_epi64(x0, 4);
-            GF256_M128 h0 = _mm_and_si128(x0, clr_mask);
-            l0 = _mm_shuffle_epi8(table_lo_y, l0);
-            h0 = _mm_shuffle_epi8(table_hi_y, h0);
-            const GF256_M128 p0 = _mm_xor_si128(l0, h0);
-            const GF256_M128 z0 = _mm_loadu_si128(z16);
-            _mm_storeu_si128(z16, _mm_xor_si128(p0, z0));
-
-            bytes -= 16, ++x16, ++z16;
-        }
+        const int vector_bytes =
+            gf256_muladd_mem_ssse3(z16, x16, y, bytes);
+        bytes -= vector_bytes;
+        z16 += vector_bytes / 16;
+        x16 += vector_bytes / 16;
     }
-# endif // GF256_TRY_SSSE3
+# endif // GF256_TRY_SSSE3 || GF256_TRY_TARGET_SSSE3
 #endif // GF256_TARGET_MOBILE
 
     uint8_t * GF256_RESTRICT z1 = reinterpret_cast<uint8_t*>(z16);
@@ -2476,57 +2574,13 @@ extern "C" void gf256_muladd_multi_mem(
         offset = vector_end;
     }
 # endif
-# if defined(GF256_TRY_SSSE3)
+# if defined(GF256_TRY_SSSE3) || defined(GF256_TRY_TARGET_SSSE3)
     if (CpuHasSSSE3)
     {
-        const GF256_M128 clear_low = _mm_set1_epi8(0x0f);
-        const int vector_begin = offset;
-        const int vector_end = offset + ((bytes - offset) & ~15);
-        for (int base = 0; base < destination_count; base += 4)
-        {
-            const int group_count =
-                destination_count - base < 4 ? destination_count - base : 4;
-            GF256_M128 table_low[4];
-            GF256_M128 table_high[4];
-            for (int local = 0; local < group_count; ++local)
-            {
-                const uint8_t scale = scales[base + local];
-                table_low[local] = _mm_loadu_si128(
-                    GF256Ctx.MM128.TABLE_LO_Y + scale);
-                table_high[local] = _mm_loadu_si128(
-                    GF256Ctx.MM128.TABLE_HI_Y + scale);
-            }
-            for (int vector_offset = vector_begin;
-                 vector_offset < vector_end;
-                 vector_offset += 16)
-            {
-                GF256_M128 input = _mm_loadu_si128(
-                    reinterpret_cast<const GF256_M128*>(x + vector_offset));
-                const GF256_M128 low = _mm_and_si128(input, clear_low);
-                input = _mm_srli_epi64(input, 4);
-                const GF256_M128 high = _mm_and_si128(input, clear_low);
-                for (int local = 0; local < group_count; ++local)
-                {
-                    if (scales[base + local] == 0u) {
-                        continue;
-                    }
-                    const GF256_M128 product = _mm_xor_si128(
-                        _mm_shuffle_epi8(table_low[local], low),
-                        _mm_shuffle_epi8(table_high[local], high));
-                    GF256_M128* const destination =
-                        reinterpret_cast<GF256_M128*>(
-                            reinterpret_cast<uint8_t*>(
-                                destinations[base + local]) + vector_offset);
-                    _mm_storeu_si128(
-                        destination,
-                        _mm_xor_si128(
-                            _mm_loadu_si128(destination), product));
-                }
-            }
-        }
-        offset = vector_end;
+        offset = gf256_muladd_multi_mem_ssse3(
+            destinations, scales, destination_count, x, offset, bytes);
     }
-# endif
+# endif // GF256_TRY_SSSE3 || GF256_TRY_TARGET_SSSE3
 #endif
 
     for (int base = 0; base < destination_count; base += 16)

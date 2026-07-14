@@ -101,8 +101,20 @@
 # if defined(__SSSE3__)
     #define GF256_TRY_SSSE3
     #include <tmmintrin.h> // SSSE3: _mm_shuffle_epi8
+# elif (defined(__GNUC__) || defined(__clang__)) && \
+       (defined(__i386__) || defined(__x86_64__))
+    // GCC and Clang can safely emit an SSSE3-only helper inside an otherwise
+    // portable SSE2 translation unit.  Runtime CPUID dispatch in gf256.cpp
+    // guarantees that these helpers are never entered on unsupported CPUs.
+    #define GF256_TRY_TARGET_SSSE3
+    #define GF256_SSSE3_TARGET __attribute__((target("ssse3")))
+    #include <tmmintrin.h> // SSSE3: _mm_shuffle_epi8
 # endif
 #endif // GF256_TARGET_MOBILE
+
+#if !defined(GF256_SSSE3_TARGET)
+    #define GF256_SSSE3_TARGET
+#endif
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
     #include <arm_neon.h>
