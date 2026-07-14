@@ -603,6 +603,18 @@ bool CheckPacketEvaluationFusion()
                 "solve: stale runtime solve was not invalid/no-write\n");
             return false;
         }
+        wirehair_v2::PrecodeSystem malformed = system;
+        malformed.StaircaseRows[0].clear();
+        stats.PacketRows = UINT32_C(0x76543210);
+        if (wirehair_v2::SolvePrecodeSystemWithRuntime(
+                malformed, config, runtime, packets, block_bytes,
+                solved, &stats) != Wirehair_InvalidInput ||
+            solved != solved_before || stats.PacketRows != UINT32_C(0x76543210))
+        {
+            std::fprintf(stderr,
+                "solve: public runtime solve skipped system validation\n");
+            return false;
+        }
         if (runtime.Initialize(1u, P, config.MixCount) ||
             runtime.IsValidFor(K, P, config.MixCount) ||
             runtime.SourcePrime() != 0u || runtime.PrecodePrime() != 0u)

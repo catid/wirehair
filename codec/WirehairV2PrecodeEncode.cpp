@@ -1660,7 +1660,8 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         GuardedAllocation();
         std::vector<uint8_t> intermediate_blocks;
         PrecodeSolveStats solve_stats;
-        WirehairResult solve_result = SolvePrecodeSystemWithRuntime(
+        WirehairResult solve_result =
+            SolvePrecodeSystemForValidatedSystemWithRuntime(
             system,
             packet_config,
             solve_runtime,
@@ -1691,7 +1692,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
             }
             intermediate_blocks.clear();
             system = std::move(selected_system);
-            solve_result = SolvePrecodeSystemWithRuntime(
+            solve_result = SolvePrecodeSystemForValidatedSystemWithRuntime(
                 system,
                 selected_config,
                 solve_runtime,

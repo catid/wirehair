@@ -2226,7 +2226,7 @@ WirehairResult SolvePrecodeSystem(
         intermediate_blocks_out, stats, resume_state);
 }
 
-WirehairResult SolvePrecodeSystemWithRuntime(
+static WirehairResult SolvePrecodeSystemImpl(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     const PacketRowRuntime& runtime,
@@ -2234,7 +2234,8 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     uint32_t block_bytes,
     std::vector<uint8_t>& intermediate_blocks_out,
     PrecodeSolveStats* stats,
-    PrecodeSolveResumeState* resume_state)
+    PrecodeSolveResumeState* resume_state,
+    bool validate_system)
 {
     PrecodeSolveStats st = {};
     const uint32_t K = system.Params.BlockCount;
@@ -2244,7 +2245,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     const uint64_t P_wide = (uint64_t)S + D2 + H;
     if (P_wide > UINT32_MAX ||
         !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount) ||
-        !ValidatePrecodeSystem(system) ||
+        (validate_system && !ValidatePrecodeSystem(system)) ||
         (system.Params.Field == CompletionField::MixedGF256GF16 &&
          (block_bytes & 1u) != 0u))
     {
@@ -3067,6 +3068,36 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     catch (const std::length_error&) {
         return Wirehair_OOM;
     }
+}
+
+WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    return SolvePrecodeSystemImpl(
+        system, config, runtime, packets, block_bytes,
+        intermediate_blocks_out, stats, resume_state, true);
+}
+
+WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state)
+{
+    return SolvePrecodeSystemImpl(
+        system, config, runtime, packets, block_bytes,
+        intermediate_blocks_out, stats, resume_state, false);
 }
 
 WirehairResult ResumePrecodeSystem(

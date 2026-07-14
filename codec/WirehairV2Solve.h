@@ -276,8 +276,23 @@ WirehairResult SolvePrecodeSystem(
     PrecodeSolveStats* stats = nullptr,
     PrecodeSolveResumeState* resume_state = nullptr);
 
-/** Internal cold solve using a validated process-local packet prime cache. */
+/** Internal cold solve using cached packet primes; still validates system. */
 WirehairResult SolvePrecodeSystemWithRuntime(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats = nullptr,
+    PrecodeSolveResumeState* resume_state = nullptr);
+
+/**
+    Internal cold solve for an immutable system validated by construction.
+    The caller must retain exclusive ownership of that trust boundary: unlike
+    SolvePrecodeSystemWithRuntime(), this does not inspect the stored row graph.
+*/
+WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
     const PacketRowRuntime& runtime,

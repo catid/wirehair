@@ -580,7 +580,8 @@ WirehairResult MessagePrecodeDecoder::AttemptSolve()
         // Keep the deterministic failure point at the solve boundary so the
         // test hook models a transient solver OOM (and counts as an attempt).
         GuardedDecoderAllocation();
-        const WirehairResult result = SolvePrecodeSystemWithRuntime(
+        const WirehairResult result =
+            SolvePrecodeSystemForValidatedSystemWithRuntime(
             SystemValue,
             PacketConfigValue,
             PacketRuntimeValue,
