@@ -347,6 +347,7 @@ enum class ResidualInsertResult
 };
 
 constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
+constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
 
 // The production GF(256) profile fixes H=12, so its periodic coefficient
 // table is immutable across every message.  Keeping that small table in
@@ -526,7 +527,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     uint32_t inactive_count,
     uint32_t projection_words,
     const std::vector<uint32_t>& inactive_index,
-    std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& projection,
     const MixedPackedCoefficients& cached_packed,
     std::vector<uint64_t>& projected)
 {
@@ -612,33 +613,18 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     // bucket.  The experiment-only skew rotates the labels of each complete
     // period block without changing its balance.  Transpose the projection by
     // the active bucket before expanding any bits: each of the first
-    // `coefficient_period` projection rows becomes the parity bucket for that
-    // residue.  The first block is unrotated, so those rows already contain
-    // the first affine vector.  All remaining source rows start at the period,
-    // so no source can alias a destination.  The caller has finished all other
-    // uses of the projection.
-    // This is algebraically identical to dense per-column expansion and
-    // requires no additional bucket allocation.
-    for (uint32_t initial = 0;
-         initial < coefficient_period; ++initial)
-    {
-        const uint32_t inactive = inactive_index[initial];
-        if (inactive == UINT32_MAX) {
-            continue;
-        }
-        if (inactive >= inactive_count) {
-            return false;
-        }
-        uint64_t* bucket = projection.data() +
-            (size_t)initial * projection_words;
-        std::fill(bucket, bucket + projection_words, uint64_t{0});
-        bucket[inactive >> 6] =
-            UINT64_C(1) << (inactive & 63u);
-    }
+    // `coefficient_period` scratch rows become the parity buckets for each
+    // residue.  Keep the original affine projections intact: back
+    // substitution can then choose between each sparse equation and its
+    // projected inactive-variable relation.  This is algebraically identical
+    // to dense per-column expansion, while the scratch is only P*ceil(R/64)
+    // words rather than L*ceil(R/64).
+    std::vector<uint64_t> residue_projection(
+        (size_t)coefficient_period * projection_words, uint64_t{0});
 
     const bool rotate_residues = ActiveMixedResiduesRotated();
     const auto accumulate_column = [&](uint32_t column, uint32_t residue) {
-        uint64_t* bucket = projection.data() +
+        uint64_t* bucket = residue_projection.data() +
             (size_t)residue * projection_words;
         const uint32_t inactive = inactive_index[column];
         if (inactive != UINT32_MAX)
@@ -659,6 +645,13 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         }
         return true;
     };
+    for (uint32_t column = 0u;
+         column < populated_residues; ++column)
+    {
+        if (!accumulate_column(column, column)) {
+            return false;
+        }
+    }
     if (!rotate_residues)
     {
         uint32_t residue = 0u;
@@ -698,7 +691,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
         const uint64_t* coefficients = cached_packed.ByResidue[residue];
-        const uint64_t* bucket = projection.data() +
+        const uint64_t* bucket = residue_projection.data() +
             (size_t)residue * projection_words;
         for (uint32_t word_index = 0;
              word_index < projection_words; ++word_index)
@@ -809,7 +802,7 @@ WirehairResult SolveMixedCompletionQuotient(
     uint32_t block_bytes,
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint32_t>& inactive_columns,
-    std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& projection,
     const std::vector<uint8_t>& binary_pivot_coeff,
     const std::vector<uint8_t>& binary_pivot_rhs,
     const std::vector<uint8_t>& binary_have_pivot,
@@ -3098,6 +3091,61 @@ static WirehairResult SolvePrecodeSystemImpl(
                 values.data() + (size_t)column * block_bytes;
             const BinaryEquationView equation =
                 rows[peel.SolveRow[column]];
+            if (equation.Columns.size() == 0u) {
+                return terminal_error();
+            }
+            const uint32_t sparse_xors =
+                (uint32_t)equation.Columns.size() - 1u;
+
+            // Projection left the affine constant in this value slot.  Once
+            // the inactive variables are solved, that relation and the
+            // original sparse equation are equivalent reconstructions.  A
+            // dense affine relation is usually worse, so count only until it
+            // cannot beat the sparse row and use it solely when it removes
+            // full payload-block XORs.  Tiny rank proxies avoid this scalar
+            // selection work entirely.
+            uint32_t projected_xors = 0u;
+            if (block_bytes >= kProjectedBackSubMinBlockBytes &&
+                words != 0u && sparse_xors != 0u)
+            {
+                const uint64_t* relation = projection.data() +
+                    (size_t)column * words;
+                for (uint32_t word_i = 0;
+                     word_i < words && projected_xors < sparse_xors;
+                     ++word_i)
+                {
+                    uint64_t word = relation[word_i];
+                    while (word != 0u && projected_xors < sparse_xors) {
+                        ++projected_xors;
+                        word &= word - 1u;
+                    }
+                }
+                if (projected_xors < sparse_xors)
+                {
+                    BatchedBlockXorAccumulator value_xor(
+                        value, block_bytes);
+                    for (uint32_t word_i = 0; word_i < words; ++word_i)
+                    {
+                        uint64_t word = relation[word_i];
+                        while (word != 0u)
+                        {
+                            const uint32_t bit =
+                                wirehair::NonzeroLowestBitIndex64(word);
+                            const uint32_t index = (word_i << 6) + bit;
+                            if (index < R) {
+                                value_xor.Add(
+                                    values.data() +
+                                    (size_t)peel.InactiveOrder[index] *
+                                        block_bytes);
+                                ++st.BlockXors;
+                            }
+                            word &= word - 1u;
+                        }
+                    }
+                    value_xor.Flush();
+                    continue;
+                }
+            }
             if (equation.Data) {
                 std::memcpy(value, equation.Data, block_bytes);
             }

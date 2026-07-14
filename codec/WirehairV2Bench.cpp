@@ -4462,6 +4462,25 @@ int CmdPrecodeFail(int argc, char** argv)
                     (int)select_result);
                 return 2;
             }
+            const uint64_t precode_count_wide =
+                (uint64_t)system.Params.Staircase +
+                system.Params.DenseRows + system.Params.HeavyRows;
+            if (precode_count_wide > UINT32_MAX) {
+                std::fprintf(stderr,
+                    "precodefail precode count overflow N=%u bb=%u\n",
+                    K, bb);
+                return 2;
+            }
+            const uint32_t precode_count = (uint32_t)precode_count_wide;
+            wirehair_v2::PacketRowRuntime runtime;
+            if (!runtime.Initialize(K, precode_count, config.MixCount)) {
+                std::fprintf(stderr,
+                    "precodefail packet runtime initialization failed "
+                    "N=%u bb=%u heavy_family=%s mix_count=%u\n",
+                    K, bb, HeavyFamilyName(heavy_family),
+                    (uint32_t)mix_count_value);
+                return 2;
+            }
             // Exclude the mix count so E2E arms share the message and loss
             // stream just like the rank trials below.
             if (payload_e2e && !RunPrecodeFailPayloadE2E(
@@ -4550,6 +4569,8 @@ int CmdPrecodeFail(int argc, char** argv)
                             }
                             const std::vector<uint8_t> zero(
                                 solve_block_bytes, uint8_t{0});
+                            std::vector<wirehair_v2::SolvePacket> packets(
+                                (size_t)K + overhead);
                             for (;;)
                             {
                                 if (cancel_workers.load()) {
@@ -4571,26 +4592,26 @@ int CmdPrecodeFail(int argc, char** argv)
                                         UINT64_C(0x94d049bb133111eb)) ^
                                     ((uint64_t)trial *
                                         UINT64_C(0xd6e8feb86659fd93)));
-                                std::vector<wirehair_v2::SolvePacket> packets;
-                                packets.reserve((size_t)K + overhead);
                                 uint32_t block_id = 0u;
-                                while (packets.size() < (size_t)K + overhead)
+                                size_t delivered = 0u;
+                                while (delivered < packets.size())
                                 {
                                     const uint32_t id = block_id++;
                                     if (ShouldDrop(rng, loss)) {
                                         continue;
                                     }
-                                    wirehair_v2::SolvePacket packet;
+                                    wirehair_v2::SolvePacket& packet =
+                                        packets[delivered++];
                                     packet.BlockId = id;
                                     packet.Data = zero.data();
-                                    packets.push_back(packet);
                                 }
                                 std::vector<uint8_t> intermediate;
                                 wirehair_v2::PrecodeSolveStats solve_stats;
                                 MatrixFailureTrial& result = results[trial];
                                 result.Result =
-                                    wirehair_v2::SolvePrecodeSystem(
-                                        system, config, packets,
+                                    wirehair_v2::
+                                        SolvePrecodeSystemForValidatedSystemWithRuntime(
+                                        system, config, runtime, packets,
                                         solve_block_bytes,
                                         intermediate, &solve_stats);
                                 result.Inactivated =
