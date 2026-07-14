@@ -2536,20 +2536,25 @@ static WirehairResult SolvePrecodeSystemImpl(
                 return Wirehair_OOM;
             }
         }
-        for (const SolvePacket& packet : packets)
+        // The peel distribution averages fewer than seven source references.
+        // Reserve one modestly padded estimate and generate each packet row
+        // only once.  The previous exact reserve initialized every packet PRNG
+        // twice; vector growth remains a safe fallback for an unusually heavy
+        // finite sample.
+        static const size_t kReservedPeelReferencesPerPacket = 7u;
+        const size_t reserve_references_per_packet =
+            kReservedPeelReferencesPerPacket + config.MixCount;
+        if (packets.size() >
+            (std::numeric_limits<size_t>::max() - reference_count) /
+                reserve_references_per_packet)
         {
-            wirehair::PeelRowParameters params;
-            if (!InitializePacketRowParameters(
-                    K, P, packet.BlockId, config, runtime, params) ||
-                !add_references(
-                    (size_t)params.PeelCount + config.MixCount))
-            {
-                return Wirehair_OOM;
-            }
+            return Wirehair_OOM;
         }
+        const size_t reserved_reference_count = reference_count +
+            packets.size() * reserve_references_per_packet;
 
         BinaryEquationArena rows;
-        rows.Initialize(row_count, reference_count);
+        rows.Initialize(row_count, reserved_reference_count);
         for (const std::vector<uint32_t>& columns : system.StaircaseRows)
         {
             rows.AppendRow(columns, nullptr);
@@ -2576,6 +2581,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 [&rows](uint32_t column) { rows.AppendColumn(column); });
             if (!generated || packet_references == 0u) {
                 return Wirehair_InvalidInput;
+            }
+            if (!add_references(packet_references)) {
+                return Wirehair_OOM;
             }
             rows.EndRow();
             st.BinaryRowReferences += packet_references;
