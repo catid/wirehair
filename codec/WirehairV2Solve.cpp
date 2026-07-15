@@ -439,57 +439,155 @@ private:
     bool Initialized = false;
 };
 
-static GF256_FORCE_INLINE void XorProjectionWords(
-    uint64_t* GF256_RESTRICT destination,
-    const uint64_t* GF256_RESTRICT source_base,
-    uint32_t source_index,
-    uint32_t words)
+template<uint32_t Count>
+struct ProjectionSourceBatch
 {
-#if defined(GF256_TARGET_X86_SIMD)
-    if (words >= 6u)
+    static GF256_FORCE_INLINE uint64_t Xor64(
+        uint64_t value,
+        const uint64_t* const* GF256_RESTRICT sources,
+        uint32_t word)
     {
-        const uint64_t* GF256_RESTRICT source =
-            source_base + (size_t)source_index * words;
-        uint32_t word = 0u;
-        for (; words - word >= 4u; word += 4u)
-        {
-            const __m128i destination0 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(destination + word));
-            const __m128i destination1 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(destination + word + 2u));
-            const __m128i source0 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(source + word));
-            const __m128i source1 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(source + word + 2u));
-            _mm_storeu_si128(
-                reinterpret_cast<__m128i*>(destination + word),
-                _mm_xor_si128(destination0, source0));
-            _mm_storeu_si128(
-                reinterpret_cast<__m128i*>(destination + word + 2u),
-                _mm_xor_si128(destination1, source1));
-        }
-        if (words - word >= 2u)
-        {
-            const __m128i destination0 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(destination + word));
-            const __m128i source0 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(source + word));
-            _mm_storeu_si128(
-                reinterpret_cast<__m128i*>(destination + word),
-                _mm_xor_si128(destination0, source0));
-            word += 2u;
-        }
-        if (word < words) {
-            destination[word] ^= source[word];
-        }
-        return;
+        return ProjectionSourceBatch<Count - 1u>::Xor64(
+            value, sources, word) ^ sources[Count - 1u][word];
+    }
+
+#if defined(GF256_TARGET_X86_SIMD)
+    static GF256_FORCE_INLINE __m128i Xor128(
+        __m128i value,
+        const uint64_t* const* GF256_RESTRICT sources,
+        uint32_t word)
+    {
+        return _mm_xor_si128(
+            ProjectionSourceBatch<Count - 1u>::Xor128(
+                value, sources, word),
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(
+                sources[Count - 1u] + word)));
     }
 #endif
-    for (uint32_t word = 0; word < words; ++word) {
-        destination[word] ^=
-            source_base[(size_t)source_index * words + word];
+};
+
+template<>
+struct ProjectionSourceBatch<0u>
+{
+    static GF256_FORCE_INLINE uint64_t Xor64(
+        uint64_t value,
+        const uint64_t* const* GF256_RESTRICT,
+        uint32_t)
+    {
+        return value;
+    }
+
+#if defined(GF256_TARGET_X86_SIMD)
+    static GF256_FORCE_INLINE __m128i Xor128(
+        __m128i value,
+        const uint64_t* const* GF256_RESTRICT,
+        uint32_t)
+    {
+        return value;
+    }
+#endif
+};
+
+template<uint32_t Count>
+static GF256_FORCE_INLINE void XorProjectionSourceBatch(
+    uint64_t* GF256_RESTRICT destination,
+    const uint64_t* const* GF256_RESTRICT sources,
+    uint32_t words)
+{
+    uint32_t word = 0u;
+#if defined(GF256_TARGET_X86_SIMD)
+    for (; words - word >= 4u; word += 4u)
+    {
+        const __m128i destination0 = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(destination + word));
+        const __m128i destination1 = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(destination + word + 2u));
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor128(
+                destination0, sources, word));
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(destination + word + 2u),
+            ProjectionSourceBatch<Count>::Xor128(
+                destination1, sources, word + 2u));
+    }
+    if (words - word >= 2u)
+    {
+        const __m128i destination0 = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(destination + word));
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor128(
+                destination0, sources, word));
+        word += 2u;
+    }
+#endif
+    for (; word < words; ++word) {
+        destination[word] = ProjectionSourceBatch<Count>::Xor64(
+            destination[word], sources, word);
     }
 }
+
+class BatchedProjectionXorAccumulator
+{
+public:
+    BatchedProjectionXorAccumulator(
+        uint64_t* destination,
+        const uint64_t* source_base,
+        uint32_t words)
+        : Destination(destination), SourceBase(source_base), Words(words)
+    {
+    }
+
+    GF256_FORCE_INLINE void Add(uint32_t source_index)
+    {
+        if (Words == 0u) {
+            return;
+        }
+        Sources[Count++] =
+            SourceBase + (size_t)source_index * Words;
+        if (Count == kBatchSize) {
+            Flush();
+        }
+    }
+
+    GF256_FORCE_INLINE void Flush()
+    {
+        switch (Count)
+        {
+#define WIREHAIR_PROJECTION_BATCH_CASE(n) \
+        case n: XorProjectionSourceBatch<n>( \
+            Destination, Sources, Words); break
+        WIREHAIR_PROJECTION_BATCH_CASE(1u);
+        WIREHAIR_PROJECTION_BATCH_CASE(2u);
+        WIREHAIR_PROJECTION_BATCH_CASE(3u);
+        WIREHAIR_PROJECTION_BATCH_CASE(4u);
+        WIREHAIR_PROJECTION_BATCH_CASE(5u);
+        WIREHAIR_PROJECTION_BATCH_CASE(6u);
+        WIREHAIR_PROJECTION_BATCH_CASE(7u);
+        WIREHAIR_PROJECTION_BATCH_CASE(8u);
+        WIREHAIR_PROJECTION_BATCH_CASE(9u);
+        WIREHAIR_PROJECTION_BATCH_CASE(10u);
+        WIREHAIR_PROJECTION_BATCH_CASE(11u);
+        WIREHAIR_PROJECTION_BATCH_CASE(12u);
+        WIREHAIR_PROJECTION_BATCH_CASE(13u);
+        WIREHAIR_PROJECTION_BATCH_CASE(14u);
+        WIREHAIR_PROJECTION_BATCH_CASE(15u);
+        WIREHAIR_PROJECTION_BATCH_CASE(16u);
+#undef WIREHAIR_PROJECTION_BATCH_CASE
+        default: break;
+        }
+        Count = 0u;
+    }
+
+private:
+    static const uint32_t kBatchSize = 16u;
+    uint64_t* Destination;
+    const uint64_t* SourceBase;
+    uint32_t Words;
+    const uint64_t* Sources[kBatchSize];
+    uint32_t Count = 0u;
+};
 
 template<class XorAccumulator>
 static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
@@ -504,6 +602,8 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
     XorAccumulator& constant_xor,
     PrecodeSolveStats& stats)
 {
+    BatchedProjectionXorAccumulator projection_xor(
+        accumulator.data(), projection.data(), words);
     for (uint32_t other : equation.Columns)
     {
         if (other == column) {
@@ -516,8 +616,7 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
         }
         else
         {
-            XorProjectionWords(
-                accumulator.data(), projection.data(), other, words);
+            projection_xor.Add(other);
             // Inactive value slots are still the zero constant at this
             // stage.  Only peeled columns can contribute to the affine RHS;
             // XORing an inactive slot would have no algebraic effect.
@@ -526,6 +625,7 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
             ++stats.BlockXors;
         }
     }
+    projection_xor.Flush();
 }
 
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
@@ -2825,6 +2925,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 std::memcpy(rhs.data(), rows[r].Data, block_bytes);
             }
             BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
+            BatchedProjectionXorAccumulator projection_xor(
+                accumulator.data(), projection.data(), words);
             for (uint32_t column : rows[r].Columns)
             {
                 const uint32_t index = inactive_index[column];
@@ -2834,17 +2936,13 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
                 else
                 {
-                    const uint64_t* bits =
-                        projection.data() + (size_t)column * words;
-                    for (uint32_t w = 0; w < words; ++w)
-                    {
-                        accumulator[w] ^= bits[w];
-                    }
+                    projection_xor.Add(column);
                     rhs_xor.Add(
                         values.data() + (size_t)column * block_bytes);
                     ++st.BlockXors;
                 }
             }
+            projection_xor.Flush();
             rhs_xor.Flush();
             // Accumulate the complete GF(2) row in packed form first.  A bit
             // that appears through several peeled projections is expanded
