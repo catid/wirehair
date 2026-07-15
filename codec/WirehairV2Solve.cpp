@@ -211,24 +211,6 @@ struct PeelResult
     uint32_t AdjacencyStorageAllocations = 0u;
 };
 
-struct ColumnCandidate
-{
-    uint32_t Primary = 0;
-    uint32_t References = 0;
-    uint32_t ReverseColumn = 0;
-
-    bool operator<(const ColumnCandidate& other) const
-    {
-        if (Primary != other.Primary) {
-            return Primary < other.Primary;
-        }
-        if (References != other.References) {
-            return References < other.References;
-        }
-        return ReverseColumn < other.ReverseColumn;
-    }
-};
-
 struct PeelRowState
 {
     // Validated WH2 systems have at most UINT16_MAX columns, so the live
@@ -1655,10 +1637,13 @@ PeelResult PeelBinaryRowsImplementation(
     std::vector<uint32_t> queue;
     queue.reserve(rows.size());
     std::vector<uint32_t> degree_two_refs(column_count, 0u);
-    std::vector<ColumnCandidate> degree_two_storage;
-    degree_two_storage.reserve(column_count);
-    std::priority_queue<ColumnCandidate> degree_two_queue(
-        std::less<ColumnCandidate>(), std::move(degree_two_storage));
+    class DegreeTwoQueue : public std::priority_queue<uint64_t>
+    {
+    public:
+        void Reserve(size_t count) { this->c.reserve(count); }
+    };
+    DegreeTwoQueue degree_two_queue;
+    degree_two_queue.Reserve(column_count);
 
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
     {
@@ -1732,6 +1717,35 @@ PeelResult PeelBinaryRowsImplementation(
     }
     reference_bucket_cursor = reference_bucket_offsets;
 
+    // Degree-two priorities compare a changing reference count followed by
+    // the immutable total-reference count and reverse column id.  Replace
+    // the three-field heap node with one 64-bit key.  The low word is a
+    // precomputed rank that preserves the exact original tie order: larger
+    // total-reference counts first, then lower column ids.
+    std::vector<uint32_t> degree_two_tie_rank(column_count);
+    std::vector<uint32_t> degree_two_rank_column(column_count);
+    uint32_t next_tie_rank = 0u;
+    for (uint32_t references = 0u;
+         references <= max_reference_count;
+         ++references)
+    {
+        const size_t begin = reference_bucket_offsets[references];
+        const size_t end =
+            reference_bucket_offsets[(size_t)references + 1u];
+        for (size_t index = end; index > begin; --index)
+        {
+            const uint32_t column = reference_columns[index - 1u];
+            degree_two_tie_rank[column] = next_tie_rank;
+            degree_two_rank_column[next_tie_rank++] = column;
+        }
+    }
+    CAT_DEBUG_ASSERT(next_tie_rank == column_count);
+
+    const auto degree_two_key = [&](uint32_t column) {
+        return (uint64_t)degree_two_refs[column] << 32 |
+            degree_two_tie_rank[column];
+    };
+
     const auto add_degree_two = [&](uint32_t row) {
         PeelRowState& state = row_state[row];
         if (state.Live != 2u || out.UsedRows[row]) {
@@ -1748,13 +1762,7 @@ PeelResult PeelBinaryRowsImplementation(
             ++pair_count;
             ++degree_two_refs[column];
             if (degree_two_refs[column] > 0u) {
-                ColumnCandidate candidate;
-                candidate.Primary = degree_two_refs[column];
-                candidate.References = (uint32_t)(
-                    column_offsets[(size_t)column + 1u] -
-                    column_offsets[column]);
-                candidate.ReverseColumn = UINT32_MAX - column;
-                degree_two_queue.push(candidate);
+                degree_two_queue.push(degree_two_key(column));
             }
         }
         (void)pair_count;
@@ -1776,13 +1784,7 @@ PeelResult PeelBinaryRowsImplementation(
             --degree_two_refs[other];
         }
         if (degree_two_refs[other] > 0u) {
-            ColumnCandidate candidate;
-            candidate.Primary = degree_two_refs[other];
-            candidate.References = (uint32_t)(
-                column_offsets[(size_t)other + 1u] -
-                column_offsets[other]);
-            candidate.ReverseColumn = UINT32_MAX - other;
-            degree_two_queue.push(candidate);
+            degree_two_queue.push(degree_two_key(other));
         }
         state.LowDegreeXor = (uint16_t)other;
     };
@@ -1851,10 +1853,11 @@ PeelResult PeelBinaryRowsImplementation(
         uint32_t best = UINT32_MAX;
         while (!degree_two_queue.empty())
         {
-            const ColumnCandidate candidate = degree_two_queue.top();
-            const uint32_t column = UINT32_MAX - candidate.ReverseColumn;
+            const uint64_t candidate = degree_two_queue.top();
+            const uint32_t column =
+                degree_two_rank_column[(uint32_t)candidate];
             if (resolved[column] ||
-                degree_two_refs[column] != candidate.Primary)
+                degree_two_refs[column] != (uint32_t)(candidate >> 32))
             {
                 degree_two_queue.pop();
                 continue;
