@@ -1535,7 +1535,10 @@ PeelResult PeelBinaryRowsImplementation(
     std::vector<uint8_t> resolved(column_count, 0u);
     std::vector<uint32_t> queue;
     std::vector<uint32_t> degree_two_refs(column_count, 0u);
-    std::priority_queue<ColumnCandidate> degree_two_queue;
+    std::vector<ColumnCandidate> degree_two_storage;
+    degree_two_storage.reserve(column_count);
+    std::priority_queue<ColumnCandidate> degree_two_queue(
+        std::less<ColumnCandidate>(), std::move(degree_two_storage));
 
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
     {
