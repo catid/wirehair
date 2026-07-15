@@ -3994,6 +3994,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
     uint32_t seed_block_bytes_override = 0u;
+    bool paired_overhead_stream = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
@@ -4160,6 +4161,9 @@ int CmdPrecodeFail(int argc, char** argv)
                      argv[i], "--packet-row-seed-avalanche"))
         {
             packet_row_seed_avalanche = true;
+        }
+        else if (!std::strcmp(argv[i], "--paired-overhead-stream")) {
+            paired_overhead_stream = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
             if (!TakeArg(
@@ -4436,7 +4440,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "full_payload_solve=%u\n",
+            "overhead_stream=%s full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -4444,6 +4448,7 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
+            paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u);
     }
     else
@@ -4458,7 +4463,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "full_payload_solve=%u\n",
+            "overhead_stream=%s full_payload_solve=%u\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -4476,6 +4481,7 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
+            paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u);
     }
     std::printf(
@@ -4687,7 +4693,8 @@ int CmdPrecodeFail(int argc, char** argv)
                                         UINT64_C(0x9e3779b97f4a7c15)) ^
                                     ((uint64_t)bb *
                                         UINT64_C(0xbf58476d1ce4e5b9)) ^
-                                    ((uint64_t)overhead *
+                                    ((uint64_t)(paired_overhead_stream ?
+                                            0u : overhead) *
                                         UINT64_C(0x94d049bb133111eb)) ^
                                     ((uint64_t)trial *
                                         UINT64_C(0xd6e8feb86659fd93)));

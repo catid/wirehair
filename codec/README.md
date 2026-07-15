@@ -282,6 +282,12 @@ systematic seed-attempt index.  Systematic selection is intentionally performed
 per candidate, so differing attempt indices mean the result compares two valid
 selected profiles rather than isolating only the mix-count variable.  The CSV
 `failure_trials` field retains the corresponding per-arm trial indices.
+By default each overhead value has an independently salted loss stream for
+broad robustness sampling.  Test builds accept `--paired-overhead-stream` to
+remove only that overhead salt: trial `t` then receives the same delivered-ID
+prefix at every requested overhead, with each larger arm appending packets to
+the smaller one.  This makes `failure_trials` sets directly comparable and
+should produce a monotone failure curve for rank-only solves.
 
 Test builds also expose `--source-hits N` and
 `--packet-peel-seed-xor U32` on `precodefail`.  The latter perturbs the

@@ -311,6 +311,9 @@ expect_success("packet_row_seed_multiplier=0x9e3779b1 packet_row_seed_avalanche=
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --packet-row-seed-multiplier 2654435761
     --packet-row-seed-avalanche --payload-e2e)
+expect_success("overhead_stream=paired" precodefail
+    --N 64 --bb-list 8 --overhead 0,1 --trials 2 --threads 2 --loss 0.1
+    --paired-overhead-stream)
 expect_failure("--packet-row-seed-multiplier must be odd and nonzero"
     precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
     --loss 0.1 --packet-row-seed-multiplier 2)
