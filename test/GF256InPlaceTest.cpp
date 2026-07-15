@@ -1,11 +1,13 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -505,7 +507,39 @@ int main(int argc, char** argv)
 
     if (!TestOperation(Operation::Multiply) ||
         !TestOperation(Operation::Divide) ||
-        !TestMultiSource() ||
+        !TestMultiSource())
+    {
+        return 1;
+    }
+
+    const int previous_wide_xor = gf256_set_thread_wide_xor(1);
+    const bool wide_multi_source_ok = TestMultiSource();
+    (void)gf256_set_thread_wide_xor(previous_wide_xor);
+    if (!wide_multi_source_ok) {
+        return 1;
+    }
+
+    std::atomic<unsigned> ready{0u};
+    std::atomic<bool> start{false};
+    bool concurrent_multi_source_ok[2] = {false, false};
+    std::thread narrow_thread([&]() {
+        ready.fetch_add(1u, std::memory_order_release);
+        while (!start.load(std::memory_order_acquire)) {}
+        concurrent_multi_source_ok[0] = TestMultiSource();
+    });
+    std::thread wide_thread([&]() {
+        const int previous = gf256_set_thread_wide_xor(1);
+        ready.fetch_add(1u, std::memory_order_release);
+        while (!start.load(std::memory_order_acquire)) {}
+        concurrent_multi_source_ok[1] = TestMultiSource();
+        (void)gf256_set_thread_wide_xor(previous);
+    });
+    while (ready.load(std::memory_order_acquire) != 2u) {}
+    start.store(true, std::memory_order_release);
+    narrow_thread.join();
+    wide_thread.join();
+    if (!concurrent_multi_source_ok[0] ||
+        !concurrent_multi_source_ok[1] ||
         !TestMultiDestination())
     {
         return 1;

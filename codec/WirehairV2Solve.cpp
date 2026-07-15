@@ -3418,6 +3418,75 @@ static WirehairResult SolvePrecodeSystemImpl(
     }
 }
 
+static bool ShouldUseWideBlockXor(
+    const PrecodeSystem& system,
+    uint32_t block_bytes)
+{
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
+    // WH2's 3-8 source batches amortize four AVX2 accumulators at this width.
+    // Smaller payloads and non-mixed solvers retain the compact kernel.
+    static const uint32_t kMaxWideBlockCount = 64000u;
+    static const uint32_t kMinWideBlockBytes = 512u;
+    if (system.Params.Field != CompletionField::MixedGF256GF16 ||
+        system.Params.BlockCount > kMaxWideBlockCount ||
+        block_bytes < kMinWideBlockBytes ||
+        gf256_init() != 0)
+    {
+        return false;
+    }
+    gf256_x86_cpu_features features = {};
+    gf256_get_active_x86_cpu_features(&features);
+    return features.AVX2 != 0;
+#else
+    (void)system;
+    (void)block_bytes;
+    return false;
+#endif
+}
+
+class ScopedThreadWideXor
+{
+public:
+    ScopedThreadWideXor()
+        : Previous(gf256_set_thread_wide_xor(1))
+    {
+    }
+
+    ~ScopedThreadWideXor()
+    {
+        (void)gf256_set_thread_wide_xor(Previous);
+    }
+
+    ScopedThreadWideXor(const ScopedThreadWideXor&) = delete;
+    ScopedThreadWideXor& operator=(const ScopedThreadWideXor&) = delete;
+
+private:
+    int Previous;
+};
+
+static WirehairResult DispatchPrecodeSolve(
+    const PrecodeSystem& system,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const std::vector<SolvePacket>& packets,
+    uint32_t block_bytes,
+    std::vector<uint8_t>& intermediate_blocks_out,
+    PrecodeSolveStats* stats,
+    PrecodeSolveResumeState* resume_state,
+    bool validate_system)
+{
+    if (ShouldUseWideBlockXor(system, block_bytes))
+    {
+        ScopedThreadWideXor wide_xor;
+        return SolvePrecodeSystemImpl(
+            system, config, runtime, packets, block_bytes,
+            intermediate_blocks_out, stats, resume_state, validate_system);
+    }
+    return SolvePrecodeSystemImpl(
+        system, config, runtime, packets, block_bytes,
+        intermediate_blocks_out, stats, resume_state, validate_system);
+}
+
 WirehairResult SolvePrecodeSystemWithRuntime(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -3428,7 +3497,7 @@ WirehairResult SolvePrecodeSystemWithRuntime(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
-    return SolvePrecodeSystemImpl(
+    return DispatchPrecodeSolve(
         system, config, runtime, packets, block_bytes,
         intermediate_blocks_out, stats, resume_state, true);
 }
@@ -3443,7 +3512,7 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     PrecodeSolveStats* stats,
     PrecodeSolveResumeState* resume_state)
 {
-    return SolvePrecodeSystemImpl(
+    return DispatchPrecodeSolve(
         system, config, runtime, packets, block_bytes,
         intermediate_blocks_out, stats, resume_state, false);
 }

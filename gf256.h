@@ -358,6 +358,13 @@ extern void gf256_add_multi_mem(void * GF256_RESTRICT vz,
                                 const void * const * GF256_RESTRICT vsrcs,
                                 int src_count, int bytes);
 
+/**
+    Select the runtime-wide fixed-source XOR kernel for the current thread.
+    Returns the previous selection so scoped internal callers can restore it.
+    Unsupported builds accept the call and always return zero.
+*/
+extern int gf256_set_thread_wide_xor(int enable);
+
 /// Performs "z[] = srcs[0][] + ... + srcs[src_count-1][]" bulk operation.
 /// Destination and source ranges must not overlap.  Non-positive source
 /// counts and byte lengths are no-ops.
