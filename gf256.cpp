@@ -1218,6 +1218,12 @@ static __attribute__((noinline)) bool gf256_try_add_multi_mem_avx2_target(
     }
 }
 
+static __attribute__((noinline)) bool gf256_try_addset_multi_mem_avx2_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int source_count,
+    int bytes);
+
 #endif
 
 extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
@@ -1436,6 +1442,120 @@ extern "C" void gf256_add_mem(void * GF256_RESTRICT vx,
         break;
     }
 }
+
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
+
+// Keep this sizeable fixed-count family after the compact add_mem body so
+// non-wide call sites retain their hot-code layout.
+template<unsigned SourceCount>
+static GF256_AVX2_TARGET void gf256_addset_multi_mem_avx2_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int bytes)
+{
+    int offset = 0;
+    while (bytes - offset >= 128)
+    {
+        __m256i accumulators[4];
+        const uint8_t* const first =
+            reinterpret_cast<const uint8_t*>(sources[0]) + offset;
+        for (int lane = 0; lane < 4; ++lane) {
+            accumulators[lane] = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(first + lane * 32));
+        }
+        for (unsigned source = 1; source < SourceCount; ++source)
+        {
+            const uint8_t* const input =
+                reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            for (int lane = 0; lane < 4; ++lane) {
+                accumulators[lane] = _mm256_xor_si256(
+                    accumulators[lane],
+                    _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(
+                            input + lane * 32)));
+            }
+        }
+        for (int lane = 0; lane < 4; ++lane) {
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(
+                    destination + offset + lane * 32),
+                accumulators[lane]);
+        }
+        offset += 128;
+    }
+    while (bytes - offset >= 32)
+    {
+        __m256i accumulator = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(
+                reinterpret_cast<const uint8_t*>(sources[0]) + offset));
+        for (unsigned source = 1; source < SourceCount; ++source) {
+            accumulator = _mm256_xor_si256(
+                accumulator,
+                _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(
+                        reinterpret_cast<const uint8_t*>(sources[source]) +
+                        offset)));
+        }
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + offset), accumulator);
+        offset += 32;
+    }
+    while (offset < bytes)
+    {
+        uint8_t accumulator =
+            reinterpret_cast<const uint8_t*>(sources[0])[offset];
+        for (unsigned source = 1; source < SourceCount; ++source) {
+            accumulator ^=
+                reinterpret_cast<const uint8_t*>(sources[source])[offset];
+        }
+        destination[offset++] = accumulator;
+    }
+}
+
+static __attribute__((noinline)) bool gf256_try_addset_multi_mem_avx2_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int source_count,
+    int bytes)
+{
+    if (!CpuHasAVX2 || bytes < 32 || source_count > 16) {
+        return false;
+    }
+    switch (source_count)
+    {
+    case 3: gf256_addset_multi_mem_avx2_target<3>(
+        destination, sources, bytes); return true;
+    case 4: gf256_addset_multi_mem_avx2_target<4>(
+        destination, sources, bytes); return true;
+    case 5: gf256_addset_multi_mem_avx2_target<5>(
+        destination, sources, bytes); return true;
+    case 6: gf256_addset_multi_mem_avx2_target<6>(
+        destination, sources, bytes); return true;
+    case 7: gf256_addset_multi_mem_avx2_target<7>(
+        destination, sources, bytes); return true;
+    case 8: gf256_addset_multi_mem_avx2_target<8>(
+        destination, sources, bytes); return true;
+    case 9: gf256_addset_multi_mem_avx2_target<9>(
+        destination, sources, bytes); return true;
+    case 10: gf256_addset_multi_mem_avx2_target<10>(
+        destination, sources, bytes); return true;
+    case 11: gf256_addset_multi_mem_avx2_target<11>(
+        destination, sources, bytes); return true;
+    case 12: gf256_addset_multi_mem_avx2_target<12>(
+        destination, sources, bytes); return true;
+    case 13: gf256_addset_multi_mem_avx2_target<13>(
+        destination, sources, bytes); return true;
+    case 14: gf256_addset_multi_mem_avx2_target<14>(
+        destination, sources, bytes); return true;
+    case 15: gf256_addset_multi_mem_avx2_target<15>(
+        destination, sources, bytes); return true;
+    case 16: gf256_addset_multi_mem_avx2_target<16>(
+        destination, sources, bytes); return true;
+    default: return false;
+    }
+}
+
+#endif
 
 extern "C" void gf256_add2_mem(void * GF256_RESTRICT vz, const void * GF256_RESTRICT vx,
                                const void * GF256_RESTRICT vy, int bytes)
@@ -1925,6 +2045,16 @@ extern "C" void gf256_addset_multi_mem(
     WH_BUMP(2, bytes);
 
     uint8_t * GF256_RESTRICT z = reinterpret_cast<uint8_t *>(vz);
+#if defined(GF256_TRY_TARGET_AVX2)
+    if (GF256_UNLIKELY(
+            WideXorThreadCount.load(std::memory_order_relaxed) != 0u) &&
+        GF256_UNLIKELY(ThreadWideXor) &&
+        gf256_try_addset_multi_mem_avx2_target(
+            z, vsrcs, src_count, bytes))
+    {
+        return;
+    }
+#endif
     if (src_count <= 16)
     {
         switch (src_count)
