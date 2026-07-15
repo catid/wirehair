@@ -1536,7 +1536,6 @@ PeelResult PeelBinaryRowsImplementation(
     std::vector<uint32_t> queue;
     std::vector<uint32_t> degree_two_refs(column_count, 0u);
     std::priority_queue<ColumnCandidate> degree_two_queue;
-    std::priority_queue<ColumnCandidate> reference_queue;
 
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
     {
@@ -1574,15 +1573,41 @@ PeelResult PeelBinaryRowsImplementation(
     }
     std::fill(degree_two_refs.begin(), degree_two_refs.end(), 0u);
 
+    // The fallback priority never changes: Prefer the largest original
+    // reference count, then the lowest column id.  Stable counting-sort
+    // buckets preserve that exact order without a 12-byte heap node and
+    // logarithmic insertion for every column.
+    uint32_t max_reference_count = 0u;
+    for (uint32_t column = 0; column < column_count; ++column) {
+        max_reference_count = std::max(
+            max_reference_count,
+            (uint32_t)(column_offsets[(size_t)column + 1u] -
+                column_offsets[column]));
+    }
+    std::vector<size_t> reference_bucket_offsets(
+        (size_t)max_reference_count + 2u, 0u);
     for (uint32_t column = 0; column < column_count; ++column)
     {
-        ColumnCandidate candidate;
-        candidate.Primary = (uint32_t)(
+        const uint32_t references = (uint32_t)(
             column_offsets[(size_t)column + 1u] - column_offsets[column]);
-        candidate.References = candidate.Primary;
-        candidate.ReverseColumn = UINT32_MAX - column;
-        reference_queue.push(candidate);
+        ++reference_bucket_offsets[(size_t)references + 1u];
     }
+    for (uint32_t references = 0;
+         references <= max_reference_count;
+         ++references)
+    {
+        reference_bucket_offsets[(size_t)references + 1u] +=
+            reference_bucket_offsets[references];
+    }
+    std::vector<size_t> reference_bucket_cursor = reference_bucket_offsets;
+    std::vector<uint32_t> reference_columns(column_count);
+    for (uint32_t column = 0; column < column_count; ++column)
+    {
+        const uint32_t references = (uint32_t)(
+            column_offsets[(size_t)column + 1u] - column_offsets[column]);
+        reference_columns[reference_bucket_cursor[references]++] = column;
+    }
+    reference_bucket_cursor = reference_bucket_offsets;
 
     const auto add_degree_two = [&](uint32_t row) {
         PeelRowState& state = row_state[row];
@@ -1714,15 +1739,22 @@ PeelResult PeelBinaryRowsImplementation(
             best = column;
             break;
         }
-        while (best == UINT32_MAX && !reference_queue.empty())
+        while (best == UINT32_MAX)
         {
-            const uint32_t column = UINT32_MAX -
-                reference_queue.top().ReverseColumn;
-            if (resolved[column]) {
-                reference_queue.pop();
-                continue;
+            size_t& cursor = reference_bucket_cursor[max_reference_count];
+            const size_t end =
+                reference_bucket_offsets[(size_t)max_reference_count + 1u];
+            while (cursor < end && resolved[reference_columns[cursor]]) {
+                ++cursor;
             }
-            best = column;
+            if (cursor < end) {
+                best = reference_columns[cursor];
+                break;
+            }
+            if (max_reference_count == 0u) {
+                break;
+            }
+            --max_reference_count;
         }
         if (best == UINT32_MAX) {
             break;
