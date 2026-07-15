@@ -1197,7 +1197,7 @@ static __attribute__((noinline)) bool gf256_try_add_multi_mem_avx2_target(
     int source_count,
     int bytes)
 {
-    if (!CpuHasAVX2 || bytes < 32 || source_count > 8) {
+    if (!CpuHasAVX2 || bytes < 32 || source_count > 16) {
         return false;
     }
     switch (source_count)
@@ -1213,6 +1213,22 @@ static __attribute__((noinline)) bool gf256_try_add_multi_mem_avx2_target(
     case 7: gf256_add_multi_mem_avx2_target<7>(
         destination, sources, bytes); return true;
     case 8: gf256_add_multi_mem_avx2_target<8>(
+        destination, sources, bytes); return true;
+    case 9: gf256_add_multi_mem_avx2_target<9>(
+        destination, sources, bytes); return true;
+    case 10: gf256_add_multi_mem_avx2_target<10>(
+        destination, sources, bytes); return true;
+    case 11: gf256_add_multi_mem_avx2_target<11>(
+        destination, sources, bytes); return true;
+    case 12: gf256_add_multi_mem_avx2_target<12>(
+        destination, sources, bytes); return true;
+    case 13: gf256_add_multi_mem_avx2_target<13>(
+        destination, sources, bytes); return true;
+    case 14: gf256_add_multi_mem_avx2_target<14>(
+        destination, sources, bytes); return true;
+    case 15: gf256_add_multi_mem_avx2_target<15>(
+        destination, sources, bytes); return true;
+    case 16: gf256_add_multi_mem_avx2_target<16>(
         destination, sources, bytes); return true;
     default: return false;
     }

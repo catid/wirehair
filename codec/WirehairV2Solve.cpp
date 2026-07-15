@@ -365,10 +365,10 @@ public:
     }
 
 private:
-    static const uint32_t kBatchSize = 8u;
+    static const uint32_t kBatchSize = 16u;
     uint8_t* Destination;
     uint32_t BlockBytes;
-    const void* PendingSources[kBatchSize] = {};
+    const void* PendingSources[kBatchSize];
     uint32_t PendingCount = 0u;
 };
 
@@ -433,7 +433,7 @@ private:
     uint8_t* Destination;
     uint32_t BlockBytes;
     bool DestinationInitiallyZero;
-    const void* PendingSources[kFusedBatchSize] = {};
+    const void* PendingSources[kFusedBatchSize];
     uint32_t PendingCount = 0u;
     uint32_t BatchCapacity;
     bool Initialized = false;
@@ -3423,7 +3423,7 @@ static bool ShouldUseWideBlockXor(
     uint32_t block_bytes)
 {
 #if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
-    // WH2's 3-8 source batches amortize four AVX2 accumulators at this width.
+    // WH2's 3-16 source batches amortize four AVX2 accumulators at this width.
     // Smaller payloads and non-mixed solvers retain the compact kernel.
     static const uint32_t kMaxWideBlockCount = 64000u;
     static const uint32_t kMinWideBlockBytes = 512u;
