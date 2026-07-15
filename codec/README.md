@@ -293,6 +293,11 @@ Test builds also expose `--source-hits N` and
 `--packet-peel-seed-xor U32` on `precodefail`.  The latter perturbs the
 profile-derived sparse-row seed without replacing its K-dependent derivation,
 allowing solve-graph cost and rank to be screened independently of row degree.
+Both `compare` and `precodefail` accept
+`--packet-row-seed-multiplier U32` plus the optional
+`--packet-row-seed-avalanche` test hooks.  These apply the same odd permutation
+and avalanche to recovery-row seeds, allowing rank candidates found by
+`precodefail` to be replayed through the end-to-end encoder/decoder benchmark.
 The mixed
 `compare` and `precodefail` arms additionally expose `--mixed-period P`,
 `--mixed-gf16-rows 2|3|4`,

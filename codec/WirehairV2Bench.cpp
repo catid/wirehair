@@ -1852,6 +1852,8 @@ int CmdCompare(int argc, char** argv)
     CompareOptions compare_options;
     bool mixed_residue_hash_keyed = false;
     uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
+    uint32_t packet_row_seed_multiplier = 1u;
+    bool packet_row_seed_avalanche = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_mix_count_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
@@ -2026,6 +2028,24 @@ int CmdCompare(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--mixed-residue-hash-keyed")) {
             mixed_residue_hash_keyed = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--packet-row-seed-multiplier"))
+        {
+            if (!TakeArg(
+                    "compare", "--packet-row-seed-multiplier",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--packet-row-seed-multiplier", value,
+                    packet_row_seed_multiplier))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(
+                     argv[i], "--packet-row-seed-avalanche"))
+        {
+            packet_row_seed_avalanche = true;
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
@@ -2215,6 +2235,16 @@ int CmdCompare(int argc, char** argv)
     }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+            packet_row_seed_multiplier))
+    {
+        std::fprintf(stderr,
+            "compare --packet-row-seed-multiplier must be odd and "
+            "nonzero\n");
+        return 1;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(
+        packet_row_seed_avalanche);
 #endif
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
@@ -2289,6 +2319,8 @@ int CmdCompare(int argc, char** argv)
         "mixed_geometry=%s mixed_residue_skew=%u "
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
+        "packet_row_seed_multiplier=0x%x "
+        "packet_row_seed_avalanche=%u "
         "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -2323,7 +2355,9 @@ int CmdCompare(int argc, char** argv)
         MixedResidueScheduleName(
             wirehair_v2::ActiveMixedResidueSchedule()),
         wirehair_v2::ActiveMixedResidueHashSeed(),
-        mixed_residue_hash_keyed ? 1u : 0u);
+        mixed_residue_hash_keyed ? 1u : 0u,
+        packet_row_seed_multiplier,
+        packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "

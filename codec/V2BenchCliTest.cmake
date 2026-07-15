@@ -222,6 +222,14 @@ expect_success("mixed_mix_count=2" compare
 expect_failure("--mixed-mix-count must be in" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-mix-count 1)
+expect_success("packet_row_seed_multiplier=0x9e3779b1.*packet_row_seed_avalanche=1"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed
+    --packet-row-seed-multiplier 2654435761 --packet-row-seed-avalanche)
+expect_failure("--packet-row-seed-multiplier must be odd and nonzero"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed
+    --packet-row-seed-multiplier 2)
 expect_success("v2_precode[ ]+17[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 17 --max-message-mib 1 --loss 0 --precode
     --precode-profile certified)
