@@ -393,6 +393,9 @@ static bool CpuHasNeon = false;     // if not, then we have to check at runtime.
 #if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
 static bool CpuHasAVX2 = false;
 #endif
+#if defined(GF256_TRY_TARGET_AVX512)
+static bool CpuHasTargetAVX512 = false;
+#endif
 #if defined(GF256_TRY_TARGET_AVX2)
 static thread_local bool ThreadWideXor = false;
 // Avoid a TLS lookup on the compact path when no thread selected the wide
@@ -552,7 +555,9 @@ extern "C" void gf256_get_active_x86_cpu_features(
 # if defined(GF256_TRY_GFNI)
     features->GFNI = CpuHasGFNI;
 # endif
-# if defined(GF256_TRY_AVX512)
+# if defined(GF256_TRY_TARGET_AVX512)
+    features->AVX512 = CpuHasTargetAVX512;
+# elif defined(GF256_TRY_AVX512)
     features->AVX512 = CpuHasAVX512;
 # endif
 #endif
@@ -613,6 +618,10 @@ static void gf256_architecture_init()
 #if defined(GF256_TRY_AVX2) || defined(GF256_TRY_TARGET_AVX2)
     CpuHasAVX2 = features.AVX2 != 0;
 #endif // GF256_TRY_AVX2 || GF256_TRY_TARGET_AVX2
+
+#if defined(GF256_TRY_TARGET_AVX512)
+    CpuHasTargetAVX512 = features.AVX512 != 0;
+#endif
 
 #if defined(GF256_TRY_GFNI)
     CpuHasGFNI = features.GFNI != 0;
@@ -1130,7 +1139,8 @@ static GF256_AVX2_TARGET int gf256_addset_mem_avx2_target(
 }
 
 template<unsigned SourceCount>
-static GF256_AVX2_TARGET void gf256_add_multi_mem_avx2_target(
+static GF256_AVX2_TARGET __attribute__((noinline)) void
+gf256_add_multi_mem_avx2_target(
     uint8_t* GF256_RESTRICT destination,
     const void* const* GF256_RESTRICT sources,
     int bytes)
@@ -1191,6 +1201,25 @@ static GF256_AVX2_TARGET void gf256_add_multi_mem_avx2_target(
     }
 }
 
+#if defined(__ELF__)
+# define GF256_WH2_AVX512_SECTION \
+    __attribute__((section(".text.wirehair_wh2_avx512")))
+#else
+# define GF256_WH2_AVX512_SECTION
+#endif
+
+static GF256_AVX512_TARGET GF256_WH2_AVX512_SECTION void
+gf256_add16_multi_mem_avx512_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int bytes);
+
+static GF256_AVX2_TARGET GF256_WH2_AVX512_SECTION void
+gf256_add16_multi_mem_wide_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int bytes);
+
 static __attribute__((noinline)) bool gf256_try_add_multi_mem_avx2_target(
     uint8_t* GF256_RESTRICT destination,
     const void* const* GF256_RESTRICT sources,
@@ -1228,7 +1257,7 @@ static __attribute__((noinline)) bool gf256_try_add_multi_mem_avx2_target(
         destination, sources, bytes); return true;
     case 15: gf256_add_multi_mem_avx2_target<15>(
         destination, sources, bytes); return true;
-    case 16: gf256_add_multi_mem_avx2_target<16>(
+    case 16: gf256_add16_multi_mem_wide_target(
         destination, sources, bytes); return true;
     default: return false;
     }
@@ -3423,3 +3452,85 @@ extern "C" void gf256_memswap(void * GF256_RESTRICT vx, void * GF256_RESTRICT vy
         break;
     }
 }
+
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX512)
+
+// Keep this sizeable WH2-only body after the compact public kernels.  ELF
+// builds also place it in a dedicated late section so its optional presence
+// cannot perturb the compact hot-code layout.
+static GF256_AVX512_TARGET GF256_WH2_AVX512_SECTION void
+gf256_add16_multi_mem_avx512_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int bytes)
+{
+    int offset = 0;
+    while (bytes - offset >= 256)
+    {
+        __m512i accumulators[4];
+        for (int lane = 0; lane < 4; ++lane) {
+            accumulators[lane] = _mm512_loadu_si512(
+                reinterpret_cast<const void*>(
+                    destination + offset + lane * 64));
+        }
+        for (unsigned source = 0; source < 16u; ++source)
+        {
+            const uint8_t* const input =
+                reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            for (int lane = 0; lane < 4; ++lane) {
+                accumulators[lane] = _mm512_xor_si512(
+                    accumulators[lane],
+                    _mm512_loadu_si512(
+                        reinterpret_cast<const void*>(input + lane * 64)));
+            }
+        }
+        for (int lane = 0; lane < 4; ++lane) {
+            _mm512_storeu_si512(
+                reinterpret_cast<void*>(
+                    destination + offset + lane * 64),
+                accumulators[lane]);
+        }
+        offset += 256;
+    }
+    while (bytes - offset >= 64)
+    {
+        __m512i accumulator = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(destination + offset));
+        for (unsigned source = 0; source < 16u; ++source) {
+            accumulator = _mm512_xor_si512(
+                accumulator,
+                _mm512_loadu_si512(reinterpret_cast<const void*>(
+                    reinterpret_cast<const uint8_t*>(sources[source]) +
+                    offset)));
+        }
+        _mm512_storeu_si512(
+            reinterpret_cast<void*>(destination + offset), accumulator);
+        offset += 64;
+    }
+    while (offset < bytes)
+    {
+        uint8_t accumulator = destination[offset];
+        for (unsigned source = 0; source < 16u; ++source) {
+            accumulator ^=
+                reinterpret_cast<const uint8_t*>(sources[source])[offset];
+        }
+        destination[offset++] = accumulator;
+    }
+}
+
+static GF256_AVX2_TARGET GF256_WH2_AVX512_SECTION void
+gf256_add16_multi_mem_wide_target(
+    uint8_t* GF256_RESTRICT destination,
+    const void* const* GF256_RESTRICT sources,
+    int bytes)
+{
+    if (CpuHasTargetAVX512 && bytes >= 64) {
+        gf256_add16_multi_mem_avx512_target(destination, sources, bytes);
+        return;
+    }
+    gf256_add_multi_mem_avx2_target<16>(destination, sources, bytes);
+}
+
+#undef GF256_WH2_AVX512_SECTION
+
+#endif
