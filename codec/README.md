@@ -327,8 +327,15 @@ cross-K resonances.  With shared-X hashed scheduling and `P>H`,
 distinct full-cycle sequence derived from the active keyed seed.  This breaks
 rank collisions shared by the GF(256) and GF(2^16) rows at the cost of one
 additional active-value XOR pass; the encoder, decoder, projection oracle,
-and verifier all use the same extension schedule.  The three- and four-row
-settings are H13/H14 experiments
+and verifier all use the same extension schedule.  `precodefail` also accepts
+`--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
+full-cycle extension derivations without changing the base GF(256) schedule;
+the default XOR is 78.
+For decoders with at least
+30000 solver columns and 1024-byte-or-larger blocks, the two residue families
+are accumulated in one sequential scan when their combined scratch is at most
+128 KiB; other shapes retain the lower-setup streamed passes.  The three- and
+four-row settings are H13/H14 experiments
 that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12
@@ -347,8 +354,18 @@ major phases so payload-size bottlenecks can be distinguished from matrix
 construction and peeling costs.
 These flags are benchmarking hooks, not wire-format selection controls.
 
-`compare` and `precodecheck` accept deterministic common packet schedules via
+`compare`, `precodecheck`, and `precodefail` accept deterministic common packet
+schedules via
 `--schedule iid|burst|permutation|systematic-first|repair-only|adversarial`.
 The reported schedule seed reproduces the exact candidate-compatible ID
-stream; `--trial-details` prints each arm's success, overhead, and paired
-overhead delta.  Schedule construction is bounded even at high requested loss.
+stream; `precodefail` uses the requested trace to select its exact K+overhead
+delivered rows, while `--trial-details` prints each end-to-end arm's success,
+overhead, and paired overhead delta.  Schedule construction is bounded even at
+high requested loss.
+
+Test-hook builds of `precodefail` also accept
+`--binary-dense-rows 1..64` for an absolute Shuffle-2 binary-row count and
+`--gf256-heavy-rows 1..128` with `--completion certified` for an absolute
+all-GF(256) completion-row count.  These controls compare denser binary and
+larger subfield alternatives on identical packet traces; they do not change
+named or production profiles.

@@ -528,6 +528,7 @@ static thread_local MixedCoefficientGeometry MixedGeometryForTesting =
 static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
+static thread_local uint32_t MixedIndependentExtensionSeedXorForTesting = 78u;
 
 static bool HasFullCycleMixedResidueSeed(
     uint32_t period,
@@ -561,7 +562,8 @@ static bool SelectIndependentExtensionResidueSeed(
     uint32_t base_seed,
     uint32_t& selected_seed)
 {
-    uint32_t candidate = base_seed ^ 1u;
+    uint32_t candidate =
+        base_seed ^ MixedIndependentExtensionSeedXorForTesting;
     for (uint32_t attempt = 0u; attempt < 1024u; ++attempt, ++candidate)
     {
         if (candidate != base_seed &&
@@ -687,6 +689,12 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled)
     }
     MixedIndependentExtensionResiduesForTesting = enabled;
     return true;
+}
+
+void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
+{
+    MixedIndependentExtensionSeedXorForTesting = seed_xor;
+    MixedIndependentExtensionResiduesForTesting = false;
 }
 
 bool SetMixedCoefficientGeometryForTesting(

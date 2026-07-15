@@ -238,6 +238,8 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
     uint32_t& selected_seed);
 /// Give GF(2^16) rows an independently keyed full-cycle hashed schedule.
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
+/// Select the XOR used to derive the independent extension schedule seed.
+void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select two (frozen H12), three (H13), or four (H14) extension rows.

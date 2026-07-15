@@ -1446,14 +1446,21 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // With H12, S=30 and D2+H=24, so these exercise exact total-column
         // counts L=243, 244, and 245 around the full-period transition.
         189u, 190u, 191u,
-        243u, 244u, 245u, 320u, 1000u
+        243u, 244u, 245u, 320u, 1000u,
+        // The independent case also covers the large-payload dual-bucket
+        // mixed-RHS path selected by SolveMixedCompletionQuotient.
+        30000u
     };
+    const size_t configured_case_count =
+        sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
     for (size_t case_index = 0;
-         case_index < sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
+         case_index < configured_case_count;
          ++case_index)
     {
         const uint32_t K = kBlockCounts[case_index];
-        const uint32_t block_bytes = (case_index & 1u) == 0u ? 2u : 6u;
+        if (K == 30000u && !independent_extension_residues) continue;
+        const uint32_t block_bytes = K == 30000u ? 1024u :
+            ((case_index & 1u) == 0u ? 2u : 6u);
         wirehair_v2::PrecodeParams params =
             wirehair_v2::MakeMixedParams(
                 K,
@@ -1560,8 +1567,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     }
     const uint64_t comparisons =
         wirehair_v2::MixedProjectionOracleComparisonsForTesting();
-    if (comparisons < 2u *
-            (sizeof(kBlockCounts) / sizeof(kBlockCounts[0])))
+    const size_t expected_case_count = configured_case_count -
+        (independent_extension_residues ? 0u : 1u);
+    if (comparisons < 2u * expected_case_count)
     {
         std::fprintf(stderr,
             "solve: mixed projection oracle comparison count=%llu\n",

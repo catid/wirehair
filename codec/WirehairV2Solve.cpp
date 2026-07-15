@@ -1187,6 +1187,142 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
 }
 #endif
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if defined(_MSC_VER)
+#define WH2_MIXED_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_MIXED_NOINLINE __attribute__((noinline))
+#else
+#define WH2_MIXED_NOINLINE
+#endif
+
+static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
+    uint32_t column_count,
+    uint32_t coefficient_period,
+    uint32_t populated_residues,
+    uint32_t block_bytes,
+    uint32_t elements,
+    uint32_t extension_rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint8_t>& values,
+    const MixedCoefficientRows& cached_rows,
+    void* const* subfield_destinations,
+    std::vector<uint8_t>& rhs_low,
+    std::vector<uint8_t>& rhs_high,
+    std::vector<uint8_t>& source_low,
+    std::vector<uint8_t>& source_high,
+    PrecodeSolveStats& stats)
+{
+    std::vector<uint8_t> subfield_buckets(
+        (size_t)coefficient_period * block_bytes, uint8_t{0});
+    std::vector<uint8_t> extension_buckets(
+        (size_t)coefficient_period * block_bytes, uint8_t{0});
+    std::vector<BatchedBlockXorAccumulator> subfield_accumulators;
+    std::vector<BatchedBlockXorAccumulator> extension_accumulators;
+    subfield_accumulators.reserve(coefficient_period);
+    extension_accumulators.reserve(coefficient_period);
+    for (uint32_t residue = 0u; residue < coefficient_period; ++residue)
+    {
+        subfield_accumulators.emplace_back(
+            subfield_buckets.data() + (size_t)residue * block_bytes,
+            block_bytes);
+        extension_accumulators.emplace_back(
+            extension_buckets.data() + (size_t)residue * block_bytes,
+            block_bytes);
+    }
+    // Walk complete coefficient blocks so the comparatively expensive hashed
+    // schedule shift and integer division are paid once per P columns rather
+    // than twice per column.  Both sums are below 2*P, so one subtraction is
+    // the exact modulo operation used by ActiveMixed*CoefficientResidue().
+    uint32_t block_start = 0u;
+    uint32_t block_index = 0u;
+    while (block_start < column_count)
+    {
+        const uint32_t subfield_shift =
+            ActiveMixedResidueBlockShift(block_index);
+        const uint32_t extension_shift =
+            ActiveMixedExtensionResidueBlockShift(block_index);
+        const uint32_t block_columns = std::min(
+            coefficient_period, column_count - block_start);
+        for (uint32_t offset = 0u; offset < block_columns; ++offset)
+        {
+            const uint32_t column = block_start + offset;
+            if (inactive_index[column] != UINT32_MAX) continue;
+            uint32_t subfield_residue = offset + subfield_shift;
+            if (subfield_residue >= coefficient_period) {
+                subfield_residue -= coefficient_period;
+            }
+            uint32_t extension_residue = offset + extension_shift;
+            if (extension_residue >= coefficient_period) {
+                extension_residue -= coefficient_period;
+            }
+            const uint8_t* value =
+                values.data() + (size_t)column * block_bytes;
+            subfield_accumulators[subfield_residue].Add(value);
+            extension_accumulators[extension_residue].Add(value);
+            stats.BlockXors += 2u;
+        }
+        block_start += block_columns;
+        ++block_index;
+    }
+    for (uint32_t residue = 0u; residue < coefficient_period; ++residue)
+    {
+        subfield_accumulators[residue].Flush();
+        extension_accumulators[residue].Flush();
+    }
+
+    uint8_t subfield_scales[kMixedGF256Rows];
+    for (uint32_t residue = 0u; residue < populated_residues; ++residue)
+    {
+        for (uint32_t row = 0u; row < kMixedGF256Rows; ++row) {
+            subfield_scales[row] = cached_rows.Subfield[row][residue];
+        }
+        AddScaledBlocks(
+            subfield_destinations, subfield_scales,
+            kMixedGF256Rows,
+            subfield_buckets.data() + (size_t)residue * block_bytes,
+            block_bytes, stats);
+        const uint8_t* extension_bucket =
+            extension_buckets.data() + (size_t)residue * block_bytes;
+        if (!GF16Deinterleave(
+                extension_bucket,
+                source_low.data(), source_high.data(), block_bytes))
+        {
+            return false;
+        }
+        const uint32_t row0 = kMixedGF256Rows;
+        const uint32_t row1 = row0 + 1u;
+        if (!GF16MulAddPlanar2(
+                rhs_low.data() + (size_t)row0 * elements,
+                rhs_high.data() + (size_t)row0 * elements,
+                cached_rows.Extension[0][residue],
+                rhs_low.data() + (size_t)row1 * elements,
+                rhs_high.data() + (size_t)row1 * elements,
+                cached_rows.Extension[1][residue],
+                source_low.data(), source_high.data(), elements))
+        {
+            return false;
+        }
+        for (uint32_t er = 2u; er < extension_rows; ++er)
+        {
+            const uint32_t row = kMixedGF256Rows + er;
+            if (!GF16MulAddPlanar(
+                    rhs_low.data() + (size_t)row * elements,
+                    rhs_high.data() + (size_t)row * elements,
+                    cached_rows.Extension[er][residue],
+                    source_low.data(), source_high.data(), elements))
+            {
+                return false;
+            }
+        }
+        stats.BlockMulAdds += extension_rows;
+    }
+    return true;
+}
+
+#undef WH2_MIXED_NOINLINE
+#endif
+
 WirehairResult SolveMixedCompletionQuotient(
     const PrecodeSystem& system,
     uint32_t column_count,
@@ -1295,7 +1431,6 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint8_t> rhs_high((size_t)H * elements, 0u);
     std::vector<uint8_t> source_low(elements);
     std::vector<uint8_t> source_high(elements);
-    std::vector<uint8_t> residue_bucket(block_bytes, 0u);
     void* subfield_destinations[kMixedGF256Rows];
     uint8_t subfield_scales[kMixedGF256Rows];
     for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
@@ -1306,6 +1441,21 @@ WirehairResult SolveMixedCompletionQuotient(
     const bool rotate_residues = ActiveMixedResiduesRotated();
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint64_t dual_bucket_bytes =
+        (uint64_t)coefficient_period * block_bytes * 2u;
+    // A sequential dual-bucket scan improves bandwidth-bound large decoders,
+    // but its accumulator setup hurts small systems and its random writes
+    // hurt once the two bucket sets no longer fit comfortably in cache.
+    const bool use_dual_residue_buckets =
+        independent_extension_residues &&
+        column_count >= 30000u &&
+        block_bytes >= 1024u &&
+        dual_bucket_bytes <= (UINT64_C(128) << 10);
+    std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
+#else
+    std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
+#endif
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
     const auto accumulate_extension_rhs = [&](
@@ -1350,7 +1500,26 @@ WirehairResult SolveMixedCompletionQuotient(
         stats.BlockMulAdds += extension_rows;
         return true;
     };
-    for (uint32_t residue = 0; residue < populated_residues; ++residue)
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_expect(use_dual_residue_buckets, false))
+#else
+    if (use_dual_residue_buckets)
+#endif
+    {
+        if (!AccumulateDualMixedCompletionRhs(
+                column_count, coefficient_period, populated_residues,
+                block_bytes, elements, extension_rows,
+                inactive_index, values, *cached_rows,
+                subfield_destinations,
+                rhs_low, rhs_high, source_low, source_high, stats))
+        {
+            return Wirehair_Error;
+        }
+        goto mixed_rhs_accumulated;
+    }
+#endif
+    for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
         std::fill(
             residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
@@ -1389,7 +1558,7 @@ WirehairResult SolveMixedCompletionQuotient(
             }
         }
         bucket_xor.Flush();
-        for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
+        for (uint32_t row = 0u; row < kMixedGF256Rows; ++row) {
             subfield_scales[row] = cached_rows->Subfield[row][residue];
         }
         AddScaledBlocks(
@@ -1403,7 +1572,7 @@ WirehairResult SolveMixedCompletionQuotient(
     }
     if (independent_extension_residues)
     {
-        for (uint32_t residue = 0;
+        for (uint32_t residue = 0u;
              residue < populated_residues; ++residue)
         {
             std::fill(
@@ -1435,6 +1604,9 @@ WirehairResult SolveMixedCompletionQuotient(
             }
         }
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+mixed_rhs_accumulated:
+#endif
 
     // Reduce all completion RHS blocks through each binary pivot together.
     // Gauss-Jordan left the binary pivot matrix in reduced form, so every

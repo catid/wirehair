@@ -362,6 +362,40 @@ expect_success("mixed_independent_extension_residues=1" precodefail
     --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_success("mixed_extension_residue_seed_xor=0x17" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mix-count 2 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 23)
+expect_failure("--mixed-extension-residue-seed-xor requires" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed
+    --mixed-extension-residue-seed-xor 23)
+expect_success("binary_dense_rows_override=16" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-rows 16)
+expect_failure("--binary-dense-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --binary-dense-rows 0)
+expect_failure("--binary-dense-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --binary-dense-rows 65)
+expect_success("gf256_heavy_rows_override=16" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion certified --gf256-heavy-rows 16)
+expect_failure("--gf256-heavy-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --gf256-heavy-rows 0)
+expect_failure("--gf256-heavy-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --gf256-heavy-rows 129)
+expect_failure("--gf256-heavy-rows requires" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --gf256-heavy-rows 16)
 expect_failure("independent extension residues require" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 32
@@ -406,7 +440,8 @@ expect_failure("working set exceeds|message dimensions are unsupported" precodef
     --bb-list 2200000 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --payload-e2e)
 
-# Common packet schedules are accepted by both E2E comparison entry points.
+# Common packet schedules are accepted by both E2E comparison entry points
+# and the rank-only precode failure harness.
 foreach(schedule IN ITEMS iid burst permutation systematic-first repair-only
         adversarial)
     expect_success("schedule=${schedule}" compare --nlo 64 --nhi 64
@@ -414,6 +449,9 @@ foreach(schedule IN ITEMS iid burst permutation systematic-first repair-only
         --schedule ${schedule} --precode)
     expect_success("schedule=${schedule}" precodecheck --N 64 --bb-list 8
         --trials 1 --loss 0.1 --schedule ${schedule})
+    expect_success("schedule=${schedule}" precodefail --N 64 --bb-list 8
+        --overhead 0 --trials 1 --threads 1 --loss 0.1
+        --schedule ${schedule})
 endforeach()
 expect_success("paired_trial: schedule=burst" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0.1
@@ -430,10 +468,14 @@ expect_success("schedule=burst" compare --nlo 8 --nhi 8 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0.99 --schedule burst --precode)
 expect_success("schedule=burst" precodecheck --N 64 --bb-list 8
     --trials 1 --loss 0.99 --schedule burst)
+expect_success("schedule=burst" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 1 --loss 0.99 --schedule burst)
 expect_failure("unknown compare schedule" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --schedule unknown)
 expect_failure("unknown precodecheck schedule" precodecheck --N 64
     --bb-list 8 --trials 1 --schedule unknown)
+expect_failure("unknown precodefail schedule" precodefail --N 64
+    --bb-list 8 --overhead 0 --trials 1 --threads 1 --schedule unknown)
 expect_success("hashed" precodefail --N 64 --bb-list 1
     --overhead 0 --trials 1 --threads 1 --loss 0.1
     --heavy-family periodic,hashed)

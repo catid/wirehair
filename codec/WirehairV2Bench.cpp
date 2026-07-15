@@ -4005,9 +4005,13 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t threads = 1u;
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
+    PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     bool mixed_residue_hash_keyed = false;
     bool mixed_independent_extension_residues = false;
+    uint32_t mixed_extension_residue_seed_xor = 78u;
     uint32_t source_hits_override = 0u;
+    uint32_t binary_dense_rows_override = 0u;
+    uint32_t gf256_heavy_rows_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
@@ -4017,6 +4021,8 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
+    bool binary_dense_rows_explicit = false;
+    bool gf256_heavy_rows_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
@@ -4031,6 +4037,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_residue_schedule_explicit = false;
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
+    bool mixed_extension_residue_seed_xor_explicit = false;
     bool seed_block_bytes_explicit = false;
 #endif
 
@@ -4125,6 +4132,19 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!TakeArg(
+                    "precodefail", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule_kind))
+            {
+                std::fprintf(stderr,
+                    "unknown precodefail schedule %s "
+                    "(expected iid, burst, permutation, systematic-first, "
+                    "repair-only, or adversarial)\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
@@ -4138,6 +4158,30 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             source_hits_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--binary-dense-rows")) {
+            if (!TakeArg(
+                    "precodefail", "--binary-dense-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--binary-dense-rows", value,
+                    binary_dense_rows_override))
+            {
+                return 1;
+            }
+            binary_dense_rows_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--gf256-heavy-rows")) {
+            if (!TakeArg(
+                    "precodefail", "--gf256-heavy-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--gf256-heavy-rows", value,
+                    gf256_heavy_rows_override))
+            {
+                return 1;
+            }
+            gf256_heavy_rows_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--packet-peel-seed-xor")) {
             if (!TakeArg(
@@ -4263,6 +4307,20 @@ int CmdPrecodeFail(int argc, char** argv)
                      "--mixed-independent-extension-residues"))
         {
             mixed_independent_extension_residues = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--mixed-extension-residue-seed-xor"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--mixed-extension-residue-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-extension-residue-seed-xor", value,
+                    mixed_extension_residue_seed_xor))
+            {
+                return 1;
+            }
+            mixed_extension_residue_seed_xor_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
@@ -4401,6 +4459,30 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --source-hits must be in [1,8]\n");
         return 1;
     }
+    if (binary_dense_rows_explicit &&
+        (binary_dense_rows_override == 0u ||
+         binary_dense_rows_override > 64u))
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-rows must be in [1,64]\n");
+        return 1;
+    }
+    if (gf256_heavy_rows_explicit &&
+        (gf256_heavy_rows_override == 0u ||
+         gf256_heavy_rows_override > 128u))
+    {
+        std::fprintf(stderr,
+            "precodefail --gf256-heavy-rows must be in [1,128]\n");
+        return 1;
+    }
+    if (gf256_heavy_rows_override != 0u &&
+        completion != PrecodeFailCompletion::Certified)
+    {
+        std::fprintf(stderr,
+            "precodefail --gf256-heavy-rows requires --completion "
+            "certified\n");
+        return 1;
+    }
     if (!wirehair_v2::SetMixedCoefficientPeriodForTesting(mixed_period))
     {
         std::fprintf(stderr,
@@ -4436,8 +4518,18 @@ int CmdPrecodeFail(int argc, char** argv)
             "--mixed-residue-schedule\n");
         return 1;
     }
+    if (mixed_extension_residue_seed_xor_explicit &&
+        !mixed_independent_extension_residues)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-extension-residue-seed-xor requires "
+            "--mixed-independent-extension-residues\n");
+        return 1;
+    }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(
+        mixed_extension_residue_seed_xor);
     if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
             mixed_independent_extension_residues))
     {
@@ -4471,19 +4563,23 @@ int CmdPrecodeFail(int argc, char** argv)
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
+            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
+            binary_dense_rows_override,
+            gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
             paired_overhead_stream ? "paired" : "salted",
-            full_payload_solve ? 1u : 0u);
+            full_payload_solve ? 1u : 0u,
+            PacketScheduleName(schedule_kind));
     }
     else
     {
@@ -4494,11 +4590,13 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
             "mixed_independent_extension_residues=%u "
+            "mixed_extension_residue_seed_xor=0x%x "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
+            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -4511,14 +4609,18 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
             mixed_independent_extension_residues ? 1u : 0u,
+            mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,
+            binary_dense_rows_override,
+            gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
             paired_overhead_stream ? "paired" : "salted",
-            full_payload_solve ? 1u : 0u);
+            full_payload_solve ? 1u : 0u,
+            PacketScheduleName(schedule_kind));
     }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
@@ -4583,6 +4685,12 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PrecodeParams base_params = canonical_params;
             if (source_hits_override != 0u) {
                 base_params.SourceHits = source_hits_override;
+            }
+            if (binary_dense_rows_override != 0u) {
+                base_params.DenseRows = binary_dense_rows_override;
+            }
+            if (gf256_heavy_rows_override != 0u) {
+                base_params.HeavyRows = gf256_heavy_rows_override;
             }
             base_params.HeavyFamily = heavy_family;
             wirehair_v2::PrecodeSystem system;
@@ -4698,6 +4806,9 @@ int CmdPrecodeFail(int argc, char** argv)
                             }
                             wirehair_v2::SetMixedResidueHashSeedForTesting(
                                 active_hash_seed);
+                            wirehair_v2::
+                                SetMixedIndependentExtensionSeedXorForTesting(
+                                    mixed_extension_residue_seed_xor);
                             if (!wirehair_v2::
                                     SetMixedIndependentExtensionResiduesForTesting(
                                         mixed_independent_extension_residues))
@@ -4740,7 +4851,7 @@ int CmdPrecodeFail(int argc, char** argv)
                                 }
                                 // Keep the delivered packet IDs paired across
                                 // completion, heavy-family, and mix-count arms.
-                                Rng rng(
+                                const uint64_t loss_seed =
                                     seed ^
                                     ((uint64_t)K *
                                         UINT64_C(0x9e3779b97f4a7c15)) ^
@@ -4750,19 +4861,43 @@ int CmdPrecodeFail(int argc, char** argv)
                                             0u : overhead) *
                                         UINT64_C(0x94d049bb133111eb)) ^
                                     ((uint64_t)trial *
-                                        UINT64_C(0xd6e8feb86659fd93)));
-                                uint32_t block_id = 0u;
-                                size_t delivered = 0u;
-                                while (delivered < packets.size())
+                                        UINT64_C(0xd6e8feb86659fd93));
+                                if (schedule_kind == PacketScheduleKind::Iid)
                                 {
-                                    const uint32_t id = block_id++;
-                                    if (ShouldDrop(rng, loss)) {
-                                        continue;
+                                    // Preserve the historical precodefail IID
+                                    // stream exactly so old result sets remain
+                                    // directly comparable.
+                                    Rng rng(loss_seed);
+                                    uint32_t block_id = 0u;
+                                    size_t delivered = 0u;
+                                    while (delivered < packets.size())
+                                    {
+                                        const uint32_t id = block_id++;
+                                        if (ShouldDrop(rng, loss)) {
+                                            continue;
+                                        }
+                                        wirehair_v2::SolvePacket& packet =
+                                            packets[delivered++];
+                                        packet.BlockId = id;
+                                        packet.Data = zero.data();
                                     }
-                                    wirehair_v2::SolvePacket& packet =
-                                        packets[delivered++];
-                                    packet.BlockId = id;
-                                    packet.Data = zero.data();
+                                }
+                                else
+                                {
+                                    const std::vector<uint32_t> ids =
+                                        BuildPacketSchedule(
+                                            K, (uint32_t)packets.size(), loss,
+                                            loss_seed, schedule_kind);
+                                    if (ids.size() != packets.size()) {
+                                        throw std::runtime_error(
+                                            "packet schedule construction "
+                                            "failed");
+                                    }
+                                    for (size_t i = 0; i < ids.size(); ++i)
+                                    {
+                                        packets[i].BlockId = ids[i];
+                                        packets[i].Data = zero.data();
+                                    }
                                 }
                                 std::vector<uint8_t> intermediate;
                                 wirehair_v2::PrecodeSolveStats solve_stats;
