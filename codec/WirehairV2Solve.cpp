@@ -1056,10 +1056,7 @@ WirehairResult SolveMixedCompletionQuotient(
         "mixed completion packing changed unexpectedly");
     if ((uint64_t)inactive_count * packed_words >
             (uint64_t)std::numeric_limits<size_t>::max() /
-                sizeof(uint64_t) ||
-        (uint64_t)H * inactive_count >
-            (uint64_t)std::numeric_limits<size_t>::max() /
-                sizeof(uint16_t))
+                sizeof(uint64_t))
     {
         return Wirehair_OOM;
     }
@@ -1094,24 +1091,6 @@ WirehairResult SolveMixedCompletionQuotient(
     }
 #endif
 
-    std::vector<uint8_t> subfield_coeff(
-        (size_t)kMixedGF256Rows * inactive_count, 0u);
-    std::vector<uint16_t> extension_coeff(
-        (size_t)extension_rows * inactive_count, 0u);
-    for (uint32_t index = 0; index < inactive_count; ++index) {
-        const uint64_t* source =
-            projected.data() + (size_t)index * packed_words;
-        for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
-            subfield_coeff[(size_t)row * inactive_count + index] =
-                (uint8_t)(source[row >> 2] >> ((row & 3u) * 16u));
-        }
-        for (uint32_t er = 0; er < extension_rows; ++er) {
-            const uint32_t row = kMixedGF256Rows + er;
-            extension_coeff[(size_t)er * inactive_count + index] =
-                (uint16_t)(source[row >> 2] >> ((row & 3u) * 16u));
-        }
-    }
-
     const uint32_t elements = block_bytes / 2u;
     std::vector<uint8_t> subfield_rhs(
         (size_t)kMixedGF256Rows * block_bytes, 0u);
@@ -1121,20 +1100,11 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint8_t> source_high(elements);
     std::vector<uint8_t> residue_bucket(block_bytes, 0u);
     void* subfield_destinations[kMixedGF256Rows];
-    void* subfield_coefficient_destinations[kMixedGF256Rows];
     uint8_t subfield_scales[kMixedGF256Rows];
     for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
         subfield_destinations[row] =
             subfield_rhs.data() + (size_t)row * block_bytes;
-        subfield_coefficient_destinations[row] =
-            subfield_coeff.data() + (size_t)row * inactive_count;
     }
-#if defined(GF256_TRY_AVX2) || defined(GF256_TRY_SSSE3) || \
-    defined(GF256_TRY_GFNI) || defined(GF256_TRY_NEON)
-    const bool use_bulk_subfield_coefficients = inactive_count >= 64u;
-#else
-    const bool use_bulk_subfield_coefficients = false;
-#endif
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const bool rotate_residues = ActiveMixedResiduesRotated();
     const uint32_t populated_residues =
@@ -1223,8 +1193,11 @@ WirehairResult SolveMixedCompletionQuotient(
         stats.BlockMulAdds += extension_rows;
     }
 
-    // Reduce all completion rows through each binary pivot together.  The
-    // first ten stay in the GF(256) subfield; the extension rows share a
+    // Reduce all completion RHS blocks through each binary pivot together.
+    // Gauss-Jordan left the binary pivot matrix in reduced form, so every
+    // other pivot column is zero in this relation.  A completion row's scale
+    // at `pivot` is therefore still its original projected coefficient.  The
+    // first ten rows stay in the GF(256) subfield; the extension rows share a
     // single pivot-RHS deinterleave.
     for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
     {
@@ -1234,37 +1207,12 @@ WirehairResult SolveMixedCompletionQuotient(
         for (uint32_t k = 0; k < inactive_count; ++k) {
             if (relation[k] > 1u) return Wirehair_Error;
         }
+        const uint64_t* packed_scales =
+            projected.data() + (size_t)pivot * packed_words;
         for (uint32_t row = 0; row < kMixedGF256Rows; ++row)
         {
-            subfield_scales[row] =
-                subfield_coeff[(size_t)row * inactive_count + pivot];
-        }
-        if (use_bulk_subfield_coefficients)
-        {
-            // The relation is binary, so multiplying it by each pivot scale
-            // exactly reproduces the conditional XOR below while sharing the
-            // relation scan across all ten coefficient rows where supported.
-            gf256_muladd_multi_mem(
-                subfield_coefficient_destinations,
-                subfield_scales,
-                (int)kMixedGF256Rows,
-                relation,
-                (int)inactive_count);
-        }
-        else
-        {
-            for (uint32_t row = 0; row < kMixedGF256Rows; ++row)
-            {
-                const uint8_t scale = subfield_scales[row];
-                if (scale == 0u) continue;
-                uint8_t* coefficients =
-                    subfield_coeff.data() + (size_t)row * inactive_count;
-                for (uint32_t k = 0; k < inactive_count; ++k) {
-                    if (relation[k]) {
-                        coefficients[k] ^= scale;
-                    }
-                }
-            }
+            subfield_scales[row] = (uint8_t)(
+                packed_scales[row >> 2] >> ((row & 3u) * 16u));
         }
         bool have_subfield_scale = false;
         for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
@@ -1283,17 +1231,11 @@ WirehairResult SolveMixedCompletionQuotient(
         bool have_extension_scale = false;
         for (uint32_t er = 0; er < extension_rows; ++er)
         {
-            const uint16_t scale =
-                extension_coeff[(size_t)er * inactive_count + pivot];
+            const uint32_t row = kMixedGF256Rows + er;
+            const uint16_t scale = (uint16_t)(
+                packed_scales[row >> 2] >> ((row & 3u) * 16u));
             extension_scales[er] = scale;
             have_extension_scale = have_extension_scale || scale != 0u;
-            if (scale == 0u) continue;
-            for (uint32_t k = 0; k < inactive_count; ++k) {
-                if (relation[k]) {
-                    extension_coeff[(size_t)er * inactive_count + k] ^=
-                        scale;
-                }
-            }
         }
         if (have_extension_scale)
         {
@@ -1362,15 +1304,41 @@ WirehairResult SolveMixedCompletionQuotient(
     }
     std::vector<uint16_t> quotient_rows(
         (size_t)H * quotient_columns, 0u);
-    for (uint32_t row = 0; row < H; ++row) {
-        for (uint32_t i = 0; i < quotient_columns; ++i) {
-            const uint32_t column = free_columns[i];
+    // Only the free columns survive binary elimination.  Computing those
+    // coefficients directly avoids materializing and Gauss-Jordan updating
+    // H full inactive-width rows.  Substituting
+    //
+    //   x[p] = rhs[p] + sum(relation[p,f] * x[f])
+    //
+    // gives C'[f] = C[f] + sum(C[p] * relation[p,f]).  Each relation bit is
+    // binary, so the packed GF(2^16) coefficient vectors combine by XOR.
+    for (uint32_t i = 0; i < quotient_columns; ++i)
+    {
+        const uint32_t free_column = free_columns[i];
+        uint64_t packed[kMixedPackedCoefficientWords] = {};
+        const uint64_t* free_coefficients =
+            projected.data() + (size_t)free_column * packed_words;
+        for (uint32_t word = 0; word < packed_words; ++word) {
+            packed[word] = free_coefficients[word];
+        }
+        for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
+        {
+            if (!binary_have_pivot[pivot] ||
+                binary_pivot_coeff[
+                    (size_t)pivot * inactive_count + free_column] == 0u)
+            {
+                continue;
+            }
+            const uint64_t* pivot_coefficients =
+                projected.data() + (size_t)pivot * packed_words;
+            for (uint32_t word = 0; word < packed_words; ++word) {
+                packed[word] ^= pivot_coefficients[word];
+            }
+        }
+        for (uint32_t row = 0; row < H; ++row) {
             quotient_rows[(size_t)row * quotient_columns + i] =
-                row < kMixedGF256Rows ?
-                subfield_coeff[(size_t)row * inactive_count + column] :
-                extension_coeff[
-                    (size_t)(row - kMixedGF256Rows) * inactive_count +
-                    column];
+                (uint16_t)(
+                    packed[row >> 2] >> ((row & 3u) * 16u));
         }
     }
 
