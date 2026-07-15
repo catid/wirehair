@@ -1783,9 +1783,11 @@ PeelResult PeelBinaryRowsImplementation(
         if (degree_two_refs[other] > 0u) {
             --degree_two_refs[other];
         }
-        if (degree_two_refs[other] > 0u) {
-            degree_two_queue.push(degree_two_key(other));
-        }
+        // If the lower degree remains nonzero, its matching key is still in
+        // the lazy heap from the earlier increment.  It cannot have reached
+        // the top while a higher key for this unresolved column existed, so
+        // pushing it again here would only create a duplicate.  Degree zero
+        // needs no live heap key.
         state.LowDegreeXor = (uint16_t)other;
     };
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r) {
