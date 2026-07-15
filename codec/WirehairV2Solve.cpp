@@ -1529,11 +1529,13 @@ PeelResult PeelBinaryRowsImplementation(
     PeelResult out;
     out.SolveRow.assign(column_count, UINT32_MAX);
     out.UsedRows.assign(rows.size(), 0u);
+    out.PeelOrder.reserve(column_count);
 
     std::vector<PeelRowState> row_state(rows.size());
     std::vector<size_t> column_offsets((size_t)column_count + 1u, 0u);
     std::vector<uint8_t> resolved(column_count, 0u);
     std::vector<uint32_t> queue;
+    queue.reserve(rows.size());
     std::vector<uint32_t> degree_two_refs(column_count, 0u);
     std::vector<ColumnCandidate> degree_two_storage;
     degree_two_storage.reserve(column_count);
