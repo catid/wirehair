@@ -185,6 +185,17 @@ expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7 mixed_
     --precode-profile mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed)
+expect_success("mixed_independent_extension_residues=1" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-mix-count 2
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_failure("independent extension residues require" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-gf16-rows 4
+    --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule ramp --mixed-independent-extension-residues)
 expect_failure("--mixed-residue-skew must be a corner-preserving" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 4
@@ -345,6 +356,17 @@ expect_success("mixed_residue_schedule=hashed mixed_residue_hash_seed=0x7 mixed_
     --completion mixed --mixed-gf16-rows 4 --mixed-period 28
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed)
+expect_success("mixed_independent_extension_residues=1" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mix-count 2 --payload-e2e
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_failure("independent extension residues require" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule ramp
+    --mixed-independent-extension-residues)
 expect_failure("--mixed-gf16-rows must be in" precodefail --N 64
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 5)

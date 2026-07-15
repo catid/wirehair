@@ -451,47 +451,6 @@ bool ParseMixedResidueSchedule(
     return false;
 }
 
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-uint32_t MixedResidueKeyedSeed(uint32_t base_seed, uint32_t block_count)
-{
-    uint32_t x = base_seed ^
-        (block_count + UINT32_C(0x9e3779b9));
-    x = (x ^ (x >> 16)) * UINT32_C(0x85ebca6b);
-    x = (x ^ (x >> 13)) * UINT32_C(0xc2b2ae35);
-    return x ^ (x >> 16);
-}
-
-uint32_t GreatestCommonDivisor(uint32_t a, uint32_t b)
-{
-    while (b != 0u) {
-        const uint32_t remainder = a % b;
-        a = b;
-        b = remainder;
-    }
-    return a;
-}
-
-bool SelectFullCycleMixedResidueKeyedSeed(
-    uint32_t base_seed,
-    uint32_t block_count,
-    uint32_t& selected_seed)
-{
-    uint32_t candidate = MixedResidueKeyedSeed(base_seed, block_count);
-    const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
-    for (uint32_t attempt = 0u; attempt < 1024u; ++attempt, ++candidate)
-    {
-        wirehair_v2::SetMixedResidueHashSeedForTesting(candidate);
-        const uint32_t cycle_shift =
-            wirehair_v2::ActiveMixedResidueBlockShift(127u);
-        if (GreatestCommonDivisor(cycle_shift, period) == 1u) {
-            selected_seed = candidate;
-            return true;
-        }
-    }
-    return false;
-}
-#endif
-
 struct CompareOptions
 {
     CompareProfileMode ProfileMode = CompareProfileBase;
@@ -1851,6 +1810,7 @@ int CmdCompare(int argc, char** argv)
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
     CompareOptions compare_options;
     bool mixed_residue_hash_keyed = false;
+    bool mixed_independent_extension_residues = false;
     uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
@@ -2030,6 +1990,12 @@ int CmdCompare(int argc, char** argv)
             mixed_residue_hash_keyed = true;
         }
         else if (!std::strcmp(
+                     argv[i],
+                     "--mixed-independent-extension-residues"))
+        {
+            mixed_independent_extension_residues = true;
+        }
+        else if (!std::strcmp(
                      argv[i], "--packet-row-seed-multiplier"))
         {
             if (!TakeArg(
@@ -2175,7 +2141,8 @@ int CmdCompare(int argc, char** argv)
              mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
-             mixed_residue_hash_keyed)
+             mixed_residue_hash_keyed ||
+             mixed_independent_extension_residues)
     {
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
@@ -2235,6 +2202,14 @@ int CmdCompare(int argc, char** argv)
     }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
+            mixed_independent_extension_residues))
+    {
+        std::fprintf(stderr,
+            "compare independent extension residues require "
+            "shared-x hashed scheduling with P>H\n");
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -2319,6 +2294,7 @@ int CmdCompare(int argc, char** argv)
         "mixed_geometry=%s mixed_residue_skew=%u "
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
+        "mixed_independent_extension_residues=%u "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
         "loss_trace=common-id-v2 "
@@ -2356,6 +2332,7 @@ int CmdCompare(int argc, char** argv)
             wirehair_v2::ActiveMixedResidueSchedule()),
         wirehair_v2::ActiveMixedResidueHashSeed(),
         mixed_residue_hash_keyed ? 1u : 0u,
+        mixed_independent_extension_residues ? 1u : 0u,
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
@@ -2410,7 +2387,8 @@ int CmdCompare(int argc, char** argv)
             if (mixed_residue_hash_keyed)
             {
                 uint32_t selected_hash_seed = 0u;
-                if (!SelectFullCycleMixedResidueKeyedSeed(
+                if (!wirehair_v2::
+                        SelectFullCycleMixedResidueKeyedSeedForTesting(
                         mixed_residue_hash_seed, N, selected_hash_seed))
                 {
                     std::fprintf(stderr,
@@ -2419,6 +2397,12 @@ int CmdCompare(int argc, char** argv)
                         N);
                     return 1;
                 }
+            }
+            if (!wirehair_v2::
+                    SetMixedIndependentExtensionResiduesForTesting(
+                        mixed_independent_extension_residues))
+            {
+                return 1;
             }
 #endif
             const wirehair_v2::SeedProfile* profile =
@@ -4022,6 +4006,7 @@ int CmdPrecodeFail(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
     bool mixed_residue_hash_keyed = false;
+    bool mixed_independent_extension_residues = false;
     uint32_t source_hits_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
     uint32_t odd_packet_peel_seed_xor = 0u;
@@ -4273,6 +4258,12 @@ int CmdPrecodeFail(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--mixed-residue-hash-keyed")) {
             mixed_residue_hash_keyed = true;
         }
+        else if (!std::strcmp(
+                     argv[i],
+                     "--mixed-independent-extension-residues"))
+        {
+            mixed_independent_extension_residues = true;
+        }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
                     "precodefail", "--seed-block-bytes",
@@ -4386,7 +4377,8 @@ int CmdPrecodeFail(int argc, char** argv)
              mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
-             mixed_residue_hash_keyed)
+             mixed_residue_hash_keyed ||
+             mixed_independent_extension_residues)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -4446,6 +4438,14 @@ int CmdPrecodeFail(int argc, char** argv)
     }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
+            mixed_independent_extension_residues))
+    {
+        std::fprintf(stderr,
+            "precodefail independent extension residues require "
+            "shared-x hashed scheduling with P>H\n");
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -4493,6 +4493,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_geometry=%s mixed_residue_skew=%u "
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
+            "mixed_independent_extension_residues=%u "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -4509,6 +4510,7 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::ActiveMixedResidueSchedule()),
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
+            mixed_independent_extension_residues ? 1u : 0u,
             source_hits_override,
             packet_peel_seed_xor,
             odd_packet_peel_seed_xor,
@@ -4534,12 +4536,21 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;
         if (mixed_residue_hash_keyed &&
-            !SelectFullCycleMixedResidueKeyedSeed(
+            !wirehair_v2::SelectFullCycleMixedResidueKeyedSeedForTesting(
                 mixed_residue_hash_seed, K, active_hash_seed))
         {
             std::fprintf(stderr,
                 "precodefail could not select a full-cycle keyed residue "
                 "hash seed for N=%u\n",
+                K);
+            return 1;
+        }
+        if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
+                mixed_independent_extension_residues))
+        {
+            std::fprintf(stderr,
+                "precodefail could not restore independent extension "
+                "residues for N=%u\n",
                 K);
             return 1;
         }
@@ -4687,6 +4698,14 @@ int CmdPrecodeFail(int argc, char** argv)
                             }
                             wirehair_v2::SetMixedResidueHashSeedForTesting(
                                 active_hash_seed);
+                            if (!wirehair_v2::
+                                    SetMixedIndependentExtensionResiduesForTesting(
+                                        mixed_independent_extension_residues))
+                            {
+                                throw std::runtime_error(
+                                    "invalid independent extension residue "
+                                    "schedule");
+                            }
                             if (!wirehair_v2::
                                     SetPacketRowSeedMultiplierForTesting(
                                         packet_row_seed_multiplier))

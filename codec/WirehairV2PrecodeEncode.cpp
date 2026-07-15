@@ -382,6 +382,8 @@ bool ComputePrecodeValues(
         }
         const uint32_t window = ActiveMixedCoefficientPeriod();
         const bool rotate_residues = ActiveMixedResiduesRotated();
+        const bool independent_extension_residues =
+            ActiveMixedIndependentExtensionResidues();
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
@@ -416,7 +418,7 @@ bool ComputePrecodeValues(
                 gf8_rhs.data() + (size_t)r * block_bytes;
         }
 
-        const auto accumulate_residue = [&](
+        const auto accumulate_subfield_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
         {
             for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
@@ -427,6 +429,12 @@ bool ComputePrecodeValues(
                 (int)kMixedGF256Rows, value, bytes);
             st.HeavyMulAdds += kMixedGF256Rows;
 
+            return true;
+        };
+
+        const auto accumulate_extension_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
             if (!GF16Deinterleave(
                     value, source_low.data(), source_high.data(), block_bytes))
             {
@@ -466,6 +474,14 @@ bool ComputePrecodeValues(
             st.HeavyMulAdds += extension_rows;
             st.MixedGF16MulAdds += extension_rows;
             return true;
+        };
+
+        const auto accumulate_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            return accumulate_subfield_residue(m, value) &&
+                (independent_extension_residues ||
+                 accumulate_extension_residue(m, value));
         };
 
         const bool use_residue_buckets = heavy_base >= 2u * window;
@@ -578,6 +594,70 @@ bool ComputePrecodeValues(
             }
         }
 
+        if (independent_extension_residues)
+        {
+            if (use_full_bucket_storage)
+            {
+                std::vector<uint8_t> bucket(
+                    (size_t)window * block_bytes, 0u);
+                for (uint32_t c = 0u; c < heavy_base; ++c)
+                {
+                    const uint32_t m =
+                        ActiveMixedExtensionCoefficientResidue(c);
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                for (uint32_t m = 0u; m < window; ++m) {
+                    if (!accumulate_extension_residue(
+                            m, bucket.data() + (size_t)m * block_bytes))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (use_residue_buckets)
+            {
+                std::vector<uint8_t> bucket(block_bytes, 0u);
+                for (uint32_t m = 0u; m < window; ++m)
+                {
+                    std::fill(
+                        bucket.begin(), bucket.end(), uint8_t{0});
+                    uint32_t block_index = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < heavy_base;
+                         block_base += window)
+                    {
+                        const uint32_t block_shift =
+                            ActiveMixedExtensionResidueBlockShift(
+                                block_index++);
+                        const uint32_t unshifted = m >= block_shift ?
+                            m - block_shift : m + window - block_shift;
+                        const uint32_t c = block_base + unshifted;
+                        if (c >= heavy_base) continue;
+                        gf256_add_mem(
+                            bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                    if (!accumulate_extension_residue(m, bucket.data())) {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                for (uint32_t c = 0u; c < heavy_base; ++c) {
+                    if (!accumulate_extension_residue(
+                            ActiveMixedExtensionCoefficientResidue(c),
+                            column_value(c)))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
         // Convert the ten GF(256) row RHS blocks once, after their fast
         // interleaved accumulation.  The extension rows are already in
         // their final planar representation.
@@ -607,7 +687,8 @@ bool ComputePrecodeValues(
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
                     gf16_coefficient_rows[er][
-                        ActiveMixedCoefficientResidue(heavy_base + j)];
+                        ActiveMixedExtensionCoefficientResidue(
+                            heavy_base + j)];
             }
         }
 

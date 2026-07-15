@@ -322,7 +322,13 @@ above.  `--mixed-residue-hash-keyed` instead derives a distinct sequence from
 the base hash seed and K, then advances to the first sequence whose 127-step
 cumulative shift is coprime to P.  This preserves the full `127*P` block-label
 cycle while breaking the fixed schedule/K coupling that produces sharp
-cross-K resonances.  The three- and four-row settings are H13/H14 experiments
+cross-K resonances.  With shared-X hashed scheduling and `P>H`,
+`--mixed-independent-extension-residues` gives the GF(2^16) rows a second,
+distinct full-cycle sequence derived from the active keyed seed.  This breaks
+rank collisions shared by the GF(256) and GF(2^16) rows at the cost of one
+additional active-value XOR pass; the encoder, decoder, projection oracle,
+and verifier all use the same extension schedule.  The three- and four-row
+settings are H13/H14 experiments
 that append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12

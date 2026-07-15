@@ -207,12 +207,17 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients();
 uint32_t ActiveMixedCoefficientPeriod();
 /// Coefficient residue for a GE column under the active balanced block skew.
 uint32_t ActiveMixedCoefficientResidue(uint32_t column);
+/// Residue used by extension-field rows.  Production aliases the shared
+/// residue; test builds may select an independently keyed schedule.
+uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column);
 /// Rotation applied to one complete period-sized block.
 uint32_t ActiveMixedResidueBlockShift(uint32_t block_index);
+uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedResidueSkew();
 MixedResidueSchedule ActiveMixedResidueSchedule();
 uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
+bool ActiveMixedIndependentExtensionResidues();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
@@ -226,6 +231,13 @@ bool SetMixedResidueSkewForTesting(uint32_t skew);
 bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule);
 /// Select the deterministic hashed-schedule sequence (benchmark/test only).
 void SetMixedResidueHashSeedForTesting(uint32_t seed);
+/// Derive and activate the first K-keyed hashed schedule with a full cycle.
+bool SelectFullCycleMixedResidueKeyedSeedForTesting(
+    uint32_t base_seed,
+    uint32_t block_count,
+    uint32_t& selected_seed);
+/// Give GF(2^16) rows an independently keyed full-cycle hashed schedule.
+bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select two (frozen H12), three (H13), or four (H14) extension rows.
