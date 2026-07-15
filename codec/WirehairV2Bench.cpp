@@ -1818,6 +1818,8 @@ int CmdCompare(int argc, char** argv)
     bool mixed_mix_count_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
+    uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
+    bool mixed_gf256_rows_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -1926,6 +1928,16 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
             mixed_gf16_rows_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
+            if (!TakeArg(
+                    "compare", "--mixed-gf256-rows", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-gf256-rows", value, mixed_gf256_rows))
+            {
+                return 1;
+            }
+            mixed_gf256_rows_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
@@ -2138,7 +2150,8 @@ int CmdCompare(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_mix_count_explicit || mixed_period_explicit ||
              mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
+             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+             mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
@@ -2157,6 +2170,18 @@ int CmdCompare(int argc, char** argv)
             wirehair_v2::kCertifiedPacketMixCount);
         return 1;
     }
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "compare --mixed-gf256-rows must be in [%u,%u], fit the "
+            "active period, and use shared-x for an extra row\n",
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMax);
+        return 1;
+    }
     if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
     {
         std::fprintf(stderr,
@@ -2170,12 +2195,9 @@ int CmdCompare(int argc, char** argv)
     {
         std::fprintf(stderr,
             "compare --mixed-period must be in [%u,%u]\n",
-            wirehair_v2::kMixedGF256Rows +
+            wirehair_v2::ActiveMixedGF256Rows() +
                 wirehair_v2::ActiveMixedGF16Rows(),
             wirehair_v2::kMixedCoefficientPeriod);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
     if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
@@ -2290,7 +2312,7 @@ int CmdCompare(int argc, char** argv)
         "dense_candidate=%u precode=%u precode_cache=%u "
         "precode_profile=%s encoder_cache=%u decoder_cache=%u schedule=%s "
         "schedule_seed=0x%llx mixed_mix_count=%u mixed_period=%u "
-        "mixed_gf16_rows=%u "
+        "mixed_gf256_rows=%u mixed_gf16_rows=%u "
         "mixed_geometry=%s mixed_residue_skew=%u "
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
@@ -2324,6 +2346,7 @@ int CmdCompare(int argc, char** argv)
         (unsigned long long)seed,
         mixed_mix_count,
         wirehair_v2::ActiveMixedCoefficientPeriod(),
+        wirehair_v2::ActiveMixedGF256Rows(),
         wirehair_v2::ActiveMixedGF16Rows(),
         MixedCoefficientGeometryName(
             wirehair_v2::ActiveMixedCoefficientGeometry()),
@@ -4025,6 +4048,8 @@ int CmdPrecodeFail(int argc, char** argv)
     bool gf256_heavy_rows_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
+    uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
+    bool mixed_gf256_rows_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -4239,6 +4264,17 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_gf16_rows_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
+            if (!TakeArg(
+                    "precodefail", "--mixed-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-gf256-rows", value, mixed_gf256_rows))
+            {
+                return 1;
+            }
+            mixed_gf256_rows_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
                     "precodefail", "--mixed-period", argc, argv, i, value) ||
@@ -4432,7 +4468,8 @@ int CmdPrecodeFail(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_period_explicit || mixed_geometry_explicit ||
-             mixed_gf16_rows_explicit || mixed_residue_skew_explicit ||
+             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+             mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
@@ -4441,6 +4478,18 @@ int CmdPrecodeFail(int argc, char** argv)
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
             "mixed\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-gf256-rows must be in [%u,%u], fit the "
+            "active period, and use shared-x for an extra row\n",
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMax);
         return 1;
     }
     if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
@@ -4487,12 +4536,9 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::fprintf(stderr,
             "precodefail --mixed-period must be in [%u,%u]\n",
-            wirehair_v2::kMixedGF256Rows +
+            wirehair_v2::ActiveMixedGF256Rows() +
                 wirehair_v2::ActiveMixedGF16Rows(),
             wirehair_v2::kMixedCoefficientPeriod);
-        return 1;
-    }
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
     if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
@@ -4585,7 +4631,8 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
-            "completion=%s mixed_period=%u mixed_gf16_rows=%u "
+            "completion=%s mixed_period=%u mixed_gf256_rows=%u "
+            "mixed_gf16_rows=%u "
             "mixed_geometry=%s mixed_residue_skew=%u "
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
@@ -4600,6 +4647,7 @@ int CmdPrecodeFail(int argc, char** argv)
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
+            wirehair_v2::ActiveMixedGF256Rows(),
             wirehair_v2::ActiveMixedGF16Rows(),
             MixedCoefficientGeometryName(
                 wirehair_v2::ActiveMixedCoefficientGeometry()),
@@ -4770,6 +4818,19 @@ int CmdPrecodeFail(int argc, char** argv)
                         {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
                             if (!wirehair_v2::
+                                    SetMixedCoefficientGeometryForTesting(
+                                        mixed_geometry))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed coefficient geometry");
+                            }
+                            if (!wirehair_v2::SetMixedGF256RowsForTesting(
+                                    mixed_gf256_rows))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed GF256 row count");
+                            }
+                            if (!wirehair_v2::
                                     SetMixedGF16RowsForTesting(
                                         mixed_gf16_rows))
                             {
@@ -4782,13 +4843,6 @@ int CmdPrecodeFail(int argc, char** argv)
                             {
                                 throw std::runtime_error(
                                     "invalid mixed coefficient period");
-                            }
-                            if (!wirehair_v2::
-                                    SetMixedCoefficientGeometryForTesting(
-                                        mixed_geometry))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed coefficient geometry");
                             }
                             if (!wirehair_v2::
                                     SetMixedResidueSkewForTesting(

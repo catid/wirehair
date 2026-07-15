@@ -302,17 +302,17 @@ string(CONCAT precodefail_paired_pattern
 expect_success("${precodefail_paired_pattern}" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 4 --threads 2 --loss 0.1
     --mix-count 2,3 --completion mixed --payload-e2e)
-expect_success("mixed_period=64 mixed_gf16_rows=2 mixed_geometry=shared-x.*full_payload_solve=1"
+expect_success("mixed_period=64 mixed_gf256_rows=10 mixed_gf16_rows=2 mixed_geometry=shared-x.*full_payload_solve=1"
     precodefail
     --N 64 --bb-list 1280 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-period 64 --mixed-geometry shared-x
     --full-payload-solve)
-expect_success("mixed_period=64 mixed_gf16_rows=3 mixed_geometry=shared-x"
+expect_success("mixed_period=64 mixed_gf256_rows=10 mixed_gf16_rows=3 mixed_geometry=shared-x"
     precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 3 --mixed-period 64
     --mixed-geometry shared-x)
-expect_success("mixed_period=32 mixed_gf16_rows=4 mixed_geometry=shared-x"
+expect_success("mixed_period=32 mixed_gf256_rows=10 mixed_gf16_rows=4 mixed_geometry=shared-x"
     precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 32
@@ -362,6 +362,29 @@ expect_success("mixed_independent_extension_residues=1" precodefail
     --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_success("mixed_gf256_rows=11" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mix-count 2 --mixed-gf256-rows 11
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues
+    --payload-e2e)
+expect_failure("--mixed-gf256-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-rows 9)
+expect_failure("--mixed-gf256-rows must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-rows 12)
+expect_failure("use shared-x for an extra row" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-rows 11 --mixed-geometry frozen)
+expect_success("mixed_gf256_rows=11" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0.1 --precode --precode-profile mixed
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
 expect_success("mixed_extension_residue_seed_xor=0x17" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mix-count 2 --mixed-gf16-rows 4 --mixed-period 32

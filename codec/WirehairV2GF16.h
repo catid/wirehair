@@ -9,6 +9,11 @@ static const uint8_t kGF16Lambda = 32u;
 static const uint16_t kGF16Generator = 266u;
 static const uint32_t kMixedCoefficientPeriod = 244u;
 static const uint32_t kMixedGF256Rows = 10u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static const uint32_t kMixedGF256RowsMax = 11u;
+#else
+static const uint32_t kMixedGF256RowsMax = kMixedGF256Rows;
+#endif
 static const uint32_t kMixedGF16Rows = 2u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static const uint32_t kMixedGF16RowsMax = 4u;
@@ -37,8 +42,9 @@ uint16_t MixedGF16Coefficient(uint32_t extension_row, uint32_t column);
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 // Experiment coefficient sharing the GF(256) rows' X=12+column coordinate.
-// Y=g^(1000+row) remains outside the GF(256) subfield, so the combined ten
-// subfield rows plus these two extension rows form one GF(2^16) Cauchy matrix.
+// Y=g^(1000+row) remains outside the GF(256) subfield, so at a common
+// residue the active subfield and extension rows form one mixed GF(2^16)
+// Cauchy row family.
 uint16_t MixedGF16SharedXCoefficient(
     uint32_t extension_row,
     uint32_t column);

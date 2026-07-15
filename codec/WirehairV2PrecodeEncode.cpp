@@ -370,12 +370,13 @@ bool ComputePrecodeValues(
         }
     }
 
-    // --- Mixed 10 x GF(256) + 2/3 x GF(2^16) completion rows ---
+    // --- Mixed GF(256) subfield + GF(2^16) completion rows ---
     if (H > 0u &&
         system.Params.Field == CompletionField::MixedGF256GF16)
     {
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
         const uint32_t extension_rows = ActiveMixedGF16Rows();
-        if (H != kMixedGF256Rows + extension_rows ||
+        if (H != subfield_rows + extension_rows ||
             !InitializeGF16())
         {
             return false;
@@ -393,9 +394,9 @@ bool ComputePrecodeValues(
         if (!cached_rows) {
             return false;
         }
-        const uint8_t* gf8_coefficient_rows[kMixedGF256Rows];
+        const uint8_t* gf8_coefficient_rows[kMixedGF256RowsMax];
         const uint16_t* gf16_coefficient_rows[kMixedGF16RowsMax];
-        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+        for (uint32_t r = 0; r < subfield_rows; ++r) {
             gf8_coefficient_rows[r] = cached_rows->Subfield[r];
         }
         for (uint32_t r = 0; r < extension_rows; ++r) {
@@ -406,14 +407,14 @@ bool ComputePrecodeValues(
         // on both bytes of each extension element.  Keep all quotient RHS
         // rows planar for the extension operations and the corner solve.
         std::vector<uint8_t> gf8_rhs(
-            (size_t)kMixedGF256Rows * block_bytes, 0u);
+            (size_t)subfield_rows * block_bytes, 0u);
         std::vector<uint8_t> rhs_low((size_t)H * elements, 0u);
         std::vector<uint8_t> rhs_high((size_t)H * elements, 0u);
         std::vector<uint8_t> source_low(elements);
         std::vector<uint8_t> source_high(elements);
-        void* gf8_destinations[kMixedGF256Rows];
-        uint8_t gf8_scales[kMixedGF256Rows];
-        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+        void* gf8_destinations[kMixedGF256RowsMax];
+        uint8_t gf8_scales[kMixedGF256RowsMax];
+        for (uint32_t r = 0; r < subfield_rows; ++r) {
             gf8_destinations[r] =
                 gf8_rhs.data() + (size_t)r * block_bytes;
         }
@@ -421,13 +422,13 @@ bool ComputePrecodeValues(
         const auto accumulate_subfield_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
         {
-            for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+            for (uint32_t r = 0; r < subfield_rows; ++r) {
                 gf8_scales[r] = gf8_coefficient_rows[r][m];
             }
             gf256_muladd_multi_mem(
                 gf8_destinations, gf8_scales,
-                (int)kMixedGF256Rows, value, bytes);
-            st.HeavyMulAdds += kMixedGF256Rows;
+                (int)subfield_rows, value, bytes);
+            st.HeavyMulAdds += subfield_rows;
 
             return true;
         };
@@ -444,7 +445,7 @@ bool ComputePrecodeValues(
             static_assert(
                 kMixedGF16Rows >= 2u,
                 "mixed completion pair kernel requires two GF16 rows");
-            const uint32_t row0 = kMixedGF256Rows;
+            const uint32_t row0 = subfield_rows;
             const uint32_t row1 = row0 + 1u;
             if (!GF16MulAddPlanar2(
                     rhs_low.data() + (size_t)row0 * elements,
@@ -460,7 +461,7 @@ bool ComputePrecodeValues(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             for (uint32_t er = 2u; er < extension_rows; ++er)
             {
-                const uint32_t row = kMixedGF256Rows + er;
+                const uint32_t row = subfield_rows + er;
                 if (!GF16MulAddPlanar(
                         rhs_low.data() + (size_t)row * elements,
                         rhs_high.data() + (size_t)row * elements,
@@ -658,10 +659,10 @@ bool ComputePrecodeValues(
             }
         }
 
-        // Convert the ten GF(256) row RHS blocks once, after their fast
+        // Convert the active GF(256) row RHS blocks once, after their fast
         // interleaved accumulation.  The extension rows are already in
         // their final planar representation.
-        for (uint32_t r = 0; r < kMixedGF256Rows; ++r)
+        for (uint32_t r = 0; r < subfield_rows; ++r)
         {
             if (!GF16Deinterleave(
                     gf8_rhs.data() + (size_t)r * block_bytes,
@@ -675,7 +676,7 @@ bool ComputePrecodeValues(
         }
 
         std::vector<uint16_t> corner((size_t)H * H);
-        for (uint32_t r = 0; r < kMixedGF256Rows; ++r) {
+        for (uint32_t r = 0; r < subfield_rows; ++r) {
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
                     gf8_coefficient_rows[r][
@@ -683,7 +684,7 @@ bool ComputePrecodeValues(
             }
         }
         for (uint32_t er = 0; er < extension_rows; ++er) {
-            const uint32_t r = kMixedGF256Rows + er;
+            const uint32_t r = subfield_rows + er;
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
                     gf16_coefficient_rows[er][

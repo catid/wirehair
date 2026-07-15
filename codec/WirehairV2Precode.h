@@ -160,7 +160,7 @@ uint8_t HeavyCoefficient(
     uint32_t heavy_rows);
 
 static const uint32_t kMixedPackedCoefficientWords =
-    (kMixedGF256Rows + kMixedGF16RowsMax + 3u) / 4u;
+    (kMixedGF256RowsMax + kMixedGF16RowsMax + 3u) / 4u;
 
 enum class MixedCoefficientGeometry : uint32_t
 {
@@ -180,7 +180,7 @@ enum class MixedResidueSchedule : uint32_t
 /// only if their arithmetic tables could not be initialized.
 struct MixedCoefficientRows
 {
-    uint8_t Subfield[kMixedGF256Rows][kMixedCoefficientPeriod];
+    uint8_t Subfield[kMixedGF256RowsMax][kMixedCoefficientPeriod];
     uint16_t Extension[kMixedGF16RowsMax][kMixedCoefficientPeriod];
 };
 
@@ -219,6 +219,7 @@ uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
 bool ActiveMixedIndependentExtensionResidues();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
+uint32_t ActiveMixedGF256Rows();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
@@ -242,6 +243,8 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
+/// Select ten or eleven GF(256) rows without changing production profiles.
+bool SetMixedGF256RowsForTesting(uint32_t rows);
 /// Select two (frozen H12), three (H13), or four (H14) extension rows.
 bool SetMixedGF16RowsForTesting(uint32_t rows);
 #endif

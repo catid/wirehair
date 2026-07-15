@@ -327,7 +327,13 @@ cross-K resonances.  With shared-X hashed scheduling and `P>H`,
 distinct full-cycle sequence derived from the active keyed seed.  This breaks
 rank collisions shared by the GF(256) and GF(2^16) rows at the cost of one
 additional active-value XOR pass; the encoder, decoder, projection oracle,
-and verifier all use the same extension schedule.  `precodefail` also accepts
+and verifier all use the same extension schedule.  Test-hook `compare` and
+`precodefail` builds accept `--mixed-gf256-rows 10|11`; the eleventh subfield
+row uses the exhaustively corner-safe Y=11 coordinate, preserves the frozen
+rows' X=12 coordinate window, and is only available
+with `shared-x`.  This provides an H15 11+4 experiment without adding another
+GF(2^16) row or changing the default 10+2 production profile.
+`precodefail` also accepts
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.

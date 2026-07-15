@@ -132,7 +132,8 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
     if (params.Field == CompletionField::MixedGF256GF16 &&
-        (params.HeavyRows != kMixedGF256Rows + ActiveMixedGF16Rows() ||
+        (params.HeavyRows != ActiveMixedGF256Rows() +
+                ActiveMixedGF16Rows() ||
          params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy))
     {
         return false;
@@ -162,7 +163,7 @@ PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed)
 {
     PrecodeParams params = MakeCertifiedParams(block_count, seed);
     params.Field = CompletionField::MixedGF256GF16;
-    params.HeavyRows = kMixedGF256Rows + ActiveMixedGF16Rows();
+    params.HeavyRows = ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
     return params;
 }
 
@@ -434,7 +435,8 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     }
     const auto build_rows = [](MixedCoefficientGeometry geometry) {
         MixedCoefficientRows result = {};
-        // The first ten rows and shared-X extension rows deliberately keep
+        // The first ten rows, optional Y=11 test row, and shared-X extension
+        // rows deliberately keep
         // the frozen H12 X coordinates [12, 256).  H13/H14 append Y values;
         // moving X with H would rewrite every existing coefficient.
         const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
@@ -442,9 +444,15 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
              residue < kMixedCoefficientPeriod;
              ++residue)
         {
-            for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
+            for (uint32_t row = 0; row < kMixedGF256RowsMax; ++row) {
+                // Y=10 develops a singular H15 independently scheduled
+                // corner at K=23092.  Y=11 is the other unused subfield
+                // coordinate below X=12 and is exhaustively nonsingular for
+                // every K=2..64000 under the active keyed P32 construction.
+                const uint32_t cauchy_y =
+                    row == kMixedGF256Rows ? row + 1u : row;
                 result.Subfield[row][residue] =
-                    HeavyCoefficient(row, residue, H);
+                    HeavyCoefficient(cauchy_y, residue, H);
             }
             for (uint32_t row = 0; row < kMixedGF16RowsMax; ++row)
             {
@@ -482,20 +490,22 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     if (!rows) {
         return nullptr;
     }
-    const auto pack_rows = [](const MixedCoefficientRows* source_rows) {
+    const auto pack_rows = [](
+        const MixedCoefficientRows* source_rows,
+        uint32_t subfield_rows) {
         MixedPackedCoefficients result = {};
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;
              ++residue)
         {
-            for (uint32_t row = 0; row < kMixedGF256Rows; ++row) {
+            for (uint32_t row = 0; row < subfield_rows; ++row) {
                 result.ByResidue[residue][row >> 2] |=
                     (uint64_t)source_rows->Subfield[row][residue] <<
                     ((row & 3u) * 16u);
             }
             for (uint32_t er = 0; er < kMixedGF16RowsMax; ++er)
             {
-                const uint32_t row = kMixedGF256Rows + er;
+                const uint32_t row = subfield_rows + er;
                 result.ByResidue[residue][row >> 2] |=
                     (uint64_t)source_rows->Extension[er][residue] <<
                     ((row & 3u) * 16u);
@@ -507,12 +517,16 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     if (ActiveMixedCoefficientGeometry() ==
         MixedCoefficientGeometry::SharedCauchyX)
     {
-        static const MixedPackedCoefficients shared_packed =
-            pack_rows(rows);
-        return &shared_packed;
+        static const MixedPackedCoefficients shared_packed_base =
+            pack_rows(rows, kMixedGF256Rows);
+        static const MixedPackedCoefficients shared_packed_extra =
+            pack_rows(rows, kMixedGF256RowsMax);
+        return ActiveMixedGF256Rows() == kMixedGF256Rows ?
+            &shared_packed_base : &shared_packed_extra;
     }
 #endif
-    static const MixedPackedCoefficients frozen_packed = pack_rows(rows);
+    static const MixedPackedCoefficients frozen_packed =
+        pack_rows(rows, kMixedGF256Rows);
     return &frozen_packed;
 }
 
@@ -525,6 +539,7 @@ static thread_local MixedResidueSchedule MixedResidueScheduleForTesting =
 static thread_local uint32_t MixedResidueHashSeedForTesting = 0u;
 static thread_local MixedCoefficientGeometry MixedGeometryForTesting =
     MixedCoefficientGeometry::FrozenPowerX;
+static thread_local uint32_t MixedGF256RowsForTesting = kMixedGF256Rows;
 static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
@@ -578,7 +593,8 @@ static bool SelectIndependentExtensionResidueSeed(
 
 bool SetMixedCoefficientPeriodForTesting(uint32_t period)
 {
-    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+    const uint32_t H =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     if (period < H || period > kMixedCoefficientPeriod) {
         return false;
     }
@@ -592,7 +608,8 @@ bool SetMixedCoefficientPeriodForTesting(uint32_t period)
 bool SetMixedResidueSkewForTesting(uint32_t skew)
 {
     const uint32_t period = MixedCoefficientPeriodForTesting;
-    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+    const uint32_t H =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     if (skew >= period ||
         (skew != 0u &&
          (MixedGeometryForTesting !=
@@ -616,7 +633,8 @@ bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule)
     {
         return false;
     }
-    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+    const uint32_t H =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     if (schedule != MixedResidueSchedule::Constant &&
         (MixedGeometryForTesting !=
                 MixedCoefficientGeometry::SharedCauchyX ||
@@ -673,7 +691,7 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled)
                 MixedCoefficientGeometry::SharedCauchyX ||
          MixedResidueScheduleForTesting != MixedResidueSchedule::Hashed ||
          MixedCoefficientPeriodForTesting <=
-            kMixedGF256Rows + MixedGF16RowsForTesting))
+            MixedGF256RowsForTesting + MixedGF16RowsForTesting))
     {
         return false;
     }
@@ -681,7 +699,7 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled)
         !SelectIndependentExtensionResidueSeed(
             MixedCoefficientPeriodForTesting,
             MixedCoefficientPeriodForTesting -
-                kMixedGF256Rows - MixedGF16RowsForTesting,
+                MixedGF256RowsForTesting - MixedGF16RowsForTesting,
             MixedResidueHashSeedForTesting,
             MixedExtensionResidueHashSeedForTesting))
     {
@@ -705,6 +723,11 @@ bool SetMixedCoefficientGeometryForTesting(
     {
         return false;
     }
+    if (geometry != MixedCoefficientGeometry::SharedCauchyX &&
+        MixedGF256RowsForTesting != kMixedGF256Rows)
+    {
+        return false;
+    }
     MixedGeometryForTesting = geometry;
     if (geometry != MixedCoefficientGeometry::SharedCauchyX) {
         MixedResidueSkewForTesting = 0u;
@@ -717,11 +740,28 @@ bool SetMixedCoefficientGeometryForTesting(
 bool SetMixedGF16RowsForTesting(uint32_t rows)
 {
     if (rows < kMixedGF16Rows || rows > kMixedGF16RowsMax ||
-        MixedCoefficientPeriodForTesting < kMixedGF256Rows + rows)
+        MixedCoefficientPeriodForTesting <
+            MixedGF256RowsForTesting + rows)
     {
         return false;
     }
     MixedGF16RowsForTesting = rows;
+    MixedResidueSkewForTesting = 0u;
+    MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
+    MixedIndependentExtensionResiduesForTesting = false;
+    return true;
+}
+
+bool SetMixedGF256RowsForTesting(uint32_t rows)
+{
+    if (rows < kMixedGF256Rows || rows > kMixedGF256RowsMax ||
+        MixedCoefficientPeriodForTesting < rows + MixedGF16RowsForTesting ||
+        (rows != kMixedGF256Rows &&
+         MixedGeometryForTesting != MixedCoefficientGeometry::SharedCauchyX))
+    {
+        return false;
+    }
+    MixedGF256RowsForTesting = rows;
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     MixedIndependentExtensionResiduesForTesting = false;
@@ -758,7 +798,8 @@ uint32_t ActiveMixedResidueBlockShift(uint32_t block_index)
     const uint32_t period = ActiveMixedCoefficientPeriod();
     if (MixedResidueScheduleForTesting == MixedResidueSchedule::Ramp)
     {
-        const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+        const uint32_t H =
+            MixedGF256RowsForTesting + MixedGF16RowsForTesting;
         const uint32_t step_count = period - H;
         if (step_count == 0u) return 0u;
         const uint64_t complete_cycles = block_index / step_count;
@@ -775,7 +816,8 @@ uint32_t ActiveMixedResidueBlockShift(uint32_t block_index)
     }
     if (MixedResidueScheduleForTesting == MixedResidueSchedule::Hashed)
     {
-        const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+        const uint32_t H =
+            MixedGF256RowsForTesting + MixedGF16RowsForTesting;
         const uint32_t step_count = period - H;
         if (step_count == 0u) return 0u;
         static const uint32_t kStepCycle = 127u;
@@ -820,7 +862,8 @@ uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index)
         return ActiveMixedResidueBlockShift(block_index);
     }
     const uint32_t period = MixedCoefficientPeriodForTesting;
-    const uint32_t H = kMixedGF256Rows + MixedGF16RowsForTesting;
+    const uint32_t H =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
     const uint32_t step_count = period - H;
     if (step_count == 0u) return 0u;
     static const uint32_t kStepCycle = 127u;
@@ -921,9 +964,18 @@ uint32_t ActiveMixedGF16Rows()
 #endif
 }
 
+uint32_t ActiveMixedGF256Rows()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedGF256RowsForTesting;
+#else
+    return kMixedGF256Rows;
+#endif
+}
+
 uint32_t ActiveMixedPackedCoefficientWords()
 {
-    return (kMixedGF256Rows + ActiveMixedGF16Rows() + 3u) / 4u;
+    return (ActiveMixedGF256Rows() + ActiveMixedGF16Rows() + 3u) / 4u;
 }
 
 uint8_t HeavyCoefficientForParams(
