@@ -439,6 +439,58 @@ private:
     bool Initialized = false;
 };
 
+static GF256_FORCE_INLINE void XorProjectionWords(
+    uint64_t* GF256_RESTRICT destination,
+    const uint64_t* GF256_RESTRICT source_base,
+    uint32_t source_index,
+    uint32_t words)
+{
+#if defined(GF256_TARGET_X86_SIMD)
+    if (words >= 6u)
+    {
+        const uint64_t* GF256_RESTRICT source =
+            source_base + (size_t)source_index * words;
+        uint32_t word = 0u;
+        for (; words - word >= 4u; word += 4u)
+        {
+            const __m128i destination0 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(destination + word));
+            const __m128i destination1 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(destination + word + 2u));
+            const __m128i source0 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(source + word));
+            const __m128i source1 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(source + word + 2u));
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(destination + word),
+                _mm_xor_si128(destination0, source0));
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(destination + word + 2u),
+                _mm_xor_si128(destination1, source1));
+        }
+        if (words - word >= 2u)
+        {
+            const __m128i destination0 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(destination + word));
+            const __m128i source0 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(source + word));
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(destination + word),
+                _mm_xor_si128(destination0, source0));
+            word += 2u;
+        }
+        if (word < words) {
+            destination[word] ^= source[word];
+        }
+        return;
+    }
+#endif
+    for (uint32_t word = 0; word < words; ++word) {
+        destination[word] ^=
+            source_base[(size_t)source_index * words + word];
+    }
+}
+
 template<class XorAccumulator>
 static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
     uint32_t column,
@@ -464,10 +516,8 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
         }
         else
         {
-            for (uint32_t w = 0; w < words; ++w) {
-                accumulator[w] ^=
-                    projection[(size_t)other * words + w];
-            }
+            XorProjectionWords(
+                accumulator.data(), projection.data(), other, words);
             // Inactive value slots are still the zero constant at this
             // stage.  Only peeled columns can contribute to the affine RHS;
             // XORing an inactive slot would have no algebraic effect.
