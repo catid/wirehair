@@ -3667,9 +3667,8 @@ gf256_try_addset_multi_mem_avx512_target(
     if (!CpuHasTargetAVX512 || bytes < 64) {
         return false;
     }
-    // WH2 source-count census is dominated by 3-8 source initializers.  Keep
-    // the rarer 9-16 cases on the existing AVX2 family to bound optional code
-    // size without giving up the measured hot-path win.
+    // Keep the fixed-count dispatch bounded to the source counts that are hot
+    // in WH2 profiles.  Larger cases remain on the existing AVX2 family.
     switch (source_count)
     {
     case 3: gf256_addset_multi_mem_avx512_target<3>(
@@ -3683,6 +3682,8 @@ gf256_try_addset_multi_mem_avx512_target(
     case 7: gf256_addset_multi_mem_avx512_target<7>(
         destination, sources, bytes); return true;
     case 8: gf256_addset_multi_mem_avx512_target<8>(
+        destination, sources, bytes); return true;
+    case 9: gf256_addset_multi_mem_avx512_target<9>(
         destination, sources, bytes); return true;
     default: return false;
     }
