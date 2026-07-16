@@ -29,6 +29,12 @@ thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 #endif
 
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+// DispatchPrecodeSolve enables this only after the shared x86 capability
+// check.  Native AVX2 builds compile the same projection loop directly.
+thread_local bool TargetWideProjectionXor = false;
+#endif
+
 struct ColumnSpan
 {
     const uint32_t* First = nullptr;
@@ -451,6 +457,24 @@ struct ProjectionSourceBatch
                 sources[Count - 1u] + word)));
     }
 #endif
+
+#if defined(__AVX2__) || defined(GF256_TRY_TARGET_AVX2)
+    // Projection rows are short (typically a handful of packed words), so a
+    // single unrolled YMM chain avoids half of the load/XOR instructions
+    // without the frequency cost measured for an AVX-512 version.
+    static GF256_AVX2_TARGET GF256_FORCE_INLINE __m256i Xor256(
+        __m256i value,
+        const uint64_t* const* GF256_RESTRICT sources,
+        uint32_t word)
+    {
+        return _mm256_xor_si256(
+            ProjectionSourceBatch<Count - 1u>::Xor256(
+                value, sources, word),
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+                sources[Count - 1u] + word)));
+    }
+#endif
+
 };
 
 template<>
@@ -473,7 +497,39 @@ struct ProjectionSourceBatch<0u>
         return value;
     }
 #endif
+
+#if defined(__AVX2__) || defined(GF256_TRY_TARGET_AVX2)
+    static GF256_AVX2_TARGET GF256_FORCE_INLINE __m256i Xor256(
+        __m256i value,
+        const uint64_t* const* GF256_RESTRICT,
+        uint32_t)
+    {
+        return value;
+    }
+#endif
+
 };
+
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+template<uint32_t Count>
+static GF256_AVX2_TARGET uint32_t XorProjectionSourceBatchAVX2(
+    uint64_t* GF256_RESTRICT destination,
+    const uint64_t* const* GF256_RESTRICT sources,
+    uint32_t words)
+{
+    uint32_t word = 0u;
+    for (; words - word >= 4u; word += 4u)
+    {
+        const __m256i destination0 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(destination + word));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor256(
+                destination0, sources, word));
+    }
+    return word;
+}
+#endif
 
 template<uint32_t Count>
 static GF256_FORCE_INLINE void XorProjectionSourceBatch(
@@ -482,6 +538,22 @@ static GF256_FORCE_INLINE void XorProjectionSourceBatch(
     uint32_t words)
 {
     uint32_t word = 0u;
+#if defined(__AVX2__)
+    for (; words - word >= 4u; word += 4u)
+    {
+        const __m256i destination0 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(destination + word));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(destination + word),
+            ProjectionSourceBatch<Count>::Xor256(
+                destination0, sources, word));
+    }
+#elif defined(GF256_TRY_TARGET_AVX2)
+    if (TargetWideProjectionXor) {
+        word = XorProjectionSourceBatchAVX2<Count>(
+            destination, sources, words);
+    }
+#endif
 #if defined(GF256_TARGET_X86_SIMD)
     for (; words - word >= 4u; word += 4u)
     {
@@ -3963,11 +4035,20 @@ class ScopedThreadWideXor
 public:
     ScopedThreadWideXor()
         : Previous(gf256_set_thread_wide_xor(1))
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+        , PreviousProjection(TargetWideProjectionXor)
+#endif
     {
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+        TargetWideProjectionXor = true;
+#endif
     }
 
     ~ScopedThreadWideXor()
     {
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+        TargetWideProjectionXor = PreviousProjection;
+#endif
         (void)gf256_set_thread_wide_xor(Previous);
     }
 
@@ -3976,6 +4057,9 @@ public:
 
 private:
     int Previous;
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
+    bool PreviousProjection;
+#endif
 };
 
 static WirehairResult DispatchPrecodeSolve(
