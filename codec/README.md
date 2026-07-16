@@ -361,8 +361,8 @@ holdout at block sizes 2/64/256/1280/4096 reproduced 98.48--98.52% reductions
 at every width.  A ten-pair core-pinned 1280-byte full-payload solve check at
 overhead four found a 0.992 aggregate time ratio (0.991 median pair ratio),
 with 0.8% fewer block XORs and 1.0% fewer muladds.  This remains a benchmark
-hook rather than a named wire profile until the all-K normalized graph
-campaign is complete.
+hook rather than a named wire profile; the v2 table below supersedes it for
+the final all-K validation.
 
 `--packet-peel-seed-table normalized-h15-v2` keeps all v1 entries immutable
 and adds six large-K graph fixes: `1683:19`, `15182:98`, `21394:26`,
@@ -387,6 +387,15 @@ decode at each K aggregates to 0.993.  Thus the sparse table is about 0.7%
 faster over those six cases while removing the recovery hotspots.  Like v1,
 v2 remains a reproducible benchmark hook rather than a named or production
 wire profile.
+
+An independent-seed direct base-versus-v2 K=2..64000 sweep then repeated the
+six hard-loss cells above with 1,919,970 trials per arm.  V2 reduced total
+failures from 1,316 to 1,239 (5.85%).  At the 29 deliberately remapped K
+values it repaired all 79 base failures and introduced two disjoint failures,
+a 97.5% reduction.  All 383,820 paired rows at unlisted K were identical in
+every deterministic result field, confirming that the sparse table leaves
+the rest of the graph space unchanged.  Both arms reported zero internal
+errors and 30 heavy shortfalls.
 
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
