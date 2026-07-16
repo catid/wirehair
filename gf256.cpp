@@ -3489,15 +3489,24 @@ gf256_add16_multi_mem_avx512_target(
                 reinterpret_cast<const void*>(
                     destination + offset + lane * 64));
         }
-        for (unsigned source = 0; source < 16u; ++source)
+        // Ternary truth table 0x96 is XOR of all three inputs.  Pairing the
+        // fixed sixteen sources halves both the dependency chain and XOR
+        // instruction count without adding memory traffic.
+        for (unsigned source = 0; source < 16u; source += 2u)
         {
-            const uint8_t* const input =
+            const uint8_t* const first =
                 reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            const uint8_t* const second =
+                reinterpret_cast<const uint8_t*>(sources[source + 1u]) +
+                offset;
             for (int lane = 0; lane < 4; ++lane) {
-                accumulators[lane] = _mm512_xor_si512(
+                accumulators[lane] = _mm512_ternarylogic_epi32(
                     accumulators[lane],
                     _mm512_loadu_si512(
-                        reinterpret_cast<const void*>(input + lane * 64)));
+                        reinterpret_cast<const void*>(first + lane * 64)),
+                    _mm512_loadu_si512(
+                        reinterpret_cast<const void*>(second + lane * 64)),
+                    0x96);
             }
         }
         for (int lane = 0; lane < 4; ++lane) {
@@ -3512,12 +3521,16 @@ gf256_add16_multi_mem_avx512_target(
     {
         __m512i accumulator = _mm512_loadu_si512(
             reinterpret_cast<const void*>(destination + offset));
-        for (unsigned source = 0; source < 16u; ++source) {
-            accumulator = _mm512_xor_si512(
+        for (unsigned source = 0; source < 16u; source += 2u) {
+            accumulator = _mm512_ternarylogic_epi32(
                 accumulator,
                 _mm512_loadu_si512(reinterpret_cast<const void*>(
                     reinterpret_cast<const uint8_t*>(sources[source]) +
-                    offset)));
+                    offset)),
+                _mm512_loadu_si512(reinterpret_cast<const void*>(
+                    reinterpret_cast<const uint8_t*>(sources[source + 1u]) +
+                    offset)),
+                0x96);
         }
         _mm512_storeu_si512(
             reinterpret_cast<void*>(destination + offset), accumulator);
