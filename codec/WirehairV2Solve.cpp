@@ -724,6 +724,34 @@ enum class ResidualInsertResult
 };
 
 constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
+// Mixed-solver measurements put the multi-source RHS crossover at a 4-KiB
+// payload; the extra wide-kernel setup is neutral or slower at MTU sizes.
+constexpr uint32_t kBatchedResidualRhsMinBlockBytes = 4096u;
+// CheckedBlockStorage caps valid payloads below this sentinel.
+constexpr uint32_t kNeverBatchResidualRhs = UINT32_MAX;
+
+// Keep the 4-KiB path out of line and in the compiler's cold section.
+// Placing it beside the literal loop reproducibly regressed 1280-byte solves,
+// while 4-KiB payloads amortize the size-optimized helper and wide XOR setup.
+#if defined(_MSC_VER)
+#define WH2_RESIDUAL_COLD_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_RESIDUAL_COLD_NOINLINE __attribute__((noinline, cold))
+#else
+#define WH2_RESIDUAL_COLD_NOINLINE
+#endif
+
+static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
+    std::vector<uint8_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t block_bytes,
+    const std::vector<uint8_t>& pivot_coeff,
+    const std::vector<uint8_t>& pivot_rhs,
+    const std::vector<uint8_t>& have_pivot,
+    PrecodeSolveStats& stats);
+
+#undef WH2_RESIDUAL_COLD_NOINLINE
 constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
 // Paired whole-solver runs show the fused path loses below these scales even
 // though the isolated payload kernel is faster.
@@ -811,28 +839,38 @@ ResidualInsertResult InsertResidualRow(
     std::vector<uint8_t>& have_pivot,
     uint32_t& rank,
     PrecodeSolveStats& stats,
-    bool allow_insert)
+    bool allow_insert,
+    uint32_t batched_rhs_min_block_bytes)
 {
-    for (uint32_t j = 0; j < R; ++j)
+    if (block_bytes < batched_rhs_min_block_bytes)
     {
-        const uint8_t scale = coeff[j];
-        if (scale == 0u || !have_pivot[j]) {
-            continue;
+        for (uint32_t j = 0; j < R; ++j)
+        {
+            const uint8_t scale = coeff[j];
+            if (scale == 0u || !have_pivot[j]) {
+                continue;
+            }
+            const uint8_t* pivot =
+                pivot_coeff.data() + (size_t)j * R;
+            if (scale == 1u) {
+                gf256_add_mem(
+                    coeff.data() + j, pivot + j, (int)(R - j));
+            }
+            else {
+                AddScaledResidualCoefficients(
+                    coeff.data() + j, scale, pivot + j, R - j);
+            }
+            AddScaledBlock(
+                rhs.data(), scale,
+                pivot_rhs.data() + (size_t)j * block_bytes,
+                block_bytes, stats);
         }
-        const uint8_t* pivot =
-            pivot_coeff.data() + (size_t)j * R;
-        if (scale == 1u) {
-            gf256_add_mem(
-                coeff.data() + j, pivot + j, (int)(R - j));
-        }
-        else {
-            AddScaledResidualCoefficients(
-                coeff.data() + j, scale, pivot + j, R - j);
-        }
-        AddScaledBlock(
-            rhs.data(), scale,
-            pivot_rhs.data() + (size_t)j * block_bytes,
-            block_bytes, stats);
+    }
+    else
+    {
+        ReduceResidualRowWithBatchedRhs(
+            coeff, rhs, R, block_bytes,
+            pivot_coeff, pivot_rhs, have_pivot, stats);
     }
 
     uint32_t pivot_column = R;
@@ -3458,6 +3496,10 @@ static WirehairResult SolvePrecodeSystemImpl(
         std::vector<uint8_t> coeff(R, 0u);
         std::vector<uint8_t> rhs(block_bytes, 0u);
         uint32_t rank = 0u;
+        const uint32_t batched_rhs_min_block_bytes =
+            system.Params.Field == CompletionField::MixedGF256GF16 ?
+                kBatchedResidualRhsMinBlockBytes :
+                kNeverBatchResidualRhs;
 
         // Project every unused binary row.
         for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
@@ -3513,7 +3555,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             if (InsertResidualRow(
                     coeff, rhs, R, block_bytes,
                     pivot_coeff, pivot_rhs, have_pivot,
-                    rank, st, true) ==
+                    rank, st, true, batched_rhs_min_block_bytes) ==
                 ResidualInsertResult::Inconsistent)
             {
                 return terminal_error();
@@ -3781,7 +3823,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 const ResidualInsertResult reduced = InsertResidualRow(
                     coeff, rhs, R, block_bytes,
                     pivot_coeff, pivot_rhs, have_pivot,
-                    rank, st, false);
+                    rank, st, false,
+                    batched_rhs_min_block_bytes);
                 if (reduced == ResidualInsertResult::Inconsistent) {
                     return terminal_error();
                 }
@@ -3800,7 +3843,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                         quotient_have_pivot,
                         quotient_rank,
                         st,
-                        true) == ResidualInsertResult::Inconsistent)
+                        true,
+                        batched_rhs_min_block_bytes) ==
+                    ResidualInsertResult::Inconsistent)
                 {
                     return terminal_error();
                 }
@@ -3826,7 +3871,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 if (InsertResidualRow(
                         coeff, rhs, R, block_bytes,
                         pivot_coeff, pivot_rhs, have_pivot,
-                        rank, st, true) ==
+                        rank, st, true,
+                        batched_rhs_min_block_bytes) ==
                     ResidualInsertResult::Inconsistent)
                 {
                     return terminal_error();
@@ -3859,7 +3905,8 @@ static WirehairResult SolvePrecodeSystemImpl(
                 if (InsertResidualRow(
                         coeff, rhs, R, block_bytes,
                         pivot_coeff, pivot_rhs, have_pivot,
-                        rank, st, true) ==
+                        rank, st, true,
+                        batched_rhs_min_block_bytes) ==
                     ResidualInsertResult::Inconsistent)
                 {
                     return terminal_error();
@@ -4157,6 +4204,63 @@ static WirehairResult DispatchPrecodeSolve(
         intermediate_blocks_out, stats, resume_state, validate_system);
 }
 
+namespace {
+
+#if defined(_MSC_VER)
+#define WH2_RESIDUAL_COLD_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_RESIDUAL_COLD_NOINLINE __attribute__((noinline, cold))
+#else
+#define WH2_RESIDUAL_COLD_NOINLINE
+#endif
+
+static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
+    std::vector<uint8_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t block_bytes,
+    const std::vector<uint8_t>& pivot_coeff,
+    const std::vector<uint8_t>& pivot_rhs,
+    const std::vector<uint8_t>& have_pivot,
+    PrecodeSolveStats& stats)
+{
+    BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
+    for (uint32_t j = 0; j < R; ++j)
+    {
+        const uint8_t scale = coeff[j];
+        if (scale == 0u || !have_pivot[j]) {
+            continue;
+        }
+        const uint8_t* pivot =
+            pivot_coeff.data() + (size_t)j * R;
+        if (scale == 1u) {
+            gf256_add_mem(
+                coeff.data() + j, pivot + j, (int)(R - j));
+        }
+        else {
+            AddScaledResidualCoefficients(
+                coeff.data() + j, scale, pivot + j, R - j);
+        }
+        const uint8_t* pivot_value =
+            pivot_rhs.data() + (size_t)j * block_bytes;
+        if (scale == 1u)
+        {
+            rhs_xor.Add(pivot_value);
+            ++stats.BlockXors;
+        }
+        else {
+            AddScaledBlock(
+                rhs.data(), scale, pivot_value,
+                block_bytes, stats);
+        }
+    }
+    rhs_xor.Flush();
+}
+
+#undef WH2_RESIDUAL_COLD_NOINLINE
+
+} // namespace
+
 WirehairResult SolvePrecodeSystemWithRuntime(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -4309,7 +4413,8 @@ WirehairResult ResumePrecodeSystem(
             state.HavePivot,
             checked_rank,
             insertion_stats,
-            allow_insert);
+            allow_insert,
+            kNeverBatchResidualRhs);
 
         if (!allow_insert)
         {
