@@ -3577,15 +3577,37 @@ gf256_addset_multi_mem_avx512_target(
             accumulators[lane] = _mm512_loadu_si512(
                 reinterpret_cast<const void*>(first + lane * 64));
         }
-        for (unsigned source = 1; source < SourceCount; ++source)
+        // Pair the remaining fixed-count sources with the same ternary XOR
+        // used by add16.  Odd tails retain the one-source XOR below.
+        unsigned source = 1u;
+        for (; source + 1u < SourceCount; source += 2u)
+        {
+            const uint8_t* const first_input =
+                reinterpret_cast<const uint8_t*>(sources[source]) + offset;
+            const uint8_t* const second_input =
+                reinterpret_cast<const uint8_t*>(sources[source + 1u]) +
+                offset;
+            for (int lane = 0; lane < 4; ++lane) {
+                accumulators[lane] = _mm512_ternarylogic_epi32(
+                    accumulators[lane],
+                    _mm512_loadu_si512(
+                        reinterpret_cast<const void*>(
+                            first_input + lane * 64)),
+                    _mm512_loadu_si512(
+                        reinterpret_cast<const void*>(
+                            second_input + lane * 64)),
+                    0x96);
+            }
+        }
+        if (source < SourceCount)
         {
             const uint8_t* const input =
                 reinterpret_cast<const uint8_t*>(sources[source]) + offset;
             for (int lane = 0; lane < 4; ++lane) {
                 accumulators[lane] = _mm512_xor_si512(
                     accumulators[lane],
-                    _mm512_loadu_si512(
-                        reinterpret_cast<const void*>(input + lane * 64)));
+                    _mm512_loadu_si512(reinterpret_cast<const void*>(
+                        input + lane * 64)));
             }
         }
         for (int lane = 0; lane < 4; ++lane) {
@@ -3600,7 +3622,19 @@ gf256_addset_multi_mem_avx512_target(
         __m512i accumulator = _mm512_loadu_si512(
             reinterpret_cast<const void*>(
                 reinterpret_cast<const uint8_t*>(sources[0]) + offset));
-        for (unsigned source = 1; source < SourceCount; ++source) {
+        unsigned source = 1u;
+        for (; source + 1u < SourceCount; source += 2u) {
+            accumulator = _mm512_ternarylogic_epi32(
+                accumulator,
+                _mm512_loadu_si512(reinterpret_cast<const void*>(
+                    reinterpret_cast<const uint8_t*>(sources[source]) +
+                    offset)),
+                _mm512_loadu_si512(reinterpret_cast<const void*>(
+                    reinterpret_cast<const uint8_t*>(sources[source + 1u]) +
+                    offset)),
+                0x96);
+        }
+        if (source < SourceCount) {
             accumulator = _mm512_xor_si512(
                 accumulator,
                 _mm512_loadu_si512(reinterpret_cast<const void*>(
