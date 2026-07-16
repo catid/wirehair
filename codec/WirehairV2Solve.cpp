@@ -2224,9 +2224,14 @@ PeelResult PeelBinaryRowsImplementation(
             degree_two_tie_rank[column];
     };
 
+    // Used rows are selected only at live degree one.  Resolving their sole
+    // column necessarily visits the selected row through this adjacency and
+    // reduces Live to zero before resolve() returns.  Live therefore already
+    // excludes them from every later queue/degree-two operation; UsedRows is
+    // retained solely to classify the unused residual equations afterward.
     const auto add_degree_two = [&](uint32_t row) {
         PeelRowState& state = row_state[row];
-        if (state.Live != 2u || out.UsedRows[row]) {
+        if (state.Live != 2u) {
             return;
         }
         uint32_t pair_xor = 0u;
@@ -2252,7 +2257,7 @@ PeelResult PeelBinaryRowsImplementation(
         uint32_t resolved_column)
     {
         PeelRowState& state = row_state[row];
-        if (state.Live != 2u || out.UsedRows[row]) {
+        if (state.Live != 2u) {
             return;
         }
         const uint32_t other =
@@ -2285,7 +2290,7 @@ PeelResult PeelBinaryRowsImplementation(
             remove_degree_two(row, column);
             --row_state[row].Live;
             add_degree_two(row);
-            if (row_state[row].Live == 1u && !out.UsedRows[row]) {
+            if (row_state[row].Live == 1u) {
                 queue.push_back(row);
             }
         }
@@ -2298,7 +2303,7 @@ PeelResult PeelBinaryRowsImplementation(
         while (queue_head < queue.size())
         {
             const uint32_t row = queue[queue_head++];
-            if (row_state[row].Live != 1u || out.UsedRows[row]) {
+            if (row_state[row].Live != 1u) {
                 continue;
             }
             uint32_t column = UINT32_MAX;
@@ -2324,6 +2329,7 @@ PeelResult PeelBinaryRowsImplementation(
             out.SolveRow[column] = row;
             out.PeelOrder.push_back(column);
             resolve(column);
+            CAT_DEBUG_ASSERT(row_state[row].Live == 0u);
             --remaining;
         }
         if (remaining == 0u) {
