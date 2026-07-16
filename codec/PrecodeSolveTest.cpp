@@ -2212,6 +2212,19 @@ bool CheckMixedSystematicSolve()
     return true;
 }
 
+bool CheckPackedBinaryResidualOracle()
+{
+    if (!wirehair_v2::CheckPackedBinaryResidualOracleForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: packed GF2 residual differential oracle failed\n");
+        return false;
+    }
+    std::printf(
+        "packed GF2 residual R=63..193 word-boundary differential: PASS\n");
+    return true;
+}
+
 bool RunCase(
     uint32_t K,
     uint32_t block_bytes,
@@ -3425,6 +3438,7 @@ int main(int argc, char** argv)
     ok = CheckMixedMix1EndToEnd() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
+    ok = CheckPackedBinaryResidualOracle() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;

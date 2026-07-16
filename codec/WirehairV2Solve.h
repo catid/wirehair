@@ -137,6 +137,12 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 /** Reset/read the number of successful optimized-versus-scan comparisons. */
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
+
+/**
+    Compare packed-GF(2) residual insertion against the byte GF(256) oracle at
+    word boundaries, including poisoned tail bits and inconsistent RHS rows.
+*/
+bool CheckPackedBinaryResidualOracleForTesting();
 #endif
 
 /**
@@ -267,12 +273,14 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     uint64_t* block_ops_out = nullptr);
 
 /**
-    Solve the complete V2 system over GF(256).
+    Solve the complete V2 system over its configured completion field.
 
     Binary staircase/dense constraints and packet equations are peeled first.
-    Unused binary rows are projected onto the inactivated columns, then the
-    actual Cauchy heavy equations are inserted into the same GF(256) residual
-    solve.  On success `intermediate_blocks_out` contains all
+    Unused binary rows are projected onto the inactivated columns.  The
+    generic path expands them into a GF(256) residual before inserting its
+    Cauchy heavy equations; the mixed path keeps that residual packed in
+    GF(2), then solves only its remaining quotient over GF(2^16).  On success
+    `intermediate_blocks_out` contains all
     K+S+D2+H block values.  The exact residual solve is bounded to
     kMaxInactiveColumns to contain adversarial memory use.  NeedMore means the
     supplied equations were rank deficient or exceeded that bound; additional
@@ -280,6 +288,8 @@ bool EvaluatePacketBlockForValidatedSystemWithRuntime(
     every failure.  When resume_state is non-null, a rank-deficient residual
     within the cap atomically replaces it with an active affine/pivot
     checkpoint; cap failures leave it unchanged and require a cold retry.
+    Mixed GF(256)/GF(2^16) solves do not publish resume checkpoints and leave
+    any caller-provided resume state unchanged on NeedMore.
     `stats` is diagnostic rather than transactional output: completed algebraic
     outcomes publish their counters, while validation failures and allocation
     failures before a resumable checkpoint may leave the caller's prior value

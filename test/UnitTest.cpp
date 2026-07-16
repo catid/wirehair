@@ -805,7 +805,12 @@ static void TestN(uint64_t seed, int N, unsigned blockBytes)
 
     if (!Test_DecodeRandomLosses(prng, seed, N, blockBytes, finalBytes, &message[0], decodedMessagePtr, messageBytes))
     {
-        SIAMESE_DEBUG_BREAK();
+        // The terminal-injection CTest expects this helper to fail so main()
+        // can return its contract exit code.  Do not turn that deliberate
+        // failure into SIGILL in DEBUG builds before main() observes it.
+        if (!ReadEnvFlag("WIREHAIR_UNIT_INJECT_TERMINAL")) {
+            SIAMESE_DEBUG_BREAK();
+        }
         cout << "!!! Test_DecodeRandomLosses failed" << endl;
         TestFailed = true;
         return;

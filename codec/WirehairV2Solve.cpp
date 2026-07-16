@@ -29,6 +29,15 @@ thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 #endif
 
+constexpr uint32_t PackedWordCount(uint32_t bit_count)
+{
+    return bit_count / 64u + ((bit_count & 63u) != 0u ? 1u : 0u);
+}
+
+static_assert(
+    PackedWordCount(UINT32_MAX) == UINT32_C(67108864),
+    "packed word count must not wrap at the uint32 boundary");
+
 #if defined(GF256_TRY_TARGET_AVX2) && !defined(__AVX2__)
 // DispatchPrecodeSolve enables this only after the shared x86 capability
 // check.  Native AVX2 builds compile the same projection loop directly.
@@ -755,7 +764,11 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
 
 #if defined(_MSC_VER)
 #define WH2_RESIDUAL_NOINLINE __declspec(noinline)
-#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+// GNU ld and lld collect .text.* in their normal executable text segment.
+// Bespoke ELF scripts that list only an exact .text input section can disable
+// the placement while retaining noinline; see codec/README.md.
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
 #define WH2_RESIDUAL_NOINLINE \
     __attribute__((noinline, section(".text.wh2_packed_residual")))
 #elif defined(__GNUC__) || defined(__clang__)
@@ -983,7 +996,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             kMixedPackedCoefficientWords <= 4u,
         "mixed completion packing must fit the unrolled projection");
     const uint32_t expected_projection_words =
-        inactive_count / 64u + ((inactive_count & 63u) != 0u ? 1u : 0u);
+        PackedWordCount(inactive_count);
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
     const uint32_t populated_residues =
@@ -1522,7 +1535,7 @@ WirehairResult SolveMixedCompletionQuotient(
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
         system.Params.HeavyRows != H || (block_bytes & 1u) != 0u ||
         binary_rank > inactive_count ||
-        projection_words != (inactive_count + 63u) / 64u ||
+        projection_words != PackedWordCount(inactive_count) ||
         inactive_index.size() != column_count ||
         inactive_columns.size() != inactive_count ||
         binary_coefficient_words > binary_pivot_coeff.max_size() ||
@@ -1569,6 +1582,11 @@ WirehairResult SolveMixedCompletionQuotient(
         kMixedPackedCoefficientWords >= 3u &&
             kMixedPackedCoefficientWords <= 4u,
         "mixed completion packing changed unexpectedly");
+    if (packed_words < 3u ||
+        packed_words > kMixedPackedCoefficientWords)
+    {
+        return Wirehair_Error;
+    }
     if ((uint64_t)inactive_count * packed_words >
             (uint64_t)std::numeric_limits<size_t>::max() /
                 sizeof(uint64_t))
@@ -3353,7 +3371,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_NeedMore;
         }
         phase_start = phase_end;
-        const uint32_t words = (R + 63u) / 64u;
+        const uint32_t words = PackedWordCount(R);
 
         std::vector<uint32_t> inactive_index(L, UINT32_MAX);
         for (uint32_t i = 0; i < R; ++i) {
@@ -4278,7 +4296,8 @@ namespace {
 // after the hot solver so its size cannot relocate unrelated hot functions.
 #if defined(_MSC_VER)
 #define WH2_RESIDUAL_NOINLINE __declspec(noinline)
-#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
 #define WH2_RESIDUAL_NOINLINE \
     __attribute__((noinline, section(".text.wh2_packed_residual")))
 #elif defined(__GNUC__) || defined(__clang__)
@@ -4302,7 +4321,7 @@ InsertPackedBinaryResidualRow(
     uint32_t batched_rhs_min_block_bytes)
 {
     CAT_DEBUG_ASSERT(
-        R > 0u && words == (R + 63u) / 64u &&
+        R > 0u && words == PackedWordCount(R) &&
         coeff.size() == words &&
         pivot_coeff.size() == (size_t)R * words &&
         pivot_rhs.size() == (size_t)R * block_bytes &&
@@ -4464,6 +4483,275 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
 
 } // namespace
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#if defined(_MSC_VER)
+#define WH2_TEST_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
+// BUILD_TESTS also links this oracle into the benchmark.  Keep its sizeable
+// test-only body out of .text.unlikely, which GNU linkers place before hot
+// text and would otherwise perturb cross-revision solver layout.
+#define WH2_TEST_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_test_oracle")))
+#define WH2_TEST_LAMBDA_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_test_oracle")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_TEST_NOINLINE __attribute__((noinline))
+#define WH2_TEST_LAMBDA_NOINLINE __attribute__((noinline))
+#else
+#define WH2_TEST_NOINLINE
+#define WH2_TEST_LAMBDA_NOINLINE
+#endif
+
+#if defined(_MSC_VER)
+#define WH2_TEST_LAMBDA_NOINLINE
+#endif
+
+WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
+{
+    if (gf256_init() != 0 ||
+        PackedWordCount(0u) != 0u ||
+        PackedWordCount(63u) != 1u ||
+        PackedWordCount(64u) != 1u ||
+        PackedWordCount(65u) != 2u ||
+        PackedWordCount(UINT32_MAX) != UINT32_C(67108864))
+    {
+        return false;
+    }
+
+    try
+    {
+        const uint32_t widths[] = {
+            63u, 64u, 65u,
+            127u, 128u, 129u,
+            191u, 192u, 193u
+        };
+        const uint32_t block_sizes[] = {2u, 4096u};
+        for (uint32_t R : widths)
+        {
+            const uint32_t words = PackedWordCount(R);
+            const uint64_t tail_mask = (R & 63u) == 0u ?
+                UINT64_MAX :
+                (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
+            for (uint32_t block_bytes : block_sizes)
+            {
+                // The 4-KiB cases select the batched RHS path.  One complete
+                // set around the first word boundary covers that separate
+                // payload kernel; wider cases focus on coefficient packing.
+                if (R > 65u && block_bytes == 4096u) continue;
+
+                uint64_t random_state =
+                    UINT64_C(0x6a09e667f3bcc909) ^
+                    ((uint64_t)R << 32) ^ block_bytes;
+                const auto next_random = [&random_state]()
+                    WH2_TEST_LAMBDA_NOINLINE -> uint64_t {
+                    random_state += UINT64_C(0x9e3779b97f4a7c15);
+                    uint64_t value = random_state;
+                    value = (value ^ (value >> 30)) *
+                        UINT64_C(0xbf58476d1ce4e5b9);
+                    value = (value ^ (value >> 27)) *
+                        UINT64_C(0x94d049bb133111eb);
+                    return value ^ (value >> 31);
+                };
+
+                std::vector<uint8_t> solution((size_t)R * block_bytes);
+                for (uint8_t& value : solution) {
+                    value = (uint8_t)next_random();
+                }
+
+                // A shuffled random upper-triangular basis is guaranteed full
+                // rank but still exercises cross-word pivots and dense RREF
+                // elimination.  Additional random rows below are then known
+                // dependencies of this complete basis.
+                std::vector<std::vector<uint64_t> > basis(
+                    R, std::vector<uint64_t>(words, uint64_t{0}));
+                for (uint32_t row = 0u; row < R; ++row)
+                {
+                    basis[row][row >> 6] |=
+                        UINT64_C(1) << (row & 63u);
+                    for (uint32_t column = row + 1u;
+                         column < R; ++column)
+                    {
+                        if ((next_random() & 1u) != 0u) {
+                            basis[row][column >> 6] |=
+                                UINT64_C(1) << (column & 63u);
+                        }
+                    }
+                }
+                std::vector<uint32_t> order(R);
+                for (uint32_t i = 0u; i < R; ++i) order[i] = i;
+                for (uint32_t count = R; count > 1u; --count) {
+                    std::swap(
+                        order[count - 1u],
+                        order[(uint32_t)(next_random() % count)]);
+                }
+
+                std::vector<uint8_t> byte_pivots((size_t)R * R, 0u);
+                std::vector<uint64_t> packed_pivots(
+                    (size_t)R * words, uint64_t{0});
+                std::vector<uint8_t> byte_pivot_rhs(
+                    (size_t)R * block_bytes, 0u);
+                std::vector<uint8_t> packed_pivot_rhs(
+                    (size_t)R * block_bytes, 0u);
+                std::vector<uint8_t> byte_have(R, 0u);
+                std::vector<uint8_t> packed_have(R, 0u);
+                uint32_t byte_rank = 0u;
+                uint32_t packed_rank = 0u;
+                PrecodeSolveStats byte_stats = {};
+                PrecodeSolveStats packed_stats = {};
+
+                const auto states_match = [&]()
+                    WH2_TEST_LAMBDA_NOINLINE -> bool {
+                    if (byte_rank != packed_rank ||
+                        byte_have != packed_have ||
+                        byte_pivot_rhs != packed_pivot_rhs ||
+                        byte_stats.BlockXors != packed_stats.BlockXors ||
+                        byte_stats.BlockMulAdds !=
+                            packed_stats.BlockMulAdds)
+                    {
+                        return false;
+                    }
+                    for (uint32_t row = 0u; row < R; ++row)
+                    {
+                        const uint64_t* packed = packed_pivots.data() +
+                            (size_t)row * words;
+                        if ((packed[words - 1u] & ~tail_mask) != 0u) {
+                            return false;
+                        }
+                        for (uint32_t column = 0u;
+                             column < R; ++column)
+                        {
+                            const uint8_t bit = (uint8_t)(
+                                (packed[column >> 6] >>
+                                    (column & 63u)) & 1u);
+                            if (byte_pivots[(size_t)row * R + column] != bit) {
+                                return false;
+                            }
+                        }
+                    }
+                    return true;
+                };
+
+                const auto insert_row = [&, tail_mask](
+                    const std::vector<uint64_t>& row,
+                    bool corrupt_rhs,
+                    ResidualInsertResult expected)
+                    WH2_TEST_LAMBDA_NOINLINE -> bool
+                {
+                    std::vector<uint8_t> byte_coeff(R, 0u);
+                    std::vector<uint64_t> packed_coeff = row;
+                    std::vector<uint8_t> rhs(block_bytes, 0u);
+                    for (uint32_t word_index = 0u;
+                         word_index < words; ++word_index)
+                    {
+                        uint64_t word = row[word_index];
+                        while (word != 0u)
+                        {
+                            const uint32_t bit =
+                                wirehair::NonzeroLowestBitIndex64(word);
+                            const uint32_t column =
+                                (word_index << 6) + bit;
+                            if (column < R)
+                            {
+                                byte_coeff[column] = 1u;
+                                const uint8_t* source = solution.data() +
+                                    (size_t)column * block_bytes;
+                                for (uint32_t i = 0u;
+                                     i < block_bytes; ++i)
+                                {
+                                    rhs[i] ^= source[i];
+                                }
+                            }
+                            word &= word - 1u;
+                        }
+                    }
+                    if (corrupt_rhs) rhs[0] ^= 1u;
+                    std::vector<uint8_t> byte_rhs = rhs;
+                    std::vector<uint8_t> packed_rhs = rhs;
+                    if (tail_mask != UINT64_MAX) {
+                        packed_coeff[words - 1u] |= ~tail_mask;
+                    }
+
+                    const ResidualInsertResult byte_result =
+                        InsertResidualRow(
+                            byte_coeff, byte_rhs, R, block_bytes,
+                            byte_pivots, byte_pivot_rhs, byte_have,
+                            byte_rank, byte_stats, true,
+                            kBatchedResidualRhsMinBlockBytes);
+                    const ResidualInsertResult packed_result =
+                        InsertPackedBinaryResidualRow(
+                            packed_coeff, packed_rhs, R, words, block_bytes,
+                            packed_pivots, packed_pivot_rhs, packed_have,
+                            packed_rank, packed_stats,
+                            kBatchedResidualRhsMinBlockBytes);
+                    return byte_result == expected &&
+                        packed_result == expected &&
+                        (packed_coeff[words - 1u] & ~tail_mask) == 0u &&
+                        states_match();
+                };
+
+                for (uint32_t index : order) {
+                    if (!insert_row(
+                            basis[index], false,
+                            ResidualInsertResult::Inserted))
+                    {
+                        return false;
+                    }
+                }
+                if (byte_rank != R || packed_rank != R) return false;
+                for (uint32_t row = 0u; row < R; ++row)
+                {
+                    if (!byte_have[row] ||
+                        std::memcmp(
+                            byte_pivot_rhs.data() +
+                                (size_t)row * block_bytes,
+                            solution.data() + (size_t)row * block_bytes,
+                            block_bytes) != 0)
+                    {
+                        return false;
+                    }
+                    for (uint32_t column = 0u;
+                         column < R; ++column)
+                    {
+                        if (byte_pivots[(size_t)row * R + column] !=
+                            (row == column ? 1u : 0u))
+                        {
+                            return false;
+                        }
+                    }
+                }
+
+                for (uint32_t extra = 0u; extra < 8u; ++extra)
+                {
+                    std::vector<uint64_t> dependent(words);
+                    for (uint64_t& word : dependent) word = next_random();
+                    dependent[words - 1u] &= tail_mask;
+                    if (!insert_row(
+                            dependent, false,
+                            ResidualInsertResult::Dependent))
+                    {
+                        return false;
+                    }
+                }
+                if (!insert_row(
+                        basis[order[0]], true,
+                        ResidualInsertResult::Inconsistent))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
+}
+
+#undef WH2_TEST_NOINLINE
+#undef WH2_TEST_LAMBDA_NOINLINE
+#endif
+
 WirehairResult SolvePrecodeSystemWithRuntime(
     const PrecodeSystem& system,
     const PacketRowConfig& config,
@@ -4519,7 +4807,7 @@ WirehairResult ResumePrecodeSystem(
             K, (uint32_t)P_wide, config.MixCount) ||
         state.InactiveCount == 0u ||
         state.Rank >= state.InactiveCount ||
-        state.ProjectionWords != (state.InactiveCount + 63u) / 64u ||
+        state.ProjectionWords != PackedWordCount(state.InactiveCount) ||
         state.InactiveIndex.size() != state.ColumnCount ||
         state.InactiveColumns.size() != state.InactiveCount ||
         state.Projection.size() !=

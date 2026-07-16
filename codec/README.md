@@ -146,6 +146,17 @@ profile.  The encoder binds that recovery-row fanout into its serialized
 profile and the decoder consumes the bound value, allowing end-to-end speed
 and recovery comparisons without changing a named profile.
 
+The mixed decoder keeps its binary residual in packed GF(2) words until the
+small GF(2^16) quotient is formed.  On ELF builds with GCC or Clang, the
+out-of-line packed insertion helper uses `.text.wh2_packed_residual`, and the
+test-only differential oracle uses `.text.wh2_test_oracle`; normal GNU ld and
+lld scripts collect these `.text.*` input sections into executable text while
+keeping unrelated hot solver layout stable.  A bespoke linker script that
+accepts only an exact `.text` input section should either collect `.text.*` or
+compile with
+`WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION=1`; the latter retains the
+portable noinline fallback without a custom section.
+
 The `compare` cached arm has separate default-off local storage controls.  Use
 `--precode-encoder-cache` to retain one exact message copy for direct
 systematic encoding, or `--precode-decoder-cache` to retain accepted
