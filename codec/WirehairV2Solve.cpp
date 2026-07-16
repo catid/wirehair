@@ -117,6 +117,25 @@ public:
         return view;
     }
 
+    // Projection discovers the solve column while this row is cache-hot.  Keep
+    // it last so reconstruction can traverse only the dependencies without an
+    // unpredictable self-column test in every sparse equation.
+    void MoveSolveColumnToEnd(size_t row, size_t column_offset)
+    {
+        const size_t first = RowOffsets[row];
+        const size_t last = RowOffsets[row + 1u];
+        CAT_DEBUG_ASSERT(first + column_offset < last);
+        std::swap(Columns[first + column_offset], Columns[last - 1u]);
+    }
+
+    BinaryEquationView SolveDependencies(size_t row) const
+    {
+        BinaryEquationView view = (*this)[row];
+        CAT_DEBUG_ASSERT(view.Columns.First != view.Columns.Last);
+        --view.Columns.Last;
+        return view;
+    }
+
 private:
     std::vector<size_t> RowOffsets;
     std::vector<uint32_t> Columns;
@@ -649,7 +668,7 @@ private:
 };
 
 template<class XorAccumulator>
-static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
+static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
     uint32_t column,
     const BinaryEquationView& equation,
     const std::vector<uint32_t>& inactive_index,
@@ -663,9 +682,15 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
 {
     BatchedProjectionXorAccumulator projection_xor(
         accumulator.data(), projection.data(), words);
-    for (uint32_t other : equation.Columns)
+    uint32_t solve_column_offset = UINT32_MAX;
+    for (const uint32_t* current = equation.Columns.begin();
+         current != equation.Columns.end();
+         ++current)
     {
+        const uint32_t other = *current;
         if (other == column) {
+            solve_column_offset = (uint32_t)(
+                current - equation.Columns.begin());
             continue;
         }
         const uint32_t index = inactive_index[other];
@@ -685,6 +710,7 @@ static GF256_FORCE_INLINE void AccumulatePeeledProjectionConstant(
         }
     }
     projection_xor.Flush();
+    return solve_column_offset;
 }
 
 bool RowIsZero(const uint8_t* data, uint32_t bytes);
@@ -3274,20 +3300,22 @@ static WirehairResult SolvePrecodeSystemImpl(
             std::fill(accumulator.begin(), accumulator.end(), uint64_t{0});
             uint8_t* constant =
                 values.data() + (size_t)column * block_bytes;
+            const uint32_t solve_row = peel.SolveRow[column];
             const BinaryEquationView equation =
-                rows[peel.SolveRow[column]];
+                rows[solve_row];
             if (equation.Columns.size() == 0u) {
                 return terminal_error();
             }
             const size_t initialization_sources =
                 equation.Columns.size() - 1u +
                 (equation.Data ? 1u : 0u);
+            uint32_t solve_column_offset = UINT32_MAX;
             if (enable_fused_block_initialization &&
                 initialization_sources <= 16u)
             {
                 BatchedBlockXorInitializer constant_xor(
                     constant, block_bytes, equation.Data, true);
-                AccumulatePeeledProjectionConstant(
+                solve_column_offset = AccumulatePeeledProjectionConstant(
                     column, equation, inactive_index, words, projection,
                     values, block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
@@ -3299,11 +3327,16 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
                 BatchedBlockXorAccumulator constant_xor(
                     constant, block_bytes);
-                AccumulatePeeledProjectionConstant(
+                solve_column_offset = AccumulatePeeledProjectionConstant(
                     column, equation, inactive_index, words, projection,
                     values, block_bytes, accumulator, constant_xor, st);
                 constant_xor.Flush();
             }
+            CAT_DEBUG_ASSERT(solve_column_offset != UINT32_MAX);
+            if (solve_column_offset == UINT32_MAX) {
+                return terminal_error();
+            }
+            rows.MoveSolveColumnToEnd(solve_row, solve_column_offset);
             for (uint32_t w = 0; w < words; ++w) {
                 projection[(size_t)column * words + w] = accumulator[w];
             }
@@ -3888,12 +3921,9 @@ static WirehairResult SolvePrecodeSystemImpl(
             uint8_t* value =
                 values.data() + (size_t)column * block_bytes;
             const BinaryEquationView equation =
-                rows[peel.SolveRow[column]];
-            if (equation.Columns.size() == 0u) {
-                return terminal_error();
-            }
+                rows.SolveDependencies(peel.SolveRow[column]);
             const uint32_t sparse_xors =
-                (uint32_t)equation.Columns.size() - 1u;
+                (uint32_t)equation.Columns.size();
 
             // Projection left the affine constant in this value slot.  Once
             // the inactive variables are solved, that relation and the
@@ -3945,7 +3975,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
             }
             const size_t initialization_sources =
-                equation.Columns.size() - 1u +
+                equation.Columns.size() +
                 (equation.Data ? 1u : 0u);
             if (enable_fused_block_initialization &&
                 initialization_sources <= 16u)
@@ -3954,9 +3984,6 @@ static WirehairResult SolvePrecodeSystemImpl(
                     value, block_bytes, equation.Data);
                 for (uint32_t other : equation.Columns)
                 {
-                    if (other == column) {
-                        continue;
-                    }
                     value_xor.Add(
                         values.data() + (size_t)other * block_bytes);
                     ++st.BlockXors;
@@ -3974,9 +4001,6 @@ static WirehairResult SolvePrecodeSystemImpl(
                 BatchedBlockXorAccumulator value_xor(value, block_bytes);
                 for (uint32_t other : equation.Columns)
                 {
-                    if (other == column) {
-                        continue;
-                    }
                     value_xor.Add(
                         values.data() + (size_t)other * block_bytes);
                     ++st.BlockXors;
