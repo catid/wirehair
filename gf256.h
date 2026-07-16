@@ -78,6 +78,15 @@
     #define GF256_TRY_AVX2 /* 256-bit */
     #include <immintrin.h>
     #define GF256_ALIGN_BYTES 32
+# if (defined(__GNUC__) || defined(__clang__)) && \
+     (defined(__i386__) || defined(__x86_64__)) && \
+     defined(GF256_TARGET_X86_SIMD)
+    // Native AVX2 builds still need runtime-gated AVX-512 helpers.  Without
+    // this definition -march=native bypasses the WH2 wide-XOR path and can be
+    // substantially slower than the portable runtime-dispatch build.
+    #define GF256_TRY_TARGET_AVX512
+    #define GF256_AVX512_TARGET __attribute__((target("avx512f")))
+# endif
 #else // __AVX2__
     #define GF256_ALIGN_BYTES 16
 # if (defined(__GNUC__) || defined(__clang__)) && \
@@ -99,6 +108,11 @@
 #endif
 #if !defined(GF256_AVX512_TARGET)
     #define GF256_AVX512_TARGET
+#endif
+
+#if defined(GF256_TRY_TARGET_AVX2) || \
+    (defined(GF256_TRY_AVX2) && defined(GF256_TRY_TARGET_AVX512))
+    #define GF256_TRY_WIDE_XOR
 #endif
 
 // Ablation S1 (wirehair-cqu): GFNI gf2p8affineqb constant-multiply for poly 0x14D.

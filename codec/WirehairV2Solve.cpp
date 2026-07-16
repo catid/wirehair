@@ -3882,9 +3882,10 @@ static bool ShouldUseWideBlockXor(
     const PrecodeSystem& system,
     uint32_t block_bytes)
 {
-#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_TARGET_AVX2)
-    // WH2's 3-16 source batches amortize four AVX2 accumulators at this width.
-    // Smaller payloads and non-mixed solvers retain the compact kernel.
+#if !defined(GF256_TARGET_MOBILE) && defined(GF256_TRY_WIDE_XOR)
+    // WH2's 3-16 source batches amortize the wide AVX2/AVX-512 kernels at
+    // this width.  Smaller payloads and non-mixed solvers retain the compact
+    // kernel.
     static const uint32_t kMaxWideBlockCount = 64000u;
     static const uint32_t kMinWideBlockBytes = 512u;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
