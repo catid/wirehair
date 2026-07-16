@@ -328,21 +328,47 @@ distinct full-cycle sequence derived from the active keyed seed.  This breaks
 rank collisions shared by the GF(256) and GF(2^16) rows at the cost of one
 additional active-value XOR pass; the encoder, decoder, projection oracle,
 and verifier all use the same extension schedule.  Test-hook `compare` and
-`precodefail` builds accept `--mixed-gf256-rows 10|11`; the eleventh subfield
-row uses the exhaustively corner-safe Y=11 coordinate, preserves the frozen
-rows' X=12 coordinate window, and is only available
-with `shared-x`.  This provides an H15 11+4 experiment without adding another
-GF(2^16) row or changing the default 10+2 production profile.
+`precodefail` builds accept `--mixed-gf256-rows 10|11|12`; the extra subfield
+rows use the exhaustively corner-safe Y=11 and Y=46 coordinates, preserve the
+frozen rows' X=12 coordinate window, and are only available with `shared-x`.
+This provides H15 11+4 and H16 12+4 experiments without adding another
+GF(2^16) row or changing the default 10+2 production profile.  The H16 pair
+is restricted to P31/P32, whose independently scheduled corners are
+nonsingular for every K=2..64000.  Neither period is a uniform promotion:
+independent normalized-graph holdouts found severe K-dependent recovery
+resonances (including a P32 failure concentration at K=11), while
+cross-payload holdouts found additional graph-dependent resonances at
+different payload widths.  The two periods remain available to research a
+versioned payload-independent graph seed or K-dependent selection; other
+periods are rejected because they are singular, allow the Y=46 coordinate to
+overlap the shared-X window, or produced worse recovery resonances despite a
+nonsingular corner.
 `precodefail` also accepts
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.
+The test-only
+`--packet-peel-seed-table normalized-h15-v1` selects an offline-tuned packet
+seed XOR at the 23 hard block counts in `[4,41]` and leaves every other K at
+zero.  It is intentionally restricted to the exact normalized seed-profile
+1280, H15 11+4/P32, keyed-hash-68, independent-extension-XOR-78, mix-2
+experiment used to derive it.  Each CSV row appends the active XOR so a
+multi-K run remains reproducible.  Three independent hard-loss stages totaling
+5.796 million selected-arm trials on those K reduced exact-K failures by
+98.5% versus salt zero and by 87.0% versus the best K-dependent H16/D13/D14
+row-count comparator.  A separate 6.9-million-trial-per-arm cross-payload
+holdout at block sizes 2/64/256/1280/4096 reproduced 98.48--98.52% reductions
+at every width.  A ten-pair core-pinned 1280-byte full-payload solve check at
+overhead four found a 0.992 aggregate time ratio (0.991 median pair ratio),
+with 0.8% fewer block XORs and 1.0% fewer muladds.  This remains a benchmark
+hook rather than a named wire profile until the all-K normalized graph
+campaign is complete.
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
 are accumulated in one sequential scan when their combined scratch is at most
-128 KiB; other shapes retain the lower-setup streamed passes.  The three- and
-four-row settings are H13/H14 experiments
-that append one or two GF(2^16) completion rows;
+128 KiB; other shapes retain the lower-setup streamed passes.  With ten
+GF(256) rows, the three- and four-row settings are H13/H14 experiments that
+append one or two GF(2^16) completion rows;
 `shared-x` builds all active extension rows from the same Cauchy column
 coordinates as the ten subfield rows, while `frozen` preserves the named H12
 profile's coefficients.  Together these hooks allow coefficient-bucket speed

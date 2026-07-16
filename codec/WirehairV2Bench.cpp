@@ -2173,15 +2173,6 @@ int CmdCompare(int argc, char** argv)
     if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
-    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
-    {
-        std::fprintf(stderr,
-            "compare --mixed-gf256-rows must be in [%u,%u], fit the "
-            "active period, and use shared-x for an extra row\n",
-            wirehair_v2::kMixedGF256Rows,
-            wirehair_v2::kMixedGF256RowsMax);
-        return 1;
-    }
     if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
     {
         std::fprintf(stderr,
@@ -2198,6 +2189,16 @@ int CmdCompare(int argc, char** argv)
             wirehair_v2::ActiveMixedGF256Rows() +
                 wirehair_v2::ActiveMixedGF16Rows(),
             wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "compare --mixed-gf256-rows must be in [%u,%u], fit the "
+            "active period, use shared-x for an extra row, and use the "
+            "validated 12+4 geometry for twelve rows\n",
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMax);
         return 1;
     }
     if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
@@ -4014,6 +4015,39 @@ private:
     std::vector<std::thread>& Threads;
 };
 
+uint32_t NormalizedH15V1PacketPeelSeedXor(uint32_t K)
+{
+    // Offline hard-loss tuning for the normalized 1280-byte seed profile.
+    // Unlisted K values deliberately retain the base packet graph.
+    switch (K)
+    {
+    case 4u:  return 57u;
+    case 5u:  return 105u;
+    case 6u:  return 23u;
+    case 7u:  return 83u;
+    case 9u:  return 51u;
+    case 11u: return 168u;
+    case 12u: return 250u;
+    case 13u: return 123u;
+    case 14u: return 157u;
+    case 15u: return 55u;
+    case 17u: return 185u;
+    case 18u: return 37u;
+    case 19u: return 194u;
+    case 22u: return 204u;
+    case 25u: return 104u;
+    case 28u: return 122u;
+    case 29u: return 242u;
+    case 31u: return 129u;
+    case 32u: return 56u;
+    case 33u: return 110u;
+    case 37u: return 172u;
+    case 39u: return 148u;
+    case 41u: return 125u;
+    default:  return 0u;
+    }
+}
+
 int CmdPrecodeFail(int argc, char** argv)
 {
     std::string nlist = "1000,3200,10000,32000,64000";
@@ -4036,6 +4070,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t binary_dense_rows_override = 0u;
     uint32_t gf256_heavy_rows_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
+    bool packet_peel_seed_table = false;
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
@@ -4046,6 +4081,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
+    bool packet_peel_seed_xor_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
     uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
@@ -4218,6 +4254,24 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+            packet_peel_seed_xor_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--packet-peel-seed-table")) {
+            if (!TakeArg(
+                    "precodefail", "--packet-peel-seed-table",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (std::strcmp(value, "normalized-h15-v1") != 0)
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --packet-peel-seed-table %s "
+                    "(expected normalized-h15-v1)\n",
+                    value);
+                return 1;
+            }
+            packet_peel_seed_table = true;
         }
         else if (!std::strcmp(
                      argv[i], "--odd-packet-peel-seed-xor"))
@@ -4483,15 +4537,6 @@ int CmdPrecodeFail(int argc, char** argv)
     if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(mixed_geometry)) {
         return 1;
     }
-    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-gf256-rows must be in [%u,%u], fit the "
-            "active period, and use shared-x for an extra row\n",
-            wirehair_v2::kMixedGF256Rows,
-            wirehair_v2::kMixedGF256RowsMax);
-        return 1;
-    }
     if (!wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows))
     {
         std::fprintf(stderr,
@@ -4539,6 +4584,16 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedGF256Rows() +
                 wirehair_v2::ActiveMixedGF16Rows(),
             wirehair_v2::kMixedCoefficientPeriod);
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-gf256-rows must be in [%u,%u], fit the "
+            "active period, use shared-x for an extra row, and use the "
+            "validated 12+4 geometry for twelve rows\n",
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMax);
         return 1;
     }
     if (!wirehair_v2::SetMixedResidueSkewForTesting(mixed_residue_skew)) {
@@ -4602,6 +4657,37 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
+    if (packet_peel_seed_table && packet_peel_seed_xor_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --packet-peel-seed-table conflicts with "
+            "--packet-peel-seed-xor\n");
+        return 1;
+    }
+    if (packet_peel_seed_table &&
+        (completion != PrecodeFailCompletion::Mixed ||
+         mix_counts.size() != 1u || mix_counts[0] != 2 ||
+         seed_block_bytes_override != 1280u ||
+         mixed_gf256_rows != 11u || mixed_gf16_rows != 4u ||
+         mixed_period != 32u ||
+         mixed_geometry !=
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX ||
+         mixed_residue_schedule !=
+            wirehair_v2::MixedResidueSchedule::Hashed ||
+         mixed_residue_hash_seed != 68u ||
+         !mixed_residue_hash_keyed ||
+         !mixed_independent_extension_residues ||
+         mixed_extension_residue_seed_xor != 78u ||
+         source_hits_override != 0u || binary_dense_rows_override != 0u ||
+         odd_packet_peel_seed_xor != 0u ||
+         packet_row_seed_multiplier != 1u ||
+         packet_row_seed_avalanche))
+    {
+        std::fprintf(stderr,
+            "precodefail normalized-h15-v1 packet seed table requires "
+            "its normalized H15/mix2 geometry\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -4609,6 +4695,7 @@ int CmdPrecodeFail(int argc, char** argv)
         std::printf(
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
+            "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -4617,6 +4704,7 @@ int CmdPrecodeFail(int argc, char** argv)
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
+            packet_peel_seed_table ? "normalized-h15-v1" : "none",
             binary_dense_rows_override,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
@@ -4639,6 +4727,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_independent_extension_residues=%u "
             "mixed_extension_residue_seed_xor=0x%x "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
+            "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -4660,6 +4749,7 @@ int CmdPrecodeFail(int argc, char** argv)
             mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,
+            packet_peel_seed_table ? "normalized-h15-v1" : "none",
             binary_dense_rows_override,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
@@ -4677,12 +4767,16 @@ int CmdPrecodeFail(int argc, char** argv)
         "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
         "project_ms_mu,residual_ms_mu,backsub_ms_mu,seed_attempt,"
         "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
-        "heavy_gain_hist,failure_trials\n");
+        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
         const uint32_t K = (uint32_t)n_value;
         const uint32_t bb = (uint32_t)bb_value;
+        const uint32_t active_packet_peel_seed_xor =
+            packet_peel_seed_table ?
+                NormalizedH15V1PacketPeelSeedXor(K) :
+                packet_peel_seed_xor;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;
         if (mixed_residue_hash_keyed &&
@@ -4723,7 +4817,7 @@ int CmdPrecodeFail(int argc, char** argv)
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
             seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
-            packet_peel_seed_xor;
+            active_packet_peel_seed_xor;
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
         std::map<uint32_t, PairedMixOutcomes> paired_outcomes;
@@ -4824,12 +4918,6 @@ int CmdPrecodeFail(int argc, char** argv)
                                 throw std::runtime_error(
                                     "invalid mixed coefficient geometry");
                             }
-                            if (!wirehair_v2::SetMixedGF256RowsForTesting(
-                                    mixed_gf256_rows))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed GF256 row count");
-                            }
                             if (!wirehair_v2::
                                     SetMixedGF16RowsForTesting(
                                         mixed_gf16_rows))
@@ -4843,6 +4931,12 @@ int CmdPrecodeFail(int argc, char** argv)
                             {
                                 throw std::runtime_error(
                                     "invalid mixed coefficient period");
+                            }
+                            if (!wirehair_v2::SetMixedGF256RowsForTesting(
+                                    mixed_gf256_rows))
+                            {
+                                throw std::runtime_error(
+                                    "invalid mixed GF256 row count");
                             }
                             if (!wirehair_v2::
                                     SetMixedResidueSkewForTesting(
@@ -5101,7 +5195,7 @@ int CmdPrecodeFail(int argc, char** argv)
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
                 "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
-                "%s,%s,%s\n",
+                "%s,%s,%s,0x%x\n",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -5125,7 +5219,7 @@ int CmdPrecodeFail(int argc, char** argv)
                 first_rank_failure == UINT32_MAX ?
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
-                failure_trials.c_str());
+                failure_trials.c_str(), active_packet_peel_seed_xor);
         }
         }
         for (const std::pair<const uint32_t, PairedMixOutcomes>& paired :

@@ -10,7 +10,7 @@ static const uint16_t kGF16Generator = 266u;
 static const uint32_t kMixedCoefficientPeriod = 244u;
 static const uint32_t kMixedGF256Rows = 10u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-static const uint32_t kMixedGF256RowsMax = 11u;
+static const uint32_t kMixedGF256RowsMax = 12u;
 #else
 static const uint32_t kMixedGF256RowsMax = kMixedGF256Rows;
 #endif

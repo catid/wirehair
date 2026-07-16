@@ -243,9 +243,9 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
-/// Select ten or eleven GF(256) rows without changing production profiles.
+/// Select 10/11 rows generally, or a validated 12+4-row test geometry.
 bool SetMixedGF256RowsForTesting(uint32_t rows);
-/// Select two (frozen H12), three (H13), or four (H14) extension rows.
+/// Select two, three, or four extension rows; twelve GF(256) rows require four.
 bool SetMixedGF16RowsForTesting(uint32_t rows);
 #endif
 

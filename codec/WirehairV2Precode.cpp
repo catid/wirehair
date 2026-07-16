@@ -435,10 +435,11 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     }
     const auto build_rows = [](MixedCoefficientGeometry geometry) {
         MixedCoefficientRows result = {};
-        // The first ten rows, optional Y=11 test row, and shared-X extension
-        // rows deliberately keep
-        // the frozen H12 X coordinates [12, 256).  H13/H14 append Y values;
-        // moving X with H would rewrite every existing coefficient.
+        // The first ten rows, optional Y=11/Y=46 test rows, and shared-X
+        // extension rows deliberately keep
+        // the frozen H12 X coordinates [12, 256).  Later test geometries
+        // append Y values; moving X with H would rewrite every existing
+        // coefficient.
         const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;
@@ -448,11 +449,18 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
                 // Y=10 develops a singular H15 independently scheduled
                 // corner at K=23092.  Y=11 is the other unused subfield
                 // coordinate below X=12 and is exhaustively nonsingular for
-                // every K=2..64000 under the active keyed P32 construction.
-                const uint32_t cauchy_y =
-                    row == kMixedGF256Rows ? row + 1u : row;
-                result.Subfield[row][residue] =
-                    HeavyCoefficient(cauchy_y, residue, H);
+                // every K=2..64000 under the active keyed P31/P32
+                // constructions.
+                // With Y=11 retained, Y=46 also keeps the H16 corner
+                // nonsingular for every K=2..64000 under the corresponding
+                // independently scheduled P31/P32 constructions.
+                uint32_t cauchy_y = row;
+                if (row == kMixedGF256Rows) cauchy_y = 11u;
+                else if (row == kMixedGF256Rows + 1u) cauchy_y = 46u;
+                const uint32_t cauchy_x = H + residue;
+                result.Subfield[row][residue] = cauchy_y < H ?
+                    HeavyCoefficient(cauchy_y, residue, H) :
+                    gf256_inv((uint8_t)(cauchy_x ^ cauchy_y));
             }
             for (uint32_t row = 0; row < kMixedGF16RowsMax; ++row)
             {
@@ -519,10 +527,15 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     {
         static const MixedPackedCoefficients shared_packed_base =
             pack_rows(rows, kMixedGF256Rows);
-        static const MixedPackedCoefficients shared_packed_extra =
+        static const MixedPackedCoefficients shared_packed_one_extra =
+            pack_rows(rows, kMixedGF256Rows + 1u);
+        static const MixedPackedCoefficients shared_packed_two_extra =
             pack_rows(rows, kMixedGF256RowsMax);
-        return ActiveMixedGF256Rows() == kMixedGF256Rows ?
-            &shared_packed_base : &shared_packed_extra;
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        if (subfield_rows == kMixedGF256Rows) return &shared_packed_base;
+        if (subfield_rows == kMixedGF256Rows + 1u)
+            return &shared_packed_one_extra;
+        return &shared_packed_two_extra;
     }
 #endif
     static const MixedPackedCoefficients frozen_packed =
@@ -591,11 +604,19 @@ static bool SelectIndependentExtensionResidueSeed(
     return false;
 }
 
+static bool IsValidatedH16Period(uint32_t period)
+{
+    return period == 31u || period == 32u;
+}
+
 bool SetMixedCoefficientPeriodForTesting(uint32_t period)
 {
     const uint32_t H =
         MixedGF256RowsForTesting + MixedGF16RowsForTesting;
-    if (period < H || period > kMixedCoefficientPeriod) {
+    if (period < H || period > kMixedCoefficientPeriod ||
+        (MixedGF256RowsForTesting >= kMixedGF256Rows + 2u &&
+         !IsValidatedH16Period(period)))
+    {
         return false;
     }
     MixedCoefficientPeriodForTesting = period;
@@ -740,6 +761,8 @@ bool SetMixedCoefficientGeometryForTesting(
 bool SetMixedGF16RowsForTesting(uint32_t rows)
 {
     if (rows < kMixedGF16Rows || rows > kMixedGF16RowsMax ||
+        (MixedGF256RowsForTesting >= kMixedGF256Rows + 2u &&
+         rows != kMixedGF16RowsMax) ||
         MixedCoefficientPeriodForTesting <
             MixedGF256RowsForTesting + rows)
     {
@@ -756,6 +779,9 @@ bool SetMixedGF256RowsForTesting(uint32_t rows)
 {
     if (rows < kMixedGF256Rows || rows > kMixedGF256RowsMax ||
         MixedCoefficientPeriodForTesting < rows + MixedGF16RowsForTesting ||
+        (rows >= kMixedGF256Rows + 2u &&
+         (!IsValidatedH16Period(MixedCoefficientPeriodForTesting) ||
+          MixedGF16RowsForTesting != kMixedGF16RowsMax)) ||
         (rows != kMixedGF256Rows &&
          MixedGeometryForTesting != MixedCoefficientGeometry::SharedCauchyX))
     {
@@ -781,15 +807,25 @@ uint32_t ActiveMixedCoefficientPeriod()
 uint32_t ActiveMixedCoefficientResidue(uint32_t column)
 {
     const uint32_t period = ActiveMixedCoefficientPeriod();
-    return (column % period +
-        ActiveMixedResidueBlockShift(column / period)) % period;
+    uint32_t residue = column % period;
+    const uint32_t shift =
+        ActiveMixedResidueBlockShift(column / period);
+    CAT_DEBUG_ASSERT(shift < period);
+    residue += shift;
+    // Every block-shift schedule returns a reduced residue, so the sum is
+    // below 2 * period and one subtraction avoids a second integer divide.
+    return residue < period ? residue : residue - period;
 }
 
 uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column)
 {
     const uint32_t period = ActiveMixedCoefficientPeriod();
-    return (column % period +
-        ActiveMixedExtensionResidueBlockShift(column / period)) % period;
+    uint32_t residue = column % period;
+    const uint32_t shift =
+        ActiveMixedExtensionResidueBlockShift(column / period);
+    CAT_DEBUG_ASSERT(shift < period);
+    residue += shift;
+    return residue < period ? residue : residue - period;
 }
 
 uint32_t ActiveMixedResidueBlockShift(uint32_t block_index)

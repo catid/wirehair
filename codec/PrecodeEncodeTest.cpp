@@ -459,10 +459,10 @@ uint32_t MixedCornerRank(const std::vector<uint32_t>& columns)
     return MixedCornerRank(columns, columns);
 }
 
-bool TestIndependentMixedCornerAcrossK()
+bool TestIndependentMixedCornerAcrossKForPeriod(uint32_t period)
 {
     MixedGF16RowsScope rows_scope(wirehair_v2::kMixedGF16RowsMax);
-    MixedCoefficientPeriodScope period_scope(32u);
+    MixedCoefficientPeriodScope period_scope(period);
     MixedCoefficientGeometryScope geometry_scope(
         wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
     MixedGF256RowsScope subfield_scope(
@@ -514,8 +514,15 @@ bool TestIndependentMixedCornerAcrossK()
     (void)wirehair_v2::
         SetMixedIndependentExtensionResiduesForTesting(false);
     std::printf(
-        "mixed independent P32 keyed corners K=2..64000: PASS\n");
+        "mixed independent P%u H16 keyed corners K=2..64000: PASS\n",
+        period);
     return true;
+}
+
+bool TestIndependentMixedCornerAcrossK()
+{
+    return TestIndependentMixedCornerAcrossKForPeriod(31u) &&
+        TestIndependentMixedCornerAcrossKForPeriod(32u);
 }
 
 bool TestMixedCornerRankForGeometry(
@@ -666,12 +673,26 @@ bool TestMixedCornerRank()
             wirehair_v2::kMixedGF256RowsMax) ||
         !wirehair_v2::SetMixedCoefficientGeometryForTesting(
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+        wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256RowsMax) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(32u) ||
         !wirehair_v2::SetMixedGF256RowsForTesting(
             wirehair_v2::kMixedGF256RowsMax) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(28u) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(30u) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(31u) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(32u) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(34u) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(29u) ||
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(33u) ||
         wirehair_v2::SetMixedCoefficientGeometryForTesting(
             wirehair_v2::MixedCoefficientGeometry::FrozenPowerX) ||
         !wirehair_v2::SetMixedGF256RowsForTesting(
             wirehair_v2::kMixedGF256Rows) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(original_period) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(original_rows) ||
         !wirehair_v2::SetMixedCoefficientGeometryForTesting(
             original_geometry) ||
         wirehair_v2::ActiveMixedGF256Rows() !=
@@ -1221,9 +1242,9 @@ bool TestMixedCompletionForPeriod(
     uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
-    MixedGF256RowsScope subfield_scope(subfield_rows);
     MixedGF16RowsScope rows_scope(extension_rows);
     MixedCoefficientPeriodScope period_scope(period);
+    MixedGF256RowsScope subfield_scope(subfield_rows);
     MixedResidueSkewScope skew_scope(residue_skew);
     MixedResidueScheduleScope schedule_scope(residue_schedule);
     MixedResidueHashSeedScope hash_seed_scope(
@@ -1234,7 +1255,18 @@ bool TestMixedCompletionForPeriod(
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid()) {
+        !schedule_scope.IsValid() || !independent_scope.IsValid())
+    {
+        std::fprintf(stderr,
+            "mixed completion: invalid test scope g=%u s=%u r=%u p=%u "
+            "k=%u q=%u i=%u\n",
+            geometry_scope.IsValid() ? 1u : 0u,
+            subfield_scope.IsValid() ? 1u : 0u,
+            rows_scope.IsValid() ? 1u : 0u,
+            period_scope.IsValid() ? 1u : 0u,
+            skew_scope.IsValid() ? 1u : 0u,
+            schedule_scope.IsValid() ? 1u : 0u,
+            independent_scope.IsValid() ? 1u : 0u);
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
