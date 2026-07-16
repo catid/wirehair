@@ -548,6 +548,51 @@ bool CheckPacketEvaluationFusion()
         }
     }
 
+    // Exercise the one-pass packet set-XOR gate at its exact 16-term boundary.
+    // The existing length/offset matrix above covers every tail shape on the
+    // paired fallback; this larger-K case selects the fixed-count family
+    // with independently unaligned input and output ranges.
+    {
+        static const uint32_t set_xor_K = 10000u;
+        static const uint32_t set_xor_block_bytes = 1280u;
+        wirehair_v2::PrecodeSystem set_xor_system;
+        if (!wirehair_v2::BuildPrecodeSystem(
+                wirehair_v2::MakeCertifiedParams(
+                    set_xor_K, UINT64_C(0x736574786f723136)),
+                set_xor_system))
+        {
+            return false;
+        }
+        const uint32_t set_xor_P =
+            set_xor_system.Params.Staircase +
+            set_xor_system.Params.DenseRows +
+            set_xor_system.Params.HeavyRows;
+        wirehair_v2::PacketRowConfig set_xor_config = config;
+        set_xor_config.MixCount = 2u;
+        uint32_t set_xor_id = UINT32_MAX;
+        for (uint32_t id = 0u; id < 1000000u; ++id)
+        {
+            wirehair::PeelRowParameters params;
+            params.Initialize(
+                id, set_xor_config.PeelSeed,
+                (uint16_t)set_xor_K, (uint16_t)set_xor_P);
+            if (params.PeelCount + set_xor_config.MixCount == 16u)
+            {
+                set_xor_id = id;
+                break;
+            }
+        }
+        if (set_xor_id == UINT32_MAX ||
+            !CheckPacketEvaluationCase(
+                set_xor_system, set_xor_config, set_xor_id,
+                set_xor_block_bytes, 7u, 31u, true))
+        {
+            std::fprintf(stderr,
+                "solve: 16-term packet set-XOR fixture failed\n");
+            return false;
+        }
+    }
+
     // Hard-coded packet bytes guard the shipping equation and fused schedule
     // independently of the row-column golden vectors in PolicyTest.
     {

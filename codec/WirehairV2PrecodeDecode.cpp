@@ -123,6 +123,30 @@ bool MemoryRangesOverlap(
     return first_begin < second_end && second_begin < first_end;
 }
 
+class ScopedRecoveryWideXor
+{
+public:
+    explicit ScopedRecoveryWideXor(bool enable)
+        : Enabled(enable)
+        , Previous(enable ? gf256_set_thread_wide_xor(1) : 0)
+    {
+    }
+
+    ~ScopedRecoveryWideXor()
+    {
+        if (Enabled) {
+            (void)gf256_set_thread_wide_xor(Previous);
+        }
+    }
+
+    ScopedRecoveryWideXor(const ScopedRecoveryWideXor&) = delete;
+    ScopedRecoveryWideXor& operator=(const ScopedRecoveryWideXor&) = delete;
+
+private:
+    bool Enabled;
+    int Previous;
+};
+
 } // namespace
 
 uint32_t PacketSlotTable::Hash(uint32_t packet_id)
@@ -968,6 +992,13 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
             GuardedDecoderAllocation();
             final_block.resize(BlockBytesValue);
         }
+
+        // Match the packet set-XOR working-set gate: outside this range the
+        // evaluator stays on kernels that do not consult thread-wide dispatch.
+        const ScopedRecoveryWideXor wide_xor(
+            SystemValue.Params.Field == CompletionField::MixedGF256GF16 &&
+            K >= 10000u && K <= 64000u &&
+            BlockBytesValue >= 1280u && BlockBytesValue <= 32u * 1024u);
 
         uint8_t* output = static_cast<uint8_t*>(message_out);
         for (uint32_t block_id = 0; block_id < K; ++block_id)

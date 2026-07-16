@@ -2652,6 +2652,7 @@ static_assert(
 
 static const uint32_t kPacketTailPairMaxBlockBytes = 32u * 1024u;
 static const uint32_t kPacketTailPairMinTerms = 6u;
+static const uint32_t kPacketSetXorMaxTerms = 16u;
 
 #if defined(_MSC_VER)
 #define WH2_PACKET_NOINLINE __declspec(noinline)
@@ -2719,6 +2720,44 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
     }
 }
 
+// Complete small packet rows fit the fixed-count set-XOR family.  Gather the
+// already-distinct source terms and disjoint precode suffix once, then consume
+// every input in a single destination pass.
+static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
+    const wirehair::PeelRowParameters& params,
+    wirehair::PeelRowIterator source,
+    uint32_t source_count,
+    uint32_t precode_count,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const uint8_t* intermediate_blocks,
+    uint32_t block_bytes,
+    uint8_t* block_out)
+{
+    const void* sources[kPacketSetXorMaxTerms];
+    uint32_t count = 0u;
+    do {
+        sources[count++] = intermediate_blocks +
+            (size_t)source.GetColumn() * block_bytes;
+    } while (source.Iterate());
+
+    if (config.MixCount == 1u)
+    {
+        sources[count++] = intermediate_blocks +
+            (size_t)(source_count + params.MixFirst) * block_bytes;
+    }
+    else
+    {
+        const wirehair::RowMixIterator mix(
+            params, (uint16_t)precode_count, runtime.PrecodePrime());
+        for (uint32_t i = 0u; i < config.MixCount; ++i) {
+            sources[count++] = intermediate_blocks +
+                (size_t)(source_count + mix.Columns[i]) * block_bytes;
+        }
+    }
+    gf256_addset_multi_mem(block_out, sources, (int)count, (int)block_bytes);
+}
+
 #undef WH2_PACKET_NOINLINE
 
 static bool EvaluatePacketBlockImpl(
@@ -2778,16 +2817,25 @@ static bool EvaluatePacketBlockImpl(
     // The existing schedules are already optimal until the row contains six
     // total terms.  Above that crossover, pairing the complete tail removes
     // at least one destination read/write pass.
+    const uint32_t packet_terms =
+        (uint32_t)params.PeelCount + config.MixCount;
     if (block_bytes <= kPacketTailPairMaxBlockBytes &&
-        (uint32_t)params.PeelCount + config.MixCount >=
-            kPacketTailPairMinTerms)
+        packet_terms >= kPacketTailPairMinTerms)
     {
-        EvaluatePacketTailPaired(
-            params, source, K, P, config, runtime, intermediate_blocks,
-            block_bytes, block_out);
+        if (K >= 10000u && block_bytes >= 1280u &&
+            packet_terms <= kPacketSetXorMaxTerms)
+        {
+            EvaluatePacketSetXor(
+                params, source, K, P, config, runtime, intermediate_blocks,
+                block_bytes, block_out);
+        }
+        else {
+            EvaluatePacketTailPaired(
+                params, source, K, P, config, runtime, intermediate_blocks,
+                block_bytes, block_out);
+        }
         if (block_ops_out) {
-            *block_ops_out =
-                (uint64_t)params.PeelCount + config.MixCount;
+            *block_ops_out = packet_terms;
         }
         return true;
     }
