@@ -537,6 +537,64 @@ expect_success("53503,64.*0xee" precodefail
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
     --mixed-independent-extension-residues)
+
+function(expect_normalized_h15_seed table K seed_hex)
+    expect_success("${K},64.*0x${seed_hex}[^0-9a-fA-F]" precodefail
+        --N ${K} --bb-list 64 --seed-block-bytes 1280 --overhead 0
+        --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+        --completion mixed --mix-count 2 --packet-peel-seed-table ${table}
+        --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+        --mixed-geometry shared-x --mixed-residue-schedule hashed
+        --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+        --mixed-independent-extension-residues)
+endfunction()
+
+# V4 preserves every earlier mapping and adds exactly the discovery-selected
+# rank-one salts that the frozen independent holdout validated.
+set(normalized_h15_v4_seed_cases
+    "16,6"
+    "39559,3c"
+    "40831,b3"
+    "43742,1b"
+    "43751,63"
+    "45168,6c"
+    "45464,22"
+    "45857,31"
+    "45903,3a"
+    "46296,4"
+    "46606,eb"
+    "46933,6a"
+    "47029,75"
+    "47105,51"
+    "47307,b2"
+    "48231,e1"
+    "48311,7a"
+    "48466,57"
+    "49124,ed"
+    "49412,ad"
+    "49486,8e"
+    "49627,ac"
+    "49727,8f"
+    "49865,ff"
+    "50689,8e"
+    "50885,3f"
+    "50899,c"
+    "51494,d0"
+    "52935,8"
+    "53613,1e"
+    "53697,cc"
+    "53804,a9")
+foreach(seed_case IN LISTS normalized_h15_v4_seed_cases)
+    string(REPLACE "," ";" seed_fields "${seed_case}")
+    list(GET seed_fields 0 seed_K)
+    list(GET seed_fields 1 seed_hex)
+    expect_normalized_h15_seed(normalized-h15-v4 ${seed_K} ${seed_hex})
+endforeach()
+expect_normalized_h15_seed(normalized-h15-v4 4 39)
+expect_normalized_h15_seed(normalized-h15-v4 62039 2)
+expect_normalized_h15_seed(normalized-h15-v4 10 8b)
+expect_normalized_h15_seed(normalized-h15-v4 42 0)
+
 expect_failure("conflicts with --packet-peel-seed-xor" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
     --trials 1 --threads 1 --loss 0.35 --completion mixed --mix-count 2

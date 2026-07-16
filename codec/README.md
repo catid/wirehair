@@ -419,6 +419,34 @@ Eight alternating, physical-core-isolated phases then measured 1280- and
 6.66% fewer field multiply-adds.  V2 had one rank failure in the timing set;
 v3 had none.
 
+`--packet-peel-seed-table normalized-h15-v4` keeps every v1/v2/v3 entry
+immutable and adds the frozen rank-one salts for 32 recurrent v3 hotspots:
+`16:6`, `39559:60`, `40831:179`, `43742:27`, `43751:99`, `45168:108`,
+`45464:34`, `45857:49`, `45903:58`, `46296:4`, `46606:235`,
+`46933:106`, `47029:117`, `47105:81`, `47307:178`, `48231:225`,
+`48311:122`, `48466:87`, `49124:237`, `49412:173`, `49486:142`,
+`49627:172`, `49727:143`, `49865:255`, `50689:142`, `50885:63`,
+`50899:12`, `51494:208`, `52935:8`, `53613:30`, `53697:204`, and
+`53804:169`.  The mapping was frozen after a 256-salt discovery screen and
+before activating the independent holdout seed.  On the 192,000-trial frozen
+holdout (burst, adversarial, and repair-only at losses .35 and .50), v4 reduced
+2,504 salt-zero failures to 87 (96.53%), improved every K and every aggregate
+schedule/loss slice, and resolved 2,502 baseline failures while introducing
+85.  It used 0.73% fewer block XORs and 3.60% fewer field multiply-adds; 11 of
+192 individual cells regressed and heavy shortfalls changed from one to six.
+Those are rank and logical-work results at the normalized 64-byte test width,
+so they were not used alone as a payload-speed claim.  A subsequent fresh,
+six-phase paired/swapped physical-core holdout measured all 32 additions at
+overhead four with three full-payload trials per K.  After conservatively
+excluding paired rows where v3 rank-failed, v4's aggregate solve-time ratios
+were 0.9786 at 1280 bytes and 0.9836 at 4096 bytes; every phase won.  Whole-run
+cycle ratios were 0.9789 and 0.9868, while instruction ratios were 0.9699 and
+0.9727, even though v4 completed all trials and v3 had 19 rank failures across
+the two widths.  This is an aggregate selected-hotspot result rather than a
+universal per-K guarantee; 27 of the 32 K values improved when the two widths
+were combined.  V4 remains a reproducible benchmark hook, not a named or
+production wire profile.
+
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
 are accumulated in one sequential scan when their combined scratch is at most

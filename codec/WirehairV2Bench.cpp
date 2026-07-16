@@ -4083,12 +4083,56 @@ uint32_t NormalizedH15V3PacketPeelSeedXor(uint32_t K)
     }
 }
 
+uint32_t NormalizedH15V4PacketPeelSeedXor(uint32_t K)
+{
+    // Discovery-selected rank-one salts, independently validated by a frozen
+    // hard-loss holdout over recurrent v3 hotspots.  Preserve every earlier
+    // table entry and leave all other packet graphs unchanged.
+    switch (K)
+    {
+    case 16u:    return 6u;
+    case 39559u: return 60u;
+    case 40831u: return 179u;
+    case 43742u: return 27u;
+    case 43751u: return 99u;
+    case 45168u: return 108u;
+    case 45464u: return 34u;
+    case 45857u: return 49u;
+    case 45903u: return 58u;
+    case 46296u: return 4u;
+    case 46606u: return 235u;
+    case 46933u: return 106u;
+    case 47029u: return 117u;
+    case 47105u: return 81u;
+    case 47307u: return 178u;
+    case 48231u: return 225u;
+    case 48311u: return 122u;
+    case 48466u: return 87u;
+    case 49124u: return 237u;
+    case 49412u: return 173u;
+    case 49486u: return 142u;
+    case 49627u: return 172u;
+    case 49727u: return 143u;
+    case 49865u: return 255u;
+    case 50689u: return 142u;
+    case 50885u: return 63u;
+    case 50899u: return 12u;
+    case 51494u: return 208u;
+    case 52935u: return 8u;
+    case 53613u: return 30u;
+    case 53697u: return 204u;
+    case 53804u: return 169u;
+    default:     return NormalizedH15V3PacketPeelSeedXor(K);
+    }
+}
+
 enum class PacketPeelSeedTable : uint32_t
 {
     None = 0,
     NormalizedH15V1 = 1,
     NormalizedH15V2 = 2,
-    NormalizedH15V3 = 3
+    NormalizedH15V3 = 3,
+    NormalizedH15V4 = 4
 };
 
 const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
@@ -4101,6 +4145,8 @@ const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
         return "normalized-h15-v2";
     case PacketPeelSeedTable::NormalizedH15V3:
         return "normalized-h15-v3";
+    case PacketPeelSeedTable::NormalizedH15V4:
+        return "normalized-h15-v4";
     default:
         return "none";
     }
@@ -4334,12 +4380,16 @@ int CmdPrecodeFail(int argc, char** argv)
                 packet_peel_seed_table =
                     PacketPeelSeedTable::NormalizedH15V3;
             }
+            else if (std::strcmp(value, "normalized-h15-v4") == 0) {
+                packet_peel_seed_table =
+                    PacketPeelSeedTable::NormalizedH15V4;
+            }
             else
             {
                 std::fprintf(stderr,
                     "precodefail unknown --packet-peel-seed-table %s "
-                    "(expected normalized-h15-v1, normalized-h15-v2, or "
-                    "normalized-h15-v3)\n",
+                    "(expected normalized-h15-v1, normalized-h15-v2, "
+                    "normalized-h15-v3, or normalized-h15-v4)\n",
                     value);
                 return 1;
             }
@@ -4863,6 +4913,12 @@ int CmdPrecodeFail(int argc, char** argv)
         {
             active_packet_peel_seed_xor =
                 NormalizedH15V3PacketPeelSeedXor(K);
+        }
+        else if (packet_peel_seed_table ==
+                 PacketPeelSeedTable::NormalizedH15V4)
+        {
+            active_packet_peel_seed_xor =
+                NormalizedH15V4PacketPeelSeedXor(K);
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;
