@@ -3172,6 +3172,19 @@ static WirehairResult SolvePrecodeSystemImpl(
                         reinterpret_cast<void*>(aligned),
                         advised_bytes,
                         MADV_HUGEPAGE);
+#if defined(MADV_POPULATE_WRITE)
+                    // Bulk prefaulting has a fixed syscall/page-table cost.
+                    // Paired cold-solve measurements show that it pays for
+                    // K >= 32000 systems with at least 32 MiB of full pages;
+                    // smaller K with unusually wide blocks does not reliably
+                    // amortize it.
+                    if (K >= 32000u && advised_bytes >= (32u << 20)) {
+                        (void)madvise(
+                            reinterpret_cast<void*>(aligned),
+                            advised_bytes,
+                            MADV_POPULATE_WRITE);
+                    }
+#endif
                 }
             }
         }
