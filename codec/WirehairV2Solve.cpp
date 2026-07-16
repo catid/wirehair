@@ -15,6 +15,11 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 namespace wirehair_v2 {
 namespace {
 
@@ -3136,7 +3141,42 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         projection_words = (size_t)L * words;
         std::vector<uint64_t> projection(projection_words, 0u);
-        std::vector<uint8_t> values(value_bytes, 0u);
+        std::vector<uint8_t> values;
+        values.reserve(value_bytes);
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+        // Request transparent huge pages before the first touch.  The value
+        // workspace is both large and repeatedly scanned by payload XORs;
+        // normal 4-KiB first-touch faults are a material part of cold solve
+        // latency.  madvise is advisory, so unsupported/disabled THP retains
+        // the standard vector behavior.
+        if (value_bytes >= (2u << 20))
+        {
+            const long system_page_bytes = sysconf(_SC_PAGESIZE);
+            const uintptr_t page_bytes = system_page_bytes > 0 ?
+                (uintptr_t)system_page_bytes : 0u;
+            const uintptr_t begin =
+                reinterpret_cast<uintptr_t>(values.data());
+            if (page_bytes != 0u &&
+                (page_bytes & (page_bytes - 1u)) == 0u &&
+                begin <= std::numeric_limits<uintptr_t>::max() -
+                    (page_bytes - 1u))
+            {
+                const uintptr_t aligned =
+                    (begin + page_bytes - 1u) & ~(page_bytes - 1u);
+                const size_t skipped = (size_t)(aligned - begin);
+                const size_t advised_bytes = skipped < value_bytes ?
+                    (value_bytes - skipped) &
+                        ~(size_t)(page_bytes - 1u) : 0u;
+                if (advised_bytes >= (2u << 20)) {
+                    (void)madvise(
+                        reinterpret_cast<void*>(aligned),
+                        advised_bytes,
+                        MADV_HUGEPAGE);
+                }
+            }
+        }
+#endif
+        values.resize(value_bytes, 0u);
         std::vector<uint64_t> accumulator(words, 0u);
         const bool enable_fused_block_initialization =
             K >= kFusedBlockXorInitMinBlockCount &&
