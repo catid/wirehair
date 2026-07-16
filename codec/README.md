@@ -363,6 +363,31 @@ overhead four found a 0.992 aggregate time ratio (0.991 median pair ratio),
 with 0.8% fewer block XORs and 1.0% fewer muladds.  This remains a benchmark
 hook rather than a named wire profile until the all-K normalized graph
 campaign is complete.
+
+`--packet-peel-seed-table normalized-h15-v2` keeps all v1 entries immutable
+and adds six large-K graph fixes: `1683:19`, `15182:98`, `21394:26`,
+`24432:75`, `34207:213`, and `62039:2`.  The selection is deliberately sparse.
+An exhaustive K=2..64000 hard-loss sweep (burst, adversarial, and repair-only
+at losses .35 and .50, 1,919,970 trials per arm) found 1,284 failures for salt
+zero, 1,344 for global salt one, and 1,372 for global salt two.  The shifted
+graphs repaired nearly every base failure but created a similarly sized,
+mostly disjoint set, so neither global shift is an improvement.  H16 12+4/P32
+reduced that base total to 1,199, but introduced 196 failures that H15 avoided
+and required about 7% more block muladds; it is therefore not selected either.
+
+The final v2 salts were chosen jointly for recovery and payload solve speed.
+A fresh two-seed holdout covered block sizes 2/64/256/1280/4096, IID, burst,
+permutation, systematic-first, repair-only, and adversarial schedules, and
+losses .05/.10/.25/.35/.50/.75.  Across 72,000 trials at each of the six K
+values, the selected graphs reduced 23,341 base failures to 40 (99.83%) and
+heavy shortfalls from 146 to 10.  Alternating, physical-core-isolated
+1280-byte full-payload solves at overhead four measured candidate/base cycle
+ratios of 0.991, 0.971, 0.968, 1.002, 1.000, and 0.994 respectively; one
+decode at each K aggregates to 0.993.  Thus the sparse table is about 0.7%
+faster over those six cases while removing the recovery hotspots.  Like v1,
+v2 remains a reproducible benchmark hook rather than a named or production
+wire profile.
+
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
 are accumulated in one sequential scan when their combined scratch is at most

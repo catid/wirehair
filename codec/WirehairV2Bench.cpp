@@ -4048,6 +4048,42 @@ uint32_t NormalizedH15V1PacketPeelSeedXor(uint32_t K)
     }
 }
 
+uint32_t NormalizedH15V2PacketPeelSeedXor(uint32_t K)
+{
+    // Fresh-seed and cross-payload holdouts for large-K resonances.  Keep v1
+    // immutable so previously recorded benchmark commands remain replayable.
+    switch (K)
+    {
+    case 1683u:  return 19u;
+    case 15182u: return 98u;
+    case 21394u: return 26u;
+    case 24432u: return 75u;
+    case 34207u: return 213u;
+    case 62039u: return 2u;
+    default:     return NormalizedH15V1PacketPeelSeedXor(K);
+    }
+}
+
+enum class PacketPeelSeedTable : uint32_t
+{
+    None = 0,
+    NormalizedH15V1 = 1,
+    NormalizedH15V2 = 2
+};
+
+const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
+{
+    switch (table)
+    {
+    case PacketPeelSeedTable::NormalizedH15V1:
+        return "normalized-h15-v1";
+    case PacketPeelSeedTable::NormalizedH15V2:
+        return "normalized-h15-v2";
+    default:
+        return "none";
+    }
+}
+
 int CmdPrecodeFail(int argc, char** argv)
 {
     std::string nlist = "1000,3200,10000,32000,64000";
@@ -4070,7 +4106,8 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t binary_dense_rows_override = 0u;
     uint32_t gf256_heavy_rows_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
-    bool packet_peel_seed_table = false;
+    PacketPeelSeedTable packet_peel_seed_table =
+        PacketPeelSeedTable::None;
     uint32_t odd_packet_peel_seed_xor = 0u;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
@@ -4263,15 +4300,22 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
-            if (std::strcmp(value, "normalized-h15-v1") != 0)
+            if (std::strcmp(value, "normalized-h15-v1") == 0) {
+                packet_peel_seed_table =
+                    PacketPeelSeedTable::NormalizedH15V1;
+            }
+            else if (std::strcmp(value, "normalized-h15-v2") == 0) {
+                packet_peel_seed_table =
+                    PacketPeelSeedTable::NormalizedH15V2;
+            }
+            else
             {
                 std::fprintf(stderr,
                     "precodefail unknown --packet-peel-seed-table %s "
-                    "(expected normalized-h15-v1)\n",
+                    "(expected normalized-h15-v1 or normalized-h15-v2)\n",
                     value);
                 return 1;
             }
-            packet_peel_seed_table = true;
         }
         else if (!std::strcmp(
                      argv[i], "--odd-packet-peel-seed-xor"))
@@ -4657,14 +4701,15 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
-    if (packet_peel_seed_table && packet_peel_seed_xor_explicit)
+    if (packet_peel_seed_table != PacketPeelSeedTable::None &&
+        packet_peel_seed_xor_explicit)
     {
         std::fprintf(stderr,
             "precodefail --packet-peel-seed-table conflicts with "
             "--packet-peel-seed-xor\n");
         return 1;
     }
-    if (packet_peel_seed_table &&
+    if (packet_peel_seed_table != PacketPeelSeedTable::None &&
         (completion != PrecodeFailCompletion::Mixed ||
          mix_counts.size() != 1u || mix_counts[0] != 2 ||
          seed_block_bytes_override != 1280u ||
@@ -4684,7 +4729,7 @@ int CmdPrecodeFail(int argc, char** argv)
          packet_row_seed_avalanche))
     {
         std::fprintf(stderr,
-            "precodefail normalized-h15-v1 packet seed table requires "
+            "precodefail normalized H15 packet seed table requires "
             "its normalized H15/mix2 geometry\n");
         return 1;
     }
@@ -4704,7 +4749,7 @@ int CmdPrecodeFail(int argc, char** argv)
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
-            packet_peel_seed_table ? "normalized-h15-v1" : "none",
+            PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
@@ -4749,7 +4794,7 @@ int CmdPrecodeFail(int argc, char** argv)
             mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,
-            packet_peel_seed_table ? "normalized-h15-v1" : "none",
+            PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
@@ -4773,10 +4818,19 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         const uint32_t K = (uint32_t)n_value;
         const uint32_t bb = (uint32_t)bb_value;
-        const uint32_t active_packet_peel_seed_xor =
-            packet_peel_seed_table ?
-                NormalizedH15V1PacketPeelSeedXor(K) :
-                packet_peel_seed_xor;
+        uint32_t active_packet_peel_seed_xor = packet_peel_seed_xor;
+        if (packet_peel_seed_table ==
+            PacketPeelSeedTable::NormalizedH15V1)
+        {
+            active_packet_peel_seed_xor =
+                NormalizedH15V1PacketPeelSeedXor(K);
+        }
+        else if (packet_peel_seed_table ==
+                 PacketPeelSeedTable::NormalizedH15V2)
+        {
+            active_packet_peel_seed_xor =
+                NormalizedH15V2PacketPeelSeedXor(K);
+        }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;
         if (mixed_residue_hash_keyed &&

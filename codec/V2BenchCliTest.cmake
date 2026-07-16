@@ -385,6 +385,70 @@ expect_success("42,64.*0x0" precodefail
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
     --mixed-independent-extension-residues)
+expect_success("1683,64.*0x0" precodefail
+    --N 1683 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v1
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("4,64.*0x39" precodefail
+    --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("1683,64.*0x13" precodefail
+    --N 1683 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("15182,64.*0x62" precodefail
+    --N 15182 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("21394,64.*0x1a" precodefail
+    --N 21394 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("24432,64.*0x4b" precodefail
+    --N 24432 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("34207,64.*0xd5" precodefail
+    --N 34207 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("62039,64.*0x2" precodefail
+    --N 62039 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
 expect_failure("conflicts with --packet-peel-seed-xor" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
     --trials 1 --threads 1 --loss 0.35 --completion mixed --mix-count 2
