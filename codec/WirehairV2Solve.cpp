@@ -752,6 +752,33 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
     PrecodeSolveStats& stats);
 
 #undef WH2_RESIDUAL_COLD_NOINLINE
+
+#if defined(_MSC_VER)
+#define WH2_RESIDUAL_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#define WH2_RESIDUAL_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_packed_residual")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_RESIDUAL_NOINLINE __attribute__((noinline))
+#else
+#define WH2_RESIDUAL_NOINLINE
+#endif
+
+static WH2_RESIDUAL_NOINLINE ResidualInsertResult
+InsertPackedBinaryResidualRow(
+    std::vector<uint64_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t words,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& pivot_coeff,
+    std::vector<uint8_t>& pivot_rhs,
+    std::vector<uint8_t>& have_pivot,
+    uint32_t& rank,
+    PrecodeSolveStats& stats,
+    uint32_t batched_rhs_min_block_bytes);
+
+#undef WH2_RESIDUAL_NOINLINE
 constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
 // Paired whole-solver runs show the fused path loses below these scales even
 // though the isolated payload kernel is faster.
@@ -1476,7 +1503,7 @@ WirehairResult SolveMixedCompletionQuotient(
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint32_t>& inactive_columns,
     const std::vector<uint64_t>& projection,
-    const std::vector<uint8_t>& binary_pivot_coeff,
+    const std::vector<uint64_t>& binary_pivot_coeff,
     const std::vector<uint8_t>& binary_pivot_rhs,
     const std::vector<uint8_t>& binary_have_pivot,
     uint32_t binary_rank,
@@ -1488,11 +1515,21 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint32_t H = subfield_rows + extension_rows;
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
+    const uint64_t binary_coefficient_words =
+        (uint64_t)inactive_count * projection_words;
+    const uint64_t binary_rhs_bytes =
+        (uint64_t)inactive_count * block_bytes;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
         system.Params.HeavyRows != H || (block_bytes & 1u) != 0u ||
         binary_rank > inactive_count ||
+        projection_words != (inactive_count + 63u) / 64u ||
         inactive_index.size() != column_count ||
         inactive_columns.size() != inactive_count ||
+        binary_coefficient_words > binary_pivot_coeff.max_size() ||
+        binary_pivot_coeff.size() != (size_t)binary_coefficient_words ||
+        binary_rhs_bytes > binary_pivot_rhs.max_size() ||
+        binary_pivot_rhs.size() != (size_t)binary_rhs_bytes ||
+        binary_have_pivot.size() != inactive_count ||
         projection_elements > projection.max_size() ||
         projection.size() != (size_t)projection_elements)
     {
@@ -1762,11 +1799,6 @@ mixed_rhs_accumulated:
     for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
     {
         if (!binary_have_pivot[pivot]) continue;
-        const uint8_t* relation =
-            binary_pivot_coeff.data() + (size_t)pivot * inactive_count;
-        for (uint32_t k = 0; k < inactive_count; ++k) {
-            if (relation[k] > 1u) return Wirehair_Error;
-        }
         const uint64_t* packed_scales =
             projected.data() + (size_t)pivot * packed_words;
         for (uint32_t row = 0; row < subfield_rows; ++row)
@@ -1883,9 +1915,12 @@ mixed_rhs_accumulated:
         }
         for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
         {
+            const uint64_t* relation =
+                binary_pivot_coeff.data() +
+                    (size_t)pivot * projection_words;
             if (!binary_have_pivot[pivot] ||
-                binary_pivot_coeff[
-                    (size_t)pivot * inactive_count + free_column] == 0u)
+                (relation[free_column >> 6] &
+                    (UINT64_C(1) << (free_column & 63u))) == 0u)
             {
                 continue;
             }
@@ -2082,12 +2117,16 @@ mixed_rhs_accumulated:
             value,
             binary_pivot_rhs.data() + (size_t)pivot * block_bytes,
             block_bytes);
-        const uint8_t* relation =
-            binary_pivot_coeff.data() + (size_t)pivot * inactive_count;
+        const uint64_t* relation =
+            binary_pivot_coeff.data() +
+                (size_t)pivot * projection_words;
         for (uint32_t i = 0; i < quotient_columns; ++i) {
-            const uint8_t scale = relation[free_columns[i]];
-            if (scale > 1u) return Wirehair_Error;
-            if (scale == 0u) continue;
+            const uint32_t free_column = free_columns[i];
+            if ((relation[free_column >> 6] &
+                    (UINT64_C(1) << (free_column & 63u))) == 0u)
+            {
+                continue;
+            }
             gf256_add_mem(
                 value,
                 values.data() +
@@ -3485,21 +3524,31 @@ static WirehairResult SolvePrecodeSystemImpl(
             return Wirehair_Success;
         }
 
-        // Reduced GF(256) pivot rows, indexed by pivot column.  Gauss-Jordan
-        // insertion leaves an identity matrix when rank reaches R.
-        if ((uint64_t)R * R >
-            (uint64_t)std::numeric_limits<size_t>::max())
+        const bool mixed_completion =
+            system.Params.Field == CompletionField::MixedGF256GF16;
+        // The mixed path's residual rows are binary until its small extension
+        // quotient.  Other completion fields retain their GF(256) byte rows.
+        if ((!mixed_completion &&
+                (uint64_t)R * R >
+                    (uint64_t)std::numeric_limits<size_t>::max()) ||
+            (mixed_completion &&
+                (uint64_t)R * words >
+                    (uint64_t)std::numeric_limits<size_t>::max() /
+                        sizeof(uint64_t)))
         {
             return Wirehair_OOM;
         }
-        std::vector<uint8_t> pivot_coeff((size_t)R * R, 0u);
+        std::vector<uint8_t> pivot_coeff(
+            mixed_completion ? 0u : (size_t)R * R, 0u);
+        std::vector<uint64_t> binary_pivot_coeff(
+            mixed_completion ? (size_t)R * words : 0u, uint64_t{0});
         size_t residual_value_bytes = 0u;
         if (!CheckedBlockStorage(R, block_bytes, residual_value_bytes)) {
             return Wirehair_OOM;
         }
         std::vector<uint8_t> pivot_rhs(residual_value_bytes, 0u);
         std::vector<uint8_t> have_pivot(R, 0u);
-        std::vector<uint8_t> coeff(R, 0u);
+        std::vector<uint8_t> coeff(mixed_completion ? 0u : R, 0u);
         std::vector<uint8_t> rhs(block_bytes, 0u);
         uint32_t rank = 0u;
         const uint32_t batched_rhs_min_block_bytes =
@@ -3540,41 +3589,51 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
             projection_xor.Flush();
             rhs_xor.Flush();
-            // Accumulate the complete GF(2) row in packed form first.  A bit
-            // that appears through several peeled projections is expanded
-            // only once after its final parity is known.
-            std::fill(coeff.begin(), coeff.end(), uint8_t{0});
-            for (uint32_t w = 0; w < words; ++w)
+            ResidualInsertResult insertion;
+            if (mixed_completion)
             {
-                uint64_t word = accumulator[w];
-                while (word != 0u)
-                {
-                    const uint32_t bit =
-                        wirehair::NonzeroLowestBitIndex64(word);
-                    const uint32_t projected = (w << 6) + bit;
-                    if (projected < R) {
-                        coeff[projected] = 1u;
-                    }
-                    word &= word - 1u;
-                }
+                insertion = InsertPackedBinaryResidualRow(
+                    accumulator, rhs, R, words, block_bytes,
+                    binary_pivot_coeff, pivot_rhs, have_pivot,
+                    rank, st, batched_rhs_min_block_bytes);
             }
-            if (InsertResidualRow(
+            else
+            {
+                // Generic GF(256) completion consumes one byte per projected
+                // coefficient.  Expand each final parity bit exactly once.
+                std::fill(coeff.begin(), coeff.end(), uint8_t{0});
+                for (uint32_t w = 0; w < words; ++w)
+                {
+                    uint64_t word = accumulator[w];
+                    while (word != 0u)
+                    {
+                        const uint32_t bit =
+                            wirehair::NonzeroLowestBitIndex64(word);
+                        const uint32_t projected = (w << 6) + bit;
+                        if (projected < R) {
+                            coeff[projected] = 1u;
+                        }
+                        word &= word - 1u;
+                    }
+                }
+                insertion = InsertResidualRow(
                     coeff, rhs, R, block_bytes,
                     pivot_coeff, pivot_rhs, have_pivot,
-                    rank, st, true, batched_rhs_min_block_bytes) ==
-                ResidualInsertResult::Inconsistent)
+                    rank, st, true, batched_rhs_min_block_bytes);
+            }
+            if (insertion == ResidualInsertResult::Inconsistent)
             {
                 return terminal_error();
             }
         }
 
-        if (system.Params.Field == CompletionField::MixedGF256GF16)
+        if (mixed_completion)
         {
             const WirehairResult mixed_result =
                 SolveMixedCompletionQuotient(
                     system, L, R, words, block_bytes,
                     inactive_index, peel.InactiveOrder, projection,
-                    pivot_coeff, pivot_rhs, have_pivot, rank,
+                    binary_pivot_coeff, pivot_rhs, have_pivot, rank,
                     values, st);
             phase_end = SolveClock::now();
             st.ResidualNanoseconds = (uint64_t)
@@ -4211,6 +4270,144 @@ static WirehairResult DispatchPrecodeSolve(
 }
 
 namespace {
+
+// Mixed completion starts from binary packet equations.  Keep that residual
+// factorization packed in GF(2) instead of expanding each bit into a GF(256)
+// byte: all pivots and elimination scales remain exactly zero or one until
+// the small GF(2^16) quotient is formed.  This definition intentionally lives
+// after the hot solver so its size cannot relocate unrelated hot functions.
+#if defined(_MSC_VER)
+#define WH2_RESIDUAL_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#define WH2_RESIDUAL_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_packed_residual")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_RESIDUAL_NOINLINE __attribute__((noinline))
+#else
+#define WH2_RESIDUAL_NOINLINE
+#endif
+
+static WH2_RESIDUAL_NOINLINE ResidualInsertResult
+InsertPackedBinaryResidualRow(
+    std::vector<uint64_t>& coeff,
+    std::vector<uint8_t>& rhs,
+    uint32_t R,
+    uint32_t words,
+    uint32_t block_bytes,
+    std::vector<uint64_t>& pivot_coeff,
+    std::vector<uint8_t>& pivot_rhs,
+    std::vector<uint8_t>& have_pivot,
+    uint32_t& rank,
+    PrecodeSolveStats& stats,
+    uint32_t batched_rhs_min_block_bytes)
+{
+    CAT_DEBUG_ASSERT(
+        R > 0u && words == (R + 63u) / 64u &&
+        coeff.size() == words &&
+        pivot_coeff.size() == (size_t)R * words &&
+        pivot_rhs.size() == (size_t)R * block_bytes &&
+        have_pivot.size() == R);
+
+    if ((R & 63u) != 0u) {
+        coeff[words - 1u] &=
+            (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
+    }
+
+    if (block_bytes < batched_rhs_min_block_bytes)
+    {
+        for (uint32_t column = 0; column < R; ++column)
+        {
+            const uint64_t bit = UINT64_C(1) << (column & 63u);
+            if ((coeff[column >> 6] & bit) == 0u ||
+                !have_pivot[column])
+            {
+                continue;
+            }
+            const uint64_t* pivot =
+                pivot_coeff.data() + (size_t)column * words;
+            for (uint32_t word = column >> 6; word < words; ++word) {
+                coeff[word] ^= pivot[word];
+            }
+            AddScaledBlock(
+                rhs.data(), 1u,
+                pivot_rhs.data() + (size_t)column * block_bytes,
+                block_bytes, stats);
+        }
+    }
+    else
+    {
+        BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
+        for (uint32_t column = 0; column < R; ++column)
+        {
+            const uint64_t bit = UINT64_C(1) << (column & 63u);
+            if ((coeff[column >> 6] & bit) == 0u ||
+                !have_pivot[column])
+            {
+                continue;
+            }
+            const uint64_t* pivot =
+                pivot_coeff.data() + (size_t)column * words;
+            for (uint32_t word = column >> 6; word < words; ++word) {
+                coeff[word] ^= pivot[word];
+            }
+            rhs_xor.Add(
+                pivot_rhs.data() + (size_t)column * block_bytes);
+            ++stats.BlockXors;
+        }
+        rhs_xor.Flush();
+    }
+
+    uint32_t pivot_column = R;
+    for (uint32_t word = 0; word < words; ++word)
+    {
+        if (coeff[word] != 0u) {
+            pivot_column = (word << 6) +
+                wirehair::NonzeroLowestBitIndex64(coeff[word]);
+            break;
+        }
+    }
+    if (pivot_column >= R) {
+        return RowIsZero(rhs.data(), block_bytes) ?
+            ResidualInsertResult::Dependent :
+            ResidualInsertResult::Inconsistent;
+    }
+    if (have_pivot[pivot_column]) {
+        return ResidualInsertResult::Inconsistent;
+    }
+
+    const uint32_t pivot_word = pivot_column >> 6;
+    const uint64_t pivot_bit =
+        UINT64_C(1) << (pivot_column & 63u);
+    for (uint32_t existing = 0; existing < R; ++existing)
+    {
+        if (!have_pivot[existing]) {
+            continue;
+        }
+        uint64_t* existing_coeff =
+            pivot_coeff.data() + (size_t)existing * words;
+        if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
+            continue;
+        }
+        for (uint32_t word = pivot_word; word < words; ++word) {
+            existing_coeff[word] ^= coeff[word];
+        }
+        AddScaledBlock(
+            pivot_rhs.data() + (size_t)existing * block_bytes,
+            1u, rhs.data(), block_bytes, stats);
+    }
+
+    std::memcpy(
+        pivot_coeff.data() + (size_t)pivot_column * words,
+        coeff.data(), (size_t)words * sizeof(uint64_t));
+    std::memcpy(
+        pivot_rhs.data() + (size_t)pivot_column * block_bytes,
+        rhs.data(), block_bytes);
+    have_pivot[pivot_column] = 1u;
+    ++rank;
+    return ResidualInsertResult::Inserted;
+}
+
+#undef WH2_RESIDUAL_NOINLINE
 
 #if defined(_MSC_VER)
 #define WH2_RESIDUAL_COLD_NOINLINE __declspec(noinline)

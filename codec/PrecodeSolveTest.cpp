@@ -1968,7 +1968,7 @@ bool CheckMixedSystematicSolve()
         return false;
     }
 
-    const uint32_t block_sizes[] = {2u, 16u, 1280u, 2048u};
+    const uint32_t block_sizes[] = {2u, 16u, 1280u, 2048u, 4096u};
     for (uint32_t block_bytes : block_sizes)
     {
         std::vector<uint8_t> message((size_t)K * block_bytes);
