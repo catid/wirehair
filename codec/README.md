@@ -397,6 +397,28 @@ every deterministic result field, confirming that the sparse table leaves
 the rest of the graph space unchanged.  Both arms reported zero internal
 errors and 30 heavy shortfalls.
 
+`--packet-peel-seed-table normalized-h15-v3` keeps all v1/v2 entries immutable
+and adds nine residual all-K hotspot repairs: `10:139`, `20:140`, `11414:86`,
+`48567:209`, `49312:52`, `49842:188`, `50281:121`, `51375:192`, and
+`53503:238`.  A 256-salt discovery screen followed by two fresh-seed holdouts
+tested burst, adversarial, repair-only, and IID schedules at losses .10, .35,
+and .50.  Across 383,400 selected-arm trials on these nine K values, the final
+salts reduced 13,074 salt-zero failures to 388 (33.7x); every schedule/loss
+cell improved in the deepest holdout.  On that 324,000-trial slice they also
+used 0.48% fewer block XORs and 1.98% fewer field multiply-adds.  D13 and D14
+binary-row controls were both less reliable and did more aggregate work.  Like
+v1/v2, v3 is a reproducible benchmark hook rather than a named or production
+wire profile.  A subsequent fresh-seed K=2..64000 sweep repeated the six hard
+loss cells with 1,919,970 trials per table.  V3 reduced v2's 1,254 failures to
+1,249 by repairing all five failures at the nine new K values and introducing
+none.  All 383,940 rows at unlisted K matched in every deterministic result
+field; both tables reported 32 heavy shortfalls and zero internal errors.
+Eight alternating, physical-core-isolated phases then measured 1280- and
+4096-byte full-payload solves at overhead four.  V3 won every phase and had a
+0.981 aggregate solve-time ratio versus v2, with 2.16% fewer block XORs and
+6.66% fewer field multiply-adds.  V2 had one rank failure in the timing set;
+v3 had none.
+
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
 are accumulated in one sequential scan when their combined scratch is at most

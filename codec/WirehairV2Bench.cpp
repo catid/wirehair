@@ -4064,11 +4064,31 @@ uint32_t NormalizedH15V2PacketPeelSeedXor(uint32_t K)
     }
 }
 
+uint32_t NormalizedH15V3PacketPeelSeedXor(uint32_t K)
+{
+    // Independent hard-loss holdouts for residual v2 all-K hotspots.  Keep
+    // both earlier tables immutable so recorded experiments remain replayable.
+    switch (K)
+    {
+    case 10u:    return 139u;
+    case 20u:    return 140u;
+    case 11414u: return 86u;
+    case 48567u: return 209u;
+    case 49312u: return 52u;
+    case 49842u: return 188u;
+    case 50281u: return 121u;
+    case 51375u: return 192u;
+    case 53503u: return 238u;
+    default:     return NormalizedH15V2PacketPeelSeedXor(K);
+    }
+}
+
 enum class PacketPeelSeedTable : uint32_t
 {
     None = 0,
     NormalizedH15V1 = 1,
-    NormalizedH15V2 = 2
+    NormalizedH15V2 = 2,
+    NormalizedH15V3 = 3
 };
 
 const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
@@ -4079,6 +4099,8 @@ const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
         return "normalized-h15-v1";
     case PacketPeelSeedTable::NormalizedH15V2:
         return "normalized-h15-v2";
+    case PacketPeelSeedTable::NormalizedH15V3:
+        return "normalized-h15-v3";
     default:
         return "none";
     }
@@ -4308,11 +4330,16 @@ int CmdPrecodeFail(int argc, char** argv)
                 packet_peel_seed_table =
                     PacketPeelSeedTable::NormalizedH15V2;
             }
+            else if (std::strcmp(value, "normalized-h15-v3") == 0) {
+                packet_peel_seed_table =
+                    PacketPeelSeedTable::NormalizedH15V3;
+            }
             else
             {
                 std::fprintf(stderr,
                     "precodefail unknown --packet-peel-seed-table %s "
-                    "(expected normalized-h15-v1 or normalized-h15-v2)\n",
+                    "(expected normalized-h15-v1, normalized-h15-v2, or "
+                    "normalized-h15-v3)\n",
                     value);
                 return 1;
             }
@@ -4830,6 +4857,12 @@ int CmdPrecodeFail(int argc, char** argv)
         {
             active_packet_peel_seed_xor =
                 NormalizedH15V2PacketPeelSeedXor(K);
+        }
+        else if (packet_peel_seed_table ==
+                 PacketPeelSeedTable::NormalizedH15V3)
+        {
+            active_packet_peel_seed_xor =
+                NormalizedH15V3PacketPeelSeedXor(K);
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;

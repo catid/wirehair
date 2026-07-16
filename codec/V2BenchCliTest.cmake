@@ -449,6 +449,94 @@ expect_success("62039,64.*0x2" precodefail
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
     --mixed-independent-extension-residues)
+expect_success("4,64.*0x39" precodefail
+    --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("62039,64.*0x2" precodefail
+    --N 62039 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("10,64.*0x8b" precodefail
+    --N 10 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("20,64.*0x8c" precodefail
+    --N 20 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("11414,64.*0x56" precodefail
+    --N 11414 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("48567,64.*0xd1" precodefail
+    --N 48567 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("49312,64.*0x34" precodefail
+    --N 49312 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("49842,64.*0xbc" precodefail
+    --N 49842 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("50281,64.*0x79" precodefail
+    --N 50281 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("51375,64.*0xc0" precodefail
+    --N 51375 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
+expect_success("53503,64.*0xee" precodefail
+    --N 53503 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2 --packet-peel-seed-table normalized-h15-v3
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues)
 expect_failure("conflicts with --packet-peel-seed-xor" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
     --trials 1 --threads 1 --loss 0.35 --completion mixed --mix-count 2
