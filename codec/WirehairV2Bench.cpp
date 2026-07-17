@@ -26,6 +26,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
@@ -4550,13 +4555,115 @@ uint32_t NormalizedH15V4PacketPeelSeedXor(uint32_t K)
     }
 }
 
+// Mechanically translated from the sealed normalized-H15-v5 selection table.
+// This complete 168-entry mapping comprises the 70 immutable nonzero v4
+// entries plus exactly 98 v5 additions.  High-byte bucket offsets keep the
+// logical table at 756 bytes and bound populated-bucket scans to 26 entries
+// (eight outside the tiny-K bucket).
+static const uint8_t kNormalizedH15V5BucketOffsets[252] = {
+    0, 26, 26, 26, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29, 29, 29, 29,
+    29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 30, 30, 30,
+    30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31,
+    31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+    31, 31, 31, 31, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+    33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33,
+    33, 33, 33, 33, 33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 34, 34,
+    34, 34, 34, 34, 34, 34, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35,
+    35, 35, 35, 36, 36, 36, 36, 36, 36, 36, 37, 38, 38, 38, 38, 38,
+    40, 40, 40, 41, 41, 41, 41, 41, 42, 42, 42, 44, 45, 48, 50, 50,
+    50, 53, 56, 58, 62, 67, 71, 74, 79, 83, 83, 87, 89, 94, 99, 104,
+    107, 109, 115, 119, 124, 126, 127, 135, 136, 139, 144, 145, 147, 150,
+    153, 157, 159, 160, 163, 165, 165, 165, 165, 166, 166, 166, 166, 166,
+    166, 166, 166, 166, 166, 166, 166, 166, 166, 166, 166, 166, 166, 166,
+    166, 166, 166, 166, 166, 166, 166, 166, 167, 168, 168, 168, 168, 168,
+    168, 168, 168, 168
+};
+
+static const uint16_t kNormalizedH15V5Keys[168] = {
+    4u, 5u, 6u, 7u, 9u, 10u, 11u, 12u,
+    13u, 14u, 15u, 16u, 17u, 18u, 19u, 20u,
+    22u, 25u, 28u, 29u, 31u, 32u, 33u, 37u,
+    39u, 41u, 955u, 1683u, 6485u, 11414u, 15182u, 21394u,
+    24432u, 30864u, 34207u, 37466u, 39284u, 39559u, 40831u, 40912u,
+    41692u, 42923u, 43742u, 43751u, 43883u, 44054u, 44130u, 44131u,
+    44487u, 44495u, 45083u, 45168u, 45185u, 45327u, 45464u, 45561u,
+    45568u, 45739u, 45857u, 45903u, 45962u, 46018u, 46114u, 46125u,
+    46141u, 46193u, 46296u, 46365u, 46402u, 46460u, 46503u, 46606u,
+    46765u, 46772u, 46857u, 46890u, 46933u, 47029u, 47094u, 47105u,
+    47157u, 47301u, 47307u, 47620u, 47775u, 47840u, 47864u, 48034u,
+    48115u, 48231u, 48236u, 48251u, 48311u, 48354u, 48466u, 48504u,
+    48562u, 48567u, 48629u, 48667u, 48735u, 48766u, 48827u, 48839u,
+    48942u, 49122u, 49124u, 49312u, 49335u, 49412u, 49424u, 49427u,
+    49486u, 49542u, 49627u, 49669u, 49727u, 49842u, 49865u, 49995u,
+    50084u, 50114u, 50124u, 50173u, 50281u, 50419u, 50654u, 50689u,
+    50729u, 50753u, 50755u, 50870u, 50885u, 50899u, 50923u, 51151u,
+    51310u, 51375u, 51419u, 51468u, 51470u, 51494u, 51561u, 51692u,
+    51793u, 52155u, 52207u, 52266u, 52427u, 52445u, 52640u, 52650u,
+    52698u, 52741u, 52779u, 52928u, 52935u, 53065u, 53180u, 53503u,
+    53613u, 53690u, 53697u, 53804u, 53927u, 54904u, 61824u, 62039u
+};
+
+static const uint8_t kNormalizedH15V5Salts[168] = {
+    0x39u, 0x69u, 0x17u, 0x53u, 0x33u, 0x8bu, 0xa8u, 0xfau, 0x7bu,
+    0x9du, 0x37u, 0x06u, 0xb9u, 0x25u, 0xc2u, 0x8cu, 0xccu, 0x68u,
+    0x7au, 0xf2u, 0x81u, 0x38u, 0x6eu, 0xacu, 0x94u, 0x7du, 0x27u,
+    0x13u, 0x27u, 0x56u, 0x62u, 0x1au, 0x4bu, 0x27u, 0xd5u, 0x27u,
+    0x79u, 0x3cu, 0xb3u, 0x79u, 0x27u, 0x27u, 0x1bu, 0x63u, 0x27u,
+    0x27u, 0x27u, 0x6fu, 0x27u, 0x27u, 0x27u, 0x6cu, 0x27u, 0x27u,
+    0x22u, 0x27u, 0x27u, 0x27u, 0x31u, 0x3au, 0x27u, 0x27u, 0x79u,
+    0x79u, 0x27u, 0x27u, 0x04u, 0x27u, 0x27u, 0x6fu, 0x79u, 0xebu,
+    0x27u, 0x79u, 0x79u, 0x27u, 0x6au, 0x75u, 0x27u, 0x51u, 0x27u,
+    0x27u, 0xb2u, 0x27u, 0x79u, 0x27u, 0x27u, 0x27u, 0x6fu, 0xe1u,
+    0x79u, 0x79u, 0x7au, 0x6fu, 0x57u, 0x27u, 0x27u, 0xd1u, 0x27u,
+    0x27u, 0x27u, 0x27u, 0x27u, 0x27u, 0x27u, 0x79u, 0xedu, 0x34u,
+    0x27u, 0xadu, 0x27u, 0x27u, 0x8eu, 0x27u, 0xacu, 0x27u, 0x8fu,
+    0xbcu, 0xffu, 0x27u, 0x79u, 0x79u, 0x27u, 0x27u, 0x79u, 0x79u,
+    0x27u, 0x8eu, 0x27u, 0x27u, 0x27u, 0x6fu, 0x3fu, 0x0cu, 0x27u,
+    0x27u, 0x27u, 0xc0u, 0x27u, 0x27u, 0x27u, 0xd0u, 0x27u, 0x27u,
+    0x27u, 0x27u, 0x6fu, 0x79u, 0x27u, 0x79u, 0x79u, 0x27u, 0x27u,
+    0x27u, 0x27u, 0x27u, 0x08u, 0x27u, 0x27u, 0xeeu, 0x1eu, 0x27u,
+    0xccu, 0xa9u, 0x27u, 0x27u, 0x27u, 0x02u
+};
+
+static_assert(
+    sizeof(kNormalizedH15V5BucketOffsets) +
+        sizeof(kNormalizedH15V5Keys) +
+        sizeof(kNormalizedH15V5Salts) == 756u,
+    "normalized-H15-v5 logical table storage changed");
+
+uint32_t NormalizedH15V5PacketPeelSeedXor(uint32_t K)
+{
+    if (K > 64000u) {
+        return 0u;
+    }
+    const uint32_t bucket = K >> 8;
+    const uint32_t end = kNormalizedH15V5BucketOffsets[bucket + 1u];
+    for (uint32_t index = kNormalizedH15V5BucketOffsets[bucket];
+         index < end;
+         ++index)
+    {
+        const uint32_t key = kNormalizedH15V5Keys[index];
+        if (key >= K) {
+            return key == K ? kNormalizedH15V5Salts[index] : 0u;
+        }
+    }
+    return 0u;
+}
+
+static const char kNormalizedH15V5SelectionTableSha256[] =
+    "ef1729d961f71bc604e972194495e9e508459d62db786d0d9df56c3ce4198f3c";
+static const char kNormalizedH15V5CompletionSealSha256[] =
+    "4fdc34d4ff18bbbe5e037bd159bbb8c04d0e58e762cc065e5823ce5cf43495e8";
+
 enum class PacketPeelSeedTable : uint32_t
 {
     None = 0,
     NormalizedH15V1 = 1,
     NormalizedH15V2 = 2,
     NormalizedH15V3 = 3,
-    NormalizedH15V4 = 4
+    NormalizedH15V4 = 4,
+    NormalizedH15V5 = 5
 };
 
 const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
@@ -4571,9 +4678,584 @@ const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
         return "normalized-h15-v3";
     case PacketPeelSeedTable::NormalizedH15V4:
         return "normalized-h15-v4";
+    case PacketPeelSeedTable::NormalizedH15V5:
+        return "normalized-h15-v5";
     default:
         return "none";
     }
+}
+
+const char* NormalizedH15V5Decision(uint32_t v4_salt, uint32_t v5_salt)
+{
+    if (v4_salt != 0u) {
+        return "immutable-nonzero-v4";
+    }
+    return v5_salt != 0u ? "selected" : "retain-zero";
+}
+
+void PrintNormalizedH15V5Row(uint32_t K)
+{
+    const uint32_t v4_salt = NormalizedH15V4PacketPeelSeedXor(K);
+    const uint32_t v5_salt = NormalizedH15V5PacketPeelSeedXor(K);
+    std::printf(
+        "%u\t0x%x\t0x%x\t%u\t%s\n",
+        K,
+        v4_salt,
+        v5_salt,
+        v4_salt != v5_salt ? 1u : 0u,
+        NormalizedH15V5Decision(v4_salt, v5_salt));
+}
+
+#if defined(_MSC_VER)
+#define WH2_H15_LOOKUP_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_H15_LOOKUP_NOINLINE __attribute__((noinline))
+#else
+#define WH2_H15_LOOKUP_NOINLINE
+#endif
+
+// A separate noinline entry point keeps the lookup microbenchmark meaningful
+// even under LTO.  Its runtime-generated inputs and printed, loop-carried
+// checksum make eliminating, hoisting, or constant-folding calls invalid.
+static WH2_H15_LOOKUP_NOINLINE uint32_t
+BenchmarkNormalizedH15V4PacketPeelSeedXor(uint32_t K)
+{
+    return NormalizedH15V4PacketPeelSeedXor(K);
+}
+
+static WH2_H15_LOOKUP_NOINLINE uint32_t
+BenchmarkNormalizedH15V5PacketPeelSeedXor(uint32_t K)
+{
+    return NormalizedH15V5PacketPeelSeedXor(K);
+}
+
+#undef WH2_H15_LOOKUP_NOINLINE
+
+struct H15LookupBenchmarkResult
+{
+    uint64_t Checksum;
+    uint64_t ElapsedNanoseconds;
+    uint64_t CompletedLookups;
+};
+
+template <uint32_t (*Lookup)(uint32_t)>
+H15LookupBenchmarkResult RunH15LookupBenchmark(
+    const std::vector<uint32_t>& keys,
+    uint64_t lookup_count,
+    uint64_t seed)
+{
+    static const uint32_t kKeyCount = 4096u;
+    uint64_t checksum = seed ^ UINT64_C(0x9e3779b97f4a7c15);
+    const Clock::time_point begin = Clock::now();
+    for (uint64_t i = 0u; i < lookup_count; ++i)
+    {
+        // Both arms traverse the same runtime-generated K stream.  The
+        // printed loop-carried checksum consumes each noinline result without
+        // feeding table-specific data back into the access pattern.
+        const uint32_t K = keys[(uint32_t)i & (kKeyCount - 1u)];
+        const uint32_t salt = Lookup(K);
+        checksum ^=
+            (uint64_t)K * UINT64_C(0xbf58476d1ce4e5b9) +
+            (uint64_t)salt + i;
+        checksum = (checksum << 13) | (checksum >> 51);
+    }
+    H15LookupBenchmarkResult result;
+    result.Checksum = checksum;
+    result.ElapsedNanoseconds = (uint64_t)
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - begin).count();
+    result.CompletedLookups = lookup_count;
+    return result;
+}
+
+uint32_t GreatestCommonDivisor(uint32_t a, uint32_t b)
+{
+    while (b != 0u)
+    {
+        const uint32_t remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+template <uint32_t (*Lookup)(uint32_t)>
+H15LookupBenchmarkResult RunH15DomainLookupBenchmark(
+    const std::vector<uint32_t>& keys,
+    uint64_t domain_repeats)
+{
+    uint64_t checksum = UINT64_C(0xd15ea5e483135763);
+    uint64_t i = 0u;
+    const Clock::time_point begin = Clock::now();
+    for (uint64_t repeat = 0u; repeat < domain_repeats; ++repeat)
+    {
+        for (uint32_t K : keys)
+        {
+            const uint32_t salt = Lookup(K);
+            checksum ^=
+                (uint64_t)K * UINT64_C(0xbf58476d1ce4e5b9) +
+                (uint64_t)salt + i++;
+            checksum = (checksum << 13) | (checksum >> 51);
+        }
+    }
+    H15LookupBenchmarkResult result;
+    result.Checksum = checksum;
+    result.ElapsedNanoseconds = (uint64_t)
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - begin).count();
+    result.CompletedLookups = i;
+    return result;
+}
+
+int CmdH15Table(int argc, char** argv)
+{
+    bool dump = false;
+    bool summary = false;
+    bool lookup_explicit = false;
+    bool benchmark_explicit = false;
+    bool benchmark_table_explicit = false;
+    bool permutation_step_explicit = false;
+    bool domain_repeats_explicit = false;
+    bool seed_explicit = false;
+    std::string lookup_list;
+    uint64_t benchmark_lookups = 0u;
+    uint64_t domain_repeats = 0u;
+    uint64_t seed = UINT64_C(0x48313576356c6f6f);
+    uint32_t permutation_step = 0u;
+    PacketPeelSeedTable benchmark_table =
+        PacketPeelSeedTable::NormalizedH15V5;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--dump")) {
+            dump = true;
+        }
+        else if (!std::strcmp(argv[i], "--summary")) {
+            summary = true;
+        }
+        else if (!std::strcmp(argv[i], "--lookup")) {
+            if (!TakeArg("h15table", "--lookup", argc, argv, i, value)) {
+                return 1;
+            }
+            if (lookup_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --lookup may be specified only once\n");
+                return 1;
+            }
+            lookup_list = value;
+            lookup_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--benchmark-lookups")) {
+            if (!TakeArg(
+                    "h15table", "--benchmark-lookups",
+                    argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--benchmark-lookups", value, benchmark_lookups))
+            {
+                return 1;
+            }
+            if (benchmark_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --benchmark-lookups may be specified only "
+                    "once\n");
+                return 1;
+            }
+            benchmark_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--permutation-step")) {
+            if (!TakeArg(
+                    "h15table", "--permutation-step",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--permutation-step", value, permutation_step))
+            {
+                return 1;
+            }
+            if (permutation_step_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --permutation-step may be specified only "
+                    "once\n");
+                return 1;
+            }
+            permutation_step_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--domain-repeats")) {
+            if (!TakeArg(
+                    "h15table", "--domain-repeats",
+                    argc, argv, i, value) ||
+                !ParseU64Arg("--domain-repeats", value, domain_repeats))
+            {
+                return 1;
+            }
+            if (domain_repeats_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --domain-repeats may be specified only once\n");
+                return 1;
+            }
+            domain_repeats_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--table")) {
+            if (!TakeArg("h15table", "--table", argc, argv, i, value)) {
+                return 1;
+            }
+            if (benchmark_table_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --table may be specified only once\n");
+                return 1;
+            }
+            benchmark_table_explicit = true;
+            if (std::strcmp(value, "normalized-h15-v4") == 0) {
+                benchmark_table = PacketPeelSeedTable::NormalizedH15V4;
+            }
+            else if (std::strcmp(value, "normalized-h15-v5") == 0) {
+                benchmark_table = PacketPeelSeedTable::NormalizedH15V5;
+            }
+            else
+            {
+                std::fprintf(stderr,
+                    "h15table unknown --table %s "
+                    "(expected normalized-h15-v4 or normalized-h15-v5)\n",
+                    value);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("h15table", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed))
+            {
+                return 1;
+            }
+            if (seed_explicit)
+            {
+                std::fprintf(stderr,
+                    "h15table --seed may be specified only once\n");
+                return 1;
+            }
+            seed_explicit = true;
+        }
+        else if (!UnknownArg("h15table", argv[i])) {
+            return 1;
+        }
+    }
+
+    const bool domain_benchmark_explicit =
+        permutation_step_explicit || domain_repeats_explicit;
+    const uint32_t modes =
+        (dump ? 1u : 0u) +
+        (summary ? 1u : 0u) +
+        (lookup_explicit ? 1u : 0u) +
+        (benchmark_explicit ? 1u : 0u) +
+        (domain_benchmark_explicit ? 1u : 0u);
+    if (modes != 1u)
+    {
+        std::fprintf(stderr,
+            "h15table requires exactly one of --dump, --summary, "
+            "--lookup, --benchmark-lookups, or the paired "
+            "--permutation-step/--domain-repeats mode\n");
+        return 1;
+    }
+    if (seed_explicit && !benchmark_explicit)
+    {
+        std::fprintf(stderr,
+            "h15table --seed requires --benchmark-lookups\n");
+        return 1;
+    }
+    if (benchmark_table_explicit &&
+        !benchmark_explicit && !domain_benchmark_explicit)
+    {
+        std::fprintf(stderr,
+            "h15table --table requires a lookup benchmark mode\n");
+        return 1;
+    }
+
+    if (dump)
+    {
+#if defined(_WIN32)
+        // The sealed TSV is an LF-delimited byte artifact.  Disable the
+        // Windows CRT's stdout CRLF translation so its digest is portable.
+        if (_setmode(_fileno(stdout), _O_BINARY) == -1)
+        {
+            std::fprintf(stderr,
+                "h15table could not set binary stdout mode\n");
+            return 2;
+        }
+#endif
+        std::printf("K\tv4_salt\tv5_salt\tchanged\tdecision\n");
+        for (uint32_t K = 2u; K <= 64000u; ++K) {
+            PrintNormalizedH15V5Row(K);
+        }
+        return 0;
+    }
+
+    if (lookup_explicit)
+    {
+        const std::vector<int> block_counts = ParseIntList(lookup_list);
+        if (block_counts.empty())
+        {
+            std::fprintf(stderr,
+                "h15table --lookup requires a non-empty integer list\n");
+            return 1;
+        }
+        if (!ValidateBlockCounts(block_counts, "h15table")) {
+            return 1;
+        }
+        std::printf("K\tv4_salt\tv5_salt\tchanged\tdecision\n");
+        for (int K : block_counts) {
+            PrintNormalizedH15V5Row((uint32_t)K);
+        }
+        return 0;
+    }
+
+    if (summary)
+    {
+        uint32_t max_bucket_entries = 0u;
+        uint32_t previous_key = 0u;
+        if (kNormalizedH15V5BucketOffsets[0] != 0u ||
+            kNormalizedH15V5BucketOffsets[251] != 168u)
+        {
+            std::fprintf(stderr,
+                "h15table bucket endpoint invariant failed\n");
+            return 2;
+        }
+        for (uint32_t bucket = 0u; bucket <= 250u; ++bucket)
+        {
+            const uint32_t begin =
+                kNormalizedH15V5BucketOffsets[bucket];
+            const uint32_t end =
+                kNormalizedH15V5BucketOffsets[bucket + 1u];
+            if (begin > end || end > 168u)
+            {
+                std::fprintf(stderr,
+                    "h15table bucket range invariant failed at %u\n",
+                    bucket);
+                return 2;
+            }
+            max_bucket_entries = std::max(
+                max_bucket_entries, end - begin);
+            for (uint32_t index = begin; index < end; ++index)
+            {
+                const uint32_t key = kNormalizedH15V5Keys[index];
+                if ((key >> 8) != bucket ||
+                    (index != 0u && key <= previous_key) ||
+                    kNormalizedH15V5Salts[index] == 0u)
+                {
+                    std::fprintf(stderr,
+                        "h15table entry invariant failed at index %u\n",
+                        index);
+                    return 2;
+                }
+                previous_key = key;
+            }
+        }
+        if (max_bucket_entries != 26u)
+        {
+            std::fprintf(stderr,
+                "h15table max bucket size invariant failed: %u\n",
+                max_bucket_entries);
+            return 2;
+        }
+        uint32_t v4_nonzero = 0u;
+        uint32_t overrides = 0u;
+        uint32_t salt_27 = 0u;
+        uint32_t salt_79 = 0u;
+        uint32_t salt_6f = 0u;
+        uint32_t salt_a8 = 0u;
+        for (uint32_t K = 2u; K <= 64000u; ++K)
+        {
+            const uint32_t v4_salt =
+                NormalizedH15V4PacketPeelSeedXor(K);
+            const uint32_t v5_salt =
+                NormalizedH15V5PacketPeelSeedXor(K);
+            v4_nonzero += v4_salt != 0u ? 1u : 0u;
+            if (v4_salt != 0u && v5_salt != v4_salt)
+            {
+                std::fprintf(stderr,
+                    "h15table changed immutable v4 entry at K=%u\n", K);
+                return 2;
+            }
+            if (v4_salt == v5_salt) {
+                continue;
+            }
+            ++overrides;
+            if (v5_salt == 0x27u) ++salt_27;
+            else if (v5_salt == 0x79u) ++salt_79;
+            else if (v5_salt == 0x6fu) ++salt_6f;
+            else if (v5_salt == 0xa8u) ++salt_a8;
+            else
+            {
+                std::fprintf(stderr,
+                    "h15table found unknown v5 salt 0x%x at K=%u\n",
+                    v5_salt, K);
+                return 2;
+            }
+        }
+        if (v4_nonzero != 70u || overrides != 98u ||
+            salt_27 != 75u || salt_79 != 17u ||
+            salt_6f != 6u || salt_a8 != 0u)
+        {
+            std::fprintf(stderr,
+                "h15table invariant mismatch: v4=%u overrides=%u "
+                "c27=%u c79=%u c6f=%u ca8=%u\n",
+                v4_nonzero, overrides,
+                salt_27, salt_79, salt_6f, salt_a8);
+            return 2;
+        }
+        std::printf(
+            "domain=2..64000 entries=63999 v4_nonzero=%u overrides=%u "
+            "c27=%u c79=%u c6f=%u ca8=%u "
+            "logical_table_bytes=%u max_bucket_entries=%u "
+            "selection_table_sha256=%s completion_seal_sha256=%s\n",
+            v4_nonzero, overrides,
+            salt_27, salt_79, salt_6f, salt_a8,
+            (unsigned)(sizeof(kNormalizedH15V5BucketOffsets) +
+                sizeof(kNormalizedH15V5Keys) +
+                sizeof(kNormalizedH15V5Salts)),
+            max_bucket_entries,
+            kNormalizedH15V5SelectionTableSha256,
+            kNormalizedH15V5CompletionSealSha256);
+        return 0;
+    }
+
+    static const uint64_t kMaxBenchmarkLookups = UINT64_C(1000000000);
+    if (domain_benchmark_explicit)
+    {
+        static const uint64_t kDomainSize = UINT64_C(63999);
+        if (!permutation_step_explicit || !domain_repeats_explicit)
+        {
+            std::fprintf(stderr,
+                "h15table domain benchmark requires both "
+                "--permutation-step and --domain-repeats\n");
+            return 1;
+        }
+        if (permutation_step < 1u || permutation_step >= kDomainSize ||
+            GreatestCommonDivisor(
+                permutation_step, (uint32_t)kDomainSize) != 1u)
+        {
+            std::fprintf(stderr,
+                "h15table --permutation-step must be in [1,63998] and "
+                "coprime to 63999\n");
+            return 1;
+        }
+        if (domain_repeats < 1u)
+        {
+            std::fprintf(stderr,
+                "h15table --domain-repeats must be nonzero\n");
+            return 1;
+        }
+        if (domain_repeats > UINT64_MAX / kDomainSize)
+        {
+            std::fprintf(stderr,
+                "h15table domain repeat count overflows lookup count\n");
+            return 1;
+        }
+        const uint64_t lookup_count = domain_repeats * kDomainSize;
+        if (lookup_count > kMaxBenchmarkLookups)
+        {
+            std::fprintf(stderr,
+                "h15table domain benchmark lookups must be at most %llu\n",
+                (unsigned long long)kMaxBenchmarkLookups);
+            return 1;
+        }
+        std::vector<uint32_t> domain_keys((size_t)kDomainSize);
+        std::vector<uint8_t> seen((size_t)kDomainSize, 0u);
+        for (uint32_t index = 0u; index < (uint32_t)kDomainSize; ++index)
+        {
+            const uint32_t K = 2u + (uint32_t)(
+                (uint64_t)index * permutation_step % kDomainSize);
+            if (K < 2u || K > 64000u || seen[K - 2u] != 0u)
+            {
+                std::fprintf(stderr,
+                    "h15table could not construct a full domain "
+                    "permutation\n");
+                return 2;
+            }
+            seen[K - 2u] = 1u;
+            domain_keys[index] = K;
+        }
+        if (domain_keys.size() != kDomainSize ||
+            std::find(seen.begin(), seen.end(), (uint8_t)0u) != seen.end())
+        {
+            std::fprintf(stderr,
+                "h15table domain permutation validation failed\n");
+            return 2;
+        }
+        const H15LookupBenchmarkResult result =
+            benchmark_table == PacketPeelSeedTable::NormalizedH15V4 ?
+                RunH15DomainLookupBenchmark<
+                    BenchmarkNormalizedH15V4PacketPeelSeedXor>(
+                        domain_keys, domain_repeats) :
+                RunH15DomainLookupBenchmark<
+                    BenchmarkNormalizedH15V5PacketPeelSeedXor>(
+                        domain_keys, domain_repeats);
+        if (result.CompletedLookups != lookup_count)
+        {
+            std::fprintf(stderr,
+                "h15table domain benchmark lookup count mismatch\n");
+            return 2;
+        }
+        std::printf(
+            "profile=full-domain-permutation arm=%s lookups=%llu "
+            "permutation_step=%u domain_repeats=%llu checksum=0x%llx "
+            "elapsed_ns=%llu ns_per_lookup=%.3f "
+            "selection_table_sha256=%s\n",
+            PacketPeelSeedTableName(benchmark_table),
+            (unsigned long long)lookup_count,
+            permutation_step,
+            (unsigned long long)domain_repeats,
+            (unsigned long long)result.Checksum,
+            (unsigned long long)result.ElapsedNanoseconds,
+            (double)result.ElapsedNanoseconds / (double)lookup_count,
+            kNormalizedH15V5SelectionTableSha256);
+        return 0;
+    }
+
+    if (benchmark_lookups < 1u ||
+        benchmark_lookups > kMaxBenchmarkLookups)
+    {
+        std::fprintf(stderr,
+            "h15table --benchmark-lookups must be in [1,%llu]\n",
+            (unsigned long long)kMaxBenchmarkLookups);
+        return 1;
+    }
+
+    static const uint32_t kKeyCount = 4096u;
+    std::vector<uint32_t> keys(kKeyCount);
+    Rng rng(seed);
+    for (uint32_t& K : keys) {
+        K = 2u + rng.U32() % 63999u;
+    }
+    const H15LookupBenchmarkResult result =
+        benchmark_table == PacketPeelSeedTable::NormalizedH15V4 ?
+            RunH15LookupBenchmark<
+                BenchmarkNormalizedH15V4PacketPeelSeedXor>(
+                    keys, benchmark_lookups, seed) :
+            RunH15LookupBenchmark<
+                BenchmarkNormalizedH15V5PacketPeelSeedXor>(
+                    keys, benchmark_lookups, seed);
+    if (result.CompletedLookups != benchmark_lookups)
+    {
+        std::fprintf(stderr,
+            "h15table random benchmark lookup count mismatch\n");
+        return 2;
+    }
+    std::printf(
+        "profile=random-keys arm=%s lookups=%llu seed=0x%llx "
+        "checksum=0x%llx elapsed_ns=%llu "
+        "ns_per_lookup=%.3f selection_table_sha256=%s\n",
+        PacketPeelSeedTableName(benchmark_table),
+        (unsigned long long)benchmark_lookups,
+        (unsigned long long)seed,
+        (unsigned long long)result.Checksum,
+        (unsigned long long)result.ElapsedNanoseconds,
+        (double)result.ElapsedNanoseconds / (double)benchmark_lookups,
+        kNormalizedH15V5SelectionTableSha256);
+    return 0;
 }
 
 int CmdPrecodeFail(int argc, char** argv)
@@ -4816,12 +5498,17 @@ int CmdPrecodeFail(int argc, char** argv)
                 packet_peel_seed_table =
                     PacketPeelSeedTable::NormalizedH15V4;
             }
+            else if (std::strcmp(value, "normalized-h15-v5") == 0) {
+                packet_peel_seed_table =
+                    PacketPeelSeedTable::NormalizedH15V5;
+            }
             else
             {
                 std::fprintf(stderr,
                     "precodefail unknown --packet-peel-seed-table %s "
                     "(expected normalized-h15-v1, normalized-h15-v2, "
-                    "normalized-h15-v3, or normalized-h15-v4)\n",
+                    "normalized-h15-v3, normalized-h15-v4, or "
+                    "normalized-h15-v5)\n",
                     value);
                 return 1;
             }
@@ -5394,6 +6081,12 @@ int CmdPrecodeFail(int argc, char** argv)
         {
             active_packet_peel_seed_xor =
                 NormalizedH15V4PacketPeelSeedXor(K);
+        }
+        else if (packet_peel_seed_table ==
+                 PacketPeelSeedTable::NormalizedH15V5)
+        {
+            active_packet_peel_seed_xor =
+                NormalizedH15V5PacketPeelSeedXor(K);
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         uint32_t active_hash_seed = mixed_residue_hash_seed;
@@ -6160,8 +6853,8 @@ int main(int argc, char** argv)
     if (argc < 2) {
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
-            "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
-            "selftest [opts]\n");
+            "h15table|peelcost|densecheck|densetune|densecount|densegrid|"
+            "precodefail|selftest [opts]\n");
         return 1;
     }
     try
@@ -6174,6 +6867,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "seedtable")) {
             return CmdSeedTable(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "h15table")) {
+            return CmdH15Table(argc - 2, argv + 2);
         }
         if (!std::strcmp(argv[1], "peelcost")) {
             return CmdPeelCost(argc - 2, argv + 2);
