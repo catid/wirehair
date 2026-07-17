@@ -139,6 +139,7 @@ expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
 
 # Valid one-trial smoke for all remaining modes.
 expect_success("loss boundary oracle: PASS" selftest)
+expect_success("mixed null-witness exit policy: PASS" selftest)
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
 expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8

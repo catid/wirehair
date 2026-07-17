@@ -3691,7 +3691,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 MixedNullWitnessSink && R >= rank)
             {
                 const uint32_t quotient_columns = R - rank;
-                if (quotient_columns != 0u && quotient_columns <= 15u &&
+                if (quotient_columns != 0u &&
+                    quotient_columns <=
+                        kMaxMixedNullWitnessQuotientColumns &&
                     quotient_columns <= system.Params.HeavyRows &&
                     st.ResidualRank >= rank && st.ResidualRank < R)
                 {
@@ -4964,7 +4966,11 @@ WH2_WITNESS_NOINLINE bool BuildFullBinaryNullspaceBasis(
         return false;
     }
     const uint32_t quotient_columns = inactive_count - binary_rank;
-    if (quotient_columns == 0u || quotient_columns > 15u) return false;
+    if (quotient_columns == 0u ||
+        quotient_columns > kMaxMixedNullWitnessQuotientColumns)
+    {
+        return false;
+    }
     std::vector<uint32_t> free_columns;
     free_columns.reserve(quotient_columns);
     uint32_t counted_rank = 0u;

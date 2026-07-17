@@ -3762,6 +3762,14 @@ enum class MixedNullReplayStatus
     Error
 };
 
+static const int kMixedNullReplayInternalErrorExitCode = 3;
+
+int MixedNullReplayExitCode(MixedNullReplayStatus status)
+{
+    return status == MixedNullReplayStatus::Error ?
+        kMixedNullReplayInternalErrorExitCode : 0;
+}
+
 const char* MixedNullReplayStatusName(MixedNullReplayStatus status)
 {
     switch (status)
@@ -3864,7 +3872,9 @@ bool BuildMixedNullClassification(
     const bool basis_size_overflow = d != 0u &&
         (size_t)L > std::numeric_limits<size_t>::max() / d;
     if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
-        d == 0u || d > 15u || period == 0u || period > 244u ||
+        d == 0u ||
+        d > wirehair_v2::kMaxMixedNullWitnessQuotientColumns ||
+        period == 0u || period > 244u ||
         basis_size_overflow || source_count > L ||
         witness.InactiveMask.size() != L ||
         witness.CanonicalBasis.size() != (size_t)d * L)
@@ -4445,6 +4455,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool paired_overhead_stream = false;
     bool mixed_null_witnesses = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
@@ -5501,7 +5512,9 @@ int CmdPrecodeFail(int argc, char** argv)
                         stats.BinaryResidualRank;
                     const uint32_t quotient_rank = stats.ResidualRank -
                         stats.BinaryResidualRank;
-                    if (q != 0u && q <= 15u &&
+                    if (q != 0u &&
+                        q <= wirehair_v2::
+                            kMaxMixedNullWitnessQuotientColumns &&
                         q <= system.Params.HeavyRows && quotient_rank < q)
                     {
                         captured_witness_trial = trial;
@@ -5589,6 +5602,9 @@ int CmdPrecodeFail(int argc, char** argv)
                         witness_status = MixedNullReplayStatus::Error;
                         witness_reason = "replay_exception";
                     }
+                }
+                if (witness_status == MixedNullReplayStatus::Error) {
+                    mixed_null_witness_internal_error = true;
                 }
             }
 #endif
@@ -5803,11 +5819,31 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         }
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedNullReplayExitCode(
+        mixed_null_witness_internal_error ? MixedNullReplayStatus::Error :
+            MixedNullReplayStatus::None);
+#else
     return 0;
+#endif
 }
 
 int CmdSelfTest()
 {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (kMixedNullReplayInternalErrorExitCode != 3 ||
+        MixedNullReplayExitCode(MixedNullReplayStatus::None) != 0 ||
+        MixedNullReplayExitCode(MixedNullReplayStatus::Captured) != 0 ||
+        MixedNullReplayExitCode(MixedNullReplayStatus::Skipped) != 0 ||
+        MixedNullReplayExitCode(MixedNullReplayStatus::Error) !=
+            kMixedNullReplayInternalErrorExitCode)
+    {
+        std::fprintf(stderr, "mixed null-witness exit policy mismatch\n");
+        return 1;
+    }
+    std::printf("mixed null-witness exit policy: PASS\n");
+#endif
+
     double wilson_lower = 0.0;
     double wilson_upper = 0.0;
     Wilson95(0u, 4u, wilson_lower, wilson_upper);
