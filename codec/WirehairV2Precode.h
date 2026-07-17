@@ -97,6 +97,18 @@ struct PrecodeParams
     */
     bool DenseTwoAnchor = false;
 
+    /**
+        Experiment-only phase within the independently shuffled second deck.
+
+        Zero emits the second balanced anchor before consuming any swap pair,
+        preserving the versioned two-anchor construction exactly.  Phases one
+        and two consume that many balanced set/clear swap pairs before row 7,
+        then continue with four fresh pairs.  This changes no row count, RNG
+        consumption, or production default.  Nonzero values are valid only
+        when DenseTwoAnchor is enabled.
+    */
+    uint32_t DenseTwoAnchorPhase = 0;
+
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
 

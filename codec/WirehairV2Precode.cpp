@@ -138,8 +138,10 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     {
         return false;
     }
-    if (params.DenseTwoAnchor &&
-        (params.DenseRows != 12u || params.DenseIdentityCorner))
+    if ((params.DenseTwoAnchor &&
+         (params.DenseRows != 12u || params.DenseIdentityCorner ||
+          params.DenseTwoAnchorPhase > 2u)) ||
+        (!params.DenseTwoAnchor && params.DenseTwoAnchorPhase != 0u))
     {
         return false;
     }
@@ -161,6 +163,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.SourceHits = CertifiedSourceHits(block_count);
     params.DenseIdentityCorner = false;
     params.DenseTwoAnchor = false;
+    params.DenseTwoAnchorPhase = 0u;
     params.Seed = seed;
     return params;
 }
@@ -291,6 +294,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         {
             UnbiasedShuffleDeck(prng, deck.data(), deck_span);
             uint32_t flip_count = halves[half];
+            uint32_t flip_offset = 0u;
             if (params.DenseTwoAnchor && half == 1u)
             {
                 // Reuse the certified second-half shuffle, but turn its
@@ -301,6 +305,17 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                 for (uint32_t i = 0; i < set_count; ++i) {
                     bitmap[deck[i]] = 1u;
                 }
+                // Experimental q1/q2 phases rotate the five-row anchor
+                // window forward within this same deck.  Each pre-applied
+                // pair swaps one set and one clear column, so the anchor
+                // remains exactly balanced.  The fixed upper bound of two
+                // is validated before any output is modified.
+                flip_offset = params.DenseTwoAnchorPhase;
+                for (uint32_t ii = 0; ii < flip_offset; ++ii)
+                {
+                    bitmap[deck[ii]] ^= 1u;
+                    bitmap[deck[set_count + ii]] ^= 1u;
+                }
                 emit_row();
                 --flip_count;
             }
@@ -308,8 +323,9 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             {
                 // Deck entries at distinct positions are distinct columns,
                 // so each flip pair changes exactly two columns
-                bitmap[deck[ii]] ^= 1u;
-                bitmap[deck[set_count + ii]] ^= 1u;
+                const uint32_t deck_index = flip_offset + ii;
+                bitmap[deck[deck_index]] ^= 1u;
+                bitmap[deck[set_count + deck_index]] ^= 1u;
                 emit_row();
             }
         }

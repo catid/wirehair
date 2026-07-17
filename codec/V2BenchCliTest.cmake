@@ -834,9 +834,27 @@ expect_failure("--mixed-extension-residue-seed-xor requires" precodefail
 expect_success("binary_dense_rows_override=16" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-rows 16)
-expect_success("binary_dense_two_anchor=1" precodefail
+expect_success(
+    "binary_dense_two_anchor=1.*binary_dense_two_anchor_phase=0" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor)
+expect_success(
+    "binary_dense_two_anchor=1.*binary_dense_two_anchor_phase=1" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor
+    --binary-dense-two-anchor-phase 1)
+expect_success(
+    "binary_dense_two_anchor=1.*binary_dense_two_anchor_phase=2" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor
+    --binary-dense-two-anchor-phase 2)
+expect_failure("--binary-dense-two-anchor-phase requires" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor-phase 1)
+expect_failure("--binary-dense-two-anchor-phase must be in" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor
+    --binary-dense-two-anchor-phase 3)
 expect_success(
     "packet_peel_seed_table=normalized-h15-v4.*binary_dense_two_anchor=1"
     precodefail --N 64 --bb-list 64 --overhead 0 --trials 1 --threads 1

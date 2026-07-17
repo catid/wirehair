@@ -42,7 +42,7 @@ bool TestParams()
             params.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
             params.SourceHits != c.SourceHits ||
-            params.DenseTwoAnchor)
+            params.DenseTwoAnchor || params.DenseTwoAnchorPhase != 0u)
         {
             std::fprintf(stderr,
                 "certified params wrong for K=%u (N1=%u, want %u)\n",
@@ -109,6 +109,13 @@ bool TestParams()
     invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
     invalid.DenseIdentityCorner = true;
     invalid.DenseTwoAnchor = true;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseTwoAnchorPhase = 1u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseTwoAnchor = true;
+    invalid.DenseTwoAnchorPhase = 3u;
     invalid_params.push_back(invalid);
 
     for (size_t i = 0; i < invalid_params.size(); ++i)
@@ -351,32 +358,70 @@ bool TestTwoAnchorDeterminism(uint32_t K)
     }
 
     params.DenseTwoAnchor = true;
-    wirehair_v2::PrecodeSystem a, b;
-    if (!BuildPrecodeSystem(params, a) || !BuildPrecodeSystem(params, b) ||
-        !TestStaircase(a) || !TestDenseRows(a))
+    wirehair_v2::PrecodeSystem phased[3];
+    for (uint32_t phase = 0u; phase <= 2u; ++phase)
     {
-        std::fprintf(stderr, "K=%u: two-anchor build failed\n", K);
-        return false;
-    }
-    if (a.StaircaseRows != b.StaircaseRows ||
-        a.DenseRowColumns != b.DenseRowColumns)
-    {
-        std::fprintf(stderr,
-            "K=%u: same seed produced different two-anchor systems\n", K);
-        return false;
-    }
-    if (a.StaircaseRows != baseline.StaircaseRows)
-    {
-        std::fprintf(stderr,
-            "K=%u: two-anchor changed staircase construction\n", K);
-        return false;
-    }
-    for (uint32_t r = 0u; r <= 6u; ++r)
-    {
-        if (a.DenseRowColumns[r] != baseline.DenseRowColumns[r])
+        params.DenseTwoAnchorPhase = phase;
+        wirehair_v2::PrecodeSystem repeat;
+        if (!BuildPrecodeSystem(params, phased[phase]) ||
+            !BuildPrecodeSystem(params, repeat) ||
+            !TestStaircase(phased[phase]) ||
+            !TestDenseRows(phased[phase]))
         {
             std::fprintf(stderr,
-                "K=%u: two-anchor changed preserved dense row %u\n", K, r);
+                "K=%u: two-anchor phase %u build failed\n", K, phase);
+            return false;
+        }
+        if (phased[phase].StaircaseRows != repeat.StaircaseRows ||
+            phased[phase].DenseRowColumns != repeat.DenseRowColumns)
+        {
+            std::fprintf(stderr,
+                "K=%u: same seed produced different two-anchor phase %u "
+                "systems\n", K, phase);
+            return false;
+        }
+        if (phased[phase].StaircaseRows != baseline.StaircaseRows)
+        {
+            std::fprintf(stderr,
+                "K=%u: two-anchor phase %u changed staircase "
+                "construction\n", K, phase);
+            return false;
+        }
+        for (uint32_t r = 0u; r <= 6u; ++r)
+        {
+            if (phased[phase].DenseRowColumns[r] !=
+                baseline.DenseRowColumns[r])
+            {
+                std::fprintf(stderr,
+                    "K=%u: two-anchor phase %u changed preserved dense "
+                    "row %u\n", K, phase, r);
+                return false;
+            }
+        }
+    }
+    const wirehair_v2::PrecodeSystem& a = phased[0];
+    // q1/q2 are exact forward windows through the same independently
+    // shuffled second-deck cadence.  Pinning these overlaps proves q0 remains
+    // byte-identical and the experiment changes phase rather than RNG use.
+    for (uint32_t phase = 1u; phase <= 2u; ++phase)
+    {
+        for (uint32_t row = 7u; row + phase < 12u; ++row)
+        {
+            if (phased[phase].DenseRowColumns[row] !=
+                phased[0].DenseRowColumns[row + phase])
+            {
+                std::fprintf(stderr,
+                    "K=%u: two-anchor phase %u row %u is not q0 row %u\n",
+                    K, phase, row, row + phase);
+                return false;
+            }
+        }
+        if (phased[phase].DenseRowColumns[11] ==
+            phased[0].DenseRowColumns[11])
+        {
+            std::fprintf(stderr,
+                "K=%u: two-anchor phase %u did not advance final row\n",
+                K, phase);
             return false;
         }
     }
@@ -398,13 +443,17 @@ bool TestTwoAnchorDeterminism(uint32_t K)
         return false;
     }
 
-    wirehair_v2::PrecodeSystem bad = a;
-    bad.DenseRowColumns[7].pop_back();
-    if (wirehair_v2::ValidatePrecodeSystem(bad))
+    for (uint32_t phase = 0u; phase <= 2u; ++phase)
     {
-        std::fprintf(stderr,
-            "K=%u: validator accepted an unbalanced second anchor\n", K);
-        return false;
+        wirehair_v2::PrecodeSystem bad = phased[phase];
+        bad.DenseRowColumns[7].pop_back();
+        if (wirehair_v2::ValidatePrecodeSystem(bad))
+        {
+            std::fprintf(stderr,
+                "K=%u: validator accepted an unbalanced phase %u second "
+                "anchor\n", K, phase);
+            return false;
+        }
     }
 
     if (K == 945u)
@@ -666,6 +715,7 @@ int main()
         params.DenseIdentityCorner = false;
         params.DenseRows = 12u;
         params.DenseTwoAnchor = true;
+        params.DenseTwoAnchorPhase = trial % 3u;
         if (!BuildPrecodeSystem(params, system) ||
             !wirehair_v2::ValidatePrecodeSystem(system) ||
             !TestDenseRows(system))

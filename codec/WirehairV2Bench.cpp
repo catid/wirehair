@@ -4607,11 +4607,13 @@ int CmdPrecodeFail(int argc, char** argv)
     bool paired_overhead_stream = false;
     bool mixed_null_witnesses = false;
     bool binary_dense_two_anchor = false;
+    uint32_t binary_dense_two_anchor_phase = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
+    bool binary_dense_two_anchor_phase_explicit = false;
     bool gf256_heavy_rows_explicit = false;
     bool packet_peel_seed_xor_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
@@ -4772,6 +4774,20 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
             binary_dense_two_anchor = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--binary-dense-two-anchor-phase"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--binary-dense-two-anchor-phase",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--binary-dense-two-anchor-phase", value,
+                    binary_dense_two_anchor_phase))
+            {
+                return 1;
+            }
+            binary_dense_two_anchor_phase_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--gf256-heavy-rows")) {
             if (!TakeArg(
@@ -5144,6 +5160,21 @@ int CmdPrecodeFail(int argc, char** argv)
             "dense rows\n");
         return 1;
     }
+    if (binary_dense_two_anchor_phase_explicit &&
+        !binary_dense_two_anchor)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor-phase requires "
+            "--binary-dense-two-anchor\n");
+        return 1;
+    }
+    if (binary_dense_two_anchor_phase > 2u)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor-phase must be in "
+            "[0,2]\n");
+        return 1;
+    }
     if (gf256_heavy_rows_explicit &&
         (gf256_heavy_rows_override == 0u ||
          gf256_heavy_rows_override > 128u))
@@ -5295,6 +5326,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "binary_dense_two_anchor_phase=%u "
             "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -5306,6 +5338,7 @@ int CmdPrecodeFail(int argc, char** argv)
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
             binary_dense_two_anchor ? 1u : 0u,
+            binary_dense_two_anchor_phase,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5331,6 +5364,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "binary_dense_two_anchor_phase=%u "
             "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -5360,6 +5394,7 @@ int CmdPrecodeFail(int argc, char** argv)
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
             binary_dense_two_anchor ? 1u : 0u,
+            binary_dense_two_anchor_phase,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5492,6 +5527,8 @@ int CmdPrecodeFail(int argc, char** argv)
                 base_params.DenseRows = binary_dense_rows_override;
             }
             base_params.DenseTwoAnchor = binary_dense_two_anchor;
+            base_params.DenseTwoAnchorPhase =
+                binary_dense_two_anchor_phase;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }
