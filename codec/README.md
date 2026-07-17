@@ -458,6 +458,43 @@ universal per-K guarantee; 27 of the 32 K values improved when the two widths
 were combined.  V4 remains a reproducible benchmark hook, not a named or
 production wire profile.
 
+`--packet-peel-seed-table normalized-h15-v5` preserves all 70 nonzero v4
+mappings and adds 98 K-specific overlays from the sealed normalized-H15-v5
+selection campaign.  The four frozen candidate arms contribute 75 entries at
+`0x27`, 17 at `0x79`, six at `0x6f`, and none at `0xa8`.  Across the campaign's
+1,126,695 logical trials, the final overlay reduced 304 baseline rank failures
+to 156 by repairing 148 trials and introducing none; on the changed-K slice it
+reduced 148 failures to zero.  Paired-success logical work changed by -0.011%
+block XORs and -0.041% field multiply-adds over the full overlay.  These are
+sealed selection results, not the separately reserved holdout.  V5 remains a
+benchmark hook and does not alter a named profile, serialized profile, or
+production wire bytes.
+
+The `h15table` benchmark command makes this sparse mapping independently
+auditable without running codec trials.  `h15table --dump` emits the canonical
+K=2..64000 TSV whose SHA-256 is
+`ef1729d961f71bc604e972194495e9e508459d62db786d0d9df56c3ce4198f3c`;
+`--summary` checks the counts and prints that digest plus completion-seal
+digest `4fdc34d4ff18bbbe5e037bd159bbb8c04d0e58e762cc065e5823ce5cf43495e8`.
+`--lookup K[,K...]` reports focused goldens, while
+`--benchmark-lookups COUNT [--seed U64] --table normalized-h15-v4|normalized-h15-v5`
+times runtime-generated lookups behind separate noinline arm boundaries and
+prints a loop-carried checksum so the compiler cannot discard or constant-fold
+the measured work.  V5 uses a complete, sorted 168-entry high-byte-bucket
+layout: 252 bytes of offsets, 336 bytes of keys, and 168 bytes of salts (756
+logical bytes total).  It therefore returns inherited v4 and selected v5
+values in one lookup without a second sparse-table fallback.
+
+The frozen, seed-free holdout lookup panel uses
+`h15table --permutation-step 40501 --domain-repeats 2048 --table ARM` for each
+of the v4 and v5 arms.  The command validates that the runtime step is coprime
+to 63999, precomputes and verifies the exact permutation
+`K=2+((i*40501) mod 63999)` outside the timer, and then performs 2048
+division-free full-domain passes (131,069,952 timed calls).  Its output names
+the profile and arm and reports the exact count, checksum, elapsed time, and
+nanoseconds per lookup for ABBA scheduling.  The frozen checksums are
+`0x5f244ad7ce774dfc` for v4 and `0x447d503555521b60` for v5.
+
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families
 are accumulated in one sequential scan when their combined scratch is at most

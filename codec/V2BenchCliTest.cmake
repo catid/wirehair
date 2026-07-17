@@ -50,6 +50,116 @@ function(expect_success pattern)
     reject_sanitizer("${out}${err}" "expected success: ${ARGN}")
 endfunction()
 
+function(expect_output_sha256 expected)
+    set(output_file
+        "${CMAKE_CURRENT_BINARY_DIR}/wirehair-v2-bench-output-${expected}.tmp")
+    file(REMOVE "${output_file}")
+    execute_process(
+        COMMAND "${BENCH}" ${ARGN}
+        RESULT_VARIABLE result
+        OUTPUT_FILE "${output_file}"
+        ERROR_VARIABLE err
+        TIMEOUT 90)
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
+        file(REMOVE "${output_file}")
+        message(FATAL_ERROR
+            "expected exit 0, got '${result}': ${ARGN}\nstderr=${err}")
+    endif()
+    reject_sanitizer("${err}" "SHA-256 output command: ${ARGN}")
+    file(SHA256 "${output_file}" actual)
+    file(REMOVE "${output_file}")
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR
+            "output SHA-256 mismatch for ${ARGN}: "
+            "got ${actual}, expected ${expected}")
+    endif()
+endfunction()
+
+# The canonical exhaustive dump is byte-identical to the independently
+# verified sealed K=2..64000 selection output.  Lookup goldens cover inherited
+# v4, retained zero, and every selected v5 salt arm.
+expect_output_sha256(
+    ef1729d961f71bc604e972194495e9e508459d62db786d0d9df56c3ce4198f3c
+    h15table --dump)
+expect_success(
+    "domain=2..64000 entries=63999 v4_nonzero=70 overrides=98 c27=75 c79=17 c6f=6 ca8=0 logical_table_bytes=756 max_bucket_entries=26.*completion_seal_sha256=4fdc34d4ff18bbbe5e037bd159bbb8c04d0e58e762cc065e5823ce5cf43495e8"
+    h15table --summary)
+expect_success("4[\t]0x39[\t]0x39[\t]0[\t]immutable-nonzero-v4"
+    h15table --lookup 4)
+expect_success("42[\t]0x0[\t]0x0[\t]0[\t]retain-zero"
+    h15table --lookup 42)
+expect_success("955[\t]0x0[\t]0x27[\t]1[\t]selected"
+    h15table --lookup 955)
+expect_success("39284[\t]0x0[\t]0x79[\t]1[\t]selected"
+    h15table --lookup 39284)
+expect_success("44131[\t]0x0[\t]0x6f[\t]1[\t]selected"
+    h15table --lookup 44131)
+expect_failure("requires exactly one" h15table)
+expect_failure("requires exactly one" h15table --summary --dump)
+expect_failure("--N values must be in" h15table --lookup 1)
+expect_failure("--N values must be in" h15table --lookup 64001)
+expect_failure("benchmark-lookups must be" h15table --benchmark-lookups 0)
+expect_failure("benchmark-lookups must be"
+    h15table --benchmark-lookups 1000000001)
+expect_failure("--seed requires" h15table --summary --seed 1)
+expect_failure("--table requires a lookup benchmark mode"
+    h15table --summary --table normalized-h15-v4)
+expect_failure("unknown --table" h15table --benchmark-lookups 1
+    --table unknown)
+expect_failure("--table may be specified only once"
+    h15table --benchmark-lookups 1 --table normalized-h15-v4
+    --table normalized-h15-v5)
+expect_failure("--benchmark-lookups may be specified only once"
+    h15table --benchmark-lookups 1 --benchmark-lookups 1)
+expect_failure("--seed may be specified only once"
+    h15table --benchmark-lookups 1 --seed 1 --seed 1)
+expect_failure("--lookup may be specified only once"
+    h15table --lookup 64001 --lookup 2)
+expect_failure("requires exactly one" h15table --benchmark-lookups 1
+    --permutation-step 40501 --domain-repeats 1)
+expect_failure("requires both" h15table --permutation-step 40501)
+expect_failure("requires both" h15table --domain-repeats 1)
+foreach(step IN ITEMS 0 3 63999)
+    expect_failure("coprime to 63999" h15table
+        --permutation-step ${step} --domain-repeats 1)
+endforeach()
+expect_failure("--domain-repeats must be nonzero" h15table
+    --permutation-step 40501 --domain-repeats 0)
+expect_failure("repeat count overflows" h15table
+    --permutation-step 40501 --domain-repeats 18446744073709551615)
+expect_failure("lookups must be at most" h15table
+    --permutation-step 40501 --domain-repeats 15626)
+expect_failure("--seed requires --benchmark-lookups" h15table
+    --permutation-step 40501 --domain-repeats 1 --seed 1)
+expect_failure("--permutation-step may be specified only once" h15table
+    --permutation-step 40501 --permutation-step 40501 --domain-repeats 1)
+expect_failure("--domain-repeats may be specified only once" h15table
+    --permutation-step 40501 --domain-repeats 1 --domain-repeats 1)
+
+# Runtime-generated keys, separate noinline lookup boundaries, and printed
+# loop-carried checksums prevent the optimizer from deleting or precomputing
+# either lookup-latency arm.  Both arms traverse identical K streams.
+expect_success(
+    "profile=random-keys arm=normalized-h15-v4 lookups=4096 seed=0x123456789abcdef0 checksum=0x78d1f4d6c778e12d.*selection_table_sha256=ef1729d961f71bc604e972194495e9e508459d62db786d0d9df56c3ce4198f3c"
+    h15table --benchmark-lookups 4096 --seed 0x123456789abcdef0
+    --table normalized-h15-v4)
+expect_success(
+    "profile=random-keys arm=normalized-h15-v5 lookups=4096 seed=0x123456789abcdef0 checksum=0x6bcdf5e4c778e135.*selection_table_sha256=ef1729d961f71bc604e972194495e9e508459d62db786d0d9df56c3ce4198f3c"
+    h15table --benchmark-lookups 4096 --seed 0x123456789abcdef0
+    --table normalized-h15-v5)
+
+# The frozen, seed-free holdout panel precomputes the full-domain permutation
+# outside the timed region, then performs division-free nested repeats.  A
+# one-repeat golden covers exact order/count/checksum without slowing CI.
+expect_success(
+    "profile=full-domain-permutation arm=normalized-h15-v4 lookups=63999 permutation_step=40501 domain_repeats=1 checksum=0xdd572d1ed95a951b"
+    h15table --permutation-step 40501 --domain-repeats 1
+    --table normalized-h15-v4)
+expect_success(
+    "profile=full-domain-permutation arm=normalized-h15-v5 lookups=63999 permutation_step=40501 domain_repeats=1 checksum=0x3259c1b3d5cd8df4"
+    h15table --permutation-step 40501 --domain-repeats 1
+    --table normalized-h15-v5)
+
 # Trial count boundaries, including the old uint16 narrowing boundary.
 expect_failure("trials must be" seedtable --N 2 --bb-list 1
     --peel-candidates 1 --trials 0)
@@ -677,6 +787,12 @@ expect_normalized_h15_seed(normalized-h15-v4 4 39)
 expect_normalized_h15_seed(normalized-h15-v4 62039 2)
 expect_normalized_h15_seed(normalized-h15-v4 10 8b)
 expect_normalized_h15_seed(normalized-h15-v4 42 0)
+
+# V5 is a benchmark-only mapping: one selected salt proves precodefail wiring,
+# while inherited nonzero and retained-zero cases prove complete-table parity.
+expect_normalized_h15_seed(normalized-h15-v5 955 27)
+expect_normalized_h15_seed(normalized-h15-v5 4 39)
+expect_normalized_h15_seed(normalized-h15-v5 42 0)
 
 expect_failure("conflicts with --packet-peel-seed-xor" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
