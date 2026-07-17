@@ -48,6 +48,7 @@ THERMAL_HEADER = (
     "dimm_i2c2_50_c", "dimm_i2c2_51_c", "dimm_i2c2_52_c", "dimm_i2c2_53_c",
     "dimm_read_errors", "load1", "load5", "load15", "edac_ce", "edac_ue",
 )
+MAX_LIVE_THERMAL_LINE_BYTES = 4096
 TIMING_RE = re.compile(
     r"elapsed_s=([0-9]+(?:\.[0-9]+)?) user_s=([0-9]+(?:\.[0-9]+)?) "
     r"sys_s=([0-9]+(?:\.[0-9]+)?) cpu_pct=([0-9]+)% "
@@ -535,6 +536,18 @@ def parse_thermal_line(data: bytes, line_number: int) -> tuple[list[str], list[f
     return fields, numeric
 
 
+def merge_live_thermal_chunk(
+        pending: bytes, chunk: bytes, line_number: int) -> tuple[bytes, bytes | None]:
+    if len(pending) + len(chunk) > MAX_LIVE_THERMAL_LINE_BYTES:
+        fail(f"thermal:{line_number}: live line exceeded bounded length")
+    combined = pending + chunk
+    if not combined.endswith(b"\n"):
+        return combined, None
+    if combined.count(b"\n") != 1:
+        fail(f"thermal:{line_number}: live reader returned multiple lines")
+    return b"", combined
+
+
 def watchdog(args: argparse.Namespace) -> None:
     source = args.thermal_source
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -563,9 +576,19 @@ def watchdog(args: argparse.Namespace) -> None:
         missing_streak = [0] * 8
         max_missing_streak = [0] * 8
         line_number = args.start_line
+        pending = b""
         while True:
-            line = stream.readline()
-            if line:
+            chunk = stream.readline()
+            if chunk:
+                pending, line = merge_live_thermal_chunk(
+                    pending, chunk, line_number + 1)
+                if line is None:
+                    if time.monotonic() - last_sample_wall > 5.0:
+                        fail("live watchdog received no complete thermal sample for five seconds")
+                    if args.done_file.exists():
+                        break
+                    time.sleep(0.1)
+                    continue
                 line_number += 1
                 fields, numbers = parse_thermal_line(line, line_number)
                 normalized = line.replace(b"\r\n", b"\n")
@@ -1108,6 +1131,32 @@ def selftest(_args: argparse.Namespace) -> None:
     if header.replace(b"\r\n", b"\n") != (",".join(THERMAL_HEADER) + "\n").encode("ascii"):
         fail("selftest thermal CRLF normalization mismatch")
     expect_failure(lambda: parse_thermal_line(b"bad\n", 2), "bad thermal field count")
+    thermal_fields = (
+        "2026-07-17T00:00:00.000Z", "1.0", "100.0", "4000.0", "60.0",
+        *("50.0" for _ in range(8)), "0", "1.0", "1.0", "1.0", "0", "0",
+    )
+    thermal_line = (",".join(thermal_fields) + "\n").encode("ascii")
+    parse_thermal_line(thermal_line, 2)
+    for framed_line in (thermal_line, thermal_line[:-1] + b"\r\n"):
+        if merge_live_thermal_chunk(b"", framed_line, 2) != (b"", framed_line):
+            fail("selftest complete live thermal line was not emitted exactly")
+        for split in range(1, len(framed_line)):
+            pending, complete = merge_live_thermal_chunk(b"", framed_line[:split], 2)
+            if complete is not None or pending != framed_line[:split]:
+                fail("selftest live thermal prefix was not buffered exactly")
+            if merge_live_thermal_chunk(pending, b"", 2) != (pending, None):
+                fail("selftest empty live thermal read changed its buffered prefix")
+            pending, complete = merge_live_thermal_chunk(
+                pending, framed_line[split:], 2)
+            if pending or complete != framed_line:
+                fail("selftest split live thermal line was not reassembled exactly")
+            parse_thermal_line(complete, 2)
+    expect_failure(lambda: merge_live_thermal_chunk(
+        b"x" * MAX_LIVE_THERMAL_LINE_BYTES, b"x", 2),
+        "oversized partial live thermal line")
+    expect_failure(lambda: merge_live_thermal_chunk(
+        b"", thermal_line + thermal_line, 2),
+        "multiple live thermal lines in one reader chunk")
     job: dict[str, object] = {
         "_ks": (2,), "_trials": 1, "arm": "v4", "loss": "0.10",
         "profile": "normalized-h15-v4", "schedule": "iid",
