@@ -47,6 +47,16 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Forwarded SSH Agent
+
+The client SSH session cycles frequently, so a persisted `SSH_AUTH_SOCK`
+(including the value exported by `.bashrc`) is usually stale.  Before any
+GitHub push, refresh the shell and then locate the newest live forwarded agent
+socket under `/tmp/ssh-*/agent.*`; do not assume the persisted path is valid.
+Validate the selected socket with both `ssh-add -l` and non-interactive GitHub
+SSH authentication before using it, and export that live path only for the
+commands that need it.
+
 ## Bug Fix Passes
 
 Bug fix passes are not just running unit tests. They require actually reading
