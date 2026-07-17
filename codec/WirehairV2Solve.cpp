@@ -5140,6 +5140,11 @@ WH2_WITNESS_NOINLINE void CaptureMixedNullWitness(
         diagnostic.BasisHashLow = canonical.HashLow;
         diagnostic.BasisHashHigh = canonical.HashHigh;
         diagnostic.CanonicalBasis = std::move(canonical.Basis);
+        diagnostic.InactiveMask.resize(column_count, uint8_t{0});
+        for (uint32_t column = 0u; column < column_count; ++column) {
+            diagnostic.InactiveMask[column] =
+                inactive_index[column] != UINT32_MAX ? 1u : 0u;
+        }
         diagnostic.QuotientVerified =
             diagnostic.QuotientRank == expected_quotient_rank &&
             diagnostic.KernelDimension ==
@@ -5180,10 +5185,12 @@ WH2_WITNESS_NOINLINE void CaptureMixedNullWitness(
     catch (const std::bad_alloc&) {
         diagnostic.Status = MixedNullWitnessStatus::AllocationFailure;
         diagnostic.CanonicalBasis.clear();
+        diagnostic.InactiveMask.clear();
     }
     catch (...) {
         diagnostic.Status = MixedNullWitnessStatus::InternalError;
         diagnostic.CanonicalBasis.clear();
+        diagnostic.InactiveMask.clear();
     }
     *sink = std::move(diagnostic);
 }
@@ -5304,6 +5311,28 @@ WH2_TEST_NOINLINE bool CheckMixedNullWitnessCanonicalizationForTesting()
             dimension_two.QuotientRank != 1u ||
             dimension_two.KernelDimension != 2u ||
             dimension_two.Basis.size() != 2u * L)
+        {
+            return false;
+        }
+        std::vector<uint16_t> transformed_one_row(q, 0u);
+        for (uint32_t column = 0u; column < q; ++column)
+        {
+            uint16_t value = 0u;
+            for (uint32_t term_index = 0u; term_index < 2u; ++term_index)
+            {
+                const uint32_t term = combinations[column][term_index];
+                if (term != UINT32_MAX) value ^= one_row[term];
+            }
+            transformed_one_row[column] =
+                GF16MultiplyInitialized(value, b);
+        }
+        CanonicalMixedKernel transformed_dimension_two;
+        if (!BuildCanonicalMixedKernel(
+                transformed_one_row, 1u, q, transformed_basis, L,
+                transformed_dimension_two) ||
+            transformed_dimension_two.Basis != dimension_two.Basis ||
+            transformed_dimension_two.HashLow != dimension_two.HashLow ||
+            transformed_dimension_two.HashHigh != dimension_two.HashHigh)
         {
             return false;
         }

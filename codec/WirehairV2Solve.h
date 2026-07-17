@@ -174,6 +174,8 @@ struct MixedNullWitnessDiagnostic
     uint64_t BasisHashLow = 0u;
     uint64_t BasisHashHigh = 0u;
     std::vector<uint16_t> CanonicalBasis;
+    /** One byte per original column: one for inactive, zero for peeled. */
+    std::vector<uint8_t> InactiveMask;
 };
 
 /** Install a non-owning capture sink for mixed solves on the calling thread. */
