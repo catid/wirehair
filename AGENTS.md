@@ -82,6 +82,14 @@ env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY \
 - A budget-exhausted run that returns no report is not a review.  Narrow the
   scope or, when authorized, use a sufficient cap; the first successful
   repository review here needed more than a $5 cap and completed under $20.
+- Claude CLI reviews can legitimately run far longer than 300 seconds.  Keep
+  the subprocess in a resumable session and poll it carefully; do not kill or
+  classify an otherwise-live review as failed merely because a five-minute
+  client/tool wait expired.
+- If the most recent Claude CLI attempt produced no report because the client
+  timed out, retry it once with the same scoped prompt and a sufficiently long
+  session/wall-time allowance.  Do not treat authentication, quota, model, or
+  substantive command failures as timeout-only failures.
 - Fable is advisory, not an authority.  Reproduce every finding locally,
   reject unsound suggestions explicitly, apply fixes ourselves, and rerun the
   relevant gates.  Never expose private code to an external reviewer without
@@ -89,8 +97,8 @@ env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY \
 
 ## Web Research With Exa
 
-Use the Exa MCP as a fast discovery-and-fetch pipeline when web research is
-needed:
+Use the Exa MCP as the default discovery-and-fetch pipeline for web searches
+and other external research:
 
 1. Call `web_search_exa` with a semantically rich description of the ideal
    page (including technology/version and the evidence sought), normally with

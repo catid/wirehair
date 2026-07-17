@@ -2,6 +2,39 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Web Research With Exa
+
+Use the Exa MCP as the default discovery-and-fetch pipeline for web searches
+and other external research:
+
+1. Call `web_search_exa` with a semantically rich description of the ideal
+   page (including technology/version and the evidence sought), normally with
+   3-5 results. Do not submit a loose keyword pile.
+2. Prefer primary papers, standards, official documentation, and upstream
+   repositories from the result set. Follow the best URLs with
+   `web_fetch_exa`; batch related URLs and set a bounded character limit.
+3. Verify material claims against the fetched primary source and cite that
+   source, not the search highlight. Use the normal browser/search path when
+   Exa is unavailable, when an authoritative site needs direct inspection, or
+   when current facts require an additional check.
+
+Exa is for external discovery, not facts already available in the repository.
+The validated pattern in this project was a targeted technical search that
+surfaced the primary inactivation-decoding paper, followed by a focused fetch
+of its authoritative arXiv page.
+
+## Long-Running Claude CLI Reviews
+
+Claude CLI reviews can legitimately run far longer than 300 seconds. Keep the
+subprocess in a resumable session and poll it carefully; do not kill or
+classify an otherwise-live review as failed merely because a five-minute
+client/tool wait expired.
+
+If the most recent Claude CLI attempt produced no report because the client
+timed out, retry it once with the same scoped prompt and a sufficiently long
+session/wall-time allowance. Do not treat authentication, quota, model, or
+substantive command failures as timeout-only failures.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 

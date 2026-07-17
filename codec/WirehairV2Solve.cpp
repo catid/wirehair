@@ -2769,7 +2769,6 @@ static const uint32_t kPacketSetXorMaxTerms = 16u;
 // the compact common evaluator when the size/degree gate does not select it.
 static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
     const wirehair::PeelRowParameters& params,
-    wirehair::PeelRowIterator source,
     uint32_t source_count,
     uint32_t precode_count,
     const PacketRowConfig& config,
@@ -2778,6 +2777,8 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
     uint32_t block_bytes,
     uint8_t* block_out)
 {
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)source_count, runtime.SourcePrime());
     const uint8_t* const first_source = intermediate_blocks +
         (size_t)source.GetColumn() * block_bytes;
     (void)source.Iterate();
@@ -2826,7 +2827,6 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
 // every input in a single destination pass.
 static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
     const wirehair::PeelRowParameters& params,
-    wirehair::PeelRowIterator source,
     uint32_t source_count,
     uint32_t precode_count,
     const PacketRowConfig& config,
@@ -2835,6 +2835,8 @@ static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
     uint32_t block_bytes,
     uint8_t* block_out)
 {
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)source_count, runtime.SourcePrime());
     const void* sources[kPacketSetXorMaxTerms];
     uint32_t count = 0u;
     do {
@@ -2910,11 +2912,7 @@ static bool EvaluatePacketBlockImpl(
         PacketPeelSeedForBlockId(block_id, config),
         (uint16_t)K,
         (uint16_t)P);
-    wirehair::PeelRowIterator source(
-        params, (uint16_t)K, runtime.SourcePrime());
     uint64_t operations = 1u;
-    const uint8_t* first_source =
-        intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
     // The existing schedules are already optimal until the row contains six
     // total terms.  Above that crossover, pairing the complete tail removes
     // at least one destination read/write pass.
@@ -2927,12 +2925,12 @@ static bool EvaluatePacketBlockImpl(
             packet_terms <= kPacketSetXorMaxTerms)
         {
             EvaluatePacketSetXor(
-                params, source, K, P, config, runtime, intermediate_blocks,
+                params, K, P, config, runtime, intermediate_blocks,
                 block_bytes, block_out);
         }
         else {
             EvaluatePacketTailPaired(
-                params, source, K, P, config, runtime, intermediate_blocks,
+                params, K, P, config, runtime, intermediate_blocks,
                 block_bytes, block_out);
         }
         if (block_ops_out) {
@@ -2940,6 +2938,10 @@ static bool EvaluatePacketBlockImpl(
         }
         return true;
     }
+    wirehair::PeelRowIterator source(
+        params, (uint16_t)K, runtime.SourcePrime());
+    const uint8_t* first_source =
+        intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
     if (config.MixCount == kCertifiedPacketMixCount)
     {
         const wirehair::RowMixIterator mix(
