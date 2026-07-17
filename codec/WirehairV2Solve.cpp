@@ -999,6 +999,31 @@ ResidualInsertResult InsertResidualRow(
     return ResidualInsertResult::Inserted;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static void ComposeMixedRowLabelPackedCoefficients(
+    const MixedPackedCoefficients& cached_packed,
+    uint32_t residue,
+    uint32_t subfield_rows,
+    uint32_t packed_words,
+    uint64_t* composed)
+{
+    for (uint32_t word = 0u; word < packed_words; ++word) {
+        composed[word] = cached_packed.ByResidue[residue][word];
+    }
+    if (!ActiveMixedGF256RowLabelPermutations()) return;
+    for (uint32_t row = 0u; row < subfield_rows; ++row)
+    {
+        const uint32_t word = row >> 2;
+        const uint32_t shift = (row & 3u) * 16u;
+        const uint64_t mask = UINT64_C(0xffff) << shift;
+        const uint32_t label =
+            ActiveMixedGF256RowCoefficientLabel(row, residue);
+        composed[word] = (composed[word] & ~mask) |
+            (cached_packed.ByResidue[label][word] & mask);
+    }
+}
+#endif
+
 bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     uint32_t column_count,
     uint32_t inactive_count,
@@ -1036,6 +1061,17 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     }
 
     projected.assign((size_t)projected_elements, uint64_t{0});
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const bool row_label_permutations =
+        ActiveMixedGF256RowLabelPermutations();
+    const uint32_t heavy_rows =
+        subfield_rows + ActiveMixedGF16Rows();
+    if (row_label_permutations && column_count < heavy_rows) {
+        return false;
+    }
+    const uint32_t first_heavy_column = row_label_permutations ?
+        column_count - heavy_rows : column_count;
+#endif
     const auto xor_projected = [&](uint32_t index,
                                    const uint64_t* coefficients) {
         uint64_t* destination =
@@ -1055,8 +1091,24 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         for (uint32_t column = 0; column < column_count; ++column)
         {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            uint64_t composed[kMixedPackedCoefficientWords] = {};
+            const uint32_t residue = column;
+            if (row_label_permutations && column < first_heavy_column) {
+                ComposeMixedRowLabelPackedCoefficients(
+                    cached_packed, residue, subfield_rows,
+                    packed_words, composed);
+            }
+            else {
+                for (uint32_t word = 0u; word < packed_words; ++word) {
+                    composed[word] = cached_packed.ByResidue[residue][word];
+                }
+            }
+            const uint64_t* coefficients = composed;
+#else
             const uint64_t* coefficients =
                 cached_packed.ByResidue[column];
+#endif
             const uint32_t inactive = inactive_index[column];
             if (inactive != UINT32_MAX)
             {
@@ -1203,7 +1255,15 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
 
     for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        uint64_t composed[kMixedPackedCoefficientWords] = {};
+        ComposeMixedRowLabelPackedCoefficients(
+            cached_packed, residue, subfield_rows,
+            packed_words, composed);
+        const uint64_t* coefficients = composed;
+#else
         const uint64_t* coefficients = cached_packed.ByResidue[residue];
+#endif
         const uint64_t* bucket = residue_projection.data() +
             (size_t)residue * projection_words;
         for (uint32_t word_index = 0;
@@ -1272,6 +1332,63 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             }
         }
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Shared A buckets also contain the final H columns.  They were expanded
+    // with permuted subfield labels above, so restore the canonical corner by
+    // applying the GF(256) coefficient delta directly for just those H
+    // columns.  This bounded H-column correction may scan their projected
+    // inactive relations, but it does not create another K-sized bucket pass.
+    if (row_label_permutations)
+    {
+        for (uint32_t column = first_heavy_column;
+             column < column_count; ++column)
+        {
+            const uint32_t residue = ActiveMixedCoefficientResidue(column);
+            uint64_t delta[kMixedPackedCoefficientWords] = {};
+            bool nonzero = false;
+            for (uint32_t row = 0u; row < subfield_rows; ++row)
+            {
+                const uint32_t label =
+                    ActiveMixedGF256RowCoefficientLabel(row, residue);
+                const uint16_t canonical = (uint16_t)(
+                    cached_packed.ByResidue[residue][row >> 2] >>
+                    ((row & 3u) * 16u));
+                const uint16_t permuted = (uint16_t)(
+                    cached_packed.ByResidue[label][row >> 2] >>
+                    ((row & 3u) * 16u));
+                const uint16_t difference = canonical ^ permuted;
+                delta[row >> 2] |=
+                    (uint64_t)difference << ((row & 3u) * 16u);
+                nonzero = nonzero || difference != 0u;
+            }
+            if (!nonzero) continue;
+            const uint32_t inactive = inactive_index[column];
+            if (inactive != UINT32_MAX)
+            {
+                if (inactive >= inactive_count) return false;
+                xor_projected(inactive, delta);
+                continue;
+            }
+            const uint64_t* bits = projection.data() +
+                (size_t)column * projection_words;
+            for (uint32_t word_index = 0u;
+                 word_index < projection_words; ++word_index)
+            {
+                uint64_t word = bits[word_index];
+                while (word != 0u)
+                {
+                    const uint32_t bit =
+                        wirehair::NonzeroLowestBitIndex64(word);
+                    const uint32_t index = (word_index << 6) + bit;
+                    if (index < inactive_count) {
+                        xor_projected(index, delta);
+                    }
+                    word &= word - 1u;
+                }
+            }
+        }
+    }
+#endif
     return true;
 }
 
@@ -1310,6 +1427,15 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     uint32_t residue = 0u;
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
+    const bool row_label_permutations =
+        ActiveMixedGF256RowLabelPermutations();
+    const uint32_t heavy_rows =
+        subfield_rows + ActiveMixedGF16Rows();
+    if (row_label_permutations && column_count < heavy_rows) {
+        return false;
+    }
+    const uint32_t first_heavy_column = row_label_permutations ?
+        column_count - heavy_rows : column_count;
     uint64_t subfield_masks[kMixedPackedCoefficientWords] = {};
     uint64_t extension_masks[kMixedPackedCoefficientWords] = {};
     if (independent_extension_residues)
@@ -1341,6 +1467,26 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
                     (extension_coefficients[word] & extension_masks[word]);
             }
             column_coefficients = combined_coefficients;
+        }
+        if (row_label_permutations && column < first_heavy_column)
+        {
+            if (column_coefficients != combined_coefficients) {
+                for (uint32_t word = 0u; word < packed_words; ++word) {
+                    combined_coefficients[word] = column_coefficients[word];
+                }
+                column_coefficients = combined_coefficients;
+            }
+            for (uint32_t row = 0u; row < subfield_rows; ++row)
+            {
+                const uint32_t label =
+                    ActiveMixedGF256RowCoefficientLabel(row, residue);
+                const uint32_t packed = row >> 2;
+                const uint32_t shift = (row & 3u) * 16u;
+                const uint64_t mask = UINT64_C(0xffff) << shift;
+                combined_coefficients[packed] =
+                    (combined_coefficients[packed] & ~mask) |
+                    (cached_packed.ByResidue[label][packed] & mask);
+            }
         }
         if (++block_column == coefficient_period)
         {
@@ -1477,7 +1623,13 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
     for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
         for (uint32_t row = 0u; row < subfield_rows; ++row) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const uint32_t label =
+                ActiveMixedGF256RowCoefficientLabel(row, residue);
+            subfield_scales[row] = cached_rows.Subfield[row][label];
+#else
             subfield_scales[row] = cached_rows.Subfield[row][residue];
+#endif
         }
         AddScaledBlocks(
             subfield_destinations, subfield_scales,
@@ -1551,7 +1703,11 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint64_t binary_rhs_bytes =
         (uint64_t)inactive_count * block_bytes;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
-        system.Params.HeavyRows != H || (block_bytes & 1u) != 0u ||
+        system.Params.HeavyRows != H ||
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        (ActiveMixedGF256RowLabelPermutations() && column_count < H) ||
+#endif
+        (block_bytes & 1u) != 0u ||
         binary_rank > inactive_count ||
         projection_words != PackedWordCount(inactive_count) ||
         inactive_index.size() != column_count ||
@@ -1660,6 +1816,10 @@ WirehairResult SolveMixedCompletionQuotient(
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const bool row_label_permutations =
+        ActiveMixedGF256RowLabelPermutations();
+    const uint32_t first_heavy_column = row_label_permutations ?
+        column_count - H : column_count;
     const uint64_t dual_bucket_bytes =
         (uint64_t)coefficient_period * block_bytes * 2u;
     // A sequential dual-bucket scan improves bandwidth-bound large decoders,
@@ -1777,7 +1937,13 @@ WirehairResult SolveMixedCompletionQuotient(
         }
         bucket_xor.Flush();
         for (uint32_t row = 0u; row < subfield_rows; ++row) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const uint32_t label =
+                ActiveMixedGF256RowCoefficientLabel(row, residue);
+            subfield_scales[row] = cached_rows->Subfield[row][label];
+#else
             subfield_scales[row] = cached_rows->Subfield[row][residue];
+#endif
         }
         AddScaledBlocks(
             subfield_destinations, subfield_scales,
@@ -1824,6 +1990,33 @@ WirehairResult SolveMixedCompletionQuotient(
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 mixed_rhs_accumulated:
+    // As in the packed projection, shared buckets included the final H
+    // columns under permuted labels.  Correct only known tail values by the
+    // canonical^permuted scale delta, retaining one K-sized bucket pass.
+    if (row_label_permutations)
+    {
+        for (uint32_t column = first_heavy_column;
+             column < column_count; ++column)
+        {
+            if (inactive_index[column] != UINT32_MAX) continue;
+            const uint32_t residue = ActiveMixedCoefficientResidue(column);
+            const uint8_t* value =
+                values.data() + (size_t)column * block_bytes;
+            for (uint32_t row = 0u; row < subfield_rows; ++row)
+            {
+                const uint32_t label =
+                    ActiveMixedGF256RowCoefficientLabel(row, residue);
+                const uint8_t difference =
+                    cached_rows->Subfield[row][residue] ^
+                    cached_rows->Subfield[row][label];
+                if (difference != 0u) {
+                    AddScaledBlock(
+                        static_cast<uint8_t*>(subfield_destinations[row]),
+                        difference, value, block_bytes, stats);
+                }
+            }
+        }
+    }
 #endif
 
     // Reduce all completion RHS blocks through each binary pivot together.
@@ -4846,11 +5039,22 @@ WH2_WITNESS_NOINLINE uint16_t DirectMixedCoefficient(
     const MixedCoefficientRows& coefficients,
     uint32_t subfield_rows,
     uint32_t heavy_row,
-    uint32_t column)
+    uint32_t column,
+    uint32_t first_heavy_column)
 {
     if (heavy_row < subfield_rows) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const uint32_t residue = ActiveMixedCoefficientResidue(column);
+        const uint32_t label =
+            ActiveMixedGF256RowLabelPermutations() &&
+                column < first_heavy_column ?
+            ActiveMixedGF256RowCoefficientLabel(heavy_row, residue) :
+            residue;
+        return coefficients.Subfield[heavy_row][label];
+#else
         return coefficients.Subfield[heavy_row][
             ActiveMixedCoefficientResidue(column)];
+#endif
     }
     return coefficients.Extension[heavy_row - subfield_rows][
         ActiveMixedExtensionCoefficientResidue(column)];
@@ -4870,7 +5074,8 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
     size_t vector_elements = 0u;
     size_t syndrome_elements = 0u;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
-        system.Params.HeavyRows != heavy_rows || !coefficients ||
+        system.Params.HeavyRows != heavy_rows ||
+        column_count < heavy_rows || !coefficients ||
         !CheckedMatrixElements(
             vector_count, column_count, vector_elements) ||
         vectors.size() != vector_elements ||
@@ -4880,6 +5085,7 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
         return false;
     }
     if (syndromes) syndromes->assign(syndrome_elements, 0u);
+    const uint32_t first_heavy_column = column_count - heavy_rows;
     for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy)
     {
         for (uint32_t vector_index = 0u;
@@ -4897,7 +5103,8 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
                 if (value == 0u) continue;
                 sum ^= GF16MultiplyInitialized(
                     DirectMixedCoefficient(
-                        *coefficients, subfield_rows, heavy, column),
+                        *coefficients, subfield_rows, heavy, column,
+                        first_heavy_column),
                     value);
             }
             if (syndromes) {
@@ -6043,6 +6250,11 @@ bool VerifyPrecodeSolution(
     const bool independent_extension_residues =
         cached_mixed_coefficients &&
         ActiveMixedIndependentExtensionResidues();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const bool row_label_permutations =
+        cached_mixed_coefficients &&
+        ActiveMixedGF256RowLabelPermutations();
+#endif
     const uint32_t mixed_subfield_rows = cached_mixed_coefficients ?
         ActiveMixedGF256Rows() : 0u;
     const MixedCoefficientRows* mixed_rows = cached_mixed_coefficients ?
@@ -6155,9 +6367,20 @@ bool VerifyPrecodeSolution(
             }
             else
             {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                const uint32_t subfield_label =
+                    row_label_permutations && column < L - H ?
+                        ActiveMixedGF256RowCoefficientLabel(
+                            heavy, active_coefficient_residue) :
+                        active_coefficient_residue;
+#endif
                 const uint8_t scale = cached_mixed_coefficients ?
                     mixed_rows->Subfield[heavy][
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                        subfield_label] :
+#else
                         active_coefficient_residue] :
+#endif
                     HeavyCoefficientForParams(
                         system.Params, heavy, column);
                 if (scale == 1u) {

@@ -557,6 +557,14 @@ static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
 static thread_local uint32_t MixedIndependentExtensionSeedXorForTesting = 78u;
+static thread_local bool MixedGF256RowLabelPermutationsForTesting = false;
+static thread_local uint32_t MixedGF256RowLabelSeedForTesting =
+    UINT32_C(0x243f6a88);
+
+static void DisableMixedRowLabelPermutations()
+{
+    MixedGF256RowLabelPermutationsForTesting = false;
+}
 
 static bool HasFullCycleMixedResidueSeed(
     uint32_t period,
@@ -623,6 +631,7 @@ bool SetMixedCoefficientPeriodForTesting(uint32_t period)
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
 }
 
@@ -643,6 +652,7 @@ bool SetMixedResidueSkewForTesting(uint32_t skew)
     }
     MixedResidueSkewForTesting = skew;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
 }
 
@@ -666,6 +676,7 @@ bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule)
     }
     MixedResidueScheduleForTesting = schedule;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
 }
 
@@ -673,6 +684,7 @@ void SetMixedResidueHashSeedForTesting(uint32_t seed)
 {
     MixedResidueHashSeedForTesting = seed;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
 }
 
 bool SelectFullCycleMixedResidueKeyedSeedForTesting(
@@ -727,6 +739,9 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled)
         return false;
     }
     MixedIndependentExtensionResiduesForTesting = enabled;
+    if (!enabled) {
+        DisableMixedRowLabelPermutations();
+    }
     return true;
 }
 
@@ -734,6 +749,31 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
 {
     MixedIndependentExtensionSeedXorForTesting = seed_xor;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
+}
+
+bool SetMixedGF256RowLabelPermutationsForTesting(bool enabled)
+{
+    if (enabled &&
+        (!MixedIndependentExtensionResiduesForTesting ||
+         MixedGeometryForTesting !=
+                MixedCoefficientGeometry::SharedCauchyX ||
+         MixedResidueScheduleForTesting != MixedResidueSchedule::Hashed ||
+         MixedGF256RowsForTesting != kMixedGF256Rows + 1u ||
+         MixedGF16RowsForTesting != kMixedGF16RowsMax ||
+         MixedCoefficientPeriodForTesting <=
+            MixedGF256RowsForTesting + MixedGF16RowsForTesting))
+    {
+        return false;
+    }
+    MixedGF256RowLabelPermutationsForTesting = enabled;
+    return true;
+}
+
+void SetMixedGF256RowLabelSeedForTesting(uint32_t seed)
+{
+    MixedGF256RowLabelSeedForTesting = seed;
+    DisableMixedRowLabelPermutations();
 }
 
 bool SetMixedCoefficientGeometryForTesting(
@@ -755,6 +795,7 @@ bool SetMixedCoefficientGeometryForTesting(
         MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     }
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
 }
 
@@ -772,6 +813,7 @@ bool SetMixedGF16RowsForTesting(uint32_t rows)
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
 }
 
@@ -791,7 +833,86 @@ bool SetMixedGF256RowsForTesting(uint32_t rows)
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     MixedIndependentExtensionResiduesForTesting = false;
+    DisableMixedRowLabelPermutations();
     return true;
+}
+
+uint32_t ActiveMixedGF256RowCoefficientLabel(
+    uint32_t row,
+    uint32_t residue)
+{
+    const uint32_t period = MixedCoefficientPeriodForTesting;
+    CAT_DEBUG_ASSERT(row < MixedGF256RowsForTesting);
+    CAT_DEBUG_ASSERT(residue < period);
+    if (!MixedGF256RowLabelPermutationsForTesting) {
+        return residue;
+    }
+
+    // The table is rebuilt only when a test thread changes geometry or seed.
+    // A general Fisher-Yates permutation avoids retaining affine/rotation
+    // structure while the hot path remains one bounded table lookup.
+    static thread_local uint32_t cached_period = 0u;
+    static thread_local uint32_t cached_rows = 0u;
+    static thread_local uint32_t cached_seed = UINT32_MAX;
+    static thread_local uint8_t labels[
+        kMixedGF256RowsMax][kMixedCoefficientPeriod] = {};
+    if (cached_period != period ||
+        cached_rows != MixedGF256RowsForTesting ||
+        cached_seed != MixedGF256RowLabelSeedForTesting)
+    {
+        for (uint32_t r = 0u; r < MixedGF256RowsForTesting; ++r)
+        {
+            for (uint32_t i = 0u; i < period; ++i) {
+                labels[r][i] = (uint8_t)i;
+            }
+            uint32_t state = MixedGF256RowLabelSeedForTesting ^
+                ((r + 1u) * UINT32_C(0x9e3779b9));
+            for (uint32_t i = period - 1u; i > 0u; --i)
+            {
+                state += UINT32_C(0x9e3779b9);
+                uint32_t x = state;
+                x = (x ^ (x >> 16)) * UINT32_C(0x85ebca6b);
+                x = (x ^ (x >> 13)) * UINT32_C(0xc2b2ae35);
+                x ^= x >> 16;
+                const uint32_t j = x % (i + 1u);
+                std::swap(labels[r][i], labels[r][j]);
+            }
+            // A row-derived random stream is overwhelmingly likely to be
+            // nonidentity and unique already.  Make both properties
+            // contractual: the P cyclic rotations of any permutation are
+            // distinct, and active rows+1<P, so at least one rotation is
+            // neither identity nor equal to an earlier row.
+            for (;;)
+            {
+                bool identity = true;
+                for (uint32_t i = 0u; i < period; ++i) {
+                    identity = identity && labels[r][i] == i;
+                }
+                bool duplicate = false;
+                for (uint32_t previous = 0u; previous < r; ++previous) {
+                    duplicate = duplicate || std::equal(
+                        labels[r], labels[r] + period, labels[previous]);
+                }
+                if (!identity && !duplicate) break;
+                std::rotate(
+                    labels[r], labels[r] + 1u, labels[r] + period);
+            }
+        }
+        cached_period = period;
+        cached_rows = MixedGF256RowsForTesting;
+        cached_seed = MixedGF256RowLabelSeedForTesting;
+    }
+    return labels[row][residue];
+}
+
+bool ActiveMixedGF256RowLabelPermutations()
+{
+    return MixedGF256RowLabelPermutationsForTesting;
+}
+
+uint32_t ActiveMixedGF256RowLabelSeed()
+{
+    return MixedGF256RowLabelSeedForTesting;
 }
 #endif
 

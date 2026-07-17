@@ -224,6 +224,17 @@ uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/// Map one shared residue bucket to the coefficient label used by a GF(256)
+/// completion row.  This is a row-specific permutation of bucket labels,
+/// not an independent column partition: columns in the same shared bucket
+/// remain aliased in every row.  Callers preserve the final H-column corner
+/// by making the remapping effective only for non-heavy columns, directly or
+/// with an equivalent shared-bucket tail correction.
+uint32_t ActiveMixedGF256RowCoefficientLabel(
+    uint32_t row,
+    uint32_t residue);
+bool ActiveMixedGF256RowLabelPermutations();
+uint32_t ActiveMixedGF256RowLabelSeed();
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
@@ -241,6 +252,11 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
+/// Give every GF(256) row a deterministic row-specific permutation of the
+/// shared bucket labels.  Requires the bounded shared-X H15 experiment arm.
+bool SetMixedGF256RowLabelPermutationsForTesting(bool enabled);
+/// Select the deterministic row-label permutation family.
+void SetMixedGF256RowLabelSeedForTesting(uint32_t seed);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select 10/11 rows generally, or a validated 12+4-row test geometry.

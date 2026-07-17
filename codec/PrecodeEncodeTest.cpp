@@ -200,6 +200,31 @@ private:
     bool Valid;
 };
 
+class MixedGF256RowLabelPermutationsScope
+{
+public:
+    explicit MixedGF256RowLabelPermutationsScope(
+        bool enabled,
+        uint32_t seed = UINT32_C(0x243f6a88))
+        : Valid(false)
+    {
+        wirehair_v2::SetMixedGF256RowLabelSeedForTesting(seed);
+        Valid = wirehair_v2::
+            SetMixedGF256RowLabelPermutationsForTesting(enabled);
+    }
+
+    ~MixedGF256RowLabelPermutationsScope()
+    {
+        (void)wirehair_v2::
+            SetMixedGF256RowLabelPermutationsForTesting(false);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    bool Valid;
+};
+
 const char* MixedGeometryName(
     wirehair_v2::MixedCoefficientGeometry geometry)
 {
@@ -354,9 +379,17 @@ bool VerifyValues(
             }
             else
             {
+                const uint32_t subfield_label =
+                    system.Params.Field ==
+                            wirehair_v2::CompletionField::MixedGF256GF16 &&
+                        wirehair_v2::
+                            ActiveMixedGF256RowLabelPermutations() &&
+                        c < L - H ?
+                    wirehair_v2::ActiveMixedGF256RowCoefficientLabel(
+                        r, coefficient_column) : coefficient_column;
                 const uint8_t y = system.Params.Field ==
                         wirehair_v2::CompletionField::MixedGF256GF16 ?
-                    mixed_rows->Subfield[r][coefficient_column] :
+                    mixed_rows->Subfield[r][subfield_label] :
                     wirehair_v2::HeavyCoefficient(r, coefficient_column, H);
                 if (y == 1u) {
                     gf256_add_mem(acc.data(), v, (int)block_bytes);
@@ -904,6 +937,105 @@ bool TestMixedCornerRank()
     return true;
 }
 
+bool TestMixedRowLabelPermutationContract()
+{
+    bool ok =
+        wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) &&
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax) &&
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(32u) &&
+        wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows + 1u) &&
+        wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Hashed);
+    wirehair_v2::SetMixedResidueHashSeedForTesting(68u);
+    ok = ok &&
+        wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(true);
+    wirehair_v2::SetMixedGF256RowLabelSeedForTesting(
+        UINT32_C(0x243f6a88));
+    ok = ok &&
+        wirehair_v2::SetMixedGF256RowLabelPermutationsForTesting(true) &&
+        wirehair_v2::ActiveMixedGF256RowLabelPermutations() &&
+        wirehair_v2::ActiveMixedGF256RowLabelSeed() ==
+            UINT32_C(0x243f6a88);
+
+    uint32_t mappings[wirehair_v2::kMixedGF256RowsMax][32] = {};
+    for (uint32_t row = 0u;
+         row < wirehair_v2::ActiveMixedGF256Rows() && ok; ++row)
+    {
+        bool seen[32] = {};
+        bool nonidentity = false;
+        for (uint32_t residue = 0u; residue < 32u; ++residue)
+        {
+            const uint32_t label =
+                wirehair_v2::ActiveMixedGF256RowCoefficientLabel(
+                    row, residue);
+            if (label >= 32u || seen[label]) {
+                ok = false;
+                break;
+            }
+            seen[label] = true;
+            mappings[row][residue] = label;
+            nonidentity = nonidentity || label != residue;
+        }
+        if (!nonidentity) {
+            ok = false;
+        }
+    }
+    for (uint32_t a = 0u;
+         a < wirehair_v2::ActiveMixedGF256Rows() && ok; ++a)
+    {
+        for (uint32_t b = a + 1u;
+             b < wirehair_v2::ActiveMixedGF256Rows(); ++b)
+        {
+            bool different = false;
+            for (uint32_t residue = 0u; residue < 32u; ++residue) {
+                different = different ||
+                    mappings[a][residue] != mappings[b][residue];
+            }
+            if (!different) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    // Seed/config mutations must not leave a stale active table.  Disabling
+    // the prerequisite extension schedule also disables row permutations.
+    wirehair_v2::SetMixedGF256RowLabelSeedForTesting(
+        UINT32_C(0x13198a2e));
+    ok = ok && !wirehair_v2::ActiveMixedGF256RowLabelPermutations() &&
+        wirehair_v2::SetMixedGF256RowLabelPermutationsForTesting(true) &&
+        wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) &&
+        !wirehair_v2::ActiveMixedGF256RowLabelPermutations() &&
+        !wirehair_v2::SetMixedGF256RowLabelPermutationsForTesting(true);
+
+    const bool restored =
+        wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Constant) &&
+        wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows) &&
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows) &&
+        wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::FrozenPowerX) &&
+        wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedCoefficientPeriod);
+    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
+    wirehair_v2::SetMixedGF256RowLabelSeedForTesting(
+        UINT32_C(0x243f6a88));
+    if (!ok || !restored)
+    {
+        std::fprintf(stderr,
+            "mixed row-label permutation contract failed\n");
+        return false;
+    }
+    std::printf(
+        "mixed GF256 row-label bijection/config invalidation: PASS\n");
+    return true;
+}
+
 /// GF(2) rank of the D2 x D2 dense corner (structure only)
 uint32_t DenseCornerRank(const wirehair_v2::PrecodeSystem& system)
 {
@@ -1239,7 +1371,8 @@ bool TestMixedCompletionForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    bool row_label_permutations = false)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1252,21 +1385,25 @@ bool TestMixedCompletionForPeriod(
             wirehair_v2::ActiveMixedResidueHashSeed());
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
+    MixedGF256RowLabelPermutationsScope row_label_scope(
+        row_label_permutations);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid())
+        !schedule_scope.IsValid() || !independent_scope.IsValid() ||
+        !row_label_scope.IsValid())
     {
         std::fprintf(stderr,
             "mixed completion: invalid test scope g=%u s=%u r=%u p=%u "
-            "k=%u q=%u i=%u\n",
+            "k=%u q=%u i=%u l=%u\n",
             geometry_scope.IsValid() ? 1u : 0u,
             subfield_scope.IsValid() ? 1u : 0u,
             rows_scope.IsValid() ? 1u : 0u,
             period_scope.IsValid() ? 1u : 0u,
             skew_scope.IsValid() ? 1u : 0u,
             schedule_scope.IsValid() ? 1u : 0u,
-            independent_scope.IsValid() ? 1u : 0u);
+            independent_scope.IsValid() ? 1u : 0u,
+            row_label_scope.IsValid() ? 1u : 0u);
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
@@ -1444,12 +1581,13 @@ bool TestMixedCompletionForPeriod(
     std::printf(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u: "
+        "independent_extension=%u row_labels=%u: "
         "PASS\n",
         period, MixedGeometryName(geometry), subfield_rows, extension_rows,
         residue_skew,
         (uint32_t)residue_schedule,
-        independent_extension_residues ? 1u : 0u);
+        independent_extension_residues ? 1u : 0u,
+        row_label_permutations ? 1u : 0u);
     return true;
 }
 
@@ -1534,7 +1672,16 @@ bool TestMixedCompletion()
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
-            wirehair_v2::kMixedGF256RowsMax))
+            wirehair_v2::kMixedGF256RowsMax) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            true))
     {
         return false;
     }
@@ -2910,6 +3057,7 @@ int main(int argc, char** argv)
     ok = TestCostModel() && ok;
     ok = TestHeavyResidueDispatch() && ok;
     ok = TestMixedCornerRank() && ok;
+    ok = TestMixedRowLabelPermutationContract() && ok;
     ok = TestIndependentMixedCornerAcrossK() && ok;
     ok = TestMixedCompletion() && ok;
     ok = TestRecoveryBlockEncoding() && ok;

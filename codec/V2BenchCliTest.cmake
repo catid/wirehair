@@ -452,6 +452,35 @@ expect_success("mixed_gf256_rows=11" precodefail
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues
     --payload-e2e)
+expect_success("mixed_gf256_row_label_permutations=1 mixed_gf256_row_label_seed=0x243f6a88"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --completion mixed --mix-count 2 --mixed-gf256-rows 11
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues
+    --mixed-gf256-row-label-permutations --payload-e2e)
+expect_failure("normalized H15 packet seed table requires"
+    precodefail
+    --N 64 --bb-list 8 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --schedule adversarial
+    --completion mixed --mix-count 2
+    --packet-peel-seed-table normalized-h15-v4
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-gf256-row-label-permutations)
+expect_failure("--mixed-gf256-row-label-seed requires" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-row-label-seed 9)
+expect_failure("GF256 row-label permutations require" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mix-count 2 --mixed-gf256-rows 10
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues
+    --mixed-gf256-row-label-permutations)
 expect_success("4,64.*0x39" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
     --trials 2 --threads 2 --loss 0.35 --schedule adversarial

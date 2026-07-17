@@ -423,7 +423,13 @@ bool ComputePrecodeValues(
             uint32_t m, const uint8_t* value) -> bool
         {
             for (uint32_t r = 0; r < subfield_rows; ++r) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                const uint32_t label =
+                    ActiveMixedGF256RowCoefficientLabel(r, m);
+                gf8_scales[r] = gf8_coefficient_rows[r][label];
+#else
                 gf8_scales[r] = gf8_coefficient_rows[r][m];
+#endif
             }
             gf256_muladd_multi_mem(
                 gf8_destinations, gf8_scales,
