@@ -66,6 +66,11 @@ public:
 
     const SeedProfile& Profile() const;
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const PrecodeSolveStats* PrecodeEncoderSolveStatsForTesting() const;
+    const PrecodeSolveStats* PrecodeSolveStatsForTesting() const;
+#endif
+
 private:
     std::unique_ptr<wirehair::Codec> Impl;
     std::unique_ptr<MessagePrecodeEncoder> PrecodeImpl;

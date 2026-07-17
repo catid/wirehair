@@ -94,6 +94,14 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint64_t MixedJointSourceXors = 0;
+    uint64_t MixedJointMarginalXors = 0;
+    uint64_t MixedJointMarginalCopies = 0;
+    uint64_t MixedJointScratchBytes = 0;
+    uint32_t MixedJointActiveDeltas = 0;
+    uint64_t MixedDualSourceColumns = 0;
+#endif
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)

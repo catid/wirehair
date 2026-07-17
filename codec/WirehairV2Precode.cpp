@@ -557,6 +557,8 @@ static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
 static thread_local uint32_t MixedIndependentExtensionSeedXorForTesting = 78u;
+static thread_local MixedResidueBucketMode MixedResidueBucketModeForTesting =
+    MixedResidueBucketMode::Automatic;
 
 static bool HasFullCycleMixedResidueSeed(
     uint32_t period,
@@ -734,6 +736,37 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
 {
     MixedIndependentExtensionSeedXorForTesting = seed_xor;
     MixedIndependentExtensionResiduesForTesting = false;
+}
+
+bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode)
+{
+    if (mode != MixedResidueBucketMode::Automatic &&
+        mode != MixedResidueBucketMode::Separate &&
+        mode != MixedResidueBucketMode::Dual &&
+        mode != MixedResidueBucketMode::JointDelta)
+    {
+        return false;
+    }
+    MixedResidueBucketModeForTesting = mode;
+    return true;
+}
+
+MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting()
+{
+    return MixedResidueBucketModeForTesting;
+}
+
+bool UseAutomaticMixedJointResidueBucketsForTesting(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period)
+{
+    // Pinned ABBA measurements cover P=32 only.  Larger periods multiply the
+    // marginal work and scratch, so they must remain explicitly opt-in until
+    // separately benchmarked.
+    return coefficient_period == 32u &&
+        ((block_bytes >= 4096u && block_count >= 3200u) ||
+         (block_bytes >= 1280u && block_count >= 10000u));
 }
 
 bool SetMixedCoefficientGeometryForTesting(

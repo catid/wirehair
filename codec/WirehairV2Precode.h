@@ -224,6 +224,14 @@ uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+enum class MixedResidueBucketMode : uint32_t
+{
+    Automatic = 0,
+    Separate = 1,
+    Dual = 2,
+    JointDelta = 3
+};
+
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
@@ -241,6 +249,14 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
+/// Select the independent-schedule RHS accumulation implementation.
+bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode);
+MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting();
+/// Benchmark-derived conservative crossover for the joint-delta experiment.
+bool UseAutomaticMixedJointResidueBucketsForTesting(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select 10/11 rows generally, or a validated 12+4-row test geometry.

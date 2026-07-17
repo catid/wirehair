@@ -85,6 +85,7 @@ set(WIREHAIR_V2_PUBLIC_SOURCE_FILES
         codec/WirehairV2PrecodeDecode.h
         codec/WirehairV2PrecodeEncode.cpp
         codec/WirehairV2PrecodeEncode.h
+        codec/WirehairV2MixedBuckets.h
         codec/WirehairV2Profile.cpp
         codec/WirehairV2Seeds.cpp
         codec/WirehairV2Seeds.h

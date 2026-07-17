@@ -391,4 +391,16 @@ const SeedProfile& Codec::Profile() const
     return CurrentProfile;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+const PrecodeSolveStats* Codec::PrecodeEncoderSolveStatsForTesting() const
+{
+    return PrecodeImpl ? &PrecodeImpl->SolveStats() : nullptr;
+}
+
+const PrecodeSolveStats* Codec::PrecodeSolveStatsForTesting() const
+{
+    return PrecodeDecoderImpl ? &PrecodeDecoderImpl->SolveStats() : nullptr;
+}
+#endif
+
 } // namespace wirehair_v2

@@ -15,6 +15,7 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2PrecodeDecode.h
     WirehairV2PrecodeEncode.cpp
     WirehairV2PrecodeEncode.h
+    WirehairV2MixedBuckets.h
     WirehairV2Seeds.cpp
     WirehairV2Seeds.h
     WirehairV2Solve.cpp

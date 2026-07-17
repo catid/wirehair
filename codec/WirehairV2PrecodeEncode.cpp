@@ -4,6 +4,9 @@
 #include "../gf256.h"
 
 #include "WirehairV2Plan.h"
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#include "WirehairV2MixedBuckets.h"
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -490,7 +493,96 @@ bool ComputePrecodeValues(
             use_residue_buckets &&
             (uint64_t)window * block_bytes <=
                 GetHeavyBucketStorageLimit();
-        if (use_full_bucket_storage)
+        bool independent_buckets_accumulated = false;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const MixedResidueBucketMode bucket_mode =
+            ActiveMixedResidueBucketModeForTesting();
+        const uint64_t one_plane_bytes = (uint64_t)window * block_bytes;
+        const bool automatic_joint_delta_buckets =
+            bucket_mode == MixedResidueBucketMode::Automatic &&
+            UseAutomaticMixedJointResidueBucketsForTesting(
+                system.Params.BlockCount, block_bytes, window);
+        const bool use_joint_delta_buckets =
+            independent_extension_residues && use_residue_buckets &&
+            (bucket_mode == MixedResidueBucketMode::JointDelta ||
+             automatic_joint_delta_buckets) &&
+            one_plane_bytes <= UINT64_MAX / 3u &&
+            one_plane_bytes * 3u <= GetHeavyBucketStorageLimit();
+        const bool use_dual_buckets =
+            independent_extension_residues && use_residue_buckets &&
+            bucket_mode == MixedResidueBucketMode::Dual &&
+            one_plane_bytes <= UINT64_MAX / 2u &&
+            one_plane_bytes * 2u <= GetHeavyBucketStorageLimit();
+        if (use_joint_delta_buckets)
+        {
+            MixedJointResidueBuckets buckets;
+            if (!AccumulateMixedJointResidueBuckets(
+                    heavy_base, window, block_bytes, column_value,
+                    [](uint32_t) { return true; }, false, buckets))
+            {
+                return false;
+            }
+            st.HeavyBucketXors +=
+                buckets.SourceXors + buckets.MarginalXors;
+            st.MixedJointSourceXors = buckets.SourceXors;
+            st.MixedJointMarginalXors = buckets.MarginalXors;
+            st.MixedJointMarginalCopies = buckets.MarginalCopies;
+            st.MixedJointScratchBytes = buckets.ScratchBytes;
+            st.MixedJointActiveDeltas = buckets.ActiveDeltas;
+            for (uint32_t m = 0u; m < window; ++m)
+            {
+                if (!accumulate_subfield_residue(
+                        m,
+                        buckets.Subfield.get() +
+                            (size_t)m * block_bytes) ||
+                    !accumulate_extension_residue(
+                        m,
+                        buckets.Extension.get() +
+                            (size_t)m * block_bytes))
+                {
+                    return false;
+                }
+            }
+            independent_buckets_accumulated = true;
+        }
+        else if (use_dual_buckets)
+        {
+            std::vector<uint8_t> subfield_buckets(
+                (size_t)window * block_bytes, uint8_t{0});
+            std::vector<uint8_t> extension_buckets(
+                (size_t)window * block_bytes, uint8_t{0});
+            for (uint32_t c = 0u; c < heavy_base; ++c)
+            {
+                gf256_add_mem(
+                    subfield_buckets.data() +
+                        (size_t)ActiveMixedCoefficientResidue(c) * block_bytes,
+                    column_value(c), bytes);
+                gf256_add_mem(
+                    extension_buckets.data() +
+                        (size_t)ActiveMixedExtensionCoefficientResidue(c) *
+                            block_bytes,
+                    column_value(c), bytes);
+                st.HeavyBucketXors += 2u;
+            }
+            st.MixedDualSourceColumns = heavy_base;
+            for (uint32_t m = 0u; m < window; ++m)
+            {
+                if (!accumulate_subfield_residue(
+                        m,
+                        subfield_buckets.data() +
+                            (size_t)m * block_bytes) ||
+                    !accumulate_extension_residue(
+                        m,
+                        extension_buckets.data() +
+                            (size_t)m * block_bytes))
+                {
+                    return false;
+                }
+            }
+            independent_buckets_accumulated = true;
+        }
+#endif
+        if (!independent_buckets_accumulated && use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
             if (!rotate_residues)
@@ -532,7 +624,7 @@ bool ComputePrecodeValues(
                 }
             }
         }
-        else if (use_residue_buckets)
+        else if (!independent_buckets_accumulated && use_residue_buckets)
         {
             std::vector<uint8_t> bucket(block_bytes, 0u);
             for (uint32_t m = 0; m < window; ++m)
@@ -566,7 +658,7 @@ bool ComputePrecodeValues(
                 if (!accumulate_residue(m, bucket.data())) return false;
             }
         }
-        else
+        else if (!independent_buckets_accumulated)
         {
             if (!rotate_residues)
             {
@@ -595,7 +687,8 @@ bool ComputePrecodeValues(
             }
         }
 
-        if (independent_extension_residues)
+        if (independent_extension_residues &&
+            !independent_buckets_accumulated)
         {
             if (use_full_bucket_storage)
             {

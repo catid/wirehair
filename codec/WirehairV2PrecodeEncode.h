@@ -76,9 +76,9 @@ struct PrecodeEncodeStats
     /// GF(2) Gauss-Jordan block XORs + solution copies for the dense corner
     uint64_t DenseSolveBlockOps = 0;
 
-    /// Plain block XORs folding same-residue known columns into the
-    /// mod-(256 - H) residue buckets before the heavy accumulation
-    /// (model: K + S + D2 when the bucketed path is taken, else 0)
+    /// Plain block XOR-class contributions folding known columns into heavy
+    /// residue buckets.  The joint-delta test path excludes its write-only
+    /// first-marginal copies, reported separately below.
     uint64_t HeavyBucketXors = 0;
 
     /// GF(256) muladd-class block ops accumulating the heavy known parts
@@ -101,6 +101,17 @@ struct PrecodeEncodeStats
 
     /// Full-block deinterleave/interleave conversions in the mixed path.
     uint64_t MixedPlaneConversions = 0;
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /// Joint-delta experiment counters.  These stay zero unless that
+    /// explicitly selected test path is used.
+    uint64_t MixedJointSourceXors = 0;
+    uint64_t MixedJointMarginalXors = 0;
+    uint64_t MixedJointMarginalCopies = 0;
+    uint64_t MixedJointScratchBytes = 0;
+    uint32_t MixedJointActiveDeltas = 0;
+    uint64_t MixedDualSourceColumns = 0;
+#endif
 };
 
 /**

@@ -343,6 +343,12 @@ struct TrialResult
     uint64_t EncodedBytes;
     uint64_t DecodedBytes;
     uint64_t RecoveredBytes;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint64_t MixedEncoderJointSourceColumns;
+    uint64_t MixedDecoderJointSourceColumns;
+    uint64_t MixedEncoderDualSourceColumns;
+    uint64_t MixedDecoderDualSourceColumns;
+#endif
 };
 
 struct Accum
@@ -450,6 +456,44 @@ bool ParseMixedResidueSchedule(
     }
     return false;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+const char* MixedResidueBucketModeName(
+    wirehair_v2::MixedResidueBucketMode mode)
+{
+    switch (mode)
+    {
+    case wirehair_v2::MixedResidueBucketMode::Separate: return "separate";
+    case wirehair_v2::MixedResidueBucketMode::Dual: return "dual";
+    case wirehair_v2::MixedResidueBucketMode::JointDelta:
+        return "joint-delta";
+    default: return "auto";
+    }
+}
+
+bool ParseMixedResidueBucketMode(
+    const char* text,
+    wirehair_v2::MixedResidueBucketMode& mode)
+{
+    if (!std::strcmp(text, "auto")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Automatic;
+        return true;
+    }
+    if (!std::strcmp(text, "separate")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Separate;
+        return true;
+    }
+    if (!std::strcmp(text, "dual")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Dual;
+        return true;
+    }
+    if (!std::strcmp(text, "joint-delta")) {
+        mode = wirehair_v2::MixedResidueBucketMode::JointDelta;
+        return true;
+    }
+    return false;
+}
+#endif
 
 struct CompareOptions
 {
@@ -1181,6 +1225,20 @@ TrialResult RunV2PrecodeTrial(
         }
     }
     tr.TerminalResult = result;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (const wirehair_v2::PrecodeSolveStats* stats =
+            enc.PrecodeEncoderSolveStatsForTesting())
+    {
+        tr.MixedEncoderJointSourceColumns = stats->MixedJointSourceXors;
+        tr.MixedEncoderDualSourceColumns = stats->MixedDualSourceColumns;
+    }
+    if (const wirehair_v2::PrecodeSolveStats* stats =
+            dec.PrecodeSolveStatsForTesting())
+    {
+        tr.MixedDecoderJointSourceColumns = stats->MixedJointSourceXors;
+        tr.MixedDecoderDualSourceColumns = stats->MixedDualSourceColumns;
+    }
+#endif
     return tr;
 }
 
@@ -1832,6 +1890,9 @@ int CmdCompare(int argc, char** argv)
     bool mixed_residue_schedule_explicit = false;
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
+    wirehair_v2::MixedResidueBucketMode mixed_residue_bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+    bool mixed_residue_bucket_mode_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -2007,6 +2068,22 @@ int CmdCompare(int argc, char** argv)
         {
             mixed_independent_extension_residues = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-residue-buckets"))
+        {
+            if (!TakeArg(
+                    "compare", "--mixed-residue-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(
+                    value, mixed_residue_bucket_mode))
+            {
+                std::fprintf(stderr,
+                    "compare unknown --mixed-residue-buckets token %s "
+                    "(expected auto, separate, dual, or joint-delta)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_bucket_mode_explicit = true;
+        }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-multiplier"))
         {
@@ -2155,7 +2232,8 @@ int CmdCompare(int argc, char** argv)
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
+             mixed_independent_extension_residues ||
+             mixed_residue_bucket_mode_explicit)
     {
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
@@ -2231,6 +2309,20 @@ int CmdCompare(int argc, char** argv)
         std::fprintf(stderr,
             "compare independent extension residues require "
             "shared-x hashed scheduling with P>H\n");
+        return 1;
+    }
+    if (mixed_residue_bucket_mode !=
+            wirehair_v2::MixedResidueBucketMode::Automatic &&
+        !mixed_independent_extension_residues)
+    {
+        std::fprintf(stderr,
+            "compare explicit --mixed-residue-buckets requires "
+            "--mixed-independent-extension-residues\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedResidueBucketModeForTesting(
+            mixed_residue_bucket_mode))
+    {
         return 1;
     }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
@@ -2318,6 +2410,7 @@ int CmdCompare(int argc, char** argv)
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
         "mixed_independent_extension_residues=%u "
+        "mixed_residue_buckets_requested=%s "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
         "loss_trace=common-id-v2 "
@@ -2357,6 +2450,7 @@ int CmdCompare(int argc, char** argv)
         wirehair_v2::ActiveMixedResidueHashSeed(),
         mixed_residue_hash_keyed ? 1u : 0u,
         mixed_independent_extension_residues ? 1u : 0u,
+        MixedResidueBucketModeName(mixed_residue_bucket_mode),
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
@@ -2500,6 +2594,44 @@ int CmdCompare(int argc, char** argv)
                         mixed_precode_result, mixed_cache_result);
                 }
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const auto validate_effective_bucket_mode = [&](
+                const TrialResult& result, const char* arm) -> bool
+            {
+                if (mixed_residue_bucket_mode ==
+                        wirehair_v2::MixedResidueBucketMode::Automatic ||
+                    mixed_residue_bucket_mode ==
+                        wirehair_v2::MixedResidueBucketMode::Separate)
+                {
+                    return true;
+                }
+                const bool joint = mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta;
+                const bool encoder_used = joint ?
+                    result.MixedEncoderJointSourceColumns != 0u :
+                    result.MixedEncoderDualSourceColumns != 0u;
+                const bool decoder_used = joint ?
+                    result.MixedDecoderJointSourceColumns != 0u :
+                    result.MixedDecoderDualSourceColumns != 0u;
+                if (encoder_used && decoder_used) return true;
+                std::fprintf(stderr,
+                    "compare requested mixed residue bucket mode %s but "
+                    "arm %s fell back (N=%u bb=%u encoder_used=%u "
+                    "decoder_used=%u)\n",
+                    MixedResidueBucketModeName(mixed_residue_bucket_mode),
+                    arm, N, block_bytes,
+                    encoder_used ? 1u : 0u, decoder_used ? 1u : 0u);
+                return false;
+            };
+            if (include_mixed &&
+                ((include_precode && !validate_effective_bucket_mode(
+                    mixed_precode_result, "precode")) ||
+                 (include_precode_cache && !validate_effective_bucket_mode(
+                    mixed_cache_result, "precode-cache"))))
+            {
+                return 1;
+            }
+#endif
             AddTrial(baseline, N, baseline_result);
             AddTrial(v2, N, v2_result);
             if (include_precode && include_certified) {
@@ -3693,6 +3825,12 @@ struct MatrixFailureTrial
     uint64_t ProjectNanoseconds = 0u;
     uint64_t ResidualNanoseconds = 0u;
     uint64_t BackSubNanoseconds = 0u;
+    uint64_t MixedJointSourceXors = 0u;
+    uint64_t MixedJointMarginalXors = 0u;
+    uint64_t MixedJointMarginalCopies = 0u;
+    uint64_t MixedJointScratchBytes = 0u;
+    uint32_t MixedJointActiveDeltas = 0u;
+    uint64_t MixedDualSourceColumns = 0u;
 };
 
 uint64_t TotalSolveNanoseconds(
@@ -3722,6 +3860,12 @@ bool SameNonTimingSolveStats(
             b.BinaryAdjacencyStorageAllocations &&
         a.BlockXors == b.BlockXors &&
         a.BlockMulAdds == b.BlockMulAdds &&
+        a.MixedJointSourceXors == b.MixedJointSourceXors &&
+        a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
+        a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
+        a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
+        a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
+        a.MixedDualSourceColumns == b.MixedDualSourceColumns &&
         a.PacketSeedAttempt == b.PacketSeedAttempt;
 }
 
@@ -4478,6 +4622,9 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
     bool mixed_extension_residue_seed_xor_explicit = false;
+    wirehair_v2::MixedResidueBucketMode mixed_residue_bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+    bool mixed_residue_bucket_mode_explicit = false;
     bool seed_block_bytes_explicit = false;
 #endif
 
@@ -4810,6 +4957,22 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_extension_residue_seed_xor_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--mixed-residue-buckets"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--mixed-residue-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(
+                    value, mixed_residue_bucket_mode))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --mixed-residue-buckets token %s "
+                    "(expected auto, separate, dual, or joint-delta)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_bucket_mode_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
                     "precodefail", "--seed-block-bytes",
@@ -4926,7 +5089,8 @@ int CmdPrecodeFail(int argc, char** argv)
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
+             mixed_independent_extension_residues ||
+             mixed_residue_bucket_mode_explicit)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -5038,6 +5202,20 @@ int CmdPrecodeFail(int argc, char** argv)
             "shared-x hashed scheduling with P>H\n");
         return 1;
     }
+    if (mixed_residue_bucket_mode !=
+            wirehair_v2::MixedResidueBucketMode::Automatic &&
+        !mixed_independent_extension_residues)
+    {
+        std::fprintf(stderr,
+            "precodefail explicit --mixed-residue-buckets requires "
+            "--mixed-independent-extension-residues\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedResidueBucketModeForTesting(
+            mixed_residue_bucket_mode))
+    {
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -5126,6 +5304,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
             "mixed_independent_extension_residues=%u "
+            "mixed_residue_buckets_requested=%s "
             "mixed_extension_residue_seed_xor=0x%x "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
@@ -5147,6 +5326,7 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
             mixed_independent_extension_residues ? 1u : 0u,
+            MixedResidueBucketModeName(mixed_residue_bucket_mode),
             mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,
@@ -5169,7 +5349,10 @@ int CmdPrecodeFail(int argc, char** argv)
         "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
         "project_ms_mu,residual_ms_mu,backsub_ms_mu,seed_attempt,"
         "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
-        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor\n");
+        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor,"
+        "mixed_joint_source_xors_mu,mixed_joint_marginal_xors_mu,"
+        "mixed_joint_marginal_copies_mu,mixed_joint_active_deltas_mu,"
+        "mixed_joint_scratch_bytes_mu,mixed_dual_source_columns_mu\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
@@ -5231,6 +5414,8 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::
                     SetMixedIndependentExtensionResiduesForTesting(
                         mixed_independent_extension_residues) &&
+                wirehair_v2::SetMixedResidueBucketModeForTesting(
+                    mixed_residue_bucket_mode) &&
                 wirehair_v2::SetPacketRowSeedMultiplierForTesting(
                     packet_row_seed_multiplier) &&
                 (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
@@ -5465,6 +5650,18 @@ int CmdPrecodeFail(int argc, char** argv)
                                 result.BackSubNanoseconds =
                                     solve_stats.BackSubNanoseconds;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                                result.MixedJointSourceXors =
+                                    solve_stats.MixedJointSourceXors;
+                                result.MixedJointMarginalXors =
+                                    solve_stats.MixedJointMarginalXors;
+                                result.MixedJointMarginalCopies =
+                                    solve_stats.MixedJointMarginalCopies;
+                                result.MixedJointScratchBytes =
+                                    solve_stats.MixedJointScratchBytes;
+                                result.MixedJointActiveDeltas =
+                                    solve_stats.MixedJointActiveDeltas;
+                                result.MixedDualSourceColumns =
+                                    solve_stats.MixedDualSourceColumns;
                                 if (mixed_null_witnesses) {
                                     witness_trial_stats[trial] = solve_stats;
                                 }
@@ -5492,6 +5689,41 @@ int CmdPrecodeFail(int argc, char** argv)
             }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta ||
+                mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::Dual)
+            {
+                const bool joint = mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta;
+                for (uint32_t trial = 0u; trial < trials; ++trial)
+                {
+                    const MatrixFailureTrial& result = results[trial];
+                    const bool stopped_before_mixed_completion =
+                        result.Result == Wirehair_NeedMore &&
+                        result.Inactivated >= result.BinaryRank &&
+                        result.Inactivated - result.BinaryRank >
+                            system.Params.HeavyRows;
+                    if (stopped_before_mixed_completion) {
+                        continue;
+                    }
+                    const bool used = joint ?
+                        result.MixedJointSourceXors != 0u &&
+                            result.MixedJointMarginalCopies != 0u :
+                        result.MixedDualSourceColumns != 0u;
+                    if (used) continue;
+                    std::fprintf(stderr,
+                        "precodefail requested mixed residue bucket mode %s "
+                        "but trial %u fell back (N=%u bb=%u result=%d "
+                        "inactivated=%u binary_rank=%u heavy_rows=%u)\n",
+                        MixedResidueBucketModeName(
+                            mixed_residue_bucket_mode),
+                        trial, K, bb, (int)result.Result,
+                        result.Inactivated, result.BinaryRank,
+                        system.Params.HeavyRows);
+                    return 1;
+                }
+            }
             if (mixed_null_witnesses)
             {
                 uint32_t first_need_more = UINT32_MAX;
@@ -5622,6 +5854,12 @@ int CmdPrecodeFail(int argc, char** argv)
             uint64_t backsub_ns_sum = 0u;
             uint64_t block_xors_sum = 0u;
             uint64_t block_muladds_sum = 0u;
+            uint64_t mixed_joint_source_xors_sum = 0u;
+            uint64_t mixed_joint_marginal_xors_sum = 0u;
+            uint64_t mixed_joint_marginal_copies_sum = 0u;
+            uint64_t mixed_joint_active_deltas_sum = 0u;
+            uint64_t mixed_joint_scratch_bytes_sum = 0u;
+            uint64_t mixed_dual_source_columns_sum = 0u;
             uint32_t inact_max = 0u;
             uint64_t binary_def_sum = 0u;
             uint32_t binary_def_max = 0u;
@@ -5663,6 +5901,17 @@ int CmdPrecodeFail(int argc, char** argv)
                 backsub_ns_sum += result.BackSubNanoseconds;
                 block_xors_sum += result.BlockXors;
                 block_muladds_sum += result.BlockMulAdds;
+                mixed_joint_source_xors_sum += result.MixedJointSourceXors;
+                mixed_joint_marginal_xors_sum +=
+                    result.MixedJointMarginalXors;
+                mixed_joint_marginal_copies_sum +=
+                    result.MixedJointMarginalCopies;
+                mixed_joint_active_deltas_sum +=
+                    result.MixedJointActiveDeltas;
+                mixed_joint_scratch_bytes_sum +=
+                    result.MixedJointScratchBytes;
+                mixed_dual_source_columns_sum +=
+                    result.MixedDualSourceColumns;
                 inact_max = std::max(
                     inact_max, result.Inactivated);
                 const uint32_t binary_def = result.Inactivated >=
@@ -5704,7 +5953,7 @@ int CmdPrecodeFail(int argc, char** argv)
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
                 "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
-                "%s,%s,%s,0x%x\n",
+                "%s,%s,%s,0x%x,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -5728,7 +5977,13 @@ int CmdPrecodeFail(int argc, char** argv)
                 first_rank_failure == UINT32_MAX ?
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
-                failure_trials.c_str(), active_packet_peel_seed_xor);
+                failure_trials.c_str(), active_packet_peel_seed_xor,
+                (double)mixed_joint_source_xors_sum / trials,
+                (double)mixed_joint_marginal_xors_sum / trials,
+                (double)mixed_joint_marginal_copies_sum / trials,
+                (double)mixed_joint_active_deltas_sum / trials,
+                (double)mixed_joint_scratch_bytes_sum / trials,
+                (double)mixed_dual_source_columns_sum / trials);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             if (mixed_null_witnesses)
             {

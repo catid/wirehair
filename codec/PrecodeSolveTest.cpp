@@ -202,6 +202,29 @@ private:
     bool Valid;
 };
 
+class MixedResidueBucketModeScope
+{
+public:
+    explicit MixedResidueBucketModeScope(
+        wirehair_v2::MixedResidueBucketMode mode)
+        : Previous(
+            wirehair_v2::ActiveMixedResidueBucketModeForTesting())
+        , Valid(wirehair_v2::SetMixedResidueBucketModeForTesting(mode))
+    {
+    }
+
+    ~MixedResidueBucketModeScope()
+    {
+        (void)wirehair_v2::SetMixedResidueBucketModeForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    wirehair_v2::MixedResidueBucketMode Previous;
+    bool Valid;
+};
+
 class BinaryPeelOracleScope
 {
 public:
@@ -1489,7 +1512,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    wirehair_v2::MixedResidueBucketMode bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1502,10 +1527,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             wirehair_v2::ActiveMixedResidueHashSeed());
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
+    MixedResidueBucketModeScope bucket_mode_scope(bucket_mode);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid())
+        !schedule_scope.IsValid() || !independent_scope.IsValid() ||
+        !bucket_mode_scope.IsValid())
     {
         std::fprintf(stderr,
             "solve: invalid mixed projection scope g=%u s=%u r=%u p=%u "
@@ -1561,6 +1588,22 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         }
         const uint32_t column_count = K + system.Params.Staircase +
             system.Params.DenseRows + system.Params.HeavyRows;
+        const bool automatic_joint_bucketed =
+            bucket_mode == wirehair_v2::MixedResidueBucketMode::Automatic &&
+            wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+                K, block_bytes, period);
+        const bool joint_bucketed = independent_extension_residues &&
+            (bucket_mode ==
+                 wirehair_v2::MixedResidueBucketMode::JointDelta ||
+             automatic_joint_bucketed);
+        const bool dual_bucketed = independent_extension_residues &&
+            (bucket_mode == wirehair_v2::MixedResidueBucketMode::Dual ||
+             (bucket_mode ==
+                  wirehair_v2::MixedResidueBucketMode::Automatic &&
+              !automatic_joint_bucketed && column_count >= 30000u &&
+              block_bytes >= 1024u &&
+              (uint64_t)2u * period * block_bytes <=
+                  (UINT64_C(128) << 10)));
         if (K >= 189u && K <= 191u &&
             column_count != 243u + (K - 189u) +
                 (extension_rows - wirehair_v2::kMixedGF16Rows) +
@@ -1584,11 +1627,13 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 message.data() + (size_t)id * block_bytes;
         }
         std::vector<uint8_t> expected;
+        wirehair_v2::PrecodeSolveStats systematic_stats;
         const uint64_t systematic_comparisons_before =
             wirehair_v2::MixedProjectionOracleComparisonsForTesting();
         const WirehairResult systematic_result =
             wirehair_v2::SolvePrecodeSystem(
-                system, config, systematic, block_bytes, expected);
+                system, config, systematic, block_bytes, expected,
+                &systematic_stats);
         const uint64_t systematic_comparisons_after =
             wirehair_v2::MixedProjectionOracleComparisonsForTesting();
         if (systematic_result != Wirehair_Success ||
@@ -1600,6 +1645,67 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             std::fprintf(stderr,
                 "solve: mixed projection systematic oracle failed K=%u\n", K);
             return false;
+        }
+        const auto bucket_stats_valid = [&](
+            const wirehair_v2::PrecodeSolveStats& stats) -> bool
+        {
+            if (joint_bucketed)
+            {
+                return stats.MixedJointSourceXors +
+                            stats.InactivatedColumns == column_count &&
+                    stats.MixedJointActiveDeltas > 0u &&
+                    stats.MixedJointMarginalXors ==
+                        (uint64_t)2u * period *
+                            (stats.MixedJointActiveDeltas - 1u) &&
+                    stats.MixedJointMarginalCopies ==
+                        (uint64_t)2u * period &&
+                    stats.MixedJointScratchBytes ==
+                        (uint64_t)3u * period * block_bytes &&
+                    stats.MixedDualSourceColumns == 0u;
+            }
+            if (dual_bucketed)
+            {
+                return stats.MixedDualSourceColumns +
+                            stats.InactivatedColumns == column_count &&
+                    stats.MixedJointSourceXors == 0u &&
+                    stats.MixedJointMarginalXors == 0u &&
+                    stats.MixedJointMarginalCopies == 0u &&
+                    stats.MixedJointScratchBytes == 0u &&
+                    stats.MixedJointActiveDeltas == 0u;
+            }
+            return stats.MixedJointSourceXors == 0u &&
+                stats.MixedJointMarginalXors == 0u &&
+                stats.MixedJointMarginalCopies == 0u &&
+                stats.MixedJointScratchBytes == 0u &&
+                stats.MixedJointActiveDeltas == 0u &&
+                stats.MixedDualSourceColumns == 0u;
+        };
+        if (!bucket_stats_valid(systematic_stats))
+        {
+            std::fprintf(stderr,
+                "solve: mixed bucket systematic accounting failed K=%u\n",
+                K);
+            return false;
+        }
+        if (joint_bucketed || dual_bucketed)
+        {
+            std::vector<uint8_t> separate_expected;
+            {
+                MixedResidueBucketModeScope separate_scope(
+                    wirehair_v2::MixedResidueBucketMode::Separate);
+                if (!separate_scope.IsValid() ||
+                    wirehair_v2::SolvePrecodeSystem(
+                        system, config, systematic, block_bytes,
+                        separate_expected) != Wirehair_Success)
+                {
+                    return false;
+                }
+            }
+            if (separate_expected != expected) {
+                std::fprintf(stderr,
+                    "solve: bucket/separate systematic mismatch K=%u\n", K);
+                return false;
+            }
         }
 
         // Replay a deterministic lossy schedule containing repair ids.  This
@@ -1629,10 +1735,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             delivered.push_back(packet);
         }
         std::vector<uint8_t> recovered;
+        wirehair_v2::PrecodeSolveStats repair_stats;
         const uint64_t repair_comparisons_before =
             wirehair_v2::MixedProjectionOracleComparisonsForTesting();
         const WirehairResult repair_result = wirehair_v2::SolvePrecodeSystem(
-                system, config, delivered, block_bytes, recovered);
+                system, config, delivered, block_bytes, recovered,
+                &repair_stats);
         const uint64_t repair_comparisons_after =
             wirehair_v2::MixedProjectionOracleComparisonsForTesting();
         if (repair_result != Wirehair_Success ||
@@ -1644,6 +1752,32 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             std::fprintf(stderr,
                 "solve: mixed projection repair oracle failed K=%u\n", K);
             return false;
+        }
+        if (!bucket_stats_valid(repair_stats))
+        {
+            std::fprintf(stderr,
+                "solve: mixed bucket repair accounting failed K=%u\n", K);
+            return false;
+        }
+        if (joint_bucketed || dual_bucketed)
+        {
+            std::vector<uint8_t> separate_recovered;
+            {
+                MixedResidueBucketModeScope separate_scope(
+                    wirehair_v2::MixedResidueBucketMode::Separate);
+                if (!separate_scope.IsValid() ||
+                    wirehair_v2::SolvePrecodeSystem(
+                        system, config, delivered, block_bytes,
+                        separate_recovered) != Wirehair_Success)
+                {
+                    return false;
+                }
+            }
+            if (separate_recovered != recovered) {
+                std::fprintf(stderr,
+                    "solve: bucket/separate repair mismatch K=%u\n", K);
+                return false;
+            }
         }
     }
     const uint64_t comparisons =
@@ -1660,11 +1794,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     std::printf(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u "
+        "independent_extension=%u bucket_mode=%u "
         "comparisons=%llu: PASS\n",
         period, (uint32_t)geometry, subfield_rows, extension_rows,
         residue_skew, (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
+        (uint32_t)bucket_mode,
         (unsigned long long)comparisons);
     return true;
 }
@@ -1747,7 +1882,25 @@ bool CheckMixedProjectionResidueBucketsOracle()
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
-            wirehair_v2::kMixedGF256RowsMax))
+            wirehair_v2::kMixedGF256RowsMax) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::Dual) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::JointDelta))
     {
         return false;
     }

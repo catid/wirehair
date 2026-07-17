@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -197,6 +199,29 @@ public:
     bool IsValid() const { return Valid; }
 
 private:
+    bool Valid;
+};
+
+class MixedResidueBucketModeScope
+{
+public:
+    explicit MixedResidueBucketModeScope(
+        wirehair_v2::MixedResidueBucketMode mode)
+        : Previous(
+            wirehair_v2::ActiveMixedResidueBucketModeForTesting())
+        , Valid(wirehair_v2::SetMixedResidueBucketModeForTesting(mode))
+    {
+    }
+
+    ~MixedResidueBucketModeScope()
+    {
+        (void)wirehair_v2::SetMixedResidueBucketModeForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    wirehair_v2::MixedResidueBucketMode Previous;
     bool Valid;
 };
 
@@ -1239,7 +1264,9 @@ bool TestMixedCompletionForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    wirehair_v2::MixedResidueBucketMode bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1252,10 +1279,12 @@ bool TestMixedCompletionForPeriod(
             wirehair_v2::ActiveMixedResidueHashSeed());
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
+    MixedResidueBucketModeScope bucket_mode_scope(bucket_mode);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid())
+        !schedule_scope.IsValid() || !independent_scope.IsValid() ||
+        !bucket_mode_scope.IsValid())
     {
         std::fprintf(stderr,
             "mixed completion: invalid test scope g=%u s=%u r=%u p=%u "
@@ -1348,23 +1377,54 @@ bool TestMixedCompletionForPeriod(
                 wirehair_v2::ActiveMixedCoefficientPeriod();
             const bool bucketed =
                 heavy_base >= 2u * coefficient_period;
+            const bool joint_bucketed =
+                bucketed && independent_extension_residues &&
+                bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta;
+            const bool dual_bucketed =
+                bucketed && independent_extension_residues &&
+                bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::Dual;
             const uint64_t residues = bucketed ?
                 coefficient_period : heavy_base;
+            const uint64_t separate_bucket_xors = bucketed ?
+                (uint64_t)heavy_base *
+                    (independent_extension_residues ? 2u : 1u) :
+                0u;
+            const bool joint_stats_ok = !joint_bucketed ||
+                (full_stats.MixedJointSourceXors == heavy_base &&
+                 full_stats.MixedJointActiveDeltas > 0u &&
+                 full_stats.MixedJointMarginalXors ==
+                    (uint64_t)2u * coefficient_period *
+                        (full_stats.MixedJointActiveDeltas - 1u) &&
+                 full_stats.MixedJointMarginalCopies ==
+                    (uint64_t)2u * coefficient_period &&
+                 full_stats.MixedJointScratchBytes ==
+                    (uint64_t)3u * coefficient_period * bb);
+            const bool dual_stats_ok = !dual_bucketed ||
+                (full_stats.MixedDualSourceColumns == heavy_base &&
+                 full_stats.MixedJointSourceXors == 0u &&
+                 full_stats.MixedJointMarginalXors == 0u &&
+                 full_stats.MixedJointMarginalCopies == 0u &&
+                 full_stats.MixedJointScratchBytes == 0u &&
+                 full_stats.MixedJointActiveDeltas == 0u);
+            const uint64_t expected_full_bucket_xors = joint_bucketed ?
+                full_stats.MixedJointSourceXors +
+                    full_stats.MixedJointMarginalXors :
+                separate_bucket_xors;
             if (!full_ok || !streamed_ok || full != streamed ||
                 !VerifyValues(
                     system, source.data(), streamed.data(), bb, "mixed") ||
-                full_stats.HeavyBucketXors != (bucketed ?
-                    (uint64_t)heavy_base *
-                        (independent_extension_residues ? 2u : 1u) :
-                    0u) ||
+                !joint_stats_ok ||
+                !dual_stats_ok ||
+                full_stats.HeavyBucketXors != expected_full_bucket_xors ||
+                streamed_stats.HeavyBucketXors != separate_bucket_xors ||
                 full_stats.HeavyMulAdds != params.HeavyRows * residues ||
                 full_stats.MixedGF16MulAdds !=
                     wirehair_v2::ActiveMixedGF16Rows() * residues ||
                 full_stats.MixedPlaneConversions !=
                     residues + wirehair_v2::ActiveMixedGF256Rows() +
                         params.HeavyRows ||
-                full_stats.HeavyBucketXors !=
-                    streamed_stats.HeavyBucketXors ||
                 full_stats.HeavyMulAdds != streamed_stats.HeavyMulAdds ||
                 full_stats.HeavySolveBlockOps !=
                     streamed_stats.HeavySolveBlockOps ||
@@ -1444,12 +1504,13 @@ bool TestMixedCompletionForPeriod(
     std::printf(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u: "
+        "independent_extension=%u bucket_mode=%u: "
         "PASS\n",
         period, MixedGeometryName(geometry), subfield_rows, extension_rows,
         residue_skew,
         (uint32_t)residue_schedule,
-        independent_extension_residues ? 1u : 0u);
+        independent_extension_residues ? 1u : 0u,
+        (uint32_t)bucket_mode);
     return true;
 }
 
@@ -1534,8 +1595,100 @@ bool TestMixedCompletion()
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
-            wirehair_v2::kMixedGF256RowsMax))
+            wirehair_v2::kMixedGF256RowsMax) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::Dual) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            wirehair_v2::MixedResidueBucketMode::JointDelta))
     {
+        return false;
+    }
+    return true;
+}
+
+bool TestAutomaticMixedJointBucketPolicy()
+{
+    if (wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            3199u, 4096u, 32u) ||
+        !wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            3200u, 4096u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            9999u, 1280u, 32u) ||
+        !wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            10000u, 1280u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            64000u, 1279u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            64000u, 4096u, 31u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            64000u, 4096u, 33u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            64000u, 4096u, 244u))
+    {
+        std::fprintf(stderr, "mixed automatic bucket policy boundary failed\n");
+        return false;
+    }
+
+    MixedCoefficientGeometryScope geometry_scope(
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    MixedGF16RowsScope extension_scope(wirehair_v2::kMixedGF16RowsMax);
+    MixedCoefficientPeriodScope period_scope(32u);
+    MixedGF256RowsScope subfield_scope(wirehair_v2::kMixedGF256Rows + 1u);
+    MixedResidueSkewScope skew_scope(0u);
+    MixedResidueScheduleScope schedule_scope(
+        wirehair_v2::MixedResidueSchedule::Hashed);
+    MixedResidueHashSeedScope hash_scope(68u);
+    MixedIndependentExtensionResiduesScope independent_scope(true);
+    MixedResidueBucketModeScope bucket_scope(
+        wirehair_v2::MixedResidueBucketMode::Automatic);
+    if (!geometry_scope.IsValid() || !extension_scope.IsValid() ||
+        !period_scope.IsValid() || !subfield_scope.IsValid() ||
+        !skew_scope.IsValid() || !schedule_scope.IsValid() ||
+        !independent_scope.IsValid() || !bucket_scope.IsValid())
+    {
+        return false;
+    }
+
+    static const uint32_t K = 3200u;
+    static const uint32_t block_bytes = 4096u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeMixedParams(K, UINT64_C(0xa070b0c0d0e0f001));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildPrecodeSystem(params, system)) return false;
+    const uint32_t parity_count =
+        params.Staircase + params.DenseRows + params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * block_bytes);
+    std::vector<uint8_t> parity((size_t)parity_count * block_bytes);
+    FillRandomBlocks(source.data(), source.size(), UINT64_C(0xa070f111));
+    wirehair_v2::PrecodeEncodeStats stats;
+    if (!wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes, parity.data(), &stats) ||
+        !VerifyValues(
+            system, source.data(), parity.data(), block_bytes,
+            "mixed automatic joint buckets") ||
+        stats.MixedJointSourceXors !=
+            (uint64_t)K + params.Staircase + params.DenseRows ||
+        stats.MixedJointMarginalCopies != 64u ||
+        stats.MixedJointActiveDeltas == 0u ||
+        stats.MixedDualSourceColumns != 0u)
+    {
+        std::fprintf(stderr,
+            "mixed automatic bucket dispatch/accounting failed\n");
         return false;
     }
     return true;
@@ -1583,7 +1736,13 @@ bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats)
         stats.HeavySolveBlockOps == 0u &&
         stats.MixedGF16MulAdds == 0u &&
         stats.MixedGF16SolveBlockOps == 0u &&
-        stats.MixedPlaneConversions == 0u;
+        stats.MixedPlaneConversions == 0u &&
+        stats.MixedJointSourceXors == 0u &&
+        stats.MixedJointMarginalXors == 0u &&
+        stats.MixedJointMarginalCopies == 0u &&
+        stats.MixedJointScratchBytes == 0u &&
+        stats.MixedJointActiveDeltas == 0u &&
+        stats.MixedDualSourceColumns == 0u;
 }
 
 bool TestStrictSystemValidation()
@@ -2866,11 +3025,131 @@ bool TestTypedFailuresAndAllocationContainment()
     return true;
 }
 
+int RunMixedBucketEncodeBenchmark(
+    uint32_t K,
+    uint32_t block_bytes,
+    uint32_t iterations,
+    wirehair_v2::MixedResidueBucketMode mode)
+{
+    if (K < 2u || K > 64000u || block_bytes == 0u ||
+        (block_bytes & 1u) != 0u || iterations == 0u ||
+        (uint64_t)K * block_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return 2;
+    }
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMax) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(32u) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows + 1u) ||
+        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
+        !wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Hashed))
+    {
+        return 2;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(68u);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(true) ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(mode))
+    {
+        return 2;
+    }
+
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0x6a6f696e7464656c) ^ K);
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+        return 1;
+    }
+    const uint32_t parity_count =
+        params.Staircase + params.DenseRows + params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * block_bytes);
+    std::vector<uint8_t> parity((size_t)parity_count * block_bytes);
+    FillRandomBlocks(
+        source.data(), source.size(),
+        UINT64_C(0x656e636f6465626d) ^ K ^ block_bytes);
+    wirehair_v2::PrecodeEncodeStats stats;
+    if (!wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes, parity.data(), &stats))
+    {
+        return 1;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (uint32_t iteration = 0u; iteration < iterations; ++iteration)
+    {
+        if (!wirehair_v2::ComputePrecodeValues(
+                system, source.data(), block_bytes, parity.data(), &stats))
+        {
+            return 1;
+        }
+    }
+    const auto stop = std::chrono::steady_clock::now();
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(stop - start).count();
+    uint64_t checksum = 0u;
+    for (size_t i = 0u; i < parity.size(); i += 4096u) {
+        checksum = checksum * 257u + parity[i];
+    }
+    std::printf(
+        "mixed_bucket_encode K=%u bb=%u iterations=%u mode=%u "
+        "elapsed_ms=%.6f per_iteration_ms=%.6f bucket_xors=%llu "
+        "joint_source=%llu joint_marginal=%llu joint_copies=%llu "
+        "dual_source_columns=%llu deltas=%u scratch=%llu "
+        "checksum=0x%llx\n",
+        K, block_bytes, iterations, (uint32_t)mode,
+        elapsed_ms, elapsed_ms / iterations,
+        (unsigned long long)stats.HeavyBucketXors,
+        (unsigned long long)stats.MixedJointSourceXors,
+        (unsigned long long)stats.MixedJointMarginalXors,
+        (unsigned long long)stats.MixedJointMarginalCopies,
+        (unsigned long long)stats.MixedDualSourceColumns,
+        stats.MixedJointActiveDeltas,
+        (unsigned long long)stats.MixedJointScratchBytes,
+        (unsigned long long)checksum);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     gf256_init();
+
+    if (argc == 6 &&
+        std::strcmp(argv[1], "--mixed-bucket-bench") == 0)
+    {
+        uint32_t K = 0u;
+        uint32_t block_bytes = 0u;
+        uint32_t iterations = 0u;
+        if (!ParsePositiveU32(argv[2], K) ||
+            !ParsePositiveU32(argv[3], block_bytes) ||
+            !ParsePositiveU32(argv[4], iterations))
+        {
+            return 2;
+        }
+        wirehair_v2::MixedResidueBucketMode mode;
+        if (std::strcmp(argv[5], "auto") == 0) {
+            mode = wirehair_v2::MixedResidueBucketMode::Automatic;
+        }
+        else if (std::strcmp(argv[5], "separate") == 0) {
+            mode = wirehair_v2::MixedResidueBucketMode::Separate;
+        }
+        else if (std::strcmp(argv[5], "dual") == 0) {
+            mode = wirehair_v2::MixedResidueBucketMode::Dual;
+        }
+        else if (std::strcmp(argv[5], "joint-delta") == 0) {
+            mode = wirehair_v2::MixedResidueBucketMode::JointDelta;
+        }
+        else {
+            return 2;
+        }
+        return RunMixedBucketEncodeBenchmark(
+            K, block_bytes, iterations, mode);
+    }
 
     if (argc == 2 && std::strcmp(argv[1], "--oom-probe") == 0)
     {
@@ -2912,6 +3191,7 @@ int main(int argc, char** argv)
     ok = TestMixedCornerRank() && ok;
     ok = TestIndependentMixedCornerAcrossK() && ok;
     ok = TestMixedCompletion() && ok;
+    ok = TestAutomaticMixedJointBucketPolicy() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;
     ok = TestBorrowedMessageLifetime() && ok;

@@ -3,6 +3,9 @@
 #include "../WirehairTools.h"
 #include "../gf256.h"
 #include "WirehairV2Plan.h"
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#include "WirehairV2MixedBuckets.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1463,6 +1466,7 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             subfield_accumulators[subfield_residue].Add(value);
             extension_accumulators[extension_residue].Add(value);
             stats.BlockXors += 2u;
+            ++stats.MixedDualSourceColumns;
         }
         block_start += block_columns;
         ++block_index;
@@ -1486,6 +1490,96 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             block_bytes, stats);
         const uint8_t* extension_bucket =
             extension_buckets.data() + (size_t)residue * block_bytes;
+        if (!GF16Deinterleave(
+                extension_bucket,
+                source_low.data(), source_high.data(), block_bytes))
+        {
+            return false;
+        }
+        const uint32_t row0 = subfield_rows;
+        const uint32_t row1 = row0 + 1u;
+        if (!GF16MulAddPlanar2(
+                rhs_low.data() + (size_t)row0 * elements,
+                rhs_high.data() + (size_t)row0 * elements,
+                cached_rows.Extension[0][residue],
+                rhs_low.data() + (size_t)row1 * elements,
+                rhs_high.data() + (size_t)row1 * elements,
+                cached_rows.Extension[1][residue],
+                source_low.data(), source_high.data(), elements))
+        {
+            return false;
+        }
+        for (uint32_t er = 2u; er < extension_rows; ++er)
+        {
+            const uint32_t row = subfield_rows + er;
+            if (!GF16MulAddPlanar(
+                    rhs_low.data() + (size_t)row * elements,
+                    rhs_high.data() + (size_t)row * elements,
+                    cached_rows.Extension[er][residue],
+                    source_low.data(), source_high.data(), elements))
+            {
+                return false;
+            }
+        }
+        stats.BlockMulAdds += extension_rows;
+    }
+    return true;
+}
+
+static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
+    uint32_t column_count,
+    uint32_t coefficient_period,
+    uint32_t populated_residues,
+    uint32_t subfield_rows,
+    uint32_t block_bytes,
+    uint32_t elements,
+    uint32_t extension_rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint8_t>& values,
+    const MixedCoefficientRows& cached_rows,
+    void* const* subfield_destinations,
+    std::vector<uint8_t>& rhs_low,
+    std::vector<uint8_t>& rhs_high,
+    std::vector<uint8_t>& source_low,
+    std::vector<uint8_t>& source_high,
+    PrecodeSolveStats& stats)
+{
+    MixedJointResidueBuckets buckets;
+    if (!AccumulateMixedJointResidueBuckets(
+            column_count,
+            coefficient_period,
+            block_bytes,
+            [&](uint32_t column) {
+                return values.data() + (size_t)column * block_bytes;
+            },
+            [&](uint32_t column) {
+                return inactive_index[column] == UINT32_MAX;
+            },
+            true,
+            buckets))
+    {
+        return false;
+    }
+    stats.BlockXors += buckets.SourceXors + buckets.MarginalXors;
+    stats.MixedJointSourceXors = buckets.SourceXors;
+    stats.MixedJointMarginalXors = buckets.MarginalXors;
+    stats.MixedJointMarginalCopies = buckets.MarginalCopies;
+    stats.MixedJointScratchBytes = buckets.ScratchBytes;
+    stats.MixedJointActiveDeltas = buckets.ActiveDeltas;
+
+    uint8_t subfield_scales[kMixedGF256RowsMax];
+    for (uint32_t residue = 0u; residue < populated_residues; ++residue)
+    {
+        for (uint32_t row = 0u; row < subfield_rows; ++row) {
+            subfield_scales[row] = cached_rows.Subfield[row][residue];
+        }
+        AddScaledBlocks(
+            subfield_destinations, subfield_scales,
+            subfield_rows,
+            buckets.Subfield.get() + (size_t)residue * block_bytes,
+            block_bytes, stats);
+        const uint8_t* extension_bucket =
+            buckets.Extension.get() + (size_t)residue * block_bytes;
         if (!GF16Deinterleave(
                 extension_bucket,
                 source_low.data(), source_high.data(), block_bytes))
@@ -1660,16 +1754,36 @@ WirehairResult SolveMixedCompletionQuotient(
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    const uint64_t dual_bucket_bytes =
-        (uint64_t)coefficient_period * block_bytes * 2u;
+    static const uint64_t kExperimentalBucketByteCap = UINT64_C(64) << 20;
+    const uint64_t one_bucket_plane_bytes =
+        (uint64_t)coefficient_period * block_bytes;
+    const bool dual_buckets_fit =
+        one_bucket_plane_bytes <= kExperimentalBucketByteCap / 2u;
+    const bool joint_buckets_fit =
+        one_bucket_plane_bytes <= kExperimentalBucketByteCap / 3u;
+    const MixedResidueBucketMode bucket_mode =
+        ActiveMixedResidueBucketModeForTesting();
+    const bool automatic_joint_residue_buckets =
+        bucket_mode == MixedResidueBucketMode::Automatic &&
+        UseAutomaticMixedJointResidueBucketsForTesting(
+            system.Params.BlockCount, block_bytes, coefficient_period);
     // A sequential dual-bucket scan improves bandwidth-bound large decoders,
     // but its accumulator setup hurts small systems and its random writes
     // hurt once the two bucket sets no longer fit comfortably in cache.
     const bool use_dual_residue_buckets =
         independent_extension_residues &&
-        column_count >= 30000u &&
-        block_bytes >= 1024u &&
-        dual_bucket_bytes <= (UINT64_C(128) << 10);
+        dual_buckets_fit &&
+        (bucket_mode == MixedResidueBucketMode::Dual ||
+         (bucket_mode == MixedResidueBucketMode::Automatic &&
+          !automatic_joint_residue_buckets &&
+          column_count >= 30000u &&
+          block_bytes >= 1024u &&
+          one_bucket_plane_bytes * 2u <= (UINT64_C(128) << 10)));
+    const bool use_joint_residue_buckets =
+        independent_extension_residues &&
+        (bucket_mode == MixedResidueBucketMode::JointDelta ||
+         automatic_joint_residue_buckets) &&
+        joint_buckets_fit;
     std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
 #else
     std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
@@ -1720,17 +1834,27 @@ WirehairResult SolveMixedCompletionQuotient(
     };
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #if defined(__GNUC__) || defined(__clang__)
-    if (__builtin_expect(use_dual_residue_buckets, false))
+    if (__builtin_expect(
+            use_dual_residue_buckets || use_joint_residue_buckets,
+            false))
 #else
-    if (use_dual_residue_buckets)
+    if (use_dual_residue_buckets || use_joint_residue_buckets)
 #endif
     {
-        if (!AccumulateDualMixedCompletionRhs(
+        const bool accumulated = use_joint_residue_buckets ?
+            AccumulateJointMixedCompletionRhs(
                 column_count, coefficient_period, populated_residues,
                 subfield_rows, block_bytes, elements, extension_rows,
                 inactive_index, values, *cached_rows,
                 subfield_destinations,
-                rhs_low, rhs_high, source_low, source_high, stats))
+                rhs_low, rhs_high, source_low, source_high, stats) :
+            AccumulateDualMixedCompletionRhs(
+                column_count, coefficient_period, populated_residues,
+                subfield_rows, block_bytes, elements, extension_rows,
+                inactive_index, values, *cached_rows,
+                subfield_destinations,
+                rhs_low, rhs_high, source_low, source_high, stats);
+        if (!accumulated)
         {
             return Wirehair_Error;
         }

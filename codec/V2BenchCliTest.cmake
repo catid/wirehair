@@ -192,6 +192,24 @@ expect_success("mixed_independent_extension_residues=1" compare
     --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_success("mixed_residue_buckets_requested=joint-delta" compare
+    --nlo 3200 --nhi 3200 --trials 1 --bb-list 4096 --max-message-mib 16
+    --loss 0 --precode --precode-profile mixed --mixed-mix-count 2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-independent-extension-residues
+    --mixed-residue-buckets joint-delta)
+expect_failure("encoder_used=0 decoder_used=0" compare
+    --nlo 2 --nhi 2 --trials 1 --bb-list 700000 --max-message-mib 2
+    --loss 0 --precode --precode-profile mixed --mixed-mix-count 2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-independent-extension-residues
+    --mixed-residue-buckets joint-delta)
+expect_failure("explicit --mixed-residue-buckets requires" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed
+    --mixed-residue-buckets joint-delta)
 expect_failure("independent extension residues require" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode --precode-profile mixed --mixed-gf16-rows 4
@@ -445,6 +463,30 @@ expect_success("mixed_independent_extension_residues=1" precodefail
     --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues)
+expect_success("mixed_residue_buckets_requested=joint-delta" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mix-count 2 --full-payload-solve
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 7 --mixed-independent-extension-residues
+    --mixed-residue-buckets joint-delta)
+expect_success("2,2,periodic,2,0,2,1,1,0" precodefail
+    --N 2 --bb-list 2 --overhead 0 --trials 2 --threads 1 --loss 0.35
+    --completion mixed --mix-count 2 --schedule adversarial
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-residue-buckets joint-delta)
+expect_failure("trial 1 fell back" precodefail
+    --N 2 --bb-list 700000 --overhead 0 --trials 2 --threads 1 --loss 0.35
+    --completion mixed --mix-count 2 --full-payload-solve
+    --schedule adversarial --seed-block-bytes 2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-residue-buckets joint-delta)
 expect_success("mixed_gf256_rows=11" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mix-count 2 --mixed-gf256-rows 11
