@@ -1074,6 +1074,12 @@ uint32_t ActiveMixedGF256BreakerResidueBlockShift(
     if (breaker_index >= MixedIndependentGF256BreakerRowsForTesting) {
         return ActiveMixedResidueBlockShift(block_index);
     }
+    // Anchor schedule C at the final GF(256) row, then extend upward with
+    // D, E, ... as more breaker rows are enabled.  This makes R(n+1) retain
+    // every row-to-schedule assignment from R(n) instead of renaming all
+    // previously active suffix rows.
+    const uint32_t schedule_index =
+        MixedIndependentGF256BreakerRowsForTesting - 1u - breaker_index;
     const uint32_t period = MixedCoefficientPeriodForTesting;
     const uint32_t H =
         MixedGF256RowsForTesting + MixedGF16RowsForTesting;
@@ -1090,10 +1096,10 @@ uint32_t ActiveMixedGF256BreakerResidueBlockShift(
     if (cached_period[breaker_index] != period ||
         cached_step_count[breaker_index] != step_count ||
         cached_seed[breaker_index] !=
-            MixedGF256BreakerResidueHashSeedsForTesting[breaker_index])
+            MixedGF256BreakerResidueHashSeedsForTesting[schedule_index])
     {
         const uint32_t seed =
-            MixedGF256BreakerResidueHashSeedsForTesting[breaker_index];
+            MixedGF256BreakerResidueHashSeedsForTesting[schedule_index];
         prefix[breaker_index][0] = 0u;
         for (uint32_t i = 0u; i < kMixedResidueStepCycle; ++i)
         {
@@ -1173,8 +1179,12 @@ uint32_t ActiveMixedIndependentGF256BreakerRows()
 
 uint32_t ActiveMixedGF256BreakerResidueHashSeed(uint32_t breaker_index)
 {
-    return breaker_index < MixedIndependentGF256BreakerRowsForTesting ?
-        MixedGF256BreakerResidueHashSeedsForTesting[breaker_index] : 0u;
+    if (breaker_index >= MixedIndependentGF256BreakerRowsForTesting) {
+        return 0u;
+    }
+    const uint32_t schedule_index =
+        MixedIndependentGF256BreakerRowsForTesting - 1u - breaker_index;
+    return MixedGF256BreakerResidueHashSeedsForTesting[schedule_index];
 }
 #endif
 

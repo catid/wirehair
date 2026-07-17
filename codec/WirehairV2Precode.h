@@ -226,8 +226,10 @@ uint32_t ActiveMixedPackedCoefficientWords();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /// Maximum number of experiment-only GF(256) rows that may use independent
 /// bucket schedules.  The independent rows are always the final rows of the
-/// active GF(256) prefix; all other GF(256) rows retain the canonical A
-/// schedule.
+/// active GF(256) prefix.  Schedule C is anchored to the final row and each
+/// additional schedule is added upward, so increasing the count preserves
+/// every previously active row assignment.  All other GF(256) rows retain
+/// the canonical A schedule.
 static const uint32_t kMixedGF256BreakerRowsMax = 3u;
 /// Residue used by one experiment-only independently scheduled GF(256) row.
 /// Non-heavy columns use the row's keyed schedule, while the final H columns

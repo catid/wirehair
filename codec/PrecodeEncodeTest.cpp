@@ -1662,11 +1662,76 @@ bool TestIndependentGF256BreakerSchedule()
         return false;
     }
 
+    // Adding breaker rows must extend the independently scheduled suffix
+    // upward without renaming rows that were already active.  Breaker indices
+    // enumerate the suffix from its first row, so C moves from index 0 at R1
+    // to index 1 at R2 and index 2 at R3 while remaining physical row 10.
+    static const uint32_t kNestedBlocks = 128u;
+    uint32_t r1_c_shifts[kNestedBlocks] = {};
+    for (uint32_t block = 0u; block < kNestedBlocks; ++block) {
+        r1_c_shifts[block] =
+            wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                0u, block);
+    }
+    const uint32_t c_seed =
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(0u);
+    if (!wirehair_v2::SetMixedIndependentGF256BreakerRowsForTesting(2u) ||
+        wirehair_v2::ActiveMixedIndependentGF256BreakerRows() != 2u)
+    {
+        std::fprintf(stderr, "GF256 breakers: nested R2 setup failed\n");
+        return false;
+    }
+    const uint32_t d_seed =
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(0u);
+    bool r2_d_differs = d_seed != c_seed;
+    uint32_t r2_d_shifts[kNestedBlocks] = {};
+    for (uint32_t block = 0u; block < kNestedBlocks; ++block)
+    {
+        r2_d_shifts[block] =
+            wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                0u, block);
+        r2_d_differs = r2_d_differs ||
+            r2_d_shifts[block] != r1_c_shifts[block];
+        if (wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                1u, block) != r1_c_shifts[block])
+        {
+            std::fprintf(stderr,
+                "GF256 breakers: R2 row10 did not retain schedule C\n");
+            return false;
+        }
+    }
+    if (!r2_d_differs ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(1u) != c_seed)
+    {
+        std::fprintf(stderr,
+            "GF256 breakers: R2 row9=D,row10=C contract failed\n");
+        return false;
+    }
+
     if (!wirehair_v2::SetMixedIndependentGF256BreakerRowsForTesting(3u) ||
         wirehair_v2::ActiveMixedIndependentGF256BreakerRows() != 3u)
     {
         std::fprintf(stderr, "GF256 breakers: count=3 setup failed\n");
         return false;
+    }
+    if (wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(1u) != d_seed ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(2u) != c_seed)
+    {
+        std::fprintf(stderr,
+            "GF256 breakers: R3 did not retain row9=D,row10=C\n");
+        return false;
+    }
+    for (uint32_t block = 0u; block < kNestedBlocks; ++block)
+    {
+        if (wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                1u, block) != r2_d_shifts[block] ||
+            wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                2u, block) != r1_c_shifts[block])
+        {
+            std::fprintf(stderr,
+                "GF256 breakers: R3 nested shift identity failed\n");
+            return false;
+        }
     }
     bool schedules_are_distinct = true;
     for (uint32_t breaker = 0u; breaker < 3u; ++breaker)
