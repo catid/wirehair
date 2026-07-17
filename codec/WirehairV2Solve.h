@@ -97,6 +97,9 @@ struct PrecodeSolveStats
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/** Largest mixed quotient reconstructed by the null-witness diagnostic. */
+static const uint32_t kMaxMixedNullWitnessQuotientColumns = 15u;
+
 /**
     Multiply packet ids by an odd 32-bit constant before initializing the row
     PRNG.  Odd multiplication is a permutation of the complete id domain, so
