@@ -224,16 +224,38 @@ uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-/// Residue used by the experiment-only eleventh GF(256) row.  Non-heavy
-/// columns use a third independently keyed schedule, while the final H
-/// columns deliberately remain on the canonical schedule so the shared-X
-/// corner is unchanged.
+/// Maximum number of experiment-only GF(256) rows that may use independent
+/// bucket schedules.  The independent rows are always the final rows of the
+/// active GF(256) prefix; all other GF(256) rows retain the canonical A
+/// schedule.
+static const uint32_t kMixedGF256BreakerRowsMax = 3u;
+/// Residue used by one experiment-only independently scheduled GF(256) row.
+/// Non-heavy columns use the row's keyed schedule, while the final H columns
+/// deliberately remain on canonical schedule A so the shared-X corner is
+/// unchanged.
 uint32_t ActiveMixedGF256BreakerCoefficientResidue(
+    uint32_t breaker_index,
     uint32_t column,
     uint32_t first_heavy_column);
-uint32_t ActiveMixedGF256BreakerResidueBlockShift(uint32_t block_index);
+inline uint32_t ActiveMixedGF256BreakerCoefficientResidue(
+    uint32_t column,
+    uint32_t first_heavy_column)
+{
+    return ActiveMixedGF256BreakerCoefficientResidue(
+        0u, column, first_heavy_column);
+}
+uint32_t ActiveMixedGF256BreakerResidueBlockShift(
+    uint32_t breaker_index,
+    uint32_t block_index);
+inline uint32_t ActiveMixedGF256BreakerResidueBlockShift(
+    uint32_t block_index)
+{
+    return ActiveMixedGF256BreakerResidueBlockShift(0u, block_index);
+}
 bool ActiveMixedIndependentGF256BreakerResidues();
-uint32_t ActiveMixedGF256BreakerResidueHashSeed();
+uint32_t ActiveMixedIndependentGF256BreakerRows();
+uint32_t ActiveMixedGF256BreakerResidueHashSeed(
+    uint32_t breaker_index = 0u);
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
@@ -251,8 +273,11 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
-/// Split the fixed H=15 experiment as 10 canonical GF(256) rows, one
-/// independently keyed GF(256) breaker row, and four GF(2^16) rows.
+/// Select 0..3 independently keyed suffix rows in the fixed 11+4 H=15
+/// experiment.  This is a bounded experiment-only control and never changes
+/// a production profile or serialized wire contract.
+bool SetMixedIndependentGF256BreakerRowsForTesting(uint32_t rows);
+/// Compatibility control for the original one-breaker experiment.
 bool SetMixedIndependentGF256BreakerResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent GF(256) breaker schedule.
 void SetMixedIndependentGF256BreakerSeedXorForTesting(uint32_t seed_xor);

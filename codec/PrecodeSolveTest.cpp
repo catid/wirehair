@@ -205,16 +205,16 @@ private:
 class MixedIndependentGF256BreakerResiduesScope
 {
 public:
-    explicit MixedIndependentGF256BreakerResiduesScope(bool enabled)
+    explicit MixedIndependentGF256BreakerResiduesScope(uint32_t rows)
         : Valid(wirehair_v2::
-            SetMixedIndependentGF256BreakerResiduesForTesting(enabled))
+            SetMixedIndependentGF256BreakerRowsForTesting(rows))
     {
     }
 
     ~MixedIndependentGF256BreakerResiduesScope()
     {
         (void)wirehair_v2::
-            SetMixedIndependentGF256BreakerResiduesForTesting(false);
+            SetMixedIndependentGF256BreakerRowsForTesting(0u);
     }
 
     bool IsValid() const { return Valid; }
@@ -1511,7 +1511,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
     uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
-    bool independent_gf256_breaker_residues = false)
+    uint32_t independent_gf256_breaker_rows = 0u)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1525,7 +1525,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
     MixedIndependentGF256BreakerResiduesScope breaker_scope(
-        independent_gf256_breaker_residues);
+        independent_gf256_breaker_rows);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
@@ -1553,7 +1553,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // counts L=243, 244, and 245 around the full-period transition.
         189u, 190u, 191u,
         243u, 244u, 245u, 320u, 1000u,
-        // The independent case also covers the large-payload dual-bucket
+        // The independent case also covers the large-payload fused-bucket
         // mixed-RHS path selected by SolveMixedCompletionQuotient.
         30000u
     };
@@ -1691,7 +1691,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         period, (uint32_t)geometry, subfield_rows, extension_rows,
         residue_skew, (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
-        independent_gf256_breaker_residues ? 1u : 0u,
+        independent_gf256_breaker_rows,
         (unsigned long long)comparisons);
     return true;
 }
@@ -1775,7 +1775,25 @@ bool CheckMixedProjectionResidueBucketsOracle()
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
             wirehair_v2::kMixedGF256Rows + 1u,
-            true) ||
+            1u) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            2u) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            3u) ||
         !CheckMixedProjectionResidueBucketsOracleForPeriod(
             32u,
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

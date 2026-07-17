@@ -203,16 +203,16 @@ private:
 class MixedIndependentGF256BreakerResiduesScope
 {
 public:
-    explicit MixedIndependentGF256BreakerResiduesScope(bool enabled)
+    explicit MixedIndependentGF256BreakerResiduesScope(uint32_t rows)
         : Valid(wirehair_v2::
-            SetMixedIndependentGF256BreakerResiduesForTesting(enabled))
+            SetMixedIndependentGF256BreakerRowsForTesting(rows))
     {
     }
 
     ~MixedIndependentGF256BreakerResiduesScope()
     {
         (void)wirehair_v2::
-            SetMixedIndependentGF256BreakerResiduesForTesting(false);
+            SetMixedIndependentGF256BreakerRowsForTesting(0u);
     }
 
     bool IsValid() const { return Valid; }
@@ -358,13 +358,17 @@ bool VerifyValues(
                     wirehair_v2::CompletionField::MixedGF256GF16 ?
                 wirehair_v2::ActiveMixedCoefficientResidue(c) : c;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const uint32_t breaker_rows = wirehair_v2::
+                ActiveMixedIndependentGF256BreakerRows();
+            const uint32_t first_breaker_row =
+                mixed_subfield_rows - breaker_rows;
             if (system.Params.Field ==
                     wirehair_v2::CompletionField::MixedGF256GF16 &&
-                wirehair_v2::ActiveMixedIndependentGF256BreakerResidues() &&
-                r + 1u == mixed_subfield_rows)
+                r >= first_breaker_row && r < mixed_subfield_rows)
             {
                 coefficient_column = wirehair_v2::
-                    ActiveMixedGF256BreakerCoefficientResidue(c, L - H);
+                    ActiveMixedGF256BreakerCoefficientResidue(
+                        r - first_breaker_row, c, L - H);
             }
 #endif
             const uint8_t* v =
@@ -589,7 +593,8 @@ bool TestGF256BreakerCornerAcrossK()
             !wirehair_v2::
                 SetMixedIndependentExtensionResiduesForTesting(true) ||
             !wirehair_v2::
-                SetMixedIndependentGF256BreakerResiduesForTesting(true))
+                SetMixedIndependentGF256BreakerRowsForTesting(
+                    wirehair_v2::kMixedGF256BreakerRowsMax))
         {
             return false;
         }
@@ -604,13 +609,20 @@ bool TestGF256BreakerCornerAcrossK()
                 wirehair_v2::ActiveMixedCoefficientResidue(column);
             extension_columns[j] =
                 wirehair_v2::ActiveMixedExtensionCoefficientResidue(column);
-            if (wirehair_v2::
-                    ActiveMixedGF256BreakerCoefficientResidue(
-                        column, heavy_base) != subfield_columns[j])
+            for (uint32_t breaker = 0u;
+                 breaker < wirehair_v2::kMixedGF256BreakerRowsMax;
+                 ++breaker)
             {
-                std::fprintf(stderr,
-                    "GF256 breaker changed heavy corner at K=%u\n", K);
-                return false;
+                if (wirehair_v2::
+                        ActiveMixedGF256BreakerCoefficientResidue(
+                            breaker, column, heavy_base) !=
+                        subfield_columns[j])
+                {
+                    std::fprintf(stderr,
+                        "GF256 breaker %u changed heavy corner at K=%u\n",
+                        breaker, K);
+                    return false;
+                }
             }
         }
         if (MixedCornerRank(subfield_columns, extension_columns) != H)
@@ -621,11 +633,11 @@ bool TestGF256BreakerCornerAcrossK()
         }
     }
     (void)wirehair_v2::
-        SetMixedIndependentGF256BreakerResiduesForTesting(false);
+        SetMixedIndependentGF256BreakerRowsForTesting(0u);
     (void)wirehair_v2::
         SetMixedIndependentExtensionResiduesForTesting(false);
     std::printf(
-        "GF256 breaker P32 H15 canonical corners K=2..64000: PASS\n");
+        "GF256 breakers=3 P32 H15 canonical corners K=2..64000: PASS\n");
     return true;
 }
 
@@ -1344,7 +1356,7 @@ bool TestMixedCompletionForPeriod(
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
     uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
-    bool independent_gf256_breaker_residues = false)
+    uint32_t independent_gf256_breaker_rows = 0u)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1358,7 +1370,7 @@ bool TestMixedCompletionForPeriod(
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
     MixedIndependentGF256BreakerResiduesScope breaker_scope(
-        independent_gf256_breaker_residues);
+        independent_gf256_breaker_rows);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
@@ -1466,7 +1478,7 @@ bool TestMixedCompletionForPeriod(
                     (uint64_t)heavy_base *
                         (1u +
                          (independent_extension_residues ? 1u : 0u) +
-                         (independent_gf256_breaker_residues ? 1u : 0u)) :
+                         independent_gf256_breaker_rows) :
                     0u) ||
                 full_stats.HeavyMulAdds != params.HeavyRows * residues ||
                 full_stats.MixedGF16MulAdds !=
@@ -1561,7 +1573,7 @@ bool TestMixedCompletionForPeriod(
         residue_skew,
         (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
-        independent_gf256_breaker_residues ? 1u : 0u);
+        independent_gf256_breaker_rows);
     return true;
 }
 
@@ -1647,6 +1659,55 @@ bool TestIndependentGF256BreakerSchedule()
             selected_seed,
             wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(),
             a0, a1, b0, b1, c0, c1, breaker_syndrome);
+        return false;
+    }
+
+    if (!wirehair_v2::SetMixedIndependentGF256BreakerRowsForTesting(3u) ||
+        wirehair_v2::ActiveMixedIndependentGF256BreakerRows() != 3u)
+    {
+        std::fprintf(stderr, "GF256 breakers: count=3 setup failed\n");
+        return false;
+    }
+    bool schedules_are_distinct = true;
+    for (uint32_t breaker = 0u; breaker < 3u; ++breaker)
+    {
+        const uint32_t seed =
+            wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(breaker);
+        schedules_are_distinct = schedules_are_distinct &&
+            seed != selected_seed;
+        for (uint32_t prior = 0u; prior < breaker; ++prior) {
+            schedules_are_distinct = schedules_are_distinct && seed !=
+                wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(prior);
+        }
+        bool differs_from_prior = breaker == 0u;
+        for (uint32_t block = 0u; block < 128u; ++block)
+        {
+            if (breaker != 0u &&
+                wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                    breaker, block) !=
+                wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(
+                    breaker - 1u, block))
+            {
+                differs_from_prior = true;
+            }
+            for (uint32_t column = first_heavy_column;
+                 column < kColumnCount; ++column)
+            {
+                schedules_are_distinct = schedules_are_distinct &&
+                    wirehair_v2::ActiveMixedGF256BreakerCoefficientResidue(
+                        breaker, column, first_heavy_column) ==
+                    wirehair_v2::ActiveMixedCoefficientResidue(column);
+            }
+        }
+        schedules_are_distinct = schedules_are_distinct &&
+            differs_from_prior;
+    }
+    if (!schedules_are_distinct ||
+        !wirehair_v2::SetMixedIndependentGF256BreakerRowsForTesting(1u))
+    {
+        std::fprintf(stderr,
+            "GF256 breakers: distinct schedule/canonical-tail contract "
+            "failed\n");
         return false;
     }
 
@@ -1777,7 +1838,25 @@ bool TestMixedCompletion()
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
             wirehair_v2::kMixedGF256Rows + 1u,
-            true) ||
+            1u) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            2u) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
+            3u) ||
         !TestMixedCompletionForPeriod(
             32u,
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

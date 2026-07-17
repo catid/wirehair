@@ -27,6 +27,7 @@ namespace {
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local int32_t MixedFusedScheduleBucketsMode = -1;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 #endif
 
@@ -1102,21 +1103,22 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    const bool independent_gf256_breaker_residues =
-        ActiveMixedIndependentGF256BreakerResidues();
+    const uint32_t independent_gf256_breaker_rows =
+        ActiveMixedIndependentGF256BreakerRows();
     const uint32_t heavy_rows =
         subfield_rows + ActiveMixedGF16Rows();
-    if (independent_gf256_breaker_residues &&
+    if (independent_gf256_breaker_rows != 0u &&
         column_count < heavy_rows)
     {
         return false;
     }
     const uint32_t first_heavy_column = column_count >= heavy_rows ?
         column_count - heavy_rows : 0u;
-    const uint32_t gf256_breaker_row = subfield_rows - 1u;
+    const uint32_t first_gf256_breaker_row =
+        subfield_rows - independent_gf256_breaker_rows;
     std::vector<uint64_t> gf256_breaker_residue_projection(
-        independent_gf256_breaker_residues ?
-            (size_t)coefficient_period * projection_words : 0u,
+        (size_t)independent_gf256_breaker_rows *
+            coefficient_period * projection_words,
         uint64_t{0});
 #endif
     std::vector<uint64_t> extension_residue_projection(
@@ -1130,8 +1132,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         for (uint32_t row = 0u; row < subfield_rows; ++row) {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            if (independent_gf256_breaker_residues &&
-                row == gf256_breaker_row)
+            if (row >= first_gf256_breaker_row)
             {
                 continue;
             }
@@ -1158,12 +1159,16 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                     projection_words;
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        uint64_t* gf256_breaker_bucket = nullptr;
-        if (independent_gf256_breaker_residues) {
-            gf256_breaker_bucket =
+        uint64_t* gf256_breaker_buckets[kMixedGF256BreakerRowsMax] = {};
+        for (uint32_t breaker = 0u;
+             breaker < independent_gf256_breaker_rows;
+             ++breaker)
+        {
+            gf256_breaker_buckets[breaker] =
                 gf256_breaker_residue_projection.data() +
-                (size_t)ActiveMixedGF256BreakerCoefficientResidue(
-                    column, first_heavy_column) * projection_words;
+                ((size_t)breaker * coefficient_period +
+                 ActiveMixedGF256BreakerCoefficientResidue(
+                    breaker, column, first_heavy_column)) * projection_words;
         }
 #endif
         const uint32_t inactive = inactive_index[column];
@@ -1179,8 +1184,11 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                     UINT64_C(1) << (inactive & 63u);
             }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-            if (gf256_breaker_bucket) {
-                gf256_breaker_bucket[inactive >> 6] ^=
+            for (uint32_t breaker = 0u;
+                 breaker < independent_gf256_breaker_rows;
+                 ++breaker)
+            {
+                gf256_breaker_buckets[breaker][inactive >> 6] ^=
                     UINT64_C(1) << (inactive & 63u);
             }
 #endif
@@ -1195,8 +1203,11 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                     extension_bucket[word] ^= bits[word];
                 }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                if (gf256_breaker_bucket) {
-                    gf256_breaker_bucket[word] ^= bits[word];
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker)
+                {
+                    gf256_breaker_buckets[breaker][word] ^= bits[word];
                 }
 #endif
             }
@@ -1264,7 +1275,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
                     if (!independent_extension_residues &&
-                        !independent_gf256_breaker_residues)
+                        independent_gf256_breaker_rows == 0u)
 #else
                     if (!independent_extension_residues)
 #endif
@@ -1324,8 +1335,12 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (independent_gf256_breaker_residues)
+    for (uint32_t breaker = 0u;
+         breaker < independent_gf256_breaker_rows;
+         ++breaker)
     {
+        const uint32_t gf256_breaker_row =
+            first_gf256_breaker_row + breaker;
         const uint64_t breaker_mask =
             UINT64_C(0xffff) << ((gf256_breaker_row & 3u) * 16u);
         for (uint32_t residue = 0u;
@@ -1335,7 +1350,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 cached_packed.ByResidue[residue];
             const uint64_t* bucket =
                 gf256_breaker_residue_projection.data() +
-                (size_t)residue * projection_words;
+                ((size_t)breaker * coefficient_period + residue) *
+                    projection_words;
             for (uint32_t word_index = 0u;
                  word_index < projection_words; ++word_index)
             {
@@ -1395,12 +1411,13 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     uint32_t residue = 0u;
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
-    const bool independent_gf256_breaker_residues =
-        ActiveMixedIndependentGF256BreakerResidues();
-    const uint32_t gf256_breaker_row = subfield_rows - 1u;
+    const uint32_t independent_gf256_breaker_rows =
+        ActiveMixedIndependentGF256BreakerRows();
+    const uint32_t first_gf256_breaker_row =
+        subfield_rows - independent_gf256_breaker_rows;
     const uint32_t heavy_rows =
         subfield_rows + ActiveMixedGF16Rows();
-    if (independent_gf256_breaker_residues &&
+    if (independent_gf256_breaker_rows != 0u &&
         column_count < heavy_rows)
     {
         return false;
@@ -1412,8 +1429,7 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     if (independent_extension_residues)
     {
         for (uint32_t row = 0u; row < subfield_rows; ++row) {
-            if (independent_gf256_breaker_residues &&
-                row == gf256_breaker_row)
+            if (row >= first_gf256_breaker_row)
             {
                 continue;
             }
@@ -1442,11 +1458,15 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
                     (column_coefficients[word] & subfield_masks[word]) |
                     (extension_coefficients[word] & extension_masks[word]);
             }
-            if (independent_gf256_breaker_residues)
+            for (uint32_t breaker = 0u;
+                 breaker < independent_gf256_breaker_rows;
+                 ++breaker)
             {
+                const uint32_t gf256_breaker_row =
+                    first_gf256_breaker_row + breaker;
                 const uint32_t breaker_residue =
                     ActiveMixedGF256BreakerCoefficientResidue(
-                        column, first_heavy_column);
+                        breaker, column, first_heavy_column);
                 const uint64_t* breaker_coefficients =
                     cached_packed.ByResidue[breaker_residue];
                 const uint32_t packed = gf256_breaker_row >> 2;
@@ -1514,7 +1534,7 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
 #define WH2_MIXED_NOINLINE
 #endif
 
-static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
+static WH2_MIXED_NOINLINE bool AccumulateFusedMixedCompletionRhs(
     uint32_t column_count,
     uint32_t coefficient_period,
     uint32_t populated_residues,
@@ -1532,12 +1552,10 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
     std::vector<uint8_t>& source_high,
     PrecodeSolveStats& stats)
 {
-    const bool independent_gf256_breaker_residues =
-        ActiveMixedIndependentGF256BreakerResidues();
-    const uint32_t gf256_breaker_row = subfield_rows - 1u;
+    const uint32_t independent_gf256_breaker_rows =
+        ActiveMixedIndependentGF256BreakerRows();
     const uint32_t canonical_subfield_rows =
-        subfield_rows -
-        (independent_gf256_breaker_residues ? 1u : 0u);
+        subfield_rows - independent_gf256_breaker_rows;
     if (column_count < subfield_rows + extension_rows) {
         return false;
     }
@@ -1548,17 +1566,16 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
     std::vector<uint8_t> extension_buckets(
         (size_t)coefficient_period * block_bytes, uint8_t{0});
     std::vector<uint8_t> gf256_breaker_buckets(
-        independent_gf256_breaker_residues ?
-            (size_t)coefficient_period * block_bytes : 0u,
+        (size_t)independent_gf256_breaker_rows *
+            coefficient_period * block_bytes,
         uint8_t{0});
     std::vector<BatchedBlockXorAccumulator> subfield_accumulators;
     std::vector<BatchedBlockXorAccumulator> extension_accumulators;
     std::vector<BatchedBlockXorAccumulator> gf256_breaker_accumulators;
     subfield_accumulators.reserve(coefficient_period);
     extension_accumulators.reserve(coefficient_period);
-    if (independent_gf256_breaker_residues) {
-        gf256_breaker_accumulators.reserve(coefficient_period);
-    }
+    gf256_breaker_accumulators.reserve(
+        (size_t)independent_gf256_breaker_rows * coefficient_period);
     for (uint32_t residue = 0u; residue < coefficient_period; ++residue)
     {
         subfield_accumulators.emplace_back(
@@ -1567,10 +1584,19 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
         extension_accumulators.emplace_back(
             extension_buckets.data() + (size_t)residue * block_bytes,
             block_bytes);
-        if (independent_gf256_breaker_residues) {
+    }
+    for (uint32_t breaker = 0u;
+         breaker < independent_gf256_breaker_rows;
+         ++breaker)
+    {
+        for (uint32_t residue = 0u;
+             residue < coefficient_period;
+             ++residue)
+        {
             gf256_breaker_accumulators.emplace_back(
                 gf256_breaker_buckets.data() +
-                    (size_t)residue * block_bytes,
+                    ((size_t)breaker * coefficient_period + residue) *
+                        block_bytes,
                 block_bytes);
         }
     }
@@ -1586,10 +1612,15 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             ActiveMixedResidueBlockShift(block_index);
         const uint32_t extension_shift =
             ActiveMixedExtensionResidueBlockShift(block_index);
-        const uint32_t gf256_breaker_shift =
-            independent_gf256_breaker_residues ?
-                ActiveMixedGF256BreakerResidueBlockShift(block_index) :
-                subfield_shift;
+        uint32_t gf256_breaker_shifts[kMixedGF256BreakerRowsMax] = {};
+        for (uint32_t breaker = 0u;
+             breaker < independent_gf256_breaker_rows;
+             ++breaker)
+        {
+            gf256_breaker_shifts[breaker] =
+                ActiveMixedGF256BreakerResidueBlockShift(
+                    breaker, block_index);
+        }
         const uint32_t block_columns = std::min(
             coefficient_period, column_count - block_start);
         for (uint32_t offset = 0u; offset < block_columns; ++offset)
@@ -1609,15 +1640,18 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             subfield_accumulators[subfield_residue].Add(value);
             extension_accumulators[extension_residue].Add(value);
             stats.BlockXors += 2u;
-            if (independent_gf256_breaker_residues)
+            for (uint32_t breaker = 0u;
+                 breaker < independent_gf256_breaker_rows;
+                 ++breaker)
             {
                 uint32_t gf256_breaker_residue = offset +
                     (column < first_heavy_column ?
-                        gf256_breaker_shift : subfield_shift);
+                        gf256_breaker_shifts[breaker] : subfield_shift);
                 if (gf256_breaker_residue >= coefficient_period) {
                     gf256_breaker_residue -= coefficient_period;
                 }
                 gf256_breaker_accumulators[
+                    (size_t)breaker * coefficient_period +
                     gf256_breaker_residue].Add(value);
                 ++stats.BlockXors;
             }
@@ -1629,8 +1663,12 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
     {
         subfield_accumulators[residue].Flush();
         extension_accumulators[residue].Flush();
-        if (independent_gf256_breaker_residues) {
-            gf256_breaker_accumulators[residue].Flush();
+        for (uint32_t breaker = 0u;
+             breaker < independent_gf256_breaker_rows;
+             ++breaker)
+        {
+            gf256_breaker_accumulators[
+                (size_t)breaker * coefficient_period + residue].Flush();
         }
     }
 
@@ -1645,8 +1683,12 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             canonical_subfield_rows,
             subfield_buckets.data() + (size_t)residue * block_bytes,
             block_bytes, stats);
-        if (independent_gf256_breaker_residues)
+        for (uint32_t breaker = 0u;
+             breaker < independent_gf256_breaker_rows;
+             ++breaker)
         {
+            const uint32_t gf256_breaker_row =
+                canonical_subfield_rows + breaker;
             const uint8_t scale =
                 cached_rows.Subfield[gf256_breaker_row][residue];
             AddScaledBlock(
@@ -1654,7 +1696,8 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
                     subfield_destinations[gf256_breaker_row]),
                 scale,
                 gf256_breaker_buckets.data() +
-                    (size_t)residue * block_bytes,
+                    ((size_t)breaker * coefficient_period + residue) *
+                        block_bytes,
                 block_bytes, stats);
         }
         const uint8_t* extension_bucket =
@@ -1837,24 +1880,29 @@ WirehairResult SolveMixedCompletionQuotient(
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    const bool independent_gf256_breaker_residues =
-        ActiveMixedIndependentGF256BreakerResidues();
-    const uint32_t gf256_breaker_row = subfield_rows - 1u;
+    const uint32_t independent_gf256_breaker_rows =
+        ActiveMixedIndependentGF256BreakerRows();
     const uint32_t canonical_subfield_rows =
-        subfield_rows -
-        (independent_gf256_breaker_residues ? 1u : 0u);
+        subfield_rows - independent_gf256_breaker_rows;
     const uint32_t first_heavy_column = column_count - H;
-    const uint64_t dual_bucket_bytes =
+    const uint64_t fused_bucket_bytes =
         (uint64_t)coefficient_period * block_bytes *
-        (independent_gf256_breaker_residues ? 3u : 2u);
-    // A sequential dual-bucket scan improves bandwidth-bound large decoders,
+        (2u + independent_gf256_breaker_rows);
+    // A sequential fused-bucket scan improves bandwidth-bound large decoders,
     // but its accumulator setup hurts small systems and its random writes
-    // hurt once the two bucket sets no longer fit comfortably in cache.
-    const bool use_dual_residue_buckets =
+    // hurt once the bucket sets no longer fit comfortably in cache.
+    const bool forced_fused_scratch_is_bounded =
+        fused_bucket_bytes <= (UINT64_C(256) << 10);
+    const uint64_t auto_fused_scratch_limit =
+        independent_gf256_breaker_rows <= 1u ?
+            (UINT64_C(128) << 10) : (UINT64_C(256) << 10);
+    const bool use_fused_residue_buckets =
         independent_extension_residues &&
-        column_count >= 30000u &&
-        block_bytes >= 1024u &&
-        dual_bucket_bytes <= (UINT64_C(128) << 10);
+        ((MixedFusedScheduleBucketsMode > 0 &&
+          forced_fused_scratch_is_bounded) ||
+         (MixedFusedScheduleBucketsMode < 0 &&
+          fused_bucket_bytes <= auto_fused_scratch_limit &&
+          column_count >= 30000u && block_bytes >= 1024u));
     std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
 #else
     std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
@@ -1905,12 +1953,12 @@ WirehairResult SolveMixedCompletionQuotient(
     };
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #if defined(__GNUC__) || defined(__clang__)
-    if (__builtin_expect(use_dual_residue_buckets, false))
+    if (__builtin_expect(use_fused_residue_buckets, false))
 #else
-    if (use_dual_residue_buckets)
+    if (use_fused_residue_buckets)
 #endif
     {
-        if (!AccumulateDualMixedCompletionRhs(
+        if (!AccumulateFusedMixedCompletionRhs(
                 column_count, coefficient_period, populated_residues,
                 subfield_rows, block_bytes, elements, extension_rows,
                 inactive_index, values, *cached_rows,
@@ -2013,8 +2061,12 @@ WirehairResult SolveMixedCompletionQuotient(
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (independent_gf256_breaker_residues)
+    for (uint32_t breaker = 0u;
+         breaker < independent_gf256_breaker_rows;
+         ++breaker)
     {
+        const uint32_t gf256_breaker_row =
+            canonical_subfield_rows + breaker;
         for (uint32_t residue = 0u;
              residue < populated_residues; ++residue)
         {
@@ -2028,7 +2080,8 @@ WirehairResult SolveMixedCompletionQuotient(
                  block_base += coefficient_period)
             {
                 const uint32_t breaker_shift =
-                    ActiveMixedGF256BreakerResidueBlockShift(block_index);
+                    ActiveMixedGF256BreakerResidueBlockShift(
+                        breaker, block_index);
                 const uint32_t canonical_shift =
                     ActiveMixedResidueBlockShift(block_index++);
                 const uint32_t breaker_unshifted =
@@ -2792,6 +2845,20 @@ void SetMixedNullWitnessDiagnosticForTesting(
         *diagnostic = MixedNullWitnessDiagnostic{};
     }
     MixedNullWitnessSink = diagnostic;
+}
+
+bool SetMixedFusedScheduleBucketsModeForTesting(int32_t mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    MixedFusedScheduleBucketsMode = mode;
+    return true;
+}
+
+int32_t ActiveMixedFusedScheduleBucketsModeForTesting()
+{
+    return MixedFusedScheduleBucketsMode;
 }
 
 void SetMixedProjectionOracleForTesting(bool enabled)
@@ -5100,11 +5167,14 @@ WH2_WITNESS_NOINLINE uint16_t DirectMixedCoefficient(
     uint32_t first_heavy_column)
 {
     if (heavy_row < subfield_rows) {
-        if (ActiveMixedIndependentGF256BreakerResidues() &&
-            heavy_row + 1u == subfield_rows)
+        const uint32_t breaker_rows =
+            ActiveMixedIndependentGF256BreakerRows();
+        const uint32_t first_breaker_row = subfield_rows - breaker_rows;
+        if (heavy_row >= first_breaker_row)
         {
             return coefficients.Subfield[heavy_row][
                 ActiveMixedGF256BreakerCoefficientResidue(
+                    heavy_row - first_breaker_row,
                     column, first_heavy_column)];
         }
         return coefficients.Subfield[heavy_row][
@@ -6304,13 +6374,15 @@ bool VerifyPrecodeSolution(
     const bool independent_extension_residues =
         cached_mixed_coefficients &&
         ActiveMixedIndependentExtensionResidues();
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    const bool independent_gf256_breaker_residues =
-        cached_mixed_coefficients &&
-        ActiveMixedIndependentGF256BreakerResidues();
-#endif
     const uint32_t mixed_subfield_rows = cached_mixed_coefficients ?
         ActiveMixedGF256Rows() : 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const uint32_t independent_gf256_breaker_rows =
+        cached_mixed_coefficients ?
+            ActiveMixedIndependentGF256BreakerRows() : 0u;
+    const uint32_t first_gf256_breaker_row =
+        mixed_subfield_rows - independent_gf256_breaker_rows;
+#endif
     const MixedCoefficientRows* mixed_rows = cached_mixed_coefficients ?
         GetMixedCoefficientRows() : nullptr;
     if (cached_mixed_coefficients && !mixed_rows) {
@@ -6423,9 +6495,10 @@ bool VerifyPrecodeSolution(
             {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
                 const uint32_t subfield_residue =
-                    independent_gf256_breaker_residues &&
-                    heavy + 1u == mixed_subfield_rows ?
+                    heavy >= first_gf256_breaker_row &&
+                    heavy < mixed_subfield_rows ?
                         ActiveMixedGF256BreakerCoefficientResidue(
+                            heavy - first_gf256_breaker_row,
                             column, L - H) :
                         active_coefficient_residue;
 #endif

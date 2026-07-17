@@ -386,9 +386,10 @@ bool ComputePrecodeValues(
         const bool independent_extension_residues =
             ActiveMixedIndependentExtensionResidues();
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        const bool independent_gf256_breaker_residues =
-            ActiveMixedIndependentGF256BreakerResidues();
-        const uint32_t gf256_breaker_row = subfield_rows - 1u;
+        const uint32_t independent_gf256_breaker_rows =
+            ActiveMixedIndependentGF256BreakerRows();
+        const uint32_t first_gf256_breaker_row =
+            subfield_rows - independent_gf256_breaker_rows;
 #endif
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
@@ -429,8 +430,7 @@ bool ComputePrecodeValues(
         {
             for (uint32_t r = 0; r < subfield_rows; ++r) {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                if (independent_gf256_breaker_residues &&
-                    r == gf256_breaker_row)
+                if (r >= first_gf256_breaker_row)
                 {
                     continue;
                 }
@@ -439,8 +439,7 @@ bool ComputePrecodeValues(
             }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             const uint32_t destination_count =
-                subfield_rows -
-                (independent_gf256_breaker_residues ? 1u : 0u);
+                first_gf256_breaker_row;
             gf256_muladd_multi_mem(
                 gf8_destinations, gf8_scales,
                 (int)destination_count, value, bytes);
@@ -457,12 +456,16 @@ bool ComputePrecodeValues(
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         const auto accumulate_gf256_breaker_residue = [&](
-            uint32_t m, const uint8_t* value)
+            uint32_t breaker_index,
+            uint32_t m,
+            const uint8_t* value)
         {
+            const uint32_t row =
+                first_gf256_breaker_row + breaker_index;
             gf256_muladd_mem(
                 gf8_rhs.data() +
-                    (size_t)gf256_breaker_row * block_bytes,
-                gf8_coefficient_rows[gf256_breaker_row][m],
+                    (size_t)row * block_bytes,
+                gf8_coefficient_rows[row][m],
                 value, bytes);
             ++st.HeavyMulAdds;
         };
@@ -525,6 +528,82 @@ bool ComputePrecodeValues(
             use_residue_buckets &&
             (uint64_t)window * block_bytes <=
                 GetHeavyBucketStorageLimit();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const uint32_t independent_schedule_count = 1u +
+            (independent_extension_residues ? 1u : 0u) +
+            independent_gf256_breaker_rows;
+        const bool use_fused_full_bucket_storage =
+            use_full_bucket_storage &&
+            (independent_extension_residues ||
+             independent_gf256_breaker_rows != 0u) &&
+            (uint64_t)independent_schedule_count * window * block_bytes <=
+                GetHeavyBucketStorageLimit();
+        if (use_fused_full_bucket_storage)
+        {
+            const uint32_t schedule_count = independent_schedule_count;
+            std::vector<uint8_t> buckets(
+                (size_t)schedule_count * window * block_bytes, 0u);
+            void* destinations[2u + kMixedGF256BreakerRowsMax];
+            uint8_t scales[2u + kMixedGF256BreakerRowsMax];
+            std::fill(scales, scales + schedule_count, uint8_t{1});
+            for (uint32_t c = 0u; c < heavy_base; ++c)
+            {
+                uint32_t schedule = 0u;
+                destinations[schedule++] = buckets.data() +
+                    (size_t)ActiveMixedCoefficientResidue(c) * block_bytes;
+                if (independent_extension_residues) {
+                    destinations[schedule++] = buckets.data() +
+                        ((size_t)window +
+                         ActiveMixedExtensionCoefficientResidue(c)) *
+                            block_bytes;
+                }
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker)
+                {
+                    destinations[schedule++] = buckets.data() +
+                        ((size_t)(1u +
+                            (independent_extension_residues ? 1u : 0u) +
+                            breaker) * window +
+                         ActiveMixedGF256BreakerCoefficientResidue(
+                            breaker, c, heavy_base)) * block_bytes;
+                }
+                gf256_muladd_multi_mem(
+                    destinations, scales, (int)schedule_count,
+                    column_value(c), bytes);
+                st.HeavyBucketXors += schedule_count;
+            }
+            for (uint32_t m = 0u; m < window; ++m)
+            {
+                if (!accumulate_subfield_residue(
+                        m, buckets.data() + (size_t)m * block_bytes))
+                {
+                    return false;
+                }
+                uint32_t schedule = 1u;
+                if (independent_extension_residues)
+                {
+                    if (!accumulate_extension_residue(
+                            m, buckets.data() +
+                                ((size_t)schedule * window + m) *
+                                    block_bytes))
+                    {
+                        return false;
+                    }
+                    ++schedule;
+                }
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker, ++schedule)
+                {
+                    accumulate_gf256_breaker_residue(
+                        breaker, m, buckets.data() +
+                            ((size_t)schedule * window + m) * block_bytes);
+                }
+            }
+        }
+        else
+#endif
         if (use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
@@ -630,7 +709,11 @@ bool ComputePrecodeValues(
             }
         }
 
-        if (independent_extension_residues)
+        if (independent_extension_residues
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            && !use_fused_full_bucket_storage
+#endif
+            )
         {
             if (use_full_bucket_storage)
             {
@@ -695,60 +778,81 @@ bool ComputePrecodeValues(
         }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        if (independent_gf256_breaker_residues)
+        if (independent_gf256_breaker_rows != 0u &&
+            !use_fused_full_bucket_storage)
         {
             if (use_full_bucket_storage)
             {
                 std::vector<uint8_t> bucket(
                     (size_t)window * block_bytes, 0u);
-                for (uint32_t c = 0u; c < heavy_base; ++c)
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker)
                 {
-                    const uint32_t m =
-                        ActiveMixedGF256BreakerCoefficientResidue(
-                            c, heavy_base);
-                    gf256_add_mem(
-                        bucket.data() + (size_t)m * block_bytes,
-                        column_value(c), bytes);
-                    ++st.HeavyBucketXors;
-                }
-                for (uint32_t m = 0u; m < window; ++m) {
-                    accumulate_gf256_breaker_residue(
-                        m, bucket.data() + (size_t)m * block_bytes);
+                    std::fill(
+                        bucket.begin(), bucket.end(), uint8_t{0});
+                    for (uint32_t c = 0u; c < heavy_base; ++c)
+                    {
+                        const uint32_t m =
+                            ActiveMixedGF256BreakerCoefficientResidue(
+                                breaker, c, heavy_base);
+                        gf256_add_mem(
+                            bucket.data() + (size_t)m * block_bytes,
+                            column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                    for (uint32_t m = 0u; m < window; ++m) {
+                        accumulate_gf256_breaker_residue(
+                            breaker, m,
+                            bucket.data() + (size_t)m * block_bytes);
+                    }
                 }
             }
             else if (use_residue_buckets)
             {
                 std::vector<uint8_t> bucket(block_bytes, 0u);
-                for (uint32_t m = 0u; m < window; ++m)
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker)
                 {
-                    std::fill(
-                        bucket.begin(), bucket.end(), uint8_t{0});
-                    uint32_t block_index = 0u;
-                    for (uint32_t block_base = 0u;
-                         block_base < heavy_base;
-                         block_base += window)
+                    for (uint32_t m = 0u; m < window; ++m)
                     {
-                        const uint32_t block_shift =
-                            ActiveMixedGF256BreakerResidueBlockShift(
-                                block_index++);
-                        const uint32_t unshifted = m >= block_shift ?
-                            m - block_shift : m + window - block_shift;
-                        const uint32_t c = block_base + unshifted;
-                        if (c >= heavy_base) continue;
-                        gf256_add_mem(
-                            bucket.data(), column_value(c), bytes);
-                        ++st.HeavyBucketXors;
+                        std::fill(
+                            bucket.begin(), bucket.end(), uint8_t{0});
+                        uint32_t block_index = 0u;
+                        for (uint32_t block_base = 0u;
+                             block_base < heavy_base;
+                             block_base += window)
+                        {
+                            const uint32_t block_shift =
+                                ActiveMixedGF256BreakerResidueBlockShift(
+                                    breaker, block_index++);
+                            const uint32_t unshifted = m >= block_shift ?
+                                m - block_shift : m + window - block_shift;
+                            const uint32_t c = block_base + unshifted;
+                            if (c >= heavy_base) continue;
+                            gf256_add_mem(
+                                bucket.data(), column_value(c), bytes);
+                            ++st.HeavyBucketXors;
+                        }
+                        accumulate_gf256_breaker_residue(
+                            breaker, m, bucket.data());
                     }
-                    accumulate_gf256_breaker_residue(m, bucket.data());
                 }
             }
             else
             {
-                for (uint32_t c = 0u; c < heavy_base; ++c) {
-                    accumulate_gf256_breaker_residue(
-                        ActiveMixedGF256BreakerCoefficientResidue(
-                            c, heavy_base),
-                        column_value(c));
+                for (uint32_t breaker = 0u;
+                     breaker < independent_gf256_breaker_rows;
+                     ++breaker)
+                {
+                    for (uint32_t c = 0u; c < heavy_base; ++c) {
+                        accumulate_gf256_breaker_residue(
+                            breaker,
+                            ActiveMixedGF256BreakerCoefficientResidue(
+                                breaker, c, heavy_base),
+                            column_value(c));
+                    }
                 }
             }
         }

@@ -371,6 +371,29 @@ null witness, but costs one additional active-value bucket/XOR pass in both
 encoder and decoder.  The hook is deliberately limited to shared-X, hashed,
 independent-B, 11+4, P>H test configurations and does not change a production
 wire profile.
+The bounded generalization
+`--mixed-independent-gf256-breaker-rows 0|1|2|3` assigns distinct C, D, and E
+partitions to the corresponding suffix rows, while retaining A for every
+final-H coefficient.  `--mixed-fused-schedule-buckets auto|off|on` controls a
+test-only decoder path that accumulates A/B/C/D/E buckets during one column
+scan with at most 256 KiB of combined scratch.  Automatic selection retains
+the existing 128 KiB cap for zero/one breaker and uses 256 KiB only for the
+multi-breaker experiment.  The one-breaker parent was itself neutral in its
+fresh all-K confirmation (477 to 474 failures, 11 repairs versus 8
+introductions, exact p=0.648) while adding 3.64% block XOR work.  On a selected
+set of 41 exact traces from its earlier sampled prescreen where zero and one
+breaker disagreed, two breakers retained
+all 28 one-breaker repairs and removed all 13 one-breaker introductions;
+three breakers produced the same outcomes.  A further 112 shared-failure and
+320 shared-success replay introduced no two- or three-breaker differences.
+These are deliberately discriminating replays, not a broad holdout.  Pinned,
+alternating full-payload K=48466 solves at 1280 bytes measured two breakers
+1.9% slower than one and three breakers 3.5% slower, even with the fused path;
+the extra schedules increased logical block XORs by 3.5% and 7.0% respectively.
+The fused two-breaker scan itself reduced cycles by about 3%, instructions by
+about 5%, and cache misses by about 10% versus separate scans.  Thus two rows
+are a useful reliability ceiling and motivate cheaper composite schedules,
+but neither multi-row setting is a promotion candidate as implemented.
 The test-only
 `--packet-peel-seed-table normalized-h15-v1` selects an offline-tuned packet
 seed XOR at the 23 hard block counts in `[4,41]` and leaves every other K at

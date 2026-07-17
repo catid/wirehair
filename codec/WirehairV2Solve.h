@@ -120,6 +120,14 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
 
 /**
+    Select the experiment-only fused mixed-schedule RHS bucket path on the
+    calling thread: -1 uses the cache-size heuristic, 0 forces the separate
+    schedule scans, and 1 forces one column scan when bounded scratch fits.
+*/
+bool SetMixedFusedScheduleBucketsModeForTesting(int32_t mode);
+int32_t ActiveMixedFusedScheduleBucketsModeForTesting();
+
+/**
     Enable an independent dense-expansion oracle for mixed completion
     coefficient projection.  Balanced enable/disable calls are nestable.  Test
     code uses this to compare the optimized residue-bucket projection against
