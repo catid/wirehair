@@ -376,6 +376,123 @@ void AddScaledBlocks(
         (int)block_bytes);
 }
 
+// Add one source block to several independent destinations while it remains
+// hot in registers.  The packed binary residual back-elimination below often
+// clears one new pivot from several existing RHS rows.  Calling gf256_add_mem
+// separately rereads the same source for each destination; this loop loads it
+// once per SIMD lane and fans that value out to the destination rows.
+#if (defined(__AVX2__) || defined(GF256_TRY_TARGET_AVX2)) && \
+    !defined(WH_COUNT)
+static GF256_AVX2_TARGET void XorBlockIntoDestinationsAVX2(
+    uint8_t* const* destinations,
+    uint32_t destination_count,
+    const uint8_t* source,
+    uint32_t block_bytes)
+{
+    uint32_t offset = 0u;
+    for (; block_bytes - offset >= 32u; offset += 32u)
+    {
+        const __m256i value = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(source + offset));
+        for (uint32_t destination = 0u;
+             destination < destination_count;
+             ++destination)
+        {
+            __m256i* const output = reinterpret_cast<__m256i*>(
+                destinations[destination] + offset);
+            _mm256_storeu_si256(
+                output,
+                _mm256_xor_si256(_mm256_loadu_si256(output), value));
+        }
+    }
+    if (offset < block_bytes)
+    {
+        const uint32_t tail = block_bytes - offset;
+        for (uint32_t destination = 0u;
+             destination < destination_count;
+             ++destination)
+        {
+            gf256_add_mem(
+                destinations[destination] + offset,
+                source + offset,
+                (int)tail);
+        }
+    }
+}
+#endif
+
+#if defined(GF256_TRY_TARGET_AVX2) && !defined(WH_COUNT)
+static const gf256_x86_cpu_features& ActiveXorCpuFeatures()
+{
+    static const gf256_x86_cpu_features features = []() {
+        gf256_x86_cpu_features result = {};
+        gf256_get_active_x86_cpu_features(&result);
+        return result;
+    }();
+    return features;
+}
+#endif
+
+static bool CanXorBlockIntoDestinationsVectorized()
+{
+#if defined(WH_COUNT)
+    // Keep gf256's optional thread-local byte/call instrumentation exact.
+    // Instrumented builds retain the individually accounted baseline calls.
+    return false;
+#elif defined(__AVX2__)
+    return true;
+#elif defined(GF256_TRY_TARGET_AVX2)
+    return ActiveXorCpuFeatures().AVX2 != 0;
+#else
+    return false;
+#endif
+}
+
+static void XorBlockIntoDestinations(
+    uint8_t* const* destinations,
+    uint32_t destination_count,
+    const uint8_t* source,
+    uint32_t block_bytes)
+{
+    if (destination_count == 0u) {
+        return;
+    }
+    if (destination_count == 1u)
+    {
+        gf256_add_mem(destinations[0], source, (int)block_bytes);
+        return;
+    }
+#if defined(WH_COUNT)
+    for (uint32_t destination = 0u;
+         destination < destination_count;
+         ++destination)
+    {
+        gf256_add_mem(
+            destinations[destination], source, (int)block_bytes);
+    }
+    return;
+#elif defined(__AVX2__)
+    XorBlockIntoDestinationsAVX2(
+        destinations, destination_count, source, block_bytes);
+    return;
+#elif defined(GF256_TRY_TARGET_AVX2)
+    // The only caller reaches this helper after the runtime capability gate.
+    // Avoid repeating CPUID-derived dispatch for every four destinations.
+    CAT_DEBUG_ASSERT(ActiveXorCpuFeatures().AVX2 != 0);
+    XorBlockIntoDestinationsAVX2(
+        destinations, destination_count, source, block_bytes);
+    return;
+#else
+    for (uint32_t destination = 0u;
+         destination < destination_count;
+         ++destination)
+    {
+        gf256_add_mem(
+            destinations[destination], source, (int)block_bytes);
+    }
+#endif
+}
+
 class BatchedBlockXorAccumulator
 {
 public:
@@ -4577,22 +4694,66 @@ InsertPackedBinaryResidualRow(
     const uint32_t pivot_word = pivot_column >> 6;
     const uint64_t pivot_bit =
         UINT64_C(1) << (pivot_column & 63u);
-    for (uint32_t existing = 0; existing < R; ++existing)
+    // Small payloads retain the compact direct loop.  At wider payloads,
+    // batch RHS destinations so the newly inserted source row is loaded once
+    // per group while the coefficient elimination remains in exact row order.
+    if (block_bytes < 512u ||
+        !CanXorBlockIntoDestinationsVectorized())
     {
-        if (!have_pivot[existing]) {
-            continue;
+        for (uint32_t existing = 0; existing < R; ++existing)
+        {
+            if (!have_pivot[existing]) {
+                continue;
+            }
+            uint64_t* existing_coeff =
+                pivot_coeff.data() + (size_t)existing * words;
+            if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
+                continue;
+            }
+            for (uint32_t word = pivot_word; word < words; ++word) {
+                existing_coeff[word] ^= coeff[word];
+            }
+            AddScaledBlock(
+                pivot_rhs.data() + (size_t)existing * block_bytes,
+                1u, rhs.data(), block_bytes, stats);
         }
-        uint64_t* existing_coeff =
-            pivot_coeff.data() + (size_t)existing * words;
-        if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
-            continue;
+    }
+    else
+    {
+        // Four destinations plus the shared source stay within the practical
+        // stream budget on current cores.  Two destinations waste source
+        // loads, while eight or sixteen interleaved wide rows create enough
+        // memory stalls to erase the saved instructions.
+        static const uint32_t kDestinationBatch = 4u;
+        uint8_t* destinations[kDestinationBatch];
+        uint32_t destination_count = 0u;
+        const auto flush_destinations = [&]() {
+            XorBlockIntoDestinations(
+                destinations, destination_count,
+                rhs.data(), block_bytes);
+            destination_count = 0u;
+        };
+        for (uint32_t existing = 0; existing < R; ++existing)
+        {
+            if (!have_pivot[existing]) {
+                continue;
+            }
+            uint64_t* existing_coeff =
+                pivot_coeff.data() + (size_t)existing * words;
+            if ((existing_coeff[pivot_word] & pivot_bit) == 0u) {
+                continue;
+            }
+            for (uint32_t word = pivot_word; word < words; ++word) {
+                existing_coeff[word] ^= coeff[word];
+            }
+            destinations[destination_count++] =
+                pivot_rhs.data() + (size_t)existing * block_bytes;
+            ++stats.BlockXors;
+            if (destination_count == kDestinationBatch) {
+                flush_destinations();
+            }
         }
-        for (uint32_t word = pivot_word; word < words; ++word) {
-            existing_coeff[word] ^= coeff[word];
-        }
-        AddScaledBlock(
-            pivot_rhs.data() + (size_t)existing * block_bytes,
-            1u, rhs.data(), block_bytes, stats);
+        flush_destinations();
     }
 
     std::memcpy(
@@ -5517,7 +5678,12 @@ WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
             127u, 128u, 129u,
             191u, 192u, 193u
         };
-        const uint32_t block_sizes[] = {2u, 4096u};
+        const uint32_t block_sizes[] = {
+            2u,
+            511u, 512u, 513u,
+            543u,
+            4096u
+        };
         for (uint32_t R : widths)
         {
             const uint32_t words = PackedWordCount(R);
@@ -5526,10 +5692,11 @@ WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
                 (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
             for (uint32_t block_bytes : block_sizes)
             {
-                // The 4-KiB cases select the batched RHS path.  One complete
-                // set around the first word boundary covers that separate
-                // payload kernel; wider cases focus on coefficient packing.
-                if (R > 65u && block_bytes == 4096u) continue;
+                // One complete set around the first word boundary covers the
+                // direct/batched threshold, exact SIMD widths, short tails,
+                // and a 4-KiB payload.  Wider cases focus on coefficient
+                // packing with the compact payload.
+                if (R > 65u && block_bytes != 2u) continue;
 
                 uint64_t random_state =
                     UINT64_C(0x6a09e667f3bcc909) ^
