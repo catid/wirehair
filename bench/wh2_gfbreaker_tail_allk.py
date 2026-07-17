@@ -1017,11 +1017,30 @@ def run_campaign(args: argparse.Namespace) -> None:
     for group in range(GROUP_COUNT):
         bins[group % len(cpus)].append(group)
     total = len(all_jobs)
-    already = sum(
-        (raw / f"{job.stem}.stdout").is_file() and
-        (raw / f"{job.stem}.stderr").is_file()
-        for job in all_jobs
-    )
+    expected_raw_names = {
+        f"{job.stem}.{extension}"
+        for job in all_jobs for extension in ("stdout", "stderr")
+    }
+    actual_raw_names = {path.name for path in raw.iterdir()}
+    if not actual_raw_names.issubset(expected_raw_names):
+        common.die("raw directory contains an unexpected pre-run artifact")
+    preexisting_jobs: set[int] = set()
+    for job in all_jobs:
+        stdout_path = raw / f"{job.stem}.stdout"
+        stderr_path = raw / f"{job.stem}.stderr"
+        if stdout_path.exists() or stderr_path.exists():
+            if not stdout_path.exists() or not stderr_path.exists():
+                common.die(f"{job.stem}: invalid pre-run raw pair")
+            common.regular_file(stdout_path, "pre-run stdout")
+            common.regular_file(stderr_path, "pre-run stderr")
+            if stderr_path.stat().st_size:
+                common.die(f"{job.stem}: nonempty pre-run stderr")
+            parse_job_output(
+                stdout_path.read_bytes(), job, strata[job.stratum],
+                all_groups[job.group],
+            )
+            preexisting_jobs.add(job.job)
+    already = len(preexisting_jobs)
     completed = already
     progress_lock = threading.Lock()
     start = time.monotonic()
@@ -1092,6 +1111,14 @@ def run_campaign(args: argparse.Namespace) -> None:
                 monitor.stop(require_two=not abort.is_set())
             finally:
                 if abort.is_set() and monitor.samples < 2:
+                    if not poison_path.exists():
+                        for job in all_jobs:
+                            if job.job in preexisting_jobs:
+                                continue
+                            for extension in ("stdout", "stderr"):
+                                (raw / f"{job.stem}.{extension}").unlink(
+                                    missing_ok=True,
+                                )
                     thermal_path.unlink(missing_ok=True)
     finally:
         for signum, previous in previous_signals.items():
@@ -1484,6 +1511,24 @@ def exact_p_values(totals: Counter[str]) -> dict[str, dict[str, object]]:
     }
 
 
+def exact_probability_at_most(
+    probability: dict[str, object], numerator: int, denominator: int,
+) -> bool:
+    raw_numerator = probability.get("numerator")
+    raw_denominator = probability.get("denominator")
+    if (not isinstance(raw_numerator, str) or
+        not isinstance(raw_denominator, str) or
+        not re.fullmatch(r"0x(0|[1-9a-f][0-9a-f]*)", raw_numerator) or
+        not re.fullmatch(r"0x[1-9a-f][0-9a-f]*", raw_denominator)):
+        common.die("exact probability ratio is not canonical hexadecimal")
+    observed_numerator = int(raw_numerator, 16)
+    observed_denominator = int(raw_denominator, 16)
+    if (not 0 <= observed_numerator <= observed_denominator or
+        numerator < 0 or denominator <= 0):
+        common.die("exact probability ratio is outside [0,1]")
+    return observed_numerator * denominator <= numerator * observed_denominator
+
+
 def analysis_gates(
     totals: Counter[str], work: dict[str, object],
     p_values: dict[str, dict[str, object]],
@@ -1517,11 +1562,11 @@ def analysis_gates(
             totals["nested_repair_current_r2"] >
             totals["nested_intro_current_r2"],
         "nested_exact_p_le_0_05_vs_r0":
-            Decimal(str(p_values["r0"]["decimal"])) <= Decimal("0.05"),
+            exact_probability_at_most(p_values["r0"], 1, 20),
         "nested_exact_p_le_0_05_vs_r1":
-            Decimal(str(p_values["r1"]["decimal"])) <= Decimal("0.05"),
+            exact_probability_at_most(p_values["r1"], 1, 20),
         "nested_exact_p_le_0_05_vs_current_r2":
-            Decimal(str(p_values["current_r2"]["decimal"])) <= Decimal("0.05"),
+            exact_probability_at_most(p_values["current_r2"], 1, 20),
         "no_adverse_schedule_slice_vs_current_r2": all(
             counter["nested_repair_current_r2"] >=
                 counter["nested_intro_current_r2"]
