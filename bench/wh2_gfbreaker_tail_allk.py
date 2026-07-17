@@ -859,7 +859,7 @@ class ThermalMonitor:
         self.thread = threading.Thread(target=worker, name="thermal-monitor", daemon=True)
         self.thread.start()
 
-    def stop(self) -> None:
+    def stop(self, require_two: bool = True) -> None:
         deadline = time.monotonic() + 5
         while (self.samples < 2 and self.error is None and
                not self.abort.is_set() and self.thread and self.thread.is_alive() and
@@ -872,7 +872,7 @@ class ThermalMonitor:
                 common.die("thermal monitor did not stop")
         if self.error:
             raise self.error
-        if self.samples < 2:
+        if require_two and self.samples < 2:
             common.die("thermal monitor captured fewer than two samples")
 
 
@@ -1062,7 +1062,11 @@ def run_campaign(args: argparse.Namespace) -> None:
             kill_active(signal.SIGKILL)
             raise
         finally:
-            monitor.stop()
+            try:
+                monitor.stop(require_two=not abort.is_set())
+            finally:
+                if abort.is_set() and monitor.samples < 2:
+                    thermal_path.unlink(missing_ok=True)
     finally:
         for signum, previous in previous_signals.items():
             signal.signal(signum, previous)
