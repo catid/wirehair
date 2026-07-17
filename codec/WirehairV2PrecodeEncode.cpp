@@ -279,10 +279,13 @@ bool ComputePrecodeValues(
     // --- Shuffle-2 dense rows ---
     // Transform to consecutive-row differences: diff row 0 = row 0, diff
     // row r = row r XOR row r-1 (unit bidiagonal row transform: same rank,
-    // same solution).  Each difference is the flip pair, so the known part
-    // of diff row r > 0 costs at most 2 block ops; dense-column flips only
-    // toggle the row's corner mask.  Then Gauss-Jordan solves the D2 x D2
-    // GF(2) corner with the known sums as block-valued RHS.
+    // same solution).  Each certified difference is the flip pair, so the
+    // known part of diff row r > 0 costs at most 2 block ops; dense-column
+    // flips only toggle the row's corner mask.  The experiment-only
+    // two-anchor schedule deliberately makes row 6 -> 7 dense, and this
+    // generic path accumulates that larger difference directly.  Then
+    // Gauss-Jordan solves the D2 x D2 GF(2) corner with the known sums as
+    // block-valued RHS.
     if (D2 > 0u)
     {
         std::vector<uint8_t> rhs((size_t)D2 * block_bytes);

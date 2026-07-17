@@ -344,6 +344,40 @@ if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
 endif()
 reject_sanitizer("${out}${err}" "mixed null-witness post-run replay")
 
+# The same folded loss stream is a true D12 sparse-alias fixture.  Keep this
+# separate from the historical D13 diagnostic above: the two-anchor hook must
+# repair the default-D12 witness without changing the checked-in D13 golden.
+set(d12_witness_args
+    precodefail --N 945 --bb-list 1280 --overhead 0 --trials 2 --threads 2
+    --loss 0.35 --seed 0xa11ce520f84d877e --schedule burst
+    --completion mixed --mix-count 2 --mixed-gf256-rows 11
+    --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 68
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 78 --mixed-null-witnesses)
+run_bench(result out err ${d12_witness_args})
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "945,1280,periodic,2,0,2,1,1,0," OR
+    NOT out MATCHES
+        "N=945,bb=1280,trial=0,status=captured,reason=verified.*L=1018,R=86,binary_rank=71,q=15,quotient_rank=14,d=1.*hash=fbbd73391d7826a04e44d80115698ea5")
+    message(FATAL_ERROR
+        "default-D12 sparse witness replay failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "default-D12 sparse witness replay")
+
+run_bench(result out err ${d12_witness_args} --binary-dense-two-anchor)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "binary_dense_two_anchor=1" OR
+    NOT out MATCHES "945,1280,periodic,2,0,2,2,0,0," OR
+    NOT out MATCHES
+        "N=945,bb=1280,trial=-1,status=none,reason=no_need_more")
+    message(FATAL_ERROR
+        "two-anchor D12 witness repair failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "two-anchor D12 witness repair")
+
 # A second real solve pins canonical full-L ordering and hashes for d=2.
 run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 0
     --trials 1 --threads 1 --loss 0.35 --seed 3 --schedule adversarial
@@ -800,6 +834,23 @@ expect_failure("--mixed-extension-residue-seed-xor requires" precodefail
 expect_success("binary_dense_rows_override=16" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-rows 16)
+expect_success("binary_dense_two_anchor=1" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor)
+expect_success(
+    "packet_peel_seed_table=normalized-h15-v4.*binary_dense_two_anchor=1"
+    precodefail --N 64 --bb-list 64 --overhead 0 --trials 1 --threads 1
+    --loss 0.35 --schedule burst --completion mixed --mix-count 2
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 78 --seed-block-bytes 1280
+    --packet-peel-seed-table normalized-h15-v4
+    --binary-dense-two-anchor)
+expect_failure("requires 12 binary dense rows" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor --binary-dense-rows 13)
 expect_failure("--binary-dense-rows must be in" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --binary-dense-rows 0)

@@ -138,6 +138,11 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     {
         return false;
     }
+    if (params.DenseTwoAnchor &&
+        (params.DenseRows != 12u || params.DenseIdentityCorner))
+    {
+        return false;
+    }
     return !params.DenseIdentityCorner ||
         known_span >= 2u * (uint64_t)(params.DenseRows >> 1);
 }
@@ -155,6 +160,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);
     params.DenseIdentityCorner = false;
+    params.DenseTwoAnchor = false;
     params.Seed = seed;
     return params;
 }
@@ -284,7 +290,21 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         for (uint32_t half = 0; half < 2u; ++half)
         {
             UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-            for (uint32_t ii = 0; ii < halves[half]; ++ii)
+            uint32_t flip_count = halves[half];
+            if (params.DenseTwoAnchor && half == 1u)
+            {
+                // Reuse the certified second-half shuffle, but turn its
+                // balanced set-half into a new dense equation.  One of the
+                // five baseline flips becomes the anchor emission, keeping
+                // D2, RNG consumption, and all rows 0..6 unchanged.
+                std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                for (uint32_t i = 0; i < set_count; ++i) {
+                    bitmap[deck[i]] = 1u;
+                }
+                emit_row();
+                --flip_count;
+            }
+            for (uint32_t ii = 0; ii < flip_count; ++ii)
             {
                 // Deck entries at distinct positions are distinct columns,
                 // so each flip pair changes exactly two columns
@@ -387,7 +407,10 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         {
             return false;
         }
-        if (row_index == 0u)
+        const uint32_t second_anchor = 1u + (D2 >> 1);
+        const bool is_anchor = row_index == 0u ||
+            (params.DenseTwoAnchor && row_index == second_anchor);
+        if (is_anchor)
         {
             const size_t first_count = params.DenseIdentityCorner ?
                 known_count : row.size();

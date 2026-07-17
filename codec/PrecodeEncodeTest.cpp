@@ -1082,6 +1082,51 @@ bool TestCorrectnessDoctored()
     return true;
 }
 
+bool TestTwoAnchorPhasedEncoder()
+{
+    // The public phased encoder is not the intended benchmark path for this
+    // experiment, but it must still evaluate the deliberately dense row 6->7
+    // difference correctly whenever the full-span dense corner is feasible.
+    const uint32_t K = 2u;
+    const uint32_t block_bytes = 13u;
+    for (uint32_t seed = 0u; seed < 10000u; ++seed)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(K, seed);
+        params.DenseTwoAnchor = true;
+        wirehair_v2::PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system)) {
+            return false;
+        }
+        if (!wirehair_v2::DenseCornerInvertible(system)) {
+            continue;
+        }
+
+        const uint32_t parity_count = system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        std::vector<uint8_t> source((size_t)K * block_bytes);
+        std::vector<uint8_t> parity((size_t)parity_count * block_bytes);
+        FillRandomBlocks(
+            source.data(), source.size(), UINT64_C(0x7a12e0c0) + seed);
+        if (!wirehair_v2::ComputePrecodeValues(
+                system, source.data(), block_bytes, parity.data()) ||
+            !VerifyValues(
+                system, source.data(), parity.data(), block_bytes,
+                "two-anchor"))
+        {
+            std::fprintf(stderr,
+                "two-anchor phased encode failed at seed=%u\n", seed);
+            return false;
+        }
+        std::printf(
+            "two-anchor phased encoder seed=%u: PASS\n", seed);
+        return true;
+    }
+    std::fprintf(stderr,
+        "two-anchor phased encoder found no feasible tiny corner\n");
+    return false;
+}
+
 bool TestFeasibility(uint32_t trials)
 {
     const uint32_t Ks[] = {1000u, 3200u, 32000u};
@@ -3217,6 +3262,7 @@ int main(int argc, char** argv)
     bool ok = true;
     ok = TestCorrectnessAsBuilt() && ok;
     ok = TestCorrectnessDoctored() && ok;
+    ok = TestTwoAnchorPhasedEncoder() && ok;
     ok = TestMalformedDenseCorner() && ok;
     ok = TestStrictSystemValidation() && ok;
     ok = TestCostModel() && ok;
