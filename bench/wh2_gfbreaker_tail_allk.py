@@ -308,7 +308,7 @@ def rebuild_nested_binary(worktree: Path, binary: Path) -> tuple[Path, list[str]
         common.die("nested CMake build tree is not configured from this worktree")
     command = [
         "cmake", "--build", str(build_dir), "--target", "wirehair_v2_bench",
-        "-j", str(min(120, os.cpu_count() or 1)),
+        "--clean-first", "-j", str(min(120, os.cpu_count() or 1)),
     ]
     try:
         subprocess.run(command, check=True)
@@ -508,13 +508,13 @@ def verify_frozen(out: Path) -> tuple[dict[str, object], tuple[Stratum, ...], tu
         build_dir != build_source / "build-tail" or
         Path(str(source.get("nested_binary_source"))) !=
             build_dir / "codec/wirehair_v2_bench" or
-        not isinstance(build_command, list) or len(build_command) != 7 or
-        build_command[:6] != [
+        not isinstance(build_command, list) or len(build_command) != 8 or
+        build_command[:7] != [
             "cmake", "--build", str(build_dir), "--target",
-            "wirehair_v2_bench", "-j",
+            "wirehair_v2_bench", "--clean-first", "-j",
         ] or
-        not isinstance(build_command[6], str) or
-        not build_command[6].isdigit() or not 1 <= int(build_command[6]) <= 120):
+        not isinstance(build_command[7], str) or
+        not build_command[7].isdigit() or not 1 <= int(build_command[7]) <= 120):
         common.die("frozen nested build provenance is malformed")
     screen_digest = source.get("screen_artifact_seal_sha256")
     if screen_digest != EXPECTED_SCREEN_SEAL_SHA256:
