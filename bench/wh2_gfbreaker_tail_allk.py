@@ -430,6 +430,7 @@ def prepare(args: argparse.Namespace) -> None:
         "thermal_cpu_abort_c": 90, "thermal_dimm_abort_c": 90,
         "thermal_cpu_busy_min_pct": 95, "thermal_stale_seconds": 5,
         "edac_policy": "abort-on-any-increase",
+        "thermal_policy_abort_poison": True,
     }
     common.atomic_json(frozen / "contract.json", contract)
     freeze_paths = [
@@ -548,6 +549,7 @@ def verify_frozen(out: Path) -> tuple[dict[str, object], tuple[Stratum, ...], tu
         "thermal_cpu_abort_c": 90, "thermal_dimm_abort_c": 90,
         "thermal_cpu_busy_min_pct": 95, "thermal_stale_seconds": 5,
         "edac_policy": "abort-on-any-increase",
+        "thermal_policy_abort_poison": True,
     }
     if set(contract) != set(expected_contract) | {"prepared_utc"}:
         common.die("frozen contract key set mismatch")
@@ -754,9 +756,13 @@ def validate_thermal_row(
 
 
 class ThermalMonitor:
-    def __init__(self, source: Path, destination: Path, abort: threading.Event):
+    def __init__(
+        self, source: Path, destination: Path, poison: Path,
+        abort: threading.Event,
+    ):
         self.source = common.regular_file(source, "thermal source")
         self.destination = destination
+        self.poison = poison
         self.abort = abort
         self.stop_event = threading.Event()
         self.error: BaseException | None = None
@@ -854,6 +860,19 @@ class ThermalMonitor:
             except BaseException as exc:
                 self.error = exc
                 self.abort.set()
+                try:
+                    common.atomic_json(self.poison, {
+                        "schema": SCHEMA + ".thermal_abort",
+                        "aborted_utc": utc_now(),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "samples_before_abort": self.samples,
+                        "resume_allowed": False,
+                    })
+                except BaseException as poison_exc:
+                    self.error = RuntimeError(
+                        f"thermal abort {exc!r}; poison write failed {poison_exc!r}"
+                    )
                 kill_active(signal.SIGTERM)
 
         self.thread = threading.Thread(target=worker, name="thermal-monitor", daemon=True)
@@ -957,6 +976,13 @@ def run_campaign(args: argparse.Namespace) -> None:
     thermal_dir = results / "thermal"
     raw.mkdir(parents=True, exist_ok=True)
     thermal_dir.mkdir(parents=True, exist_ok=True)
+    poison_path = results / "thermal_policy_abort.json"
+    poison_partial = poison_path.with_name(poison_path.name + ".partial")
+    if (poison_path.exists() or poison_path.is_symlink() or
+        poison_partial.exists() or poison_partial.is_symlink()):
+        common.die(
+            f"campaign root was poisoned by a thermal-policy abort: {poison_path}"
+        )
     if (results / "phase_complete.sha256").exists():
         verify_results(out)
         print(json.dumps({"already_complete": True, "output": str(out)}, sort_keys=True))
@@ -974,7 +1000,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         common.die("thermal segment index exhausted")
     thermal_path = thermal_dir / f"segment{segment:03d}.csv"
     abort = threading.Event()
-    monitor = ThermalMonitor(args.thermal, thermal_path, abort)
+    monitor = ThermalMonitor(args.thermal, thermal_path, poison_path, abort)
     environment = dict(os.environ)
     for key in list(environment):
         if key.startswith("WIREHAIR_") or key in {
