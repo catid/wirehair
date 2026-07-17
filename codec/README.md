@@ -529,6 +529,12 @@ division-free full-domain passes (131,069,952 timed calls).  Its output names
 the profile and arm and reports the exact count, checksum, elapsed time, and
 nanoseconds per lookup for ABBA scheduling.  The frozen checksums are
 `0x5f244ad7ce774dfc` for v4 and `0x447d503555521b60` for v5.
+The lookup performance gate records the median signed delta as v5 nanoseconds
+per lookup minus v4 nanoseconds per lookup and permits at most a `+2 ns`
+slowdown.  Negative values are improvements and have no lower magnitude cap.
+This one-sided definition is frozen by campaign contract and gates schemas v2
+and lookup-summary schema v2; the former absolute-delta/v1 records are rejected
+rather than reinterpreted.
 
 For decoders with at least
 30000 solver columns and 1024-byte-or-larger blocks, the two residue families

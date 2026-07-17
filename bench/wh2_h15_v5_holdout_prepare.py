@@ -42,6 +42,9 @@ LOOKUP_CHECKSUMS = {
     "normalized-h15-v4": "0x5f244ad7ce774dfc",
     "normalized-h15-v5": "0x447d503555521b60",
 }
+CONTRACT_SCHEMA = "wirehair.wh2.normalized_h15_v5.holdout.contract.v2"
+GATES_SCHEMA = "wirehair.wh2.normalized_h15_v5.holdout.gates.v2"
+LOOKUP_SUMMARY_SCHEMA = "wirehair.wh2.holdout.lookup_summary.v2"
 SCHEDULES = ("iid", "burst", "permutation", "systematic-first",
              "repair-only", "adversarial")
 LOSSES = ("0.10", "0.35", "0.50", "0.65")
@@ -554,7 +557,7 @@ def make_gates() -> dict[str, object]:
             "temperature_abort_c": 90.0,
         },
         "lookup": {
-            "absolute_median_delta_ns_max": 2.0,
+            "signed_median_delta_ns_max": 2.0,
             "lookup_specific_code_data_bytes_max": 4096,
             "logical_table_bytes_max": 2048,
             "median_ratio_max": 1.25,
@@ -591,7 +594,7 @@ def make_gates() -> dict[str, object]:
             "semantic_identity_unchanged_k": True,
             "xor_ratio_max": 1.01,
         },
-        "schema": "wirehair.wh2.normalized_h15_v5.holdout.gates.v1",
+        "schema": GATES_SCHEMA,
     }
 
 
@@ -653,7 +656,7 @@ def prepare_freeze(args: argparse.Namespace) -> None:
         "recovery_artifacts": EXPECTED_RECOVERY_ARTIFACTS,
         "recovery_input_roles": [role for role, _ in RECOVERY_INPUT_ROLES],
         "reference_binary_sha256": sha256_bytes(reference_data),
-        "schema": "wirehair.wh2.normalized_h15_v5.holdout.contract.v1",
+        "schema": CONTRACT_SCHEMA,
         "selection_completion_seal_sha256": SELECTION_COMPLETION_SHA256,
         "selection_table_sha256": TABLE_SHA256,
         "source_commitment_sha256": SOURCE_COMMITMENT_SHA256,
@@ -933,7 +936,7 @@ def validate_freeze(root: Path) -> dict[str, object]:
         "stride_groups": 120,
     }
     if (set(manifest) != expected_keys or
-            manifest.get("schema") != "wirehair.wh2.normalized_h15_v5.holdout.contract.v1" or
+            manifest.get("schema") != CONTRACT_SCHEMA or
             manifest.get("geometry") != expected_geometry or
             manifest.get("payload_artifacts") != EXPECTED_PAYLOAD_ARTIFACTS or
             manifest.get("lookup_artifacts") != EXPECTED_LOOKUP_ARTIFACTS or
@@ -1037,6 +1040,38 @@ def verify_performance_artifact_sets(root: Path) -> None:
         ("payload", "lookup"))
 
 
+def metric(value: object, label: str, allow_negative: bool = False) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        fail(f"{label}: invalid decimal")
+    if not parsed.is_finite() or (not allow_negative and parsed < 0):
+        fail(f"{label}: expected a finite {'signed' if allow_negative else 'nonnegative'} decimal")
+    return parsed
+
+
+def validate_lookup_summary(lookup: object) -> None:
+    if (not isinstance(lookup, dict) or set(lookup) != {
+            "signed_median_delta_ns", "checksums", "gate", "median_ratio",
+            "per_phase_ratios", "schema"} or
+            lookup.get("schema") != LOOKUP_SUMMARY_SCHEMA or
+            lookup.get("checksums") != LOOKUP_CHECKSUMS or
+            not isinstance(lookup.get("per_phase_ratios"), list) or
+            len(lookup["per_phase_ratios"]) != 12):
+        fail("lookup summary schema mismatch")
+    lookup_ratios = [metric(value, "lookup phase ratio")
+                     for value in lookup["per_phase_ratios"]]
+    lookup_median = (sorted(lookup_ratios)[5] + sorted(lookup_ratios)[6]) / 2
+    signed_delta = metric(
+        lookup["signed_median_delta_ns"], "lookup signed median delta",
+        allow_negative=True)
+    if (any(value <= 0 or value > Decimal("1.50") for value in lookup_ratios) or
+            metric(lookup["median_ratio"], "lookup median ratio") != lookup_median or
+            lookup_median > Decimal("1.25") or signed_delta > Decimal("2") or
+            lookup.get("gate") != "PASS"):
+        fail("lookup summary violates its exact schema or frozen gates")
+
+
 def validate_performance(root: Path) -> None:
     verify_performance_artifact_sets(root)
     for panel, manifest_path, count in (
@@ -1060,15 +1095,6 @@ def validate_performance(root: Path) -> None:
         if environment_audit.returncode != 0:
             fail(f"{panel}: independent environment audit failed: "
                  f"{environment_audit.stderr.strip()}")
-    def metric(value: object, label: str, allow_negative: bool = False) -> Decimal:
-        try:
-            parsed = Decimal(str(value))
-        except InvalidOperation:
-            fail(f"{label}: invalid decimal")
-        if not parsed.is_finite() or (not allow_negative and parsed < 0):
-            fail(f"{label}: expected a finite {'signed' if allow_negative else 'nonnegative'} decimal")
-        return parsed
-
     payload = parse_json(read_relative(root, "performance/payload_summary.json"), "payload summary")
     payload_keys = {
             "all_256_solve_ratio", "changed_98_solve_ratio", "class_coverage",
@@ -1127,22 +1153,7 @@ def validate_performance(root: Path) -> None:
             payload.get("gate") != "PASS"):
         fail("payload summary violates its exact schema or frozen gates")
     lookup = parse_json(read_relative(root, "performance/lookup_summary.json"), "lookup summary")
-    if (not isinstance(lookup, dict) or set(lookup) != {
-            "absolute_median_delta_ns", "checksums", "gate", "median_ratio",
-            "per_phase_ratios", "schema"} or
-            lookup.get("schema") != "wirehair.wh2.holdout.lookup_summary.v1" or
-            lookup.get("checksums") != LOOKUP_CHECKSUMS or
-            not isinstance(lookup.get("per_phase_ratios"), list) or
-            len(lookup["per_phase_ratios"]) != 12):
-        fail("lookup summary schema mismatch")
-    lookup_ratios = [metric(value, "lookup phase ratio") for value in lookup["per_phase_ratios"]]
-    lookup_median = (sorted(lookup_ratios)[5] + sorted(lookup_ratios)[6]) / 2
-    if (any(value <= 0 or value > Decimal("1.50") for value in lookup_ratios) or
-            metric(lookup["median_ratio"], "lookup median ratio") != lookup_median or
-            lookup_median > Decimal("1.25") or
-            metric(lookup["absolute_median_delta_ns"], "lookup absolute median delta") > Decimal("2") or
-            lookup.get("gate") != "PASS"):
-        fail("lookup summary violates its exact schema or frozen gates")
+    validate_lookup_summary(lookup)
     static = parse_json(read_relative(root, "performance/static_size_summary.json"), "static summary")
     size_keys = ("logical_table_bytes", "lookup_symbol_bytes")
     symbol_sizes = static.get("lookup_symbols") if isinstance(static, dict) else None
@@ -1663,6 +1674,46 @@ def selftest(_args: argparse.Namespace) -> None:
         fail("selftest payload job count mismatch")
     if len(parse_tsv(make_lookup_jobs(), LOOKUP_JOB_HEADER, "lookup jobs")) != 24:
         fail("selftest lookup job count mismatch")
+    frozen_gates = make_gates()
+    lookup_gates = frozen_gates.get("lookup")
+    if (frozen_gates.get("schema") != GATES_SCHEMA or
+            not isinstance(lookup_gates, dict) or
+            lookup_gates.get("signed_median_delta_ns_max") != 2.0 or
+            "absolute_median_delta_ns_max" in lookup_gates):
+        fail("selftest signed lookup gate schema mismatch")
+
+    def synthetic_lookup_summary(delta: str) -> dict[str, object]:
+        ratio_value = (Decimal("100") + Decimal(delta)) / Decimal("100")
+        ratio_text = str(ratio_value)
+        return {
+            "checksums": LOOKUP_CHECKSUMS,
+            "gate": "PASS",
+            "median_ratio": ratio_text,
+            "per_phase_ratios": [ratio_text] * 12,
+            "schema": LOOKUP_SUMMARY_SCHEMA,
+            "signed_median_delta_ns": delta,
+        }
+    for delta in ("1", "2", "-4"):
+        validate_lookup_summary(synthetic_lookup_summary(delta))
+    expect_failure(lambda: validate_lookup_summary(synthetic_lookup_summary("3")),
+                   "lookup signed slowdown above +2 ns")
+    for nonfinite in ("NaN", "Infinity", "-Infinity"):
+        nonfinite_lookup = synthetic_lookup_summary("1")
+        nonfinite_lookup["signed_median_delta_ns"] = nonfinite
+        expect_failure(
+            lambda nonfinite_lookup=nonfinite_lookup: validate_lookup_summary(
+                nonfinite_lookup),
+            f"lookup nonfinite signed delta {nonfinite}")
+    legacy_lookup = synthetic_lookup_summary("1")
+    legacy_lookup["schema"] = "wirehair.wh2.holdout.lookup_summary.v1"
+    legacy_lookup["absolute_median_delta_ns"] = legacy_lookup.pop(
+        "signed_median_delta_ns")
+    expect_failure(lambda: validate_lookup_summary(legacy_lookup),
+                   "legacy absolute lookup-summary schema")
+    malformed_lookup = synthetic_lookup_summary("1")
+    malformed_lookup["schema"] = "wirehair.wh2.holdout.lookup_summary.v3"
+    expect_failure(lambda: validate_lookup_summary(malformed_lookup),
+                   "unknown lookup-summary schema")
     reveal_rows = []
     selection_rows = []
     for partition, target in (("selection", selection_rows), ("holdout", reveal_rows)):
@@ -1826,7 +1877,7 @@ def selftest(_args: argparse.Namespace) -> None:
         write_exclusive(root, "unmanifested.tmp", b"extra\n")
         expect_failure(lambda: verify_completion_layout(root, sealed=True),
                        "post-completion extra campaign-root file")
-    print("selftest: ok (geometry, raw Git provenance, exact completion sets, nested seals)")
+    print("selftest: ok (geometry, signed lookup validation, raw Git provenance, exact completion sets, nested seals)")
 
 
 def main() -> int:

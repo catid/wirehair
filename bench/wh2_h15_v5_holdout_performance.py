@@ -187,7 +187,7 @@ def parse_lookup(data: bytes, stderr: bytes, job: dict[str, str], label: str) ->
 
 def load_contract(root: Path) -> tuple[dict[str, object], dict[int, dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     manifest = contract.validate_freeze(root)
-    if not isinstance(manifest, dict) or manifest.get("schema") != "wirehair.wh2.normalized_h15_v5.holdout.contract.v1":
+    if not isinstance(manifest, dict) or manifest.get("schema") != contract.CONTRACT_SCHEMA:
         fail("freeze contract schema mismatch")
     binary = contract.read_relative(root, "freeze/wirehair_v2_bench")
     reference = contract.read_relative(root, "freeze/reference_wirehair_v2_bench")
@@ -552,13 +552,12 @@ def reduce_lookup(jobs: list[dict[str, str]], results: dict[int, object]) -> dic
         deltas.append(phases[phase]["v5"] - phases[phase]["v4"])
     median_ratio = statistics.median(ratios)
     median_delta = statistics.median(deltas)
-    absolute_median_delta = abs(median_delta)
-    passed = (median_ratio <= Decimal("1.25") and absolute_median_delta <= Decimal("2") and
+    passed = (median_ratio <= Decimal("1.25") and median_delta <= Decimal("2") and
               max(ratios) <= Decimal("1.50"))
-    return {"absolute_median_delta_ns": str(absolute_median_delta), "checksums": contract.LOOKUP_CHECKSUMS,
+    return {"signed_median_delta_ns": str(median_delta), "checksums": contract.LOOKUP_CHECKSUMS,
             "gate": "PASS" if passed else "FAIL", "median_ratio": str(median_ratio),
             "per_phase_ratios": [str(value) for value in ratios],
-            "schema": "wirehair.wh2.holdout.lookup_summary.v1"}
+            "schema": contract.LOOKUP_SUMMARY_SCHEMA}
 
 
 def size_sections(path: Path) -> dict[str, int]:
@@ -867,22 +866,39 @@ def selftest(_args: argparse.Namespace) -> None:
             if stubborn_watchdog.poll() is None:
                 terminate_and_drain(stubborn_watchdog, 0.1)
             fail("selftest nonterminating watchdog escaped kill/reap fallback")
-    fake_jobs = []
-    fake_results: dict[int, object] = {}
-    for phase, first in enumerate(contract.LOOKUP_FIRST_ARMS):
-        arms = ("v4", "v5") if first == "v4" else ("v5", "v4")
-        for arm in arms:
-            job_id = len(fake_jobs)
-            profile = f"normalized-h15-{arm}"
-            fake_jobs.append({"job_id": str(job_id), "phase": str(phase), "arm": arm,
-                              "profile": profile, "lookups": "131069952",
-                              "expected_checksum": contract.LOOKUP_CHECKSUMS[profile]})
-            fake_results[job_id] = {
-                "elapsed_ns": 1310699520 if arm == "v4" else 1441769472,
-                "ns": Decimal("10.0") if arm == "v4" else Decimal("11.0")}
-    summary = reduce_lookup(fake_jobs, fake_results)
-    if summary["gate"] != "PASS" or summary["median_ratio"] != "1.1":
-        fail("selftest lookup reduction mismatch")
+    def synthetic_lookup_reduction(v5_ns: int) -> dict[str, object]:
+        fake_jobs = []
+        fake_results: dict[int, object] = {}
+        lookups = 131069952
+        for phase, first in enumerate(contract.LOOKUP_FIRST_ARMS):
+            arms = ("v4", "v5") if first == "v4" else ("v5", "v4")
+            for arm in arms:
+                job_id = len(fake_jobs)
+                profile = f"normalized-h15-{arm}"
+                ns = 100 if arm == "v4" else v5_ns
+                fake_jobs.append({"job_id": str(job_id), "phase": str(phase), "arm": arm,
+                                  "profile": profile, "lookups": str(lookups),
+                                  "expected_checksum": contract.LOOKUP_CHECKSUMS[profile]})
+                fake_results[job_id] = {
+                    "elapsed_ns": lookups * ns, "ns": Decimal(ns)}
+        return reduce_lookup(fake_jobs, fake_results)
+
+    lookup_cases = (
+        ("+1 ns slowdown", 101, "PASS", "1", "1.01"),
+        ("+2 ns slowdown boundary", 102, "PASS", "2", "1.02"),
+        ("+3 ns slowdown", 103, "FAIL", "3", "1.03"),
+        ("-4 ns improvement", 96, "PASS", "-4", "0.96"),
+    )
+    for label, v5_ns, expected_gate, expected_delta, expected_ratio in lookup_cases:
+        summary = synthetic_lookup_reduction(v5_ns)
+        if (summary != {
+                "checksums": contract.LOOKUP_CHECKSUMS,
+                "gate": expected_gate,
+                "median_ratio": expected_ratio,
+                "per_phase_ratios": [expected_ratio] * 12,
+                "schema": contract.LOOKUP_SUMMARY_SCHEMA,
+                "signed_median_delta_ns": expected_delta}):
+            fail(f"selftest lookup signed-delta reduction mismatch: {label}")
     if ratio(Decimal(0), Decimal(0)) != 1 or ratio(Decimal(1), Decimal(0)).is_finite():
         fail("selftest ratio edge cases mismatch")
     table_rows = contract.parse_tsv(
@@ -948,7 +964,7 @@ def selftest(_args: argparse.Namespace) -> None:
     expect_failure(lambda: parse_lookup(b"bad\n", b"", {
         "profile": "normalized-h15-v4", "expected_checksum": contract.LOOKUP_CHECKSUMS["normalized-h15-v4"],
         "lookups": "131069952"}, "bad"), "malformed lookup output")
-    print("selftest: ok (watchdog lifecycle, drained pipes, reducers, and joint-delta schema)")
+    print("selftest: ok (watchdog lifecycle, drained pipes, signed lookup gate, reducers, and joint-delta schema)")
 
 
 def main() -> int:
