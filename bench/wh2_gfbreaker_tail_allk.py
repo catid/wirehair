@@ -921,17 +921,21 @@ def run_one(
         except ProcessLookupError:
             pass
         stdout, stderr = process.communicate()
-        common.atomic_bytes(stdout_path, stdout)
-        common.atomic_bytes(stderr_path, stderr)
-        common.die(f"{job.stem}: timeout after {timeout} seconds")
+        common.die(
+            f"{job.stem}: timeout after {timeout} seconds; "
+            f"discarded stdout={len(stdout)} stderr={len(stderr)} bytes"
+        )
     finally:
         with ACTIVE_LOCK:
             ACTIVE.pop(job.job, None)
+    if process.returncode != 0 or stderr:
+        common.die(
+            f"{job.stem}: exit={process.returncode}, discarded "
+            f"stdout={len(stdout)} stderr={len(stderr)} bytes"
+        )
+    parse_job_output(stdout, job, stratum, ks)
     common.atomic_bytes(stdout_path, stdout)
     common.atomic_bytes(stderr_path, stderr)
-    if process.returncode != 0 or stderr:
-        common.die(f"{job.stem}: exit={process.returncode}, stderr={len(stderr)} bytes")
-    parse_job_output(stdout, job, stratum, ks)
     return True
 
 
