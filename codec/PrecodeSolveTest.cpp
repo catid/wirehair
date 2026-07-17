@@ -2225,6 +2225,19 @@ bool CheckPackedBinaryResidualOracle()
     return true;
 }
 
+bool CheckMixedNullWitnessCanonicalization()
+{
+    if (!wirehair_v2::CheckMixedNullWitnessCanonicalizationForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: mixed null-witness canonicalization oracle failed\n");
+        return false;
+    }
+    std::printf(
+        "mixed GF16 null-witness basis invariance: PASS\n");
+    return true;
+}
+
 bool RunCase(
     uint32_t K,
     uint32_t block_bytes,
@@ -3439,6 +3452,7 @@ int main(int argc, char** argv)
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;
+    ok = CheckMixedNullWitnessCanonicalization() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;

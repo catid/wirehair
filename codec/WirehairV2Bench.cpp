@@ -3695,6 +3695,37 @@ struct MatrixFailureTrial
     uint64_t BackSubNanoseconds = 0u;
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+class MixedNullWitnessScope
+{
+public:
+    explicit MixedNullWitnessScope(
+        wirehair_v2::MixedNullWitnessDiagnostic* diagnostic)
+        : Active(diagnostic != nullptr)
+    {
+        if (Active) {
+            wirehair_v2::SetMixedNullWitnessDiagnosticForTesting(diagnostic);
+        }
+    }
+
+    ~MixedNullWitnessScope()
+    {
+        Disable();
+    }
+
+    void Disable()
+    {
+        if (Active) {
+            wirehair_v2::SetMixedNullWitnessDiagnosticForTesting(nullptr);
+            Active = false;
+        }
+    }
+
+private:
+    bool Active;
+};
+#endif
+
 const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family);
 
 enum class PrecodeFailCompletion
@@ -4183,6 +4214,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool paired_overhead_stream = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    bool mixed_null_witnesses = false;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
@@ -4314,6 +4346,9 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
             full_payload_solve = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-null-witnesses")) {
+            mixed_null_witnesses = true;
         }
         else if (!std::strcmp(argv[i], "--source-hits")) {
             if (!TakeArg(
@@ -4594,6 +4629,14 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --threads must be in [1,256]\n");
         return 1;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (mixed_null_witnesses && threads != 1u)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-null-witnesses requires --threads 1\n");
+        return 1;
+    }
+#endif
     for (int overhead : overheads) {
         if (overhead < 0 || overhead > 1024) {
             std::fprintf(stderr,
@@ -4642,7 +4685,8 @@ int CmdPrecodeFail(int argc, char** argv)
         }
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    else if (mixed_period_explicit || mixed_geometry_explicit ||
+    else if (mixed_null_witnesses || mixed_period_explicit ||
+             mixed_geometry_explicit ||
              mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
              mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
@@ -5030,6 +5074,10 @@ int CmdPrecodeFail(int argc, char** argv)
         {
             const uint32_t overhead = (uint32_t)overhead_value;
             std::vector<MatrixFailureTrial> results(trials);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            wirehair_v2::MixedNullWitnessDiagnostic captured_witness;
+            uint32_t captured_witness_trial = UINT32_MAX;
+#endif
             std::atomic<uint32_t> next_trial(0u);
             std::atomic<bool> cancel_workers(false);
             std::atomic<bool> worker_failed(false);
@@ -5131,6 +5179,13 @@ int CmdPrecodeFail(int argc, char** argv)
                                 solve_block_bytes, uint8_t{0});
                             std::vector<wirehair_v2::SolvePacket> packets(
                                 (size_t)K + overhead);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                            wirehair_v2::MixedNullWitnessDiagnostic
+                                witness_candidate;
+                            MixedNullWitnessScope witness_scope(
+                                mixed_null_witnesses ?
+                                    &witness_candidate : nullptr);
+#endif
                             for (;;)
                             {
                                 if (cancel_workers.load()) {
@@ -5199,6 +5254,18 @@ int CmdPrecodeFail(int argc, char** argv)
                                         system, config, runtime, packets,
                                         solve_block_bytes,
                                         intermediate, &solve_stats);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                                if (captured_witness_trial == UINT32_MAX &&
+                                    witness_candidate.Status !=
+                                    wirehair_v2::
+                                        MixedNullWitnessStatus::None)
+                                {
+                                    captured_witness =
+                                        std::move(witness_candidate);
+                                    captured_witness_trial = trial;
+                                    witness_scope.Disable();
+                                }
+#endif
                                 result.Inactivated =
                                     solve_stats.InactivatedColumns;
                                 result.Rank = solve_stats.ResidualRank;
@@ -5363,6 +5430,40 @@ int CmdPrecodeFail(int argc, char** argv)
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
                 failure_trials.c_str(), active_packet_peel_seed_xor);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (mixed_null_witnesses)
+            {
+                const wirehair_v2::MixedNullWitnessDiagnostic& witness =
+                    captured_witness;
+                if (witness.Status !=
+                    wirehair_v2::MixedNullWitnessStatus::None)
+                {
+                    const uint64_t expected_words =
+                        (uint64_t)witness.KernelDimension *
+                        witness.ColumnCount;
+                    std::printf(
+                        "# mixed_null_witness,v=1,N=%u,bb=%u,trial=%u,"
+                        "status=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
+                        "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
+                        "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
+                        "hash=%016llx%016llx\n",
+                        K, bb, captured_witness_trial,
+                        (uint32_t)witness.Status,
+                        witness.ColumnCount, witness.InactiveCount,
+                        witness.BinaryRank, witness.QuotientColumns,
+                        witness.QuotientRank, witness.KernelDimension,
+                        witness.QuotientVerified ? 1u : 0u,
+                        witness.BinaryVerified ? 1u : 0u,
+                        witness.CompletionVerified ? 1u : 0u,
+                        witness.CanonicalVerified ? 1u : 0u,
+                        witness.CanonicalBasis.size(),
+                        expected_words == witness.CanonicalBasis.size() ?
+                            1u : 0u,
+                        (unsigned long long)witness.BasisHashHigh,
+                        (unsigned long long)witness.BasisHashLow);
+                }
+            }
+#endif
         }
         }
         for (const std::pair<const uint32_t, PairedMixOutcomes>& paired :
