@@ -1302,14 +1302,61 @@ def update_comparison(counter: Counter[str], label: str, base: bool, candidate: 
         counter[f"nested_intro_{label}"] += 1
 
 
+def binomial_lower_sum(n: int, k: int) -> int:
+    if k < 0:
+        return 0
+    term = 1
+    total = 1
+    for value in range(k):
+        term = term * (n - value) // (value + 1)
+        total += term
+    return total
+
+
+def binomial_upper_from_center(n: int, threshold: int, denominator: int) -> int:
+    center = (n + 1) // 2
+    term = math.comb(n, center)
+    if n & 1:
+        total = denominator // 2
+    else:
+        total = (denominator + term) // 2
+    for value in range(center, threshold):
+        total -= term
+        term = term * (n - value) // (value + 1)
+    return total
+
+
 def binomial_one_sided(repairs: int, introductions: int) -> dict[str, object]:
     discordant = repairs + introductions
     if discordant == 0:
-        return {"numerator": 1, "denominator": 1, "decimal": "1"}
-    numerator = sum(math.comb(discordant, k) for k in range(introductions + 1))
+        return {"numerator": "0x1", "denominator": "0x1", "decimal": "1"}
     denominator = 1 << discordant
+    center = (discordant + 1) // 2
+    if repairs == introductions:
+        numerator = binomial_upper_from_center(
+            discordant, repairs, denominator,
+        )
+    elif repairs > introductions:
+        center_cost = repairs - center
+        if introductions <= center_cost:
+            numerator = binomial_lower_sum(discordant, introductions)
+        else:
+            numerator = binomial_upper_from_center(
+                discordant, repairs, denominator,
+            )
+    else:
+        center_threshold = introductions + 1
+        center_cost = center_threshold - center
+        if repairs <= center_cost:
+            numerator = denominator - binomial_lower_sum(
+                discordant, repairs - 1,
+            )
+        else:
+            numerator = denominator - binomial_upper_from_center(
+                discordant, center_threshold, denominator,
+            )
     return {
-        "numerator": numerator, "denominator": denominator,
+        "numerator": hex(numerator), "denominator": hex(denominator),
         "decimal": str(Decimal(numerator) / Decimal(denominator)),
     }
 
@@ -1776,10 +1823,10 @@ def self_test() -> None:
     if first != second or len(groups()) != GROUP_COUNT or len(jobs()) != EXPECTED_JOBS:
         common.die("self-test deterministic geometry")
     if binomial_one_sided(11, 0) != {
-        "numerator": 1, "denominator": 2048,
+        "numerator": "0x1", "denominator": "0x800",
         "decimal": str(Decimal(1) / Decimal(2048)),
     } or binomial_one_sided(1, 1) != {
-        "numerator": 3, "denominator": 4,
+        "numerator": "0x3", "denominator": "0x4",
         "decimal": "0.75",
     }:
         common.die("self-test exact binomial")
