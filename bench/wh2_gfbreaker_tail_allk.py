@@ -1170,6 +1170,7 @@ def verify_results(out: Path) -> dict[Path, str]:
     baseline_edac: tuple[int, int] | None = None
     thermal_stats: dict[int, tuple[int, float, float, float]] = {}
     previous_mono: float | None = None
+    previous_values: tuple[str, ...] | None = None
     for segment, path in sorted(thermal_by_segment.items()):
         count = 0
         busy_min = 100.0
@@ -1189,8 +1190,17 @@ def verify_results(out: Path) -> dict[Path, str]:
                     )
                 mono, busy, cpu, dimm = validate_thermal_row(values, baseline_edac)
                 if previous_mono is not None and mono <= previous_mono:
-                    common.die("sealed thermal samples are not strictly monotonic")
+                    boundary_duplicate = (
+                        count == 0 and mono == previous_mono and
+                        tuple(values) == previous_values
+                    )
+                    if not boundary_duplicate:
+                        common.die(
+                            "sealed thermal samples regress or duplicate "
+                            "within a segment"
+                        )
                 previous_mono = mono
+                previous_values = tuple(values)
                 count += 1
                 busy_min = min(busy_min, busy)
                 cpu_max = max(cpu_max, cpu)
