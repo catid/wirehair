@@ -202,6 +202,27 @@ private:
     bool Valid;
 };
 
+class MixedIndependentGF256BreakerResiduesScope
+{
+public:
+    explicit MixedIndependentGF256BreakerResiduesScope(bool enabled)
+        : Valid(wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(enabled))
+    {
+    }
+
+    ~MixedIndependentGF256BreakerResiduesScope()
+    {
+        (void)wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(false);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    bool Valid;
+};
+
 class BinaryPeelOracleScope
 {
 public:
@@ -1489,7 +1510,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    bool independent_gf256_breaker_residues = false)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1502,21 +1524,25 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             wirehair_v2::ActiveMixedResidueHashSeed());
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
+    MixedIndependentGF256BreakerResiduesScope breaker_scope(
+        independent_gf256_breaker_residues);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid())
+        !schedule_scope.IsValid() || !independent_scope.IsValid() ||
+        !breaker_scope.IsValid())
     {
         std::fprintf(stderr,
             "solve: invalid mixed projection scope g=%u s=%u r=%u p=%u "
-            "k=%u q=%u i=%u\n",
+            "k=%u q=%u i=%u c=%u\n",
             geometry_scope.IsValid() ? 1u : 0u,
             subfield_scope.IsValid() ? 1u : 0u,
             rows_scope.IsValid() ? 1u : 0u,
             period_scope.IsValid() ? 1u : 0u,
             skew_scope.IsValid() ? 1u : 0u,
             schedule_scope.IsValid() ? 1u : 0u,
-            independent_scope.IsValid() ? 1u : 0u);
+            independent_scope.IsValid() ? 1u : 0u,
+            breaker_scope.IsValid() ? 1u : 0u);
         return false;
     }
     wirehair_v2::ResetMixedProjectionOracleComparisonsForTesting();
@@ -1660,11 +1686,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     std::printf(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u "
+        "independent_extension=%u independent_breaker=%u "
         "comparisons=%llu: PASS\n",
         period, (uint32_t)geometry, subfield_rows, extension_rows,
         residue_skew, (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
+        independent_gf256_breaker_residues ? 1u : 0u,
         (unsigned long long)comparisons);
     return true;
 }
@@ -1739,6 +1766,15 @@ bool CheckMixedProjectionResidueBucketsOracle()
             wirehair_v2::kMixedGF16RowsMax,
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
+            true) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
             true) ||
         !CheckMixedProjectionResidueBucketsOracleForPeriod(
             32u,

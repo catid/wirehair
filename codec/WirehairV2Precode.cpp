@@ -557,6 +557,11 @@ static thread_local uint32_t MixedGF16RowsForTesting = kMixedGF16Rows;
 static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
 static thread_local uint32_t MixedIndependentExtensionSeedXorForTesting = 78u;
+static thread_local bool MixedIndependentGF256BreakerResiduesForTesting =
+    false;
+static thread_local uint32_t MixedGF256BreakerResidueHashSeedForTesting = 0u;
+static thread_local uint32_t MixedIndependentGF256BreakerSeedXorForTesting =
+    UINT32_C(0xb7e15162);
 
 static bool HasFullCycleMixedResidueSeed(
     uint32_t period,
@@ -604,6 +609,33 @@ static bool SelectIndependentExtensionResidueSeed(
     return false;
 }
 
+static bool SelectIndependentGF256BreakerResidueSeed(
+    uint32_t period,
+    uint32_t step_count,
+    uint32_t base_seed,
+    uint32_t& selected_seed)
+{
+    uint32_t candidate =
+        base_seed ^ MixedIndependentGF256BreakerSeedXorForTesting;
+    for (uint32_t attempt = 0u; attempt < 1024u; ++attempt, ++candidate)
+    {
+        if (candidate != base_seed &&
+            candidate != MixedExtensionResidueHashSeedForTesting &&
+            HasFullCycleMixedResidueSeed(period, step_count, candidate))
+        {
+            selected_seed = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void DisableIndependentMixedResidues()
+{
+    MixedIndependentExtensionResiduesForTesting = false;
+    MixedIndependentGF256BreakerResiduesForTesting = false;
+}
+
 static bool IsValidatedH16Period(uint32_t period)
 {
     return period == 31u || period == 32u;
@@ -622,7 +654,7 @@ bool SetMixedCoefficientPeriodForTesting(uint32_t period)
     MixedCoefficientPeriodForTesting = period;
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 
@@ -642,7 +674,7 @@ bool SetMixedResidueSkewForTesting(uint32_t skew)
         return false;
     }
     MixedResidueSkewForTesting = skew;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 
@@ -665,14 +697,14 @@ bool SetMixedResidueScheduleForTesting(MixedResidueSchedule schedule)
         return false;
     }
     MixedResidueScheduleForTesting = schedule;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 
 void SetMixedResidueHashSeedForTesting(uint32_t seed)
 {
     MixedResidueHashSeedForTesting = seed;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
 }
 
 bool SelectFullCycleMixedResidueKeyedSeedForTesting(
@@ -727,13 +759,48 @@ bool SetMixedIndependentExtensionResiduesForTesting(bool enabled)
         return false;
     }
     MixedIndependentExtensionResiduesForTesting = enabled;
+    MixedIndependentGF256BreakerResiduesForTesting = false;
     return true;
 }
 
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
 {
     MixedIndependentExtensionSeedXorForTesting = seed_xor;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
+}
+
+bool SetMixedIndependentGF256BreakerResiduesForTesting(bool enabled)
+{
+    if (enabled &&
+        (!MixedIndependentExtensionResiduesForTesting ||
+         MixedGeometryForTesting !=
+                MixedCoefficientGeometry::SharedCauchyX ||
+         MixedResidueScheduleForTesting != MixedResidueSchedule::Hashed ||
+         MixedGF256RowsForTesting != kMixedGF256Rows + 1u ||
+         MixedGF16RowsForTesting != kMixedGF16RowsMax ||
+         MixedCoefficientPeriodForTesting <=
+            MixedGF256RowsForTesting + MixedGF16RowsForTesting))
+    {
+        return false;
+    }
+    if (enabled &&
+        !SelectIndependentGF256BreakerResidueSeed(
+            MixedCoefficientPeriodForTesting,
+            MixedCoefficientPeriodForTesting -
+                MixedGF256RowsForTesting - MixedGF16RowsForTesting,
+            MixedResidueHashSeedForTesting,
+            MixedGF256BreakerResidueHashSeedForTesting))
+    {
+        return false;
+    }
+    MixedIndependentGF256BreakerResiduesForTesting = enabled;
+    return true;
+}
+
+void SetMixedIndependentGF256BreakerSeedXorForTesting(uint32_t seed_xor)
+{
+    MixedIndependentGF256BreakerSeedXorForTesting = seed_xor;
+    MixedIndependentGF256BreakerResiduesForTesting = false;
 }
 
 bool SetMixedCoefficientGeometryForTesting(
@@ -754,7 +821,7 @@ bool SetMixedCoefficientGeometryForTesting(
         MixedResidueSkewForTesting = 0u;
         MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
     }
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 
@@ -771,7 +838,7 @@ bool SetMixedGF16RowsForTesting(uint32_t rows)
     MixedGF16RowsForTesting = rows;
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 
@@ -790,7 +857,7 @@ bool SetMixedGF256RowsForTesting(uint32_t rows)
     MixedGF256RowsForTesting = rows;
     MixedResidueSkewForTesting = 0u;
     MixedResidueScheduleForTesting = MixedResidueSchedule::Constant;
-    MixedIndependentExtensionResiduesForTesting = false;
+    DisableIndependentMixedResidues();
     return true;
 }
 #endif
@@ -827,6 +894,26 @@ uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column)
     residue += shift;
     return residue < period ? residue : residue - period;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint32_t ActiveMixedGF256BreakerCoefficientResidue(
+    uint32_t column,
+    uint32_t first_heavy_column)
+{
+    if (!MixedIndependentGF256BreakerResiduesForTesting ||
+        column >= first_heavy_column)
+    {
+        return ActiveMixedCoefficientResidue(column);
+    }
+    const uint32_t period = ActiveMixedCoefficientPeriod();
+    uint32_t residue = column % period;
+    const uint32_t shift =
+        ActiveMixedGF256BreakerResidueBlockShift(column / period);
+    CAT_DEBUG_ASSERT(shift < period);
+    residue += shift;
+    return residue < period ? residue : residue - period;
+}
+#endif
 
 uint32_t ActiveMixedResidueBlockShift(uint32_t block_index)
 {
@@ -936,6 +1023,49 @@ uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index)
 #endif
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint32_t ActiveMixedGF256BreakerResidueBlockShift(uint32_t block_index)
+{
+    if (!MixedIndependentGF256BreakerResiduesForTesting) {
+        return ActiveMixedResidueBlockShift(block_index);
+    }
+    const uint32_t period = MixedCoefficientPeriodForTesting;
+    const uint32_t H =
+        MixedGF256RowsForTesting + MixedGF16RowsForTesting;
+    const uint32_t step_count = period - H;
+    CAT_DEBUG_ASSERT(step_count > 0u);
+    static const uint32_t kStepCycle = 127u;
+    static thread_local uint32_t cached_period = 0u;
+    static thread_local uint32_t cached_step_count = 0u;
+    static thread_local uint32_t cached_seed = UINT32_MAX;
+    static thread_local uint64_t prefix[kStepCycle + 1u] = {};
+    if (cached_period != period ||
+        cached_step_count != step_count ||
+        cached_seed != MixedGF256BreakerResidueHashSeedForTesting)
+    {
+        const uint32_t seed = MixedGF256BreakerResidueHashSeedForTesting;
+        prefix[0] = 0u;
+        for (uint32_t i = 0u; i < kStepCycle; ++i)
+        {
+            uint32_t x = i + UINT32_C(0x9e3779b9) +
+                seed * UINT32_C(0x85ebca6b);
+            x = (x ^ (x >> 16)) * UINT32_C(0x85ebca6b);
+            x = (x ^ (x >> 13)) * UINT32_C(0xc2b2ae35);
+            x ^= x >> 16;
+            prefix[i + 1u] = prefix[i] + 1u + x % step_count;
+        }
+        cached_period = period;
+        cached_step_count = step_count;
+        cached_seed = seed;
+    }
+    const uint64_t complete_cycles = block_index / kStepCycle;
+    const uint32_t remainder = block_index % kStepCycle;
+    return (uint32_t)(
+        (complete_cycles * prefix[kStepCycle] + prefix[remainder]) %
+        period);
+}
+#endif
+
 uint32_t ActiveMixedResidueSkew()
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -981,6 +1111,18 @@ bool ActiveMixedIndependentExtensionResidues()
     return false;
 #endif
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ActiveMixedIndependentGF256BreakerResidues()
+{
+    return MixedIndependentGF256BreakerResiduesForTesting;
+}
+
+uint32_t ActiveMixedGF256BreakerResidueHashSeed()
+{
+    return MixedGF256BreakerResidueHashSeedForTesting;
+}
+#endif
 
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry()
 {

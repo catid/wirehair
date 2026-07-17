@@ -358,6 +358,19 @@ nonsingular corner.
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.
+For the fixed H15 11+4 experiment, `precodefail` additionally accepts
+`--mixed-independent-gf256-breaker-residues` and the optional
+`--mixed-gf256-breaker-residue-seed-xor U32` (default `0xb7e15162`).  This
+splits the completion rows into 10A+1C+4B: the eleventh GF(256) row uses a
+third full-cycle column partition for non-heavy columns, while the final H
+columns remain on A exactly so the shared-X encoder corner is unchanged.
+Unlike a row-wise permutation of coefficient labels inside the existing A
+buckets, which is operationally free but leaves every A collision class
+unchanged, C is a true row-specific column partition.  It can break an A/B
+null witness, but costs one additional active-value bucket/XOR pass in both
+encoder and decoder.  The hook is deliberately limited to shared-X, hashed,
+independent-B, 11+4, P>H test configurations and does not change a production
+wire profile.
 The test-only
 `--packet-peel-seed-table normalized-h15-v1` selects an offline-tuned packet
 seed XOR at the 23 hard block counts in `[4,41]` and leaves every other K at

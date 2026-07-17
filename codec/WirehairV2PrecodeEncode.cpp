@@ -385,6 +385,11 @@ bool ComputePrecodeValues(
         const bool rotate_residues = ActiveMixedResiduesRotated();
         const bool independent_extension_residues =
             ActiveMixedIndependentExtensionResidues();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const bool independent_gf256_breaker_residues =
+            ActiveMixedIndependentGF256BreakerResidues();
+        const uint32_t gf256_breaker_row = subfield_rows - 1u;
+#endif
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
@@ -423,15 +428,45 @@ bool ComputePrecodeValues(
             uint32_t m, const uint8_t* value) -> bool
         {
             for (uint32_t r = 0; r < subfield_rows; ++r) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                if (independent_gf256_breaker_residues &&
+                    r == gf256_breaker_row)
+                {
+                    continue;
+                }
+#endif
                 gf8_scales[r] = gf8_coefficient_rows[r][m];
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const uint32_t destination_count =
+                subfield_rows -
+                (independent_gf256_breaker_residues ? 1u : 0u);
+            gf256_muladd_multi_mem(
+                gf8_destinations, gf8_scales,
+                (int)destination_count, value, bytes);
+            st.HeavyMulAdds += destination_count;
+#else
             gf256_muladd_multi_mem(
                 gf8_destinations, gf8_scales,
                 (int)subfield_rows, value, bytes);
             st.HeavyMulAdds += subfield_rows;
+#endif
 
             return true;
         };
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const auto accumulate_gf256_breaker_residue = [&](
+            uint32_t m, const uint8_t* value)
+        {
+            gf256_muladd_mem(
+                gf8_rhs.data() +
+                    (size_t)gf256_breaker_row * block_bytes,
+                gf8_coefficient_rows[gf256_breaker_row][m],
+                value, bytes);
+            ++st.HeavyMulAdds;
+        };
+#endif
 
         const auto accumulate_extension_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
@@ -658,6 +693,66 @@ bool ComputePrecodeValues(
                 }
             }
         }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (independent_gf256_breaker_residues)
+        {
+            if (use_full_bucket_storage)
+            {
+                std::vector<uint8_t> bucket(
+                    (size_t)window * block_bytes, 0u);
+                for (uint32_t c = 0u; c < heavy_base; ++c)
+                {
+                    const uint32_t m =
+                        ActiveMixedGF256BreakerCoefficientResidue(
+                            c, heavy_base);
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                for (uint32_t m = 0u; m < window; ++m) {
+                    accumulate_gf256_breaker_residue(
+                        m, bucket.data() + (size_t)m * block_bytes);
+                }
+            }
+            else if (use_residue_buckets)
+            {
+                std::vector<uint8_t> bucket(block_bytes, 0u);
+                for (uint32_t m = 0u; m < window; ++m)
+                {
+                    std::fill(
+                        bucket.begin(), bucket.end(), uint8_t{0});
+                    uint32_t block_index = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < heavy_base;
+                         block_base += window)
+                    {
+                        const uint32_t block_shift =
+                            ActiveMixedGF256BreakerResidueBlockShift(
+                                block_index++);
+                        const uint32_t unshifted = m >= block_shift ?
+                            m - block_shift : m + window - block_shift;
+                        const uint32_t c = block_base + unshifted;
+                        if (c >= heavy_base) continue;
+                        gf256_add_mem(
+                            bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                    accumulate_gf256_breaker_residue(m, bucket.data());
+                }
+            }
+            else
+            {
+                for (uint32_t c = 0u; c < heavy_base; ++c) {
+                    accumulate_gf256_breaker_residue(
+                        ActiveMixedGF256BreakerCoefficientResidue(
+                            c, heavy_base),
+                        column_value(c));
+                }
+            }
+        }
+#endif
 
         // Convert the active GF(256) row RHS blocks once, after their fast
         // interleaved accumulation.  The extension rows are already in

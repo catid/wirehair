@@ -200,6 +200,27 @@ private:
     bool Valid;
 };
 
+class MixedIndependentGF256BreakerResiduesScope
+{
+public:
+    explicit MixedIndependentGF256BreakerResiduesScope(bool enabled)
+        : Valid(wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(enabled))
+    {
+    }
+
+    ~MixedIndependentGF256BreakerResiduesScope()
+    {
+        (void)wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(false);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    bool Valid;
+};
+
 const char* MixedGeometryName(
     wirehair_v2::MixedCoefficientGeometry geometry)
 {
@@ -336,6 +357,16 @@ bool VerifyValues(
                 system.Params.Field ==
                     wirehair_v2::CompletionField::MixedGF256GF16 ?
                 wirehair_v2::ActiveMixedCoefficientResidue(c) : c;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 &&
+                wirehair_v2::ActiveMixedIndependentGF256BreakerResidues() &&
+                r + 1u == mixed_subfield_rows)
+            {
+                coefficient_column = wirehair_v2::
+                    ActiveMixedGF256BreakerCoefficientResidue(c, L - H);
+            }
+#endif
             const uint8_t* v =
                 ColumnValue(system, source, parity, block_bytes, c);
             if (system.Params.Field ==
@@ -523,6 +554,79 @@ bool TestIndependentMixedCornerAcrossK()
 {
     return TestIndependentMixedCornerAcrossKForPeriod(31u) &&
         TestIndependentMixedCornerAcrossKForPeriod(32u);
+}
+
+bool TestGF256BreakerCornerAcrossK()
+{
+    MixedGF16RowsScope rows_scope(wirehair_v2::kMixedGF16RowsMax);
+    MixedCoefficientPeriodScope period_scope(32u);
+    MixedCoefficientGeometryScope geometry_scope(
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    MixedGF256RowsScope subfield_scope(
+        wirehair_v2::kMixedGF256Rows + 1u);
+    MixedResidueScheduleScope schedule_scope(
+        wirehair_v2::MixedResidueSchedule::Hashed);
+    MixedResidueHashSeedScope hash_seed_scope(68u);
+    if (!rows_scope.IsValid() || !period_scope.IsValid() ||
+        !geometry_scope.IsValid() || !subfield_scope.IsValid() ||
+        !schedule_scope.IsValid())
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    wirehair_v2::SetMixedIndependentGF256BreakerSeedXorForTesting(
+        UINT32_C(0xb7e15162));
+    const uint32_t H = wirehair_v2::ActiveMixedGF256Rows() +
+        wirehair_v2::ActiveMixedGF16Rows();
+    std::vector<uint32_t> subfield_columns(H);
+    std::vector<uint32_t> extension_columns(H);
+    for (uint32_t K = 2u; K <= 64000u; ++K)
+    {
+        uint32_t selected_seed = 0u;
+        if (!wirehair_v2::
+                SelectFullCycleMixedResidueKeyedSeedForTesting(
+                    68u, K, selected_seed) ||
+            !wirehair_v2::
+                SetMixedIndependentExtensionResiduesForTesting(true) ||
+            !wirehair_v2::
+                SetMixedIndependentGF256BreakerResiduesForTesting(true))
+        {
+            return false;
+        }
+        const wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(K, 0u);
+        const uint32_t heavy_base =
+            K + params.Staircase + params.DenseRows;
+        for (uint32_t j = 0u; j < H; ++j)
+        {
+            const uint32_t column = heavy_base + j;
+            subfield_columns[j] =
+                wirehair_v2::ActiveMixedCoefficientResidue(column);
+            extension_columns[j] =
+                wirehair_v2::ActiveMixedExtensionCoefficientResidue(column);
+            if (wirehair_v2::
+                    ActiveMixedGF256BreakerCoefficientResidue(
+                        column, heavy_base) != subfield_columns[j])
+            {
+                std::fprintf(stderr,
+                    "GF256 breaker changed heavy corner at K=%u\n", K);
+                return false;
+            }
+        }
+        if (MixedCornerRank(subfield_columns, extension_columns) != H)
+        {
+            std::fprintf(stderr,
+                "GF256 breaker corner singular at K=%u\n", K);
+            return false;
+        }
+    }
+    (void)wirehair_v2::
+        SetMixedIndependentGF256BreakerResiduesForTesting(false);
+    (void)wirehair_v2::
+        SetMixedIndependentExtensionResiduesForTesting(false);
+    std::printf(
+        "GF256 breaker P32 H15 canonical corners K=2..64000: PASS\n");
+    return true;
 }
 
 bool TestMixedCornerRankForGeometry(
@@ -1239,7 +1343,8 @@ bool TestMixedCompletionForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    bool independent_gf256_breaker_residues = false)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1252,21 +1357,25 @@ bool TestMixedCompletionForPeriod(
             wirehair_v2::ActiveMixedResidueHashSeed());
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
+    MixedIndependentGF256BreakerResiduesScope breaker_scope(
+        independent_gf256_breaker_residues);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
-        !schedule_scope.IsValid() || !independent_scope.IsValid())
+        !schedule_scope.IsValid() || !independent_scope.IsValid() ||
+        !breaker_scope.IsValid())
     {
         std::fprintf(stderr,
             "mixed completion: invalid test scope g=%u s=%u r=%u p=%u "
-            "k=%u q=%u i=%u\n",
+            "k=%u q=%u i=%u c=%u\n",
             geometry_scope.IsValid() ? 1u : 0u,
             subfield_scope.IsValid() ? 1u : 0u,
             rows_scope.IsValid() ? 1u : 0u,
             period_scope.IsValid() ? 1u : 0u,
             skew_scope.IsValid() ? 1u : 0u,
             schedule_scope.IsValid() ? 1u : 0u,
-            independent_scope.IsValid() ? 1u : 0u);
+            independent_scope.IsValid() ? 1u : 0u,
+            breaker_scope.IsValid() ? 1u : 0u);
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
@@ -1355,7 +1464,9 @@ bool TestMixedCompletionForPeriod(
                     system, source.data(), streamed.data(), bb, "mixed") ||
                 full_stats.HeavyBucketXors != (bucketed ?
                     (uint64_t)heavy_base *
-                        (independent_extension_residues ? 2u : 1u) :
+                        (1u +
+                         (independent_extension_residues ? 1u : 0u) +
+                         (independent_gf256_breaker_residues ? 1u : 0u)) :
                     0u) ||
                 full_stats.HeavyMulAdds != params.HeavyRows * residues ||
                 full_stats.MixedGF16MulAdds !=
@@ -1444,12 +1555,143 @@ bool TestMixedCompletionForPeriod(
     std::printf(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u: "
+        "independent_extension=%u independent_breaker=%u: "
         "PASS\n",
         period, MixedGeometryName(geometry), subfield_rows, extension_rows,
         residue_skew,
         (uint32_t)residue_schedule,
-        independent_extension_residues ? 1u : 0u);
+        independent_extension_residues ? 1u : 0u,
+        independent_gf256_breaker_residues ? 1u : 0u);
+    return true;
+}
+
+bool TestIndependentGF256BreakerSchedule()
+{
+    MixedCoefficientGeometryScope geometry_scope(
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    MixedGF16RowsScope extension_rows_scope(
+        wirehair_v2::kMixedGF16RowsMax);
+    MixedCoefficientPeriodScope period_scope(32u);
+    MixedGF256RowsScope subfield_rows_scope(
+        wirehair_v2::kMixedGF256Rows + 1u);
+    MixedResidueSkewScope skew_scope(0u);
+    MixedResidueScheduleScope schedule_scope(
+        wirehair_v2::MixedResidueSchedule::Hashed);
+    MixedResidueHashSeedScope hash_seed_scope(68u);
+    uint32_t selected_seed = 0u;
+    if (!geometry_scope.IsValid() || !extension_rows_scope.IsValid() ||
+        !period_scope.IsValid() || !subfield_rows_scope.IsValid() ||
+        !skew_scope.IsValid() || !schedule_scope.IsValid() ||
+        !wirehair_v2::SelectFullCycleMixedResidueKeyedSeedForTesting(
+            68u, 945u, selected_seed))
+    {
+        std::fprintf(stderr, "GF256 breaker: base configuration failed\n");
+        return false;
+    }
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    MixedIndependentExtensionResiduesScope extension_scope(true);
+    wirehair_v2::SetMixedIndependentGF256BreakerSeedXorForTesting(
+        UINT32_C(0xb7e15162));
+    MixedIndependentGF256BreakerResiduesScope breaker_scope(true);
+    if (!extension_scope.IsValid() || !breaker_scope.IsValid()) {
+        std::fprintf(stderr, "GF256 breaker: independent setup failed\n");
+        return false;
+    }
+
+    static const uint32_t kColumn0 = 579u;
+    static const uint32_t kColumn1 = 657u;
+    static const uint32_t kColumnCount = 1019u;
+    static const uint32_t kHeavyRows = 15u;
+    const uint32_t first_heavy_column = kColumnCount - kHeavyRows;
+    const uint32_t a0 =
+        wirehair_v2::ActiveMixedCoefficientResidue(kColumn0);
+    const uint32_t a1 =
+        wirehair_v2::ActiveMixedCoefficientResidue(kColumn1);
+    const uint32_t b0 =
+        wirehair_v2::ActiveMixedExtensionCoefficientResidue(kColumn0);
+    const uint32_t b1 =
+        wirehair_v2::ActiveMixedExtensionCoefficientResidue(kColumn1);
+    const uint32_t c0 = wirehair_v2::
+        ActiveMixedGF256BreakerCoefficientResidue(
+            kColumn0, first_heavy_column);
+    const uint32_t c1 = wirehair_v2::
+        ActiveMixedGF256BreakerCoefficientResidue(
+            kColumn1, first_heavy_column);
+    const wirehair_v2::MixedCoefficientRows* rows =
+        wirehair_v2::GetMixedCoefficientRows();
+    const uint16_t breaker_syndrome = rows ?
+        (uint16_t)(rows->Subfield[wirehair_v2::kMixedGF256Rows][c0] ^
+                   rows->Subfield[wirehair_v2::kMixedGF256Rows][c1]) : 0u;
+    bool heavy_tail_is_canonical = true;
+    for (uint32_t column = first_heavy_column;
+         column < kColumnCount; ++column)
+    {
+        heavy_tail_is_canonical = heavy_tail_is_canonical &&
+            wirehair_v2::ActiveMixedGF256BreakerCoefficientResidue(
+                column, first_heavy_column) ==
+            wirehair_v2::ActiveMixedCoefficientResidue(column);
+    }
+    if (!rows || selected_seed != UINT32_C(0xf090c9ff) ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed() !=
+            UINT32_C(0x4771989e) ||
+        a0 != 11u || a1 != 11u || b0 != 13u || b1 != 13u ||
+        c0 != 31u || c1 != 10u || breaker_syndrome == 0u ||
+        !heavy_tail_is_canonical ||
+        wirehair_v2::ActiveMixedResidueBlockShift(0u) != 0u ||
+        wirehair_v2::ActiveMixedExtensionResidueBlockShift(0u) != 0u ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(0u) != 0u)
+    {
+        std::fprintf(stderr,
+            "GF256 breaker: K945 oracle mismatch "
+            "seed=%08x C=%08x A=%u/%u B=%u/%u C=%u/%u syndrome=%04x\n",
+            selected_seed,
+            wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(),
+            a0, a1, b0, b1, c0, c1, breaker_syndrome);
+        return false;
+    }
+
+    uint32_t original_breaker_shifts[128] = {};
+    for (uint32_t block = 0u; block < 128u; ++block) {
+        original_breaker_shifts[block] =
+            wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(block);
+    }
+    wirehair_v2::SetMixedIndependentGF256BreakerSeedXorForTesting(
+        UINT32_C(0x243f6a88));
+    if (wirehair_v2::ActiveMixedIndependentGF256BreakerResidues() ||
+        !wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(true) ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed() ==
+            UINT32_C(0x4771989e))
+    {
+        std::fprintf(stderr, "GF256 breaker: seed reset contract failed\n");
+        return false;
+    }
+    bool alternate_sequence_differs = false;
+    for (uint32_t block = 0u; block < 128u; ++block) {
+        alternate_sequence_differs = alternate_sequence_differs ||
+            wirehair_v2::ActiveMixedGF256BreakerResidueBlockShift(block) !=
+                original_breaker_shifts[block];
+    }
+    wirehair_v2::SetMixedIndependentGF256BreakerSeedXorForTesting(
+        UINT32_C(0xb7e15162));
+    if (!alternate_sequence_differs ||
+        !wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(true) ||
+        wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed() !=
+            UINT32_C(0x4771989e) ||
+        !wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
+        wirehair_v2::ActiveMixedIndependentGF256BreakerResidues() ||
+        wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(true))
+    {
+        std::fprintf(stderr,
+            "GF256 breaker: cache/B dependency reset contract failed\n");
+        return false;
+    }
+    std::printf(
+        "GF256 breaker K945 oracle: A=11/11 B=13/13 C=31/10 "
+        "syndrome=%04x corner=A PASS\n",
+        breaker_syndrome);
     return true;
 }
 
@@ -1526,6 +1768,15 @@ bool TestMixedCompletion()
             wirehair_v2::kMixedGF16RowsMax,
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
+            true) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows + 1u,
             true) ||
         !TestMixedCompletionForPeriod(
             32u,
@@ -2911,6 +3162,8 @@ int main(int argc, char** argv)
     ok = TestHeavyResidueDispatch() && ok;
     ok = TestMixedCornerRank() && ok;
     ok = TestIndependentMixedCornerAcrossK() && ok;
+    ok = TestGF256BreakerCornerAcrossK() && ok;
+    ok = TestIndependentGF256BreakerSchedule() && ok;
     ok = TestMixedCompletion() && ok;
     ok = TestRecoveryBlockEncoding() && ok;
     ok = TestMessagePrecodeEncoder() && ok;

@@ -452,6 +452,47 @@ expect_success("mixed_gf256_rows=11" precodefail
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues
     --payload-e2e)
+expect_failure("requires --mixed-independent-gf256-breaker-residues"
+    precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --completion mixed
+    --mixed-gf256-breaker-residue-seed-xor 17)
+expect_failure("independent GF256 breaker residues require" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-rows 11 --mixed-gf16-rows 4
+    --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed
+    --mixed-independent-gf256-breaker-residues)
+expect_failure("independent GF256 breaker residues require" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-gf256-rows 10 --mixed-gf16-rows 4
+    --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-independent-extension-residues
+    --mixed-independent-gf256-breaker-residues)
+
+# The bounded 10A+1C+4B worker configuration promotes the pinned K945
+# quotient-rank failure while retaining the canonical heavy corner.
+run_bench(result out err precodefail
+    --N 945 --bb-list 1280 --overhead 0 --trials 1 --threads 1
+    --loss 0.35 --seed 0xa11ce520f84d877e --schedule burst
+    --completion mixed --mix-count 2 --binary-dense-rows 13
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 78
+    --mixed-independent-gf256-breaker-residues --mixed-null-witnesses)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES
+        "mixed_null_witnesses=1 mixed_independent_gf256_breaker_residues=1 mixed_gf256_breaker_residue_seed_xor=0xb7e15162" OR
+    NOT out MATCHES "945,1280,periodic,2,0,1,1,0,0," OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2,N=945,bb=1280,trial=-1,status=none,reason=no_need_more.*hash_seed=0xf090c9ff.*breaker_hash_seed=0x4771989e,independent_gf256_breaker=1,L=1019" OR
+    out MATCHES "mixed_null_row")
+    message(FATAL_ERROR
+        "GF256 breaker K945 promotion failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "GF256 breaker K945 promotion")
 expect_success("4,64.*0x39" precodefail
     --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
     --trials 2 --threads 2 --loss 0.35 --schedule adversarial

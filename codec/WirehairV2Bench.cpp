@@ -3869,12 +3869,16 @@ bool BuildMixedNullClassification(
     const uint32_t L = witness.ColumnCount;
     const uint32_t d = witness.KernelDimension;
     const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
+    const bool independent_gf256_breaker_residues =
+        wirehair_v2::ActiveMixedIndependentGF256BreakerResidues();
+    const uint32_t H = wirehair_v2::ActiveMixedGF256Rows() +
+        wirehair_v2::ActiveMixedGF16Rows();
     const bool basis_size_overflow = d != 0u &&
         (size_t)L > std::numeric_limits<size_t>::max() / d;
     if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
         d == 0u ||
         d > wirehair_v2::kMaxMixedNullWitnessQuotientColumns ||
-        period == 0u || period > 244u ||
+        period == 0u || period > 244u || L < H ||
         basis_size_overflow || source_count > L ||
         witness.InactiveMask.size() != L ||
         witness.CanonicalBasis.size() != (size_t)d * L)
@@ -3889,6 +3893,8 @@ bool BuildMixedNullClassification(
     }
     if (inactive_count != witness.InactiveCount) return false;
     std::vector<MixedNullBucket> subfield(period), extension(period);
+    std::vector<MixedNullBucket> gf256_breaker(
+        independent_gf256_breaker_residues ? period : 0u);
     std::vector<MixedNullBucket> joint((size_t)period * period);
     lines.clear();
     lines.reserve(d);
@@ -3896,6 +3902,8 @@ bool BuildMixedNullClassification(
     {
         std::fill(subfield.begin(), subfield.end(), MixedNullBucket{});
         std::fill(extension.begin(), extension.end(), MixedNullBucket{});
+        std::fill(
+            gf256_breaker.begin(), gf256_breaker.end(), MixedNullBucket{});
         std::fill(joint.begin(), joint.end(), MixedNullBucket{});
         uint32_t parts[4] = {};
         uint32_t gf256_values = 0u;
@@ -3920,6 +3928,16 @@ bool BuildMixedNullClassification(
             subfield[sf].Sum ^= value;
             ++extension[ex].Count;
             extension[ex].Sum ^= value;
+            if (independent_gf256_breaker_residues)
+            {
+                const uint32_t breaker =
+                    wirehair_v2::
+                        ActiveMixedGF256BreakerCoefficientResidue(
+                            column, L - H);
+                if (breaker >= period) return false;
+                ++gf256_breaker[breaker].Count;
+                gf256_breaker[breaker].Sum ^= value;
+            }
             MixedNullBucket& pair = joint[(size_t)sf * period + ex];
             ++pair.Count;
             pair.Sum ^= value;
@@ -3932,6 +3950,11 @@ bool BuildMixedNullClassification(
             UINT8_C(0x45), row, period, extension, true);
         const MixedNullBucketSummary pair = SummarizeMixedNullBuckets(
             UINT8_C(0x4a), row, period, joint, false);
+        MixedNullBucketSummary breaker;
+        if (independent_gf256_breaker_residues) {
+            breaker = SummarizeMixedNullBuckets(
+                UINT8_C(0x43), row, period, gf256_breaker, true);
+        }
         if (support != gf256_values + gf16_values ||
             pair.Occupied < std::max(sf.Occupied, ex.Occupied) ||
             pair.Occupied > support)
@@ -3939,7 +3962,7 @@ bool BuildMixedNullClassification(
             return false;
         }
         char line[2048];
-        const int written = std::snprintf(
+        int written = std::snprintf(
             line, sizeof(line),
             "# mixed_null_row,v=1,row=%u,nz=%u,source=%u,precode=%u,"
             "source_peeled=%u,source_inactive=%u,"
@@ -3961,6 +3984,23 @@ bool BuildMixedNullClassification(
             (unsigned long long)pair.Hash,
             sf.Top.c_str(), ex.Top.c_str());
         if (written < 0 || (size_t)written >= sizeof(line)) return false;
+        if (independent_gf256_breaker_residues)
+        {
+            const int appended = std::snprintf(
+                line + written, sizeof(line) - (size_t)written,
+                ",br_occ=%u,br_cancel=%u,br_cancel_terms=%u,"
+                "br_max=%u,br_hash=%016llx,br_top=%s",
+                breaker.Occupied, breaker.Cancelled,
+                breaker.CancelledTerms, breaker.Maximum,
+                (unsigned long long)breaker.Hash,
+                breaker.Top.c_str());
+            if (appended < 0 ||
+                (size_t)appended >= sizeof(line) - (size_t)written)
+            {
+                return false;
+            }
+            written += appended;
+        }
         lines.push_back(line);
     }
     return true;
@@ -4442,6 +4482,9 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_residue_hash_keyed = false;
     bool mixed_independent_extension_residues = false;
     uint32_t mixed_extension_residue_seed_xor = 78u;
+    bool mixed_independent_gf256_breaker_residues = false;
+    uint32_t mixed_gf256_breaker_residue_seed_xor =
+        UINT32_C(0xb7e15162);
     uint32_t source_hits_override = 0u;
     uint32_t binary_dense_rows_override = 0u;
     uint32_t gf256_heavy_rows_override = 0u;
@@ -4478,6 +4521,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
     bool mixed_extension_residue_seed_xor_explicit = false;
+    bool mixed_gf256_breaker_residue_seed_xor_explicit = false;
     bool seed_block_bytes_explicit = false;
 #endif
 
@@ -4810,6 +4854,28 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_extension_residue_seed_xor_explicit = true;
         }
+        else if (!std::strcmp(
+                     argv[i],
+                     "--mixed-independent-gf256-breaker-residues"))
+        {
+            mixed_independent_gf256_breaker_residues = true;
+        }
+        else if (!std::strcmp(
+                     argv[i],
+                     "--mixed-gf256-breaker-residue-seed-xor"))
+        {
+            if (!TakeArg(
+                    "precodefail",
+                    "--mixed-gf256-breaker-residue-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-gf256-breaker-residue-seed-xor", value,
+                    mixed_gf256_breaker_residue_seed_xor))
+            {
+                return 1;
+            }
+            mixed_gf256_breaker_residue_seed_xor_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
                     "precodefail", "--seed-block-bytes",
@@ -4926,7 +4992,9 @@ int CmdPrecodeFail(int argc, char** argv)
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
+             mixed_independent_extension_residues ||
+             mixed_independent_gf256_breaker_residues ||
+             mixed_gf256_breaker_residue_seed_xor_explicit)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -5026,6 +5094,14 @@ int CmdPrecodeFail(int argc, char** argv)
             "--mixed-independent-extension-residues\n");
         return 1;
     }
+    if (mixed_gf256_breaker_residue_seed_xor_explicit &&
+        !mixed_independent_gf256_breaker_residues)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-gf256-breaker-residue-seed-xor "
+            "requires --mixed-independent-gf256-breaker-residues\n");
+        return 1;
+    }
     wirehair_v2::SetMixedResidueHashSeedForTesting(
         mixed_residue_hash_seed);
     wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(
@@ -5036,6 +5112,17 @@ int CmdPrecodeFail(int argc, char** argv)
         std::fprintf(stderr,
             "precodefail independent extension residues require "
             "shared-x hashed scheduling with P>H\n");
+        return 1;
+    }
+    wirehair_v2::SetMixedIndependentGF256BreakerSeedXorForTesting(
+        mixed_gf256_breaker_residue_seed_xor);
+    if (!wirehair_v2::
+            SetMixedIndependentGF256BreakerResiduesForTesting(
+                mixed_independent_gf256_breaker_residues))
+    {
+        std::fprintf(stderr,
+            "precodefail independent GF256 breaker residues require "
+            "the shared-x hashed 10A+1C+4B H15 geometry with P>H\n");
         return 1;
     }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
@@ -5077,6 +5164,7 @@ int CmdPrecodeFail(int argc, char** argv)
          mixed_residue_hash_seed != 68u ||
          !mixed_residue_hash_keyed ||
          !mixed_independent_extension_residues ||
+         mixed_independent_gf256_breaker_residues ||
          mixed_extension_residue_seed_xor != 78u ||
          source_hits_override != 0u || binary_dense_rows_override != 0u ||
          odd_packet_peel_seed_xor != 0u ||
@@ -5090,6 +5178,17 @@ int CmdPrecodeFail(int argc, char** argv)
     }
 #endif
 
+    char mixed_gf256_breaker_preamble[192] = {};
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (mixed_independent_gf256_breaker_residues) {
+        std::snprintf(
+            mixed_gf256_breaker_preamble,
+            sizeof(mixed_gf256_breaker_preamble),
+            " mixed_independent_gf256_breaker_residues=1"
+            " mixed_gf256_breaker_residue_seed_xor=0x%x",
+            mixed_gf256_breaker_residue_seed_xor);
+    }
+#endif
     if (completion == PrecodeFailCompletion::Certified)
     {
         std::printf(
@@ -5100,7 +5199,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -5114,7 +5213,8 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
+            mixed_gf256_breaker_preamble);
     }
     else
     {
@@ -5133,7 +5233,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -5160,7 +5260,8 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
+            mixed_gf256_breaker_preamble);
     }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
@@ -5231,6 +5332,12 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::
                     SetMixedIndependentExtensionResiduesForTesting(
                         mixed_independent_extension_residues) &&
+                (wirehair_v2::
+                     SetMixedIndependentGF256BreakerSeedXorForTesting(
+                         mixed_gf256_breaker_residue_seed_xor), true) &&
+                wirehair_v2::
+                    SetMixedIndependentGF256BreakerResiduesForTesting(
+                        mixed_independent_gf256_breaker_residues) &&
                 wirehair_v2::SetPacketRowSeedMultiplierForTesting(
                     packet_row_seed_multiplier) &&
                 (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
@@ -5244,6 +5351,14 @@ int CmdPrecodeFail(int argc, char** argv)
                 "precodefail could not configure test thread for N=%u\n",
                 K);
             return 1;
+        }
+        if (mixed_independent_gf256_breaker_residues) {
+            std::printf(
+                "# precodefail_gf256_breaker: N=%u base_hash_seed=0x%x "
+                "breaker_hash_seed=0x%x seed_xor=0x%x heavy_tail=A\n",
+                K, active_hash_seed,
+                wirehair_v2::ActiveMixedGF256BreakerResidueHashSeed(),
+                mixed_gf256_breaker_residue_seed_xor);
         }
 #endif
         const wirehair_v2::SeedProfile profile =
@@ -5772,12 +5887,23 @@ int CmdPrecodeFail(int argc, char** argv)
                     witness.BasisHashHigh : 0u;
                 const uint64_t hash_low = have_diagnostic ?
                     witness.BasisHashLow : 0u;
+                char breaker_witness_fields[192] = {};
+                if (mixed_independent_gf256_breaker_residues) {
+                    std::snprintf(
+                        breaker_witness_fields,
+                        sizeof(breaker_witness_fields),
+                        ",breaker_seed_xor=0x%x,breaker_hash_seed=0x%x,"
+                        "independent_gf256_breaker=1",
+                        mixed_gf256_breaker_residue_seed_xor,
+                        wirehair_v2::
+                            ActiveMixedGF256BreakerResidueHashSeed());
+                }
                 std::printf(
                     "# mixed_null_witness,v=2,N=%u,bb=%u,trial=%d,"
                     "status=%s,reason=%s,diagnostic_status=%u,"
                     "replay_stats_ok=%u,period=%u,schedule=%s,"
                     "hash_seed=0x%x,extension_seed_xor=0x%x,"
-                    "independent_extension=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
+                    "independent_extension=%u%s,L=%u,R=%u,binary_rank=%u,q=%u,"
                     "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
                     "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
                     "hash=%016llx%016llx\n",
@@ -5790,6 +5916,7 @@ int CmdPrecodeFail(int argc, char** argv)
                         wirehair_v2::ActiveMixedResidueSchedule()),
                     active_hash_seed, mixed_extension_residue_seed_xor,
                     mixed_independent_extension_residues ? 1u : 0u,
+                    breaker_witness_fields,
                     L, R, binary_rank, q, qrank, d,
                     have_diagnostic && witness.QuotientVerified ? 1u : 0u,
                     have_diagnostic && witness.BinaryVerified ? 1u : 0u,
