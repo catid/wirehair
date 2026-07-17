@@ -294,6 +294,88 @@ expect_success("# peelcost:" peelcost --N 2 --bb-list 8 --trials 1
     --structures lt_m1_c16 --precode dense --overhead 0)
 expect_success("# precodefail:" precodefail --N 64 --bb-list 8
     --overhead 0,1 --trials 4 --threads 2 --loss 0.1)
+
+function(run_mixed_witness result_var out_var err_var seed trial_count)
+    run_bench(result out err precodefail
+        --N 945 --bb-list 1280 --overhead 0
+        --trials ${trial_count} --threads 2 --loss 0.35 --seed ${seed}
+        --schedule burst --completion mixed --mix-count 2
+        --binary-dense-rows 13 --mixed-gf256-rows 11
+        --mixed-gf16-rows 4 --mixed-period 32 --mixed-geometry shared-x
+        --mixed-residue-schedule hashed --mixed-residue-hash-seed 68
+        --mixed-residue-hash-keyed --mixed-independent-extension-residues
+        --mixed-extension-residue-seed-xor 78 --mixed-null-witnesses)
+    set(${result_var} "${result}" PARENT_SCOPE)
+    set(${out_var} "${out}" PARENT_SCOPE)
+    set(${err_var} "${err}" PARENT_SCOPE)
+endfunction()
+
+# The primary trials run on two workers.  Only the deterministic post-join
+# replay installs the TLS sink; trial 21 is folded into logical trial zero.
+run_mixed_witness(result out err 0xa11ce520f84d877e 2)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "trials=2 threads=2.*mixed_null_witnesses=1" OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2,N=945,bb=1280,trial=0,status=captured,reason=verified,diagnostic_status=1,replay_stats_ok=1,period=32,schedule=hashed,hash_seed=0xf090c9ff,extension_seed_xor=0x4e,independent_extension=1,L=1019,R=90,binary_rank=75,q=15,quotient_rank=14,d=1.*hash=9351dfef8d448cb7540a5901e8c02974" OR
+    NOT out MATCHES
+        "mixed_null_row,v=1,row=0,nz=2,source=2,precode=0,source_peeled=1,source_inactive=1,precode_peeled=0,precode_inactive=0,gf256=2,gf16=0,sf_occ=1,sf_cancel=1,sf_cancel_terms=2,sf_max=2,sf_hash=4f7f2ed9c09b8250,ex_occ=1,ex_cancel=1,ex_cancel_terms=2,ex_max=2,ex_hash=beb11b1eb16788b2,pair_occ=1,pair_cancel=1,pair_cancel_terms=2,pair_max=2,pair_hash=cf3f4a67f907b9cf,sf_top=11:2:0000,ex_top=13:2:0000")
+    message(FATAL_ERROR
+        "mixed null-witness post-run replay failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "mixed null-witness post-run replay")
+
+# A second real solve pins canonical full-L ordering and hashes for d=2.
+run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --seed 3 --schedule adversarial
+    --completion mixed --source-hits 2 --mix-count 2 --mixed-period 12
+    --mixed-null-witnesses)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "64,8,periodic,2,0,1,0,1,0," OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=captured,reason=verified,diagnostic_status=1,replay_stats_ok=1.*L=107,R=33,binary_rank=21,q=12,quotient_rank=10,d=2.*exact_words=214,exact_size_ok=1,hash=16daf34d0ed35f45b4ac5bf49004e1a1" OR
+    NOT out MATCHES
+        "mixed_null_row,v=1,row=0.*sf_hash=cb3ab68d3ac8b9c4.*ex_hash=be52b9be6f9d47a6.*pair_hash=78e77a1db4dacc7b" OR
+    NOT out MATCHES
+        "mixed_null_row,v=1,row=1.*sf_hash=596023278d8fd107.*ex_hash=9dd32dc060d03dc5.*pair_hash=86fb1d0bc060b438" OR
+    out MATCHES "mixed_null_row,v=1,row=2")
+    message(FATAL_ERROR
+        "mixed null-witness d=2 classification failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "mixed null-witness d=2 classification")
+
+run_mixed_witness(result out err 0x9d2c4a71 2)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "trials=2 threads=2.*mixed_null_witnesses=1" OR
+    NOT out MATCHES "945,1280,periodic,2,0,2,2,0,0," OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2,N=945,bb=1280,trial=-1,status=none,reason=no_need_more,diagnostic_status=0,replay_stats_ok=0.*L=1019,R=0,binary_rank=0,q=0,quotient_rank=0,d=0.*exact_words=0,exact_size_ok=0,hash=00000000000000000000000000000000" OR
+    out MATCHES "mixed_null_row")
+    message(FATAL_ERROR
+        "mixed null-witness benign record failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "mixed null-witness benign record")
+
+run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --seed 1 --schedule adversarial
+    --completion mixed --source-hits 2 --mix-count 1
+    --mixed-null-witnesses)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES "64,8,periodic,1,0,1,0,1,0," OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=skipped,reason=ineligible_need_more,diagnostic_status=0,replay_stats_ok=0.*L=107,R=32,binary_rank=19,q=13,quotient_rank=0,d=13.*exact_words=0,exact_size_ok=0,hash=00000000000000000000000000000000" OR
+    out MATCHES "mixed_null_row")
+    message(FATAL_ERROR
+        "mixed null-witness skipped record failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "mixed null-witness skipped record")
+expect_failure("mixed experiment flags require --completion mixed"
+    precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --completion certified --mixed-null-witnesses)
+
 string(CONCAT precodefail_paired_pattern
     "precodefail_paired:.*completion=mixed.*mix2_fail=.*mix3_fail=.*"
     "both_fail=.*mix2_only=.*mix3_only=.*both_success=.*mcnemar_p=.*"

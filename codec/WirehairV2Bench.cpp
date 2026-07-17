@@ -3695,7 +3695,36 @@ struct MatrixFailureTrial
     uint64_t BackSubNanoseconds = 0u;
 };
 
+uint64_t TotalSolveNanoseconds(
+    const wirehair_v2::PrecodeSolveStats& stats)
+{
+    return stats.BuildNanoseconds + stats.PeelNanoseconds +
+        stats.ProjectNanoseconds + stats.ResidualNanoseconds +
+        stats.BackSubNanoseconds;
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool SameNonTimingSolveStats(
+    const wirehair_v2::PrecodeSolveStats& a,
+    const wirehair_v2::PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.BlockXors == b.BlockXors &&
+        a.BlockMulAdds == b.BlockMulAdds &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt;
+}
+
 class MixedNullWitnessScope
 {
 public:
@@ -3724,6 +3753,208 @@ public:
 private:
     bool Active;
 };
+
+enum class MixedNullReplayStatus
+{
+    None,
+    Captured,
+    Skipped,
+    Error
+};
+
+const char* MixedNullReplayStatusName(MixedNullReplayStatus status)
+{
+    switch (status)
+    {
+    case MixedNullReplayStatus::None: return "none";
+    case MixedNullReplayStatus::Captured: return "captured";
+    case MixedNullReplayStatus::Skipped: return "skipped";
+    default: return "error";
+    }
+}
+
+struct MixedNullBucket
+{
+    uint32_t Count = 0u;
+    uint16_t Sum = 0u;
+};
+
+struct MixedNullBucketSummary
+{
+    uint32_t Occupied = 0u;
+    uint32_t Cancelled = 0u;
+    uint32_t CancelledTerms = 0u;
+    uint32_t Maximum = 0u;
+    uint64_t Hash = 0u;
+    std::string Top;
+};
+
+void HashMixedNullByte(uint8_t value, uint64_t& hash)
+{
+    hash ^= value;
+    hash *= UINT64_C(0x100000001b3);
+}
+
+void HashMixedNullU32(uint32_t value, uint64_t& hash)
+{
+    for (uint32_t byte = 0u; byte < 4u; ++byte) {
+        HashMixedNullByte((uint8_t)(value >> (8u * byte)), hash);
+    }
+}
+
+MixedNullBucketSummary SummarizeMixedNullBuckets(
+    uint8_t domain,
+    uint32_t row,
+    uint32_t period,
+    const std::vector<MixedNullBucket>& buckets,
+    bool include_top)
+{
+    MixedNullBucketSummary summary;
+    summary.Hash = UINT64_C(0xcbf29ce484222325);
+    HashMixedNullByte(domain, summary.Hash);
+    HashMixedNullU32(row, summary.Hash);
+    HashMixedNullU32(period, summary.Hash);
+    std::vector<uint32_t> occupied;
+    occupied.reserve(include_top ? period : 0u);
+    for (uint32_t index = 0u; index < (uint32_t)buckets.size(); ++index)
+    {
+        const MixedNullBucket& bucket = buckets[index];
+        HashMixedNullU32(index, summary.Hash);
+        HashMixedNullU32(bucket.Count, summary.Hash);
+        HashMixedNullByte((uint8_t)bucket.Sum, summary.Hash);
+        HashMixedNullByte((uint8_t)(bucket.Sum >> 8), summary.Hash);
+        if (bucket.Count == 0u) continue;
+        ++summary.Occupied;
+        summary.Maximum = std::max(summary.Maximum, bucket.Count);
+        if (bucket.Sum == 0u) {
+            ++summary.Cancelled;
+            summary.CancelledTerms += bucket.Count;
+        }
+        if (include_top) occupied.push_back(index);
+    }
+    std::sort(occupied.begin(), occupied.end(), [&](uint32_t a, uint32_t b) {
+        if (buckets[a].Count != buckets[b].Count) {
+            return buckets[a].Count > buckets[b].Count;
+        }
+        return a < b;
+    });
+    const size_t top_count = std::min<size_t>(8u, occupied.size());
+    for (size_t i = 0u; i < top_count; ++i)
+    {
+        const uint32_t residue = occupied[i];
+        const MixedNullBucket& bucket = buckets[residue];
+        char item[48];
+        std::snprintf(
+            item, sizeof(item), "%s%u:%u:%04x",
+            i == 0u ? "" : "|", residue, bucket.Count, bucket.Sum);
+        summary.Top += item;
+    }
+    if (summary.Top.empty()) summary.Top = "-";
+    return summary;
+}
+
+bool BuildMixedNullClassification(
+    uint32_t source_count,
+    const wirehair_v2::MixedNullWitnessDiagnostic& witness,
+    std::vector<std::string>& lines)
+{
+    const uint32_t L = witness.ColumnCount;
+    const uint32_t d = witness.KernelDimension;
+    const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
+    const bool basis_size_overflow = d != 0u &&
+        (size_t)L > std::numeric_limits<size_t>::max() / d;
+    if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
+        d == 0u || d > 15u || period == 0u || period > 244u ||
+        basis_size_overflow || source_count > L ||
+        witness.InactiveMask.size() != L ||
+        witness.CanonicalBasis.size() != (size_t)d * L)
+    {
+        return false;
+    }
+    uint32_t inactive_count = 0u;
+    for (uint8_t inactive : witness.InactiveMask)
+    {
+        if (inactive > 1u) return false;
+        inactive_count += inactive;
+    }
+    if (inactive_count != witness.InactiveCount) return false;
+    std::vector<MixedNullBucket> subfield(period), extension(period);
+    std::vector<MixedNullBucket> joint((size_t)period * period);
+    lines.clear();
+    lines.reserve(d);
+    for (uint32_t row = 0u; row < d; ++row)
+    {
+        std::fill(subfield.begin(), subfield.end(), MixedNullBucket{});
+        std::fill(extension.begin(), extension.end(), MixedNullBucket{});
+        std::fill(joint.begin(), joint.end(), MixedNullBucket{});
+        uint32_t parts[4] = {};
+        uint32_t gf256_values = 0u;
+        uint32_t gf16_values = 0u;
+        const uint16_t* vector = witness.CanonicalBasis.data() +
+            (size_t)row * L;
+        for (uint32_t column = 0u; column < L; ++column)
+        {
+            const uint16_t value = vector[column];
+            if (value == 0u) continue;
+            const bool source = column < source_count;
+            const bool inactive = witness.InactiveMask[column] != 0u;
+            ++parts[(source ? 0u : 2u) + (inactive ? 1u : 0u)];
+            if ((value >> 8) == 0u) ++gf256_values;
+            else ++gf16_values;
+            const uint32_t sf =
+                wirehair_v2::ActiveMixedCoefficientResidue(column);
+            const uint32_t ex =
+                wirehair_v2::ActiveMixedExtensionCoefficientResidue(column);
+            if (sf >= period || ex >= period) return false;
+            ++subfield[sf].Count;
+            subfield[sf].Sum ^= value;
+            ++extension[ex].Count;
+            extension[ex].Sum ^= value;
+            MixedNullBucket& pair = joint[(size_t)sf * period + ex];
+            ++pair.Count;
+            pair.Sum ^= value;
+        }
+        const uint32_t support =
+            parts[0] + parts[1] + parts[2] + parts[3];
+        const MixedNullBucketSummary sf = SummarizeMixedNullBuckets(
+            UINT8_C(0x53), row, period, subfield, true);
+        const MixedNullBucketSummary ex = SummarizeMixedNullBuckets(
+            UINT8_C(0x45), row, period, extension, true);
+        const MixedNullBucketSummary pair = SummarizeMixedNullBuckets(
+            UINT8_C(0x4a), row, period, joint, false);
+        if (support != gf256_values + gf16_values ||
+            pair.Occupied < std::max(sf.Occupied, ex.Occupied) ||
+            pair.Occupied > support)
+        {
+            return false;
+        }
+        char line[2048];
+        const int written = std::snprintf(
+            line, sizeof(line),
+            "# mixed_null_row,v=1,row=%u,nz=%u,source=%u,precode=%u,"
+            "source_peeled=%u,source_inactive=%u,"
+            "precode_peeled=%u,precode_inactive=%u,"
+            "gf256=%u,gf16=%u,sf_occ=%u,sf_cancel=%u,"
+            "sf_cancel_terms=%u,sf_max=%u,sf_hash=%016llx,"
+            "ex_occ=%u,ex_cancel=%u,ex_cancel_terms=%u,ex_max=%u,"
+            "ex_hash=%016llx,pair_occ=%u,pair_cancel=%u,"
+            "pair_cancel_terms=%u,pair_max=%u,pair_hash=%016llx,"
+            "sf_top=%s,ex_top=%s",
+            row, support, parts[0] + parts[1], parts[2] + parts[3],
+            parts[0], parts[1], parts[2], parts[3],
+            gf256_values, gf16_values,
+            sf.Occupied, sf.Cancelled, sf.CancelledTerms, sf.Maximum,
+            (unsigned long long)sf.Hash,
+            ex.Occupied, ex.Cancelled, ex.CancelledTerms, ex.Maximum,
+            (unsigned long long)ex.Hash,
+            pair.Occupied, pair.Cancelled, pair.CancelledTerms, pair.Maximum,
+            (unsigned long long)pair.Hash,
+            sf.Top.c_str(), ex.Top.c_str());
+        if (written < 0 || (size_t)written >= sizeof(line)) return false;
+        lines.push_back(line);
+    }
+    return true;
+}
 #endif
 
 const char* HeavyFamilyName(wirehair_v2::HeavyCoefficientFamily family);
@@ -4212,9 +4443,9 @@ int CmdPrecodeFail(int argc, char** argv)
     bool packet_row_seed_avalanche = false;
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
+    bool mixed_null_witnesses = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint32_t fail_thread_launch_after = UINT32_MAX;
-    bool mixed_null_witnesses = false;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool gf256_heavy_rows_explicit = false;
@@ -4629,14 +4860,6 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --threads must be in [1,256]\n");
         return 1;
     }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (mixed_null_witnesses && threads != 1u)
-    {
-        std::fprintf(stderr,
-            "precodefail --mixed-null-witnesses requires --threads 1\n");
-        return 1;
-    }
-#endif
     for (int overhead : overheads) {
         if (overhead < 0 || overhead > 1024) {
             std::fprintf(stderr,
@@ -4866,7 +5089,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -4879,7 +5102,8 @@ int CmdPrecodeFail(int argc, char** argv)
             seed_block_bytes_override,
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
-            PacketScheduleName(schedule_kind));
+            PacketScheduleName(schedule_kind),
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
     }
     else
     {
@@ -4898,7 +5122,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -4924,7 +5148,8 @@ int CmdPrecodeFail(int argc, char** argv)
             seed_block_bytes_override,
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
-            PacketScheduleName(schedule_kind));
+            PacketScheduleName(schedule_kind),
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
     }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
@@ -4976,12 +5201,36 @@ int CmdPrecodeFail(int argc, char** argv)
                 K);
             return 1;
         }
-        if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
-                mixed_independent_extension_residues))
+        const auto configure_test_thread = [&]() -> bool {
+            return wirehair_v2::SetMixedCoefficientGeometryForTesting(
+                       mixed_geometry) &&
+                wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows) &&
+                wirehair_v2::SetMixedCoefficientPeriodForTesting(
+                    mixed_period) &&
+                wirehair_v2::SetMixedGF256RowsForTesting(mixed_gf256_rows) &&
+                wirehair_v2::SetMixedResidueSkewForTesting(
+                    mixed_residue_skew) &&
+                wirehair_v2::SetMixedResidueScheduleForTesting(
+                    mixed_residue_schedule) &&
+                (wirehair_v2::SetMixedResidueHashSeedForTesting(
+                     active_hash_seed), true) &&
+                (wirehair_v2::
+                     SetMixedIndependentExtensionSeedXorForTesting(
+                         mixed_extension_residue_seed_xor), true) &&
+                wirehair_v2::
+                    SetMixedIndependentExtensionResiduesForTesting(
+                        mixed_independent_extension_residues) &&
+                wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+                    packet_row_seed_multiplier) &&
+                (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
+                     packet_row_seed_avalanche), true) &&
+                (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+                     odd_packet_peel_seed_xor), true);
+        };
+        if (!configure_test_thread())
         {
             std::fprintf(stderr,
-                "precodefail could not restore independent extension "
-                "residues for N=%u\n",
+                "precodefail could not configure test thread for N=%u\n",
                 K);
             return 1;
         }
@@ -5073,10 +5322,60 @@ int CmdPrecodeFail(int argc, char** argv)
         for (int overhead_value : overheads)
         {
             const uint32_t overhead = (uint32_t)overhead_value;
+            uint32_t solve_block_bytes =
+                completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+            if (full_payload_solve) solve_block_bytes = bb;
+            const auto populate_trial_packets = [&, overhead](
+                uint32_t trial,
+                const uint8_t* packet_data,
+                std::vector<wirehair_v2::SolvePacket>& packets) -> bool
+            {
+                const uint64_t loss_seed =
+                    seed ^
+                    ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+                    ((uint64_t)bb * UINT64_C(0xbf58476d1ce4e5b9)) ^
+                    ((uint64_t)(paired_overhead_stream ? 0u : overhead) *
+                        UINT64_C(0x94d049bb133111eb)) ^
+                    ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93));
+                if (schedule_kind == PacketScheduleKind::Iid)
+                {
+                    Rng rng(loss_seed);
+                    uint32_t block_id = 0u;
+                    size_t delivered = 0u;
+                    while (delivered < packets.size())
+                    {
+                        const uint32_t id = block_id++;
+                        if (ShouldDrop(rng, loss)) continue;
+                        wirehair_v2::SolvePacket& packet =
+                            packets[delivered++];
+                        packet.BlockId = id;
+                        packet.Data = packet_data;
+                    }
+                    return true;
+                }
+                const std::vector<uint32_t> ids = BuildPacketSchedule(
+                    K, (uint32_t)packets.size(), loss, loss_seed,
+                    schedule_kind);
+                if (ids.size() != packets.size()) return false;
+                for (size_t i = 0u; i < ids.size(); ++i) {
+                    packets[i].BlockId = ids[i];
+                    packets[i].Data = packet_data;
+                }
+                return true;
+            };
             std::vector<MatrixFailureTrial> results(trials);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            // Preserve the compact always-on benchmark record.  Full solver
+            // metadata is only allocated and written for witness runs.
+            std::vector<wirehair_v2::PrecodeSolveStats> witness_trial_stats;
+            if (mixed_null_witnesses) witness_trial_stats.resize(trials);
             wirehair_v2::MixedNullWitnessDiagnostic captured_witness;
             uint32_t captured_witness_trial = UINT32_MAX;
+            MixedNullReplayStatus witness_status =
+                MixedNullReplayStatus::None;
+            const char* witness_reason = "no_need_more";
+            bool witness_replay_stats_ok = false;
+            std::vector<std::string> witness_classification_lines;
 #endif
             std::atomic<uint32_t> next_trial(0u);
             std::atomic<bool> cancel_workers(false);
@@ -5102,90 +5401,15 @@ int CmdPrecodeFail(int argc, char** argv)
                         try
                         {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                            if (!wirehair_v2::
-                                    SetMixedCoefficientGeometryForTesting(
-                                        mixed_geometry))
-                            {
+                            if (!configure_test_thread()) {
                                 throw std::runtime_error(
-                                    "invalid mixed coefficient geometry");
+                                    "invalid worker test configuration");
                             }
-                            if (!wirehair_v2::
-                                    SetMixedGF16RowsForTesting(
-                                        mixed_gf16_rows))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed GF16 row count");
-                            }
-                            if (!wirehair_v2::
-                                    SetMixedCoefficientPeriodForTesting(
-                                        mixed_period))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed coefficient period");
-                            }
-                            if (!wirehair_v2::SetMixedGF256RowsForTesting(
-                                    mixed_gf256_rows))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed GF256 row count");
-                            }
-                            if (!wirehair_v2::
-                                    SetMixedResidueSkewForTesting(
-                                        mixed_residue_skew))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed residue skew");
-                            }
-                            if (!wirehair_v2::
-                                    SetMixedResidueScheduleForTesting(
-                                        mixed_residue_schedule))
-                            {
-                                throw std::runtime_error(
-                                    "invalid mixed residue schedule");
-                            }
-                            wirehair_v2::SetMixedResidueHashSeedForTesting(
-                                active_hash_seed);
-                            wirehair_v2::
-                                SetMixedIndependentExtensionSeedXorForTesting(
-                                    mixed_extension_residue_seed_xor);
-                            if (!wirehair_v2::
-                                    SetMixedIndependentExtensionResiduesForTesting(
-                                        mixed_independent_extension_residues))
-                            {
-                                throw std::runtime_error(
-                                    "invalid independent extension residue "
-                                    "schedule");
-                            }
-                            if (!wirehair_v2::
-                                    SetPacketRowSeedMultiplierForTesting(
-                                        packet_row_seed_multiplier))
-                            {
-                                throw std::runtime_error(
-                                    "invalid packet row seed multiplier");
-                            }
-                            wirehair_v2::
-                                SetPacketRowSeedAvalancheForTesting(
-                                    packet_row_seed_avalanche);
-                            wirehair_v2::SetOddPacketPeelSeedXorForTesting(
-                                odd_packet_peel_seed_xor);
 #endif
-                            uint32_t solve_block_bytes =
-                                completion == PrecodeFailCompletion::Mixed ?
-                                    2u : 1u;
-                            if (full_payload_solve) {
-                                solve_block_bytes = bb;
-                            }
                             const std::vector<uint8_t> zero(
                                 solve_block_bytes, uint8_t{0});
                             std::vector<wirehair_v2::SolvePacket> packets(
                                 (size_t)K + overhead);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                            wirehair_v2::MixedNullWitnessDiagnostic
-                                witness_candidate;
-                            MixedNullWitnessScope witness_scope(
-                                mixed_null_witnesses ?
-                                    &witness_candidate : nullptr);
-#endif
                             for (;;)
                             {
                                 if (cancel_workers.load()) {
@@ -5195,55 +5419,11 @@ int CmdPrecodeFail(int argc, char** argv)
                                 if (trial >= trials) {
                                     break;
                                 }
-                                // Keep the delivered packet IDs paired across
-                                // completion, heavy-family, and mix-count arms.
-                                const uint64_t loss_seed =
-                                    seed ^
-                                    ((uint64_t)K *
-                                        UINT64_C(0x9e3779b97f4a7c15)) ^
-                                    ((uint64_t)bb *
-                                        UINT64_C(0xbf58476d1ce4e5b9)) ^
-                                    ((uint64_t)(paired_overhead_stream ?
-                                            0u : overhead) *
-                                        UINT64_C(0x94d049bb133111eb)) ^
-                                    ((uint64_t)trial *
-                                        UINT64_C(0xd6e8feb86659fd93));
-                                if (schedule_kind == PacketScheduleKind::Iid)
+                                if (!populate_trial_packets(
+                                        trial, zero.data(), packets))
                                 {
-                                    // Preserve the historical precodefail IID
-                                    // stream exactly so old result sets remain
-                                    // directly comparable.
-                                    Rng rng(loss_seed);
-                                    uint32_t block_id = 0u;
-                                    size_t delivered = 0u;
-                                    while (delivered < packets.size())
-                                    {
-                                        const uint32_t id = block_id++;
-                                        if (ShouldDrop(rng, loss)) {
-                                            continue;
-                                        }
-                                        wirehair_v2::SolvePacket& packet =
-                                            packets[delivered++];
-                                        packet.BlockId = id;
-                                        packet.Data = zero.data();
-                                    }
-                                }
-                                else
-                                {
-                                    const std::vector<uint32_t> ids =
-                                        BuildPacketSchedule(
-                                            K, (uint32_t)packets.size(), loss,
-                                            loss_seed, schedule_kind);
-                                    if (ids.size() != packets.size()) {
-                                        throw std::runtime_error(
-                                            "packet schedule construction "
-                                            "failed");
-                                    }
-                                    for (size_t i = 0; i < ids.size(); ++i)
-                                    {
-                                        packets[i].BlockId = ids[i];
-                                        packets[i].Data = zero.data();
-                                    }
+                                    throw std::runtime_error(
+                                        "packet schedule construction failed");
                                 }
                                 std::vector<uint8_t> intermediate;
                                 wirehair_v2::PrecodeSolveStats solve_stats;
@@ -5254,18 +5434,6 @@ int CmdPrecodeFail(int argc, char** argv)
                                         system, config, runtime, packets,
                                         solve_block_bytes,
                                         intermediate, &solve_stats);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                                if (captured_witness_trial == UINT32_MAX &&
-                                    witness_candidate.Status !=
-                                    wirehair_v2::
-                                        MixedNullWitnessStatus::None)
-                                {
-                                    captured_witness =
-                                        std::move(witness_candidate);
-                                    captured_witness_trial = trial;
-                                    witness_scope.Disable();
-                                }
-#endif
                                 result.Inactivated =
                                     solve_stats.InactivatedColumns;
                                 result.Rank = solve_stats.ResidualRank;
@@ -5274,11 +5442,7 @@ int CmdPrecodeFail(int argc, char** argv)
                                 result.BlockXors = solve_stats.BlockXors;
                                 result.BlockMulAdds = solve_stats.BlockMulAdds;
                                 result.SolveNanoseconds =
-                                    solve_stats.BuildNanoseconds +
-                                    solve_stats.PeelNanoseconds +
-                                    solve_stats.ProjectNanoseconds +
-                                    solve_stats.ResidualNanoseconds +
-                                    solve_stats.BackSubNanoseconds;
+                                    TotalSolveNanoseconds(solve_stats);
                                 result.BuildNanoseconds =
                                     solve_stats.BuildNanoseconds;
                                 result.PeelNanoseconds =
@@ -5289,6 +5453,11 @@ int CmdPrecodeFail(int argc, char** argv)
                                     solve_stats.ResidualNanoseconds;
                                 result.BackSubNanoseconds =
                                     solve_stats.BackSubNanoseconds;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                                if (mixed_null_witnesses) {
+                                    witness_trial_stats[trial] = solve_stats;
+                                }
+#endif
                             }
                         }
                         catch (...) {
@@ -5310,6 +5479,119 @@ int CmdPrecodeFail(int argc, char** argv)
                 std::fprintf(stderr, "precodefail worker failed\n");
                 return 2;
             }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (mixed_null_witnesses)
+            {
+                uint32_t first_need_more = UINT32_MAX;
+                for (uint32_t trial = 0u; trial < trials; ++trial)
+                {
+                    const MatrixFailureTrial& candidate = results[trial];
+                    if (candidate.Result != Wirehair_NeedMore) continue;
+                    if (first_need_more == UINT32_MAX) first_need_more = trial;
+                    const wirehair_v2::PrecodeSolveStats& stats =
+                        witness_trial_stats[trial];
+                    if (stats.InactivatedColumns <
+                            stats.BinaryResidualRank ||
+                        stats.ResidualRank < stats.BinaryResidualRank)
+                    {
+                        continue;
+                    }
+                    const uint32_t q = stats.InactivatedColumns -
+                        stats.BinaryResidualRank;
+                    const uint32_t quotient_rank = stats.ResidualRank -
+                        stats.BinaryResidualRank;
+                    if (q != 0u && q <= 15u &&
+                        q <= system.Params.HeavyRows && quotient_rank < q)
+                    {
+                        captured_witness_trial = trial;
+                        break;
+                    }
+                }
+                if (captured_witness_trial == UINT32_MAX)
+                {
+                    if (first_need_more != UINT32_MAX) {
+                        captured_witness_trial = first_need_more;
+                        witness_status = MixedNullReplayStatus::Skipped;
+                        witness_reason = "ineligible_need_more";
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        std::vector<wirehair_v2::SolvePacket> packets(
+                            (size_t)K + overhead);
+                        const std::vector<uint8_t> replay_zero(
+                            solve_block_bytes, uint8_t{0});
+                        if (!configure_test_thread()) {
+                            witness_status = MixedNullReplayStatus::Error;
+                            witness_reason = "replay_config";
+                        }
+                        else if (!populate_trial_packets(
+                                     captured_witness_trial,
+                                     replay_zero.data(), packets))
+                        {
+                            witness_status = MixedNullReplayStatus::Error;
+                            witness_reason = "replay_schedule";
+                        }
+                        else
+                        {
+                            std::vector<uint8_t> intermediate;
+                            wirehair_v2::PrecodeSolveStats replay_stats;
+                            WirehairResult replay_result;
+                            {
+                                MixedNullWitnessScope witness_scope(
+                                    &captured_witness);
+                                replay_result = wirehair_v2::
+                                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                                        system, config, runtime, packets,
+                                        solve_block_bytes, intermediate,
+                                        &replay_stats);
+                            }
+                            const MatrixFailureTrial& original =
+                                results[captured_witness_trial];
+                            witness_replay_stats_ok =
+                                replay_result == original.Result &&
+                                SameNonTimingSolveStats(
+                                    replay_stats,
+                                    witness_trial_stats[
+                                        captured_witness_trial]);
+                            if (!witness_replay_stats_ok) {
+                                witness_status = MixedNullReplayStatus::Error;
+                                witness_reason = "replay_mismatch";
+                            }
+                            else if (captured_witness.Status !=
+                                     wirehair_v2::
+                                         MixedNullWitnessStatus::Captured)
+                            {
+                                witness_status = MixedNullReplayStatus::Error;
+                                witness_reason = "diagnostic_failed";
+                            }
+                            else {
+                                witness_status =
+                                    MixedNullReplayStatus::Captured;
+                                witness_reason = "verified";
+                                if (!BuildMixedNullClassification(
+                                        K, captured_witness,
+                                        witness_classification_lines))
+                                {
+                                    witness_classification_lines.clear();
+                                    witness_status =
+                                        MixedNullReplayStatus::Error;
+                                    witness_reason = "classification_failed";
+                                }
+                            }
+                        }
+                    }
+                    catch (...) {
+                        witness_classification_lines.clear();
+                        witness_status = MixedNullReplayStatus::Error;
+                        witness_reason = "replay_exception";
+                    }
+                }
+            }
+#endif
 
             uint32_t successes = 0u;
             uint32_t rank_failures = 0u;
@@ -5365,7 +5647,8 @@ int CmdPrecodeFail(int argc, char** argv)
                 backsub_ns_sum += result.BackSubNanoseconds;
                 block_xors_sum += result.BlockXors;
                 block_muladds_sum += result.BlockMulAdds;
-                inact_max = std::max(inact_max, result.Inactivated);
+                inact_max = std::max(
+                    inact_max, result.Inactivated);
                 const uint32_t binary_def = result.Inactivated >=
                     result.BinaryRank ?
                     result.Inactivated - result.BinaryRank : 0u;
@@ -5435,32 +5718,78 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 const wirehair_v2::MixedNullWitnessDiagnostic& witness =
                     captured_witness;
-                if (witness.Status !=
-                    wirehair_v2::MixedNullWitnessStatus::None)
-                {
-                    const uint64_t expected_words =
-                        (uint64_t)witness.KernelDimension *
-                        witness.ColumnCount;
-                    std::printf(
-                        "# mixed_null_witness,v=1,N=%u,bb=%u,trial=%u,"
-                        "status=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
-                        "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
-                        "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
-                        "hash=%016llx%016llx\n",
-                        K, bb, captured_witness_trial,
-                        (uint32_t)witness.Status,
-                        witness.ColumnCount, witness.InactiveCount,
-                        witness.BinaryRank, witness.QuotientColumns,
-                        witness.QuotientRank, witness.KernelDimension,
-                        witness.QuotientVerified ? 1u : 0u,
-                        witness.BinaryVerified ? 1u : 0u,
-                        witness.CompletionVerified ? 1u : 0u,
-                        witness.CanonicalVerified ? 1u : 0u,
-                        witness.CanonicalBasis.size(),
-                        expected_words == witness.CanonicalBasis.size() ?
-                            1u : 0u,
-                        (unsigned long long)witness.BasisHashHigh,
-                        (unsigned long long)witness.BasisHashLow);
+                const bool have_trial = captured_witness_trial < trials;
+                const bool have_diagnostic =
+                    witness_status == MixedNullReplayStatus::Captured;
+                const wirehair_v2::PrecodeSolveStats* selected_stats =
+                    have_trial ?
+                        &witness_trial_stats[captured_witness_trial] : nullptr;
+                const uint32_t selected_R = selected_stats ?
+                    selected_stats->InactivatedColumns : 0u;
+                const uint32_t selected_binary_rank = selected_stats ?
+                    selected_stats->BinaryResidualRank : 0u;
+                const uint32_t selected_rank = selected_stats ?
+                    selected_stats->ResidualRank : 0u;
+                const uint32_t selected_q =
+                    selected_R >= selected_binary_rank ?
+                    selected_R - selected_binary_rank : 0u;
+                const uint32_t selected_qrank =
+                    selected_rank >= selected_binary_rank ?
+                    selected_rank - selected_binary_rank : 0u;
+                const uint32_t L = have_diagnostic ?
+                    witness.ColumnCount : K + precode_count;
+                const uint32_t R = have_diagnostic ?
+                    witness.InactiveCount : selected_R;
+                const uint32_t binary_rank = have_diagnostic ?
+                    witness.BinaryRank : selected_binary_rank;
+                const uint32_t q = have_diagnostic ?
+                    witness.QuotientColumns : selected_q;
+                const uint32_t qrank = have_diagnostic ?
+                    witness.QuotientRank : selected_qrank;
+                const uint32_t d = have_diagnostic ?
+                    witness.KernelDimension :
+                    (q >= qrank ? q - qrank : 0u);
+                const uint64_t expected_words = (uint64_t)d * L;
+                const size_t exact_words = have_diagnostic ?
+                    witness.CanonicalBasis.size() : 0u;
+                const uint64_t hash_high = have_diagnostic ?
+                    witness.BasisHashHigh : 0u;
+                const uint64_t hash_low = have_diagnostic ?
+                    witness.BasisHashLow : 0u;
+                std::printf(
+                    "# mixed_null_witness,v=2,N=%u,bb=%u,trial=%d,"
+                    "status=%s,reason=%s,diagnostic_status=%u,"
+                    "replay_stats_ok=%u,period=%u,schedule=%s,"
+                    "hash_seed=0x%x,extension_seed_xor=0x%x,"
+                    "independent_extension=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
+                    "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
+                    "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
+                    "hash=%016llx%016llx\n",
+                    K, bb, have_trial ? (int)captured_witness_trial : -1,
+                    MixedNullReplayStatusName(witness_status),
+                    witness_reason, (uint32_t)witness.Status,
+                    witness_replay_stats_ok ? 1u : 0u,
+                    wirehair_v2::ActiveMixedCoefficientPeriod(),
+                    MixedResidueScheduleName(
+                        wirehair_v2::ActiveMixedResidueSchedule()),
+                    active_hash_seed, mixed_extension_residue_seed_xor,
+                    mixed_independent_extension_residues ? 1u : 0u,
+                    L, R, binary_rank, q, qrank, d,
+                    have_diagnostic && witness.QuotientVerified ? 1u : 0u,
+                    have_diagnostic && witness.BinaryVerified ? 1u : 0u,
+                    have_diagnostic && witness.CompletionVerified ? 1u : 0u,
+                    have_diagnostic && witness.CanonicalVerified ? 1u : 0u,
+                    exact_words,
+                    have_diagnostic && expected_words == exact_words ?
+                        1u : 0u,
+                    (unsigned long long)hash_high,
+                    (unsigned long long)hash_low);
+                if (witness_status == MixedNullReplayStatus::Captured) {
+                    for (const std::string& line :
+                         witness_classification_lines)
+                    {
+                        std::printf("%s\n", line.c_str());
+                    }
                 }
             }
 #endif
