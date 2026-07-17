@@ -5,8 +5,9 @@ The campaign covers every K in 2..64000 under three fresh seeds and the
 burst, adversarial, and repair-only 50% loss schedules.  It compares fixed
 D12 with adaptive fixed-D12/two-anchor and adaptive D13 using the exact
 mixed10-GF(256)/2-GF(65536), period-244, mix2 production geometry at 64-byte
-payloads.  The published R2 group ledger is used only as a full-domain salt
-batching map; no previously observed failure selection is consumed.
+payloads.  The published R2 group ledger is used only as a full-domain batching
+map: its historical salt column is recorded but never applied.  Every cell
+uses the named production profile's packet-peel seed xor of zero.
 
 Prepare must run from a clean immutable commit.  Run must use the frozen
 script, helper, binary, group ledger, and contract produced by prepare.
@@ -28,7 +29,9 @@ import math
 import os
 from pathlib import Path
 import queue
+import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -37,14 +40,18 @@ import time
 from typing import Any, Iterable, Sequence
 
 from wh2_rank_floor_two_anchor_screen import (
+    THERMAL_FIELDS,
     TIMING_FIELDS,
     binomial_one_sided,
     canonical_json,
     deterministic_equal,
     parse_bench_output,
+    parse_thermal_sample,
     sha256_file,
     thermal_finish,
     thermal_start,
+    validate_thermal_current,
+    validate_thermal_health,
 )
 
 
@@ -73,7 +80,8 @@ BASE_OPTIONS = (
     "--mix-count", "2",
 )
 PAIRED_HEADER = (
-    "K", "salt", "schedule", "seed_index", "seed",
+    "K", "group", "group_ledger_salt_unused",
+    "active_packet_peel_seed_xor", "schedule", "seed_index", "seed",
     *(
         f"{arm}_{field}"
         for arm in ARMS
@@ -167,7 +175,7 @@ def canonical_u64(text: str, context: str) -> int:
 @dataclass(frozen=True)
 class Group:
     group: int
-    salt: str
+    ledger_salt: str
     ks: tuple[int, ...]
 
 
@@ -180,7 +188,7 @@ class Job:
     seed: str
     schedule: str
     group: int
-    salt: str
+    ledger_salt: str
     ks: tuple[int, ...]
 
     @property
@@ -206,7 +214,7 @@ def load_groups(path: Path, expected_sha256: str = GROUPS_SHA256) -> list[Group]
             die(f"groups:{number}: expected three fields")
         group = strict_uint(row[0], f"groups:{number}:group")
         salt_value = canonical_u64(row[1], f"groups:{number}:salt")
-        salt = f"0x{salt_value:x}"
+        ledger_salt = f"0x{salt_value:x}"
         values = tuple(
             strict_uint(value, f"groups:{number}:K")
             for value in row[2].split(",")
@@ -218,7 +226,7 @@ def load_groups(path: Path, expected_sha256: str = GROUPS_SHA256) -> list[Group]
         if group != len(groups):
             die(f"groups:{number}: group IDs are not contiguous from zero")
         seen.update(values)
-        groups.append(Group(group, salt, values))
+        groups.append(Group(group, ledger_salt, values))
     if len(groups) != 186 or seen != set(range(K_MIN, K_MAX + 1)):
         die("group ledger is not 186 groups covering exact K=2..64000")
     return groups
@@ -250,7 +258,7 @@ def build_jobs(groups: Sequence[Group]) -> list[Job]:
                             continue
                         jobs.append(Job(
                             len(jobs), arm, band, seed_index, seed, schedule,
-                            group.group, group.salt, ks,
+                            group.group, group.ledger_salt, ks,
                         ))
                         cells += len(ks)
     expected_cells = len(ARMS) * len(SEEDS) * len(SCHEDULES) * K_COUNT
@@ -271,7 +279,7 @@ def make_command(binary: Path, job: Job) -> list[str]:
         "--N", ",".join(map(str, job.ks)),
         "--seed", job.seed,
         "--schedule", job.schedule,
-        "--packet-peel-seed-xor", str(canonical_u64(job.salt, "job salt")),
+        "--packet-peel-seed-xor", "0",
         *arm_options(job.arm, job.band),
     ]
 
@@ -289,6 +297,195 @@ class CpuPool:
         self._queue.put(cpu)
 
 
+def signal_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def process_group_exists(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def close_process_streams(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def stop_and_reap_process_group(
+    process: subprocess.Popen[bytes], grace_seconds: float = 5.0,
+) -> None:
+    try:
+        signal_process_group(process, signal.SIGTERM)
+        try:
+            process.communicate(timeout=grace_seconds)
+        except BaseException:
+            # Cleanup must continue even if pipe communication itself fails.
+            pass
+        if process.poll() is None:
+            signal_process_group(process, signal.SIGKILL)
+            try:
+                process.wait(timeout=grace_seconds)
+            except BaseException:
+                pass
+        deadline = time.monotonic() + grace_seconds
+        while process_group_exists(process) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process_group_exists(process):
+            signal_process_group(process, signal.SIGKILL)
+            kill_deadline = time.monotonic() + grace_seconds
+            while (process_group_exists(process) and
+                    time.monotonic() < kill_deadline):
+                time.sleep(0.05)
+    finally:
+        close_process_streams(process)
+    if process.poll() is None or process_group_exists(process):
+        raise CampaignError(f"child process group {process.pid} was not reaped")
+
+
+class ProcessRegistry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.processes: set[subprocess.Popen[bytes]] = set()
+
+    def add(self, process: subprocess.Popen[bytes]) -> None:
+        with self.lock:
+            self.processes.add(process)
+
+    def remove(self, process: subprocess.Popen[bytes]) -> None:
+        with self.lock:
+            self.processes.discard(process)
+
+    def signal_all(self, signum: int) -> None:
+        with self.lock:
+            processes = tuple(self.processes)
+        for process in processes:
+            signal_process_group(process, signum)
+
+    def count(self) -> int:
+        with self.lock:
+            return len(self.processes)
+
+    def snapshot(self) -> tuple[subprocess.Popen[bytes], ...]:
+        with self.lock:
+            return tuple(self.processes)
+
+    def drain(self, timeout: float = 6.0) -> None:
+        self.signal_all(signal.SIGTERM)
+        deadline = time.monotonic() + timeout
+        while self.count() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self.count():
+            for process in self.snapshot():
+                try:
+                    stop_and_reap_process_group(process, timeout)
+                except CampaignError:
+                    continue
+                self.remove(process)
+        if self.count():
+            die("campaign cleanup could not drain all child process groups")
+
+
+class CampaignSignalGuard:
+    def __init__(self, abort: threading.Event, registry: ProcessRegistry) -> None:
+        self.abort = abort
+        self.registry = registry
+        self.received: int | None = None
+        self.previous: dict[int, Any] = {}
+        self.read_fd = -1
+        self.write_fd = -1
+        self.control_stop = False
+        self.control_thread: threading.Thread | None = None
+        self.control_started = False
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        if self.received is None:
+            self.received = signum
+        try:
+            os.write(self.write_fd, b"s")
+        except (BlockingIOError, OSError):
+            pass
+
+    def _control_loop(self) -> None:
+        while True:
+            try:
+                readable, _, _ = select.select([self.read_fd], [], [], 1.0)
+            except (OSError, ValueError):
+                return
+            if not readable:
+                if self.control_stop:
+                    return
+                continue
+            try:
+                os.read(self.read_fd, 4096)
+            except (BlockingIOError, OSError):
+                pass
+            if self.control_stop:
+                return
+            self.abort.set()
+            self.registry.signal_all(signal.SIGTERM)
+
+    def _stop_control(self) -> None:
+        self.control_stop = True
+        if self.write_fd >= 0:
+            try:
+                os.write(self.write_fd, b"x")
+            except (BlockingIOError, OSError):
+                pass
+        if self.control_thread is not None and self.control_started:
+            self.control_thread.join()
+        for signum, handler in self.previous.items():
+            signal.signal(signum, handler)
+        for fd in (self.read_fd, self.write_fd):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self.read_fd = self.write_fd = -1
+
+    def __enter__(self) -> "CampaignSignalGuard":
+        if threading.current_thread() is not threading.main_thread():
+            die("campaign signal guard must run on the main thread")
+        self.read_fd, self.write_fd = os.pipe()
+        try:
+            os.set_blocking(self.write_fd, False)
+            self.control_thread = threading.Thread(
+                target=self._control_loop, name="campaign-signal-control"
+            )
+            try:
+                self.control_thread.start()
+            finally:
+                self.control_started = self.control_thread.ident is not None
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                self.previous[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._handle)
+        except BaseException:
+            self._stop_control()
+            raise
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        self.abort.set()
+        try:
+            self.registry.drain()
+        finally:
+            self._stop_control()
+        if self.received is not None:
+            name = signal.Signals(self.received).name
+            raise CampaignError(f"campaign terminated by external {name}") from exc
+        return False
+
+
 class ThermalGuard:
     def __init__(
         self, path: Path, abort: threading.Event,
@@ -300,83 +497,98 @@ class ThermalGuard:
         self.stale_seconds = stale_seconds
         self.limit_c = limit_c
         self.consecutive_limit = consecutive_limit
-        self.mark = thermal_start(path)
+        if (not math.isfinite(limit_c) or not 0.0 <= limit_c <= 120.0 or
+                consecutive_limit <= 0):
+            die("thermal guard policy is outside the canonical range")
+        self.mark = thermal_start(path, stale_seconds=stale_seconds)
+        self.read_offset = self.mark["offset"]
+        self.last_monotonic = self.mark["monotonic_s"]
         self.stop_event = threading.Event()
         self.error: str | None = None
-        self.polls = 0
-        self.high_polls = 0
+        self.poll_iterations = 0
+        self.samples = 0
+        self.high_samples = 0
         self.thread = threading.Thread(target=self._loop, name="thermal-guard")
+        self.started = False
 
     def start(self) -> None:
-        self.thread.start()
+        try:
+            self.thread.start()
+        finally:
+            self.started = self.thread.ident is not None
 
-    def _latest(self) -> dict[str, str]:
+    def _new_samples(self) -> list[dict[str, Any]]:
         with self.path.open("rb") as source:
-            source.seek(0, os.SEEK_END)
-            size = source.tell()
-            source.seek(max(0, size - 16384))
-            suffix = source.read()
             file_stat = os.fstat(source.fileno())
-        if time.time() - file_stat.st_mtime > self.stale_seconds:
-            die("thermal logger is stale")
-        lines = suffix.splitlines()
-        if suffix and not suffix.endswith(b"\n"):
-            lines = lines[:-1]
-        if len(lines) < 2 and size > len(suffix):
-            die("cannot find a complete thermal data row")
-        if not lines:
-            die("thermal log has no complete data row")
-        header = next(csv.reader([self.mark["header"].decode("utf-8").strip()]))
-        values = next(csv.reader([lines[-1].decode("utf-8")]))
-        if len(values) != len(header):
-            die("latest thermal row has the wrong field count")
-        return dict(zip(header, values))
+            if ((file_stat.st_dev, file_stat.st_ino) !=
+                    (self.mark["dev"], self.mark["ino"])):
+                die("thermal logger inode changed")
+            if file_stat.st_size < self.read_offset:
+                die("thermal logger shrank")
+            source.seek(self.read_offset)
+            suffix = source.read()
+        complete_end = suffix.rfind(b"\n")
+        if complete_end < 0:
+            if len(suffix) > 16384:
+                die("thermal logger has an oversized partial row")
+            return []
+        complete = suffix[:complete_end + 1]
+        partial = suffix[complete_end + 1:]
+        if len(partial) > 16384:
+            die("thermal logger has an oversized partial row")
+        lines = complete.splitlines(keepends=True)
+        samples = [
+            parse_thermal_sample(line, f"live thermal row {number}")
+            for number, line in enumerate(lines, 1)
+        ]
+        self.read_offset += len(complete)
+        return samples
 
     def _loop(self) -> None:
-        consecutive = 0
-        while not self.stop_event.wait(1.0):
+        consecutive = 1 if self.mark["max_temperature_c"] >= self.limit_c else 0
+        while not self.stop_event.wait(0.25):
             try:
-                row = self._latest()
-                dimm_fields = [name for name in row if name.startswith("dimm_i2c")]
-                if len(dimm_fields) != 8:
-                    die("thermal logger does not expose eight DIMM readings")
-                temperatures = (
-                    [float(row["cpu_tctl_c"])] +
-                    [float(row[name]) for name in dimm_fields]
+                samples = self._new_samples()
+                self.poll_iterations += 1
+                for sample in samples:
+                    delta = sample["monotonic_s"] - self.last_monotonic
+                    if delta <= 0.0 or delta > self.stale_seconds:
+                        die("thermal logger is nonmonotonic or has a sampling gap")
+                    validate_thermal_health(sample, "live thermal sample")
+                    self.last_monotonic = sample["monotonic_s"]
+                    self.samples += 1
+                    high = sample["max_temperature_c"] >= self.limit_c
+                    self.high_samples += high
+                    consecutive = consecutive + 1 if high else 0
+                    if consecutive >= self.consecutive_limit:
+                        die(
+                            f"thermal limit {self.limit_c:g} C reached for "
+                            f"{consecutive} consecutive samples"
+                        )
+                current = samples[-1] if samples else {
+                    "monotonic_s": self.last_monotonic
+                }
+                validate_thermal_current(
+                    current, self.stale_seconds, "live thermal tail"
                 )
-                if any(not math.isfinite(value) for value in temperatures):
-                    die("thermal logger reports a non-finite temperature")
-                maximum = max(temperatures)
-                if int(row["dimm_read_errors"]) != 0:
-                    die("thermal logger reports a DIMM read error")
-                edac_ce = int(row["edac_ce"])
-                edac_ue = int(row["edac_ue"])
-                if (edac_ce < self.mark["edac_ce"] or
-                        edac_ue < self.mark["edac_ue"]):
-                    die("thermal logger EDAC counter decreased")
-                if (edac_ce != self.mark["edac_ce"] or
-                        edac_ue != self.mark["edac_ue"]):
-                    die("thermal logger reports a new EDAC event")
-                consecutive = consecutive + 1 if maximum >= self.limit_c else 0
-                self.polls += 1
-                self.high_polls += maximum >= self.limit_c
-                if consecutive >= self.consecutive_limit:
-                    die(
-                        f"thermal limit {self.limit_c:g} C reached for "
-                        f"{consecutive} consecutive polls"
-                    )
             except Exception as exc:  # Preserve the first guard failure for main.
                 self.error = str(exc)
                 self.abort.set()
                 return
 
     def finish(self, output: Path) -> dict[str, Any]:
+        if not self.started:
+            die("thermal guard was never started")
         self.stop_event.set()
         self.thread.join()
-        summary = thermal_finish(self.path, self.mark, output)
+        summary = thermal_finish(
+            self.path, self.mark, output,
+            limit_c=self.limit_c, stale_seconds=self.stale_seconds,
+        )
         summary.update({
-            "guard_polls": self.polls,
-            "guard_high_polls": self.high_polls,
+            "guard_poll_iterations": self.poll_iterations,
+            "guard_samples": self.samples,
+            "guard_high_samples": self.high_samples,
             "guard_limit_c": self.limit_c,
             "guard_error": self.error,
         })
@@ -389,6 +601,7 @@ def run_job(
     result_root: Path,
     pool: CpuPool,
     abort: threading.Event,
+    registry: ProcessRegistry,
     timeout: float,
 ) -> dict[str, Any]:
     if abort.is_set():
@@ -400,32 +613,44 @@ def run_job(
         command = ["taskset", "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
         process = subprocess.Popen(
-            command, text=True, encoding="utf-8",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=max(0.001, min(0.25, remaining))
-                )
-                break
-            except subprocess.TimeoutExpired:
-                reason = None
-                if abort.is_set():
-                    reason = "campaign abort"
-                elif remaining <= 0:
-                    reason = f"timeout after {timeout:g}s"
-                if reason is None:
-                    continue
-                process.terminate()
+        registered = False
+        try:
+            registry.add(process)
+            registered = True
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
                 try:
-                    process.communicate(timeout=5.0)
+                    stdout_bytes, stderr_bytes = process.communicate(
+                        timeout=max(0.001, min(0.25, remaining))
+                    )
+                    break
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.communicate()
-                die(f"job {job.job} terminated on {reason}")
+                    reason = None
+                    if abort.is_set():
+                        reason = "campaign abort"
+                    elif remaining <= 0:
+                        reason = f"timeout after {timeout:g}s"
+                    if reason is None:
+                        continue
+                    stop_and_reap_process_group(process)
+                    die(f"job {job.job} terminated on {reason}")
+        finally:
+            leader_live = process.poll() is None
+            descendants_live = process_group_exists(process)
+            if leader_live or descendants_live:
+                stop_and_reap_process_group(process)
+            else:
+                close_process_streams(process)
+            if process.poll() is None or process_group_exists(process):
+                die(f"job {job.job} child cleanup was not proven")
+            if registered:
+                registry.remove(process)
+            if not leader_live and descendants_live:
+                die(f"job {job.job} left an unexpected child process")
         end_ns = time.time_ns()
     finally:
         pool.release(cpu)
@@ -433,16 +658,21 @@ def run_job(
     stdout_path = result_root / "stdout" / f"{job.stem}.csv"
     stderr_path = result_root / "stderr" / f"{job.stem}.txt"
     command_path = result_root / "commands" / f"{job.stem}.json"
-    atomic_write(stdout_path, stdout.encode("utf-8"))
-    atomic_write(stderr_path, stderr.encode("utf-8"))
-    if process.returncode != 0 or stderr:
+    atomic_write(stdout_path, stdout_bytes)
+    atomic_write(stderr_path, stderr_bytes)
+    try:
+        stdout = stdout_bytes.decode("utf-8")
+        stderr = stderr_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        die(f"job {job.job} emitted non-UTF-8 output: {exc}")
+    if process.returncode != 0 or stderr_bytes:
         die(
             f"job {job.job} failed rc={process.returncode}: "
             f"{stderr[-1000:]}"
         )
     options = arm_options(job.arm, job.band)
     rows = parse_bench_output(
-        stdout, job.ks, job.salt, job.seed, job.schedule,
+        stdout, job.ks, "0x0", job.seed, job.schedule,
         options, True,
     )
     if len(rows) != len(job.ks):
@@ -450,7 +680,9 @@ def run_job(
     record = {
         "job": job.job, "arm": job.arm, "band": job.band,
         "seed_index": job.seed_index, "seed": job.seed,
-        "schedule": job.schedule, "group": job.group, "salt": job.salt,
+        "schedule": job.schedule, "group": job.group,
+        "group_ledger_salt_unused": job.ledger_salt,
+        "active_packet_peel_seed_xor": "0x0",
         "K_count": len(job.ks), "cpu": cpu, "command": command,
         "start_ns": start_ns, "end_ns": end_ns,
         "elapsed_ns": end_ns - start_ns, "returncode": process.returncode,
@@ -589,7 +821,7 @@ def prepare(args: argparse.Namespace) -> int:
     destinations["binary"].chmod(0o755)
     destinations["script"].chmod(0o755)
     contract = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v2",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v4",
         "source_commit": head, "source_repo": str(repo),
         "build_command": build_command,
         "binary_source": str(binary),
@@ -604,12 +836,17 @@ def prepare(args: argparse.Namespace) -> int:
         "arms": ARMS, "seeds": SEEDS, "schedules": SCHEDULES,
         "loss": "0.50", "trials": 1, "block_bytes": 64,
         "independence": (
-            "Fresh seeds and every K; published R2 groups are salt batching "
-            "only, with no failure-selected input."
+            "Fresh seeds and every K with packet-peel seed xor fixed to the "
+            "named production value zero. Published R2 group membership is "
+            "batching/order metadata only; its historical salt column is "
+            "sealed for provenance but never applied or analyzed as a scope."
         ),
+        "packet_peel_seed_xor": "0x0",
+        "group_ledger_salts_applied": False,
         "saturated_timing_speed_claim_valid": False,
+        "thermal_fields": THERMAL_FIELDS,
         "thermal_policy": {
-            "limit_c": 90.0, "consecutive_polls": 3,
+            "limit_c": 90.0, "consecutive_samples": 3,
             "stale_seconds": 5.0, "min_cpu_busy_pct": 95.0,
         },
     }
@@ -650,12 +887,19 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], Path, Path, list[Grou
     contract = json.loads(stable_bytes(frozen / "contract.json"))
     if (
         contract.get("schema") !=
-            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v2"
+            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v4"
         or tuple(contract.get("arms", ())) != ARMS
         or tuple(contract.get("seeds", ())) != SEEDS
         or tuple(contract.get("schedules", ())) != SCHEDULES
         or contract.get("K_domain") != [K_MIN, K_MAX]
         or contract.get("groups_sha256") != GROUPS_SHA256
+        or contract.get("packet_peel_seed_xor") != "0x0"
+        or contract.get("group_ledger_salts_applied") is not False
+        or tuple(contract.get("thermal_fields", ())) != THERMAL_FIELDS
+        or contract.get("thermal_policy") != {
+            "limit_c": 90.0, "consecutive_samples": 3,
+            "stale_seconds": 5.0, "min_cpu_busy_pct": 95.0,
+        }
         or contract.get("cmake_cache_sha256") !=
             sha256_file(frozen / "CMakeCache.txt")
     ):
@@ -719,7 +963,7 @@ def load_arm_data(
         stdout_path = result_root / "stdout" / f"{job.stem}.csv"
         text = stable_bytes(stdout_path).decode("utf-8")
         rows = parse_bench_output(
-            text, job.ks, job.salt, job.seed, job.schedule,
+            text, job.ks, "0x0", job.seed, job.schedule,
             arm_options(job.arm, job.band), True,
         )
         arm = data[job.arm]
@@ -768,7 +1012,7 @@ def verify_low_identity(
         for arm, job in arms.items():
             path = result_root / "stdout" / f"{job.stem}.csv"
             parsed[arm] = parse_bench_output(
-                stable_bytes(path).decode("utf-8"), job.ks, job.salt,
+                stable_bytes(path).decode("utf-8"), job.ks, "0x0",
                 job.seed, job.schedule, (), True,
             )
         base = parsed["d12"]
@@ -877,7 +1121,8 @@ def counter_report(counter: Counter[str]) -> dict[str, Any]:
             "both_fail": counter[f"{arm}_both_fail"],
             "cleared_heavy_shortfall": counter[f"{arm}_cleared_shortfall"],
             "new_heavy_shortfall": counter[f"{arm}_new_shortfall"],
-            "one_sided_exact": binomial_one_sided(repairs, introductions),
+            "descriptive_cell_sign_tail":
+                binomial_one_sided(repairs, introductions),
             "paired_success_cells": counter[f"{arm}_paired_success"],
             "block_xor_ratio_paired_success": ratio(
                 counter[f"{arm}_paired_candidate_xors_milli"],
@@ -905,10 +1150,12 @@ def analyze(
         die("result phase seal does not cover the exact result artifact set")
     identity = verify_low_identity(jobs, result_root)
     data = load_arm_data(jobs, result_root)
-    salt_by_k = [""] * (K_MAX + 1)
+    group_by_k = [-1] * (K_MAX + 1)
+    ledger_salt_by_k = [""] * (K_MAX + 1)
     for group in groups:
         for K in group.ks:
-            salt_by_k[K] = group.salt
+            group_by_k[K] = group.group
+            ledger_salt_by_k[K] = group.ledger_salt
 
     analysis = result_dir / "analysis"
     analysis.mkdir(exist_ok=False)
@@ -928,7 +1175,10 @@ def analyze(
             for schedule in SCHEDULES:
                 for K in range(K_MIN, K_MAX + 1):
                     index = cell_index(seed_index, schedule, K)
-                    values: list[Any] = [K, salt_by_k[K], schedule, seed_index, seed]
+                    values: list[Any] = [
+                        K, group_by_k[K], ledger_salt_by_k[K], "0x0",
+                        schedule, seed_index, seed,
+                    ]
                     interesting = False
                     for arm in ARMS:
                         arm_data = data[arm]
@@ -953,7 +1203,6 @@ def analyze(
                         ("seed", f"seed{seed_index}"),
                         ("schedule_seed", f"{schedule}:seed{seed_index}"),
                         ("K_band", band(K)),
-                        ("salt", salt_by_k[K]),
                     ):
                         update_counter(scopes[(scope_type, scope)], data, index)
 
@@ -1038,6 +1287,11 @@ def analyze(
                 ])
                 exact_rows += 1
 
+    for report in consistency.values():
+        report["descriptive_K_cluster_sign_tail"] = binomial_one_sided(
+            report["K_better"], report["K_worse"]
+        )
+
     with scopes_path.open("w", encoding="utf-8", newline="") as output:
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(("scope_type", "scope", "summary_json"))
@@ -1045,7 +1299,7 @@ def analyze(
             writer.writerow((*key, canonical_json(counter_report(scopes[key]))))
 
     summary = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.analysis.v1",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.analysis.v2",
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "coverage": {
@@ -1055,6 +1309,13 @@ def analyze(
             "arms": ARMS, "total_recovery_cells": total["cells"] * len(ARMS),
         },
         "independence": contract["independence"],
+        "statistical_interpretation": (
+            "This is a deterministic census over the sealed seeds and loss "
+            "schedules, not an IID population sample. Cell- and K-direction "
+            "exact sign tails are descriptive diagnostics only; promotion is "
+            "not gated on a p-value and must also use per-seed/schedule "
+            "direction, effect size, and new-resonance checks."
+        ),
         "adaptive_low_K_identity": identity,
         "overall": counter_report(total),
         "consistency": consistency,
@@ -1094,41 +1355,55 @@ def run(args: argparse.Namespace) -> int:
         thermal, abort,
         stale_seconds=float(contract["thermal_policy"]["stale_seconds"]),
         limit_c=float(contract["thermal_policy"]["limit_c"]),
-        consecutive_limit=int(contract["thermal_policy"]["consecutive_polls"]),
+        consecutive_limit=int(contract["thermal_policy"]["consecutive_samples"]),
     )
-    guard.start()
+    registry = ProcessRegistry()
     records: list[dict[str, Any]] = []
     campaign_error: BaseException | None = None
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    futures = [
-        executor.submit(
-            run_job, job, binary, result_root, pool, abort,
-            float(contract["timeout_seconds"]),
-        )
-        for job in jobs
-    ]
-    completed = 0
-    try:
-        for future in concurrent.futures.as_completed(futures):
-            records.append(future.result())
-            completed += 1
-            if completed % 100 == 0 or completed == len(jobs):
-                print(f"all-K progress {completed}/{len(jobs)}", flush=True)
-            if guard.error:
-                die(f"thermal guard failed: {guard.error}")
-    except BaseException as exc:
-        campaign_error = exc
-        abort.set()
-        for future in futures:
-            future.cancel()
-    finally:
-        executor.shutdown(wait=True, cancel_futures=True)
-        thermal_summary = guard.finish(result_root / "thermal_interval.csv")
+    with CampaignSignalGuard(abort, registry):
+        try:
+            guard.start()
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers
+            ) as executor:
+                futures: list[concurrent.futures.Future[dict[str, Any]]] = []
+                completed = 0
+                try:
+                    for job in jobs:
+                        if abort.is_set():
+                            die("campaign aborted during job submission")
+                        futures.append(executor.submit(
+                            run_job, job, binary, result_root, pool, abort,
+                            registry, float(contract["timeout_seconds"]),
+                        ))
+                    for future in concurrent.futures.as_completed(futures):
+                        records.append(future.result())
+                        completed += 1
+                        if completed % 100 == 0 or completed == len(jobs):
+                            print(
+                                f"all-K progress {completed}/{len(jobs)}",
+                                flush=True,
+                            )
+                        if guard.error:
+                            die(f"thermal guard failed: {guard.error}")
+                except BaseException as exc:
+                    campaign_error = exc
+                    abort.set()
+                    registry.signal_all(signal.SIGTERM)
+                    for future in futures:
+                        future.cancel()
+        finally:
+            if guard.started:
+                thermal_summary = guard.finish(
+                    result_root / "thermal_interval.csv"
+                )
     if guard.error:
         die(f"thermal guard failed: {guard.error}")
     if (
         thermal_summary["cpu_busy_min_pct"] <
             float(contract["thermal_policy"]["min_cpu_busy_pct"]) or
+        thermal_summary["thermal_high_max_consecutive_samples"] >=
+            int(contract["thermal_policy"]["consecutive_samples"]) or
         thermal_summary["dimm_read_errors_max"] != 0 or
         thermal_summary["edac_ce_delta"] != 0 or
         thermal_summary["edac_ue_delta"] != 0
@@ -1145,7 +1420,7 @@ def run(args: argparse.Namespace) -> int:
         for record in records:
             output.write(canonical_json(record) + "\n")
     run_summary = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v1",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v3",
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "jobs": len(jobs), "workers": workers,

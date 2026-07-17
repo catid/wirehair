@@ -19,6 +19,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import time
@@ -47,6 +48,16 @@ TIMING_FIELDS = {
     "solve_ms_mu", "build_ms_mu", "peel_ms_mu", "project_ms_mu",
     "residual_ms_mu", "backsub_ms_mu",
 }
+THERMAL_FIELDS = (
+    "utc", "monotonic_s", "cpu_busy_pct", "cpu_avg_mhz", "cpu_tctl_c",
+    "dimm_i2c1_50_c", "dimm_i2c1_51_c", "dimm_i2c1_52_c",
+    "dimm_i2c1_53_c", "dimm_i2c2_50_c", "dimm_i2c2_51_c",
+    "dimm_i2c2_52_c", "dimm_i2c2_53_c", "dimm_read_errors",
+    "load1", "load5", "load15", "edac_ce", "edac_ue",
+)
+THERMAL_DIMM_FIELDS = THERMAL_FIELDS[5:13]
+THERMAL_SCALAR_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?\Z")
+THERMAL_COUNTER_PATTERN = re.compile(r"[0-9]+\Z")
 BENCH_HEADER_V1 = (
     "N", "bb", "heavy_family", "mix_count", "overhead", "trials",
     "success", "rank_fail", "error", "fail_rate", "inact_mu",
@@ -808,13 +819,116 @@ def write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: Sequence[str])
         writer.writerows(rows)
 
 
-def thermal_start(path: Path) -> dict[str, Any]:
+def thermal_scalar(text: str, context: str) -> float:
+    if THERMAL_SCALAR_PATTERN.fullmatch(text) is None:
+        raise ValueError(f"{context} is not a canonical nonnegative scalar")
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{context} is not finite")
+    return value
+
+
+def thermal_counter(text: str, context: str) -> int:
+    if THERMAL_COUNTER_PATTERN.fullmatch(text) is None:
+        raise ValueError(f"{context} is not a canonical unsigned counter")
+    return int(text, 10)
+
+
+def parse_thermal_sample(line: bytes, context: str) -> dict[str, Any]:
+    if not line.endswith(b"\n"):
+        raise ValueError(f"{context} is not a complete CSV row")
+    try:
+        text = line.decode("utf-8")[:-1]
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{context} is not UTF-8") from exc
+    if text.endswith("\r"):
+        text = text[:-1]
+    values = text.split(",")
+    if len(values) != len(THERMAL_FIELDS):
+        raise ValueError(f"{context} has the wrong field count")
+    row = dict(zip(THERMAL_FIELDS, values))
+    if not row["utc"]:
+        raise ValueError(f"{context} has an empty UTC timestamp")
+    monotonic_s = thermal_scalar(row["monotonic_s"], f"{context}:monotonic_s")
+    cpu_busy_pct = thermal_scalar(row["cpu_busy_pct"], f"{context}:cpu_busy_pct")
+    cpu_avg_mhz = thermal_scalar(row["cpu_avg_mhz"], f"{context}:cpu_avg_mhz")
+    cpu_tctl_c = thermal_scalar(row["cpu_tctl_c"], f"{context}:cpu_tctl_c")
+    dimm_temperatures = tuple(
+        thermal_scalar(row[field], f"{context}:{field}")
+        for field in THERMAL_DIMM_FIELDS
+    )
+    loads = tuple(
+        thermal_scalar(row[field], f"{context}:{field}")
+        for field in ("load1", "load5", "load15")
+    )
+    dimm_read_errors = thermal_counter(
+        row["dimm_read_errors"], f"{context}:dimm_read_errors"
+    )
+    edac_ce = thermal_counter(row["edac_ce"], f"{context}:edac_ce")
+    edac_ue = thermal_counter(row["edac_ue"], f"{context}:edac_ue")
+    if not 0.0 <= cpu_busy_pct <= 100.0:
+        raise ValueError(f"{context} CPU busy percentage is out of range")
+    if cpu_avg_mhz <= 0.0:
+        raise ValueError(f"{context} CPU frequency is not positive")
+    if not 0.0 <= cpu_tctl_c <= 120.0:
+        raise ValueError(f"{context} CPU temperature is out of range")
+    if any(not 0.0 <= value <= 100.0 for value in dimm_temperatures):
+        raise ValueError(f"{context} DIMM temperature is out of range")
+    return {
+        "raw": line,
+        "monotonic_s": monotonic_s,
+        "cpu_busy_pct": cpu_busy_pct,
+        "cpu_avg_mhz": cpu_avg_mhz,
+        "cpu_tctl_c": cpu_tctl_c,
+        "dimm_temperatures": dimm_temperatures,
+        "dimm_read_errors": dimm_read_errors,
+        "loads": loads,
+        "edac_ce": edac_ce,
+        "edac_ue": edac_ue,
+        "max_temperature_c": max(cpu_tctl_c, *dimm_temperatures),
+    }
+
+
+def validate_thermal_current(
+    sample: dict[str, Any], stale_seconds: float, context: str,
+) -> None:
+    if not math.isfinite(stale_seconds) or stale_seconds <= 0.0:
+        raise ValueError("thermal stale interval must be positive and finite")
+    try:
+        with Path("/proc/uptime").open("r", encoding="ascii") as source:
+            uptime_fields = source.read().split()
+    except OSError as exc:
+        raise ValueError("cannot read canonical system uptime") from exc
+    if len(uptime_fields) != 2:
+        raise ValueError("canonical system uptime has the wrong schema")
+    now = thermal_scalar(uptime_fields[0], "system uptime")
+    if (now - sample["monotonic_s"] > stale_seconds or
+            sample["monotonic_s"] - now > 1.0):
+        raise ValueError(f"{context} is stale or future-dated")
+
+
+def validate_thermal_health(sample: dict[str, Any], context: str) -> None:
+    if sample["dimm_read_errors"] != 0:
+        raise ValueError(f"{context} reports a DIMM read error")
+    if sample["edac_ce"] != 0 or sample["edac_ue"] != 0:
+        raise ValueError(f"{context} reports a nonzero EDAC counter")
+
+
+def thermal_start(path: Path, stale_seconds: float = 5.0) -> dict[str, Any]:
     deadline = time.monotonic() + 5.0
     while True:
         with path.open("rb") as source:
             header = source.readline()
-            if not header.startswith(b"utc,") or not header.endswith(b"\n"):
+            if not header.endswith(b"\n"):
                 raise ValueError("thermal log has an invalid header")
+            try:
+                header_text = header.decode("utf-8")[:-1]
+            except UnicodeDecodeError as exc:
+                raise ValueError("thermal log has an invalid header") from exc
+            if header_text.endswith("\r"):
+                header_text = header_text[:-1]
+            if header_text != ",".join(THERMAL_FIELDS):
+                raise ValueError("thermal log does not use the canonical schema")
             source.seek(0, os.SEEK_END)
             offset = source.tell()
             if offset <= len(header):
@@ -830,23 +944,35 @@ def thermal_start(path: Path) -> dict[str, Any]:
         if time.monotonic() >= deadline:
             raise ValueError("thermal log ends in a persistent partial row")
         time.sleep(0.05)
-    lines = tail.splitlines()
+    lines = tail.splitlines(keepends=True)
     if not lines:
         raise ValueError("thermal log has no complete data row")
-    fields = next(csv.reader([header.decode("utf-8").strip()]))
-    values = next(csv.reader([lines[-1].decode("utf-8")]))
-    if len(values) != len(fields):
-        raise ValueError("thermal baseline row has the wrong field count")
-    baseline = dict(zip(fields, values))
+    baseline_row = lines[-1]
+    baseline = parse_thermal_sample(baseline_row, "thermal baseline")
+    wall_age = time.time() - stat_before.st_mtime
+    if wall_age > stale_seconds or wall_age < -1.0:
+        raise ValueError("thermal baseline file timestamp is stale or future-dated")
+    validate_thermal_current(baseline, stale_seconds, "thermal baseline")
+    validate_thermal_health(baseline, "thermal baseline")
     return {
         "dev": stat_before.st_dev, "ino": stat_before.st_ino,
         "offset": offset, "header": header,
-        "edac_ce": int(baseline["edac_ce"]),
-        "edac_ue": int(baseline["edac_ue"]),
+        "baseline_row": baseline_row, "baseline": baseline,
+        "edac_ce": baseline["edac_ce"], "edac_ue": baseline["edac_ue"],
+        "monotonic_s": baseline["monotonic_s"],
+        "max_temperature_c": baseline["max_temperature_c"],
     }
 
 
-def thermal_finish(path: Path, start: dict[str, Any], output: Path) -> dict[str, Any]:
+def thermal_finish(
+    path: Path,
+    start: dict[str, Any],
+    output: Path,
+    limit_c: float = 90.0,
+    stale_seconds: float = 5.0,
+) -> dict[str, Any]:
+    if not math.isfinite(limit_c) or not 0.0 <= limit_c <= 120.0:
+        raise ValueError("thermal limit is outside the canonical range")
     suffix = b""
     deadline = time.monotonic() + 5.0
     while True:
@@ -864,49 +990,59 @@ def thermal_finish(path: Path, start: dict[str, Any], output: Path) -> dict[str,
         if time.monotonic() >= deadline:
             raise ValueError("thermal log ends in a persistent partial interval row")
         time.sleep(0.05)
-    output.write_bytes(start["header"] + suffix)
-    with output.open("r", encoding="utf-8", newline="") as source:
-        reader = csv.DictReader(source)
-        rows = list(reader)
-    if not rows:
+    wall_age = time.time() - stat_after.st_mtime
+    if wall_age > stale_seconds or wall_age < -1.0:
+        raise ValueError("thermal interval file timestamp is stale or future-dated")
+    interval_lines = suffix.splitlines(keepends=True)
+    if not interval_lines:
         raise ValueError("thermal interval contains no samples")
-    expected_fields = next(csv.reader([
-        start["header"].decode("utf-8").strip()
-    ]))
-    if reader.fieldnames != expected_fields or any(
-            None in row or any(value is None for value in row.values())
-            for row in rows):
-        raise ValueError("thermal interval row schema changed")
-    dimm_fields = [key for key in rows[0] if key.startswith("dimm_i2c")]
-    if len(dimm_fields) != 8:
-        raise ValueError("thermal interval does not contain eight DIMM fields")
-    if any(not row[field] for row in rows for field in dimm_fields):
-        raise ValueError("thermal interval contains a blank DIMM reading")
-    cpu_busy_values = [float(row["cpu_busy_pct"]) for row in rows]
-    cpu_temperature_values = [float(row["cpu_tctl_c"]) for row in rows]
+    samples = [start["baseline"]]
+    for number, line in enumerate(interval_lines, 1):
+        samples.append(parse_thermal_sample(line, f"thermal interval row {number}"))
+    for number, (previous, sample) in enumerate(zip(samples, samples[1:]), 1):
+        delta = sample["monotonic_s"] - previous["monotonic_s"]
+        if delta <= 0.0 or delta > stale_seconds:
+            raise ValueError(
+                f"thermal interval row {number} is nonmonotonic or follows a gap"
+            )
+    validate_thermal_current(samples[-1], stale_seconds, "thermal interval tail")
+    for number, sample in enumerate(samples):
+        validate_thermal_health(sample, f"thermal sealed row {number}")
+    output.write_bytes(start["header"] + start["baseline_row"] + suffix)
+    interval_samples = samples[1:]
+    cpu_busy_values = [sample["cpu_busy_pct"] for sample in interval_samples]
+    cpu_temperature_values = [sample["cpu_tctl_c"] for sample in samples]
     dimm_temperature_values = [
-        float(row[field]) for row in rows for field in dimm_fields
+        value for sample in samples for value in sample["dimm_temperatures"]
     ]
-    if (any(not math.isfinite(value) or value < 0.0 or value > 100.0
-            for value in cpu_busy_values) or
-        any(not math.isfinite(value) for value in
-            cpu_temperature_values + dimm_temperature_values)):
-        raise ValueError("thermal interval contains an invalid numeric value")
-    edac_ce_values = [start["edac_ce"], *(int(row["edac_ce"]) for row in rows)]
-    edac_ue_values = [start["edac_ue"], *(int(row["edac_ue"]) for row in rows)]
-    if any(b < a for values in (edac_ce_values, edac_ue_values)
-            for a, b in zip(values, values[1:])):
-        raise ValueError("thermal interval EDAC counter decreased")
+    consecutive_high = 0
+    max_consecutive_high = consecutive_high
+    high_samples = 0
+    for sample in samples:
+        if sample["max_temperature_c"] >= limit_c:
+            consecutive_high += 1
+            high_samples += 1
+            max_consecutive_high = max(max_consecutive_high, consecutive_high)
+        else:
+            consecutive_high = 0
+    edac_ce_values = [sample["edac_ce"] for sample in samples]
+    edac_ue_values = [sample["edac_ue"] for sample in samples]
     edac_ce_delta = edac_ce_values[-1] - edac_ce_values[0]
     edac_ue_delta = edac_ue_values[-1] - edac_ue_values[0]
     return {
-        "samples": len(rows),
+        "samples": len(interval_samples),
+        "sealed_samples_including_baseline": len(samples),
         "cpu_busy_min_pct": min(cpu_busy_values),
         "cpu_tctl_max_c": max(cpu_temperature_values),
         "dimm_max_c": max(dimm_temperature_values),
-        "dimm_read_errors_max": max(int(row["dimm_read_errors"]) for row in rows),
+        "dimm_read_errors_max": max(
+            sample["dimm_read_errors"] for sample in samples
+        ),
         "edac_ce_delta": edac_ce_delta,
         "edac_ue_delta": edac_ue_delta,
+        "thermal_limit_c": limit_c,
+        "thermal_high_samples": high_samples,
+        "thermal_high_max_consecutive_samples": max_consecutive_high,
     }
 
 

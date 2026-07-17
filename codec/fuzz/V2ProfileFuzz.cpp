@@ -175,7 +175,9 @@ bool FuzzProfileContract(
     wirehair_v2::fuzz::Input& input,
     std::string& failure)
 {
-    const uint32_t K = 16u + input.U8() % 17u;
+    const uint32_t K = (input.U8() & 31u) == 0u ?
+        wirehair_v2::kDenseTwoAnchorMinBlockCount + input.U8() % 17u :
+        16u + input.U8() % 17u;
     uint32_t block_bytes = 1u + input.U8() % 64u;
     const bool mixed = input.Bool();
     if (mixed) block_bytes += block_bytes & 1u;

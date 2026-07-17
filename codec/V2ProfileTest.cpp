@@ -845,9 +845,51 @@ bool CheckAdaptiveTwoAnchorDescriptorContract(
     wirehair_v2_free(old_small);
     wirehair_v2_free(new_small);
 
+    // The final K below the cutoff must still produce the original equations.
+    static const uint32_t BelowK = 4095u;
+    static const uint32_t BlockBytes = 2u;
+    std::vector<uint8_t> below_message((size_t)BelowK * BlockBytes);
+    FillMessage(below_message);
+    WirehairV2Codec old_below = nullptr;
+    WirehairV2Codec new_below = nullptr;
+    uint8_t old_below_block[BlockBytes] = {};
+    uint8_t new_below_block[BlockBytes] = {};
+    uint32_t old_below_bytes = 0u;
+    uint32_t new_below_bytes = 0u;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
+            below_message.data(), below_message.size(), BlockBytes,
+            old_small_profile, sizeof(old_small_profile), &serialized_bytes,
+            &old_below) == WirehairV2_Success,
+            "adaptive two-anchor K=4095 baseline selector") ||
+        !Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07,
+            below_message.data(), below_message.size(), BlockBytes,
+            new_small_profile, sizeof(new_small_profile), &serialized_bytes,
+            &new_below) == WirehairV2_Success,
+            "adaptive two-anchor K=4095 selector") ||
+        !Check(wirehair_v2_encode(
+            old_below, BelowK + 17u, old_below_block,
+            sizeof(old_below_block), &old_below_bytes) == WirehairV2_Success,
+            "adaptive two-anchor K=4095 baseline encode") ||
+        !Check(wirehair_v2_encode(
+            new_below, BelowK + 17u, new_below_block,
+            sizeof(new_below_block), &new_below_bytes) ==
+                WirehairV2_Success &&
+            new_below_bytes == old_below_bytes &&
+            std::memcmp(
+                new_below_block, old_below_block, old_below_bytes) == 0,
+            "adaptive two-anchor K=4095 equation identity"))
+    {
+        wirehair_v2_free(old_below);
+        wirehair_v2_free(new_below);
+        return false;
+    }
+    wirehair_v2_free(old_below);
+    wirehair_v2_free(new_below);
+
     // The named policy freezes the second anchor at the exact K=4096 edge.
     static const uint32_t K = 4096u;
-    static const uint32_t BlockBytes = 2u;
     std::vector<uint8_t> message((size_t)K * BlockBytes);
     FillMessage(message);
     uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};

@@ -581,9 +581,9 @@ bool SameOptions(
 bool RunOptionContractCase(
     const char* label,
     const wirehair_v2::MessagePrecodeEncoderOptions& options,
-    const wirehair_v2::MessagePrecodeEncoderOptions& mismatched)
+    const wirehair_v2::MessagePrecodeEncoderOptions& mismatched,
+    uint32_t K = 64u)
 {
-    const uint32_t K = 64u;
     const uint32_t block_bytes =
         options.Completion ==
             wirehair_v2::CompletionField::MixedGF256GF16 ? 16u : 17u;
@@ -770,6 +770,12 @@ bool RunBoundContractCases()
     variant.AdaptiveDenseTwoAnchor = true;
     if (!RunOptionContractCase(
             "mixed-mix2-two-anchor", variant, mixed_mix3))
+    {
+        return false;
+    }
+    if (!RunOptionContractCase(
+            "mixed-mix2-two-anchor-active", variant, mixed_mix3,
+            wirehair_v2::kDenseTwoAnchorMinBlockCount))
     {
         return false;
     }
