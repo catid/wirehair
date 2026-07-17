@@ -33,6 +33,10 @@ struct SeedProfile
     uint32_t V2PacketPeelSeed = 0;
     uint32_t V2RecoveryMixCount = 0;
     bool V2DenseIdentityCorner = false;
+    bool V2DenseTwoAnchor = false;
+    // Profile-level policy bit.  It remains true below the K cutoff even
+    // though those small systems retain the certified one-anchor equations.
+    bool V2AdaptiveDenseTwoAnchor = false;
     uint64_t V2PrecodeSeedSalt = 0;
     uint64_t V2RecoveryRowSeedSalt = 0;
     bool Tuned = false;

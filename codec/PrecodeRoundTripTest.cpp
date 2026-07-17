@@ -572,6 +572,7 @@ bool SameOptions(
 {
     return a.RecoveryMixCount == b.RecoveryMixCount &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.AdaptiveDenseTwoAnchor == b.AdaptiveDenseTwoAnchor &&
         a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
         a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt &&
         a.Completion == b.Completion;
@@ -604,12 +605,18 @@ bool RunOptionContractCase(
     if (wirehair_v2::kPacketRowContractVersion != 4u ||
         !profile.V2SeedSelected ||
         profile.V2PrecodeContractVersion !=
-            wirehair_v2::PrecodeContractVersion(options.Completion) ||
+            wirehair_v2::PrecodeContractVersion(
+                options.Completion, options.AdaptiveDenseTwoAnchor) ||
         profile.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion ||
         profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2RecoveryMixCount != options.RecoveryMixCount ||
         profile.V2DenseIdentityCorner != options.DenseIdentityCorner ||
+        profile.V2DenseTwoAnchor !=
+            (options.AdaptiveDenseTwoAnchor &&
+             K >= wirehair_v2::kDenseTwoAnchorMinBlockCount) ||
+        profile.V2AdaptiveDenseTwoAnchor !=
+            options.AdaptiveDenseTwoAnchor ||
         profile.V2CompletionField != options.Completion ||
         profile.V2PrecodeSeedSalt != options.PrecodeSeedSalt ||
         profile.V2RecoveryRowSeedSalt != options.RecoveryRowSeedSalt)
@@ -628,6 +635,8 @@ bool RunOptionContractCase(
         inherited.System().Params.Field != profile.V2CompletionField ||
         inherited.System().Params.SourceHits != profile.V2SourceHits ||
         inherited.System().Params.Seed != profile.V2PrecodeSeed ||
+        inherited.System().Params.DenseTwoAnchor !=
+            profile.V2DenseTwoAnchor ||
         inherited.PacketPeelSeed() != profile.V2PacketPeelSeed ||
         !CompleteDirectRepairOnly(
             encoder, inherited, message, K, block_bytes, label))
@@ -688,6 +697,49 @@ bool RunBoundContractCases()
             "contract: GF256/mix2 option pair was accepted\n");
         return false;
     }
+
+    const uint32_t mixed_invalid_block_bytes = 16u;
+    const uint64_t mixed_invalid_message_bytes =
+        (uint64_t)invalid_K * mixed_invalid_block_bytes;
+    std::vector<uint8_t> mixed_invalid_message(
+        (size_t)mixed_invalid_message_bytes, 0x5du);
+    const auto reject_two_anchor_options = [&](const char* label,
+        const wirehair_v2::MessagePrecodeEncoderOptions& rejected_options)
+    {
+        wirehair_v2::Codec rejected_encoder;
+        wirehair_v2::MessagePrecodeDecoder rejected_decoder;
+        if (rejected_encoder.InitializePrecodeEncoder(
+                mixed_invalid_message.data(), mixed_invalid_message_bytes,
+                mixed_invalid_block_bytes, nullptr, &rejected_options) !=
+                    Wirehair_InvalidInput ||
+            rejected_decoder.InitializeResult(
+                mixed_invalid_message_bytes, mixed_invalid_block_bytes,
+                nullptr, &rejected_options) != Wirehair_InvalidInput)
+        {
+            std::fprintf(stderr,
+                "contract: invalid two-anchor option pair %s was accepted\n",
+                label);
+            return false;
+        }
+        return true;
+    };
+    wirehair_v2::MessagePrecodeEncoderOptions invalid_two_anchor = defaults;
+    invalid_two_anchor.AdaptiveDenseTwoAnchor = true;
+    if (!reject_two_anchor_options("GF256/mix3", invalid_two_anchor)) {
+        return false;
+    }
+    invalid_two_anchor.Completion =
+        wirehair_v2::CompletionField::MixedGF256GF16;
+    if (!reject_two_anchor_options("mixed/mix3", invalid_two_anchor)) {
+        return false;
+    }
+    invalid_two_anchor.RecoveryMixCount = 2u;
+    invalid_two_anchor.DenseIdentityCorner = true;
+    if (!reject_two_anchor_options(
+            "mixed/mix2/identity-corner", invalid_two_anchor))
+    {
+        return false;
+    }
     variant = defaults;
     variant.DenseIdentityCorner = true;
     if (!RunOptionContractCase("dense-corner", variant, defaults)) {
@@ -712,6 +764,13 @@ bool RunBoundContractCases()
     wirehair_v2::MessagePrecodeEncoderOptions mixed_mix3 = variant;
     variant.RecoveryMixCount = 2u;
     if (!RunOptionContractCase("mixed-mix2", variant, mixed_mix3)) {
+        return false;
+    }
+    mixed_mix3 = variant;
+    variant.AdaptiveDenseTwoAnchor = true;
+    if (!RunOptionContractCase(
+            "mixed-mix2-two-anchor", variant, mixed_mix3))
+    {
         return false;
     }
 
@@ -834,6 +893,17 @@ bool RunBoundContractCases()
     malformed.V2DenseIdentityCorner =
         !malformed.V2DenseIdentityCorner;
     if (!reject_profile(malformed, "dense-corner option")) {
+        return false;
+    }
+    malformed = alternate_encoder.Profile();
+    malformed.V2DenseTwoAnchor = !malformed.V2DenseTwoAnchor;
+    if (!reject_profile(malformed, "active dense-two-anchor state")) {
+        return false;
+    }
+    malformed = alternate_encoder.Profile();
+    malformed.V2AdaptiveDenseTwoAnchor =
+        !malformed.V2AdaptiveDenseTwoAnchor;
+    if (!reject_profile(malformed, "adaptive dense-two-anchor policy")) {
         return false;
     }
     malformed = alternate_encoder.Profile();

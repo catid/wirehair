@@ -16,9 +16,17 @@ namespace wirehair_v2 {
 static const uint32_t kPacketRowContractVersion = 4u;
 static const uint32_t kPrecodeContractVersion = 2u; // existing/default alias
 static const uint32_t kMixedPrecodeContractVersion = 3u;
+static const uint32_t kMixedTwoAnchorPrecodeContractVersion = 4u;
 
-inline uint32_t PrecodeContractVersion(CompletionField field)
+inline uint32_t PrecodeContractVersion(
+    CompletionField field,
+    bool adaptive_dense_two_anchor = false)
 {
+    if (adaptive_dense_two_anchor)
+    {
+        return field == CompletionField::MixedGF256GF16 ?
+            kMixedTwoAnchorPrecodeContractVersion : 0u;
+    }
     if (field == CompletionField::GF256) return kPrecodeContractVersion;
     if (field == CompletionField::MixedGF256GF16)
         return kMixedPrecodeContractVersion;

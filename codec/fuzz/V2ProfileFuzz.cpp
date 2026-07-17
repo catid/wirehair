@@ -31,6 +31,7 @@ bool SameParams(
         a.Field == b.Field &&
         a.HeavyFamily == b.HeavyFamily &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchor == b.DenseTwoAnchor &&
         a.Seed == b.Seed;
 }
 
@@ -189,6 +190,9 @@ bool FuzzProfileContract(
         wirehair_v2::CompletionField::GF256;
     options.RecoveryMixCount = mixed && input.Bool() ? 2u :
         wirehair_v2::kCertifiedPacketMixCount;
+    options.AdaptiveDenseTwoAnchor = mixed &&
+        options.RecoveryMixCount == 2u &&
+        !options.DenseIdentityCorner && input.Bool();
 
     wirehair_v2::MessagePrecodeEncoderOptions resolved;
     wirehair_v2::PrecodeParams params;
@@ -222,7 +226,7 @@ bool FuzzProfileContract(
 
     wirehair_v2::SeedProfile bad = profile;
     wirehair_v2::MessagePrecodeEncoderOptions requested = bound_options;
-    const unsigned mutation = input.U8() % 18u;
+    const unsigned mutation = input.U8() % 21u;
     switch (mutation)
     {
     case 0: ++bad.V2PrecodeContractVersion; break;
@@ -239,26 +243,34 @@ bool FuzzProfileContract(
     case 8: bad.V2PacketPeelSeed ^= 1u; break;
     case 9: bad.V2RecoveryMixCount = 0u; break;
     case 10: bad.V2DenseIdentityCorner = !bad.V2DenseIdentityCorner; break;
-    case 11: bad.V2PrecodeSeedSalt ^= 1u; break;
-    case 12: bad.V2RecoveryRowSeedSalt ^= 1u; break;
-    case 13: bad.V2SeedAttempt = wirehair_v2::kMaxPacketSeedAttempts; break;
-    case 14: bad.DenseCount ^= 1u; break;
-    case 15:
+    case 11: bad.V2DenseTwoAnchor = !bad.V2DenseTwoAnchor; break;
+    case 12:
+        bad.V2AdaptiveDenseTwoAnchor = !bad.V2AdaptiveDenseTwoAnchor;
+        break;
+    case 13: bad.V2PrecodeSeedSalt ^= 1u; break;
+    case 14: bad.V2RecoveryRowSeedSalt ^= 1u; break;
+    case 15: bad.V2SeedAttempt = wirehair_v2::kMaxPacketSeedAttempts; break;
+    case 16: bad.DenseCount ^= 1u; break;
+    case 17:
         bad.V2SeedSelected = false;
         break;
-    case 16:
+    case 18:
         requested.PrecodeSeedSalt ^= 1u;
         break;
-    default:
+    case 19:
         requested.Completion = requested.Completion ==
                 wirehair_v2::CompletionField::MixedGF256GF16 ?
             wirehair_v2::CompletionField::GF256 :
             wirehair_v2::CompletionField::MixedGF256GF16;
         break;
+    default:
+        requested.AdaptiveDenseTwoAnchor =
+            !requested.AdaptiveDenseTwoAnchor;
+        break;
     }
     wirehair_v2::MessagePrecodeEncoderOptions ignored_options;
     const wirehair_v2::MessagePrecodeEncoderOptions* requested_pointer =
-        mutation >= 16u ? &requested : nullptr;
+        mutation >= 18u ? &requested : nullptr;
     if (wirehair_v2::ResolveMessagePrecodeOptions(
             bad, requested_pointer, ignored_options))
     {

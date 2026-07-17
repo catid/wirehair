@@ -239,6 +239,15 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07 \
     UINT64_C(0x20a4f27a870612a2)
 
+/**
+    Mixed/mix2 profile with an adaptive second D12 anchor from K=4096.
+
+    This is an explicit opt-in equation profile.  Existing mixed and default
+    profile identifiers retain their original equations and serialized bytes.
+*/
+#define WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07 \
+    UINT64_C(0x7d8c2436401ba9eb)
+
 /** Current serialized V2 equation profile. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07

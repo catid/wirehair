@@ -783,6 +783,215 @@ bool CheckMix2DescriptorContract(const std::vector<uint8_t>& message)
             "C++ mixed/mix2 selector preserves golden");
 }
 
+bool CheckAdaptiveTwoAnchorDescriptorContract(
+    const std::vector<uint8_t>& small_message)
+{
+    static const uint8_t SmallGolden[
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {
+        0x57, 0x48, 0x56, 0x32, 0x01, 0x00, 0x20, 0x00,
+        0xeb, 0xa9, 0x1b, 0x40, 0x36, 0x24, 0x8c, 0x7d,
+        0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+
+    uint8_t old_small_profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    uint8_t new_small_profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    uint32_t serialized_bytes = 0u;
+    WirehairV2Codec old_small = nullptr;
+    WirehairV2Codec new_small = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
+            small_message.data(), small_message.size(), 16u,
+            old_small_profile, sizeof(old_small_profile), &serialized_bytes,
+            &old_small) == WirehairV2_Success,
+            "adaptive two-anchor low-K baseline selector") ||
+        !Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07,
+            small_message.data(), small_message.size(), 16u,
+            new_small_profile, sizeof(new_small_profile), &serialized_bytes,
+            &new_small) == WirehairV2_Success &&
+            serialized_bytes == sizeof(new_small_profile) &&
+            std::memcmp(
+                new_small_profile, SmallGolden,
+                sizeof(new_small_profile)) == 0,
+            "adaptive two-anchor low-K descriptor golden"))
+    {
+        wirehair_v2_free(old_small);
+        wirehair_v2_free(new_small);
+        return false;
+    }
+    const uint32_t low_ids[] = {0u, 12345u};
+    for (uint32_t id : low_ids)
+    {
+        uint8_t old_block[16] = {};
+        uint8_t new_block[16] = {};
+        uint32_t old_bytes = 0u;
+        uint32_t new_bytes = 0u;
+        if (!Check(wirehair_v2_encode(
+                old_small, id, old_block, sizeof(old_block), &old_bytes) ==
+                    WirehairV2_Success,
+                "adaptive two-anchor low-K baseline encode") ||
+            !Check(wirehair_v2_encode(
+                new_small, id, new_block, sizeof(new_block), &new_bytes) ==
+                    WirehairV2_Success && new_bytes == old_bytes &&
+                    std::memcmp(new_block, old_block, old_bytes) == 0,
+                "adaptive two-anchor low-K equation identity"))
+        {
+            wirehair_v2_free(old_small);
+            wirehair_v2_free(new_small);
+            return false;
+        }
+    }
+    wirehair_v2_free(old_small);
+    wirehair_v2_free(new_small);
+
+    // The named policy freezes the second anchor at the exact K=4096 edge.
+    static const uint32_t K = 4096u;
+    static const uint32_t BlockBytes = 2u;
+    std::vector<uint8_t> message((size_t)K * BlockBytes);
+    FillMessage(message);
+    uint8_t profile[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    WirehairV2Codec encoder = nullptr;
+    WirehairV2Codec recreated = nullptr;
+    WirehairV2Codec decoder = nullptr;
+    WirehairV2Codec old_encoder = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07,
+            message.data(), message.size(), BlockBytes,
+            profile, sizeof(profile), &serialized_bytes, &encoder) ==
+                WirehairV2_Success,
+            "adaptive two-anchor boundary selector") ||
+        !Check(wirehair_v2_encoder_create_profile(
+            message.data(), profile, sizeof(profile), &recreated) ==
+                WirehairV2_Success,
+            "adaptive two-anchor descriptor recreates encoder") ||
+        !Check(wirehair_v2_decoder_create(
+            profile, sizeof(profile), &decoder) == WirehairV2_Success,
+            "adaptive two-anchor descriptor creates decoder") ||
+        !Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
+            message.data(), message.size(), BlockBytes,
+            old_small_profile, sizeof(old_small_profile), &serialized_bytes,
+            &old_encoder) == WirehairV2_Success,
+            "adaptive two-anchor boundary baseline selector"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        wirehair_v2_free(old_encoder);
+        return false;
+    }
+
+    const uint32_t repair_id = K + 17u;
+    uint8_t block[BlockBytes] = {};
+    uint8_t recreated_block[BlockBytes] = {};
+    uint8_t old_block[BlockBytes] = {};
+    uint32_t block_bytes = 0u;
+    uint32_t recreated_bytes = 0u;
+    uint32_t old_bytes = 0u;
+    if (!Check(wirehair_v2_encode(
+            encoder, repair_id, block, sizeof(block), &block_bytes) ==
+                WirehairV2_Success && block_bytes == BlockBytes,
+            "adaptive two-anchor boundary repair encode") ||
+        !Check(wirehair_v2_encode(
+            recreated, repair_id, recreated_block, sizeof(recreated_block),
+            &recreated_bytes) == WirehairV2_Success &&
+            recreated_bytes == block_bytes &&
+            std::memcmp(block, recreated_block, block_bytes) == 0,
+            "adaptive two-anchor descriptor equation identity") ||
+        !Check(wirehair_v2_encode(
+            old_encoder, repair_id, old_block, sizeof(old_block), &old_bytes) ==
+                WirehairV2_Success && old_bytes == block_bytes &&
+            std::memcmp(block, old_block, block_bytes) != 0,
+            "adaptive two-anchor boundary changes equations"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        wirehair_v2_free(old_encoder);
+        return false;
+    }
+    static const uint8_t ExpectedTwoAnchorRepair[BlockBytes] = {0xb8u, 0x5eu};
+    static const uint8_t ExpectedOldRepair[BlockBytes] = {0x0cu, 0x33u};
+    if (std::memcmp(
+            block, ExpectedTwoAnchorRepair,
+            sizeof(ExpectedTwoAnchorRepair)) != 0)
+    {
+        std::fprintf(stderr,
+            "adaptive two-anchor repair golden actual: 0x%02x, 0x%02x\n",
+            block[0], block[1]);
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        wirehair_v2_free(old_encoder);
+        return false;
+    }
+    if (std::memcmp(old_block, ExpectedOldRepair, sizeof(ExpectedOldRepair)) != 0)
+    {
+        std::fprintf(stderr,
+            "frozen mixed/mix2 boundary repair golden actual: "
+            "0x%02x, 0x%02x\n",
+            old_block[0], old_block[1]);
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(recreated);
+        wirehair_v2_free(decoder);
+        wirehair_v2_free(old_encoder);
+        return false;
+    }
+
+    WirehairV2Result decode_result = WirehairV2_NeedMore;
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        if (id == 113u) continue;
+        uint32_t bytes = 0u;
+        if (!Check(wirehair_v2_encode(
+                encoder, id, block, sizeof(block), &bytes) ==
+                    WirehairV2_Success,
+                "adaptive two-anchor systematic encode"))
+        {
+            wirehair_v2_free(encoder);
+            wirehair_v2_free(recreated);
+            wirehair_v2_free(decoder);
+            wirehair_v2_free(old_encoder);
+            return false;
+        }
+        decode_result = wirehair_v2_decode(decoder, id, block, bytes);
+    }
+    for (uint32_t id = K;
+         decode_result == WirehairV2_NeedMore && id < K + 96u;
+         ++id)
+    {
+        uint32_t bytes = 0u;
+        if (!Check(wirehair_v2_encode(
+                encoder, id, block, sizeof(block), &bytes) ==
+                    WirehairV2_Success,
+                "adaptive two-anchor repair encode"))
+        {
+            wirehair_v2_free(encoder);
+            wirehair_v2_free(recreated);
+            wirehair_v2_free(decoder);
+            wirehair_v2_free(old_encoder);
+            return false;
+        }
+        decode_result = wirehair_v2_decode(decoder, id, block, bytes);
+    }
+    std::vector<uint8_t> recovered(message.size());
+    uint64_t recovered_bytes = 0u;
+    const bool ok = Check(decode_result == WirehairV2_Success,
+            "adaptive two-anchor boundary decode") &&
+        Check(wirehair_v2_recover(
+            decoder, recovered.data(), recovered.size(), &recovered_bytes) ==
+                WirehairV2_Success,
+            "adaptive two-anchor boundary recover") &&
+        Check(recovered_bytes == message.size() && recovered == message,
+            "adaptive two-anchor boundary recovered bytes");
+    wirehair_v2_free(encoder);
+    wirehair_v2_free(recreated);
+    wirehair_v2_free(decoder);
+    wirehair_v2_free(old_encoder);
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -1104,6 +1313,9 @@ int main()
         return fail_after_create();
     }
     if (!CheckMix2DescriptorContract(message)) {
+        return fail_after_create();
+    }
+    if (!CheckAdaptiveTwoAnchorDescriptorContract(message)) {
         return fail_after_create();
     }
 

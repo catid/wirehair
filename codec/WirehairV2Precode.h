@@ -39,6 +39,10 @@
 
 namespace wirehair_v2 {
 
+// The opt-in two-anchor profile keeps the certified dense construction below
+// this boundary and replaces only the second D12 shuffle half at larger K.
+static const uint32_t kDenseTwoAnchorMinBlockCount = 4096u;
+
 enum class HeavyCoefficientFamily : uint32_t
 {
     PeriodicCauchy = 0,
@@ -78,7 +82,7 @@ struct PrecodeParams
     bool DenseIdentityCorner = false;
 
     /**
-        Experiment-only D=12 Shuffle-2 variant with two balanced anchors.
+        D=12 Shuffle-2 variant with two balanced anchors.
 
         The certified construction keeps one balanced row and derives all
         eleven later rows through two-column flips.  This variant keeps rows
@@ -87,7 +91,8 @@ struct PrecodeParams
         flips.  It therefore trades one sparse difference direction for a
         second independently shuffled dense equation without adding a row.
 
-        Named/public profiles never select this flag.  It is deliberately
+        The flag records the active equation construction for one K.  Named
+        profiles bind any adaptive K cutoff separately.  It is deliberately
         incompatible with DenseIdentityCorner and with DenseRows != 12.
     */
     bool DenseTwoAnchor = false;

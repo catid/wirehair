@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Freeze and run an independent all-K D12 two-anchor confirmation.
+"""Freeze and run an independent production-H12 two-anchor confirmation.
 
 The campaign covers every K in 2..64000 under three fresh seeds and the
 burst, adversarial, and repair-only 50% loss schedules.  It compares fixed
-D12 with adaptive fixed-D12/two-anchor and adaptive D13.  The published R2
-group ledger is used only as a full-domain salt batching map; no previously
-observed failure selection is consumed.
+D12 with adaptive fixed-D12/two-anchor and adaptive D13 using the exact
+mixed10-GF(256)/2-GF(65536), period-244, mix2 production geometry at 64-byte
+payloads.  The published R2 group ledger is used only as a full-domain salt
+batching map; no previously observed failure selection is consumed.
 
 Prepare must run from a clean immutable commit.  Run must use the frozen
 script, helper, binary, group ledger, and contract produced by prepare.
@@ -64,24 +65,12 @@ ARMS = ("d12", "two_anchor_adaptive", "d13_adaptive")
 BASE_OPTIONS = (
     "precodefail",
     "--bb-list", "64",
-    "--seed-block-bytes", "1280",
     "--overhead", "0",
     "--trials", "1",
     "--threads", "1",
     "--loss", "0.50",
     "--completion", "mixed",
     "--mix-count", "2",
-    "--mixed-gf256-rows", "11",
-    "--mixed-gf16-rows", "4",
-    "--mixed-period", "32",
-    "--mixed-geometry", "shared-x",
-    "--mixed-residue-schedule", "hashed",
-    "--mixed-residue-hash-seed", "68",
-    "--mixed-residue-hash-keyed",
-    "--mixed-independent-extension-residues",
-    "--mixed-extension-residue-seed-xor", "78",
-    "--mixed-independent-gf256-breaker-rows", "0",
-    "--mixed-fused-schedule-buckets", "auto",
 )
 PAIRED_HEADER = (
     "K", "salt", "schedule", "seed_index", "seed",
@@ -360,6 +349,14 @@ class ThermalGuard:
                 maximum = max(temperatures)
                 if int(row["dimm_read_errors"]) != 0:
                     die("thermal logger reports a DIMM read error")
+                edac_ce = int(row["edac_ce"])
+                edac_ue = int(row["edac_ue"])
+                if (edac_ce < self.mark["edac_ce"] or
+                        edac_ue < self.mark["edac_ue"]):
+                    die("thermal logger EDAC counter decreased")
+                if (edac_ce != self.mark["edac_ce"] or
+                        edac_ue != self.mark["edac_ue"]):
+                    die("thermal logger reports a new EDAC event")
                 consecutive = consecutive + 1 if maximum >= self.limit_c else 0
                 self.polls += 1
                 self.high_polls += maximum >= self.limit_c
@@ -402,14 +399,33 @@ def run_job(
             die(f"campaign abort set before job {job.job} launch")
         command = ["taskset", "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
-        try:
-            process = subprocess.run(
-                command, check=False, text=True, encoding="utf-8",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            die(f"job {job.job} timed out after {timeout:g}s: {exc}")
+        process = subprocess.Popen(
+            command, text=True, encoding="utf-8",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=max(0.001, min(0.25, remaining))
+                )
+                break
+            except subprocess.TimeoutExpired:
+                reason = None
+                if abort.is_set():
+                    reason = "campaign abort"
+                elif remaining <= 0:
+                    reason = f"timeout after {timeout:g}s"
+                if reason is None:
+                    continue
+                process.terminate()
+                try:
+                    process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                die(f"job {job.job} terminated on {reason}")
         end_ns = time.time_ns()
     finally:
         pool.release(cpu)
@@ -417,16 +433,16 @@ def run_job(
     stdout_path = result_root / "stdout" / f"{job.stem}.csv"
     stderr_path = result_root / "stderr" / f"{job.stem}.txt"
     command_path = result_root / "commands" / f"{job.stem}.json"
-    atomic_write(stdout_path, process.stdout.encode("utf-8"))
-    atomic_write(stderr_path, process.stderr.encode("utf-8"))
-    if process.returncode != 0 or process.stderr:
+    atomic_write(stdout_path, stdout.encode("utf-8"))
+    atomic_write(stderr_path, stderr.encode("utf-8"))
+    if process.returncode != 0 or stderr:
         die(
             f"job {job.job} failed rc={process.returncode}: "
-            f"{process.stderr[-1000:]}"
+            f"{stderr[-1000:]}"
         )
     options = arm_options(job.arm, job.band)
     rows = parse_bench_output(
-        process.stdout, job.ks, job.salt, job.seed, job.schedule,
+        stdout, job.ks, job.salt, job.seed, job.schedule,
         options, True,
     )
     if len(rows) != len(job.ks):
@@ -504,12 +520,48 @@ def tracked_clean_source(script: Path, helper: Path) -> tuple[Path, str]:
     return repo, head
 
 
+def cmake_source_directory(cache: Path) -> Path:
+    prefix = "CMAKE_HOME_DIRECTORY:INTERNAL="
+    matches = [
+        line[len(prefix):]
+        for line in stable_bytes(cache).decode("utf-8").splitlines()
+        if line.startswith(prefix)
+    ]
+    if len(matches) != 1:
+        die("CMake cache lacks one canonical source-directory record")
+    return Path(matches[0]).resolve(strict=True)
+
+
 def prepare(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve(strict=True)
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
     repo, head = tracked_clean_source(script, helper)
-    binary = args.binary.resolve(strict=True)
-    groups = args.groups.resolve(strict=True)
+    binary_input = args.binary.absolute()
+    if binary_input.is_symlink():
+        die("--binary must not be a symlink")
+    binary = binary_input.resolve(strict=True)
+    build_dir = binary.parent.parent.resolve(strict=True)
+    cache = build_dir / "CMakeCache.txt"
+    if binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True):
+        die("--binary must be the codec/wirehair_v2_bench build target")
+    if cmake_source_directory(cache) != repo:
+        die("--binary CMake cache belongs to a different source tree")
+    build_command = [
+        "cmake", "--build", str(build_dir), "--target",
+        "wirehair_v2_bench", "--clean-first", "--parallel",
+        str(args.build_workers),
+    ]
+    subprocess.run(build_command, check=True)
+    post_repo, post_head = tracked_clean_source(script, helper)
+    if post_repo != repo or post_head != head:
+        die("source repository changed during the clean benchmark rebuild")
+    if binary_input.is_symlink():
+        die("clean benchmark rebuild replaced --binary with a symlink")
+    binary = binary_input.resolve(strict=True)
+    groups_input = args.groups.absolute()
+    if groups_input.is_symlink():
+        die("--groups must not be a symlink")
+    groups = groups_input.resolve(strict=True)
     thermal = args.thermal.resolve(strict=True)
     if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
         die("--binary must be an executable, non-symlink regular file")
@@ -523,22 +575,26 @@ def prepare(args: argparse.Namespace) -> int:
         "script": frozen / script.name,
         "helper": frozen / helper.name,
         "binary": frozen / "wirehair_v2_bench",
+        "cmake_cache": frozen / "CMakeCache.txt",
         "groups": frozen / "groups.tsv",
     }
     for source, destination in (
         (script, destinations["script"]),
         (helper, destinations["helper"]),
         (binary, destinations["binary"]),
+        (cache, destinations["cmake_cache"]),
         (groups, destinations["groups"]),
     ):
         shutil.copyfile(source, destination)
     destinations["binary"].chmod(0o755)
     destinations["script"].chmod(0o755)
     contract = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v1",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v2",
         "source_commit": head, "source_repo": str(repo),
+        "build_command": build_command,
         "binary_source": str(binary),
         "binary_sha256": sha256_file(destinations["binary"]),
+        "cmake_cache_sha256": sha256_file(destinations["cmake_cache"]),
         "script_sha256": sha256_file(destinations["script"]),
         "helper_sha256": sha256_file(destinations["helper"]),
         "groups_sha256": sha256_file(destinations["groups"]),
@@ -554,7 +610,7 @@ def prepare(args: argparse.Namespace) -> int:
         "saturated_timing_speed_claim_valid": False,
         "thermal_policy": {
             "limit_c": 90.0, "consecutive_polls": 3,
-            "stale_seconds": 5.0,
+            "stale_seconds": 5.0, "min_cpu_busy_pct": 95.0,
         },
     }
     contract_path = frozen / "contract.json"
@@ -585,20 +641,23 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], Path, Path, list[Grou
         for name in (
             "wh2_rank_floor_two_anchor_allk.py",
             "wh2_rank_floor_two_anchor_screen.py",
-            "wirehair_v2_bench", "groups.tsv", "contract.json",
+            "wirehair_v2_bench", "CMakeCache.txt", "groups.tsv",
+            "contract.json",
         )
     }
     if set(staged) != expected:
-        die("frozen seal does not cover the exact five-file staged set")
+        die("frozen seal does not cover the exact six-file staged set")
     contract = json.loads(stable_bytes(frozen / "contract.json"))
     if (
         contract.get("schema") !=
-            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v1"
+            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v2"
         or tuple(contract.get("arms", ())) != ARMS
         or tuple(contract.get("seeds", ())) != SEEDS
         or tuple(contract.get("schedules", ())) != SCHEDULES
         or contract.get("K_domain") != [K_MIN, K_MAX]
         or contract.get("groups_sha256") != GROUPS_SHA256
+        or contract.get("cmake_cache_sha256") !=
+            sha256_file(frozen / "CMakeCache.txt")
     ):
         die("frozen contract does not match this campaign")
     script = (frozen / "wh2_rank_floor_two_anchor_allk.py").resolve(strict=True)
@@ -1068,6 +1127,8 @@ def run(args: argparse.Namespace) -> int:
     if guard.error:
         die(f"thermal guard failed: {guard.error}")
     if (
+        thermal_summary["cpu_busy_min_pct"] <
+            float(contract["thermal_policy"]["min_cpu_busy_pct"]) or
         thermal_summary["dimm_read_errors_max"] != 0 or
         thermal_summary["edac_ce_delta"] != 0 or
         thermal_summary["edac_ue_delta"] != 0
@@ -1126,14 +1187,15 @@ def main() -> int:
     prepare_parser.add_argument("--thermal", type=Path, required=True)
     prepare_parser.add_argument("--result-dir", type=Path, required=True)
     prepare_parser.add_argument("--workers", type=int, default=120)
+    prepare_parser.add_argument("--build-workers", type=int, default=32)
     prepare_parser.add_argument("--timeout", type=float, default=1200.0)
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--result-dir", type=Path, required=True)
     args = parser.parse_args()
     getcontext().prec = 100
     if args.mode == "prepare":
-        if args.workers <= 0 or args.timeout <= 0:
-            die("--workers and --timeout must be positive")
+        if args.workers <= 0 or args.build_workers <= 0 or args.timeout <= 0:
+            die("--workers, --build-workers, and --timeout must be positive")
         return prepare(args)
     return run(args)
 

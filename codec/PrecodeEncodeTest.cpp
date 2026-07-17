@@ -2791,6 +2791,10 @@ bool TestSystematicSourceCache()
             selected_profile.V2RecoveryMixCount ||
         cached_profile.V2DenseIdentityCorner !=
             selected_profile.V2DenseIdentityCorner ||
+        cached_profile.V2DenseTwoAnchor !=
+            selected_profile.V2DenseTwoAnchor ||
+        cached_profile.V2AdaptiveDenseTwoAnchor !=
+            selected_profile.V2AdaptiveDenseTwoAnchor ||
         cached_profile.V2PrecodeSeedSalt !=
             selected_profile.V2PrecodeSeedSalt ||
         cached_profile.V2RecoveryRowSeedSalt !=

@@ -294,6 +294,9 @@ struct MessagePrecodeEncoderOptions
     // be checked against a selected profile rather than silently ignored.
     uint32_t RecoveryMixCount = kDefaultRecoveryMixCount;
     bool DenseIdentityCorner = false;
+    // Versioned equation policy: retain certified D12 below K=4096 and use
+    // the second shuffled-deck anchor at and above that boundary.
+    bool AdaptiveDenseTwoAnchor = false;
     uint64_t PrecodeSeedSalt = kMessagePrecodeSeedSalt;
     uint64_t RecoveryRowSeedSalt = kMessageRecoveryRowSeedSalt;
     CompletionField Completion = CompletionField::GF256;

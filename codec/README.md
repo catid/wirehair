@@ -283,8 +283,11 @@ The default `precodefail` completion is `certified`.  The `--completion mixed`
 arm exercises the mixed GF(256)/GF(2^16) H12 solver and requires even block
 bytes and the `periodic` heavy family.  Mix count 3 corresponds to
 `WIREHAIR_V2_PROFILE_MIXED_2026_07`; mix count 2 corresponds to the distinct
-opt-in `WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07`.  Neither changes the default
-`WIREHAIR_V2_PROFILE_CURRENT`.  With `--mix-count 2,3`, both selected candidate
+opt-in `WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07`.  The separately versioned
+`WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07` retains the same mixed
+rows and mix2 packet schedule while changing the D12 binary construction only
+at K >= 4096.  None changes the default `WIREHAIR_V2_PROFILE_CURRENT`.  With
+`--mix-count 2,3`, both selected candidate
 profiles receive the same packet-ID trace for each trial; optional payload E2E
 checks also share their message and loss stream.  The
 `precodefail_paired` comment reports all four paired outcome cells, the exact

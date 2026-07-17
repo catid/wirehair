@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Paired D12 two-anchor rank-floor screen over revealed gen2b inputs.
+"""Paired production-H12 two-anchor screen over revealed development inputs.
 
-This one-off experiment consumes only the published gen2b all-K analysis.
-It does not locate, inspect, or depend on any H15-v5 holdout material.
+This one-off development screen consumes only the published gen2b all-K
+analysis, but evaluates the exact mixed10-GF(256)/2-GF(65536), period-244,
+mix2 production geometry.  Its selected inputs are not independent evidence;
+the companion all-K campaign provides the independent confirmation.  This
+script does not locate, inspect, or depend on any H15-v5 holdout material.
 """
 
 from __future__ import annotations
@@ -44,27 +47,30 @@ TIMING_FIELDS = {
     "solve_ms_mu", "build_ms_mu", "peel_ms_mu", "project_ms_mu",
     "residual_ms_mu", "backsub_ms_mu",
 }
+BENCH_HEADER_V1 = (
+    "N", "bb", "heavy_family", "mix_count", "overhead", "trials",
+    "success", "rank_fail", "error", "fail_rate", "inact_mu",
+    "inact_max", "binary_def_mu", "binary_def_max", "heavy_gain_mu",
+    "heavy_gain_min", "heavy_shortfall", "solve_ms_mu", "build_ms_mu",
+    "peel_ms_mu", "project_ms_mu", "residual_ms_mu", "backsub_ms_mu",
+    "seed_attempt", "block_xors_mu", "block_muladds_mu",
+    "first_rank_fail", "binary_def_hist", "heavy_gain_hist",
+    "failure_trials", "active_packet_peel_seed_xor",
+)
+BENCH_HEADER_JOINT_DELTA = BENCH_HEADER_V1 + (
+    "mixed_joint_source_xors_mu", "mixed_joint_marginal_xors_mu",
+    "mixed_joint_marginal_copies_mu", "mixed_joint_active_deltas_mu",
+    "mixed_joint_scratch_bytes_mu", "mixed_dual_source_columns_mu",
+)
 BASE_OPTIONS = (
     "precodefail",
     "--bb-list", "64",
-    "--seed-block-bytes", "1280",
     "--overhead", "0",
     "--trials", "1",
     "--threads", "1",
     "--loss", "0.50",
     "--completion", "mixed",
     "--mix-count", "2",
-    "--mixed-gf256-rows", "11",
-    "--mixed-gf16-rows", "4",
-    "--mixed-period", "32",
-    "--mixed-geometry", "shared-x",
-    "--mixed-residue-schedule", "hashed",
-    "--mixed-residue-hash-seed", "68",
-    "--mixed-residue-hash-keyed",
-    "--mixed-independent-extension-residues",
-    "--mixed-extension-residue-seed-xor", "78",
-    "--mixed-independent-gf256-breaker-rows", "0",
-    "--mixed-fused-schedule-buckets", "auto",
 )
 
 
@@ -300,6 +306,15 @@ def parse_bench_output(
     expected_trials: int = 1,
     expected_bb: int = 64,
 ) -> list[dict[str, str]]:
+    def option_value(flag: str, default: str) -> str:
+        try:
+            index = expected_options.index(flag)
+        except ValueError:
+            return default
+        if index + 1 >= len(expected_options):
+            raise ValueError(f"benchmark option {flag} lacks a value")
+        return expected_options[index + 1]
+
     lines = output.splitlines()
     if len(lines) != len(expected_Ks) + 2:
         raise ValueError(
@@ -311,21 +326,60 @@ def parse_bench_output(
         raise ValueError("binary_dense_two_anchor preamble mismatch")
     if not candidate and "binary_dense_two_anchor" in preamble:
         raise ValueError("baseline binary unexpectedly reports two-anchor hook")
-    dense_rows = "0"
-    if "--binary-dense-rows" in expected_options:
-        index = expected_options.index("--binary-dense-rows")
-        dense_rows = expected_options[index + 1]
+    dense_rows = option_value("--binary-dense-rows", "0")
+    hash_seed = int(option_value("--mixed-residue-hash-seed", "0"), 0)
+    extension_xor = int(
+        option_value("--mixed-extension-residue-seed-xor", "78"), 0
+    )
     fixed = {
         "trials": str(expected_trials), "threads": "1", "loss": "0.5",
-        "completion": "mixed", "mixed_period": "32",
-        "mixed_gf256_rows": "11", "mixed_gf16_rows": "4",
-        "mixed_geometry": "shared-x", "mixed_residue_schedule": "hashed",
-        "mixed_residue_hash_seed": "0x44",
-        "mixed_residue_hash_keyed": "1",
-        "mixed_independent_extension_residues": "1",
-        "mixed_extension_residue_seed_xor": "0x4e",
+        "completion": option_value("--completion", "mixed"),
+        "mixed_period": option_value("--mixed-period", "244"),
+        "mixed_gf256_rows": option_value("--mixed-gf256-rows", "10"),
+        "mixed_gf16_rows": option_value("--mixed-gf16-rows", "2"),
+        "mixed_geometry": option_value("--mixed-geometry", "frozen"),
+        "mixed_residue_skew": option_value("--mixed-residue-skew", "0"),
+        "mixed_residue_schedule": option_value(
+            "--mixed-residue-schedule", "constant"
+        ),
+        "mixed_residue_hash_seed": hex(hash_seed),
+        "mixed_residue_hash_keyed": (
+            "1" if "--mixed-residue-hash-keyed" in expected_options else "0"
+        ),
+        "mixed_independent_extension_residues": (
+            "1" if "--mixed-independent-extension-residues" in expected_options
+            else "0"
+        ),
+        "mixed_residue_buckets_requested": option_value(
+            "--mixed-fused-schedule-buckets", "auto"
+        ),
+        "mixed_extension_residue_seed_xor": hex(extension_xor),
+        "source_hits_override": option_value("--source-hits", "0"),
+        "packet_peel_seed_table": option_value(
+            "--packet-peel-seed-table", "none"
+        ),
         "binary_dense_rows_override": dense_rows,
-        "seed_block_bytes_override": "1280", "schedule": expected_schedule,
+        "gf256_heavy_rows_override": option_value(
+            "--gf256-heavy-rows", "0"
+        ),
+        "odd_packet_peel_seed_xor": hex(int(option_value(
+            "--odd-packet-peel-seed-xor", "0"
+        ), 0)),
+        "packet_row_seed_multiplier": hex(int(option_value(
+            "--packet-row-seed-multiplier", "1"
+        ), 0)),
+        "packet_row_seed_avalanche": (
+            "1" if "--packet-row-seed-avalanche" in expected_options else "0"
+        ),
+        "seed_block_bytes_override": option_value("--seed-block-bytes", "0"),
+        "overhead_stream": (
+            "paired" if "--paired-overhead-stream" in expected_options
+            else "salted"
+        ),
+        "full_payload_solve": (
+            "1" if "--full-payload-solve" in expected_options else "0"
+        ),
+        "schedule": expected_schedule,
     }
     for key, expected in fixed.items():
         if preamble.get(key) != expected:
@@ -337,7 +391,7 @@ def parse_bench_output(
     if int(preamble.get("seed", "-1"), 0) != int(expected_seed, 0):
         raise ValueError("preamble seed mismatch")
     header = next(csv.reader([lines[1]]))
-    if len(header) != 31 or header[:3] != ["N", "bb", "heavy_family"]:
+    if tuple(header) not in (BENCH_HEADER_V1, BENCH_HEADER_JOINT_DELTA):
         raise ValueError("benchmark CSV header mismatch")
     records: list[dict[str, str]] = []
     order: list[int] = []
@@ -427,7 +481,7 @@ def run_identity(
         if returncode != 0 or stderr:
             raise RuntimeError(f"identity {stem} failed rc={returncode}: {stderr[-1000:]}")
         rows = parse_bench_output(
-            stdout, IDENTITY_KS, "0x0", seed, schedule, (),
+            stdout, IDENTITY_KS, "0x0", seed, schedule, BASE_OPTIONS,
             role == "candidate"
         )
         return {
@@ -527,13 +581,42 @@ def run_task(
 
 
 def binomial_one_sided(repairs: int, introductions: int) -> dict[str, Any]:
+    if repairs < 0 or introductions < 0:
+        raise ValueError("paired outcome counts must be nonnegative")
     discordant = repairs + introductions
     if discordant == 0:
         return {"numerator": 1, "denominator": 1, "decimal": "1"}
-    numerator = sum(
-        math.comb(discordant, k) for k in range(repairs, discordant + 1)
-    )
+
+    def coefficient_sum(begin: int, end: int) -> int:
+        if begin >= end:
+            return 0
+        term = math.comb(discordant, begin)
+        total = term
+        for k in range(begin + 1, end):
+            term = term * (discordant - k + 1) // k
+            total += term
+        return total
+
     denominator = 1 << discordant
+    center = discordant // 2 + (discordant & 1)
+    choices = (
+        (discordant - repairs + 1, "upper"),
+        (repairs, "lower"),
+        (abs(repairs - center), "center"),
+    )
+    representation = min(choices)[1]
+    if representation == "upper":
+        numerator = coefficient_sum(repairs, discordant + 1)
+    elif representation == "lower":
+        numerator = denominator - coefficient_sum(0, repairs)
+    else:
+        numerator = denominator >> 1
+        if (discordant & 1) == 0:
+            numerator += math.comb(discordant, center) >> 1
+        if repairs < center:
+            numerator += coefficient_sum(repairs, center)
+        elif repairs > center:
+            numerator -= coefficient_sum(center, repairs)
     divisor = math.gcd(numerator, denominator)
     numerator //= divisor
     denominator //= divisor
@@ -726,27 +809,47 @@ def write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: Sequence[str])
 
 
 def thermal_start(path: Path) -> dict[str, Any]:
-    with path.open("rb") as source:
-        header = source.readline()
-        if not header.startswith(b"utc,") or not header.endswith(b"\n"):
-            raise ValueError("thermal log has an invalid header")
-        source.seek(0, os.SEEK_END)
-        offset = source.tell()
-        if offset <= len(header):
-            raise ValueError("thermal log has no data rows")
-        source.seek(offset - 1)
-        if source.read(1) != b"\n":
-            raise ValueError("thermal log ends in a partial row")
-        stat_before = os.fstat(source.fileno())
+    deadline = time.monotonic() + 5.0
+    while True:
+        with path.open("rb") as source:
+            header = source.readline()
+            if not header.startswith(b"utc,") or not header.endswith(b"\n"):
+                raise ValueError("thermal log has an invalid header")
+            source.seek(0, os.SEEK_END)
+            offset = source.tell()
+            if offset <= len(header):
+                raise ValueError("thermal log has no data rows")
+            source.seek(offset - 1)
+            complete = source.read(1) == b"\n"
+            stat_before = os.fstat(source.fileno())
+            if complete:
+                source.seek(max(len(header), offset - 16384))
+                tail = source.read(offset - source.tell())
+        if complete:
+            break
+        if time.monotonic() >= deadline:
+            raise ValueError("thermal log ends in a persistent partial row")
+        time.sleep(0.05)
+    lines = tail.splitlines()
+    if not lines:
+        raise ValueError("thermal log has no complete data row")
+    fields = next(csv.reader([header.decode("utf-8").strip()]))
+    values = next(csv.reader([lines[-1].decode("utf-8")]))
+    if len(values) != len(fields):
+        raise ValueError("thermal baseline row has the wrong field count")
+    baseline = dict(zip(fields, values))
     return {
         "dev": stat_before.st_dev, "ino": stat_before.st_ino,
         "offset": offset, "header": header,
+        "edac_ce": int(baseline["edac_ce"]),
+        "edac_ue": int(baseline["edac_ue"]),
     }
 
 
 def thermal_finish(path: Path, start: dict[str, Any], output: Path) -> dict[str, Any]:
     suffix = b""
-    for attempt in range(5):
+    deadline = time.monotonic() + 5.0
+    while True:
         with path.open("rb") as source:
             stat_after = os.fstat(source.fileno())
             if ((stat_after.st_dev, stat_after.st_ino) !=
@@ -758,27 +861,52 @@ def thermal_finish(path: Path, start: dict[str, Any], output: Path) -> dict[str,
             suffix = source.read()
         if suffix.endswith(b"\n"):
             break
-        if attempt == 4:
-            raise ValueError("thermal log ends in a partial interval row")
+        if time.monotonic() >= deadline:
+            raise ValueError("thermal log ends in a persistent partial interval row")
         time.sleep(0.05)
     output.write_bytes(start["header"] + suffix)
     with output.open("r", encoding="utf-8", newline="") as source:
-        rows = list(csv.DictReader(source))
+        reader = csv.DictReader(source)
+        rows = list(reader)
     if not rows:
         raise ValueError("thermal interval contains no samples")
+    expected_fields = next(csv.reader([
+        start["header"].decode("utf-8").strip()
+    ]))
+    if reader.fieldnames != expected_fields or any(
+            None in row or any(value is None for value in row.values())
+            for row in rows):
+        raise ValueError("thermal interval row schema changed")
     dimm_fields = [key for key in rows[0] if key.startswith("dimm_i2c")]
     if len(dimm_fields) != 8:
         raise ValueError("thermal interval does not contain eight DIMM fields")
     if any(not row[field] for row in rows for field in dimm_fields):
         raise ValueError("thermal interval contains a blank DIMM reading")
+    cpu_busy_values = [float(row["cpu_busy_pct"]) for row in rows]
+    cpu_temperature_values = [float(row["cpu_tctl_c"]) for row in rows]
+    dimm_temperature_values = [
+        float(row[field]) for row in rows for field in dimm_fields
+    ]
+    if (any(not math.isfinite(value) or value < 0.0 or value > 100.0
+            for value in cpu_busy_values) or
+        any(not math.isfinite(value) for value in
+            cpu_temperature_values + dimm_temperature_values)):
+        raise ValueError("thermal interval contains an invalid numeric value")
+    edac_ce_values = [start["edac_ce"], *(int(row["edac_ce"]) for row in rows)]
+    edac_ue_values = [start["edac_ue"], *(int(row["edac_ue"]) for row in rows)]
+    if any(b < a for values in (edac_ce_values, edac_ue_values)
+            for a, b in zip(values, values[1:])):
+        raise ValueError("thermal interval EDAC counter decreased")
+    edac_ce_delta = edac_ce_values[-1] - edac_ce_values[0]
+    edac_ue_delta = edac_ue_values[-1] - edac_ue_values[0]
     return {
         "samples": len(rows),
-        "cpu_busy_min_pct": min(float(row["cpu_busy_pct"]) for row in rows),
-        "cpu_tctl_max_c": max(float(row["cpu_tctl_c"]) for row in rows),
-        "dimm_max_c": max(float(row[field]) for row in rows for field in dimm_fields),
+        "cpu_busy_min_pct": min(cpu_busy_values),
+        "cpu_tctl_max_c": max(cpu_temperature_values),
+        "dimm_max_c": max(dimm_temperature_values),
         "dimm_read_errors_max": max(int(row["dimm_read_errors"]) for row in rows),
-        "edac_ce_delta": int(rows[-1]["edac_ce"]) - int(rows[0]["edac_ce"]),
-        "edac_ue_delta": int(rows[-1]["edac_ue"]) - int(rows[0]["edac_ue"]),
+        "edac_ce_delta": edac_ce_delta,
+        "edac_ue_delta": edac_ue_delta,
     }
 
 
