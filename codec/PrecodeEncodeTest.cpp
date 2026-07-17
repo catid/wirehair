@@ -1622,22 +1622,39 @@ bool TestMixedCompletion()
 
 bool TestAutomaticMixedJointBucketPolicy()
 {
-    if (wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+    if (wirehair_v2::UseAutomaticMixedJointResidueBuckets(
             3199u, 4096u, 32u) ||
+        !wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            3200u, 4096u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            9999u, 1280u, 32u) ||
+        !wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            10000u, 1280u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            64000u, 1279u, 32u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            64000u, 4096u, 31u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            64000u, 4096u, 33u) ||
+        wirehair_v2::UseAutomaticMixedJointResidueBuckets(
+            64000u, 4096u, 244u) ||
         !wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
             3200u, 4096u, 32u) ||
-        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            9999u, 1280u, 32u) ||
-        !wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            10000u, 1280u, 32u) ||
-        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            64000u, 1279u, 32u) ||
-        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            64000u, 4096u, 31u) ||
-        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            64000u, 4096u, 33u) ||
-        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
-            64000u, 4096u, 244u))
+        !wirehair_v2::MixedJointResidueBucketStorageFits(
+            32u, 699050u,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap) ||
+        wirehair_v2::MixedJointResidueBucketStorageFits(
+            32u, 699051u,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap) ||
+        wirehair_v2::MixedJointResidueBucketStorageFits(
+            0u, 4096u,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap) ||
+        wirehair_v2::MixedJointResidueBucketStorageFits(
+            wirehair_v2::kMixedCoefficientPeriod + 1u, 4096u,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap) ||
+        wirehair_v2::MixedJointResidueBucketStorageFits(
+            32u, 0u,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap))
     {
         std::fprintf(stderr, "mixed automatic bucket policy boundary failed\n");
         return false;
@@ -1674,10 +1691,20 @@ bool TestAutomaticMixedJointBucketPolicy()
         params.Staircase + params.DenseRows + params.HeavyRows;
     std::vector<uint8_t> source((size_t)K * block_bytes);
     std::vector<uint8_t> parity((size_t)parity_count * block_bytes);
+    std::vector<uint8_t> capped(parity.size());
     FillRandomBlocks(source.data(), source.size(), UINT64_C(0xa070f111));
     wirehair_v2::PrecodeEncodeStats stats;
-    if (!wirehair_v2::ComputePrecodeValues(
-            system, source.data(), block_bytes, parity.data(), &stats) ||
+    const bool joint_ok = wirehair_v2::ComputePrecodeValues(
+        system, source.data(), block_bytes, parity.data(), &stats);
+    const uint64_t joint_plane_bytes = UINT64_C(32) * block_bytes;
+    wirehair_v2::SetHeavyBucketStorageLimitForTesting(
+        3u * joint_plane_bytes - 1u);
+    wirehair_v2::PrecodeEncodeStats capped_stats;
+    const bool capped_ok = wirehair_v2::ComputePrecodeValues(
+        system, source.data(), block_bytes, capped.data(), &capped_stats);
+    wirehair_v2::SetHeavyBucketStorageLimitForTesting(
+        wirehair_v2::kMixedJointResidueBucketDataByteCap);
+    if (!joint_ok || !capped_ok || parity != capped ||
         !VerifyValues(
             system, source.data(), parity.data(), block_bytes,
             "mixed automatic joint buckets") ||
@@ -1685,7 +1712,13 @@ bool TestAutomaticMixedJointBucketPolicy()
             (uint64_t)K + params.Staircase + params.DenseRows ||
         stats.MixedJointMarginalCopies != 64u ||
         stats.MixedJointActiveDeltas == 0u ||
-        stats.MixedDualSourceColumns != 0u)
+        stats.MixedDualSourceColumns != 0u ||
+        capped_stats.MixedJointSourceXors != 0u ||
+        capped_stats.MixedJointMarginalXors != 0u ||
+        capped_stats.MixedJointMarginalCopies != 0u ||
+        capped_stats.MixedJointScratchBytes != 0u ||
+        capped_stats.MixedJointActiveDeltas != 0u ||
+        capped_stats.MixedDualSourceColumns != 0u)
     {
         std::fprintf(stderr,
             "mixed automatic bucket dispatch/accounting failed\n");

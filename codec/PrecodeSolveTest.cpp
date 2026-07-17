@@ -1554,6 +1554,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // counts L=243, 244, and 245 around the full-period transition.
         189u, 190u, 191u,
         243u, 244u, 245u, 320u, 1000u,
+        // Automatic P32 joint-delta crossover (decoder dispatch coverage).
+        3200u,
         // The independent case also covers the large-payload dual-bucket
         // mixed-RHS path selected by SolveMixedCompletionQuotient.
         30000u
@@ -1566,8 +1568,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     {
         const uint32_t K = kBlockCounts[case_index];
         if (K == 30000u && !independent_extension_residues) continue;
-        const uint32_t block_bytes = K == 30000u ? 1024u :
-            ((case_index & 1u) == 0u ? 2u : 6u);
+        const bool automatic_joint_case = K == 3200u &&
+            independent_extension_residues && period == 32u &&
+            bucket_mode == wirehair_v2::MixedResidueBucketMode::Automatic;
+        const uint32_t block_bytes = automatic_joint_case ? 4096u :
+            (K == 30000u ? 1024u :
+             ((case_index & 1u) == 0u ? 2u : 6u));
         wirehair_v2::PrecodeParams params =
             wirehair_v2::MakeMixedParams(
                 K,

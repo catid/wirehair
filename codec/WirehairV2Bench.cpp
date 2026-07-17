@@ -412,6 +412,7 @@ const char* MixedCoefficientGeometryName(
         "shared-x" : "frozen";
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseMixedCoefficientGeometry(
     const char* text,
     wirehair_v2::MixedCoefficientGeometry& geometry)
@@ -426,6 +427,7 @@ bool ParseMixedCoefficientGeometry(
     }
     return false;
 }
+#endif
 
 const char* MixedResidueScheduleName(
     wirehair_v2::MixedResidueSchedule schedule)
@@ -438,6 +440,7 @@ const char* MixedResidueScheduleName(
     }
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseMixedResidueSchedule(
     const char* text,
     wirehair_v2::MixedResidueSchedule& schedule)
@@ -456,6 +459,7 @@ bool ParseMixedResidueSchedule(
     }
     return false;
 }
+#endif
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 const char* MixedResidueBucketModeName(
@@ -2450,7 +2454,11 @@ int CmdCompare(int argc, char** argv)
         wirehair_v2::ActiveMixedResidueHashSeed(),
         mixed_residue_hash_keyed ? 1u : 0u,
         mixed_independent_extension_residues ? 1u : 0u,
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         MixedResidueBucketModeName(mixed_residue_bucket_mode),
+#else
+        "auto",
+#endif
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
@@ -5326,7 +5334,11 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
             mixed_independent_extension_residues ? 1u : 0u,
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             MixedResidueBucketModeName(mixed_residue_bucket_mode),
+#else
+            "auto",
+#endif
             mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,

@@ -374,20 +374,24 @@ the first temporary plane, then XORs later planes into A[a] and
 B[(a+delta)%P].  Thus every active source column is read once rather than
 contributed to two separate bucket scans.  The data planes occupy exactly
 `3*P*block_bytes` (the reported plane-byte counter deliberately excludes small
-allocator-dependent scheduling vectors), and both dual and joint experiments
-are capped at 64 MiB.  Partial final P-column blocks and decoder-inactive
-columns use the same path.
+allocator-dependent scheduling vectors), and both dual experiments and the
+joint implementation are capped at 64 MiB.  Partial final P-column blocks and
+decoder-inactive columns use the same path.
 
 Pinned alternating full-payload solves found joint slower at K=945, but
 reproducibly faster beyond the measured crossover: versus dual, about 1.6% at
 K=20000/bb=4096, 1.0% at K=48466/bb=4096, and 0.6% at
 K=64000/bb=1280.  Representative three-way medians improved 2.45% versus
 separate at K=20000/bb=4096 and 2.09% at K=64000/bb=1280.  Accordingly the
-test-hook `auto` policy selects joint at P=32 and K>=3200 for block sizes
->=4096, or at P=32 and K>=10000 for block sizes >=1280; it never selects
-joint below 1280 bytes or at an unmeasured coefficient period.
-This policy and implementation remain experimental and hooks-off production
-objects are required to stay byte-identical.
+production implementation policy selects joint at P=32 and K>=3200 for block
+sizes >=4096, or at P=32 and K>=10000 for block sizes >=1280; it never selects
+joint below 1280 bytes or at an unmeasured coefficient period.  The policy is
+compiled in hooks-off encoder and decoder paths and is used whenever a future
+versioned profile activates independent subfield/extension residue schedules;
+the current frozen profiles share one schedule, so their equations, payloads,
+profiles, and wire bytes remain unchanged.  Test hooks retain explicit
+`separate`, `dual`, and `joint-delta` overrides around the same production
+automatic decision.
 
 The test-only
 `--packet-peel-seed-table normalized-h15-v1` selects an offline-tuned packet

@@ -543,6 +543,36 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     return &frozen_packed;
 }
 
+bool MixedJointResidueBucketStorageFits(
+    uint32_t coefficient_period,
+    uint32_t block_bytes,
+    uint64_t data_byte_limit)
+{
+    if (coefficient_period == 0u ||
+        coefficient_period > kMixedCoefficientPeriod ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu)
+    {
+        return false;
+    }
+    const uint64_t plane_bytes =
+        (uint64_t)coefficient_period * block_bytes;
+    return plane_bytes <= std::numeric_limits<size_t>::max() &&
+        plane_bytes <= data_byte_limit / 3u;
+}
+
+bool UseAutomaticMixedJointResidueBuckets(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period)
+{
+    // Pinned ABBA measurements cover P=32 only.  Larger periods multiply the
+    // marginal work and scratch, so they remain explicitly opt-in in test
+    // builds until separately benchmarked.
+    return coefficient_period == 32u &&
+        ((block_bytes >= 4096u && block_count >= 3200u) ||
+         (block_bytes >= 1280u && block_count >= 10000u));
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static thread_local uint32_t MixedCoefficientPeriodForTesting =
     kMixedCoefficientPeriod;
@@ -761,12 +791,8 @@ bool UseAutomaticMixedJointResidueBucketsForTesting(
     uint32_t block_bytes,
     uint32_t coefficient_period)
 {
-    // Pinned ABBA measurements cover P=32 only.  Larger periods multiply the
-    // marginal work and scratch, so they must remain explicitly opt-in until
-    // separately benchmarked.
-    return coefficient_period == 32u &&
-        ((block_bytes >= 4096u && block_count >= 3200u) ||
-         (block_bytes >= 1280u && block_count >= 10000u));
+    return UseAutomaticMixedJointResidueBuckets(
+        block_count, block_bytes, coefficient_period);
 }
 
 bool SetMixedCoefficientGeometryForTesting(

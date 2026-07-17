@@ -1,6 +1,10 @@
 #include <wirehair/wirehair.h>
 #include <wirehair/wirehair.hpp>
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#error "profile/wire golden tests must exercise the hooks-off public library"
+#endif
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>

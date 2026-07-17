@@ -3,10 +3,8 @@
 #include "../WirehairTools.h"
 #include "../gf256.h"
 
-#include "WirehairV2Plan.h"
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #include "WirehairV2MixedBuckets.h"
-#endif
+#include "WirehairV2Plan.h"
 
 #include <algorithm>
 #include <cstring>
@@ -494,25 +492,32 @@ bool ComputePrecodeValues(
             (uint64_t)window * block_bytes <=
                 GetHeavyBucketStorageLimit();
         bool independent_buckets_accumulated = false;
+        const bool automatic_joint_delta_buckets =
+            independent_extension_residues &&
+            UseAutomaticMixedJointResidueBuckets(
+                system.Params.BlockCount, block_bytes, window);
+        bool request_joint_delta_buckets =
+            automatic_joint_delta_buckets;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const uint64_t one_plane_bytes = (uint64_t)window * block_bytes;
+        bool use_dual_buckets = false;
         const MixedResidueBucketMode bucket_mode =
             ActiveMixedResidueBucketModeForTesting();
-        const uint64_t one_plane_bytes = (uint64_t)window * block_bytes;
-        const bool automatic_joint_delta_buckets =
-            bucket_mode == MixedResidueBucketMode::Automatic &&
-            UseAutomaticMixedJointResidueBucketsForTesting(
-                system.Params.BlockCount, block_bytes, window);
-        const bool use_joint_delta_buckets =
-            independent_extension_residues && use_residue_buckets &&
-            (bucket_mode == MixedResidueBucketMode::JointDelta ||
-             automatic_joint_delta_buckets) &&
-            one_plane_bytes <= UINT64_MAX / 3u &&
-            one_plane_bytes * 3u <= GetHeavyBucketStorageLimit();
-        const bool use_dual_buckets =
+        request_joint_delta_buckets =
+            bucket_mode == MixedResidueBucketMode::JointDelta ||
+            (bucket_mode == MixedResidueBucketMode::Automatic &&
+             automatic_joint_delta_buckets);
+        use_dual_buckets =
             independent_extension_residues && use_residue_buckets &&
             bucket_mode == MixedResidueBucketMode::Dual &&
             one_plane_bytes <= UINT64_MAX / 2u &&
             one_plane_bytes * 2u <= GetHeavyBucketStorageLimit();
+#endif
+        const bool use_joint_delta_buckets =
+            independent_extension_residues && use_residue_buckets &&
+            request_joint_delta_buckets &&
+            MixedJointResidueBucketStorageFits(
+                window, block_bytes, GetHeavyBucketStorageLimit());
         if (use_joint_delta_buckets)
         {
             MixedJointResidueBuckets buckets;
@@ -524,11 +529,13 @@ bool ComputePrecodeValues(
             }
             st.HeavyBucketXors +=
                 buckets.SourceXors + buckets.MarginalXors;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             st.MixedJointSourceXors = buckets.SourceXors;
             st.MixedJointMarginalXors = buckets.MarginalXors;
             st.MixedJointMarginalCopies = buckets.MarginalCopies;
             st.MixedJointScratchBytes = buckets.ScratchBytes;
             st.MixedJointActiveDeltas = buckets.ActiveDeltas;
+#endif
             for (uint32_t m = 0u; m < window; ++m)
             {
                 if (!accumulate_subfield_residue(
@@ -545,6 +552,7 @@ bool ComputePrecodeValues(
             }
             independent_buckets_accumulated = true;
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (use_dual_buckets)
         {
             std::vector<uint8_t> subfield_buckets(

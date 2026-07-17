@@ -77,7 +77,7 @@ struct PrecodeEncodeStats
     uint64_t DenseSolveBlockOps = 0;
 
     /// Plain block XOR-class contributions folding known columns into heavy
-    /// residue buckets.  The joint-delta test path excludes its write-only
+    /// residue buckets.  The joint-delta path excludes its write-only
     /// first-marginal copies, reported separately below.
     uint64_t HeavyBucketXors = 0;
 

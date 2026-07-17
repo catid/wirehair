@@ -1,7 +1,5 @@
 #pragma once
 
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-
 #include "../gf256.h"
 #include "WirehairV2Precode.h"
 
@@ -106,7 +104,11 @@ bool AccumulateMixedJointResidueBuckets(
     bool batch_sources,
     MixedJointResidueBuckets& output)
 {
-    if (coefficient_period == 0u || block_bytes == 0u) {
+    output = MixedJointResidueBuckets{};
+    if (coefficient_period == 0u ||
+        coefficient_period > kMixedCoefficientPeriod ||
+        block_bytes == 0u || block_bytes > 0x7fffffffu)
+    {
         return false;
     }
     const uint64_t plane_bytes_wide =
@@ -148,7 +150,6 @@ bool AccumulateMixedJointResidueBuckets(
         blocks_by_delta[next[delta]++] = block;
     }
 
-    output = MixedJointResidueBuckets{};
     output.Subfield.reset(new uint8_t[plane_bytes]);
     output.Extension.reset(new uint8_t[plane_bytes]);
     std::unique_ptr<uint8_t[]> temporary(new uint8_t[plane_bytes]);
@@ -285,5 +286,3 @@ bool AccumulateMixedJointResidueBuckets(
 }
 
 } // namespace wirehair_v2
-
-#endif // WIREHAIR_V2_ENABLE_TEST_HOOKS

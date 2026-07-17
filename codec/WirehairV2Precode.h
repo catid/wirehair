@@ -223,6 +223,30 @@ uint32_t ActiveMixedGF256Rows();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
+// Production data-plane cap for joint A/B residue accumulation.  The small
+// scheduling vectors are bounded by K and P separately; this limit covers the
+// three P * block_bytes planes that dominate scratch use.
+static const uint64_t kMixedJointResidueBucketDataByteCap =
+    UINT64_C(64) << 20;
+
+/// True when three joint-delta data planes fit the supplied scratch budget.
+bool MixedJointResidueBucketStorageFits(
+    uint32_t coefficient_period,
+    uint32_t block_bytes,
+    uint64_t data_byte_limit);
+
+/**
+    Production implementation policy for independently scheduled A/B mixed
+    residues.  This is an execution choice only: it changes neither equations
+    nor wire/profile bytes.  Pinned ABBA measurements currently justify the
+    joint-delta helper only at P=32 and the two conservative K/payload
+    crossovers below; callers must additionally enforce the scratch cap.
+*/
+bool UseAutomaticMixedJointResidueBuckets(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period);
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 enum class MixedResidueBucketMode : uint32_t
 {
@@ -252,7 +276,7 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
 /// Select the independent-schedule RHS accumulation implementation.
 bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode);
 MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting();
-/// Benchmark-derived conservative crossover for the joint-delta experiment.
+/// Compatibility test accessor for the production implementation policy.
 bool UseAutomaticMixedJointResidueBucketsForTesting(
     uint32_t block_count,
     uint32_t block_bytes,
