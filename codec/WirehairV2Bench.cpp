@@ -4454,6 +4454,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
     bool mixed_null_witnesses = false;
+    bool binary_dense_two_anchor = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
@@ -4613,6 +4614,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             binary_dense_rows_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
+            binary_dense_two_anchor = true;
         }
         else if (!std::strcmp(argv[i], "--gf256-heavy-rows")) {
             if (!TakeArg(
@@ -4960,6 +4964,14 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --binary-dense-rows must be in [1,64]\n");
         return 1;
     }
+    if (binary_dense_two_anchor && binary_dense_rows_override != 0u &&
+        binary_dense_rows_override != 12u)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor requires 12 binary "
+            "dense rows\n");
+        return 1;
+    }
     if (gf256_heavy_rows_explicit &&
         (gf256_heavy_rows_override == 0u ||
          gf256_heavy_rows_override > 128u))
@@ -5096,7 +5108,8 @@ int CmdPrecodeFail(int argc, char** argv)
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+            "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
@@ -5106,6 +5119,7 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_peel_seed_xor,
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
+            binary_dense_two_anchor ? 1u : 0u,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5129,7 +5143,8 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_extension_residue_seed_xor=0x%x "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+            "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
@@ -5152,6 +5167,7 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_peel_seed_xor,
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
+            binary_dense_two_anchor ? 1u : 0u,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5278,6 +5294,7 @@ int CmdPrecodeFail(int argc, char** argv)
             if (binary_dense_rows_override != 0u) {
                 base_params.DenseRows = binary_dense_rows_override;
             }
+            base_params.DenseTwoAnchor = binary_dense_two_anchor;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }

@@ -21,9 +21,10 @@
       generated Shuffle-2 style: first row = the ceil(span/2) set-half of a
       shuffled deck, every subsequent row = previous row XOR two deck-driven
       flips (one set-half entry, one clear-half entry), with a reshuffle at
-      the halves boundary.  Consecutive rows differ in exactly two columns,
-      so encoder parity generation costs 2 block-XORs per row after the
-      first (the measured 54% precode-gen cut at K=3200 for n12+s2).
+      the halves boundary.  Consecutive rows differ in exactly two columns.
+      In the experiment-only two-anchor variant, row 7 is instead reset to
+      the balanced half of the second shuffled deck; rows 8..11 resume the
+      two-flip cadence.
     - H = 12 explicit Cauchy heavy rows.  Coefficients come from a Cauchy
       construction that is exactly MDS within any window of up to
       256 - H = 244 GE columns (W99 band requirement is >= 20); columns wrap
@@ -76,6 +77,21 @@ struct PrecodeParams
     */
     bool DenseIdentityCorner = false;
 
+    /**
+        Experiment-only D=12 Shuffle-2 variant with two balanced anchors.
+
+        The certified construction keeps one balanced row and derives all
+        eleven later rows through two-column flips.  This variant keeps rows
+        0..6 unchanged, resets row 7 to the balanced half of the already
+        scheduled second deck, and derives rows 8..11 through two-column
+        flips.  It therefore trades one sparse difference direction for a
+        second independently shuffled dense equation without adding a row.
+
+        Named/public profiles never select this flag.  It is deliberately
+        incompatible with DenseIdentityCorner and with DenseRows != 12.
+    */
+    bool DenseTwoAnchor = false;
+
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
 
@@ -115,7 +131,9 @@ struct PrecodeSystem
         identity-corner variant, the deck spans only K+S known columns and
         each row additionally owns dense column K+S+r; consecutive full rows
         differ in four columns, but their known-column part still changes by
-        exactly two deck flips.
+        exactly two deck flips.  In the two-anchor variant, row 7 is another
+        balanced row and only the row 6 -> 7 transition is exempt from the
+        two-column-difference rule.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified
@@ -134,8 +152,9 @@ struct PrecodeSystem
 
     Returns false for invalid parameters (BlockCount outside [2, 64000],
     Staircase == 0, SourceHits outside [1, 8], DenseRows > 64,
-    HeavyRows > 128, or a full symbol domain that does not fit uint16) or if
-    the generated structure fails ValidatePrecodeSystem().
+    HeavyRows > 128, an invalid dense experiment combination, or a full
+    symbol domain that does not fit uint16) or if the generated structure
+    fails ValidatePrecodeSystem().
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 

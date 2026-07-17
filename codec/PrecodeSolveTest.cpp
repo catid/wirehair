@@ -1489,7 +1489,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     wirehair_v2::MixedResidueSchedule residue_schedule =
         wirehair_v2::MixedResidueSchedule::Constant,
     bool independent_extension_residues = false,
-    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows)
+    uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
+    bool dense_two_anchor = false)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1546,6 +1547,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 K,
                 UINT64_C(0x70726f6a65637400) ^
                     ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)));
+        params.DenseTwoAnchor = dense_two_anchor;
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed =
             UINT32_C(0x6f72636c) ^ K * UINT32_C(0x9e3779b9);
@@ -1660,11 +1662,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     std::printf(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u "
+        "independent_extension=%u dense_two_anchor=%u "
         "comparisons=%llu: PASS\n",
         period, (uint32_t)geometry, subfield_rows, extension_rows,
         residue_skew, (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
+        dense_two_anchor ? 1u : 0u,
         (unsigned long long)comparisons);
     return true;
 }
@@ -1739,6 +1742,15 @@ bool CheckMixedProjectionResidueBucketsOracle()
             wirehair_v2::kMixedGF16RowsMax,
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed,
+            true) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16RowsMax,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            11u,
             true) ||
         !CheckMixedProjectionResidueBucketsOracleForPeriod(
             32u,
