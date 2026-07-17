@@ -143,6 +143,45 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
     word boundaries, including poisoned tail bits and inconsistent RHS rows.
 */
 bool CheckPackedBinaryResidualOracleForTesting();
+
+enum class MixedNullWitnessStatus : uint32_t
+{
+    None = 0,
+    Captured = 1,
+    AlgebraMismatch = 2,
+    AllocationFailure = 3,
+    InternalError = 4
+};
+
+/**
+    Exact test-only description of ker(A) intersect ker(C) for a singular
+    mixed quotient.  CanonicalBasis is row-major over all original solver
+    columns, with KernelDimension rows and ColumnCount columns.
+*/
+struct MixedNullWitnessDiagnostic
+{
+    MixedNullWitnessStatus Status = MixedNullWitnessStatus::None;
+    uint32_t ColumnCount = 0u;
+    uint32_t InactiveCount = 0u;
+    uint32_t BinaryRank = 0u;
+    uint32_t QuotientColumns = 0u;
+    uint32_t QuotientRank = 0u;
+    uint32_t KernelDimension = 0u;
+    bool QuotientVerified = false;
+    bool BinaryVerified = false;
+    bool CompletionVerified = false;
+    bool CanonicalVerified = false;
+    uint64_t BasisHashLow = 0u;
+    uint64_t BasisHashHigh = 0u;
+    std::vector<uint16_t> CanonicalBasis;
+};
+
+/** Install a non-owning capture sink for mixed solves on the calling thread. */
+void SetMixedNullWitnessDiagnosticForTesting(
+    MixedNullWitnessDiagnostic* diagnostic);
+
+/** Pure GF(2^16) nullspace/canonicalization invariance oracle. */
+bool CheckMixedNullWitnessCanonicalizationForTesting();
 #endif
 
 /**

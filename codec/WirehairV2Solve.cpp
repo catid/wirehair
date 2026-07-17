@@ -27,6 +27,7 @@ namespace {
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -151,6 +152,23 @@ private:
     std::vector<const uint8_t*> RowData;
     size_t NextRow = 0u;
 };
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void CaptureMixedNullWitness(
+    const PrecodeSystem& system,
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t projection_words,
+    const BinaryEquationArena& rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint32_t>& inactive_columns,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& binary_pivot_coeff,
+    const std::vector<uint8_t>& binary_have_pivot,
+    uint32_t binary_rank,
+    uint32_t expected_quotient_rank,
+    MixedNullWitnessDiagnostic* sink) noexcept;
+#endif
 
 inline uint32_t PacketRowSeedForBlockId(uint32_t block_id)
 {
@@ -2517,6 +2535,15 @@ void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor)
     OddPacketPeelSeedXor = seed_xor;
 }
 
+void SetMixedNullWitnessDiagnosticForTesting(
+    MixedNullWitnessDiagnostic* diagnostic)
+{
+    if (diagnostic) {
+        *diagnostic = MixedNullWitnessDiagnostic{};
+    }
+    MixedNullWitnessSink = diagnostic;
+}
+
 void SetMixedProjectionOracleForTesting(bool enabled)
 {
     if (enabled) {
@@ -3659,6 +3686,23 @@ static WirehairResult SolvePrecodeSystemImpl(
             st.ResidualNanoseconds = (uint64_t)
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     phase_end - phase_start).count();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (mixed_result == Wirehair_NeedMore &&
+                MixedNullWitnessSink && R >= rank)
+            {
+                const uint32_t quotient_columns = R - rank;
+                if (quotient_columns != 0u && quotient_columns <= 15u &&
+                    quotient_columns <= system.Params.HeavyRows &&
+                    st.ResidualRank >= rank && st.ResidualRank < R)
+                {
+                    CaptureMixedNullWitness(
+                        system, L, R, words, rows, inactive_index,
+                        peel.InactiveOrder, projection,
+                        binary_pivot_coeff, have_pivot, rank,
+                        st.ResidualRank - rank, MixedNullWitnessSink);
+                }
+            }
+#endif
             if (mixed_result != Wirehair_Success)
             {
                 if (stats) *stats = st;
@@ -4483,6 +4527,671 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
 
 #undef WH2_RESIDUAL_COLD_NOINLINE
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+
+#if defined(_MSC_VER)
+#define WH2_WITNESS_NOINLINE __declspec(noinline)
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__)) && \
+    !defined(WIREHAIR_V2_DISABLE_PACKED_RESIDUAL_TEXT_SECTION)
+#define WH2_WITNESS_NOINLINE \
+    __attribute__((noinline, section(".text.wh2_test_oracle")))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WH2_WITNESS_NOINLINE __attribute__((noinline))
+#else
+#define WH2_WITNESS_NOINLINE
+#endif
+
+struct CanonicalMixedKernel
+{
+    uint32_t QuotientRank = 0u;
+    uint32_t KernelDimension = 0u;
+    uint64_t HashLow = 0u;
+    uint64_t HashHigh = 0u;
+    std::vector<uint16_t> Basis;
+};
+
+WH2_WITNESS_NOINLINE bool CheckedMatrixElements(
+    uint32_t rows,
+    uint32_t columns,
+    size_t& elements)
+{
+    if (rows != 0u && columns >
+            std::numeric_limits<size_t>::max() / rows)
+    {
+        return false;
+    }
+    elements = (size_t)rows * columns;
+    return true;
+}
+
+WH2_WITNESS_NOINLINE bool RrefGF16(
+    std::vector<uint16_t>& matrix,
+    uint32_t rows,
+    uint32_t columns,
+    std::vector<uint32_t>& pivot_columns)
+{
+    size_t elements = 0u;
+    if (!CheckedMatrixElements(rows, columns, elements) ||
+        matrix.size() != elements)
+    {
+        return false;
+    }
+    pivot_columns.clear();
+    pivot_columns.reserve(std::min(rows, columns));
+    uint32_t rank = 0u;
+    for (uint32_t column = 0u;
+         column < columns && rank < rows;
+         ++column)
+    {
+        uint32_t selected = rank;
+        while (selected < rows &&
+               matrix[(size_t)selected * columns + column] == 0u)
+        {
+            ++selected;
+        }
+        if (selected == rows) continue;
+        if (selected != rank)
+        {
+            for (uint32_t c = 0u; c < columns; ++c) {
+                std::swap(
+                    matrix[(size_t)selected * columns + c],
+                    matrix[(size_t)rank * columns + c]);
+            }
+        }
+        uint16_t* pivot = matrix.data() + (size_t)rank * columns;
+        const uint16_t inverse = GF16InverseInitialized(pivot[column]);
+        if (inverse == 0u) return false;
+        if (pivot[column] != 1u)
+        {
+            for (uint32_t c = column; c < columns; ++c) {
+                pivot[c] = GF16MultiplyInitialized(pivot[c], inverse);
+            }
+        }
+        for (uint32_t row = 0u; row < rows; ++row)
+        {
+            if (row == rank) continue;
+            uint16_t* destination =
+                matrix.data() + (size_t)row * columns;
+            const uint16_t scale = destination[column];
+            if (scale == 0u) continue;
+            for (uint32_t c = column; c < columns; ++c) {
+                destination[c] ^=
+                    GF16MultiplyInitialized(scale, pivot[c]);
+            }
+        }
+        pivot_columns.push_back(column);
+        ++rank;
+    }
+    return true;
+}
+
+WH2_WITNESS_NOINLINE void HashMixedKernelByte(
+    uint8_t value,
+    uint64_t& low,
+    uint64_t& high)
+{
+    low ^= value;
+    low *= UINT64_C(0x100000001b3);
+    high ^= (uint8_t)(value ^ UINT8_C(0xa5));
+    high *= UINT64_C(0x100000001b3);
+    high ^= high >> 29;
+}
+
+WH2_WITNESS_NOINLINE void HashMixedKernelU32(
+    uint32_t value,
+    uint64_t& low,
+    uint64_t& high)
+{
+    for (uint32_t byte = 0u; byte < 4u; ++byte) {
+        HashMixedKernelByte(
+            (uint8_t)(value >> (8u * byte)), low, high);
+    }
+}
+
+WH2_WITNESS_NOINLINE void HashCanonicalMixedKernel(
+    uint32_t column_count,
+    uint32_t quotient_columns,
+    uint32_t quotient_rank,
+    uint32_t kernel_dimension,
+    const std::vector<uint16_t>& basis,
+    uint64_t& low,
+    uint64_t& high)
+{
+    low = UINT64_C(0xcbf29ce484222325);
+    high = UINT64_C(0x84222325cbf29ce4);
+    static const char domain[] = "wh2-mixed-null-v1";
+    for (size_t i = 0u; i + 1u < sizeof(domain); ++i) {
+        HashMixedKernelByte((uint8_t)domain[i], low, high);
+    }
+    HashMixedKernelU32(column_count, low, high);
+    HashMixedKernelU32(quotient_columns, low, high);
+    HashMixedKernelU32(quotient_rank, low, high);
+    HashMixedKernelU32(kernel_dimension, low, high);
+    for (uint16_t coefficient : basis)
+    {
+        HashMixedKernelByte((uint8_t)coefficient, low, high);
+        HashMixedKernelByte((uint8_t)(coefficient >> 8), low, high);
+    }
+}
+
+WH2_WITNESS_NOINLINE bool BuildCanonicalMixedKernel(
+    const std::vector<uint16_t>& quotient,
+    uint32_t quotient_rows,
+    uint32_t quotient_columns,
+    const std::vector<uint16_t>& full_binary_basis,
+    uint32_t column_count,
+    CanonicalMixedKernel& output)
+{
+    size_t quotient_elements = 0u;
+    size_t basis_elements = 0u;
+    if (!CheckedMatrixElements(
+            quotient_rows, quotient_columns, quotient_elements) ||
+        !CheckedMatrixElements(
+            quotient_columns, column_count, basis_elements) ||
+        quotient.size() != quotient_elements ||
+        full_binary_basis.size() != basis_elements)
+    {
+        return false;
+    }
+
+    std::vector<uint16_t> reduced = quotient;
+    std::vector<uint32_t> quotient_pivots;
+    if (!RrefGF16(
+            reduced, quotient_rows, quotient_columns, quotient_pivots))
+    {
+        return false;
+    }
+    const uint32_t quotient_rank = (uint32_t)quotient_pivots.size();
+    const uint32_t kernel_dimension = quotient_columns - quotient_rank;
+    size_t null_elements = 0u;
+    size_t mapped_elements = 0u;
+    if (!CheckedMatrixElements(
+            kernel_dimension, quotient_columns, null_elements) ||
+        !CheckedMatrixElements(
+            kernel_dimension, column_count, mapped_elements))
+    {
+        return false;
+    }
+    std::vector<uint16_t> nullspace(null_elements, 0u);
+    std::vector<uint8_t> is_pivot(quotient_columns, uint8_t{0});
+    for (uint32_t pivot : quotient_pivots) is_pivot[pivot] = 1u;
+    uint32_t null_row = 0u;
+    for (uint32_t free_column = 0u;
+         free_column < quotient_columns;
+         ++free_column)
+    {
+        if (is_pivot[free_column]) continue;
+        uint16_t* vector =
+            nullspace.data() + (size_t)null_row * quotient_columns;
+        vector[free_column] = 1u;
+        for (uint32_t row = 0u; row < quotient_rank; ++row) {
+            vector[quotient_pivots[row]] =
+                reduced[(size_t)row * quotient_columns + free_column];
+        }
+        ++null_row;
+    }
+    if (null_row != kernel_dimension) return false;
+
+    for (uint32_t row = 0u; row < quotient_rows; ++row)
+    {
+        for (uint32_t vector_index = 0u;
+             vector_index < kernel_dimension;
+             ++vector_index)
+        {
+            uint16_t sum = 0u;
+            const uint16_t* vector = nullspace.data() +
+                (size_t)vector_index * quotient_columns;
+            for (uint32_t column = 0u;
+                 column < quotient_columns;
+                 ++column)
+            {
+                sum ^= GF16MultiplyInitialized(
+                    quotient[(size_t)row * quotient_columns + column],
+                    vector[column]);
+            }
+            if (sum != 0u) return false;
+        }
+    }
+
+    std::vector<uint16_t> mapped(mapped_elements, 0u);
+    for (uint32_t vector_index = 0u;
+         vector_index < kernel_dimension;
+         ++vector_index)
+    {
+        uint16_t* destination =
+            mapped.data() + (size_t)vector_index * column_count;
+        const uint16_t* vector = nullspace.data() +
+            (size_t)vector_index * quotient_columns;
+        for (uint32_t basis_index = 0u;
+             basis_index < quotient_columns;
+             ++basis_index)
+        {
+            const uint16_t scale = vector[basis_index];
+            if (scale == 0u) continue;
+            const uint16_t* source = full_binary_basis.data() +
+                (size_t)basis_index * column_count;
+            for (uint32_t column = 0u; column < column_count; ++column)
+            {
+                if (source[column] != 0u) {
+                    destination[column] ^= GF16MultiplyInitialized(
+                        scale, source[column]);
+                }
+            }
+        }
+    }
+    std::vector<uint32_t> canonical_pivots;
+    if (!RrefGF16(
+            mapped, kernel_dimension, column_count, canonical_pivots) ||
+        canonical_pivots.size() != kernel_dimension)
+    {
+        return false;
+    }
+
+    CanonicalMixedKernel result;
+    result.QuotientRank = quotient_rank;
+    result.KernelDimension = kernel_dimension;
+    result.Basis.swap(mapped);
+    HashCanonicalMixedKernel(
+        column_count, quotient_columns, quotient_rank, kernel_dimension,
+        result.Basis, result.HashLow, result.HashHigh);
+    output = std::move(result);
+    return true;
+}
+
+WH2_WITNESS_NOINLINE uint32_t Parity64(uint64_t value)
+{
+    value ^= value >> 32;
+    value ^= value >> 16;
+    value ^= value >> 8;
+    value ^= value >> 4;
+    return (UINT16_C(0x6996) >> (value & 15u)) & 1u;
+}
+
+WH2_WITNESS_NOINLINE bool VerifyBinaryNullVectors(
+    const BinaryEquationArena& rows,
+    uint32_t column_count,
+    const std::vector<uint16_t>& vectors,
+    uint32_t vector_count)
+{
+    size_t elements = 0u;
+    if (!CheckedMatrixElements(
+            vector_count, column_count, elements) ||
+        vectors.size() != elements)
+    {
+        return false;
+    }
+    for (uint32_t vector_index = 0u;
+         vector_index < vector_count;
+         ++vector_index)
+    {
+        const uint16_t* vector =
+            vectors.data() + (size_t)vector_index * column_count;
+        for (uint32_t row = 0u; row < (uint32_t)rows.size(); ++row)
+        {
+            uint16_t sum = 0u;
+            for (uint32_t column : rows[row].Columns)
+            {
+                if (column >= column_count) return false;
+                sum ^= vector[column];
+            }
+            if (sum != 0u) return false;
+        }
+    }
+    return true;
+}
+
+WH2_WITNESS_NOINLINE uint16_t DirectMixedCoefficient(
+    const MixedCoefficientRows& coefficients,
+    uint32_t subfield_rows,
+    uint32_t heavy_row,
+    uint32_t column)
+{
+    if (heavy_row < subfield_rows) {
+        return coefficients.Subfield[heavy_row][
+            ActiveMixedCoefficientResidue(column)];
+    }
+    return coefficients.Extension[heavy_row - subfield_rows][
+        ActiveMixedExtensionCoefficientResidue(column)];
+}
+
+WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
+    const PrecodeSystem& system,
+    uint32_t column_count,
+    const std::vector<uint16_t>& vectors,
+    uint32_t vector_count,
+    std::vector<uint16_t>* syndromes)
+{
+    const uint32_t subfield_rows = ActiveMixedGF256Rows();
+    const uint32_t extension_rows = ActiveMixedGF16Rows();
+    const uint32_t heavy_rows = subfield_rows + extension_rows;
+    const MixedCoefficientRows* coefficients = GetMixedCoefficientRows();
+    size_t vector_elements = 0u;
+    size_t syndrome_elements = 0u;
+    if (system.Params.Field != CompletionField::MixedGF256GF16 ||
+        system.Params.HeavyRows != heavy_rows || !coefficients ||
+        !CheckedMatrixElements(
+            vector_count, column_count, vector_elements) ||
+        vectors.size() != vector_elements ||
+        !CheckedMatrixElements(
+            heavy_rows, vector_count, syndrome_elements))
+    {
+        return false;
+    }
+    if (syndromes) syndromes->assign(syndrome_elements, 0u);
+    for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy)
+    {
+        for (uint32_t vector_index = 0u;
+             vector_index < vector_count;
+             ++vector_index)
+        {
+            const uint16_t* vector = vectors.data() +
+                (size_t)vector_index * column_count;
+            uint16_t sum = 0u;
+            for (uint32_t column = 0u;
+                 column < column_count;
+                 ++column)
+            {
+                const uint16_t value = vector[column];
+                if (value == 0u) continue;
+                sum ^= GF16MultiplyInitialized(
+                    DirectMixedCoefficient(
+                        *coefficients, subfield_rows, heavy, column),
+                    value);
+            }
+            if (syndromes) {
+                (*syndromes)[(size_t)heavy * vector_count + vector_index] =
+                    sum;
+            }
+            else if (sum != 0u) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+WH2_WITNESS_NOINLINE bool VerifyCompletionNullVectors(
+    const PrecodeSystem& system,
+    uint32_t column_count,
+    const std::vector<uint16_t>& vectors,
+    uint32_t vector_count)
+{
+    return EvaluateDirectMixedSyndromes(
+        system, column_count, vectors, vector_count, nullptr);
+}
+
+WH2_WITNESS_NOINLINE bool BuildDirectMixedQuotient(
+    const PrecodeSystem& system,
+    uint32_t column_count,
+    const std::vector<uint16_t>& full_binary_basis,
+    uint32_t quotient_columns,
+    std::vector<uint16_t>& quotient)
+{
+    return EvaluateDirectMixedSyndromes(
+        system, column_count, full_binary_basis, quotient_columns,
+        &quotient);
+}
+
+WH2_WITNESS_NOINLINE bool BuildFullBinaryNullspaceBasis(
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t projection_words,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint32_t>& inactive_columns,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& binary_pivot_coeff,
+    const std::vector<uint8_t>& binary_have_pivot,
+    uint32_t binary_rank,
+    std::vector<uint16_t>& full_basis)
+{
+    if (inactive_count == 0u || binary_rank > inactive_count ||
+        projection_words != PackedWordCount(inactive_count) ||
+        inactive_index.size() != column_count ||
+        inactive_columns.size() != inactive_count ||
+        binary_have_pivot.size() != inactive_count)
+    {
+        return false;
+    }
+    size_t projection_elements = 0u;
+    size_t pivot_elements = 0u;
+    if (!CheckedMatrixElements(
+            column_count, projection_words, projection_elements) ||
+        !CheckedMatrixElements(
+            inactive_count, projection_words, pivot_elements) ||
+        projection.size() != projection_elements ||
+        binary_pivot_coeff.size() != pivot_elements)
+    {
+        return false;
+    }
+    const uint32_t quotient_columns = inactive_count - binary_rank;
+    if (quotient_columns == 0u || quotient_columns > 15u) return false;
+    std::vector<uint32_t> free_columns;
+    free_columns.reserve(quotient_columns);
+    uint32_t counted_rank = 0u;
+    for (uint32_t column = 0u; column < inactive_count; ++column)
+    {
+        if (binary_have_pivot[column]) ++counted_rank;
+        else free_columns.push_back(column);
+        const uint32_t absolute = inactive_columns[column];
+        if (absolute >= column_count || inactive_index[absolute] != column) {
+            return false;
+        }
+    }
+    if (counted_rank != binary_rank ||
+        free_columns.size() != quotient_columns)
+    {
+        return false;
+    }
+    const uint64_t tail_mask = (inactive_count & 63u) == 0u ?
+        UINT64_MAX :
+        (UINT64_C(1) << (inactive_count & 63u)) - UINT64_C(1);
+    for (uint32_t column = 0u; column < column_count; ++column) {
+        if ((projection[(size_t)column * projection_words +
+                        projection_words - 1u] & ~tail_mask) != 0u)
+        {
+            return false;
+        }
+    }
+    for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+    {
+        if (!binary_have_pivot[pivot]) continue;
+        const uint64_t* relation = binary_pivot_coeff.data() +
+            (size_t)pivot * projection_words;
+        if ((relation[projection_words - 1u] & ~tail_mask) != 0u ||
+            (relation[pivot >> 6] &
+                (UINT64_C(1) << (pivot & 63u))) == 0u)
+        {
+            return false;
+        }
+        for (uint32_t other = 0u; other < inactive_count; ++other)
+        {
+            if (other != pivot && binary_have_pivot[other] &&
+                (relation[other >> 6] &
+                    (UINT64_C(1) << (other & 63u))) != 0u)
+            {
+                return false;
+            }
+        }
+    }
+
+    size_t inactive_basis_elements = 0u;
+    size_t full_basis_elements = 0u;
+    if (!CheckedMatrixElements(
+            quotient_columns, projection_words,
+            inactive_basis_elements) ||
+        !CheckedMatrixElements(
+            quotient_columns, column_count, full_basis_elements))
+    {
+        return false;
+    }
+    std::vector<uint64_t> inactive_basis(
+        inactive_basis_elements, uint64_t{0});
+    full_basis.assign(full_basis_elements, 0u);
+    for (uint32_t basis_index = 0u;
+         basis_index < quotient_columns;
+         ++basis_index)
+    {
+        const uint32_t free_column = free_columns[basis_index];
+        uint64_t* inactive_vector = inactive_basis.data() +
+            (size_t)basis_index * projection_words;
+        inactive_vector[free_column >> 6] |=
+            UINT64_C(1) << (free_column & 63u);
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            if (!binary_have_pivot[pivot]) continue;
+            const uint64_t* relation = binary_pivot_coeff.data() +
+                (size_t)pivot * projection_words;
+            if ((relation[free_column >> 6] &
+                    (UINT64_C(1) << (free_column & 63u))) != 0u)
+            {
+                inactive_vector[pivot >> 6] |=
+                    UINT64_C(1) << (pivot & 63u);
+            }
+        }
+        uint16_t* full_vector = full_basis.data() +
+            (size_t)basis_index * column_count;
+        for (uint32_t inactive = 0u;
+             inactive < inactive_count;
+             ++inactive)
+        {
+            if ((inactive_vector[inactive >> 6] &
+                    (UINT64_C(1) << (inactive & 63u))) != 0u)
+            {
+                full_vector[inactive_columns[inactive]] = 1u;
+            }
+        }
+        for (uint32_t column = 0u; column < column_count; ++column)
+        {
+            if (inactive_index[column] != UINT32_MAX) continue;
+            uint32_t parity = 0u;
+            const uint64_t* projected = projection.data() +
+                (size_t)column * projection_words;
+            for (uint32_t word = 0u; word < projection_words; ++word) {
+                parity ^= Parity64(projected[word] & inactive_vector[word]);
+            }
+            full_vector[column] = (uint16_t)(parity & 1u);
+        }
+    }
+    return true;
+}
+
+WH2_WITNESS_NOINLINE void CaptureMixedNullWitness(
+    const PrecodeSystem& system,
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t projection_words,
+    const BinaryEquationArena& rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint32_t>& inactive_columns,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& binary_pivot_coeff,
+    const std::vector<uint8_t>& binary_have_pivot,
+    uint32_t binary_rank,
+    uint32_t expected_quotient_rank,
+    MixedNullWitnessDiagnostic* sink) noexcept
+{
+    if (!sink) return;
+    MixedNullWitnessDiagnostic diagnostic;
+    diagnostic.ColumnCount = column_count;
+    diagnostic.InactiveCount = inactive_count;
+    diagnostic.BinaryRank = binary_rank;
+    diagnostic.QuotientColumns = inactive_count >= binary_rank ?
+        inactive_count - binary_rank : 0u;
+    try
+    {
+        std::vector<uint16_t> full_binary_basis;
+        if (!BuildFullBinaryNullspaceBasis(
+                column_count, inactive_count, projection_words,
+                inactive_index, inactive_columns, projection,
+                binary_pivot_coeff, binary_have_pivot, binary_rank,
+                full_binary_basis) ||
+            !VerifyBinaryNullVectors(
+                rows, column_count, full_binary_basis,
+                diagnostic.QuotientColumns))
+        {
+            diagnostic.Status =
+                MixedNullWitnessStatus::AlgebraMismatch;
+            *sink = std::move(diagnostic);
+            return;
+        }
+        std::vector<uint16_t> quotient;
+        if (!BuildDirectMixedQuotient(
+                system, column_count, full_binary_basis,
+                diagnostic.QuotientColumns, quotient))
+        {
+            diagnostic.Status =
+                MixedNullWitnessStatus::AlgebraMismatch;
+            *sink = std::move(diagnostic);
+            return;
+        }
+        CanonicalMixedKernel canonical;
+        if (!BuildCanonicalMixedKernel(
+                quotient, system.Params.HeavyRows,
+                diagnostic.QuotientColumns, full_binary_basis,
+                column_count, canonical))
+        {
+            diagnostic.Status =
+                MixedNullWitnessStatus::AlgebraMismatch;
+            *sink = std::move(diagnostic);
+            return;
+        }
+        diagnostic.QuotientRank = canonical.QuotientRank;
+        diagnostic.KernelDimension = canonical.KernelDimension;
+        diagnostic.BasisHashLow = canonical.HashLow;
+        diagnostic.BasisHashHigh = canonical.HashHigh;
+        diagnostic.CanonicalBasis = std::move(canonical.Basis);
+        diagnostic.QuotientVerified =
+            diagnostic.QuotientRank == expected_quotient_rank &&
+            diagnostic.KernelDimension ==
+                diagnostic.QuotientColumns - diagnostic.QuotientRank &&
+            diagnostic.KernelDimension != 0u;
+        diagnostic.BinaryVerified = VerifyBinaryNullVectors(
+            rows, column_count, diagnostic.CanonicalBasis,
+            diagnostic.KernelDimension);
+        diagnostic.CompletionVerified = VerifyCompletionNullVectors(
+            system, column_count, diagnostic.CanonicalBasis,
+            diagnostic.KernelDimension);
+
+        std::vector<uint16_t> canonical_copy = diagnostic.CanonicalBasis;
+        std::vector<uint32_t> canonical_pivots;
+        uint64_t hash_low = 0u;
+        uint64_t hash_high = 0u;
+        diagnostic.CanonicalVerified =
+            RrefGF16(
+                canonical_copy, diagnostic.KernelDimension,
+                column_count, canonical_pivots) &&
+            canonical_pivots.size() == diagnostic.KernelDimension &&
+            canonical_copy == diagnostic.CanonicalBasis;
+        HashCanonicalMixedKernel(
+            column_count, diagnostic.QuotientColumns,
+            diagnostic.QuotientRank, diagnostic.KernelDimension,
+            diagnostic.CanonicalBasis, hash_low, hash_high);
+        diagnostic.CanonicalVerified =
+            diagnostic.CanonicalVerified &&
+            hash_low == diagnostic.BasisHashLow &&
+            hash_high == diagnostic.BasisHashHigh;
+        diagnostic.Status =
+            diagnostic.QuotientVerified && diagnostic.BinaryVerified &&
+                diagnostic.CompletionVerified &&
+                diagnostic.CanonicalVerified ?
+            MixedNullWitnessStatus::Captured :
+            MixedNullWitnessStatus::AlgebraMismatch;
+    }
+    catch (const std::bad_alloc&) {
+        diagnostic.Status = MixedNullWitnessStatus::AllocationFailure;
+        diagnostic.CanonicalBasis.clear();
+    }
+    catch (...) {
+        diagnostic.Status = MixedNullWitnessStatus::InternalError;
+        diagnostic.CanonicalBasis.clear();
+    }
+    *sink = std::move(diagnostic);
+}
+
+#undef WH2_WITNESS_NOINLINE
+
+#endif
+
 } // namespace
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -4508,6 +5217,119 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
 #if defined(_MSC_VER)
 #define WH2_TEST_LAMBDA_NOINLINE
 #endif
+
+WH2_TEST_NOINLINE bool CheckMixedNullWitnessCanonicalizationForTesting()
+{
+    if (!InitializeGF16()) return false;
+    try
+    {
+        const uint32_t q = 3u;
+        const uint32_t L = 5u;
+        const uint16_t a = UINT16_C(0x0102);
+        const uint16_t b = UINT16_C(0x3456);
+        const std::vector<uint16_t> binary_basis = {
+            1u, 0u, 1u, 0u, 0u,
+            0u, 1u, 1u, 0u, 1u,
+            0u, 0u, 0u, 1u, 1u
+        };
+        const std::vector<uint16_t> quotient = {
+            1u, 0u, a,
+            0u, 1u, b
+        };
+        CanonicalMixedKernel reference;
+        if (!BuildCanonicalMixedKernel(
+                quotient, 2u, q, binary_basis, L, reference) ||
+            reference.QuotientRank != 2u ||
+            reference.KernelDimension != 1u ||
+            reference.Basis.size() != L ||
+            reference.Basis[0] != 1u)
+        {
+            return false;
+        }
+        const uint16_t inverse_a = GF16InverseInitialized(a);
+        const uint16_t expected[] = {
+            1u,
+            GF16MultiplyInitialized(b, inverse_a),
+            GF16MultiplyInitialized((uint16_t)(a ^ b), inverse_a),
+            inverse_a,
+            GF16MultiplyInitialized((uint16_t)(b ^ 1u), inverse_a)
+        };
+        if (!std::equal(
+                reference.Basis.begin(), reference.Basis.end(), expected))
+        {
+            return false;
+        }
+
+        // B' = B*T and Q' = Q*T for one fixed invertible binary T.
+        std::vector<uint16_t> transformed_basis((size_t)q * L, 0u);
+        std::vector<uint16_t> transformed_quotient(2u * q, 0u);
+        const uint32_t combinations[q][2] = {
+            {0u, UINT32_MAX}, {0u, 1u}, {1u, 2u}
+        };
+        for (uint32_t column = 0u; column < q; ++column)
+        {
+            for (uint32_t term_index = 0u; term_index < 2u; ++term_index)
+            {
+                const uint32_t term = combinations[column][term_index];
+                if (term == UINT32_MAX) continue;
+                for (uint32_t c = 0u; c < L; ++c) {
+                    transformed_basis[(size_t)column * L + c] ^=
+                        binary_basis[(size_t)term * L + c];
+                }
+                for (uint32_t row = 0u; row < 2u; ++row) {
+                    transformed_quotient[(size_t)row * q + column] ^=
+                        quotient[(size_t)row * q + term];
+                }
+            }
+        }
+        std::swap_ranges(
+            transformed_quotient.begin(),
+            transformed_quotient.begin() + q,
+            transformed_quotient.begin() + q);
+        CanonicalMixedKernel transformed;
+        if (!BuildCanonicalMixedKernel(
+                transformed_quotient, 2u, q, transformed_basis, L,
+                transformed) ||
+            transformed.Basis != reference.Basis ||
+            transformed.HashLow != reference.HashLow ||
+            transformed.HashHigh != reference.HashHigh)
+        {
+            return false;
+        }
+
+        CanonicalMixedKernel dimension_two;
+        const std::vector<uint16_t> one_row = {1u, a, b};
+        if (!BuildCanonicalMixedKernel(
+                one_row, 1u, q, binary_basis, L, dimension_two) ||
+            dimension_two.QuotientRank != 1u ||
+            dimension_two.KernelDimension != 2u ||
+            dimension_two.Basis.size() != 2u * L)
+        {
+            return false;
+        }
+        CanonicalMixedKernel full_rank;
+        const std::vector<uint16_t> identity = {
+            1u, 0u, 0u,
+            0u, 1u, 0u,
+            0u, 0u, 1u
+        };
+        if (!BuildCanonicalMixedKernel(
+                identity, q, q, binary_basis, L, full_rank) ||
+            full_rank.QuotientRank != q ||
+            full_rank.KernelDimension != 0u ||
+            !full_rank.Basis.empty())
+        {
+            return false;
+        }
+        std::vector<uint16_t> malformed_basis = binary_basis;
+        malformed_basis.pop_back();
+        return !BuildCanonicalMixedKernel(
+            quotient, 2u, q, malformed_basis, L, full_rank);
+    }
+    catch (...) {
+        return false;
+    }
+}
 
 WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
 {
