@@ -1198,6 +1198,111 @@ expect_failure("bad --seed value" preferredtiming
     --route-context-sha256 "${route_context_sha256}"
     --loss 0.5 --seed 0x1234 --schedule burst)
 
+# Grouped timing uses one immutable, full-payload packet trace and reapplies
+# every TLS experiment setting outside each timed solve.  The cold fixture
+# compares the campaign's raw P48/r0 reference with its P48/r3 finalist in
+# four exact ABBABAAB cycles.  Outcomes may differ under the hard trace, but
+# every physical observation must reproduce its arm's preflight result so the
+# common-success classification remains trustworthy.
+run_bench(grouped_timing_result grouped_timing grouped_timing_err
+    groupedtiming --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule adversarial)
+string(REGEX MATCHALL
+    "\n4096,64,4,adversarial,4660,0.5,cold," grouped_timing_rows
+    "${grouped_timing}")
+list(LENGTH grouped_timing_rows grouped_timing_row_count)
+string(REGEX MATCHALL
+    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],(control|candidate),(48),(0|3),(auto|separate),[0-9]+,0x[0-9a-f]+,0x[0-9a-f]+,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
+    grouped_timing_valid_rows "${grouped_timing}")
+list(LENGTH grouped_timing_valid_rows grouped_timing_valid_row_count)
+if(NOT grouped_timing_result EQUAL 0 OR grouped_timing_err OR
+   NOT grouped_timing_row_count EQUAL 32 OR
+   NOT grouped_timing_valid_row_count EQUAL 32 OR
+   NOT grouped_timing MATCHES
+       "schema=v1.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_grouped_rows=0 control_buckets=auto control_grouped_hash_seed=0x0 control_final_h_a_columns=0.*candidate_period=48 candidate_grouped_rows=3 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15162 candidate_final_h_a_columns=12.*dense_two_anchor=1 control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer allocator_tls_state=preflight-warmed" OR
+   NOT grouped_timing MATCHES
+       "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes" OR
+   NOT grouped_timing MATCHES
+       ",control,48,0,auto,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,90775,1973," OR
+   NOT grouped_timing MATCHES
+       ",candidate,48,3,separate,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,94847,1974,")
+    message(FATAL_ERROR
+        "grouped cold timing fixture failed\n"
+        "${grouped_timing}\n${grouped_timing_err}")
+endif()
+foreach(cycle RANGE 0 3)
+    foreach(slot RANGE 0 7)
+        if(slot EQUAL 0 OR slot EQUAL 3 OR slot EQUAL 5 OR slot EQUAL 6)
+            set(grouped_timing_arm "control")
+        else()
+            set(grouped_timing_arm "candidate")
+        endif()
+        if(NOT grouped_timing MATCHES
+           "cold,${cycle},${slot},${grouped_timing_arm},")
+            message(FATAL_ERROR
+                "grouped timing order mismatch cycle=${cycle} slot=${slot}")
+        endif()
+    endforeach()
+endforeach()
+
+# Replacement cycles support independent warm panels and explicit dispatch
+# comparisons without splicing partial output from a full run.
+run_bench(grouped_warm_result grouped_warm grouped_warm_err groupedtiming
+    --N 3200 --bb 64 --overhead 0
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 32 --candidate-grouped-rows 7
+    --candidate-buckets joint-delta --evict-bytes 4096 --cache-state warm
+    --cycle-index 2 --loss 0.5 --seed 4660 --schedule repair-only)
+string(REGEX MATCHALL
+    "\n3200,64,0,repair-only,4660,0.5,warm,2," grouped_warm_rows
+    "${grouped_warm}")
+list(LENGTH grouped_warm_rows grouped_warm_row_count)
+if(NOT grouped_warm_result EQUAL 0 OR grouped_warm_err OR
+   NOT grouped_warm_row_count EQUAL 8 OR NOT grouped_warm MATCHES
+       "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_grouped_rows=0 control_buckets=auto.*candidate_period=32 candidate_grouped_rows=7 candidate_buckets=joint-delta.*dense_two_anchor=1" OR
+   NOT grouped_warm MATCHES
+       ",candidate,32,7,joint-delta,0,0x13a1a9dd5eb58b9d,0xf226e3bc,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,115,12,12,73665,1756,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3172,1984,64,32,6144,0,204800,204800,210304")
+    message(FATAL_ERROR
+        "grouped warm replacement fixture failed\n"
+        "${grouped_warm}\n${grouped_warm_err}")
+endif()
+
+expect_failure("requires --N" groupedtiming)
+expect_failure("argument domain mismatch" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 11 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("argument domain mismatch" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0
+    --control-buckets separate
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("argument domain mismatch" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 48 --candidate-grouped-rows 10
+    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("bad --seed value" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 0x1234 --schedule burst)
+expect_failure("cache-state must be cold or warm" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
+    --loss 0.5 --seed 4660 --schedule burst)
+
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64
     --preferred-map "3@64=none|4096@64=1"
