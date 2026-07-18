@@ -807,6 +807,16 @@ expect_failure("requires its normalized H15/mix2 geometry" precodefail
     --mixed-geometry shared-x --mixed-residue-schedule hashed
     --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
     --mixed-independent-extension-residues)
+expect_failure("requires its normalized H15/mix2 geometry" precodefail
+    --N 4 --bb-list 64 --seed-block-bytes 1280 --overhead 0
+    --trials 1 --threads 1 --loss 0.35 --completion mixed --mix-count 2
+    --packet-peel-seed-table normalized-h15-v4
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-residue-hash-seed 68 --mixed-residue-hash-keyed
+    --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 78
+    --degree-balanced-staircase)
 expect_failure("unknown --packet-peel-seed-table" precodefail
     --N 4 --bb-list 64 --overhead 0 --trials 1 --threads 1 --loss 0.35
     --packet-peel-seed-table unknown)
@@ -911,6 +921,9 @@ expect_success(
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor
     --binary-dense-two-anchor-phase 2)
+expect_success("degree_balanced_staircase=1" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --degree-balanced-staircase)
 expect_failure("--binary-dense-two-anchor-phase requires" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor-phase 1)

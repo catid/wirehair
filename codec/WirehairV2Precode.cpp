@@ -57,6 +57,25 @@ void UnbiasedShuffleDeck(
     }
 }
 
+// Uniform Fisher-Yates permutation for matching-only random choices.  The
+// certified dense-row construction above deliberately uses a Sattolo cycle;
+// a prefix of such a cycle is not a uniform subset (for example deck[0] can
+// never be zero), so it must not select the degree-remainder rows.
+void UnbiasedShufflePermutation(
+    wirehair::PCGRandom& prng,
+    uint16_t* deck,
+    uint32_t count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        deck[i] = (uint16_t)i;
+    }
+    for (uint32_t remaining = count; remaining > 1u; --remaining)
+    {
+        const uint32_t pick = UniformBelow(prng, remaining);
+        std::swap(deck[pick], deck[remaining - 1u]);
+    }
+}
+
 bool IsStrictlyIncreasingBelow(
     const std::vector<uint32_t>& row,
     uint64_t limit)
@@ -72,6 +91,86 @@ bool IsStrictlyIncreasingBelow(
         }
         previous = column;
         have_previous = true;
+    }
+    return true;
+}
+
+bool AppendDegreeBalancedStaircaseEdges(
+    const PrecodeParams& params,
+    std::vector<std::vector<uint32_t>>& rows)
+{
+    const uint32_t K = params.BlockCount;
+    const uint32_t S = params.Staircase;
+    const uint32_t hits = std::min(params.SourceHits, S);
+    const uint32_t edge_count = K * hits;
+    const uint32_t low_degree = edge_count / S;
+    const uint32_t extra_rows = edge_count % S;
+    const uint32_t high_degree = low_degree + (extra_rows != 0u);
+
+    // This stream is deliberately independent of the certified construction
+    // stream.  BuildPrecodeSystem still consumes the certified staircase draws
+    // before calling here, so dense rows remain bit-identical between arms.
+    wirehair::PCGRandom matching_prng;
+    matching_prng.Seed(
+        params.Seed ^ UINT64_C(0x8b8b8b8bd3c4a56f),
+        ((uint64_t)K << 32) ^ ((uint64_t)S << 16) ^
+            (uint64_t)params.SourceHits ^ UINT64_C(0x6465677265656d61));
+
+    // Randomly choose which rows receive the remainder socket, then match each
+    // source's sockets to distinct rows with the greatest residual capacity.
+    // Holding a source's selected rows out of the buckets until all its sockets
+    // are assigned prevents duplicate edges.  Highest-capacity selection keeps
+    // the residual sequence graphical through the final source.
+    std::vector<uint16_t> row_deck(S);
+    UnbiasedShufflePermutation(matching_prng, row_deck.data(), S);
+    std::vector<uint32_t> remaining(S, low_degree);
+    for (uint32_t i = 0; i < extra_rows; ++i) {
+        ++remaining[row_deck[i]];
+    }
+
+    std::vector<std::vector<uint16_t>> buckets(high_degree + 1u);
+    for (uint32_t row = 0; row < S; ++row) {
+        buckets[remaining[row]].push_back((uint16_t)row);
+    }
+
+    uint32_t active_degree = high_degree;
+    uint16_t selected_rows[8];
+    uint32_t selected_degrees[8];
+    for (uint32_t source = 0; source < K; ++source)
+    {
+        for (uint32_t hit = 0; hit < hits; ++hit)
+        {
+            while (active_degree > 0u && buckets[active_degree].empty()) {
+                --active_degree;
+            }
+            if (active_degree == 0u) {
+                return false;
+            }
+            std::vector<uint16_t>& bucket = buckets[active_degree];
+            const uint32_t pick = UniformBelow(
+                matching_prng, (uint32_t)bucket.size());
+            const uint16_t row = bucket[pick];
+            bucket[pick] = bucket.back();
+            bucket.pop_back();
+            selected_rows[hit] = row;
+            selected_degrees[hit] = active_degree;
+        }
+        for (uint32_t hit = 0; hit < hits; ++hit)
+        {
+            const uint32_t next_degree = selected_degrees[hit] - 1u;
+            buckets[next_degree].push_back(selected_rows[hit]);
+            active_degree = std::max(active_degree, next_degree);
+            rows[selected_rows[hit]].push_back(source);
+        }
+    }
+
+    if (buckets[0].size() != S) {
+        return false;
+    }
+    for (size_t degree = 1; degree < buckets.size(); ++degree) {
+        if (!buckets[degree].empty()) {
+            return false;
+        }
     }
     return true;
 }
@@ -161,6 +260,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.DenseRows = 12u;
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);
+    params.DegreeBalancedStaircase = false;
     params.DenseIdentityCorner = false;
     params.DenseTwoAnchor = false;
     params.DenseTwoAnchorPhase = 0u;
@@ -198,17 +298,19 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     prng.Seed(params.Seed, K);
 
     // --- Staircase rows ---
-    // Reserve for the expected load: K*N1/S source hits + parity + link
+    // Reserve for the expected load: K*min(N1,S)/S source hits plus parity
+    // and link columns.
     {
-        const uint32_t expected = (K * N1) / S + 3u;
+        const uint32_t hits = std::min(N1, S);
+        const uint32_t expected = (K * hits) / S + 3u;
         for (uint32_t j = 0; j < S; ++j) {
             out.StaircaseRows[j].reserve(expected);
         }
     }
 
-    // Each source column hits min(N1, S) distinct parities.  Distinctness
-    // by retry: the tiny-K dense-count table goes as low as S=2 (K=2), but
-    // hits <= S always leaves a free residue, so the loop terminates.
+    // Consume the certified independent-placement stream in both modes so the
+    // later dense construction remains bit-identical.  In the experimental
+    // balanced mode these placements are discarded and replaced below.
     {
         uint32_t picks[8];
         const uint32_t hits = N1 < S ? N1 : S;
@@ -229,9 +331,16 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     }
                 } while (collide);
                 picks[hit] = p;
-                out.StaircaseRows[p].push_back(c);
+                if (!params.DegreeBalancedStaircase) {
+                    out.StaircaseRows[p].push_back(c);
+                }
             }
         }
+    }
+    if (params.DegreeBalancedStaircase &&
+        !AppendDegreeBalancedStaircaseEdges(params, out.StaircaseRows))
+    {
+        return false;
     }
 
     // Own parity column and staircase link.  Source entries were appended
@@ -351,6 +460,10 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
 
     const uint32_t staircase_end = K + S;
     std::vector<uint8_t> source_hits(K, 0u);
+    uint32_t balanced_high_rows = 0u;
+    const uint32_t balanced_edges = K * std::min(params.SourceHits, S);
+    const uint32_t balanced_low = balanced_edges / S;
+    const uint32_t balanced_extra = balanced_edges % S;
     for (uint32_t row_index = 0; row_index < S; ++row_index)
     {
         const std::vector<uint32_t>& row = system.StaircaseRows[row_index];
@@ -361,6 +474,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         const uint32_t link = own - 1u;
         bool have_own = false;
         bool have_link = row_index == 0u;
+        uint32_t source_degree = 0u;
         for (uint32_t column : row)
         {
             if (column < K)
@@ -369,6 +483,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
                     return false;
                 }
                 ++source_hits[column];
+                ++source_degree;
             }
             else if (column == own) {
                 have_own = true;
@@ -383,6 +498,20 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         if (!have_own || !have_link) {
             return false;
         }
+        if (params.DegreeBalancedStaircase)
+        {
+            if (source_degree == balanced_low + 1u && balanced_extra != 0u) {
+                ++balanced_high_rows;
+            }
+            else if (source_degree != balanced_low) {
+                return false;
+            }
+        }
+    }
+    if (params.DegreeBalancedStaircase &&
+        balanced_high_rows != balanced_extra)
+    {
+        return false;
     }
     const uint8_t expected_hits = (uint8_t)std::min(params.SourceHits, S);
     for (uint8_t hits : source_hits) {

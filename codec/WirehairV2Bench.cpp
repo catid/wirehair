@@ -6916,6 +6916,8 @@ bool SameGroupedTimingBaseGraph(
         a_params.HeavyRows == b_params.HeavyRows &&
         a_params.SourceHits == b_params.SourceHits &&
         a_params.Field == b_params.Field &&
+        a_params.DegreeBalancedStaircase ==
+            b_params.DegreeBalancedStaircase &&
         a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
         a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
         a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
@@ -7546,6 +7548,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_null_witnesses = false;
     bool binary_dense_two_anchor = false;
     uint32_t binary_dense_two_anchor_phase = 0u;
+    bool degree_balanced_staircase = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
@@ -7714,6 +7717,9 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
             binary_dense_two_anchor = true;
+        }
+        else if (!std::strcmp(argv[i], "--degree-balanced-staircase")) {
+            degree_balanced_staircase = true;
         }
         else if (!std::strcmp(
                      argv[i], "--binary-dense-two-anchor-phase"))
@@ -8277,6 +8283,7 @@ int CmdPrecodeFail(int argc, char** argv)
          !mixed_independent_extension_residues ||
          mixed_extension_residue_seed_xor != 78u ||
          source_hits_override != 0u || binary_dense_rows_override != 0u ||
+         degree_balanced_staircase ||
          odd_packet_peel_seed_xor != 0u ||
          packet_row_seed_multiplier != 1u ||
          packet_row_seed_avalanche))
@@ -8300,7 +8307,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -8316,7 +8323,9 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
+            degree_balanced_staircase ?
+                " degree_balanced_staircase=1" : "");
     }
     else
     {
@@ -8341,7 +8350,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -8380,7 +8389,9 @@ int CmdPrecodeFail(int argc, char** argv)
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
-            mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
+            mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
+            degree_balanced_staircase ?
+                " degree_balanced_staircase=1" : "");
     }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
@@ -8508,6 +8519,8 @@ int CmdPrecodeFail(int argc, char** argv)
             base_params.DenseTwoAnchor = binary_dense_two_anchor;
             base_params.DenseTwoAnchorPhase =
                 binary_dense_two_anchor_phase;
+            base_params.DegreeBalancedStaircase =
+                degree_balanced_staircase;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }
