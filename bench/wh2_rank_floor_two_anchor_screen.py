@@ -834,7 +834,11 @@ def thermal_counter(text: str, context: str) -> int:
     return int(text, 10)
 
 
-def parse_thermal_sample(line: bytes, context: str) -> dict[str, Any]:
+def parse_thermal_sample(
+    line: bytes,
+    context: str,
+    allow_dimm_read_errors: bool = False,
+) -> dict[str, Any]:
     if not line.endswith(b"\n"):
         raise ValueError(f"{context} is not a complete CSV row")
     try:
@@ -853,16 +857,29 @@ def parse_thermal_sample(line: bytes, context: str) -> dict[str, Any]:
     cpu_busy_pct = thermal_scalar(row["cpu_busy_pct"], f"{context}:cpu_busy_pct")
     cpu_avg_mhz = thermal_scalar(row["cpu_avg_mhz"], f"{context}:cpu_avg_mhz")
     cpu_tctl_c = thermal_scalar(row["cpu_tctl_c"], f"{context}:cpu_tctl_c")
+    dimm_read_errors = thermal_counter(
+        row["dimm_read_errors"], f"{context}:dimm_read_errors"
+    )
+    missing_dimm_fields = tuple(
+        field for field in THERMAL_DIMM_FIELDS if row[field] == ""
+    )
+    if allow_dimm_read_errors:
+        if len(missing_dimm_fields) != dimm_read_errors:
+            raise ValueError(
+                f"{context} DIMM read-error count does not match missing "
+                "temperature fields"
+            )
+        if len(missing_dimm_fields) == len(THERMAL_DIMM_FIELDS):
+            raise ValueError(f"{context} has no readable DIMM temperatures")
+    elif missing_dimm_fields:
+        raise ValueError(f"{context} has a missing DIMM temperature")
     dimm_temperatures = tuple(
         thermal_scalar(row[field], f"{context}:{field}")
-        for field in THERMAL_DIMM_FIELDS
+        for field in THERMAL_DIMM_FIELDS if row[field] != ""
     )
     loads = tuple(
         thermal_scalar(row[field], f"{context}:{field}")
         for field in ("load1", "load5", "load15")
-    )
-    dimm_read_errors = thermal_counter(
-        row["dimm_read_errors"], f"{context}:dimm_read_errors"
     )
     edac_ce = thermal_counter(row["edac_ce"], f"{context}:edac_ce")
     edac_ue = thermal_counter(row["edac_ue"], f"{context}:edac_ue")
@@ -885,7 +902,7 @@ def parse_thermal_sample(line: bytes, context: str) -> dict[str, Any]:
         "loads": loads,
         "edac_ce": edac_ce,
         "edac_ue": edac_ue,
-        "max_temperature_c": max(cpu_tctl_c, *dimm_temperatures),
+        "max_temperature_c": max((cpu_tctl_c, *dimm_temperatures)),
     }
 
 
@@ -907,14 +924,23 @@ def validate_thermal_current(
         raise ValueError(f"{context} is stale or future-dated")
 
 
-def validate_thermal_health(sample: dict[str, Any], context: str) -> None:
-    if sample["dimm_read_errors"] != 0:
+def validate_thermal_health(
+    sample: dict[str, Any], context: str, require_zero_edac: bool = True,
+    require_zero_dimm_errors: bool = True,
+) -> None:
+    if require_zero_dimm_errors and sample["dimm_read_errors"] != 0:
         raise ValueError(f"{context} reports a DIMM read error")
-    if sample["edac_ce"] != 0 or sample["edac_ue"] != 0:
+    if (require_zero_edac and
+            (sample["edac_ce"] != 0 or sample["edac_ue"] != 0)):
         raise ValueError(f"{context} reports a nonzero EDAC counter")
 
 
-def thermal_start(path: Path, stale_seconds: float = 5.0) -> dict[str, Any]:
+def thermal_start(
+    path: Path,
+    stale_seconds: float = 5.0,
+    require_zero_edac: bool = True,
+    require_zero_dimm_errors: bool = True,
+) -> dict[str, Any]:
     deadline = time.monotonic() + 5.0
     while True:
         with path.open("rb") as source:
@@ -948,12 +974,16 @@ def thermal_start(path: Path, stale_seconds: float = 5.0) -> dict[str, Any]:
     if not lines:
         raise ValueError("thermal log has no complete data row")
     baseline_row = lines[-1]
-    baseline = parse_thermal_sample(baseline_row, "thermal baseline")
+    baseline = parse_thermal_sample(
+        baseline_row, "thermal baseline",
+        allow_dimm_read_errors=not require_zero_dimm_errors)
     wall_age = time.time() - stat_before.st_mtime
     if wall_age > stale_seconds or wall_age < -1.0:
         raise ValueError("thermal baseline file timestamp is stale or future-dated")
     validate_thermal_current(baseline, stale_seconds, "thermal baseline")
-    validate_thermal_health(baseline, "thermal baseline")
+    validate_thermal_health(
+        baseline, "thermal baseline", require_zero_edac=require_zero_edac,
+        require_zero_dimm_errors=require_zero_dimm_errors)
     return {
         "dev": stat_before.st_dev, "ino": stat_before.st_ino,
         "offset": offset, "header": header,
@@ -970,9 +1000,17 @@ def thermal_finish(
     output: Path,
     limit_c: float = 90.0,
     stale_seconds: float = 5.0,
+    require_zero_edac: bool = True,
+    require_zero_dimm_errors: bool = True,
+    dimm_limit_c: float | None = None,
 ) -> dict[str, Any]:
+    if dimm_limit_c is None:
+        dimm_limit_c = limit_c
     if not math.isfinite(limit_c) or not 0.0 <= limit_c <= 120.0:
         raise ValueError("thermal limit is outside the canonical range")
+    if (not math.isfinite(dimm_limit_c) or
+            not 0.0 <= dimm_limit_c <= 120.0):
+        raise ValueError("DIMM thermal limit is outside the canonical range")
     suffix = b""
     deadline = time.monotonic() + 5.0
     while True:
@@ -998,7 +1036,9 @@ def thermal_finish(
         raise ValueError("thermal interval contains no samples")
     samples = [start["baseline"]]
     for number, line in enumerate(interval_lines, 1):
-        samples.append(parse_thermal_sample(line, f"thermal interval row {number}"))
+        samples.append(parse_thermal_sample(
+            line, f"thermal interval row {number}",
+            allow_dimm_read_errors=not require_zero_dimm_errors))
     for number, (previous, sample) in enumerate(zip(samples, samples[1:]), 1):
         delta = sample["monotonic_s"] - previous["monotonic_s"]
         if delta <= 0.0 or delta > stale_seconds:
@@ -1007,7 +1047,10 @@ def thermal_finish(
             )
     validate_thermal_current(samples[-1], stale_seconds, "thermal interval tail")
     for number, sample in enumerate(samples):
-        validate_thermal_health(sample, f"thermal sealed row {number}")
+        validate_thermal_health(
+            sample, f"thermal sealed row {number}",
+            require_zero_edac=require_zero_edac,
+            require_zero_dimm_errors=require_zero_dimm_errors)
     output.write_bytes(start["header"] + start["baseline_row"] + suffix)
     interval_samples = samples[1:]
     cpu_busy_values = [sample["cpu_busy_pct"] for sample in interval_samples]
@@ -1019,7 +1062,8 @@ def thermal_finish(
     max_consecutive_high = consecutive_high
     high_samples = 0
     for sample in samples:
-        if sample["max_temperature_c"] >= limit_c:
+        if (sample["cpu_tctl_c"] >= limit_c or
+                max(sample["dimm_temperatures"]) >= dimm_limit_c):
             consecutive_high += 1
             high_samples += 1
             max_consecutive_high = max(max_consecutive_high, consecutive_high)
@@ -1027,8 +1071,21 @@ def thermal_finish(
             consecutive_high = 0
     edac_ce_values = [sample["edac_ce"] for sample in samples]
     edac_ue_values = [sample["edac_ue"] for sample in samples]
-    edac_ce_delta = edac_ce_values[-1] - edac_ce_values[0]
-    edac_ue_delta = edac_ue_values[-1] - edac_ue_values[0]
+    def counter_delta(values: Sequence[int]) -> int:
+        """Return the net delta, or a negative rollback step as a gap marker."""
+        steps = [current - previous
+                 for previous, current in zip(values, values[1:])]
+        rollback = min(steps, default=0)
+        if rollback < 0:
+            # The raw sealed rows remain the authority.  A negative result is
+            # deliberately propagated so permissive timing callers classify
+            # the counter discontinuity as a telemetry gap instead of hiding
+            # it behind a nonnegative net change.
+            return rollback
+        return values[-1] - values[0]
+
+    edac_ce_delta = counter_delta(edac_ce_values)
+    edac_ue_delta = counter_delta(edac_ue_values)
     return {
         "samples": len(interval_samples),
         "sealed_samples_including_baseline": len(samples),
@@ -1157,7 +1214,8 @@ def main() -> int:
     per_k_fields = list(per_k[0])
     write_csv(result_dir / "per_k.csv", per_k, per_k_fields)
     thermal_summary = thermal_finish(
-        thermal, thermal_mark, result_dir / "thermal_interval.csv"
+        thermal, thermal_mark, result_dir / "thermal_interval.csv",
+        dimm_limit_c=90.0,
     )
     summary["thermal"] = thermal_summary
     summary_path = result_dir / "summary.json"

@@ -1,0 +1,10 @@
+{
+  "name": "wirehair-wh2-drand-verifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned offline dependency lock for the WH2 holdout beacon verifier",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "drand-client": "1.4.2"
+  }
+}

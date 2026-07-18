@@ -584,6 +584,7 @@ class ThermalGuard:
         summary = thermal_finish(
             self.path, self.mark, output,
             limit_c=self.limit_c, stale_seconds=self.stale_seconds,
+            dimm_limit_c=self.limit_c,
         )
         summary.update({
             "guard_poll_iterations": self.poll_iterations,

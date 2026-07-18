@@ -738,6 +738,48 @@ install(FILES
 if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     find_package(PkgConfig QUIET)
+    find_program(WIREHAIR_GIT_EXECUTABLE git)
+    # The campaign stack imports fcntl and these suites exercise POSIX
+    # path/executable semantics.  Keep them off native Windows rather than
+    # registering tests that fail during module import.
+    if(Python3_Interpreter_FOUND AND UNIX)
+        foreach(_wh2_preferred_suite IN ITEMS campaign holdout timing)
+            add_test(
+                NAME wh2_preferred_attempt_${_wh2_preferred_suite}_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_preferred_attempt_${_wh2_preferred_suite}_test.py
+                    -v)
+            set_tests_properties(
+                wh2_preferred_attempt_${_wh2_preferred_suite}_test
+                PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
+                    LABELS
+                        "v2;research;state-machine;${_wh2_preferred_suite}"
+                    TIMEOUT 120)
+        endforeach()
+        add_test(
+            NAME wh2_rank_floor_two_anchor_screen_test
+            COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py
+                -v)
+        set_tests_properties(wh2_rank_floor_two_anchor_screen_test
+            PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
+                LABELS "v2;research;thermal"
+                TIMEOUT 30)
+    endif()
+    if(Python3_Interpreter_FOUND AND WIREHAIR_GIT_EXECUTABLE AND UNIX)
+        add_test(
+            NAME wh2_preferred_attempt_search_test
+            COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/bench/wh2_preferred_attempt_search_test.py
+                -v)
+        set_tests_properties(wh2_preferred_attempt_search_test
+            PROPERTIES
+                ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
+                LABELS "v2;research;state-machine;beacon"
+                TIMEOUT 60)
+    endif()
     get_property(WIREHAIR_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     foreach(_wirehair_package_variant IN ITEMS static shared both)
         if(_wirehair_package_variant STREQUAL "shared")

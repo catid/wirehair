@@ -866,6 +866,710 @@ expect_success(
     --mixed-extension-residue-seed-xor 78 --seed-block-bytes 1280
     --packet-peel-seed-table normalized-h15-v4
     --binary-dense-two-anchor)
+
+# The post-selection preferred-attempt harness is benchmark-only.  Route mode
+# emits canonical bytes; cached candidate/paired modes hash and parse those
+# bytes themselves before they skip systematic probes.
+set(route_context_sha256
+    "89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567")
+run_bench(route_result route_k3 route_err preferredattempt --mode route
+    --N 3,4 --bb-list 64 --preferred-map "3@64=0,1,2|4@64=none"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_result EQUAL 0 OR NOT "${route_err}" STREQUAL "")
+    message(FATAL_ERROR "cannot create K3 route fixture: ${route_err}")
+endif()
+set(route_k3_path "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3.csv")
+file(WRITE "${route_k3_path}" "${route_k3}")
+file(SHA256 "${route_k3_path}" route_k3_sha256)
+if(NOT "${route_k3}" MATCHES
+   "preferredattempt-route-manifest: schema=v1.*context_sha256=${route_context_sha256}" OR
+   NOT "${route_k3}" MATCHES "3,64,preferred,0,1,1,0,1,0,0,2,0" OR
+   NOT "${route_k3}" MATCHES "3,64,preferred,1,1,1,1,0,1,0,0,0" OR
+   NOT "${route_k3}" MATCHES "3,64,preferred,2,1,1,0,1,0,0,0,1" OR
+   NOT "${route_k3}" MATCHES "4,64,control,-1,[0-9]+,[0-9]+,1,0,1,0,[0-9]+,0")
+    message(FATAL_ERROR "unexpected K3 route fixture:\n${route_k3}")
+endif()
+
+run_bench(route_result route_k3_only route_err preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=0,1,2"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_result EQUAL 0 OR NOT "${route_err}" STREQUAL "")
+    message(FATAL_ERROR "cannot create K3-only route fixture: ${route_err}")
+endif()
+set(route_k3_only_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3-only.csv")
+file(WRITE "${route_k3_only_path}" "${route_k3_only}")
+file(SHA256 "${route_k3_only_path}" route_k3_only_sha256)
+
+run_bench(route_result route_k4096 route_err preferredattempt --mode route
+    --N 4096 --bb-list 64 --preferred-map "4096@64=0,1"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_result EQUAL 0 OR NOT "${route_err}" STREQUAL "")
+    message(FATAL_ERROR "cannot create K4096 route fixture: ${route_err}")
+endif()
+set(route_k4096_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k4096.csv")
+file(WRITE "${route_k4096_path}" "${route_k4096}")
+file(SHA256 "${route_k4096_path}" route_k4096_sha256)
+
+# Paired and timing consumers bind canonical selected manifests: one physical
+# route row per preferred K/width.  Candidate batches intentionally retain the
+# multi-attempt artifacts above.
+run_bench(route_k3_p0_result route_k3_p0 route_k3_p0_err
+    preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+set(route_k3_p0_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3-p0.csv")
+file(WRITE "${route_k3_p0_path}" "${route_k3_p0}")
+file(SHA256 "${route_k3_p0_path}" route_k3_p0_sha256)
+run_bench(route_k3_p1_result route_k3_p1 route_k3_p1_err
+    preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=1"
+    --route-context-sha256 "${route_context_sha256}")
+set(route_k3_p1_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3-p1.csv")
+file(WRITE "${route_k3_p1_path}" "${route_k3_p1}")
+file(SHA256 "${route_k3_p1_path}" route_k3_p1_sha256)
+run_bench(route_k3_p2_result route_k3_p2 route_k3_p2_err
+    preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=2"
+    --route-context-sha256 "${route_context_sha256}")
+set(route_k3_p2_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3-p2.csv")
+file(WRITE "${route_k3_p2_path}" "${route_k3_p2}")
+file(SHA256 "${route_k3_p2_path}" route_k3_p2_sha256)
+run_bench(route_k3_k4_p0_result route_k3_k4_p0 route_k3_k4_p0_err
+    preferredattempt --mode route
+    --N 3,4 --bb-list 64 --preferred-map "3@64=0|4@64=none"
+    --route-context-sha256 "${route_context_sha256}")
+set(route_k3_k4_p0_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k3-k4-p0.csv")
+file(WRITE "${route_k3_k4_p0_path}" "${route_k3_k4_p0}")
+file(SHA256 "${route_k3_k4_p0_path}" route_k3_k4_p0_sha256)
+run_bench(route_k4096_p0_result route_k4096_p0 route_k4096_p0_err
+    preferredattempt --mode route
+    --N 4096 --bb-list 64 --preferred-map "4096@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+set(route_k4096_p0_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k4096-p0.csv")
+file(WRITE "${route_k4096_p0_path}" "${route_k4096_p0}")
+file(SHA256 "${route_k4096_p0_path}" route_k4096_p0_sha256)
+run_bench(route_k4096_p1_result route_k4096_p1 route_k4096_p1_err
+    preferredattempt --mode route
+    --N 4096 --bb-list 64 --preferred-map "4096@64=1"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_k3_p0_result EQUAL 0 OR route_k3_p0_err OR
+   NOT route_k3_p1_result EQUAL 0 OR route_k3_p1_err OR
+   NOT route_k3_p2_result EQUAL 0 OR route_k3_p2_err OR
+   NOT route_k3_k4_p0_result EQUAL 0 OR route_k3_k4_p0_err OR
+   NOT route_k4096_p0_result EQUAL 0 OR route_k4096_p0_err OR
+   NOT route_k4096_p1_result EQUAL 0 OR route_k4096_p1_err)
+    message(FATAL_ERROR
+        "cannot create selected route fixtures\n"
+        "k3p0=${route_k3_p0_err}\nk3p1=${route_k3_p1_err}\n"
+        "k3p2=${route_k3_p2_err}\nk3k4=${route_k3_k4_p0_err}\n"
+        "k4096p0=${route_k4096_p0_err}\n"
+        "k4096p1=${route_k4096_p1_err}")
+endif()
+set(route_k4096_p1_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k4096-p1.csv")
+file(WRITE "${route_k4096_p1_path}" "${route_k4096_p1}")
+file(SHA256 "${route_k4096_p1_path}" route_k4096_p1_sha256)
+
+# A selected attempt may equal the canonical attempt at an encountered wider
+# width.  The routing protocol calls this a valid neutral alias (while bb64
+# must remain direct), so preferredtiming must time two identical actual arms
+# instead of rejecting the frozen K or substituting a sample.
+run_bench(route_result route_k4096_wide_noop route_err preferredattempt
+    --mode route --N 4096 --bb-list 1280
+    --preferred-map "4096@1280=0"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_result EQUAL 0 OR NOT "${route_err}" STREQUAL "" OR
+   NOT "${route_k4096_wide_noop}" MATCHES
+       "4096,1280,preferred,0,0,0,1,0,1,0,1,0")
+    message(FATAL_ERROR
+        "cannot create K4096 wide no-op route fixture: ${route_err}\n"
+        "${route_k4096_wide_noop}")
+endif()
+set(route_k4096_wide_noop_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-k4096-wide-noop.csv")
+file(WRITE "${route_k4096_wide_noop_path}" "${route_k4096_wide_noop}")
+file(SHA256 "${route_k4096_wide_noop_path}"
+    route_k4096_wide_noop_sha256)
+
+# Full-width solve timing uses one immutable K+4 packet trace for both arms,
+# prebuilds systems outside the timer, and emits four exact CTTCTCCT cycles.
+# The first cycle remains in the audit record but is excluded by the external
+# exact-rational analyzer.  A small eviction buffer keeps this CLI fixture
+# bounded; the frozen campaign enforces max(2*LLC,256MiB).
+run_bench(timing_solve_result timing_solve timing_solve_err preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL "\n4096,64,solve," timing_solve_rows
+    "${timing_solve}")
+list(LENGTH timing_solve_rows timing_solve_row_count)
+string(REGEX MATCHALL
+    "\n4096,64,solve,[0-3],[0-7],(control|candidate),[0-9]+,0,[0-9]+,0,"
+    timing_solve_valid_rows "${timing_solve}")
+list(LENGTH timing_solve_valid_rows timing_solve_valid_row_count)
+if(NOT timing_solve_result EQUAL 0 OR timing_solve_err OR
+   NOT timing_solve_row_count EQUAL 32 OR
+   NOT timing_solve_valid_row_count EQUAL 32 OR NOT timing_solve MATCHES
+       "metric=solve.*cycles=4 order=CTTCTCCT discard_cycle=0.*cycle_mode=full.*cycle_index=all.*overhead=4.*payload=distinct-zero-v1.*payload_alignment=64.*payload_prefaulted=1" OR
+   NOT timing_solve MATCHES ",262144,268160")
+    message(FATAL_ERROR
+        "preferred solve timing fixture failed\n${timing_solve}\n${timing_solve_err}")
+endif()
+foreach(cycle RANGE 0 3)
+    foreach(slot RANGE 0 7)
+        if(slot EQUAL 0 OR slot EQUAL 3 OR slot EQUAL 5 OR slot EQUAL 6)
+            set(timing_arm "control")
+        else()
+            set(timing_arm "candidate")
+        endif()
+        if(NOT timing_solve MATCHES
+           "4096,64,solve,${cycle},${slot},${timing_arm},")
+            message(FATAL_ERROR
+                "preferred solve timing order mismatch cycle=${cycle} slot=${slot}")
+        endif()
+    endforeach()
+endforeach()
+
+run_bench(timing_retry_result timing_retry timing_retry_err preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --cycle-index 2
+    --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL "\n4096,64,solve,2," timing_retry_rows
+    "${timing_retry}")
+list(LENGTH timing_retry_rows timing_retry_row_count)
+if(NOT timing_retry_result EQUAL 0 OR timing_retry_err OR
+   NOT timing_retry_row_count EQUAL 8 OR NOT timing_retry MATCHES
+       "cycles=1 order=CTTCTCCT discard_cycle=0 cycle_mode=replacement cycle_index=2")
+    message(FATAL_ERROR
+        "preferred timing replacement-cycle fixture failed\n"
+        "${timing_retry}\n${timing_retry_err}")
+endif()
+
+run_bench(timing_setup_result timing_setup timing_setup_err preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric setup --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL "\n4096,64,setup," timing_setup_rows
+    "${timing_setup}")
+list(LENGTH timing_setup_rows timing_setup_row_count)
+string(REGEX MATCHALL
+    "\n4096,64,setup,[0-3],[0-7],(control|candidate),[0-9]+,0,[0-9]+,0,"
+    timing_setup_valid_rows "${timing_setup}")
+list(LENGTH timing_setup_valid_rows timing_setup_valid_row_count)
+if(NOT timing_setup_result EQUAL 0 OR timing_setup_err OR
+   NOT timing_setup_row_count EQUAL 32 OR
+   NOT timing_setup_valid_row_count EQUAL 32 OR NOT timing_setup MATCHES
+       "metric=setup.*cycles=4 order=CTTCTCCT discard_cycle=0.*overhead=none.*payload=none" OR
+   NOT timing_setup MATCHES ",0,0")
+    message(FATAL_ERROR
+        "preferred setup timing fixture failed\n${timing_setup}\n${timing_setup_err}")
+endif()
+
+run_bench(timing_noop_result timing_noop timing_noop_err preferredtiming
+    --N 4096 --bb 1280 --preferred-attempt 0 --evict-bytes 4096
+    --metric setup --route-cache "${route_k4096_wide_noop_path}"
+    --route-cache-sha256 "${route_k4096_wide_noop_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL
+    "\n4096,1280,setup,[0-3],[0-7],(control|candidate),0,0,"
+    timing_noop_rows "${timing_noop}")
+list(LENGTH timing_noop_rows timing_noop_row_count)
+if(NOT timing_noop_result EQUAL 0 OR timing_noop_err OR
+   NOT timing_noop_row_count EQUAL 32)
+    message(FATAL_ERROR
+        "preferred wide no-op timing fixture failed\n"
+        "${timing_noop}\n${timing_noop_err}")
+endif()
+
+expect_failure("requires a cached direct route or valid wide no-op alias"
+    preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 0 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_p0_path}"
+    --route-cache-sha256 "${route_k4096_p0_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("exact selected-attempt route row" preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("argument domain mismatch" preferredtiming
+    --N 4096 --bb 256 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("argument domain mismatch" preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --cycle-index 4
+    --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("bad --N value" preferredtiming
+    --N 04096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("bad --seed value" preferredtiming
+    --N 4096 --bb 64 --preferred-attempt 1 --evict-bytes 4096
+    --metric solve --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 0x1234 --schedule burst)
+
+run_bench(route_result route_mixed route_err preferredattempt --mode route
+    --N 3,4096 --bb-list 64
+    --preferred-map "3@64=none|4096@64=1"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_result EQUAL 0 OR NOT "${route_err}" STREQUAL "")
+    message(FATAL_ERROR "cannot create mixed route fixture: ${route_err}")
+endif()
+set(route_mixed_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-mixed.csv")
+file(WRITE "${route_mixed_path}" "${route_mixed}")
+file(SHA256 "${route_mixed_path}" route_mixed_sha256)
+
+expect_success("mode=paired.*systematic_probe_accounting=explicit"
+    preferredattempt --mode paired --N 3 --bb-list 64
+    --preferred-map "3@64=0" --route-cache "${route_k3_p0_path}"
+    --route-cache-sha256 "${route_k3_p0_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.35 --seed 1 --schedule repair-only)
+expect_success("3,64,control,-1,1,1,0,1,0,0,0,1,1,1"
+    preferredattempt --mode paired --N 3 --bb-list 64
+    --preferred-map "3@64=0" --route-cache "${route_k3_p0_path}"
+    --route-cache-sha256 "${route_k3_p0_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.35 --seed 1 --schedule repair-only)
+expect_success("3,64,candidate,0,1,1,1,0,1,0,0,0,1,1"
+    preferredattempt --mode paired --N 3 --bb-list 64
+    --preferred-map "3@64=0" --route-cache "${route_k3_p0_path}"
+    --route-cache-sha256 "${route_k3_p0_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.35 --seed 1 --schedule repair-only)
+expect_success("4,64,candidate,-1,[0-9]+,[0-9]+,0,1,0,1,0,0,[01],[01]"
+    preferredattempt --mode paired --N 3,4 --bb-list 64
+    --preferred-map "3@64=0" --route-cache "${route_k3_k4_p0_path}"
+    --route-cache-sha256 "${route_k3_k4_p0_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.35 --seed 1 --schedule repair-only)
+run_bench(mixed_result mixed_out mixed_err preferredattempt --mode paired
+    --N 3,4096 --bb-list 64 --preferred-map "4096@64=1"
+    --route-cache "${route_mixed_path}"
+    --route-cache-sha256 "${route_mixed_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.35 --seed 1 --schedule repair-only)
+set(mixed_rows 0)
+set(mixed_physical_solves 0)
+set(mixed_candidate_rows 0)
+set(mixed_candidate_physical_solves 0)
+string(REPLACE "\n" ";" mixed_lines "${mixed_out}")
+foreach(line IN LISTS mixed_lines)
+    if(line MATCHES "^[0-9]+,")
+        math(EXPR mixed_rows "${mixed_rows} + 1")
+        string(REPLACE "," ";" columns "${line}")
+        list(GET columns 2 arm)
+        list(GET columns 11 physical_solve)
+        math(EXPR mixed_physical_solves
+            "${mixed_physical_solves} + ${physical_solve}")
+        if(arm STREQUAL "candidate")
+            math(EXPR mixed_candidate_rows "${mixed_candidate_rows} + 1")
+            math(EXPR mixed_candidate_physical_solves
+                "${mixed_candidate_physical_solves} + ${physical_solve}")
+        endif()
+    endif()
+endforeach()
+if(NOT mixed_result EQUAL 0 OR mixed_err OR NOT mixed_rows EQUAL 4 OR
+   NOT mixed_candidate_rows EQUAL 2 OR
+   NOT mixed_physical_solves EQUAL 3 OR
+   NOT mixed_candidate_physical_solves EQUAL 1)
+    message(FATAL_ERROR
+        "mixed preferred/control logical-physical accounting mismatch\n"
+        "${mixed_out}\n${mixed_err}")
+endif()
+expect_success("4096,64,candidate,1,0,1,1,1,0,0,1,1,0,0"
+    preferredattempt --mode paired --N 4096 --bb-list 64
+    --preferred-map "4096@64=1" --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success(
+    "mode=candidate.*route_cache_sha256=${route_k4096_sha256}"
+    preferredattempt --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success("4096,64,candidate,1,0,1,1,1,0,0,1,1,0,0"
+    preferredattempt --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("requires explicit --mode" preferredattempt
+    --N 3 --bb-list 64)
+expect_failure("specified more than once" preferredattempt --mode route
+    --mode route --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("canonical ascending decimal lists" preferredattempt --mode route
+    --N 03 --bb-list 64 --preferred-map "3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("canonical ascending decimal lists" preferredattempt --mode route
+    --N 4,3 --bb-list 64
+    --preferred-map "4@64=0|3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("canonical K/width record order" preferredattempt --mode route
+    --N 3,4 --bb-list 64
+    --preferred-map "4@64=0|3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("canonical K/width record order" preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "03@64=00"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("route mode rejects recovery-only" preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-context-sha256 "${route_context_sha256}" --loss 0.5)
+expect_failure("require explicit --loss" preferredattempt --mode control
+    --N 3 --bb-list 64)
+expect_failure("requires a nonempty map" preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map none
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("malformed --preferred-map" preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "3@64=0,0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("malformed --preferred-map" preferredattempt --mode route
+    --N 3 --bb-list 64
+    --preferred-map
+    "3@64=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("outside --N x --bb-list" preferredattempt --mode route
+    --N 3 --bb-list 64 --preferred-map "4@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("must cover the exact" preferredattempt --mode route
+    --N 3,4 --bb-list 64 --preferred-map "3@64=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("unique even values" preferredattempt --mode control
+    --N 3 --bb-list 63)
+expect_failure("at most four widths" preferredattempt --mode control
+    --N 3 --bb-list 2,4,6,8,10)
+expect_failure("exactly one of --probe-route" preferredattempt
+    --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=1"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("attempt rows must exactly match" preferredattempt
+    --mode candidate --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-cache "${route_k3_only_path}"
+    --route-cache-sha256 "${route_k3_only_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("selected attempt row must exactly match" preferredattempt
+    --mode paired --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-cache "${route_k3_only_path}"
+    --route-cache-sha256 "${route_k3_only_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success("probe_route=1" preferredattempt
+    --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --probe-route
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success(
+    "preferred_route: N=4096 bb=64 p=0 a0=0 actual=0 valid=1 fallback=0 no_op=1 direct=0 preferred_probe_solves=0"
+    preferredattempt --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --probe-route
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success(
+    "4096,64,candidate,1,0,1,1,1,0,0,1,1,0,0"
+    preferredattempt --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --probe-route
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+run_bench(probe_result probe_out probe_err preferredattempt --mode candidate
+    --N 4096 --bb-list 64 --preferred-map "4096@64=0,1" --probe-route
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL "canonical_probe_solves=" canonical_probe_events
+    "${probe_out}")
+string(REGEX MATCHALL "preferred_probe_solves=" preferred_probe_events
+    "${probe_out}")
+list(LENGTH canonical_probe_events canonical_probe_event_count)
+list(LENGTH preferred_probe_events preferred_probe_event_count)
+if(NOT probe_result EQUAL 0 OR probe_err OR
+   NOT canonical_probe_event_count EQUAL 1 OR
+   NOT preferred_probe_event_count EQUAL 2)
+    message(FATAL_ERROR
+        "preferred probe accounting is not one-event additive\n${probe_out}\n"
+        "${probe_err}")
+endif()
+run_bench(alias_result alias_out alias_err preferredattempt --mode candidate
+    --N 3 --bb-list 64
+    --preferred-map "3@64=0,1,2" --route-cache "${route_k3_only_path}"
+    --route-cache-sha256 "${route_k3_only_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL "preferred_candidate_alias: N=3 bb=64 p=[012][^\r\n]*physical_solve=0"
+    alias_events "${alias_out}")
+string(REGEX MATCHALL "(^|\n)3,64," alias_numeric_rows "${alias_out}")
+string(REGEX MATCHALL "preferred_probe_accounting" alias_probe_events
+    "${alias_out}")
+list(LENGTH alias_events alias_event_count)
+list(LENGTH alias_numeric_rows alias_numeric_row_count)
+list(LENGTH alias_probe_events alias_probe_event_count)
+if(NOT alias_result EQUAL 0 OR alias_err OR
+   NOT alias_event_count EQUAL 3 OR NOT alias_numeric_row_count EQUAL 0 OR
+   NOT alias_probe_event_count EQUAL 0)
+    message(FATAL_ERROR
+        "cached all-alias accounting mismatch\n${alias_out}\n${alias_err}")
+endif()
+
+run_bench(candidate_mixed_result candidate_mixed_out candidate_mixed_err
+    preferredattempt --mode candidate --N 4096 --bb-list 64
+    --preferred-map "4096@64=0,1" --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCHALL
+    "preferred_candidate_alias: N=4096 bb=64 p=0[^\r\n]*physical_solve=0"
+    candidate_mixed_aliases "${candidate_mixed_out}")
+string(REGEX MATCHALL "(^|\n)4096,64,candidate,1,[^\r\n]*"
+    candidate_mixed_rows "${candidate_mixed_out}")
+string(REGEX MATCHALL "preferred_probe_accounting" candidate_mixed_probes
+    "${candidate_mixed_out}")
+list(LENGTH candidate_mixed_aliases candidate_mixed_alias_count)
+list(LENGTH candidate_mixed_rows candidate_mixed_row_count)
+list(LENGTH candidate_mixed_probes candidate_mixed_probe_count)
+if(NOT candidate_mixed_result EQUAL 0 OR candidate_mixed_err OR
+   NOT candidate_mixed_alias_count EQUAL 1 OR
+   NOT candidate_mixed_row_count EQUAL 1 OR
+   NOT candidate_mixed_probe_count EQUAL 0 OR
+   NOT candidate_mixed_out MATCHES
+       "4096,64,candidate,1,0,1,1,1,0,0,1,1,0,0")
+    message(FATAL_ERROR
+        "cached mixed alias/direct accounting mismatch\n"
+        "${candidate_mixed_out}\n${candidate_mixed_err}")
+endif()
+expect_success("3,64,candidate,1,1,1,1,1,0,1,0,0"
+    preferredattempt --mode paired --N 3 --bb-list 64
+    --preferred-map "3@64=1" --route-cache "${route_k3_p1_path}"
+    --route-cache-sha256 "${route_k3_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success("3,64,candidate,2,1,1,1,0,1,0,0,0"
+    preferredattempt --mode paired --N 3 --bb-list 64
+    --preferred-map "3@64=2" --route-cache "${route_k3_p2_path}"
+    --route-cache-sha256 "${route_k3_p2_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+
+# The native reader independently enforces the same ordered-group and
+# first-row-only canonical probe charge accepted by the frozen Python parser.
+# Rehashing semantically noncanonical bytes must not turn them into a cache.
+string(REPLACE "3,64,preferred,0,1,1,0,1,0,0,2,0"
+    "3,64,preferred,0,1,1,0,1,0,0,0,0"
+    route_shifted_charge "${route_k3_only}")
+string(REPLACE "3,64,preferred,1,1,1,1,0,1,0,0,0"
+    "3,64,preferred,1,1,1,1,0,1,0,2,0"
+    route_shifted_charge "${route_shifted_charge}")
+set(route_shifted_charge_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-shifted-charge.csv")
+file(WRITE "${route_shifted_charge_path}" "${route_shifted_charge}")
+file(SHA256 "${route_shifted_charge_path}" route_shifted_charge_sha256)
+expect_failure("first-row canonical probe accounting" preferredattempt
+    --mode candidate --N 3 --bb-list 64 --preferred-map "3@64=0,1,2"
+    --route-cache "${route_shifted_charge_path}"
+    --route-cache-sha256 "${route_shifted_charge_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+
+string(REPLACE "\n" ";" route_k3_lines "${route_k3}")
+list(GET route_k3_lines 0 route_k3_preamble)
+list(GET route_k3_lines 1 route_k3_header)
+list(GET route_k3_lines 2 route_k3_p0)
+list(GET route_k3_lines 3 route_k3_p1)
+list(GET route_k3_lines 4 route_k3_p2)
+list(GET route_k3_lines 5 route_k4_control)
+set(route_reordered
+    "${route_k3_preamble}\n${route_k3_header}\n${route_k4_control}\n${route_k3_p0}\n${route_k3_p1}\n${route_k3_p2}\n")
+set(route_reordered_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-reordered.csv")
+file(WRITE "${route_reordered_path}" "${route_reordered}")
+file(SHA256 "${route_reordered_path}" route_reordered_sha256)
+expect_failure("key groups are reordered" preferredattempt --mode paired
+    --N 3,4 --bb-list 64 --preferred-map "3@64=0"
+    --route-cache "${route_reordered_path}"
+    --route-cache-sha256 "${route_reordered_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+
+# The digest is over the actual bytes and the parser independently rejects a
+# self-consistently rehashed forged p<a0 direct classification.
+set(route_tampered_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-tampered.csv")
+file(WRITE "${route_tampered_path}" "${route_k4096}#")
+expect_failure("SHA-256 mismatch" preferredattempt --mode candidate
+    --N 4096 --bb-list 64 --preferred-map "4096@64=0,1"
+    --route-cache "${route_tampered_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REPLACE "3,64,preferred,0,1,1,0,1,0,0,2,0"
+    "3,64,preferred,0,1,0,1,0,0,1,2,0"
+    route_forged "${route_k3_only}")
+set(route_forged_path
+    "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-forged.csv")
+file(WRITE "${route_forged_path}" "${route_forged}")
+file(SHA256 "${route_forged_path}" route_forged_sha256)
+expect_failure("inconsistent classification" preferredattempt
+    --mode candidate --N 3 --bb-list 64 --preferred-map "3@64=0,1,2"
+    --route-cache "${route_forged_path}"
+    --route-cache-sha256 "${route_forged_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("selected attempt row must exactly match" preferredattempt
+    --mode paired --N 4096 --bb-list 64 --preferred-map "4096@64=2"
+    --route-cache "${route_k4096_p1_path}"
+    --route-cache-sha256 "${route_k4096_p1_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("route cache keys must exactly match" preferredattempt
+    --mode candidate --N 3 --bb-list 64 --preferred-map "3@64=0,1,2"
+    --route-cache "${route_k3_path}"
+    --route-cache-sha256 "${route_k3_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_failure("requires explicit --preferred-map" preferredattempt
+    --mode paired --N 4096 --bb-list 64
+    --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("map/cache route-status mismatch" preferredattempt
+    --mode paired --N 4096 --bb-list 64 --preferred-map none
+    --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+
+# Exactly 32 candidates and multiple K/width records are accepted without
+# reordering or dropping records; the independent cache parser also rejects a
+# validly classified, self-consistently rehashed 33rd attempt for one key.
+run_bench(route_32_result route_32 route_32_err preferredattempt --mode route
+    --N 3 --bb-list 64
+    --preferred-map
+    "3@64=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31"
+    --route-context-sha256 "${route_context_sha256}")
+if(NOT route_32_result EQUAL 0 OR route_32_err OR
+   NOT route_32 MATCHES "3,64,preferred,31,")
+    message(FATAL_ERROR "32-attempt route fixture failed\n${route_32}\n${route_32_err}")
+endif()
+run_bench(route_33_tail_result route_33_tail route_33_tail_err
+    preferredattempt --mode route --N 3 --bb-list 64
+    --preferred-map "3@64=32"
+    --route-context-sha256 "${route_context_sha256}")
+string(REPLACE "\n" ";" route_33_tail_lines "${route_33_tail}")
+list(GET route_33_tail_lines 2 route_33_tail_row)
+string(REGEX REPLACE ",[0-9]+,([0-9]+)$" ",0,\\1"
+    route_33_tail_row "${route_33_tail_row}")
+set(route_33 "${route_32}${route_33_tail_row}\n")
+set(route_33_path "${CMAKE_CURRENT_BINARY_DIR}/preferred-route-33.csv")
+file(WRITE "${route_33_path}" "${route_33}")
+file(SHA256 "${route_33_path}" route_33_sha256)
+if(NOT route_33_tail_result EQUAL 0 OR route_33_tail_err)
+    message(FATAL_ERROR "cannot create 33rd route row: ${route_33_tail_err}")
+endif()
+expect_failure("more than 32 attempts" preferredattempt --mode candidate
+    --N 3 --bb-list 64 --preferred-map "3@64=0"
+    --route-cache "${route_33_path}"
+    --route-cache-sha256 "${route_33_sha256}"
+    --route-context-sha256 "${route_context_sha256}"
+    --loss 0.5 --seed 4660 --schedule burst)
+expect_success("4,256,preferred,0," preferredattempt --mode route --N 3,4
+    --bb-list 64,256
+    --preferred-map "3@64=0|3@256=0|4@64=0|4@256=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("logical p list must be identical" preferredattempt
+    --mode route --N 4096 --bb-list 64,256
+    --preferred-map "4096@64=0,1|4096@256=0"
+    --route-context-sha256 "${route_context_sha256}")
+expect_failure("supports only 64,256,1280,4096" preferredattempt
+    --mode control --N 3 --bb-list 128)
+expect_failure("magic/schema mismatch" preferredattempt --mode candidate
+    --N 4096 --bb-list 64 --preferred-map "4096@64=0,1"
+    --route-cache "${route_k4096_path}"
+    --route-cache-sha256 "${route_k4096_sha256}"
+    --route-context-sha256
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    --loss 0.5 --seed 4660 --schedule burst)
+
+# The dedicated q0 control is equation-identical to the historical
+# precodefail path on both sides of the adaptive two-anchor cutoff, at every
+# development width.  Timing columns are deliberately ignored.
+run_bench(identity_result identity_out identity_err preferredattempt
+    --mode control --N 4095,4096 --bb-list 64,256,1280,4096
+    --loss 0.5 --seed 4660 --schedule burst)
+run_bench(legacy_4095_result legacy_4095 legacy_4095_err precodefail
+    --N 4095 --bb-list 64,256,1280,4096 --overhead 0 --trials 1
+    --threads 1 --loss 0.5 --seed 4660 --schedule burst
+    --completion mixed --mix-count 2)
+run_bench(legacy_4096_result legacy_4096 legacy_4096_err precodefail
+    --N 4096 --bb-list 64,256,1280,4096 --overhead 0 --trials 1
+    --threads 1 --loss 0.5 --seed 4660 --schedule burst
+    --completion mixed --mix-count 2 --binary-dense-two-anchor)
+if(NOT identity_result EQUAL 0 OR NOT legacy_4095_result EQUAL 0 OR
+   NOT legacy_4096_result EQUAL 0 OR identity_err OR legacy_4095_err OR
+   legacy_4096_err OR NOT identity_out MATCHES
+       "mode=control.*route_context_sha256=none")
+    message(FATAL_ERROR
+        "q0 boundary identity command failed\n"
+        "dedicated=${identity_err}\nlegacy4095=${legacy_4095_err}\n"
+        "legacy4096=${legacy_4096_err}")
+endif()
+foreach(spec IN ITEMS
+    "4095|64|129|97043|4465" "4095|256|139|97089|4588"
+    "4095|1280|130|95407|4476" "4095|4096|137|95901|4565"
+    "4096|64|147|96644|4681" "4096|256|129|98043|4465"
+    "4096|1280|148|96289|4694" "4096|4096|144|96038|4651")
+    string(REPLACE "|" ";" fields "${spec}")
+    list(GET fields 0 identity_K)
+    list(GET fields 1 identity_bb)
+    list(GET fields 2 identity_inact)
+    list(GET fields 3 identity_xors)
+    list(GET fields 4 identity_muladds)
+    set(dedicated_pattern
+        "${identity_K},${identity_bb},control,-1,0,0,0,1,0,0,0,1,0,0,0,0,${identity_inact},12,12,${identity_xors},${identity_muladds}")
+    if(identity_K STREQUAL "4095")
+        set(legacy_out "${legacy_4095}")
+    else()
+        set(legacy_out "${legacy_4096}")
+    endif()
+    set(legacy_pattern
+        "${identity_K},${identity_bb},periodic,2,0,1,1,0,0,0\\.00000000,${identity_inact}\\.000,${identity_inact},12\\.000,12,12\\.000,12,0,[^\r\n]*,0,${identity_xors}\\.000,${identity_muladds}\\.000,")
+    if(NOT identity_out MATCHES "${dedicated_pattern}" OR
+       NOT legacy_out MATCHES "${legacy_pattern}")
+        message(FATAL_ERROR
+            "q0 identity mismatch for K=${identity_K} bb=${identity_bb}\n"
+            "dedicated=${identity_out}\nlegacy=${legacy_out}")
+    endif()
+endforeach()
+expect_failure("schedule must be burst" preferredattempt --mode control
+    --N 3 --bb-list 64 --schedule iid)
 expect_failure("requires 12 binary dense rows" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor --binary-dense-rows 13)
