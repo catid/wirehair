@@ -1191,6 +1191,47 @@ int main()
     {
         return fail_after_create();
     }
+
+    uint32_t aliased_packet[BlockBytes / sizeof(uint32_t)];
+    std::fill(
+        aliased_packet,
+        aliased_packet + BlockBytes / sizeof(uint32_t),
+        UINT32_C(0xa5a5a5a5));
+    uint32_t aliased_packet_before[BlockBytes / sizeof(uint32_t)];
+    std::memcpy(
+        aliased_packet_before, aliased_packet, sizeof(aliased_packet));
+    if (!Check(wirehair_v2_encode(
+            encoder, BlockCount, aliased_packet, BlockBytes - 1u,
+            &aliased_packet[1]) == WirehairV2_InvalidInput,
+            "aliased short encode size output rejection") ||
+        !Check(std::memcmp(
+            aliased_packet, aliased_packet_before,
+            sizeof(aliased_packet)) == 0,
+            "aliased short encode was not no-write") ||
+        !Check(wirehair_v2_encode(
+            encoder, BlockCount, aliased_packet, BlockBytes,
+            &aliased_packet[1]) == WirehairV2_InvalidInput,
+            "aliased exact encode size output rejection") ||
+        !Check(std::memcmp(
+            aliased_packet, aliased_packet_before,
+            sizeof(aliased_packet)) == 0,
+            "aliased exact encode was not no-write"))
+    {
+        return fail_after_create();
+    }
+
+    uint32_t adjacent_packet[
+        BlockBytes / sizeof(uint32_t) + 1u] = {};
+    if (!Check(wirehair_v2_encode(
+            encoder, BlockCount, adjacent_packet, BlockBytes,
+            &adjacent_packet[BlockBytes / sizeof(uint32_t)]) ==
+                WirehairV2_Success &&
+            adjacent_packet[BlockBytes / sizeof(uint32_t)] == BlockBytes,
+            "adjacent encode size output"))
+    {
+        return fail_after_create();
+    }
+
     uint8_t exact_final[5] = {};
     if (!Check(wirehair_v2_encode(
             encoder, BlockCount - 1u, exact_final, sizeof(exact_final),

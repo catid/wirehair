@@ -803,13 +803,13 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     uint32_t outputCapacity,
     uint32_t* dataBytesOut)
 {
-    if (dataBytesOut) {
-        *dataBytesOut = 0u;
-    }
     PublicCodec* impl = FromHandle(codec);
-    if (!impl || impl->Mode != CodecMode::Encoder ||
-        !blockDataOut || !dataBytesOut)
+    if (!dataBytesOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (!impl || impl->Mode != CodecMode::Encoder || !blockDataOut)
     {
+        *dataBytesOut = 0u;
         return WirehairV2_InvalidInput;
     }
     const uint64_t block_count = BlockCountWide(
@@ -818,6 +818,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     if (block_count != 0u && blockId == block_count - 1u) {
         required = (uint32_t)(impl->MessageBytes -
             (block_count - 1u) * impl->BlockBytes);
+    }
+    if (MemoryRangesOverlap(
+            blockDataOut, required, dataBytesOut, sizeof(*dataBytesOut)))
+    {
+        return WirehairV2_InvalidInput;
     }
     *dataBytesOut = required;
     if (outputCapacity < required) {

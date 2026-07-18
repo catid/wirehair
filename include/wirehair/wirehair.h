@@ -358,10 +358,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     Select an explicit supported V2 equation profile and create an encoder.
 
     The current/default profile remains available through
-    wirehair_v2_encoder_create().  Both mixed profiles require a positive even
-    blockBytes value.  Their distinct IDs bind exactly three and exactly two
-    packet mix columns respectively.  Unknown IDs and invalid mixed dimensions
-    are rejected before codec allocation or serialized-profile output writes.
+    wirehair_v2_encoder_create().  All mixed profiles require a positive even
+    blockBytes value.  The original mixed ID binds exactly three packet mix
+    columns; both mixed/mix2 IDs bind exactly two, with the two-anchor ID also
+    binding its adaptive dense construction.  Unknown IDs and invalid mixed
+    dimensions are rejected before codec allocation or serialized-profile
+    output writes.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint64_t profileId,
@@ -401,7 +403,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     dataBytesOut is required.  On success it receives the bytes written.  A
     non-null output buffer shorter than the exact systematic or repair packet
     reports WirehairV2_BufferTooSmall, reports the required size through
-    dataBytesOut, and is not modified.
+    dataBytesOut, and is not modified.  dataBytesOut must not overlap the
+    packet output range; overlap reports WirehairV2_InvalidInput without
+    modifying either range.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     WirehairV2Codec codec,
