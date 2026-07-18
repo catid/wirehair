@@ -246,14 +246,28 @@ uint32_t ActiveMixedCoefficientResidue(uint32_t column);
 /// Residue used by extension-field rows.  Production aliases the shared
 /// residue; test builds may select an independently keyed schedule.
 uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column);
+/**
+    Residue used by the experiment-only grouped GF(256) suffix rows.
+
+    Non-corner columns use one fixed full-cycle schedule C.  The final H
+    completion columns deliberately remain on canonical schedule A so the
+    encoder corner is byte-for-byte unchanged.  Production and a zero active
+    grouped-row count always alias ActiveMixedCoefficientResidue().
+*/
+uint32_t ActiveMixedGroupedGF256CoefficientResidue(
+    uint32_t column,
+    uint32_t first_heavy_column);
 /// Rotation applied to one complete period-sized block.
 uint32_t ActiveMixedResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index);
+uint32_t ActiveMixedGroupedGF256ResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedResidueSkew();
 MixedResidueSchedule ActiveMixedResidueSchedule();
 uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
 bool ActiveMixedIndependentExtensionResidues();
+uint32_t ActiveMixedGroupedGF256Rows();
+uint32_t ActiveMixedGroupedGF256HashSeed();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF256Rows();
 uint32_t ActiveMixedGF16Rows();
@@ -309,7 +323,13 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
-/// Select the independent-schedule RHS accumulation implementation.
+///
+/// Assign one shared schedule C to the final 0..9 rows of the fixed H12
+/// GF(256) prefix.  This raw-architecture hook is intentionally restricted to
+/// shared-X, constant-A, 10 GF(256) + 2 GF(2^16), P>H configurations and is
+/// mutually exclusive with independent GF(2^16) scheduling.
+bool SetMixedGroupedGF256RowsForTesting(uint32_t rows);
+/// Select the secondary-schedule RHS accumulation implementation.
 bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode);
 MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting();
 /// Compatibility test accessor for the production implementation policy.

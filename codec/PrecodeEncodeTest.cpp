@@ -225,6 +225,27 @@ private:
     bool Valid;
 };
 
+class MixedGroupedGF256RowsScope
+{
+public:
+    explicit MixedGroupedGF256RowsScope(uint32_t rows)
+        : Previous(wirehair_v2::ActiveMixedGroupedGF256Rows())
+        , Valid(wirehair_v2::SetMixedGroupedGF256RowsForTesting(rows))
+    {
+    }
+
+    ~MixedGroupedGF256RowsScope()
+    {
+        (void)wirehair_v2::SetMixedGroupedGF256RowsForTesting(Previous);
+    }
+
+    bool IsValid() const { return Valid; }
+
+private:
+    uint32_t Previous;
+    bool Valid;
+};
+
 const char* MixedGeometryName(
     wirehair_v2::MixedCoefficientGeometry geometry)
 {
@@ -352,6 +373,14 @@ bool VerifyValues(
     // embeds its leading rows in the subfield and uses GF(2^16) afterward.
     const uint32_t mixed_subfield_rows =
         wirehair_v2::ActiveMixedGF256Rows();
+    const uint32_t mixed_grouped_rows =
+        wirehair_v2::ActiveMixedGroupedGF256Rows();
+    if (mixed_grouped_rows > mixed_subfield_rows) {
+        return false;
+    }
+    const uint32_t mixed_grouped_first_row =
+        mixed_subfield_rows - mixed_grouped_rows;
+    const uint32_t first_heavy_column = L - H;
     for (uint32_t r = 0; r < H; ++r)
     {
         std::memset(acc.data(), 0, block_bytes);
@@ -361,6 +390,15 @@ bool VerifyValues(
                 system.Params.Field ==
                     wirehair_v2::CompletionField::MixedGF256GF16 ?
                 wirehair_v2::ActiveMixedCoefficientResidue(c) : c;
+            if (system.Params.Field ==
+                    wirehair_v2::CompletionField::MixedGF256GF16 &&
+                r < mixed_subfield_rows &&
+                r >= mixed_grouped_first_row)
+            {
+                coefficient_column = wirehair_v2::
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        c, first_heavy_column);
+            }
             const uint8_t* v =
                 ColumnValue(system, source, parity, block_bytes, c);
             if (system.Params.Field ==
@@ -1301,6 +1339,279 @@ bool TestHeavyResidueDispatch()
 
 bool StatsAreZero(const wirehair_v2::PrecodeEncodeStats& stats);
 
+bool EncodeStatsEqual(
+    const wirehair_v2::PrecodeEncodeStats& a,
+    const wirehair_v2::PrecodeEncodeStats& b)
+{
+    return a.StaircaseBlockOps == b.StaircaseBlockOps &&
+        a.DenseKnownBlockOps == b.DenseKnownBlockOps &&
+        a.DenseSolveBlockOps == b.DenseSolveBlockOps &&
+        a.HeavyBucketXors == b.HeavyBucketXors &&
+        a.HeavyMulAdds == b.HeavyMulAdds &&
+        a.HeavySolveBlockOps == b.HeavySolveBlockOps &&
+        a.MixedGF16MulAdds == b.MixedGF16MulAdds &&
+        a.MixedGF16SolveBlockOps == b.MixedGF16SolveBlockOps &&
+        a.MixedPlaneConversions == b.MixedPlaneConversions &&
+        a.MixedJointSourceXors == b.MixedJointSourceXors &&
+        a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
+        a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
+        a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
+        a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
+        a.MixedDualSourceColumns == b.MixedDualSourceColumns;
+}
+
+bool CheckGroupedMixedResidueScheduleCase(
+    uint32_t period,
+    uint32_t grouped_rows,
+    uint32_t& expected_hash_seed)
+{
+    MixedCoefficientGeometryScope geometry_scope(
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    MixedGF16RowsScope extension_scope(wirehair_v2::kMixedGF16Rows);
+    MixedCoefficientPeriodScope period_scope(period);
+    MixedGF256RowsScope subfield_scope(wirehair_v2::kMixedGF256Rows);
+    MixedResidueSkewScope skew_scope(0u);
+    MixedResidueScheduleScope schedule_scope(
+        wirehair_v2::MixedResidueSchedule::Constant);
+    MixedIndependentExtensionResiduesScope independent_scope(false);
+    MixedResidueBucketModeScope bucket_scope(
+        wirehair_v2::MixedResidueBucketMode::Automatic);
+    // Configure this last: its contract depends on every scope above.
+    MixedGroupedGF256RowsScope grouped_scope(grouped_rows);
+    if (!geometry_scope.IsValid() || !extension_scope.IsValid() ||
+        !period_scope.IsValid() || !subfield_scope.IsValid() ||
+        !skew_scope.IsValid() || !schedule_scope.IsValid() ||
+        !independent_scope.IsValid() || !bucket_scope.IsValid() ||
+        !grouped_scope.IsValid() ||
+        wirehair_v2::ActiveMixedGroupedGF256Rows() != grouped_rows ||
+        wirehair_v2::ActiveMixedIndependentExtensionResidues())
+    {
+        return false;
+    }
+
+    const uint32_t selected_seed =
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    if (selected_seed == 0u ||
+        (expected_hash_seed != 0u && selected_seed != expected_hash_seed))
+    {
+        return false;
+    }
+    expected_hash_seed = selected_seed;
+
+    const uint32_t H = wirehair_v2::kMixedGF256Rows +
+        wirehair_v2::kMixedGF16Rows;
+    bool differs_from_a = false;
+    uint32_t previous_c =
+        wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(0u);
+    if (previous_c != 0u ||
+        wirehair_v2::ActiveMixedResidueBlockShift(0u) != 0u)
+    {
+        return false;
+    }
+    for (uint32_t block = 0u; block < 127u; ++block)
+    {
+        const uint32_t a =
+            wirehair_v2::ActiveMixedResidueBlockShift(block + 1u);
+        const uint32_t c = wirehair_v2::
+            ActiveMixedGroupedGF256ResidueBlockShift(block + 1u);
+        if (a >= period || c >= period) return false;
+        const uint32_t step = (c + period - previous_c) % period;
+        if (a != 0u || step == 0u || step > period - H) {
+            return false;
+        }
+        differs_from_a = differs_from_a || c != a;
+        previous_c = c;
+    }
+    for (uint32_t cycle = 1u; cycle < period; ++cycle)
+    {
+        if (wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(
+                127u * cycle) == 0u)
+        {
+            return false;
+        }
+    }
+    if (!differs_from_a ||
+        wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(
+            127u * period) != 0u)
+    {
+        return false;
+    }
+
+    // All grouped rows share this one C partition.  Check the accessor over
+    // several complete cycles; the encode/constraint differential below
+    // independently verifies that every suffix row actually consumes it.
+    const uint32_t first_grouped_row =
+        wirehair_v2::kMixedGF256Rows - grouped_rows;
+    for (uint32_t block = 0u; block < 3u * period; ++block)
+    {
+        const uint32_t column = block * period + block % period;
+        uint32_t expected_residue = column % period +
+            wirehair_v2::ActiveMixedGroupedGF256ResidueBlockShift(block);
+        if (expected_residue >= period) expected_residue -= period;
+        for (uint32_t row = first_grouped_row;
+             row < wirehair_v2::kMixedGF256Rows; ++row)
+        {
+            (void)row;
+            if (wirehair_v2::
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        column, UINT32_MAX) != expected_residue)
+            {
+                return false;
+            }
+        }
+    }
+
+    // C is used only before the completion corner.  Spot-check the complete
+    // supported K range endpoints and a large transition-size system.
+    static const uint32_t kBlockCounts[] = {2u, 4096u, 64000u};
+    for (uint32_t K : kBlockCounts)
+    {
+        const wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(
+                K, UINT64_C(0x67726f7570656400) ^ K);
+        const uint32_t first_heavy_column =
+            K + params.Staircase + params.DenseRows;
+        for (uint32_t j = 0u; j < H; ++j)
+        {
+            const uint32_t column = first_heavy_column + j;
+            if (wirehair_v2::
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        column, first_heavy_column) !=
+                wirehair_v2::ActiveMixedCoefficientResidue(column))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool TestGroupedMixedResidueSchedule()
+{
+    static const uint32_t kPeriods[] = {32u, 48u, 64u, 96u};
+    static const uint32_t kGroupedRows[] = {1u, 5u, 9u};
+    for (uint32_t period : kPeriods)
+    {
+        uint32_t selected_seed = 0u;
+        for (uint32_t grouped_rows : kGroupedRows)
+        {
+            if (!CheckGroupedMixedResidueScheduleCase(
+                    period, grouped_rows, selected_seed))
+            {
+                std::fprintf(stderr,
+                    "grouped mixed residue invariant failed P=%u r=%u\n",
+                    period, grouped_rows);
+                return false;
+            }
+        }
+    }
+
+    // A zero-row selection must restore the exact canonical equation and
+    // accounting stream even after a nonzero C schedule was active.
+    MixedCoefficientGeometryScope geometry_scope(
+        wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+    MixedGF16RowsScope extension_scope(wirehair_v2::kMixedGF16Rows);
+    MixedCoefficientPeriodScope period_scope(32u);
+    MixedGF256RowsScope subfield_scope(wirehair_v2::kMixedGF256Rows);
+    MixedResidueSkewScope skew_scope(0u);
+    MixedResidueScheduleScope schedule_scope(
+        wirehair_v2::MixedResidueSchedule::Constant);
+    MixedIndependentExtensionResiduesScope independent_scope(false);
+    MixedResidueBucketModeScope bucket_scope(
+        wirehair_v2::MixedResidueBucketMode::Automatic);
+    MixedGroupedGF256RowsScope grouped_scope(0u);
+    if (!geometry_scope.IsValid() || !extension_scope.IsValid() ||
+        !period_scope.IsValid() || !subfield_scope.IsValid() ||
+        !skew_scope.IsValid() || !schedule_scope.IsValid() ||
+        !independent_scope.IsValid() || !bucket_scope.IsValid() ||
+        !grouped_scope.IsValid())
+    {
+        return false;
+    }
+
+    const uint32_t K = 500u;
+    const uint32_t block_bytes = 16u;
+    wirehair_v2::PrecodeParams params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0x67726f7570306964));
+    params.DenseIdentityCorner = true;
+    wirehair_v2::PrecodeSystem system;
+    if (!BuildPrecodeSystem(params, system)) return false;
+    const uint32_t parity_count =
+        params.Staircase + params.DenseRows + params.HeavyRows;
+    const uint32_t L = K + parity_count;
+    const uint32_t first_heavy_column = L - params.HeavyRows;
+    std::vector<uint8_t> source((size_t)K * block_bytes);
+    std::vector<uint8_t> canonical((size_t)parity_count * block_bytes);
+    std::vector<uint8_t> grouped(canonical.size());
+    std::vector<uint8_t> restored(canonical.size());
+    FillRandomBlocks(
+        source.data(), source.size(), UINT64_C(0x67726f7570307372));
+    wirehair_v2::PrecodeEncodeStats canonical_stats;
+    wirehair_v2::PrecodeEncodeStats grouped_stats;
+    wirehair_v2::PrecodeEncodeStats restored_stats;
+    if (wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ||
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed() != 0u ||
+        !wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes,
+            canonical.data(), &canonical_stats))
+    {
+        std::fprintf(stderr,
+            "grouped mixed canonical r0 encode failed\n");
+        return false;
+    }
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(5u) ||
+        !wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes,
+            grouped.data(), &grouped_stats) ||
+        !VerifyValues(
+            system, source.data(), grouped.data(), block_bytes,
+            "grouped mixed r5"))
+    {
+        std::fprintf(stderr,
+            "grouped mixed active C encode/oracle failed\n");
+        return false;
+    }
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(0u) ||
+        wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ||
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed() != 0u ||
+        !wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes,
+            restored.data(), &restored_stats) ||
+        canonical != restored ||
+        !EncodeStatsEqual(canonical_stats, restored_stats) ||
+        !VerifyValues(
+            system, source.data(), restored.data(), block_bytes,
+            "grouped mixed r0 restored"))
+    {
+        std::fprintf(stderr,
+            "grouped mixed zero-row identity/restore failed\n");
+        return false;
+    }
+    for (uint32_t column = 0u; column < L; ++column)
+    {
+        if (wirehair_v2::ActiveMixedGroupedGF256CoefficientResidue(
+                column, first_heavy_column) !=
+            wirehair_v2::ActiveMixedCoefficientResidue(column))
+        {
+            std::fprintf(stderr,
+                "grouped mixed r0 residue identity failed column=%u\n",
+                column);
+            return false;
+        }
+    }
+
+    if (wirehair_v2::SetMixedGroupedGF256RowsForTesting(10u) ||
+        wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u)
+    {
+        std::fprintf(stderr,
+            "grouped mixed invalid row count was accepted\n");
+        return false;
+    }
+    std::printf(
+        "grouped mixed C schedule/r0 identity/corner invariants: PASS\n");
+    return true;
+}
+
 bool TestMixedCompletionForPeriod(
     uint32_t period,
     wirehair_v2::MixedCoefficientGeometry geometry,
@@ -1311,7 +1622,8 @@ bool TestMixedCompletionForPeriod(
     bool independent_extension_residues = false,
     uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
     wirehair_v2::MixedResidueBucketMode bucket_mode =
-        wirehair_v2::MixedResidueBucketMode::Automatic)
+        wirehair_v2::MixedResidueBucketMode::Automatic,
+    uint32_t grouped_gf256_rows = 0u)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1325,22 +1637,28 @@ bool TestMixedCompletionForPeriod(
     MixedIndependentExtensionResiduesScope independent_scope(
         independent_extension_residues);
     MixedResidueBucketModeScope bucket_mode_scope(bucket_mode);
+    // This experiment setter validates the complete H12/A-schedule state,
+    // so configure it after every other mixed coefficient scope.  It is also
+    // destroyed first, before those prerequisite scopes begin restoring.
+    MixedGroupedGF256RowsScope grouped_scope(grouped_gf256_rows);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
         !schedule_scope.IsValid() || !independent_scope.IsValid() ||
-        !bucket_mode_scope.IsValid())
+        !bucket_mode_scope.IsValid() || !grouped_scope.IsValid())
     {
         std::fprintf(stderr,
             "mixed completion: invalid test scope g=%u s=%u r=%u p=%u "
-            "k=%u q=%u i=%u\n",
+            "k=%u q=%u i=%u b=%u c=%u\n",
             geometry_scope.IsValid() ? 1u : 0u,
             subfield_scope.IsValid() ? 1u : 0u,
             rows_scope.IsValid() ? 1u : 0u,
             period_scope.IsValid() ? 1u : 0u,
             skew_scope.IsValid() ? 1u : 0u,
             schedule_scope.IsValid() ? 1u : 0u,
-            independent_scope.IsValid() ? 1u : 0u);
+            independent_scope.IsValid() ? 1u : 0u,
+            bucket_mode_scope.IsValid() ? 1u : 0u,
+            grouped_scope.IsValid() ? 1u : 0u);
         return false;
     }
     // Exercise the exact production geometry (default full-span dense
@@ -1422,19 +1740,22 @@ bool TestMixedCompletionForPeriod(
                 wirehair_v2::ActiveMixedCoefficientPeriod();
             const bool bucketed =
                 heavy_base >= 2u * coefficient_period;
+            const bool two_residue_schedules =
+                independent_extension_residues ||
+                grouped_gf256_rows != 0u;
             const bool joint_bucketed =
-                bucketed && independent_extension_residues &&
+                bucketed && two_residue_schedules &&
                 bucket_mode ==
                     wirehair_v2::MixedResidueBucketMode::JointDelta;
             const bool dual_bucketed =
-                bucketed && independent_extension_residues &&
+                bucketed && two_residue_schedules &&
                 bucket_mode ==
                     wirehair_v2::MixedResidueBucketMode::Dual;
             const uint64_t residues = bucketed ?
                 coefficient_period : heavy_base;
             const uint64_t separate_bucket_xors = bucketed ?
                 (uint64_t)heavy_base *
-                    (independent_extension_residues ? 2u : 1u) :
+                    (two_residue_schedules ? 2u : 1u) :
                 0u;
             const bool joint_stats_ok = !joint_bucketed ||
                 (full_stats.MixedJointSourceXors == heavy_base &&
@@ -1549,13 +1870,16 @@ bool TestMixedCompletionForPeriod(
     std::printf(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
-        "independent_extension=%u bucket_mode=%u: "
+        "independent_extension=%u bucket_mode=%u grouped_gf256_rows=%u "
+        "grouped_hash_seed=0x%x: "
         "PASS\n",
         period, MixedGeometryName(geometry), subfield_rows, extension_rows,
         residue_skew,
         (uint32_t)residue_schedule,
         independent_extension_residues ? 1u : 0u,
-        (uint32_t)bucket_mode);
+        (uint32_t)bucket_mode,
+        grouped_gf256_rows,
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed());
     return true;
 }
 
@@ -1658,7 +1982,37 @@ bool TestMixedCompletion()
             wirehair_v2::MixedResidueSchedule::Hashed,
             true,
             wirehair_v2::kMixedGF256Rows + 1u,
-            wirehair_v2::MixedResidueBucketMode::JointDelta))
+            wirehair_v2::MixedResidueBucketMode::JointDelta) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Separate,
+            1u) ||
+        !TestMixedCompletionForPeriod(
+            64u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Dual,
+            5u) ||
+        !TestMixedCompletionForPeriod(
+            96u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::JointDelta,
+            9u))
     {
         return false;
     }
@@ -3273,6 +3627,7 @@ int main(int argc, char** argv)
     ok = TestHeavyResidueDispatch() && ok;
     ok = TestMixedCornerRank() && ok;
     ok = TestIndependentMixedCornerAcrossK() && ok;
+    ok = TestGroupedMixedResidueSchedule() && ok;
     ok = TestMixedCompletion() && ok;
     ok = TestAutomaticMixedJointBucketPolicy() && ok;
     ok = TestRecoveryBlockEncoding() && ok;

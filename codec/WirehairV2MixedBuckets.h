@@ -91,14 +91,18 @@ struct MixedJointResidueBuckets
 };
 
 // Accumulate the two independently rotated P-bucket marginals through one
-// temporary P-bucket plane per active B-A block-shift delta.  `source_at`
+// temporary P-bucket plane per active secondary-minus-A block-shift delta.
+// The secondary schedule is B for the independent-extension path and C for
+// grouped GF(256) rows.  `source_at`
 // returns the value of one column and `is_active` excludes decoder-inactive
 // columns.  Complete and partial final P-column blocks share the same path.
-template<class SourceAt, class IsActive>
-bool AccumulateMixedJointResidueBuckets(
+template<class ShiftAAt, class ShiftBAt, class SourceAt, class IsActive>
+bool AccumulateMixedJointResidueBucketsWithShifts(
     uint32_t column_count,
     uint32_t coefficient_period,
     uint32_t block_bytes,
+    ShiftAAt shift_a_at,
+    ShiftBAt shift_b_at,
     SourceAt source_at,
     IsActive is_active,
     bool batch_sources,
@@ -127,9 +131,8 @@ bool AccumulateMixedJointResidueBuckets(
     std::vector<uint32_t> block_deltas(block_count);
     for (uint32_t block = 0u; block < block_count; ++block)
     {
-        const uint32_t a_shift = ActiveMixedResidueBlockShift(block);
-        const uint32_t b_shift =
-            ActiveMixedExtensionResidueBlockShift(block);
+        const uint32_t a_shift = shift_a_at(block);
+        const uint32_t b_shift = shift_b_at(block);
         if (a_shift >= coefficient_period || b_shift >= coefficient_period) {
             return false;
         }
@@ -283,6 +286,35 @@ bool AccumulateMixedJointResidueBuckets(
         marginals_initialized = true;
     }
     return true;
+}
+
+// Production A/B wrapper.  Keeping the original interface centralizes the
+// experiment-only choice of a different second schedule in its callers and
+// leaves every existing call site and no-hooks instantiation unchanged.
+template<class SourceAt, class IsActive>
+bool AccumulateMixedJointResidueBuckets(
+    uint32_t column_count,
+    uint32_t coefficient_period,
+    uint32_t block_bytes,
+    SourceAt source_at,
+    IsActive is_active,
+    bool batch_sources,
+    MixedJointResidueBuckets& output)
+{
+    return AccumulateMixedJointResidueBucketsWithShifts(
+        column_count,
+        coefficient_period,
+        block_bytes,
+        [](uint32_t block) {
+            return ActiveMixedResidueBlockShift(block);
+        },
+        [](uint32_t block) {
+            return ActiveMixedExtensionResidueBlockShift(block);
+        },
+        source_at,
+        is_active,
+        batch_sources,
+        output);
 }
 
 } // namespace wirehair_v2

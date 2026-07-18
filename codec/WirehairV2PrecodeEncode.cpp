@@ -380,15 +380,22 @@ bool ComputePrecodeValues(
     {
         const uint32_t subfield_rows = ActiveMixedGF256Rows();
         const uint32_t extension_rows = ActiveMixedGF16Rows();
+        const uint32_t grouped_gf256_rows =
+            ActiveMixedGroupedGF256Rows();
+        const bool independent_extension_residues =
+            ActiveMixedIndependentExtensionResidues();
         if (H != subfield_rows + extension_rows ||
+            grouped_gf256_rows > subfield_rows ||
+            (grouped_gf256_rows != 0u &&
+             independent_extension_residues) ||
             !InitializeGF16())
         {
             return false;
         }
+        const uint32_t first_grouped_gf256_row =
+            subfield_rows - grouped_gf256_rows;
         const uint32_t window = ActiveMixedCoefficientPeriod();
         const bool rotate_residues = ActiveMixedResiduesRotated();
-        const bool independent_extension_residues =
-            ActiveMixedIndependentExtensionResidues();
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
@@ -434,6 +441,35 @@ bool ComputePrecodeValues(
                 (int)subfield_rows, value, bytes);
             st.HeavyMulAdds += subfield_rows;
 
+            return true;
+        };
+
+        const auto accumulate_primary_subfield_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            for (uint32_t r = 0u;
+                 r < first_grouped_gf256_row; ++r)
+            {
+                gf8_scales[r] = gf8_coefficient_rows[r][m];
+            }
+            gf256_muladd_multi_mem(
+                gf8_destinations, gf8_scales,
+                (int)first_grouped_gf256_row, value, bytes);
+            st.HeavyMulAdds += first_grouped_gf256_row;
+            return true;
+        };
+
+        const auto accumulate_grouped_subfield_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            for (uint32_t r = 0u; r < grouped_gf256_rows; ++r) {
+                gf8_scales[r] = gf8_coefficient_rows[
+                    first_grouped_gf256_row + r][m];
+            }
+            gf256_muladd_multi_mem(
+                gf8_destinations + first_grouped_gf256_row,
+                gf8_scales, (int)grouped_gf256_rows, value, bytes);
+            st.HeavyMulAdds += grouped_gf256_rows;
             return true;
         };
 
@@ -484,6 +520,10 @@ bool ComputePrecodeValues(
         const auto accumulate_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
         {
+            if (grouped_gf256_rows != 0u) {
+                return accumulate_primary_subfield_residue(m, value) &&
+                    accumulate_extension_residue(m, value);
+            }
             return accumulate_subfield_residue(m, value) &&
                 (independent_extension_residues ||
                  accumulate_extension_residue(m, value));
@@ -494,9 +534,11 @@ bool ComputePrecodeValues(
             use_residue_buckets &&
             (uint64_t)window * block_bytes <=
                 GetHeavyBucketStorageLimit();
-        bool independent_buckets_accumulated = false;
+        bool secondary_buckets_accumulated = false;
+        const bool secondary_schedule =
+            independent_extension_residues || grouped_gf256_rows != 0u;
         const bool automatic_joint_delta_buckets =
-            independent_extension_residues &&
+            secondary_schedule &&
             UseAutomaticMixedJointResidueBuckets(
                 system.Params.BlockCount, block_bytes, window);
         bool request_joint_delta_buckets =
@@ -511,22 +553,35 @@ bool ComputePrecodeValues(
             (bucket_mode == MixedResidueBucketMode::Automatic &&
              automatic_joint_delta_buckets);
         use_dual_buckets =
-            independent_extension_residues && use_residue_buckets &&
+            secondary_schedule && use_residue_buckets &&
             bucket_mode == MixedResidueBucketMode::Dual &&
             one_plane_bytes <= UINT64_MAX / 2u &&
             one_plane_bytes * 2u <= GetHeavyBucketStorageLimit();
 #endif
         const bool use_joint_delta_buckets =
-            independent_extension_residues && use_residue_buckets &&
+            secondary_schedule && use_residue_buckets &&
             request_joint_delta_buckets &&
             MixedJointResidueBucketStorageFits(
                 window, block_bytes, GetHeavyBucketStorageLimit());
         if (use_joint_delta_buckets)
         {
             MixedJointResidueBuckets buckets;
-            if (!AccumulateMixedJointResidueBuckets(
+            const bool buckets_ok = grouped_gf256_rows != 0u ?
+                AccumulateMixedJointResidueBucketsWithShifts(
+                    heavy_base, window, block_bytes,
+                    [](uint32_t block) {
+                        return ActiveMixedResidueBlockShift(block);
+                    },
+                    [](uint32_t block) {
+                        return ActiveMixedGroupedGF256ResidueBlockShift(
+                            block);
+                    },
+                    column_value, [](uint32_t) { return true; },
+                    false, buckets) :
+                AccumulateMixedJointResidueBuckets(
                     heavy_base, window, block_bytes, column_value,
-                    [](uint32_t) { return true; }, false, buckets))
+                    [](uint32_t) { return true; }, false, buckets);
+            if (!buckets_ok)
             {
                 return false;
             }
@@ -541,19 +596,24 @@ bool ComputePrecodeValues(
 #endif
             for (uint32_t m = 0u; m < window; ++m)
             {
-                if (!accumulate_subfield_residue(
-                        m,
-                        buckets.Subfield.get() +
-                            (size_t)m * block_bytes) ||
-                    !accumulate_extension_residue(
-                        m,
-                        buckets.Extension.get() +
-                            (size_t)m * block_bytes))
+                const uint8_t* const primary_bucket =
+                    buckets.Subfield.get() + (size_t)m * block_bytes;
+                const uint8_t* const secondary_bucket =
+                    buckets.Extension.get() + (size_t)m * block_bytes;
+                const bool accumulated = grouped_gf256_rows != 0u ?
+                    accumulate_primary_subfield_residue(
+                        m, primary_bucket) &&
+                    accumulate_extension_residue(m, primary_bucket) &&
+                    accumulate_grouped_subfield_residue(
+                        m, secondary_bucket) :
+                    accumulate_subfield_residue(m, primary_bucket) &&
+                    accumulate_extension_residue(m, secondary_bucket);
+                if (!accumulated)
                 {
                     return false;
                 }
             }
-            independent_buckets_accumulated = true;
+            secondary_buckets_accumulated = true;
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (use_dual_buckets)
@@ -570,30 +630,38 @@ bool ComputePrecodeValues(
                     column_value(c), bytes);
                 gf256_add_mem(
                     extension_buckets.data() +
-                        (size_t)ActiveMixedExtensionCoefficientResidue(c) *
-                            block_bytes,
+                        (size_t)(grouped_gf256_rows != 0u ?
+                            ActiveMixedGroupedGF256CoefficientResidue(
+                                c, heavy_base) :
+                            ActiveMixedExtensionCoefficientResidue(c)) *
+                        block_bytes,
                     column_value(c), bytes);
                 st.HeavyBucketXors += 2u;
             }
             st.MixedDualSourceColumns = heavy_base;
             for (uint32_t m = 0u; m < window; ++m)
             {
-                if (!accumulate_subfield_residue(
-                        m,
-                        subfield_buckets.data() +
-                            (size_t)m * block_bytes) ||
-                    !accumulate_extension_residue(
-                        m,
-                        extension_buckets.data() +
-                            (size_t)m * block_bytes))
+                const uint8_t* const primary_bucket =
+                    subfield_buckets.data() + (size_t)m * block_bytes;
+                const uint8_t* const secondary_bucket =
+                    extension_buckets.data() + (size_t)m * block_bytes;
+                const bool accumulated = grouped_gf256_rows != 0u ?
+                    accumulate_primary_subfield_residue(
+                        m, primary_bucket) &&
+                    accumulate_extension_residue(m, primary_bucket) &&
+                    accumulate_grouped_subfield_residue(
+                        m, secondary_bucket) :
+                    accumulate_subfield_residue(m, primary_bucket) &&
+                    accumulate_extension_residue(m, secondary_bucket);
+                if (!accumulated)
                 {
                     return false;
                 }
             }
-            independent_buckets_accumulated = true;
+            secondary_buckets_accumulated = true;
         }
 #endif
-        if (!independent_buckets_accumulated && use_full_bucket_storage)
+        if (!secondary_buckets_accumulated && use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
             if (!rotate_residues)
@@ -635,7 +703,7 @@ bool ComputePrecodeValues(
                 }
             }
         }
-        else if (!independent_buckets_accumulated && use_residue_buckets)
+        else if (!secondary_buckets_accumulated && use_residue_buckets)
         {
             std::vector<uint8_t> bucket(block_bytes, 0u);
             for (uint32_t m = 0; m < window; ++m)
@@ -669,7 +737,7 @@ bool ComputePrecodeValues(
                 if (!accumulate_residue(m, bucket.data())) return false;
             }
         }
-        else if (!independent_buckets_accumulated)
+        else if (!secondary_buckets_accumulated)
         {
             if (!rotate_residues)
             {
@@ -699,7 +767,7 @@ bool ComputePrecodeValues(
         }
 
         if (independent_extension_residues &&
-            !independent_buckets_accumulated)
+            !secondary_buckets_accumulated)
         {
             if (use_full_bucket_storage)
             {
@@ -762,6 +830,74 @@ bool ComputePrecodeValues(
                 }
             }
         }
+        if (grouped_gf256_rows != 0u &&
+            !secondary_buckets_accumulated)
+        {
+            if (use_full_bucket_storage)
+            {
+                std::vector<uint8_t> bucket(
+                    (size_t)window * block_bytes, uint8_t{0});
+                for (uint32_t c = 0u; c < heavy_base; ++c)
+                {
+                    const uint32_t m =
+                        ActiveMixedGroupedGF256CoefficientResidue(
+                            c, heavy_base);
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                for (uint32_t m = 0u; m < window; ++m) {
+                    if (!accumulate_grouped_subfield_residue(
+                            m, bucket.data() + (size_t)m * block_bytes))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (use_residue_buckets)
+            {
+                std::vector<uint8_t> bucket(block_bytes, uint8_t{0});
+                for (uint32_t m = 0u; m < window; ++m)
+                {
+                    std::fill(
+                        bucket.begin(), bucket.end(), uint8_t{0});
+                    uint32_t block_index = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < heavy_base;
+                         block_base += window)
+                    {
+                        const uint32_t block_shift =
+                            ActiveMixedGroupedGF256ResidueBlockShift(
+                                block_index++);
+                        const uint32_t unshifted = m >= block_shift ?
+                            m - block_shift : m + window - block_shift;
+                        const uint32_t c = block_base + unshifted;
+                        if (c >= heavy_base) continue;
+                        gf256_add_mem(
+                            bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                    if (!accumulate_grouped_subfield_residue(
+                            m, bucket.data()))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                for (uint32_t c = 0u; c < heavy_base; ++c) {
+                    if (!accumulate_grouped_subfield_residue(
+                            ActiveMixedGroupedGF256CoefficientResidue(
+                                c, heavy_base),
+                            column_value(c)))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
 
         // Convert the active GF(256) row RHS blocks once, after their fast
         // interleaved accumulation.  The extension rows are already in
@@ -792,8 +928,10 @@ bool ComputePrecodeValues(
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
                     gf16_coefficient_rows[er][
-                        ActiveMixedExtensionCoefficientResidue(
-                            heavy_base + j)];
+                        grouped_gf256_rows != 0u ?
+                            ActiveMixedCoefficientResidue(heavy_base + j) :
+                            ActiveMixedExtensionCoefficientResidue(
+                                heavy_base + j)];
             }
         }
 

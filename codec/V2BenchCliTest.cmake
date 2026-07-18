@@ -157,9 +157,46 @@ expect_success("v2_mixed[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
 expect_success("v2_mixed_cached[ ]+8[ ]+1[ ]+0" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode-cache --precode-profile mixed)
-expect_success("mixed_period=64" compare --nlo 64 --nhi 64 --trials 1
+expect_success(
+    "mixed_period=64.*mixed_grouped_gf256_rows=0 mixed_grouped_gf256_hash_seed=0x0 mixed_grouped_final_h_a_columns=0"
+    compare --nlo 64 --nhi 64 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-period 64)
+foreach(grouped_period IN ITEMS 32 48 64 96)
+    expect_success(
+        "mixed_grouped_gf256_rows=3 mixed_grouped_gf256_hash_seed=0x[1-9a-fA-F][0-9a-fA-F]* mixed_grouped_final_h_a_columns=12"
+        compare --nlo 64 --nhi 64 --trials 1 --bb-list 8
+        --max-message-mib 1 --loss 0 --precode --precode-profile mixed
+        --mixed-period ${grouped_period} --mixed-geometry shared-x
+        --mixed-grouped-gf256-rows 3)
+endforeach()
+expect_success(
+    "mixed_grouped_gf256_rows=1.*mixed_residue_buckets_requested=joint-delta"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 8
+    --max-message-mib 1 --loss 0 --precode --precode-profile mixed
+    --mixed-period 32 --mixed-geometry shared-x
+    --mixed-grouped-gf256-rows 1 --mixed-residue-buckets joint-delta)
+expect_failure("mixed experiment flags require a mixed precode profile" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile certified
+    --mixed-grouped-gf256-rows 0)
+expect_failure("--mixed-grouped-gf256-rows must be in" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-period 32
+    --mixed-geometry shared-x --mixed-grouped-gf256-rows 10)
+expect_failure("nonzero grouping requires shared-x" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-period 32
+    --mixed-grouped-gf256-rows 3)
+expect_failure("nonzero grouping requires shared-x constant-A" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed --mixed-period 32
+    --mixed-geometry shared-x --mixed-residue-schedule hashed
+    --mixed-grouped-gf256-rows 3)
+expect_failure("--mixed-grouped-gf256-rows requires a value" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0 --precode --precode-profile mixed
+    --mixed-grouped-gf256-rows)
 expect_failure("mixed experiment flags require a mixed precode profile" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode --precode-profile certified --mixed-period 64)
@@ -825,6 +862,32 @@ expect_success("mixed_extension_residue_seed_xor=0x17" precodefail
     --mixed-residue-hash-seed 7 --mixed-residue-hash-keyed
     --mixed-independent-extension-residues
     --mixed-extension-residue-seed-xor 23)
+run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 12
+    --trials 2 --threads 2 --loss 0.1 --completion mixed --mix-count 2
+    --payload-e2e --mixed-null-witnesses --mixed-period 32
+    --mixed-geometry shared-x --mixed-grouped-gf256-rows 9
+    --mixed-residue-buckets dual)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES
+        "mixed_grouped_gf256_rows=9 mixed_grouped_gf256_hash_seed=0x[1-9a-fA-F][0-9a-fA-F]* mixed_grouped_final_h_a_columns=12.*mixed_residue_buckets_requested=dual" OR
+    NOT out MATCHES
+        "mixed_null_witness,v=2.*grouped_gf256_rows=9,grouped_first_row=1,grouped_hash_seed=0x[1-9a-fA-F][0-9a-fA-F]*,grouped_final_h_a_columns=12")
+    message(FATAL_ERROR
+        "grouped GF256 precodefail/null receipt failed\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "grouped GF256 precodefail/null receipt")
+expect_failure("nonzero grouping requires shared-x constant-A" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-period 32 --mixed-geometry shared-x
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
+    --mixed-independent-extension-residues --mixed-grouped-gf256-rows 3)
+expect_failure("mixed experiment flags require --completion mixed" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion certified --mixed-grouped-gf256-rows 0)
+expect_failure("--mixed-grouped-gf256-rows requires a value" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --mixed-grouped-gf256-rows)
 expect_failure("--mixed-extension-residue-seed-xor requires" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 32

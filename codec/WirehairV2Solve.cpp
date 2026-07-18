@@ -1135,14 +1135,18 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         PackedWordCount(inactive_count);
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
+    const uint32_t extension_rows = ActiveMixedGF16Rows();
+    const uint32_t grouped_gf256_rows = ActiveMixedGroupedGF256Rows();
+    const uint32_t H = subfield_rows + extension_rows;
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
     const uint64_t projected_elements =
         (uint64_t)inactive_count * packed_words;
-    if (coefficient_period < subfield_rows + ActiveMixedGF16Rows() ||
+    if (coefficient_period < H || column_count < H ||
         coefficient_period > kMixedCoefficientPeriod ||
+        grouped_gf256_rows > subfield_rows ||
         inactive_index.size() != column_count ||
         projection_words != expected_projection_words ||
         projection_words == 0u ||
@@ -1152,6 +1156,9 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         return false;
     }
+    const uint32_t first_grouped_gf256_row =
+        subfield_rows - grouped_gf256_rows;
+    const uint32_t first_heavy_column = column_count - H;
 
     projected.assign((size_t)projected_elements, uint64_t{0});
     const auto xor_projected = [&](uint32_t index,
@@ -1166,6 +1173,36 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
 #endif
     };
 
+    const bool independent_extension_residues =
+        ActiveMixedIndependentExtensionResidues();
+    const bool secondary_schedule =
+        independent_extension_residues || grouped_gf256_rows != 0u;
+    if (independent_extension_residues && grouped_gf256_rows != 0u) {
+        return false;
+    }
+    uint64_t primary_masks[kMixedPackedCoefficientWords] = {};
+    uint64_t secondary_masks[kMixedPackedCoefficientWords] = {};
+    if (secondary_schedule)
+    {
+        for (uint32_t row = 0u; row < subfield_rows; ++row)
+        {
+            uint64_t* const masks =
+                grouped_gf256_rows != 0u &&
+                row >= first_grouped_gf256_row ?
+                    secondary_masks : primary_masks;
+            masks[row >> 2] |=
+                UINT64_C(0xffff) << ((row & 3u) * 16u);
+        }
+        for (uint32_t er = 0u; er < extension_rows; ++er)
+        {
+            const uint32_t row = subfield_rows + er;
+            uint64_t* const masks = independent_extension_residues ?
+                secondary_masks : primary_masks;
+            masks[row >> 2] |=
+                UINT64_C(0xffff) << ((row & 3u) * 16u);
+        }
+    }
+
     // At or below one complete coefficient period, no two columns share a
     // coefficient vector.  Retain the direct expansion so tiny systems pay no
     // bucket setup cost.
@@ -1173,8 +1210,30 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         for (uint32_t column = 0; column < column_count; ++column)
         {
-            const uint64_t* coefficients =
-                cached_packed.ByResidue[column];
+            uint64_t combined_coefficients[
+                kMixedPackedCoefficientWords] = {};
+            const uint64_t* coefficients = cached_packed.ByResidue[
+                ActiveMixedCoefficientResidue(column)];
+            // Preserve the established one-period independent-extension
+            // solve path exactly.  Grouped GF(256) still composes A/C masks
+            // explicitly even though both schedules currently start at zero;
+            // that keeps the row partition and corner override invariant
+            // visible instead of relying on today's block-zero coincidence.
+            if (grouped_gf256_rows != 0u)
+            {
+                const uint32_t secondary_residue =
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        column, first_heavy_column);
+                const uint64_t* secondary_coefficients =
+                    cached_packed.ByResidue[secondary_residue];
+                for (uint32_t word = 0u; word < packed_words; ++word) {
+                    combined_coefficients[word] =
+                        (coefficients[word] & primary_masks[word]) |
+                        (secondary_coefficients[word] &
+                            secondary_masks[word]);
+                }
+                coefficients = combined_coefficients;
+            }
             const uint32_t inactive = inactive_index[column];
             if (inactive != UINT32_MAX)
             {
@@ -1217,38 +1276,24 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     // words rather than L*ceil(R/64).
     std::vector<uint64_t> residue_projection(
         (size_t)coefficient_period * projection_words, uint64_t{0});
-    const bool independent_extension_residues =
-        ActiveMixedIndependentExtensionResidues();
-    std::vector<uint64_t> extension_residue_projection(
-        independent_extension_residues ?
+    std::vector<uint64_t> secondary_residue_projection(
+        secondary_schedule ?
             (size_t)coefficient_period * projection_words : 0u,
         uint64_t{0});
-
-    uint64_t subfield_masks[kMixedPackedCoefficientWords] = {};
-    uint64_t extension_masks[kMixedPackedCoefficientWords] = {};
-    if (independent_extension_residues)
-    {
-        for (uint32_t row = 0u; row < subfield_rows; ++row) {
-            subfield_masks[row >> 2] |=
-                UINT64_C(0xffff) << ((row & 3u) * 16u);
-        }
-        for (uint32_t er = 0u; er < ActiveMixedGF16Rows(); ++er)
-        {
-            const uint32_t row = subfield_rows + er;
-            extension_masks[row >> 2] |=
-                UINT64_C(0xffff) << ((row & 3u) * 16u);
-        }
-    }
 
     const bool rotate_residues = ActiveMixedResiduesRotated();
     const auto accumulate_column = [&](uint32_t column, uint32_t residue) {
         uint64_t* bucket = residue_projection.data() +
             (size_t)residue * projection_words;
-        uint64_t* extension_bucket = nullptr;
-        if (independent_extension_residues) {
-            extension_bucket = extension_residue_projection.data() +
-                (size_t)ActiveMixedExtensionCoefficientResidue(column) *
-                    projection_words;
+        uint64_t* secondary_bucket = nullptr;
+        if (secondary_schedule) {
+            const uint32_t secondary_residue =
+                independent_extension_residues ?
+                    ActiveMixedExtensionCoefficientResidue(column) :
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        column, first_heavy_column);
+            secondary_bucket = secondary_residue_projection.data() +
+                (size_t)secondary_residue * projection_words;
         }
         const uint32_t inactive = inactive_index[column];
         if (inactive != UINT32_MAX)
@@ -1258,8 +1303,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             }
             bucket[inactive >> 6] ^=
                 UINT64_C(1) << (inactive & 63u);
-            if (extension_bucket) {
-                extension_bucket[inactive >> 6] ^=
+            if (secondary_bucket) {
+                secondary_bucket[inactive >> 6] ^=
                     UINT64_C(1) << (inactive & 63u);
             }
         }
@@ -1269,8 +1314,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 projection.data() + (size_t)column * projection_words;
             for (uint32_t word = 0; word < projection_words; ++word) {
                 bucket[word] ^= bits[word];
-                if (extension_bucket) {
-                    extension_bucket[word] ^= bits[word];
+                if (secondary_bucket) {
+                    secondary_bucket[word] ^= bits[word];
                 }
             }
         }
@@ -1335,7 +1380,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                 const uint32_t index = (word_index << 6) + bit;
                 if (index < inactive_count)
                 {
-                    if (!independent_extension_residues) {
+                    if (!secondary_schedule) {
                         xor_projected(index, coefficients);
                     }
                     else
@@ -1346,8 +1391,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                              packed < packed_words; ++packed)
                         {
                             destination[packed] ^=
-                                coefficients[packed] &
-                                subfield_masks[packed];
+                                coefficients[packed] & primary_masks[packed];
                         }
                     }
                 }
@@ -1355,14 +1399,14 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             }
         }
     }
-    if (independent_extension_residues)
+    if (secondary_schedule)
     {
         for (uint32_t residue = 0u;
              residue < populated_residues; ++residue)
         {
             const uint64_t* coefficients =
                 cached_packed.ByResidue[residue];
-            const uint64_t* bucket = extension_residue_projection.data() +
+            const uint64_t* bucket = secondary_residue_projection.data() +
                 (size_t)residue * projection_words;
             for (uint32_t word_index = 0u;
                  word_index < projection_words; ++word_index)
@@ -1381,8 +1425,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                              packed < packed_words; ++packed)
                         {
                             destination[packed] ^=
-                                coefficients[packed] &
-                                extension_masks[packed];
+                                coefficients[packed] & secondary_masks[packed];
                         }
                     }
                     word &= word - 1u;
@@ -1418,28 +1461,47 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
     projected.assign((size_t)projected_elements, uint64_t{0});
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
-    if (coefficient_period < subfield_rows + ActiveMixedGF16Rows() ||
+    const uint32_t extension_rows = ActiveMixedGF16Rows();
+    const uint32_t grouped_gf256_rows = ActiveMixedGroupedGF256Rows();
+    const uint32_t H = subfield_rows + extension_rows;
+    if (coefficient_period < H || column_count < H ||
+        grouped_gf256_rows > subfield_rows ||
         coefficient_period > kMixedCoefficientPeriod)
     {
         return false;
     }
+    const uint32_t first_heavy_column = column_count - H;
     uint32_t block_index = 0u;
     uint32_t block_column = 0u;
     uint32_t residue = 0u;
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
-    uint64_t subfield_masks[kMixedPackedCoefficientWords] = {};
-    uint64_t extension_masks[kMixedPackedCoefficientWords] = {};
-    if (independent_extension_residues)
+    const bool secondary_schedule =
+        independent_extension_residues || grouped_gf256_rows != 0u;
+    if (independent_extension_residues && grouped_gf256_rows != 0u) {
+        return false;
+    }
+    const uint32_t first_grouped_gf256_row =
+        subfield_rows - grouped_gf256_rows;
+    uint64_t primary_masks[kMixedPackedCoefficientWords] = {};
+    uint64_t secondary_masks[kMixedPackedCoefficientWords] = {};
+    if (secondary_schedule)
     {
-        for (uint32_t row = 0u; row < subfield_rows; ++row) {
-            subfield_masks[row >> 2] |=
+        for (uint32_t row = 0u; row < subfield_rows; ++row)
+        {
+            uint64_t* const masks =
+                grouped_gf256_rows != 0u &&
+                row >= first_grouped_gf256_row ?
+                    secondary_masks : primary_masks;
+            masks[row >> 2] |=
                 UINT64_C(0xffff) << ((row & 3u) * 16u);
         }
-        for (uint32_t er = 0u; er < ActiveMixedGF16Rows(); ++er)
+        for (uint32_t er = 0u; er < extension_rows; ++er)
         {
             const uint32_t row = subfield_rows + er;
-            extension_masks[row >> 2] |=
+            uint64_t* const masks = independent_extension_residues ?
+                secondary_masks : primary_masks;
+            masks[row >> 2] |=
                 UINT64_C(0xffff) << ((row & 3u) * 16u);
         }
     }
@@ -1448,15 +1510,20 @@ bool ProjectMixedCompletionCoefficientsByDenseExpansion(
         uint64_t combined_coefficients[kMixedPackedCoefficientWords] = {};
         const uint64_t* column_coefficients =
             cached_packed.ByResidue[residue];
-        if (independent_extension_residues)
+        if (secondary_schedule)
         {
-            const uint64_t* extension_coefficients =
+            const uint32_t secondary_residue =
+                independent_extension_residues ?
+                    ActiveMixedExtensionCoefficientResidue(column) :
+                    ActiveMixedGroupedGF256CoefficientResidue(
+                        column, first_heavy_column);
+            const uint64_t* secondary_coefficients =
                 cached_packed.ByResidue[
-                    ActiveMixedExtensionCoefficientResidue(column)];
+                    secondary_residue];
             for (uint32_t word = 0u; word < packed_words; ++word) {
                 combined_coefficients[word] =
-                    (column_coefficients[word] & subfield_masks[word]) |
-                    (extension_coefficients[word] & extension_masks[word]);
+                    (column_coefficients[word] & primary_masks[word]) |
+                    (secondary_coefficients[word] & secondary_masks[word]);
             }
             column_coefficients = combined_coefficients;
         }
@@ -1738,6 +1805,261 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
     return true;
 }
 
+static WH2_MIXED_NOINLINE bool ApplyGroupedMixedCompletionBuckets(
+    uint32_t coefficient_period,
+    uint32_t populated_residues,
+    uint32_t subfield_rows,
+    uint32_t first_grouped_gf256_row,
+    uint32_t block_bytes,
+    uint32_t elements,
+    uint32_t extension_rows,
+    const MixedCoefficientRows& cached_rows,
+    void* const* subfield_destinations,
+    std::vector<uint8_t>& rhs_low,
+    std::vector<uint8_t>& rhs_high,
+    std::vector<uint8_t>& source_low,
+    std::vector<uint8_t>& source_high,
+    const uint8_t* primary_buckets,
+    const uint8_t* grouped_buckets,
+    PrecodeSolveStats& stats)
+{
+    if (first_grouped_gf256_row >= subfield_rows ||
+        extension_rows < 2u ||
+        populated_residues > coefficient_period)
+    {
+        return false;
+    }
+    const uint32_t grouped_gf256_rows =
+        subfield_rows - first_grouped_gf256_row;
+    uint8_t scales[kMixedGF256RowsMax];
+    for (uint32_t residue = 0u; residue < populated_residues; ++residue)
+    {
+        const uint8_t* const primary_bucket =
+            primary_buckets + (size_t)residue * block_bytes;
+        const uint8_t* const grouped_bucket =
+            grouped_buckets + (size_t)residue * block_bytes;
+        for (uint32_t row = 0u;
+             row < first_grouped_gf256_row; ++row)
+        {
+            scales[row] = cached_rows.Subfield[row][residue];
+        }
+        AddScaledBlocks(
+            subfield_destinations, scales,
+            first_grouped_gf256_row, primary_bucket,
+            block_bytes, stats);
+        for (uint32_t row = 0u; row < grouped_gf256_rows; ++row) {
+            scales[row] = cached_rows.Subfield[
+                first_grouped_gf256_row + row][residue];
+        }
+        AddScaledBlocks(
+            subfield_destinations + first_grouped_gf256_row,
+            scales, grouped_gf256_rows, grouped_bucket,
+            block_bytes, stats);
+
+        if (!GF16Deinterleave(
+                primary_bucket,
+                source_low.data(), source_high.data(), block_bytes))
+        {
+            return false;
+        }
+        const uint32_t row0 = subfield_rows;
+        const uint32_t row1 = row0 + 1u;
+        if (!GF16MulAddPlanar2(
+                rhs_low.data() + (size_t)row0 * elements,
+                rhs_high.data() + (size_t)row0 * elements,
+                cached_rows.Extension[0][residue],
+                rhs_low.data() + (size_t)row1 * elements,
+                rhs_high.data() + (size_t)row1 * elements,
+                cached_rows.Extension[1][residue],
+                source_low.data(), source_high.data(), elements))
+        {
+            return false;
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        for (uint32_t er = 2u; er < extension_rows; ++er)
+        {
+            const uint32_t row = subfield_rows + er;
+            if (!GF16MulAddPlanar(
+                    rhs_low.data() + (size_t)row * elements,
+                    rhs_high.data() + (size_t)row * elements,
+                    cached_rows.Extension[er][residue],
+                    source_low.data(), source_high.data(), elements))
+            {
+                return false;
+            }
+        }
+#endif
+        stats.BlockMulAdds += extension_rows;
+    }
+    return true;
+}
+
+static WH2_MIXED_NOINLINE bool AccumulateDualGroupedMixedCompletionRhs(
+    uint32_t column_count,
+    uint32_t first_heavy_column,
+    uint32_t coefficient_period,
+    uint32_t populated_residues,
+    uint32_t subfield_rows,
+    uint32_t first_grouped_gf256_row,
+    uint32_t block_bytes,
+    uint32_t elements,
+    uint32_t extension_rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint8_t>& values,
+    const MixedCoefficientRows& cached_rows,
+    void* const* subfield_destinations,
+    std::vector<uint8_t>& rhs_low,
+    std::vector<uint8_t>& rhs_high,
+    std::vector<uint8_t>& source_low,
+    std::vector<uint8_t>& source_high,
+    PrecodeSolveStats& stats)
+{
+    if (first_heavy_column > column_count) return false;
+    std::vector<uint8_t> primary_buckets(
+        (size_t)coefficient_period * block_bytes, uint8_t{0});
+    std::vector<uint8_t> grouped_buckets(
+        (size_t)coefficient_period * block_bytes, uint8_t{0});
+    std::vector<BatchedBlockXorAccumulator> primary_accumulators;
+    std::vector<BatchedBlockXorAccumulator> grouped_accumulators;
+    primary_accumulators.reserve(coefficient_period);
+    grouped_accumulators.reserve(coefficient_period);
+    for (uint32_t residue = 0u; residue < coefficient_period; ++residue)
+    {
+        primary_accumulators.emplace_back(
+            primary_buckets.data() + (size_t)residue * block_bytes,
+            block_bytes);
+        grouped_accumulators.emplace_back(
+            grouped_buckets.data() + (size_t)residue * block_bytes,
+            block_bytes);
+    }
+    uint32_t block_start = 0u;
+    uint32_t block_index = 0u;
+    while (block_start < column_count)
+    {
+        const uint32_t primary_shift =
+            ActiveMixedResidueBlockShift(block_index);
+        const uint32_t grouped_shift =
+            ActiveMixedGroupedGF256ResidueBlockShift(block_index);
+        const uint32_t block_columns = std::min(
+            coefficient_period, column_count - block_start);
+        for (uint32_t offset = 0u; offset < block_columns; ++offset)
+        {
+            const uint32_t column = block_start + offset;
+            if (inactive_index[column] != UINT32_MAX) continue;
+            uint32_t primary_residue = offset + primary_shift;
+            if (primary_residue >= coefficient_period) {
+                primary_residue -= coefficient_period;
+            }
+            uint32_t grouped_residue = primary_residue;
+            if (column < first_heavy_column)
+            {
+                grouped_residue = offset + grouped_shift;
+                if (grouped_residue >= coefficient_period) {
+                    grouped_residue -= coefficient_period;
+                }
+            }
+            const uint8_t* value =
+                values.data() + (size_t)column * block_bytes;
+            primary_accumulators[primary_residue].Add(value);
+            grouped_accumulators[grouped_residue].Add(value);
+            stats.BlockXors += 2u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++stats.MixedDualSourceColumns;
+#endif
+        }
+        block_start += block_columns;
+        ++block_index;
+    }
+    for (uint32_t residue = 0u; residue < coefficient_period; ++residue)
+    {
+        primary_accumulators[residue].Flush();
+        grouped_accumulators[residue].Flush();
+    }
+    return ApplyGroupedMixedCompletionBuckets(
+        coefficient_period, populated_residues, subfield_rows,
+        first_grouped_gf256_row, block_bytes, elements, extension_rows,
+        cached_rows, subfield_destinations,
+        rhs_low, rhs_high, source_low, source_high,
+        primary_buckets.data(), grouped_buckets.data(), stats);
+}
+
+static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
+    uint32_t column_count,
+    uint32_t first_heavy_column,
+    uint32_t coefficient_period,
+    uint32_t populated_residues,
+    uint32_t subfield_rows,
+    uint32_t first_grouped_gf256_row,
+    uint32_t block_bytes,
+    uint32_t elements,
+    uint32_t extension_rows,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint8_t>& values,
+    const MixedCoefficientRows& cached_rows,
+    void* const* subfield_destinations,
+    std::vector<uint8_t>& rhs_low,
+    std::vector<uint8_t>& rhs_high,
+    std::vector<uint8_t>& source_low,
+    std::vector<uint8_t>& source_high,
+    PrecodeSolveStats& stats)
+{
+    if (first_heavy_column > column_count) return false;
+    MixedJointResidueBuckets buckets;
+    if (!AccumulateMixedJointResidueBucketsWithShifts(
+            first_heavy_column,
+            coefficient_period,
+            block_bytes,
+            [](uint32_t block) {
+                return ActiveMixedResidueBlockShift(block);
+            },
+            [](uint32_t block) {
+                return ActiveMixedGroupedGF256ResidueBlockShift(block);
+            },
+            [&](uint32_t column) {
+                return values.data() + (size_t)column * block_bytes;
+            },
+            [&](uint32_t column) {
+                return inactive_index[column] == UINT32_MAX;
+            },
+            true,
+            buckets))
+    {
+        return false;
+    }
+
+    uint64_t tail_xors = 0u;
+    for (uint32_t column = first_heavy_column;
+         column < column_count; ++column)
+    {
+        if (inactive_index[column] != UINT32_MAX) continue;
+        const uint32_t residue = ActiveMixedCoefficientResidue(column);
+        const uint8_t* const source =
+            values.data() + (size_t)column * block_bytes;
+        gf256_add_mem(
+            buckets.Subfield.get() + (size_t)residue * block_bytes,
+            source, (int)block_bytes);
+        gf256_add_mem(
+            buckets.Extension.get() + (size_t)residue * block_bytes,
+            source, (int)block_bytes);
+        tail_xors += 2u;
+    }
+    stats.BlockXors +=
+        buckets.SourceXors + buckets.MarginalXors + tail_xors;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    stats.MixedJointSourceXors = buckets.SourceXors + tail_xors;
+    stats.MixedJointMarginalXors = buckets.MarginalXors;
+    stats.MixedJointMarginalCopies = buckets.MarginalCopies;
+    stats.MixedJointScratchBytes = buckets.ScratchBytes;
+    stats.MixedJointActiveDeltas = buckets.ActiveDeltas;
+#endif
+    return ApplyGroupedMixedCompletionBuckets(
+        coefficient_period, populated_residues, subfield_rows,
+        first_grouped_gf256_row, block_bytes, elements, extension_rows,
+        cached_rows, subfield_destinations,
+        rhs_low, rhs_high, source_low, source_high,
+        buckets.Subfield.get(), buckets.Extension.get(), stats);
+}
+
 #undef WH2_MIXED_NOINLINE
 
 static const uint32_t kMixedCompletionRowsMax =
@@ -1941,6 +2263,9 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
     const uint32_t extension_rows = ActiveMixedGF16Rows();
     const uint32_t H = subfield_rows + extension_rows;
+    const uint32_t grouped_gf256_rows = ActiveMixedGroupedGF256Rows();
+    const bool independent_extension_residues =
+        ActiveMixedIndependentExtensionResidues();
     const uint64_t projection_elements =
         (uint64_t)column_count * projection_words;
     const uint64_t binary_coefficient_words =
@@ -1948,7 +2273,11 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint64_t binary_rhs_bytes =
         (uint64_t)inactive_count * block_bytes;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
-        system.Params.HeavyRows != H || (block_bytes & 1u) != 0u ||
+        system.Params.HeavyRows != H || column_count < H ||
+        grouped_gf256_rows > subfield_rows ||
+        (grouped_gf256_rows != 0u &&
+         independent_extension_residues) ||
+        (block_bytes & 1u) != 0u ||
         binary_rank > inactive_count ||
         projection_words != PackedWordCount(inactive_count) ||
         inactive_index.size() != column_count ||
@@ -1963,6 +2292,9 @@ WirehairResult SolveMixedCompletionQuotient(
     {
         return Wirehair_InvalidInput;
     }
+    const uint32_t first_grouped_gf256_row =
+        subfield_rows - grouped_gf256_rows;
+    const uint32_t first_heavy_column = column_count - H;
     for (uint32_t index = 0; index < inactive_count; ++index)
     {
         const uint32_t column = inactive_columns[index];
@@ -2098,8 +2430,6 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint32_t elements = block_bytes / 2u;
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const bool rotate_residues = ActiveMixedResiduesRotated();
-    const bool independent_extension_residues =
-        ActiveMixedIndependentExtensionResidues();
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
 
@@ -2140,11 +2470,13 @@ WirehairResult SolveMixedCompletionQuotient(
 
         const auto add_syndrome_source = [&](
             uint32_t residue,
-            bool include_subfield,
+            const uint8_t* source,
+            uint32_t first_subfield_row,
+            uint32_t last_subfield_row,
             bool include_extension) -> bool
         {
             if (!GF16Deinterleave(
-                    residue_bucket.data(), source_low.data(),
+                    source, source_low.data(),
                     source_high.data(), block_bytes))
             {
                 return false;
@@ -2155,13 +2487,12 @@ WirehairResult SolveMixedCompletionQuotient(
                 const uint16_t* transform = factor.Transform.data() +
                     (size_t)dependency_row * kMixedCompletionRowsMax;
                 uint16_t scale = 0u;
-                if (include_subfield)
+                for (uint32_t row = first_subfield_row;
+                     row < last_subfield_row; ++row)
                 {
-                    for (uint32_t row = 0u; row < subfield_rows; ++row) {
-                        scale ^= GF16MultiplyInitialized(
-                            transform[row],
-                            cached_rows->Subfield[row][residue]);
-                    }
+                    scale ^= GF16MultiplyInitialized(
+                        transform[row],
+                        cached_rows->Subfield[row][residue]);
                 }
                 if (include_extension)
                 {
@@ -2194,7 +2525,11 @@ WirehairResult SolveMixedCompletionQuotient(
         };
 
         const auto accumulate_syndrome_schedule = [&](
-            bool extension_schedule) -> bool
+            uint32_t column_limit,
+            uint32_t schedule,
+            uint32_t first_subfield_row,
+            uint32_t last_subfield_row,
+            bool include_extension) -> bool
         {
             for (uint32_t residue = 0u;
                  residue < populated_residues; ++residue)
@@ -2203,10 +2538,10 @@ WirehairResult SolveMixedCompletionQuotient(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
                 BatchedBlockXorAccumulator bucket_xor(
                     residue_bucket.data(), block_bytes);
-                if (!extension_schedule && !rotate_residues)
+                if (schedule == 0u && !rotate_residues)
                 {
                     for (uint32_t column = residue;
-                         column < column_count;
+                         column < column_limit;
                          column += coefficient_period)
                     {
                         if (inactive_index[column] != UINT32_MAX) continue;
@@ -2219,18 +2554,27 @@ WirehairResult SolveMixedCompletionQuotient(
                 {
                     uint32_t block_index = 0u;
                     for (uint32_t block_base = 0u;
-                         block_base < column_count;
+                         block_base < column_limit;
                          block_base += coefficient_period)
                     {
-                        const uint32_t block_shift = extension_schedule ?
-                            ActiveMixedExtensionResidueBlockShift(
-                                block_index++) :
-                            ActiveMixedResidueBlockShift(block_index++);
+                        uint32_t block_shift =
+                            ActiveMixedResidueBlockShift(block_index);
+                        if (schedule == 1u) {
+                            block_shift =
+                                ActiveMixedExtensionResidueBlockShift(
+                                    block_index);
+                        }
+                        else if (schedule == 2u) {
+                            block_shift =
+                                ActiveMixedGroupedGF256ResidueBlockShift(
+                                    block_index);
+                        }
+                        ++block_index;
                         const uint32_t unshifted = residue >= block_shift ?
                             residue - block_shift :
                             residue + coefficient_period - block_shift;
                         const uint32_t column = block_base + unshifted;
-                        if (column >= column_count ||
+                        if (column >= column_limit ||
                             inactive_index[column] != UINT32_MAX)
                         {
                             continue;
@@ -2240,12 +2584,27 @@ WirehairResult SolveMixedCompletionQuotient(
                         ++stats.BlockXors;
                     }
                 }
+                if (schedule == 2u)
+                {
+                    for (uint32_t column = first_heavy_column;
+                         column < column_count; ++column)
+                    {
+                        if (inactive_index[column] != UINT32_MAX ||
+                            ActiveMixedCoefficientResidue(column) != residue)
+                        {
+                            continue;
+                        }
+                        bucket_xor.Add(
+                            values.data() +
+                                (size_t)column * block_bytes);
+                        ++stats.BlockXors;
+                    }
+                }
                 bucket_xor.Flush();
                 if (!add_syndrome_source(
-                        residue,
-                        !extension_schedule,
-                        extension_schedule ||
-                            !independent_extension_residues))
+                        residue, residue_bucket.data(),
+                        first_subfield_row, last_subfield_row,
+                        include_extension))
                 {
                     return false;
                 }
@@ -2253,9 +2612,28 @@ WirehairResult SolveMixedCompletionQuotient(
             return true;
         };
 
-        if (!accumulate_syndrome_schedule(false) ||
-            (independent_extension_residues &&
-             !accumulate_syndrome_schedule(true)))
+        bool syndromes_accumulated = false;
+        if (grouped_gf256_rows != 0u)
+        {
+            syndromes_accumulated =
+                accumulate_syndrome_schedule(
+                    column_count, 0u, 0u,
+                    first_grouped_gf256_row, true) &&
+                accumulate_syndrome_schedule(
+                    first_heavy_column, 2u,
+                    first_grouped_gf256_row, subfield_rows, false);
+        }
+        else
+        {
+            syndromes_accumulated = accumulate_syndrome_schedule(
+                column_count, 0u, 0u, subfield_rows,
+                !independent_extension_residues);
+            if (syndromes_accumulated && independent_extension_residues) {
+                syndromes_accumulated = accumulate_syndrome_schedule(
+                    column_count, 1u, 0u, 0u, true);
+            }
+        }
+        if (!syndromes_accumulated)
         {
             return Wirehair_Error;
         }
@@ -2344,8 +2722,10 @@ WirehairResult SolveMixedCompletionQuotient(
         subfield_destinations[row] =
             subfield_rhs.data() + (size_t)row * block_bytes;
     }
+    const bool secondary_schedule =
+        independent_extension_residues || grouped_gf256_rows != 0u;
     const bool automatic_joint_residue_buckets =
-        independent_extension_residues &&
+        secondary_schedule &&
         UseAutomaticMixedJointResidueBuckets(
             system.Params.BlockCount, block_bytes, coefficient_period);
     bool request_joint_residue_buckets =
@@ -2367,7 +2747,7 @@ WirehairResult SolveMixedCompletionQuotient(
     // but its accumulator setup hurts small systems and its random writes
     // hurt once the two bucket sets no longer fit comfortably in cache.
     use_dual_residue_buckets =
-        independent_extension_residues &&
+        secondary_schedule &&
         dual_buckets_fit &&
         (bucket_mode == MixedResidueBucketMode::Dual ||
          (bucket_mode == MixedResidueBucketMode::Automatic &&
@@ -2377,7 +2757,7 @@ WirehairResult SolveMixedCompletionQuotient(
           one_bucket_plane_bytes * 2u <= (UINT64_C(128) << 10)));
 #endif
     const bool use_joint_residue_buckets =
-        independent_extension_residues &&
+        secondary_schedule &&
         request_joint_residue_buckets &&
         MixedJointResidueBucketStorageFits(
             coefficient_period, block_bytes,
@@ -2436,19 +2816,43 @@ WirehairResult SolveMixedCompletionQuotient(
     if (use_dual_residue_buckets || use_joint_residue_buckets)
 #endif
     {
-        const bool accumulated = use_joint_residue_buckets ?
-            AccumulateJointMixedCompletionRhs(
-                column_count, coefficient_period, populated_residues,
-                subfield_rows, block_bytes, elements, extension_rows,
-                inactive_index, values, *cached_rows,
-                subfield_destinations,
-                rhs_low, rhs_high, source_low, source_high, stats) :
-            AccumulateDualMixedCompletionRhs(
-                column_count, coefficient_period, populated_residues,
-                subfield_rows, block_bytes, elements, extension_rows,
-                inactive_index, values, *cached_rows,
-                subfield_destinations,
-                rhs_low, rhs_high, source_low, source_high, stats);
+        bool accumulated = false;
+        if (grouped_gf256_rows != 0u)
+        {
+            accumulated = use_joint_residue_buckets ?
+                AccumulateJointGroupedMixedCompletionRhs(
+                    column_count, first_heavy_column,
+                    coefficient_period, populated_residues,
+                    subfield_rows, first_grouped_gf256_row,
+                    block_bytes, elements, extension_rows,
+                    inactive_index, values, *cached_rows,
+                    subfield_destinations,
+                    rhs_low, rhs_high, source_low, source_high, stats) :
+                AccumulateDualGroupedMixedCompletionRhs(
+                    column_count, first_heavy_column,
+                    coefficient_period, populated_residues,
+                    subfield_rows, first_grouped_gf256_row,
+                    block_bytes, elements, extension_rows,
+                    inactive_index, values, *cached_rows,
+                    subfield_destinations,
+                    rhs_low, rhs_high, source_low, source_high, stats);
+        }
+        else
+        {
+            accumulated = use_joint_residue_buckets ?
+                AccumulateJointMixedCompletionRhs(
+                    column_count, coefficient_period, populated_residues,
+                    subfield_rows, block_bytes, elements, extension_rows,
+                    inactive_index, values, *cached_rows,
+                    subfield_destinations,
+                    rhs_low, rhs_high, source_low, source_high, stats) :
+                AccumulateDualMixedCompletionRhs(
+                    column_count, coefficient_period, populated_residues,
+                    subfield_rows, block_bytes, elements, extension_rows,
+                    inactive_index, values, *cached_rows,
+                    subfield_destinations,
+                    rhs_low, rhs_high, source_low, source_high, stats);
+        }
         if (!accumulated)
         {
             return Wirehair_Error;
@@ -2495,12 +2899,16 @@ WirehairResult SolveMixedCompletionQuotient(
             }
         }
         bucket_xor.Flush();
-        for (uint32_t row = 0u; row < subfield_rows; ++row) {
+        const uint32_t primary_subfield_rows =
+            grouped_gf256_rows != 0u ?
+                first_grouped_gf256_row : subfield_rows;
+        for (uint32_t row = 0u; row < primary_subfield_rows; ++row) {
             subfield_scales[row] = cached_rows->Subfield[row][residue];
         }
         AddScaledBlocks(
             subfield_destinations, subfield_scales,
-            subfield_rows, residue_bucket.data(), block_bytes, stats);
+            primary_subfield_rows,
+            residue_bucket.data(), block_bytes, stats);
         if (!independent_extension_residues &&
             !accumulate_extension_rhs(residue, residue_bucket.data()))
         {
@@ -2539,6 +2947,58 @@ WirehairResult SolveMixedCompletionQuotient(
             {
                 return Wirehair_Error;
             }
+        }
+    }
+    if (grouped_gf256_rows != 0u)
+    {
+        for (uint32_t residue = 0u;
+             residue < populated_residues; ++residue)
+        {
+            std::fill(
+                residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+            BatchedBlockXorAccumulator bucket_xor(
+                residue_bucket.data(), block_bytes);
+            uint32_t block_index = 0u;
+            for (uint32_t block_base = 0u;
+                 block_base < first_heavy_column;
+                 block_base += coefficient_period)
+            {
+                const uint32_t block_shift =
+                    ActiveMixedGroupedGF256ResidueBlockShift(block_index++);
+                const uint32_t unshifted = residue >= block_shift ?
+                    residue - block_shift :
+                    residue + coefficient_period - block_shift;
+                const uint32_t column = block_base + unshifted;
+                if (column >= first_heavy_column ||
+                    inactive_index[column] != UINT32_MAX)
+                {
+                    continue;
+                }
+                bucket_xor.Add(
+                    values.data() + (size_t)column * block_bytes);
+                ++stats.BlockXors;
+            }
+            for (uint32_t column = first_heavy_column;
+                 column < column_count; ++column)
+            {
+                if (inactive_index[column] != UINT32_MAX ||
+                    ActiveMixedCoefficientResidue(column) != residue)
+                {
+                    continue;
+                }
+                bucket_xor.Add(
+                    values.data() + (size_t)column * block_bytes);
+                ++stats.BlockXors;
+            }
+            bucket_xor.Flush();
+            for (uint32_t row = 0u; row < grouped_gf256_rows; ++row) {
+                subfield_scales[row] = cached_rows->Subfield[
+                    first_grouped_gf256_row + row][residue];
+            }
+            AddScaledBlocks(
+                subfield_destinations + first_grouped_gf256_row,
+                subfield_scales, grouped_gf256_rows,
+                residue_bucket.data(), block_bytes, stats);
         }
     }
 mixed_rhs_accumulated:
@@ -5522,11 +5982,23 @@ WH2_WITNESS_NOINLINE uint16_t DirectMixedCoefficient(
     const MixedCoefficientRows& coefficients,
     uint32_t subfield_rows,
     uint32_t heavy_row,
-    uint32_t column)
+    uint32_t column,
+    uint32_t first_heavy_column)
 {
-    if (heavy_row < subfield_rows) {
+    if (heavy_row < subfield_rows)
+    {
+        const uint32_t grouped_gf256_rows =
+            ActiveMixedGroupedGF256Rows();
+        const uint32_t first_grouped_gf256_row =
+            grouped_gf256_rows <= subfield_rows ?
+                subfield_rows - grouped_gf256_rows : subfield_rows;
+        const uint32_t residue = grouped_gf256_rows != 0u &&
+                heavy_row >= first_grouped_gf256_row ?
+            ActiveMixedGroupedGF256CoefficientResidue(
+                column, first_heavy_column) :
+            ActiveMixedCoefficientResidue(column);
         return coefficients.Subfield[heavy_row][
-            ActiveMixedCoefficientResidue(column)];
+            residue];
     }
     return coefficients.Extension[heavy_row - subfield_rows][
         ActiveMixedExtensionCoefficientResidue(column)];
@@ -5546,7 +6018,9 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
     size_t vector_elements = 0u;
     size_t syndrome_elements = 0u;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
-        system.Params.HeavyRows != heavy_rows || !coefficients ||
+        system.Params.HeavyRows != heavy_rows ||
+        column_count < heavy_rows ||
+        ActiveMixedGroupedGF256Rows() > subfield_rows || !coefficients ||
         !CheckedMatrixElements(
             vector_count, column_count, vector_elements) ||
         vectors.size() != vector_elements ||
@@ -5555,6 +6029,7 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
     {
         return false;
     }
+    const uint32_t first_heavy_column = column_count - heavy_rows;
     if (syndromes) syndromes->assign(syndrome_elements, 0u);
     for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy)
     {
@@ -5573,7 +6048,8 @@ WH2_WITNESS_NOINLINE bool EvaluateDirectMixedSyndromes(
                 if (value == 0u) continue;
                 sum ^= GF16MultiplyInitialized(
                     DirectMixedCoefficient(
-                        *coefficients, subfield_rows, heavy, column),
+                        *coefficients, subfield_rows, heavy, column,
+                        first_heavy_column),
                     value);
             }
             if (syndromes) {
@@ -6226,13 +6702,27 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         const uint32_t extension_rows = ActiveMixedGF16Rows();
         const uint32_t heavy_rows = subfield_rows + extension_rows;
         const bool independent = ActiveMixedIndependentExtensionResidues();
+        const uint32_t grouped_gf256_rows =
+            ActiveMixedGroupedGF256Rows();
         const MixedCoefficientRows* rows = GetMixedCoefficientRows();
         if (!rows || period == 0u ||
             period > kMixedCoefficientPeriod ||
-            heavy_rows > kMixedCompletionRowsMax)
+            heavy_rows > kMixedCompletionRowsMax ||
+            grouped_gf256_rows > subfield_rows ||
+            (grouped_gf256_rows != 0u && independent))
         {
             return false;
         }
+        const uint32_t first_grouped_gf256_row =
+            subfield_rows - grouped_gf256_rows;
+        const uint64_t pair_count_wide = (uint64_t)period * period;
+        if (pair_count_wide >= UINT32_MAX - heavy_rows) return false;
+        const uint32_t pair_count = (uint32_t)pair_count_wide;
+        // Search one more than P^2 non-corner columns, guaranteeing a repeated
+        // A/secondary-residue pair.  Reserve a separate final-H suffix so the
+        // selected columns remain on C during the actual grouped solve.
+        const uint32_t first_heavy_column = pair_count + 1u;
+        const uint32_t column_count = first_heavy_column + heavy_rows;
         const auto coefficient_vector = [&](uint32_t column) {
             std::array<uint16_t, kMixedCompletionRowsMax> result = {};
             const uint32_t subfield_residue =
@@ -6240,8 +6730,14 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
             const uint32_t extension_residue = independent ?
                 ActiveMixedExtensionCoefficientResidue(column) :
                 subfield_residue;
+            const uint32_t grouped_residue =
+                ActiveMixedGroupedGF256CoefficientResidue(
+                    column, first_heavy_column);
             for (uint32_t row = 0u; row < subfield_rows; ++row) {
-                result[row] = rows->Subfield[row][subfield_residue];
+                const uint32_t residue = grouped_gf256_rows != 0u &&
+                        row >= first_grouped_gf256_row ?
+                    grouped_residue : subfield_residue;
+                result[row] = rows->Subfield[row][residue];
             }
             for (uint32_t row = 0u; row < extension_rows; ++row) {
                 result[subfield_rows + row] =
@@ -6249,17 +6745,18 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
             }
             return result;
         };
-        const uint64_t pair_count_wide = (uint64_t)period * period;
-        if (pair_count_wide >= UINT32_MAX) return false;
-        const uint32_t pair_count = (uint32_t)pair_count_wide;
         std::vector<uint32_t> first(pair_count, UINT32_MAX);
         uint32_t duplicate0 = UINT32_MAX;
         uint32_t duplicate1 = UINT32_MAX;
-        for (uint32_t column = 0u; column <= pair_count; ++column)
+        for (uint32_t column = 0u;
+             column < first_heavy_column; ++column)
         {
             const uint32_t a = ActiveMixedCoefficientResidue(column);
-            const uint32_t b = independent ?
-                ActiveMixedExtensionCoefficientResidue(column) : a;
+            const uint32_t b = grouped_gf256_rows != 0u ?
+                ActiveMixedGroupedGF256CoefficientResidue(
+                    column, first_heavy_column) :
+                (independent ?
+                    ActiveMixedExtensionCoefficientResidue(column) : a);
             if (a >= period || b >= period) return false;
             const uint32_t key = a * period + b;
             if (first[key] != UINT32_MAX) {
@@ -6284,7 +6781,8 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         const uint16_t inverse = GF16InverseInitialized(base[pivot]);
         if (inverse == 0u) return false;
         uint32_t inconsistent_column = UINT32_MAX;
-        for (uint32_t column = 0u; column <= pair_count; ++column)
+        for (uint32_t column = 0u;
+             column < first_heavy_column; ++column)
         {
             if (column == duplicate0 || column == duplicate1) continue;
             const std::array<uint16_t, kMixedCompletionRowsMax> candidate =
@@ -6307,8 +6805,6 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         }
         if (inconsistent_column == UINT32_MAX) return false;
 
-        const uint32_t column_count = std::max(
-            std::max(duplicate0, duplicate1), inconsistent_column) + 1u;
         PrecodeSystem system;
         system.Params = MakeMixedParams(
             column_count, UINT64_C(0x13198a2e03707344));
@@ -7174,9 +7670,20 @@ bool VerifyPrecodeSolution(
         ActiveMixedIndependentExtensionResidues();
     const uint32_t mixed_subfield_rows = cached_mixed_coefficients ?
         ActiveMixedGF256Rows() : 0u;
+    const uint32_t mixed_grouped_gf256_rows = cached_mixed_coefficients ?
+        ActiveMixedGroupedGF256Rows() : 0u;
+    const uint32_t mixed_first_grouped_gf256_row =
+        mixed_grouped_gf256_rows <= mixed_subfield_rows ?
+            mixed_subfield_rows - mixed_grouped_gf256_rows : 0u;
+    const uint32_t first_heavy_column = L - H;
     const MixedCoefficientRows* mixed_rows = cached_mixed_coefficients ?
         GetMixedCoefficientRows() : nullptr;
-    if (cached_mixed_coefficients && !mixed_rows) {
+    if (cached_mixed_coefficients &&
+        (!mixed_rows ||
+         mixed_grouped_gf256_rows > mixed_subfield_rows ||
+         (mixed_grouped_gf256_rows != 0u &&
+          independent_extension_residues)))
+    {
         return false;
     }
     std::vector<uint8_t> value(block_bytes, 0u);
@@ -7284,9 +7791,16 @@ bool VerifyPrecodeSolution(
             }
             else
             {
+                const uint32_t subfield_residue =
+                    cached_mixed_coefficients &&
+                    mixed_grouped_gf256_rows != 0u &&
+                    heavy >= mixed_first_grouped_gf256_row ?
+                        ActiveMixedGroupedGF256CoefficientResidue(
+                            column, first_heavy_column) :
+                        active_coefficient_residue;
                 const uint8_t scale = cached_mixed_coefficients ?
                     mixed_rows->Subfield[heavy][
-                        active_coefficient_residue] :
+                        subfield_residue] :
                     HeavyCoefficientForParams(
                         system.Params, heavy, column);
                 if (scale == 1u) {
