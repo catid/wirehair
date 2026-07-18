@@ -164,6 +164,19 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
         return true;
     }
     bool marginals_initialized = false;
+    // The active-delta loop reconstructs the initializer objects because
+    // their pending counts and initialization state are delta-local.  Keep
+    // the vector storage itself across iterations: P is small but a full
+    // cycle can activate many deltas, and repeatedly allocating the same P
+    // objects showed up in grouped-schedule solve profiles.
+    std::vector<MixedBatchedBlockXorInitializer> accumulators;
+    std::vector<uint8_t> initialized;
+    if (batch_sources) {
+        accumulators.reserve(coefficient_period);
+    }
+    else {
+        initialized.reserve(coefficient_period);
+    }
 
     for (uint32_t delta = 0u; delta < coefficient_period; ++delta)
     {
@@ -171,11 +184,9 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
         const uint32_t end = delta_offsets[delta + 1u];
         if (begin == end) continue;
         ++output.ActiveDeltas;
-        std::vector<MixedBatchedBlockXorInitializer> accumulators;
-        std::vector<uint8_t> initialized;
         if (batch_sources)
         {
-            accumulators.reserve(coefficient_period);
+            accumulators.clear();
             for (uint32_t a = 0u; a < coefficient_period; ++a)
             {
                 accumulators.emplace_back(

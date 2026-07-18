@@ -1117,6 +1117,49 @@ ResidualInsertResult InsertResidualRow(
     return ResidualInsertResult::Inserted;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static bool CacheMixedGroupedGF256ResidueBlockShifts(
+    uint32_t column_limit,
+    uint32_t coefficient_period,
+    std::vector<uint8_t>& block_shifts)
+{
+    static_assert(
+        kMixedCoefficientPeriod <= UINT8_MAX,
+        "grouped residue shifts must fit their compact cache");
+    if (coefficient_period == 0u ||
+        coefficient_period > kMixedCoefficientPeriod)
+    {
+        return false;
+    }
+    const uint32_t block_count = column_limit / coefficient_period +
+        (column_limit % coefficient_period != 0u ? 1u : 0u);
+    static const uint32_t kMixedCompletionRows =
+        kMixedGF256Rows + kMixedGF16Rows;
+    static const uint32_t kMaxNonCornerColumns =
+        UINT16_MAX - kMixedCompletionRows;
+    static const uint32_t kMinGroupedPeriod = kMixedCompletionRows + 1u;
+    static const uint32_t kMaxGroupedShiftBlocks =
+        (kMaxNonCornerColumns + kMinGroupedPeriod - 1u) /
+            kMinGroupedPeriod;
+    if (block_count > kMaxGroupedShiftBlocks ||
+        block_count > block_shifts.max_size())
+    {
+        return false;
+    }
+    block_shifts.resize(block_count);
+    for (uint32_t block = 0u; block < block_count; ++block)
+    {
+        const uint32_t shift =
+            ActiveMixedGroupedGF256ResidueBlockShift(block);
+        if (shift >= coefficient_period) {
+            return false;
+        }
+        block_shifts[block] = (uint8_t)shift;
+    }
+    return true;
+}
+#endif
+
 bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     uint32_t column_count,
     uint32_t inactive_count,
@@ -1124,6 +1167,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint64_t>& projection,
     const MixedPackedCoefficients& cached_packed,
+    const uint8_t* grouped_block_shifts,
+    uint32_t grouped_block_shift_count,
     std::vector<uint64_t>& projected)
 {
     const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
@@ -1159,6 +1204,33 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     const uint32_t first_grouped_gf256_row =
         subfield_rows - grouped_gf256_rows;
     const uint32_t first_heavy_column = column_count - H;
+    if (grouped_gf256_rows != 0u)
+    {
+        const uint32_t grouped_block_count =
+            first_heavy_column / coefficient_period +
+            (first_heavy_column % coefficient_period != 0u ? 1u : 0u);
+        if (grouped_block_shift_count != grouped_block_count ||
+            (grouped_block_count != 0u && !grouped_block_shifts))
+        {
+            return false;
+        }
+    }
+
+    // C is cached once per complete or partial non-corner P-column block.
+    // The final H columns deliberately keep their A residue even when they
+    // share a physical block with the last non-corner columns.
+    const auto grouped_residue_at = [&](
+        uint32_t column,
+        uint32_t primary_residue)
+    {
+        if (column >= first_heavy_column) {
+            return primary_residue;
+        }
+        uint32_t residue = column % coefficient_period;
+        residue += grouped_block_shifts[column / coefficient_period];
+        return residue < coefficient_period ?
+            residue : residue - coefficient_period;
+    };
 
     projected.assign((size_t)projected_elements, uint64_t{0});
     const auto xor_projected = [&](uint32_t index,
@@ -1212,8 +1284,10 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         {
             uint64_t combined_coefficients[
                 kMixedPackedCoefficientWords] = {};
+            const uint32_t primary_residue =
+                ActiveMixedCoefficientResidue(column);
             const uint64_t* coefficients = cached_packed.ByResidue[
-                ActiveMixedCoefficientResidue(column)];
+                primary_residue];
             // Preserve the established one-period independent-extension
             // solve path exactly.  Grouped GF(256) still composes A/C masks
             // explicitly even though both schedules currently start at zero;
@@ -1222,8 +1296,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             if (grouped_gf256_rows != 0u)
             {
                 const uint32_t secondary_residue =
-                    ActiveMixedGroupedGF256CoefficientResidue(
-                        column, first_heavy_column);
+                    grouped_residue_at(column, primary_residue);
                 const uint64_t* secondary_coefficients =
                     cached_packed.ByResidue[secondary_residue];
                 for (uint32_t word = 0u; word < packed_words; ++word) {
@@ -1290,8 +1363,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
             const uint32_t secondary_residue =
                 independent_extension_residues ?
                     ActiveMixedExtensionCoefficientResidue(column) :
-                    ActiveMixedGroupedGF256CoefficientResidue(
-                        column, first_heavy_column);
+                    grouped_residue_at(column, residue);
             secondary_bucket = secondary_residue_projection.data() +
                 (size_t)secondary_residue * projection_words;
         }
@@ -1904,6 +1976,8 @@ static WH2_MIXED_NOINLINE bool AccumulateDualGroupedMixedCompletionRhs(
     uint32_t block_bytes,
     uint32_t elements,
     uint32_t extension_rows,
+    const uint8_t* grouped_block_shifts,
+    uint32_t grouped_block_shift_count,
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint8_t>& values,
     const MixedCoefficientRows& cached_rows,
@@ -1914,7 +1988,17 @@ static WH2_MIXED_NOINLINE bool AccumulateDualGroupedMixedCompletionRhs(
     std::vector<uint8_t>& source_high,
     PrecodeSolveStats& stats)
 {
-    if (first_heavy_column > column_count) return false;
+    if (coefficient_period == 0u || first_heavy_column > column_count) {
+        return false;
+    }
+    const uint32_t expected_grouped_blocks =
+        first_heavy_column / coefficient_period +
+        (first_heavy_column % coefficient_period != 0u ? 1u : 0u);
+    if (grouped_block_shift_count != expected_grouped_blocks ||
+        (expected_grouped_blocks != 0u && !grouped_block_shifts))
+    {
+        return false;
+    }
     std::vector<uint8_t> primary_buckets(
         (size_t)coefficient_period * block_bytes, uint8_t{0});
     std::vector<uint8_t> grouped_buckets(
@@ -1938,8 +2022,12 @@ static WH2_MIXED_NOINLINE bool AccumulateDualGroupedMixedCompletionRhs(
     {
         const uint32_t primary_shift =
             ActiveMixedResidueBlockShift(block_index);
-        const uint32_t grouped_shift =
-            ActiveMixedGroupedGF256ResidueBlockShift(block_index);
+        uint32_t grouped_shift = primary_shift;
+        if (block_start < first_heavy_column)
+        {
+            CAT_DEBUG_ASSERT(block_index < grouped_block_shift_count);
+            grouped_shift = grouped_block_shifts[block_index];
+        }
         const uint32_t block_columns = std::min(
             coefficient_period, column_count - block_start);
         for (uint32_t offset = 0u; offset < block_columns; ++offset)
@@ -1993,6 +2081,8 @@ static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
     uint32_t block_bytes,
     uint32_t elements,
     uint32_t extension_rows,
+    const uint8_t* grouped_block_shifts,
+    uint32_t grouped_block_shift_count,
     const std::vector<uint32_t>& inactive_index,
     const std::vector<uint8_t>& values,
     const MixedCoefficientRows& cached_rows,
@@ -2003,7 +2093,17 @@ static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
     std::vector<uint8_t>& source_high,
     PrecodeSolveStats& stats)
 {
-    if (first_heavy_column > column_count) return false;
+    if (coefficient_period == 0u || first_heavy_column > column_count) {
+        return false;
+    }
+    const uint32_t expected_grouped_blocks =
+        first_heavy_column / coefficient_period +
+        (first_heavy_column % coefficient_period != 0u ? 1u : 0u);
+    if (grouped_block_shift_count != expected_grouped_blocks ||
+        (expected_grouped_blocks != 0u && !grouped_block_shifts))
+    {
+        return false;
+    }
     MixedJointResidueBuckets buckets;
     if (!AccumulateMixedJointResidueBucketsWithShifts(
             first_heavy_column,
@@ -2012,8 +2112,9 @@ static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
             [](uint32_t block) {
                 return ActiveMixedResidueBlockShift(block);
             },
-            [](uint32_t block) {
-                return ActiveMixedGroupedGF256ResidueBlockShift(block);
+            [&](uint32_t block) {
+                CAT_DEBUG_ASSERT(block < grouped_block_shift_count);
+                return grouped_block_shifts[block];
             },
             [&](uint32_t column) {
                 return values.data() + (size_t)column * block_bytes;
@@ -2324,6 +2425,28 @@ WirehairResult SolveMixedCompletionQuotient(
         return Wirehair_Error;
     }
 
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    const uint8_t* grouped_block_shifts = nullptr;
+    uint32_t grouped_block_shift_count = 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (grouped_gf256_rows != 0u)
+    {
+        // Reuse this thread's bounded (at most 5,041-byte) allocation across
+        // decoder instances.  Grouped schedules are test-hook experiments,
+        // so production and r=0 solves do not touch this TLS cache.
+        static thread_local std::vector<uint8_t> grouped_block_shift_cache;
+        if (!CacheMixedGroupedGF256ResidueBlockShifts(
+                first_heavy_column, coefficient_period,
+                grouped_block_shift_cache))
+        {
+            return Wirehair_Error;
+        }
+        grouped_block_shifts = grouped_block_shift_cache.data();
+        grouped_block_shift_count =
+            (uint32_t)grouped_block_shift_cache.size();
+    }
+#endif
+
     const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     static_assert(
         kMixedPackedCoefficientWords >= 3u &&
@@ -2355,7 +2478,8 @@ WirehairResult SolveMixedCompletionQuotient(
     std::vector<uint64_t> projected;
     if (!ProjectMixedCompletionCoefficientsByResidueBuckets(
             column_count, inactive_count, projection_words,
-            inactive_index, projection, *cached_packed, projected) ||
+            inactive_index, projection, *cached_packed,
+            grouped_block_shifts, grouped_block_shift_count, projected) ||
         projected.size() != (size_t)inactive_count * packed_words)
     {
         return Wirehair_Error;
@@ -2428,7 +2552,6 @@ WirehairResult SolveMixedCompletionQuotient(
     }
 
     const uint32_t elements = block_bytes / 2u;
-    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const bool rotate_residues = ActiveMixedResiduesRotated();
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
@@ -2565,9 +2688,9 @@ WirehairResult SolveMixedCompletionQuotient(
                                     block_index);
                         }
                         else if (schedule == 2u) {
-                            block_shift =
-                                ActiveMixedGroupedGF256ResidueBlockShift(
-                                    block_index);
+                            CAT_DEBUG_ASSERT(
+                                block_index < grouped_block_shift_count);
+                            block_shift = grouped_block_shifts[block_index];
                         }
                         ++block_index;
                         const uint32_t unshifted = residue >= block_shift ?
@@ -2825,6 +2948,7 @@ WirehairResult SolveMixedCompletionQuotient(
                     coefficient_period, populated_residues,
                     subfield_rows, first_grouped_gf256_row,
                     block_bytes, elements, extension_rows,
+                    grouped_block_shifts, grouped_block_shift_count,
                     inactive_index, values, *cached_rows,
                     subfield_destinations,
                     rhs_low, rhs_high, source_low, source_high, stats) :
@@ -2833,6 +2957,7 @@ WirehairResult SolveMixedCompletionQuotient(
                     coefficient_period, populated_residues,
                     subfield_rows, first_grouped_gf256_row,
                     block_bytes, elements, extension_rows,
+                    grouped_block_shifts, grouped_block_shift_count,
                     inactive_index, values, *cached_rows,
                     subfield_destinations,
                     rhs_low, rhs_high, source_low, source_high, stats);
@@ -2963,8 +3088,9 @@ WirehairResult SolveMixedCompletionQuotient(
                  block_base < first_heavy_column;
                  block_base += coefficient_period)
             {
+                CAT_DEBUG_ASSERT(block_index < grouped_block_shift_count);
                 const uint32_t block_shift =
-                    ActiveMixedGroupedGF256ResidueBlockShift(block_index++);
+                    grouped_block_shifts[block_index++];
                 const uint32_t unshifted = residue >= block_shift ?
                     residue - block_shift :
                     residue + coefficient_period - block_shift;
@@ -6705,13 +6831,42 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         const uint32_t grouped_gf256_rows =
             ActiveMixedGroupedGF256Rows();
         const MixedCoefficientRows* rows = GetMixedCoefficientRows();
-        if (!rows || period == 0u ||
+        const MixedPackedCoefficients* packed_rows =
+            GetMixedPackedCoefficients();
+        if (!rows || !packed_rows || period == 0u ||
             period > kMixedCoefficientPeriod ||
             heavy_rows > kMixedCompletionRowsMax ||
             grouped_gf256_rows > subfield_rows ||
             (grouped_gf256_rows != 0u && independent))
         {
             return false;
+        }
+        if (grouped_gf256_rows != 0u)
+        {
+            // With no non-corner prefix there are no C shifts to cache.  The
+            // complete H-column suffix must still project on canonical A, and
+            // an empty vector is permitted to expose a null data() pointer.
+            const uint32_t inactive_count = 1u;
+            const uint32_t projection_words = PackedWordCount(inactive_count);
+            std::vector<uint32_t> inactive_index(
+                heavy_rows, UINT32_MAX);
+            inactive_index[0] = 0u;
+            const std::vector<uint64_t> projection(
+                (size_t)heavy_rows * projection_words, UINT64_C(0));
+            std::vector<uint64_t> dense_projected;
+            std::vector<uint64_t> bucket_projected;
+            if (!ProjectMixedCompletionCoefficientsByDenseExpansion(
+                    heavy_rows, inactive_count, projection_words,
+                    inactive_index, projection, *packed_rows,
+                    dense_projected) ||
+                !ProjectMixedCompletionCoefficientsByResidueBuckets(
+                    heavy_rows, inactive_count, projection_words,
+                    inactive_index, projection, *packed_rows,
+                    nullptr, 0u, bucket_projected) ||
+                bucket_projected != dense_projected)
+            {
+                return false;
+            }
         }
         const uint32_t first_grouped_gf256_row =
             subfield_rows - grouped_gf256_rows;
