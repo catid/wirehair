@@ -32,7 +32,7 @@ import subprocess
 import time
 from collections import defaultdict
 from decimal import Decimal, getcontext
-from typing import Any, Iterable, Sequence
+from typing import Any, BinaryIO, Iterable, Sequence
 
 
 SOURCE_CELLS_SHA256 = (
@@ -63,6 +63,7 @@ THERMAL_FIELDS = (
     "load1", "load5", "load15", "edac_ce", "edac_ue",
 )
 THERMAL_DIMM_FIELDS = THERMAL_FIELDS[5:13]
+THERMAL_ROW_MAX_BYTES = 16384
 THERMAL_SCALAR_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?\Z")
 THERMAL_COUNTER_PATTERN = re.compile(r"[0-9]+\Z")
 BENCH_HEADER_V1 = (
@@ -931,6 +932,8 @@ def parse_thermal_sample(
     context: str,
     allow_dimm_read_errors: bool = False,
 ) -> dict[str, Any]:
+    if len(line) > THERMAL_ROW_MAX_BYTES:
+        raise ValueError(f"{context} exceeds the thermal row size limit")
     if not line.endswith(b"\n"):
         raise ValueError(f"{context} is not a complete CSV row")
     try:
@@ -1027,6 +1030,55 @@ def validate_thermal_health(
         raise ValueError(f"{context} reports a nonzero EDAC counter")
 
 
+def validate_thermal_log_descriptor(
+    source: BinaryIO,
+    path: Path,
+) -> os.stat_result:
+    descriptor = os.fstat(source.fileno())
+    try:
+        named = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"thermal log pathname is unavailable: {path}") from exc
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+    )
+    if (not stat.S_ISREG(descriptor.st_mode) or descriptor.st_nlink != 1 or
+            not stat.S_ISREG(named.st_mode) or named.st_nlink != 1 or
+            identity(descriptor) != identity(named)):
+        raise ValueError(f"thermal log is not a unique regular file: {path}")
+    return descriptor
+
+
+def open_thermal_log(path: Path) -> BinaryIO:
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"thermal log is a symlink: {path}") from exc
+        raise ValueError(f"thermal log is unavailable: {path}") from exc
+    source: BinaryIO | None = None
+    try:
+        # Critical header/baseline rereads must observe same-inode writes;
+        # BufferedReader may otherwise serve stale bytes after seek().
+        source = os.fdopen(descriptor, "rb", buffering=0)
+        validate_thermal_log_descriptor(source, path)
+    except BaseException:
+        try:
+            if source is None:
+                os.close(descriptor)
+            else:
+                source.close()
+        except OSError:
+            pass
+        raise
+    if source is None:
+        raise AssertionError("thermal log descriptor wrapper is unavailable")
+    return source
+
+
 def thermal_start(
     path: Path,
     stale_seconds: float = 5.0,
@@ -1035,7 +1087,7 @@ def thermal_start(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + 5.0
     while True:
-        with path.open("rb") as source:
+        with open_thermal_log(path) as source:
             header = source.readline()
             if not header.endswith(b"\n"):
                 raise ValueError("thermal log has an invalid header")
@@ -1053,19 +1105,28 @@ def thermal_start(
                 raise ValueError("thermal log has no data rows")
             source.seek(offset - 1)
             complete = source.read(1) == b"\n"
-            stat_before = os.fstat(source.fileno())
+            stat_before = validate_thermal_log_descriptor(source, path)
             if complete:
-                source.seek(max(len(header), offset - 16384))
+                source.seek(max(len(header), offset - THERMAL_ROW_MAX_BYTES))
                 tail = source.read(offset - source.tell())
+                lines = tail.splitlines(keepends=True)
+                if not lines:
+                    raise ValueError("thermal log has no complete data row")
+                baseline_row = lines[-1]
+                row_start = offset - len(baseline_row)
+                if row_start < len(header):
+                    raise ValueError("thermal baseline overlaps its header")
+                if row_start > len(header):
+                    source.seek(row_start - 1)
+                    if source.read(1) != b"\n":
+                        raise ValueError(
+                            "thermal baseline exceeds the row size limit")
+                stat_before = validate_thermal_log_descriptor(source, path)
         if complete:
             break
         if time.monotonic() >= deadline:
             raise ValueError("thermal log ends in a persistent partial row")
         time.sleep(0.05)
-    lines = tail.splitlines(keepends=True)
-    if not lines:
-        raise ValueError("thermal log has no complete data row")
-    baseline_row = lines[-1]
     baseline = parse_thermal_sample(
         baseline_row, "thermal baseline",
         allow_dimm_read_errors=not require_zero_dimm_errors)
@@ -1106,16 +1167,56 @@ def thermal_finish(
     suffix = b""
     deadline = time.monotonic() + 5.0
     while True:
-        with path.open("rb") as source:
-            stat_after = os.fstat(source.fileno())
-            if ((stat_after.st_dev, stat_after.st_ino) !=
+        with open_thermal_log(path) as source:
+            stat_before_read = validate_thermal_log_descriptor(source, path)
+            if ((stat_before_read.st_dev, stat_before_read.st_ino) !=
                     (start["dev"], start["ino"])):
                 raise ValueError("thermal log inode changed")
-            if stat_after.st_size < start["offset"]:
+            if stat_before_read.st_size < start["offset"]:
                 raise ValueError("thermal log shrank")
+            header = start.get("header")
+            baseline_row = start.get("baseline_row")
+            if (not isinstance(header, bytes) or
+                    not isinstance(baseline_row, bytes) or
+                    start["offset"] < len(header) + len(baseline_row)):
+                raise ValueError("thermal start record is malformed")
+            baseline_start = start["offset"] - len(baseline_row)
+            source.seek(0)
+            if source.read(len(header)) != header:
+                raise ValueError("thermal log header changed after the mark")
+            source.seek(baseline_start)
+            if source.read(len(baseline_row)) != baseline_row:
+                raise ValueError("thermal baseline row changed after the mark")
             source.seek(start["offset"])
             suffix = source.read()
-        if suffix.endswith(b"\n"):
+            source.seek(0)
+            if source.read(len(header)) != header:
+                raise ValueError("thermal log header changed during finish")
+            source.seek(baseline_start)
+            if source.read(len(baseline_row)) != baseline_row:
+                raise ValueError("thermal baseline row changed during finish")
+            stat_after = validate_thermal_log_descriptor(source, path)
+            if stat_after.st_size < start["offset"]:
+                raise ValueError("thermal log shrank")
+            # Reread after the post-read stat as well.  Metadata timestamps
+            # can have coarser granularity than a same-length in-place write.
+            source.seek(0)
+            if source.read(len(header)) != header:
+                raise ValueError("thermal log header changed at finish")
+            source.seek(baseline_start)
+            if source.read(len(baseline_row)) != baseline_row:
+                raise ValueError("thermal baseline row changed at finish")
+            stat_final = validate_thermal_log_descriptor(source, path)
+            stable_identity = lambda value: (
+                value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+            )
+            captured_to_stable_end = (
+                stable_identity(stat_before_read) == stable_identity(stat_after) ==
+                stable_identity(stat_final) and
+                start["offset"] + len(suffix) == stat_final.st_size)
+            stat_after = stat_final
+        if captured_to_stable_end and suffix.endswith(b"\n"):
             break
         if time.monotonic() >= deadline:
             raise ValueError("thermal log ends in a persistent partial interval row")

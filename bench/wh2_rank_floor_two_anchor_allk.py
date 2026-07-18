@@ -35,6 +35,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import select
 import shutil
 import signal
@@ -46,15 +47,18 @@ from typing import Any, Iterable, Sequence
 
 from wh2_rank_floor_two_anchor_screen import (
     THERMAL_FIELDS,
+    THERMAL_ROW_MAX_BYTES,
     TIMING_FIELDS,
     binomial_one_sided,
     canonical_json,
     deterministic_equal,
+    open_thermal_log,
     parse_bench_output,
     parse_thermal_sample,
     sha256_file as _screen_sha256_file,
     thermal_finish,
     thermal_start,
+    validate_thermal_log_descriptor,
     validate_thermal_current,
     validate_thermal_health,
 )
@@ -74,6 +78,10 @@ SEEDS = (
 )
 SCHEDULES = ("burst", "adversarial", "repair-only")
 ARMS = ("d12", "two_anchor_adaptive", "d13_adaptive")
+THERMAL_BASELINE_FIELDS = {
+    "dev", "ino", "offset", "edac_ce", "edac_ue", "monotonic_s",
+    "max_temperature_c", "row_sha256",
+}
 BASE_OPTIONS = (
     "precodefail",
     "--bb-list", "64",
@@ -126,6 +134,71 @@ def sha256_file(path: Path, *, require_unique: bool = True) -> str:
             except (OSError, ValueError) as retry_exc:
                 die(str(retry_exc))
         die(str(exc))
+
+
+def _canonical_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and
+        all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def frozen_executable_path(
+    record: Any,
+    context: str,
+) -> Path:
+    """Validate one frozen absolute executable while permitting hardlinks."""
+    if (not isinstance(record, dict) or
+            set(record) != {"path", "sha256"} or
+            not isinstance(record.get("path"), str) or
+            not _canonical_digest(record.get("sha256"))):
+        die(f"frozen {context} identity record is malformed")
+    path = Path(record["path"])
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        die(f"frozen {context} is unavailable: {exc}")
+    if (not path.is_absolute() or resolved != path or
+            not os.access(path, os.X_OK) or
+            sha256_file(path, require_unique=False) != record["sha256"]):
+        die(f"frozen {context} changed or is indirect/nonexecutable")
+    return path
+
+
+def executable_identity(name: str) -> dict[str, str]:
+    located = shutil.which(name)
+    if located is None:
+        die(f"required executable is unavailable: {name}")
+    try:
+        path = Path(located).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        die(f"required executable is unavailable: {name}: {exc}")
+    if not path.is_absolute() or not os.access(path, os.X_OK):
+        die(f"required executable is not executable: {name}")
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path, require_unique=False),
+    }
+
+
+def python_runtime_identity() -> dict[str, str]:
+    try:
+        path = Path(sys.executable).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        die(f"Python runtime is unavailable: {exc}")
+    if not path.is_absolute() or not os.access(path, os.X_OK):
+        die("Python runtime is not an absolute executable")
+    return {
+        "path": str(path), "version": sys.version,
+        "sha256": sha256_file(path, require_unique=False),
+    }
+
+
+def verify_frozen_binary(binary: Path, digest: Any) -> None:
+    if (not _canonical_digest(digest) or
+            not os.access(binary, os.X_OK) or
+            sha256_file(binary) != digest):
+        die("frozen benchmark binary changed or is nonexecutable")
 
 
 def _process_start_ticks(pid: int) -> int | None:
@@ -563,6 +636,29 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def validate_prepare_anchor(
+    result_dir: Path,
+    schema: str,
+    fields: Sequence[str],
+    staged_field: str,
+) -> dict[str, Any]:
+    """Bind the mutable staged manifest to its outer prepare record."""
+    try:
+        record = json.loads(stable_bytes(result_dir / "prepare.json"))
+    except json.JSONDecodeError as exc:
+        raise CampaignError("prepare anchor is not canonical JSON") from exc
+    expected_fields = {"schema", "result_dir", *fields}
+    if (not isinstance(record, dict) or set(record) != expected_fields or
+            record.get("schema") != schema or
+            record.get("result_dir") != str(result_dir) or
+            not isinstance(record.get(staged_field), str) or
+            not _canonical_digest(record.get(staged_field)) or
+            sha256_file(result_dir / "frozen/staged.sha256") !=
+            record[staged_field]):
+        die("prepare anchor does not bind the frozen staged manifest")
+    return record
+
+
 def strict_uint(text: str, context: str) -> int:
     if not text or (text != "0" and text.startswith("0")) or not text.isdigit():
         die(f"{context}: noncanonical unsigned integer {text!r}")
@@ -893,11 +989,146 @@ class CampaignSignalGuard:
         return False
 
 
+def validate_frozen_thermal_source(
+    path: Path,
+    baseline: Any,
+    stale_seconds: float,
+    cpu_limit_c: float = 90.0,
+    dimm_limit_c: float = 90.0,
+    consecutive_limit: int = 3,
+) -> tuple[int, int, int, int]:
+    """Revalidate the frozen row and every append-only telemetry row."""
+    plain_nonnegative = lambda value: (
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    )
+    if (not math.isfinite(stale_seconds) or stale_seconds <= 0.0 or
+            not math.isfinite(cpu_limit_c) or
+            not 0.0 <= cpu_limit_c <= 120.0 or
+            not math.isfinite(dimm_limit_c) or
+            not 0.0 <= dimm_limit_c <= 120.0 or
+            not isinstance(consecutive_limit, int) or
+            isinstance(consecutive_limit, bool) or consecutive_limit <= 0 or
+            not isinstance(baseline, dict) or
+            set(baseline) != THERMAL_BASELINE_FIELDS or
+            not plain_nonnegative(baseline.get("dev")) or
+            baseline.get("dev") == 0 or
+            not plain_nonnegative(baseline.get("ino")) or
+            baseline.get("ino") == 0 or
+            not plain_nonnegative(baseline.get("offset")) or
+            baseline.get("offset") == 0 or
+            not plain_nonnegative(baseline.get("edac_ce")) or
+            not plain_nonnegative(baseline.get("edac_ue")) or
+            any(not isinstance(baseline.get(field), (int, float)) or
+                isinstance(baseline.get(field), bool) or
+                not math.isfinite(float(baseline[field]))
+                for field in ("monotonic_s", "max_temperature_c")) or
+            float(baseline["monotonic_s"]) < 0.0 or
+            not 0.0 <= float(baseline["max_temperature_c"]) <= 120.0 or
+            not _canonical_digest(baseline.get("row_sha256"))):
+        die("frozen thermal baseline record is malformed")
+    try:
+        current = thermal_start(
+            path, stale_seconds=stale_seconds, require_zero_edac=False)
+    except (OSError, ValueError) as exc:
+        die(f"frozen thermal source is unavailable: {exc}")
+    expected_identity = (baseline["dev"], baseline["ino"])
+    if ((current["dev"], current["ino"]) != expected_identity or
+            current["offset"] < baseline["offset"] or
+            current["edac_ce"] != baseline["edac_ce"] or
+            current["edac_ue"] != baseline["edac_ue"] or
+            current["monotonic_s"] < float(baseline["monotonic_s"])):
+        die("thermal source changed since the public freeze")
+    try:
+        with open_thermal_log(path) as source:
+            metadata = validate_thermal_log_descriptor(source, path)
+            if ((metadata.st_dev, metadata.st_ino) != expected_identity or
+                    metadata.st_size < baseline["offset"]):
+                die("frozen thermal baseline is no longer retained")
+            header = source.readline()
+            if header != current["header"]:
+                die("frozen thermal header changed")
+            window_start = max(
+                len(header), baseline["offset"] - THERMAL_ROW_MAX_BYTES)
+            source.seek(window_start)
+            window = source.read(baseline["offset"] - window_start)
+            window_rows = window.splitlines(keepends=True)
+            if not window_rows:
+                die("frozen thermal baseline row is unavailable")
+            frozen_row_start = baseline["offset"] - len(window_rows[-1])
+            if frozen_row_start < len(header):
+                die("frozen thermal baseline overlaps its header")
+            if frozen_row_start > len(header):
+                source.seek(frozen_row_start - 1)
+                if source.read(1) != b"\n":
+                    die("frozen thermal baseline exceeds the row size limit")
+            source.seek(baseline["offset"])
+            interval = source.read(current["offset"] - baseline["offset"])
+            if len(interval) != current["offset"] - baseline["offset"]:
+                die("frozen thermal history changed while being read")
+            validate_thermal_log_descriptor(source, path)
+    except (OSError, ValueError) as exc:
+        die(f"frozen thermal baseline cannot be reread: {exc}")
+    rows = window.splitlines(keepends=True)
+    if not rows or not window.endswith(b"\n"):
+        die("frozen thermal baseline row is unavailable")
+    row = rows[-1]
+    if sha256_bytes(row) != baseline["row_sha256"]:
+        die("frozen thermal baseline row changed")
+    try:
+        sample = parse_thermal_sample(row, "frozen thermal baseline")
+    except ValueError as exc:
+        die(f"frozen thermal baseline row is invalid: {exc}")
+    if (sample["edac_ce"] != baseline["edac_ce"] or
+            sample["edac_ue"] != baseline["edac_ue"] or
+            sample["monotonic_s"] != float(baseline["monotonic_s"]) or
+            sample["max_temperature_c"] !=
+            float(baseline["max_temperature_c"])):
+        die("frozen thermal baseline record differs from its row")
+    consecutive_high = int(
+        sample["cpu_tctl_c"] >= cpu_limit_c or
+        max(sample["dimm_temperatures"]) >= dimm_limit_c)
+    if consecutive_high >= consecutive_limit:
+        die("frozen thermal history exceeded its consecutive limit")
+    if interval and not interval.endswith(b"\n"):
+        die("frozen thermal history contains a partial row")
+    previous = sample
+    for number, history_row in enumerate(
+            interval.splitlines(keepends=True), 1):
+        try:
+            history = parse_thermal_sample(
+                history_row, f"frozen thermal history row {number}")
+            validate_thermal_health(
+                history, f"frozen thermal history row {number}",
+                require_zero_edac=False)
+        except ValueError as exc:
+            die(f"frozen thermal history is invalid: {exc}")
+        delta = history["monotonic_s"] - previous["monotonic_s"]
+        if delta <= 0.0 or delta > stale_seconds:
+            die("frozen thermal history is nonmonotonic or contains a gap")
+        if (history["edac_ce"] != baseline["edac_ce"] or
+                history["edac_ue"] != baseline["edac_ue"]):
+            die("frozen thermal history changed the EDAC counters")
+        high = (history["cpu_tctl_c"] >= cpu_limit_c or
+                max(history["dimm_temperatures"]) >= dimm_limit_c)
+        consecutive_high = consecutive_high + 1 if high else 0
+        if consecutive_high >= consecutive_limit:
+            die("frozen thermal history exceeded its consecutive limit")
+        previous = history
+    if (previous["raw"] != current["baseline_row"] or
+            previous["monotonic_s"] != current["monotonic_s"]):
+        die("frozen thermal history does not reach the current baseline")
+    return (
+        baseline["dev"], baseline["ino"],
+        baseline["edac_ce"], baseline["edac_ue"])
+
+
 class ThermalGuard:
     def __init__(
         self, path: Path, abort: threading.Event,
         stale_seconds: float = 5.0, limit_c: float = 90.0,
         consecutive_limit: int = 3,
+        expected_edac_ce: int = 0, expected_edac_ue: int = 0,
+        expected_dev: int | None = None, expected_ino: int | None = None,
     ) -> None:
         self.path = path
         self.abort = abort
@@ -905,9 +1136,33 @@ class ThermalGuard:
         self.limit_c = limit_c
         self.consecutive_limit = consecutive_limit
         if (not math.isfinite(limit_c) or not 0.0 <= limit_c <= 120.0 or
-                consecutive_limit <= 0):
+                consecutive_limit <= 0 or
+                not isinstance(expected_edac_ce, int) or
+                isinstance(expected_edac_ce, bool) or expected_edac_ce < 0 or
+                not isinstance(expected_edac_ue, int) or
+                isinstance(expected_edac_ue, bool) or expected_edac_ue < 0 or
+                (expected_dev is None) != (expected_ino is None) or
+                (expected_dev is not None and (
+                    not isinstance(expected_dev, int) or
+                    isinstance(expected_dev, bool) or expected_dev <= 0 or
+                    not isinstance(expected_ino, int) or
+                    isinstance(expected_ino, bool) or expected_ino <= 0))):
             die("thermal guard policy is outside the canonical range")
-        self.mark = thermal_start(path, stale_seconds=stale_seconds)
+        self.expected_edac_ce = expected_edac_ce
+        self.expected_edac_ue = expected_edac_ue
+        self.mark = thermal_start(
+            path, stale_seconds=stale_seconds, require_zero_edac=False)
+        if (expected_dev is not None and
+                (self.mark["dev"], self.mark["ino"]) !=
+                (expected_dev, expected_ino)):
+            die("thermal logger identity changed since the frozen baseline")
+        self._validate_sample(self.mark["baseline"], "thermal baseline")
+        self.initial_consecutive_high = self._trailing_high_samples()
+        if self.initial_consecutive_high >= self.consecutive_limit:
+            die(
+                f"thermal limit {self.limit_c:g} C was already reached for "
+                f"{self.initial_consecutive_high} consecutive samples"
+            )
         self.read_offset = self.mark["offset"]
         self.last_monotonic = self.mark["monotonic_s"]
         self.stop_event = threading.Event()
@@ -918,6 +1173,57 @@ class ThermalGuard:
         self.thread = threading.Thread(target=self._loop, name="thermal-guard")
         self.started = False
 
+    def _trailing_high_samples(self) -> int:
+        """Bridge a high-temperature streak across the live guard mark."""
+        with open_thermal_log(self.path) as source:
+            metadata = validate_thermal_log_descriptor(source, self.path)
+            if ((metadata.st_dev, metadata.st_ino) !=
+                    (self.mark["dev"], self.mark["ino"]) or
+                    metadata.st_size < self.mark["offset"]):
+                die("thermal logger changed while seeding the live guard")
+            header = source.readline()
+            if header != self.mark["header"]:
+                die("thermal logger header changed while seeding the live guard")
+            start = max(
+                len(header),
+                self.mark["offset"] -
+                self.consecutive_limit * THERMAL_ROW_MAX_BYTES,
+            )
+            source.seek(start)
+            window = source.read(self.mark["offset"] - start)
+            validate_thermal_log_descriptor(source, self.path)
+        rows = window.splitlines(keepends=True)
+        if (not rows or not window.endswith(b"\n") or
+                rows[-1] != self.mark["baseline_row"]):
+            die("thermal guard mark is not retained byte-exactly")
+        retained = rows[-self.consecutive_limit:]
+        previous: dict[str, Any] | None = None
+        consecutive = 0
+        for number, row in enumerate(retained, 1):
+            if len(row) > THERMAL_ROW_MAX_BYTES:
+                die("thermal guard history contains an oversized row")
+            try:
+                sample = parse_thermal_sample(
+                    row, f"thermal guard history row {number}")
+            except ValueError as exc:
+                die(f"thermal guard history is invalid: {exc}")
+            self._validate_sample(sample, "thermal guard history")
+            if previous is not None:
+                delta = sample["monotonic_s"] - previous["monotonic_s"]
+                if delta <= 0.0 or delta > self.stale_seconds:
+                    die("thermal guard history is nonmonotonic or has a gap")
+            previous = sample
+            high = sample["max_temperature_c"] >= self.limit_c
+            consecutive = consecutive + 1 if high else 0
+        return consecutive
+
+    def _validate_sample(self, sample: dict[str, Any], context: str) -> None:
+        validate_thermal_health(
+            sample, context, require_zero_edac=False)
+        if (sample["edac_ce"] != self.expected_edac_ce or
+                sample["edac_ue"] != self.expected_edac_ue):
+            die(f"{context} changed the frozen EDAC counters")
+
     def start(self) -> None:
         try:
             self.thread.start()
@@ -925,8 +1231,8 @@ class ThermalGuard:
             self.started = self.thread.ident is not None
 
     def _new_samples(self) -> list[dict[str, Any]]:
-        with self.path.open("rb") as source:
-            file_stat = os.fstat(source.fileno())
+        with open_thermal_log(self.path) as source:
+            file_stat = validate_thermal_log_descriptor(source, self.path)
             if ((file_stat.st_dev, file_stat.st_ino) !=
                     (self.mark["dev"], self.mark["ino"])):
                 die("thermal logger inode changed")
@@ -934,14 +1240,15 @@ class ThermalGuard:
                 die("thermal logger shrank")
             source.seek(self.read_offset)
             suffix = source.read()
+            validate_thermal_log_descriptor(source, self.path)
         complete_end = suffix.rfind(b"\n")
         if complete_end < 0:
-            if len(suffix) > 16384:
+            if len(suffix) > THERMAL_ROW_MAX_BYTES:
                 die("thermal logger has an oversized partial row")
             return []
         complete = suffix[:complete_end + 1]
         partial = suffix[complete_end + 1:]
-        if len(partial) > 16384:
+        if len(partial) > THERMAL_ROW_MAX_BYTES:
             die("thermal logger has an oversized partial row")
         lines = complete.splitlines(keepends=True)
         samples = [
@@ -952,7 +1259,7 @@ class ThermalGuard:
         return samples
 
     def _loop(self) -> None:
-        consecutive = 1 if self.mark["max_temperature_c"] >= self.limit_c else 0
+        consecutive = self.initial_consecutive_high
         while not self.stop_event.wait(0.25):
             try:
                 samples = self._new_samples()
@@ -961,7 +1268,7 @@ class ThermalGuard:
                     delta = sample["monotonic_s"] - self.last_monotonic
                     if delta <= 0.0 or delta > self.stale_seconds:
                         die("thermal logger is nonmonotonic or has a sampling gap")
-                    validate_thermal_health(sample, "live thermal sample")
+                    self._validate_sample(sample, "live thermal sample")
                     self.last_monotonic = sample["monotonic_s"]
                     self.samples += 1
                     high = sample["max_temperature_c"] >= self.limit_c
@@ -991,8 +1298,10 @@ class ThermalGuard:
         summary = thermal_finish(
             self.path, self.mark, output,
             limit_c=self.limit_c, stale_seconds=self.stale_seconds,
-            dimm_limit_c=self.limit_c,
+            require_zero_edac=False, dimm_limit_c=self.limit_c,
         )
+        if summary["edac_ce_delta"] != 0 or summary["edac_ue_delta"] != 0:
+            die("thermal interval changed the frozen EDAC counters")
         summary.update({
             "guard_poll_iterations": self.poll_iterations,
             "guard_samples": self.samples,
@@ -1006,6 +1315,9 @@ class ThermalGuard:
 def run_job(
     job: Job,
     binary: Path,
+    binary_sha256: str,
+    taskset: Path,
+    taskset_record: dict[str, str],
     result_root: Path,
     pool: CpuPool,
     abort: threading.Event,
@@ -1018,7 +1330,10 @@ def run_job(
     try:
         if abort.is_set():
             die(f"campaign abort set before job {job.job} launch")
-        command = ["taskset", "-c", str(cpu), *make_command(binary, job)]
+        verify_frozen_binary(binary, binary_sha256)
+        if frozen_executable_path(taskset_record, "taskset") != taskset:
+            die("frozen taskset path changed before job launch")
+        command = [str(taskset), "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1136,46 +1451,173 @@ def verify_sha_manifest(root: Path, manifest: Path) -> dict[Path, str]:
     return result
 
 
-def tracked_clean_source(script: Path, helper: Path) -> tuple[Path, str]:
+def tracked_clean_source(
+    script: Path,
+    helper: Path,
+    git: Path,
+) -> tuple[Path, str]:
     repo = Path(subprocess.check_output(
-        ("git", "-C", str(script.parent), "rev-parse", "--show-toplevel"),
+        (
+            str(git), "--no-replace-objects", "-C", str(script.parent),
+            "rev-parse", "--show-toplevel",
+        ),
         text=True,
     ).strip()).resolve(strict=True)
     for args, name in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run(("git", "-C", str(repo), *args), check=False).returncode:
+        if subprocess.run(
+                (str(git), "--no-replace-objects", "-C", str(repo), *args),
+                check=False).returncode:
             die(f"tracked source {name} is dirty")
     head = subprocess.check_output(
-        ("git", "-C", str(repo), "rev-parse", "HEAD"), text=True,
+        (
+            str(git), "--no-replace-objects", "-C", str(repo),
+            "rev-parse", "HEAD",
+        ), text=True,
     ).strip()
     for path in (script, helper):
-        relative = path.resolve(strict=True).relative_to(repo)
+        relative = path.relative_to(repo)
         tracked = subprocess.check_output(
-            ("git", "-C", str(repo), "show", f"HEAD:{relative}"),
+            (
+                str(git), "--no-replace-objects", "-C", str(repo),
+                "cat-file", "blob", f"{head}:{relative}",
+            ),
         )
         if tracked != stable_bytes(path):
             die(f"{relative} does not exactly match immutable HEAD")
     return repo, head
 
 
-def cmake_source_directory(cache: Path) -> Path:
-    prefix = "CMAKE_HOME_DIRECTORY:INTERNAL="
-    matches = [
-        line[len(prefix):]
-        for line in stable_bytes(cache).decode("utf-8").splitlines()
-        if line.startswith(prefix)
-    ]
-    if len(matches) != 1:
-        die("CMake cache lacks one canonical source-directory record")
-    return Path(matches[0]).resolve(strict=True)
+def verify_frozen_sources_at_commit(
+    repo: Path,
+    commit: str,
+    sources: Sequence[tuple[Path, Path]],
+    git: Path,
+) -> None:
+    """Bind copied controller bytes to immutable Git objects, not the worktree."""
+    if not sources or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        die("frozen source verification lacks an immutable commit")
+    for source, frozen in sources:
+        try:
+            if not source.is_absolute() or ".." in source.parts:
+                die("frozen source inventory contains a noncanonical path")
+            # The source Path was canonicalized when prepare began.  Keep its
+            # lexical repository identity here: resolving it again would let a
+            # transient symlink swap redirect this check to another Git path.
+            relative = source.relative_to(repo)
+            expected = subprocess.check_output(
+                (
+                    str(git), "--no-replace-objects", "-C", str(repo),
+                    "cat-file", "blob", f"{commit}:{relative}",
+                ),
+            )
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            raise CampaignError(
+                f"cannot read immutable source object for {source}") from exc
+        if stable_bytes(frozen) != expected:
+            die(
+                f"frozen source {frozen.name} differs from immutable "
+                f"commit {commit}"
+            )
+
+
+def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
+    """Require an uninstrumented strict native Release benchmark build."""
+    try:
+        raw = stable_bytes(cache)
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise CampaignError("CMake cache is not UTF-8") from exc
+    entries: dict[str, tuple[str, str]] = {}
+    for number, line in enumerate(lines, 1):
+        if not line or line.startswith(("#", "//")):
+            continue
+        match = re.fullmatch(r"([^:=]+):([^=]+)=(.*)", line)
+        if match is None:
+            die(f"CMake cache line {number} is malformed")
+        key, kind, value = match.groups()
+        if key in entries:
+            die(f"CMake cache repeats {key}")
+        entries[key] = (kind, value)
+    required = {
+        "CMAKE_BUILD_TYPE": ("STRING", "Release"),
+        "BUILD_TESTS": ("BOOL", "ON"),
+        "BUILD_CODEC_V2": ("BOOL", "ON"),
+        "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
+        "MARCH_NATIVE": ("BOOL", "ON"),
+        "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
+        "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
+        "WH_LTO": ("STRING", "OFF"),
+        "WH_PGO_MODE": ("STRING", "OFF"),
+        "CMAKE_C_FLAGS": ("STRING", ""),
+        "CMAKE_CXX_FLAGS": ("STRING", ""),
+        "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+        "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+        "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+        "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
+        "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    }
+    for key, expected in required.items():
+        if entries.get(key) != expected:
+            die(f"candidate CMake policy requires {key}={expected[1]!r}")
+    for key in (
+            "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
+            "CMAKE_TOOLCHAIN_FILE"):
+        if key in entries and entries[key][1]:
+            die(f"candidate CMake policy forbids {key}")
+    if ("CMAKE_CONFIGURATION_TYPES" in entries and
+            entries["CMAKE_CONFIGURATION_TYPES"][1]):
+        die("candidate CMake policy requires a single-config generator")
+    banned = ("-fsanitize", "--coverage", "-fprofile", "-pg")
+    for key, (_kind, value) in entries.items():
+        if "FLAGS" in key and any(token in value for token in banned):
+            die(f"candidate CMake policy forbids instrumentation in {key}")
+        if (key.startswith("CMAKE_INTERPROCEDURAL_OPTIMIZATION") and
+                value.upper() not in ("", "OFF", "FALSE", "0")):
+            die("candidate CMake policy forbids implicit IPO/LTO")
+    home = entries.get("CMAKE_HOME_DIRECTORY")
+    if home is None or home[0] != "INTERNAL":
+        die("candidate CMake cache lacks its source-tree binding")
+    try:
+        home_path = Path(home[1]).resolve(strict=True)
+    except OSError as exc:
+        raise CampaignError("candidate CMake source tree is unavailable") from exc
+    if home_path != repo.resolve(strict=True):
+        die("candidate CMake cache belongs to another source tree")
+    for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_GENERATOR"):
+        if key not in entries or not entries[key][1]:
+            die(f"candidate CMake cache lacks {key}")
+    if entries["CMAKE_GENERATOR"] not in (
+            ("INTERNAL", "Unix Makefiles"), ("INTERNAL", "Ninja")):
+        die("candidate CMake policy requires Unix Makefiles or Ninja")
+    return {
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.build_policy.v1",
+        "cmake_cache_sha256": sha256_bytes(raw),
+        "build_type": "Release", "march_native": True,
+        "strict_warnings": True, "tests_enabled": True,
+        "benchmarks_built": True, "lto": "OFF", "pgo": "OFF",
+        "c_compiler": entries["CMAKE_C_COMPILER"][1],
+        "cxx_compiler": entries["CMAKE_CXX_COMPILER"][1],
+        "generator": entries["CMAKE_GENERATOR"][1],
+    }
 
 
 def prepare(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve(strict=True)
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
-    repo, head = tracked_clean_source(script, helper)
+    git_record = executable_identity("git")
+    git = frozen_executable_path(git_record, "git")
+    repo, head = tracked_clean_source(script, helper, git)
+    taskset_record = executable_identity("taskset")
+    cmake_record = executable_identity("cmake")
+    python_runtime = python_runtime_identity()
+    taskset = frozen_executable_path(taskset_record, "taskset")
+    cmake = frozen_executable_path(cmake_record, "cmake")
     binary_input = args.binary.absolute()
     if binary_input.is_symlink():
         die("--binary must not be a symlink")
@@ -1184,20 +1626,26 @@ def prepare(args: argparse.Namespace) -> int:
     cache = build_dir / "CMakeCache.txt"
     if binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True):
         die("--binary must be the codec/wirehair_v2_bench build target")
-    if cmake_source_directory(cache) != repo:
-        die("--binary CMake cache belongs to a different source tree")
+    build_policy = validate_candidate_build_policy(cache, repo)
     build_command = [
-        "cmake", "--build", str(build_dir), "--target",
+        str(cmake), "--build", str(build_dir), "--target",
         "wirehair_v2_bench", "--clean-first", "--parallel",
         str(args.build_workers),
     ]
     subprocess.run(build_command, check=True)
-    post_repo, post_head = tracked_clean_source(script, helper)
+    post_repo, post_head = tracked_clean_source(script, helper, git)
     if post_repo != repo or post_head != head:
         die("source repository changed during the clean benchmark rebuild")
+    if validate_candidate_build_policy(cache, repo) != build_policy:
+        die("candidate build policy changed during the clean rebuild")
+    if (frozen_executable_path(git_record, "git") != git or
+            frozen_executable_path(taskset_record, "taskset") != taskset or
+            frozen_executable_path(cmake_record, "cmake") != cmake):
+        die("frozen tool path changed during the clean rebuild")
     if binary_input.is_symlink():
         die("clean benchmark rebuild replaced --binary with a symlink")
     binary = binary_input.resolve(strict=True)
+    live_binary_sha256 = sha256_file(binary)
     groups_input = args.groups.absolute()
     if groups_input.is_symlink():
         die("--groups must not be a symlink")
@@ -1206,7 +1654,7 @@ def prepare(args: argparse.Namespace) -> int:
     if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
         die("--binary must be an executable, non-symlink regular file")
     load_groups(groups)
-    thermal_start(thermal)
+    thermal_mark = thermal_start(thermal)
     result_dir = args.result_dir.resolve()
     result_dir.mkdir(parents=True, exist_ok=False)
     frozen = result_dir / "frozen"
@@ -1228,17 +1676,41 @@ def prepare(args: argparse.Namespace) -> int:
         shutil.copyfile(source, destination)
     destinations["binary"].chmod(0o755)
     destinations["script"].chmod(0o755)
+    verify_frozen_sources_at_commit(
+        repo, head,
+        ((script, destinations["script"]), (helper, destinations["helper"])),
+        git,
+    )
+    if validate_candidate_build_policy(
+            destinations["cmake_cache"], repo) != build_policy:
+        die("frozen candidate CMake policy changed while being copied")
+    if sha256_file(destinations["binary"]) != live_binary_sha256:
+        die("clean benchmark binary changed while it was being frozen")
     contract = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v4",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v5",
         "source_commit": head, "source_repo": str(repo),
         "build_command": build_command,
         "binary_source": str(binary),
-        "binary_sha256": sha256_file(destinations["binary"]),
+        "binary_sha256": live_binary_sha256,
         "cmake_cache_sha256": sha256_file(destinations["cmake_cache"]),
+        "build_policy": build_policy,
         "script_sha256": sha256_file(destinations["script"]),
         "helper_sha256": sha256_file(destinations["helper"]),
         "groups_sha256": sha256_file(destinations["groups"]),
         "thermal": str(thermal), "workers": args.workers,
+        "taskset": taskset_record,
+        "cmake": cmake_record,
+        "git": git_record,
+        "python": python_runtime,
+        "thermal_baseline": {
+            "dev": thermal_mark["dev"], "ino": thermal_mark["ino"],
+            "offset": thermal_mark["offset"],
+            "edac_ce": thermal_mark["edac_ce"],
+            "edac_ue": thermal_mark["edac_ue"],
+            "monotonic_s": thermal_mark["monotonic_s"],
+            "max_temperature_c": thermal_mark["max_temperature_c"],
+            "row_sha256": sha256_bytes(thermal_mark["baseline_row"]),
+        },
         "timeout_seconds": args.timeout,
         "K_domain": [K_MIN, K_MAX], "cutoff": CUTOFF,
         "arms": ARMS, "seeds": SEEDS, "schedules": SCHEDULES,
@@ -1265,11 +1737,13 @@ def prepare(args: argparse.Namespace) -> int:
     atomic_write(staged_path, sha_manifest(result_dir, staged_paths))
     verify_sha_manifest(result_dir, staged_path)
     prepared = {
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v1",
         "result_dir": str(result_dir), "source_commit": head,
         "binary_sha256": contract["binary_sha256"],
         "staged_sha256": sha256_file(staged_path),
         "run_command": [
-            sys.executable, str(destinations["script"]), "run",
+            python_runtime["path"],
+            str(destinations["script"]), "run",
             "--result-dir", str(result_dir),
         ],
     }
@@ -1278,8 +1752,17 @@ def prepare(args: argparse.Namespace) -> int:
     return 0
 
 
-def load_frozen(result_dir: Path) -> tuple[dict[str, Any], Path, Path, list[Group]]:
+def load_frozen(
+    result_dir: Path,
+) -> tuple[
+    dict[str, Any], Path, Path, Path, tuple[int, int, int, int], list[Group],
+]:
     frozen = result_dir / "frozen"
+    prepare_anchor = validate_prepare_anchor(
+        result_dir,
+        "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v1",
+        ("source_commit", "binary_sha256", "staged_sha256", "run_command"),
+        "staged_sha256")
     staged = verify_sha_manifest(result_dir, frozen / "staged.sha256")
     expected = {
         (frozen / name).resolve(strict=True)
@@ -1295,7 +1778,7 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], Path, Path, list[Grou
     contract = json.loads(stable_bytes(frozen / "contract.json"))
     if (
         contract.get("schema") !=
-            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v4"
+            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v5"
         or tuple(contract.get("arms", ())) != ARMS
         or tuple(contract.get("seeds", ())) != SEEDS
         or tuple(contract.get("schedules", ())) != SCHEDULES
@@ -1310,23 +1793,48 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], Path, Path, list[Grou
         }
         or contract.get("cmake_cache_sha256") !=
             sha256_file(frozen / "CMakeCache.txt")
+        or contract.get("build_policy") != validate_candidate_build_policy(
+            frozen / "CMakeCache.txt",
+            Path(str(contract.get("source_repo", ""))))
     ):
         die("frozen contract does not match this campaign")
     script = (frozen / "wh2_rank_floor_two_anchor_allk.py").resolve(strict=True)
     helper = (frozen / "wh2_rank_floor_two_anchor_screen.py").resolve(strict=True)
     if Path(__file__).resolve(strict=True) != script:
         die("run must be invoked through the frozen campaign script")
+    run_command = prepare_anchor.get("run_command")
+    python_runtime = contract.get("python")
+    if python_runtime != python_runtime_identity():
+        die("frozen Python runtime changed")
+    if (not isinstance(run_command, list) or len(run_command) != 5 or
+            run_command[0] != python_runtime["path"] or
+            run_command[1:] != [
+                str(script), "run", "--result-dir", str(result_dir)]):
+        die("prepare anchor run command changed")
     if (
         sha256_file(script) != contract["script_sha256"] or
         sha256_file(helper) != contract["helper_sha256"]
     ):
         die("frozen script or helper does not match the contract")
     binary = (frozen / "wirehair_v2_bench").resolve(strict=True)
-    if not os.access(binary, os.X_OK) or sha256_file(binary) != contract["binary_sha256"]:
-        die("frozen binary is missing, non-executable, or changed")
+    verify_frozen_binary(binary, contract.get("binary_sha256"))
+    if (prepare_anchor.get("source_commit") != contract.get("source_commit") or
+            prepare_anchor.get("binary_sha256") !=
+            contract.get("binary_sha256")):
+        die("prepare anchor differs from the frozen all-K contract")
+    taskset = frozen_executable_path(contract.get("taskset"), "taskset")
+    frozen_executable_path(contract.get("cmake"), "cmake")
+    frozen_executable_path(contract.get("git"), "git")
     groups = load_groups(frozen / "groups.tsv", contract["groups_sha256"])
     thermal = Path(contract["thermal"]).resolve(strict=True)
-    return contract, binary, thermal, groups
+    thermal_identity = validate_frozen_thermal_source(
+        thermal, contract.get("thermal_baseline"),
+        float(contract["thermal_policy"]["stale_seconds"]),
+        cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+        dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+        consecutive_limit=int(
+            contract["thermal_policy"]["consecutive_samples"]))
+    return contract, binary, taskset, thermal, thermal_identity, groups
 
 
 class ArmData:
@@ -1374,8 +1882,10 @@ def load_arm_data(
             text, job.ks, "0x0", job.seed, job.schedule,
             arm_options(job.arm, job.band), True,
         )
+        if len(rows) != len(job.ks):
+            die(f"{job.stem} parsed row cardinality changed")
         arm = data[job.arm]
-        for K, row in zip(job.ks, rows, strict=True):
+        for K, row in zip(job.ks, rows):
             index = cell_index(job.seed_index, job.schedule, K)
             if arm.seen[index]:
                 die(f"duplicate analyzed cell {job.arm}/{job.seed_index}/{job.schedule}/{K}")
@@ -1425,7 +1935,9 @@ def verify_low_identity(
             )
         base = parsed["d12"]
         for candidate in ARMS[1:]:
-            for base_row, candidate_row in zip(base, parsed[candidate], strict=True):
+            if len(base) != len(parsed[candidate]):
+                die(f"low-K identity row cardinality differs for {candidate}")
+            for base_row, candidate_row in zip(base, parsed[candidate]):
                 comparisons += len(base_row) - len(TIMING_FIELDS)
                 if not deterministic_equal(base_row, candidate_row):
                     die(
@@ -1747,7 +2259,8 @@ def analyze(
 
 def run(args: argparse.Namespace) -> int:
     result_dir = args.result_dir.resolve(strict=True)
-    contract, binary, thermal, groups = load_frozen(result_dir)
+    contract, binary, taskset, thermal, thermal_identity, groups = \
+        load_frozen(result_dir)
     jobs = build_jobs(groups)
     result_root = result_dir / "results"
     result_root.mkdir(exist_ok=False)
@@ -1764,10 +2277,23 @@ def run(args: argparse.Namespace) -> int:
         stale_seconds=float(contract["thermal_policy"]["stale_seconds"]),
         limit_c=float(contract["thermal_policy"]["limit_c"]),
         consecutive_limit=int(contract["thermal_policy"]["consecutive_samples"]),
+        expected_dev=thermal_identity[0], expected_ino=thermal_identity[1],
+        expected_edac_ce=thermal_identity[2],
+        expected_edac_ue=thermal_identity[3],
     )
+    if validate_frozen_thermal_source(
+            thermal, contract.get("thermal_baseline"),
+            float(contract["thermal_policy"]["stale_seconds"]),
+            cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            consecutive_limit=int(
+                contract["thermal_policy"]["consecutive_samples"])) != \
+            thermal_identity:
+        die("frozen thermal baseline changed before all-K guard start")
     registry = ProcessRegistry()
     records: list[dict[str, Any]] = []
     campaign_error: BaseException | None = None
+    thermal_summary: dict[str, Any] | None = None
     with CampaignSignalGuard(abort, registry):
         try:
             guard.start()
@@ -1781,8 +2307,10 @@ def run(args: argparse.Namespace) -> int:
                         if abort.is_set():
                             die("campaign aborted during job submission")
                         futures.append(executor.submit(
-                            run_job, job, binary, result_root, pool, abort,
-                            registry, float(contract["timeout_seconds"]),
+                            run_job, job, binary, contract["binary_sha256"],
+                            taskset, contract["taskset"], result_root, pool,
+                            abort, registry,
+                            float(contract["timeout_seconds"]),
                         ))
                     for future in concurrent.futures.as_completed(futures):
                         records.append(future.result())
@@ -1807,9 +2335,11 @@ def run(args: argparse.Namespace) -> int:
                 )
     if guard.error:
         die(f"thermal guard failed: {guard.error}")
+    if thermal_summary is None:
+        if campaign_error is not None:
+            raise campaign_error
+        die("thermal guard did not produce a summary")
     if (
-        thermal_summary["cpu_busy_min_pct"] <
-            float(contract["thermal_policy"]["min_cpu_busy_pct"]) or
         thermal_summary["thermal_high_max_consecutive_samples"] >=
             int(contract["thermal_policy"]["consecutive_samples"]) or
         thermal_summary["dimm_read_errors_max"] != 0 or
@@ -1819,6 +2349,21 @@ def run(args: argparse.Namespace) -> int:
         die(f"memory telemetry changed during campaign: {thermal_summary}")
     if campaign_error is not None:
         raise campaign_error
+    if thermal_summary["cpu_busy_min_pct"] < \
+            float(contract["thermal_policy"]["min_cpu_busy_pct"]):
+        die(f"CPU utilization fell below campaign gate: {thermal_summary}")
+    verify_frozen_binary(binary, contract.get("binary_sha256"))
+    if frozen_executable_path(contract.get("taskset"), "taskset") != taskset:
+        die("frozen taskset path changed during the all-K campaign")
+    if validate_frozen_thermal_source(
+            thermal, contract.get("thermal_baseline"),
+            float(contract["thermal_policy"]["stale_seconds"]),
+            cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            consecutive_limit=int(
+                contract["thermal_policy"]["consecutive_samples"])) != \
+            thermal_identity:
+        die("frozen thermal baseline changed during the all-K campaign")
     records.sort(key=lambda record: record["job"])
     if len(records) != len(jobs):
         die(f"completed {len(records)} jobs, want {len(jobs)}")
@@ -1877,7 +2422,8 @@ def main() -> int:
     args = parser.parse_args()
     getcontext().prec = 100
     if args.mode == "prepare":
-        if args.workers <= 0 or args.build_workers <= 0 or args.timeout <= 0:
+        if (args.workers <= 0 or args.build_workers <= 0 or
+                not math.isfinite(args.timeout) or args.timeout <= 0):
             die("--workers, --build-workers, and --timeout must be positive")
         return prepare(args)
     return run(args)

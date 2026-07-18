@@ -21,11 +21,30 @@ if str(HERE) not in sys.path:
 
 import wh2_preferred_attempt_campaign as campaign
 import wh2_preferred_attempt_search as search
+import wh2_rank_floor_two_anchor_screen as screen
 
 
 CONTEXT = "12" * 32
 PARENT = "34" * 32
 SEEDS = ("0x0000000000000001", "0x0000000000000002")
+
+
+def thermal_row(
+    monotonic_s: float,
+    *,
+    edac_ce: int = 0,
+    edac_ue: int = 0,
+    cpu_tctl_c: float = 60.0,
+) -> bytes:
+    fields = [
+        "2026-07-18T00:00:00.000Z", f"{monotonic_s:.6f}",
+        "100.0", "3600.0", f"{cpu_tctl_c:.1f}",
+        *(f"{50.0 + index:.2f}" for index in range(8)),
+        "0", "128.0", "128.0", "128.0", str(edac_ce), str(edac_ue),
+    ]
+    if len(fields) != len(screen.THERMAL_FIELDS):
+        raise AssertionError("thermal fixture field count changed")
+    return (",".join(fields) + "\n").encode("ascii")
 
 
 def metrics(
@@ -178,9 +197,11 @@ def runner_contract(
     taskset.parent.mkdir(parents=True, exist_ok=True)
     taskset.write_bytes(b"mock frozen taskset\n")
     taskset.chmod(0o755)
+    binary = thermal.parent / "frozen" / "wirehair_v2_bench"
     return {
         "cpu_set": list(cpus), "workers": workers,
         "timeout_seconds": timeout, "thermal": str(thermal.resolve()),
+        "binary_sha256": campaign.sha256_bytes(binary.read_bytes()),
         "thermal_policy": {
             "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
             "timing_cpu_limit_c": 85.0, "timing_dimm_limit_c": 90.0,
@@ -225,6 +246,167 @@ class FakeThermalGuard:
             "guard_high_samples": 0, "guard_limit_c": 90.0,
             "guard_error": None,
         }
+
+
+class ThermalSourceTests(unittest.TestCase):
+    def test_timing_history_uses_stricter_cpu_limit_between_panels(self) -> None:
+        header = (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii")
+        baseline_row = thermal_row(100.0, cpu_tctl_c=80.0)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(header + baseline_row)
+            with mock.patch.object(screen, "validate_thermal_current"):
+                mark = campaign.common.thermal_start(
+                    path, require_zero_edac=False)
+            contract = {
+                "thermal_baseline": {
+                    "dev": mark["dev"], "ino": mark["ino"],
+                    "offset": mark["offset"], "edac_ce": 0, "edac_ue": 0,
+                    "monotonic_s": mark["monotonic_s"],
+                    "max_temperature_c": mark["max_temperature_c"],
+                    "row_sha256": campaign.sha256_bytes(baseline_row),
+                },
+            }
+            policy = {
+                "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
+                "timing_cpu_limit_c": 85.0,
+                "timing_dimm_limit_c": 90.0,
+                "consecutive_samples": 3, "stale_seconds": 5.0,
+            }
+            with path.open("ab") as output:
+                for monotonic_s in (101.0, 102.0, 103.0):
+                    output.write(thermal_row(
+                        monotonic_s, cpu_tctl_c=86.0))
+            with mock.patch.object(screen, "validate_thermal_current"):
+                campaign.validate_frozen_thermal_source(
+                    contract, path, policy)
+                mark = campaign.common.thermal_start(
+                    path, require_zero_edac=False)
+            timing_contract = {
+                "thermal_baseline": {
+                    "dev": mark["dev"], "ino": mark["ino"],
+                    "offset": mark["offset"], "edac_ce": mark["edac_ce"],
+                    "edac_ue": mark["edac_ue"],
+                    "monotonic_s": mark["monotonic_s"],
+                    "max_temperature_c": mark["max_temperature_c"],
+                    "row_sha256": campaign.sha256_bytes(
+                        mark["baseline_row"]),
+                },
+            }
+            with mock.patch.object(screen, "validate_thermal_current"):
+                campaign.validate_frozen_thermal_source(
+                    timing_contract, path, policy, timing=True)
+            with path.open("ab") as output:
+                for monotonic_s in (104.0, 105.0, 106.0):
+                    output.write(thermal_row(
+                        monotonic_s, cpu_tctl_c=86.0))
+            with mock.patch.object(screen, "validate_thermal_current"):
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "consecutive limit"):
+                    campaign.validate_frozen_thermal_source(
+                        timing_contract, path, policy, timing=True)
+
+    def test_frozen_source_retains_nonzero_edac_baseline_exactly(self) -> None:
+        header = (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii")
+        baseline_row = thermal_row(100.0, edac_ce=5, edac_ue=2)
+        current_row = thermal_row(101.0, edac_ce=5, edac_ue=2)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(header + baseline_row)
+            with mock.patch.object(screen, "validate_thermal_current"):
+                mark = campaign.common.thermal_start(
+                    path, require_zero_edac=False)
+            contract = {
+                "thermal_baseline": {
+                    "dev": mark["dev"], "ino": mark["ino"],
+                    "offset": mark["offset"], "edac_ce": 5, "edac_ue": 2,
+                    "monotonic_s": mark["monotonic_s"],
+                    "max_temperature_c": mark["max_temperature_c"],
+                    "row_sha256": campaign.sha256_bytes(baseline_row),
+                },
+            }
+            with path.open("ab") as output:
+                output.write(current_row)
+            with mock.patch.object(screen, "validate_thermal_current"):
+                self.assertEqual(
+                    campaign.validate_frozen_thermal_source(
+                        contract, path, {"stale_seconds": 5.0}),
+                    (mark["dev"], mark["ino"], 5, 2))
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "identity changed"):
+                    campaign.common.ThermalGuard(
+                        path, threading.Event(),
+                        expected_dev=mark["dev"],
+                        expected_ino=mark["ino"] + 1,
+                        expected_edac_ce=5, expected_edac_ue=2)
+                guard = campaign.common.ThermalGuard(
+                    path, threading.Event(),
+                    expected_dev=mark["dev"], expected_ino=mark["ino"],
+                    expected_edac_ce=5, expected_edac_ue=2)
+            guard._validate_sample(
+                screen.parse_thermal_sample(
+                    current_row, "unchanged EDAC fixture"),
+                "unchanged EDAC fixture")
+            with self.assertRaises(campaign.CampaignError):
+                guard._validate_sample(
+                    screen.parse_thermal_sample(
+                        thermal_row(102.0, edac_ce=6, edac_ue=2),
+                        "changed EDAC fixture"),
+                    "changed EDAC fixture")
+
+            changed_baseline = baseline_row.replace(b",60.0,", b",61.0,", 1)
+            self.assertEqual(len(changed_baseline), len(baseline_row))
+            with path.open("r+b") as output:
+                output.seek(len(header))
+                output.write(changed_baseline)
+            with mock.patch.object(screen, "validate_thermal_current"), \
+                 self.assertRaisesRegex(
+                     campaign.CampaignError, "baseline row changed"):
+                campaign.validate_frozen_thermal_source(
+                    contract, path, {"stale_seconds": 5.0})
+            with path.open("r+b") as output:
+                output.seek(len(header))
+                output.write(baseline_row)
+
+            with path.open("ab") as output:
+                output.write(thermal_row(102.0, edac_ce=6, edac_ue=2))
+            with mock.patch.object(screen, "validate_thermal_current"), \
+                 self.assertRaisesRegex(
+                     campaign.CampaignError, "changed since"):
+                campaign.validate_frozen_thermal_source(
+                    contract, path, {"stale_seconds": 5.0})
+            with path.open("ab") as output:
+                output.write(thermal_row(103.0, edac_ce=5, edac_ue=2))
+            with mock.patch.object(screen, "validate_thermal_current"), \
+                 self.assertRaisesRegex(
+                     campaign.CampaignError, "history changed"):
+                campaign.validate_frozen_thermal_source(
+                    contract, path, {"stale_seconds": 5.0})
+
+    def test_frozen_source_rejects_prelaunch_sampling_gap(self) -> None:
+        header = (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii")
+        baseline_row = thermal_row(100.0)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(header + baseline_row)
+            with mock.patch.object(screen, "validate_thermal_current"):
+                mark = campaign.common.thermal_start(
+                    path, require_zero_edac=False)
+            contract = {
+                "thermal_baseline": {
+                    "dev": mark["dev"], "ino": mark["ino"],
+                    "offset": mark["offset"], "edac_ce": 0, "edac_ue": 0,
+                    "monotonic_s": mark["monotonic_s"],
+                    "max_temperature_c": mark["max_temperature_c"],
+                    "row_sha256": campaign.sha256_bytes(baseline_row),
+                },
+            }
+            with path.open("ab") as output:
+                output.write(thermal_row(106.0))
+            with mock.patch.object(screen, "validate_thermal_current"), \
+                 self.assertRaisesRegex(campaign.CampaignError, "contains a gap"):
+                campaign.validate_frozen_thermal_source(
+                    contract, path, {"stale_seconds": 5.0})
 
 
 class LowBusyThermalGuard(FakeThermalGuard):
@@ -354,6 +536,137 @@ class ParserAndLedgerTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_end_history_rescan_rejects_streak_split_across_guard_mark(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, binary = make_result_root(temporary)
+            ledger = campaign.build_control_ledger(
+                {0: (10,)}, (10,), (SEEDS[0],), PARENT,
+                schedules=("burst",), losses=("0.50",), widths=(64,))
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+            identity = (1, 2, 0, 0)
+
+            def execute(
+                _command: Tuple[str, ...], _timeout: float,
+                _abort: threading.Event, _registry: object, cpu: int,
+            ) -> campaign.ExecutionResult:
+                return campaign.ExecutionResult(
+                    0, control_output(ledger.jobs[0]), b"", 100, 200, cpu)
+
+            def fake_guard(
+                path: Path, abort: threading.Event, **_kwargs: object,
+            ) -> FakeThermalGuard:
+                return FakeThermalGuard(path, abort)
+
+            runner = campaign.JobRunner(
+                root, binary, (3,), 1, 10.0, execute)
+            with trust_patch(contract), \
+                 mock.patch.object(
+                     campaign, "validate_frozen_thermal_source",
+                     side_effect=(
+                         identity, identity,
+                         campaign.CampaignError("split high streak"),
+                     ),
+                 ) as validate_history, \
+                 mock.patch.object(
+                     campaign.common, "ThermalGuard",
+                     side_effect=fake_guard), \
+                 self.assertRaisesRegex(
+                     campaign.CampaignError, "split high streak"):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertEqual(validate_history.call_count, 3)
+            self.assertFalse(
+                campaign.phase_completion_path(root, ledger).exists())
+
+    def test_transient_executable_mutation_is_caught_before_second_launch(
+            self) -> None:
+        for mutation_target in ("binary", "taskset"):
+            with self.subTest(target=mutation_target), \
+                 tempfile.TemporaryDirectory() as temporary:
+                root, binary = make_result_root(temporary)
+                ledger = campaign.build_control_ledger(
+                    {0: (10,)}, (10,), (SEEDS[0],), PARENT,
+                    schedules=("burst", "adversarial"), losses=("0.50",),
+                    widths=(64,))
+                thermal = root / "thermal-live.csv"
+                contract = runner_contract((3,), 1, 10.0, thermal)
+                taskset = Path(contract["system_tools"]["taskset"]["path"])
+                original_binary = binary.read_bytes()
+                original_taskset = taskset.read_bytes()
+                calls = 0
+
+                def execute(
+                    _command: Tuple[str, ...], _timeout: float,
+                    _abort: threading.Event, _registry: object, cpu: int,
+                ) -> campaign.ExecutionResult:
+                    nonlocal calls
+                    job = ledger.jobs[calls]
+                    calls += 1
+                    if calls == 1:
+                        target = binary if mutation_target == "binary" else taskset
+                        target.write_bytes(b"transient executable mutation\n")
+                    return campaign.ExecutionResult(
+                        0, control_output(job), b"", 100, 200, cpu)
+
+                class RestoringThermal(FakeThermalGuard):
+                    def finish(self, output: Path) -> dict:
+                        binary.write_bytes(original_binary)
+                        binary.chmod(0o755)
+                        taskset.write_bytes(original_taskset)
+                        taskset.chmod(0o755)
+                        return super().finish(output)
+
+                runner = campaign.JobRunner(
+                    root, binary, (3,), 1, 10.0, execute,
+                    RestoringThermal)
+                with trust_patch(contract), self.assertRaisesRegex(
+                        campaign.CampaignError, "changed"):
+                    runner.run_ledger(
+                        ledger, thermal, install_signal_handlers=False)
+                self.assertEqual(calls, 1)
+                self.assertFalse(
+                    campaign.phase_completion_path(root, ledger).exists())
+
+    def test_binary_must_remain_executable_and_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, binary = make_result_root(temporary)
+            ledger = campaign.build_control_ledger(
+                {0: (10,)}, (10,), (SEEDS[0],), PARENT,
+                schedules=("burst",), losses=("0.50",), widths=(64,))
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+
+            def mutate_binary(
+                _command: Tuple[str, ...], _timeout: float,
+                _abort: threading.Event, _registry: object, cpu: int,
+            ) -> campaign.ExecutionResult:
+                binary.write_bytes(b"mutated benchmark binary\n")
+                binary.chmod(0o755)
+                return campaign.ExecutionResult(
+                    0, control_output(ledger.jobs[0]), b"", 100, 200, cpu)
+
+            runner = campaign.JobRunner(
+                root, binary, (3,), 1, 10.0, mutate_binary,
+                FakeThermalGuard)
+            binary.chmod(0o644)
+            with trust_patch(contract), self.assertRaisesRegex(
+                    campaign.CampaignError, "nonexecutable"):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertFalse(
+                (root / "ledgers/control-control.json").exists())
+
+            binary.write_bytes(b"mock frozen binary\n")
+            binary.chmod(0o755)
+            with trust_patch(contract), self.assertRaisesRegex(
+                    campaign.CampaignError, "binary changed"):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertFalse(
+                (root / "completed/control-control.json").exists())
+
     def test_taskset_atomic_receipt_completion_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root, binary = make_result_root(temporary)
@@ -378,6 +691,18 @@ class RunnerTests(unittest.TestCase):
                 root, binary, (3,), 1, 10.0, execute, FakeThermalGuard)
             thermal = root / "thermal-live.csv"
             contract = runner_contract((3,), 1, 10.0, thermal)
+            taskset_path = Path(
+                contract["system_tools"]["taskset"]["path"])
+            taskset_alias = taskset_path.with_name("taskset-hardlink")
+            os.link(taskset_path, taskset_alias)
+            self.assertEqual(taskset_path.stat().st_nlink, 2)
+            taskset_loop = taskset_path.with_name("taskset-loop")
+            taskset_loop.symlink_to(taskset_loop.name)
+            loop_contract = copy.deepcopy(contract)
+            loop_contract["system_tools"]["taskset"]["path"] = \
+                str(taskset_loop)
+            with self.assertRaises(campaign.CampaignError):
+                campaign.frozen_taskset_path(loop_contract)
             guards_before = FakeThermalGuard.instances
             with trust_patch(contract) as verifier:
                 first = runner.run_ledger(
@@ -386,6 +711,8 @@ class RunnerTests(unittest.TestCase):
                 second = runner.run_ledger(
                     ledger, thermal,
                     install_signal_handlers=False)
+            self.assertTrue(taskset_alias.samefile(taskset_path))
+            self.assertEqual(taskset_path.stat().st_nlink, 2)
             self.assertEqual(len(calls), 1)
             self.assertEqual(FakeThermalGuard.instances - guards_before, 1)
             self.assertEqual(first[0].receipt, second[0].receipt)
@@ -441,8 +768,6 @@ class RunnerTests(unittest.TestCase):
                     install_signal_handlers=False)
             interval_path.write_bytes(interval_bytes)
 
-            taskset_path = Path(
-                contract["system_tools"]["taskset"]["path"])
             taskset_bytes = taskset_path.read_bytes()
             taskset_path.write_bytes(taskset_bytes + b"tamper\n")
             with trust_patch(contract), self.assertRaises(campaign.CampaignError):

@@ -10,7 +10,9 @@ import math
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -177,6 +179,169 @@ def cell_grid(
 
 
 class HoldoutFixtureTest(unittest.TestCase):
+    def test_end_history_rescan_rejects_split_holdout_streak(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "frozen/wirehair_v2_bench"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"mock binary\n")
+            binary.chmod(0o755)
+            manifest = subject.canonical_selected_route_manifest(
+                tuple(preferred_route(4096, width)
+                      for width in subject.WIDTHS),
+                (4096,), subject.WIDTHS, {4096: 2}, CONTEXT)
+            cache = root / "cache/routes.csv"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(manifest)
+            job = paired_job(cache_binding(manifest))
+            ledger = subject.HoldoutLedger(
+                "h1", "paired", ROOT_HASH, PARENT_HASH, CONTEXT, (job,))
+            thermal = root / "live-thermal.csv"
+            thermal.write_bytes(b"mock live thermal\n")
+            taskset = root / "taskset"
+            taskset.write_bytes(b"mock taskset\n")
+            taskset.chmod(0o755)
+            policy = {
+                "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
+                "timing_cpu_limit_c": 85.0,
+                "timing_dimm_limit_c": 90.0,
+                "consecutive_samples": 3, "stale_seconds": 5.0,
+                "min_cpu_busy_pct": 95.0,
+                "edac_ce_delta": 0, "edac_ue_delta": 0,
+            }
+            contract = {
+                "cpu_set": [0], "workers": 1, "timeout_seconds": 10.0,
+                "thermal": str(thermal), "thermal_policy": policy,
+                "binary_sha256": hashlib.sha256(
+                    binary.read_bytes()).hexdigest(),
+                "system_tools": {"taskset": {
+                    "path": str(taskset),
+                    "sha256": hashlib.sha256(
+                        taskset.read_bytes()).hexdigest(),
+                }},
+            }
+            summary = {
+                "samples": 1, "sealed_samples_including_baseline": 2,
+                "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 65.0,
+                "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+                "edac_ce_delta": 0, "edac_ue_delta": 0,
+                "thermal_limit_c": 90.0, "thermal_high_samples": 0,
+                "thermal_high_max_consecutive_samples": 0,
+                "guard_poll_iterations": 1, "guard_samples": 1,
+                "guard_high_samples": 0, "guard_limit_c": 90.0,
+                "guard_error": None,
+            }
+
+            class FakeGuard:
+                def __init__(
+                    self, _path: Path, _abort: object, **_kwargs: object,
+                ) -> None:
+                    self.started = False
+                    self.error = None
+
+                def start(self) -> None:
+                    self.started = True
+
+                def finish(self, path: Path) -> Dict[str, object]:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"sealed thermal interval\n")
+                    return dict(summary)
+
+            def executor(
+                _command: Tuple[str, ...], _timeout: float,
+                _abort: object, _registry: object, cpu: int,
+            ) -> campaign.ExecutionResult:
+                return campaign.ExecutionResult(
+                    0, paired_bytes(job), b"", 10, 20, cpu)
+
+            runner = subject.HoldoutRunner(
+                root, binary, (0,), 1, 10.0, executor=executor,
+                binding_verifier=lambda _root, _ledger: None,
+                runtime_verifier=lambda _root: ({}, contract))
+            identity = (1, 2, 0, 0)
+            with mock.patch.object(
+                    campaign, "validate_frozen_thermal_source",
+                    side_effect=(
+                        identity, identity,
+                        campaign.CampaignError("split holdout streak"),
+                    )) as validate_history, \
+                 mock.patch.object(
+                     campaign.common, "ThermalGuard", FakeGuard), \
+                 self.assertRaisesRegex(
+                     campaign.CampaignError, "split holdout streak"):
+                runner.run_ledger(
+                    ledger, thermal,
+                    install_signal_handlers=False, exact=False)
+            self.assertEqual(validate_history.call_count, 3)
+            self.assertFalse(
+                (root / "h1" / (subject._phase_stem(ledger) + ".json")).exists())
+
+    def test_transient_executable_mutation_stops_second_holdout_launch(
+            self) -> None:
+        for mutation_target in ("binary", "taskset"):
+            with self.subTest(target=mutation_target), \
+                 tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                binary = root / "frozen/wirehair_v2_bench"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"mock binary\n")
+                binary.chmod(0o755)
+                manifest = subject.canonical_selected_route_manifest(
+                    tuple(preferred_route(4096, width)
+                          for width in subject.WIDTHS),
+                    (4096,), subject.WIDTHS, {4096: 2}, CONTEXT)
+                cache = root / "cache/routes.csv"
+                cache.parent.mkdir(parents=True)
+                cache.write_bytes(manifest)
+                first = paired_job(cache_binding(manifest))
+                second = replace(
+                    first, job_id="h1-paired-00001", root_index=1,
+                    seed="0x0000000000000002")
+                taskset_path = root / "taskset"
+                taskset_path.write_bytes(b"mock taskset\n")
+                taskset_path.chmod(0o755)
+                contract = {
+                    "binary_sha256": hashlib.sha256(
+                        binary.read_bytes()).hexdigest(),
+                    "system_tools": {"taskset": {
+                        "path": str(taskset_path),
+                        "sha256": hashlib.sha256(
+                            taskset_path.read_bytes()).hexdigest(),
+                    }},
+                }
+                calls = 0
+
+                def executor(
+                    _command: Tuple[str, ...], _timeout: float,
+                    _abort: object, _registry: object, cpu: int,
+                ) -> campaign.ExecutionResult:
+                    nonlocal calls
+                    job = (first, second)[calls]
+                    calls += 1
+                    if calls == 1:
+                        target = (binary if mutation_target == "binary"
+                                  else taskset_path)
+                        target.write_bytes(b"transient executable mutation\n")
+                    return campaign.ExecutionResult(
+                        0, paired_bytes(job), b"", 10, 20, cpu)
+
+                runner = subject.HoldoutRunner(
+                    root, binary, (0,), 1, 10, executor=executor)
+                for job in (first, second):
+                    for path in subject.job_paths(root, job).values():
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                pool = campaign.common.CpuPool((0,), 1)
+                abort = threading.Event()
+                registry = campaign.common.ProcessRegistry()
+                taskset = str(taskset_path)
+                runner._run_one(
+                    first, pool, abort, registry, taskset, contract)
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "changed"):
+                    runner._run_one(
+                        second, pool, abort, registry, taskset, contract)
+                self.assertEqual(calls, 1)
+
     def test_exact_cardinality_builders_and_malformed_axes(self) -> None:
         h1_cohort = tuple(range(4096, 4096 + subject.H1_K_COUNT))
         h1_table = {K: (2 if K == h1_cohort[0] else None) for K in h1_cohort}
@@ -459,6 +624,7 @@ class HoldoutFixtureTest(unittest.TestCase):
             binary = root / "frozen/wirehair_v2_bench"
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"mock binary\n")
+            binary.chmod(0o755)
             exact = subject.canonical_selected_route_manifest(
                 tuple(preferred_route(4096, width)
                       for width in subject.WIDTHS),
@@ -499,6 +665,8 @@ class HoldoutFixtureTest(unittest.TestCase):
             contract = {
                 "cpu_set": [0], "workers": 1, "timeout_seconds": 10.0,
                 "thermal": str(live_thermal), "thermal_policy": policy,
+                "binary_sha256": hashlib.sha256(
+                    binary.read_bytes()).hexdigest(),
                 "system_tools": {"taskset": {
                     "path": str(taskset),
                     "sha256": hashlib.sha256(taskset.read_bytes()).hexdigest(),
@@ -616,6 +784,111 @@ class HoldoutFixtureTest(unittest.TestCase):
             receipt_path.write_bytes(campaign.canonical_json_bytes(malformed))
             with self.assertRaises(subject.CampaignError):
                 subject.verify_receipt(root, binary, job, {0})
+
+    def test_end_identity_failure_forces_full_holdout_rerun(self) -> None:
+        for mutation_target in ("binary", "taskset"):
+            with self.subTest(target=mutation_target), \
+                 tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                binary = root / "frozen/wirehair_v2_bench"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"mock binary\n")
+                binary.chmod(0o755)
+                manifest = subject.canonical_selected_route_manifest(
+                    tuple(preferred_route(4096, width)
+                          for width in subject.WIDTHS),
+                    (4096,), subject.WIDTHS, {4096: 2}, CONTEXT)
+                cache = root / "cache/routes.csv"
+                cache.parent.mkdir(parents=True)
+                cache.write_bytes(manifest)
+                job = paired_job(cache_binding(manifest))
+                ledger = subject.HoldoutLedger(
+                    "h1", "paired", ROOT_HASH, PARENT_HASH, CONTEXT, (job,))
+                output = paired_bytes(job)
+                thermal = root / "live-thermal.csv"
+                thermal.write_bytes(b"mock live thermal\n")
+                taskset = root / "taskset"
+                taskset.write_bytes(b"mock taskset\n")
+                taskset.chmod(0o755)
+                policy = {
+                    "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
+                    "timing_cpu_limit_c": 85.0,
+                    "timing_dimm_limit_c": 90.0,
+                    "consecutive_samples": 3, "stale_seconds": 5.0,
+                    "min_cpu_busy_pct": 95.0,
+                    "edac_ce_delta": 0, "edac_ue_delta": 0,
+                }
+                summary = {
+                    "samples": 1, "sealed_samples_including_baseline": 2,
+                    "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 65.0,
+                    "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+                    "edac_ce_delta": 0, "edac_ue_delta": 0,
+                    "thermal_limit_c": 90.0, "thermal_high_samples": 0,
+                    "thermal_high_max_consecutive_samples": 0,
+                    "guard_poll_iterations": 1, "guard_samples": 1,
+                    "guard_high_samples": 0, "guard_limit_c": 90.0,
+                    "guard_error": None,
+                }
+                contract = {
+                    "cpu_set": [0], "workers": 1,
+                    "timeout_seconds": 10.0, "thermal": str(thermal),
+                    "thermal_policy": policy,
+                    "binary_sha256": hashlib.sha256(
+                        binary.read_bytes()).hexdigest(),
+                    "system_tools": {"taskset": {
+                        "path": str(taskset),
+                        "sha256": hashlib.sha256(
+                            taskset.read_bytes()).hexdigest(),
+                    }},
+                }
+                calls = 0
+                mutate = True
+
+                class FakeThermal:
+                    def __init__(self, _path: Path, _abort: object) -> None:
+                        self.started = False
+                        self.error = None
+
+                    def start(self) -> None:
+                        self.started = True
+
+                    def finish(self, path: Path) -> Dict[str, object]:
+                        path.write_bytes(b"sealed thermal interval\n")
+                        return dict(summary)
+
+                def executor(
+                    _command: Tuple[str, ...], _timeout: float,
+                    _abort: object, _registry: object, cpu: int,
+                ) -> campaign.ExecutionResult:
+                    nonlocal calls
+                    calls += 1
+                    if mutate:
+                        target = binary if mutation_target == "binary" else taskset
+                        target.write_bytes(b"mutated executable\n")
+                    return campaign.ExecutionResult(
+                        0, output, b"", 10, 20, cpu)
+
+                runner = subject.HoldoutRunner(
+                    root, binary, (0,), 1, 10, executor=executor,
+                    binding_verifier=lambda _root, _ledger: None,
+                    runtime_verifier=lambda _root: ({}, contract),
+                    thermal_factory=FakeThermal)
+                with self.assertRaises(subject.CampaignError):
+                    runner.run_ledger(
+                        ledger, thermal,
+                        install_signal_handlers=False, exact=False)
+                phase = root / "h1" / (subject._phase_stem(ledger) + ".json")
+                self.assertFalse(phase.exists())
+                binary.write_bytes(b"mock binary\n")
+                binary.chmod(0o755)
+                taskset.write_bytes(b"mock taskset\n")
+                taskset.chmod(0o755)
+                mutate = False
+                runner.run_ledger(
+                    ledger, thermal,
+                    install_signal_handlers=False, exact=False)
+                self.assertEqual(calls, 2)
+                self.assertTrue(phase.exists())
 
 
 if __name__ == "__main__":

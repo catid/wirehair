@@ -1704,6 +1704,15 @@ def _execute_timing_process(
             pass
         process.communicate()
         raise
+    descendants_live = common.process_group_exists(process)
+    if descendants_live:
+        try:
+            common.stop_and_reap_process_group(process)
+        except common.CampaignError as exc:
+            raise TimingError(
+                "timing process group cleanup could not be proven") from exc
+        raise TimingError("timing process left an unexpected child process")
+    common.close_process_streams(process)
     return subprocess.CompletedProcess(
         command, process.returncode, stdout=output, stderr=errors)
 

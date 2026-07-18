@@ -485,6 +485,15 @@ if summarize_thermal_csv "$work/far-missing.csv" >/dev/null; then
     printf '%s\n' 'large missing-DIMM sampling gap unexpectedly passed' >&2
     exit 1
 fi
+# CLOCK_BOOTTIME samples must advance strictly.  Equal timestamps are neither
+# ordered evidence nor a second independent thermal observation.
+duplicate_mono=${valid_end/,102.25,/,101.25,}
+printf '%s\n%s\n%s\n%s\n' "$WH2_THERMAL_CSV_HEADER" "$valid_start" \
+    "$duplicate_mono" "$duplicate_mono" >"$work/duplicate-mono.csv"
+if summarize_thermal_csv "$work/duplicate-mono.csv" >/dev/null; then
+    printf '%s\n' 'duplicate monotonic timestamps unexpectedly passed' >&2
+    exit 1
+fi
 fractional_errors=${missing/,8,1,1,1,0,0/,1.5,1,1,1,0,0}
 printf '%s\n%s\n%s\n%s\n' "$WH2_THERMAL_CSV_HEADER" "$valid_start" \
     "$fractional_errors" "$valid_end" >"$work/fractional-errors.csv"

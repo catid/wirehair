@@ -1678,7 +1678,7 @@ class HoldoutRunner:
         self.executor = executor or campaign.subprocess_executor
         self.binding_verifier = binding_verifier
         self.runtime_verifier = runtime_verifier
-        self.thermal_factory = thermal_factory or common.ThermalGuard
+        self.thermal_factory = thermal_factory
 
     def _run_one(
         self,
@@ -1687,6 +1687,7 @@ class HoldoutRunner:
         abort: threading.Event,
         registry: common.ProcessRegistry,
         taskset: str,
+        contract: Mapping[str, Any],
     ) -> Tuple[Dict[str, Any], ParsedHoldoutOutput]:
         paths = job_paths(self.result_root, job)
         with campaign.job_lock(paths["lock"]):
@@ -1704,6 +1705,9 @@ class HoldoutRunner:
             try:
                 if abort.is_set():
                     die("holdout abort set while waiting for a CPU")
+                campaign.verify_frozen_binary(self.binary, contract)
+                if frozen_taskset_path(contract) != taskset:
+                    die("frozen taskset changed before holdout job launch")
                 command = (taskset, "-c", str(cpu), *base)
                 execution = self.executor(
                     tuple(command), self.timeout, abort, registry, cpu)
@@ -1791,11 +1795,16 @@ class HoldoutRunner:
             die("frozen holdout thermal log is unavailable: {}".format(error))
         if actual_thermal != frozen_thermal:
             die("holdout thermal log differs from frozen runtime")
+        frozen_thermal_baseline: Optional[Tuple[int, int, int, int]] = None
+        if self.thermal_factory is None:
+            frozen_thermal_baseline = campaign.validate_frozen_thermal_source(
+                contract, actual_thermal, thermal_policy)
         expected_binary = (
             self.result_root / "frozen/wirehair_v2_bench").resolve(strict=True)
         if (self.binary.resolve(strict=True) != expected_binary or
                 self.binary != expected_binary):
             die("holdout runner binary is not the frozen binary")
+        campaign.verify_frozen_binary(self.binary, contract)
         ledger_path = self.result_root / ledger.phase / "ledgers" / (
             ledger.kind + ".json")
         campaign.write_hashed_artifact(
@@ -1837,12 +1846,32 @@ class HoldoutRunner:
             executor: Optional[ThreadPoolExecutor] = None
             futures: Dict[Future[Any], HoldoutJob] = {}
             try:
-                thermal = self.thermal_factory(actual_thermal, abort)
+                if self.thermal_factory is None:
+                    if frozen_thermal_baseline is None:
+                        die("frozen holdout thermal baseline is unavailable")
+                    thermal = common.ThermalGuard(
+                        actual_thermal, abort,
+                        stale_seconds=float(thermal_policy["stale_seconds"]),
+                        limit_c=float(thermal_policy["cpu_limit_c"]),
+                        consecutive_limit=thermal_policy["consecutive_samples"],
+                        expected_dev=frozen_thermal_baseline[0],
+                        expected_ino=frozen_thermal_baseline[1],
+                        expected_edac_ce=frozen_thermal_baseline[2],
+                        expected_edac_ue=frozen_thermal_baseline[3])
+                    if campaign.validate_frozen_thermal_source(
+                            contract, actual_thermal,
+                            thermal_policy) != frozen_thermal_baseline:
+                        die(
+                            "frozen holdout thermal baseline changed before "
+                            "guard start")
+                else:
+                    thermal = self.thermal_factory(actual_thermal, abort)
                 thermal.start()
                 executor = ThreadPoolExecutor(max_workers=self.workers)
                 futures = {
                     executor.submit(
-                        self._run_one, job, pool, abort, registry, taskset): job
+                        self._run_one, job, pool, abort, registry, taskset,
+                        contract): job
                     for job in ledger.jobs}
                 for future in as_completed(futures):
                     completed[futures[future].job_id] = future.result()
@@ -1886,6 +1915,19 @@ class HoldoutRunner:
             raise run_error
         if registry.count() != 0:
             die("holdout phase left registered child processes")
+        self.binding_verifier(self.result_root, ledger)
+        _end_prepare, end_contract = self.runtime_verifier(self.result_root)
+        campaign.verify_frozen_binary(self.binary, end_contract)
+        if frozen_taskset_path(end_contract) != taskset:
+            die("frozen holdout taskset identity changed during the phase")
+        if self.thermal_factory is None:
+            end_policy = campaign.validate_thermal_policy(end_contract)
+            if (end_policy != thermal_policy or
+                    frozen_thermal_baseline is None or
+                    campaign.validate_frozen_thermal_source(
+                        end_contract, actual_thermal, end_policy) !=
+                    frozen_thermal_baseline):
+                die("frozen holdout thermal history changed during the phase")
         ordered = tuple(completed[job.job_id] for job in ledger.jobs)
         if len(ordered) != len(ledger.jobs):
             die("holdout phase completion cardinality mismatch")

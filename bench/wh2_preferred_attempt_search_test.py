@@ -520,6 +520,30 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             "            pass",
             "        else:",
             "            raise AssertionError(reader)",
+            "    try:",
+            "        screen.thermal_start(fifo)",
+            "    except ValueError:",
+            "        pass",
+            "    else:",
+            "        raise AssertionError('thermal_start accepted FIFO')",
+            "    try:",
+            "        screen.thermal_finish(",
+            "            fifo, {'dev': 0, 'ino': 0, 'offset': 0},",
+            "            fifo.with_name('sealed.csv'))",
+            "    except ValueError:",
+            "        pass",
+            "    else:",
+            "        raise AssertionError('thermal_finish accepted FIFO')",
+            "    guard = object.__new__(common.ThermalGuard)",
+            "    guard.path = fifo",
+            "    guard.mark = {'dev': 0, 'ino': 0}",
+            "    guard.read_offset = 0",
+            "    try:",
+            "        guard._new_samples()",
+            "    except ValueError:",
+            "        pass",
+            "    else:",
+            "        raise AssertionError('thermal guard accepted FIFO')",
         ))
         completed = subprocess.run(
             (sys.executable, "-c", script), capture_output=True,
@@ -708,7 +732,9 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             environment = os.environ.copy()
             with mock.patch.object(
                     subject, "newest_github_agent_environment",
-                    return_value=environment):
+                    return_value=environment), \
+                 mock.patch.object(
+                     subject, "verify_recoverable_prepare_sources"):
                 prepare_sha256 = subject.common.sha256_file(
                     staging / "prepare.json")
                 published_before_crash = subject.publish_r1_freeze_tag(
@@ -750,7 +776,10 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             )
             with mock.patch.object(
                     subject, "newest_github_agent_environment",
-                    return_value=environment), self.assertRaises(
+                    return_value=environment), \
+                 mock.patch.object(
+                     subject, "verify_recoverable_prepare_sources"), \
+                 self.assertRaises(
                         subject.CampaignError):
                 with subject.atomic_result_directory(broken_final):
                     self.fail("malformed complete staging was accepted")
@@ -778,6 +807,8 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 "final, template, ready = map(Path, sys.argv[1:])",
                 "subject.newest_github_agent_environment = "
                 "lambda _tools: os.environ.copy()",
+                "subject.verify_recoverable_prepare_sources = "
+                "lambda _frozen, _contract: None",
                 "with subject.atomic_result_directory(final) as transaction:",
                 "    staging = transaction[0]",
                 "    shutil.copytree(template / 'frozen', staging / 'frozen')",
@@ -936,6 +967,69 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             finally:
                 listener.close()
 
+    def test_frozen_executable_records_allow_hardlinks_not_indirection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-frozen-executable-") as temporary:
+            root = Path(temporary).resolve()
+            executable = root / "runtime"
+            executable.write_bytes(b"mock frozen executable\n")
+            executable.chmod(0o755)
+            hardlink = root / "runtime-hardlink"
+            os.link(executable, hardlink)
+            self.assertEqual(executable.stat().st_nlink, 2)
+            digest = subject.common.sha256_file(
+                executable, require_unique=False)
+            tool_record = {"path": str(executable), "sha256": digest}
+            runtime_record = {
+                **tool_record, "version": subject.DRAND_NODE_VERSION,
+            }
+
+            self.assertEqual(
+                subject.frozen_tool_path({"taskset": tool_record}, "taskset"),
+                executable)
+            session = object.__new__(subject.TimingHostSession)
+            session.tools = {"taskset": tool_record}
+            self.assertEqual(session.tool("taskset"), str(executable))
+            with mock.patch.object(
+                    subject, "command_version",
+                    return_value=subject.DRAND_NODE_VERSION):
+                self.assertEqual(subject.frozen_runtime_path(
+                    runtime_record, "node", subject.DRAND_NODE_VERSION),
+                    executable)
+            self.assertTrue(hardlink.samefile(executable))
+            self.assertEqual(executable.stat().st_nlink, 2)
+
+            indirect = root / "runtime-symlink"
+            indirect.symlink_to(executable.name)
+            indirect_tool = {**tool_record, "path": str(indirect)}
+            indirect_runtime = {**runtime_record, "path": str(indirect)}
+            with self.assertRaises(subject.CampaignError):
+                subject.frozen_tool_path(
+                    {"taskset": indirect_tool}, "taskset")
+            with mock.patch.object(
+                    subject, "command_version",
+                    return_value=subject.DRAND_NODE_VERSION), \
+                 self.assertRaises(subject.CampaignError):
+                subject.frozen_runtime_path(
+                    indirect_runtime, "node", subject.DRAND_NODE_VERSION)
+
+            loop = root / "runtime-loop"
+            loop.symlink_to(loop.name)
+            loop_tool = {**tool_record, "path": str(loop)}
+            loop_runtime = {**runtime_record, "path": str(loop)}
+            with self.assertRaises(subject.CampaignError):
+                subject.frozen_tool_path({"taskset": loop_tool}, "taskset")
+            with self.assertRaises(subject.CampaignError):
+                subject.frozen_runtime_path(
+                    loop_runtime, "node", subject.DRAND_NODE_VERSION)
+
+            malformed = {**runtime_record, "sha256": "not-a-digest"}
+            with self.assertRaises(subject.CampaignError):
+                subject.frozen_runtime_path(
+                    malformed, "node", subject.DRAND_NODE_VERSION)
+
     def test_fake_remote_tag_and_late_ordering(self) -> None:
         with tempfile.TemporaryDirectory(prefix="wh2-tag-test-") as temporary:
             repo, commit = self.fake_repo(Path(temporary))
@@ -1017,6 +1111,56 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 }
                 subject.verify_r1_freeze_publication(
                     freeze, prepare, freeze_contract)
+
+                git = str(tools["git"]["path"])
+                probe_tag = "wh2-replace-ref-probe"
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "tag", "-a", probe_tag, commit, "-m", "wrong annotation",
+                ), check=True)
+                wrong_object = subprocess.check_output((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "rev-parse", f"{probe_tag}^{{tag}}",
+                ), text=True).strip()
+                good_object = freeze_publication["tag_object"]
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "replace", wrong_object, good_object,
+                ), check=True)
+                expected_ref = "refs/tags/{}".format(
+                    freeze_publication["tag_name"])
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "update-ref", expected_ref, wrong_object,
+                ), check=True)
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "push", "--force", "origin",
+                    f"{expected_ref}:{expected_ref}",
+                ), check=True, capture_output=True)
+                forged_raw, _forged_rows = subject.tag_remote_rows(
+                    repo, freeze_publication["tag_name"], environment, tools)
+                forged = {
+                    **freeze_publication,
+                    "tag_object": wrong_object,
+                    "remote_rows_ascii": forged_raw.decode("ascii"),
+                    "remote_rows_sha256": subject.sha256_bytes(forged_raw),
+                }
+                subject.atomic_state_json(publication_path, forged)
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "annotation changed"):
+                    subject.verify_r1_freeze_publication(
+                        freeze, prepare, freeze_contract)
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "update-ref", expected_ref, good_object,
+                ), check=True)
+                subprocess.run((
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "push", "--force", "origin",
+                    f"{expected_ref}:{expected_ref}",
+                ), check=True, capture_output=True)
+                subject.atomic_state_json(publication_path, freeze_publication)
                 publication_bytes = publication_path.read_bytes()
                 publication_path.unlink()
                 with self.assertRaises(subject.CampaignError):
@@ -1468,18 +1612,143 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             panel.mkdir()
             self.assertFalse(
                 subject.timing_panel_needs_host_lock(timing, panel))
+            self.assertFalse(
+                subject.timing_panel_has_complete_seal(timing, panel))
             (panel / "panel.json").write_bytes(b"{}\n")
             self.assertTrue(
                 subject.timing_panel_needs_host_lock(timing, panel))
             (panel / "panel.json.sha256").symlink_to("missing")
             self.assertFalse(
                 subject.timing_panel_needs_host_lock(timing, panel))
+            self.assertFalse(
+                subject.timing_panel_has_complete_seal(timing, panel))
+            (panel / "panel.json.sha256").unlink()
+            (panel / "panel.json.sha256").write_bytes(b"sealed\n")
+            self.assertTrue(
+                subject.timing_panel_has_complete_seal(timing, panel))
             journal = Path(temporary) / "host-journal.json"
             self.assertFalse(subject.timing_host_lock_required(
                 timing, (panel,), journal))
             journal.write_bytes(b"stale host state\n")
             self.assertTrue(subject.timing_host_lock_required(
                 timing, (panel,), journal))
+
+    def test_sealed_timing_phase_is_structurally_load_only(self) -> None:
+        timing = mock.Mock()
+        spec = object()
+        config = object()
+        probe = object()
+        panel = Path("/nonexistent/sealed-panel")
+        timing.load_timing_panel_result.return_value = "sealed"
+        self.assertEqual(
+            subject.load_or_run_timing_panel(
+                timing, True, spec, config, probe, panel),
+            "sealed")
+        timing.load_timing_panel_result.assert_called_once_with(
+            panel, spec, config)
+        timing.run_or_resume_timing_panel.assert_not_called()
+
+        timing.reset_mock()
+        timing.run_or_resume_timing_panel.return_value = "active"
+        self.assertEqual(
+            subject.load_or_run_timing_panel(
+                timing, False, spec, config, probe, panel),
+            "active")
+        timing.run_or_resume_timing_panel.assert_called_once_with(
+            spec, config, probe, panel)
+        timing.load_timing_panel_result.assert_not_called()
+
+    def test_timing_thermal_baseline_starts_strict_policy_at_phase(
+            self) -> None:
+        def row(monotonic_s: float, cpu_c: float) -> bytes:
+            fields = [
+                "2026-07-18T00:00:00Z", str(monotonic_s), "100", "4000",
+                str(cpu_c), *(["50"] * 8), "0", "1", "1", "1", "0", "0",
+            ]
+            self.assertEqual(len(fields), len(subject.THERMAL_FIELDS))
+            return (",".join(fields) + "\n").encode("ascii")
+
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-thermal-baseline-") as temporary:
+            result = Path(temporary).resolve()
+            frozen = result / "frozen"
+            frozen.mkdir()
+            subject.common.atomic_json(frozen / "contract.json", {})
+            timing_dir = result / "timing"
+            timing_dir.mkdir()
+            thermal = result / "thermal.csv"
+            header = (",".join(subject.THERMAL_FIELDS) + "\n").encode("ascii")
+            now = time.monotonic()
+            prepare_row = row(now - 1.0, 80.0)
+            thermal.write_bytes(header + prepare_row)
+            prepare_mark = screen_module.thermal_start(
+                thermal, require_zero_edac=False)
+            contract = {
+                "source_commit": "1" * 40,
+                "thermal_baseline": {
+                    "dev": prepare_mark["dev"], "ino": prepare_mark["ino"],
+                    "offset": prepare_mark["offset"],
+                    "edac_ce": prepare_mark["edac_ce"],
+                    "edac_ue": prepare_mark["edac_ue"],
+                    "monotonic_s": prepare_mark["monotonic_s"],
+                    "max_temperature_c":
+                        prepare_mark["max_temperature_c"],
+                    "row_sha256": subject.sha256_bytes(prepare_row),
+                },
+            }
+            policy = {
+                "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
+                "timing_cpu_limit_c": 85.0,
+                "timing_dimm_limit_c": 90.0,
+                "consecutive_samples": 3, "stale_seconds": 5.0,
+            }
+            with thermal.open("ab") as output:
+                for offset in (0.9, 0.8, 0.7):
+                    output.write(row(now - offset, 86.0))
+            identity = campaign_module.validate_frozen_thermal_source(
+                contract, thermal, policy)
+            stale = timing_dir / ".thermal_baseline.json.99999999.partial"
+            stale.write_bytes(b"interrupted baseline\n")
+            baseline, path, digest, timing_identity = \
+                subject.load_or_create_timing_thermal_baseline(
+                    result, timing_dir, campaign_module, contract,
+                    thermal, policy, identity, False)
+            self.assertFalse(stale.exists())
+            self.assertEqual(timing_identity, identity)
+            self.assertGreater(
+                baseline["offset"], contract["thermal_baseline"]["offset"])
+            self.assertEqual(subject.verify_named_hash_sidecar(path), digest)
+
+            path.with_suffix(".json.sha256").unlink()
+            resumed = subject.load_or_create_timing_thermal_baseline(
+                result, timing_dir, campaign_module, contract,
+                thermal, policy, identity, False)
+            self.assertEqual(resumed[0], baseline)
+            self.assertEqual(resumed[2], digest)
+            path.with_suffix(".json.sha256").unlink()
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "lacks its thermal baseline"):
+                subject.load_or_create_timing_thermal_baseline(
+                    result, timing_dir, campaign_module, contract,
+                    thermal, policy, identity, True)
+            resumed = subject.load_or_create_timing_thermal_baseline(
+                result, timing_dir, campaign_module, contract,
+                thermal, policy, identity, False)
+
+            with thermal.open("ab") as output:
+                output.write(row(now - 0.6, 86.0))
+                output.write(row(now - 0.5, 86.0))
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "consecutive limit"):
+                subject.validate_timing_thermal_histories(
+                    campaign_module, contract, thermal, policy, baseline)
+            # Once the timing phase is durably sealed, later recovery rows are
+            # governed by the 90 C recovery policy, not retroactively by 85 C.
+            completed = subject.load_or_create_timing_thermal_baseline(
+                result, timing_dir, campaign_module, contract,
+                thermal, policy, identity, True)
+            self.assertEqual(completed[0], baseline)
+            self.assertEqual(completed[3], identity)
 
     def test_timing_host_journal_precedes_first_mocked_mutation(self) -> None:
         boot_id = "11111111-2222-3333-4444-555555555555"
@@ -1960,6 +2229,25 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                         probe.finish(token)
                 reap.assert_called_once_with(process)
 
+    def test_successful_turbostat_leader_cannot_leave_a_child(self) -> None:
+        process = subprocess.Popen(
+            (
+                "/bin/sh", "-c",
+                "(sleep 20) >/dev/null 2>&1 & exit 0",
+            ),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        process.wait(timeout=2.0)
+        probe = subject.LinuxTimingEvidenceProbe(
+            mock.Mock(), mock.Mock(), Path("/thermal"), Path("/evidence"))
+        token = subject.TimingEvidenceToken(
+            {}, process, {}, Path("/thermal-out"),
+            Path("/performance-out"), ("turbostat",))
+        with self.assertRaisesRegex(
+                subject.CampaignError, "unexpected child process"):
+            probe.finish(token)
+        self.assertFalse(subject.common.process_group_exists(process))
+
     def test_interrupted_turbostat_startup_is_reaped(self) -> None:
         with tempfile.TemporaryDirectory(
                 prefix="wh2-turbostat-startup-") as temporary:
@@ -1968,13 +2256,17 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             host.core = 0
             host.isolation.sibling_cpus = ()
             host.tool.side_effect = lambda name: f"/frozen/{name}"
+            frozen_baseline = (1, 2, 5, 6)
             probe = subject.LinuxTimingEvidenceProbe(
-                mock.Mock(), host, Path("/thermal"), Path(temporary))
+                mock.Mock(), host, Path("/thermal"), Path(temporary),
+                frozen_baseline)
             process = mock.Mock()
             process.pid = 12345
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.object(
-                    subject, "thermal_start", return_value={}))
+                    subject, "thermal_start", return_value={
+                        "dev": 1, "ino": 2, "edac_ce": 5, "edac_ue": 6,
+                    }))
                 stack.enter_context(mock.patch.object(
                     subject.subprocess, "Popen", return_value=process))
                 stack.enter_context(mock.patch.object(

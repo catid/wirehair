@@ -340,6 +340,9 @@ def expected_phase(options: Sequence[str]) -> int:
 def run_job(
     job: Job,
     binary: Path,
+    binary_sha256: str,
+    taskset: Path,
+    taskset_record: dict[str, str],
     result_root: Path,
     pool: common.CpuPool,
     abort: threading.Event,
@@ -352,7 +355,10 @@ def run_job(
     try:
         if abort.is_set():
             die(f"campaign abort set before job {job.job} launch")
-        command = ["taskset", "-c", str(cpu), *make_command(binary, job)]
+        common.verify_frozen_binary(binary, binary_sha256)
+        if common.frozen_executable_path(taskset_record, "taskset") != taskset:
+            die("frozen taskset path changed before job launch")
+        command = [str(taskset), "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -436,34 +442,52 @@ def run_job(
     return record
 
 
-def tracked_clean_sources(paths: Sequence[Path]) -> tuple[Path, str]:
+def tracked_clean_sources(
+    paths: Sequence[Path],
+    git: Path,
+) -> tuple[Path, str]:
     if not paths:
         die("no tracked sources supplied")
     repo = Path(subprocess.check_output(
-        ("git", "-C", str(paths[0].parent), "rev-parse", "--show-toplevel"),
+        (
+            str(git), "--no-replace-objects", "-C", str(paths[0].parent),
+            "rev-parse", "--show-toplevel",
+        ),
         text=True,
     ).strip()).resolve(strict=True)
     for args, name in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run(("git", "-C", str(repo), *args), check=False).returncode:
+        if subprocess.run(
+                (str(git), "--no-replace-objects", "-C", str(repo), *args),
+                check=False).returncode:
             die(f"tracked source {name} is dirty")
     head = subprocess.check_output(
-        ("git", "-C", str(repo), "rev-parse", "HEAD"), text=True,
+        (
+            str(git), "--no-replace-objects", "-C", str(repo),
+            "rev-parse", "HEAD",
+        ), text=True,
     ).strip()
     for path in paths:
-        resolved = path.resolve(strict=True)
-        relative = resolved.relative_to(repo)
+        relative = path.relative_to(repo)
         tracked = subprocess.check_output(
-            ("git", "-C", str(repo), "show", f"HEAD:{relative}"),
+            (
+                str(git), "--no-replace-objects", "-C", str(repo),
+                "cat-file", "blob", f"{head}:{relative}",
+            ),
         )
-        if tracked != common.stable_bytes(resolved):
+        if tracked != common.stable_bytes(path):
             die(f"{relative} does not exactly match immutable HEAD")
     return repo, head
 
 
-def q0_identity(binary: Path) -> dict[str, Any]:
+def q0_identity(
+    binary: Path,
+    binary_sha256: str,
+    taskset: Path,
+    taskset_record: dict[str, str],
+) -> dict[str, Any]:
     ks = (4096, TARGET_K, 64000)
     fixed = [
         str(binary), *BASE_OPTIONS, "--N", ",".join(map(str, ks)),
@@ -472,14 +496,20 @@ def q0_identity(binary: Path) -> dict[str, Any]:
     ]
     outputs: list[str] = []
     commands = (fixed, [*fixed, "--binary-dense-two-anchor-phase", "0"])
+    pinned_commands = tuple(
+        [str(taskset), "-c", "0", *command] for command in commands)
     options = (
         ("--binary-dense-two-anchor",),
         ("--binary-dense-two-anchor", "--binary-dense-two-anchor-phase", "0"),
     )
     rows: list[list[dict[str, str]]] = []
-    for command, expected_options in zip(commands, options):
+    for command, expected_options in zip(pinned_commands, options):
+        common.verify_frozen_binary(binary, binary_sha256)
+        if common.frozen_executable_path(
+                taskset_record, "taskset") != taskset:
+            die("frozen taskset changed before q0 identity launch")
         completed = subprocess.run(
-            ["taskset", "-c", "0", *command], capture_output=True,
+            command, capture_output=True,
             check=False, timeout=300,
         )
         if completed.returncode != 0 or completed.stderr:
@@ -508,6 +538,10 @@ def q0_identity(binary: Path) -> dict[str, Any]:
             field: implicit[field]
             for field in implicit if field not in TIMING_FIELDS
         })
+    common.verify_frozen_binary(binary, binary_sha256)
+    if common.frozen_executable_path(
+            taskset_record, "taskset") != taskset:
+        die("frozen taskset changed during q0 identity validation")
     return {
         "passed": True,
         "K": list(ks),
@@ -515,8 +549,8 @@ def q0_identity(binary: Path) -> dict[str, Any]:
         "canonical_rows_sha256": sha256_bytes(json_bytes(canonical_rows)),
         "implicit_stdout_sha256": sha256_bytes(outputs[0].encode("utf-8")),
         "explicit_stdout_sha256": sha256_bytes(outputs[1].encode("utf-8")),
-        "implicit_command": commands[0],
-        "explicit_command": commands[1],
+        "implicit_command": pinned_commands[0],
+        "explicit_command": pinned_commands[1],
     }
 
 
@@ -529,7 +563,14 @@ def prepare(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve(strict=True)
     allk = script.with_name("wh2_rank_floor_two_anchor_allk.py")
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
-    repo, head = tracked_clean_sources((script, allk, helper))
+    git_record = common.executable_identity("git")
+    git = common.frozen_executable_path(git_record, "git")
+    repo, head = tracked_clean_sources((script, allk, helper), git)
+    taskset_record = common.executable_identity("taskset")
+    cmake_record = common.executable_identity("cmake")
+    python_runtime = common.python_runtime_identity()
+    taskset = common.frozen_executable_path(taskset_record, "taskset")
+    cmake = common.frozen_executable_path(cmake_record, "cmake")
     if args.source_cells.absolute().is_symlink():
         die("--source-cells must not be a symlink")
     cohort = load_source_cohort(args.source_cells.resolve(strict=True))
@@ -539,26 +580,34 @@ def prepare(args: argparse.Namespace) -> int:
     binary = binary_input.resolve(strict=True)
     build_dir = binary.parent.parent.resolve(strict=True)
     cache = build_dir / "CMakeCache.txt"
-    if (binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True) or
-            common.cmake_source_directory(cache) != repo):
+    if binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True):
         die("--binary is not this source tree's codec/wirehair_v2_bench")
+    build_policy = common.validate_candidate_build_policy(cache, repo)
     if args.workers != 64 or args.build_workers < 1 or args.build_workers > 64:
         die("focused screen requires 64 workers and 1..64 build workers")
     build_command = [
-        "taskset", "-c", "0-63", "cmake", "--build", str(build_dir),
+        str(taskset), "-c", "0-63", str(cmake), "--build", str(build_dir),
         "--target", "wirehair_v2_bench", "--clean-first", "--parallel",
         str(args.build_workers),
     ]
     subprocess.run(build_command, check=True)
-    post_repo, post_head = tracked_clean_sources((script, allk, helper))
+    post_repo, post_head = tracked_clean_sources((script, allk, helper), git)
     if post_repo != repo or post_head != head:
         die("source repository changed during clean benchmark rebuild")
+    if common.validate_candidate_build_policy(cache, repo) != build_policy:
+        die("candidate build policy changed during clean benchmark rebuild")
+    if (common.frozen_executable_path(git_record, "git") != git or
+            common.frozen_executable_path(taskset_record, "taskset") != taskset or
+            common.frozen_executable_path(cmake_record, "cmake") != cmake):
+        die("frozen build-tool path changed during clean benchmark rebuild")
     if binary_input.is_symlink():
         die("clean benchmark rebuild replaced --binary with a symlink")
     binary = binary_input.resolve(strict=True)
-    identity = q0_identity(binary)
+    live_binary_sha256 = common.sha256_file(binary)
+    identity = q0_identity(
+        binary, live_binary_sha256, taskset, taskset_record)
     thermal = args.thermal.resolve(strict=True)
-    thermal_start(thermal)
+    thermal_mark = thermal_start(thermal)
     result_dir = args.result_dir.resolve()
     result_dir.mkdir(parents=True, exist_ok=False)
     frozen = result_dir / "frozen"
@@ -584,14 +633,33 @@ def prepare(args: argparse.Namespace) -> int:
     common.atomic_json(destinations["q0_identity"], identity)
     for name in ("script", "binary"):
         destinations[name].chmod(0o755)
+    common.verify_frozen_sources_at_commit(
+        repo, head,
+        (
+            (script, destinations["script"]),
+            (allk, destinations["allk"]),
+            (helper, destinations["helper"]),
+        ),
+        git,
+    )
+    if common.validate_candidate_build_policy(
+            destinations["cmake_cache"], repo) != build_policy:
+        die("frozen candidate CMake policy changed while being copied")
+    if common.sha256_file(destinations["binary"]) != live_binary_sha256:
+        die("q0 identity binary changed while it was being frozen")
     contract = {
-        "schema": "wirehair.wh2.two_anchor_phase.contract.v1",
+        "schema": "wirehair.wh2.two_anchor_phase.contract.v2",
         "purpose": "post-selection tuning only; forbidden for architecture selection",
         "source_commit": head,
         "source_repo": str(repo),
         "build_command": build_command,
         "binary_sha256": common.sha256_file(destinations["binary"]),
         "cmake_cache_sha256": common.sha256_file(destinations["cmake_cache"]),
+        "build_policy": build_policy,
+        "taskset": taskset_record,
+        "cmake": cmake_record,
+        "git": git_record,
+        "python": python_runtime,
         "script_sha256": common.sha256_file(destinations["script"]),
         "allk_sha256": common.sha256_file(destinations["allk"]),
         "helper_sha256": common.sha256_file(destinations["helper"]),
@@ -600,6 +668,15 @@ def prepare(args: argparse.Namespace) -> int:
         "source_cells_sha256": SOURCE_CELLS_SHA256,
         "cohort_ks_sha256": COHORT_KS_SHA256,
         "thermal": str(thermal),
+        "thermal_baseline": {
+            "dev": thermal_mark["dev"], "ino": thermal_mark["ino"],
+            "offset": thermal_mark["offset"],
+            "edac_ce": thermal_mark["edac_ce"],
+            "edac_ue": thermal_mark["edac_ue"],
+            "monotonic_s": thermal_mark["monotonic_s"],
+            "max_temperature_c": thermal_mark["max_temperature_c"],
+            "row_sha256": sha256_bytes(thermal_mark["baseline_row"]),
+        },
         "workers": args.workers,
         "timeout_seconds": args.timeout,
         "cpu_set": list(range(64)),
@@ -638,19 +715,29 @@ def prepare(args: argparse.Namespace) -> int:
     if set(verified) != {path.resolve(strict=True) for path in staged_files}:
         die("staged seal does not cover the exact frozen phase inputs")
     prepare_record = {
+        "schema": "wirehair.wh2.two_anchor_phase.prepare.v1",
         "source_commit": head,
         "binary_sha256": contract["binary_sha256"],
         "cohort_sha256": contract["cohort_sha256"],
         "q0_identity": identity,
         "staged_seal_sha256": common.sha256_file(staged),
         "result_dir": str(result_dir),
+        "run_command": [
+            python_runtime["path"], str(destinations["script"]), "run",
+            "--result-dir", str(result_dir),
+        ],
     }
     common.atomic_json(result_dir / "prepare.json", prepare_record)
     print(canonical_json(prepare_record))
     return 0
 
 
-def load_frozen(result_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
+def load_frozen(
+    result_dir: Path,
+) -> tuple[
+    dict[str, Any], dict[str, Any], Path, Path, Path,
+    tuple[int, int, int, int],
+]:
     frozen = result_dir / "frozen"
     script = Path(__file__).resolve(strict=True)
     if script.parent != frozen.resolve(strict=True):
@@ -664,6 +751,11 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Path,
     actual_names = {path.name for path in frozen.iterdir()}
     if actual_names != expected_names or any(path.is_symlink() for path in frozen.iterdir()):
         die("frozen tree names or file types changed")
+    prepare_anchor = common.validate_prepare_anchor(
+        result_dir, "wirehair.wh2.two_anchor_phase.prepare.v1",
+        ("source_commit", "binary_sha256", "cohort_sha256", "q0_identity",
+         "staged_seal_sha256", "run_command"),
+        "staged_seal_sha256")
     staged = frozen / "staged.sha256"
     verified = common.verify_sha_manifest(result_dir, staged)
     expected_targets = {
@@ -678,7 +770,21 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Path,
     if (not isinstance(contract, dict) or not isinstance(cohort, dict) or
             not isinstance(identity, dict)):
         die("frozen contract, cohort, and identity must be objects")
-    if (contract.get("schema") != "wirehair.wh2.two_anchor_phase.contract.v1" or
+    python_runtime = contract.get("python")
+    if python_runtime != common.python_runtime_identity():
+        die("frozen phase-screen Python runtime changed")
+    if prepare_anchor.get("run_command") != [
+            python_runtime["path"], str(script), "run",
+            "--result-dir", str(result_dir)]:
+        die("phase-screen prepare run command changed")
+    if (prepare_anchor.get("source_commit") != contract.get("source_commit") or
+            prepare_anchor.get("binary_sha256") !=
+            contract.get("binary_sha256") or
+            prepare_anchor.get("cohort_sha256") !=
+            contract.get("cohort_sha256") or
+            prepare_anchor.get("q0_identity") != identity):
+        die("prepare anchor differs from the frozen phase-screen inputs")
+    if (contract.get("schema") != "wirehair.wh2.two_anchor_phase.contract.v2" or
             contract.get("purpose") !=
             "post-selection tuning only; forbidden for architecture selection" or
             contract.get("workers") != 64 or
@@ -727,15 +833,29 @@ def load_frozen(result_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Path,
     for field, name in hash_fields.items():
         if contract.get(field) != common.sha256_file(frozen / name):
             die(f"frozen contract {field} mismatch")
+    if contract.get("build_policy") != common.validate_candidate_build_policy(
+            frozen / "CMakeCache.txt",
+            Path(str(contract.get("source_repo", "")))):
+        die("frozen phase-screen build policy changed")
     if (cohort.get("schema") != "wirehair.wh2.two_anchor_phase.cohort.v1" or
             cohort.get("source_cells_sha256") != SOURCE_CELLS_SHA256 or
             cohort.get("ks_sha256") != COHORT_KS_SHA256):
         die("frozen cohort contract mismatch")
     binary = frozen / "wirehair_v2_bench"
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        die("frozen benchmark binary is not executable")
+    common.verify_frozen_binary(binary, contract.get("binary_sha256"))
+    taskset = common.frozen_executable_path(
+        contract.get("taskset"), "taskset")
+    common.frozen_executable_path(contract.get("cmake"), "cmake")
+    common.frozen_executable_path(contract.get("git"), "git")
     thermal = Path(contract["thermal"]).resolve(strict=True)
-    return contract, cohort, binary, thermal
+    thermal_identity = common.validate_frozen_thermal_source(
+        thermal, contract.get("thermal_baseline"),
+        float(contract["thermal_policy"]["stale_seconds"]),
+        cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+        dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+        consecutive_limit=int(
+            contract["thermal_policy"]["consecutive_samples"]))
+    return contract, cohort, binary, taskset, thermal, thermal_identity
 
 
 def milli(text: str, context: str) -> int:
@@ -777,6 +897,8 @@ def load_results(
     phase_hashes: dict[Path, str],
 ) -> tuple[dict[tuple[str, int, str, int], dict[str, str]], list[dict[str, Any]]]:
     result_root = result_dir / "results"
+    taskset = common.frozen_executable_path(
+        contract.get("taskset"), "taskset")
     expected_phase_targets = {
         (result_root / directory / filename).resolve(strict=True)
         for job in jobs
@@ -804,7 +926,7 @@ def load_results(
         record = json.loads(common.stable_bytes(command_path))
         if not isinstance(record, dict):
             die(f"job {job.job} command record is not an object")
-        command = ["taskset", "-c", str(record.get("cpu")), *make_command(
+        command = [str(taskset), "-c", str(record.get("cpu")), *make_command(
             result_root.parent / "frozen/wirehair_v2_bench", job
         )]
         expected_stdout = str(stdout_path.relative_to(result_root))
@@ -1137,7 +1259,8 @@ def run(args: argparse.Namespace) -> int:
     result_dir = args.result_dir.resolve(strict=True)
     if set(path.name for path in result_dir.iterdir()) != {"frozen", "prepare.json"}:
         die("result directory is not pristine after prepare")
-    contract, cohort, binary, thermal = load_frozen(result_dir)
+    contract, cohort, binary, taskset, thermal, thermal_identity = \
+        load_frozen(result_dir)
     jobs = build_jobs([int(K) for K in cohort["ks"]])
     cpus = sorted(os.sched_getaffinity(0))
     if cpus != list(range(64)):
@@ -1153,7 +1276,19 @@ def run(args: argparse.Namespace) -> int:
         stale_seconds=float(contract["thermal_policy"]["stale_seconds"]),
         limit_c=float(contract["thermal_policy"]["limit_c"]),
         consecutive_limit=int(contract["thermal_policy"]["consecutive_samples"]),
+        expected_dev=thermal_identity[0], expected_ino=thermal_identity[1],
+        expected_edac_ce=thermal_identity[2],
+        expected_edac_ue=thermal_identity[3],
     )
+    if common.validate_frozen_thermal_source(
+            thermal, contract.get("thermal_baseline"),
+            float(contract["thermal_policy"]["stale_seconds"]),
+            cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            consecutive_limit=int(
+                contract["thermal_policy"]["consecutive_samples"])) != \
+            thermal_identity:
+        die("frozen thermal baseline changed before phase guard start")
     registry = common.ProcessRegistry()
     records: list[dict[str, Any]] = []
     campaign_error: BaseException | None = None
@@ -1168,8 +1303,10 @@ def run(args: argparse.Namespace) -> int:
                         if abort.is_set():
                             die("campaign aborted during job submission")
                         futures.append(executor.submit(
-                            run_job, job, binary, result_root, pool, abort,
-                            registry, float(contract["timeout_seconds"]),
+                            run_job, job, binary, contract["binary_sha256"],
+                            taskset, contract["taskset"], result_root, pool,
+                            abort, registry,
+                            float(contract["timeout_seconds"]),
                         ))
                     for completed, future in enumerate(
                             concurrent.futures.as_completed(futures), 1):
@@ -1193,6 +1330,8 @@ def run(args: argparse.Namespace) -> int:
     if guard.error:
         die(f"thermal guard failed: {guard.error}")
     if thermal_summary is None:
+        if campaign_error is not None:
+            raise campaign_error
         die("thermal guard did not produce a summary")
     if (
         thermal_summary["thermal_high_max_consecutive_samples"] >=
@@ -1211,6 +1350,19 @@ def run(args: argparse.Namespace) -> int:
     if thermal_summary["cpu_busy_min_pct"] < \
             float(contract["thermal_policy"]["min_cpu_busy_pct"]):
         die(f"CPU utilization fell below campaign gate: {thermal_summary}")
+    common.verify_frozen_binary(binary, contract.get("binary_sha256"))
+    if common.frozen_executable_path(
+            contract.get("taskset"), "taskset") != taskset:
+        die("frozen taskset path changed during the phase screen")
+    if common.validate_frozen_thermal_source(
+            thermal, contract.get("thermal_baseline"),
+            float(contract["thermal_policy"]["stale_seconds"]),
+            cpu_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            dimm_limit_c=float(contract["thermal_policy"]["limit_c"]),
+            consecutive_limit=int(
+                contract["thermal_policy"]["consecutive_samples"])) != \
+            thermal_identity:
+        die("frozen thermal baseline changed during the phase screen")
     records.sort(key=lambda record: record["job"])
     if len(records) != len(jobs) or registry.count() != 0:
         die("focused campaign did not reap exact job set")

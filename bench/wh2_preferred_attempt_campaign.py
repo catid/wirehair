@@ -1573,8 +1573,6 @@ THERMAL_POLICY_FIELDS = {
     "timing_dimm_limit_c", "consecutive_samples", "stale_seconds",
     "min_cpu_busy_pct", "edac_ce_delta", "edac_ue_delta",
 }
-
-
 def validate_thermal_policy(contract: Mapping[str, Any]) -> Dict[str, Any]:
     policy = contract.get("thermal_policy")
     if not isinstance(policy, dict) or set(policy) != THERMAL_POLICY_FIELDS:
@@ -1600,6 +1598,28 @@ def validate_thermal_policy(contract: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(policy)
 
 
+def validate_frozen_thermal_source(
+    contract: Mapping[str, Any],
+    path: Path,
+    policy: Mapping[str, Any],
+    timing: bool = False,
+) -> Tuple[int, int, int, int]:
+    baseline = contract.get("thermal_baseline")
+    try:
+        stale_seconds = float(policy["stale_seconds"])
+        cpu_limit = float(policy.get(
+            "timing_cpu_limit_c" if timing else "cpu_limit_c",
+            85.0 if timing else 90.0))
+        dimm_limit = float(policy.get(
+            "timing_dimm_limit_c" if timing else "dimm_limit_c", 90.0))
+        return common.validate_frozen_thermal_source(
+            path, baseline, stale_seconds,
+            cpu_limit_c=cpu_limit, dimm_limit_c=dimm_limit,
+            consecutive_limit=int(policy.get("consecutive_samples", 3)))
+    except (KeyError, TypeError, ValueError, common.CampaignError) as error:
+        die(str(error))
+
+
 def frozen_taskset_path(contract: Mapping[str, Any]) -> Path:
     tools = contract.get("system_tools")
     entry = tools.get("taskset") if isinstance(tools, dict) else None
@@ -1613,14 +1633,25 @@ def frozen_taskset_path(contract: Mapping[str, Any]) -> Path:
         die("frozen taskset path is not absolute")
     try:
         resolved = declared.resolve(strict=True)
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         die("frozen taskset is unavailable: {}".format(error))
     if resolved != declared or not os.access(str(declared), os.X_OK):
         die("frozen taskset is indirect or nonexecutable")
-    tool_bytes = common.stable_bytes(declared)
-    if sha256_bytes(tool_bytes) != entry["sha256"]:
+    # Distribution-managed executables may legitimately share an inode.  The
+    # frozen system-tool contract binds this absolute path and stable digest;
+    # unlike campaign artifacts, link-count uniqueness is not an invariant.
+    if common.sha256_file(declared, require_unique=False) != entry["sha256"]:
         die("frozen taskset SHA256 changed")
     return declared
+
+
+def verify_frozen_binary(binary: Path, contract: Mapping[str, Any]) -> None:
+    digest = contract.get("binary_sha256")
+    if (not isinstance(digest, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", digest) or
+            not os.access(str(binary), os.X_OK) or
+            common.sha256_file(binary) != digest):
+        die("frozen benchmark binary changed or is nonexecutable")
 
 
 def validate_thermal_summary(
@@ -1799,8 +1830,7 @@ class JobRunner:
         self.workers = workers
         self.timeout = timeout
         self.executor = executor if executor is not None else subprocess_executor
-        self.thermal_factory = (
-            thermal_factory if thermal_factory is not None else common.ThermalGuard)
+        self.thermal_factory = thermal_factory
 
     def _run_one(
         self,
@@ -1809,6 +1839,7 @@ class JobRunner:
         abort: threading.Event,
         registry: common.ProcessRegistry,
         taskset_path: Path,
+        contract: Mapping[str, Any],
     ) -> CompletedJob:
         paths = job_paths(self.result_root, job)
         with job_lock(paths["lock"]):
@@ -1833,6 +1864,10 @@ class JobRunner:
             try:
                 if abort.is_set():
                     die("campaign abort set before {} launch".format(job.job_id))
+                verify_frozen_binary(self.binary, contract)
+                if frozen_taskset_path(contract) != taskset_path:
+                    die("frozen taskset changed before {} launch".format(
+                        job.job_id))
                 command = (
                     str(taskset_path), "-c", str(cpu), *command_without_taskset)
                 execution = self.executor(
@@ -1909,11 +1944,16 @@ class JobRunner:
             die("frozen thermal log is unavailable: {}".format(error))
         if actual_thermal != frozen_thermal:
             die("job runner thermal log differs from the frozen contract")
+        frozen_thermal: Optional[Tuple[int, int, int, int]] = None
+        if self.thermal_factory is None:
+            frozen_thermal = validate_frozen_thermal_source(
+                contract, actual_thermal, thermal_policy)
         expected_binary = (
             self.result_root / "frozen" / "wirehair_v2_bench").resolve(strict=True)
         if (self.binary.resolve(strict=True) != expected_binary or
                 self.binary != expected_binary):
             die("job runner binary is not the frozen controller binary")
+        verify_frozen_binary(self.binary, contract)
         # Building the record validates contiguous IDs and all job invariants
         # before any subprocess is launched.
         ledger.record()
@@ -1954,13 +1994,30 @@ class JobRunner:
             executor: Optional[ThreadPoolExecutor] = None
             futures: Dict[Future[CompletedJob], JobSpec] = {}
             try:
-                thermal = self.thermal_factory(thermal_path, abort)
+                if self.thermal_factory is None:
+                    if frozen_thermal is None:
+                        die("frozen thermal baseline is unavailable")
+                    thermal = common.ThermalGuard(
+                        thermal_path, abort,
+                        stale_seconds=float(thermal_policy["stale_seconds"]),
+                        limit_c=float(thermal_policy["cpu_limit_c"]),
+                        consecutive_limit=thermal_policy["consecutive_samples"],
+                        expected_dev=frozen_thermal[0],
+                        expected_ino=frozen_thermal[1],
+                        expected_edac_ce=frozen_thermal[2],
+                        expected_edac_ue=frozen_thermal[3])
+                    if validate_frozen_thermal_source(
+                            contract, actual_thermal,
+                            thermal_policy) != frozen_thermal:
+                        die("frozen thermal baseline changed before guard start")
+                else:
+                    thermal = self.thermal_factory(thermal_path, abort)
                 thermal.start()
                 executor = ThreadPoolExecutor(max_workers=self.workers)
                 futures = {
                     executor.submit(
                         self._run_one, job, pool, abort, registry,
-                        taskset_path): job
+                        taskset_path, contract): job
                     for job in ledger.jobs
                 }
                 for future in as_completed(futures):
@@ -2010,8 +2067,18 @@ class JobRunner:
             raise campaign_error
         if registry.count() != 0:
             die("phase completion left registered child processes")
-        if frozen_taskset_path(contract) != taskset_path:
+        _end_prepare, end_contract = verify_frozen_controller_runtime(
+            self.result_root)
+        verify_frozen_binary(self.binary, end_contract)
+        if frozen_taskset_path(end_contract) != taskset_path:
             die("frozen taskset identity changed during the phase")
+        if self.thermal_factory is None:
+            end_policy = validate_thermal_policy(end_contract)
+            if (end_policy != thermal_policy or frozen_thermal is None or
+                    validate_frozen_thermal_source(
+                        end_contract, actual_thermal, end_policy) !=
+                    frozen_thermal):
+                die("frozen thermal history changed during the phase")
         ordered = tuple(completed[job.job_id] for job in ledger.jobs)
         if len(ordered) != len(ledger.jobs):
             die("job ledger completion cardinality mismatch")

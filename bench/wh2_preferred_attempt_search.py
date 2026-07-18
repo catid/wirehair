@@ -84,6 +84,26 @@ SOURCE_ROOTS = (
     "0x94d049bb133111eb",
     "0x8538ecb5bd456ea3",
 )
+PREFERRED_TRACKED_SOURCE_FILES = (
+    ("bench/wh2_preferred_attempt_search.py", "script",
+     "wh2_preferred_attempt_search.py"),
+    ("bench/wh2_rank_floor_two_anchor_allk.py", "allk",
+     "wh2_rank_floor_two_anchor_allk.py"),
+    ("bench/wh2_rank_floor_two_anchor_screen.py", "helper",
+     "wh2_rank_floor_two_anchor_screen.py"),
+    ("bench/wh2_preferred_attempt_campaign.py", "campaign_module",
+     "wh2_preferred_attempt_campaign.py"),
+    ("bench/wh2_preferred_attempt_holdout.py", "holdout_module",
+     "wh2_preferred_attempt_holdout.py"),
+    ("bench/wh2_preferred_attempt_timing.py", "timing_module",
+     "wh2_preferred_attempt_timing.py"),
+    ("bench/wh2_drand_verify.cjs", "drand_wrapper",
+     "wh2_drand_verify.cjs"),
+    ("bench/drand-verifier/package.json", "drand_package",
+     "drand-package.json"),
+    ("bench/drand-verifier/package-lock.json", "drand_lock",
+     "drand-package-lock.json"),
+)
 COHORT_SHA256 = (
     "1233920b35cd2b594ec48ef7dcd016a0c5132f28b79a2c914b7d843989fea6c5"
 )
@@ -1917,17 +1937,7 @@ class TimingHostSession:
                 "; ".join(str(error) for error in errors))
 
     def tool(self, name: str) -> str:
-        if not isinstance(self.tools, dict):
-            die("timing host lacks the frozen system-tool inventory")
-        record = self.tools.get(name)
-        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
-            die(f"timing host lacks frozen {name} identity")
-        path = Path(str(record["path"]))
-        if (not path.is_absolute() or path.resolve(strict=True) != path or
-                common.sha256_file(
-                    path, require_unique=False) != record["sha256"]):
-            die(f"timing host frozen {name} changed")
-        return str(path)
+        return str(frozen_tool_path(self.tools, name))
 
     def checked(
         self,
@@ -2492,11 +2502,13 @@ class LinuxTimingEvidenceProbe:
         host: TimingHostSession,
         thermal_log: Path,
         evidence_dir: Path,
+        frozen_thermal_baseline: tuple[int, int, int, int] | None = None,
     ) -> None:
         self.timing = timing
         self.host = host
         self.thermal_log = thermal_log
         self.evidence_dir = evidence_dir
+        self.frozen_thermal_baseline = frozen_thermal_baseline
 
     def start(
         self,
@@ -2519,6 +2531,14 @@ class LinuxTimingEvidenceProbe:
         mark = thermal_start(
             self.thermal_log, stale_seconds=5.0, require_zero_edac=False,
             require_zero_dimm_errors=False)
+        if (self.frozen_thermal_baseline is not None and
+                (mark["dev"], mark["ino"],
+                 mark["edac_ce"], mark["edac_ue"]) !=
+                self.frozen_thermal_baseline):
+            die("timing evidence thermal mark differs from the public freeze")
+        # The initial and final controller scans cover all history outside
+        # attempts.  This mark plus finish() covers every row in the attempt
+        # without reparsing the entire growing log on the isolated core.
         command = (
             self.host.tool("sudo"), "-n", self.host.tool("turbostat"),
             "--quiet", "--cpu", str(self.host.core), "--interval", "0.1",
@@ -2618,6 +2638,16 @@ class LinuxTimingEvidenceProbe:
                     "turbostat cleanup failed after interrupted evidence "
                     f"collection: {cleanup_error}") from error
             raise
+        descendants_live = common.process_group_exists(process)
+        if descendants_live:
+            try:
+                common.stop_and_reap_process_group(process)
+            except BaseException as cleanup_error:
+                raise CampaignError(
+                    "turbostat descendant cleanup could not be proven: "
+                    f"{cleanup_error}") from cleanup_error
+            die("turbostat left an unexpected child process")
+        common.close_process_streams(process)
         returncode = process.returncode
         envelope = (
             b"wirehair-wh2-timing-performance-interval-v1\n" +
@@ -2738,37 +2768,58 @@ def tracked_clean_sources(
         die("no tracked source paths")
     git = str(frozen_tool_path(tool_records, "git"))
     repo = Path(subprocess.check_output(
-        (git, "-C", str(paths[0].parent), "rev-parse", "--show-toplevel"),
+        (
+            git, "--no-replace-objects", "-C", str(paths[0].parent),
+            "rev-parse", "--show-toplevel",
+        ),
         text=True,
     ).strip()).resolve(strict=True)
     for args, label in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run((git, "-C", str(repo), *args), check=False).returncode:
+        if subprocess.run(
+                (git, "--no-replace-objects", "-C", str(repo), *args),
+                check=False).returncode:
             die(f"tracked source {label} is dirty")
     head = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", "HEAD"), text=True,
+        (git, "--no-replace-objects", "-C", str(repo), "rev-parse", "HEAD"),
+        text=True,
     ).strip()
     upstream = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", "@{upstream}"), text=True,
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "rev-parse", "@{upstream}",
+        ), text=True,
     ).strip()
     if head != upstream:
         die("prepare requires immutable HEAD already pushed to its upstream")
     branch = subprocess.check_output(
-        (git, "-C", str(repo), "symbolic-ref", "--short", "HEAD"),
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "symbolic-ref", "--short", "HEAD",
+        ),
         text=True,
     ).strip()
     remote = subprocess.check_output(
-        (git, "-C", str(repo), "config", "--get", f"branch.{branch}.remote"),
+        (
+            git, "--no-replace-objects", "-C", str(repo), "config", "--get",
+            f"branch.{branch}.remote",
+        ),
         text=True,
     ).strip()
     merge_ref = subprocess.check_output(
-        (git, "-C", str(repo), "config", "--get", f"branch.{branch}.merge"),
+        (
+            git, "--no-replace-objects", "-C", str(repo), "config", "--get",
+            f"branch.{branch}.merge",
+        ),
         text=True,
     ).strip()
     remote_rows = subprocess.run(
-        (git, "-C", str(repo), "ls-remote", "--exit-code", remote, merge_ref),
+        (
+            git, "--no-replace-objects", "-C", str(repo), "ls-remote",
+            "--exit-code", remote, merge_ref,
+        ),
         text=True, capture_output=True, check=False, timeout=60,
     )
     expected_remote_line = f"{head}\t{merge_ref}\n"
@@ -2778,11 +2829,13 @@ def tracked_clean_sources(
             "the exact local HEAD"
         )
     for path in paths:
-        resolved = path.resolve(strict=True)
-        relative = resolved.relative_to(repo)
+        relative = path.relative_to(repo)
         if subprocess.check_output(
-                (git, "-C", str(repo), "show", f"HEAD:{relative}")) != \
-                common.stable_bytes(resolved):
+                (
+                    git, "--no-replace-objects", "-C", str(repo),
+                    "cat-file", "blob", f"{head}:{relative}",
+                )) != \
+                common.stable_bytes(path):
             die(f"tracked source does not match HEAD: {relative}")
     return repo, head, upstream
 
@@ -3078,14 +3131,52 @@ def frozen_tool_path(
             not re.fullmatch(r"[0-9a-f]{64}", digest)):
         die(f"frozen {name} identity is malformed")
     path = Path(path_text)
-    if (not path.is_absolute() or path.resolve(strict=True) != path or
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        die(f"frozen {name} executable is unavailable: {error}")
+    if (not path.is_absolute() or resolved != path or
             common.sha256_file(path, require_unique=False) != digest or
             not os.access(path, os.X_OK)):
         die(f"frozen {name} executable changed")
     if require_current_path:
         located = shutil.which(name)
-        if located is None or Path(located).resolve(strict=True) != path:
+        try:
+            current = (Path(located).resolve(strict=True)
+                       if located is not None else None)
+        except (OSError, RuntimeError):
+            current = None
+        if current != path:
             die(f"PATH no longer resolves to the frozen {name} executable")
+    return path
+
+
+def frozen_runtime_path(
+    record: Any,
+    name: str,
+    expected_version: str,
+) -> Path:
+    if (not isinstance(record, dict) or
+            set(record) != {"path", "version", "sha256"}):
+        die(f"frozen {name} runtime identity record changed")
+    path_text = record.get("path")
+    version = record.get("version")
+    digest = record.get("sha256")
+    if (not isinstance(path_text, str) or
+            not isinstance(version, str) or version != expected_version or
+            not isinstance(digest, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        die(f"frozen {name} runtime identity is malformed")
+    path = Path(path_text)
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        die(f"frozen {name} runtime is unavailable: {error}")
+    if (not path.is_absolute() or resolved != path or
+            not os.access(path, os.X_OK) or
+            common.sha256_file(path, require_unique=False) != digest or
+            command_version(path, expected_version) != expected_version):
+        die(f"PERMANENT: frozen {name} runtime changed")
     return path
 
 
@@ -3642,6 +3733,8 @@ def verify_frozen_controller_runtime(
         if (not isinstance(expected, str) or
                 common.sha256_file(path.resolve(strict=True)) != expected):
             die(f"PERMANENT: frozen controller input changed: {path.name}")
+    if not os.access(frozen / "wirehair_v2_bench", os.X_OK):
+        die("PERMANENT: frozen benchmark binary is nonexecutable")
     frozen_cache = frozen / "CMakeCache.txt"
     if (common.sha256_file(frozen_cache) !=
             contract.get("cmake_cache_sha256") or
@@ -3657,18 +3750,8 @@ def verify_frozen_controller_runtime(
     if (current_script != expected_script or
             common.sha256_file(current_script) != contract.get("script_sha256")):
         die("PERMANENT: controller must execute the exact frozen script")
-    node_record = contract.get("node")
-    npm_record = contract.get("npm")
-    if not isinstance(node_record, dict) or not isinstance(npm_record, dict):
-        die("frozen runtime records are missing")
-    for record, expected_version in (
-            (node_record, DRAND_NODE_VERSION), (npm_record, DRAND_NPM_VERSION)):
-        executable = Path(str(record.get("path", ""))).resolve(strict=True)
-        if (record.get("version") != expected_version or
-                common.sha256_file(
-                    executable, require_unique=False) != record.get("sha256") or
-                command_version(executable, expected_version) != expected_version):
-            die(f"PERMANENT: frozen {executable.name} runtime changed")
+    frozen_runtime_path(contract.get("node"), "node", DRAND_NODE_VERSION)
+    frozen_runtime_path(contract.get("npm"), "npm", DRAND_NPM_VERSION)
     tool_records = contract.get("system_tools")
     expected_tool_names = {
         "bash", "cmake", "git", "readelf", "ssh", "ssh-add",
@@ -3807,21 +3890,26 @@ def clean_source_commit(contract: dict[str, Any]) -> tuple[Path, str]:
         die("frozen source commit is invalid")
     git = str(frozen_tool_path(contract.get("system_tools"), "git"))
     head = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", "HEAD"), text=True,
+        (git, "--no-replace-objects", "-C", str(repo), "rev-parse", "HEAD"),
+        text=True,
     ).strip()
     if head != commit:
         die("PERMANENT: source worktree no longer names the frozen commit")
     for arguments in (("diff", "--quiet", "HEAD", "--"),
                       ("diff", "--cached", "--quiet", "HEAD", "--")):
         if subprocess.run(
-                (git, "-C", str(repo), *arguments), check=False).returncode:
+                (git, "--no-replace-objects", "-C", str(repo), *arguments),
+                check=False).returncode:
             die("PERMANENT: source worktree or index became dirty")
     return repo, commit
 
 
 def github_remote_url(repo: Path, git_path: Path | str) -> str:
     url = subprocess.check_output(
-        (str(git_path), "-C", str(repo), "remote", "get-url", "origin"),
+        (
+            str(git_path), "--no-replace-objects", "-C", str(repo),
+            "remote", "get-url", "origin",
+        ),
         text=True,
     ).strip()
     if not (re.fullmatch(r"git@github\.com:[^\s]+", url) or
@@ -4054,7 +4142,8 @@ def tag_remote_rows(
     git = str(frozen_tool_path(tool_records, "git"))
     result = subprocess.run(
         (
-            git, "-C", str(repo), "ls-remote", "--tags", "origin",
+            git, "--no-replace-objects", "-C", str(repo),
+            "ls-remote", "--tags", "origin",
             f"refs/tags/{tag_name}", f"refs/tags/{tag_name}^{{}}",
         ),
         env=environment, capture_output=True, check=False, timeout=60,
@@ -4088,27 +4177,40 @@ def publish_seal_tag(
         phase, seal_sha256, manifest_sha256, seal_record)
     local_ref = f"refs/tags/{tag_name}"
     local_exists = subprocess.run(
-        (git, "-C", str(repo), "show-ref", "--verify", "--quiet", local_ref),
+        (
+            git, "--no-replace-objects", "-C", str(repo), "show-ref",
+            "--verify", "--quiet", local_ref,
+        ),
         check=False,
     ).returncode == 0
     if not local_exists:
         subprocess.run(
             (
-                git, "-C", str(repo), "tag", "-a", tag_name,
+                git, "--no-replace-objects", "-C", str(repo),
+                "tag", "-a", tag_name,
                 seal_record["source_commit"], "-m", annotation,
             ),
             check=True, timeout=30,
         )
     tag_object = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", f"{tag_name}^{{tag}}"),
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "rev-parse", f"{tag_name}^{{tag}}",
+        ),
         text=True,
     ).strip()
     peeled = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", f"{tag_name}^{{}}"),
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "rev-parse", f"{tag_name}^{{}}",
+        ),
         text=True,
     ).strip()
     tag_bytes = subprocess.check_output(
-        (git, "-C", str(repo), "cat-file", "tag", tag_object))
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "cat-file", "tag", tag_object,
+        ))
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -4129,7 +4231,8 @@ def publish_seal_tag(
             die("holdout seal publication deadline passed before tag push")
         pushed = subprocess.run(
             (
-                git, "-C", str(repo), "push", "origin",
+                git, "--no-replace-objects", "-C", str(repo),
+                "push", "origin",
                 f"{local_ref}:{local_ref}",
             ),
             env=environment, text=True, capture_output=True,
@@ -4195,27 +4298,40 @@ def publish_r1_freeze_tag(
     annotation = r1_freeze_tag_annotation(prepare_record, prepare_sha256)
     local_ref = f"refs/tags/{tag_name}"
     local_exists = subprocess.run(
-        (git, "-C", str(repo), "show-ref", "--verify", "--quiet", local_ref),
+        (
+            git, "--no-replace-objects", "-C", str(repo), "show-ref",
+            "--verify", "--quiet", local_ref,
+        ),
         check=False,
     ).returncode == 0
     if not local_exists:
         subprocess.run(
             (
-                git, "-C", str(repo), "tag", "-a", tag_name,
+                git, "--no-replace-objects", "-C", str(repo),
+                "tag", "-a", tag_name,
                 prepare_record["source_commit"], "-m", annotation,
             ),
             check=True, timeout=30,
         )
     tag_object = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", f"{tag_name}^{{tag}}"),
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "rev-parse", f"{tag_name}^{{tag}}",
+        ),
         text=True,
     ).strip()
     peeled = subprocess.check_output(
-        (git, "-C", str(repo), "rev-parse", f"{tag_name}^{{}}"),
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "rev-parse", f"{tag_name}^{{}}",
+        ),
         text=True,
     ).strip()
     tag_bytes = subprocess.check_output(
-        (git, "-C", str(repo), "cat-file", "tag", tag_object))
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "cat-file", "tag", tag_object,
+        ))
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -4232,7 +4348,8 @@ def publish_r1_freeze_tag(
     if not remote_rows:
         pushed = subprocess.run(
             (
-                git, "-C", str(repo), "push", "origin",
+                git, "--no-replace-objects", "-C", str(repo),
+                "push", "origin",
                 f"{local_ref}:{local_ref}",
             ),
             env=environment, text=True, capture_output=True,
@@ -4309,12 +4426,18 @@ def verify_r1_freeze_publication(
     tool_records = contract.get("system_tools")
     git = str(frozen_tool_path(tool_records, "git"))
     current_remote = subprocess.check_output(
-        (git, "-C", str(repo), "remote", "get-url", "origin"), text=True,
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "remote", "get-url", "origin",
+        ), text=True,
     ).strip()
     if prepare_record.get("github_remote") != current_remote:
         die("PERMANENT: R1 freeze GitHub remote binding changed")
     tag_bytes = subprocess.check_output(
-        (git, "-C", str(repo), "cat-file", "tag", publication["tag_object"]))
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "cat-file", "tag", publication["tag_object"],
+        ))
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -4939,7 +5062,10 @@ def verify_seal_publication(
     tool_records = contract.get("system_tools")
     git = str(frozen_tool_path(tool_records, "git"))
     tag_bytes = subprocess.check_output(
-        (git, "-C", str(repo), "cat-file", "tag", publication["tag_object"]))
+        (
+            git, "--no-replace-objects", "-C", str(repo),
+            "cat-file", "tag", publication["tag_object"],
+        ))
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -5636,6 +5762,33 @@ def verify_staged_prepared_result_root(
         die("PERMANENT: staged campaign root differs from the public freeze")
 
 
+def verify_recoverable_prepare_sources(
+    frozen: Path,
+    contract: dict[str, Any],
+) -> None:
+    """Recheck immutable source/cache bindings immediately before tagging."""
+    source_repo = contract.get("source_repo")
+    if not isinstance(source_repo, str):
+        die("PERMANENT: frozen source repository binding is malformed")
+    repo_path = Path(source_repo)
+    try:
+        repo = repo_path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        die(f"PERMANENT: frozen source repository is unavailable: {error}")
+    if not repo_path.is_absolute() or repo != repo_path:
+        die("PERMANENT: frozen source repository path is indirect")
+    inventory = tuple(
+        (repo / relative, frozen / frozen_name)
+        for relative, _key, frozen_name in PREFERRED_TRACKED_SOURCE_FILES)
+    common.verify_frozen_sources_at_commit(
+        repo, str(contract.get("source_commit", "")), inventory,
+        frozen_tool_path(contract.get("system_tools"), "git"),
+    )
+    if validate_candidate_build_policy(
+            frozen / "CMakeCache.txt", repo) != contract.get("build_policy"):
+        die("PERMANENT: frozen CMake policy differs before publication")
+
+
 def reconcile_complete_prepare(
     result_dir: Path,
     final: Path,
@@ -5673,6 +5826,7 @@ def reconcile_complete_prepare(
         die("PERMANENT: recoverable frozen contract state is invalid")
     verify_frozen_staged_anchor(result_dir, prepare_record)
     verify_prepare_contract_bindings(frozen, prepare_record, contract)
+    verify_recoverable_prepare_sources(frozen, contract)
     if not os.path.lexists(str(publication_path)):
         # Order every trust anchor before the external irreversible action.
         fsync_tree(result_dir)
@@ -6126,6 +6280,19 @@ def prepare(args: argparse.Namespace) -> int:
         copied["script"].chmod(0o755)
         copied["drand_wrapper"].chmod(0o755)
         copied["binary"].chmod(0o755)
+        immutable_sources = tuple(
+            (repo / relative, copied[name])
+            for relative, name, _frozen_name in PREFERRED_TRACKED_SOURCE_FILES)
+        if tuple(source for source, _target in immutable_sources) != \
+                tracked_inputs:
+            die("preferred tracked-source inventory changed")
+        common.verify_frozen_sources_at_commit(
+            repo, head, immutable_sources,
+            frozen_tool_path(system_tools, "git"),
+        )
+        if validate_candidate_build_policy(
+                copied["cmake_cache"], repo) != build_policy:
+            die("frozen candidate CMake policy changed while being copied")
         if (common.sha256_file(copied["binary"]) != live_binary_sha256 or
                 elf_build_id(copied["binary"], readelf) != live_build_id):
             die("frozen benchmark differs from the q0-tested binary")
@@ -7456,6 +7623,21 @@ def timing_panel_paths(
     )
 
 
+def load_or_run_timing_panel(
+    timing: Any,
+    phase_complete: bool,
+    spec: Any,
+    config: Any,
+    probe: Any,
+    panel_dir: Path,
+) -> Any:
+    """A sealed timing phase is structurally load-only, never executable."""
+    if phase_complete:
+        return timing.load_timing_panel_result(panel_dir, spec, config)
+    return timing.run_or_resume_timing_panel(
+        spec, config, probe, panel_dir)
+
+
 def timing_panel_needs_host_lock(timing: Any, panel_dir: Path) -> bool:
     """Include missing-sidecar crash repair in exclusive host isolation."""
     if not panel_dir.exists() and not panel_dir.is_symlink():
@@ -7465,6 +7647,17 @@ def timing_panel_needs_host_lock(timing: Any, panel_dir: Path) -> bool:
     manifest_present = manifest.exists() or manifest.is_symlink()
     sidecar_present = sidecar.exists() or sidecar.is_symlink()
     return manifest_present and not sidecar_present
+
+
+def timing_panel_has_complete_seal(timing: Any, panel_dir: Path) -> bool:
+    if panel_dir.is_symlink() or not panel_dir.is_dir():
+        return False
+    manifest = panel_dir / timing.PANEL_RESULT_NAME
+    sidecar = panel_dir / timing.PANEL_RESULT_SIDECAR_NAME
+    return (
+        not manifest.is_symlink() and manifest.is_file() and
+        not sidecar.is_symlink() and sidecar.is_file()
+    )
 
 
 def timing_host_lock_required(
@@ -7546,6 +7739,128 @@ def publish_combined_timing_cache(
     return cache_path.resolve(strict=True), cache_sha256
 
 
+def validate_timing_thermal_histories(
+    campaign: Any,
+    contract: dict[str, Any],
+    thermal_log: Path,
+    thermal_policy: dict[str, Any],
+    timing_baseline: dict[str, Any],
+) -> tuple[int, int, int, int]:
+    """Apply recovery limits before the timing mark and timing limits after."""
+    recovery_identity = campaign.validate_frozen_thermal_source(
+        contract, thermal_log, thermal_policy)
+    timing_identity = campaign.validate_frozen_thermal_source(
+        {"thermal_baseline": timing_baseline},
+        thermal_log, thermal_policy, timing=True)
+    if timing_identity != recovery_identity:
+        die("timing thermal source differs from the recovery campaign source")
+    return timing_identity
+
+
+def load_or_create_timing_thermal_baseline(
+    result_dir: Path,
+    timing_dir: Path,
+    campaign: Any,
+    contract: dict[str, Any],
+    thermal_log: Path,
+    thermal_policy: dict[str, Any],
+    expected_identity: tuple[int, int, int, int],
+    phase_complete: bool,
+) -> tuple[dict[str, Any], Path, str, tuple[int, int, int, int]]:
+    """Durably bind the point where the stricter timing policy begins."""
+    path = timing_dir / "thermal_baseline.json"
+    sidecar = path.with_suffix(".json.sha256")
+    contract_sha256 = common.sha256_file(
+        result_dir / "frozen/contract.json")
+    prepare_baseline_sha256 = sha256_bytes(
+        common.json_bytes(contract.get("thermal_baseline")))
+    thermal_policy_sha256 = sha256_bytes(
+        common.json_bytes(thermal_policy))
+    record: dict[str, Any]
+    if not campaign.path_present(path):
+        removed = common._discard_stale_atomic_partials(path)
+        removed = common._discard_stale_atomic_partials(sidecar) or removed
+        if removed:
+            fsync_directory(timing_dir)
+    if phase_complete and (
+            not campaign.path_present(path) or
+            not campaign.path_present(sidecar)):
+        die("sealed timing phase lacks its thermal baseline binding")
+    if campaign.path_present(path):
+        record = campaign.load_canonical_object(
+            path, "timing thermal baseline")
+        campaign.verify_sealed_record(
+            record,
+            "wirehair.wh2.h12_preferred_attempt.timing_thermal_baseline.v1")
+    else:
+        if campaign.path_present(sidecar) or any(timing_dir.iterdir()):
+            die("timing artifacts exist without the timing thermal baseline")
+        try:
+            mark = thermal_start(
+                thermal_log,
+                stale_seconds=float(thermal_policy["stale_seconds"]),
+                require_zero_edac=False)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            die(f"cannot establish timing thermal baseline: {error}")
+        baseline = {
+            "dev": mark["dev"], "ino": mark["ino"],
+            "offset": mark["offset"],
+            "edac_ce": mark["edac_ce"], "edac_ue": mark["edac_ue"],
+            "monotonic_s": mark["monotonic_s"],
+            "max_temperature_c": mark["max_temperature_c"],
+            "row_sha256": sha256_bytes(mark["baseline_row"]),
+        }
+        if validate_timing_thermal_histories(
+                campaign, contract, thermal_log, thermal_policy,
+                baseline) != expected_identity:
+            die("thermal source changed while establishing the timing baseline")
+        record = campaign.sealed_record(
+            "wirehair.wh2.h12_preferred_attempt.timing_thermal_baseline.v1",
+            {
+                "source_commit": contract.get("source_commit"),
+                "contract_sha256": contract_sha256,
+                "prepare_thermal_baseline_sha256":
+                    prepare_baseline_sha256,
+                "thermal_policy_sha256": thermal_policy_sha256,
+                "thermal": str(thermal_log),
+                "baseline": baseline,
+            },
+        )
+    exact_fields = {
+        "schema", "source_commit", "contract_sha256",
+        "prepare_thermal_baseline_sha256", "thermal_policy_sha256",
+        "thermal", "baseline", "self_sha256_excluding_field",
+    }
+    baseline = record.get("baseline")
+    if (set(record) != exact_fields or
+            record.get("source_commit") != contract.get("source_commit") or
+            record.get("contract_sha256") != contract_sha256 or
+            record.get("prepare_thermal_baseline_sha256") !=
+                prepare_baseline_sha256 or
+            record.get("thermal_policy_sha256") != thermal_policy_sha256 or
+            record.get("thermal") != str(thermal_log) or
+            not isinstance(baseline, dict) or
+            set(baseline) != common.THERMAL_BASELINE_FIELDS):
+        die("timing thermal baseline binding changed")
+    encoded = campaign.canonical_json_bytes(record)
+    if phase_complete:
+        digest = verify_named_hash_sidecar(path)
+        if sha256_bytes(encoded) != digest:
+            die("sealed timing thermal baseline bytes changed")
+        identity = campaign.validate_frozen_thermal_source(
+            {"thermal_baseline": baseline},
+            thermal_log, thermal_policy)
+    else:
+        digest = campaign.write_hashed_artifact(path, encoded)
+        if verify_named_hash_sidecar(path) != digest:
+            die("timing thermal baseline sidecar changed")
+        identity = validate_timing_thermal_histories(
+            campaign, contract, thermal_log, thermal_policy, baseline)
+    if identity != expected_identity:
+        die("timing thermal baseline identity changed")
+    return baseline, path.resolve(strict=True), digest, identity
+
+
 def run_timing(args: argparse.Namespace) -> int:
     """Run or strictly resume the final isolated H1-table timing gate."""
     result_dir = args.result_dir.resolve(strict=True)
@@ -7559,6 +7874,12 @@ def run_timing(args: argparse.Namespace) -> int:
     timing = load_frozen_python_module(
         result_dir, "wh2_preferred_attempt_timing",
         "timing_module_sha256")
+    binary = (result_dir / "frozen/wirehair_v2_bench").resolve(strict=True)
+    thermal_log = Path(str(contract.get("thermal", ""))).resolve(strict=True)
+    thermal_policy = campaign.validate_thermal_policy(contract)
+    campaign.verify_frozen_binary(binary, contract)
+    recovery_thermal_identity = campaign.validate_frozen_thermal_source(
+        contract, thermal_log, thermal_policy)
     cohort, bins = load_frozen_cohort_bins(result_dir, campaign)
     route_context_sha256 = str(contract.get("route_context_sha256", ""))
     development_table, _development_caches, development_table_sha256 = \
@@ -7614,12 +7935,18 @@ def run_timing(args: argparse.Namespace) -> int:
         sample = timing.select_timing_sample(routed)
     except Exception as error:
         die(f"timing sample selection failed: {error}")
+    phase_path = timing_dir / "phase_complete.sha256"
+    phase_was_complete = campaign.path_present(phase_path)
+    timing_baseline, timing_baseline_path, timing_baseline_sha256, \
+        timing_thermal_identity = load_or_create_timing_thermal_baseline(
+            result_dir, timing_dir, campaign, contract, thermal_log,
+            thermal_policy, recovery_thermal_identity, phase_was_complete)
     specs = timing_panel_specs(timing, sample, h1_table)
     cache_path, cache_sha256 = publish_combined_timing_cache(
         result_dir, timing_dir, campaign, holdout, sample, h1_table,
         bins, h1_caches, route_context_sha256)
     sample_record = campaign.sealed_record(
-        "wirehair.wh2.h12_preferred_attempt.timing_sample.v1",
+        "wirehair.wh2.h12_preferred_attempt.timing_sample.v2",
         {
             "protocol_sha256": contract["protocol_sha256"],
             "route_context_sha256": route_context_sha256,
@@ -7628,6 +7955,7 @@ def run_timing(args: argparse.Namespace) -> int:
             "h2_root_file_sha256": h2_root_sha256,
             "h2_seal_record_sha256": h2_root["seal_record_sha256"],
             "execution_core": TIMING_CORE,
+            "timing_thermal_baseline_sha256": timing_baseline_sha256,
             "setup_schedule": TIMING_SETUP_SCHEDULE,
             "sample": list(sample), "S": len(sample),
             "route_cache_sha256": cache_sha256,
@@ -7648,8 +7976,6 @@ def run_timing(args: argparse.Namespace) -> int:
     sample_sha256 = campaign.write_hashed_artifact(
         sample_path, campaign.canonical_json_bytes(sample_record))
 
-    binary = (result_dir / "frozen/wirehair_v2_bench").resolve(strict=True)
-    thermal_log = Path(str(contract.get("thermal", ""))).resolve(strict=True)
     try:
         host = TimingHostSession(contract, timing, TIMING_CORE)
         config = timing.TimingRunnerConfig(
@@ -7667,6 +7993,8 @@ def run_timing(args: argparse.Namespace) -> int:
 
     panels: list[Any] = []
     execution_files: set[Path] = {
+        timing_baseline_path,
+        timing_baseline_path.with_suffix(".json.sha256").resolve(strict=True),
         cache_path,
         cache_path.with_suffix(".csv.sha256").resolve(strict=True),
         sample_path.resolve(strict=True),
@@ -7677,15 +8005,22 @@ def run_timing(args: argparse.Namespace) -> int:
         (timing_panel_paths(timing_dir, spec)[0] for spec in specs),
         host.journal_path,
     )
+    if phase_was_complete and any(
+            not timing_panel_has_complete_seal(
+                timing, timing_panel_paths(timing_dir, spec)[0])
+            for spec in specs):
+        die("sealed timing phase has an incomplete panel")
 
     def load_or_run_panels() -> None:
         for spec in specs:
             panel_dir, evidence_dir = timing_panel_paths(timing_dir, spec)
             probe = LinuxTimingEvidenceProbe(
-                timing, host, thermal_log, evidence_dir)
+                timing, host, thermal_log, evidence_dir,
+                timing_thermal_identity)
             try:
-                result = timing.run_or_resume_timing_panel(
-                    spec, config, probe, panel_dir)
+                result = load_or_run_timing_panel(
+                    timing, phase_was_complete, spec, config, probe,
+                    panel_dir)
             except Exception as error:
                 die(
                     "timing panel failed for "
@@ -7707,8 +8042,18 @@ def run_timing(args: argparse.Namespace) -> int:
     else:
         load_or_run_panels()
 
+    _end_prepare, end_contract = verify_frozen_controller_runtime(result_dir)
+    campaign.verify_frozen_binary(binary, end_contract)
+    end_thermal_policy = campaign.validate_thermal_policy(end_contract)
+    if end_thermal_policy != thermal_policy:
+        die("timing thermal policy changed before phase seal")
+    if (not phase_was_complete and
+            validate_timing_thermal_histories(
+                campaign, end_contract, thermal_log, end_thermal_policy,
+                timing_baseline) != timing_thermal_identity):
+        die("timing thermal histories changed before phase seal")
     phase_sha256 = write_exact_manifest_once(
-        result_dir, timing_dir / "phase_complete.sha256",
+        result_dir, phase_path,
         execution_files, campaign)
     try:
         analysis = timing.analyze_timing(

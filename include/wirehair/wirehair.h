@@ -569,7 +569,9 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_profile_ex(
     The `blockId` >= N blocks are generated on demand.
 
     Preconditions:
-       Block is at least `blockBytes` in size
+       Block is at least `blockBytes` in size, except that the final
+       systematic block (`blockId == N - 1`) may use the exact shorter final
+       message remainder when the message is not block-aligned.
 
     Returns Wirehair_Success on success.
     Returns other codes on error.

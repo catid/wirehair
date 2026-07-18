@@ -246,6 +246,11 @@ class RunnerTests(unittest.TestCase):
                 bash,
                 str(run_ci.ROOT / "experiments" / "test_byte_metrics.sh"),
             ]),
+            mock.call([
+                bash,
+                str(run_ci.ROOT / "experiments" /
+                    "test_wh2_thermal_runner.sh"),
+            ]),
         ], run.call_args_list)
 
     def test_data_integrity_parser_is_a_standalone_non_matrix_lane(self):

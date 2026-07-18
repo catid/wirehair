@@ -65,8 +65,8 @@ rejects both missing API symbols and leaked C++ implementation symbols.
 Repository data integrity runs once on Linux, outside the compiler/linkage
 matrix. It runs the dense-count, precode-result/ranking, and byte-metric
 validator unit tests; lints the heavy-matrix documentation; validates every
-tracked precode CSV and error-log invariant; and exercises the byte-ledger
-tools with bounded 1--10 MiB working sets and three timing repeats. Any
+tracked precode CSV and error-log invariant; and exercises the byte-ledger and
+WH2 thermal-runner tools, including strict monotonic telemetry ordering. Any
 malformed artifact stops the lane at the validator that reports its file and
 row. The complete hosted gate is also available locally:
 

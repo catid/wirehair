@@ -591,6 +591,17 @@ class RunnerTests(unittest.TestCase):
                 check=False, timeout=0.05)
         self.assertLess(time.monotonic() - started, 1.0)
 
+    def test_default_executor_rejects_success_with_surviving_child(self):
+        with self.assertRaisesRegex(
+                timing.TimingError, "unexpected child process"):
+            timing._execute_timing_process(
+                (
+                    "/bin/sh", "-c",
+                    "(sleep 20) >/dev/null 2>&1 & exit 0",
+                ),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False, timeout=2.0)
+
     def test_probe_start_failure_is_retained_as_unsealed_evidence(self):
         class FailingProbe:
             def start(self, _spec, _attempt_index, _cycle_index):
