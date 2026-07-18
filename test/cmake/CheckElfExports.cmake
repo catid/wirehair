@@ -91,6 +91,7 @@ if(NOT nm_result EQUAL 0)
 endif()
 
 set(actual_exports "")
+set(version_marker_count 0)
 string(REPLACE "\r\n" "\n" nm_output "${nm_output}")
 string(REPLACE "\r" "\n" nm_output "${nm_output}")
 string(REPLACE "\n" ";" nm_lines "${nm_output}")
@@ -99,18 +100,35 @@ foreach(line IN LISTS nm_lines)
     if(line STREQUAL "")
         continue()
     endif()
-    if(NOT line MATCHES "^([^ \t]+)[ \t]+[A-Za-z?][ \t]+")
+    if(NOT line MATCHES
+       "^([^ \t]+)[ \t]+([A-Za-z?])[ \t]+([^ \t]+)([ \t]+([^ \t]+))?$")
         message(FATAL_ERROR "Unrecognized nm output line: '${line}'")
     endif()
-    list(APPEND actual_exports "${CMAKE_MATCH_1}")
+    set(nm_symbol "${CMAKE_MATCH_1}")
+    set(nm_type "${CMAKE_MATCH_2}")
+    set(nm_value "${CMAKE_MATCH_3}")
+    set(nm_size "${CMAKE_MATCH_5}")
+
+    # GNU nm prints the absolute version namespace without a suffix, while
+    # LLVM nm renders that same linker-metadata row with its default-version
+    # suffix.  Ignore either spelling only when the rest of the record proves
+    # it is the zero-valued absolute marker.  A callable/data symbol or a
+    # nonzero lookalike must remain in the exact export comparison.
+    if((nm_symbol STREQUAL "${abi_version}" OR
+        nm_symbol STREQUAL "${abi_version}@@${abi_version}") AND
+       nm_type STREQUAL "A" AND
+       nm_value MATCHES "^0+$" AND
+       (nm_size STREQUAL "" OR nm_size MATCHES "^0+$"))
+        math(EXPR version_marker_count "${version_marker_count} + 1")
+        if(version_marker_count GREATER 1)
+            message(FATAL_ERROR
+                "nm reported duplicate ELF version namespace markers")
+        endif()
+        continue()
+    endif()
+    list(APPEND actual_exports "${nm_symbol}")
 endforeach()
 
-# GNU ld emits the version namespace itself as an absolute dynamic symbol;
-# mold records the same version definition without that synthetic dynsym row.
-# It is linker metadata rather than a callable ABI entry point.  Normalize only
-# that exact marker while still requiring every function to carry the default
-# version suffix and rejecting every other name.
-list(REMOVE_ITEM actual_exports "${abi_version}")
 set(expected_exports "")
 foreach(symbol IN LISTS public_symbols)
     list(APPEND expected_exports "${symbol}@@${abi_version}")

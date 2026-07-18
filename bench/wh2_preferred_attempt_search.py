@@ -62,7 +62,7 @@ from wh2_rank_floor_two_anchor_screen import (
 )
 
 
-SCHEMA = "wirehair.wh2.h12_preferred_attempt.contract.v1"
+SCHEMA = "wirehair.wh2.h12_preferred_attempt.contract.v2"
 SOURCE_COMMIT = "df13c42966233ac64ae6b65e4aed318485313ad8"
 SOURCE_FAILURES_SHA256 = (
     "3f0a28c33eea4a707ac38136ef9ff5125d4fb5502655022734ab680b549dca39"
@@ -104,6 +104,21 @@ PREFERRED_TRACKED_SOURCE_FILES = (
     ("bench/drand-verifier/package-lock.json", "drand_lock",
      "drand-package-lock.json"),
 )
+PREFERRED_FROZEN_STAGED_NAMES = frozenset((
+    "wh2_preferred_attempt_search.py",
+    "wh2_rank_floor_two_anchor_allk.py",
+    "wh2_rank_floor_two_anchor_screen.py",
+    "wh2_preferred_attempt_campaign.py",
+    "wh2_preferred_attempt_holdout.py",
+    "wh2_preferred_attempt_timing.py",
+    "wh2_drand_verify.cjs",
+    "wirehair_v2_bench", "CMakeCache.txt", "pinned_build.json",
+    "drand-package.json", "drand-package-lock.json", "drand-client.cjs",
+    "cohort.txt", "weights.tsv", "assignment.tsv", "bins.tsv",
+    "allk_assignment.tsv", "allk_bins.tsv",
+    "protocol.json", "q0_identity.json", "route_context.json",
+    "contract.json",
+))
 COHORT_SHA256 = (
     "1233920b35cd2b594ec48ef7dcd016a0c5132f28b79a2c914b7d843989fea6c5"
 )
@@ -240,6 +255,7 @@ HOLDOUT_PHASES = {
         required_files=(
             "prepare.json", "frozen/contract.json", "frozen/protocol.json",
             "frozen/staged.sha256", "frozen/wirehair_v2_bench",
+            "frozen/pinned_build.json",
             "frozen/wh2_preferred_attempt_search.py",
             "frozen/wh2_preferred_attempt_campaign.py",
             "frozen/wh2_preferred_attempt_holdout.py",
@@ -273,6 +289,7 @@ HOLDOUT_PHASES = {
         required_files=(
             "prepare.json", "frozen/contract.json", "frozen/protocol.json",
             "frozen/staged.sha256", "frozen/wirehair_v2_bench",
+            "frozen/pinned_build.json",
             "frozen/wh2_preferred_attempt_search.py",
             "frozen/wh2_preferred_attempt_campaign.py",
             "frozen/wh2_preferred_attempt_holdout.py",
@@ -3101,6 +3118,9 @@ def system_tool_identities() -> dict[str, dict[str, str]]:
             "bash", "cmake", "git", "readelf", "ssh", "ssh-add",
             "taskset", "numactl",
             "turbostat", "systemctl", "systemd-run", "sudo", "tee"):
+        if name in {"cmake", "git", "taskset"}:
+            tools[name] = common._trusted_executable(name)
+            continue
         located = shutil.which(name)
         if located is None:
             die(f"required frozen system tool is unavailable: {name}")
@@ -3632,6 +3652,12 @@ def verify_frozen_staged_anchor(
         path for path in frozen.iterdir()
         if path.name not in ("staged.sha256", "r1_freeze_publication.json")
     ]
+    if {path.name for path in staged_paths} != PREFERRED_FROZEN_STAGED_NAMES:
+        die("PERMANENT: frozen staged filename inventory changed")
+    allowed_names = PREFERRED_FROZEN_STAGED_NAMES | {
+        "staged.sha256", "r1_freeze_publication.json"}
+    if any(path.name not in allowed_names for path in frozen.iterdir()):
+        die("PERMANENT: frozen directory contains an unexpected artifact")
     if any(path.is_symlink() or not path.is_file() for path in staged_paths):
         die("PERMANENT: frozen staged file identity changed")
     expected_staged = {path.resolve(strict=True) for path in staged_paths}
@@ -3652,6 +3678,7 @@ def verify_prepare_contract_bindings(
         "binary_sha256": contract.get("binary_sha256"),
         "binary_elf_build_id": contract.get("binary_elf_build_id"),
         "cmake_cache_sha256": contract.get("cmake_cache_sha256"),
+        "pinned_build_sha256": contract.get("pinned_build_sha256"),
         "build_policy": contract.get("build_policy"),
         "script_sha256": contract.get("script_sha256"),
         "allk_sha256": contract.get("allk_sha256"),
@@ -3706,12 +3733,25 @@ def verify_prepared_result_root(
     return actual
 
 
+def validate_preferred_prepare_schemas(
+    prepare_record: object,
+    contract: object,
+) -> None:
+    if (not isinstance(prepare_record, dict) or
+            prepare_record.get("schema") !=
+            "wirehair.wh2.h12_preferred_attempt.prepare.v2" or
+            not isinstance(contract, dict) or
+            contract.get("schema") != SCHEMA):
+        die("PERMANENT: frozen prepare or contract schema changed")
+
+
 def verify_frozen_controller_runtime(
     result_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     frozen = result_dir / "frozen"
     prepare_record = load_json_object(result_dir / "prepare.json", "prepare record")
     contract = load_json_object(frozen / "contract.json", "frozen contract")
+    validate_preferred_prepare_schemas(prepare_record, contract)
     verify_prepared_result_root(result_dir, prepare_record)
     verify_frozen_staged_anchor(result_dir, prepare_record)
     exact_hashes = {
@@ -3728,6 +3768,8 @@ def verify_frozen_controller_runtime(
         frozen / "drand-package.json": contract.get("drand_package_sha256"),
         frozen / "drand-package-lock.json":
             contract.get("drand_package_lock_sha256"),
+        frozen / "pinned_build.json":
+            contract.get("pinned_build_sha256"),
     }
     for path, expected in exact_hashes.items():
         if (not isinstance(expected, str) or
@@ -3736,13 +3778,14 @@ def verify_frozen_controller_runtime(
     if not os.access(frozen / "wirehair_v2_bench", os.X_OK):
         die("PERMANENT: frozen benchmark binary is nonexecutable")
     frozen_cache = frozen / "CMakeCache.txt"
+    pinned_build = load_json_object(
+        frozen / "pinned_build.json", "pinned build record")
+    common.validate_pinned_build_record(pinned_build, frozen_cache)
     if (common.sha256_file(frozen_cache) !=
-            contract.get("cmake_cache_sha256") or
-            validate_candidate_build_policy(
-                frozen_cache,
-                Path(str(contract.get("source_repo", "")))) !=
-            contract.get("build_policy")):
+            contract.get("cmake_cache_sha256")):
         die("PERMANENT: frozen candidate build policy changed")
+    common.validate_pinned_build_contract_binding(
+        contract, pinned_build, "PERMANENT: frozen candidate")
     verify_prepare_contract_bindings(frozen, prepare_record, contract)
     current_script = Path(__file__).resolve(strict=True)
     expected_script = (
@@ -5711,21 +5754,10 @@ def acquire_holdout(args: argparse.Namespace) -> int:
 
 def discard_prepare_atomic_partials(path: Path) -> bool:
     """Remove only exact atomic-write debris while holding the prepare lock."""
-    pattern = re.compile(
-        rf"\.{re.escape(path.name)}\.[1-9][0-9]*\.partial")
-    removed = False
-    for candidate in tuple(path.parent.iterdir()):
-        if pattern.fullmatch(candidate.name) is None:
-            continue
-        metadata = candidate.lstat()
-        if (not stat_module.S_ISREG(metadata.st_mode) or
-                metadata.st_nlink != 1):
-            die(f"refusing nonunique prepare temporary: {candidate}")
-        candidate.unlink()
-        removed = True
-    if removed:
-        fsync_directory(path.parent)
-    return removed
+    if not common._discard_stale_atomic_partials(path):
+        return False
+    fsync_directory(path.parent)
+    return True
 
 
 def prepare_staging_paths(final: Path) -> tuple[Path, ...]:
@@ -5784,9 +5816,12 @@ def verify_recoverable_prepare_sources(
         repo, str(contract.get("source_commit", "")), inventory,
         frozen_tool_path(contract.get("system_tools"), "git"),
     )
-    if validate_candidate_build_policy(
-            frozen / "CMakeCache.txt", repo) != contract.get("build_policy"):
-        die("PERMANENT: frozen CMake policy differs before publication")
+    pinned_build = load_json_object(
+        frozen / "pinned_build.json", "recoverable pinned build")
+    common.validate_pinned_build_record(
+        pinned_build, frozen / "CMakeCache.txt")
+    common.validate_pinned_build_contract_binding(
+        contract, pinned_build, "PERMANENT: recoverable candidate")
 
 
 def reconcile_complete_prepare(
@@ -5809,7 +5844,7 @@ def reconcile_complete_prepare(
             common.json_bytes(prepare_record):
         die("PERMANENT: recoverable prepare record is not canonical JSON")
     if (prepare_record.get("schema") !=
-            "wirehair.wh2.h12_preferred_attempt.prepare.v1" or
+            "wirehair.wh2.h12_preferred_attempt.prepare.v2" or
             prepare_record.get("launch_state") != "CLEAN_UNLAUNCHED" or
             prepare_record.get("holdout_root_files_present") is not False):
         die("PERMANENT: recoverable prepare state is invalid")
@@ -5908,7 +5943,8 @@ def atomic_result_directory(
 ) -> Iterator[tuple[Path, Path, dict[str, Any] | None]]:
     """Build or recover one prepared campaign under a persistent lock."""
     absolute = requested.absolute()
-    parent_fd = common.open_durable_directory(absolute.parent, create=True)
+    parent_fd = common.open_durable_directory(
+        absolute.parent, create=True, reprove_existing=True)
     os.close(parent_fd)
     parent = absolute.parent.resolve(strict=True)
     final = parent / absolute.name
@@ -6083,91 +6119,7 @@ def elf_build_id(binary: Path, readelf: Path) -> str:
 
 def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
     """Require the exact native Release policy used for campaign evidence."""
-    try:
-        raw = common.stable_bytes(cache)
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise CampaignError("CMake cache is not UTF-8") from exc
-    entries: dict[str, tuple[str, str]] = {}
-    for number, line in enumerate(lines, 1):
-        if not line or line.startswith(("#", "//")):
-            continue
-        match = re.fullmatch(r"([^:=]+):([^=]+)=(.*)", line)
-        if match is None:
-            die(f"CMake cache line {number} is malformed")
-        key, kind, value = match.groups()
-        if key in entries:
-            die(f"CMake cache repeats {key}")
-        entries[key] = (kind, value)
-
-    required = {
-        "CMAKE_BUILD_TYPE": ("STRING", "Release"),
-        "BUILD_TESTS": ("BOOL", "ON"),
-        "BUILD_CODEC_V2": ("BOOL", "ON"),
-        "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
-        "MARCH_NATIVE": ("BOOL", "ON"),
-        "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
-        "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
-        "WH_LTO": ("STRING", "OFF"),
-        "WH_PGO_MODE": ("STRING", "OFF"),
-        "CMAKE_C_FLAGS": ("STRING", ""),
-        "CMAKE_CXX_FLAGS": ("STRING", ""),
-        "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
-        "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
-        "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
-        "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
-        "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
-    }
-    for key, expected in required.items():
-        if entries.get(key) != expected:
-            die(f"candidate CMake policy requires {key}={expected[1]!r}")
-    for key in (
-            "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
-            "CMAKE_TOOLCHAIN_FILE"):
-        if key in entries and entries[key][1]:
-            die(f"candidate CMake policy forbids {key}")
-    if ("CMAKE_CONFIGURATION_TYPES" in entries and
-            entries["CMAKE_CONFIGURATION_TYPES"][1]):
-        die("candidate CMake policy requires a single-config generator")
-    banned = ("-fsanitize", "--coverage", "-fprofile", "-pg")
-    for key, (_kind, value) in entries.items():
-        if ("FLAGS" in key and any(token in value for token in banned)):
-            die(f"candidate CMake policy forbids instrumentation in {key}")
-        if (key.startswith("CMAKE_INTERPROCEDURAL_OPTIMIZATION") and
-                value.upper() not in ("", "OFF", "FALSE", "0")):
-            die("candidate CMake policy forbids implicit IPO/LTO")
-    home = entries.get("CMAKE_HOME_DIRECTORY")
-    if (home is None or home[0] != "INTERNAL"):
-        die("candidate CMake cache lacks its source-tree binding")
-    try:
-        home_path = Path(home[1]).resolve(strict=True)
-    except OSError as exc:
-        raise CampaignError("candidate CMake source tree is unavailable") from exc
-    if home_path != repo.resolve(strict=True):
-        die("candidate CMake cache belongs to another source tree")
-    for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_GENERATOR"):
-        if key not in entries or not entries[key][1]:
-            die(f"candidate CMake cache lacks {key}")
-    if entries["CMAKE_GENERATOR"] != ("INTERNAL", "Unix Makefiles") and \
-            entries["CMAKE_GENERATOR"] != ("INTERNAL", "Ninja"):
-        die("candidate CMake policy requires Unix Makefiles or Ninja")
-    return {
-        "schema": "wirehair.wh2.h12_preferred_attempt.build_policy.v1",
-        "cmake_cache_sha256": sha256_bytes(raw),
-        "build_type": "Release",
-        "march_native": True,
-        "strict_warnings": True,
-        "tests_enabled": True,
-        "benchmarks_built": True,
-        "lto": "OFF",
-        "pgo": "OFF",
-        "c_compiler": entries["CMAKE_C_COMPILER"][1],
-        "cxx_compiler": entries["CMAKE_CXX_COMPILER"][1],
-        "generator": entries["CMAKE_GENERATOR"][1],
-    }
+    return common.validate_candidate_build_policy(cache, repo)
 
 
 def prepare(args: argparse.Namespace) -> int:
@@ -6200,40 +6152,31 @@ def prepare(args: argparse.Namespace) -> int:
     remote_url = github_remote_url(
         repo, frozen_tool_path(system_tools, "git"))
     protocol, ledgers = derive_plan(args.source_result)
-    binary_input = args.binary.absolute()
-    if binary_input.is_symlink():
-        die("--binary must not be a symlink")
-    binary = binary_input.resolve(strict=True)
-    build_dir = binary.parent.parent.resolve(strict=True)
-    cache = build_dir / "CMakeCache.txt"
-    if (binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True) or
-            common.cmake_source_directory(cache) != repo):
-        die("--binary is not this source tree's wirehair_v2_bench")
-    build_policy = validate_candidate_build_policy(cache, repo)
     if args.workers != 128 or not 1 <= args.build_workers <= 128:
         die("campaign requires 128 workers and 1..128 build workers")
-    build_command = [
-        str(frozen_tool_path(system_tools, "taskset")), "-c", "0-127",
-        str(frozen_tool_path(system_tools, "cmake")), "--build", str(build_dir),
-        "--target", "wirehair_v2_bench", "--clean-first", "--parallel",
-        str(args.build_workers),
-    ]
-    subprocess.run(build_command, check=True)
+    readelf = frozen_tool_path(system_tools, "readelf")
+    with common.fresh_pinned_benchmark_build(
+            repo, head, args.binary, system_tools["git"],
+            system_tools["cmake"], system_tools["taskset"],
+            build_workers=args.build_workers,
+            cpu_set="0-127") as fresh_build:
+        build_policy = fresh_build.record["build_policy"]
+        build_command = fresh_build.record["build_command"]
+        live_binary_sha256 = fresh_build.record["binary_sha256"]
+        live_build_id = fresh_build.record["binary_elf_build_id"]
+        live_identity = q0_control_identity(fresh_build.binary)
+        if (common.sha256_file(fresh_build.binary) != live_binary_sha256 or
+                elf_build_id(fresh_build.binary, readelf) != live_build_id):
+            die("fresh benchmark changed during q0 identity validation")
+        binary_bytes = common.stable_bytes(fresh_build.binary)
+        cache_bytes = common.stable_bytes(fresh_build.cache)
+        pinned_build = fresh_build.record
+        pinned_build_bytes = common.json_bytes(pinned_build)
+        common.validate_pinned_build_record(
+            pinned_build, fresh_build.cache)
     if tracked_clean_sources(
             tracked_inputs, system_tools)[1:] != (head, upstream):
-        die("repository changed during clean benchmark rebuild")
-    if validate_candidate_build_policy(cache, repo) != build_policy:
-        die("candidate CMake policy changed during clean rebuild")
-    if binary_input.is_symlink():
-        die("clean rebuild replaced the binary with a symlink")
-    binary = binary_input.resolve(strict=True)
-    live_binary_sha256 = common.sha256_file(binary)
-    readelf = frozen_tool_path(system_tools, "readelf")
-    live_build_id = elf_build_id(binary, readelf)
-    live_identity = q0_control_identity(binary)
-    if (common.sha256_file(binary) != live_binary_sha256 or
-            elf_build_id(binary, readelf) != live_build_id):
-        die("benchmark binary changed during q0 identity validation")
+        die("repository changed during fresh benchmark build")
     drand = obtain_drand_verifier(
         drand_wrapper, drand_package, drand_lock)
     if tracked_clean_sources(
@@ -6259,6 +6202,7 @@ def prepare(args: argparse.Namespace) -> int:
             "drand_wrapper": frozen / drand_wrapper.name,
             "binary": frozen / "wirehair_v2_bench",
             "cmake_cache": frozen / "CMakeCache.txt",
+            "pinned_build": frozen / "pinned_build.json",
             "drand_package": frozen / "drand-package.json",
             "drand_lock": frozen / "drand-package-lock.json",
             "drand_bundle": frozen / "drand-client.cjs",
@@ -6272,10 +6216,11 @@ def prepare(args: argparse.Namespace) -> int:
             (drand_wrapper, copied["drand_wrapper"]),
             (drand_package, copied["drand_package"]),
             (drand_lock, copied["drand_lock"]),
-            (binary, copied["binary"]),
-            (cache, copied["cmake_cache"]),
         ):
             shutil.copyfile(source, target)
+        common.atomic_write(copied["binary"], binary_bytes)
+        common.atomic_write(copied["cmake_cache"], cache_bytes)
+        common.atomic_write(copied["pinned_build"], pinned_build_bytes)
         common.atomic_write(copied["drand_bundle"], drand["bundle"])
         copied["script"].chmod(0o755)
         copied["drand_wrapper"].chmod(0o755)
@@ -6290,9 +6235,9 @@ def prepare(args: argparse.Namespace) -> int:
             repo, head, immutable_sources,
             frozen_tool_path(system_tools, "git"),
         )
-        if validate_candidate_build_policy(
-                copied["cmake_cache"], repo) != build_policy:
-            die("frozen candidate CMake policy changed while being copied")
+        common.validate_pinned_build_record(
+            json.loads(common.stable_bytes(copied["pinned_build"])),
+            copied["cmake_cache"])
         if (common.sha256_file(copied["binary"]) != live_binary_sha256 or
                 elf_build_id(copied["binary"], readelf) != live_build_id):
             die("frozen benchmark differs from the q0-tested binary")
@@ -6374,6 +6319,8 @@ def prepare(args: argparse.Namespace) -> int:
             "binary_sha256": live_binary_sha256,
             "binary_elf_build_id": live_build_id,
             "cmake_cache_sha256": common.sha256_file(copied["cmake_cache"]),
+            "pinned_build_sha256": common.sha256_file(
+                copied["pinned_build"]),
             "build_policy": build_policy,
             "script_sha256": common.sha256_file(copied["script"]),
             "allk_sha256": common.sha256_file(copied["allk"]),
@@ -6441,6 +6388,11 @@ def prepare(args: argparse.Namespace) -> int:
         }
         common.atomic_json(frozen / "contract.json", contract)
         contract_sha256 = common.sha256_file(frozen / "contract.json")
+        if ({path.name for path in frozen.iterdir()} !=
+                PREFERRED_FROZEN_STAGED_NAMES or
+                any(path.is_symlink() or not path.is_file()
+                    for path in frozen.iterdir())):
+            die("preferred frozen staged filename inventory changed")
         staged_files = [
             path for path in frozen.iterdir() if path.name != "staged.sha256"
         ]
@@ -6457,7 +6409,7 @@ def prepare(args: argparse.Namespace) -> int:
                 tracked_inputs, system_tools)[1:] != (head, upstream):
             die("repository changed before atomic campaign publication")
         prepare_record = {
-            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v1",
+            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v2",
             "source_commit": head, "binary_sha256": contract["binary_sha256"],
             "script_sha256": contract["script_sha256"],
             "allk_sha256": contract["allk_sha256"],
@@ -6467,6 +6419,7 @@ def prepare(args: argparse.Namespace) -> int:
             "timing_module_sha256": contract["timing_module_sha256"],
             "binary_elf_build_id": live_build_id,
             "cmake_cache_sha256": contract["cmake_cache_sha256"],
+            "pinned_build_sha256": contract["pinned_build_sha256"],
             "build_policy": contract["build_policy"],
             "contract_sha256": contract_sha256,
             "protocol_sha256": contract["protocol_sha256"],
@@ -8138,7 +8091,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     prepare_parser = subparsers.add_parser(
         "prepare", help="freeze immutable inputs without launching recovery work")
     prepare_parser.add_argument("--source-result", type=Path, required=True)
-    prepare_parser.add_argument("--binary", type=Path, required=True)
+    prepare_parser.add_argument(
+        "--binary", type=Path, required=True,
+        help=("accepted local benchmark used only to confirm the system "
+              "toolchain; its binary and generated graph are never reused"))
     prepare_parser.add_argument("--thermal", type=Path, required=True)
     prepare_parser.add_argument("--result-dir", type=Path, required=True)
     prepare_parser.add_argument("--workers", type=int, default=128)

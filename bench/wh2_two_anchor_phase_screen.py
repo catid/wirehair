@@ -554,7 +554,10 @@ def q0_identity(
     }
 
 
-def prepare(args: argparse.Namespace) -> int:
+def _prepare_with_fresh_pinned_benchmark_build(
+    args: argparse.Namespace,
+    final_result_dir: Path,
+) -> dict[str, Any]:
     if not args.acknowledge_post_selection_only:
         die(
             "prepare requires --acknowledge-post-selection-only; this "
@@ -563,55 +566,22 @@ def prepare(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve(strict=True)
     allk = script.with_name("wh2_rank_floor_two_anchor_allk.py")
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
-    git_record = common.executable_identity("git")
+    git_record = common._trusted_executable("git")
     git = common.frozen_executable_path(git_record, "git")
     repo, head = tracked_clean_sources((script, allk, helper), git)
-    taskset_record = common.executable_identity("taskset")
-    cmake_record = common.executable_identity("cmake")
+    taskset_record = common._trusted_executable("taskset")
+    cmake_record = common._trusted_executable("cmake")
     python_runtime = common.python_runtime_identity()
     taskset = common.frozen_executable_path(taskset_record, "taskset")
     cmake = common.frozen_executable_path(cmake_record, "cmake")
     if args.source_cells.absolute().is_symlink():
         die("--source-cells must not be a symlink")
     cohort = load_source_cohort(args.source_cells.resolve(strict=True))
-    binary_input = args.binary.absolute()
-    if binary_input.is_symlink():
-        die("--binary must not be a symlink")
-    binary = binary_input.resolve(strict=True)
-    build_dir = binary.parent.parent.resolve(strict=True)
-    cache = build_dir / "CMakeCache.txt"
-    if binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True):
-        die("--binary is not this source tree's codec/wirehair_v2_bench")
-    build_policy = common.validate_candidate_build_policy(cache, repo)
     if args.workers != 64 or args.build_workers < 1 or args.build_workers > 64:
         die("focused screen requires 64 workers and 1..64 build workers")
-    build_command = [
-        str(taskset), "-c", "0-63", str(cmake), "--build", str(build_dir),
-        "--target", "wirehair_v2_bench", "--clean-first", "--parallel",
-        str(args.build_workers),
-    ]
-    subprocess.run(build_command, check=True)
-    post_repo, post_head = tracked_clean_sources((script, allk, helper), git)
-    if post_repo != repo or post_head != head:
-        die("source repository changed during clean benchmark rebuild")
-    if common.validate_candidate_build_policy(cache, repo) != build_policy:
-        die("candidate build policy changed during clean benchmark rebuild")
-    if (common.frozen_executable_path(git_record, "git") != git or
-            common.frozen_executable_path(taskset_record, "taskset") != taskset or
-            common.frozen_executable_path(cmake_record, "cmake") != cmake):
-        die("frozen build-tool path changed during clean benchmark rebuild")
-    if binary_input.is_symlink():
-        die("clean benchmark rebuild replaced --binary with a symlink")
-    binary = binary_input.resolve(strict=True)
-    live_binary_sha256 = common.sha256_file(binary)
-    identity = q0_identity(
-        binary, live_binary_sha256, taskset, taskset_record)
     thermal = args.thermal.resolve(strict=True)
-    thermal_mark = thermal_start(thermal)
     result_dir = args.result_dir.resolve()
-    result_dir.mkdir(parents=True, exist_ok=False)
     frozen = result_dir / "frozen"
-    frozen.mkdir()
     destinations = {
         "script": frozen / script.name,
         "allk": frozen / allk.name,
@@ -620,13 +590,50 @@ def prepare(args: argparse.Namespace) -> int:
         "cmake_cache": frozen / "CMakeCache.txt",
         "cohort": frozen / "cohort.json",
         "q0_identity": frozen / "q0_identity.json",
+        "pinned_build": frozen / "pinned_build.json",
     }
+    with common.fresh_pinned_benchmark_build(
+            repo, head, args.binary, git_record, cmake_record,
+            taskset_record, build_workers=args.build_workers,
+            cpu_set="0-63") as fresh_build:
+        build_policy = fresh_build.record["build_policy"]
+        build_command = fresh_build.record["build_command"]
+        live_binary_sha256 = fresh_build.record["binary_sha256"]
+        identity = q0_identity(
+            fresh_build.binary, live_binary_sha256, taskset,
+            taskset_record)
+        thermal_mark = thermal_start(thermal)
+        post_repo, post_head = tracked_clean_sources(
+            (script, allk, helper), git)
+        if post_repo != repo or post_head != head:
+            die("source repository changed during fresh benchmark build")
+        if (common.frozen_executable_path(git_record, "git") != git or
+                common.frozen_executable_path(
+                    taskset_record, "taskset") != taskset or
+                common.frozen_executable_path(
+                    cmake_record, "cmake") != cmake):
+            die("frozen build-tool path changed during fresh benchmark build")
+        binary_bytes = common.stable_bytes(fresh_build.binary)
+        cache_bytes = common.stable_bytes(fresh_build.cache)
+        pinned_build_bytes = common.json_bytes(fresh_build.record)
+        if common.sha256_bytes(binary_bytes) != live_binary_sha256:
+            die("q0-tested fresh benchmark changed while it was captured")
+        common.validate_pinned_build_record(
+            fresh_build.record, fresh_build.cache)
+    # Publish only after the fresh-build context's post-yield graph, source,
+    # compiler, and tool checks have all succeeded.
+    frozen.mkdir()
+    common.atomic_write(destinations["binary"], binary_bytes)
+    common.atomic_write(destinations["cmake_cache"], cache_bytes)
+    common.atomic_write(destinations["pinned_build"], pinned_build_bytes)
+    if common.sha256_file(destinations["binary"]) != live_binary_sha256:
+        die("captured q0-tested benchmark changed while it was frozen")
+    common.validate_pinned_build_record(
+        json.loads(pinned_build_bytes), destinations["cmake_cache"])
     for source, destination in (
         (script, destinations["script"]),
         (allk, destinations["allk"]),
         (helper, destinations["helper"]),
-        (binary, destinations["binary"]),
-        (cache, destinations["cmake_cache"]),
     ):
         shutil.copyfile(source, destination)
     common.atomic_json(destinations["cohort"], cohort)
@@ -642,19 +649,22 @@ def prepare(args: argparse.Namespace) -> int:
         ),
         git,
     )
-    if common.validate_candidate_build_policy(
-            destinations["cmake_cache"], repo) != build_policy:
-        die("frozen candidate CMake policy changed while being copied")
     if common.sha256_file(destinations["binary"]) != live_binary_sha256:
         die("q0 identity binary changed while it was being frozen")
+    pinned_build_sha256 = common.sha256_file(destinations["pinned_build"])
+    common.validate_pinned_build_record(
+        json.loads(common.stable_bytes(destinations["pinned_build"])),
+        destinations["cmake_cache"],
+    )
     contract = {
-        "schema": "wirehair.wh2.two_anchor_phase.contract.v2",
+        "schema": "wirehair.wh2.two_anchor_phase.contract.v3",
         "purpose": "post-selection tuning only; forbidden for architecture selection",
         "source_commit": head,
         "source_repo": str(repo),
         "build_command": build_command,
         "binary_sha256": common.sha256_file(destinations["binary"]),
         "cmake_cache_sha256": common.sha256_file(destinations["cmake_cache"]),
+        "pinned_build_sha256": pinned_build_sha256,
         "build_policy": build_policy,
         "taskset": taskset_record,
         "cmake": cmake_record,
@@ -715,19 +725,30 @@ def prepare(args: argparse.Namespace) -> int:
     if set(verified) != {path.resolve(strict=True) for path in staged_files}:
         die("staged seal does not cover the exact frozen phase inputs")
     prepare_record = {
-        "schema": "wirehair.wh2.two_anchor_phase.prepare.v1",
+        "schema": "wirehair.wh2.two_anchor_phase.prepare.v2",
         "source_commit": head,
         "binary_sha256": contract["binary_sha256"],
+        "pinned_build_sha256": pinned_build_sha256,
         "cohort_sha256": contract["cohort_sha256"],
         "q0_identity": identity,
         "staged_seal_sha256": common.sha256_file(staged),
-        "result_dir": str(result_dir),
+        "result_dir": str(final_result_dir),
         "run_command": [
-            python_runtime["path"], str(destinations["script"]), "run",
-            "--result-dir", str(result_dir),
+            python_runtime["path"],
+            str(final_result_dir / "frozen" / script.name), "run",
+            "--result-dir", str(final_result_dir),
         ],
     }
     common.atomic_json(result_dir / "prepare.json", prepare_record)
+    return prepare_record
+
+
+def prepare(args: argparse.Namespace) -> int:
+    with common.prepare_result_staging(args.result_dir) as (staging, final):
+        staged_args = argparse.Namespace(**vars(args))
+        staged_args.result_dir = staging
+        prepare_record = _prepare_with_fresh_pinned_benchmark_build(
+            staged_args, final)
     print(canonical_json(prepare_record))
     return 0
 
@@ -746,15 +767,18 @@ def load_frozen(
         script.name, "wh2_rank_floor_two_anchor_allk.py",
         "wh2_rank_floor_two_anchor_screen.py", "wirehair_v2_bench",
         "CMakeCache.txt", "cohort.json", "q0_identity.json",
-        "contract.json", "staged.sha256",
+        "pinned_build.json", "contract.json", "staged.sha256",
     }
     actual_names = {path.name for path in frozen.iterdir()}
-    if actual_names != expected_names or any(path.is_symlink() for path in frozen.iterdir()):
+    if (actual_names != expected_names or
+            any(path.is_symlink() or not path.is_file()
+                for path in frozen.iterdir())):
         die("frozen tree names or file types changed")
     prepare_anchor = common.validate_prepare_anchor(
-        result_dir, "wirehair.wh2.two_anchor_phase.prepare.v1",
-        ("source_commit", "binary_sha256", "cohort_sha256", "q0_identity",
-         "staged_seal_sha256", "run_command"),
+        result_dir, "wirehair.wh2.two_anchor_phase.prepare.v2",
+        ("source_commit", "binary_sha256", "pinned_build_sha256",
+         "cohort_sha256", "q0_identity", "staged_seal_sha256",
+         "run_command"),
         "staged_seal_sha256")
     staged = frozen / "staged.sha256"
     verified = common.verify_sha_manifest(result_dir, staged)
@@ -767,6 +791,10 @@ def load_frozen(
     contract = json.loads(common.stable_bytes(frozen / "contract.json"))
     cohort = json.loads(common.stable_bytes(frozen / "cohort.json"))
     identity = json.loads(common.stable_bytes(frozen / "q0_identity.json"))
+    pinned_build = json.loads(
+        common.stable_bytes(frozen / "pinned_build.json"))
+    common.validate_pinned_build_record(
+        pinned_build, frozen / "CMakeCache.txt")
     if (not isinstance(contract, dict) or not isinstance(cohort, dict) or
             not isinstance(identity, dict)):
         die("frozen contract, cohort, and identity must be objects")
@@ -780,11 +808,13 @@ def load_frozen(
     if (prepare_anchor.get("source_commit") != contract.get("source_commit") or
             prepare_anchor.get("binary_sha256") !=
             contract.get("binary_sha256") or
+            prepare_anchor.get("pinned_build_sha256") !=
+            contract.get("pinned_build_sha256") or
             prepare_anchor.get("cohort_sha256") !=
             contract.get("cohort_sha256") or
             prepare_anchor.get("q0_identity") != identity):
         die("prepare anchor differs from the frozen phase-screen inputs")
-    if (contract.get("schema") != "wirehair.wh2.two_anchor_phase.contract.v2" or
+    if (contract.get("schema") != "wirehair.wh2.two_anchor_phase.contract.v3" or
             contract.get("purpose") !=
             "post-selection tuning only; forbidden for architecture selection" or
             contract.get("workers") != 64 or
@@ -824,6 +854,7 @@ def load_frozen(
     hash_fields = {
         "binary_sha256": "wirehair_v2_bench",
         "cmake_cache_sha256": "CMakeCache.txt",
+        "pinned_build_sha256": "pinned_build.json",
         "script_sha256": script.name,
         "allk_sha256": "wh2_rank_floor_two_anchor_allk.py",
         "helper_sha256": "wh2_rank_floor_two_anchor_screen.py",
@@ -833,10 +864,8 @@ def load_frozen(
     for field, name in hash_fields.items():
         if contract.get(field) != common.sha256_file(frozen / name):
             die(f"frozen contract {field} mismatch")
-    if contract.get("build_policy") != common.validate_candidate_build_policy(
-            frozen / "CMakeCache.txt",
-            Path(str(contract.get("source_repo", "")))):
-        die("frozen phase-screen build policy changed")
+    common.validate_pinned_build_contract_binding(
+        contract, pinned_build, "frozen phase-screen contract")
     if (cohort.get("schema") != "wirehair.wh2.two_anchor_phase.cohort.v1" or
             cohort.get("source_cells_sha256") != SOURCE_CELLS_SHA256 or
             cohort.get("ks_sha256") != COHORT_KS_SHA256):
@@ -1411,7 +1440,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
     prepare_parser = subparsers.add_parser("prepare")
-    prepare_parser.add_argument("--binary", type=Path, required=True)
+    prepare_parser.add_argument(
+        "--binary", type=Path, required=True,
+        help=("accepted local benchmark used only to confirm the system "
+              "toolchain; its binary and generated graph are never reused"))
     prepare_parser.add_argument("--source-cells", type=Path, required=True)
     prepare_parser.add_argument("--thermal", type=Path, required=True)
     prepare_parser.add_argument("--result-dir", type=Path, required=True)

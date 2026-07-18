@@ -27,6 +27,25 @@ import wh2_rank_floor_two_anchor_screen as screen_module
 
 
 class PreferredAttemptSearchTest(unittest.TestCase):
+    def test_runtime_schema_gate_requires_current_prepare_and_contract(
+            self) -> None:
+        prepare = {
+            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v2"}
+        contract = {"schema": subject.SCHEMA}
+        subject.validate_preferred_prepare_schemas(prepare, contract)
+        for changed_prepare, changed_contract in (
+                ({"schema": "wirehair.wh2.h12_preferred_attempt.prepare.v1"},
+                 contract),
+                (prepare,
+                 {"schema": "wirehair.wh2.h12_preferred_attempt.contract.v1"}),
+                ([], contract),
+                (prepare, [])):
+            with self.subTest(
+                    prepare=changed_prepare, contract=changed_contract), \
+                 self.assertRaisesRegex(subject.CampaignError, "schema"):
+                subject.validate_preferred_prepare_schemas(
+                    changed_prepare, changed_contract)
+
     def fake_repo(self, parent: Path) -> tuple[Path, str]:
         repo = parent / "source"
         remote = parent / "origin.git"
@@ -120,6 +139,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
         bindings = {
             "source_commit": commit,
             "binary_sha256": "1" * 64,
+            "pinned_build_sha256": "",
             "script_sha256": "2" * 64,
             "allk_sha256": "3" * 64,
             "helper_sha256": "4" * 64,
@@ -144,6 +164,12 @@ class PreferredAttemptSearchTest(unittest.TestCase):
         subject.common.atomic_json(frozen / "q0_identity.json", q0_identity)
         bindings["q0_identity_sha256"] = subject.common.sha256_file(
             frozen / "q0_identity.json")
+        for name in sorted(subject.PREFERRED_FROZEN_STAGED_NAMES - {
+                "contract.json", "q0_identity.json"}):
+            subject.common.atomic_write(
+                frozen / name, (name + "\n").encode("ascii"))
+        bindings["pinned_build_sha256"] = subject.common.sha256_file(
+            frozen / "pinned_build.json")
         contract = {
             "schema": subject.SCHEMA,
             "source_repo": str(repo),
@@ -158,7 +184,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 staging, tuple(frozen.iterdir())),
         )
         prepare = {
-            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v1",
+            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v2",
             **bindings,
             "q0_identity": q0_identity,
             "contract_sha256": contract_sha256,
@@ -223,9 +249,14 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             target = root / "wave.json"
             stale = root / ".wave.json.99999999.partial"
             stale.write_bytes(b"stale\n")
+            dotted_sibling = root / \
+                ".wave.json.sha256.99999999.1.partial"
+            dotted_sibling.write_bytes(b"different target\n")
             subject.common.atomic_write(target, b"complete\n")
             self.assertEqual(target.read_bytes(), b"complete\n")
             self.assertFalse(stale.exists())
+            self.assertTrue(dotted_sibling.exists())
+            dotted_sibling.unlink()
 
             published = root / "published.json"
             linked_marker = root / ".published.json.99999999.partial"
@@ -718,6 +749,34 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 original_handlers,
             )
 
+    def test_prepare_transaction_reproves_existing_parent_ancestors(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-prepare-parent-durability-") as temporary:
+            root = Path(temporary).resolve()
+            parent = root / "existing-a" / "existing-b"
+            parent.mkdir(parents=True)
+            final = parent / "campaign"
+            real_fsync = subject.common.os.fsync
+            flushed: set[tuple[int, int]] = set()
+
+            def record_fsync(descriptor):
+                metadata = os.fstat(descriptor)
+                flushed.add((metadata.st_dev, metadata.st_ino))
+                return real_fsync(descriptor)
+
+            with mock.patch.object(
+                    subject.common.os, "fsync", side_effect=record_fsync), \
+                 self.assertRaisesRegex(RuntimeError, "fixture stop"):
+                with subject.atomic_result_directory(final):
+                    raise RuntimeError("fixture stop")
+            expected = {
+                (path.stat().st_dev, path.stat().st_ino)
+                for path in (root, root / "existing-a", parent)
+            }
+            self.assertTrue(expected.issubset(flushed))
+            self.assertFalse(final.exists())
+
     def test_prepare_transaction_reconciles_complete_staging(self) -> None:
         with tempfile.TemporaryDirectory(
                 prefix="wh2-prepare-transaction-recover-") as temporary:
@@ -742,12 +801,17 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     contract["system_tools"])
                 self.assertFalse(
                     (staging / "frozen/r1_freeze_publication.json").exists())
+                receipt_partial = staging / "frozen" / (
+                    ".r1_freeze_publication.json.99999999.1.partial")
+                receipt_partial.write_bytes(b"interrupted receipt\n")
                 with subject.atomic_result_directory(final) as transaction:
                     self.assertEqual(transaction[0], final)
                     self.assertEqual(transaction[1], final)
                     self.assertEqual(transaction[2], prepare)
                 subject.verify_r1_freeze_publication(
                     final, prepare, contract)
+            self.assertFalse(
+                (final / "frozen" / receipt_partial.name).exists())
             self.assertFalse(staging.exists())
             self.assertTrue(final.is_dir())
             self.assertTrue(
@@ -1188,8 +1252,16 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             frozen = result / "frozen"
             frozen.mkdir()
             subject.common.atomic_json(frozen / "contract.json", {"version": 1})
-            subject.common.atomic_write(frozen / "binary", b"original\n")
-            staged_files = [frozen / "contract.json", frozen / "binary"]
+            for name in sorted(subject.PREFERRED_FROZEN_STAGED_NAMES - {
+                    "contract.json", "wirehair_v2_bench"}):
+                subject.common.atomic_write(
+                    frozen / name, (name + "\n").encode("ascii"))
+            subject.common.atomic_write(
+                frozen / "wirehair_v2_bench", b"original\n")
+            staged_files = [
+                frozen / name
+                for name in sorted(subject.PREFERRED_FROZEN_STAGED_NAMES)
+            ]
             subject.common.atomic_write(
                 frozen / "staged.sha256",
                 subject.common.sha_manifest(result, staged_files),
@@ -1201,17 +1273,18 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     subject.common.sha256_file(frozen / "contract.json"),
             }
             subject.verify_frozen_staged_anchor(result, prepare)
-            alias = frozen / "binary-alias"
-            (frozen / "binary").rename(alias)
-            (frozen / "binary").symlink_to(alias.name)
+            alias = frozen / "wirehair_v2_bench-alias"
+            (frozen / "wirehair_v2_bench").rename(alias)
+            (frozen / "wirehair_v2_bench").symlink_to(alias.name)
             with self.assertRaises(subject.CampaignError):
                 subject.verify_frozen_staged_anchor(result, prepare)
 
-            (frozen / "binary").unlink()
-            alias.rename(frozen / "binary")
+            (frozen / "wirehair_v2_bench").unlink()
+            alias.rename(frozen / "wirehair_v2_bench")
             subject.verify_frozen_staged_anchor(result, prepare)
             subject.common.atomic_json(frozen / "contract.json", {"version": 2})
-            subject.common.atomic_write(frozen / "binary", b"replacement\n")
+            subject.common.atomic_write(
+                frozen / "wirehair_v2_bench", b"replacement\n")
             subject.common.atomic_write(
                 frozen / "staged.sha256",
                 subject.common.sha_manifest(result, staged_files),
@@ -1299,9 +1372,14 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             cache = repo / "CMakeCache.txt"
             entries = {
                 "CMAKE_BUILD_TYPE": ("STRING", "Release"),
+                "BUILD_SHARED_LIBS": ("BOOL", "OFF"),
                 "BUILD_TESTS": ("BOOL", "ON"),
                 "BUILD_CODEC_V2": ("BOOL", "ON"),
+                "WIREHAIR_BUILD_BOTH": ("BOOL", "OFF"),
+                "WIREHAIR_STATIC_PIC": ("BOOL", "ON"),
+                "WIREHAIR_BUILD_TOOLS": ("BOOL", "OFF"),
                 "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
+                "WIREHAIR_ENABLE_SCHEDULED_TESTS": ("BOOL", "OFF"),
                 "MARCH_NATIVE": ("BOOL", "ON"),
                 "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
                 "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
@@ -1317,6 +1395,8 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
                 "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
                 "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+                "CMAKE_STATIC_LINKER_FLAGS": ("STRING", ""),
+                "CMAKE_STATIC_LINKER_FLAGS_RELEASE": ("STRING", ""),
                 "CMAKE_C_COMPILER": ("FILEPATH", "/usr/bin/cc"),
                 "CMAKE_CXX_COMPILER": ("FILEPATH", "/usr/bin/c++"),
                 "CMAKE_GENERATOR": ("INTERNAL", "Unix Makefiles"),
@@ -1336,7 +1416,15 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             self.assertTrue(policy["tests_enabled"])
             for key, value in (
                     ("MARCH_NATIVE", ("BOOL", "OFF")),
+                    ("BUILD_SHARED_LIBS", ("BOOL", "ON")),
                     ("WH_PGO_MODE", ("STRING", "USE")),
+                    ("CMAKE_CXX_STANDARD", ("STRING", "23")),
+                    ("CMAKE_CXX_LINKER_LAUNCHER",
+                     ("STRING", "/tmp/untrusted-launcher")),
+                    ("CMAKE_PROJECT_INCLUDE",
+                     ("FILEPATH", "/tmp/untrusted-project.cmake")),
+                    ("CMAKE_STATIC_LINKER_FLAGS",
+                     ("STRING", "-Wl,--wrap=malloc")),
                     ("CMAKE_CONFIGURATION_TYPES",
                      ("STRING", "Debug;Release")),
                     ("CMAKE_GENERATOR",

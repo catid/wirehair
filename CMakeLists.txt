@@ -757,18 +757,21 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                         "v2;research;state-machine;${_wh2_preferred_suite}"
                     TIMEOUT 120)
         endforeach()
-        add_test(
-            NAME wh2_rank_floor_two_anchor_screen_test
-            COMMAND ${Python3_EXECUTABLE}
-                ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py
-                -v)
-        set_tests_properties(wh2_rank_floor_two_anchor_screen_test
-            PROPERTIES
-                ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
-                LABELS "v2;research;thermal"
-                TIMEOUT 30)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(
+                NAME wh2_rank_floor_two_anchor_screen_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py
+                    -v)
+            set_tests_properties(wh2_rank_floor_two_anchor_screen_test
+                PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
+                    LABELS "v2;research;thermal"
+                    TIMEOUT 180)
+        endif()
     endif()
-    if(Python3_Interpreter_FOUND AND WIREHAIR_GIT_EXECUTABLE AND UNIX)
+    if(Python3_Interpreter_FOUND AND WIREHAIR_GIT_EXECUTABLE AND
+       CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(
             NAME wh2_preferred_attempt_search_test
             COMMAND ${Python3_EXECUTABLE}

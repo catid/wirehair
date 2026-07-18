@@ -25,6 +25,8 @@ import argparse
 from array import array
 from collections import Counter, defaultdict
 import concurrent.futures
+from contextlib import contextmanager
+import ctypes
 import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
@@ -33,17 +35,19 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import queue
 import re
+import secrets
 import select
 import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from wh2_rank_floor_two_anchor_screen import (
     THERMAL_FIELDS,
@@ -236,8 +240,12 @@ def _atomic_writer_pid_is_live(
     return True
 
 
-def open_durable_directory(path: Path, *, create: bool = False) -> int:
+def open_durable_directory(
+        path: Path, *, create: bool = False,
+        reprove_existing: bool = False) -> int:
     """Open an absolute directory without following any component symlink."""
+    if reprove_existing and not create:
+        die("cannot re-prove directory entries without create=True")
     absolute = path.absolute()
     if (not absolute.is_absolute() or
             any(part in ("", ".", "..") for part in absolute.parts[1:])):
@@ -248,19 +256,33 @@ def open_durable_directory(path: Path, *, create: bool = False) -> int:
     descriptor = os.open("/", flags)
     try:
         for part in absolute.parts[1:]:
-            created = False
-            if create:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=descriptor)
-                    created = True
-                except FileExistsError:
-                    pass
-            next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            if created:
-                os.fsync(next_descriptor)
-                os.fsync(descriptor)
-            os.close(descriptor)
+            next_descriptor: int | None = None
+            try:
+                created = False
+                if create:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=descriptor)
+                        created = True
+                    except FileExistsError:
+                        pass
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+                if created or reprove_existing:
+                    # A component can be residue from an earlier call whose
+                    # fsync failed after mkdir.  Result-staging setup explicitly
+                    # re-proves every traversed edge on retry; ordinary atomic
+                    # writes only flush entries created by this invocation.
+                    os.fsync(next_descriptor)
+                    os.fsync(descriptor)
+            except BaseException:
+                if next_descriptor is not None:
+                    try:
+                        os.close(next_descriptor)
+                    except OSError:
+                        pass
+                raise
+            previous_descriptor = descriptor
             descriptor = next_descriptor
+            os.close(previous_descriptor)
         metadata = os.fstat(descriptor)
         named = os.stat(absolute, follow_symlinks=False)
         if (not stat.S_ISDIR(metadata.st_mode) or
@@ -269,11 +291,17 @@ def open_durable_directory(path: Path, *, create: bool = False) -> int:
             die(f"directory pathname changed while opening: {path}")
         return descriptor
     except OSError as error:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
         raise CampaignError(
             f"cannot open durable directory {path}: {error}") from error
     except BaseException:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
         raise
 
 
@@ -1523,8 +1551,107 @@ def verify_frozen_sources_at_commit(
             )
 
 
-def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
-    """Require an uninstrumented strict native Release benchmark build."""
+PINNED_BUILD_PATH = "/usr/bin:/bin"
+PINNED_BUILD_TIMEOUT_SECONDS = 900.0
+PINNED_CONFIGURE_TIMEOUT_SECONDS = 180.0
+PINNED_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+PINNED_PROJECT_CACHE = {
+    "BUILD_SHARED_LIBS": ("BOOL", "OFF"),
+    "BUILD_TESTS": ("BOOL", "ON"),
+    "BUILD_CODEC_V2": ("BOOL", "ON"),
+    "MARCH_NATIVE": ("BOOL", "ON"),
+    "WIREHAIR_BUILD_BOTH": ("BOOL", "OFF"),
+    "WIREHAIR_STATIC_PIC": ("BOOL", "ON"),
+    "WIREHAIR_BUILD_TOOLS": ("BOOL", "OFF"),
+    "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
+    "WIREHAIR_ENABLE_SCHEDULED_TESTS": ("BOOL", "OFF"),
+    "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
+    "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
+    "WH_LTO": ("STRING", "OFF"),
+    "WH_PGO_MODE": ("STRING", "OFF"),
+}
+PINNED_LANGUAGE_CACHE = {
+    "CMAKE_BUILD_TYPE": ("STRING", "Release"),
+    "CMAKE_CXX_STANDARD": ("STRING", "11"),
+    "CMAKE_CXX_STANDARD_REQUIRED": ("BOOL", "ON"),
+    "CMAKE_CXX_EXTENSIONS": ("BOOL", "ON"),
+    "CMAKE_C_FLAGS": ("STRING", ""),
+    "CMAKE_CXX_FLAGS": ("STRING", ""),
+    "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+    "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+    "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
+    "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
+    "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
+    "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    "CMAKE_STATIC_LINKER_FLAGS": ("STRING", ""),
+    "CMAKE_STATIC_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    "CMAKE_INTERPROCEDURAL_OPTIMIZATION": ("BOOL", "OFF"),
+    "CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE": ("BOOL", "OFF"),
+}
+PINNED_EXPLICIT_EMPTY_CACHE = {
+    "CMAKE_C_COMPILER_LAUNCHER": "STRING",
+    "CMAKE_CXX_COMPILER_LAUNCHER": "STRING",
+    "CMAKE_C_LINKER_LAUNCHER": "STRING",
+    "CMAKE_CXX_LINKER_LAUNCHER": "STRING",
+    "CMAKE_RULE_LAUNCH_COMPILE": "STRING",
+    "CMAKE_RULE_LAUNCH_LINK": "STRING",
+}
+PINNED_FORBIDDEN_CACHE = {
+    "CMAKE_TOOLCHAIN_FILE": "FILEPATH",
+    "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "STRING",
+    "CMAKE_PROJECT_INCLUDE": "FILEPATH",
+    "CMAKE_PROJECT_INCLUDE_BEFORE": "FILEPATH",
+    "CMAKE_PROJECT_wirehair_INCLUDE": "FILEPATH",
+    "CMAKE_PROJECT_wirehair_INCLUDE_BEFORE": "FILEPATH",
+    "CMAKE_USER_MAKE_RULES_OVERRIDE": "FILEPATH",
+    "CMAKE_USER_MAKE_RULES_OVERRIDE_C": "FILEPATH",
+    "CMAKE_USER_MAKE_RULES_OVERRIDE_CXX": "FILEPATH",
+    "CMAKE_MODULE_PATH": "STRING",
+    "CMAKE_PREFIX_PATH": "STRING",
+    "CMAKE_PROGRAM_PATH": "STRING",
+    "CMAKE_INCLUDE_PATH": "STRING",
+    "CMAKE_LIBRARY_PATH": "STRING",
+    "CMAKE_FIND_ROOT_PATH": "STRING",
+    "CMAKE_SYSROOT": "PATH",
+    "CMAKE_SYSROOT_COMPILE": "PATH",
+    "CMAKE_SYSROOT_LINK": "PATH",
+    "CMAKE_C_COMPILER_ARG1": "STRING",
+    "CMAKE_CXX_COMPILER_ARG1": "STRING",
+    "CMAKE_C_COMPILER_TARGET": "STRING",
+    "CMAKE_CXX_COMPILER_TARGET": "STRING",
+    "CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN": "PATH",
+    "CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN": "PATH",
+}
+PINNED_TOOL_CACHE_NAMES = {
+    "cmake": None,
+    "git": None,
+    "taskset": None,
+    "ninja": "CMAKE_MAKE_PROGRAM",
+    "cc": "CMAKE_C_COMPILER",
+    "cxx": "CMAKE_CXX_COMPILER",
+    "ar": "CMAKE_AR",
+    "ranlib": "CMAKE_RANLIB",
+    "ld": "CMAKE_LINKER",
+    "nm": "CMAKE_NM",
+    "objcopy": "CMAKE_OBJCOPY",
+    "objdump": "CMAKE_OBJDUMP",
+    "strip": "CMAKE_STRIP",
+    "readelf": None,
+}
+
+
+@dataclass(frozen=True)
+class FreshPinnedBuild:
+    binary: Path
+    cache: Path
+    record: dict[str, Any]
+
+
+def _parse_cmake_cache(
+    cache: Path,
+) -> tuple[bytes, dict[str, tuple[str, str]]]:
     try:
         raw = stable_bytes(cache)
         lines = raw.decode("utf-8").splitlines()
@@ -1541,42 +1668,1715 @@ def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
         if key in entries:
             die(f"CMake cache repeats {key}")
         entries[key] = (kind, value)
+    return raw, entries
+
+
+def _identity_for_executable(path: Path, context: str) -> dict[str, str]:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        die(f"required {context} executable is unavailable: {exc}")
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        die(f"required {context} path is not an executable regular file")
+    return {
+        "path": str(resolved),
+        "sha256": sha256_file(resolved, require_unique=False),
+    }
+
+
+def _trusted_executable(name: str) -> dict[str, str]:
+    located = shutil.which(name, path=PINNED_BUILD_PATH)
+    if located is None:
+        die(f"trusted build PATH lacks {name}")
+    return _identity_for_executable(Path(located), name)
+
+
+def _validate_tool_inventory(tools: Any) -> None:
+    if not isinstance(tools, dict) or set(tools) != set(
+            PINNED_TOOL_CACHE_NAMES):
+        die("pinned build tool inventory changed")
+    for name, record in tools.items():
+        frozen_executable_path(record, f"pinned-build {name}")
+
+
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+class _PinnedBuildInterrupted(BaseException):
+    pass
+
+
+class _PinnedBuildSignalGuard:
+    """Defer terminal signals until child and workspace cleanup completes."""
+
+    def __init__(self) -> None:
+        self.signals = (signal.SIGINT, signal.SIGTERM)
+        self.previous: dict[int, Any] = {}
+        self.previous_mask: set[signal.Signals] | None = None
+        self.pending: list[int] = []
+        self.acquisition_depth = 0
+
+    def _block(self) -> None:
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, self.signals)
+        if self.previous_mask is None:
+            self.previous_mask = previous_mask
+
+    def _handler(self, signum: int, _frame: Any) -> None:
+        if not self.pending:
+            self.pending.append(signum)
+        if self.acquisition_depth:
+            return
+        self._block()
+        raise _PinnedBuildInterrupted()
+
+    def __enter__(self) -> "_PinnedBuildSignalGuard":
+        if threading.current_thread() is not threading.main_thread():
+            die("fresh pinned build must run on the main thread")
+        # Keep the signals blocked until activate() runs as the first
+        # statement inside the entered `with` body.  That guarantees Python
+        # has registered __exit__ before a pending signal can invoke us.
+        self._block()
+        try:
+            for signum in self.signals:
+                self.previous[signum] = signal.getsignal(signum)
+                if self.previous[signum] != signal.SIG_IGN:
+                    signal.signal(signum, self._handler)
+        except BaseException:
+            for signum, previous in self.previous.items():
+                signal.signal(signum, previous)
+            if self.previous_mask is not None:
+                signal.pthread_sigmask(
+                    signal.SIG_SETMASK, self.previous_mask)
+            raise
+        return self
+
+    def activate(self) -> None:
+        if self.previous_mask is None:
+            die("pinned-build signal guard was not entered")
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+
+    @contextmanager
+    def deferred_acquisition(self) -> Iterator[None]:
+        """Defer raising until a newly created resource is registered."""
+        self.acquisition_depth += 1
+        try:
+            yield
+        finally:
+            self.acquisition_depth -= 1
+            if self.pending:
+                # The caller's assignment has completed before context exit,
+                # so its encompassing exception handler can now clean up.
+                self._block()
+                raise _PinnedBuildInterrupted()
+
+    def block_for_cleanup(self) -> None:
+        self._block()
+
+    def __exit__(self, _kind: Any, _error: Any, _traceback: Any) -> bool:
+        self._block()
+        restore_error: BaseException | None = None
+        for signum, previous in self.previous.items():
+            try:
+                signal.signal(signum, previous)
+            except BaseException as error:
+                if restore_error is None:
+                    restore_error = error
+        if self.previous_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+        if self.pending:
+            os.kill(os.getpid(), self.pending[0])
+            raise CampaignError(
+                "pinned-build interruption handler returned")
+        if restore_error is not None:
+            raise restore_error
+        return False
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[Any], *, graceful: bool = True,
+) -> None:
+    if graceful and _process_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if graceful:
+        deadline = time.monotonic() + 1.0
+        while (_process_group_exists(process.pid) and
+               time.monotonic() < deadline):
+            process.poll()
+            time.sleep(0.01)
+    if _process_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 2.0
+    while _process_group_exists(process.pid) and time.monotonic() < deadline:
+        process.poll()
+        time.sleep(0.01)
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+    if _process_group_exists(process.pid):
+        die("pinned build process group survived forced cleanup")
+
+
+def _run_pinned_command(
+    command: Sequence[str],
+    env: dict[str, str],
+    temporary: Path,
+    timeout: float,
+    context: str,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> tuple[bytes, bytes]:
+    if (not command or any(not isinstance(part, str) or not part
+                           for part in command) or
+            not math.isfinite(timeout) or timeout <= 0):
+        die(f"invalid {context} command")
+    with tempfile.TemporaryFile(dir=str(temporary)) as stdout_file, \
+            tempfile.TemporaryFile(dir=str(temporary)) as stderr_file:
+        process: subprocess.Popen[Any] | None = None
+        try:
+            with signal_guard.deferred_acquisition():
+                process = subprocess.Popen(
+                    tuple(command), stdin=subprocess.DEVNULL,
+                    stdout=stdout_file, stderr=stderr_file, env=env,
+                    cwd=str(temporary.parent),
+                    start_new_session=True,
+                )
+            deadline = time.monotonic() + timeout
+            while True:
+                returncode = process.poll()
+                sizes = (os.fstat(stdout_file.fileno()).st_size,
+                         os.fstat(stderr_file.fileno()).st_size)
+                if any(size > PINNED_OUTPUT_MAX_BYTES for size in sizes):
+                    _terminate_process_group(process, graceful=False)
+                    die(f"{context} output exceeded the bounded capture limit")
+                if returncode is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    _terminate_process_group(process)
+                    die(f"{context} timed out")
+                time.sleep(0.01)
+            if _process_group_exists(process.pid):
+                _terminate_process_group(process)
+                die(f"{context} left a surviving descendant")
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read()
+            stderr = stderr_file.read()
+            if returncode:
+                detail = stderr[-4096:].decode("utf-8", errors="replace")
+                die(f"{context} failed ({returncode}): {detail.strip()}")
+            return stdout, stderr
+        except BaseException:
+            if (process is not None and
+                    (process.poll() is None or
+                     _process_group_exists(process.pid))):
+                _terminate_process_group(process)
+            raise
+
+
+def _snapshot_path(path_bytes: bytes) -> tuple[str, ...]:
+    try:
+        text = path_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CampaignError("Git tree contains a non-UTF-8 path") from exc
+    path = PurePosixPath(text)
+    if (not text or text.startswith("/") or path.is_absolute() or
+            "\\" in text or
+            any(part in ("", ".", "..") for part in path.parts) or
+            any(ord(character) < 32 or ord(character) == 127
+                for character in text)):
+        die("Git tree contains a noncanonical source path")
+    return path.parts
+
+
+def _write_snapshot_file(path: Path, data: bytes, executable: bool) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o700 if executable else 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                die("short write while materializing immutable source")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _verify_source_snapshot(
+    source: Path,
+    manifest: Sequence[dict[str, Any]],
+) -> None:
+    expected = {entry["path"]: entry for entry in manifest}
+    if len(expected) != len(manifest):
+        die("immutable source manifest repeats a path")
+    actual: set[str] = set()
+    expected_directories = {"."}
+    for relative in expected:
+        parent = PurePosixPath(relative).parent
+        while parent != PurePosixPath("."):
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
+    actual_directories: set[str] = set()
+    for root_text, directories, files in os.walk(source, followlinks=False):
+        root = Path(root_text)
+        relative_root = root.relative_to(source).as_posix()
+        actual_directories.add(
+            "." if relative_root == "." else relative_root)
+        root_stat = root.lstat()
+        if (not stat.S_ISDIR(root_stat.st_mode) or
+                stat.S_IMODE(root_stat.st_mode) != 0o555):
+            die("immutable source directory permissions changed")
+        for name in directories:
+            child = root / name
+            if child.is_symlink() or not child.is_dir():
+                die("immutable source contains an indirect directory")
+        for name in files:
+            path = root / name
+            relative = path.relative_to(source).as_posix()
+            entry = expected.get(relative)
+            metadata = path.lstat()
+            wanted_mode = 0o555 if entry and entry["mode"] == "100755" \
+                else 0o444
+            if (entry is None or not stat.S_ISREG(metadata.st_mode) or
+                    metadata.st_nlink != 1 or
+                    stat.S_IMODE(metadata.st_mode) != wanted_mode or
+                    metadata.st_size != entry["bytes"] or
+                    sha256_file(path) != entry["sha256"]):
+                die(f"immutable source snapshot changed at {relative}")
+            actual.add(relative)
+    if actual != set(expected) or actual_directories != expected_directories:
+        die("immutable source snapshot file inventory changed")
+
+
+def _materialize_commit_snapshot(
+    repo: Path,
+    commit: str,
+    git: Path,
+    source: Path,
+    env: dict[str, str],
+    temporary: Path,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> dict[str, Any]:
+    if source.exists() or os.path.lexists(str(source)):
+        die("fresh source snapshot path already exists")
+    source.mkdir(mode=0o700)
+    head, _stderr = _run_pinned_command(
+        (str(git), "--no-replace-objects", "-C", str(repo),
+         "rev-parse", "HEAD"),
+        env, temporary, 30.0, "immutable source HEAD lookup", signal_guard)
+    if head.strip().decode("ascii", errors="strict") != commit:
+        die("clean Git environment names a different source commit")
+    tree_raw, _stderr = _run_pinned_command(
+        (str(git), "--no-replace-objects", "-C", str(repo),
+         "rev-parse", f"{commit}^{{tree}}"),
+        env, temporary, 30.0, "immutable source tree lookup", signal_guard)
+    tree_oid = tree_raw.strip().decode("ascii", errors="strict")
+    if re.fullmatch(r"[0-9a-f]{40}", tree_oid) is None:
+        die("immutable source tree object is malformed")
+    timestamp_raw, _stderr = _run_pinned_command(
+        (str(git), "--no-replace-objects", "-C", str(repo),
+         "show", "-s", "--format=%ct", commit),
+        env, temporary, 30.0, "immutable source timestamp lookup",
+        signal_guard)
+    try:
+        timestamp = int(timestamp_raw.strip(), 10)
+    except ValueError:
+        die("immutable source commit timestamp is malformed")
+    if timestamp < 0:
+        die("immutable source commit timestamp is negative")
+    tree, _stderr = _run_pinned_command(
+        (str(git), "--no-replace-objects", "-C", str(repo),
+         "ls-tree", "-r", "-z", "--full-tree", commit),
+        env, temporary, 60.0, "immutable source tree inventory",
+        signal_guard)
+    manifest: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_entry in tree.split(b"\0"):
+        if not raw_entry:
+            continue
+        try:
+            header, path_bytes = raw_entry.split(b"\t", 1)
+            mode, kind, oid = header.decode("ascii").split(" ")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise CampaignError("Git tree entry is malformed") from exc
+        if (mode not in ("100644", "100755") or kind != "blob" or
+                re.fullmatch(r"[0-9a-f]{40}", oid) is None):
+            die("Git tree contains a symlink, submodule, or nonregular file")
+        parts = _snapshot_path(path_bytes)
+        relative = PurePosixPath(*parts).as_posix()
+        if relative in seen:
+            die("Git tree repeats a source path")
+        seen.add(relative)
+        data, _stderr = _run_pinned_command(
+            (str(git), "--no-replace-objects", "-C", str(repo),
+             "cat-file", "blob", oid),
+            env, temporary, 30.0, f"immutable source blob {relative}",
+            signal_guard)
+        target = source.joinpath(*parts)
+        _write_snapshot_file(target, data, mode == "100755")
+        manifest.append({
+            "path": relative, "mode": mode, "git_blob_oid": oid,
+            "bytes": len(data), "sha256": sha256_bytes(data),
+        })
+    if not manifest:
+        die("immutable source tree is empty")
+    for root_text, directories, files in os.walk(source, topdown=False):
+        root = Path(root_text)
+        for name in files:
+            path = root / name
+            relative = path.relative_to(source).as_posix()
+            entry = next(item for item in manifest
+                         if item["path"] == relative)
+            path.chmod(0o555 if entry["mode"] == "100755" else 0o444)
+        for name in directories:
+            (root / name).chmod(0o555)
+    source.chmod(0o555)
+    manifest.sort(key=lambda entry: entry["path"])
+    _verify_source_snapshot(source, manifest)
+    return {
+        "commit": commit, "tree_oid": tree_oid,
+        "materialized_path": str(source),
+        "commit_timestamp": timestamp,
+        "file_count": len(manifest),
+        "manifest_sha256": sha256_bytes(json_bytes(manifest)),
+        "manifest": manifest,
+    }
+
+
+def _tree_digest(root: Path) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            die(f"provenance tree contains a nonregular entry: {path}")
+        data = stable_bytes(path)
+        records.append({
+            "path": path.relative_to(root).as_posix(),
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "bytes": len(data), "sha256": sha256_bytes(data),
+        })
+    if not records:
+        die(f"provenance tree is empty: {root}")
+    return {
+        "root": str(root), "file_count": len(records),
+        "bytes": sum(record["bytes"] for record in records),
+        "manifest_sha256": sha256_bytes(json_bytes(records)),
+    }
+
+
+def _cmake_root_identity(
+    cmake: Path,
+    env: dict[str, str],
+    temporary: Path,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> dict[str, Any]:
+    output, _stderr = _run_pinned_command(
+        (str(cmake), "--system-information"), env, temporary, 60.0,
+        "CMake module-root inventory", signal_guard)
+    matches = re.findall(rb'^CMAKE_ROOT "([^"\r\n]+)"$', output,
+                         flags=re.MULTILINE)
+    if len(matches) != 1:
+        die("CMake system information lacks one module root")
+    try:
+        root = Path(matches[0].decode("utf-8")).resolve(strict=True)
+    except (UnicodeDecodeError, OSError, RuntimeError) as exc:
+        raise CampaignError("CMake module root is unavailable") from exc
+    return _tree_digest(root)
+
+
+def _compiler_identity(
+    compiler: Path,
+    env: dict[str, str],
+    temporary: Path,
+    *,
+    native_probe: bool,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> dict[str, Any]:
+    record: dict[str, Any] = _identity_for_executable(
+        compiler, compiler.name)
+    language = "c++" if native_probe else "c"
+    predefines, predefine_stderr = _run_pinned_command(
+        (str(compiler), "-dM", "-E", "-x", language, "/dev/null"),
+        env, temporary, 30.0, "compiler family probe", signal_guard)
+    if (predefine_stderr or b"#define __clang__" in predefines or
+            not re.search(rb"^#define __GNUC__ [1-9][0-9]*$", predefines,
+                          flags=re.MULTILINE)):
+        die(
+            "fresh pinned benchmark builds currently require a native GCC "
+            "toolchain; Clang and other driver families are unsupported")
+    record["family"] = "gcc"
+    record["predefines_sha256"] = sha256_bytes(predefines)
+    queries = {
+        "version_sha256": (str(compiler), "--version"),
+        "dumpmachine_sha256": (str(compiler), "-dumpmachine"),
+        "dumpspecs_sha256": (str(compiler), "-dumpspecs"),
+        "search_dirs_sha256": (str(compiler), "-print-search-dirs"),
+        "sysroot_sha256": (str(compiler), "-print-sysroot"),
+    }
+    for field, command in queries.items():
+        stdout, stderr = _run_pinned_command(
+            command, env, temporary, 30.0, f"compiler query {field}",
+            signal_guard)
+        record[field] = sha256_bytes(stdout + b"\0" + stderr)
+    if native_probe:
+        output = temporary / "native-probe.o"
+        stdout, stderr = _run_pinned_command(
+            (str(compiler), "-march=native", "-Q", "--help=target",
+             "-c", "-x", "c++", "/dev/null", "-o", str(output)),
+            env, temporary, 60.0, "native compiler target probe",
+            signal_guard)
+        try:
+            output.unlink()
+        except FileNotFoundError:
+            die("native compiler target probe did not create its object")
+        record["native_target_sha256"] = sha256_bytes(
+            stdout + b"\0" + stderr)
+    subprograms: dict[str, dict[str, str]] = {}
+    for name in ("cc1", "cc1plus", "collect2", "lto-wrapper", "as", "ld"):
+        stdout, _stderr = _run_pinned_command(
+            (str(compiler), f"-print-prog-name={name}"),
+            env, temporary, 30.0, f"compiler subprogram query {name}",
+            signal_guard)
+        text = stdout.strip().decode("utf-8", errors="strict")
+        if not text:
+            die(f"compiler did not identify its {name} subprogram")
+        path = Path(text)
+        if not path.is_absolute():
+            located = shutil.which(text, path=env["PATH"])
+            if located is None:
+                die(f"compiler {name} subprogram is unavailable")
+            path = Path(located)
+        subprograms[name] = _identity_for_executable(path, name)
+    record["subprograms"] = subprograms
+    return record
+
+
+def _validate_compiler_record_paths(record: Any, context: str) -> None:
+    required_hashes = {
+        "predefines_sha256", "version_sha256", "dumpmachine_sha256",
+        "dumpspecs_sha256", "search_dirs_sha256", "sysroot_sha256",
+    }
+    if (not isinstance(record, dict) or
+            record.get("family") != "gcc" or
+            not required_hashes.issubset(record) or
+            not all(_canonical_digest(record.get(field))
+                    for field in required_hashes) or
+            not isinstance(record.get("subprograms"), dict) or
+            set(record["subprograms"]) != {
+                "cc1", "cc1plus", "collect2", "lto-wrapper", "as", "ld"}):
+        die(f"pinned {context} compiler record is malformed")
+    if ((context == "cxx") != ("native_target_sha256" in record) or
+            (context == "cxx" and
+             not _canonical_digest(record.get("native_target_sha256")))):
+        die(f"pinned {context} native-target record is malformed")
+    frozen_executable_path(
+        {"path": record.get("path"), "sha256": record.get("sha256")},
+        f"pinned {context} compiler")
+    for name, identity in record["subprograms"].items():
+        frozen_executable_path(identity, f"pinned compiler {name}")
+
+
+def _current_compiler_records(
+    tools: dict[str, dict[str, str]],
+    env: dict[str, str],
+    temporary: Path,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> dict[str, Any]:
+    return {
+        "cc": _compiler_identity(
+            Path(tools["cc"]["path"]), env, temporary,
+            native_probe=False, signal_guard=signal_guard),
+        "cxx": _compiler_identity(
+            Path(tools["cxx"]["path"]), env, temporary,
+            native_probe=True, signal_guard=signal_guard),
+    }
+
+
+def _pinned_graph_identity(
+    build: Path,
+    ninja: Path,
+    env: dict[str, str],
+    temporary: Path,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> dict[str, Any]:
+    relative_files = (
+        "CMakeCache.txt", "build.ninja", "CMakeFiles/rules.ninja",
+        "compile_commands.json",
+    )
+    files = []
+    for relative in relative_files:
+        path = build / relative
+        data = stable_bytes(path)
+        files.append({
+            "path": relative, "bytes": len(data),
+            "sha256": sha256_bytes(data),
+        })
+    commands, stderr = _run_pinned_command(
+        (str(ninja), "-C", str(build), "-t", "commands",
+         "wirehair_v2_bench"),
+        env, temporary, 60.0, "Ninja benchmark command inventory",
+        signal_guard)
+    if stderr:
+        die("Ninja command inventory wrote unexpected stderr")
+    normalized = commands.replace(str(build).encode(), b"<BUILD>")
+    source = build.parent / "source"
+    normalized = normalized.replace(str(source).encode(), b"<SOURCE>")
+    forbidden = (
+        b"-fsanitize", b"--coverage", b"-fprofile", b" -pg",
+        b"-flto", b"-fplugin", b"-specs", b"--sysroot",
+        b"-fuse-ld", b" -include", b"-imacros", b" -B",
+        b"-DWH_SEED_KNOBS",
+        b"-DWH_PEELCAP",
+    )
+    if any(token in normalized for token in forbidden):
+        die("Ninja benchmark command graph contains a forbidden option")
+    return {
+        "files": files,
+        "files_manifest_sha256": sha256_bytes(json_bytes(files)),
+        "target_commands_bytes": len(commands),
+        "target_commands_sha256": sha256_bytes(commands),
+        "normalized_target_commands_sha256": sha256_bytes(normalized),
+    }
+
+
+def _open_cleanup_child_directory(
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> int:
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except PermissionError:
+        # File modes are irrelevant to unlink and must never be changed: a
+        # rejected hardlink may name an inode outside staging.  Directories do
+        # need traversal permission, so restore it and then bind the opened
+        # descriptor back to the inode observed by the parent.
+        path_flags = (getattr(os, "O_PATH", 0) |
+                      getattr(os, "O_CLOEXEC", 0) |
+                      getattr(os, "O_DIRECTORY", 0) |
+                      getattr(os, "O_NOFOLLOW", 0))
+        if not getattr(os, "O_PATH", 0):
+            die("descriptor-bound cleanup requires Linux O_PATH")
+        path_fd = os.open(name, path_flags, dir_fd=parent_fd)
+        try:
+            path_metadata = os.fstat(path_fd)
+            if (not stat.S_ISDIR(path_metadata.st_mode) or
+                    (path_metadata.st_dev, path_metadata.st_ino) !=
+                    expected_identity):
+                die("prepared-result cleanup directory changed before chmod")
+            os.chmod(f"/proc/self/fd/{path_fd}", 0o700)
+        finally:
+            os.close(path_fd)
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(opened.st_mode) or
+                (opened.st_dev, opened.st_ino) != expected_identity or
+                (named.st_dev, named.st_ino) != expected_identity):
+            die("prepared-result cleanup directory identity changed")
+        os.fchmod(descriptor, 0o700)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _make_tree_writable(root: Path) -> None:
+    """Restore directory traversal for private-workspace removal only."""
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        return
+    root.chmod(0o700)
+    for root_text, directories, _files in os.walk(
+            root, topdown=True, followlinks=False):
+        directory = Path(root_text)
+        directory.chmod(0o700)
+        for name in directories:
+            child = directory / name
+            metadata = child.lstat()
+            if stat.S_ISDIR(metadata.st_mode):
+                child.chmod(0o700)
+
+
+def _remove_cleanup_contents(directory_fd: int) -> None:
+    for name in sorted(os.listdir(directory_fd)):
+        if name in ("", ".", ".."):
+            die("prepared-result cleanup found a noncanonical entry")
+        metadata = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            identity = (metadata.st_dev, metadata.st_ino)
+            child_fd = _open_cleanup_child_directory(
+                directory_fd, name, identity)
+            try:
+                _remove_cleanup_contents(child_fd)
+            finally:
+                os.close(child_fd)
+            confirmed = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(confirmed.st_mode) or
+                    (confirmed.st_dev, confirmed.st_ino) != identity):
+                die("prepared-result cleanup child identity changed")
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            # Unlinking does not require write permission on the inode and is
+            # safe for symlinks, FIFOs, and rejected hardlinks.
+            os.unlink(name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def _remove_owned_staging_directory(
+    parent_fd: int,
+    staging_fd: int,
+    staging_name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    opened = os.fstat(staging_fd)
+    named = os.stat(
+        staging_name, dir_fd=parent_fd, follow_symlinks=False)
+    if (not stat.S_ISDIR(opened.st_mode) or
+            (opened.st_dev, opened.st_ino) != expected_identity or
+            not stat.S_ISDIR(named.st_mode) or
+            (named.st_dev, named.st_ino) != expected_identity):
+        die("prepared-result staging identity changed before cleanup")
+    os.fchmod(staging_fd, 0o700)
+    _remove_cleanup_contents(staging_fd)
+    confirmed = os.stat(
+        staging_name, dir_fd=parent_fd, follow_symlinks=False)
+    if (not stat.S_ISDIR(confirmed.st_mode) or
+            (confirmed.st_dev, confirmed.st_ino) != expected_identity):
+        die("prepared-result staging identity changed during cleanup")
+    os.rmdir(staging_name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+class _PreparedResultPublicationCommitted(CampaignError):
+    """Publication renamed successfully but durability could not be proved."""
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _directory_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    # Renaming a directory changes its ctime even though its durable contents
+    # and all other relevant metadata are unchanged.
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns,
+    )
+
+
+def _prepared_tree_inventory(
+    root: Path,
+    expected_identity: tuple[int, int],
+) -> tuple[tuple[Any, ...], ...]:
+    """Return a stable, content-bound inventory of one private plain tree."""
+    root_metadata = root.lstat()
+    if (not stat.S_ISDIR(root_metadata.st_mode) or
+            (root_metadata.st_dev, root_metadata.st_ino) !=
+            expected_identity):
+        die("prepared-result staging identity changed")
+    inventory: list[tuple[Any, ...]] = []
+    expected_directories = {"."}
+    visited_directories: set[str] = set()
+    directory_records: list[
+        tuple[Path, tuple[int, ...], tuple[str, ...]]
+    ] = []
+
+    def walk_error(error: OSError) -> None:
+        raise CampaignError(
+            "cannot inspect complete prepared-result tree: "
+            f"{error.filename}: {error}") from error
+
+    for directory_text, names, filenames in os.walk(
+            root, topdown=True, onerror=walk_error, followlinks=False):
+        names.sort()
+        filenames.sort()
+        directory = Path(directory_text)
+        directory_metadata = directory.lstat()
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            die(f"refusing non-directory in prepared result: {directory}")
+        relative_directory = directory.relative_to(root)
+        relative_text = relative_directory.as_posix()
+        if relative_text in visited_directories:
+            die(f"prepared-result directory visited twice: {directory}")
+        visited_directories.add(relative_text)
+        directory_identity = _directory_stat_identity(directory_metadata)
+        entry_names = tuple(sorted((*names, *filenames)))
+        directory_records.append(
+            (directory, directory_identity, entry_names))
+        inventory.append((
+            "directory", relative_text,
+            stat.S_IMODE(directory_metadata.st_mode),
+            directory_identity,
+        ))
+        for name in names:
+            child = directory / name
+            child_metadata = child.lstat()
+            if not stat.S_ISDIR(child_metadata.st_mode):
+                die(f"refusing symlink or non-directory in prepared result: {child}")
+            expected_directories.add(child.relative_to(root).as_posix())
+        for name in filenames:
+            child = directory / name
+            child_metadata = child.lstat()
+            if (not stat.S_ISREG(child_metadata.st_mode) or
+                    child_metadata.st_nlink != 1):
+                die(f"refusing nonunique non-file in prepared result: {child}")
+            data = stable_bytes(child)
+            confirmed = child.lstat()
+            if _stat_identity(confirmed) != _stat_identity(child_metadata):
+                die(f"prepared-result file changed during inventory: {child}")
+            inventory.append((
+                "file", child.relative_to(root).as_posix(),
+                stat.S_IMODE(confirmed.st_mode), confirmed.st_size,
+                sha256_bytes(data), _stat_identity(confirmed),
+            ))
+    if visited_directories != expected_directories:
+        die("prepared-result inventory skipped a named directory")
+    for (directory, expected_directory_identity,
+         expected_entry_names) in reversed(directory_records):
+        confirmed_directory = directory.lstat()
+        if (not stat.S_ISDIR(confirmed_directory.st_mode) or
+                _directory_stat_identity(confirmed_directory) !=
+                expected_directory_identity):
+            die(f"prepared-result directory changed during inventory: {directory}")
+        if tuple(sorted(os.listdir(directory))) != expected_entry_names:
+            die(f"prepared-result directory entries changed during inventory: {directory}")
+    confirmed_root = root.lstat()
+    if ((confirmed_root.st_dev, confirmed_root.st_ino) != expected_identity or
+            not stat.S_ISDIR(confirmed_root.st_mode)):
+        die("prepared-result staging identity changed during inventory")
+    return tuple(inventory)
+
+
+def _fsync_prepared_tree(
+    root: Path,
+    expected_identity: tuple[int, int],
+) -> tuple[tuple[Any, ...], ...]:
+    """Flush a stable, symlink-free prepared tree before its commit rename."""
+    before_inventory = _prepared_tree_inventory(root, expected_identity)
+    directories: list[tuple[Path, tuple[int, ...]]] = []
+    for kind, relative, *_fields in before_inventory:
+        path = root if relative == "." else root / relative
+        expected_stat_identity = _fields[-1]
+        if kind == "directory":
+            directories.append((path, expected_stat_identity))
+            continue
+        parent_fd = open_durable_directory(path.parent)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+            try:
+                descriptor_before = os.fstat(descriptor)
+                named_before = os.stat(
+                    path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (not stat.S_ISREG(descriptor_before.st_mode) or
+                        descriptor_before.st_nlink != 1 or
+                        _stat_identity(descriptor_before) !=
+                        expected_stat_identity or
+                        _stat_identity(named_before) !=
+                        _stat_identity(descriptor_before)):
+                    die(f"prepared-result file changed before flush: {path}")
+                os.fsync(descriptor)
+                descriptor_after = os.fstat(descriptor)
+                named_after = os.stat(
+                    path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (_stat_identity(descriptor_after) !=
+                        _stat_identity(descriptor_before) or
+                        _stat_identity(named_after) !=
+                        _stat_identity(descriptor_after)):
+                    die(f"prepared-result file changed during flush: {path}")
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent_fd)
+    for directory, expected_stat_identity in sorted(
+            directories, key=lambda item: len(item[0].parts), reverse=True):
+        descriptor = open_durable_directory(directory)
+        try:
+            before = os.fstat(descriptor)
+            if (not stat.S_ISDIR(before.st_mode) or
+                    _directory_stat_identity(before) !=
+                    expected_stat_identity):
+                die(f"prepared-result directory changed before flush: {directory}")
+            os.fsync(descriptor)
+            after = os.fstat(descriptor)
+            named_after = directory.lstat()
+            if (_directory_stat_identity(after) !=
+                    _directory_stat_identity(before) or
+                    _directory_stat_identity(named_after) !=
+                    _directory_stat_identity(after)):
+                die(f"prepared-result directory changed during flush: {directory}")
+        finally:
+            os.close(descriptor)
+    after_inventory = _prepared_tree_inventory(root, expected_identity)
+    if after_inventory != before_inventory:
+        die("prepared-result tree changed while it was flushed")
+    return after_inventory
+
+
+def _rename_directory_noreplace(
+    source: Path,
+    target: Path,
+    expected_identity: tuple[int, int],
+    expected_inventory: tuple[tuple[Any, ...], ...],
+) -> None:
+    """Atomically publish a sibling directory without replacing a target."""
+    if (not source.is_absolute() or not target.is_absolute() or
+            source.parent != target.parent or
+            source.name in ("", ".", "..") or
+            target.name in ("", ".", "..")):
+        die("prepared-result publication paths are noncanonical")
+    directory_fd = open_durable_directory(source.parent)
+    committed = False
+    try:
+        before = os.stat(
+            source.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(before.st_mode) or
+                (before.st_dev, before.st_ino) != expected_identity):
+            die("prepared-result staging source identity changed")
+        if (_prepared_tree_inventory(source, expected_identity) !=
+                expected_inventory):
+            die("prepared-result tree changed after its durability flush")
+        try:
+            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        except AttributeError as exc:
+            raise CampaignError(
+                "Linux renameat2 is required for result publication") from exc
+        renameat2.argtypes = (
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            directory_fd, os.fsencode(source.name),
+            directory_fd, os.fsencode(target.name), 1)  # RENAME_NOREPLACE
+        if result != 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                die("prepared-result publication target already exists")
+            raise CampaignError(
+                "prepared-result no-replace publication failed: "
+                f"{os.strerror(error_number)}")
+        committed = True
+        try:
+            after = os.stat(
+                target.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(after.st_mode) or
+                    (after.st_dev, after.st_ino) != expected_identity):
+                die("prepared-result publication identity changed")
+            if (_prepared_tree_inventory(target, expected_identity) !=
+                    expected_inventory):
+                die("prepared-result tree changed at its commit rename")
+            os.fsync(directory_fd)
+            durable = os.stat(
+                target.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(durable.st_mode) or
+                    (durable.st_dev, durable.st_ino) != expected_identity):
+                die("prepared-result publication identity changed after flush")
+        except Exception as exc:
+            raise _PreparedResultPublicationCommitted(
+                "prepared-result publication committed, but durability or "
+                "identity confirmation failed; preserve and inspect the "
+                f"published target {target}: {exc}") from exc
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            # A read-only directory close cannot change the commit outcome.
+            # Before rename it is still a normal preparation failure; after
+            # rename, parent fsync and identity checks above are authoritative.
+            if not committed and sys.exc_info()[0] is None:
+                raise
+
+
+def _attach_secondary_failure(
+    active_error: BaseException,
+    attribute: str,
+    error: BaseException,
+    context: str,
+) -> None:
+    """Keep the primary exception while making a cleanup failure observable."""
+    try:
+        setattr(active_error, attribute, error)
+    except Exception:
+        pass
+    detail = f"{context}: {type(error).__name__}: {error}"
+    add_note = getattr(active_error, "add_note", None)
+    if callable(add_note):
+        add_note(detail)
+        return
+    try:
+        arguments = active_error.args
+        if arguments and isinstance(arguments[0], str):
+            active_error.args = (
+                f"{arguments[0]} [{detail}]", *arguments[1:])
+        else:
+            active_error.args = (*arguments, detail)
+    except Exception:
+        pass
+
+
+@contextmanager
+def prepare_result_staging(requested: Path) -> Iterator[tuple[Path, Path]]:
+    """Build a result privately and publish it only after full validation."""
+    absolute = requested.absolute()
+    parent_fd = open_durable_directory(
+        absolute.parent, create=True, reprove_existing=True)
+    try:
+        parent = absolute.parent.resolve(strict=True)
+        opened_parent = os.fstat(parent_fd)
+        named_parent = os.stat(parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(opened_parent.st_mode) or
+                _directory_stat_identity(opened_parent) !=
+                _directory_stat_identity(named_parent)):
+            die("prepared-result parent path changed after durable creation")
+        final = parent / absolute.name
+        if (not final.name or
+                _entry_exists_at(parent_fd, final.name)):
+            die("prepared-result publication target already exists or is empty")
+
+        transaction_guard = _PinnedBuildSignalGuard()
+        with transaction_guard:
+            staging: Path | None = None
+            staging_fd: int | None = None
+            identity: tuple[int, int] | None = None
+            staging_created = False
+            published = False
+            try:
+                # The cleanup finally is registered before signals are first
+                # unblocked.  A nested fresh-build guard may replay into this
+                # outer guard, which defers the user's signal until the result
+                # staging tree has been removed or committed.
+                transaction_guard.activate()
+                for _attempt in range(128):
+                    name = (
+                        f".{final.name}.prepare-{os.getpid()}-"
+                        f"{secrets.token_hex(16)}")
+                    staging = parent / name
+                    try:
+                        with transaction_guard.deferred_acquisition():
+                            os.mkdir(name, 0o700, dir_fd=parent_fd)
+                            staging_created = True
+                            metadata = os.stat(
+                                name, dir_fd=parent_fd,
+                                follow_symlinks=False)
+                            if not stat.S_ISDIR(metadata.st_mode):
+                                die("prepared-result staging creation changed")
+                            identity = (metadata.st_dev, metadata.st_ino)
+                            flags = (
+                                os.O_RDONLY |
+                                getattr(os, "O_CLOEXEC", 0) |
+                                getattr(os, "O_DIRECTORY", 0) |
+                                getattr(os, "O_NOFOLLOW", 0)
+                            )
+                            staging_fd = os.open(
+                                name, flags, dir_fd=parent_fd)
+                            opened = os.fstat(staging_fd)
+                            if ((opened.st_dev, opened.st_ino) != identity or
+                                    not stat.S_ISDIR(opened.st_mode)):
+                                die("prepared-result staging creation raced")
+                        break
+                    except FileExistsError:
+                        staging = None
+                        staging_created = False
+                        identity = None
+                        continue
+                else:
+                    die("cannot allocate a unique prepared-result staging name")
+
+                if staging is None or staging_fd is None or identity is None:
+                    die("prepared-result staging acquisition was incomplete")
+                os.fchmod(staging_fd, 0o700)
+                path_metadata = staging.lstat()
+                if (not stat.S_ISDIR(path_metadata.st_mode) or
+                        (path_metadata.st_dev, path_metadata.st_ino) !=
+                        identity):
+                    die("prepared-result staging path changed after creation")
+                os.fsync(staging_fd)
+                os.fsync(parent_fd)
+
+                yield staging, final
+                inventory = _fsync_prepared_tree(staging, identity)
+                old_mask = None
+                if hasattr(signal, "pthread_sigmask"):
+                    old_mask = signal.pthread_sigmask(
+                        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                try:
+                    try:
+                        _rename_directory_noreplace(
+                            staging, final, identity, inventory)
+                        published = True
+                    except _PreparedResultPublicationCommitted:
+                        published = True
+                        raise
+                finally:
+                    if old_mask is not None:
+                        restore_error = None
+                        try:
+                            signal.pthread_sigmask(
+                                signal.SIG_SETMASK, old_mask)
+                        except OSError as error:
+                            restore_error = error
+                            try:
+                                signal.pthread_sigmask(
+                                    signal.SIG_SETMASK, old_mask)
+                            except OSError:
+                                # We changed only these two signals.  If exact
+                                # restore keeps failing, undo just the additions
+                                # so the prior mask is reconstructed.
+                                added = {
+                                    signal.SIGINT, signal.SIGTERM,
+                                }.difference(old_mask)
+                                try:
+                                    if added:
+                                        signal.pthread_sigmask(
+                                            signal.SIG_UNBLOCK, added)
+                                    restore_error = None
+                                except OSError:
+                                    pass
+                            else:
+                                restore_error = None
+                        if restore_error is not None:
+                            active_error = sys.exc_info()[1]
+                            if active_error is not None:
+                                _attach_secondary_failure(
+                                    active_error,
+                                    "publication_signal_restore_error",
+                                    restore_error,
+                                    "publication signal-mask restore failed",
+                                )
+                            elif published:
+                                raise _PreparedResultPublicationCommitted(
+                                    "prepared-result publication committed, "
+                                    "but its signal mask could not be restored"
+                                ) from restore_error
+                            else:
+                                raise CampaignError(
+                                    "prepared-result publication signal mask "
+                                    "could not be restored") from restore_error
+            finally:
+                # Block before any cleanup pathname/descriptor transition.  A
+                # pending user signal is replayed by the guard only afterward.
+                transaction_guard.block_for_cleanup()
+                active_error = sys.exc_info()[1]
+                cleanup_error: BaseException | None = None
+                if (not published and staging is not None and
+                        staging_created):
+                    try:
+                        if identity is None:
+                            die(
+                                "prepared-result staging ownership was not "
+                                "captured; preserving the unresolved path")
+                        if staging_fd is None:
+                            staging_fd = _open_cleanup_child_directory(
+                                parent_fd, staging.name, identity)
+                        _remove_owned_staging_directory(
+                            parent_fd, staging_fd, staging.name, identity)
+                    except FileNotFoundError as missing_error:
+                        try:
+                            current_staging = os.stat(
+                                staging.name, dir_fd=parent_fd,
+                                follow_symlinks=False)
+                        except FileNotFoundError:
+                            current_staging = None
+                        if current_staging is not None:
+                            cleanup_error = CampaignError(
+                                "prepared-result staging contents changed "
+                                "during cleanup")
+                            cleanup_error.__cause__ = missing_error
+                        else:
+                            # A failed pre-commit rename cannot legitimately
+                            # remove the root.  If final has our inode, the
+                            # commit boundary was crossed; otherwise report the
+                            # vanished resource.
+                            try:
+                                final_metadata = os.stat(
+                                    final.name, dir_fd=parent_fd,
+                                    follow_symlinks=False)
+                            except FileNotFoundError as error:
+                                cleanup_error = CampaignError(
+                                    "prepared-result staging vanished before "
+                                    "cleanup")
+                                cleanup_error.__cause__ = error
+                            else:
+                                if (identity is None or
+                                        (final_metadata.st_dev,
+                                         final_metadata.st_ino) != identity):
+                                    cleanup_error = CampaignError(
+                                        "prepared-result staging vanished and "
+                                        "final has a different identity")
+                                else:
+                                    published = True
+                    except BaseException as error:
+                        cleanup_error = error
+                if staging_fd is not None:
+                    try:
+                        os.close(staging_fd)
+                    except OSError as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+                    staging_fd = None
+                if cleanup_error is not None:
+                    if active_error is not None:
+                        _attach_secondary_failure(
+                            active_error, "prepared_result_cleanup_error",
+                            cleanup_error,
+                            "prepared-result cleanup also failed",
+                        )
+                    else:
+                        raise cleanup_error
+    finally:
+        active_error = sys.exc_info()[1]
+        try:
+            os.close(parent_fd)
+        except OSError as error:
+            if active_error is not None:
+                _attach_secondary_failure(
+                    active_error, "prepared_result_parent_close_error",
+                    error, "prepared-result parent close also failed")
+            else:
+                raise
+
+
+def validate_pinned_build_record(
+    record: Any,
+    cache: Path,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    if (not isinstance(record, dict) or
+            record.get("schema") != "wirehair.wh2.pinned_build.v1" or
+            not isinstance(record.get("source"), dict) or
+            not isinstance(record.get("tools"), dict) or
+            not isinstance(record.get("environment"), dict) or
+            not isinstance(record.get("configure_command"), list) or
+            not isinstance(record.get("build_command"), list) or
+            not _canonical_digest(record.get("binary_sha256")) or
+            not _canonical_digest(record.get("cmake_cache_sha256"))):
+        die("pinned build record is malformed")
+    if sha256_file(cache) != record["cmake_cache_sha256"]:
+        die("pinned build cache differs from its provenance record")
+    _raw_cache, cache_entries = _parse_cmake_cache(cache)
+    _validate_tool_inventory(record["tools"])
+    compiler_records = record.get("compiler_records")
+    if not isinstance(compiler_records, dict) or set(compiler_records) != {
+            "cc", "cxx"}:
+        die("pinned compiler inventory changed")
+    for name in ("cc", "cxx"):
+        _validate_compiler_record_paths(compiler_records[name], name)
+    cmake_root = record.get("cmake_root")
+    if (not isinstance(cmake_root, dict) or
+            set(cmake_root) != {
+                "root", "file_count", "bytes", "manifest_sha256"} or
+            not isinstance(cmake_root.get("root"), str) or
+            not _canonical_digest(cmake_root.get("manifest_sha256")) or
+            _tree_digest(Path(cmake_root["root"])) != cmake_root):
+        die("pinned CMake module tree changed")
+    source = record["source"]
+    if (re.fullmatch(r"[0-9a-f]{40}", str(source.get("commit", ""))) is None or
+            re.fullmatch(r"[0-9a-f]{40}",
+                         str(source.get("tree_oid", ""))) is None or
+            not _canonical_digest(source.get("manifest_sha256")) or
+            not isinstance(source.get("materialized_path"), str) or
+            not Path(source["materialized_path"]).is_absolute() or
+            not isinstance(source.get("commit_timestamp"), int) or
+            isinstance(source.get("commit_timestamp"), bool) or
+            source["commit_timestamp"] < 0 or
+            not isinstance(source.get("manifest"), list) or
+            source.get("file_count") != len(source["manifest"]) or
+            sha256_bytes(json_bytes(source["manifest"])) !=
+            source["manifest_sha256"]):
+        die("pinned build source provenance is malformed")
+    if cache_entries.get("CMAKE_HOME_DIRECTORY") != (
+            "INTERNAL", source["materialized_path"]):
+        die("pinned build cache source binding changed")
+    environment = record["environment"]
+    expected_environment_keys = {
+        "PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "LANG", "LC_ALL",
+        "TZ", "SOURCE_DATE_EPOCH",
+    }
+    workspace = Path(source["materialized_path"]).parent
+    if (set(environment) != expected_environment_keys or
+            record.get("working_directory") != str(workspace) or
+            environment.get("PATH") != PINNED_BUILD_PATH or
+            environment.get("LANG") != "C" or
+            environment.get("LC_ALL") != "C" or
+            environment.get("TZ") != "UTC" or
+            environment.get("SOURCE_DATE_EPOCH") !=
+            str(source.get("commit_timestamp")) or
+            environment.get("HOME") != str(workspace / "home") or
+            environment.get("TMPDIR") != str(workspace / "tmp") or
+            environment.get("XDG_CONFIG_HOME") != str(workspace / "xdg")):
+        die("pinned build environment policy changed")
+    configure = record["configure_command"]
+    build_command = record["build_command"]
+    expected_source = source["materialized_path"]
+    expected_build = str(workspace / "build")
+    if (len(configure) < 7 or
+            configure[:7] != [
+                record["tools"]["cmake"]["path"], "-S", expected_source,
+                "-B", expected_build, "-G", "Ninja"] or
+            expected_build not in build_command or
+            record["tools"]["cmake"]["path"] not in build_command or
+            record.get("legacy_graph_used") is not False or
+            not isinstance(record.get("legacy_binary_hint"), str) or
+            record.get("legacy_binary_hint") in configure or
+            record.get("legacy_binary_hint") in build_command):
+        die("pinned build command policy changed")
+    policy = record.get("build_policy")
+    if (not isinstance(policy, dict) or
+            policy.get("cmake_cache_sha256") !=
+            record["cmake_cache_sha256"] or
+            policy.get("fresh_pinned") is not True):
+        die("pinned build policy binding changed")
+    graph = record.get("graph")
+    expected_graph_files = {
+        "CMakeCache.txt", "build.ninja", "CMakeFiles/rules.ninja",
+        "compile_commands.json",
+    }
+    if (not isinstance(graph, dict) or
+            not isinstance(graph.get("files"), list) or
+            len(graph["files"]) != len(expected_graph_files) or
+            not all(isinstance(entry, dict) for entry in graph["files"]) or
+            {entry.get("path") for entry in graph["files"]
+             if isinstance(entry, dict)} != expected_graph_files or
+            not all(_canonical_digest(entry.get("sha256")) and
+                    isinstance(entry.get("bytes"), int) and
+                    entry["bytes"] >= 0 for entry in graph["files"]) or
+            not _canonical_digest(graph.get("files_manifest_sha256")) or
+            sha256_bytes(json_bytes(graph["files"])) !=
+            graph["files_manifest_sha256"] or
+            not all(_canonical_digest(graph.get(field)) for field in (
+                "target_commands_sha256",
+                "normalized_target_commands_sha256")) or
+            not isinstance(graph.get("target_commands_bytes"), int) or
+            graph["target_commands_bytes"] <= 0 or
+            not _canonical_digest(record.get("legacy_cache_sha256")) or
+            re.fullmatch(r"[0-9a-f]+",
+                         str(record.get("binary_elf_build_id", ""))) is None or
+            not all(_canonical_digest(record.get(field)) for field in (
+                "configure_stdout_sha256", "configure_stderr_sha256",
+                "build_stdout_sha256", "build_stderr_sha256",
+                "elf_notes_sha256", "elf_dynamic_sha256"))):
+        die("pinned build graph or output provenance is malformed")
+    cache_graph = next(
+        entry for entry in graph["files"]
+        if entry.get("path") == "CMakeCache.txt")
+    if cache_graph.get("sha256") != record["cmake_cache_sha256"]:
+        die("pinned build graph cache binding changed")
+    if source_root is not None:
+        _verify_source_snapshot(source_root, source["manifest"])
+    return record
+
+
+def validate_pinned_build_contract_binding(
+    contract: Any,
+    pinned_build: Any,
+    context: str,
+    *,
+    require_legacy_hint: bool = False,
+) -> None:
+    """Cross-bind the human-facing contract to exact build provenance."""
+    if (not isinstance(contract, dict) or
+            not isinstance(pinned_build, dict) or
+            contract.get("build_policy") !=
+            pinned_build.get("build_policy") or
+            contract.get("build_command") !=
+            pinned_build.get("build_command") or
+            contract.get("source_commit") !=
+            pinned_build.get("source", {}).get("commit") or
+            contract.get("binary_sha256") !=
+            pinned_build.get("binary_sha256") or
+            (require_legacy_hint and
+             contract.get("legacy_binary_hint") !=
+             pinned_build.get("legacy_binary_hint"))):
+        die(f"{context} build provenance differs from its pinned build")
+
+
+@contextmanager
+def _fresh_pinned_benchmark_build_impl(
+    repo: Path,
+    commit: str,
+    binary_hint: Path,
+    git_record: dict[str, str],
+    cmake_record: dict[str, str],
+    taskset_record: dict[str, str] | None,
+    *,
+    build_workers: int,
+    cpu_set: str | None,
+    signal_guard: _PinnedBuildSignalGuard,
+) -> Iterator[FreshPinnedBuild]:
+    """Build the benchmark from immutable Git bytes in a new private tree."""
+    if (re.fullmatch(r"[0-9a-f]{40}", commit) is None or
+            not isinstance(build_workers, int) or
+            isinstance(build_workers, bool) or build_workers <= 0):
+        die("fresh pinned build arguments are invalid")
+    binary_input = binary_hint.absolute()
+    if binary_input.is_symlink():
+        die("--binary toolchain hint must not be a symlink")
+    hinted_binary = binary_input.resolve(strict=True)
+    if not hinted_binary.is_file() or not os.access(hinted_binary, os.X_OK):
+        die("--binary toolchain hint must be an executable regular file")
+    hinted_build = hinted_binary.parent.parent.resolve(strict=True)
+    hinted_cache = hinted_build / "CMakeCache.txt"
+    if hinted_binary != (
+            hinted_build / "codec/wirehair_v2_bench").resolve(strict=True):
+        die("--binary must name the codec/wirehair_v2_bench toolchain hint")
+    hint_policy = validate_candidate_build_policy(hinted_cache, repo)
+    hinted_cache_sha256 = hint_policy["cmake_cache_sha256"]
+    tools = {
+        "cmake": cmake_record,
+        "git": git_record,
+        "taskset": taskset_record,
+        "ninja": _trusted_executable("ninja"),
+        "cc": _trusted_executable("cc"),
+        "cxx": _trusted_executable("c++"),
+        "ar": _trusted_executable("ar"),
+        "ranlib": _trusted_executable("ranlib"),
+        "ld": _trusted_executable("ld"),
+        "nm": _trusted_executable("nm"),
+        "objcopy": _trusted_executable("objcopy"),
+        "objdump": _trusted_executable("objdump"),
+        "strip": _trusted_executable("strip"),
+        "readelf": _trusted_executable("readelf"),
+    }
+    git = frozen_executable_path(git_record, "git")
+    cmake = frozen_executable_path(cmake_record, "cmake")
+    taskset = None
+    if cpu_set is not None:
+        if taskset_record is None:
+            die("pinned build CPU set lacks taskset identity")
+        taskset = frozen_executable_path(taskset_record, "taskset")
+    elif taskset_record is not None:
+        frozen_executable_path(taskset_record, "taskset")
+    if taskset_record is None:
+        die("fresh pinned build lacks a taskset identity")
+    _validate_tool_inventory(tools)
+    for name, supplied in (("cmake", cmake_record), ("git", git_record),
+                           ("taskset", taskset_record)):
+        if supplied != _trusted_executable(name):
+            die(f"fresh pinned build requires the trusted system {name}")
+    for field, name in (("c_compiler", "cc"), ("cxx_compiler", "cxx")):
+        try:
+            hinted = Path(str(hint_policy[field])).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise CampaignError("hinted compiler is unavailable") from exc
+        if hinted != Path(tools[name]["path"]):
+            die("--binary toolchain hint uses a different system compiler")
+
+    workspace: Path | None = None
+    try:
+        with signal_guard.deferred_acquisition():
+            workspace = Path(tempfile.mkdtemp(
+                prefix="wirehair-wh2-pinned-build-"))
+        workspace.chmod(0o700)
+        home = workspace / "home"
+        temporary = workspace / "tmp"
+        xdg = workspace / "xdg"
+        for directory in (home, temporary, xdg):
+            directory.mkdir(mode=0o700)
+        env = {
+            "PATH": PINNED_BUILD_PATH,
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(xdg),
+            "TMPDIR": str(temporary),
+            "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+        }
+        source = workspace / "source"
+        source_record = _materialize_commit_snapshot(
+            repo, commit, git, source, env, temporary, signal_guard)
+        env["SOURCE_DATE_EPOCH"] = str(source_record["commit_timestamp"])
+        cmake_root = _cmake_root_identity(
+            cmake, env, temporary, signal_guard)
+        compiler_records = _current_compiler_records(
+            tools, env, temporary, signal_guard)
+        _validate_tool_inventory(tools)
+        _verify_source_snapshot(source, source_record["manifest"])
+        build = workspace / "build"
+        if os.path.lexists(str(build)):
+            die("fresh pinned build directory already exists")
+        configure_command = [str(cmake), "-S", str(source), "-B", str(build),
+                             "-G", "Ninja"]
+        configure_values = {
+            **PINNED_PROJECT_CACHE, **PINNED_LANGUAGE_CACHE,
+            "CMAKE_MAKE_PROGRAM": ("FILEPATH", tools["ninja"]["path"]),
+            "CMAKE_C_COMPILER": ("FILEPATH", tools["cc"]["path"]),
+            "CMAKE_CXX_COMPILER": ("FILEPATH", tools["cxx"]["path"]),
+            "CMAKE_AR": ("FILEPATH", tools["ar"]["path"]),
+            "CMAKE_RANLIB": ("FILEPATH", tools["ranlib"]["path"]),
+            "CMAKE_LINKER": ("FILEPATH", tools["ld"]["path"]),
+            "CMAKE_NM": ("FILEPATH", tools["nm"]["path"]),
+            "CMAKE_OBJCOPY": ("FILEPATH", tools["objcopy"]["path"]),
+            "CMAKE_OBJDUMP": ("FILEPATH", tools["objdump"]["path"]),
+            "CMAKE_STRIP": ("FILEPATH", tools["strip"]["path"]),
+            "CMAKE_C_COMPILER_AR": ("FILEPATH", tools["ar"]["path"]),
+            "CMAKE_CXX_COMPILER_AR": ("FILEPATH", tools["ar"]["path"]),
+            "CMAKE_C_COMPILER_RANLIB":
+                ("FILEPATH", tools["ranlib"]["path"]),
+            "CMAKE_CXX_COMPILER_RANLIB":
+                ("FILEPATH", tools["ranlib"]["path"]),
+            "CMAKE_EXPORT_COMPILE_COMMANDS": ("BOOL", "ON"),
+            "CMAKE_SUPPRESS_REGENERATION": ("BOOL", "ON"),
+            "CMAKE_DISABLE_SOURCE_CHANGES": ("BOOL", "ON"),
+            "CMAKE_DISABLE_IN_SOURCE_BUILD": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_OpenMP": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_Python3": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_PkgConfig": ("BOOL", "ON"),
+            "CMAKE_FIND_USE_PACKAGE_REGISTRY": ("BOOL", "OFF"),
+            "CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY": ("BOOL", "OFF"),
+        }
+        configure_values.update({
+            key: (kind, "")
+            for key, kind in PINNED_EXPLICIT_EMPTY_CACHE.items()
+        })
+        for key in sorted(configure_values):
+            kind, value = configure_values[key]
+            configure_command.append(f"-D{key}:{kind}={value}")
+        configure_stdout, configure_stderr = _run_pinned_command(
+            configure_command, env, temporary,
+            PINNED_CONFIGURE_TIMEOUT_SECONDS, "fresh CMake configure",
+            signal_guard)
+        if not build.is_dir() or build.is_symlink():
+            die("CMake did not create a direct fresh build directory")
+        cache = build / "CMakeCache.txt"
+        build_policy = validate_candidate_build_policy(
+            cache, source, require_pinned=True, expected_tools=tools)
+        binary = build / "codec/wirehair_v2_bench"
+        if os.path.lexists(str(binary)):
+            die("fresh configure unexpectedly created the benchmark target")
+        graph = _pinned_graph_identity(
+            build, Path(tools["ninja"]["path"]), env, temporary,
+            signal_guard)
+        prebuild_graph = _pinned_graph_identity(
+            build, Path(tools["ninja"]["path"]), env, temporary,
+            signal_guard)
+        if graph != prebuild_graph:
+            die("fresh Ninja graph changed before its build")
+        _verify_source_snapshot(source, source_record["manifest"])
+        _validate_tool_inventory(tools)
+        if _current_compiler_records(
+                tools, env, temporary, signal_guard) != compiler_records:
+            die("compiler identity changed during fresh configuration")
+        if _tree_digest(Path(cmake_root["root"])) != cmake_root:
+            die("CMake module tree changed before the build")
+        command_prefix = [] if taskset is None else [
+            str(taskset), "-c", str(cpu_set)]
+        build_command = [
+            *command_prefix, str(cmake), "--build", str(build),
+            "--target", "wirehair_v2_bench", "--parallel",
+            str(build_workers), "--verbose",
+        ]
+        build_stdout, build_stderr = _run_pinned_command(
+            build_command, env, temporary,
+            PINNED_BUILD_TIMEOUT_SECONDS, "fresh benchmark build",
+            signal_guard)
+        if _pinned_graph_identity(
+                build, Path(tools["ninja"]["path"]), env,
+                temporary, signal_guard) != graph:
+            die("fresh Ninja graph changed during its build")
+        if validate_candidate_build_policy(
+                cache, source, require_pinned=True,
+                expected_tools=tools) != build_policy:
+            die("fresh CMake policy changed during its build")
+        _verify_source_snapshot(source, source_record["manifest"])
+        _validate_tool_inventory(tools)
+        if _current_compiler_records(
+                tools, env, temporary, signal_guard) != compiler_records:
+            die("compiler identity changed during the fresh build")
+        if _tree_digest(Path(cmake_root["root"])) != cmake_root:
+            die("CMake module tree changed during the build")
+        binary_sha256 = sha256_file(binary)
+        if not os.access(binary, os.X_OK):
+            die("fresh benchmark target is not executable")
+        readelf = Path(tools["readelf"]["path"])
+        notes, notes_stderr = _run_pinned_command(
+            (str(readelf), "--notes", str(binary)), env, temporary, 30.0,
+            "fresh benchmark ELF build-ID inspection", signal_guard)
+        matches = re.findall(
+            rb"^[ \t]*Build ID: ([0-9a-f]+)[ \t]*$", notes,
+            flags=re.MULTILINE)
+        if notes_stderr or len(matches) != 1:
+            die("fresh benchmark lacks one lowercase ELF build ID")
+        dynamic, dynamic_stderr = _run_pinned_command(
+            (str(readelf), "--dynamic", str(binary)), env, temporary, 30.0,
+            "fresh benchmark ELF dynamic inspection", signal_guard)
+        if dynamic_stderr or re.search(rb"\((?:RPATH|RUNPATH)\)", dynamic):
+            die("fresh benchmark contains an unexpected runtime search path")
+        record = {
+            "schema": "wirehair.wh2.pinned_build.v1",
+            "source": source_record,
+            "tools": tools,
+            "compiler_records": compiler_records,
+            "cmake_root": cmake_root,
+            "environment": env,
+            "working_directory": str(workspace),
+            "legacy_binary_hint": str(hinted_binary),
+            "legacy_cache_sha256": hinted_cache_sha256,
+            "legacy_graph_used": False,
+            "configure_command": configure_command,
+            "build_command": build_command,
+            "configure_stdout_sha256": sha256_bytes(configure_stdout),
+            "configure_stderr_sha256": sha256_bytes(configure_stderr),
+            "build_stdout_sha256": sha256_bytes(build_stdout),
+            "build_stderr_sha256": sha256_bytes(build_stderr),
+            "build_policy": build_policy,
+            "graph": graph,
+            "cmake_cache_sha256": sha256_file(cache),
+            "binary_sha256": binary_sha256,
+            "binary_elf_build_id": matches[0].decode("ascii"),
+            "elf_notes_sha256": sha256_bytes(notes),
+            "elf_dynamic_sha256": sha256_bytes(dynamic),
+        }
+        validate_pinned_build_record(record, cache, source)
+        if sha256_file(hinted_cache) != hinted_cache_sha256:
+            die("--binary toolchain-hint cache changed during fresh build")
+        fresh = FreshPinnedBuild(binary=binary, cache=cache, record=record)
+        try:
+            yield fresh
+        finally:
+            if sys.exc_info()[0] is None:
+                if (sha256_file(binary) != binary_sha256 or
+                        validate_candidate_build_policy(
+                            cache, source, require_pinned=True,
+                            expected_tools=tools) != build_policy or
+                        _pinned_graph_identity(
+                            build, Path(tools["ninja"]["path"]), env,
+                            temporary, signal_guard) != graph):
+                    die("fresh pinned build changed while it was staged")
+                validate_pinned_build_record(record, cache, source)
+    except BaseException:
+        signal_guard.block_for_cleanup()
+        raise
+    else:
+        signal_guard.block_for_cleanup()
+    finally:
+        if workspace is not None:
+            _make_tree_writable(workspace)
+            shutil.rmtree(workspace)
+
+
+@contextmanager
+def fresh_pinned_benchmark_build(
+    repo: Path,
+    commit: str,
+    binary_hint: Path,
+    git_record: dict[str, str],
+    cmake_record: dict[str, str],
+    taskset_record: dict[str, str] | None,
+    *,
+    build_workers: int,
+    cpu_set: str | None,
+) -> Iterator[FreshPinnedBuild]:
+    signal_guard = _PinnedBuildSignalGuard()
+    with signal_guard:
+        signal_guard.activate()
+        try:
+            with _fresh_pinned_benchmark_build_impl(
+                    repo, commit, binary_hint, git_record, cmake_record,
+                    taskset_record, build_workers=build_workers,
+                    cpu_set=cpu_set, signal_guard=signal_guard) as build:
+                yield build
+        except BaseException:
+            signal_guard.block_for_cleanup()
+            raise
+        else:
+            signal_guard.block_for_cleanup()
+
+
+def validate_candidate_build_policy(
+    cache: Path,
+    repo: Path,
+    *,
+    require_pinned: bool = False,
+    expected_tools: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Require the exact uninstrumented native Release benchmark policy."""
+    raw, entries = _parse_cmake_cache(cache)
     required = {
-        "CMAKE_BUILD_TYPE": ("STRING", "Release"),
-        "BUILD_TESTS": ("BOOL", "ON"),
-        "BUILD_CODEC_V2": ("BOOL", "ON"),
-        "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
-        "MARCH_NATIVE": ("BOOL", "ON"),
-        "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
-        "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
-        "WH_LTO": ("STRING", "OFF"),
-        "WH_PGO_MODE": ("STRING", "OFF"),
-        "CMAKE_C_FLAGS": ("STRING", ""),
-        "CMAKE_CXX_FLAGS": ("STRING", ""),
-        "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
-        "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
-        "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
-        "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
-        "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
-        "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+        **PINNED_PROJECT_CACHE,
+        **{
+            key: value for key, value in PINNED_LANGUAGE_CACHE.items()
+            if (require_pinned or key not in (
+                "CMAKE_CXX_STANDARD", "CMAKE_CXX_STANDARD_REQUIRED",
+                "CMAKE_CXX_EXTENSIONS",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE",
+            ))
+        },
     }
     for key, expected in required.items():
         if entries.get(key) != expected:
             die(f"candidate CMake policy requires {key}={expected[1]!r}")
     for key in (
-            "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
-            "CMAKE_TOOLCHAIN_FILE"):
+            "CMAKE_CXX_STANDARD", "CMAKE_CXX_STANDARD_REQUIRED",
+            "CMAKE_CXX_EXTENSIONS",
+            "CMAKE_INTERPROCEDURAL_OPTIMIZATION",
+            "CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE"):
+        if key in entries and entries[key] != PINNED_LANGUAGE_CACHE[key]:
+            die(f"candidate CMake policy requires {key}="
+                f"{PINNED_LANGUAGE_CACHE[key][1]!r}")
+    for key in PINNED_EXPLICIT_EMPTY_CACHE:
         if key in entries and entries[key][1]:
             die(f"candidate CMake policy forbids {key}")
+        if require_pinned and entries.get(key) != (
+                PINNED_EXPLICIT_EMPTY_CACHE[key], ""):
+            die(f"fresh CMake policy must explicitly clear {key}")
+    for key in PINNED_FORBIDDEN_CACHE:
+        if key in entries and (require_pinned or entries[key][1]):
+            die(f"candidate CMake policy forbids {key}")
+    for key, (_kind, value) in entries.items():
+        upper = key.upper()
+        if ((upper.endswith("_COMPILER_LAUNCHER") or
+             upper.endswith("_LINKER_LAUNCHER") or
+             upper.startswith("CMAKE_RULE_LAUNCH_")) and value):
+            die(f"candidate CMake policy forbids launcher {key}")
+        if (upper.startswith("CMAKE_PROJECT_") and
+                upper.endswith(("_INCLUDE", "_INCLUDE_BEFORE")) and value):
+            die(f"candidate CMake policy forbids project hook {key}")
     if ("CMAKE_CONFIGURATION_TYPES" in entries and
             entries["CMAKE_CONFIGURATION_TYPES"][1]):
         die("candidate CMake policy requires a single-config generator")
-    banned = ("-fsanitize", "--coverage", "-fprofile", "-pg")
+    banned = (
+        "-fsanitize", "--coverage", "-fprofile", "-pg", "-flto",
+        "-fplugin", "-specs", "--sysroot", "-fuse-ld",
+        "-DWH_SEED_KNOBS", "-DWH_PEELCAP", "-Wl,--wrap",
+    )
     for key, (_kind, value) in entries.items():
         if "FLAGS" in key and any(token in value for token in banned):
-            die(f"candidate CMake policy forbids instrumentation in {key}")
+            die(f"candidate CMake policy forbids injected flags in {key}")
         if (key.startswith("CMAKE_INTERPROCEDURAL_OPTIMIZATION") and
                 value.upper() not in ("", "OFF", "FALSE", "0")):
             die("candidate CMake policy forbids implicit IPO/LTO")
@@ -1592,88 +3392,148 @@ def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
     for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_GENERATOR"):
         if key not in entries or not entries[key][1]:
             die(f"candidate CMake cache lacks {key}")
-    if entries["CMAKE_GENERATOR"] not in (
-            ("INTERNAL", "Unix Makefiles"), ("INTERNAL", "Ninja")):
-        die("candidate CMake policy requires Unix Makefiles or Ninja")
+    allowed_generators = (("INTERNAL", "Ninja"),) if require_pinned else (
+        ("INTERNAL", "Unix Makefiles"), ("INTERNAL", "Ninja"))
+    if entries["CMAKE_GENERATOR"] not in allowed_generators:
+        die("candidate CMake policy has an unapproved generator")
+    if require_pinned:
+        if expected_tools is None:
+            die("fresh CMake policy lacks expected tool identities")
+        for name, cache_key in PINNED_TOOL_CACHE_NAMES.items():
+            if cache_key is None:
+                continue
+            entry = entries.get(cache_key)
+            if entry is None or not entry[1]:
+                die(f"fresh CMake policy lacks {cache_key}")
+            try:
+                observed = Path(entry[1]).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise CampaignError(
+                    f"fresh CMake tool {cache_key} is unavailable") from exc
+            if observed != Path(expected_tools[name]["path"]):
+                die(f"fresh CMake policy changed {cache_key}")
+        for cache_key, tool_name in (
+                ("CMAKE_C_COMPILER_AR", "ar"),
+                ("CMAKE_CXX_COMPILER_AR", "ar"),
+                ("CMAKE_C_COMPILER_RANLIB", "ranlib"),
+                ("CMAKE_CXX_COMPILER_RANLIB", "ranlib")):
+            entry = entries.get(cache_key)
+            if entry is None or not entry[1]:
+                die(f"fresh CMake policy lacks {cache_key}")
+            try:
+                observed = Path(entry[1]).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise CampaignError(
+                    f"fresh CMake tool {cache_key} is unavailable") from exc
+            if observed != Path(expected_tools[tool_name]["path"]):
+                die(f"fresh CMake policy changed {cache_key}")
+        for key in (
+                "CMAKE_GENERATOR_INSTANCE", "CMAKE_GENERATOR_PLATFORM",
+                "CMAKE_GENERATOR_TOOLSET"):
+            if key in entries and entries[key][1]:
+                die(f"fresh CMake generator binding changed {key}")
+        exact_fresh = {
+            "CMAKE_EXPORT_COMPILE_COMMANDS": ("BOOL", "ON"),
+            "CMAKE_SUPPRESS_REGENERATION": ("BOOL", "ON"),
+            "CMAKE_DISABLE_SOURCE_CHANGES": ("BOOL", "ON"),
+            "CMAKE_DISABLE_IN_SOURCE_BUILD": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_OpenMP": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_Python3": ("BOOL", "ON"),
+            "CMAKE_DISABLE_FIND_PACKAGE_PkgConfig": ("BOOL", "ON"),
+            "CMAKE_FIND_USE_PACKAGE_REGISTRY": ("BOOL", "OFF"),
+            "CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY": ("BOOL", "OFF"),
+        }
+        for key, expected in exact_fresh.items():
+            if entries.get(key) != expected:
+                die(f"fresh CMake policy requires {key}={expected[1]!r}")
     return {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.build_policy.v1",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.build_policy.v2",
         "cmake_cache_sha256": sha256_bytes(raw),
         "build_type": "Release", "march_native": True,
         "strict_warnings": True, "tests_enabled": True,
         "benchmarks_built": True, "lto": "OFF", "pgo": "OFF",
+        "static_library": True, "static_pic": True,
+        "cxx_standard": 11, "cxx_extensions": True,
         "c_compiler": entries["CMAKE_C_COMPILER"][1],
         "cxx_compiler": entries["CMAKE_CXX_COMPILER"][1],
         "generator": entries["CMAKE_GENERATOR"][1],
+        "fresh_pinned": require_pinned,
     }
 
 
-def prepare(args: argparse.Namespace) -> int:
+def _prepare_with_fresh_pinned_benchmark_build(
+    args: argparse.Namespace,
+    final_result_dir: Path,
+) -> dict[str, Any]:
     script = Path(__file__).resolve(strict=True)
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
-    git_record = executable_identity("git")
+    git_record = _trusted_executable("git")
     git = frozen_executable_path(git_record, "git")
     repo, head = tracked_clean_source(script, helper, git)
-    taskset_record = executable_identity("taskset")
-    cmake_record = executable_identity("cmake")
+    taskset_record = _trusted_executable("taskset")
+    cmake_record = _trusted_executable("cmake")
     python_runtime = python_runtime_identity()
     taskset = frozen_executable_path(taskset_record, "taskset")
     cmake = frozen_executable_path(cmake_record, "cmake")
-    binary_input = args.binary.absolute()
-    if binary_input.is_symlink():
-        die("--binary must not be a symlink")
-    binary = binary_input.resolve(strict=True)
-    build_dir = binary.parent.parent.resolve(strict=True)
-    cache = build_dir / "CMakeCache.txt"
-    if binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True):
-        die("--binary must be the codec/wirehair_v2_bench build target")
-    build_policy = validate_candidate_build_policy(cache, repo)
-    build_command = [
-        str(cmake), "--build", str(build_dir), "--target",
-        "wirehair_v2_bench", "--clean-first", "--parallel",
-        str(args.build_workers),
-    ]
-    subprocess.run(build_command, check=True)
-    post_repo, post_head = tracked_clean_source(script, helper, git)
-    if post_repo != repo or post_head != head:
-        die("source repository changed during the clean benchmark rebuild")
-    if validate_candidate_build_policy(cache, repo) != build_policy:
-        die("candidate build policy changed during the clean rebuild")
-    if (frozen_executable_path(git_record, "git") != git or
-            frozen_executable_path(taskset_record, "taskset") != taskset or
-            frozen_executable_path(cmake_record, "cmake") != cmake):
-        die("frozen tool path changed during the clean rebuild")
-    if binary_input.is_symlink():
-        die("clean benchmark rebuild replaced --binary with a symlink")
-    binary = binary_input.resolve(strict=True)
-    live_binary_sha256 = sha256_file(binary)
     groups_input = args.groups.absolute()
     if groups_input.is_symlink():
         die("--groups must not be a symlink")
     groups = groups_input.resolve(strict=True)
     thermal = args.thermal.resolve(strict=True)
-    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
-        die("--binary must be an executable, non-symlink regular file")
     load_groups(groups)
-    thermal_mark = thermal_start(thermal)
     result_dir = args.result_dir.resolve()
-    result_dir.mkdir(parents=True, exist_ok=False)
     frozen = result_dir / "frozen"
-    frozen.mkdir()
     destinations = {
         "script": frozen / script.name,
         "helper": frozen / helper.name,
         "binary": frozen / "wirehair_v2_bench",
         "cmake_cache": frozen / "CMakeCache.txt",
         "groups": frozen / "groups.tsv",
+        "pinned_build": frozen / "pinned_build.json",
     }
+    with fresh_pinned_benchmark_build(
+            repo, head, args.binary, git_record, cmake_record,
+            taskset_record, build_workers=args.build_workers,
+            cpu_set=None) as fresh_build:
+        post_repo, post_head = tracked_clean_source(script, helper, git)
+        if post_repo != repo or post_head != head:
+            die("source repository changed during the fresh benchmark build")
+        if (frozen_executable_path(git_record, "git") != git or
+                frozen_executable_path(
+                    taskset_record, "taskset") != taskset or
+                frozen_executable_path(cmake_record, "cmake") != cmake):
+            die("frozen tool path changed during the fresh benchmark build")
+        thermal_mark = thermal_start(thermal)
+        build_policy = fresh_build.record["build_policy"]
+        build_command = fresh_build.record["build_command"]
+        legacy_binary_hint = fresh_build.record["legacy_binary_hint"]
+        live_binary_sha256 = fresh_build.record["binary_sha256"]
+        binary_bytes = stable_bytes(fresh_build.binary)
+        cache_bytes = stable_bytes(fresh_build.cache)
+        pinned_build_bytes = json_bytes(fresh_build.record)
+        if sha256_bytes(binary_bytes) != live_binary_sha256:
+            die("fresh benchmark binary changed while it was captured")
+        validate_pinned_build_record(fresh_build.record, fresh_build.cache)
+    # Do not expose a final result tree until every fresh-build exit check has
+    # passed.  A failed context-exit validation must remain safely retryable.
+    frozen.mkdir()
+    atomic_write(destinations["binary"], binary_bytes)
+    atomic_write(destinations["cmake_cache"], cache_bytes)
+    atomic_write(destinations["pinned_build"], pinned_build_bytes)
+    if sha256_file(destinations["binary"]) != live_binary_sha256:
+        die("captured fresh benchmark changed while it was frozen")
+    validate_pinned_build_record(
+        json.loads(pinned_build_bytes), destinations["cmake_cache"])
     for source, destination in (
         (script, destinations["script"]),
         (helper, destinations["helper"]),
-        (binary, destinations["binary"]),
-        (cache, destinations["cmake_cache"]),
         (groups, destinations["groups"]),
     ):
         shutil.copyfile(source, destination)
+    # The source ledger was validated before the build, but the copy itself
+    # is a second read and may race a rewrite.  Validate the exact frozen
+    # bytes before sealing them into an immutable no-replace result.
+    load_groups(destinations["groups"], GROUPS_SHA256)
     destinations["binary"].chmod(0o755)
     destinations["script"].chmod(0o755)
     verify_frozen_sources_at_commit(
@@ -1681,18 +3541,21 @@ def prepare(args: argparse.Namespace) -> int:
         ((script, destinations["script"]), (helper, destinations["helper"])),
         git,
     )
-    if validate_candidate_build_policy(
-            destinations["cmake_cache"], repo) != build_policy:
-        die("frozen candidate CMake policy changed while being copied")
     if sha256_file(destinations["binary"]) != live_binary_sha256:
-        die("clean benchmark binary changed while it was being frozen")
+        die("fresh benchmark binary changed while inputs were frozen")
+    pinned_build_sha256 = sha256_file(destinations["pinned_build"])
+    validate_pinned_build_record(
+        json.loads(stable_bytes(destinations["pinned_build"])),
+        destinations["cmake_cache"],
+    )
     contract = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v5",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.contract.v6",
         "source_commit": head, "source_repo": str(repo),
         "build_command": build_command,
-        "binary_source": str(binary),
+        "legacy_binary_hint": legacy_binary_hint,
         "binary_sha256": live_binary_sha256,
         "cmake_cache_sha256": sha256_file(destinations["cmake_cache"]),
+        "pinned_build_sha256": pinned_build_sha256,
         "build_policy": build_policy,
         "script_sha256": sha256_file(destinations["script"]),
         "helper_sha256": sha256_file(destinations["helper"]),
@@ -1737,17 +3600,27 @@ def prepare(args: argparse.Namespace) -> int:
     atomic_write(staged_path, sha_manifest(result_dir, staged_paths))
     verify_sha_manifest(result_dir, staged_path)
     prepared = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v1",
-        "result_dir": str(result_dir), "source_commit": head,
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v2",
+        "result_dir": str(final_result_dir), "source_commit": head,
         "binary_sha256": contract["binary_sha256"],
+        "pinned_build_sha256": pinned_build_sha256,
         "staged_sha256": sha256_file(staged_path),
         "run_command": [
             python_runtime["path"],
-            str(destinations["script"]), "run",
-            "--result-dir", str(result_dir),
+            str(final_result_dir / "frozen" / script.name), "run",
+            "--result-dir", str(final_result_dir),
         ],
     }
     atomic_json(result_dir / "prepare.json", prepared)
+    return prepared
+
+
+def prepare(args: argparse.Namespace) -> int:
+    with prepare_result_staging(args.result_dir) as (staging, final):
+        staged_args = argparse.Namespace(**vars(args))
+        staged_args.result_dir = staging
+        prepared = _prepare_with_fresh_pinned_benchmark_build(
+            staged_args, final)
     print(canonical_json(prepared))
     return 0
 
@@ -1760,8 +3633,9 @@ def load_frozen(
     frozen = result_dir / "frozen"
     prepare_anchor = validate_prepare_anchor(
         result_dir,
-        "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v1",
-        ("source_commit", "binary_sha256", "staged_sha256", "run_command"),
+        "wirehair.wh2.rank_floor_two_anchor_allk.prepare.v2",
+        ("source_commit", "binary_sha256", "pinned_build_sha256",
+         "staged_sha256", "run_command"),
         "staged_sha256")
     staged = verify_sha_manifest(result_dir, frozen / "staged.sha256")
     expected = {
@@ -1770,15 +3644,26 @@ def load_frozen(
             "wh2_rank_floor_two_anchor_allk.py",
             "wh2_rank_floor_two_anchor_screen.py",
             "wirehair_v2_bench", "CMakeCache.txt", "groups.tsv",
-            "contract.json",
+            "pinned_build.json", "contract.json",
         )
     }
     if set(staged) != expected:
-        die("frozen seal does not cover the exact six-file staged set")
+        die("frozen seal does not cover the exact seven-file staged set")
+    expected_names = {path.name for path in expected} | {"staged.sha256"}
+    if ({path.name for path in frozen.iterdir()} != expected_names or
+            any(path.is_symlink() or not path.is_file()
+                for path in frozen.iterdir())):
+        die("frozen all-K tree contains an unexpected artifact")
     contract = json.loads(stable_bytes(frozen / "contract.json"))
+    try:
+        pinned_build = json.loads(stable_bytes(frozen / "pinned_build.json"))
+    except json.JSONDecodeError as exc:
+        raise CampaignError("pinned build record is not JSON") from exc
+    validate_pinned_build_record(
+        pinned_build, frozen / "CMakeCache.txt")
     if (
         contract.get("schema") !=
-            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v5"
+            "wirehair.wh2.rank_floor_two_anchor_allk.contract.v6"
         or tuple(contract.get("arms", ())) != ARMS
         or tuple(contract.get("seeds", ())) != SEEDS
         or tuple(contract.get("schedules", ())) != SCHEDULES
@@ -1793,11 +3678,13 @@ def load_frozen(
         }
         or contract.get("cmake_cache_sha256") !=
             sha256_file(frozen / "CMakeCache.txt")
-        or contract.get("build_policy") != validate_candidate_build_policy(
-            frozen / "CMakeCache.txt",
-            Path(str(contract.get("source_repo", ""))))
+        or contract.get("pinned_build_sha256") !=
+            sha256_file(frozen / "pinned_build.json")
     ):
         die("frozen contract does not match this campaign")
+    validate_pinned_build_contract_binding(
+        contract, pinned_build, "frozen all-K contract",
+        require_legacy_hint=True)
     script = (frozen / "wh2_rank_floor_two_anchor_allk.py").resolve(strict=True)
     helper = (frozen / "wh2_rank_floor_two_anchor_screen.py").resolve(strict=True)
     if Path(__file__).resolve(strict=True) != script:
@@ -1820,7 +3707,9 @@ def load_frozen(
     verify_frozen_binary(binary, contract.get("binary_sha256"))
     if (prepare_anchor.get("source_commit") != contract.get("source_commit") or
             prepare_anchor.get("binary_sha256") !=
-            contract.get("binary_sha256")):
+            contract.get("binary_sha256") or
+            prepare_anchor.get("pinned_build_sha256") !=
+            contract.get("pinned_build_sha256")):
         die("prepare anchor differs from the frozen all-K contract")
     taskset = frozen_executable_path(contract.get("taskset"), "taskset")
     frozen_executable_path(contract.get("cmake"), "cmake")
@@ -2410,7 +4299,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
     prepare_parser = subparsers.add_parser("prepare")
-    prepare_parser.add_argument("--binary", type=Path, required=True)
+    prepare_parser.add_argument(
+        "--binary", type=Path, required=True,
+        help=("accepted local benchmark used only to confirm the system "
+              "toolchain; its binary and generated graph are never reused"))
     prepare_parser.add_argument("--groups", type=Path, required=True)
     prepare_parser.add_argument("--thermal", type=Path, required=True)
     prepare_parser.add_argument("--result-dir", type=Path, required=True)
