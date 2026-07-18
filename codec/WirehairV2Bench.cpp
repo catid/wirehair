@@ -6306,17 +6306,20 @@ struct PreferredTimingCell
     std::string TraceSha256;
 };
 
-bool BuildPreferredTimingCell(
+bool BuildFullPayloadTimingCell(
     const wirehair_v2::PrecodeParams& params,
     const wirehair_v2::PacketRowConfig& config,
     uint32_t block_bytes,
+    uint32_t overhead,
     double loss,
     uint64_t external_seed,
     PacketScheduleKind schedule,
+    bool salt_overhead,
+    const char* trace_tag,
     PreferredTimingCell& cell)
 {
     const uint32_t K = params.BlockCount;
-    const uint64_t delivered_wide = (uint64_t)K + 4u;
+    const uint64_t delivered_wide = (uint64_t)K + overhead;
     const uint64_t precode_count_wide =
         (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
     const uint64_t payload_bytes_wide = delivered_wide * block_bytes;
@@ -6332,7 +6335,9 @@ bool BuildPreferredTimingCell(
     }
     const uint64_t loss_seed = external_seed ^
         ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
-        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9));
+        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+        ((uint64_t)(salt_overhead ? overhead : 0u) *
+            UINT64_C(0x94d049bb133111eb));
     const std::vector<uint32_t> ids = BuildPacketSchedule(
         K, (uint32_t)delivered_wide, loss, loss_seed, schedule);
     if (ids.size() != (size_t)delivered_wide) return false;
@@ -6358,7 +6363,7 @@ bool BuildPreferredTimingCell(
 
     cell.Packets.resize((size_t)delivered_wide);
     std::ostringstream trace;
-    trace << "wirehair-wh2-preferred-timing-trace-v1\n"
+    trace << trace_tag << "\n"
           << "K=" << K << "\nblock_bytes=" << block_bytes
           << "\nseed=" << external_seed << "\nloss="
           << std::setprecision(17) << loss << "\nschedule="
@@ -6372,6 +6377,20 @@ bool BuildPreferredTimingCell(
     trace << '\n';
     cell.TraceSha256 = Sha256Hex(trace.str());
     return true;
+}
+
+bool BuildPreferredTimingCell(
+    const wirehair_v2::PrecodeParams& params,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_bytes,
+    double loss,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    PreferredTimingCell& cell)
+{
+    return BuildFullPayloadTimingCell(
+        params, config, block_bytes, 4u, loss, external_seed, schedule,
+        false, "wirehair-wh2-preferred-timing-trace-v1", cell);
 }
 
 static volatile uint8_t PreferredTimingEvictionSink = 0u;
@@ -6811,6 +6830,681 @@ int CmdPreferredTiming(int argc, char** argv)
                 std::fprintf(stderr,
                     "preferredtiming run failed cycle=%u slot=%u result=%d\n",
                     cycle, slot, (int)result);
+                return 2;
+            }
+        }
+    }
+    return 0;
+}
+
+enum class GroupedTimingCacheState
+{
+    Cold,
+    Warm
+};
+
+const char* GroupedTimingCacheStateName(GroupedTimingCacheState state)
+{
+    return state == GroupedTimingCacheState::Cold ? "cold" : "warm";
+}
+
+struct GroupedTimingArm
+{
+    uint32_t Period = 0u;
+    uint32_t GroupedRows = 0u;
+    wirehair_v2::MixedResidueBucketMode Buckets =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+};
+
+bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
+{
+    // Reapply the complete thread-local experiment state for every physical
+    // solve.  Several setters deliberately clear secondary schedules, so the
+    // grouped suffix must remain last.  None of this setup is timed.
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows) ||
+        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
+        !wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Constant))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(arm.Buckets) ||
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u))
+    {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+            arm.GroupedRows))
+    {
+        return false;
+    }
+    return wirehair_v2::ActiveMixedCoefficientGeometry() ==
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
+        wirehair_v2::ActiveMixedGF256Rows() ==
+            wirehair_v2::kMixedGF256Rows &&
+        wirehair_v2::ActiveMixedGF16Rows() ==
+            wirehair_v2::kMixedGF16Rows &&
+        wirehair_v2::ActiveMixedCoefficientPeriod() == arm.Period &&
+        wirehair_v2::ActiveMixedResidueSkew() == 0u &&
+        wirehair_v2::ActiveMixedResidueSchedule() ==
+            wirehair_v2::MixedResidueSchedule::Constant &&
+        !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
+        wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
+        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
+}
+
+bool SameGroupedTimingBaseGraph(
+    const wirehair_v2::PrecodeParams& a_params,
+    const wirehair_v2::PacketRowConfig& a_config,
+    const wirehair_v2::PrecodeParams& b_params,
+    const wirehair_v2::PacketRowConfig& b_config)
+{
+    return a_params.BlockCount == b_params.BlockCount &&
+        a_params.Staircase == b_params.Staircase &&
+        a_params.DenseRows == b_params.DenseRows &&
+        a_params.HeavyRows == b_params.HeavyRows &&
+        a_params.SourceHits == b_params.SourceHits &&
+        a_params.Field == b_params.Field &&
+        a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
+        a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
+        a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
+        a_params.HeavyFamily == b_params.HeavyFamily &&
+        a_params.Seed == b_params.Seed &&
+        a_config.PeelSeed == b_config.PeelSeed &&
+        a_config.MixCount == b_config.MixCount;
+}
+
+struct GroupedTimingObservation
+{
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+};
+
+bool RunGroupedTimingObservation(
+    const GroupedTimingArm& arm,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const PreferredTimingCell& cell,
+    uint32_t block_bytes,
+    GroupedTimingObservation& observation)
+{
+    if (!ConfigureGroupedTimingArm(arm)) return false;
+    std::vector<uint8_t> intermediate;
+    observation = GroupedTimingObservation{};
+    observation.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, cell.Runtime, cell.Packets, block_bytes,
+            intermediate, &observation.Stats);
+    return observation.Result == Wirehair_Success ||
+        observation.Result == Wirehair_NeedMore;
+}
+
+const char* GroupedTimingOutcomeClass(
+    WirehairResult control,
+    WirehairResult candidate)
+{
+    const bool control_success = control == Wirehair_Success;
+    const bool candidate_success = candidate == Wirehair_Success;
+    if (control_success && candidate_success) return "common-success";
+    if (control_success) return "control-only";
+    if (candidate_success) return "candidate-only";
+    return "common-failure";
+}
+
+int GroupedTimingCpuMigrated(int before, int after)
+{
+    return before < 0 || after < 0 ? -1 : (before != after ? 1 : 0);
+}
+
+int GroupedTimingFaultContaminated(
+    int64_t minor_delta,
+    int64_t major_delta)
+{
+    return minor_delta < 0 || major_delta < 0 ?
+        -1 : (minor_delta != 0 || major_delta != 0 ? 1 : 0);
+}
+
+int CmdGroupedTiming(int argc, char** argv)
+{
+    uint32_t K = 0u;
+    uint32_t block_bytes = 0u;
+    uint32_t overhead = 0u;
+    uint32_t cycle_index = 0u;
+    uint64_t eviction_bytes = 0u;
+    double loss = 0.0;
+    uint64_t seed = 0u;
+    PacketScheduleKind schedule = PacketScheduleKind::Burst;
+    GroupedTimingCacheState cache_state = GroupedTimingCacheState::Cold;
+    GroupedTimingArm control_arm;
+    GroupedTimingArm candidate_arm;
+    bool have_K = false;
+    bool have_block_bytes = false;
+    bool have_overhead = false;
+    bool have_control_period = false;
+    bool have_control_rows = false;
+    bool have_control_buckets = false;
+    bool have_candidate_period = false;
+    bool have_candidate_rows = false;
+    bool have_candidate_buckets = false;
+    bool have_eviction = false;
+    bool have_cache_state = false;
+    bool have_loss = false;
+    bool have_seed = false;
+    bool have_schedule = false;
+    bool have_cycle_index = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (have_K ||
+                !TakeArg("groupedtiming", "--N", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--N", value, K)) return 1;
+            have_K = true;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (have_block_bytes ||
+                !TakeArg("groupedtiming", "--bb", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--bb", value, block_bytes)) return 1;
+            have_block_bytes = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (have_overhead || !TakeArg(
+                    "groupedtiming", "--overhead", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--overhead", value, overhead))
+            {
+                return 1;
+            }
+            have_overhead = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-period")) {
+            if (have_control_period || !TakeArg(
+                    "groupedtiming", "--control-period",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--control-period", value, control_arm.Period))
+            {
+                return 1;
+            }
+            have_control_period = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-grouped-rows")) {
+            if (have_control_rows || !TakeArg(
+                    "groupedtiming", "--control-grouped-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--control-grouped-rows", value,
+                    control_arm.GroupedRows))
+            {
+                return 1;
+            }
+            have_control_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-buckets")) {
+            if (have_control_buckets || !TakeArg(
+                    "groupedtiming", "--control-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(value, control_arm.Buckets))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --control-buckets must be auto, "
+                    "separate, dual, or joint-delta\n");
+                return 1;
+            }
+            have_control_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-period")) {
+            if (have_candidate_period || !TakeArg(
+                    "groupedtiming", "--candidate-period",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--candidate-period", value, candidate_arm.Period))
+            {
+                return 1;
+            }
+            have_candidate_period = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-grouped-rows")) {
+            if (have_candidate_rows || !TakeArg(
+                    "groupedtiming", "--candidate-grouped-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--candidate-grouped-rows", value,
+                    candidate_arm.GroupedRows))
+            {
+                return 1;
+            }
+            have_candidate_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-buckets")) {
+            if (have_candidate_buckets || !TakeArg(
+                    "groupedtiming", "--candidate-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(value, candidate_arm.Buckets))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --candidate-buckets must be auto, "
+                    "separate, dual, or joint-delta\n");
+                return 1;
+            }
+            have_candidate_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (have_eviction || !TakeArg(
+                    "groupedtiming", "--evict-bytes", argc, argv, i,
+                    value) || !ParseCanonicalU64Arg(
+                        "--evict-bytes", value, eviction_bytes))
+            {
+                return 1;
+            }
+            have_eviction = true;
+        }
+        else if (!std::strcmp(argv[i], "--cache-state")) {
+            if (have_cache_state || !TakeArg(
+                    "groupedtiming", "--cache-state", argc, argv, i,
+                    value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "cold")) {
+                cache_state = GroupedTimingCacheState::Cold;
+            }
+            else if (!std::strcmp(value, "warm")) {
+                cache_state = GroupedTimingCacheState::Warm;
+            }
+            else {
+                std::fprintf(stderr,
+                    "groupedtiming --cache-state must be cold or warm\n");
+                return 1;
+            }
+            have_cache_state = true;
+        }
+        else if (!std::strcmp(argv[i], "--cycle-index")) {
+            if (have_cycle_index || !TakeArg(
+                    "groupedtiming", "--cycle-index", argc, argv, i,
+                    value) || !ParseCanonicalU32Arg(
+                        "--cycle-index", value, cycle_index))
+            {
+                return 1;
+            }
+            have_cycle_index = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (have_loss || !TakeArg(
+                    "groupedtiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
+            have_loss = true;
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (have_seed || !TakeArg(
+                    "groupedtiming", "--seed", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg("--seed", value, seed)) return 1;
+            have_seed = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (have_schedule || !TakeArg(
+                    "groupedtiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --schedule must be burst, adversarial, "
+                    "or repair-only\n");
+                return 1;
+            }
+            have_schedule = true;
+        }
+        else if (!UnknownArg("groupedtiming", argv[i])) {
+            return 1;
+        }
+    }
+    if (!have_K || !have_block_bytes || !have_overhead ||
+        !have_control_period || !have_control_rows ||
+        !have_control_buckets || !have_candidate_period ||
+        !have_candidate_rows || !have_candidate_buckets || !have_eviction ||
+        !have_cache_state || !have_loss || !have_seed || !have_schedule)
+    {
+        std::fprintf(stderr,
+            "groupedtiming requires --N, --bb, --overhead, "
+            "--control-period, --control-grouped-rows, --control-buckets, "
+            "--candidate-period, --candidate-grouped-rows, "
+            "--candidate-buckets, --evict-bytes, --cache-state, --loss, "
+            "--seed, and --schedule\n");
+        return 1;
+    }
+    const auto invalid_arm = [](const GroupedTimingArm& arm) {
+        return arm.Period <
+                wirehair_v2::kMixedGF256Rows +
+                    wirehair_v2::kMixedGF16Rows ||
+            arm.Period > wirehair_v2::kMixedCoefficientPeriod ||
+            arm.GroupedRows > 9u ||
+            (arm.GroupedRows != 0u &&
+             arm.Period <= wirehair_v2::kMixedGF256Rows +
+                wirehair_v2::kMixedGF16Rows) ||
+            (arm.GroupedRows == 0u &&
+             arm.Buckets !=
+                wirehair_v2::MixedResidueBucketMode::Automatic);
+    };
+    if (K < 2u || K > 64000u ||
+        (block_bytes != 64u && block_bytes != 1280u &&
+         block_bytes != 4096u) ||
+        overhead > 1024u || (uint64_t)K + overhead > UINT32_MAX ||
+        invalid_arm(control_arm) || invalid_arm(candidate_arm) ||
+        (have_cycle_index && cycle_index > 3u) ||
+        eviction_bytes < 4096u ||
+        eviction_bytes > (uint64_t)std::numeric_limits<size_t>::max() ||
+        !ValidateLoss(loss, "groupedtiming") ||
+        (schedule != PacketScheduleKind::Burst &&
+         schedule != PacketScheduleKind::Adversarial &&
+         schedule != PacketScheduleKind::RepairOnly))
+    {
+        std::fprintf(stderr, "groupedtiming argument domain mismatch\n");
+        return 1;
+    }
+    const std::vector<int> one_K(1u, (int)K);
+    const std::vector<int> one_bb(1u, (int)block_bytes);
+    if (!ValidatePayloadE2EInputs(
+            one_K, one_bb, "groupedtiming"))
+    {
+        return 1;
+    }
+
+    wirehair_v2::PrecodeParams control_base_params;
+    wirehair_v2::PacketRowConfig control_base_config;
+    wirehair_v2::PrecodeParams candidate_base_params;
+    wirehair_v2::PacketRowConfig candidate_base_config;
+    wirehair_v2::PrecodeSystem control_system;
+    wirehair_v2::PacketRowConfig control_config;
+    wirehair_v2::PrecodeSystem candidate_system;
+    wirehair_v2::PacketRowConfig candidate_config;
+    uint32_t control_attempt = 0u;
+    uint32_t candidate_attempt = 0u;
+    uint32_t control_grouped_hash_seed = 0u;
+    uint32_t candidate_grouped_hash_seed = 0u;
+    if (!ConfigureGroupedTimingArm(control_arm) ||
+        !MakeH12Q0Configuration(
+            K, block_bytes, control_base_params, control_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming could not construct the control arm\n");
+        return 2;
+    }
+    // The grouped reliability campaign used the raw two-anchor architecture
+    // at every K, rather than the later adaptive named-profile cutoff.
+    control_base_params.DenseTwoAnchor = true;
+    if (control_arm.GroupedRows != 0u) {
+        control_grouped_hash_seed =
+            wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    }
+    const WirehairResult control_select =
+        wirehair_v2::SelectSystematicConfiguration(
+            control_base_params, control_base_config,
+            control_system, control_config, &control_attempt);
+    if (control_select != Wirehair_Success) {
+        std::fprintf(stderr,
+            "groupedtiming control seed selection failed result=%d\n",
+            (int)control_select);
+        return 2;
+    }
+    if (!ConfigureGroupedTimingArm(candidate_arm) ||
+        !MakeH12Q0Configuration(
+            K, block_bytes, candidate_base_params, candidate_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming could not construct the candidate arm\n");
+        return 2;
+    }
+    candidate_base_params.DenseTwoAnchor = true;
+    if (candidate_arm.GroupedRows != 0u) {
+        candidate_grouped_hash_seed =
+            wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    }
+    if (!SameGroupedTimingBaseGraph(
+            control_base_params, control_base_config,
+            candidate_base_params, candidate_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming arms do not share one base graph/configuration\n");
+        return 2;
+    }
+    const WirehairResult candidate_select =
+        wirehair_v2::SelectSystematicConfiguration(
+            candidate_base_params, candidate_base_config,
+            candidate_system, candidate_config, &candidate_attempt);
+    if (candidate_select != Wirehair_Success) {
+        std::fprintf(stderr,
+            "groupedtiming candidate seed selection failed result=%d\n",
+            (int)candidate_select);
+        return 2;
+    }
+
+    PreferredTimingCell cell;
+    if (!BuildFullPayloadTimingCell(
+            control_system.Params, control_config, block_bytes, overhead, loss,
+            seed, schedule, true,
+            "wirehair-wh2-grouped-timing-trace-v1", cell))
+    {
+        std::fprintf(stderr, "groupedtiming solve setup failed\n");
+        return 2;
+    }
+    const uint64_t candidate_precode_wide =
+        (uint64_t)candidate_system.Params.Staircase +
+        candidate_system.Params.DenseRows + candidate_system.Params.HeavyRows;
+    if (candidate_precode_wide > UINT32_MAX ||
+        !cell.Runtime.IsValidFor(
+            K, (uint32_t)candidate_precode_wide,
+            candidate_config.MixCount) ||
+        cell.Packets.size() != (size_t)K + overhead)
+    {
+        std::fprintf(stderr,
+            "groupedtiming selected arms do not share one packet domain\n");
+        return 2;
+    }
+
+    // Allocate and prefault the eviction working set before either preflight.
+    // In warm mode, touching it afterward would make the first recorded solve
+    // cold; in cold mode, each timed slot explicitly traverses it again.
+    std::vector<uint8_t> eviction((size_t)eviction_bytes, 0u);
+    EvictPreferredTimingCache(eviction);
+
+    GroupedTimingObservation control_preflight;
+    GroupedTimingObservation candidate_preflight;
+    if (!RunGroupedTimingObservation(
+            control_arm, control_system, control_config, cell, block_bytes,
+            control_preflight) ||
+        !RunGroupedTimingObservation(
+            candidate_arm, candidate_system, candidate_config, cell,
+            block_bytes,
+            candidate_preflight))
+    {
+        std::fprintf(stderr, "groupedtiming preflight failed\n");
+        return 2;
+    }
+    const char* const outcome_class = GroupedTimingOutcomeClass(
+        control_preflight.Result, candidate_preflight.Result);
+    const bool common_success =
+        control_preflight.Result == Wirehair_Success &&
+        candidate_preflight.Result == Wirehair_Success;
+
+    static const char kOrder[] = {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
+    const std::string cycle_index_text =
+        have_cycle_index ? std::to_string(cycle_index) : "all";
+    const uint64_t packet_payload_bytes =
+        ((uint64_t)K + overhead) * block_bytes;
+    std::printf(
+        "# groupedtiming: schema=v1 policy=h12-q0-grouped "
+        "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
+        "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
+        "loss=%.17g seed=%llu schedule=%s cache_state=%s "
+        "overhead_stream=salted "
+        "evict_bytes=%llu eviction_prefaulted=1 "
+        "control_period=%u control_grouped_rows=%u "
+        "control_buckets=%s control_grouped_hash_seed=0x%x "
+        "control_final_h_a_columns=%u candidate_period=%u "
+        "candidate_grouped_rows=%u candidate_buckets=%s "
+        "candidate_grouped_hash_seed=0x%x "
+        "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
+        "dense_two_anchor=1 control_attempt=%u "
+        "control_matrix_seed=0x%llx control_peel_seed=0x%x "
+        "candidate_attempt=%u candidate_matrix_seed=0x%llx "
+        "candidate_peel_seed=0x%x mix=2 "
+        "payload=distinct-packet-zero-v1 payload_count=%u "
+        "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
+        "system_build=outside-timer tls_reapply=full-per-slot-outside-timer "
+        "allocator_tls_state=preflight-warmed "
+        "preflight_control_result=%d preflight_candidate_result=%d "
+        "cell_class=%s common_success=%u trace_sha256=%s\n",
+        have_cycle_index ? 1u : 4u,
+        have_cycle_index ? "replacement" : "full",
+        cycle_index_text.c_str(), K, block_bytes, overhead, loss,
+        (unsigned long long)seed, PacketScheduleName(schedule),
+        GroupedTimingCacheStateName(cache_state),
+        (unsigned long long)eviction_bytes,
+        control_arm.Period, control_arm.GroupedRows,
+        MixedResidueBucketModeName(control_arm.Buckets),
+        control_grouped_hash_seed,
+        control_arm.GroupedRows != 0u ?
+            control_system.Params.HeavyRows : 0u,
+        candidate_arm.Period, candidate_arm.GroupedRows,
+        MixedResidueBucketModeName(candidate_arm.Buckets),
+        candidate_grouped_hash_seed,
+        candidate_arm.GroupedRows != 0u ?
+            candidate_system.Params.HeavyRows : 0u,
+        control_attempt,
+        (unsigned long long)control_system.Params.Seed,
+        control_config.PeelSeed, candidate_attempt,
+        (unsigned long long)candidate_system.Params.Seed,
+        candidate_config.PeelSeed,
+        K + overhead,
+        (unsigned long long)packet_payload_bytes,
+        (int)control_preflight.Result, (int)candidate_preflight.Result,
+        outcome_class, common_success ? 1u : 0u,
+        cell.TraceSha256.c_str());
+    std::printf(
+        "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
+        "period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,"
+        "peel_seed,preflight_result,cell_class,common_success,result,"
+        "outcome_stable,elapsed_ns,saturated,"
+        "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
+        "fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,"
+        "block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,"
+        "joint_source_xors,joint_marginal_xors,joint_marginal_copies,"
+        "joint_active_deltas,joint_scratch_bytes,dual_source_columns,"
+        "source_bytes,packet_payload_bytes,intermediate_bytes\n");
+
+    const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
+    const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
+    for (uint32_t cycle = first_cycle; cycle < end_cycle; ++cycle)
+    {
+        for (uint32_t slot = 0u; slot < 8u; ++slot)
+        {
+            const bool control = kOrder[slot] == 'A';
+            const GroupedTimingArm& arm = control ?
+                control_arm : candidate_arm;
+            const wirehair_v2::PrecodeSystem& active_system = control ?
+                control_system : candidate_system;
+            const wirehair_v2::PacketRowConfig& active_config = control ?
+                control_config : candidate_config;
+            const uint32_t active_attempt = control ?
+                control_attempt : candidate_attempt;
+            const WirehairResult preflight_result = control ?
+                control_preflight.Result : candidate_preflight.Result;
+            if (!ConfigureGroupedTimingArm(arm)) {
+                std::fprintf(stderr,
+                    "groupedtiming TLS reapplication failed cycle=%u "
+                    "slot=%u\n", cycle, slot);
+                return 2;
+            }
+            if (cache_state == GroupedTimingCacheState::Cold) {
+                EvictPreferredTimingCache(eviction);
+            }
+            const PreferredTimingUsage usage_before =
+                ReadPreferredTimingUsage();
+            const int cpu_before = PreferredTimingCurrentCpu();
+            const Clock::time_point begin = Clock::now();
+            wirehair_v2::PrecodeSolveStats stats;
+            std::vector<uint8_t> intermediate;
+            const WirehairResult result =
+                wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                    active_system, active_config,
+                    cell.Runtime, cell.Packets, block_bytes,
+                    intermediate, &stats);
+            const Clock::time_point end = Clock::now();
+            const int cpu_after = PreferredTimingCurrentCpu();
+            const PreferredTimingUsage usage_after =
+                ReadPreferredTimingUsage();
+            bool saturated = false;
+            const uint64_t elapsed_ns =
+                PreferredTimingElapsedNanoseconds(begin, end, saturated);
+            const int64_t minflt_delta =
+                usage_before.MinorFaults < 0 || usage_after.MinorFaults < 0 ?
+                -1 : usage_after.MinorFaults - usage_before.MinorFaults;
+            const int64_t majflt_delta =
+                usage_before.MajorFaults < 0 || usage_after.MajorFaults < 0 ?
+                -1 : usage_after.MajorFaults - usage_before.MajorFaults;
+            const uint32_t binary_def =
+                stats.InactivatedColumns >= stats.BinaryResidualRank ?
+                stats.InactivatedColumns - stats.BinaryResidualRank : 0u;
+            const uint32_t heavy_gain =
+                stats.ResidualRank >= stats.BinaryResidualRank ?
+                stats.ResidualRank - stats.BinaryResidualRank : 0u;
+            const bool outcome_stable = result == preflight_result;
+            std::printf(
+                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%u,"
+                "0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,%d,%d,%lld,%lld,"
+                "%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu\n",
+                K, block_bytes, overhead, PacketScheduleName(schedule),
+                (unsigned long long)seed, loss,
+                GroupedTimingCacheStateName(cache_state), cycle, slot,
+                control ? "control" : "candidate", arm.Period,
+                arm.GroupedRows, MixedResidueBucketModeName(arm.Buckets),
+                active_attempt,
+                (unsigned long long)active_system.Params.Seed,
+                active_config.PeelSeed,
+                (int)preflight_result, outcome_class,
+                common_success ? 1u : 0u, (int)result,
+                outcome_stable ? 1u : 0u,
+                (unsigned long long)elapsed_ns, saturated ? 1u : 0u,
+                cpu_before, cpu_after,
+                GroupedTimingCpuMigrated(cpu_before, cpu_after),
+                (long long)minflt_delta, (long long)majflt_delta,
+                GroupedTimingFaultContaminated(
+                    minflt_delta, majflt_delta),
+                stats.InactivatedColumns, binary_def, heavy_gain,
+                (unsigned long long)stats.BlockXors,
+                (unsigned long long)stats.BlockMulAdds,
+                (unsigned long long)stats.BuildNanoseconds,
+                (unsigned long long)stats.PeelNanoseconds,
+                (unsigned long long)stats.ProjectNanoseconds,
+                (unsigned long long)stats.ResidualNanoseconds,
+                (unsigned long long)stats.BackSubNanoseconds,
+                (unsigned long long)stats.MixedJointSourceXors,
+                (unsigned long long)stats.MixedJointMarginalXors,
+                (unsigned long long)stats.MixedJointMarginalCopies,
+                stats.MixedJointActiveDeltas,
+                (unsigned long long)stats.MixedJointScratchBytes,
+                (unsigned long long)stats.MixedDualSourceColumns,
+                (unsigned long long)((uint64_t)K * block_bytes),
+                (unsigned long long)packet_payload_bytes,
+                intermediate.size());
+            if (saturated || !outcome_stable ||
+                (result != Wirehair_Success && result != Wirehair_NeedMore))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming run failed cycle=%u slot=%u result=%d "
+                    "preflight=%d\n",
+                    cycle, slot, (int)result, (int)preflight_result);
                 return 2;
             }
         }
@@ -8518,7 +9212,8 @@ int main(int argc, char** argv)
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
-            "preferredattempt|preferredtiming|selftest [opts]\n");
+            "preferredattempt|preferredtiming|groupedtiming|selftest "
+            "[opts]\n");
 #else
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
@@ -8563,6 +9258,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "preferredtiming")) {
             return CmdPreferredTiming(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "groupedtiming")) {
+            return CmdGroupedTiming(argc - 2, argv + 2);
         }
 #endif
         if (!std::strcmp(argv[1], "selftest")) {

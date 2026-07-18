@@ -132,6 +132,25 @@ beside production and the V1-compatible wrapper arms.  `precodefail` runs a
 threaded fixed-overhead V2 rank/failure grid and reports inactivation and solve
 cost rather than relying on a peel-only proxy.
 
+Test builds also expose `groupedtiming` for promotion-grade, paired timing of
+the raw grouped-GF(256) completion experiments.  Each invocation binds one
+hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
+`--schedule`) and compares explicit control/candidate period, grouped-row, and
+residue-bucket settings.  It uses distinct 64-byte-aligned, prefaulted packet
+payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
+requested replacement cycle) with raw nanoseconds, internal solve phases,
+work counters, CPU migration, and fault receipts.  `--cache-state cold`
+evicts the requested `--evict-bytes` before every sample; `warm` retains the
+working set.  Here `cold` means data-cache-cold after both arm preflights;
+the command intentionally does not measure fresh-process allocator or first-
+use TLS setup costs, and receipts this as `allocator_tls_state=preflight-warmed`.
+Only rows whose preflight classification is `common-success`
+are valid paired speed observations.  All test-only TLS settings are reapplied
+outside the timer before every arm, and this command changes no named profile
+or production equation.  The benchmark records the CPU before and after each
+sample but does not choose an affinity itself; promotion runners must pin each
+process and reject rows reporting migration, faults, or saturated timing.
+
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
 `both` replays the same message seed and packet-ID schedule through both WH2
