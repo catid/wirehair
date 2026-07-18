@@ -155,6 +155,39 @@ or production equation.  The benchmark records the CPU before and after each
 sample but does not choose an affinity itself; promotion runners must pin each
 process and reject rows reporting migration, faults, or saturated timing.
 
+`bench/wh2_lazy_solve_timing.py` is the sealed cross-binary runner for the
+solve-arena change.  Its `prepare` command builds exact commits
+`243f8ed86b7bf102fa1cb7156a481c170935e57b` and
+`b9916d463998779e2be58e5711f23e60335433f8` with one compiler/configuration,
+freezes binary, source-tree, compiler, dependency, build-command, and bounded
+v1/v2 smoke receipts, and writes an immutable 108-cell ledger.  The ledger
+covers K 3200..64000, block widths 64/1280/4096, the three hard packet
+schedules, and cold/warm cache state with identical raw P48/r3 settings.  Each
+cell launches the two binaries in an outer `ABBABAAB` order while retaining
+the command's inner four-cycle `ABBABAAB` order and discarding inner cycle
+zero.  `run` is fresh-only: load fillers must already be stopped, the timing
+core and SMT sibling must be quiet, and one live CPU/eight-DIMM sampler pinned
+outside the timing LLC must be the sole I2C reader.  `reduce` and `verify`
+replay every raw row, signed fault receipt, retry, task receipt, trace/work
+identity (including the exact cold/warm graph identity), thermal cadence,
+EDAC counter, and immutable file hash before they accept the result.
+Preparation smoke output is explicitly non-timing evidence; only an isolated
+`run` can produce promotional timing evidence.
+
+```sh
+python3 bench/wh2_lazy_solve_timing.py prepare \
+  --repo . --result-dir /tmp/wh2-lazy-paired \
+  --core 8 --controller-core 126 --numa-node 0
+python3 /tmp/wh2-lazy-paired/frozen/wh2_lazy_solve_timing.py run \
+  --result-dir /tmp/wh2-lazy-paired \
+  --thermal-csv /tmp/wirehair-thermal.csv \
+  --thermal-pid-file /tmp/wirehair-thermal.pid
+python3 /tmp/wh2-lazy-paired/frozen/wh2_lazy_solve_timing.py reduce \
+  --result-dir /tmp/wh2-lazy-paired
+python3 /tmp/wh2-lazy-paired/frozen/wh2_lazy_solve_timing.py verify \
+  --result-dir /tmp/wh2-lazy-paired
+```
+
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
 `both` replays the same message seed and packet-ID schedule through both WH2
