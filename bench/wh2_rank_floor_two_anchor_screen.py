@@ -10,18 +10,25 @@ script does not locate, inspect, or depend on any H15-v5 holdout material.
 
 from __future__ import annotations
 
+import sys
+
+# This module is imported from exact-inventory frozen campaign directories.
+sys.dont_write_bytecode = True
+
 import argparse
 import concurrent.futures
 import csv
+import errno
 import hashlib
+import io
 import json
 import math
 import os
 from pathlib import Path
 import queue
 import re
+import stat
 import subprocess
-import sys
 import time
 from collections import defaultdict
 from decimal import Decimal, getcontext
@@ -89,12 +96,92 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1 << 20), b""):
-            digest.update(block)
+def sha256_file(path: Path, *, require_unique: bool = True) -> str:
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError("refusing symlink input: %s" % path) from exc
+        raise ValueError("unable to open unique regular input: %s" % path) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or
+                (require_unique and before.st_nlink != 1)):
+            raise ValueError("refusing nonunique regular input: %s" % path)
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            digest = hashlib.sha256()
+            for block in iter(lambda: source.read(1 << 20), b""):
+                digest.update(block)
+            midpoint = os.fstat(descriptor)
+            pathname_midpoint = os.stat(path, follow_symlinks=False)
+            source.seek(0)
+            confirmation = hashlib.sha256()
+            for block in iter(lambda: source.read(1 << 20), b""):
+                confirmation.update(block)
+        after = os.fstat(descriptor)
+        pathname_after = os.stat(path, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(before) != identity(midpoint) or
+            not stat.S_ISREG(pathname_midpoint.st_mode) or
+            (require_unique and pathname_midpoint.st_nlink != 1) or
+            identity(pathname_midpoint) != identity(midpoint) or
+            digest.digest() != confirmation.digest() or
+            identity(midpoint) != identity(after) or
+            not stat.S_ISREG(pathname_after.st_mode) or
+            (require_unique and pathname_after.st_nlink != 1) or
+            identity(pathname_after) != identity(after)):
+        raise ValueError("input changed while hashing: %s" % path)
     return digest.hexdigest()
+
+
+def stable_file_bytes(path: Path) -> bytes:
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError("refusing symlink input: %s" % path) from exc
+        raise ValueError("unable to open unique regular input: %s" % path) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValueError("refusing nonunique regular input: %s" % path)
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            data = source.read()
+            midpoint = os.fstat(descriptor)
+            pathname_midpoint = os.stat(path, follow_symlinks=False)
+            source.seek(0)
+            confirmation = source.read()
+        after = os.fstat(descriptor)
+        pathname_after = os.stat(path, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(before) != identity(midpoint) or
+            len(data) != before.st_size or
+            not stat.S_ISREG(pathname_midpoint.st_mode) or
+            pathname_midpoint.st_nlink != 1 or
+            identity(pathname_midpoint) != identity(midpoint) or
+            data != confirmation or
+            identity(midpoint) != identity(after) or
+            not stat.S_ISREG(pathname_after.st_mode) or
+            pathname_after.st_nlink != 1 or
+            identity(pathname_after) != identity(after)):
+        raise ValueError("input changed while reading: %s" % path)
+    return data
 
 
 def canonical_json(value: Any) -> str:
@@ -116,7 +203,8 @@ def expected_strata() -> tuple[tuple[int, str, str], ...]:
 
 
 def load_source_cells(path: Path) -> dict[str, Any]:
-    if sha256_file(path) != SOURCE_CELLS_SHA256:
+    raw = stable_file_bytes(path)
+    if sha256_bytes(raw) != SOURCE_CELLS_SHA256:
         raise ValueError("source cells SHA256 mismatch")
     required = {
         "K", "bb", "salt", "schedule", "loss", "seed_index", "seed",
@@ -132,7 +220,11 @@ def load_source_cells(path: Path) -> dict[str, Any]:
     seen_cells: set[tuple[int, int, str]] = set()
     strata: set[tuple[int, str, str]] = set()
     row_count = 0
-    with path.open("r", encoding="utf-8", newline="") as source:
+    try:
+        source_text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("source cells CSV is not UTF-8") from exc
+    with io.StringIO(source_text, newline="") as source:
         reader = csv.DictReader(source)
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             raise ValueError("source cells CSV has an unexpected schema")

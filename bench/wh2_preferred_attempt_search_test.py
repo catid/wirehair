@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, redirect_stdout
+import fcntl
 import hashlib
 import io
 import json
@@ -14,7 +15,9 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -102,6 +105,711 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             "wrapper_result_sha256": "a" * 64,
             "verified_ms": subject.now_utc_ms(),
         }
+
+    def complete_prepare_staging(
+        self,
+        staging: Path,
+        final: Path,
+        repo: Path,
+        commit: str,
+        remote: Path,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        frozen = staging / "frozen"
+        frozen.mkdir(parents=True)
+        tools = self.fake_contract(repo, commit)["system_tools"]
+        bindings = {
+            "source_commit": commit,
+            "binary_sha256": "1" * 64,
+            "script_sha256": "2" * 64,
+            "allk_sha256": "3" * 64,
+            "helper_sha256": "4" * 64,
+            "campaign_module_sha256": "5" * 64,
+            "holdout_module_sha256": "6" * 64,
+            "timing_module_sha256": "7" * 64,
+            "protocol_sha256": "8" * 64,
+            "route_context_sha256": "9" * 64,
+            "q0_identity_sha256": "",
+            "drand_wrapper_sha256": "a" * 64,
+            "drand_package_sha256": "b" * 64,
+            "drand_package_lock_sha256": "c" * 64,
+            "drand_client_bundle_sha256": "d" * 64,
+            "node": {"path": "/node", "version": "test", "sha256": "e" * 64},
+            "npm": {"path": "/npm", "version": "test", "sha256": "f" * 64},
+            "python": {"path": "/python", "version": "test", "sha256": "0" * 64},
+            "system_tools": tools,
+            "host_runtime": {"boot_id": "test"},
+            "drand_offline_selftest": {"passed": True},
+        }
+        q0_identity = {"passed": True, "comparisons": 1}
+        subject.common.atomic_json(frozen / "q0_identity.json", q0_identity)
+        bindings["q0_identity_sha256"] = subject.common.sha256_file(
+            frozen / "q0_identity.json")
+        contract = {
+            "schema": subject.SCHEMA,
+            "source_repo": str(repo),
+            "holdout_root_files_present": False,
+            **bindings,
+        }
+        subject.common.atomic_json(frozen / "contract.json", contract)
+        contract_sha256 = subject.common.sha256_file(frozen / "contract.json")
+        subject.common.atomic_write(
+            frozen / "staged.sha256",
+            subject.common.sha_manifest(
+                staging, tuple(frozen.iterdir())),
+        )
+        prepare = {
+            "schema": "wirehair.wh2.h12_preferred_attempt.prepare.v1",
+            **bindings,
+            "q0_identity": q0_identity,
+            "contract_sha256": contract_sha256,
+            "staged_seal_sha256": subject.common.sha256_file(
+                frozen / "staged.sha256"),
+            "development_seed_ledger_sha256": "1" * 64,
+            "future_beacon_contract_sha256": "2" * 64,
+            "github_remote": str(remote),
+            "result_dir": str(final),
+            "launch_state": "CLEAN_UNLAUNCHED",
+            "holdout_root_files_present": False,
+            "prepared_utc_ns": time.time_ns(),
+        }
+        subject.common.atomic_json(staging / "prepare.json", prepare)
+        return prepare, contract
+
+    def fake_timing_recovery_tools(
+        self,
+        root: Path,
+    ) -> dict[str, dict[str, str]]:
+        tools: dict[str, dict[str, str]] = {}
+        for name in subject.TIMING_HOST_RECOVERY_TOOLS:
+            path = root / name
+            path.write_bytes((f"mock {name}\n").encode("ascii"))
+            path.chmod(0o755)
+            tools[name] = {
+                "path": str(path.resolve(strict=True)),
+                "sha256": subject.common.sha256_file(path),
+            }
+        return tools
+
+    def fake_timing_host_journal(
+        self,
+        root: Path,
+        boot_id: str,
+    ) -> dict[str, object]:
+        return {
+            "schema": subject.TIMING_HOST_JOURNAL_SCHEMA,
+            "boot_id": boot_id,
+            "core": 0,
+            "siblings": [{"cpu": 64, "online": "1"}],
+            "slices": [
+                {"unit": "system.slice", "allowed": "",
+                 "effective": "0 64"},
+                {"unit": "user.slice", "allowed": "",
+                 "effective": "0 64"},
+                {"unit": "machine.slice", "allowed": "",
+                 "effective": ""},
+            ],
+            "fillers": {
+                "command": subject.TimingHostSession._filler_command_record(),
+                "count": 2,
+                "cpus": [0, 1],
+            },
+            "recovery_tools": self.fake_timing_recovery_tools(root),
+        }
+
+    def test_atomic_write_recovers_dead_partials_and_defers_sigterm(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-atomic-write-") as temporary:
+            root = Path(temporary)
+            target = root / "wave.json"
+            stale = root / ".wave.json.99999999.partial"
+            stale.write_bytes(b"stale\n")
+            subject.common.atomic_write(target, b"complete\n")
+            self.assertEqual(target.read_bytes(), b"complete\n")
+            self.assertFalse(stale.exists())
+
+            published = root / "published.json"
+            linked_marker = root / ".published.json.99999999.partial"
+            published.write_bytes(b"immutable\n")
+            os.link(published, linked_marker)
+            self.assertEqual(published.stat().st_nlink, 2)
+            subject.common.atomic_write_once_or_same(
+                published, b"immutable\n")
+            self.assertFalse(linked_marker.exists())
+            self.assertEqual(published.stat().st_nlink, 1)
+
+            readable = root / "readable.json"
+            readable_marker = root / ".readable.json.99999999.partial"
+            readable.write_bytes(b"readable\n")
+            os.link(readable, readable_marker)
+            self.assertEqual(
+                subject.common.stable_bytes(readable), b"readable\n")
+            self.assertFalse(readable_marker.exists())
+            self.assertEqual(readable.stat().st_nlink, 1)
+
+            os.link(readable, readable_marker)
+            self.assertEqual(
+                subject.common.sha256_file(readable),
+                subject.common.sha256_bytes(b"readable\n"))
+            self.assertFalse(readable_marker.exists())
+
+            os.link(readable, readable_marker)
+            self.assertEqual(
+                subject.common.sha256_file(
+                    readable, require_unique=False),
+                subject.common.sha256_bytes(b"readable\n"))
+            self.assertTrue(readable_marker.exists())
+            self.assertEqual(readable.stat().st_nlink, 2)
+            self.assertEqual(
+                subject.common.stable_bytes(readable), b"readable\n")
+            self.assertFalse(readable_marker.exists())
+
+            malicious = root / "malicious.json"
+            malicious_alias = root / "malicious-alias.json"
+            malicious.write_bytes(b"malicious\n")
+            os.link(malicious, malicious_alias)
+            with self.assertRaisesRegex(
+                    subject.common.CampaignError, "nonunique"):
+                subject.common.stable_bytes(malicious)
+            with self.assertRaisesRegex(
+                    subject.common.CampaignError, "nonunique"):
+                subject.common.sha256_file(malicious)
+            self.assertEqual(
+                subject.common.sha256_file(
+                    malicious, require_unique=False),
+                subject.common.sha256_bytes(b"malicious\n"))
+            self.assertTrue(malicious.exists())
+            self.assertTrue(malicious_alias.exists())
+
+            racy = root / "racy.json"
+            racy.write_bytes(b"old\n")
+            real_stat = subject.common.os.stat
+            changed = False
+
+            def mutate_before_named_stat(*args, **kwargs):
+                nonlocal changed
+                if (not changed and kwargs.get("dir_fd") is not None and
+                        args and args[0] == racy.name):
+                    changed = True
+                    racy.write_bytes(b"new\n")
+                return real_stat(*args, **kwargs)
+
+            with mock.patch.object(
+                    subject.common.os, "stat",
+                    side_effect=mutate_before_named_stat), \
+                 self.assertRaisesRegex(
+                     subject.common.CampaignError, "changed"):
+                subject.common.stable_bytes(racy)
+            self.assertTrue(changed)
+
+            exclusive = root / "exclusive-directory"
+            exclusive_fd = subject.common.create_durable_directory(exclusive)
+            os.close(exclusive_fd)
+            exclusive_inode = exclusive.stat().st_ino
+            with self.assertRaisesRegex(
+                    subject.common.CampaignError, "already exists"):
+                subject.common.create_durable_directory(exclusive)
+            self.assertEqual(exclusive.stat().st_ino, exclusive_inode)
+
+            fault_parent = root / "fault-parent"
+            fault_parent.mkdir()
+            parent_fd = os.open(
+                fault_parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            opened_child: list[int] = []
+            real_open = subject.common.os.open
+            real_close = subject.common.os.close
+            injected = False
+
+            def track_open(*args: object, **kwargs: object) -> int:
+                descriptor = real_open(*args, **kwargs)
+                opened_child.append(descriptor)
+                return descriptor
+
+            def fail_parent_close(descriptor: int) -> None:
+                nonlocal injected
+                if descriptor == parent_fd and not injected:
+                    injected = True
+                    real_close(descriptor)
+                    raise OSError("injected parent close failure")
+                real_close(descriptor)
+
+            with mock.patch.object(
+                    subject.common, "open_durable_directory",
+                    return_value=parent_fd), \
+                 mock.patch.object(
+                     subject.common.os, "open", side_effect=track_open), \
+                 mock.patch.object(
+                     subject.common.os, "close", side_effect=fail_parent_close), \
+                 self.assertRaisesRegex(OSError, "parent close failure"):
+                subject.common.create_durable_directory(
+                    fault_parent / "created")
+            self.assertTrue(injected)
+            self.assertEqual(len(opened_child), 1)
+            for descriptor in (parent_fd, opened_child[0]):
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+            outside = root / "outside"
+            outside.mkdir()
+            alias = root / "directory-alias"
+            alias.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(subject.CampaignError):
+                subject.common.atomic_write_once_or_same(
+                    alias / "escaped.json", b"must not escape\n")
+            self.assertFalse((outside / "escaped.json").exists())
+
+            live = root / f".wave.json.{os.getpid()}.partial"
+            live.write_bytes(b"active\n")
+            with self.assertRaisesRegex(
+                    subject.common.CampaignError, "writer is still active"):
+                subject.common.atomic_write(target, b"replacement\n")
+            self.assertEqual(live.read_bytes(), b"active\n")
+            live.unlink()
+
+            start_ticks = subject.common._process_start_ticks(os.getpid())
+            self.assertIsNotNone(start_ticks)
+            reused = root / (
+                f".wave.json.{os.getpid()}.{int(start_ticks) + 1}.partial")
+            reused.write_bytes(b"stale reused pid\n")
+            subject.common.atomic_write(target, b"replacement\n")
+            self.assertFalse(reused.exists())
+            self.assertEqual(target.read_bytes(), b"replacement\n")
+
+            live_identity = root / (
+                f".wave.json.{os.getpid()}.{start_ticks}.partial")
+            live_identity.write_bytes(b"active identity\n")
+            with self.assertRaisesRegex(
+                    subject.common.CampaignError, "writer is still active"):
+                subject.common.atomic_write(target, b"must not replace\n")
+            self.assertTrue(live_identity.exists())
+            live_identity.unlink()
+
+            signaled_target = root / "signaled.json"
+            ready = root / "ready"
+            script = "\n".join((
+                "import pathlib, sys, time",
+                f"sys.path.insert(0, {str(Path(__file__).parent)!r})",
+                "import wh2_rank_floor_two_anchor_allk as common",
+                "original_fsync = common.os.fsync",
+                "first = True",
+                "def slow_fsync(fd):",
+                "    global first",
+                "    if first:",
+                "        first = False",
+                f"        pathlib.Path({str(ready)!r}).write_bytes(b'ready')",
+                "        time.sleep(1.0)",
+                "    original_fsync(fd)",
+                "common.os.fsync = slow_fsync",
+                f"common.atomic_write(pathlib.Path({str(signaled_target)!r}), b'x' * 1024)",
+            ))
+            process = subprocess.Popen((sys.executable, "-c", script))
+            for _ in range(500):
+                if ready.exists():
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            process.terminate()
+            self.assertEqual(process.wait(timeout=5), -signal.SIGTERM)
+            self.assertEqual(signaled_target.read_bytes(), b"x" * 1024)
+            self.assertEqual(
+                list(root.glob(".signaled.json.*.partial")), [])
+
+            if hasattr(signal, "pthread_sigmask"):
+                before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                cleanup_target = root / "cleanup-failure.json"
+                try:
+                    with mock.patch.object(
+                            subject.common.os, "replace",
+                            side_effect=OSError("replace failed")), \
+                         mock.patch.object(
+                             subject.common.os, "unlink",
+                             side_effect=OSError("cleanup failed")), \
+                         self.assertRaisesRegex(OSError, "cleanup failed"):
+                        subject.common.atomic_write(cleanup_target, b"value\n")
+                    after = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    self.assertEqual(after, before)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, before)
+                    for partial in root.glob(
+                            ".cleanup-failure.json.*.partial"):
+                        partial.unlink()
+
+    def test_development_analysis_inventory_discards_dead_manifest_partial(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-analysis-inventory-") as temporary:
+            development = Path(temporary)
+            artifact = development / "summary.json"
+            artifact.write_bytes(b"sealed\n")
+            phase = development / "phase_complete.sha256"
+            phase.write_bytes(b"phase\n")
+            stale = development / \
+                ".analysis_complete.sha256.99999999.partial"
+            stale.write_bytes(b"interrupted\n")
+            self.assertEqual(
+                subject.development_analysis_inventory(
+                    development, {artifact, phase}),
+                {artifact.resolve(strict=True), phase.resolve(strict=True)})
+            self.assertFalse(stale.exists())
+            alias = development / "summary-alias.json"
+            alias.symlink_to(artifact.name)
+            with self.assertRaisesRegex(subject.CampaignError, "symlink"):
+                subject.development_analysis_inventory(
+                    development, {artifact, phase})
+            alias.unlink()
+            junk = development / "junk.txt"
+            junk.write_bytes(b"ambient\n")
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "artifact set mismatch"):
+                subject.development_analysis_inventory(
+                    development, {artifact, phase})
+
+    def test_campaign_execution_lock_is_persistent_and_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-command-lock-") as temporary:
+            result = Path(temporary).resolve()
+            with subject.campaign_execution_lock(result):
+                lock = result / "locks/campaign-execution.lock"
+                self.assertTrue(lock.is_file())
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "controller is active"):
+                    with subject.campaign_execution_lock(result):
+                        self.fail("a second controller acquired the lock")
+            self.assertTrue(lock.is_file())
+            with subject.campaign_execution_lock(result):
+                pass
+
+    def test_immutable_publication_never_overwrites_racing_target(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-publish-race-") as temporary:
+            target = Path(temporary) / "artifact.json"
+            real_link = subject.common.os.link
+
+            def competing_link(source: object, destination: object,
+                               **kwargs: object) -> None:
+                target.write_bytes(b"competitor\n")
+                real_link(source, destination, **kwargs)
+
+            with mock.patch.object(
+                    subject.common.os, "link", side_effect=competing_link), \
+                 self.assertRaises(subject.CampaignError):
+                campaign_module.durable_write_once_or_same(
+                    target, b"intended\n")
+            self.assertEqual(b"competitor\n", target.read_bytes())
+
+    def test_expected_regular_file_readers_do_not_block_on_fifo(self) -> None:
+        script = "\n".join((
+            "import os, sys, tempfile",
+            "from pathlib import Path",
+            f"sys.path.insert(0, {str(Path(__file__).parent)!r})",
+            "import wh2_preferred_attempt_search as search",
+            "import wh2_rank_floor_two_anchor_allk as common",
+            "import wh2_rank_floor_two_anchor_screen as screen",
+            "with tempfile.TemporaryDirectory() as temporary:",
+            "    fifo = Path(temporary) / 'artifact'",
+            "    os.mkfifo(fifo)",
+            "    for reader in (screen.sha256_file, "
+            "                   screen.stable_file_bytes, "
+            "                   common.stable_bytes, "
+            "                   search.fsync_existing_regular_file):",
+            "        try:",
+            "            reader(fifo)",
+            "        except (ValueError, common.CampaignError, "
+            "                search.CampaignError):",
+            "            pass",
+            "        else:",
+            "            raise AssertionError(reader)",
+        ))
+        completed = subprocess.run(
+            (sys.executable, "-c", script), capture_output=True,
+            text=True, check=False, timeout=5)
+        self.assertEqual(
+            completed.returncode, 0,
+            msg=completed.stdout + completed.stderr)
+
+    def test_frozen_module_imports_never_create_bytecode_entries(self) -> None:
+        module_names = (
+            "wh2_preferred_attempt_campaign",
+            "wh2_preferred_attempt_holdout",
+            "wh2_preferred_attempt_search",
+            "wh2_preferred_attempt_timing",
+            "wh2_rank_floor_two_anchor_allk",
+            "wh2_rank_floor_two_anchor_screen",
+        )
+        source = Path(__file__).parent
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-frozen-no-pycache-") as temporary:
+            frozen = Path(temporary)
+            for module_name in module_names:
+                shutil.copyfile(
+                    source / f"{module_name}.py",
+                    frozen / f"{module_name}.py")
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            script = (
+                "import pathlib, runpy, sys; "
+                "path=pathlib.Path(sys.argv[1]); "
+                "sys.path.insert(0, str(path.parent)); "
+                "runpy.run_path(str(path), run_name='frozen_probe'); "
+                "assert not (path.parent/'__pycache__').exists()"
+            )
+            for module_name in module_names:
+                with self.subTest(module=module_name):
+                    shutil.rmtree(frozen / "__pycache__", ignore_errors=True)
+                    completed = subprocess.run(
+                        (sys.executable, "-c", script,
+                         str(frozen / f"{module_name}.py")),
+                        env=environment, capture_output=True, text=True,
+                        check=False, timeout=10)
+                    self.assertEqual(
+                        completed.returncode, 0,
+                        msg=completed.stdout + completed.stderr)
+
+    def test_prepare_transaction_sigterm_cleanup_and_persistent_flock(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-prepare-transaction-signal-") as temporary:
+            root = Path(temporary)
+            original_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in (signal.SIGINT, signal.SIGTERM)
+            }
+            final = root / "campaign"
+            ready = root / "ready"
+            script = "\n".join((
+                "from pathlib import Path",
+                "import signal, sys, time",
+                f"sys.path.insert(0, {str(Path(__file__).parent)!r})",
+                "import wh2_preferred_attempt_search as subject",
+                "signal.signal(signal.SIGINT, signal.default_int_handler)",
+                "final, ready = Path(sys.argv[1]), Path(sys.argv[2])",
+                "with subject.atomic_result_directory(final) as transaction:",
+                "    ready.write_text(str(transaction[0]), encoding='ascii')",
+                "    time.sleep(30)",
+            ))
+            process = subprocess.Popen(
+                (sys.executable, "-c", script, str(final), str(ready)))
+            for _ in range(500):
+                if ready.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "lock is held"):
+                with subject.atomic_result_directory(final):
+                    self.fail("contending prepare unexpectedly acquired the lock")
+            process.terminate()
+            self.assertEqual(process.wait(timeout=5), -signal.SIGTERM)
+            lock = root / ".campaign.prepare.lock"
+            self.assertTrue(lock.is_file())
+            lock_inode = lock.stat().st_ino
+            self.assertEqual(
+                [path for path in root.iterdir()
+                 if path.is_dir() and path.name.startswith(".campaign.prepare")],
+                [],
+            )
+            self.assertEqual(
+                {signum: signal.getsignal(signum)
+                 for signum in (signal.SIGINT, signal.SIGTERM)},
+                original_handlers,
+            )
+
+            interrupt_final = root / "interrupt-campaign"
+            interrupt_ready = root / "interrupt-ready"
+            interrupted = subprocess.Popen((
+                sys.executable, "-c", script, str(interrupt_final),
+                str(interrupt_ready),
+            ), stderr=subprocess.DEVNULL)
+            for _ in range(500):
+                if interrupt_ready.exists() or interrupted.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(interrupt_ready.exists())
+            interrupted.send_signal(signal.SIGINT)
+            self.assertEqual(interrupted.wait(timeout=5), -signal.SIGINT)
+            self.assertEqual(
+                [path for path in root.iterdir() if path.is_dir() and
+                 path.name.startswith(".interrupt-campaign.prepare")],
+                [],
+            )
+
+            legacy_final = root / "legacy-campaign"
+            legacy_lock = root / ".legacy-campaign.prepare.lock"
+            legacy_lock.write_text("pid=99999999\n", encoding="ascii")
+            legacy_staging = root / ".legacy-campaign.prepare-99999999"
+            legacy_staging.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "fixture stop"):
+                with subject.atomic_result_directory(legacy_final):
+                    self.assertFalse(legacy_staging.exists())
+                    raise RuntimeError("fixture stop")
+            self.assertTrue(legacy_lock.read_text(encoding="ascii").startswith(
+                "schema=wirehair.wh2.prepare_lock.v1\n"))
+
+            live_final = root / "live-legacy-campaign"
+            live_lock = root / ".live-legacy-campaign.prepare.lock"
+            live_lock.write_text(f"pid={os.getpid()}\n", encoding="ascii")
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "legacy prepare owner is still active"):
+                with subject.atomic_result_directory(live_final):
+                    self.fail("live legacy owner was ignored")
+
+            returning_final = root / "returning-handler-campaign"
+            previous_term = signal.signal(signal.SIGTERM, lambda *_args: None)
+
+            def returning_delivery(_pid: int, signum: int) -> None:
+                handler = signal.getsignal(signum)
+                self.assertTrue(callable(handler))
+                handler(signum, None)
+
+            try:
+                with mock.patch.object(
+                        subject.os, "kill", side_effect=returning_delivery), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError,
+                         "handler returned without terminating"):
+                    with subject.atomic_result_directory(returning_final):
+                        signal.raise_signal(signal.SIGTERM)
+                    self.fail("interrupted prepare continued after its body")
+            finally:
+                signal.signal(signal.SIGTERM, previous_term)
+
+            stale = root / ".campaign.prepare-99999999"
+            stale.mkdir()
+            (stale / "incomplete").write_bytes(b"discard me\n")
+            with self.assertRaisesRegex(RuntimeError, "fixture stop"):
+                with subject.atomic_result_directory(
+                        final, create=False) as transaction:
+                    self.assertFalse(stale.exists())
+                    self.assertIsNone(transaction[2])
+                    raise RuntimeError("fixture stop")
+            self.assertEqual(lock.stat().st_ino, lock_inode)
+            self.assertEqual(
+                [path for path in root.iterdir()
+                 if path.is_dir() and path.name.startswith(".campaign.prepare")],
+                [],
+            )
+            self.assertEqual(
+                {signum: signal.getsignal(signum)
+                 for signum in (signal.SIGINT, signal.SIGTERM)},
+                original_handlers,
+            )
+
+    def test_prepare_transaction_reconciles_complete_staging(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-prepare-transaction-recover-") as temporary:
+            root = Path(temporary).resolve()
+            repo, commit = self.fake_repo(root)
+            remote = root / "origin.git"
+            final = root / "campaign"
+            staging = root / ".campaign.prepare-99999999"
+            staging.mkdir()
+            prepare, contract = self.complete_prepare_staging(
+                staging, final, repo, commit, remote)
+            environment = os.environ.copy()
+            with mock.patch.object(
+                    subject, "newest_github_agent_environment",
+                    return_value=environment):
+                prepare_sha256 = subject.common.sha256_file(
+                    staging / "prepare.json")
+                published_before_crash = subject.publish_r1_freeze_tag(
+                    repo, prepare, prepare_sha256,
+                    contract["system_tools"])
+                self.assertFalse(
+                    (staging / "frozen/r1_freeze_publication.json").exists())
+                with subject.atomic_result_directory(final) as transaction:
+                    self.assertEqual(transaction[0], final)
+                    self.assertEqual(transaction[1], final)
+                    self.assertEqual(transaction[2], prepare)
+                subject.verify_r1_freeze_publication(
+                    final, prepare, contract)
+            self.assertFalse(staging.exists())
+            self.assertTrue(final.is_dir())
+            self.assertTrue(
+                (final / "frozen/r1_freeze_publication.json").is_file())
+            self.assertEqual(subject.load_fixed_json(
+                final / "frozen/r1_freeze_publication.json",
+                "recovered R1 receipt")["tag_object"],
+                published_before_crash["tag_object"])
+
+            absent = root / "absent-campaign"
+            with subject.atomic_result_directory(
+                    absent, create=False) as transaction:
+                self.assertEqual(transaction, (absent, absent, None))
+                self.assertFalse(absent.exists())
+                self.assertFalse(
+                    (root / ".absent-campaign.prepare.partial").exists())
+
+            broken_final = root / "broken-campaign"
+            broken_staging = root / ".broken-campaign.prepare.partial"
+            broken_staging.mkdir()
+            self.complete_prepare_staging(
+                broken_staging, broken_final, repo, commit, remote)
+            subject.common.atomic_json(
+                broken_staging / "frozen/r1_freeze_publication.json",
+                {"status": "malformed"},
+            )
+            with mock.patch.object(
+                    subject, "newest_github_agent_environment",
+                    return_value=environment), self.assertRaises(
+                        subject.CampaignError):
+                with subject.atomic_result_directory(broken_final):
+                    self.fail("malformed complete staging was accepted")
+            self.assertTrue(broken_staging.is_dir())
+            self.assertTrue((broken_staging / "prepare.json").is_file())
+            self.assertFalse(broken_final.exists())
+
+    def test_prepare_sigterm_finalizes_complete_staging(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-prepare-complete-signal-") as temporary:
+            root = Path(temporary).resolve()
+            repo, commit = self.fake_repo(root)
+            remote = root / "origin.git"
+            final = root / "campaign"
+            template = root / "template"
+            template.mkdir()
+            prepare, contract = self.complete_prepare_staging(
+                template, final, repo, commit, remote)
+            ready = root / "ready"
+            script = "\n".join((
+                "from pathlib import Path",
+                "import os, shutil, sys, time",
+                f"sys.path.insert(0, {str(Path(__file__).parent)!r})",
+                "import wh2_preferred_attempt_search as subject",
+                "final, template, ready = map(Path, sys.argv[1:])",
+                "subject.newest_github_agent_environment = "
+                "lambda _tools: os.environ.copy()",
+                "with subject.atomic_result_directory(final) as transaction:",
+                "    staging = transaction[0]",
+                "    shutil.copytree(template / 'frozen', staging / 'frozen')",
+                "    shutil.copyfile(template / 'prepare.json', "
+                "staging / 'prepare.json')",
+                "    ready.write_bytes(b'ready')",
+                "    time.sleep(30)",
+            ))
+            process = subprocess.Popen((
+                sys.executable, "-c", script, str(final), str(template),
+                str(ready),
+            ))
+            for _ in range(500):
+                if ready.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            process.terminate()
+            self.assertEqual(process.wait(timeout=10), -signal.SIGTERM)
+            self.assertTrue(final.is_dir())
+            self.assertEqual(
+                [path for path in root.iterdir()
+                 if path.is_dir() and path.name.startswith(".campaign.prepare")],
+                [],
+            )
+            self.assertTrue(
+                (final / "frozen/r1_freeze_publication.json").is_file())
+            with mock.patch.object(
+                    subject, "newest_github_agent_environment",
+                    return_value=os.environ.copy()):
+                subject.verify_r1_freeze_publication(
+                    final, prepare, contract)
 
     def test_quicknet_formula_and_root_goldens(self) -> None:
         subject.validate_beacon_contract_kats()
@@ -354,6 +1062,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             (frozen / "binary").symlink_to(alias.name)
             with self.assertRaises(subject.CampaignError):
                 subject.verify_frozen_staged_anchor(result, prepare)
+
             (frozen / "binary").unlink()
             alias.rename(frozen / "binary")
             subject.verify_frozen_staged_anchor(result, prepare)
@@ -399,6 +1108,131 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             with self.assertRaises(subject.CampaignError):
                 subject.verify_prepare_contract_bindings(
                     frozen, mutated_q0, contract)
+
+    def test_seal_attempt_never_replaces_a_dangling_final_name(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-seal-name-") as temporary:
+            result = Path(temporary).resolve()
+            spec = subject.HOLDOUT_PHASES["h1"]
+            seal_record = {"schema": "test.seal.v1"}
+            seal_bytes = subject.fixed_json_bytes(seal_record)
+            seal_sha256 = hashlib.sha256(seal_bytes).hexdigest()
+            seal_parent = result / "seals" / spec.seal_tree
+            seal_parent.mkdir(parents=True)
+            final = seal_parent / seal_sha256
+            final.symlink_to("missing-seal-directory", target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "digest already exists"):
+                subject.write_seal_attempt(
+                    result, spec, b"manifest\n", seal_record, seal_bytes)
+            self.assertTrue(final.is_symlink())
+
+    def test_directory_publication_never_replaces_a_racing_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wh2-dir-publish-") as temporary:
+            parent = Path(temporary).resolve()
+            source = parent / "staging"
+            target = parent / "published"
+            source.mkdir()
+            target.mkdir()
+            source_inode = source.stat().st_ino
+            target_inode = target.stat().st_ino
+
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "target already exists"):
+                subject.rename_directory_noreplace(source, target)
+            self.assertEqual(source.stat().st_ino, source_inode)
+            self.assertEqual(target.stat().st_ino, target_inode)
+
+            target.rmdir()
+            subject.rename_directory_noreplace(source, target)
+            self.assertFalse(source.exists())
+            self.assertEqual(target.stat().st_ino, source_inode)
+
+    def test_candidate_build_policy_is_exact_native_release(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-build-policy-") as temporary:
+            repo = Path(temporary).resolve()
+            cache = repo / "CMakeCache.txt"
+            entries = {
+                "CMAKE_BUILD_TYPE": ("STRING", "Release"),
+                "BUILD_TESTS": ("BOOL", "ON"),
+                "BUILD_CODEC_V2": ("BOOL", "ON"),
+                "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
+                "MARCH_NATIVE": ("BOOL", "ON"),
+                "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
+                "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
+                "WH_LTO": ("STRING", "OFF"),
+                "WH_PGO_MODE": ("STRING", "OFF"),
+                "CMAKE_C_FLAGS": ("STRING", ""),
+                "CMAKE_CXX_FLAGS": ("STRING", ""),
+                "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+                "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+                "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
+                "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+                "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
+                "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
+                "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
+                "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+                "CMAKE_C_COMPILER": ("FILEPATH", "/usr/bin/cc"),
+                "CMAKE_CXX_COMPILER": ("FILEPATH", "/usr/bin/c++"),
+                "CMAKE_GENERATOR": ("INTERNAL", "Unix Makefiles"),
+                "CMAKE_HOME_DIRECTORY": ("INTERNAL", str(repo)),
+            }
+
+            def publish(values: dict[str, tuple[str, str]]) -> None:
+                cache.write_text("".join(
+                    f"{key}:{kind}={value}\n"
+                    for key, (kind, value) in values.items()),
+                    encoding="utf-8")
+
+            publish(entries)
+            policy = subject.validate_candidate_build_policy(cache, repo)
+            self.assertTrue(policy["march_native"])
+            self.assertEqual(policy["build_type"], "Release")
+            self.assertTrue(policy["tests_enabled"])
+            for key, value in (
+                    ("MARCH_NATIVE", ("BOOL", "OFF")),
+                    ("WH_PGO_MODE", ("STRING", "USE")),
+                    ("CMAKE_CONFIGURATION_TYPES",
+                     ("STRING", "Debug;Release")),
+                    ("CMAKE_GENERATOR",
+                     ("INTERNAL", "Ninja Multi-Config")),
+                    ("CMAKE_CXX_FLAGS_RELEASE",
+                     ("STRING", "-O3 -DNDEBUG -fsanitize=address"))):
+                with self.subTest(key=key):
+                    mutated = dict(entries)
+                    mutated[key] = value
+                    publish(mutated)
+                    with self.assertRaises(subject.CampaignError):
+                        subject.validate_candidate_build_policy(cache, repo)
+
+    def test_prepared_result_root_rejects_relocation_and_aliases(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-result-root-binding-") as temporary:
+            parent = Path(temporary).resolve()
+            original = parent / "campaign"
+            original.mkdir()
+            prepare = {"result_dir": str(original)}
+            self.assertEqual(
+                subject.verify_prepared_result_root(original, prepare),
+                original)
+
+            relocated = parent / "campaign-copy"
+            relocated.mkdir()
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "differs from the public freeze"):
+                subject.verify_prepared_result_root(relocated, prepare)
+
+            alias = parent / "campaign-alias"
+            alias.symlink_to(original, target_is_directory=True)
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "differs from the public freeze"):
+                subject.verify_prepared_result_root(alias, prepare)
+
+            noncanonical = {"result_dir": str(original) + "/."}
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "differs from the public freeze"):
+                subject.verify_prepared_result_root(original, noncanonical)
 
     def test_phase_manifests_exclude_only_operational_locks(self) -> None:
         for phase, spec in subject.HOLDOUT_PHASES.items():
@@ -460,7 +1294,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 result, phase_files))
             analysis_path = development / "analysis_complete.sha256"
             analysis_path.write_bytes(subject.common.sha_manifest(
-                result, {table_path}))
+                result, {phase_path, table_path}))
 
             route_context = "7" * 64
             contract = {
@@ -522,6 +1356,58 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             "h1/route_cache/index.json",
             "h1/route_cache/index.json.sha256",
         }.issubset(required))
+        self.assertIn(
+            "verify_h1_seal_readiness", subject.run_h1.__code__.co_names)
+
+    def test_holdout_wrapper_failure_replay_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-wave-failure-replay-") as temporary:
+            waves = Path(temporary)
+            seal_sha256 = "1" * 64
+            wrapper_failure = {
+                "schema": "wirehair.wh2.drand_quicknet_wave.v1",
+                "status": "PERMANENT_WRAPPER_FAILURE",
+                "stdout_sha256": "2" * 64,
+                "stderr_sha256": "3" * 64,
+                "returncode": 1,
+            }
+
+            def outer(wave: int, completed_ms: int,
+                      result: dict[str, object], returncode: int,
+                      stderr_sha256: str) -> dict[str, object]:
+                return {
+                    "schema": "wirehair.wh2.holdout_wave_record.v1",
+                    "phase": "h1",
+                    "seal_record_sha256": seal_sha256,
+                    "wave": wave,
+                    "completed_ms": completed_ms,
+                    "wrapper_returncode": returncode,
+                    "wrapper_stderr_sha256": stderr_sha256,
+                    "result": result,
+                }
+
+            path = waves / "wave-000001.json"
+            valid = outer(1, 10, wrapper_failure, 1, "3" * 64)
+            subject.atomic_fixed_json_once(path, valid)
+            self.assertEqual(len(subject.load_existing_wave_records(
+                waves, "h1", seal_sha256, 123)), 1)
+            original = path.read_bytes()
+            for mutation in ("extra", "stderr", "returncode", "negative"):
+                path.unlink()
+                changed = json.loads(original)
+                if mutation == "extra":
+                    changed["result"]["extra"] = True
+                elif mutation == "stderr":
+                    changed["result"]["stderr_sha256"] = "4" * 64
+                elif mutation == "returncode":
+                    changed["result"]["returncode"] = 2
+                else:
+                    changed["completed_ms"] = -1
+                subject.atomic_fixed_json_once(path, changed)
+                with self.subTest(mutation=mutation), self.assertRaises(
+                        subject.CampaignError):
+                    subject.load_existing_wave_records(
+                        waves, "h1", seal_sha256, 123)
 
     def test_distinct_cpu_and_dimm_thermal_limits(self) -> None:
         def row(monotonic: int, cpu_c: int, dimm_c: int) -> bytes:
@@ -569,6 +1455,422 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 subject.thermal_finish(
                     thermal, mark, root / "invalid.csv", limit_c=85.0,
                     dimm_limit_c=float("nan"))
+
+    def test_timing_missing_sidecar_repair_requires_host_lock(self) -> None:
+        timing = argparse.Namespace(
+            PANEL_RESULT_NAME="panel.json",
+            PANEL_RESULT_SIDECAR_NAME="panel.json.sha256")
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-lock-repair-") as temporary:
+            panel = Path(temporary) / "panel"
+            self.assertTrue(
+                subject.timing_panel_needs_host_lock(timing, panel))
+            panel.mkdir()
+            self.assertFalse(
+                subject.timing_panel_needs_host_lock(timing, panel))
+            (panel / "panel.json").write_bytes(b"{}\n")
+            self.assertTrue(
+                subject.timing_panel_needs_host_lock(timing, panel))
+            (panel / "panel.json.sha256").symlink_to("missing")
+            self.assertFalse(
+                subject.timing_panel_needs_host_lock(timing, panel))
+            journal = Path(temporary) / "host-journal.json"
+            self.assertFalse(subject.timing_host_lock_required(
+                timing, (panel,), journal))
+            journal.write_bytes(b"stale host state\n")
+            self.assertTrue(subject.timing_host_lock_required(
+                timing, (panel,), journal))
+
+    def test_timing_host_journal_precedes_first_mocked_mutation(self) -> None:
+        boot_id = "11111111-2222-3333-4444-555555555555"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(64,), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-host-order-") as temporary:
+            root = Path(temporary).resolve()
+            record = self.fake_timing_host_journal(root, boot_id)
+            session = subject.TimingHostSession(
+                {"system_tools": {}}, timing, 0)
+            session.lock_path = root / "host.lock"
+            session.journal_path = root / "host.json"
+            events: list[str] = []
+            real_write = session._write_host_journal
+
+            def write_journal(value: dict[str, object]) -> None:
+                real_write(value)
+                self.assertTrue(session.journal_path.exists())
+                events.append("durable-journal")
+
+            def first_mutation() -> None:
+                self.assertTrue(session.journal_path.exists())
+                events.append("first-mutation")
+                raise subject.CampaignError("simulated mutation failure")
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}))
+                stack.enter_context(mock.patch.object(
+                    session, "_install_signal_handlers"))
+                stack.enter_context(mock.patch.object(
+                    session, "_quiesce_signal_handlers"))
+                stack.enter_context(mock.patch.object(
+                    session, "_restore_signal_handlers"))
+                stack.enter_context(mock.patch.object(
+                    session, "checked", return_value=b""))
+                stack.enter_context(mock.patch.object(
+                    session, "tool", side_effect=lambda name: f"/mock/{name}"))
+                stack.enter_context(mock.patch.object(
+                    session, "_snapshot_host_journal", return_value=record))
+                stack.enter_context(mock.patch.object(
+                    session, "_write_host_journal",
+                    side_effect=write_journal))
+                stack.enter_context(mock.patch.object(
+                    session, "_validate_restored_host_journal"))
+                stack.enter_context(mock.patch.object(
+                    session, "_stop_fillers", side_effect=first_mutation))
+                stack.enter_context(mock.patch.object(
+                    session, "_restore_host_state", return_value=[]))
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "simulated mutation failure"):
+                    session.__enter__()
+            self.assertEqual(
+                events, ["durable-journal", "first-mutation"])
+            self.assertFalse(session.journal_path.exists())
+            self.assertIsNone(session.lock_fd)
+
+    def test_timing_host_never_signals_a_reused_numeric_pid(self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        session = subject.TimingHostSession({}, timing, 0)
+        with mock.patch.object(
+                session, "_process_start_ticks", return_value=200), \
+             mock.patch.object(
+                 subject.os, "pidfd_open", return_value=77, create=True), \
+             mock.patch.object(
+                 subject.signal, "pidfd_send_signal", create=True) as send, \
+             mock.patch.object(subject.os, "close") as close:
+            session._terminate_process_identities(((12345, 100),))
+        send.assert_not_called()
+        close.assert_called_once_with(77)
+
+    def test_timing_host_journal_discharge_is_descriptor_bound(self) -> None:
+        boot_id = "11111111-2222-3333-4444-555555555555"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-journal-binding-") as temporary:
+            root = Path(temporary).resolve()
+            record = self.fake_timing_host_journal(root, boot_id)
+            session = subject.TimingHostSession({}, timing, 0)
+            session.journal_path = root / "host.json"
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}):
+                session._write_host_journal(record)
+            original = session.journal_path.with_name("original.json")
+            session.journal_path.rename(original)
+            session.journal_path.write_bytes(session.journal_bytes or b"")
+            os.chmod(session.journal_path, 0o600)
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "changed while being read"):
+                session._delete_host_journal()
+            self.assertTrue(session.journal_path.exists())
+            self.assertTrue(original.exists())
+            session._clear_host_snapshot()
+
+    def test_timing_host_recovers_linked_journal_commit_window(self) -> None:
+        boot_id = "11111111-2222-3333-4444-555555555555"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-journal-linked-") as temporary:
+            root = Path(temporary).resolve()
+            record = self.fake_timing_host_journal(root, boot_id)
+            writer = subject.TimingHostSession({}, timing, 0)
+            writer.journal_path = root / "host.json"
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}):
+                writer._write_host_journal(record)
+            writer._clear_host_snapshot()
+            marker = root / ".host.json.99999999.partial"
+            os.link(writer.journal_path, marker)
+            self.assertEqual(writer.journal_path.stat().st_nlink, 2)
+
+            recovery = subject.TimingHostSession({}, timing, 0)
+            recovery.journal_path = writer.journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}):
+                self.assertEqual(recovery._load_host_journal(), record)
+            self.assertFalse(marker.exists())
+            self.assertEqual(writer.journal_path.stat().st_nlink, 1)
+            recovery._clear_host_snapshot()
+
+    def test_timing_host_rejects_nonprivate_global_lock(self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-lock-mode-") as temporary:
+            root = Path(temporary).resolve()
+            lock = root / "host.lock"
+            lock.write_bytes(b"")
+            lock.chmod(0o644)
+            session = subject.TimingHostSession({}, timing, 0)
+            session.lock_path = lock
+            session.journal_path = root / "host.json"
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "unique regular file"):
+                session.__enter__()
+            self.assertIsNone(session.lock_fd)
+
+    def test_timing_host_lock_acquisition_error_closes_descriptor(self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-lock-error-") as temporary:
+            root = Path(temporary).resolve()
+            session = subject.TimingHostSession({}, timing, 0)
+            session.lock_path = root / "host.lock"
+            session.journal_path = root / "host.json"
+            real_open = os.open
+            descriptors: list[int] = []
+
+            def opened(*args: object, **kwargs: object) -> int:
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with mock.patch.object(subject.os, "open", side_effect=opened), \
+                 mock.patch.object(
+                     subject.os, "fstat", side_effect=OSError("fstat fault")), \
+                 self.assertRaisesRegex(OSError, "fstat fault"):
+                session.__enter__()
+            self.assertIsNone(session.lock_fd)
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+
+    def test_timing_host_malformed_journal_closes_bound_descriptor(self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        session = subject.TimingHostSession({}, timing, 0)
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        with mock.patch.object(
+                session, "_open_bound_host_journal",
+                return_value=(descriptor, b"[")), \
+             mock.patch.object(
+                 subject.json, "loads", side_effect=RecursionError("deep")), \
+             self.assertRaisesRegex(RecursionError, "deep"):
+            session._load_host_journal()
+        self.assertIsNone(session.journal_fd)
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
+    def test_timing_host_clear_error_still_releases_global_lock(self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-close-error-") as temporary:
+            lock = Path(temporary) / "host.lock"
+            descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            session = subject.TimingHostSession({}, timing, 0)
+            session.lock_fd = descriptor
+            with mock.patch.object(
+                    session, "_quiesce_signal_handlers"), \
+                 mock.patch.object(session, "_restore_signal_handlers"), \
+                 mock.patch.object(
+                     session, "_clear_host_snapshot",
+                     side_effect=OSError("journal close fault")), \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "journal close fault"):
+                session.close()
+            self.assertIsNone(session.lock_fd)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_timing_host_recovers_durable_crash_journal_exactly(self) -> None:
+        boot_id = "11111111-2222-3333-4444-555555555555"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(64,), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-host-journal-") as temporary:
+            root = Path(temporary).resolve()
+            journal_path = root / "host.json"
+            record = self.fake_timing_host_journal(root, boot_id)
+            writer = subject.TimingHostSession({}, timing, 0)
+            writer.journal_path = journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}):
+                writer._write_host_journal(record)
+            persisted = journal_path.read_bytes()
+            self.assertIn(b'"recovery_tools"', persisted)
+            self.assertIn(b'"single_cpu_affinity": true', persisted)
+
+            # Simulate the state left by a hard kill after all mutations: the
+            # sibling is offline, cgroups are narrowed, and fillers are gone.
+            sibling_state = {64: "0"}
+            allowed = {unit: "1" for unit in subject.TIMING_HOST_UNITS}
+            effective = {unit: "1" for unit in subject.TIMING_HOST_UNITS}
+            desired_effective = {
+                item["unit"]: item["effective"]
+                for item in record["slices"]
+            }
+            filler_inventory: list[
+                tuple[
+                    tuple[int, ...], tuple[int, ...],
+                    tuple[tuple[int, int], ...],
+                ]
+            ] = [((), (), ())]
+            events: list[tuple[object, ...]] = []
+
+            def write_online(cpu: int, value: str) -> None:
+                self.assertEqual(
+                    recovery.tools, record["recovery_tools"])
+                events.append(("online", cpu, value))
+                sibling_state[cpu] = value
+
+            def set_allowed(unit: str, value: str) -> None:
+                self.assertEqual(
+                    recovery.tools, record["recovery_tools"])
+                events.append(("allowed", unit, value))
+                allowed[unit] = value.replace(",", " ")
+                effective[unit] = (
+                    value.replace(",", " ")
+                    if value else desired_effective[unit])
+
+            def restart_fillers() -> None:
+                self.assertEqual(
+                    recovery.tools, record["recovery_tools"])
+                events.append(("fillers",))
+                filler_inventory[0] = (
+                    (101, 102), (0, 1), ((101, 1), (102, 1)))
+
+            recovery = subject.TimingHostSession({}, timing, 0)
+            recovery.journal_path = journal_path
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_read_sibling_state",
+                    side_effect=lambda cpu: sibling_state[cpu]))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_write_online", side_effect=write_online))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_set_allowed", side_effect=set_allowed))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_systemctl_allowed",
+                    side_effect=lambda unit: allowed[unit]))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_systemctl_effective",
+                    side_effect=lambda unit: effective[unit]))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_restart_fillers",
+                    side_effect=restart_fillers))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_filler_inventory",
+                    side_effect=lambda: filler_inventory[0]))
+                stack.enter_context(mock.patch.object(
+                    recovery, "_matching_filler_inventory",
+                    side_effect=lambda: filler_inventory[0]))
+                recovery._recover_existing_host_journal()
+
+            self.assertFalse(journal_path.exists())
+            self.assertEqual(sibling_state, {64: "1"})
+            self.assertEqual(allowed, {
+                unit: "" for unit in subject.TIMING_HOST_UNITS})
+            self.assertEqual(effective, desired_effective)
+            self.assertEqual(
+                filler_inventory[0],
+                ((101, 102), (0, 1), ((101, 1), (102, 1))))
+            self.assertEqual(events[0], ("online", 64, "1"))
+            self.assertEqual(events[-1], ("fillers",))
+            self.assertIsNone(recovery.journal_record)
+            self.assertIsNone(recovery.journal_bytes)
+
+    def test_timing_host_retains_cross_boot_journal_without_mutation(self) -> None:
+        old_boot = "11111111-2222-3333-4444-555555555555"
+        new_boot = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(64,), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-host-old-boot-") as temporary:
+            root = Path(temporary).resolve()
+            journal_path = root / "host.json"
+            record = self.fake_timing_host_journal(root, old_boot)
+            writer = subject.TimingHostSession({}, timing, 0)
+            writer.journal_path = journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": old_boot}):
+                writer._write_host_journal(record)
+            persisted = journal_path.read_bytes()
+
+            recovery = subject.TimingHostSession({}, timing, 0)
+            recovery.journal_path = journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": new_boot}), \
+                 mock.patch.object(recovery, "_write_online") as write_online, \
+                 mock.patch.object(recovery, "_set_allowed") as set_allowed, \
+                 mock.patch.object(
+                     recovery, "_restart_fillers") as restart_fillers, \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "different boot"):
+                recovery._recover_existing_host_journal()
+            write_online.assert_not_called()
+            set_allowed.assert_not_called()
+            restart_fillers.assert_not_called()
+            self.assertEqual(journal_path.read_bytes(), persisted)
+
+    def test_timing_host_journal_survives_failed_exact_validation(self) -> None:
+        boot_id = "11111111-2222-3333-4444-555555555555"
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(64,), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-host-retained-") as temporary:
+            root = Path(temporary).resolve()
+            journal_path = root / "host.json"
+            record = self.fake_timing_host_journal(root, boot_id)
+            writer = subject.TimingHostSession({}, timing, 0)
+            writer.journal_path = journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}):
+                writer._write_host_journal(record)
+            persisted = journal_path.read_bytes()
+
+            recovery = subject.TimingHostSession({}, timing, 0)
+            recovery.journal_path = journal_path
+            with mock.patch.object(
+                    subject, "host_runtime_identity",
+                    return_value={"boot_id": boot_id}), \
+                 mock.patch.object(
+                     recovery, "_restore_host_state",
+                     return_value=[subject.CampaignError(
+                         "exact validation failed")]), \
+                 mock.patch.object(
+                     recovery, "_delete_host_journal") as delete, \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "exact validation failed"):
+                recovery._recover_existing_host_journal()
+            delete.assert_not_called()
+            self.assertEqual(journal_path.read_bytes(), persisted)
 
     def test_timing_host_defers_signals_until_mocked_restore_finishes(self) -> None:
         timing = mock.Mock()
@@ -717,33 +2019,222 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     return_value=None,
                 ))
                 stack.enter_context(redirect_stdout(io.StringIO()))
+                dangling_state = result / "beacon/h1/state.json"
+                dangling_state.parent.mkdir(parents=True, exist_ok=True)
+                dangling_state.symlink_to("missing-state.json")
+                with self.assertRaises(subject.CampaignError):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertTrue(dangling_state.is_symlink())
+                dangling_state.unlink()
                 self.assertEqual(subject.seal_holdout(argparse.Namespace(
                     result_dir=result, phase="h1")), 0)
                 state = subject.load_fixed_json(
                     result / "beacon/h1/state.json", "test state")
-                _attempt, _manifest, seal, _seal_sha = subject.load_seal_attempt(
+                attempt, _manifest, seal, _seal_sha = subject.load_seal_attempt(
                     result, subject.HOLDOUT_PHASES["h1"], state)
+                publication_path = attempt / "publication.json"
+                publication_bytes = publication_path.read_bytes()
+                stale_publication = attempt / \
+                    ".publication.json.99999999.partial"
+                stale_publication.write_bytes(b"interrupted receipt\n")
+                interrupted_state = dict(state)
+                interrupted_state["status"] = "SEALED"
+                for key in (
+                        "tag_name", "tag_object", "publication_confirmed_ms"):
+                    interrupted_state.pop(key)
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+                with mock.patch.object(
+                        subject, "publish_seal_tag",
+                        side_effect=AssertionError("must not republish")), \
+                     mock.patch.object(
+                         subject, "now_utc_ms",
+                         return_value=seal["round_time_ms"] - 1):
+                    self.assertEqual(subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1")), 0)
+                state = subject.load_fixed_json(
+                    result / "beacon/h1/state.json", "recovered state")
+                self.assertEqual(state["status"], "WAITING_UNTIL_T")
+                self.assertEqual(publication_path.read_bytes(), publication_bytes)
+                self.assertFalse(stale_publication.exists())
+                waiting_state = dict(state)
+
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+                with mock.patch.object(
+                        subject, "now_utc_ms",
+                        return_value=seal["round_time_ms"] + 1), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError,
+                         "durability could not be reconfirmed"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertEqual(
+                    subject.load_fixed_json(
+                        result / "beacon/h1/state.json", "unproven recovery")
+                    ["status"],
+                    "ABANDONED_PUBLICATION_UNPROVEN_LATE")
+                self.assertEqual(publication_path.read_bytes(), publication_bytes)
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+
+                confirmed_late_start = subject.load_fixed_json(
+                    publication_path, "test confirmed publication")
+                confirmed_late_start["receipt_write_started_ms"] = \
+                    seal["round_time_ms"]
+                subject.atomic_state_json(
+                    publication_path, confirmed_late_start)
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "started at or after T"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertEqual(
+                    subject.load_fixed_json(
+                        result / "beacon/h1/state.json", "late-start recovery")
+                    ["status"], "ABANDONED_PUBLICATION_LATE")
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+                subject.common.atomic_write(publication_path, publication_bytes)
+
+                impossible_late = subject.load_fixed_json(
+                    publication_path, "test publication")
+                impossible_late["status"] = "ABANDONED_LATE"
+                subject.atomic_state_json(publication_path, impossible_late)
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+                impossible_bytes = publication_path.read_bytes()
+                with mock.patch.object(
+                        subject, "publish_seal_tag",
+                        side_effect=AssertionError("must not republish")), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "publication receipt mismatch"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertEqual(
+                    subject.load_fixed_json(
+                        result / "beacon/h1/state.json", "failed recovery")
+                    ["status"], "SEALED")
+                self.assertEqual(publication_path.read_bytes(), impossible_bytes)
+
+                null_late = dict(impossible_late)
+                null_late["confirmed_ms"] = seal["round_time_ms"]
+                null_late["receipt_write_started_ms"] = \
+                    seal["round_time_ms"]
+                null_late["receipt_persisted_ms"] = None
+                subject.atomic_state_json(publication_path, null_late)
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "publication receipt mismatch"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertEqual(
+                    subject.load_fixed_json(
+                        result / "beacon/h1/state.json", "null recovery")
+                    ["status"], "SEALED")
+
+                first_write_late = dict(impossible_late)
+                first_write_late["confirmed_ms"] = seal["round_time_ms"]
+                first_write_late["receipt_write_started_ms"] = \
+                    seal["round_time_ms"]
+                subject.atomic_state_json(publication_path, first_write_late)
+                with mock.patch.object(
+                        subject, "publish_seal_tag",
+                        side_effect=AssertionError("must not republish")), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "completed at or after T"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                self.assertEqual(
+                    subject.load_fixed_json(
+                        result / "beacon/h1/state.json", "first-write late")
+                    ["status"], "ABANDONED_PUBLICATION_LATE")
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", interrupted_state)
+
+                abandoned_late = dict(impossible_late)
+                abandoned_late["receipt_persisted_ms"] = \
+                    seal["round_time_ms"]
+                subject.atomic_state_json(publication_path, abandoned_late)
+                abandoned_bytes = publication_path.read_bytes()
+                with mock.patch.object(
+                        subject, "publish_seal_tag",
+                        side_effect=AssertionError("must not republish")), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "completed at or after T"):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                abandoned_state = subject.load_fixed_json(
+                    result / "beacon/h1/state.json", "abandoned recovery")
+                self.assertEqual(
+                    abandoned_state["status"],
+                    "ABANDONED_PUBLICATION_LATE")
+                self.assertEqual(publication_path.read_bytes(), abandoned_bytes)
+
+                corrupted_late = dict(abandoned_late)
+                corrupted_late["tag_name"] = "wrong-tag"
+                subject.atomic_state_json(publication_path, corrupted_late)
+                with mock.patch.object(
+                        subject, "obtain_verified_latest_bound") as latest, \
+                     self.assertRaises(subject.CampaignError):
+                    subject.seal_holdout(argparse.Namespace(
+                        result_dir=result, phase="h1"))
+                latest.assert_not_called()
+
+                subject.common.atomic_write(publication_path, publication_bytes)
+                subject.atomic_state_json(
+                    result / "beacon/h1/state.json", waiting_state)
+                state = waiting_state
                 beacon = dict(subject.DRAND_KNOWN_ROUND)
                 beacon["round"] = seal["round"]
                 origins = [f"https://{host}" for host in subject.DRAND_RELAYS]
+                canonical_sha256 = hashlib.sha256(
+                    subject.canonical_beacon_bytes(beacon)).hexdigest()
                 wave = {
                     "schema": "wirehair.wh2.drand_quicknet_wave.v1",
                     "status": "QUORUM",
                     "chain_hash": subject.DRAND_CHAIN_HASH,
                     "consensus_origins": origins[:3],
-                    "observations": [
-                        {"origin": origin, "ok": True} for origin in origins
-                    ],
+                    "observations": [{
+                        "origin": origin,
+                        "ok": True,
+                        "canonical_sha256": canonical_sha256,
+                        "beacon": beacon,
+                        "fetch_started_ms": 1 + index * 2,
+                        "fetch_completed_ms": 2 + index * 2,
+                        "raw_response_sha256": f"{index + 1:x}" * 64,
+                    } for index, origin in enumerate(origins[:3])] + [{
+                        "origin": origins[3],
+                        "ok": False,
+                        "error": "test timeout",
+                    }],
                     "beacon": beacon,
                 }
                 real_run = subject.subprocess.run
+                drand_calls: list[object] = []
+                drand_wave = [wave]
+                drand_returncode = [0]
+                drand_stderr = [b"process fault\n"]
+                waves_parent_synced = False
+
+                real_fsync_directory = subject.fsync_directory
+
+                def fsync_directory(path: Path) -> None:
+                    nonlocal waves_parent_synced
+                    real_fsync_directory(path)
+                    waves = result / "beacon/h1/waves"
+                    if path == waves.parent and waves.is_dir():
+                        waves_parent_synced = True
 
                 def run(command: object, *args: object, **kwargs: object):
                     if (isinstance(command, tuple) and len(command) >= 4 and
                             command[-1] == str(seal["round"]) and
                             "wh2_drand_verify.cjs" in str(command[1])):
+                        self.assertTrue(waves_parent_synced)
+                        drand_calls.append(command)
                         return subprocess.CompletedProcess(
-                            command, 0, json.dumps(wave).encode("ascii"), b"")
+                            command, drand_returncode[0],
+                            json.dumps(drand_wave[0]).encode("ascii"),
+                            drand_stderr[0])
                     return real_run(command, *args, **kwargs)
 
                 def offline(
@@ -769,28 +2260,224 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     acquire_stack.enter_context(mock.patch.object(
                         subject, "offline_verify_beacon", side_effect=offline),
                     )
+                    acquire_stack.enter_context(mock.patch.object(
+                        subject, "fsync_directory",
+                        side_effect=fsync_directory,
+                    ))
+                    with self.assertRaisesRegex(
+                            subject.CampaignError, "process status changed"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 1)
+                    failed_wave = \
+                        result / "beacon/h1/waves/wave-000001.json"
+                    failed_wave.unlink()
+                    subject.fsync_directory(failed_wave.parent)
+                    subject.atomic_state_json(
+                        result / "beacon/h1/state.json", waiting_state)
+                    drand_stderr[0] = b""
+                    drand_returncode[0] = 2
+                    drand_wave[0] = {
+                        "status": "TEMPORARY_NO_QUORUM",
+                    }
+                    with self.assertRaisesRegex(
+                            subject.CampaignError, "invalid coverage"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 2)
+                    with self.assertRaisesRegex(
+                            subject.CampaignError, "invalid coverage"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 2)
+                    failed_wave.unlink()
+                    subject.fsync_directory(failed_wave.parent)
+                    subject.atomic_state_json(
+                        result / "beacon/h1/state.json", waiting_state)
+                    drand_returncode[0] = 0
+                    drand_wave[0] = wave
                     self.assertEqual(subject.acquire_holdout(acquire), 0)
                     root = subject.load_fixed_json(
                         result / "holdout/h1_roots.json", "test root")
                     self.assertEqual(root["status"], "ROOTED")
                     self.assertEqual(len(root["roots"]), subject.H1_ROOT_COUNT)
+                    self.assertEqual(len(drand_calls), 3)
+                    root_path = result / "holdout/h1_roots.json"
+                    state_path = result / "beacon/h1/state.json"
+                    wave_path = result / "beacon/h1/waves/wave-000001.json"
+                    root_bytes = root_path.read_bytes()
+                    state_bytes = state_path.read_bytes()
+                    wave_bytes = wave_path.read_bytes()
+
+                    root_marker = root_path.parent / \
+                        f".{root_path.name}.99999999.partial"
+                    os.link(root_path, root_marker)
+                    self.assertEqual(root_path.stat().st_nlink, 2)
+                    self.assertEqual(subject.acquire_holdout(acquire), 0)
+                    self.assertFalse(root_marker.exists())
+                    self.assertEqual(root_path.stat().st_nlink, 1)
+                    self.assertEqual(root_path.read_bytes(), root_bytes)
+
+                    root_path.unlink()
+                    subject.atomic_state_json(state_path, waiting_state)
+                    self.assertEqual(subject.acquire_holdout(acquire), 0)
+                    self.assertEqual(len(drand_calls), 3)
+                    self.assertEqual(root_path.read_bytes(), root_bytes)
+
+                    bad_stderr = subject.load_fixed_json(
+                        wave_path, "test persisted wave")
+                    bad_stderr["wrapper_stderr_sha256"] = "a" * 64
+                    subject.atomic_state_json(wave_path, bad_stderr)
+                    root_path.unlink()
+                    subject.atomic_state_json(state_path, waiting_state)
+                    with self.assertRaisesRegex(
+                            subject.CampaignError, "process status changed"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    subject.common.atomic_write(wave_path, wave_bytes)
+                    subject.common.atomic_write(root_path, root_bytes)
+
+                    conflicting_beacon = dict(beacon)
+                    conflicting_beacon["signature"] = (
+                        ("0" if beacon["signature"][0] != "0" else "1") +
+                        beacon["signature"][1:])
+                    conflicting_beacon["randomness"] = hashlib.sha256(
+                        bytes.fromhex(
+                            conflicting_beacon["signature"])).hexdigest()
+                    permanent = subject.load_fixed_json(
+                        wave_path, "test persisted wave")
+                    permanent["wrapper_returncode"] = 3
+                    permanent["result"] = {
+                        "schema": "wirehair.wh2.drand_quicknet_wave.v1",
+                        "status": "PERMANENT_VERIFIED_DISAGREEMENT",
+                        "chain_hash": subject.DRAND_CHAIN_HASH,
+                        "observations": [
+                            dict(wave["observations"][0]),
+                            {
+                                **dict(wave["observations"][1]),
+                                "beacon": conflicting_beacon,
+                                "canonical_sha256": hashlib.sha256(
+                                    subject.canonical_beacon_bytes(
+                                        conflicting_beacon)).hexdigest(),
+                            },
+                            {
+                                "origin": origins[2],
+                                "ok": False,
+                                "error": "test disagreement",
+                            },
+                            dict(wave["observations"][3]),
+                        ],
+                    }
+                    subject.atomic_state_json(wave_path, permanent)
+                    root_path.unlink()
+                    subject.atomic_state_json(state_path, waiting_state)
+                    with self.assertRaisesRegex(
+                            subject.CampaignError, "permanently blocked"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    self.assertEqual(subject.load_fixed_json(
+                        state_path, "blocked replay")["status"],
+                        "BLOCKED_PERMANENT")
+
+                    subject.common.atomic_write(wave_path, wave_bytes)
+                    alternate = parent / "alternate-wave-ledger"
+                    alternate.mkdir()
+                    waves_dir = wave_path.parent
+                    hidden = waves_dir.with_name("waves-hidden")
+                    waves_dir.rename(hidden)
+                    waves_dir.symlink_to(alternate, target_is_directory=True)
+                    root_path.unlink(missing_ok=True)
+                    subject.atomic_state_json(state_path, waiting_state)
+                    with mock.patch.object(
+                            subject, "verify_manifest_bytes",
+                            return_value=None), \
+                         self.assertRaisesRegex(
+                             subject.CampaignError, "plain directory"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    waves_dir.unlink()
+                    hidden.rename(waves_dir)
+
+                    subject.common.atomic_write(root_path, root_bytes)
+                    subject.common.atomic_write(state_path, state_bytes)
+                    waves_dir.rename(hidden)
+                    waves_dir.symlink_to(hidden, target_is_directory=True)
+                    with mock.patch.object(
+                            subject, "verify_manifest_bytes",
+                            return_value=None), \
+                         self.assertRaisesRegex(
+                             subject.CampaignError, "plain directory"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    waves_dir.unlink()
+                    hidden.rename(waves_dir)
+
+                    quorum_two = subject.load_fixed_json(
+                        wave_path, "test quorum wave")
+                    quorum_two["wave"] = 2
+                    wave_two_path = waves_dir / "wave-000002.json"
+                    subject.atomic_state_json(wave_two_path, quorum_two)
+                    subject.atomic_state_json(wave_path, permanent)
+                    rooted_after_terminal = dict(root)
+                    rooted_after_terminal["wave"] = 2
+                    rooted_after_terminal["wave_record_sha256"] = \
+                        subject.common.sha256_file(wave_two_path)
+                    subject.atomic_state_json(
+                        root_path, rooted_after_terminal)
+                    with self.assertRaisesRegex(
+                            subject.CampaignError,
+                            "continued after a terminal result"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    wave_two_path.unlink()
+                    subject.fsync_directory(waves_dir)
+                    subject.common.atomic_write(wave_path, wave_bytes)
+                    subject.common.atomic_write(root_path, root_bytes)
+                    subject.common.atomic_write(state_path, state_bytes)
+
+                    external_root = parent / "external-root.json"
+                    external_root.write_bytes(root_bytes)
+                    root_path.unlink()
+                    root_path.symlink_to(external_root)
+                    subject.atomic_state_json(state_path, waiting_state)
+                    with mock.patch.object(
+                            subject, "verify_manifest_bytes",
+                            return_value=None), \
+                         self.assertRaisesRegex(
+                             subject.CampaignError, "unique regular file"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    root_path.unlink()
+                    os.link(external_root, root_path)
+                    with mock.patch.object(
+                            subject, "verify_manifest_bytes",
+                            return_value=None), \
+                         self.assertRaisesRegex(
+                             subject.CampaignError, "unique regular file"):
+                        subject.acquire_holdout(acquire)
+                    self.assertEqual(len(drand_calls), 3)
+                    root_path.unlink()
+                    subject.common.atomic_write(root_path, root_bytes)
+                    subject.common.atomic_write(state_path, state_bytes)
+
                     self.assertEqual(subject.acquire_holdout(acquire), 0)
                     self.assertEqual(len(list(
                         (result / "beacon/h1/waves").glob("wave-*.json"))), 1)
-                    root_path = result / "holdout/h1_roots.json"
-                    state_path = result / "beacon/h1/state.json"
-                    root_bytes = root_path.read_bytes()
-                    state_bytes = state_path.read_bytes()
                     for field, value in (
                             ("manifest_sha256", "f" * 64),
                             ("round", root["round"] + 1),
-                            ("round_time_ms", root["round_time_ms"] + 1)):
+                            ("round_time_ms", root["round_time_ms"] + 1),
+                            ("wave", True),
+                            ("rooted_ms", "invalid")):
                         mutated_root = dict(root)
                         mutated_root[field] = value
                         subject.atomic_state_json(root_path, mutated_root)
                         with self.assertRaises(subject.CampaignError):
                             subject.acquire_holdout(acquire)
                         subject.common.atomic_write(root_path, root_bytes)
+                    mutated_root = dict(root)
+                    mutated_root["unrecognized"] = "field"
+                    subject.atomic_state_json(root_path, mutated_root)
+                    with self.assertRaises(subject.CampaignError):
+                        subject.acquire_holdout(acquire)
+                    subject.common.atomic_write(root_path, root_bytes)
                     rooted_state = subject.load_fixed_json(
                         state_path, "test rooted state")
                     mutated_state = dict(rooted_state)

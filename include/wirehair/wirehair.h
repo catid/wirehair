@@ -278,8 +278,9 @@ typedef enum WirehairV2Result_t
 /**
     Host-native representation of the canonical serialized V2 profile.
 
-    This structure is exactly 32 bytes in ABI version 2.  It is not itself a
-    wire image: use wirehair_v2_profile_serialize() and
+    This Wirehair V2 structure is exactly 32 bytes in profile-structure
+    version 1 (WIREHAIR_V2_PROFILE_VERSION).  It is not itself a wire image:
+    use wirehair_v2_profile_serialize() and
     wirehair_v2_profile_deserialize() at persistence or transport boundaries.
     All reserved fields must be zero.  seed_attempt is the selected
     deterministic equation-seed attempt in [0, 255].

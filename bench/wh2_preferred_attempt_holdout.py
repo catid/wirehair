@@ -19,6 +19,12 @@ gate reducers without manufacturing a rooted drand campaign.
 
 from __future__ import annotations
 
+import sys
+
+# Frozen campaign directories have an exact immutable inventory.  Disable
+# import-cache writes before loading any local frozen helper module.
+sys.dont_write_bytecode = True
+
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -1801,7 +1807,7 @@ class HoldoutRunner:
             _load_phase_completion(
                 self.result_root, ledger, self.binary, set(self.cpus),
                 exact=exact, thermal_policy=thermal_policy,
-                taskset_path=taskset)
+                taskset_path=taskset, repair_missing_sidecar=True)
             return tuple(
                 verify_receipt(
                     self.result_root, self.binary, job, set(self.cpus), taskset)
@@ -1861,8 +1867,11 @@ class HoldoutRunner:
                     if thermal is not None and getattr(thermal, "started", False):
                         try:
                             output = phase_thermal_path(self.result_root, ledger)
-                            output.parent.mkdir(parents=True, exist_ok=True)
+                            parent_fd = common.open_durable_directory(
+                                output.parent, create=True)
+                            os.close(parent_fd)
                             thermal_summary = thermal.finish(output)
+                            campaign.fsync_existing_regular_file(output)
                         except BaseException as error:
                             cleanup_error = error
         if cleanup_error is not None:
@@ -1979,6 +1988,7 @@ def _load_phase_completion(
     allowed_cpus: Set[int], exact: bool = True,
     thermal_policy: Optional[Mapping[str, Any]] = None,
     taskset_path: Optional[str] = None,
+    repair_missing_sidecar: bool = False,
 ) -> Dict[str, Any]:
     stem = _phase_stem(ledger)
     path = result_root / ledger.phase / (stem + ".json")
@@ -1988,8 +1998,13 @@ def _load_phase_completion(
     stored_bytes = _json_bytes(stored)
     expected_sidecar = (
         _sha256(stored_bytes) + "  " + path.name + "\n").encode("ascii")
-    if common.stable_bytes(path.with_suffix(".sha256")) != expected_sidecar:
+    sidecar = path.with_suffix(".sha256")
+    sidecar_present = campaign.path_present(sidecar)
+    if (sidecar_present and
+            common.stable_bytes(sidecar) != expected_sidecar):
         die("holdout phase completion sidecar changed")
+    if not sidecar_present and not repair_missing_sidecar:
+        die("holdout phase completion sidecar is missing")
     if thermal_policy is None or taskset_path is None:
         _prepare, contract = campaign.verify_frozen_controller_runtime(
             result_root)
@@ -2021,6 +2036,12 @@ def _load_phase_completion(
         thermal_path, summary, thermal_policy, taskset_path, exact=exact)
     if stored != recomputed:
         die("holdout phase completion changed after publication")
+    if not sidecar_present:
+        # Publication orders the canonical record before its checksum.  Heal
+        # only the missing checksum after the complete semantic record,
+        # receipts, route bindings, and telemetry have been recomputed.  A
+        # present but incorrect checksum remains a permanent error.
+        campaign.durable_write_once_or_same(sidecar, expected_sidecar)
     return stored
 
 

@@ -14,6 +14,12 @@ thermal, and atomic-file safety primitives from the all-K campaign runner.
 
 from __future__ import annotations
 
+import sys
+
+# Frozen campaign directories have an exact immutable inventory.  Disable
+# import-cache writes before loading any local frozen helper module.
+sys.dont_write_bytecode = True
+
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -196,7 +202,7 @@ def verify_sealed_record(record: Mapping[str, Any], schema: str) -> None:
 
 
 def durable_atomic_write(path: Path, data: bytes) -> None:
-    common.atomic_write(path, data)
+    common.atomic_write_once_or_same(path, data)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     descriptor = os.open(str(path.parent), flags)
     try:
@@ -716,13 +722,11 @@ class JobLedger:
 
 def durable_write_once_or_same(path: Path, data: bytes) -> None:
     """Publish immutable campaign bytes, accepting only an identical resume."""
-    if os.path.lexists(str(path)):
-        if common.stable_bytes(path) != data:
-            die("immutable campaign artifact changed: {}".format(path))
-        return
-    durable_atomic_write(path, data)
-    if common.stable_bytes(path) != data:
-        die("campaign artifact publication was not stable: {}".format(path))
+    try:
+        common.atomic_write_once_or_same(path, data)
+    except common.CampaignError as exc:
+        die("immutable campaign artifact publication failed: {}: {}".format(
+            path, exc))
 
 
 def write_hashed_artifact(path: Path, data: bytes) -> str:
@@ -1274,16 +1278,12 @@ def discard_partial_output_pair(paths: Mapping[str, Path], job_id: str) -> None:
     ]
     if not existing:
         die("{} uncommitted-output cleanup found no outputs".format(job_id))
-    parents: Set[Path] = set()
     for path in existing:
         common.stable_bytes(path)  # Reject symlinks/nonregular/changing inputs.
     for path in existing:
-        path.unlink()
-        parents.add(path.parent)
-    for parent in parents:
-        descriptor = os.open(
-            str(parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        descriptor = common.open_durable_directory(path.parent)
         try:
+            os.unlink(path.name, dir_fd=descriptor)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -1291,14 +1291,25 @@ def discard_partial_output_pair(paths: Mapping[str, Path], job_id: str) -> None:
 
 @contextmanager
 def job_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        str(path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-        0o600)
+    directory_fd = common.open_durable_directory(path.parent, create=True)
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) |
+            getattr(os, "O_NOFOLLOW", 0),
+            0o600, dir_fd=directory_fd)
+    except BaseException:
+        os.close(directory_fd)
+        raise
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        named = os.stat(
+            path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or
+                (metadata.st_dev, metadata.st_ino) !=
+                (named.st_dev, named.st_ino)):
             die("job lock is not a unique regular file")
+        os.fsync(directory_fd)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -1309,6 +1320,7 @@ def job_lock(path: Path) -> Iterator[None]:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+            os.close(directory_fd)
 
 
 def route_job_from_candidate(job: JobSpec) -> JobSpec:
@@ -1978,7 +1990,9 @@ class JobRunner:
                         try:
                             thermal_output = phase_thermal_path(
                                 self.result_root, ledger)
-                            thermal_output.parent.mkdir(parents=True, exist_ok=True)
+                            parent_fd = common.open_durable_directory(
+                                thermal_output.parent, create=True)
+                            os.close(parent_fd)
                             thermal_summary = thermal.finish(thermal_output)
                             fsync_existing_regular_file(thermal_output)
                         except BaseException as error:
@@ -2175,7 +2189,10 @@ def _verify_phase_completion(
     """Verify a fully sealed phase without starting or replacing telemetry."""
     path = phase_completion_path(result_root, ledger)
     encoded = common.stable_bytes(path)
-    verify_hash_sidecar(path, encoded, "phase completion")
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    sidecar_present = path_present(sidecar)
+    if sidecar_present:
+        verify_hash_sidecar(path, encoded, "phase completion")
     record = load_canonical_object(path, "phase completion")
     verify_sealed_record(record, SCHEMA_PREFIX + ".phase_completion.v1")
     completed = tuple(
@@ -2211,6 +2228,16 @@ def _verify_phase_completion(
             allowed_cpus, None, None)
     if canonical_json_bytes(expected) != encoded:
         die("phase completion is not the exact recomputed record")
+    if not sidecar_present:
+        # The completion record is written and directory-fsynced before its
+        # checksum sidecar.  A hard interruption in that narrow window must
+        # not strand an otherwise exact, fully recomputable phase.  Repair
+        # only after receipts, telemetry, schema, and canonical bytes have all
+        # been independently revalidated above; an existing bad sidecar is
+        # never replaced.
+        digest = sha256_bytes(encoded)
+        durable_write_once_or_same(
+            sidecar, (digest + "  " + path.name + "\n").encode("ascii"))
     return completed
 
 

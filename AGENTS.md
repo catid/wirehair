@@ -47,6 +47,15 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Forwarded SSH Agent Refresh
+
+The client SSH session cycles frequently, so an inherited `SSH_AUTH_SOCK` is
+usually stale by the time a push is needed.  Before Git/Beads SSH operations,
+refresh the latest shell environment and select the newest live forwarded
+`/tmp/ssh-*/agent.*` socket.  Verify it non-interactively with `ssh-add -l`
+and `ssh -o BatchMode=yes -T git@github.com`; do not treat the inherited socket
+as authoritative.
+
 ## Bug Fix Passes
 
 Bug fix passes are not just running unit tests. They require actually reading

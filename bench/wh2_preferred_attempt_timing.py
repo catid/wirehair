@@ -18,7 +18,14 @@ their SHA256 bindings in :class:`EnvironmentEvidence`.
 
 from __future__ import annotations
 
+import sys
+
+# Frozen campaign directories have an exact immutable inventory.  Disable
+# import-cache writes before loading any local frozen helper module.
+sys.dont_write_bytecode = True
+
 from dataclasses import asdict, dataclass, replace
+import errno
 from fractions import Fraction
 import hashlib
 import json
@@ -31,6 +38,8 @@ import signal
 import stat
 import subprocess
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+import wh2_rank_floor_two_anchor_allk as common
 
 
 SAMPLE_DOMAIN = b"wirehair.wh2.h12-preferred-attempt.timing-sample.v1|"
@@ -88,45 +97,18 @@ def _canonical_json(value: Any) -> bytes:
     ) + "\n").encode("ascii")
 
 
-def _sha256_file(path: Path) -> str:
-    if path.is_symlink():
-        raise TimingError("refusing symlink input: %s" % path)
-    with path.open("rb") as source:
-        before = os.fstat(source.fileno())
-        if not stat.S_ISREG(before.st_mode):
-            raise TimingError("refusing nonregular input: %s" % path)
-        digest = hashlib.sha256()
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-        after = os.fstat(source.fileno())
-    identity = lambda value: (
-        value.st_dev, value.st_ino, value.st_size,
-        value.st_mtime_ns, value.st_ctime_ns,
-    )
-    if identity(before) != identity(after):
-        raise TimingError("input changed while hashing: %s" % path)
-    return digest.hexdigest()
+def _sha256_file(path: Path, *, require_unique: bool = True) -> str:
+    try:
+        return common.sha256_file(path, require_unique=require_unique)
+    except common.CampaignError as exc:
+        raise TimingError(str(exc)) from exc
 
 
 def _stable_file_bytes(path: Path) -> bytes:
-    if path.is_symlink():
-        raise TimingError("refusing symlink evidence: %s" % path)
-    with path.open("rb") as source:
-        before = os.fstat(source.fileno())
-        if not stat.S_ISREG(before.st_mode):
-            raise TimingError("refusing nonregular evidence: %s" % path)
-        data = source.read()
-        after = os.fstat(source.fileno())
-    identity = lambda value: (
-        value.st_dev, value.st_ino, value.st_size,
-        value.st_mtime_ns, value.st_ctime_ns,
-    )
-    if identity(before) != identity(after):
-        raise TimingError("evidence changed while reading: %s" % path)
-    return data
+    try:
+        return common.stable_bytes(path)
+    except common.CampaignError as exc:
+        raise TimingError(str(exc)) from exc
 
 
 def _canonical_object_file(path: Path, name: str) -> Tuple[Dict[str, Any], bytes]:
@@ -700,7 +682,7 @@ class TimingRunnerConfig:
                 path = Path(self.launcher[index])
                 try:
                     resolved = path.resolve(strict=True)
-                    digest = _sha256_file(path)
+                    digest = _sha256_file(path, require_unique=False)
                 except (OSError, TimingError) as exc:
                     raise TimingError(
                         "timing launcher executable is unavailable: %s" %
@@ -729,7 +711,7 @@ def _verify_launcher_files(config: TimingRunnerConfig) -> None:
         path = Path(config.launcher[index])
         try:
             resolved = path.resolve(strict=True)
-            digest = _sha256_file(path)
+            digest = _sha256_file(path, require_unique=False)
         except (OSError, TimingError) as exc:
             raise TimingError(
                 "timing launcher executable is unavailable: %s" % name) from exc
@@ -1178,25 +1160,27 @@ def _cycle_contamination(
     return tuple(sorted(reasons))
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    temporary = path.with_name(".%s.partial-%d" % (path.name, os.getpid()))
+def _discard_stale_atomic_partials(path: Path) -> bool:
     try:
-        with temporary.open("xb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(str(temporary), str(path))
-    except BaseException:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-    directory_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+        return common._discard_stale_atomic_partials(path)
+    except common.CampaignError as exc:
+        raise TimingError(str(exc)) from exc
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Durably publish immutable timing bytes without target replacement."""
+    try:
+        common.atomic_write_once_or_same(path, data)
+    except common.CampaignError as exc:
+        raise TimingError(str(exc)) from exc
 
 
 def _build_attempt_record(
@@ -1551,12 +1535,14 @@ def write_timing_panel_result(
     return digest
 
 
-def load_timing_panel_result(
+def _load_timing_panel_result(
     attempt_directory: Path,
     expected_spec: TimingPanelSpec,
     config: TimingRunnerConfig,
-) -> TimingPanelResult:
-    """Load only a completely sealed panel; failed/partial panels always reject."""
+    *,
+    require_sidecar: bool,
+) -> Tuple[TimingPanelResult, bytes]:
+    """Validate and recompute one panel, optionally before sidecar publication."""
     if not isinstance(attempt_directory, Path):
         raise TimingError("timing panel directory must be pathlib.Path")
     if (attempt_directory.is_symlink() or
@@ -1565,18 +1551,22 @@ def load_timing_panel_result(
     binary, route_cache = _verified_timing_inputs(config)
     manifest_path = attempt_directory / PANEL_RESULT_NAME
     sidecar_path = attempt_directory / PANEL_RESULT_SIDECAR_NAME
-    if not manifest_path.exists() or not sidecar_path.exists():
+    manifest_present = manifest_path.exists() or manifest_path.is_symlink()
+    sidecar_present = sidecar_path.exists() or sidecar_path.is_symlink()
+    if not manifest_present or (require_sidecar and not sidecar_present):
         raise TimingError(
             "timing panel is partial or failed; controller-level rerun is forbidden")
     manifest, encoded = _canonical_object_file(
         manifest_path, "timing panel result")
-    try:
-        sidecar = _stable_file_bytes(sidecar_path)
-    except OSError as exc:
-        raise TimingError("timing panel result sidecar is unavailable") from exc
     digest = _sha256(encoded)
-    if sidecar != (digest + "  " + PANEL_RESULT_NAME + "\n").encode("ascii"):
-        raise TimingError("timing panel result file hash mismatch")
+    if sidecar_present:
+        try:
+            sidecar = _stable_file_bytes(sidecar_path)
+        except OSError as exc:
+            raise TimingError("timing panel result sidecar is unavailable") from exc
+        if sidecar != (
+                digest + "  " + PANEL_RESULT_NAME + "\n").encode("ascii"):
+            raise TimingError("timing panel result file hash mismatch")
     if set(manifest) != PANEL_RESULT_FIELDS:
         raise TimingError("timing panel result fields do not match schema")
     if manifest.get("schema") != PANEL_RESULT_SCHEMA:
@@ -1616,7 +1606,9 @@ def load_timing_panel_result(
     for value in attempt_hashes:
         _require_sha256(value, "timing panel attempt record hash")
     expected_inventory = _attempt_inventory(attempt_count)
-    expected_inventory.update((PANEL_RESULT_NAME, PANEL_RESULT_SIDECAR_NAME))
+    expected_inventory.add(PANEL_RESULT_NAME)
+    if sidecar_present:
+        expected_inventory.add(PANEL_RESULT_SIDECAR_NAME)
     if _directory_inventory(attempt_directory) != expected_inventory:
         raise TimingError("sealed timing panel file inventory is not exact")
 
@@ -1663,6 +1655,20 @@ def load_timing_panel_result(
         attempts=tuple(records),
     )
     result.validate()
+    if _canonical_json(_panel_result_record(
+            result, config, binary, route_cache)) != encoded:
+        raise TimingError("timing panel result is not the exact recomputed record")
+    return result, encoded
+
+
+def load_timing_panel_result(
+    attempt_directory: Path,
+    expected_spec: TimingPanelSpec,
+    config: TimingRunnerConfig,
+) -> TimingPanelResult:
+    """Load only a completely sealed panel; failed/partial panels always reject."""
+    result, _encoded = _load_timing_panel_result(
+        attempt_directory, expected_spec, config, require_sidecar=True)
     return result
 
 
@@ -1713,7 +1719,11 @@ def run_timing_panel(
     if not isinstance(attempt_directory, Path):
         raise TimingError("timing panel directory must be pathlib.Path")
     binary, route_cache = _verified_timing_inputs(config)
-    attempt_directory.mkdir(parents=True, exist_ok=False)
+    try:
+        directory_fd = common.create_durable_directory(attempt_directory)
+    except common.CampaignError as exc:
+        raise TimingError(str(exc)) from exc
+    os.close(directory_fd)
     pending = set(TIMED_CYCLES)
     accepted: Dict[int, TimingCycle] = {}
     records: List[AttemptRecord] = []
@@ -1936,13 +1946,66 @@ def run_or_resume_timing_panel(
 ) -> TimingPanelResult:
     """Resume a clean seal, or run only when no panel directory exists.
 
-    The frozen protocol has no controller-level retry after a failed or partial
-    panel.  Consequently any pre-existing directory is loaded strictly and an
-    unsealed directory rejects without invoking ``executor``.
+    The frozen protocol has no controller-level retry after a failed panel.
+    The sole recoverable partial state is a fully published and independently
+    recomputable ``panel.json`` whose checksum sidecar was not yet published
+    when the controller stopped.  The caller holds the timing-host lock while
+    that sidecar is repaired; no process attempt is invoked or repeated.
     """
     if not isinstance(attempt_directory, Path):
         raise TimingError("timing panel directory must be pathlib.Path")
     if attempt_directory.exists() or attempt_directory.is_symlink():
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_DIRECTORY", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+        try:
+            directory_fd = os.open(attempt_directory, flags)
+        except OSError as exc:
+            raise TimingError(
+                "timing panel must be a plain directory") from exc
+        try:
+            metadata = os.fstat(directory_fd)
+            pathname_metadata = os.stat(
+                attempt_directory, follow_symlinks=False)
+        except OSError as exc:
+            raise TimingError(
+                "timing panel directory identity is unstable") from exc
+        finally:
+            os.close(directory_fd)
+        if (not stat.S_ISDIR(metadata.st_mode) or
+                (metadata.st_dev, metadata.st_ino) !=
+                (pathname_metadata.st_dev, pathname_metadata.st_ino)):
+            raise TimingError("timing panel must be a plain directory")
+        manifest_path = attempt_directory / PANEL_RESULT_NAME
+        sidecar_path = attempt_directory / PANEL_RESULT_SIDECAR_NAME
+        manifest_present = (
+            manifest_path.exists() or manifest_path.is_symlink())
+        sidecar_present = sidecar_path.exists() or sidecar_path.is_symlink()
+        if manifest_present and not sidecar_present:
+            # SIGKILL can leave the exact O_EXCL temporary for this missing
+            # sidecar.  Remove only a dead writer's regular, unique partial
+            # before exact inventory validation; live or malformed debris is
+            # fatal and is never hidden.
+            if _discard_stale_atomic_partials(sidecar_path):
+                _fsync_directory(attempt_directory)
+            result, encoded = _load_timing_panel_result(
+                attempt_directory, spec, config, require_sidecar=False)
+            # An existing sidecar, including a dangling symlink, is never
+            # replaced.  Under the caller's timing-host lock this recheck is
+            # expected to remain false; it also fails closed if that contract
+            # is violated.
+            if sidecar_path.exists() or sidecar_path.is_symlink():
+                raise TimingError(
+                    "timing panel result sidecar appeared during validation")
+            digest = _sha256(encoded)
+            _atomic_write(
+                sidecar_path,
+                (digest + "  " + PANEL_RESULT_NAME + "\n").encode("ascii"))
+            loaded = load_timing_panel_result(attempt_directory, spec, config)
+            if loaded != result:
+                raise TimingError(
+                    "repaired timing panel result did not round-trip")
+            return loaded
         return load_timing_panel_result(attempt_directory, spec, config)
     return run_timing_panel(
         spec, config, evidence_probe, attempt_directory, executor=executor)

@@ -16,6 +16,11 @@ Saturated-run timings are provenance only and are never a speed claim.
 
 from __future__ import annotations
 
+import sys
+
+# This module is imported from exact-inventory frozen campaign directories.
+sys.dont_write_bytecode = True
+
 import argparse
 from array import array
 from collections import Counter, defaultdict
@@ -23,6 +28,7 @@ import concurrent.futures
 import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
+import errno
 import hashlib
 import json
 import math
@@ -34,7 +40,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import threading
 import time
 from typing import Any, Iterable, Sequence
@@ -47,7 +52,7 @@ from wh2_rank_floor_two_anchor_screen import (
     deterministic_equal,
     parse_bench_output,
     parse_thermal_sample,
-    sha256_file,
+    sha256_file as _screen_sha256_file,
     thermal_finish,
     thermal_start,
     validate_thermal_current,
@@ -102,19 +107,435 @@ def die(message: str) -> None:
     raise CampaignError(message)
 
 
-def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.partial")
-    if temporary.exists():
-        die(f"temporary output already exists: {temporary}")
+def sha256_file(path: Path, *, require_unique: bool = True) -> str:
+    """Hash one stable, unique regular file using the shared reader."""
     try:
-        with temporary.open("wb") as output:
+        return _screen_sha256_file(path, require_unique=require_unique)
+    except (OSError, ValueError) as exc:
+        try:
+            metadata = path.lstat()
+            recoverable = require_unique and \
+                stat.S_ISREG(metadata.st_mode) and \
+                metadata.st_nlink == 2
+        except OSError:
+            recoverable = False
+        if recoverable and _reconcile_stale_atomic_publication(path):
+            try:
+                return _screen_sha256_file(
+                    path, require_unique=require_unique)
+            except (OSError, ValueError) as retry_exc:
+                die(str(retry_exc))
+        die(str(exc))
+
+
+def _process_start_ticks(pid: int) -> int | None:
+    """Read Linux /proc starttime so PID reuse cannot pin stale markers."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except (OSError, ValueError):
+        return None
+    closing = raw.rfind(b") ")
+    if closing < 0:
+        return None
+    fields = raw[closing + 2:].split()
+    # The suffix begins at field 3 (state); starttime is field 22.
+    if len(fields) <= 19:
+        return None
+    try:
+        value = int(fields[19], 10)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _atomic_writer_pid_is_live(
+    pid: int,
+    start_ticks: int | None = None,
+) -> bool:
+    if start_ticks is not None:
+        return _process_start_ticks(pid) == start_ticks
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def open_durable_directory(path: Path, *, create: bool = False) -> int:
+    """Open an absolute directory without following any component symlink."""
+    absolute = path.absolute()
+    if (not absolute.is_absolute() or
+            any(part in ("", ".", "..") for part in absolute.parts[1:])):
+        die(f"noncanonical directory path: {path}")
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open("/", flags)
+    try:
+        for part in absolute.parts[1:]:
+            created = False
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                    created = True
+                except FileExistsError:
+                    pass
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            if created:
+                os.fsync(next_descriptor)
+                os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        metadata = os.fstat(descriptor)
+        named = os.stat(absolute, follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or
+                (metadata.st_dev, metadata.st_ino) !=
+                (named.st_dev, named.st_ino)):
+            die(f"directory pathname changed while opening: {path}")
+        return descriptor
+    except OSError as error:
+        os.close(descriptor)
+        raise CampaignError(
+            f"cannot open durable directory {path}: {error}") from error
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def create_durable_directory(path: Path) -> int:
+    """Exclusively create, fsync, and return one plain final directory."""
+    if path.name in ("", ".", ".."):
+        die(f"noncanonical directory creation path: {path}")
+    parent_fd = open_durable_directory(path.parent, create=True)
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
+    descriptor: int | None = None
+    try:
+        try:
+            os.mkdir(path.name, 0o700, dir_fd=parent_fd)
+        except FileExistsError as error:
+            raise CampaignError(
+                f"directory already exists: {path}") from error
+        descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+        metadata = os.fstat(descriptor)
+        named = os.stat(
+            path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or
+                (metadata.st_dev, metadata.st_ino) !=
+                (named.st_dev, named.st_ino)):
+            die(f"directory pathname changed during creation: {path}")
+        os.fsync(descriptor)
+        os.fsync(parent_fd)
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        try:
+            os.close(parent_fd)
+        except BaseException:
+            pass
+        raise
+    try:
+        os.close(parent_fd)
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        raise
+    if descriptor is None:
+        die(f"created directory descriptor is unavailable: {path}")
+    return descriptor
+
+
+def _stable_bytes_at(directory_fd: int, name: str, display: Path) -> bytes:
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            die(f"refusing symlink input {display}")
+        die(f"unable to open unique regular input {display}: {exc}")
+    try:
+        before = os.fstat(descriptor)
+        if stat.S_ISREG(before.st_mode) and before.st_nlink == 2:
+            named_before = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            if ((named_before.st_dev, named_before.st_ino) !=
+                    (before.st_dev, before.st_ino)):
+                die(f"input pathname changed while being read: {display}")
+            if _reconcile_stale_atomic_publication(display, directory_fd):
+                before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            die(f"refusing nonunique regular input {display}")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            data = source.read()
+            midpoint = os.fstat(descriptor)
+            named_midpoint = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            source.seek(0)
+            confirmation = source.read()
+        after = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(before) != identity(midpoint) or
+            len(data) != before.st_size or
+            not stat.S_ISREG(named_midpoint.st_mode) or
+            named_midpoint.st_nlink != 1 or
+            identity(named_midpoint) != identity(midpoint) or
+            data != confirmation or
+            identity(midpoint) != identity(after) or
+            not stat.S_ISREG(named.st_mode) or named.st_nlink != 1 or
+            identity(named) != identity(after)):
+        die(f"input changed while being read: {display}")
+    return data
+
+
+def _entry_exists_at(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _discard_stale_atomic_partials(
+    path: Path,
+    directory_fd: int | None = None,
+) -> bool:
+    """Remove only exact dead-PID temporaries for one locked target."""
+    suffix = ".partial"
+    removed = False
+    own_descriptor = directory_fd is None
+    if directory_fd is None:
+        directory_fd = open_durable_directory(path.parent)
+    try:
+        names = os.listdir(directory_fd)
+        for name in names:
+            candidate = path.parent / name
+            if not name.startswith(".") or not name.endswith(suffix):
+                continue
+            body = name[1:-len(suffix)]
+            prefix = path.name + "."
+            if not body.startswith(prefix):
+                # Atomic names for dotted siblings can share this target's
+                # textual prefix (for example record.json and its
+                # record.json.sha256 sidecar).  Parse from the right so each
+                # caller touches only its exact target's temporary.
+                continue
+            identity_fields = body[len(prefix):].split(".")
+            if len(identity_fields) == 1:
+                pid_text = identity_fields[0]
+                start_text = None
+            elif (len(identity_fields) == 2 and
+                    all(field.isdigit() for field in identity_fields)):
+                pid_text, start_text = identity_fields
+            else:
+                # This is a marker for a dotted sibling target, not this
+                # target (for example record.json.sha256.<pid>.partial).
+                continue
+            if (not pid_text.isdigit() or pid_text == "0" or
+                    str(int(pid_text, 10)) != pid_text or
+                    (start_text is not None and (
+                        start_text == "" or str(int(start_text, 10)) !=
+                        start_text))):
+                die(f"malformed atomic temporary output: {candidate}")
+            pid = int(pid_text, 10)
+            start_ticks = (
+                int(start_text, 10) if start_text is not None else None)
+            if _atomic_writer_pid_is_live(pid, start_ticks):
+                die(f"atomic output writer is still active: {candidate}")
+            metadata = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            if (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 2 and
+                    _entry_exists_at(directory_fd, path.name)):
+                target_metadata = os.stat(
+                    path.name, dir_fd=directory_fd, follow_symlinks=False)
+                if (stat.S_ISREG(target_metadata.st_mode) and
+                        target_metadata.st_nlink == 2 and
+                        (target_metadata.st_dev, target_metadata.st_ino) ==
+                        (metadata.st_dev, metadata.st_ino)):
+                    # First make the published target name durable while its
+                    # second-name marker still exists, then retire the marker.
+                    os.fsync(directory_fd)
+                    os.unlink(name, dir_fd=directory_fd)
+                    removed = True
+                    continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                die(f"refusing nonunique atomic temporary output: {candidate}")
+            os.unlink(name, dir_fd=directory_fd)
+            removed = True
+    finally:
+        if own_descriptor:
+            os.close(directory_fd)
+    return removed
+
+
+def _reconcile_stale_atomic_publication(
+    path: Path,
+    directory_fd: int | None = None,
+) -> bool:
+    """Retire an exact dead-writer hardlink marker for a published target."""
+    own_descriptor = directory_fd is None
+    if directory_fd is None:
+        directory_fd = open_durable_directory(path.parent)
+    try:
+        before = os.stat(
+            path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 2:
+            return False
+        identity = (before.st_dev, before.st_ino)
+        if not _discard_stale_atomic_partials(path, directory_fd):
+            return False
+        os.fsync(directory_fd)
+        after = os.stat(
+            path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or
+                (after.st_dev, after.st_ino) != identity):
+            die(f"refusing nonunique regular input {path}")
+        return True
+    finally:
+        if own_descriptor:
+            os.close(directory_fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = open_durable_directory(path)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    directory_fd = open_durable_directory(path.parent, create=True)
+    writer_pid = os.getpid()
+    writer_start_ticks = _process_start_ticks(writer_pid)
+    if writer_start_ticks is None:
+        os.close(directory_fd)
+        die("atomic output writer identity is unavailable")
+    temporary_name = (
+        f".{path.name}.{writer_pid}.{writer_start_ticks}.partial")
+    old_mask = None
+    temporary_created = False
+    try:
+        if hasattr(signal, "pthread_sigmask"):
+            old_mask = signal.pthread_sigmask(
+                signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        if _discard_stale_atomic_partials(path, directory_fd):
+            os.fsync(directory_fd)
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 getattr(os, "O_NOFOLLOW", 0))
+        try:
+            descriptor = os.open(
+                temporary_name, flags, 0o600, dir_fd=directory_fd)
+        except FileExistsError:
+            die(f"temporary output already exists: {path.parent / temporary_name}")
+        temporary_created = True
+        with os.fdopen(descriptor, "wb") as output:
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        os.replace(
+            temporary_name, path.name,
+            src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_created = False
+        os.fsync(directory_fd)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            if temporary_created and _entry_exists_at(
+                    directory_fd, temporary_name):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+        finally:
+            # Cleanup failures must never strand SIGINT/SIGTERM blocked in
+            # this thread.  In particular, unlink/fsync can fail after the
+            # write path has already raised.
+            try:
+                if old_mask is not None:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            finally:
+                os.close(directory_fd)
+
+
+def atomic_write_once_or_same(path: Path, data: bytes) -> None:
+    """Durably publish immutable bytes without ever replacing the target."""
+    directory_fd = open_durable_directory(path.parent, create=True)
+    writer_pid = os.getpid()
+    writer_start_ticks = _process_start_ticks(writer_pid)
+    if writer_start_ticks is None:
+        os.close(directory_fd)
+        die("atomic output writer identity is unavailable")
+    temporary_name = (
+        f".{path.name}.{writer_pid}.{writer_start_ticks}.partial")
+    old_mask = None
+    temporary_created = False
+    target_linked = False
+    try:
+        if hasattr(signal, "pthread_sigmask"):
+            old_mask = signal.pthread_sigmask(
+                signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        if _discard_stale_atomic_partials(path, directory_fd):
+            os.fsync(directory_fd)
+        if _entry_exists_at(directory_fd, path.name):
+            if _stable_bytes_at(directory_fd, path.name, path) != data:
+                die(f"immutable output already differs: {path}")
+            os.fsync(directory_fd)
+            return
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(
+            temporary_name, flags, 0o600, dir_fd=directory_fd)
+        temporary_created = True
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(
+                temporary_name, path.name,
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                follow_symlinks=False)
+        except FileExistsError:
+            if _stable_bytes_at(directory_fd, path.name, path) != data:
+                die(f"immutable output won a conflicting race: {path}")
+        else:
+            target_linked = True
+            # Persist the target link while the temporary remains a durable
+            # recovery marker, then persist removal of that second name.
+            os.fsync(directory_fd)
+            os.unlink(temporary_name, dir_fd=directory_fd)
+            temporary_created = False
+            target_linked = False
+            os.fsync(directory_fd)
+        if _stable_bytes_at(directory_fd, path.name, path) != data:
+            die(f"immutable output publication was not stable: {path}")
+    finally:
+        try:
+            if (temporary_created and not target_linked and _entry_exists_at(
+                    directory_fd, temporary_name)):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+        finally:
+            try:
+                if old_mask is not None:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            finally:
+                os.close(directory_fd)
 
 
 def json_bytes(value: Any) -> bytes:
@@ -131,25 +552,11 @@ def atomic_json(path: Path, value: Any) -> None:
 
 
 def stable_bytes(path: Path) -> bytes:
-    if path.is_symlink():
-        die(f"refusing symlink input {path}")
-    with path.open("rb") as source:
-        before = os.fstat(source.fileno())
-        if not stat.S_ISREG(before.st_mode):
-            die(f"refusing non-regular input {path}")
-        data = source.read()
-        after = os.fstat(source.fileno())
-    identity_before = (
-        before.st_dev, before.st_ino, before.st_size,
-        before.st_mtime_ns, before.st_ctime_ns,
-    )
-    identity_after = (
-        after.st_dev, after.st_ino, after.st_size,
-        after.st_mtime_ns, after.st_ctime_ns,
-    )
-    if identity_before != identity_after or len(data) != before.st_size:
-        die(f"input changed while being read: {path}")
-    return data
+    directory_fd = open_durable_directory(path.parent)
+    try:
+        return _stable_bytes_at(directory_fd, path.name, path)
+    finally:
+        os.close(directory_fd)
 
 
 def sha256_bytes(data: bytes) -> str:

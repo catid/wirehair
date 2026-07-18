@@ -560,6 +560,23 @@ class HoldoutFixtureTest(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0][0], str(taskset))
             self.assertEqual(len(thermal_starts), 2)
+            phase_path = root / "h1" / (
+                subject._phase_stem(ledger) + ".json")
+            phase_sidecar = phase_path.with_suffix(".sha256")
+            phase_sidecar_bytes = phase_sidecar.read_bytes()
+            phase_sidecar.unlink()
+            runner.run_ledger(
+                ledger, live_thermal,
+                install_signal_handlers=False, exact=False)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(thermal_starts), 2)
+            self.assertEqual(phase_sidecar.read_bytes(), phase_sidecar_bytes)
+            phase_sidecar.write_bytes(b"wrong completion hash\n")
+            with self.assertRaises(subject.CampaignError):
+                runner.run_ledger(
+                    ledger, live_thermal,
+                    install_signal_handlers=False, exact=False)
+            phase_sidecar.write_bytes(phase_sidecar_bytes)
             original_taskset = taskset.read_bytes()
             taskset.write_bytes(b"tampered taskset\n")
             with self.assertRaises(subject.CampaignError):
@@ -569,6 +586,19 @@ class HoldoutFixtureTest(unittest.TestCase):
             taskset.write_bytes(original_taskset)
             interval = subject.phase_thermal_path(root, ledger)
             original_interval = interval.read_bytes()
+            phase_sidecar.unlink()
+            interval.write_bytes(b"tampered before sidecar repair\n")
+            with self.assertRaises(subject.CampaignError):
+                runner.run_ledger(
+                    ledger, live_thermal,
+                    install_signal_handlers=False, exact=False)
+            self.assertFalse(phase_sidecar.exists())
+            interval.write_bytes(original_interval)
+            runner.run_ledger(
+                ledger, live_thermal,
+                install_signal_handlers=False, exact=False)
+            self.assertEqual(phase_sidecar.read_bytes(), phase_sidecar_bytes)
+
             interval.write_bytes(b"tampered thermal interval\n")
             with self.assertRaises(subject.CampaignError):
                 runner.run_ledger(

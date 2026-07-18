@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -389,6 +391,22 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(first[0].receipt, second[0].receipt)
             self.assertGreaterEqual(verifier.call_count, 2)
             completion_path = root / "completed" / "control-control.json"
+            completion_sidecar = completion_path.with_suffix(".json.sha256")
+            completion_sidecar_bytes = completion_sidecar.read_bytes()
+            completion_sidecar.unlink()
+            with trust_patch(contract):
+                repaired = runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertEqual(repaired[0].receipt, first[0].receipt)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(FakeThermalGuard.instances - guards_before, 1)
+            self.assertEqual(
+                completion_sidecar.read_bytes(), completion_sidecar_bytes)
+            completion_sidecar.write_bytes(b"wrong completion hash\n")
+            with trust_patch(contract), self.assertRaises(campaign.CampaignError):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            completion_sidecar.write_bytes(completion_sidecar_bytes)
             completion = campaign.load_canonical_object(
                 completion_path, "test completion")
             campaign.verify_sealed_record(
@@ -402,6 +420,19 @@ class RunnerTests(unittest.TestCase):
                 completion["thermal_artifact"]["sha256"])
             self.assertEqual(completion["semantic_rows_sha256"],
                              completion["semantic_rows_sha256"].lower())
+
+            completion_sidecar.unlink()
+            interval_path.write_bytes(interval_bytes + b"tamper before repair\n")
+            with trust_patch(contract), self.assertRaises(campaign.CampaignError):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertFalse(completion_sidecar.exists())
+            interval_path.write_bytes(interval_bytes)
+            with trust_patch(contract):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertEqual(
+                completion_sidecar.read_bytes(), completion_sidecar_bytes)
 
             interval_path.write_bytes(interval_bytes + b"tamper\n")
             with trust_patch(contract), self.assertRaises(campaign.CampaignError):
@@ -462,6 +493,51 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(calls, [2])
             self.assertFalse(completed[0].receipt["recovered_after_interrupt"])
             self.assertEqual(completed[0].receipt["cpu"], 2)
+
+    def test_unreceipted_output_cleanup_recovers_only_atomic_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stdout = root / "job.stdout"
+            stderr = root / "job.stderr"
+            marker = root / ".job.stdout.99999999.partial"
+            stdout.write_bytes(b"stdout\n")
+            stderr.write_bytes(b"stderr\n")
+            os.link(stdout, marker)
+
+            campaign.discard_partial_output_pair(
+                {"stdout": stdout, "stderr": stderr}, "job")
+            self.assertFalse(stdout.exists())
+            self.assertFalse(stderr.exists())
+            self.assertFalse(marker.exists())
+
+            malicious = root / "malicious.stdout"
+            malicious_alias = root / "malicious-alias"
+            malicious.write_bytes(b"untrusted\n")
+            os.link(malicious, malicious_alias)
+            with self.assertRaisesRegex(campaign.CampaignError, "nonunique"):
+                campaign.discard_partial_output_pair(
+                    {"stdout": malicious, "stderr": root / "missing"},
+                    "malicious")
+            self.assertTrue(malicious.exists())
+            self.assertTrue(malicious_alias.exists())
+
+    def test_hashed_artifact_resume_distinguishes_sidecar_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "record.json"
+            encoded = b"{}\n"
+            artifact.write_bytes(encoded)
+            sidecar = artifact.with_suffix(".json.sha256")
+            stale_sidecar = root / ".record.json.sha256.99999999.partial"
+            stale_sidecar.write_bytes(b"interrupted sidecar\n")
+
+            digest = campaign.write_hashed_artifact(artifact, encoded)
+
+            self.assertEqual(digest, hashlib.sha256(encoded).hexdigest())
+            self.assertEqual(
+                sidecar.read_bytes(),
+                (digest + "  record.json\n").encode("ascii"))
+            self.assertFalse(stale_sidecar.exists())
 
     def test_failed_process_never_publishes_resumable_success_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

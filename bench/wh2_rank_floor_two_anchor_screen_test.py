@@ -42,6 +42,29 @@ def thermal_row(
 
 
 class ThermalParserTest(unittest.TestCase):
+    def test_stable_readers_reject_same_inode_change_after_final_fstat(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "input.bin"
+            real_stat = screen.os.stat
+            for reader in (screen.sha256_file, screen.stable_file_bytes):
+                with self.subTest(reader=reader.__name__):
+                    path.write_bytes(b"old\n")
+                    changed = False
+
+                    def mutate_then_stat(*args, **kwargs):
+                        nonlocal changed
+                        if not changed:
+                            changed = True
+                            path.write_bytes(b"new\n")
+                        return real_stat(*args, **kwargs)
+
+                    with mock.patch.object(
+                            screen.os, "stat", side_effect=mutate_then_stat), \
+                         self.assertRaisesRegex(ValueError, "changed"):
+                        reader(path)
+                    self.assertTrue(changed)
+
     def test_strict_default_rejects_missing_dimm_temperature(self) -> None:
         row = thermal_row(
             100.0, missing_dimms=(3,), dimm_read_errors=1)

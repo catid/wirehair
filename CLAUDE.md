@@ -35,6 +35,15 @@ timed out, retry it once with the same scoped prompt and a sufficiently long
 session/wall-time allowance. Do not treat authentication, quota, model, or
 substantive command failures as timeout-only failures.
 
+## Forwarded SSH Agent Refresh
+
+The client SSH session cycles frequently, so an inherited `SSH_AUTH_SOCK` is
+usually stale by the time a push is needed. Before Git/Beads SSH operations,
+refresh the latest shell environment and select the newest live forwarded
+`/tmp/ssh-*/agent.*` socket. Verify it non-interactively with `ssh-add -l`
+and `ssh -o BatchMode=yes -T git@github.com`; do not treat the inherited socket
+as authoritative.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 

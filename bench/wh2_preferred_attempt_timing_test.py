@@ -10,11 +10,14 @@ from dataclasses import replace
 from fractions import Fraction
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
+import signal
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import wh2_preferred_attempt_timing as timing
 
@@ -540,6 +543,45 @@ class IsolationTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_atomic_write_discards_only_dead_pid_temporaries(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            target = directory / "panel.json"
+            stale = directory / ".panel.json.99999999.partial"
+            stale.write_bytes(b"stale\n")
+            timing._atomic_write(target, b"sealed\n")
+            self.assertEqual(target.read_bytes(), b"sealed\n")
+            self.assertFalse(stale.exists())
+
+            live = directory / (".panel.json.%d.partial" % os.getpid())
+            live.write_bytes(b"active\n")
+            with self.assertRaisesRegex(
+                    timing.TimingError, "writer is still active"):
+                timing._atomic_write(target, b"replacement\n")
+            self.assertEqual(target.read_bytes(), b"sealed\n")
+            self.assertEqual(live.read_bytes(), b"active\n")
+            live.unlink()
+
+            if hasattr(signal, "pthread_sigmask"):
+                before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                cleanup_target = directory / "cleanup-failure.json"
+                try:
+                    with mock.patch.object(
+                            timing.os, "link",
+                            side_effect=OSError("link failed")), \
+                         mock.patch.object(
+                             timing.os, "unlink",
+                             side_effect=OSError("cleanup failed")), \
+                         self.assertRaisesRegex(OSError, "cleanup failed"):
+                        timing._atomic_write(cleanup_target, b"value\n")
+                    after = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    self.assertEqual(after, before)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, before)
+                    for partial in directory.glob(
+                            ".cleanup-failure.json.*.partial"):
+                        partial.unlink()
+
     def test_default_executor_reaps_timeout_process_group(self):
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
@@ -630,6 +672,114 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(Fraction(9, 10), resumed.panel_ratio())
             self.assertEqual([], executor.calls)
             self.assertEqual([], probe.starts)
+
+    def test_resume_repairs_only_missing_panel_sidecar_after_validation(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            config = make_config(directory)
+            spec = panel_spec()
+            attempts = directory / "attempts"
+            original = timing.run_timing_panel(
+                spec, config, EvidenceQueue([clean_evidence()]), attempts,
+                executor=ExecutorQueue([
+                    timing_stdout(spec, config.route_cache_sha256)]))
+            panel_raw = (attempts / timing.PANEL_RESULT_NAME).read_bytes()
+            sidecar = attempts / timing.PANEL_RESULT_SIDECAR_NAME
+            sidecar.unlink()
+            stale = attempts / (
+                ".%s.99999999.partial" % timing.PANEL_RESULT_SIDECAR_NAME)
+            stale.write_bytes(b"interrupted sidecar\n")
+
+            executor = ExecutorQueue([])
+            probe = EvidenceQueue([])
+            resumed = timing.run_or_resume_timing_panel(
+                spec, config, probe, attempts, executor=executor)
+
+            self.assertEqual(original, resumed)
+            self.assertEqual(
+                (sha256(panel_raw) + "  panel.json\n").encode("ascii"),
+                sidecar.read_bytes())
+            self.assertFalse(stale.exists())
+            self.assertEqual([], executor.calls)
+            self.assertEqual([], probe.starts)
+
+    def test_resume_rejects_panel_symlink_before_external_cleanup(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            config = make_config(directory)
+            spec = panel_spec()
+            external = directory / "external"
+            external.mkdir()
+            (external / timing.PANEL_RESULT_NAME).write_bytes(b"{}\n")
+            stale = external / (
+                ".%s.99999999.partial" %
+                timing.PANEL_RESULT_SIDECAR_NAME)
+            stale.write_bytes(b"external interrupted sidecar\n")
+            alias = directory / "attempts"
+            alias.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaisesRegex(timing.TimingError, "plain directory"):
+                timing.run_or_resume_timing_panel(
+                    spec, config, EvidenceQueue([]), alias,
+                    executor=ExecutorQueue([]))
+            self.assertEqual(
+                b"external interrupted sidecar\n", stale.read_bytes())
+
+    def test_immutable_timing_write_never_overwrites_racing_target(self):
+        with tempfile.TemporaryDirectory() as name:
+            target = Path(name) / "artifact.json"
+            real_link = timing.os.link
+
+            def competing_link(source, destination, **kwargs):
+                target.write_bytes(b"competitor\n")
+                real_link(source, destination, **kwargs)
+
+            with mock.patch.object(
+                    timing.os, "link", side_effect=competing_link), \
+                 self.assertRaisesRegex(timing.TimingError, "conflicting"):
+                timing._atomic_write(target, b"intended\n")
+            self.assertEqual(b"competitor\n", target.read_bytes())
+
+    def test_resume_does_not_repair_sidecar_before_attempt_validation(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            config = make_config(directory)
+            spec = panel_spec()
+            attempts = directory / "attempts"
+            timing.run_timing_panel(
+                spec, config, EvidenceQueue([clean_evidence()]), attempts,
+                executor=ExecutorQueue([
+                    timing_stdout(spec, config.route_cache_sha256)]))
+            sidecar = attempts / timing.PANEL_RESULT_SIDECAR_NAME
+            sidecar.unlink()
+            stdout = attempts / "attempt-00.stdout"
+            stdout.write_bytes(stdout.read_bytes() + b"tamper\n")
+
+            with self.assertRaisesRegex(timing.TimingError, "stream hash"):
+                timing.run_or_resume_timing_panel(
+                    spec, config, EvidenceQueue([]), attempts,
+                    executor=ExecutorQueue([]))
+            self.assertFalse(sidecar.exists())
+
+    def test_resume_never_replaces_existing_bad_panel_sidecar(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            config = make_config(directory)
+            spec = panel_spec()
+            attempts = directory / "attempts"
+            timing.run_timing_panel(
+                spec, config, EvidenceQueue([clean_evidence()]), attempts,
+                executor=ExecutorQueue([
+                    timing_stdout(spec, config.route_cache_sha256)]))
+            sidecar = attempts / timing.PANEL_RESULT_SIDECAR_NAME
+            bad = b"0" * 64 + b"  panel.json\n"
+            sidecar.write_bytes(bad)
+
+            with self.assertRaisesRegex(timing.TimingError, "file hash"):
+                timing.run_or_resume_timing_panel(
+                    spec, config, EvidenceQueue([]), attempts,
+                    executor=ExecutorQueue([]))
+            self.assertEqual(bad, sidecar.read_bytes())
 
     def test_failed_or_partial_panel_is_never_rerun_by_controller(self):
         with tempfile.TemporaryDirectory() as name:

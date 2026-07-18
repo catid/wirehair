@@ -19,11 +19,19 @@ frozen table.
 
 from __future__ import annotations
 
+import sys
+
+# This controller imports helpers from an exact-inventory frozen directory.
+# Suppress __pycache__ before any local helper import can mutate that tree.
+sys.dont_write_bytecode = True
+
 import argparse
 from contextlib import contextmanager
+import ctypes
 import csv
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import errno
 import fcntl
 import hashlib
 import heapq
@@ -34,12 +42,12 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import shutil
 import signal
 import stat as stat_module
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -276,8 +284,7 @@ HOLDOUT_PHASES = {
 }
 
 
-class CampaignError(RuntimeError):
-    pass
+CampaignError = common.CampaignError
 
 
 def die(message: str) -> None:
@@ -645,7 +652,9 @@ def validate_beacon_contract_kats() -> None:
         die("holdout phase-expansion golden changed")
 
 
-def verify_source_seals(source_root: Path) -> None:
+def verify_source_seals(
+    source_root: Path,
+) -> tuple[bytes, dict[Path, str]]:
     expected = {
         source_root / "analysis/failures_and_shortfalls.csv":
             SOURCE_FAILURES_SHA256,
@@ -655,13 +664,18 @@ def verify_source_seals(source_root: Path) -> None:
         source_root / "analysis/analysis_complete.sha256":
             SOURCE_ANALYSIS_SEAL_SHA256,
     }
+    pinned: dict[Path, bytes] = {}
     for path, digest in expected.items():
-        if common.sha256_file(path.resolve(strict=True)) != digest:
+        resolved = path.resolve(strict=True)
+        raw = common.stable_bytes(resolved)
+        if sha256_bytes(raw) != digest:
             die(f"sealed source hash mismatch: {path}")
+        pinned[resolved] = raw
     source_contract_path = source_root / "frozen/contract.json"
-    if common.sha256_file(source_contract_path) != SOURCE_CONTRACT_SHA256:
+    contract_raw = common.stable_bytes(source_contract_path)
+    if sha256_bytes(contract_raw) != SOURCE_CONTRACT_SHA256:
         die("sealed source campaign contract digest mismatch")
-    contract = json.loads(common.stable_bytes(source_contract_path))
+    contract = json.loads(contract_raw)
     if (not isinstance(contract, dict) or
             contract.get("source_commit") != SOURCE_COMMIT or
             contract.get("block_bytes") != 64 or
@@ -672,21 +686,30 @@ def verify_source_seals(source_root: Path) -> None:
         die("sealed source campaign contract mismatch")
     # Verify every source result and every published analysis file before using
     # either outcome or timing data.  The hashes above pin the manifests too.
-    common.verify_sha_manifest(
+    phase_manifest = common.verify_sha_manifest(
         source_root, source_root / "results/phase_complete.sha256")
     common.verify_sha_manifest(
         source_root, source_root / "analysis/analysis_complete.sha256")
+    for path, raw in pinned.items():
+        if common.stable_bytes(path) != raw:
+            die(f"sealed source changed during manifest verification: {path}")
+    if common.stable_bytes(source_contract_path) != contract_raw:
+        die("sealed source campaign contract changed during verification")
+    return (
+        pinned[(source_root / "analysis/failures_and_shortfalls.csv").resolve(
+            strict=True)],
+        phase_manifest,
+    )
 
 
-def derive_active_cohort(source_root: Path) -> tuple[int, ...]:
-    path = source_root / "analysis/failures_and_shortfalls.csv"
+def derive_active_cohort(source_bytes: bytes) -> tuple[int, ...]:
     required = {
         "K", "active_packet_peel_seed_xor",
         "two_anchor_adaptive_rank_fail", "two_anchor_adaptive_error",
     }
     seen_failure_cells: set[tuple[int, str, str]] = set()
     active: set[int] = set()
-    with io.StringIO(common.stable_bytes(path).decode("utf-8"), newline="") as text:
+    with io.StringIO(source_bytes.decode("utf-8"), newline="") as text:
         reader = csv.DictReader(text)
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             die("sealed failure source has an unexpected schema")
@@ -724,7 +747,9 @@ def derive_active_cohort(source_root: Path) -> tuple[int, ...]:
 
 
 def source_timing_weights(
-    source_root: Path, cohort: Sequence[int],
+    source_root: Path,
+    cohort: Sequence[int],
+    phase_manifest: dict[Path, str],
 ) -> tuple[dict[int, int], dict[int, int]]:
     cohort_set = set(cohort)
     active_weights = {K: 0 for K in cohort}
@@ -748,7 +773,12 @@ def source_timing_weights(
         seed_index = int(match.group(1))
         schedule = match.group(2)
         size_class = match.group(3)
-        data = common.stable_bytes(path).decode("utf-8")
+        raw = common.stable_bytes(path)
+        expected_digest = phase_manifest.get(path.resolve(strict=True))
+        if (expected_digest is None or
+                sha256_bytes(raw) != expected_digest):
+            die(f"q0 timing source is absent from the sealed phase: {path.name}")
+        data = raw.decode("utf-8")
         first, separator, csv_text = data.partition("\n")
         tokens = first.split()
         if not separator or tokens[:2] != ["#", "precodefail:"]:
@@ -1317,8 +1347,25 @@ def parse_systemd_cpu_set(text: str) -> tuple[int, ...]:
     return parse_linux_cpu_list(text.replace(" ", ","))
 
 
-def exact_load_filler_pids() -> tuple[int, ...]:
-    expected_tail = (b"-c", b"while :; do :; done")
+TIMING_HOST_LOCK_PATH = Path("/tmp/wirehair-wh2-timing-host.lock")
+TIMING_HOST_JOURNAL_PATH = Path(
+    "/tmp/wirehair-wh2-timing-host.journal.json")
+TIMING_HOST_JOURNAL_SCHEMA = "wirehair.wh2.timing_host_journal.v1"
+TIMING_HOST_UNITS = ("system.slice", "user.slice", "machine.slice")
+TIMING_HOST_RECOVERY_TOOLS = (
+    "bash", "sudo", "systemctl", "taskset", "tee",
+)
+LOAD_FILLER_ARGV0_BASENAME = "bash"
+LOAD_FILLER_ARGV_TAIL = ("-c", "while :; do :; done")
+LOAD_FILLER_NICE = 19
+
+
+def load_filler_pids(required_nice: int | None) -> tuple[int, ...]:
+    if (required_nice is not None and
+            (not isinstance(required_nice, int) or
+             isinstance(required_nice, bool))):
+        die("CPU filler nice filter is malformed")
+    expected_tail = tuple(value.encode("ascii") for value in LOAD_FILLER_ARGV_TAIL)
     pids: list[int] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -1328,10 +1375,17 @@ def exact_load_filler_pids() -> tuple[int, ...]:
             nice = os.getpriority(os.PRIO_PROCESS, int(entry.name))
         except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
             continue
-        if (len(fields) == 3 and Path(os.fsdecode(fields[0])).name == "bash" and
-                tuple(fields[1:]) == expected_tail and nice == 19):
+        if (len(fields) == 3 and
+                Path(os.fsdecode(fields[0])).name ==
+                    LOAD_FILLER_ARGV0_BASENAME and
+                tuple(fields[1:]) == expected_tail and
+                (required_nice is None or nice == required_nice)):
             pids.append(int(entry.name))
     return tuple(sorted(pids))
+
+
+def exact_load_filler_pids() -> tuple[int, ...]:
+    return load_filler_pids(LOAD_FILLER_NICE)
 
 
 def cpu_busy_ticks(cpu: int) -> int:
@@ -1364,16 +1418,419 @@ class TimingHostSession:
         self.core = core
         self.isolation = timing.inspect_linux_isolation(core)
         self.tools = contract.get("system_tools")
+        self.lock_path = TIMING_HOST_LOCK_PATH
+        self.journal_path = TIMING_HOST_JOURNAL_PATH
         self.lock_fd: int | None = None
+        self.journal_fd: int | None = None
         self.stopped_fillers = 0
         self.filler_cpus: tuple[int, ...] = ()
         self.sibling_states: dict[int, str] = {}
         self.slice_states: dict[str, tuple[str, str]] = {}
+        self.journal_record: dict[str, Any] | None = None
+        self.journal_bytes: bytes | None = None
         self.previous_signal_handlers: dict[int, Any] = {}
         self.pending_cleanup_signals: list[int] = []
         self.signals_installed = False
         self.closing = False
         self.active = False
+
+    def _online_cpu_set(self) -> tuple[int, ...]:
+        try:
+            text = Path("/sys/devices/system/cpu/online").read_text(
+                encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            die("timing host online CPU set is unavailable")
+        return parse_linux_cpu_list(text)
+
+    def _read_sibling_state(self, cpu: int) -> str:
+        path = Path(f"/sys/devices/system/cpu/cpu{cpu}/online")
+        try:
+            state = path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            die(f"timing sibling CPU {cpu} online state is unavailable")
+        if state not in ("0", "1"):
+            die("timing sibling online state is malformed")
+        return state
+
+    def _filler_inventory_for(
+        self,
+        pids: Sequence[int],
+        required_nice: int | None,
+    ) -> tuple[
+        tuple[int, ...], tuple[int, ...], tuple[tuple[int, int], ...],
+    ]:
+        canonical_pids = tuple(sorted(pids))
+        if canonical_pids != tuple(pids) or len(canonical_pids) != len(
+                set(canonical_pids)):
+            die("timing CPU filler PID set is noncanonical")
+        bash = Path(self.tool("bash"))
+        filler_cpus: list[int] = []
+        identities: list[tuple[int, int]] = []
+        for pid in canonical_pids:
+            start_ticks = self._process_start_ticks(pid)
+            if start_ticks is None:
+                die("timing CPU filler disappeared during topology audit")
+            try:
+                affinity = tuple(sorted(os.sched_getaffinity(pid)))
+                nice = os.getpriority(os.PRIO_PROCESS, pid)
+                command = (Path(f"/proc/{pid}/cmdline").read_bytes()
+                           .rstrip(b"\0").split(b"\0"))
+                argv0 = Path(os.fsdecode(command[0])).resolve(strict=True)
+                executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+            except (IndexError, OSError, ProcessLookupError):
+                die("timing CPU filler disappeared during topology audit")
+            if (len(affinity) != 1 or
+                    (required_nice is not None and nice != required_nice) or
+                    argv0 != bash or executable != bash or
+                    tuple(os.fsdecode(value) for value in command[1:]) !=
+                    LOAD_FILLER_ARGV_TAIL):
+                die("timing CPU filler command or affinity is not exact")
+            if self._process_start_ticks(pid) != start_ticks:
+                die("timing CPU filler identity changed during topology audit")
+            filler_cpus.append(affinity[0])
+            identities.append((pid, start_ticks))
+        return (
+            canonical_pids, tuple(sorted(filler_cpus)), tuple(identities))
+
+    def _filler_inventory(
+        self,
+    ) -> tuple[
+        tuple[int, ...], tuple[int, ...], tuple[tuple[int, int], ...],
+    ]:
+        return self._filler_inventory_for(
+            exact_load_filler_pids(), LOAD_FILLER_NICE)
+
+    def _matching_filler_inventory(
+        self,
+    ) -> tuple[
+        tuple[int, ...], tuple[int, ...], tuple[tuple[int, int], ...],
+    ]:
+        return self._filler_inventory_for(load_filler_pids(None), None)
+
+    @staticmethod
+    def _filler_command_record() -> dict[str, Any]:
+        return {
+            "argv0_basename": LOAD_FILLER_ARGV0_BASENAME,
+            "argv_tail": list(LOAD_FILLER_ARGV_TAIL),
+            "executable_tool": "bash",
+            "nice": LOAD_FILLER_NICE,
+            "single_cpu_affinity": True,
+        }
+
+    def _recovery_tool_records(self) -> dict[str, dict[str, str]]:
+        if not isinstance(self.tools, dict):
+            die("timing host lacks the frozen system-tool inventory")
+        records: dict[str, dict[str, str]] = {}
+        for name in TIMING_HOST_RECOVERY_TOOLS:
+            self.tool(name)
+            source = self.tools[name]
+            records[name] = {
+                "path": str(source["path"]),
+                "sha256": str(source["sha256"]),
+            }
+        return records
+
+    def _validate_journal_record(
+        self,
+        record: Any,
+        *,
+        require_current_boot: bool = True,
+    ) -> dict[str, Any]:
+        if (not isinstance(record, dict) or set(record) != {
+                "schema", "boot_id", "core", "siblings", "slices",
+                "fillers", "recovery_tools",
+        } or record.get("schema") != TIMING_HOST_JOURNAL_SCHEMA):
+            die("timing host recovery journal schema changed")
+        boot_id = record.get("boot_id")
+        core = record.get("core")
+        if (not isinstance(boot_id, str) or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{12}", boot_id) is None or
+                not isinstance(core, int) or isinstance(core, bool) or
+                core < 0):
+            die("timing host recovery journal identity is malformed")
+        if (require_current_boot and
+                host_runtime_identity()["boot_id"] != boot_id):
+            die(
+                "timing host recovery journal belongs to a different boot; "
+                "manual inspection is required")
+
+        siblings = record.get("siblings")
+        if not isinstance(siblings, list):
+            die("timing host recovery sibling ledger is malformed")
+        sibling_cpus: list[int] = []
+        for item in siblings:
+            if (not isinstance(item, dict) or
+                    set(item) != {"cpu", "online"} or
+                    not isinstance(item.get("cpu"), int) or
+                    isinstance(item.get("cpu"), bool) or item["cpu"] < 0 or
+                    item.get("online") not in ("0", "1")):
+                die("timing host recovery sibling ledger is malformed")
+            sibling_cpus.append(item["cpu"])
+        if (sibling_cpus != sorted(set(sibling_cpus)) or core in sibling_cpus):
+            die("timing host recovery sibling ledger is noncanonical")
+
+        slices = record.get("slices")
+        if (not isinstance(slices, list) or len(slices) != len(
+                TIMING_HOST_UNITS)):
+            die("timing host recovery systemd ledger is malformed")
+        for expected_unit, item in zip(TIMING_HOST_UNITS, slices):
+            if (not isinstance(item, dict) or
+                    set(item) != {"unit", "allowed", "effective"} or
+                    item.get("unit") != expected_unit or
+                    not isinstance(item.get("allowed"), str) or
+                    not isinstance(item.get("effective"), str)):
+                die("timing host recovery systemd ledger is malformed")
+            for name in ("allowed", "effective"):
+                if item[name]:
+                    parse_systemd_cpu_set(item[name])
+
+        fillers = record.get("fillers")
+        if (not isinstance(fillers, dict) or set(fillers) != {
+                "command", "count", "cpus",
+        } or fillers.get("command") != self._filler_command_record() or
+                not isinstance(fillers.get("count"), int) or
+                isinstance(fillers.get("count"), bool) or
+                fillers["count"] < 0 or not isinstance(
+                    fillers.get("cpus"), list)):
+            die("timing host recovery filler ledger is malformed")
+        filler_cpus = fillers["cpus"]
+        if (any(not isinstance(cpu, int) or isinstance(cpu, bool) or cpu < 0
+                for cpu in filler_cpus) or
+                filler_cpus != sorted(set(filler_cpus)) or
+                fillers["count"] != len(filler_cpus)):
+            die("timing host recovery filler CPU set is noncanonical")
+
+        tools = record.get("recovery_tools")
+        if (not isinstance(tools, dict) or
+                tuple(tools) != TIMING_HOST_RECOVERY_TOOLS):
+            die("timing host recovery tool ledger is malformed")
+        current_tools = self.tools
+        try:
+            self.tools = tools
+            for name in TIMING_HOST_RECOVERY_TOOLS:
+                self.tool(name)
+        finally:
+            self.tools = current_tools
+        return record
+
+    def _snapshot_host_journal(self) -> dict[str, Any]:
+        online = self._online_cpu_set()
+        if self.core not in online:
+            die("selected timing core is offline")
+        expected_siblings = tuple(sorted(self.isolation.sibling_cpus))
+        if (len(expected_siblings) != len(set(expected_siblings)) or
+                self.core in expected_siblings):
+            die("timing sibling topology is noncanonical")
+        sibling_states = {
+            sibling: self._read_sibling_state(sibling)
+            for sibling in expected_siblings
+        }
+        slice_states: dict[str, tuple[str, str]] = {}
+        slice_records: list[dict[str, str]] = []
+        for unit in TIMING_HOST_UNITS:
+            allowed = self._systemctl_allowed(unit)
+            effective = self._systemctl_effective(unit)
+            if allowed:
+                parse_systemd_cpu_set(allowed)
+            if effective:
+                parse_systemd_cpu_set(effective)
+            slice_states[unit] = (allowed, effective)
+            slice_records.append({
+                "unit": unit, "allowed": allowed, "effective": effective,
+            })
+        pids, filler_cpus, _identities = self._filler_inventory()
+        (matching_pids, _matching_cpus,
+         _matching_identities) = self._matching_filler_inventory()
+        if matching_pids != pids:
+            die("timing host found a noncanonical partial CPU filler command")
+        expected_cpus = tuple(sorted(os.sched_getaffinity(0)))
+        if pids and filler_cpus != expected_cpus:
+            die("timing CPU fillers do not exactly cover the controller CPU set")
+
+        record = {
+            "schema": TIMING_HOST_JOURNAL_SCHEMA,
+            "boot_id": host_runtime_identity()["boot_id"],
+            "core": self.core,
+            "siblings": [
+                {"cpu": cpu, "online": sibling_states[cpu]}
+                for cpu in expected_siblings
+            ],
+            "slices": slice_records,
+            "fillers": {
+                "command": self._filler_command_record(),
+                "count": len(pids),
+                "cpus": list(filler_cpus),
+            },
+            "recovery_tools": self._recovery_tool_records(),
+        }
+        self._validate_journal_record(record)
+        self.sibling_states = sibling_states
+        self.slice_states = slice_states
+        self.stopped_fillers = len(pids)
+        self.filler_cpus = filler_cpus
+        return record
+
+    def _write_host_journal(self, record: dict[str, Any]) -> None:
+        self._validate_journal_record(record)
+        if os.path.lexists(str(self.journal_path)):
+            die("timing host recovery journal already exists")
+        encoded = common.json_bytes(record)
+        common.atomic_write_once_or_same(self.journal_path, encoded)
+        descriptor, persisted = self._open_bound_host_journal()
+        if persisted != encoded:
+            os.close(descriptor)
+            die("timing host recovery journal changed during publication")
+        self.journal_fd = descriptor
+        self.journal_record = record
+        self.journal_bytes = encoded
+
+    @staticmethod
+    def _journal_identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_nlink, metadata.st_uid, metadata.st_gid,
+            metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+        )
+
+    def _read_bound_host_journal(
+        self,
+        descriptor: int,
+        directory_fd: int,
+    ) -> bytes:
+        before = os.fstat(descriptor)
+        if (not stat_module.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_uid != os.geteuid() or
+                stat_module.S_IMODE(before.st_mode) != 0o600):
+            die("timing host recovery journal is not a private unique file")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read()
+            midpoint = os.fstat(descriptor)
+            named_midpoint = os.stat(
+                self.journal_path.name, dir_fd=directory_fd,
+                follow_symlinks=False)
+            source.seek(0)
+            confirmation = source.read()
+        after = os.fstat(descriptor)
+        named_after = os.stat(
+            self.journal_path.name, dir_fd=directory_fd,
+            follow_symlinks=False)
+        identity = self._journal_identity
+        if (identity(before) != identity(midpoint) or
+                identity(named_midpoint) != identity(midpoint) or
+                raw != confirmation or
+                identity(midpoint) != identity(after) or
+                identity(named_after) != identity(after)):
+            die("timing host recovery journal changed while being read")
+        return raw
+
+    def _open_bound_host_journal(self) -> tuple[int, bytes]:
+        directory_fd = common.open_durable_directory(self.journal_path.parent)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
+        descriptor: int | None = None
+        try:
+            # A killed immutable writer can leave the durable target and its
+            # exact dead-writer marker as two names for one inode.  Reconcile
+            # that commit window under the global timing-host lock first.
+            if common._reconcile_stale_atomic_publication(
+                    self.journal_path, directory_fd):
+                os.fsync(directory_fd)
+            descriptor = os.open(
+                self.journal_path.name, flags, dir_fd=directory_fd)
+            raw = self._read_bound_host_journal(descriptor, directory_fd)
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    pass
+            try:
+                os.close(directory_fd)
+            except BaseException:
+                pass
+            raise
+        try:
+            os.close(directory_fd)
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    pass
+            raise
+        if descriptor is None:
+            die("timing host recovery journal descriptor is unavailable")
+        return descriptor, raw
+
+    def _load_host_journal(self) -> dict[str, Any]:
+        if self.journal_fd is not None:
+            die("timing host recovery journal is already open")
+        descriptor, raw = self._open_bound_host_journal()
+        try:
+            try:
+                record = json.loads(raw)
+                canonical = common.json_bytes(record)
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError,
+                    TypeError, ValueError):
+                die("timing host recovery journal is not valid JSON")
+            if canonical != raw:
+                die("timing host recovery journal is not canonical JSON")
+            self._validate_journal_record(record)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.journal_fd = descriptor
+        self.journal_record = record
+        self.journal_bytes = raw
+        self.sibling_states = {
+            item["cpu"]: item["online"] for item in record["siblings"]
+        }
+        self.slice_states = {
+            item["unit"]: (item["allowed"], item["effective"])
+            for item in record["slices"]
+        }
+        self.stopped_fillers = record["fillers"]["count"]
+        self.filler_cpus = tuple(record["fillers"]["cpus"])
+        return record
+
+    @contextmanager
+    def _journal_recovery_tools(self) -> Iterator[None]:
+        previous = self.tools
+        if self.journal_record is not None:
+            self.tools = self.journal_record["recovery_tools"]
+        try:
+            yield
+        finally:
+            self.tools = previous
+
+    def _delete_host_journal(self) -> None:
+        if (self.journal_record is None or self.journal_bytes is None or
+                self.journal_fd is None):
+            die("timing host recovery journal state is unavailable")
+        directory_fd = common.open_durable_directory(self.journal_path.parent)
+        try:
+            current = self._read_bound_host_journal(
+                self.journal_fd, directory_fd)
+            if current != self.journal_bytes:
+                die("timing host recovery journal changed during restoration")
+            os.unlink(self.journal_path.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            try:
+                os.stat(
+                    self.journal_path.name, dir_fd=directory_fd,
+                    follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                die("timing host recovery journal did not delete")
+        finally:
+            os.close(directory_fd)
+        descriptor = self.journal_fd
+        self.journal_fd = None
+        os.close(descriptor)
 
     def _handle_timing_signal(self, signum: int, _frame: Any) -> None:
         if self.closing:
@@ -1467,7 +1924,8 @@ class TimingHostSession:
             die(f"timing host lacks frozen {name} identity")
         path = Path(str(record["path"]))
         if (not path.is_absolute() or path.resolve(strict=True) != path or
-                common.sha256_file(path) != record["sha256"]):
+                common.sha256_file(
+                    path, require_unique=False) != record["sha256"]):
             die(f"timing host frozen {name} changed")
         return str(path)
 
@@ -1518,140 +1976,355 @@ class TimingHostSession:
         ), (value + "\n").encode("ascii"))
 
     def _stop_fillers(self) -> None:
-        pids = exact_load_filler_pids()
-        expected_cpus = tuple(sorted(os.sched_getaffinity(0)))
-        filler_cpus: list[int] = []
-        for pid in pids:
-            try:
-                affinity = tuple(sorted(os.sched_getaffinity(pid)))
-            except ProcessLookupError:
-                die("timing CPU filler disappeared during topology audit")
-            if len(affinity) != 1:
-                die("timing CPU filler is not pinned to exactly one CPU")
-            filler_cpus.append(affinity[0])
-        if pids and tuple(sorted(filler_cpus)) != expected_cpus:
-            die("timing CPU fillers do not exactly cover the controller CPU set")
-        self.stopped_fillers = len(pids)
-        self.filler_cpus = tuple(sorted(filler_cpus))
-        self._terminate_pids(pids)
-        if exact_load_filler_pids():
+        pids, filler_cpus, identities = self._filler_inventory()
+        (matching_pids, _matching_cpus,
+         _matching_identities) = self._matching_filler_inventory()
+        if (len(pids) != self.stopped_fillers or
+                filler_cpus != self.filler_cpus or matching_pids != pids):
+            die("timing CPU filler set changed after the durable snapshot")
+        self._terminate_process_identities(identities)
+        if load_filler_pids(None):
             die("timing could not stop the exact CPU filler set")
 
-    def _terminate_pids(self, pids: Sequence[int]) -> None:
-        targets = tuple(sorted(set(pids)))
-        for pid in targets:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            for pid in targets:
+    @staticmethod
+    def _process_start_ticks(pid: int) -> int | None:
+        """Return Linux /proc starttime, or None only after process exit."""
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        except OSError as error:
+            raise CampaignError(
+                f"cannot validate process identity for pid {pid}: {error}") \
+                from error
+        closing = raw.rfind(b") ")
+        fields = raw[closing + 2:].split() if closing >= 0 else []
+        # The suffix starts at field 3 (state); starttime is field 22.
+        if len(fields) <= 19 or not fields[19].isdigit():
+            die(f"malformed Linux process identity for pid {pid}")
+        return int(fields[19], 10)
+
+    def _open_original_process(
+        self,
+        pid: int,
+        start_ticks: int,
+    ) -> int | None:
+        """Open a stable kernel process handle, then validate its identity."""
+        if (not hasattr(os, "pidfd_open") or
+                not hasattr(signal, "pidfd_send_signal")):
+            die("timing host requires Linux pidfd process identity support")
+        try:
+            descriptor = os.pidfd_open(pid, 0)
+        except ProcessLookupError:
+            return None
+        if self._process_start_ticks(pid) != start_ticks:
+            os.close(descriptor)
+            return None
+        return descriptor
+
+    @staticmethod
+    def _signal_process_handle(descriptor: int, signum: int) -> bool:
+        try:
+            signal.pidfd_send_signal(descriptor, signum, None, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _terminate_process_identities(
+        self,
+        identities: Sequence[tuple[int, int]],
+    ) -> None:
+        targets = tuple(sorted(identities))
+        if (any(not isinstance(pid, int) or isinstance(pid, bool) or
+                    not isinstance(start, int) or isinstance(start, bool) or
+                    pid <= 0 or start < 0 for pid, start in targets) or
+                len({pid for pid, _start in targets}) != len(targets)):
+            die("timing process identity set is noncanonical")
+        handles: dict[int, int] = {}
+        try:
+            for pid, start_ticks in targets:
+                descriptor = self._open_original_process(pid, start_ticks)
+                if descriptor is not None:
+                    handles[pid] = descriptor
+            for descriptor in handles.values():
+                self._signal_process_handle(descriptor, signal.SIGTERM)
+            deadline = time.monotonic() + 10.0
+            ready: set[int] = set()
+            while time.monotonic() < deadline and len(ready) != len(handles):
+                descriptors = list(handles.values())
+                readable, _writable, _exceptional = select.select(
+                    descriptors, (), (), min(0.02, deadline - time.monotonic()))
+                ready.update(readable)
+                for pid in handles:
+                    try:
+                        os.waitpid(pid, os.WNOHANG)
+                    except (ChildProcessError, ProcessLookupError):
+                        pass
+            for descriptor in handles.values():
+                if descriptor not in ready:
+                    self._signal_process_handle(descriptor, signal.SIGKILL)
+            for pid in handles:
                 try:
-                    os.waitpid(pid, os.WNOHANG)
+                    os.waitpid(pid, 0)
                 except (ChildProcessError, ProcessLookupError):
                     pass
-            if not any(Path(f"/proc/{pid}").exists() for pid in targets):
-                break
-            time.sleep(0.02)
-        for pid in targets:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        for pid in targets:
-            try:
-                os.waitpid(pid, 0)
-            except (ChildProcessError, ProcessLookupError):
-                pass
+        finally:
+            for descriptor in handles.values():
+                os.close(descriptor)
 
     def _restart_fillers(self) -> None:
         if self.stopped_fillers == 0:
+            if load_filler_pids(None):
+                die("refusing unexpected CPU fillers absent from the journal")
             return
-        online_cpus = set(parse_linux_cpu_list(
-            Path("/sys/devices/system/cpu/online").read_text(
-                encoding="ascii").strip()))
+        online_cpus = set(self._online_cpu_set())
         cpus = self.filler_cpus
         if (len(cpus) != self.stopped_fillers or
                 not set(cpus).issubset(online_cpus)):
             die("refusing to restart fillers on a changed online CPU set")
-        existing = exact_load_filler_pids()
+        existing, existing_cpus, existing_identities = \
+            self._matching_filler_inventory()
         if existing:
-            try:
-                existing_cpus = tuple(sorted(
-                    next(iter(os.sched_getaffinity(pid)))
-                    for pid in existing
-                    if len(os.sched_getaffinity(pid)) == 1))
-            except ProcessLookupError:
-                existing_cpus = ()
-            if (len(existing) == self.stopped_fillers and
+            exact = exact_load_filler_pids()
+            if (existing == exact and len(existing) == self.stopped_fillers and
                     existing_cpus == cpus):
-                self.stopped_fillers = 0
-                self.filler_cpus = ()
                 return
-            die("refusing to merge a partial or foreign CPU filler set")
+            if not set(existing_cpus).issubset(cpus):
+                die("refusing to merge a foreign CPU filler set")
+            # A process may have died while the previous controller was
+            # relaunching the exact journaled command.  Remove that partial
+            # subset (including a child killed between exec and setpriority)
+            # and rebuild the complete, one-filler-per-CPU set.
+            self._terminate_process_identities(existing_identities)
+            if load_filler_pids(None):
+                die("timing could not clear a partial journaled filler set")
         taskset = self.tool("taskset")
         bash = self.tool("bash")
         last_error = "unknown restart failure"
         for _launch_attempt in range(2):
-            launched: list[int] = []
+            launched: list[tuple[int, int]] = []
             try:
                 for cpu in cpus:
                     process = subprocess.Popen(
                         (taskset, "-c", str(cpu), bash, "-c",
-                         "while :; do :; done"),
+                         LOAD_FILLER_ARGV_TAIL[1]),
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL, start_new_session=True)
-                    launched.append(process.pid)
-                    os.setpriority(os.PRIO_PROCESS, process.pid, 19)
+                    start_ticks = self._process_start_ticks(process.pid)
+                    if start_ticks is None:
+                        process.wait(timeout=5)
+                        die("CPU filler exited before identity capture")
+                    launched.append((process.pid, start_ticks))
+                    os.setpriority(
+                        os.PRIO_PROCESS, process.pid, LOAD_FILLER_NICE)
                 deadline = time.monotonic() + 5.0
                 while (len(exact_load_filler_pids()) != self.stopped_fillers and
                        time.monotonic() < deadline):
                     time.sleep(0.02)
-                restarted = exact_load_filler_pids()
+                restarted, restarted_cpus, _restarted_identities = \
+                    self._filler_inventory()
                 if len(restarted) != self.stopped_fillers:
                     raise CampaignError(
                         "CPU filler set did not restart exactly")
-                restarted_cpus = tuple(sorted(
-                    next(iter(os.sched_getaffinity(pid))) for pid in restarted
-                    if len(os.sched_getaffinity(pid)) == 1))
                 if restarted_cpus != cpus:
                     raise CampaignError(
                         "restarted CPU fillers do not cover their original CPUs")
-                self.stopped_fillers = 0
-                self.filler_cpus = ()
+                if load_filler_pids(None) != restarted:
+                    raise CampaignError(
+                        "CPU filler restart left a noncanonical partial child")
                 return
             except (OSError, ProcessLookupError, CampaignError) as error:
                 last_error = str(error)
-                self._terminate_pids(launched)
+                self._terminate_process_identities(launched)
                 # Reap any launched exact loops that survived long enough to
                 # enter the scanner before the direct PID cleanup.
-                leftovers = exact_load_filler_pids()
+                (_leftover_pids, _leftover_cpus,
+                 leftovers) = self._matching_filler_inventory()
                 if leftovers:
-                    self._terminate_pids(leftovers)
+                    self._terminate_process_identities(leftovers)
         die(f"CPU filler restart failed twice: {last_error}")
+
+    def _validate_restored_host_journal(self) -> None:
+        record = self.journal_record
+        if record is None:
+            die("timing host recovery validation lacks its journal")
+        self._validate_journal_record(record)
+        for item in record["siblings"]:
+            if self._read_sibling_state(item["cpu"]) != item["online"]:
+                die("timing sibling online state did not restore exactly")
+        for item in record["slices"]:
+            unit = item["unit"]
+            if self._systemctl_allowed(unit) != item["allowed"]:
+                die(f"timing host did not restore {unit} AllowedCPUs exactly")
+            if self._systemctl_effective(unit) != item["effective"]:
+                die(f"timing host did not restore {unit} EffectiveCPUs exactly")
+        pids, cpus, _identities = self._filler_inventory()
+        (matching_pids, _matching_cpus,
+         _matching_identities) = self._matching_filler_inventory()
+        fillers = record["fillers"]
+        if (matching_pids != pids or len(pids) != fillers["count"] or
+                cpus != tuple(fillers["cpus"])):
+            die("timing CPU filler set did not restore exactly")
+
+    def _restore_host_state(self) -> list[BaseException]:
+        errors: list[BaseException] = []
+        had_snapshot = (
+            self.journal_record is not None or bool(self.sibling_states) or
+            bool(self.slice_states) or self.stopped_fillers != 0 or
+            bool(self.filler_cpus)
+        )
+        if self.journal_record is not None:
+            try:
+                # A boot boundary invalidates every PID, cgroup, and sysfs
+                # assumption.  Fail without making any recovery mutation.
+                self._validate_journal_record(self.journal_record)
+            except BaseException as error:
+                return [error]
+        with self._journal_recovery_tools():
+            # Bring siblings online before restoring an EffectiveCPUs
+            # snapshot that contains them; otherwise systemd cannot expand
+            # the cgroup mask and a blank reset can remain narrowed.
+            for sibling, state in self.sibling_states.items():
+                try:
+                    current = self._read_sibling_state(sibling)
+                    if current != state:
+                        self._write_online(sibling, state)
+                    if self._read_sibling_state(sibling) != state:
+                        die("timing sibling online state did not restore")
+                except BaseException as error:
+                    errors.append(error)
+            for unit, (original, original_effective) in reversed(
+                    tuple(self.slice_states.items())):
+                try:
+                    # systemd clears the AllowedCPUs property text without
+                    # necessarily expanding cpuset.cpus.effective.  First
+                    # restore the exact pre-session effective set explicitly;
+                    # only then restore the original (possibly inherited)
+                    # property text.
+                    if original_effective:
+                        effective_values = parse_systemd_cpu_set(
+                            original_effective)
+                        self._set_allowed(
+                            unit, format_linux_cpu_list(effective_values))
+                        if self._systemctl_effective(unit) != original_effective:
+                            die(
+                                f"timing host did not restore {unit} "
+                                "EffectiveCPUs")
+                    self._set_allowed(unit, original)
+                    if self._systemctl_allowed(unit) != original:
+                        die(f"timing host did not restore {unit} AllowedCPUs")
+                    if (original_effective and self._systemctl_effective(unit) !=
+                            original_effective):
+                        die(
+                            f"timing host lost restored {unit} EffectiveCPUs")
+                except BaseException as error:
+                    errors.append(error)
+            self.active = False
+            if had_snapshot:
+                try:
+                    self._restart_fillers()
+                except BaseException as error:
+                    errors.append(error)
+            if self.journal_record is not None:
+                try:
+                    self._validate_restored_host_journal()
+                except BaseException as error:
+                    errors.append(error)
+        return errors
+
+    def _clear_host_snapshot(self) -> None:
+        self.sibling_states.clear()
+        self.slice_states.clear()
+        self.stopped_fillers = 0
+        self.filler_cpus = ()
+        self.journal_record = None
+        self.journal_bytes = None
+        if self.journal_fd is not None:
+            descriptor = self.journal_fd
+            self.journal_fd = None
+            os.close(descriptor)
+
+    def _recover_existing_host_journal(self) -> None:
+        if not os.path.lexists(str(self.journal_path)):
+            return
+        previous_closing = self.closing
+        self.closing = True
+        errors: list[BaseException] = []
+        try:
+            self._load_host_journal()
+            errors.extend(self._restore_host_state())
+            if not errors:
+                try:
+                    self._delete_host_journal()
+                except BaseException as error:
+                    errors.append(error)
+            if not errors:
+                self._clear_host_snapshot()
+        finally:
+            # _handle_timing_signal defers SIGINT/SIGTERM while closing is
+            # true, so a signal cannot split exact validation from the
+            # journal's unlink+directory-fsync discharge.
+            self.closing = previous_closing
+        if errors:
+            raise CampaignError(
+                "timing host crash recovery failed: " +
+                "; ".join(str(error) for error in errors))
+        pending = tuple(self.pending_cleanup_signals)
+        self.pending_cleanup_signals.clear()
+        if pending:
+            if pending[0] == signal.SIGINT:
+                raise KeyboardInterrupt
+            die(
+                "timing host interrupted during crash recovery by " +
+                signal.Signals(pending[0]).name)
 
     def __enter__(self) -> "TimingHostSession":
         if self.active:
             die("timing host session is already active")
-        lock_path = Path("/tmp/wirehair-wh2-timing-host.lock")
-        self.lock_fd = os.open(
-            lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        lock_fd = os.open(
+            self.lock_path,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) |
+            getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             0o600)
-        lock_metadata = os.fstat(self.lock_fd)
-        if (not stat_module.S_ISREG(lock_metadata.st_mode) or
-                lock_metadata.st_nlink != 1):
-            os.close(self.lock_fd)
-            self.lock_fd = None
-            die("timing host lock is not a unique regular file")
+        self.lock_fd = lock_fd
         try:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(self.lock_fd)
+            lock_metadata = os.fstat(lock_fd)
+            if (not stat_module.S_ISREG(lock_metadata.st_mode) or
+                    lock_metadata.st_nlink != 1 or
+                    lock_metadata.st_uid != os.geteuid() or
+                    stat_module.S_IMODE(lock_metadata.st_mode) != 0o600 or
+                    lock_metadata.st_size != 0):
+                die("timing host lock is not a unique regular file")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                die("another final timing session owns global host isolation")
+            locked_metadata = os.fstat(lock_fd)
+            named_lock = os.stat(self.lock_path, follow_symlinks=False)
+            if (self._journal_identity(lock_metadata) !=
+                    self._journal_identity(locked_metadata) or
+                    (named_lock.st_dev, named_lock.st_ino) !=
+                    (locked_metadata.st_dev, locked_metadata.st_ino)):
+                die("timing host lock pathname changed during acquisition")
+            os.fsync(lock_fd)
+            fsync_directory(self.lock_path.parent)
+        except BaseException:
             self.lock_fd = None
-            die("another final timing session owns global host isolation")
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except BaseException:
+                pass
+            try:
+                os.close(lock_fd)
+            except BaseException:
+                pass
+            raise
         try:
             self._install_signal_handlers()
+            # No new host snapshot or mutation may overtake a journal left by
+            # a killed controller.  Recovery uses the old frozen tool paths,
+            # not the possibly different contract starting this session.
+            self._recover_existing_host_journal()
             # This host grants noninteractive sudo per executable rather than
             # through a blanket cached credential, so `sudo -v` is not a
             # meaningful capability probe.  Exercise the exact privileged
@@ -1659,38 +2332,28 @@ class TimingHostSession:
             for name in ("systemctl", "systemd-run", "tee"):
                 self.checked((
                     self.tool("sudo"), "-n", self.tool(name), "--version"))
+            journal = self._snapshot_host_journal()
+            # The immutable journal publication is descriptor-bound and
+            # fsyncs both the file and its containing directory.  Every
+            # filler/CPU/cgroup mutation is strictly after this point.
+            self._write_host_journal(journal)
+            # Re-read every journaled host value at the mutation boundary so
+            # the durable record is an exact snapshot, not merely a sequence
+            # of individually valid observations.
+            self._validate_restored_host_journal()
             self._stop_fillers()
-            online = set(parse_linux_cpu_list(
-                Path("/sys/devices/system/cpu/online").read_text(
-                    encoding="ascii").strip()))
-            if self.core not in online:
-                die("selected timing core is offline")
-            # Snapshot cgroup state while every originally-online sibling is
-            # still online.  EffectiveCPUs omits offline CPUs, so taking this
-            # snapshot later would permanently forget the sibling at restore.
-            for unit in ("system.slice", "user.slice", "machine.slice"):
-                original = self._systemctl_allowed(unit)
-                original_effective = self._systemctl_effective(unit)
-                if original_effective:
-                    parse_systemd_cpu_set(original_effective)
-                self.slice_states[unit] = (original, original_effective)
-            for sibling in self.isolation.sibling_cpus:
-                path = Path(
-                    f"/sys/devices/system/cpu/cpu{sibling}/online")
-                state = path.read_text(encoding="ascii").strip()
-                if state not in ("0", "1"):
-                    die("timing sibling online state is malformed")
-                self.sibling_states[sibling] = state
+            online = set(self._online_cpu_set())
+            for sibling, state in self.sibling_states.items():
                 if state == "1":
                     self._write_online(sibling, "0")
-                    if path.read_text(encoding="ascii").strip() != "0":
+                    if self._read_sibling_state(sibling) != "0":
                         die("timing sibling did not become offline")
             remaining = sorted(online.difference({self.core}).difference(
                 self.isolation.sibling_cpus))
             allowed = format_linux_cpu_list(remaining)
             if not allowed:
                 die("timing isolation would leave no housekeeping CPU")
-            for unit in ("system.slice", "user.slice", "machine.slice"):
+            for unit in TIMING_HOST_UNITS:
                 self._set_allowed(unit, allowed)
                 observed = self._systemctl_allowed(unit)
                 if (not observed or
@@ -1725,7 +2388,7 @@ class TimingHostSession:
         )
 
     def isolation_is_live(self) -> bool:
-        if not self.active or exact_load_filler_pids():
+        if not self.active or load_filler_pids(None):
             return False
         for sibling in self.isolation.sibling_cpus:
             try:
@@ -1758,52 +2421,21 @@ class TimingHostSession:
             self._quiesce_signal_handlers()
         except BaseException as error:
             errors.append(error)
-        # Bring siblings online before restoring an EffectiveCPUs snapshot
-        # that contains them; otherwise systemd cannot expand the cgroup mask
-        # and an apparently blank reset remains permanently narrowed.
-        for sibling, state in self.sibling_states.items():
+        host_errors = self._restore_host_state()
+        if self.journal_record is not None and not host_errors:
             try:
-                current = Path(
-                    f"/sys/devices/system/cpu/cpu{sibling}/online").read_text(
-                        encoding="ascii").strip()
-                if current != state:
-                    self._write_online(sibling, state)
-                restored = Path(
-                    f"/sys/devices/system/cpu/cpu{sibling}/online").read_text(
-                        encoding="ascii").strip()
-                if restored != state:
-                    die("timing sibling online state did not restore")
+                # The durable anchor is discharged only while its exact host
+                # snapshot has just been independently re-read and validated.
+                self._delete_host_journal()
             except BaseException as error:
-                errors.append(error)
-        self.sibling_states.clear()
-        for unit, (original, original_effective) in reversed(
-                tuple(self.slice_states.items())):
-            try:
-                # systemd clears the AllowedCPUs property text without
-                # necessarily expanding cpuset.cpus.effective.  First restore
-                # the exact pre-session effective set explicitly; only then
-                # restore the original (possibly blank/inherited) property.
-                if original_effective:
-                    effective_values = parse_systemd_cpu_set(
-                        original_effective)
-                    self._set_allowed(
-                        unit, format_linux_cpu_list(effective_values))
-                    if self._systemctl_effective(unit) != original_effective:
-                        die(
-                            f"timing host did not restore {unit} EffectiveCPUs")
-                self._set_allowed(unit, original)
-                if self._systemctl_allowed(unit) != original:
-                    die(f"timing host did not restore {unit} AllowedCPUs")
-                if (original_effective and
-                        self._systemctl_effective(unit) != original_effective):
-                    die(
-                        f"timing host lost restored {unit} EffectiveCPUs")
-            except BaseException as error:
-                errors.append(error)
-        self.slice_states.clear()
-        self.active = False
+                host_errors.append(error)
+        errors.extend(host_errors)
+        # Never retain a mutable in-memory recovery snapshot after releasing
+        # the lock.  On failure the still-durable on-disk journal is the sole
+        # authority for the next lock owner; retrying this object later would
+        # otherwise mutate the host without exclusion.
         try:
-            self._restart_fillers()
+            self._clear_host_snapshot()
         except BaseException as error:
             errors.append(error)
         if self.lock_fd is not None:
@@ -1874,12 +2506,15 @@ class LinuxTimingEvidenceProbe:
     ) -> TimingEvidenceToken:
         if not self.host.isolation_is_live():
             die("timing isolation is not live before an attempt")
-        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_fd = common.open_durable_directory(
+            self.evidence_dir, create=True)
+        os.close(evidence_fd)
         suffix = "full" if cycle_index is None else f"cycle-{cycle_index}"
         stem = f"attempt-{process_index:02d}-{suffix}"
         thermal_path = self.evidence_dir / (stem + ".thermal.csv")
         performance_path = self.evidence_dir / (stem + ".performance.bin")
-        if thermal_path.exists() or performance_path.exists():
+        if (os.path.lexists(str(thermal_path)) or
+                os.path.lexists(str(performance_path))):
             die("timing evidence path would overwrite an earlier attempt")
         mark = thermal_start(
             self.thermal_log, stale_seconds=5.0, require_zero_edac=False,
@@ -2032,6 +2667,7 @@ class LinuxTimingEvidenceProbe:
                 "dimm_read_errors_max": baseline["dimm_read_errors"],
                 "edac_ce_delta": 0, "edac_ue_delta": 0,
             }
+        fsync_existing_regular_file(token.thermal_path)
         thermal_sha256 = common.sha256_file(token.thermal_path)
         edac_ce_delta = int(summary["edac_ce_delta"])
         edac_ue_delta = int(summary["edac_ue_delta"])
@@ -2051,7 +2687,7 @@ class LinuxTimingEvidenceProbe:
             core=self.host.core,
             numa_node=self.host.isolation.numa_node,
             exclusive_core=live_isolation,
-            load_workers_stopped=not exact_load_filler_pids(),
+            load_workers_stopped=not load_filler_pids(None),
             sibling_busy_ticks=sibling_delta,
             cpu_temperature_millic=int(round(
                 float(summary["cpu_tctl_max_c"]) * 1000.0)),
@@ -2070,9 +2706,10 @@ class LinuxTimingEvidenceProbe:
 
 def derive_plan(source_root: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
     source_root = source_root.resolve(strict=True)
-    verify_source_seals(source_root)
-    cohort = derive_active_cohort(source_root)
-    active_weights, all_weights = source_timing_weights(source_root, cohort)
+    failures_source, phase_manifest = verify_source_seals(source_root)
+    cohort = derive_active_cohort(failures_source)
+    active_weights, all_weights = source_timing_weights(
+        source_root, cohort, phase_manifest)
     ledgers = serialize_source_ledgers(cohort, active_weights, all_weights)
     protocol = protocol_definition()
     protocol["source"] = {
@@ -2418,7 +3055,8 @@ def system_tool_identities() -> dict[str, dict[str, str]]:
         if not path.is_file() or not os.access(path, os.X_OK):
             die(f"required frozen system tool is not executable: {name}")
         tools[name] = {
-            "path": str(path), "sha256": common.sha256_file(path),
+            "path": str(path),
+            "sha256": common.sha256_file(path, require_unique=False),
         }
     return tools
 
@@ -2441,7 +3079,8 @@ def frozen_tool_path(
         die(f"frozen {name} identity is malformed")
     path = Path(path_text)
     if (not path.is_absolute() or path.resolve(strict=True) != path or
-            common.sha256_file(path) != digest or not os.access(path, os.X_OK)):
+            common.sha256_file(path, require_unique=False) != digest or
+            not os.access(path, os.X_OK)):
         die(f"frozen {name} executable changed")
     if require_current_path:
         located = shutil.which(name)
@@ -2457,7 +3096,7 @@ def python_runtime_identity() -> dict[str, str]:
     return {
         "path": str(executable),
         "version": sys.version,
-        "sha256": common.sha256_file(executable),
+        "sha256": common.sha256_file(executable, require_unique=False),
     }
 
 
@@ -2549,10 +3188,10 @@ def obtain_drand_verifier(
         "bundle": bundle,
         "node": str(node),
         "node_version": node_version,
-        "node_sha256": common.sha256_file(node),
+        "node_sha256": common.sha256_file(node, require_unique=False),
         "npm": str(npm),
         "npm_version": npm_version,
-        "npm_sha256": common.sha256_file(npm),
+        "npm_sha256": common.sha256_file(npm, require_unique=False),
         "offline_selftest": selftest_record,
     }
 
@@ -2566,6 +3205,117 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def verify_plain_campaign_directory(
+    result_dir: Path,
+    path: Path,
+    context: str,
+) -> None:
+    """Reject symlinked/noncanonical directories in a frozen campaign."""
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError:
+        die(f"{context} is not a stable directory")
+    try:
+        resolved.relative_to(result_dir)
+        inside_campaign = True
+    except ValueError:
+        inside_campaign = False
+    if (path.is_symlink() or
+            not stat_module.S_ISDIR(metadata.st_mode) or
+            resolved != path or
+            not inside_campaign):
+        die(f"{context} must be a plain directory inside the campaign")
+
+
+def ensure_plain_campaign_directory(
+    result_dir: Path,
+    path: Path,
+    context: str,
+) -> None:
+    """Create one campaign directory and durably reject path aliases."""
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    verify_plain_campaign_directory(result_dir, path, context)
+    # This orders first creation of the directory entry before any network
+    # observation or immutable child record can be published beneath it.
+    fsync_directory(path.parent)
+
+
+def fsync_existing_regular_file(path: Path) -> None:
+    """Durably order an existing immutable file and its directory entry."""
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat_module.S_ISREG(metadata.st_mode) or
+                metadata.st_nlink != 1):
+            die(f"refusing to fsync nonunique publication file: {path}")
+        os.fsync(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        after = os.fstat(descriptor)
+        if (not stat_module.S_ISREG(named.st_mode) or named.st_nlink != 1 or
+                (named.st_dev, named.st_ino) !=
+                (metadata.st_dev, metadata.st_ino) or
+                (after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                 after.st_size, after.st_mtime_ns, after.st_ctime_ns) !=
+                (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                 metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+                 metadata.st_ctime_ns)):
+            die(f"publication file changed while being fsynced: {path}")
+    finally:
+        os.close(descriptor)
+    fsync_directory(path.parent)
+
+
+def rename_directory_noreplace(source: Path, target: Path) -> None:
+    """Atomically publish one directory without replacing any target entry."""
+    if (not source.is_absolute() or not target.is_absolute() or
+            source.parent != target.parent or
+            source.name in ("", ".", "..") or
+            target.name in ("", ".", "..")):
+        die("no-replace directory publication paths are noncanonical")
+    directory_fd = common.open_durable_directory(source.parent)
+    try:
+        before = os.stat(
+            source.name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat_module.S_ISDIR(before.st_mode):
+            die(f"directory publication source is not a directory: {source}")
+        try:
+            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        except AttributeError as error:
+            raise CampaignError(
+                "Linux renameat2 is required for no-replace publication") \
+                from error
+        renameat2.argtypes = (
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            directory_fd, os.fsencode(source.name),
+            directory_fd, os.fsencode(target.name), 1)  # RENAME_NOREPLACE
+        if result != 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                die(f"directory publication target already exists: {target}")
+            raise CampaignError(
+                f"no-replace directory publication failed: "
+                f"{os.strerror(error_number)}")
+        os.fsync(directory_fd)
+        after = os.stat(
+            target.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat_module.S_ISDIR(after.st_mode) or
+                (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)):
+            die(f"directory publication identity changed: {target}")
+    finally:
+        os.close(directory_fd)
+
+
 def fsync_tree(root: Path) -> None:
     """Flush every staged file and directory before publishing the tree."""
     directories = [root]
@@ -2577,9 +3327,28 @@ def fsync_tree(root: Path) -> None:
             continue
         if not path.is_file():
             die(f"refusing non-file in staged result: {path}")
-        descriptor = os.open(path, os.O_RDONLY)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
+        descriptor = os.open(path, flags)
         try:
+            before = os.fstat(descriptor)
+            named = os.stat(path, follow_symlinks=False)
+            if (not stat_module.S_ISREG(before.st_mode) or
+                    before.st_nlink != 1 or
+                    (named.st_dev, named.st_ino) !=
+                    (before.st_dev, before.st_ino)):
+                die(f"refusing unstable file in staged result: {path}")
             os.fsync(descriptor)
+            after = os.fstat(descriptor)
+            named_after = os.stat(path, follow_symlinks=False)
+            identity = lambda value: (
+                value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+            )
+            if (identity(after) != identity(before) or
+                    identity(named_after) != identity(after)):
+                die(f"file changed while flushing staged result: {path}")
         finally:
             os.close(descriptor)
     for directory in sorted(
@@ -2613,9 +3382,8 @@ def holdout_controller_lock(
     phase: str,
 ) -> Iterator[None]:
     beacon_dir = result_dir / "beacon"
-    beacon_dir.mkdir(mode=0o700, exist_ok=True)
-    if beacon_dir.is_symlink():
-        die("beacon controller directory must not be a symlink")
+    ensure_plain_campaign_directory(
+        result_dir, beacon_dir, "beacon controller directory")
     lock_path = beacon_dir / f"{phase}.lock"
     descriptor = os.open(
         lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -2632,6 +3400,44 @@ def holdout_controller_lock(
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+@contextmanager
+def campaign_execution_lock(result_dir: Path) -> Iterator[None]:
+    """Serialize all campaign controllers and their shared host evidence."""
+    locks_dir = result_dir / "locks"
+    ensure_plain_campaign_directory(
+        result_dir, locks_dir, "campaign command lock directory")
+    directory_fd = os.open(
+        locks_dir,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+        getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            "campaign-execution.lock",
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) |
+            getattr(os, "O_NOFOLLOW", 0),
+            0o600, dir_fd=directory_fd)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            die("another campaign controller is active")
+        metadata = os.fstat(descriptor)
+        if (not stat_module.S_ISREG(metadata.st_mode) or
+                metadata.st_nlink != 1 or metadata.st_size != 0 or
+                metadata.st_uid != os.geteuid() or
+                stat_module.S_IMODE(metadata.st_mode) != 0o600):
+            die("campaign command lock is not a private unique empty file")
+        os.fsync(directory_fd)
+        yield
+    finally:
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        os.close(directory_fd)
 
 
 def is_relative_prefix(relative: str, prefix: str) -> bool:
@@ -2708,6 +3514,13 @@ def verify_manifest_bytes(
     spec: HoldoutPhaseSpec,
     expected: bytes,
 ) -> None:
+    # A killed immutable root publisher can leave its exact dead-writer
+    # hardlink marker beside an otherwise committed root.  Retire that marker
+    # before the sealed inventory walk encounters it as an unexpected file.
+    root_path = result_dir / spec.root_file
+    if (os.path.lexists(str(root_path.parent)) and
+            common._discard_stale_atomic_partials(root_path)):
+        fsync_directory(root_path.parent)
     if phase_manifest_bytes(result_dir, spec) != expected:
         die(f"PERMANENT: {spec.phase} sealed input manifest changed")
 
@@ -2746,6 +3559,9 @@ def verify_prepare_contract_bindings(
     duplicated_bindings = {
         "source_commit": contract.get("source_commit"),
         "binary_sha256": contract.get("binary_sha256"),
+        "binary_elf_build_id": contract.get("binary_elf_build_id"),
+        "cmake_cache_sha256": contract.get("cmake_cache_sha256"),
+        "build_policy": contract.get("build_policy"),
         "script_sha256": contract.get("script_sha256"),
         "allk_sha256": contract.get("allk_sha256"),
         "helper_sha256": contract.get("helper_sha256"),
@@ -2778,12 +3594,34 @@ def verify_prepare_contract_bindings(
         die("PERMANENT: q0 identity trust anchor changed")
 
 
+def verify_prepared_result_root(
+    result_dir: Path,
+    prepare_record: dict[str, Any],
+) -> Path:
+    """Reject relocation/forking of the publicly frozen campaign root."""
+    prepared = prepare_record.get("result_dir")
+    if not isinstance(prepared, str) or not prepared:
+        die("PERMANENT: prepare record has no canonical result root")
+    try:
+        actual = result_dir.resolve(strict=True)
+        recorded = Path(prepared)
+        canonical_recorded = recorded.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        die(f"PERMANENT: prepared result root is unavailable: {error}")
+    if (not result_dir.is_absolute() or result_dir != actual or
+            not recorded.is_absolute() or prepared != str(canonical_recorded) or
+            canonical_recorded != actual):
+        die("PERMANENT: campaign result root differs from the public freeze")
+    return actual
+
+
 def verify_frozen_controller_runtime(
     result_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     frozen = result_dir / "frozen"
     prepare_record = load_json_object(result_dir / "prepare.json", "prepare record")
     contract = load_json_object(frozen / "contract.json", "frozen contract")
+    verify_prepared_result_root(result_dir, prepare_record)
     verify_frozen_staged_anchor(result_dir, prepare_record)
     exact_hashes = {
         frozen / "wirehair_v2_bench": contract.get("binary_sha256"),
@@ -2804,6 +3642,14 @@ def verify_frozen_controller_runtime(
         if (not isinstance(expected, str) or
                 common.sha256_file(path.resolve(strict=True)) != expected):
             die(f"PERMANENT: frozen controller input changed: {path.name}")
+    frozen_cache = frozen / "CMakeCache.txt"
+    if (common.sha256_file(frozen_cache) !=
+            contract.get("cmake_cache_sha256") or
+            validate_candidate_build_policy(
+                frozen_cache,
+                Path(str(contract.get("source_repo", "")))) !=
+            contract.get("build_policy")):
+        die("PERMANENT: frozen candidate build policy changed")
     verify_prepare_contract_bindings(frozen, prepare_record, contract)
     current_script = Path(__file__).resolve(strict=True)
     expected_script = (
@@ -2819,7 +3665,8 @@ def verify_frozen_controller_runtime(
             (node_record, DRAND_NODE_VERSION), (npm_record, DRAND_NPM_VERSION)):
         executable = Path(str(record.get("path", ""))).resolve(strict=True)
         if (record.get("version") != expected_version or
-                common.sha256_file(executable) != record.get("sha256") or
+                common.sha256_file(
+                    executable, require_unique=False) != record.get("sha256") or
                 command_version(executable, expected_version) != expected_version):
             die(f"PERMANENT: frozen {executable.name} runtime changed")
     tool_records = contract.get("system_tools")
@@ -3495,6 +4342,14 @@ def atomic_state_json(path: Path, value: dict[str, Any]) -> None:
     fsync_directory(path.parent)
 
 
+def atomic_fixed_json_once(path: Path, value: dict[str, Any]) -> None:
+    """Publish one immutable fixed-order JSON object without replacement."""
+    encoded = fixed_json_bytes(value)
+    common.atomic_write_once_or_same(path, encoded)
+    if common.stable_bytes(path) != encoded:
+        die(f"immutable JSON publication changed: {path}")
+
+
 def load_fixed_json(path: Path, context: str) -> dict[str, Any]:
     try:
         raw = common.stable_bytes(path)
@@ -3516,15 +4371,18 @@ def write_seal_attempt(
     seal_bytes: bytes,
 ) -> tuple[Path, str]:
     seal_sha256 = sha256_bytes(seal_bytes)
-    seal_parent = result_dir / "seals" / spec.seal_tree
-    seal_parent.mkdir(parents=True, exist_ok=True)
-    if seal_parent.is_symlink():
-        die("seal attempt parent must not be a symlink")
+    seals_dir = result_dir / "seals"
+    ensure_plain_campaign_directory(
+        result_dir, seals_dir, "holdout seals directory")
+    seal_parent = seals_dir / spec.seal_tree
+    ensure_plain_campaign_directory(
+        result_dir, seal_parent, "seal attempt parent")
     final = seal_parent / seal_sha256
-    if final.exists():
+    if os.path.lexists(str(final)):
         die("holdout seal digest already exists and may not be reused")
     staging = seal_parent / f".{seal_sha256}.partial-{os.getpid()}"
-    staging.mkdir(mode=0o700, exist_ok=False)
+    staging_fd = common.create_durable_directory(staging)
+    os.close(staging_fd)
     try:
         common.atomic_write(staging / "manifest.txt", manifest)
         common.atomic_write(staging / "seal.json", seal_bytes)
@@ -3538,7 +4396,7 @@ def write_seal_attempt(
             die("staged holdout seal changed")
         fsync_tree(staging)
         fsync_directory(seal_parent)
-        os.rename(staging, final)
+        rename_directory_noreplace(staging, final)
         fsync_directory(seal_parent)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -3548,9 +4406,8 @@ def write_seal_attempt(
 
 def seal_state_path(result_dir: Path, phase: str) -> Path:
     state_dir = result_dir / "beacon" / phase
-    state_dir.mkdir(mode=0o700, exist_ok=True)
-    if state_dir.is_symlink():
-        die("holdout state directory must not be a symlink")
+    ensure_plain_campaign_directory(
+        result_dir, state_dir, "holdout state directory")
     return state_dir / "state.json"
 
 
@@ -3575,6 +4432,10 @@ def load_seal_attempt(
     expected_parent = (result_dir / "seals" / spec.seal_tree).resolve(strict=True)
     if attempt.parent != expected_parent:
         die("holdout seal attempt escaped its immutable directory")
+    if common._discard_stale_atomic_partials(attempt / "publication.json"):
+        # A killed receipt write is uncommitted.  Remove only its exact
+        # dead-PID regular temporary before enforcing immutable inventory.
+        fsync_directory(attempt)
     entries = {path.name: path for path in attempt.iterdir()}
     required_names = {
         "manifest.txt", "seal.json", "seal.sha256", "manifest.sha256",
@@ -3755,9 +4616,10 @@ def seal_holdout(args: argparse.Namespace) -> int:
                 h1_seal_sha, h1_seal,
             )
         state_path = seal_state_path(result_dir, args.phase)
-        create_new = not state_path.exists()
+        state_present = os.path.lexists(str(state_path))
+        create_new = not state_present
         abandoned_round = 0
-        if state_path.exists():
+        if state_present:
             state = load_fixed_json(state_path, f"{args.phase} controller state")
             if state.get("phase") != args.phase:
                 die("holdout controller state phase mismatch")
@@ -3793,13 +4655,47 @@ def seal_holdout(args: argparse.Namespace) -> int:
                 validate_state_binding(
                     state, spec, abandoned_manifest,
                     abandoned_seal, abandoned_loaded_sha)
+                if state.get("status") == "ABANDONED_PUBLICATION_LATE":
+                    publication = load_fixed_json(
+                        _abandoned_attempt / "publication.json",
+                        "abandoned holdout seal publication")
+                    publication_state = dict(state)
+                    publication_state.update({
+                        "tag_name": publication.get("tag_name"),
+                        "tag_object": publication.get("tag_object"),
+                        "publication_confirmed_ms":
+                            publication.get("confirmed_ms"),
+                    })
+                    expected_receipt_status = (
+                        "ABANDONED_LATE"
+                        if publication.get("status") == "ABANDONED_LATE"
+                        else "CONFIRMED_LATE_START")
+                    verify_seal_publication(
+                        result_dir, publication_state, _abandoned_attempt,
+                        abandoned_seal, abandoned_loaded_sha, contract,
+                        expected_status=expected_receipt_status)
+                elif state.get("status") == \
+                        "ABANDONED_PUBLICATION_UNPROVEN_LATE":
+                    publication = load_fixed_json(
+                        _abandoned_attempt / "publication.json",
+                        "unproven-late holdout seal publication")
+                    publication_state = dict(state)
+                    publication_state.update({
+                        "tag_name": publication.get("tag_name"),
+                        "tag_object": publication.get("tag_object"),
+                        "publication_confirmed_ms":
+                            publication.get("confirmed_ms"),
+                    })
+                    verify_seal_publication(
+                        result_dir, publication_state, _abandoned_attempt,
+                        abandoned_seal, abandoned_loaded_sha, contract)
                 abandoned_round = state.get("round", 0)
                 if (not isinstance(abandoned_round, int) or
                         isinstance(abandoned_round, bool) or abandoned_round < 1):
                     die("abandoned holdout state has an invalid target round")
                 abandoned = state_path.parent / (
                     f"abandoned-{abandoned_sha}.json")
-                if abandoned.exists():
+                if os.path.lexists(str(abandoned)):
                     if common.stable_bytes(abandoned) != common.stable_bytes(state_path):
                         die("abandoned holdout state archive collision")
                 else:
@@ -3817,9 +4713,72 @@ def seal_holdout(args: argparse.Namespace) -> int:
                 repo, commit = clean_source_commit(contract)
                 if commit != seal_record.get("source_commit"):
                     die("holdout seal source commit mismatch")
+                publication_path = attempt / "publication.json"
+                if os.path.lexists(str(publication_path)):
+                    # Tag publication and controller-state advancement are
+                    # necessarily separate durable writes.  If the process
+                    # stopped between them, the immutable receipt is the
+                    # stronger fact: validate its exact timestamps, tag,
+                    # annotation, and current remote ref before advancing the
+                    # SEALED state.  Never overwrite or republish an existing
+                    # receipt during recovery.
+                    publication = load_fixed_json(
+                        publication_path, "holdout seal publication")
+                    publication_status = publication.get("status")
+                    recovered = dict(state)
+                    recovered.update({
+                        "tag_name": publication.get("tag_name"),
+                        "tag_object": publication.get("tag_object"),
+                        "publication_confirmed_ms":
+                            publication.get("confirmed_ms"),
+                    })
+                    if publication_status == "ABANDONED_LATE":
+                        recovered["status"] = "ABANDONED_PUBLICATION_LATE"
+                        verify_seal_publication(
+                            result_dir, recovered, attempt, seal_record,
+                            seal_sha256, contract,
+                            expected_status="ABANDONED_LATE")
+                        abandoned = dict(state)
+                        abandoned["status"] = "ABANDONED_PUBLICATION_LATE"
+                        atomic_state_json(state_path, abandoned)
+                        die(
+                            "holdout seal tag confirmation completed at or "
+                            "after T")
+                    receipt_started_ms = publication.get(
+                        "receipt_write_started_ms")
+                    if (isinstance(receipt_started_ms, int) and
+                            not isinstance(receipt_started_ms, bool) and
+                            receipt_started_ms >= seal_record["round_time_ms"]):
+                        recovered["status"] = "ABANDONED_PUBLICATION_LATE"
+                        verify_seal_publication(
+                            result_dir, recovered, attempt, seal_record,
+                            seal_sha256, contract,
+                            expected_status="CONFIRMED_LATE_START")
+                        abandoned = dict(state)
+                        abandoned["status"] = "ABANDONED_PUBLICATION_LATE"
+                        atomic_state_json(state_path, abandoned)
+                        die(
+                            "holdout seal publication receipt started at or "
+                            "after T")
+                    recovered["status"] = "WAITING_UNTIL_T"
+                    verify_seal_publication(
+                        result_dir, recovered, attempt, seal_record,
+                        seal_sha256, contract)
+                    fsync_existing_regular_file(publication_path)
+                    if now_utc_ms() >= seal_record["round_time_ms"]:
+                        abandoned = dict(state)
+                        abandoned["status"] = \
+                            "ABANDONED_PUBLICATION_UNPROVEN_LATE"
+                        atomic_state_json(state_path, abandoned)
+                        die(
+                            "holdout publication durability could not be "
+                            "reconfirmed before T")
+                    atomic_state_json(state_path, recovered)
+                    print(canonical_json(recovered))
+                    return 0
         if create_new:
             for relative in spec.forbidden_before_seal:
-                if (result_dir / relative).exists():
+                if os.path.lexists(str(result_dir / relative)):
                     die(f"future phase input exists before {args.phase} seal: {relative}")
             verify_phase_ready_for_seal(
                 result_dir, spec, prepare_record, contract)
@@ -3885,6 +4844,8 @@ def verify_seal_publication(
     seal_record: dict[str, Any],
     seal_sha256: str,
     contract: dict[str, Any],
+    *,
+    expected_status: str = "CONFIRMED",
 ) -> dict[str, Any]:
     publication = load_fixed_json(
         attempt / "publication.json", "holdout seal publication")
@@ -3896,32 +4857,78 @@ def verify_seal_publication(
             if isinstance(recorded_remote, str) else None
     except UnicodeEncodeError:
         recorded_remote_sha256 = None
-    expected_keys = {
+    base_keys = {
         "schema", "status", "phase", "tag_name", "tag_object",
         "peeled_source_commit", "annotation_sha256", "remote_rows_sha256",
         "remote_rows_ascii", "confirmed_ms", "receipt_write_started_ms",
     }
     confirmed_ms = publication.get("confirmed_ms")
     receipt_started_ms = publication.get("receipt_write_started_ms")
-    if (set(publication) != expected_keys or
-            publication.get("schema") !=
-                "wirehair.wh2.holdout_seal_publication.v1" or
-            publication.get("status") != "CONFIRMED" or
-            publication.get("phase") != phase or
-            publication.get("tag_name") != expected_tag or
-            state.get("tag_name") != expected_tag or
-            publication.get("tag_object") != state.get("tag_object") or
-            state.get("publication_confirmed_ms") != confirmed_ms or
-            publication.get("peeled_source_commit") !=
-                seal_record.get("source_commit") or
-            not isinstance(confirmed_ms, int) or isinstance(confirmed_ms, bool) or
-            not seal_record["seal_ms"] <= confirmed_ms <
-                seal_record["round_time_ms"] or
-            not isinstance(receipt_started_ms, int) or
-            isinstance(receipt_started_ms, bool) or
-            not confirmed_ms <= receipt_started_ms <
-                seal_record["round_time_ms"] or
-            publication.get("remote_rows_sha256") != recorded_remote_sha256):
+    receipt_persisted_ms = publication.get("receipt_persisted_ms")
+    has_persisted_ms = "receipt_persisted_ms" in publication
+    exact_keys = base_keys if expected_status in (
+        "CONFIRMED", "CONFIRMED_LATE_START") else (
+        base_keys | ({"receipt_persisted_ms"}
+                     if has_persisted_ms else set()))
+    recorded_status = (
+        "CONFIRMED" if expected_status == "CONFIRMED_LATE_START"
+        else expected_status)
+    common_valid = (
+            expected_status in (
+                "CONFIRMED", "CONFIRMED_LATE_START", "ABANDONED_LATE") and
+            set(publication) == exact_keys and
+            publication.get("schema") ==
+                "wirehair.wh2.holdout_seal_publication.v1" and
+            publication.get("status") == recorded_status and
+            publication.get("phase") == phase and
+            publication.get("tag_name") == expected_tag and
+            state.get("tag_name") == expected_tag and
+            publication.get("tag_object") == state.get("tag_object") and
+            isinstance(publication.get("tag_object"), str) and
+            re.fullmatch(r"[0-9a-f]{40}", publication["tag_object"]) is not None and
+            state.get("publication_confirmed_ms") == confirmed_ms and
+            publication.get("peeled_source_commit") ==
+                seal_record.get("source_commit") and
+            isinstance(confirmed_ms, int) and
+            not isinstance(confirmed_ms, bool) and
+            isinstance(receipt_started_ms, int) and
+            not isinstance(receipt_started_ms, bool) and
+            seal_record["seal_ms"] <= confirmed_ms <= receipt_started_ms and
+            publication.get("remote_rows_sha256") == recorded_remote_sha256)
+    if expected_status == "CONFIRMED":
+        timing_valid = (
+            isinstance(confirmed_ms, int) and
+            not isinstance(confirmed_ms, bool) and
+            isinstance(receipt_started_ms, int) and
+            not isinstance(receipt_started_ms, bool) and
+            confirmed_ms < seal_record["round_time_ms"] and
+            receipt_started_ms < seal_record["round_time_ms"])
+    elif expected_status == "CONFIRMED_LATE_START":
+        timing_valid = (
+            isinstance(confirmed_ms, int) and
+            not isinstance(confirmed_ms, bool) and
+            isinstance(receipt_started_ms, int) and
+            not isinstance(receipt_started_ms, bool) and
+            confirmed_ms < seal_record["round_time_ms"] <=
+                receipt_started_ms)
+    else:
+        persisted_valid = (
+            not has_persisted_ms or
+            (isinstance(receipt_persisted_ms, int) and
+             not isinstance(receipt_persisted_ms, bool) and
+             isinstance(receipt_started_ms, int) and
+             not isinstance(receipt_started_ms, bool) and
+             receipt_started_ms <= receipt_persisted_ms))
+        lateness_proven = (
+            (isinstance(confirmed_ms, int) and
+             not isinstance(confirmed_ms, bool) and
+             confirmed_ms >= seal_record["round_time_ms"]) or
+            (has_persisted_ms and
+             isinstance(receipt_persisted_ms, int) and
+             not isinstance(receipt_persisted_ms, bool) and
+             receipt_persisted_ms >= seal_record["round_time_ms"]))
+        timing_valid = persisted_valid and lateness_proven
+    if not common_valid or not timing_valid:
         die("PERMANENT: holdout seal publication receipt mismatch")
     repo = Path(str(contract["source_repo"]))
     repo = repo.resolve(strict=True)
@@ -4002,7 +5009,39 @@ def verify_rooted_record(
     seal_sha256: str,
     seal_record: dict[str, Any],
 ) -> dict[str, Any]:
-    record = load_fixed_json(result_dir / spec.root_file, f"{spec.phase} root file")
+    root_path = result_dir / spec.root_file
+    waves_dir = result_dir / "beacon" / spec.phase / "waves"
+    verify_plain_campaign_directory(
+        result_dir, root_path.parent, "holdout root directory")
+    verify_plain_campaign_directory(
+        result_dir, waves_dir, "holdout wave ledger")
+    # The immutable writer's durable commit window contains the target plus
+    # one exact dead-writer hardlink marker.  The shared stable reader repairs
+    # that state before the final one-link metadata assertion.
+    try:
+        root_metadata = root_path.lstat()
+    except OSError:
+        die("PERMANENT: stored holdout root is not a unique regular file")
+    if (stat_module.S_ISLNK(root_metadata.st_mode) or
+            not stat_module.S_ISREG(root_metadata.st_mode) or
+            root_metadata.st_nlink not in (1, 2)):
+        die("PERMANENT: stored holdout root is not a unique regular file")
+    if root_metadata.st_nlink == 2:
+        try:
+            reconciled = common._reconcile_stale_atomic_publication(root_path)
+        except common.CampaignError:
+            reconciled = False
+        if not reconciled:
+            die("PERMANENT: stored holdout root is not a unique regular file")
+    record = load_fixed_json(root_path, f"{spec.phase} root file")
+    try:
+        root_metadata = root_path.lstat()
+    except OSError:
+        die("PERMANENT: stored holdout root is not a unique regular file")
+    if (stat_module.S_ISLNK(root_metadata.st_mode) or
+            not stat_module.S_ISREG(root_metadata.st_mode) or
+            root_metadata.st_nlink != 1):
+        die("PERMANENT: stored holdout root is not a unique regular file")
     beacon = record.get("beacon")
     expected_tag = f"wh2-h12-kpreferred-{spec.phase}-seal-{seal_sha256[:16]}"
     publication = load_fixed_json(
@@ -4010,10 +5049,21 @@ def verify_rooted_record(
         "rooted holdout publication",
     )
     wave_number = record.get("wave")
-    wave_path = (result_dir / "beacon" / spec.phase / "waves" /
-                 f"wave-{wave_number:06d}.json") if isinstance(wave_number, int) else None
+    rooted_ms = record.get("rooted_ms")
+    wave_path = (waves_dir / f"wave-{wave_number:06d}.json"
+                 if isinstance(wave_number, int) and
+                 not isinstance(wave_number, bool) else None)
     consensus = record.get("consensus_origins")
-    if (record.get("schema") != "wirehair.wh2.holdout_roots.v1" or
+    all_origins = [f"https://{host}" for host in DRAND_RELAYS]
+    expected_keys = {
+        "schema", "phase", "status", "seal_record_sha256",
+        "manifest_sha256", "tag_name", "tag_object", "round",
+        "round_time_ms", "canonical_beacon_sha256", "beacon",
+        "master_root_sha256", "roots", "consensus_origins",
+        "observations", "wave", "wave_record_sha256", "rooted_ms",
+    }
+    if (set(record) != expected_keys or
+            record.get("schema") != "wirehair.wh2.holdout_roots.v1" or
             record.get("phase") != spec.phase or
             record.get("status") != "ROOTED" or
             record.get("seal_record_sha256") != seal_sha256 or
@@ -4031,16 +5081,27 @@ def verify_rooted_record(
             record.get("tag_object") != publication.get("tag_object") or
             not isinstance(consensus, list) or
             any(not isinstance(origin, str) for origin in consensus) or
-            len(set(consensus)) < 3 or
-            not set(consensus).issubset(
-                {f"https://{host}" for host in DRAND_RELAYS}) or
+            consensus != [
+                origin for origin in all_origins
+                if origin in set(consensus)] or
+            len(consensus) < 3 or
             not isinstance(record.get("observations"), list) or
-            not isinstance(wave_number, int) or wave_number < 1 or
-            wave_path is None or not wave_path.is_file() or wave_path.is_symlink() or
+            not isinstance(wave_number, int) or
+            isinstance(wave_number, bool) or wave_number < 1 or
+            not isinstance(rooted_ms, int) or isinstance(rooted_ms, bool) or
+            rooted_ms < seal_record.get("round_time_ms", 1) or
+            wave_path is None or
             common.sha256_file(wave_path) != record.get("wave_record_sha256") or
-            record.get("rooted_ms", 0) < seal_record.get("round_time_ms", 1)):
+            not re.fullmatch(
+                r"[0-9a-f]{64}", str(record.get("wave_record_sha256", "")))):
         die("PERMANENT: stored holdout root binding mismatch")
-    persisted_wave = load_fixed_json(wave_path, "rooted holdout wave")
+    wave_records = load_existing_wave_records(
+        waves_dir, spec.phase, seal_sha256, seal_record["round"])
+    if (len(wave_records) != wave_number or
+            not wave_records or
+            wave_records[-1][0] != wave_path.resolve(strict=True)):
+        die("PERMANENT: rooted holdout wave is not the terminal ledger entry")
+    persisted_wave = wave_records[-1][1]
     wave_result = persisted_wave.get("result")
     if (not isinstance(wave_result, dict) or
             wave_result.get("status") != "QUORUM" or
@@ -4058,27 +5119,308 @@ def verify_rooted_record(
     return record
 
 
-def existing_wave_count(
+def validate_structured_drand_wave(
+    result: dict[str, Any],
+    expected_round: int,
+) -> None:
+    """Recompute the pinned wrapper classification from exact observations."""
+    status = result.get("status")
+    base_keys = {"schema", "status", "chain_hash", "observations"}
+    if status == "QUORUM":
+        expected_keys = base_keys | {"consensus_origins", "beacon"}
+    elif status in (
+            "TEMPORARY_NO_QUORUM", "PERMANENT_VERIFIED_DISAGREEMENT"):
+        expected_keys = base_keys
+    else:
+        die("structured drand wave has an unknown status")
+    observations = result.get("observations")
+    all_origins = [f"https://{host}" for host in DRAND_RELAYS]
+    if (set(result) != expected_keys or
+            result.get("schema") !=
+                "wirehair.wh2.drand_quicknet_wave.v1" or
+            result.get("chain_hash") != DRAND_CHAIN_HASH or
+            not isinstance(observations, list) or
+            len(observations) != len(all_origins)):
+        die("structured drand wave has invalid coverage")
+
+    groups: dict[bytes, list[str]] = {}
+    beacons: dict[bytes, dict[str, Any]] = {}
+    transport_keys = {
+        "fetch_started_ms", "fetch_completed_ms", "raw_response_sha256"}
+    for expected_origin, item in zip(all_origins, observations):
+        if not isinstance(item, dict) or item.get("origin") != expected_origin:
+            die("structured drand observation order changed")
+        has_transport = bool(transport_keys & set(item))
+        if has_transport:
+            started_ms = item.get("fetch_started_ms")
+            completed_ms = item.get("fetch_completed_ms")
+            raw_sha256 = item.get("raw_response_sha256")
+            if (not transport_keys.issubset(item) or
+                    not isinstance(started_ms, int) or
+                    isinstance(started_ms, bool) or started_ms < 0 or
+                    not isinstance(completed_ms, int) or
+                    isinstance(completed_ms, bool) or
+                    completed_ms < started_ms or
+                    not isinstance(raw_sha256, str) or
+                    re.fullmatch(r"[0-9a-f]{64}", raw_sha256) is None):
+                die("structured drand transport evidence is malformed")
+        if item.get("ok") is True:
+            expected_item_keys = {
+                "origin", "ok", "canonical_sha256", "beacon",
+                *transport_keys}
+            beacon = item.get("beacon")
+            if (set(item) != expected_item_keys or not has_transport or
+                    not isinstance(beacon, dict) or
+                    beacon.get("round") != expected_round):
+                die("structured drand successful observation changed")
+            canonical = canonical_beacon_bytes(beacon)
+            if item.get("canonical_sha256") != sha256_bytes(canonical):
+                die("structured drand canonical observation hash changed")
+            groups.setdefault(canonical, []).append(expected_origin)
+            beacons[canonical] = beacon
+        elif item.get("ok") is False:
+            expected_item_keys = {"origin", "ok", "error"}
+            if has_transport:
+                expected_item_keys.update(transport_keys)
+            if (set(item) != expected_item_keys or
+                    not isinstance(item.get("error"), str) or
+                    not item["error"]):
+                die("structured drand failed observation changed")
+        else:
+            die("structured drand observation status is not boolean")
+
+    consensus = [
+        (canonical, members) for canonical, members in groups.items()
+        if len(members) >= 3
+    ]
+    if len(groups) > 1 or len(consensus) > 1:
+        recomputed_status = "PERMANENT_VERIFIED_DISAGREEMENT"
+    elif len(consensus) == 1:
+        recomputed_status = "QUORUM"
+    else:
+        recomputed_status = "TEMPORARY_NO_QUORUM"
+    if status != recomputed_status:
+        die("structured drand wave classification changed")
+    if status == "QUORUM":
+        canonical, members = consensus[0]
+        if (result.get("consensus_origins") != members or
+                result.get("beacon") != beacons[canonical]):
+            die("structured drand quorum membership changed")
+
+
+def load_existing_wave_records(
     waves_dir: Path,
     phase: str,
     seal_sha256: str,
-) -> int:
+    expected_round: int,
+) -> tuple[tuple[Path, dict[str, Any]], ...]:
+    # A controller killed inside common.atomic_write may leave only the exact
+    # dead-PID temporary for its next wave.  Recover that uncommitted write
+    # under the holdout lock; never ignore arbitrary directory entries.
+    for entry in tuple(waves_dir.iterdir()):
+        match = re.fullmatch(
+            r"\.(wave-[0-9]{6}\.json)\.[1-9][0-9]*"
+            r"(?:\.[0-9]+)?\.partial",
+            entry.name)
+        if match and common._discard_stale_atomic_partials(
+                waves_dir / match.group(1)):
+            fsync_directory(waves_dir)
     entries = sorted(waves_dir.iterdir())
     if any(not path.is_file() or path.is_symlink() or
            not re.fullmatch(r"wave-[0-9]{6}\.json", path.name)
            for path in entries):
         die("PERMANENT: unexpected entry in holdout wave ledger")
     paths = entries
+    records: list[tuple[Path, dict[str, Any]]] = []
+    terminal_seen = False
+    previous_completed_ms = -1
     for expected, path in enumerate(paths, 1):
         if path.name != f"wave-{expected:06d}.json" or path.is_symlink():
             die("PERMANENT: holdout wave ledger has a gap or noncanonical path")
         record = load_fixed_json(path, "holdout wave record")
-        if (record.get("schema") != "wirehair.wh2.holdout_wave_record.v1" or
+        result = record.get("result")
+        returncode = record.get("wrapper_returncode")
+        if (set(record) != {
+                "schema", "phase", "seal_record_sha256", "wave",
+                "completed_ms", "wrapper_returncode",
+                "wrapper_stderr_sha256", "result"} or
+                record.get("schema") !=
+                    "wirehair.wh2.holdout_wave_record.v1" or
                 record.get("phase") != phase or
                 record.get("seal_record_sha256") != seal_sha256 or
-                record.get("wave") != expected):
+                record.get("wave") != expected or
+                not isinstance(record.get("completed_ms"), int) or
+                isinstance(record.get("completed_ms"), bool) or
+                record["completed_ms"] < 0 or
+                record["completed_ms"] < previous_completed_ms or
+                not isinstance(returncode, int) or
+                isinstance(returncode, bool) or
+                not isinstance(record.get("wrapper_stderr_sha256"), str) or
+                not re.fullmatch(
+                    r"[0-9a-f]{64}", record["wrapper_stderr_sha256"]) or
+                not isinstance(result, dict) or
+                not isinstance(result.get("status"), str)):
             die("PERMANENT: holdout wave ledger binding changed")
-    return len(paths)
+        status = result["status"]
+        structured_returncodes = {
+            "QUORUM": 0,
+            "TEMPORARY_NO_QUORUM": 2,
+            "PERMANENT_VERIFIED_DISAGREEMENT": 3,
+        }
+        if (status in structured_returncodes and
+                (returncode != structured_returncodes[status] or
+                 record["wrapper_stderr_sha256"] != EMPTY_SHA256)):
+            die("PERMANENT: holdout wave process status changed")
+        if status in structured_returncodes:
+            validate_structured_drand_wave(result, expected_round)
+        elif status == "PERMANENT_WRAPPER_FAILURE":
+            if (set(result) != {
+                    "schema", "status", "stdout_sha256", "stderr_sha256",
+                    "returncode"} or
+                    result.get("schema") !=
+                        "wirehair.wh2.drand_quicknet_wave.v1" or
+                    not isinstance(result.get("stdout_sha256"), str) or
+                    re.fullmatch(
+                        r"[0-9a-f]{64}", result["stdout_sha256"]) is None or
+                    result.get("stderr_sha256") !=
+                        record["wrapper_stderr_sha256"] or
+                    result.get("returncode") != returncode):
+                die("PERMANENT: holdout wrapper-failure evidence changed")
+        else:
+            die("PERMANENT: holdout wave status is unknown")
+        terminal = status != "TEMPORARY_NO_QUORUM"
+        if terminal_seen or (terminal and expected != len(paths)):
+            die("PERMANENT: holdout wave ledger continued after a terminal result")
+        terminal_seen = terminal
+        previous_completed_ms = record["completed_ms"]
+        records.append((path.resolve(strict=True), record))
+    return tuple(records)
+
+
+def existing_wave_count(
+    waves_dir: Path,
+    phase: str,
+    seal_sha256: str,
+    expected_round: int,
+) -> int:
+    return len(load_existing_wave_records(
+        waves_dir, phase, seal_sha256, expected_round))
+
+
+def publish_root_from_quorum_wave(
+    result_dir: Path,
+    spec: HoldoutPhaseSpec,
+    contract: dict[str, Any],
+    publication: dict[str, Any],
+    manifest: bytes,
+    seal_record: dict[str, Any],
+    seal_sha256: str,
+    wave_path: Path,
+    persisted_wave: dict[str, Any],
+) -> dict[str, Any]:
+    wave_record = persisted_wave["result"]
+    if (wave_record.get("status") != "QUORUM" or
+            persisted_wave.get("wrapper_returncode") != 0 or
+            persisted_wave.get("wrapper_stderr_sha256") != EMPTY_SHA256):
+        die("stored holdout wave is not a successful quorum")
+    beacon = wave_record.get("beacon")
+    consensus_origins = wave_record.get("consensus_origins")
+    observations = wave_record.get("observations")
+    all_origins = [f"https://{host}" for host in DRAND_RELAYS]
+    if (set(wave_record) != {
+            "schema", "status", "chain_hash", "consensus_origins",
+            "observations", "beacon"} or
+            wave_record.get("schema") !=
+                "wirehair.wh2.drand_quicknet_wave.v1" or
+            wave_record.get("chain_hash") != DRAND_CHAIN_HASH or
+            not isinstance(beacon, dict) or
+            beacon.get("round") != seal_record["round"] or
+            not isinstance(consensus_origins, list) or
+            consensus_origins != [
+                origin for origin in all_origins
+                if origin in set(consensus_origins)] or
+            len(consensus_origins) < 3 or
+            not isinstance(observations, list) or
+            len(observations) != len(all_origins)):
+        die("QUORUM wrapper result has invalid coverage")
+    canonical_sha256 = sha256_bytes(canonical_beacon_bytes(beacon))
+    successful_origins: list[str] = []
+    for expected_origin, item in zip(all_origins, observations):
+        if not isinstance(item, dict) or item.get("origin") != expected_origin:
+            die("QUORUM wrapper observation order changed")
+        common_transport = {
+            "fetch_started_ms", "fetch_completed_ms",
+            "raw_response_sha256"}
+        has_transport = bool(common_transport & set(item))
+        if has_transport:
+            started_ms = item.get("fetch_started_ms")
+            completed_ms = item.get("fetch_completed_ms")
+            raw_sha256 = item.get("raw_response_sha256")
+            if (not common_transport.issubset(item) or
+                    not isinstance(started_ms, int) or
+                    isinstance(started_ms, bool) or started_ms < 0 or
+                    not isinstance(completed_ms, int) or
+                    isinstance(completed_ms, bool) or
+                    completed_ms < started_ms or
+                    not isinstance(raw_sha256, str) or
+                    not re.fullmatch(r"[0-9a-f]{64}", raw_sha256)):
+                die("QUORUM wrapper transport evidence is malformed")
+        if item.get("ok") is True:
+            expected_keys = {
+                "origin", "ok", "canonical_sha256", "beacon",
+                *common_transport}
+            if (set(item) != expected_keys or not has_transport or
+                    item.get("beacon") != beacon or
+                    item.get("canonical_sha256") != canonical_sha256):
+                die("QUORUM wrapper successful observation changed")
+            successful_origins.append(expected_origin)
+        elif item.get("ok") is False:
+            expected_keys = {"origin", "ok", "error"}
+            if has_transport:
+                expected_keys.update(common_transport)
+            if (set(item) != expected_keys or
+                    not isinstance(item.get("error"), str) or
+                    not item["error"]):
+                die("QUORUM wrapper failed observation changed")
+        else:
+            die("QUORUM wrapper observation status is not boolean")
+    if successful_origins != consensus_origins:
+        die("QUORUM wrapper consensus membership changed")
+    offline_verify = offline_verify_beacon(contract, result_dir, beacon)
+    earlier = earlier_h1_roots(result_dir) if spec.phase == "h2" else ()
+    roots = derive_beacon_roots(
+        spec.phase, seal_sha256, beacon,
+        earlier_holdout_roots=earlier)
+    rooted = {
+        "schema": "wirehair.wh2.holdout_roots.v1",
+        "phase": spec.phase,
+        "status": "ROOTED",
+        "seal_record_sha256": seal_sha256,
+        "manifest_sha256": seal_record["manifest_sha256"],
+        "tag_name": publication["tag_name"],
+        "tag_object": publication["tag_object"],
+        "round": seal_record["round"],
+        "round_time_ms": seal_record["round_time_ms"],
+        "canonical_beacon_sha256": offline_verify["canonical_sha256"],
+        "beacon": beacon,
+        "master_root_sha256": holdout_master_root(seal_sha256, beacon),
+        "roots": list(roots),
+        "consensus_origins": consensus_origins,
+        "observations": observations,
+        "wave": persisted_wave["wave"],
+        "wave_record_sha256": common.sha256_file(wave_path),
+        "rooted_ms": now_utc_ms(),
+    }
+    root_path = result_dir / spec.root_file
+    ensure_plain_campaign_directory(
+        result_dir, root_path.parent, "holdout root directory")
+    if root_path.exists() or root_path.is_symlink():
+        die("holdout root file appeared before atomic publication")
+    atomic_fixed_json_once(root_path, rooted)
+    verify_manifest_bytes(result_dir, spec, manifest)
+    verify_rooted_record(
+        result_dir, spec, contract, seal_sha256, seal_record)
+    return rooted
 
 
 def acquire_holdout(args: argparse.Namespace) -> int:
@@ -4100,7 +5442,7 @@ def acquire_holdout(args: argparse.Namespace) -> int:
         publication = verify_seal_publication(
             result_dir, state, attempt, seal_record, seal_sha256, contract)
         root_path = result_dir / spec.root_file
-        if root_path.exists():
+        if os.path.lexists(str(root_path)):
             rooted = verify_rooted_record(
                 result_dir, spec, contract, seal_sha256, seal_record)
             root_file_sha256 = common.sha256_file(root_path)
@@ -4128,9 +5470,34 @@ def acquire_holdout(args: argparse.Namespace) -> int:
         state["status"] = "WAITING_FOR_QUORUM"
         atomic_state_json(state_path, state)
         waves_dir = result_dir / "beacon" / args.phase / "waves"
-        waves_dir.mkdir(parents=True, exist_ok=True)
-        wave_number = existing_wave_count(
-            waves_dir, args.phase, seal_sha256)
+        ensure_plain_campaign_directory(
+            result_dir, waves_dir, "holdout wave ledger")
+        existing_waves = load_existing_wave_records(
+            waves_dir, args.phase, seal_sha256, seal_record["round"])
+        wave_number = len(existing_waves)
+        if existing_waves:
+            persisted_path, persisted_wave = existing_waves[-1]
+            persisted_status = persisted_wave["result"]["status"]
+            if persisted_status == "QUORUM":
+                rooted = publish_root_from_quorum_wave(
+                    result_dir, spec, contract, publication, manifest,
+                    seal_record, seal_sha256, persisted_path, persisted_wave)
+                state["status"] = "ROOTED"
+                state["root_file"] = spec.root_file
+                state["root_file_sha256"] = common.sha256_file(
+                    result_dir / spec.root_file)
+                atomic_state_json(state_path, state)
+                print(canonical_json(rooted))
+                return 0
+            if persisted_status != "TEMPORARY_NO_QUORUM":
+                state["status"] = "BLOCKED_PERMANENT"
+                state["blocked_wave"] = persisted_wave["wave"]
+                atomic_state_json(state_path, state)
+                die(
+                    "holdout beacon controller permanently blocked at wave "
+                    f"{persisted_wave['wave']}")
+            state["last_temporary_wave"] = persisted_wave["wave"]
+            atomic_state_json(state_path, state)
         started = time.monotonic()
         delays = (1, 2, 4, 8, 16, 30)
         while True:
@@ -4169,9 +5536,19 @@ def acquire_holdout(args: argparse.Namespace) -> int:
                 "result": wave_record,
             }
             wave_path = waves_dir / f"wave-{wave_number:06d}.json"
-            if wave_path.exists():
+            if os.path.lexists(str(wave_path)):
                 die("holdout wave record would overwrite an earlier wave")
-            atomic_state_json(wave_path, persisted_wave)
+            atomic_fixed_json_once(wave_path, persisted_wave)
+            verified_waves = load_existing_wave_records(
+                waves_dir, args.phase, seal_sha256, seal_record["round"])
+            if (len(verified_waves) != wave_number or
+                    verified_waves[-1][0] != wave_path.resolve(strict=True)):
+                die("PERMANENT: freshly persisted holdout wave changed")
+            # Validate the just-written process/status/stderr binding before
+            # any branch can retry, block, or publish roots.  Otherwise a bad
+            # temporary wave could be skipped within this same invocation.
+            persisted_wave = verified_waves[-1][1]
+            wave_record = persisted_wave["result"]
             status = wave_record.get("status")
             if status == "PERMANENT_VERIFIED_DISAGREEMENT" or (
                     status not in ("QUORUM", "TEMPORARY_NO_QUORUM")):
@@ -4180,67 +5557,14 @@ def acquire_holdout(args: argparse.Namespace) -> int:
                 atomic_state_json(state_path, state)
                 die(f"holdout beacon controller permanently blocked at wave {wave_number}")
             if status == "QUORUM":
-                if wave.returncode:
-                    die("QUORUM wrapper result had a failing process status")
-                beacon = wave_record.get("beacon")
-                consensus_origins = wave_record.get("consensus_origins")
-                observations = wave_record.get("observations")
-                if (not isinstance(beacon, dict) or
-                        beacon.get("round") != seal_record["round"] or
-                        not isinstance(consensus_origins, list) or
-                        any(not isinstance(origin, str)
-                            for origin in consensus_origins) or
-                        len(set(consensus_origins)) < 3 or
-                        not set(consensus_origins).issubset(
-                            {f"https://{host}" for host in DRAND_RELAYS}) or
-                        not isinstance(observations, list) or
-                        len(observations) != len(DRAND_RELAYS) or
-                        any(not isinstance(item, dict) or
-                            not isinstance(item.get("origin"), str)
-                            for item in observations) or
-                        {item.get("origin") for item in observations
-                         } !=
-                            {f"https://{host}" for host in DRAND_RELAYS}):
-                    die("QUORUM wrapper result has invalid coverage")
-                offline_verify = offline_verify_beacon(
-                    contract, result_dir, beacon)
-                earlier = earlier_h1_roots(result_dir) if args.phase == "h2" else ()
-                roots = derive_beacon_roots(
-                    args.phase, seal_sha256, beacon,
-                    earlier_holdout_roots=earlier,
-                )
-                rooted = {
-                    "schema": "wirehair.wh2.holdout_roots.v1",
-                    "phase": args.phase,
-                    "status": "ROOTED",
-                    "seal_record_sha256": seal_sha256,
-                    "manifest_sha256": seal_record["manifest_sha256"],
-                    "tag_name": publication["tag_name"],
-                    "tag_object": publication["tag_object"],
-                    "round": seal_record["round"],
-                    "round_time_ms": seal_record["round_time_ms"],
-                    "canonical_beacon_sha256":
-                        offline_verify["canonical_sha256"],
-                    "beacon": beacon,
-                    "master_root_sha256":
-                        holdout_master_root(seal_sha256, beacon),
-                    "roots": list(roots),
-                    "consensus_origins": consensus_origins,
-                    "observations": observations,
-                    "wave": wave_number,
-                    "wave_record_sha256": common.sha256_file(wave_path),
-                    "rooted_ms": now_utc_ms(),
-                }
-                root_path.parent.mkdir(parents=True, exist_ok=True)
-                if root_path.exists():
-                    die("holdout root file appeared before atomic publication")
-                atomic_state_json(root_path, rooted)
-                verify_manifest_bytes(result_dir, spec, manifest)
-                verify_rooted_record(
-                    result_dir, spec, contract, seal_sha256, seal_record)
+                rooted = publish_root_from_quorum_wave(
+                    result_dir, spec, contract, publication, manifest,
+                    seal_record, seal_sha256, wave_path.resolve(strict=True),
+                    persisted_wave)
                 state["status"] = "ROOTED"
                 state["root_file"] = spec.root_file
-                state["root_file_sha256"] = common.sha256_file(root_path)
+                state["root_file_sha256"] = common.sha256_file(
+                    result_dir / spec.root_file)
                 atomic_state_json(state_path, state)
                 print(canonical_json(rooted))
                 return 0
@@ -4248,6 +5572,9 @@ def acquire_holdout(args: argparse.Namespace) -> int:
                 die("temporary no-quorum wrapper result had an unexpected status")
             state["last_temporary_wave"] = wave_number
             atomic_state_json(state_path, state)
+            if args.no_wait:
+                print(canonical_json(state))
+                return 75
             if time.monotonic() - started >= args.max_wait_seconds:
                 print(canonical_json(state))
                 return 75
@@ -4256,46 +5583,336 @@ def acquire_holdout(args: argparse.Namespace) -> int:
                                       (time.monotonic() - started))))
 
 
+def discard_prepare_atomic_partials(path: Path) -> bool:
+    """Remove only exact atomic-write debris while holding the prepare lock."""
+    pattern = re.compile(
+        rf"\.{re.escape(path.name)}\.[1-9][0-9]*\.partial")
+    removed = False
+    for candidate in tuple(path.parent.iterdir()):
+        if pattern.fullmatch(candidate.name) is None:
+            continue
+        metadata = candidate.lstat()
+        if (not stat_module.S_ISREG(metadata.st_mode) or
+                metadata.st_nlink != 1):
+            die(f"refusing nonunique prepare temporary: {candidate}")
+        candidate.unlink()
+        removed = True
+    if removed:
+        fsync_directory(path.parent)
+    return removed
+
+
+def prepare_staging_paths(final: Path) -> tuple[Path, ...]:
+    """Enumerate only current and legacy canonical prepare siblings."""
+    current_name = f".{final.name}.prepare.partial"
+    legacy = re.compile(rf"\.{re.escape(final.name)}\.prepare-[1-9][0-9]*")
+    prefix = f".{final.name}.prepare"
+    lock_name = f".{final.name}.prepare.lock"
+    paths: list[Path] = []
+    for entry in tuple(final.parent.iterdir()):
+        if entry.name == current_name or legacy.fullmatch(entry.name):
+            metadata = entry.lstat()
+            if stat_module.S_ISLNK(metadata.st_mode) or not \
+                    stat_module.S_ISDIR(metadata.st_mode):
+                die(f"refusing non-directory prepare staging path: {entry}")
+            paths.append(entry)
+        elif entry.name.startswith(prefix) and entry.name != lock_name:
+            die(f"unexpected prepare transaction sibling: {entry}")
+    return tuple(sorted(paths, key=lambda path: path.name))
+
+
+def verify_staged_prepared_result_root(
+    staging: Path,
+    final: Path,
+    prepare_record: dict[str, Any],
+) -> None:
+    """Bind a private staging tree to its not-yet-created public pathname."""
+    prepared = prepare_record.get("result_dir")
+    if (not staging.is_absolute() or not final.is_absolute() or
+            staging.parent != final.parent or
+            final.parent != final.parent.resolve(strict=True) or
+            not isinstance(prepared, str) or prepared != str(final) or
+            not Path(prepared).is_absolute()):
+        die("PERMANENT: staged campaign root differs from the public freeze")
+
+
+def reconcile_complete_prepare(
+    result_dir: Path,
+    final: Path,
+) -> dict[str, Any]:
+    """Validate a complete tree and idempotently establish its public tag."""
+    discard_prepare_atomic_partials(result_dir / "prepare.json")
+    frozen = result_dir / "frozen"
+    if frozen.is_symlink() or not frozen.is_dir():
+        die("PERMANENT: complete prepare has no regular frozen directory")
+    publication_path = frozen / "r1_freeze_publication.json"
+    discard_prepare_atomic_partials(publication_path)
+    root_entries = {entry.name for entry in result_dir.iterdir()}
+    if root_entries != {"frozen", "prepare.json"}:
+        die("PERMANENT: complete prepare has unexpected campaign outputs")
+    prepare_record = load_json_object(
+        result_dir / "prepare.json", "recoverable prepare record")
+    if common.stable_bytes(result_dir / "prepare.json") != \
+            common.json_bytes(prepare_record):
+        die("PERMANENT: recoverable prepare record is not canonical JSON")
+    if (prepare_record.get("schema") !=
+            "wirehair.wh2.h12_preferred_attempt.prepare.v1" or
+            prepare_record.get("launch_state") != "CLEAN_UNLAUNCHED" or
+            prepare_record.get("holdout_root_files_present") is not False):
+        die("PERMANENT: recoverable prepare state is invalid")
+    if result_dir == final:
+        verify_prepared_result_root(result_dir, prepare_record)
+    else:
+        verify_staged_prepared_result_root(result_dir, final, prepare_record)
+    contract = load_json_object(frozen / "contract.json", "frozen contract")
+    if common.stable_bytes(frozen / "contract.json") != \
+            common.json_bytes(contract):
+        die("PERMANENT: recoverable frozen contract is not canonical JSON")
+    if (contract.get("schema") != SCHEMA or
+            contract.get("holdout_root_files_present") is not False):
+        die("PERMANENT: recoverable frozen contract state is invalid")
+    verify_frozen_staged_anchor(result_dir, prepare_record)
+    verify_prepare_contract_bindings(frozen, prepare_record, contract)
+    if not os.path.lexists(str(publication_path)):
+        # Order every trust anchor before the external irreversible action.
+        fsync_tree(result_dir)
+        fsync_directory(result_dir.parent)
+        prepare_sha256 = common.sha256_file(result_dir / "prepare.json")
+        publication = publish_r1_freeze_tag(
+            Path(str(contract["source_repo"])).resolve(strict=True),
+            prepare_record, prepare_sha256, contract.get("system_tools"))
+        atomic_state_json(publication_path, publication)
+    verify_r1_freeze_publication(result_dir, prepare_record, contract)
+    fsync_tree(result_dir)
+    fsync_directory(result_dir.parent)
+    return prepare_record
+
+
+def remove_incomplete_prepare_staging(paths: Iterable[Path]) -> None:
+    staged = tuple(paths)
+    if not staged:
+        return
+    parent = staged[0].parent
+    if any(path.parent != parent for path in staged):
+        die("prepare staging cleanup crossed parent directories")
+    removed = False
+    for path in staged:
+        # Presence by lstat is the irreversible boundary.  A dangling or
+        # otherwise malformed prepare.json is preserved for diagnosis.
+        if os.path.lexists(str(path / "prepare.json")):
+            die(f"refusing to delete complete prepare staging: {path}")
+        shutil.rmtree(path)
+        removed = True
+    if removed:
+        fsync_directory(parent)
+
+
+def recover_prepare_transaction(
+    final: Path,
+    *,
+    create: bool,
+) -> dict[str, Any] | None:
+    """Recover, finalize, or create staging while the persistent flock is held."""
+    staging_paths = prepare_staging_paths(final)
+    complete = tuple(
+        path for path in staging_paths
+        if os.path.lexists(str(path / "prepare.json")))
+    incomplete = tuple(path for path in staging_paths if path not in complete)
+    if len(complete) > 1:
+        die("PERMANENT: multiple complete prepare staging trees exist")
+    if os.path.lexists(str(final)):
+        metadata = final.lstat()
+        if stat_module.S_ISLNK(metadata.st_mode) or not \
+                stat_module.S_ISDIR(metadata.st_mode):
+            die(f"refusing non-directory prepared result: {final}")
+        if complete:
+            die("PERMANENT: public result and complete staging both exist")
+        remove_incomplete_prepare_staging(incomplete)
+        return reconcile_complete_prepare(final, final)
+    remove_incomplete_prepare_staging(incomplete)
+    if complete:
+        staging = complete[0]
+        prepare_record = reconcile_complete_prepare(staging, final)
+        if os.path.lexists(str(final)):
+            die(f"result directory appeared during prepare recovery: {final}")
+        rename_directory_noreplace(staging, final)
+        fsync_directory(final.parent)
+        return prepare_record
+    if not create:
+        return None
+    staging = final.parent / f".{final.name}.prepare.partial"
+    staging_fd = common.create_durable_directory(staging)
+    os.close(staging_fd)
+    return None
+
+
 @contextmanager
 def atomic_result_directory(
     requested: Path,
-) -> Iterator[tuple[Path, Path]]:
-    """Build a campaign in a private sibling and publish it once complete."""
+    *,
+    create: bool = True,
+) -> Iterator[tuple[Path, Path, dict[str, Any] | None]]:
+    """Build or recover one prepared campaign under a persistent lock."""
     absolute = requested.absolute()
-    absolute.parent.mkdir(parents=True, exist_ok=True)
+    parent_fd = common.open_durable_directory(absolute.parent, create=True)
+    os.close(parent_fd)
     parent = absolute.parent.resolve(strict=True)
     final = parent / absolute.name
-    if not final.name or final.exists():
-        die(f"result directory already exists: {final}")
+    if not final.name:
+        die("result directory name is empty")
     lock = parent / f".{final.name}.prepare.lock"
+    lock_flags = (os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) |
+                  getattr(os, "O_NOFOLLOW", 0))
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        die(f"prepare lock already exists: {lock}")
-    staging = parent / f".{final.name}.prepare-{os.getpid()}"
+        lock_fd = os.open(lock, lock_flags, 0o600)
+    except OSError as error:
+        die(f"cannot open prepare lock {lock}: {error}")
+    locked = False
+    previous_handlers: dict[int, Any] = {}
+    cleanup_started = False
+    pending_signals: list[int] = []
+    body_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
+
+    class PrepareInterrupted(BaseException):
+        def __init__(self, signum: int) -> None:
+            super().__init__(signal.Signals(signum).name)
+            self.signum = signum
+
+    def handle_prepare_signal(signum: int, _frame: Any) -> None:
+        pending_signals.append(signum)
+        if not cleanup_started:
+            raise PrepareInterrupted(signum)
+
+    def block_prepare_signals() -> set[signal.Signals] | None:
+        if not hasattr(signal, "pthread_sigmask"):
+            return None
+        return signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+
+    cleanup_mask: set[signal.Signals] | None = None
     try:
-        os.write(lock_fd, f"pid={os.getpid()}\n".encode("ascii"))
+        metadata = os.fstat(lock_fd)
+        if (not stat_module.S_ISREG(metadata.st_mode) or
+                metadata.st_nlink != 1):
+            die(f"refusing nonunique prepare lock: {lock}")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            die(f"prepare lock is held by another process: {lock}")
+        locked = True
+        metadata = os.fstat(lock_fd)
+        if (not stat_module.S_ISREG(metadata.st_mode) or
+                metadata.st_nlink != 1):
+            die(f"refusing changed prepare lock identity: {lock}")
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        previous_lock_record = os.read(lock_fd, 257)
+        legacy_owner = re.fullmatch(b"pid=([1-9][0-9]*)\n", previous_lock_record)
+        if legacy_owner is not None:
+            legacy_pid = int(legacy_owner.group(1))
+            try:
+                os.kill(legacy_pid, 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                die(f"legacy prepare owner may still be active: pid={legacy_pid}")
+            else:
+                die(f"legacy prepare owner is still active: pid={legacy_pid}")
+        # All other contents are advisory and replaced.  In particular, a
+        # process killed while refreshing this record can leave a short or
+        # empty file; flock ownership, not the diagnostic bytes, is the lock.
+        try:
+            named_metadata = lock.lstat()
+        except FileNotFoundError:
+            die(f"prepare lock pathname vanished during acquisition: {lock}")
+        if ((named_metadata.st_dev, named_metadata.st_ino) !=
+                (metadata.st_dev, metadata.st_ino)):
+            die(f"prepare lock pathname changed during acquisition: {lock}")
+        # The inode is deliberately persistent.  Unlinking a flock file lets
+        # a waiter retain the old inode while a newcomer locks a replacement.
+        os.ftruncate(lock_fd, 0)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        os.write(
+            lock_fd,
+            ("schema=wirehair.wh2.prepare_lock.v1\n"
+             f"pid={os.getpid()}\n").encode("ascii"),
+        )
         os.fsync(lock_fd)
         fsync_directory(parent)
-        staging.mkdir(mode=0o700, exist_ok=False)
+        if threading.current_thread() is not threading.main_thread():
+            die("prepare transaction must run on the main thread")
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(signum)
+            if previous == signal.SIG_IGN:
+                continue
+            previous_handlers[signum] = previous
+            signal.signal(signum, handle_prepare_signal)
         try:
-            yield staging, final
-            if final.exists():
-                die(f"result directory appeared during prepare: {final}")
-            fsync_tree(staging)
-            fsync_directory(parent)
-            os.rename(staging, final)
-            fsync_directory(parent)
-        except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+            try:
+                recovered = recover_prepare_transaction(final, create=create)
+                staging = parent / f".{final.name}.prepare.partial"
+                if recovered is None:
+                    yield (staging if create else final), final, None
+                else:
+                    yield final, final, recovered
+            except BaseException as error:
+                body_error = error
+        finally:
+            # From this assignment onward the handler only records signals.
+            # Blocking both signals then makes recovery, rename, unlock, and
+            # handler restoration one uninterruptible cleanup scope.
+            cleanup_started = True
+            cleanup_mask = block_prepare_signals()
+            try:
+                finalized = recover_prepare_transaction(final, create=False)
+                if create and finalized is None and body_error is None:
+                    body_error = CampaignError(
+                        "prepare transaction completed without prepare.json")
+            except BaseException as error:
+                cleanup_error = error
     finally:
-        os.close(lock_fd)
+        for signum, previous in previous_handlers.items():
+            try:
+                signal.signal(signum, previous)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if locked:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
         try:
-            lock.unlink()
-            fsync_directory(parent)
-        except FileNotFoundError:
-            pass
+            os.close(lock_fd)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, cleanup_mask)
+
+    if pending_signals:
+        # Preserve normal shell-visible SIGINT/SIGTERM semantics after every
+        # filesystem and lock invariant has been restored.
+        os.kill(os.getpid(), pending_signals[0])
+        # A user-installed callable handler is permitted to return.  That
+        # must not turn the interrupted transaction body into success.
+        if cleanup_error is not None:
+            if body_error is not None:
+                raise cleanup_error from body_error
+            raise cleanup_error
+        if body_error is not None and not isinstance(
+                body_error, PrepareInterrupted):
+            raise body_error
+        raise CampaignError(
+            "prepare interruption handler returned without terminating") \
+            from body_error
+    if cleanup_error is not None:
+        if body_error is not None:
+            raise cleanup_error from body_error
+        raise cleanup_error
+    if body_error is not None:
+        raise body_error
 
 
 def elf_build_id(binary: Path, readelf: Path) -> str:
@@ -4310,9 +5927,106 @@ def elf_build_id(binary: Path, readelf: Path) -> str:
     return matches[0]
 
 
+def validate_candidate_build_policy(cache: Path, repo: Path) -> dict[str, Any]:
+    """Require the exact native Release policy used for campaign evidence."""
+    try:
+        raw = common.stable_bytes(cache)
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise CampaignError("CMake cache is not UTF-8") from exc
+    entries: dict[str, tuple[str, str]] = {}
+    for number, line in enumerate(lines, 1):
+        if not line or line.startswith(("#", "//")):
+            continue
+        match = re.fullmatch(r"([^:=]+):([^=]+)=(.*)", line)
+        if match is None:
+            die(f"CMake cache line {number} is malformed")
+        key, kind, value = match.groups()
+        if key in entries:
+            die(f"CMake cache repeats {key}")
+        entries[key] = (kind, value)
+
+    required = {
+        "CMAKE_BUILD_TYPE": ("STRING", "Release"),
+        "BUILD_TESTS": ("BOOL", "ON"),
+        "BUILD_CODEC_V2": ("BOOL", "ON"),
+        "WIREHAIR_BUILD_BENCHMARKS": ("BOOL", "ON"),
+        "MARCH_NATIVE": ("BOOL", "ON"),
+        "WIREHAIR_STRICT_WARNINGS": ("BOOL", "ON"),
+        "WIREHAIR_ENABLE_LIBFUZZER": ("BOOL", "OFF"),
+        "WH_LTO": ("STRING", "OFF"),
+        "WH_PGO_MODE": ("STRING", "OFF"),
+        "CMAKE_C_FLAGS": ("STRING", ""),
+        "CMAKE_CXX_FLAGS": ("STRING", ""),
+        "CMAKE_C_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+        "CMAKE_CXX_FLAGS_RELEASE": ("STRING", "-O3 -DNDEBUG"),
+        "CMAKE_EXE_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+        "CMAKE_SHARED_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ("STRING", ""),
+        "CMAKE_MODULE_LINKER_FLAGS": ("STRING", ""),
+        "CMAKE_MODULE_LINKER_FLAGS_RELEASE": ("STRING", ""),
+    }
+    for key, expected in required.items():
+        if entries.get(key) != expected:
+            die(f"candidate CMake policy requires {key}={expected[1]!r}")
+    for key in (
+            "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
+            "CMAKE_TOOLCHAIN_FILE"):
+        if key in entries and entries[key][1]:
+            die(f"candidate CMake policy forbids {key}")
+    if ("CMAKE_CONFIGURATION_TYPES" in entries and
+            entries["CMAKE_CONFIGURATION_TYPES"][1]):
+        die("candidate CMake policy requires a single-config generator")
+    banned = ("-fsanitize", "--coverage", "-fprofile", "-pg")
+    for key, (_kind, value) in entries.items():
+        if ("FLAGS" in key and any(token in value for token in banned)):
+            die(f"candidate CMake policy forbids instrumentation in {key}")
+        if (key.startswith("CMAKE_INTERPROCEDURAL_OPTIMIZATION") and
+                value.upper() not in ("", "OFF", "FALSE", "0")):
+            die("candidate CMake policy forbids implicit IPO/LTO")
+    home = entries.get("CMAKE_HOME_DIRECTORY")
+    if (home is None or home[0] != "INTERNAL"):
+        die("candidate CMake cache lacks its source-tree binding")
+    try:
+        home_path = Path(home[1]).resolve(strict=True)
+    except OSError as exc:
+        raise CampaignError("candidate CMake source tree is unavailable") from exc
+    if home_path != repo.resolve(strict=True):
+        die("candidate CMake cache belongs to another source tree")
+    for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_GENERATOR"):
+        if key not in entries or not entries[key][1]:
+            die(f"candidate CMake cache lacks {key}")
+    if entries["CMAKE_GENERATOR"] != ("INTERNAL", "Unix Makefiles") and \
+            entries["CMAKE_GENERATOR"] != ("INTERNAL", "Ninja"):
+        die("candidate CMake policy requires Unix Makefiles or Ninja")
+    return {
+        "schema": "wirehair.wh2.h12_preferred_attempt.build_policy.v1",
+        "cmake_cache_sha256": sha256_bytes(raw),
+        "build_type": "Release",
+        "march_native": True,
+        "strict_warnings": True,
+        "tests_enabled": True,
+        "benchmarks_built": True,
+        "lto": "OFF",
+        "pgo": "OFF",
+        "c_compiler": entries["CMAKE_C_COMPILER"][1],
+        "cxx_compiler": entries["CMAKE_CXX_COMPILER"][1],
+        "generator": entries["CMAKE_GENERATOR"][1],
+    }
+
+
 def prepare(args: argparse.Namespace) -> int:
     if args.acknowledge != "POST_SELECTION_H12_PREFERRED_ATTEMPT_V1":
         die("prepare requires the exact post-selection acknowledgement")
+    # Reconcile a killed-but-complete transaction before consulting mutable
+    # source, build, network, or thermal inputs.  The later create transaction
+    # rechecks under this same persistent lock after expensive preflight.
+    with atomic_result_directory(args.result_dir, create=False) as (
+            _recovery_path, _final_path, recovered_prepare):
+        if recovered_prepare is not None:
+            print(canonical_json(recovered_prepare))
+            return 0
     script = Path(__file__).resolve(strict=True)
     allk = script.with_name("wh2_rank_floor_two_anchor_allk.py")
     helper = script.with_name("wh2_rank_floor_two_anchor_screen.py")
@@ -4341,6 +6055,7 @@ def prepare(args: argparse.Namespace) -> int:
     if (binary != (build_dir / "codec/wirehair_v2_bench").resolve(strict=True) or
             common.cmake_source_directory(cache) != repo):
         die("--binary is not this source tree's wirehair_v2_bench")
+    build_policy = validate_candidate_build_policy(cache, repo)
     if args.workers != 128 or not 1 <= args.build_workers <= 128:
         die("campaign requires 128 workers and 1..128 build workers")
     build_command = [
@@ -4353,6 +6068,8 @@ def prepare(args: argparse.Namespace) -> int:
     if tracked_clean_sources(
             tracked_inputs, system_tools)[1:] != (head, upstream):
         die("repository changed during clean benchmark rebuild")
+    if validate_candidate_build_policy(cache, repo) != build_policy:
+        die("candidate CMake policy changed during clean rebuild")
     if binary_input.is_symlink():
         die("clean rebuild replaced the binary with a symlink")
     binary = binary_input.resolve(strict=True)
@@ -4371,7 +6088,11 @@ def prepare(args: argparse.Namespace) -> int:
     host_runtime = host_runtime_identity()
     thermal = args.thermal.resolve(strict=True)
     thermal_mark = thermal_start(thermal, require_zero_edac=False)
-    with atomic_result_directory(args.result_dir) as (result_dir, final_dir):
+    with atomic_result_directory(args.result_dir) as (
+            result_dir, final_dir, recovered_prepare):
+        if recovered_prepare is not None:
+            print(canonical_json(recovered_prepare))
+            return 0
         frozen = result_dir / "frozen"
         frozen.mkdir()
         copied = {
@@ -4486,6 +6207,7 @@ def prepare(args: argparse.Namespace) -> int:
             "binary_sha256": live_binary_sha256,
             "binary_elf_build_id": live_build_id,
             "cmake_cache_sha256": common.sha256_file(copied["cmake_cache"]),
+            "build_policy": build_policy,
             "script_sha256": common.sha256_file(copied["script"]),
             "allk_sha256": common.sha256_file(copied["allk"]),
             "helper_sha256": common.sha256_file(copied["helper"]),
@@ -4560,7 +6282,7 @@ def prepare(args: argparse.Namespace) -> int:
             common.sha_manifest(result_dir, staged_files),
         )
         common.verify_sha_manifest(result_dir, frozen / "staged.sha256")
-        if any((result_dir / relative).exists() for relative in (
+        if any(os.path.lexists(str(result_dir / relative)) for relative in (
                 "holdout/h1_roots.json", "holdout/h2_roots.json",
                 "seals/development_table_seal.json", "seals/h1_table_seal.json")):
             die("future holdout or preceding table-seal file exists during prepare")
@@ -4577,6 +6299,8 @@ def prepare(args: argparse.Namespace) -> int:
             "holdout_module_sha256": contract["holdout_module_sha256"],
             "timing_module_sha256": contract["timing_module_sha256"],
             "binary_elf_build_id": live_build_id,
+            "cmake_cache_sha256": contract["cmake_cache_sha256"],
+            "build_policy": contract["build_policy"],
             "contract_sha256": contract_sha256,
             "protocol_sha256": contract["protocol_sha256"],
             "route_context_sha256": route_context_sha256,
@@ -4605,12 +6329,9 @@ def prepare(args: argparse.Namespace) -> int:
             "prepared_utc_ns": time.time_ns(),
         }
         common.atomic_json(result_dir / "prepare.json", prepare_record)
-        prepare_sha256 = common.sha256_file(result_dir / "prepare.json")
-        publication = publish_r1_freeze_tag(
-            repo, prepare_record, prepare_sha256, contract["system_tools"])
-        atomic_state_json(
-            frozen / "r1_freeze_publication.json", publication)
-        verify_r1_freeze_publication(result_dir, prepare_record, contract)
+        # Exiting atomic_result_directory performs the only tag publication.
+        # Its reconciliation path fsyncs the complete frozen tree before that
+        # irreversible external action, then seals and verifies the receipt.
     print(canonical_json(prepare_record))
     return 0
 
@@ -4695,6 +6416,32 @@ def write_exact_manifest_once(
     return common.sha256_file(target)
 
 
+def development_analysis_inventory(
+    development: Path,
+    expected_files: set[Path],
+) -> set[Path]:
+    """Require the exact protocol analysis inventory, never bless ambient files."""
+    target = development / "analysis_complete.sha256"
+    if common._discard_stale_atomic_partials(target):
+        fsync_directory(development)
+    files: set[Path] = set()
+    for path in development.rglob("*"):
+        if path.is_symlink():
+            die(f"development analysis inventory contains a symlink: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            die(f"development analysis inventory contains a non-file: {path}")
+        if path != target:
+            files.add(path.resolve(strict=True))
+    expected = {path.resolve(strict=True) for path in expected_files}
+    if files != expected:
+        die(
+            "development analysis artifact set mismatch "
+            f"(missing={len(expected - files)}, extra={len(files - expected)})")
+    return expected
+
+
 def run_development(args: argparse.Namespace) -> int:
     """Resume the frozen control/R1..R4 campaign and seal its selected table."""
     result_dir = args.result_dir.resolve(strict=True)
@@ -4736,9 +6483,11 @@ def run_development(args: argparse.Namespace) -> int:
     evidence.add_completed(runner.run_ledger(control, thermal))
 
     development = result_dir / "development"
-    development.mkdir(mode=0o700, exist_ok=True)
+    ensure_plain_campaign_directory(
+        result_dir, development, "development analysis directory")
     rounds_dir = development / "rounds"
-    rounds_dir.mkdir(mode=0o700, exist_ok=True)
+    ensure_plain_campaign_directory(
+        result_dir, rounds_dir, "development rounds directory")
     previous_record: dict[str, Any] | None = None
     previous_sha256 = root_parent
     round_rows: list[dict[str, Any]] = []
@@ -4925,12 +6674,24 @@ def run_development(args: argparse.Namespace) -> int:
     summary_path = development / "summary.json"
     campaign.write_hashed_artifact(
         summary_path, campaign.canonical_json_bytes(summary))
-    analysis_files = {
-        path.resolve(strict=True)
-        for path in development.rglob("*")
-        if path.is_file() and path.name not in (
-            "phase_complete.sha256", "analysis_complete.sha256")
+    analysis_expected = {
+        development / "phase_complete.sha256",
+        global_path, global_path.with_suffix(".json.sha256"),
+        table_path, table_path.with_suffix(".json.sha256"),
+        route_cache_index_path,
+        route_cache_index_path.with_suffix(".json.sha256"),
+        summary_path, summary_path.with_suffix(".json.sha256"),
     }
+    for spec in rounds:
+        survivor_path = rounds_dir / f"{spec.name}.survivors.json"
+        analysis_expected.update((
+            survivor_path, survivor_path.with_suffix(".json.sha256")))
+    for binding in route_cache_bindings.values():
+        cache_path = result_dir / binding.relative_path
+        analysis_expected.update((
+            cache_path, cache_path.with_suffix(".csv.sha256")))
+    analysis_files = development_analysis_inventory(
+        development, analysis_expected)
     analysis_sha256 = write_exact_manifest_once(
         result_dir, development / "analysis_complete.sha256",
         analysis_files, campaign)
@@ -5209,7 +6970,6 @@ def verify_development_seal_readiness(
 
     analysis_path = result_dir / "development/analysis_complete.sha256"
     analysis_inventory = exact_tree_files(result_dir, ("development",))
-    analysis_inventory.remove(phase_path.resolve(strict=True))
     analysis_inventory.remove(analysis_path.resolve(strict=True))
     verify_exact_sha_manifest_coverage(
         result_dir, analysis_path, analysis_inventory,
@@ -5494,6 +7254,10 @@ def run_h1(args: argparse.Namespace) -> int:
     controller_path = result_dir / "h1/controller_complete.json"
     controller_sha256 = campaign.write_hashed_artifact(
         controller_path, campaign.canonical_json_bytes(controller_record))
+    # A successful H1 controller return is itself a terminal publication
+    # boundary.  Reject late/unexpected files here rather than deferring the
+    # exact inventory check until a later H2 seal attempt.
+    verify_h1_seal_readiness(result_dir, contract)
     complete = {
         "schema": "wirehair.wh2.h12_preferred_attempt.h1_complete.v1",
         "accepted": analysis.get("accepted"),
@@ -5553,6 +7317,80 @@ def run_h2(args: argparse.Namespace) -> int:
     runner.run_ledger(paired_ledger, thermal)
     analysis = holdout.analyze_h2(
         result_dir, binary, route_ledger, paired_ledger, table, set(cpus))
+    h2_core_files: set[Path] = set()
+    for ledger in (route_ledger, paired_ledger):
+        ledger_path = result_dir / "h2/ledgers" / f"{ledger.kind}.json"
+        phase_path = result_dir / "h2" / f"phase_{ledger.kind}.json"
+        h2_core_files.update((
+            ledger_path, ledger_path.with_suffix(".json.sha256"),
+            phase_path, phase_path.with_suffix(".sha256"),
+        ))
+        for job in ledger.jobs:
+            h2_core_files.update(holdout.job_paths(result_dir, job).values())
+    for binding in route_caches.values():
+        cache_path = result_dir / binding.relative_path
+        h2_core_files.update((
+            cache_path, cache_path.with_suffix(".csv.sha256")))
+    cache_index = result_dir / "h2/route_cache_bb64/index.json"
+    phase_complete = result_dir / "h2/phase_complete.json"
+    analysis_complete = result_dir / "h2/analysis_complete.json"
+    h2_core_files.update((
+        cache_index, cache_index.with_suffix(".sha256"),
+        phase_complete, phase_complete.with_suffix(".sha256"),
+        analysis_complete, analysis_complete.with_suffix(".sha256"),
+    ))
+    h2_core = {path.resolve(strict=True) for path in h2_core_files}
+    controller_path = result_dir / "h2/controller_complete.json"
+    controller_sidecar = controller_path.with_suffix(".json.sha256")
+    manifest_path = result_dir / "h2/controller_manifest.sha256"
+    terminal_files = {controller_path, controller_sidecar, manifest_path}
+    cleaned_terminal_partial = False
+    for target in terminal_files:
+        cleaned_terminal_partial = (
+            common._discard_stale_atomic_partials(target) or
+            cleaned_terminal_partial)
+    if cleaned_terminal_partial:
+        fsync_directory(result_dir / "h2")
+    actual_before = exact_tree_files(result_dir, ("h2",))
+    terminal_resolved = {
+        path.resolve(strict=True) for path in terminal_files
+        if os.path.lexists(str(path))}
+    if (not h2_core.issubset(actual_before) or
+            actual_before - h2_core != terminal_resolved):
+        die("H2 terminal artifact inventory contains missing or extra files")
+    controller = campaign.sealed_record(
+        "wirehair.wh2.h12_preferred_attempt.h2_controller_complete.v1",
+        {
+            "root_file_sha256": root_file_sha256,
+            "parent_table_sha256": parent_table_sha256,
+            "route_ledger_sha256": common.sha256_file(
+                result_dir / "h2/ledgers/route.json"),
+            "paired_ledger_sha256": common.sha256_file(
+                result_dir / "h2/ledgers/paired.json"),
+            "route_phase_sha256": common.sha256_file(
+                result_dir / "h2/phase_route.json"),
+            "paired_phase_sha256": common.sha256_file(
+                result_dir / "h2/phase_paired.json"),
+            "combined_phase_sha256": common.sha256_file(phase_complete),
+            "analysis_sha256": common.sha256_file(analysis_complete),
+            "route_cache_index_sha256": common.sha256_file(cache_index),
+            "core_artifact_count": len(h2_core),
+            "accepted": analysis.get("accepted"),
+        },
+    )
+    controller_sha256 = campaign.write_hashed_artifact(
+        controller_path, campaign.canonical_json_bytes(controller))
+    manifest_files = set(h2_core)
+    manifest_files.update((
+        controller_path.resolve(strict=True),
+        controller_sidecar.resolve(strict=True),
+    ))
+    controller_manifest_sha256 = write_exact_manifest_once(
+        result_dir, manifest_path, manifest_files, campaign)
+    expected_terminal = set(manifest_files)
+    expected_terminal.add(manifest_path.resolve(strict=True))
+    if exact_tree_files(result_dir, ("h2",)) != expected_terminal:
+        die("H2 terminal artifact inventory changed after sealing")
     complete = {
         "schema": "wirehair.wh2.h12_preferred_attempt.h2_complete.v1",
         "accepted": analysis.get("accepted"),
@@ -5562,6 +7400,8 @@ def run_h2(args: argparse.Namespace) -> int:
             result_dir / "h2/phase_complete.json"),
         "analysis_complete_sha256": common.sha256_file(
             result_dir / "h2/analysis_complete.json"),
+        "controller_complete_sha256": controller_sha256,
+        "controller_manifest_sha256": controller_manifest_sha256,
     }
     print(canonical_json(complete))
     return 0
@@ -5614,6 +7454,28 @@ def timing_panel_paths(
         timing_dir / "panels" / spec.metric / stem,
         timing_dir / "evidence" / spec.metric / stem,
     )
+
+
+def timing_panel_needs_host_lock(timing: Any, panel_dir: Path) -> bool:
+    """Include missing-sidecar crash repair in exclusive host isolation."""
+    if not panel_dir.exists() and not panel_dir.is_symlink():
+        return True
+    manifest = panel_dir / timing.PANEL_RESULT_NAME
+    sidecar = panel_dir / timing.PANEL_RESULT_SIDECAR_NAME
+    manifest_present = manifest.exists() or manifest.is_symlink()
+    sidecar_present = sidecar.exists() or sidecar.is_symlink()
+    return manifest_present and not sidecar_present
+
+
+def timing_host_lock_required(
+    timing: Any,
+    panel_dirs: Iterable[Path],
+    journal_path: Path,
+) -> bool:
+    """Recover durable host state even when every panel is already sealed."""
+    return os.path.lexists(str(journal_path)) or any(
+        timing_panel_needs_host_lock(timing, panel_dir)
+        for panel_dir in panel_dirs)
 
 
 def verify_timing_evidence_files(
@@ -5716,7 +7578,8 @@ def run_timing(args: argparse.Namespace) -> int:
     h2_root_sha256 = common.sha256_file(h2_root_path.resolve(strict=True))
     routed = tuple(K for K in cohort if h1_table[K] is not None)
     timing_dir = result_dir / "timing"
-    timing_dir.mkdir(mode=0o700, exist_ok=True)
+    ensure_plain_campaign_directory(
+        result_dir, timing_dir, "timing result directory")
     if timing_dir.is_symlink() or not timing_dir.is_dir():
         die("timing result directory is not a regular directory")
     if len(routed) < 5:
@@ -5809,9 +7672,11 @@ def run_timing(args: argparse.Namespace) -> int:
         sample_path.resolve(strict=True),
         sample_path.with_suffix(".json.sha256").resolve(strict=True),
     }
-    missing_panel = any(
-        not timing_panel_paths(timing_dir, spec)[0].exists()
-        for spec in specs)
+    needs_host_lock = timing_host_lock_required(
+        timing,
+        (timing_panel_paths(timing_dir, spec)[0] for spec in specs),
+        host.journal_path,
+    )
 
     def load_or_run_panels() -> None:
         for spec in specs:
@@ -5834,7 +7699,7 @@ def run_timing(args: argparse.Namespace) -> int:
             execution_files.update(verify_timing_evidence_files(
                 timing_dir, evidence_dir, result))
 
-    if missing_panel:
+    if needs_host_lock:
         with host:
             if host.launcher() != config.launcher:
                 die("timing launcher changed when isolation became live")
@@ -5981,18 +7846,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return plan(args)
     if args.command == "prepare":
         return prepare(args)
-    if args.command == "run-development":
-        return run_development(args)
-    if args.command == "run-h1":
-        return run_h1(args)
-    if args.command == "run-h2":
-        return run_h2(args)
-    if args.command == "run-timing":
-        return run_timing(args)
-    if args.command == "seal-holdout":
-        return seal_holdout(args)
-    if args.command == "acquire-holdout":
-        return acquire_holdout(args)
+    campaign_controllers = {
+        "run-development": run_development,
+        "seal-holdout": seal_holdout,
+        "acquire-holdout": acquire_holdout,
+        "run-h1": run_h1,
+        "run-h2": run_h2,
+        "run-timing": run_timing,
+    }
+    if args.command in campaign_controllers:
+        result_dir = args.result_dir.resolve(strict=True)
+        # Trust the frozen tree before creating anything inside it, then
+        # repeat under exclusion in case an earlier controller completed a
+        # publication between these two operations.
+        verify_frozen_controller_runtime(result_dir)
+        with campaign_execution_lock(result_dir):
+            verify_frozen_controller_runtime(result_dir)
+            return campaign_controllers[args.command](args)
     die(f"unknown command {args.command}")
     return 1
 
