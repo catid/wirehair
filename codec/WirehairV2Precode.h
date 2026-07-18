@@ -267,6 +267,8 @@ uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
 bool ActiveMixedIndependentExtensionResidues();
 uint32_t ActiveMixedGroupedGF256Rows();
+/// Cauchy-Y rows assigned to grouped schedule C (bit r selects Y=r).
+uint32_t ActiveMixedGroupedGF256RowMask();
 uint32_t ActiveMixedGroupedGF256HashSeed();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF256Rows();
@@ -329,6 +331,13 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
 /// shared-X, constant-A, 10 GF(256) + 2 GF(2^16), P>H configurations and is
 /// mutually exclusive with independent GF(2^16) scheduling.
 bool SetMixedGroupedGF256RowsForTesting(uint32_t rows);
+///
+/// Select which of the ten fixed Cauchy-Y rows consume schedule C.  The mask
+/// must contain exactly ActiveMixedGroupedGF256Rows() bits in the low ten
+/// positions.  Internally this is only an equation-row permutation: the
+/// existing compact A/C destination groups, source scans, and arithmetic work
+/// remain identical to the suffix selected by SetMixedGroupedGF256RowsForTesting().
+bool SetMixedGroupedGF256RowMaskForTesting(uint32_t row_mask);
 /// Select the secondary-schedule RHS accumulation implementation.
 bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode);
 MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting();

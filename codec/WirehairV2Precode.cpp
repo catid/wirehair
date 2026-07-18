@@ -523,6 +523,53 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
     {
         static const MixedCoefficientRows shared_rows =
             build_rows(MixedCoefficientGeometry::SharedCauchyX);
+        const uint32_t grouped_rows = ActiveMixedGroupedGF256Rows();
+        const uint32_t row_mask = ActiveMixedGroupedGF256RowMask();
+        const uint32_t suffix_mask = grouped_rows == 0u ? 0u :
+            ((UINT32_C(1) << grouped_rows) - 1u) <<
+                (kMixedGF256Rows - grouped_rows);
+        if (row_mask != suffix_mask)
+        {
+            // The grouped kernels deliberately retain one compact A prefix
+            // and C suffix.  Reorder only the equation rows so the requested
+            // Cauchy Y coordinates occupy that suffix.  A row permutation
+            // changes neither the solution set nor the final all-A corner,
+            // and avoids adding membership branches to any payload loop.
+            static thread_local MixedCoefficientRows permuted_rows = {};
+            static thread_local uint32_t cached_row_mask = UINT32_MAX;
+            if (cached_row_mask != row_mask)
+            {
+                permuted_rows = shared_rows;
+                uint32_t destination = 0u;
+                for (uint32_t source = 0u;
+                     source < kMixedGF256Rows; ++source)
+                {
+                    if ((row_mask & (UINT32_C(1) << source)) != 0u) {
+                        continue;
+                    }
+                    std::copy(
+                        shared_rows.Subfield[source],
+                        shared_rows.Subfield[source] +
+                            kMixedCoefficientPeriod,
+                        permuted_rows.Subfield[destination++]);
+                }
+                for (uint32_t source = 0u;
+                     source < kMixedGF256Rows; ++source)
+                {
+                    if ((row_mask & (UINT32_C(1) << source)) == 0u) {
+                        continue;
+                    }
+                    std::copy(
+                        shared_rows.Subfield[source],
+                        shared_rows.Subfield[source] +
+                            kMixedCoefficientPeriod,
+                        permuted_rows.Subfield[destination++]);
+                }
+                CAT_DEBUG_ASSERT(destination == kMixedGF256Rows);
+                cached_row_mask = row_mask;
+            }
+            return &permuted_rows;
+        }
         return &shared_rows;
     }
 #endif
@@ -564,6 +611,20 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
     if (ActiveMixedCoefficientGeometry() ==
         MixedCoefficientGeometry::SharedCauchyX)
     {
+        if (ActiveMixedGroupedGF256Rows() != 0u)
+        {
+            // `rows` may be the thread-local row-permuted view.  Keep its
+            // packed lanes in a matching thread-local cache; static shared
+            // caches below remain canonical for every ungrouped caller.
+            static thread_local MixedPackedCoefficients grouped_packed = {};
+            static thread_local uint32_t cached_row_mask = UINT32_MAX;
+            const uint32_t row_mask = ActiveMixedGroupedGF256RowMask();
+            if (cached_row_mask != row_mask) {
+                grouped_packed = pack_rows(rows, kMixedGF256Rows);
+                cached_row_mask = row_mask;
+            }
+            return &grouped_packed;
+        }
         static const MixedPackedCoefficients shared_packed_base =
             pack_rows(rows, kMixedGF256Rows);
         static const MixedPackedCoefficients shared_packed_one_extra =
@@ -627,6 +688,7 @@ static thread_local bool MixedIndependentExtensionResiduesForTesting = false;
 static thread_local uint32_t MixedExtensionResidueHashSeedForTesting = 0u;
 static thread_local uint32_t MixedIndependentExtensionSeedXorForTesting = 78u;
 static thread_local uint32_t MixedGroupedGF256RowsForTesting = 0u;
+static thread_local uint32_t MixedGroupedGF256RowMaskForTesting = 0u;
 static thread_local uint32_t MixedGroupedGF256ResidueHashSeedForTesting = 0u;
 static const uint32_t kMixedGroupedGF256SeedBase = UINT32_C(0xb7e15162);
 static thread_local MixedResidueBucketMode MixedResidueBucketModeForTesting =
@@ -699,6 +761,17 @@ static void DisableMixedScheduleExperiments()
 {
     MixedIndependentExtensionResiduesForTesting = false;
     MixedGroupedGF256RowsForTesting = 0u;
+    MixedGroupedGF256RowMaskForTesting = 0u;
+}
+
+static uint32_t CountSetBits(uint32_t value)
+{
+    uint32_t count = 0u;
+    while (value != 0u) {
+        value &= value - 1u;
+        ++count;
+    }
+    return count;
 }
 
 static bool IsValidatedH16Period(uint32_t period)
@@ -859,6 +932,21 @@ bool SetMixedGroupedGF256RowsForTesting(uint32_t rows)
         return false;
     }
     MixedGroupedGF256RowsForTesting = rows;
+    MixedGroupedGF256RowMaskForTesting = rows == 0u ? 0u :
+        ((UINT32_C(1) << rows) - 1u) << (kMixedGF256Rows - rows);
+    return true;
+}
+
+bool SetMixedGroupedGF256RowMaskForTesting(uint32_t row_mask)
+{
+    static const uint32_t kValidRowMask =
+        (UINT32_C(1) << kMixedGF256Rows) - 1u;
+    if ((row_mask & ~kValidRowMask) != 0u ||
+        CountSetBits(row_mask) != MixedGroupedGF256RowsForTesting)
+    {
+        return false;
+    }
+    MixedGroupedGF256RowMaskForTesting = row_mask;
     return true;
 }
 
@@ -1198,6 +1286,16 @@ uint32_t ActiveMixedGroupedGF256Rows()
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     return MixedGroupedGF256RowsForTesting;
+#else
+    return 0u;
+#endif
+}
+
+uint32_t ActiveMixedGroupedGF256RowMask()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedGroupedGF256RowsForTesting != 0u ?
+        MixedGroupedGF256RowMaskForTesting : 0u;
 #else
     return 0u;
 #endif

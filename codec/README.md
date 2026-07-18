@@ -380,6 +380,16 @@ nonsingular corner.
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.
+For the grouped two-schedule H12 experiment, `compare` and `precodefail`
+accept `--mixed-grouped-gf256-rows R` and optional
+`--mixed-grouped-gf256-row-mask MASK`.  The low ten mask bits name the Cauchy
+Y coordinates assigned to schedule C and must contain exactly R set bits.
+Omitting the mask retains the historical final-R-row suffix.  Arbitrary masks
+are implemented as an equation-row permutation into the same compact A prefix
+and C suffix, so every mask at fixed P/R has exactly the same two source scans,
+bucket scratch, muladd count, and SIMD group sizes.  The final H columns remain
+on canonical schedule A.  These are test hooks only; no named profile selects
+grouped rows or a row mask.
 With independent extension residues, test-hook `compare` and `precodefail`
 also accept
 `--mixed-residue-buckets auto|separate|dual|joint-delta`.  The preamble labels
