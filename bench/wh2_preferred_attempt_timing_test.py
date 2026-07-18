@@ -583,13 +583,44 @@ class RunnerTests(unittest.TestCase):
                         partial.unlink()
 
     def test_default_executor_reaps_timeout_process_group(self):
-        started = time.monotonic()
-        with self.assertRaises(subprocess.TimeoutExpired):
+        with tempfile.TemporaryDirectory() as name:
+            pid_path = Path(name) / "process-group"
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                timing._execute_timing_process(
+                    (
+                        "/bin/sh", "-c",
+                        'echo $$ > "$1"; sleep 5 & wait',
+                        "timing-timeout", str(pid_path),
+                    ),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False, timeout=0.05)
+            self.assertLess(time.monotonic() - started, 1.0)
+            process_group = int(pid_path.read_text("ascii").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(process_group, 0)
+
+    def test_timeout_never_performs_an_unbounded_followup_drain(self):
+        process = mock.Mock()
+        process.pid = 12345
+        timeout = subprocess.TimeoutExpired(
+            "timing", 0.05, output=b"partial out", stderr=b"partial err")
+        process.communicate.side_effect = timeout
+        process.poll.return_value = None
+        with mock.patch.object(
+                timing.subprocess, "Popen", return_value=process), \
+             mock.patch.object(timing.os, "killpg"), \
+             mock.patch.object(
+                 timing.common,
+                 "stop_and_reap_process_group") as cleanup, \
+             self.assertRaises(subprocess.TimeoutExpired) as raised:
             timing._execute_timing_process(
-                ("/bin/sh", "-c", "sleep 5 & wait"),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                check=False, timeout=0.05)
-        self.assertLess(time.monotonic() - started, 1.0)
+                ("timing",), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=0.05)
+        cleanup.assert_called_once_with(process, 1.0)
+        self.assertEqual(process.communicate.call_count, 1)
+        self.assertEqual(raised.exception.stdout, b"partial out")
+        self.assertEqual(raised.exception.stderr, b"partial err")
 
     def test_default_executor_rejects_success_with_surviving_child(self):
         with self.assertRaisesRegex(

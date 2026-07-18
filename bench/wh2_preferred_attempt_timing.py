@@ -1692,17 +1692,27 @@ def _execute_timing_process(
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        output, errors = process.communicate()
+        output = exc.output if exc.output is not None else b""
+        errors = exc.stderr if exc.stderr is not None else b""
+        try:
+            # Never perform an unbounded drain here: an escaped session could
+            # retain our pipe descriptors after the original group is dead.
+            common.stop_and_reap_process_group(process, 1.0)
+        except common.CampaignError as cleanup_error:
+            raise TimingError(
+                "timed-out process group cleanup could not be proven") \
+                from cleanup_error
         exc.stdout = output
         exc.output = output
         exc.stderr = errors
         raise
-    except BaseException:
+    except BaseException as error:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
+            common.stop_and_reap_process_group(process, 1.0)
+        except common.CampaignError as cleanup_error:
+            raise TimingError(
+                "interrupted process group cleanup could not be proven") \
+                from cleanup_error
         raise
     descendants_live = common.process_group_exists(process)
     if descendants_live:
