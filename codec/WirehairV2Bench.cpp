@@ -119,6 +119,18 @@ bool ParseU32Arg(const char* option, const char* value, uint32_t& out)
     return ParseU32Scalar(value, out) || BadArg(option, value);
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ParseU32MaskArg(const char* option, const char* value, uint32_t& out)
+{
+    uint64_t parsed = 0u;
+    if (!ParseU64Scalar(value, parsed) || parsed > UINT32_MAX) {
+        return BadArg(option, value);
+    }
+    out = (uint32_t)parsed;
+    return true;
+}
+#endif
+
 bool ParseU16Arg(const char* option, const char* value, uint16_t& out)
 {
     return ParseU16Scalar(value, out) || BadArg(option, value);
@@ -1896,6 +1908,8 @@ int CmdCompare(int argc, char** argv)
     bool mixed_gf256_rows_explicit = false;
     uint32_t mixed_grouped_gf256_rows = 0u;
     bool mixed_grouped_gf256_rows_explicit = false;
+    uint32_t mixed_grouped_gf256_row_mask = 0u;
+    bool mixed_grouped_gf256_row_mask_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -2031,6 +2045,20 @@ int CmdCompare(int argc, char** argv)
                 return 1;
             }
             mixed_grouped_gf256_rows_explicit = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--mixed-grouped-gf256-row-mask"))
+        {
+            if (!TakeArg(
+                    "compare", "--mixed-grouped-gf256-row-mask",
+                    argc, argv, i, value) ||
+                !ParseU32MaskArg(
+                    "--mixed-grouped-gf256-row-mask", value,
+                    mixed_grouped_gf256_row_mask))
+            {
+                return 1;
+            }
+            mixed_grouped_gf256_row_mask_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
@@ -2261,6 +2289,7 @@ int CmdCompare(int argc, char** argv)
              mixed_geometry_explicit ||
              mixed_gf256_rows_explicit ||
              mixed_grouped_gf256_rows_explicit ||
+             mixed_grouped_gf256_row_mask_explicit ||
              mixed_gf16_rows_explicit ||
              mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
@@ -2372,14 +2401,27 @@ int CmdCompare(int argc, char** argv)
     wirehair_v2::SetPacketRowSeedAvalancheForTesting(
         packet_row_seed_avalanche);
     // Every earlier mixed configuration setter may clear schedule experiments.
-    // Activate the grouped suffix only after the complete thread state is set.
+    // Activate grouped C only after the complete thread state is set.
+    if (mixed_grouped_gf256_row_mask_explicit &&
+        !mixed_grouped_gf256_rows_explicit)
+    {
+        std::fprintf(stderr,
+            "compare --mixed-grouped-gf256-row-mask requires explicit "
+            "--mixed-grouped-gf256-rows\n");
+        return 1;
+    }
     if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-            mixed_grouped_gf256_rows))
+            mixed_grouped_gf256_rows) ||
+        (mixed_grouped_gf256_row_mask_explicit &&
+         !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+             mixed_grouped_gf256_row_mask)))
     {
         std::fprintf(stderr,
             "compare --mixed-grouped-gf256-rows must be in [0,9]; "
             "nonzero grouping requires shared-x constant-A 10+2 geometry, "
-            "P>H, and no independent extension residues\n");
+            "P>H, and no independent extension residues; "
+            "--mixed-grouped-gf256-row-mask must use only the low ten "
+            "bits and contain exactly that many set bits\n");
         return 1;
     }
 #endif
@@ -2458,6 +2500,7 @@ int CmdCompare(int argc, char** argv)
         "mixed_residue_hash_keyed=%u "
         "mixed_independent_extension_residues=%u "
         "mixed_grouped_gf256_rows=%u "
+        "mixed_grouped_gf256_row_mask=0x%x "
         "mixed_grouped_gf256_hash_seed=0x%x "
         "mixed_grouped_final_h_a_columns=%u "
         "mixed_residue_buckets_requested=%s "
@@ -2501,6 +2544,7 @@ int CmdCompare(int argc, char** argv)
         mixed_residue_hash_keyed ? 1u : 0u,
         mixed_independent_extension_residues ? 1u : 0u,
         wirehair_v2::ActiveMixedGroupedGF256Rows(),
+        wirehair_v2::ActiveMixedGroupedGF256RowMask(),
         wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
         wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ?
             wirehair_v2::ActiveMixedGF256Rows() +
@@ -2585,7 +2629,10 @@ int CmdCompare(int argc, char** argv)
             // clear schedule experiments.  Keep grouped C last for every
             // trial, not only for the command's initial TLS configuration.
             if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-                    mixed_grouped_gf256_rows))
+                    mixed_grouped_gf256_rows) ||
+                (mixed_grouped_gf256_row_mask_explicit &&
+                 !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                     mixed_grouped_gf256_row_mask)))
             {
                 return 1;
             }
@@ -4085,6 +4132,8 @@ bool BuildMixedNullClassification(
     const uint32_t heavy_rows = subfield_rows + extension_rows;
     const uint32_t grouped_gf256_rows =
         wirehair_v2::ActiveMixedGroupedGF256Rows();
+    const uint32_t grouped_gf256_row_mask =
+        wirehair_v2::ActiveMixedGroupedGF256RowMask();
     const bool basis_size_overflow = d != 0u &&
         (size_t)L > std::numeric_limits<size_t>::max() / d;
     if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
@@ -4200,7 +4249,8 @@ bool BuildMixedNullClassification(
             "ex_hash=%016llx,pair_occ=%u,pair_cancel=%u,"
             "pair_cancel_terms=%u,pair_max=%u,pair_hash=%016llx,"
             "sf_top=%s,ex_top=%s,grouped_gf256_rows=%u,"
-            "grouped_first_row=%u,grouped_final_h_a_columns=%u,"
+            "grouped_gf256_row_mask=0x%x,grouped_first_row=%u,"
+            "grouped_final_h_a_columns=%u,"
             "c_occ=%u,c_cancel=%u,c_cancel_terms=%u,c_max=%u,"
             "c_hash=%016llx,ac_pair_occ=%u,ac_pair_cancel=%u,"
             "ac_pair_cancel_terms=%u,ac_pair_max=%u,"
@@ -4215,7 +4265,8 @@ bool BuildMixedNullClassification(
             pair.Occupied, pair.Cancelled, pair.CancelledTerms, pair.Maximum,
             (unsigned long long)pair.Hash,
             sf.Top.c_str(), ex.Top.c_str(),
-            grouped_gf256_rows, first_grouped_gf256_row,
+            grouped_gf256_rows, grouped_gf256_row_mask,
+            first_grouped_gf256_row,
             grouped_gf256_rows != 0u ? heavy_rows : 0u,
             grouped_sf.Occupied, grouped_sf.Cancelled,
             grouped_sf.CancelledTerms, grouped_sf.Maximum,
@@ -7560,6 +7611,8 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_gf256_rows_explicit = false;
     uint32_t mixed_grouped_gf256_rows = 0u;
     bool mixed_grouped_gf256_rows_explicit = false;
+    uint32_t mixed_grouped_gf256_row_mask = 0u;
+    bool mixed_grouped_gf256_row_mask_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -7856,6 +7909,20 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_grouped_gf256_rows_explicit = true;
         }
+        else if (!std::strcmp(
+                     argv[i], "--mixed-grouped-gf256-row-mask"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--mixed-grouped-gf256-row-mask",
+                    argc, argv, i, value) ||
+                !ParseU32MaskArg(
+                    "--mixed-grouped-gf256-row-mask", value,
+                    mixed_grouped_gf256_row_mask))
+            {
+                return 1;
+            }
+            mixed_grouped_gf256_row_mask_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
                     "precodefail", "--mixed-period", argc, argv, i, value) ||
@@ -8068,6 +8135,7 @@ int CmdPrecodeFail(int argc, char** argv)
              mixed_geometry_explicit ||
              mixed_gf256_rows_explicit ||
              mixed_grouped_gf256_rows_explicit ||
+             mixed_grouped_gf256_row_mask_explicit ||
              mixed_gf16_rows_explicit ||
              mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
@@ -8239,13 +8307,26 @@ int CmdPrecodeFail(int argc, char** argv)
         odd_packet_peel_seed_xor);
     // All prerequisite setters above intentionally clear schedule experiments.
     // Grouped C must therefore be the final thread-local codec configuration.
+    if (mixed_grouped_gf256_row_mask_explicit &&
+        !mixed_grouped_gf256_rows_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-grouped-gf256-row-mask requires explicit "
+            "--mixed-grouped-gf256-rows\n");
+        return 1;
+    }
     if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-            mixed_grouped_gf256_rows))
+            mixed_grouped_gf256_rows) ||
+        (mixed_grouped_gf256_row_mask_explicit &&
+         !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+             mixed_grouped_gf256_row_mask)))
     {
         std::fprintf(stderr,
             "precodefail --mixed-grouped-gf256-rows must be in [0,9]; "
             "nonzero grouping requires shared-x constant-A 10+2 geometry, "
-            "P>H, and no independent extension residues\n");
+            "P>H, and no independent extension residues; "
+            "--mixed-grouped-gf256-row-mask must use only the low ten "
+            "bits and contain exactly that many set bits\n");
         return 1;
     }
     if (seed_block_bytes_explicit && seed_block_bytes_override == 0u)
@@ -8329,6 +8410,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_residue_hash_keyed=%u "
             "mixed_independent_extension_residues=%u "
             "mixed_grouped_gf256_rows=%u "
+            "mixed_grouped_gf256_row_mask=0x%x "
             "mixed_grouped_gf256_hash_seed=0x%x "
             "mixed_grouped_final_h_a_columns=%u "
             "mixed_residue_buckets_requested=%s "
@@ -8356,6 +8438,7 @@ int CmdPrecodeFail(int argc, char** argv)
             mixed_residue_hash_keyed ? 1u : 0u,
             mixed_independent_extension_residues ? 1u : 0u,
             wirehair_v2::ActiveMixedGroupedGF256Rows(),
+            wirehair_v2::ActiveMixedGroupedGF256RowMask(),
             wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
             wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ?
                 wirehair_v2::ActiveMixedGF256Rows() +
@@ -8463,7 +8546,10 @@ int CmdPrecodeFail(int argc, char** argv)
                 (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
                      odd_packet_peel_seed_xor), true) &&
                 wirehair_v2::SetMixedGroupedGF256RowsForTesting(
-                    mixed_grouped_gf256_rows);
+                    mixed_grouped_gf256_rows) &&
+                (!mixed_grouped_gf256_row_mask_explicit ||
+                 wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                     mixed_grouped_gf256_row_mask));
         };
         if (!configure_test_thread())
         {
@@ -9079,6 +9165,8 @@ int CmdPrecodeFail(int argc, char** argv)
                     wirehair_v2::ActiveMixedGF16Rows();
                 const uint32_t active_grouped_rows =
                     wirehair_v2::ActiveMixedGroupedGF256Rows();
+                const uint32_t active_grouped_row_mask =
+                    wirehair_v2::ActiveMixedGroupedGF256RowMask();
                 const uint32_t active_first_grouped_row =
                     active_grouped_rows <= active_subfield_rows ?
                         active_subfield_rows - active_grouped_rows : 0u;
@@ -9091,7 +9179,8 @@ int CmdPrecodeFail(int argc, char** argv)
                     "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
                     "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
                     "hash=%016llx%016llx,grouped_gf256_rows=%u,"
-                    "grouped_first_row=%u,grouped_hash_seed=0x%x,"
+                    "grouped_gf256_row_mask=0x%x,grouped_first_row=%u,"
+                    "grouped_hash_seed=0x%x,"
                     "grouped_final_h_a_columns=%u\n",
                     K, bb, have_trial ? (int)captured_witness_trial : -1,
                     MixedNullReplayStatusName(witness_status),
@@ -9112,7 +9201,8 @@ int CmdPrecodeFail(int argc, char** argv)
                         1u : 0u,
                     (unsigned long long)hash_high,
                     (unsigned long long)hash_low,
-                    active_grouped_rows, active_first_grouped_row,
+                    active_grouped_rows, active_grouped_row_mask,
+                    active_first_grouped_row,
                     wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
                     active_grouped_rows != 0u ?
                         active_subfield_rows + active_extension_rows : 0u);

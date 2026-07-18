@@ -228,21 +228,32 @@ private:
 class MixedGroupedGF256RowsScope
 {
 public:
-    explicit MixedGroupedGF256RowsScope(uint32_t rows)
-        : Previous(wirehair_v2::ActiveMixedGroupedGF256Rows())
+    explicit MixedGroupedGF256RowsScope(
+        uint32_t rows,
+        uint32_t row_mask = UINT32_MAX)
+        : PreviousRows(wirehair_v2::ActiveMixedGroupedGF256Rows())
+        , PreviousRowMask(wirehair_v2::ActiveMixedGroupedGF256RowMask())
         , Valid(wirehair_v2::SetMixedGroupedGF256RowsForTesting(rows))
     {
+        if (Valid && row_mask != UINT32_MAX) {
+            Valid = wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                row_mask);
+        }
     }
 
     ~MixedGroupedGF256RowsScope()
     {
-        (void)wirehair_v2::SetMixedGroupedGF256RowsForTesting(Previous);
+        if (wirehair_v2::SetMixedGroupedGF256RowsForTesting(PreviousRows)) {
+            (void)wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                PreviousRowMask);
+        }
     }
 
     bool IsValid() const { return Valid; }
 
 private:
-    uint32_t Previous;
+    uint32_t PreviousRows;
+    uint32_t PreviousRowMask;
     bool Valid;
 };
 
@@ -1529,6 +1540,71 @@ bool TestGroupedMixedResidueSchedule()
         return false;
     }
 
+    const wirehair_v2::MixedCoefficientRows* canonical_rows_ptr =
+        wirehair_v2::GetMixedCoefficientRows();
+    if (!canonical_rows_ptr) return false;
+    const wirehair_v2::MixedCoefficientRows canonical_rows =
+        *canonical_rows_ptr;
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(3u) ||
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() !=
+            UINT32_C(0x380) ||
+        !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            UINT32_C(0x049)))
+    {
+        std::fprintf(stderr,
+            "grouped mixed arbitrary row-mask setup failed\n");
+        return false;
+    }
+    const wirehair_v2::MixedCoefficientRows* permuted_rows =
+        wirehair_v2::GetMixedCoefficientRows();
+    const wirehair_v2::MixedPackedCoefficients* permuted_packed =
+        wirehair_v2::GetMixedPackedCoefficients();
+    static const uint32_t kExpectedYOrder[] = {
+        1u, 2u, 4u, 5u, 7u, 8u, 9u, 0u, 3u, 6u
+    };
+    if (!permuted_rows || !permuted_packed) return false;
+    for (uint32_t destination = 0u;
+         destination < wirehair_v2::kMixedGF256Rows; ++destination)
+    {
+        const uint32_t source = kExpectedYOrder[destination];
+        if (!std::equal(
+                permuted_rows->Subfield[destination],
+                permuted_rows->Subfield[destination] +
+                    wirehair_v2::kMixedCoefficientPeriod,
+                canonical_rows.Subfield[source]))
+        {
+            std::fprintf(stderr,
+                "grouped mixed row-mask permutation mismatch row=%u Y=%u\n",
+                destination, source);
+            return false;
+        }
+        for (uint32_t residue = 0u;
+             residue < wirehair_v2::kMixedCoefficientPeriod; ++residue)
+        {
+            const uint16_t packed = (uint16_t)(
+                permuted_packed->ByResidue[residue][destination >> 2] >>
+                    ((destination & 3u) * 16u));
+            if (packed != permuted_rows->Subfield[destination][residue]) {
+                std::fprintf(stderr,
+                    "grouped mixed packed row-mask mismatch row=%u P=%u\n",
+                    destination, residue);
+                return false;
+            }
+        }
+    }
+    if (wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            UINT32_C(0x400)) ||
+        wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            UINT32_C(0x001)) ||
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() != UINT32_C(0x049) ||
+        !wirehair_v2::SetMixedGroupedGF256RowsForTesting(0u) ||
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() != 0u)
+    {
+        std::fprintf(stderr,
+            "grouped mixed row-mask rejection/restore failed\n");
+        return false;
+    }
+
     const uint32_t K = 500u;
     const uint32_t block_bytes = 16u;
     wirehair_v2::PrecodeParams params = wirehair_v2::MakeMixedParams(
@@ -1544,11 +1620,15 @@ bool TestGroupedMixedResidueSchedule()
     std::vector<uint8_t> canonical((size_t)parity_count * block_bytes);
     std::vector<uint8_t> grouped(canonical.size());
     std::vector<uint8_t> restored(canonical.size());
+    std::vector<uint8_t> suffix_r3(canonical.size());
+    std::vector<uint8_t> masked_r3(canonical.size());
     FillRandomBlocks(
         source.data(), source.size(), UINT64_C(0x67726f7570307372));
     wirehair_v2::PrecodeEncodeStats canonical_stats;
     wirehair_v2::PrecodeEncodeStats grouped_stats;
     wirehair_v2::PrecodeEncodeStats restored_stats;
+    wirehair_v2::PrecodeEncodeStats suffix_r3_stats;
+    wirehair_v2::PrecodeEncodeStats masked_r3_stats;
     if (wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ||
         wirehair_v2::ActiveMixedGroupedGF256HashSeed() != 0u ||
         !wirehair_v2::ComputePrecodeValues(
@@ -1557,6 +1637,29 @@ bool TestGroupedMixedResidueSchedule()
     {
         std::fprintf(stderr,
             "grouped mixed canonical r0 encode failed\n");
+        return false;
+    }
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(3u) ||
+        wirehair_v2::ActiveMixedGroupedGF256RowMask() !=
+            UINT32_C(0x380) ||
+        !wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes,
+            suffix_r3.data(), &suffix_r3_stats) ||
+        !VerifyValues(
+            system, source.data(), suffix_r3.data(), block_bytes,
+            "grouped mixed suffix r3") ||
+        !wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+            UINT32_C(0x049)) ||
+        !wirehair_v2::ComputePrecodeValues(
+            system, source.data(), block_bytes,
+            masked_r3.data(), &masked_r3_stats) ||
+        !VerifyValues(
+            system, source.data(), masked_r3.data(), block_bytes,
+            "grouped mixed masked r3") ||
+        !EncodeStatsEqual(suffix_r3_stats, masked_r3_stats))
+    {
+        std::fprintf(stderr,
+            "grouped mixed row-mask work/oracle differential failed\n");
         return false;
     }
     if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(5u) ||
@@ -1623,7 +1726,8 @@ bool TestMixedCompletionForPeriod(
     uint32_t subfield_rows = wirehair_v2::kMixedGF256Rows,
     wirehair_v2::MixedResidueBucketMode bucket_mode =
         wirehair_v2::MixedResidueBucketMode::Automatic,
-    uint32_t grouped_gf256_rows = 0u)
+    uint32_t grouped_gf256_rows = 0u,
+    uint32_t grouped_gf256_row_mask = UINT32_MAX)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1640,7 +1744,8 @@ bool TestMixedCompletionForPeriod(
     // This experiment setter validates the complete H12/A-schedule state,
     // so configure it after every other mixed coefficient scope.  It is also
     // destroyed first, before those prerequisite scopes begin restoring.
-    MixedGroupedGF256RowsScope grouped_scope(grouped_gf256_rows);
+    MixedGroupedGF256RowsScope grouped_scope(
+        grouped_gf256_rows, grouped_gf256_row_mask);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
@@ -1871,7 +1976,7 @@ bool TestMixedCompletionForPeriod(
         "mixed completion scalar/full/streamed oracle period=%u geometry=%s "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
         "independent_extension=%u bucket_mode=%u grouped_gf256_rows=%u "
-        "grouped_hash_seed=0x%x: "
+        "grouped_gf256_row_mask=0x%x grouped_hash_seed=0x%x: "
         "PASS\n",
         period, MixedGeometryName(geometry), subfield_rows, extension_rows,
         residue_skew,
@@ -1879,6 +1984,7 @@ bool TestMixedCompletionForPeriod(
         independent_extension_residues ? 1u : 0u,
         (uint32_t)bucket_mode,
         grouped_gf256_rows,
+        wirehair_v2::ActiveMixedGroupedGF256RowMask(),
         wirehair_v2::ActiveMixedGroupedGF256HashSeed());
     return true;
 }
@@ -1950,6 +2056,28 @@ bool TestMixedCompletion()
             wirehair_v2::kMixedGF16RowsMax,
             0u,
             wirehair_v2::MixedResidueSchedule::Hashed) ||
+        !TestMixedCompletionForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::JointDelta,
+            3u,
+            UINT32_C(0x049)) ||
+        !TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Separate,
+            7u,
+            UINT32_C(0x1dd)) ||
         !TestMixedCompletionForPeriod(
             32u,
             wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

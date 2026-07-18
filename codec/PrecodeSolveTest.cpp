@@ -205,21 +205,32 @@ private:
 class MixedGroupedGF256RowsScope
 {
 public:
-    explicit MixedGroupedGF256RowsScope(uint32_t rows)
-        : Previous(wirehair_v2::ActiveMixedGroupedGF256Rows())
+    explicit MixedGroupedGF256RowsScope(
+        uint32_t rows,
+        uint32_t row_mask = UINT32_MAX)
+        : PreviousRows(wirehair_v2::ActiveMixedGroupedGF256Rows())
+        , PreviousRowMask(wirehair_v2::ActiveMixedGroupedGF256RowMask())
         , Valid(wirehair_v2::SetMixedGroupedGF256RowsForTesting(rows))
     {
+        if (Valid && row_mask != UINT32_MAX) {
+            Valid = wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                row_mask);
+        }
     }
 
     ~MixedGroupedGF256RowsScope()
     {
-        (void)wirehair_v2::SetMixedGroupedGF256RowsForTesting(Previous);
+        if (wirehair_v2::SetMixedGroupedGF256RowsForTesting(PreviousRows)) {
+            (void)wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                PreviousRowMask);
+        }
     }
 
     bool IsValid() const { return Valid; }
 
 private:
-    uint32_t Previous;
+    uint32_t PreviousRows;
+    uint32_t PreviousRowMask;
     bool Valid;
 };
 
@@ -1537,7 +1548,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     wirehair_v2::MixedResidueBucketMode bucket_mode =
         wirehair_v2::MixedResidueBucketMode::Automatic,
     bool dense_two_anchor = false,
-    uint32_t grouped_gf256_rows = 0u)
+    uint32_t grouped_gf256_rows = 0u,
+    uint32_t grouped_gf256_row_mask = UINT32_MAX)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1553,7 +1565,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     MixedResidueBucketModeScope bucket_mode_scope(bucket_mode);
     // The grouped suffix validates the complete H12/shared-X/constant-A
     // configuration and prerequisite setters clear it, so configure it last.
-    MixedGroupedGF256RowsScope grouped_scope(grouped_gf256_rows);
+    MixedGroupedGF256RowsScope grouped_scope(
+        grouped_gf256_rows, grouped_gf256_row_mask);
     if (!geometry_scope.IsValid() || !subfield_scope.IsValid() ||
         !rows_scope.IsValid() || !period_scope.IsValid() ||
         !skew_scope.IsValid() ||
@@ -1588,15 +1601,39 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // mixed-RHS path selected by SolveMixedCompletionQuotient.
         30000u
     };
-    // S=26 throughout this pair, hence L-H=K+S+D2 is 127 and 129.
-    // Those are respectively P-1 and P+1 modulo both P32 and P64, covering
-    // the final partial-period block on both sides of its boundary without
-    // inheriting the broad legacy oracle's large-system cases.
-    static const uint32_t kGroupedBlockCounts[] = {89u, 91u};
+    // Select one small K on either side of the active period boundary.  S is
+    // K-dependent, so a fixed pair that brackets P32/P64 does not generally
+    // bracket candidate periods such as P48.
+    uint32_t grouped_block_counts[] = {0u, 0u};
+    if (grouped_gf256_rows != 0u)
+    {
+        for (uint32_t K = 2u; K <= 1000u; ++K)
+        {
+            const wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeMixedParams(K, 0u);
+            const uint32_t first_heavy_column =
+                K + params.Staircase + params.DenseRows;
+            if (first_heavy_column < 2u * period) continue;
+            const uint32_t remainder = first_heavy_column % period;
+            if (remainder == period - 1u &&
+                grouped_block_counts[0] == 0u)
+            {
+                grouped_block_counts[0] = K;
+            }
+            if (remainder == 1u && grouped_block_counts[1] == 0u) {
+                grouped_block_counts[1] = K;
+            }
+        }
+        if (grouped_block_counts[0] == 0u ||
+            grouped_block_counts[1] == 0u)
+        {
+            return false;
+        }
+    }
     const uint32_t* const block_counts = grouped_gf256_rows != 0u ?
-        kGroupedBlockCounts : kBlockCounts;
+        grouped_block_counts : kBlockCounts;
     const size_t configured_case_count = grouped_gf256_rows != 0u ?
-        sizeof(kGroupedBlockCounts) / sizeof(kGroupedBlockCounts[0]) :
+        sizeof(grouped_block_counts) / sizeof(grouped_block_counts[0]) :
         sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
     size_t expected_case_count = 0u;
     for (size_t case_index = 0;
@@ -1637,8 +1674,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             column_count - system.Params.HeavyRows;
         if (grouped_gf256_rows != 0u)
         {
-            const uint32_t expected_remainder =
-                K == 89u ? period - 1u : 1u;
+            const uint32_t expected_remainder = case_index == 0u ?
+                period - 1u : 1u;
             if (first_heavy_column % period != expected_remainder)
             {
                 std::fprintf(stderr,
@@ -1875,7 +1912,8 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
         "independent_extension=%u bucket_mode=%u dense_two_anchor=%u "
-        "grouped_gf256_rows=%u grouped_hash_seed=0x%x "
+        "grouped_gf256_rows=%u grouped_gf256_row_mask=0x%x "
+        "grouped_hash_seed=0x%x "
         "comparisons=%llu: PASS\n",
         period, (uint32_t)geometry, subfield_rows, extension_rows,
         residue_skew, (uint32_t)residue_schedule,
@@ -1883,6 +1921,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         (uint32_t)bucket_mode,
         dense_two_anchor ? 1u : 0u,
         grouped_gf256_rows,
+        wirehair_v2::ActiveMixedGroupedGF256RowMask(),
         wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
         (unsigned long long)comparisons);
     return true;
@@ -2030,6 +2069,33 @@ bool CheckMixedProjectionResidueBucketsOracle()
         {
             return false;
         }
+    }
+    if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+            48u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::JointDelta,
+            false,
+            3u,
+            UINT32_C(0x049)) ||
+        !CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            wirehair_v2::kMixedGF16Rows,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Constant,
+            false,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::Separate,
+            false,
+            7u,
+            UINT32_C(0x1dd)))
+    {
+        return false;
     }
     return true;
 }
