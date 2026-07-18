@@ -29,6 +29,7 @@ import wh2_rank_floor_two_anchor_screen as screen
 CONTEXT = "12" * 32
 PARENT = "34" * 32
 SEEDS = ("0x0000000000000001", "0x0000000000000002")
+TEST_PREPARE_BASELINE_ROW_SHA256 = "ab" * 32
 
 
 def thermal_row(
@@ -204,6 +205,9 @@ def runner_contract(
         "cpu_set": list(cpus), "workers": workers,
         "timeout_seconds": timeout, "thermal": str(thermal.resolve()),
         "binary_sha256": campaign.sha256_bytes(binary.read_bytes()),
+        "thermal_baseline": {
+            "row_sha256": TEST_PREPARE_BASELINE_ROW_SHA256,
+        },
         "thermal_policy": {
             "cpu_limit_c": 90.0, "dimm_limit_c": 90.0,
             "timing_cpu_limit_c": 85.0, "timing_dimm_limit_c": 90.0,
@@ -228,6 +232,9 @@ class FakeThermalGuard:
         self.path = path
         self.abort = abort
         self.started = False
+        phase_offset = type(self).instances * 10
+        self.baseline_row = thermal_row(100.0 + phase_offset)
+        self.interval_row = thermal_row(101.0 + phase_offset)
 
     def start(self) -> None:
         self.started = True
@@ -236,21 +243,117 @@ class FakeThermalGuard:
         if not self.started:
             raise AssertionError("fake thermal worker did not start")
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"mock CPU/DIMM thermal interval\n")
+        output.write_bytes(
+            (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii") +
+            self.baseline_row + self.interval_row)
         return {
             "samples": 1, "sealed_samples_including_baseline": 2,
-            "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 65.0,
-            "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+            "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+            "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
             "edac_ce_delta": 0, "edac_ue_delta": 0,
             "thermal_limit_c": 90.0, "thermal_high_samples": 0,
             "thermal_high_max_consecutive_samples": 0,
             "guard_poll_iterations": 1, "guard_samples": 1,
             "guard_high_samples": 0, "guard_limit_c": 90.0,
             "guard_error": None,
+            "baseline_row_sha256": campaign.sha256_bytes(self.baseline_row),
         }
 
 
 class ThermalSourceTests(unittest.TestCase):
+    def test_real_thermal_guard_finish_schema_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _binary = make_result_root(temporary)
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+            baseline_row = thermal_row(100.0)
+            interval_row = thermal_row(101.0)
+            encoded = (
+                (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii") +
+                baseline_row + interval_row)
+            base_summary = {
+                "samples": 1, "sealed_samples_including_baseline": 2,
+                "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+                "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
+                "edac_ce_delta": 0, "edac_ue_delta": 0,
+                "thermal_limit_c": 90.0, "thermal_high_samples": 0,
+                "thermal_high_max_consecutive_samples": 0,
+            }
+
+            def finish_interval(
+                _path: Path, _mark: dict, output: Path, **_kwargs: object,
+            ) -> dict:
+                output.write_bytes(encoded)
+                return dict(base_summary)
+
+            guard = object.__new__(campaign.common.ThermalGuard)
+            guard.started = True
+            guard.stop_event = threading.Event()
+            guard.thread = mock.Mock()
+            guard.path = thermal
+            guard.mark = {"baseline_row": baseline_row}
+            guard.limit_c = 90.0
+            guard.stale_seconds = 5.0
+            guard.poll_iterations = 1
+            guard.samples = 1
+            guard.high_samples = 0
+            guard.error = None
+            interval = root / "thermal-interval.csv"
+            with mock.patch.object(
+                    campaign.common, "thermal_finish",
+                    side_effect=finish_interval):
+                summary = guard.finish(interval)
+
+            self.assertEqual(
+                set(summary), campaign.THERMAL_SUMMARY_FIELDS)
+            self.assertEqual(
+                campaign.validate_thermal_summary(
+                    summary, contract["thermal_policy"],
+                    campaign.thermal_artifact_baseline_row_sha256(encoded)),
+                summary)
+
+    def test_thermal_summary_binds_exact_sealed_phase_baseline_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _binary = make_result_root(temporary)
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+            guard = FakeThermalGuard(thermal, threading.Event())
+            guard.start()
+            interval = root / "thermal-interval.csv"
+            summary = guard.finish(interval)
+            policy = contract["thermal_policy"]
+            phase_baseline = \
+                campaign.thermal_artifact_baseline_row_sha256(
+                    interval.read_bytes())
+
+            with self.assertRaisesRegex(
+                    campaign.CampaignError, "canonical baseline"):
+                campaign.thermal_artifact_baseline_row_sha256(
+                    b"not a thermal artifact\n")
+
+            self.assertNotEqual(
+                phase_baseline, TEST_PREPARE_BASELINE_ROW_SHA256)
+            self.assertEqual(
+                campaign.validate_thermal_summary(
+                    summary, policy, phase_baseline),
+                summary)
+
+            missing = dict(summary)
+            del missing["baseline_row_sha256"]
+            with self.assertRaisesRegex(
+                    campaign.CampaignError, "fields are not canonical"):
+                campaign.validate_thermal_summary(
+                    missing, policy, phase_baseline)
+
+            for digest in ("not-a-digest", "cd" * 32):
+                with self.subTest(digest=digest):
+                    changed = dict(summary)
+                    changed["baseline_row_sha256"] = digest
+                    with self.assertRaisesRegex(
+                            campaign.CampaignError, "baseline binding"):
+                        campaign.validate_thermal_summary(
+                            changed, policy, phase_baseline)
+
     def test_timing_history_uses_stricter_cpu_limit_between_panels(self) -> None:
         header = (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii")
         baseline_row = thermal_row(100.0, cpu_tctl_c=80.0)
@@ -538,6 +641,88 @@ class ParserAndLedgerTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_missing_guard_baseline_never_seals_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, binary = make_result_root(temporary)
+            ledger = campaign.build_control_ledger(
+                {0: (10,)}, (10,), (SEEDS[0],), PARENT,
+                schedules=("burst",), losses=("0.50",), widths=(64,))
+
+            def execute(
+                _command: Tuple[str, ...], _timeout: float,
+                _abort: threading.Event, _registry: object, cpu: int,
+            ) -> campaign.ExecutionResult:
+                return campaign.ExecutionResult(
+                    0, control_output(ledger.jobs[0]), b"", 100, 200, cpu)
+
+            class MissingBaselineGuard(FakeThermalGuard):
+                def finish(self, output: Path) -> dict:
+                    summary = super().finish(output)
+                    del summary["baseline_row_sha256"]
+                    return summary
+
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+            runner = campaign.JobRunner(
+                root, binary, (3,), 1, 10.0, execute,
+                MissingBaselineGuard)
+            with trust_patch(contract), self.assertRaisesRegex(
+                    campaign.CampaignError, "fields are not canonical"):
+                runner.run_ledger(
+                    ledger, thermal, install_signal_handlers=False)
+            self.assertTrue(
+                campaign.job_paths(
+                    root, ledger.jobs[0])["receipt"].exists())
+            self.assertFalse(
+                campaign.phase_completion_path(root, ledger).exists())
+
+    def test_later_phase_binds_its_local_thermal_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, binary = make_result_root(temporary)
+            cohort = (10,)
+            bins = {0: cohort}
+            survivors = {10: (2,)}
+            ledgers = tuple(
+                campaign.build_route_ledger(
+                    campaign.RoundSpec(name, 4, 2, (0,), (64,)),
+                    bins, cohort, survivors, PARENT, CONTEXT)
+                for name in ("r1", "r2"))
+            next_job = iter(ledger.jobs[0] for ledger in ledgers)
+
+            def execute(
+                _command: Tuple[str, ...], _timeout: float,
+                _abort: threading.Event, _registry: object, cpu: int,
+            ) -> campaign.ExecutionResult:
+                job = next(next_job)
+                return campaign.ExecutionResult(
+                    0, route_output(job), b"", 100, 200, cpu)
+
+            thermal = root / "thermal-live.csv"
+            contract = runner_contract((3,), 1, 10.0, thermal)
+            runner = campaign.JobRunner(
+                root, binary, (3,), 1, 10.0, execute, FakeThermalGuard)
+            with trust_patch(contract):
+                for ledger in ledgers:
+                    runner.run_ledger(
+                        ledger, thermal, install_signal_handlers=False)
+
+            phase_digests = []
+            for ledger in ledgers:
+                completion = campaign.load_canonical_object(
+                    campaign.phase_completion_path(root, ledger),
+                    "test phase completion")
+                summary_digest = completion[
+                    "thermal_artifact"]["summary"]["baseline_row_sha256"]
+                artifact_digest = \
+                    campaign.thermal_artifact_baseline_row_sha256(
+                        campaign.phase_thermal_path(
+                            root, ledger).read_bytes())
+                self.assertEqual(summary_digest, artifact_digest)
+                self.assertNotEqual(
+                    summary_digest, TEST_PREPARE_BASELINE_ROW_SHA256)
+                phase_digests.append(summary_digest)
+            self.assertNotEqual(phase_digests[0], phase_digests[1])
+
     def test_subprocess_executor_bounds_both_streams_and_reaps(self) -> None:
         with tempfile.TemporaryDirectory(
                 prefix="wh2-preferred-bounded-output-") as temporary:

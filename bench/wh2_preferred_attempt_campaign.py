@@ -1567,7 +1567,7 @@ THERMAL_SUMMARY_FIELDS = {
     "edac_ce_delta", "edac_ue_delta", "thermal_limit_c",
     "thermal_high_samples", "thermal_high_max_consecutive_samples",
     "guard_poll_iterations", "guard_samples", "guard_high_samples",
-    "guard_limit_c", "guard_error",
+    "guard_limit_c", "guard_error", "baseline_row_sha256",
 }
 THERMAL_POLICY_FIELDS = {
     "cpu_limit_c", "dimm_limit_c", "timing_cpu_limit_c",
@@ -1621,6 +1621,27 @@ def validate_frozen_thermal_source(
         die(str(error))
 
 
+def thermal_artifact_baseline_row_sha256(
+    encoded: bytes,
+) -> str:
+    if not isinstance(encoded, bytes):
+        die("sealed thermal artifact is not exact bytes")
+    lines = encoded.splitlines(keepends=True)
+    expected_header = (
+        ",".join(common.THERMAL_FIELDS) + "\n").encode("ascii")
+    if (len(lines) < 3 or lines[0] != expected_header or
+            any(not line.endswith(b"\n") or
+                len(line) > common.THERMAL_ROW_MAX_BYTES
+                for line in lines[1:])):
+        die("sealed thermal artifact lacks a canonical baseline row")
+    try:
+        common.parse_thermal_sample(
+            lines[1], "sealed phase thermal baseline")
+    except ValueError as error:
+        die("sealed thermal artifact baseline is invalid: {}".format(error))
+    return sha256_bytes(lines[1])
+
+
 def frozen_taskset_path(contract: Mapping[str, Any]) -> Path:
     tools = contract.get("system_tools")
     entry = tools.get("taskset") if isinstance(tools, dict) else None
@@ -1657,10 +1678,17 @@ def verify_frozen_binary(binary: Path, contract: Mapping[str, Any]) -> None:
 
 def validate_thermal_summary(
     summary: Mapping[str, Any], policy: Mapping[str, Any],
+    expected_baseline_row_sha256: str,
     require_busy: bool = True,
 ) -> Dict[str, Any]:
     if not isinstance(summary, dict) or set(summary) != THERMAL_SUMMARY_FIELDS:
         die("thermal guard summary fields are not canonical")
+    if (not isinstance(expected_baseline_row_sha256, str) or
+            not re.fullmatch(r"[0-9a-f]{64}",
+                             expected_baseline_row_sha256) or
+            summary.get("baseline_row_sha256") !=
+                expected_baseline_row_sha256):
+        die("thermal guard summary baseline binding failed")
     integer_fields = (
         "samples", "sealed_samples_including_baseline",
         "dimm_read_errors_max", "edac_ce_delta", "edac_ue_delta",
@@ -2085,6 +2113,9 @@ class JobRunner:
             die("thermal guard did not produce a summary")
         validated_summary = validate_thermal_summary(
             thermal_summary, thermal_policy,
+            thermal_artifact_baseline_row_sha256(
+                common.stable_bytes(
+                    phase_thermal_path(self.result_root, ledger))),
             require_busy=campaign_error is None)
         if campaign_error is not None:
             raise campaign_error
@@ -2306,7 +2337,8 @@ def _verify_phase_completion(
         if sha256_bytes(thermal_bytes) != artifact["sha256"]:
             die("completed phase thermal artifact changed")
         summary = validate_thermal_summary(
-            artifact.get("summary"), thermal_policy)
+            artifact.get("summary"), thermal_policy,
+            thermal_artifact_baseline_row_sha256(thermal_bytes))
         expected = _phase_completion_record(
             result_root, binary, taskset_path, ledger, completed, allowed_cpus,
             expected_path, summary)

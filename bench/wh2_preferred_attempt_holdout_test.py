@@ -29,6 +29,29 @@ ROOT_HASH = "34" * 32
 PARENT_HASH = "56" * 32
 
 
+def thermal_row(monotonic_s: float) -> bytes:
+    fields = [
+        "2026-07-18T00:00:00.000Z", "{:.6f}".format(monotonic_s),
+        "100.0", "3600.0", "60.0",
+        *("{:.2f}".format(50.0 + index) for index in range(8)),
+        "0", "128.0", "128.0", "128.0", "0", "0",
+    ]
+    if len(fields) != len(campaign.common.THERMAL_FIELDS):
+        raise AssertionError("thermal fixture field count changed")
+    return (",".join(fields) + "\n").encode("ascii")
+
+
+PHASE_THERMAL_BASELINE_ROW = thermal_row(100.0)
+PHASE_THERMAL_HEADER = (
+    ",".join(campaign.common.THERMAL_FIELDS) + "\n").encode("ascii")
+PHASE_THERMAL_ARTIFACT_ONE = (
+    PHASE_THERMAL_HEADER + PHASE_THERMAL_BASELINE_ROW + thermal_row(101.0))
+PHASE_THERMAL_ARTIFACT_TWO = (
+    PHASE_THERMAL_ARTIFACT_ONE + thermal_row(102.0))
+PHASE_THERMAL_BASELINE_ROW_SHA256 = hashlib.sha256(
+    PHASE_THERMAL_BASELINE_ROW).hexdigest()
+
+
 def metrics(
     result: int = 0,
     heavy_shortfall: int = 0,
@@ -222,14 +245,15 @@ class HoldoutFixtureTest(unittest.TestCase):
             }
             summary = {
                 "samples": 1, "sealed_samples_including_baseline": 2,
-                "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 65.0,
-                "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+                "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+                "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
                 "edac_ce_delta": 0, "edac_ue_delta": 0,
                 "thermal_limit_c": 90.0, "thermal_high_samples": 0,
                 "thermal_high_max_consecutive_samples": 0,
                 "guard_poll_iterations": 1, "guard_samples": 1,
                 "guard_high_samples": 0, "guard_limit_c": 90.0,
                 "guard_error": None,
+                "baseline_row_sha256": PHASE_THERMAL_BASELINE_ROW_SHA256,
             }
 
             class FakeGuard:
@@ -244,7 +268,7 @@ class HoldoutFixtureTest(unittest.TestCase):
 
                 def finish(self, path: Path) -> Dict[str, object]:
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"sealed thermal interval\n")
+                    path.write_bytes(PHASE_THERMAL_ARTIFACT_ONE)
                     return dict(summary)
 
             def executor(
@@ -653,14 +677,15 @@ class HoldoutFixtureTest(unittest.TestCase):
             }
             summary = {
                 "samples": 2, "sealed_samples_including_baseline": 3,
-                "cpu_busy_min_pct": 99.0, "cpu_tctl_max_c": 70.0,
-                "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+                "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+                "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
                 "edac_ce_delta": 0, "edac_ue_delta": 0,
                 "thermal_limit_c": 90.0, "thermal_high_samples": 0,
                 "thermal_high_max_consecutive_samples": 0,
                 "guard_poll_iterations": 2, "guard_samples": 2,
                 "guard_high_samples": 0, "guard_limit_c": 90.0,
                 "guard_error": None,
+                "baseline_row_sha256": PHASE_THERMAL_BASELINE_ROW_SHA256,
             }
             contract = {
                 "cpu_set": [0], "workers": 1, "timeout_seconds": 10.0,
@@ -683,7 +708,7 @@ class HoldoutFixtureTest(unittest.TestCase):
                     self.started = True
 
                 def finish(self, path: Path) -> Dict[str, object]:
-                    path.write_bytes(b"sealed thermal interval\n")
+                    path.write_bytes(PHASE_THERMAL_ARTIFACT_TWO)
                     return dict(summary)
 
             def executor(command: Tuple[str, ...], _timeout: float,
@@ -820,14 +845,15 @@ class HoldoutFixtureTest(unittest.TestCase):
                 }
                 summary = {
                     "samples": 1, "sealed_samples_including_baseline": 2,
-                    "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 65.0,
-                    "dimm_max_c": 55.0, "dimm_read_errors_max": 0,
+                    "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+                    "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
                     "edac_ce_delta": 0, "edac_ue_delta": 0,
                     "thermal_limit_c": 90.0, "thermal_high_samples": 0,
                     "thermal_high_max_consecutive_samples": 0,
                     "guard_poll_iterations": 1, "guard_samples": 1,
                     "guard_high_samples": 0, "guard_limit_c": 90.0,
                     "guard_error": None,
+                    "baseline_row_sha256": PHASE_THERMAL_BASELINE_ROW_SHA256,
                 }
                 contract = {
                     "cpu_set": [0], "workers": 1,
@@ -853,7 +879,7 @@ class HoldoutFixtureTest(unittest.TestCase):
                         self.started = True
 
                     def finish(self, path: Path) -> Dict[str, object]:
-                        path.write_bytes(b"sealed thermal interval\n")
+                        path.write_bytes(PHASE_THERMAL_ARTIFACT_ONE)
                         return dict(summary)
 
                 def executor(

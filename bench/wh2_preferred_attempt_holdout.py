@@ -1910,7 +1910,11 @@ class HoldoutRunner:
                 raise run_error
             die("holdout thermal guard did not produce a summary")
         validated_summary = campaign.validate_thermal_summary(
-            thermal_summary, thermal_policy, require_busy=run_error is None)
+            thermal_summary, thermal_policy,
+            campaign.thermal_artifact_baseline_row_sha256(
+                common.stable_bytes(
+                    phase_thermal_path(self.result_root, ledger))),
+            require_busy=run_error is None)
         if run_error is not None:
             raise run_error
         if registry.count() != 0:
@@ -1988,9 +1992,10 @@ def phase_completion_record(
             die("nonempty holdout completion lacks exact thermal provenance")
         if thermal_policy is None:
             die("nonempty holdout completion lacks frozen thermal policy")
-        summary = campaign.validate_thermal_summary(
-            thermal_summary, thermal_policy)
         thermal_bytes = common.stable_bytes(expected_thermal)
+        summary = campaign.validate_thermal_summary(
+            thermal_summary, thermal_policy,
+            campaign.thermal_artifact_baseline_row_sha256(thermal_bytes))
         thermal_artifact: Optional[Dict[str, Any]] = {
             "path": expected_thermal.relative_to(result_root).as_posix(),
             "sha256": _sha256(thermal_bytes), "summary": summary,
@@ -2063,10 +2068,12 @@ def _load_phase_completion(
                 artifact.get("path") != expected_relative):
             die("holdout phase thermal binding is malformed")
         _require_hash(artifact.get("sha256"), "phase thermal artifact hash")
-        if _sha256(common.stable_bytes(expected_thermal)) != artifact["sha256"]:
+        thermal_bytes = common.stable_bytes(expected_thermal)
+        if _sha256(thermal_bytes) != artifact["sha256"]:
             die("completed holdout thermal artifact changed")
         summary = campaign.validate_thermal_summary(
-            artifact.get("summary"), thermal_policy)
+            artifact.get("summary"), thermal_policy,
+            campaign.thermal_artifact_baseline_row_sha256(thermal_bytes))
         thermal_path: Optional[Path] = expected_thermal
     else:
         if artifact is not None:
