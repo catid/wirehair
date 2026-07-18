@@ -1740,6 +1740,188 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
 
 #undef WH2_MIXED_NOINLINE
 
+static const uint32_t kMixedCompletionRowsMax =
+    kMixedGF256RowsMax + kMixedGF16RowsMax;
+static_assert(
+    kMixedCompletionRowsMax < UINT8_MAX,
+    "mixed quotient row indices require an out-of-band byte sentinel");
+
+struct MixedQuotientRowPlan
+{
+    std::array<uint16_t, kMixedCompletionRowsMax> ForwardScales = {};
+    std::array<uint16_t, kMixedCompletionRowsMax> BackScales = {};
+    uint16_t NormalizeScale = 1u;
+    uint8_t PivotColumn = UINT8_MAX;
+};
+
+struct MixedQuotientFactorization
+{
+    std::array<MixedQuotientRowPlan, kMixedCompletionRowsMax> Rows = {};
+    std::array<uint8_t, kMixedCompletionRowsMax> PivotRows = {};
+    std::array<
+        uint16_t,
+        kMixedCompletionRowsMax * kMixedCompletionRowsMax> Transform = {};
+    uint32_t Rank = 0u;
+};
+
+// Factor the tiny mixed-field quotient before touching any payload bytes.
+// The row plans replay the exact historical Gauss-Jordan order on RHS blocks,
+// without allocating or copying separate pivot payloads.  On the uncommon
+// deficient path BuildMixedQuotientTransform replays the same plans on an
+// identity matrix: each dependent row is then an exact syndrome equation,
+// allowing NeedMore to remain distinguishable from an inconsistent RHS
+// without constructing all H completion payload rows.
+bool FactorMixedCompletionQuotient(
+    std::vector<uint16_t>& quotient_rows,
+    uint32_t row_count,
+    uint32_t column_count,
+    MixedQuotientFactorization& factor)
+{
+    if (row_count > kMixedCompletionRowsMax ||
+        column_count > row_count ||
+        quotient_rows.size() != (size_t)row_count * column_count)
+    {
+        return false;
+    }
+
+    factor = MixedQuotientFactorization{};
+    factor.PivotRows.fill(UINT8_MAX);
+
+    for (uint32_t row = 0u; row < row_count; ++row)
+    {
+        MixedQuotientRowPlan& plan = factor.Rows[row];
+        uint16_t* coeff = column_count == 0u ? nullptr :
+            quotient_rows.data() + (size_t)row * column_count;
+        for (uint32_t column = 0u; column < column_count; ++column)
+        {
+            const uint16_t scale = coeff[column];
+            const uint8_t pivot_row = factor.PivotRows[column];
+            if (scale == 0u || pivot_row == UINT8_MAX) continue;
+            plan.ForwardScales[column] = scale;
+            const uint16_t* pivot = quotient_rows.data() +
+                (size_t)pivot_row * column_count;
+            for (uint32_t k = column; k < column_count; ++k) {
+                coeff[k] ^= GF16MultiplyInitialized(scale, pivot[k]);
+            }
+        }
+
+        uint32_t pivot_column = column_count;
+        for (uint32_t column = 0u; column < column_count; ++column) {
+            if (coeff[column] != 0u) {
+                pivot_column = column;
+                break;
+            }
+        }
+        if (pivot_column == column_count) {
+            continue;
+        }
+
+        const uint16_t pivot_value = coeff[pivot_column];
+        if (pivot_value != 1u)
+        {
+            const uint16_t inverse = GF16InverseInitialized(pivot_value);
+            if (inverse == 0u) return false;
+            plan.NormalizeScale = inverse;
+            for (uint32_t k = pivot_column; k < column_count; ++k) {
+                coeff[k] = GF16MultiplyInitialized(coeff[k], inverse);
+            }
+        }
+
+        for (uint32_t existing = 0u;
+             existing < column_count; ++existing)
+        {
+            const uint8_t existing_row = factor.PivotRows[existing];
+            if (existing_row == UINT8_MAX) continue;
+            uint16_t* existing_coeff = quotient_rows.data() +
+                (size_t)existing_row * column_count;
+            const uint16_t scale = existing_coeff[pivot_column];
+            if (scale == 0u) continue;
+            plan.BackScales[existing] = scale;
+            for (uint32_t k = pivot_column; k < column_count; ++k) {
+                existing_coeff[k] ^=
+                    GF16MultiplyInitialized(scale, coeff[k]);
+            }
+        }
+        plan.PivotColumn = (uint8_t)pivot_column;
+        factor.PivotRows[pivot_column] = (uint8_t)row;
+        ++factor.Rank;
+    }
+    return true;
+}
+
+bool BuildMixedQuotientTransform(
+    uint32_t row_count,
+    uint32_t column_count,
+    MixedQuotientFactorization& factor)
+{
+    if (row_count > kMixedCompletionRowsMax ||
+        column_count > row_count)
+    {
+        return false;
+    }
+    factor.Transform.fill(0u);
+    for (uint32_t row = 0u; row < row_count; ++row) {
+        factor.Transform[(size_t)row * kMixedCompletionRowsMax + row] = 1u;
+    }
+    const auto muladd = [&factor, row_count](
+        uint32_t destination,
+        uint32_t source,
+        uint16_t scale)
+    {
+        uint16_t* dst = factor.Transform.data() +
+            (size_t)destination * kMixedCompletionRowsMax;
+        const uint16_t* src = factor.Transform.data() +
+            (size_t)source * kMixedCompletionRowsMax;
+        for (uint32_t i = 0u; i < row_count; ++i) {
+            dst[i] ^= GF16MultiplyInitialized(scale, src[i]);
+        }
+    };
+    const auto scale_row = [&factor, row_count](
+        uint32_t row,
+        uint16_t scale)
+    {
+        uint16_t* values = factor.Transform.data() +
+            (size_t)row * kMixedCompletionRowsMax;
+        for (uint32_t i = 0u; i < row_count; ++i) {
+            values[i] = GF16MultiplyInitialized(values[i], scale);
+        }
+    };
+
+    for (uint32_t row = 0u; row < row_count; ++row)
+    {
+        const MixedQuotientRowPlan& plan = factor.Rows[row];
+        for (uint32_t column = 0u; column < column_count; ++column)
+        {
+            const uint16_t value = plan.ForwardScales[column];
+            if (value == 0u) continue;
+            const uint8_t pivot_row = factor.PivotRows[column];
+            if (pivot_row == UINT8_MAX || pivot_row == row) return false;
+            muladd(row, pivot_row, value);
+        }
+        if (plan.PivotColumn == UINT8_MAX) continue;
+        if (plan.PivotColumn >= column_count ||
+            factor.PivotRows[plan.PivotColumn] != row)
+        {
+            return false;
+        }
+        if (plan.NormalizeScale != 1u) {
+            scale_row(row, plan.NormalizeScale);
+        }
+        for (uint32_t existing = 0u;
+             existing < column_count; ++existing)
+        {
+            const uint16_t value = plan.BackScales[existing];
+            if (value == 0u) continue;
+            const uint8_t existing_row = factor.PivotRows[existing];
+            if (existing_row == UINT8_MAX || existing_row == row) {
+                return false;
+            }
+            muladd(existing_row, row, value);
+        }
+    }
+    return true;
+}
+
 WirehairResult SolveMixedCompletionQuotient(
     const PrecodeSystem& system,
     uint32_t column_count,
@@ -1857,7 +2039,299 @@ WirehairResult SolveMixedCompletionQuotient(
     }
 #endif
 
+    if ((uint64_t)H * quotient_columns >
+            (uint64_t)std::numeric_limits<size_t>::max() /
+                sizeof(uint16_t))
+    {
+        return Wirehair_OOM;
+    }
+    std::vector<uint16_t> quotient_rows(
+        (size_t)H * quotient_columns, 0u);
+    // Only the free columns survive binary elimination.  Computing those
+    // coefficients directly avoids materializing and Gauss-Jordan updating
+    // H full inactive-width rows.  Substituting
+    //
+    //   x[p] = rhs[p] + sum(relation[p,f] * x[f])
+    //
+    // gives C'[f] = C[f] + sum(C[p] * relation[p,f]).  Each relation bit is
+    // binary, so the packed GF(2^16) coefficient vectors combine by XOR.
+    for (uint32_t i = 0u; i < quotient_columns; ++i)
+    {
+        const uint32_t free_column = free_columns[i];
+        uint64_t packed[kMixedPackedCoefficientWords] = {};
+        const uint64_t* free_coefficients =
+            projected.data() + (size_t)free_column * packed_words;
+        for (uint32_t word = 0u; word < packed_words; ++word) {
+            packed[word] = free_coefficients[word];
+        }
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            const uint64_t* relation =
+                binary_pivot_coeff.data() +
+                    (size_t)pivot * projection_words;
+            if (!binary_have_pivot[pivot] ||
+                (relation[free_column >> 6] &
+                    (UINT64_C(1) << (free_column & 63u))) == 0u)
+            {
+                continue;
+            }
+            const uint64_t* pivot_coefficients =
+                projected.data() + (size_t)pivot * packed_words;
+            for (uint32_t word = 0u; word < packed_words; ++word) {
+                packed[word] ^= pivot_coefficients[word];
+            }
+        }
+        for (uint32_t row = 0u; row < H; ++row) {
+            quotient_rows[(size_t)row * quotient_columns + i] =
+                (uint16_t)(
+                    packed[row >> 2] >> ((row & 3u) * 16u));
+        }
+    }
+
+    MixedQuotientFactorization factor;
+    if (!FactorMixedCompletionQuotient(
+            quotient_rows, H, quotient_columns, factor))
+    {
+        return Wirehair_Error;
+    }
+
     const uint32_t elements = block_bytes / 2u;
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    const bool rotate_residues = ActiveMixedResiduesRotated();
+    const bool independent_extension_residues =
+        ActiveMixedIndependentExtensionResidues();
+    const uint32_t populated_residues =
+        std::min(coefficient_period, column_count);
+
+    if (factor.Rank < quotient_columns)
+    {
+        if (!BuildMixedQuotientTransform(
+                H, quotient_columns, factor))
+        {
+            return Wirehair_Error;
+        }
+        // Preserve the historical distinction between an underdetermined,
+        // consistent system (NeedMore) and corrupted/inconsistent payloads
+        // (Error).  The dependent factor rows are exact left-nullspace
+        // syndromes.  Evaluate only those rows instead of constructing and
+        // reducing every completion RHS block.
+        std::array<uint8_t, kMixedCompletionRowsMax> dependency_rows = {};
+        uint32_t dependency_count = 0u;
+        for (uint32_t row = 0u; row < H; ++row) {
+            if (factor.Rows[row].PivotColumn == UINT8_MAX) {
+                dependency_rows[dependency_count++] = (uint8_t)row;
+            }
+        }
+        if (dependency_count != H - factor.Rank) {
+            return Wirehair_Error;
+        }
+        if ((uint64_t)dependency_count * elements >
+                (uint64_t)std::numeric_limits<size_t>::max())
+        {
+            return Wirehair_OOM;
+        }
+        std::vector<uint8_t> syndrome_low(
+            (size_t)dependency_count * elements, 0u);
+        std::vector<uint8_t> syndrome_high(
+            (size_t)dependency_count * elements, 0u);
+        std::vector<uint8_t> source_low(elements);
+        std::vector<uint8_t> source_high(elements);
+        std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
+
+        const auto add_syndrome_source = [&](
+            uint32_t residue,
+            bool include_subfield,
+            bool include_extension) -> bool
+        {
+            if (!GF16Deinterleave(
+                    residue_bucket.data(), source_low.data(),
+                    source_high.data(), block_bytes))
+            {
+                return false;
+            }
+            for (uint32_t d = 0u; d < dependency_count; ++d)
+            {
+                const uint32_t dependency_row = dependency_rows[d];
+                const uint16_t* transform = factor.Transform.data() +
+                    (size_t)dependency_row * kMixedCompletionRowsMax;
+                uint16_t scale = 0u;
+                if (include_subfield)
+                {
+                    for (uint32_t row = 0u; row < subfield_rows; ++row) {
+                        scale ^= GF16MultiplyInitialized(
+                            transform[row],
+                            cached_rows->Subfield[row][residue]);
+                    }
+                }
+                if (include_extension)
+                {
+                    for (uint32_t er = 0u; er < extension_rows; ++er) {
+                        scale ^= GF16MultiplyInitialized(
+                            transform[subfield_rows + er],
+                            cached_rows->Extension[er][residue]);
+                    }
+                }
+                if (scale == 0u) continue;
+                uint8_t* low = syndrome_low.data() + (size_t)d * elements;
+                uint8_t* high = syndrome_high.data() + (size_t)d * elements;
+                if (scale == 1u)
+                {
+                    gf256_add_mem(low, source_low.data(), (int)elements);
+                    gf256_add_mem(high, source_high.data(), (int)elements);
+                    ++stats.BlockXors;
+                }
+                else if (!GF16MulAddPlanar(
+                        low, high, scale,
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return false;
+                }
+                else {
+                    ++stats.BlockMulAdds;
+                }
+            }
+            return true;
+        };
+
+        const auto accumulate_syndrome_schedule = [&](
+            bool extension_schedule) -> bool
+        {
+            for (uint32_t residue = 0u;
+                 residue < populated_residues; ++residue)
+            {
+                std::fill(
+                    residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+                BatchedBlockXorAccumulator bucket_xor(
+                    residue_bucket.data(), block_bytes);
+                if (!extension_schedule && !rotate_residues)
+                {
+                    for (uint32_t column = residue;
+                         column < column_count;
+                         column += coefficient_period)
+                    {
+                        if (inactive_index[column] != UINT32_MAX) continue;
+                        bucket_xor.Add(
+                            values.data() + (size_t)column * block_bytes);
+                        ++stats.BlockXors;
+                    }
+                }
+                else
+                {
+                    uint32_t block_index = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < column_count;
+                         block_base += coefficient_period)
+                    {
+                        const uint32_t block_shift = extension_schedule ?
+                            ActiveMixedExtensionResidueBlockShift(
+                                block_index++) :
+                            ActiveMixedResidueBlockShift(block_index++);
+                        const uint32_t unshifted = residue >= block_shift ?
+                            residue - block_shift :
+                            residue + coefficient_period - block_shift;
+                        const uint32_t column = block_base + unshifted;
+                        if (column >= column_count ||
+                            inactive_index[column] != UINT32_MAX)
+                        {
+                            continue;
+                        }
+                        bucket_xor.Add(
+                            values.data() + (size_t)column * block_bytes);
+                        ++stats.BlockXors;
+                    }
+                }
+                bucket_xor.Flush();
+                if (!add_syndrome_source(
+                        residue,
+                        !extension_schedule,
+                        extension_schedule ||
+                            !independent_extension_residues))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        if (!accumulate_syndrome_schedule(false) ||
+            (independent_extension_residues &&
+             !accumulate_syndrome_schedule(true)))
+        {
+            return Wirehair_Error;
+        }
+
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            if (!binary_have_pivot[pivot]) continue;
+            const uint64_t* packed_scales =
+                projected.data() + (size_t)pivot * packed_words;
+            std::array<uint16_t, kMixedCompletionRowsMax> scales = {};
+            bool have_scale = false;
+            for (uint32_t d = 0u; d < dependency_count; ++d)
+            {
+                const uint16_t* transform = factor.Transform.data() +
+                    (size_t)dependency_rows[d] *
+                        kMixedCompletionRowsMax;
+                uint16_t scale = 0u;
+                for (uint32_t row = 0u; row < H; ++row)
+                {
+                    const uint16_t coefficient = (uint16_t)(
+                        packed_scales[row >> 2] >>
+                            ((row & 3u) * 16u));
+                    scale ^= GF16MultiplyInitialized(
+                        transform[row], coefficient);
+                }
+                scales[d] = scale;
+                have_scale = have_scale || scale != 0u;
+            }
+            if (!have_scale) continue;
+            if (!GF16Deinterleave(
+                    binary_pivot_rhs.data() +
+                        (size_t)pivot * block_bytes,
+                    source_low.data(), source_high.data(), block_bytes))
+            {
+                return Wirehair_Error;
+            }
+            for (uint32_t d = 0u; d < dependency_count; ++d)
+            {
+                const uint16_t scale = scales[d];
+                if (scale == 0u) continue;
+                uint8_t* low = syndrome_low.data() + (size_t)d * elements;
+                uint8_t* high = syndrome_high.data() + (size_t)d * elements;
+                if (scale == 1u)
+                {
+                    gf256_add_mem(low, source_low.data(), (int)elements);
+                    gf256_add_mem(high, source_high.data(), (int)elements);
+                    ++stats.BlockXors;
+                }
+                else if (!GF16MulAddPlanar(
+                        low, high, scale,
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return Wirehair_Error;
+                }
+                else {
+                    ++stats.BlockMulAdds;
+                }
+            }
+        }
+
+        for (uint32_t d = 0u; d < dependency_count; ++d)
+        {
+            if (!RowIsZero(
+                    syndrome_low.data() + (size_t)d * elements, elements) ||
+                !RowIsZero(
+                    syndrome_high.data() + (size_t)d * elements, elements))
+            {
+                stats.ResidualRows += (uint32_t)dependency_rows[d] + 1u;
+                return Wirehair_Error;
+            }
+        }
+        stats.ResidualRows += H;
+        stats.ResidualRank = binary_rank + factor.Rank;
+        return Wirehair_NeedMore;
+    }
+
     std::vector<uint8_t> subfield_rhs(
         (size_t)subfield_rows * block_bytes, 0u);
     std::vector<uint8_t> rhs_low((size_t)H * elements, 0u);
@@ -1870,10 +2344,6 @@ WirehairResult SolveMixedCompletionQuotient(
         subfield_destinations[row] =
             subfield_rhs.data() + (size_t)row * block_bytes;
     }
-    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
-    const bool rotate_residues = ActiveMixedResiduesRotated();
-    const bool independent_extension_residues =
-        ActiveMixedIndependentExtensionResidues();
     const bool automatic_joint_residue_buckets =
         independent_extension_residues &&
         UseAutomaticMixedJointResidueBuckets(
@@ -1916,8 +2386,6 @@ WirehairResult SolveMixedCompletionQuotient(
     // avoiding one block-sized zero-fill, this makes their dominant scratch
     // exactly the selected bucket data planes plus scheduling metadata.
     std::vector<uint8_t> residue_bucket;
-    const uint32_t populated_residues =
-        std::min(coefficient_period, column_count);
     const auto accumulate_extension_rhs = [&](
         uint32_t residue,
         const uint8_t* bucket) -> bool
@@ -2170,97 +2638,35 @@ mixed_rhs_accumulated:
         }
     }
 
-    if ((uint64_t)H * quotient_columns >
-            (uint64_t)std::numeric_limits<size_t>::max() /
-                sizeof(uint16_t) ||
-        (uint64_t)quotient_columns * quotient_columns >
-            (uint64_t)std::numeric_limits<size_t>::max() /
-                sizeof(uint16_t))
-    {
-        return Wirehair_OOM;
-    }
-    std::vector<uint16_t> quotient_rows(
-        (size_t)H * quotient_columns, 0u);
-    // Only the free columns survive binary elimination.  Computing those
-    // coefficients directly avoids materializing and Gauss-Jordan updating
-    // H full inactive-width rows.  Substituting
-    //
-    //   x[p] = rhs[p] + sum(relation[p,f] * x[f])
-    //
-    // gives C'[f] = C[f] + sum(C[p] * relation[p,f]).  Each relation bit is
-    // binary, so the packed GF(2^16) coefficient vectors combine by XOR.
-    for (uint32_t i = 0; i < quotient_columns; ++i)
-    {
-        const uint32_t free_column = free_columns[i];
-        uint64_t packed[kMixedPackedCoefficientWords] = {};
-        const uint64_t* free_coefficients =
-            projected.data() + (size_t)free_column * packed_words;
-        for (uint32_t word = 0; word < packed_words; ++word) {
-            packed[word] = free_coefficients[word];
-        }
-        for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
-        {
-            const uint64_t* relation =
-                binary_pivot_coeff.data() +
-                    (size_t)pivot * projection_words;
-            if (!binary_have_pivot[pivot] ||
-                (relation[free_column >> 6] &
-                    (UINT64_C(1) << (free_column & 63u))) == 0u)
-            {
-                continue;
-            }
-            const uint64_t* pivot_coefficients =
-                projected.data() + (size_t)pivot * packed_words;
-            for (uint32_t word = 0; word < packed_words; ++word) {
-                packed[word] ^= pivot_coefficients[word];
-            }
-        }
-        for (uint32_t row = 0; row < H; ++row) {
-            quotient_rows[(size_t)row * quotient_columns + i] =
-                (uint16_t)(
-                    packed[row >> 2] >> ((row & 3u) * 16u));
-        }
-    }
-
-    std::vector<uint16_t> pivot_coeff(
-        (size_t)quotient_columns * quotient_columns, 0u);
-    std::vector<uint8_t> pivot_low(
-        (size_t)quotient_columns * elements, 0u);
-    std::vector<uint8_t> pivot_high(
-        (size_t)quotient_columns * elements, 0u);
-    std::vector<uint8_t> have_pivot(quotient_columns, 0u);
     std::vector<uint8_t> scale_scratch(elements);
-    uint32_t quotient_rank = 0u;
-    for (uint32_t row = 0; row < H; ++row)
+    for (uint32_t row = 0u; row < H; ++row)
     {
-        ++stats.ResidualRows;
-        uint16_t* coeff = quotient_columns == 0u ? nullptr :
-            quotient_rows.data() + (size_t)row * quotient_columns;
+        const MixedQuotientRowPlan& plan = factor.Rows[row];
         uint8_t* low = rhs_low.data() + (size_t)row * elements;
         uint8_t* high = rhs_high.data() + (size_t)row * elements;
-        for (uint32_t column = 0; column < quotient_columns; ++column)
+        for (uint32_t column = 0u;
+             column < quotient_columns; ++column)
         {
-            const uint16_t scale = coeff[column];
-            if (scale == 0u || !have_pivot[column]) continue;
-            const uint16_t* pivot =
-                pivot_coeff.data() + (size_t)column * quotient_columns;
-            for (uint32_t k = column; k < quotient_columns; ++k) {
-                coeff[k] ^= GF16MultiplyInitialized(scale, pivot[k]);
+            const uint16_t scale = plan.ForwardScales[column];
+            if (scale == 0u) continue;
+            const uint8_t pivot_row = factor.PivotRows[column];
+            if (pivot_row == UINT8_MAX || pivot_row == row) {
+                return Wirehair_Error;
             }
-            if (scale == 1u) {
+            const uint8_t* pivot_low =
+                rhs_low.data() + (size_t)pivot_row * elements;
+            const uint8_t* pivot_high =
+                rhs_high.data() + (size_t)pivot_row * elements;
+            if (scale == 1u)
+            {
                 gf256_add_mem(
-                    low, pivot_low.data() + (size_t)column * elements,
-                    (int)elements);
-                gf256_add_mem(
-                    high, pivot_high.data() + (size_t)column * elements,
-                    (int)elements);
+                    low, pivot_low, (int)elements);
+                gf256_add_mem(high, pivot_high, (int)elements);
                 ++stats.BlockXors;
             }
             else if (!GF16MulAddPlanar(
                     low, high, scale,
-                    pivot_low.data() + (size_t)column * elements,
-                    pivot_high.data() + (size_t)column * elements,
-                    elements))
+                    pivot_low, pivot_high, elements))
             {
                 return Wirehair_Error;
             }
@@ -2269,32 +2675,25 @@ mixed_rhs_accumulated:
             }
         }
 
-        uint32_t pivot_column = quotient_columns;
-        for (uint32_t column = 0; column < quotient_columns; ++column) {
-            if (coeff[column] != 0u) {
-                pivot_column = column;
-                break;
-            }
-        }
-        if (pivot_column == quotient_columns)
+        if (plan.PivotColumn == UINT8_MAX)
         {
-            if (!RowIsZero(low, elements) || !RowIsZero(high, elements)) {
+            if (!RowIsZero(low, elements) || !RowIsZero(high, elements))
+            {
+                stats.ResidualRows += row + 1u;
                 return Wirehair_Error;
             }
             continue;
         }
-        const uint16_t pivot_value = coeff[pivot_column];
-        if (pivot_value != 1u)
+        if (plan.PivotColumn >= quotient_columns ||
+            factor.PivotRows[plan.PivotColumn] != row)
         {
-            const uint16_t inverse = GF16InverseInitialized(pivot_value);
-            if (inverse == 0u) return Wirehair_Error;
-            for (uint32_t k = pivot_column;
-                 k < quotient_columns; ++k)
-            {
-                coeff[k] = GF16MultiplyInitialized(coeff[k], inverse);
-            }
+            return Wirehair_Error;
+        }
+        if (plan.NormalizeScale != 1u)
+        {
             if (!GF16ScalePlanar(
-                    low, high, inverse, scale_scratch.data(), elements))
+                    low, high, plan.NormalizeScale,
+                    scale_scratch.data(), elements))
             {
                 return Wirehair_Error;
             }
@@ -2303,24 +2702,19 @@ mixed_rhs_accumulated:
         uint8_t* pending_existing_low = nullptr;
         uint8_t* pending_existing_high = nullptr;
         uint16_t pending_existing_scale = 0u;
-        for (uint32_t existing = 0;
+        for (uint32_t existing = 0u;
              existing < quotient_columns; ++existing)
         {
-            if (!have_pivot[existing]) continue;
-            uint16_t* existing_coeff = pivot_coeff.data() +
-                (size_t)existing * quotient_columns;
-            const uint16_t scale = existing_coeff[pivot_column];
+            const uint16_t scale = plan.BackScales[existing];
             if (scale == 0u) continue;
-            for (uint32_t k = pivot_column;
-                 k < quotient_columns; ++k)
-            {
-                existing_coeff[k] ^=
-                    GF16MultiplyInitialized(scale, coeff[k]);
+            const uint8_t existing_row = factor.PivotRows[existing];
+            if (existing_row == UINT8_MAX || existing_row == row) {
+                return Wirehair_Error;
             }
             uint8_t* existing_low =
-                pivot_low.data() + (size_t)existing * elements;
+                rhs_low.data() + (size_t)existing_row * elements;
             uint8_t* existing_high =
-                pivot_high.data() + (size_t)existing * elements;
+                rhs_high.data() + (size_t)existing_row * elements;
             if (!pending_existing_low)
             {
                 pending_existing_low = existing_low;
@@ -2365,27 +2759,16 @@ mixed_rhs_accumulated:
                 ++stats.BlockMulAdds;
             }
         }
-        std::memcpy(
-            pivot_coeff.data() +
-                (size_t)pivot_column * quotient_columns,
-            coeff, (size_t)quotient_columns * sizeof(uint16_t));
-        std::memcpy(
-            pivot_low.data() + (size_t)pivot_column * elements,
-            low, elements);
-        std::memcpy(
-            pivot_high.data() + (size_t)pivot_column * elements,
-            high, elements);
-        have_pivot[pivot_column] = 1u;
-        ++quotient_rank;
     }
-    stats.ResidualRank = binary_rank + quotient_rank;
-    if (quotient_rank < quotient_columns) return Wirehair_NeedMore;
+    stats.ResidualRows += H;
+    stats.ResidualRank = binary_rank + factor.Rank;
 
-    for (uint32_t i = 0; i < quotient_columns; ++i)
+    for (uint32_t i = 0u; i < quotient_columns; ++i)
     {
-        if (!have_pivot[i] || !GF16Interleave(
-                pivot_low.data() + (size_t)i * elements,
-                pivot_high.data() + (size_t)i * elements,
+        const uint8_t pivot_row = factor.PivotRows[i];
+        if (pivot_row == UINT8_MAX || !GF16Interleave(
+                rhs_low.data() + (size_t)pivot_row * elements,
+                rhs_high.data() + (size_t)pivot_row * elements,
                 values.data() +
                     (size_t)inactive_columns[free_columns[i]] * block_bytes,
                 block_bytes))
@@ -5523,6 +5906,453 @@ WH2_WITNESS_NOINLINE void CaptureMixedNullWitness(
 #if defined(_MSC_VER)
 #define WH2_TEST_LAMBDA_NOINLINE
 #endif
+
+WH2_TEST_NOINLINE bool CheckMixedQuotientFactorReplayForTesting()
+{
+    if (!InitializeGF16()) return false;
+    try
+    {
+        uint64_t random_state = UINT64_C(0x243f6a8885a308d3);
+        const auto next_random = [&random_state]() -> uint16_t {
+            random_state ^= random_state << 13;
+            random_state ^= random_state >> 7;
+            random_state ^= random_state << 17;
+            return (uint16_t)random_state;
+        };
+        const auto direct_factor = [](
+            std::vector<uint16_t>& coefficients,
+            std::vector<uint16_t>& rhs,
+            uint32_t row_count,
+            uint32_t column_count,
+            uint32_t rhs_lanes,
+            std::array<uint8_t, kMixedCompletionRowsMax>& pivot_rows,
+            std::array<uint8_t, kMixedCompletionRowsMax>& row_pivots,
+            uint32_t& rank) -> bool
+        {
+            pivot_rows.fill(UINT8_MAX);
+            row_pivots.fill(UINT8_MAX);
+            rank = 0u;
+            for (uint32_t row = 0u; row < row_count; ++row)
+            {
+                uint16_t* coeff = column_count == 0u ? nullptr :
+                    coefficients.data() + (size_t)row * column_count;
+                uint16_t* row_rhs =
+                    rhs.data() + (size_t)row * rhs_lanes;
+                for (uint32_t column = 0u;
+                     column < column_count; ++column)
+                {
+                    const uint16_t scale = coeff[column];
+                    const uint8_t pivot_row = pivot_rows[column];
+                    if (scale == 0u || pivot_row == UINT8_MAX) continue;
+                    const uint16_t* pivot = coefficients.data() +
+                        (size_t)pivot_row * column_count;
+                    for (uint32_t k = column; k < column_count; ++k) {
+                        coeff[k] ^= GF16MultiplyInitialized(scale, pivot[k]);
+                    }
+                    const uint16_t* pivot_rhs = rhs.data() +
+                        (size_t)pivot_row * rhs_lanes;
+                    for (uint32_t lane = 0u; lane < rhs_lanes; ++lane) {
+                        row_rhs[lane] ^= GF16MultiplyInitialized(
+                            scale, pivot_rhs[lane]);
+                    }
+                }
+
+                uint32_t pivot_column = column_count;
+                for (uint32_t column = 0u;
+                     column < column_count; ++column)
+                {
+                    if (coeff[column] != 0u) {
+                        pivot_column = column;
+                        break;
+                    }
+                }
+                if (pivot_column == column_count) continue;
+
+                const uint16_t inverse =
+                    GF16InverseInitialized(coeff[pivot_column]);
+                if (inverse == 0u) return false;
+                if (inverse != 1u)
+                {
+                    for (uint32_t k = pivot_column;
+                         k < column_count; ++k)
+                    {
+                        coeff[k] = GF16MultiplyInitialized(coeff[k], inverse);
+                    }
+                    for (uint32_t lane = 0u; lane < rhs_lanes; ++lane) {
+                        row_rhs[lane] = GF16MultiplyInitialized(
+                            row_rhs[lane], inverse);
+                    }
+                }
+                for (uint32_t existing = 0u;
+                     existing < column_count; ++existing)
+                {
+                    const uint8_t existing_row = pivot_rows[existing];
+                    if (existing_row == UINT8_MAX) continue;
+                    uint16_t* existing_coeff = coefficients.data() +
+                        (size_t)existing_row * column_count;
+                    const uint16_t scale =
+                        existing_coeff[pivot_column];
+                    if (scale == 0u) continue;
+                    for (uint32_t k = pivot_column;
+                         k < column_count; ++k)
+                    {
+                        existing_coeff[k] ^= GF16MultiplyInitialized(
+                            scale, coeff[k]);
+                    }
+                    uint16_t* existing_rhs = rhs.data() +
+                        (size_t)existing_row * rhs_lanes;
+                    for (uint32_t lane = 0u; lane < rhs_lanes; ++lane) {
+                        existing_rhs[lane] ^= GF16MultiplyInitialized(
+                            scale, row_rhs[lane]);
+                    }
+                }
+                pivot_rows[pivot_column] = (uint8_t)row;
+                row_pivots[row] = (uint8_t)pivot_column;
+                ++rank;
+            }
+            return true;
+        };
+
+        const uint32_t row_counts[] = {
+            kMixedGF256Rows + kMixedGF16Rows,
+            kMixedCompletionRowsMax
+        };
+        static const uint32_t rhs_lanes = 3u;
+        for (uint32_t row_count : row_counts)
+        {
+            const uint32_t column_counts[] = {
+                0u, 1u, 2u, row_count - 2u, row_count
+            };
+            for (uint32_t column_count : column_counts)
+            {
+                for (uint32_t shape = 0u; shape < 4u; ++shape)
+                {
+                    std::vector<uint16_t> original(
+                        (size_t)row_count * column_count, 0u);
+                    for (uint16_t& value : original) {
+                        value = next_random();
+                    }
+                    if (shape == 0u)
+                    {
+                        std::fill(original.begin(), original.end(), 0u);
+                        for (uint32_t i = 0u; i < column_count; ++i) {
+                            original[(size_t)i * column_count + i] = 1u;
+                        }
+                    }
+                    else if (shape == 1u && column_count >= 2u)
+                    {
+                        uint16_t scale = next_random();
+                        if (scale == 0u) scale = 1u;
+                        for (uint32_t row = 0u; row < row_count; ++row) {
+                            original[(size_t)row * column_count +
+                                column_count - 1u] =
+                                GF16MultiplyInitialized(
+                                    original[(size_t)row * column_count],
+                                    scale);
+                        }
+                    }
+                    else if (shape == 2u && column_count != 0u)
+                    {
+                        std::fill(original.begin(), original.end(), 0u);
+                        original[0] = 1u;
+                        if (row_count > 1u) {
+                            original[column_count] = UINT16_C(0x1234);
+                        }
+                        for (uint32_t column = 1u;
+                             column < column_count &&
+                                 column + 1u < row_count;
+                             ++column)
+                        {
+                            original[(size_t)(column + 1u) * column_count +
+                                column] = 1u;
+                        }
+                    }
+
+                    std::vector<uint16_t> original_rhs(
+                        (size_t)row_count * rhs_lanes);
+                    for (uint16_t& value : original_rhs) {
+                        value = next_random();
+                    }
+                    std::vector<uint16_t> reference_coeff = original;
+                    std::vector<uint16_t> reference_rhs = original_rhs;
+                    std::array<
+                        uint8_t, kMixedCompletionRowsMax> reference_pivots;
+                    std::array<
+                        uint8_t, kMixedCompletionRowsMax> reference_row_pivots;
+                    uint32_t reference_rank = 0u;
+                    if (!direct_factor(
+                            reference_coeff, reference_rhs,
+                            row_count, column_count, rhs_lanes,
+                            reference_pivots, reference_row_pivots,
+                            reference_rank))
+                    {
+                        return false;
+                    }
+
+                    std::vector<uint16_t> planned_coeff = original;
+                    MixedQuotientFactorization factor;
+                    if (!FactorMixedCompletionQuotient(
+                            planned_coeff, row_count, column_count, factor) ||
+                        planned_coeff != reference_coeff ||
+                        factor.Rank != reference_rank ||
+                        factor.PivotRows != reference_pivots)
+                    {
+                        return false;
+                    }
+                    std::vector<uint16_t> planned_rhs = original_rhs;
+                    for (uint32_t row = 0u; row < row_count; ++row)
+                    {
+                        const MixedQuotientRowPlan& plan = factor.Rows[row];
+                        if (plan.PivotColumn != reference_row_pivots[row]) {
+                            return false;
+                        }
+                        uint16_t* row_rhs = planned_rhs.data() +
+                            (size_t)row * rhs_lanes;
+                        for (uint32_t column = 0u;
+                             column < column_count; ++column)
+                        {
+                            const uint16_t scale =
+                                plan.ForwardScales[column];
+                            if (scale == 0u) continue;
+                            const uint8_t pivot_row =
+                                factor.PivotRows[column];
+                            if (pivot_row == UINT8_MAX || pivot_row == row) {
+                                return false;
+                            }
+                            const uint16_t* pivot_rhs = planned_rhs.data() +
+                                (size_t)pivot_row * rhs_lanes;
+                            for (uint32_t lane = 0u;
+                                 lane < rhs_lanes; ++lane)
+                            {
+                                row_rhs[lane] ^= GF16MultiplyInitialized(
+                                    scale, pivot_rhs[lane]);
+                            }
+                        }
+                        if (plan.PivotColumn == UINT8_MAX) continue;
+                        if (plan.NormalizeScale != 1u) {
+                            for (uint32_t lane = 0u;
+                                 lane < rhs_lanes; ++lane)
+                            {
+                                row_rhs[lane] = GF16MultiplyInitialized(
+                                    row_rhs[lane], plan.NormalizeScale);
+                            }
+                        }
+                        for (uint32_t existing = 0u;
+                             existing < column_count; ++existing)
+                        {
+                            const uint16_t scale = plan.BackScales[existing];
+                            if (scale == 0u) continue;
+                            const uint8_t existing_row =
+                                factor.PivotRows[existing];
+                            if (existing_row == UINT8_MAX ||
+                                existing_row == row)
+                            {
+                                return false;
+                            }
+                            uint16_t* existing_rhs = planned_rhs.data() +
+                                (size_t)existing_row * rhs_lanes;
+                            for (uint32_t lane = 0u;
+                                 lane < rhs_lanes; ++lane)
+                            {
+                                existing_rhs[lane] ^=
+                                    GF16MultiplyInitialized(
+                                        scale, row_rhs[lane]);
+                            }
+                        }
+                    }
+                    if (planned_rhs != reference_rhs ||
+                        !BuildMixedQuotientTransform(
+                            row_count, column_count, factor))
+                    {
+                        return false;
+                    }
+                    for (uint32_t row = 0u; row < row_count; ++row)
+                    {
+                        const uint16_t* transform = factor.Transform.data() +
+                            (size_t)row * kMixedCompletionRowsMax;
+                        for (uint32_t column = 0u;
+                             column < column_count; ++column)
+                        {
+                            uint16_t value = 0u;
+                            for (uint32_t source = 0u;
+                                 source < row_count; ++source)
+                            {
+                                value ^= GF16MultiplyInitialized(
+                                    transform[source],
+                                    original[(size_t)source * column_count +
+                                        column]);
+                            }
+                            if (value != planned_coeff[
+                                    (size_t)row * column_count + column])
+                            {
+                                return false;
+                            }
+                        }
+                        for (uint32_t lane = 0u; lane < rhs_lanes; ++lane)
+                        {
+                            uint16_t value = 0u;
+                            for (uint32_t source = 0u;
+                                 source < row_count; ++source)
+                            {
+                                value ^= GF16MultiplyInitialized(
+                                    transform[source],
+                                    original_rhs[
+                                        (size_t)source * rhs_lanes + lane]);
+                            }
+                            if (value != planned_rhs[
+                                    (size_t)row * rhs_lanes + lane])
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
+{
+    if (!InitializeGF16()) return false;
+    try
+    {
+        const uint32_t period = ActiveMixedCoefficientPeriod();
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        const uint32_t extension_rows = ActiveMixedGF16Rows();
+        const uint32_t heavy_rows = subfield_rows + extension_rows;
+        const bool independent = ActiveMixedIndependentExtensionResidues();
+        const MixedCoefficientRows* rows = GetMixedCoefficientRows();
+        if (!rows || period == 0u ||
+            period > kMixedCoefficientPeriod ||
+            heavy_rows > kMixedCompletionRowsMax)
+        {
+            return false;
+        }
+        const auto coefficient_vector = [&](uint32_t column) {
+            std::array<uint16_t, kMixedCompletionRowsMax> result = {};
+            const uint32_t subfield_residue =
+                ActiveMixedCoefficientResidue(column);
+            const uint32_t extension_residue = independent ?
+                ActiveMixedExtensionCoefficientResidue(column) :
+                subfield_residue;
+            for (uint32_t row = 0u; row < subfield_rows; ++row) {
+                result[row] = rows->Subfield[row][subfield_residue];
+            }
+            for (uint32_t row = 0u; row < extension_rows; ++row) {
+                result[subfield_rows + row] =
+                    rows->Extension[row][extension_residue];
+            }
+            return result;
+        };
+        const uint64_t pair_count_wide = (uint64_t)period * period;
+        if (pair_count_wide >= UINT32_MAX) return false;
+        const uint32_t pair_count = (uint32_t)pair_count_wide;
+        std::vector<uint32_t> first(pair_count, UINT32_MAX);
+        uint32_t duplicate0 = UINT32_MAX;
+        uint32_t duplicate1 = UINT32_MAX;
+        for (uint32_t column = 0u; column <= pair_count; ++column)
+        {
+            const uint32_t a = ActiveMixedCoefficientResidue(column);
+            const uint32_t b = independent ?
+                ActiveMixedExtensionCoefficientResidue(column) : a;
+            if (a >= period || b >= period) return false;
+            const uint32_t key = a * period + b;
+            if (first[key] != UINT32_MAX) {
+                duplicate0 = first[key];
+                duplicate1 = column;
+                break;
+            }
+            first[key] = column;
+        }
+        if (duplicate0 == UINT32_MAX) return false;
+
+        const std::array<uint16_t, kMixedCompletionRowsMax> base =
+            coefficient_vector(duplicate0);
+        uint32_t pivot = heavy_rows;
+        for (uint32_t row = 0u; row < heavy_rows; ++row) {
+            if (base[row] != 0u) {
+                pivot = row;
+                break;
+            }
+        }
+        if (pivot == heavy_rows) return false;
+        const uint16_t inverse = GF16InverseInitialized(base[pivot]);
+        if (inverse == 0u) return false;
+        uint32_t inconsistent_column = UINT32_MAX;
+        for (uint32_t column = 0u; column <= pair_count; ++column)
+        {
+            if (column == duplicate0 || column == duplicate1) continue;
+            const std::array<uint16_t, kMixedCompletionRowsMax> candidate =
+                coefficient_vector(column);
+            const uint16_t scale = GF16MultiplyInitialized(
+                candidate[pivot], inverse);
+            bool multiple = true;
+            for (uint32_t row = 0u; row < heavy_rows; ++row) {
+                if (candidate[row] != GF16MultiplyInitialized(
+                        scale, base[row]))
+                {
+                    multiple = false;
+                    break;
+                }
+            }
+            if (!multiple) {
+                inconsistent_column = column;
+                break;
+            }
+        }
+        if (inconsistent_column == UINT32_MAX) return false;
+
+        const uint32_t column_count = std::max(
+            std::max(duplicate0, duplicate1), inconsistent_column) + 1u;
+        PrecodeSystem system;
+        system.Params = MakeMixedParams(
+            column_count, UINT64_C(0x13198a2e03707344));
+        const uint32_t inactive_count = 2u;
+        const uint32_t projection_words = PackedWordCount(inactive_count);
+        const uint32_t block_bytes = 2u;
+        std::vector<uint32_t> inactive_index(column_count, UINT32_MAX);
+        inactive_index[duplicate0] = 0u;
+        inactive_index[duplicate1] = 1u;
+        const std::vector<uint32_t> inactive_columns = {
+            duplicate0, duplicate1
+        };
+        const std::vector<uint64_t> projection(
+            (size_t)column_count * projection_words, UINT64_C(0));
+        const std::vector<uint64_t> binary_coeff(
+            (size_t)inactive_count * projection_words, UINT64_C(0));
+        const std::vector<uint8_t> binary_rhs(
+            (size_t)inactive_count * block_bytes, uint8_t{0});
+        const std::vector<uint8_t> have_pivot(inactive_count, uint8_t{0});
+        std::vector<uint8_t> values(
+            (size_t)column_count * block_bytes, uint8_t{0});
+        PrecodeSolveStats stats;
+        if (SolveMixedCompletionQuotient(
+                system, column_count, inactive_count, projection_words,
+                block_bytes, inactive_index, inactive_columns, projection,
+                binary_coeff, binary_rhs, have_pivot, 0u, values, stats) !=
+                Wirehair_NeedMore ||
+            stats.BinaryResidualRank != 0u ||
+            stats.ResidualRank != 1u)
+        {
+            return false;
+        }
+        values[(size_t)inconsistent_column * block_bytes] = 1u;
+        stats = PrecodeSolveStats{};
+        return SolveMixedCompletionQuotient(
+            system, column_count, inactive_count, projection_words,
+            block_bytes, inactive_index, inactive_columns, projection,
+            binary_coeff, binary_rhs, have_pivot, 0u, values, stats) ==
+            Wirehair_Error;
+    }
+    catch (...) {
+        return false;
+    }
+}
 
 WH2_TEST_NOINLINE bool CheckMixedNullWitnessCanonicalizationForTesting()
 {

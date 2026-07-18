@@ -203,6 +203,18 @@ void SetMixedNullWitnessDiagnosticForTesting(
 
 /** Pure GF(2^16) nullspace/canonicalization invariance oracle. */
 bool CheckMixedNullWitnessCanonicalizationForTesting();
+
+/**
+    Compare recorded mixed-quotient row plans with direct coefficient/RHS
+    Gauss-Jordan elimination, including the derived left transform.
+*/
+bool CheckMixedQuotientFactorReplayForTesting();
+
+/**
+    Exercise the coefficient-rank-deficient mixed-quotient shortcut with a
+    consistent zero RHS and an algebraically guaranteed inconsistent RHS.
+*/
+bool CheckMixedQuotientDeficientSyndromeForTesting();
 #endif
 
 /**

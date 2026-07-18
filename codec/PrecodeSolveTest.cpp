@@ -2410,6 +2410,60 @@ bool CheckMixedNullWitnessCanonicalization()
     return true;
 }
 
+bool CheckMixedQuotientRankFirstOracles()
+{
+    if (!wirehair_v2::CheckMixedQuotientFactorReplayForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: mixed quotient factor/replay oracle failed\n");
+        return false;
+    }
+    {
+        MixedCoefficientPeriodScope period(32u);
+        MixedCoefficientGeometryScope geometry(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+        MixedResidueScheduleScope schedule(
+            wirehair_v2::MixedResidueSchedule::Constant);
+        MixedIndependentExtensionResiduesScope independent(false);
+        MixedResidueBucketModeScope buckets(
+            wirehair_v2::MixedResidueBucketMode::Separate);
+        if (!period.IsValid() || !geometry.IsValid() ||
+            !schedule.IsValid() || !independent.IsValid() ||
+            !buckets.IsValid() ||
+            !wirehair_v2::
+                CheckMixedQuotientDeficientSyndromeForTesting())
+        {
+            std::fprintf(stderr,
+                "solve: constant mixed deficient-syndrome oracle failed\n");
+            return false;
+        }
+    }
+    {
+        MixedCoefficientPeriodScope period(32u);
+        MixedCoefficientGeometryScope geometry(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX);
+        MixedResidueScheduleScope schedule(
+            wirehair_v2::MixedResidueSchedule::Hashed);
+        MixedResidueHashSeedScope hash_seed(68u);
+        MixedIndependentExtensionResiduesScope independent(true);
+        MixedResidueBucketModeScope buckets(
+            wirehair_v2::MixedResidueBucketMode::Separate);
+        if (!period.IsValid() || !geometry.IsValid() ||
+            !schedule.IsValid() || !independent.IsValid() ||
+            !buckets.IsValid() ||
+            !wirehair_v2::
+                CheckMixedQuotientDeficientSyndromeForTesting())
+        {
+            std::fprintf(stderr,
+                "solve: independent mixed deficient-syndrome oracle failed\n");
+            return false;
+        }
+    }
+    std::printf(
+        "mixed quotient factor/replay and deficient syndromes: PASS\n");
+    return true;
+}
+
 bool RunCase(
     uint32_t K,
     uint32_t block_bytes,
@@ -3625,6 +3679,7 @@ int main(int argc, char** argv)
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;
     ok = CheckMixedNullWitnessCanonicalization() && ok;
+    ok = CheckMixedQuotientRankFirstOracles() && ok;
     ok = CheckMixDomainValidation() && ok;
     ok = CheckPacketRowDomainBoundaries() && ok;
     ok = CheckInactiveResidualCap() && ok;

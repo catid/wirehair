@@ -7909,12 +7909,13 @@ int CmdPrecodeFail(int argc, char** argv)
                 for (uint32_t trial = 0u; trial < trials; ++trial)
                 {
                     const MatrixFailureTrial& result = results[trial];
-                    const bool stopped_before_mixed_completion =
+                    // Both q > H and a coefficient-rank-deficient q <= H
+                    // return before any full mixed payload buckets are built.
+                    const bool stopped_before_mixed_payload_buckets =
                         result.Result == Wirehair_NeedMore &&
                         result.Inactivated >= result.BinaryRank &&
-                        result.Inactivated - result.BinaryRank >
-                            system.Params.HeavyRows;
-                    if (stopped_before_mixed_completion) {
+                        result.Rank < result.Inactivated;
+                    if (stopped_before_mixed_payload_buckets) {
                         continue;
                     }
                     const bool used = joint ?
