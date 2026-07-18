@@ -4722,10 +4722,14 @@ def update_counter(
     counter["cells"] += 1
     for arm in ARMS:
         values = data[arm]
-        counter[f"{arm}_fail"] += failed(values, index)
+        arm_failed = failed(values, index)
+        outcome = "failure_path" if arm_failed else "success"
+        counter[f"{arm}_fail"] += arm_failed
+        counter[f"{arm}_{outcome}_cells"] += 1
         counter[f"{arm}_error"] += values.error[index]
         counter[f"{arm}_shortfall"] += values.shortfall[index]
         counter[f"{arm}_inact_milli"] += values.inact[index]
+        counter[f"{arm}_{outcome}_inact_milli"] += values.inact[index]
         counter[f"{arm}_binary_def_milli"] += values.binary_def[index]
         counter[f"{arm}_heavy_gain_milli"] += values.heavy_gain[index]
         counter[f"{arm}_binary_def_gt15"] += values.binary_def[index] > 15000
@@ -4733,7 +4737,9 @@ def update_counter(
             counter[f"{arm}_binary_def_max_milli"], values.binary_def[index]
         )
         counter[f"{arm}_xors_milli"] += values.xors[index]
+        counter[f"{arm}_{outcome}_xors_milli"] += values.xors[index]
         counter[f"{arm}_muladds_milli"] += values.muladds[index]
+        counter[f"{arm}_{outcome}_muladds_milli"] += values.muladds[index]
     base = data["d12"]
     base_fail = failed(base, index)
     for arm in ARMS[1:]:
@@ -4750,6 +4756,9 @@ def update_counter(
         )
         if not base_fail and not candidate_fail:
             counter[f"{arm}_paired_success"] += 1
+            counter[f"{arm}_paired_base_inact_milli"] += base.inact[index]
+            counter[f"{arm}_paired_candidate_inact_milli"] += \
+                candidate.inact[index]
             counter[f"{arm}_paired_base_xors_milli"] += base.xors[index]
             counter[f"{arm}_paired_candidate_xors_milli"] += candidate.xors[index]
             counter[f"{arm}_paired_base_muladds_milli"] += base.muladds[index]
@@ -4759,38 +4768,85 @@ def update_counter(
 def counter_report(counter: Counter[str]) -> dict[str, Any]:
     arms: dict[str, Any] = {}
     for arm in ARMS:
+        success_cells = counter[f"{arm}_success_cells"]
+        failure_cells = counter[f"{arm}_failure_path_cells"]
+        if success_cells + failure_cells != counter["cells"] or \
+                failure_cells != counter[f"{arm}_fail"]:
+            die(f"{arm} outcome/cost partition does not cover the exact scope")
+        for metric in ("inact", "xors", "muladds"):
+            if counter[f"{arm}_{metric}_milli"] != (
+                    counter[f"{arm}_success_{metric}_milli"] +
+                    counter[f"{arm}_failure_path_{metric}_milli"]):
+                die(f"{arm} {metric} cost partition does not replay")
         arms[arm] = {
+            "successful_cells": success_cells,
+            "failure_path_cells": failure_cells,
             "failures": counter[f"{arm}_fail"],
             "errors": counter[f"{arm}_error"],
             "heavy_shortfall_sum": counter[f"{arm}_shortfall"],
-            "inact_milli_sum": counter[f"{arm}_inact_milli"],
+            "inact_all_cells_milli_sum": counter[f"{arm}_inact_milli"],
+            "inact_success_milli_sum":
+                counter[f"{arm}_success_inact_milli"],
+            "inact_failure_path_milli_sum":
+                counter[f"{arm}_failure_path_inact_milli"],
             "binary_def_milli_sum": counter[f"{arm}_binary_def_milli"],
             "binary_def_max_milli": counter[f"{arm}_binary_def_max_milli"],
             "binary_def_gt15_cells": counter[f"{arm}_binary_def_gt15"],
             "heavy_gain_milli_sum": counter[f"{arm}_heavy_gain_milli"],
-            "block_xors_milli_sum": counter[f"{arm}_xors_milli"],
-            "block_muladds_milli_sum": counter[f"{arm}_muladds_milli"],
+            "block_xors_all_cells_milli_sum": counter[f"{arm}_xors_milli"],
+            "block_xors_success_milli_sum":
+                counter[f"{arm}_success_xors_milli"],
+            "block_xors_failure_path_milli_sum":
+                counter[f"{arm}_failure_path_xors_milli"],
+            "block_muladds_all_cells_milli_sum":
+                counter[f"{arm}_muladds_milli"],
+            "block_muladds_success_milli_sum":
+                counter[f"{arm}_success_muladds_milli"],
+            "block_muladds_failure_path_milli_sum":
+                counter[f"{arm}_failure_path_muladds_milli"],
         }
     comparisons: dict[str, Any] = {}
     for arm in ARMS[1:]:
         repairs = counter[f"{arm}_repair"]
         introductions = counter[f"{arm}_intro"]
+        both_fail = counter[f"{arm}_both_fail"]
+        paired_success = counter[f"{arm}_paired_success"]
+        if paired_success + repairs + introductions + both_fail != \
+                counter["cells"]:
+            die(f"{arm} paired outcome partition does not cover the exact scope")
         comparisons[f"{arm}_vs_d12"] = {
             "repairs": repairs, "introductions": introductions,
-            "both_fail": counter[f"{arm}_both_fail"],
+            "both_fail": both_fail,
             "cleared_heavy_shortfall": counter[f"{arm}_cleared_shortfall"],
             "new_heavy_shortfall": counter[f"{arm}_new_shortfall"],
             "descriptive_cell_sign_tail":
                 binomial_one_sided(repairs, introductions),
-            "paired_success_cells": counter[f"{arm}_paired_success"],
+            "paired_success_cells": paired_success,
+            "paired_success_base_inact_milli_sum":
+                counter[f"{arm}_paired_base_inact_milli"],
+            "paired_success_candidate_inact_milli_sum":
+                counter[f"{arm}_paired_candidate_inact_milli"],
+            "inact_ratio_paired_success": ratio(
+                counter[f"{arm}_paired_candidate_inact_milli"],
+                counter[f"{arm}_paired_base_inact_milli"],
+            ),
+            "paired_success_base_block_xors_milli_sum":
+                counter[f"{arm}_paired_base_xors_milli"],
+            "paired_success_candidate_block_xors_milli_sum":
+                counter[f"{arm}_paired_candidate_xors_milli"],
             "block_xor_ratio_paired_success": ratio(
                 counter[f"{arm}_paired_candidate_xors_milli"],
                 counter[f"{arm}_paired_base_xors_milli"],
             ),
+            "paired_success_base_block_muladds_milli_sum":
+                counter[f"{arm}_paired_base_muladds_milli"],
+            "paired_success_candidate_block_muladds_milli_sum":
+                counter[f"{arm}_paired_candidate_muladds_milli"],
             "block_muladd_ratio_paired_success": ratio(
                 counter[f"{arm}_paired_candidate_muladds_milli"],
                 counter[f"{arm}_paired_base_muladds_milli"],
             ),
+            "failure_path_costs_excluded_from_ratios": True,
         }
     return {"cells": counter["cells"], "arms": arms, "comparisons": comparisons}
 
@@ -4958,7 +5014,7 @@ def analyze(
             writer.writerow((*key, canonical_json(counter_report(scopes[key]))))
 
     summary = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.analysis.v2",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.analysis.v3",
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "coverage": {
@@ -4974,6 +5030,14 @@ def analyze(
             "exact sign tails are descriptive diagnostics only; promotion is "
             "not gated on a p-value and must also use per-seed/schedule "
             "direction, effect size, and new-resonance checks."
+        ),
+        "cost_interpretation": (
+            "Architecture cost ratios and paired sums use only cells where "
+            "both arms succeeded. Per-arm all-cell, success, and failure-path "
+            "sums are reported separately because rank-first failures may exit "
+            "before projection or payload RHS work. Saturated campaign elapsed "
+            "times are provenance only; speed claims require pinned full-payload "
+            "timing."
         ),
         "adaptive_low_K_identity": identity,
         "overall": counter_report(total),

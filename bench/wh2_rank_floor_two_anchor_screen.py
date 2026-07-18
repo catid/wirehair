@@ -638,18 +638,36 @@ def summarize_scope(
     arms: dict[str, Any] = {}
     for arm in ARMS:
         rows = [indexed[(arm, seed_index, schedule, K)] for seed_index, schedule, K in keys]
+        success_rows = [row for row in rows if not failed(row)]
+        failure_rows = [row for row in rows if failed(row)]
         arms[arm] = {
             "cells": len(rows),
-            "failures": sum(failed(row) for row in rows),
+            "successful_cells": len(success_rows),
+            "failure_path_cells": len(failure_rows),
+            "failures": len(failure_rows),
             "errors": sum(int(row["error"]) for row in rows),
             "heavy_shortfalls": sum(int(row["heavy_shortfall"]) for row in rows),
-            "block_xors_all": str(sum(Decimal(row["block_xors_mu"]) for row in rows)),
-            "block_muladds_all": str(sum(Decimal(row["block_muladds_mu"]) for row in rows)),
+            **{
+                f"{metric}_{outcome}_sum": str(sum(
+                    Decimal(row[field]) for row in selected_rows
+                ))
+                for metric, field in (
+                    ("inact", "inact_mu"),
+                    ("block_xors", "block_xors_mu"),
+                    ("block_muladds", "block_muladds_mu"),
+                )
+                for outcome, selected_rows in (
+                    ("all_cells", rows),
+                    ("success", success_rows),
+                    ("failure_path", failure_rows),
+                )
+            },
         }
     comparisons: dict[str, Any] = {}
     for arm in ARMS[1:]:
         repairs = introductions = both_fail = 0
         new_shortfall = cleared_shortfall = 0
+        base_inact = cand_inact = Decimal(0)
         base_xors = cand_xors = Decimal(0)
         base_muladds = cand_muladds = Decimal(0)
         paired_success = 0
@@ -666,18 +684,36 @@ def summarize_scope(
             cleared_shortfall += bs and not cs
             if not bf and not cf:
                 paired_success += 1
+                base_inact += Decimal(base["inact_mu"])
+                cand_inact += Decimal(cand["inact_mu"])
                 base_xors += Decimal(base["block_xors_mu"])
                 cand_xors += Decimal(cand["block_xors_mu"])
                 base_muladds += Decimal(base["block_muladds_mu"])
                 cand_muladds += Decimal(cand["block_muladds_mu"])
+        if paired_success + repairs + introductions + both_fail != len(keys):
+            raise ValueError(f"{arm} paired outcome partition is incomplete")
         comparisons[f"{arm}_vs_d12"] = {
             "repairs": repairs, "introductions": introductions,
             "both_fail": both_fail, "new_heavy_shortfall": new_shortfall,
             "cleared_heavy_shortfall": cleared_shortfall,
             "one_sided_p": binomial_one_sided(repairs, introductions),
             "paired_success_cells": paired_success,
-            "block_xor_ratio_paired_success": str(cand_xors / base_xors),
-            "block_muladd_ratio_paired_success": str(cand_muladds / base_muladds),
+            "paired_success_base_inact_sum": str(base_inact),
+            "paired_success_candidate_inact_sum": str(cand_inact),
+            "inact_ratio_paired_success": (
+                str(cand_inact / base_inact) if base_inact else None
+            ),
+            "paired_success_base_block_xors_sum": str(base_xors),
+            "paired_success_candidate_block_xors_sum": str(cand_xors),
+            "block_xor_ratio_paired_success": (
+                str(cand_xors / base_xors) if base_xors else None
+            ),
+            "paired_success_base_block_muladds_sum": str(base_muladds),
+            "paired_success_candidate_block_muladds_sum": str(cand_muladds),
+            "block_muladd_ratio_paired_success": (
+                str(cand_muladds / base_muladds) if base_muladds else None
+            ),
+            "failure_path_costs_excluded_from_ratios": True,
         }
     consistency: dict[str, Any] = {}
     base_counts = {

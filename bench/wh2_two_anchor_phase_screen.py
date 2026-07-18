@@ -1073,6 +1073,7 @@ def comparison(
     ks: Sequence[int], base_arm: str, candidate_arm: str,
 ) -> dict[str, Any]:
     repairs = introductions = both_fail = paired_success = 0
+    base_inact = cand_inact = 0
     base_xors = cand_xors = base_muladds = cand_muladds = 0
     for seed_index in range(len(SEEDS)):
         for schedule in SCHEDULES:
@@ -1087,23 +1088,39 @@ def comparison(
                     paired_success += 1
                     base_stats = row_stats(base, "comparison base")
                     cand_stats = row_stats(cand, "comparison candidate")
+                    base_inact += base_stats["inact_milli"]
+                    cand_inact += cand_stats["inact_milli"]
                     base_xors += base_stats["block_xors_milli"]
                     cand_xors += cand_stats["block_xors_milli"]
                     base_muladds += base_stats["block_muladds_milli"]
                     cand_muladds += cand_stats["block_muladds_milli"]
+    expected_cells = len(SEEDS) * len(SCHEDULES) * len(ks)
+    if paired_success + repairs + introductions + both_fail != expected_cells:
+        die("paired outcome partition does not cover the exact phase grid")
     return {
         "repairs": repairs,
         "introductions": introductions,
         "net_failures_removed": repairs - introductions,
         "both_fail": both_fail,
         "paired_success_cells": paired_success,
+        "paired_success_base_inact_milli_sum": base_inact,
+        "paired_success_candidate_inact_milli_sum": cand_inact,
+        "inact_ratio_paired_success": (
+            str(Decimal(cand_inact) / Decimal(base_inact))
+            if base_inact else None
+        ),
+        "paired_success_base_block_xors_milli_sum": base_xors,
+        "paired_success_candidate_block_xors_milli_sum": cand_xors,
         "block_xor_ratio_paired_success": (
             str(Decimal(cand_xors) / Decimal(base_xors)) if base_xors else None
         ),
+        "paired_success_base_block_muladds_milli_sum": base_muladds,
+        "paired_success_candidate_block_muladds_milli_sum": cand_muladds,
         "block_muladd_ratio_paired_success": (
             str(Decimal(cand_muladds) / Decimal(base_muladds))
             if base_muladds else None
         ),
+        "failure_path_costs_excluded_from_ratios": True,
     }
 
 
@@ -1244,10 +1261,30 @@ def analyze(
             for seed_index in range(len(SEEDS))
             for schedule in SCHEDULES for K in ks
         ]
+        success_rows = [row for row in rows if not is_failed(row)]
+        failure_rows = [row for row in rows if is_failed(row)]
         arm_summary[arm] = {
             "cells": len(rows),
-            "failures": sum(is_failed(row) for row in rows),
+            "successful_cells": len(success_rows),
+            "failure_path_cells": len(failure_rows),
+            "failures": len(failure_rows),
             "errors": sum(int(row["error"], 10) for row in rows),
+            **{
+                f"{metric}_{outcome}_milli_sum": sum(
+                    row_stats(row, f"arm summary {arm}")[field]
+                    for row in selected_rows
+                )
+                for metric, field in (
+                    ("inact", "inact_milli"),
+                    ("block_xors", "block_xors_milli"),
+                    ("block_muladds", "block_muladds_milli"),
+                )
+                for outcome, selected_rows in (
+                    ("all_cells", rows),
+                    ("success", success_rows),
+                    ("failure_path", failure_rows),
+                )
+            },
         }
 
     post_selection_candidate_gates: dict[str, Any] = {}
@@ -1279,7 +1316,7 @@ def analyze(
         }
 
     summary = {
-        "schema": "wirehair.wh2.two_anchor_phase.analysis.v1",
+        "schema": "wirehair.wh2.two_anchor_phase.analysis.v2",
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "cohort_ks_sha256": COHORT_KS_SHA256,
@@ -1287,6 +1324,13 @@ def analyze(
         "jobs": len(jobs),
         "cells": len(ARMS) * len(SEEDS) * len(SCHEDULES) * len(ks),
         "arms": arm_summary,
+        "cost_interpretation": (
+            "Architecture cost ratios and paired sums use common-success "
+            "cells only. All-cell, successful-cell, and rank/error failure-"
+            "path sums are separate because failure paths may stop before "
+            "projection or payload RHS work. Saturated elapsed times are not "
+            "speed evidence."
+        ),
         "comparisons": {
             f"{candidate}_vs_{base}": comparison(
                 indexed, ks, base, candidate

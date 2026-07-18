@@ -582,6 +582,129 @@ class AllKProvenanceTest(unittest.TestCase):
             self.assertIn("verify_analysis_publication", run_source)
             self.assertIn("phase artifacts changed during analysis", run_source)
 
+    def test_allk_cost_report_partitions_failures_and_pairs_successes(self) -> None:
+        def arm(
+            ranks: list[int], inact: list[int], xors: list[int],
+            muladds: list[int],
+        ) -> SimpleNamespace:
+            size = len(ranks)
+            return SimpleNamespace(
+                rank=ranks, error=[0] * size, shortfall=[0] * size,
+                seed_attempt=[0] * size, inact=inact,
+                binary_def=[0] * size, heavy_gain=[0] * size,
+                xors=xors, muladds=muladds,
+            )
+
+        data = {
+            # Outcomes by cell: both succeed, candidate-only failure,
+            # base-only failure, then both fail.
+            "d12": arm(
+                [0, 0, 1, 1], [10, 20, 3, 4],
+                [100, 200, 4, 5], [50, 60, 2, 3]),
+            "two_anchor_adaptive": arm(
+                [0, 1, 0, 1], [8, 1, 30, 2],
+                [80, 3, 300, 6], [40, 1, 70, 4]),
+            "d13_adaptive": arm(
+                [0, 0, 1, 1], [10, 20, 3, 4],
+                [100, 200, 4, 5], [50, 60, 2, 3]),
+        }
+        counter: allk.Counter[str] = allk.Counter()
+        for index in range(4):
+            allk.update_counter(counter, data, index)
+        report = allk.counter_report(counter)
+
+        base = report["arms"]["d12"]
+        self.assertEqual(base["successful_cells"], 2)
+        self.assertEqual(base["failure_path_cells"], 2)
+        self.assertEqual(base["block_xors_success_milli_sum"], 300)
+        self.assertEqual(base["block_xors_failure_path_milli_sum"], 9)
+        comparison = report["comparisons"]["two_anchor_adaptive_vs_d12"]
+        self.assertEqual(comparison["paired_success_cells"], 1)
+        self.assertEqual(comparison["repairs"], 1)
+        self.assertEqual(comparison["introductions"], 1)
+        self.assertEqual(comparison["both_fail"], 1)
+        self.assertEqual(
+            comparison["paired_success_base_block_xors_milli_sum"], 100)
+        self.assertEqual(
+            comparison["paired_success_candidate_block_xors_milli_sum"], 80)
+        self.assertEqual(comparison["block_xor_ratio_paired_success"], "0.8")
+        self.assertEqual(comparison["inact_ratio_paired_success"], "0.8")
+        self.assertTrue(comparison["failure_path_costs_excluded_from_ratios"])
+
+        counter["two_anchor_adaptive_success_cells"] += 1
+        with self.assertRaisesRegex(
+                allk.CampaignError, "outcome/cost partition"):
+            allk.counter_report(counter)
+
+    def test_saturated_reducers_exclude_failure_path_costs(self) -> None:
+        def legacy_row(
+            failed: bool, inact: str, xors: str, muladds: str,
+        ) -> dict[str, str]:
+            return {
+                "rank_fail": str(int(failed)), "error": "0",
+                "heavy_shortfall": "0", "inact_mu": inact,
+                "block_xors_mu": xors, "block_muladds_mu": muladds,
+            }
+
+        K = 4096
+        legacy: dict[tuple[str, int, str, int], dict[str, str]] = {}
+        for ordinal, (seed_index, _seed, schedule) in enumerate(
+                screen.expected_strata()):
+            legacy[("d12", seed_index, schedule, K)] = legacy_row(
+                False, "10", "100", "50")
+            legacy[("two_anchor_adaptive", seed_index, schedule, K)] = \
+                legacy_row(ordinal == 0, "1" if ordinal == 0 else "8",
+                           "1" if ordinal == 0 else "80",
+                           "1" if ordinal == 0 else "40")
+            legacy[("d13_adaptive", seed_index, schedule, K)] = legacy_row(
+                False, "10", "100", "50")
+            legacy[("d14", seed_index, schedule, K)] = legacy_row(
+                False, "10", "100", "50")
+        legacy_report = screen.summarize_scope({K}, legacy)
+        candidate = legacy_report["arms"]["two_anchor_adaptive"]
+        self.assertEqual(candidate["successful_cells"], 8)
+        self.assertEqual(candidate["failure_path_cells"], 1)
+        self.assertEqual(candidate["block_xors_success_sum"], "640")
+        self.assertEqual(candidate["block_xors_failure_path_sum"], "1")
+        comparison = legacy_report["comparisons"][
+            "two_anchor_adaptive_vs_d12"]
+        self.assertEqual(comparison["paired_success_cells"], 8)
+        self.assertEqual(comparison["block_xor_ratio_paired_success"], "0.8")
+        self.assertEqual(comparison["inact_ratio_paired_success"], "0.8")
+
+        def phase_row(
+            failed: bool, inact: str, xors: str, muladds: str,
+        ) -> dict[str, str]:
+            return {
+                "rank_fail": str(int(failed)), "error": "0",
+                "heavy_shortfall": "0", "seed_attempt": "0",
+                "inact_mu": inact, "binary_def_mu": "0",
+                "heavy_gain_mu": "0", "block_xors_mu": xors,
+                "block_muladds_mu": muladds,
+            }
+
+        phased: dict[tuple[str, int, str, int], dict[str, str]] = {}
+        ordinal = 0
+        for seed_index in range(len(phase_screen.SEEDS)):
+            for schedule in phase_screen.SCHEDULES:
+                phased[("d12", seed_index, schedule, K)] = phase_row(
+                    False, "0.010", "0.100", "0.050")
+                phased[("q1", seed_index, schedule, K)] = phase_row(
+                    ordinal == 0,
+                    "0.001" if ordinal == 0 else "0.008",
+                    "0.001" if ordinal == 0 else "0.080",
+                    "0.001" if ordinal == 0 else "0.040")
+                ordinal += 1
+        phase_comparison = phase_screen.comparison(
+            phased, (K,), "d12", "q1")
+        self.assertEqual(phase_comparison["paired_success_cells"], 17)
+        self.assertEqual(
+            phase_comparison["block_xor_ratio_paired_success"], "0.8")
+        self.assertEqual(
+            phase_comparison["inact_ratio_paired_success"], "0.8")
+        self.assertTrue(
+            phase_comparison["failure_path_costs_excluded_from_ratios"])
+
     def test_allk_final_analysis_publication_reopens_exact_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             result_dir = Path(temporary)
