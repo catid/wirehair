@@ -1270,6 +1270,23 @@ if(NOT grouped_warm_result EQUAL 0 OR grouped_warm_err OR
         "${grouped_warm}\n${grouped_warm_err}")
 endif()
 
+# Dispatch timing needs intermediate practical payload widths to resolve the
+# crossover between the original 64-byte and 1280-byte timing points.  Keep
+# this bounded to the explicit sealed-campaign width set.
+run_bench(grouped_width_result grouped_width_out grouped_width_err groupedtiming
+    --N 4096 --bb 512 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 32 --candidate-grouped-rows 7
+    --candidate-buckets auto --evict-bytes 4096 --cache-state warm
+    --cycle-index 2 --loss 0.5 --seed 15111065706836454659
+    --schedule burst)
+if(NOT grouped_width_result EQUAL 0 OR NOT grouped_width_err STREQUAL "" OR
+   NOT grouped_width_out MATCHES
+       "schema=v2.*N=4096 bb=512.*control_period=244 control_grouped_rows=0.*candidate_period=32 candidate_grouped_rows=7")
+    message(FATAL_ERROR
+        "groupedtiming intermediate-width smoke failed: ${grouped_width_err}\n${grouped_width_out}")
+endif()
+
 expect_failure("requires --N" groupedtiming)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4

@@ -7215,8 +7215,9 @@ int CmdGroupedTiming(int argc, char** argv)
                 wirehair_v2::MixedResidueBucketMode::Automatic);
     };
     if (K < 2u || K > 64000u ||
-        (block_bytes != 64u && block_bytes != 1280u &&
-         block_bytes != 4096u) ||
+        (block_bytes != 64u && block_bytes != 256u &&
+         block_bytes != 512u && block_bytes != 1024u &&
+         block_bytes != 1280u && block_bytes != 4096u) ||
         overhead > 1024u || (uint64_t)K + overhead > UINT32_MAX ||
         invalid_arm(control_arm) || invalid_arm(candidate_arm) ||
         (have_cycle_index && cycle_index > 3u) ||
