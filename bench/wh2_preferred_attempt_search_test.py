@@ -2500,7 +2500,9 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 with self.subTest(mode=mode), \
                      mock.patch.object(
                          subject, "TIMING_HOST_COMMAND_TIMEOUT_SECONDS",
-                         0.05), \
+                         # Leave enough time for the fixture interpreter to
+                         # publish its PID even on the saturated test host.
+                         1.0), \
                      self.assertRaisesRegex(
                          subject.CampaignError, expected):
                     session.checked((str(tool), mode, str(marker)))
