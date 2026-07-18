@@ -1,0 +1,93 @@
+{
+  "architecture": {
+    "base": "exact production commit replay",
+    "base_commit": "3c8a7a31e0e0b592f906d52bf7fef0bafebbf2f9",
+    "candidate": "raw corrected degree-balanced staircase; no seed fixes",
+    "candidate_commit": "bf418cabbfc70e8da89e938a6f68c439e4234948",
+    "common": "mixed count2 period244 frozen geometry GF256=10 GF16=2 grouped=0 two-anchor phase0 packet-peel-xor0 table-none"
+  },
+  "artifact_hashes": {
+    "base_binary_sha256": "1f264e1e6a20c8f9b9f875799a41c81f2a98e728022a6fb1b14f7eb21cf9bc2c",
+    "base_build_receipt_sha256": "e2f3a7567616d6dc0c44a1dca5c4b3231b9786f4a7f5e2113a4ed22f45ee1eb7",
+    "binary_smoke_sha256": "392cd896c69978dce8999715f29adca88e274034527b7f57a05392459dc08fca",
+    "candidate_binary_sha256": "1e23c41e930bb3a4fdf3aefc88ea38a83a4548dcfaaa23eced38f75cf2ef11d5",
+    "candidate_build_receipt_sha256": "e138be9f806c6f598397fade6c0e30041809beb02ed916fca0602f26f47a29b8",
+    "controller_sha256": "a0cd8ff51f3a62cfc5dd655c84dc5e2e9dc443fa882297dbf2743dcab0f04b06",
+    "design_sha256": "19e5967df8e75bf95470ade0c8a8b4e16641c4e8cdd38f21f474c78ae110ee99",
+    "independent_task_audit_sha256": "964f73a0e45ba5ceafed3b50b761044d4e6dc4292292e437a598fe3c5cbdf569",
+    "prelaunch_receipts_sha256": "00215d89c9a1c2441359cb7a56bdbf80345755509ba6bf86cb06a591f6585f1c",
+    "sampler_sha256": "4761eeda3f85532994ff46642d0b6cc55ee8fa0b086f3cabcd865db9606b2c3e",
+    "tasks_manifest_sha256": "047bd03f822df8a283258fe99764fc97b235e7a5c211db2766b3776e7a5a7b0c"
+  },
+  "campaign": {
+    "K_count": 63999,
+    "K_range": [
+      2,
+      64000
+    ],
+    "cells_per_arm": 575991,
+    "hard_loss": 0.5,
+    "max_benchmark_processes_with_all_retries": 13500,
+    "max_concurrent_benchmark_processes": 128,
+    "max_sampler_attempts": 27,
+    "raw_benchmark_processes_without_retries": 4500,
+    "schedules": [
+      "burst",
+      "adversarial",
+      "repair-only"
+    ],
+    "task_pairs": 2250,
+    "tasks": 4500,
+    "total_cells": 1151982,
+    "workers": 128
+  },
+  "controller_source_commit": "516afe224158e98fae804b597536c579ac29758e",
+  "created_utc": "2026-07-18T23:50:18Z",
+  "execution": {
+    "launch_command_not_run": "/tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1/frozen/wh2_degree_balanced_allk_campaign.py launch --root /tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1 --expected-receipts-sha256 00215d89c9a1c2441359cb7a56bdbf80345755509ba6bf86cb06a591f6585f1c --execute --stage all",
+    "preflight_command_run": "/tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1/frozen/wh2_degree_balanced_allk_campaign.py launch --root /tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1 --expected-receipts-sha256 00215d89c9a1c2441359cb7a56bdbf80345755509ba6bf86cb06a591f6585f1c --preflight-only",
+    "preflight_status": "BLOCKED_CONCURRENT_SAMPLER",
+    "prepared_not_launched": true,
+    "root": "/tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1"
+  },
+  "output_bounds": {
+    "campaign_budget_bytes": 3221225472,
+    "sealed_worst_case_bytes": 2194735104,
+    "stage_timeout_seconds": 1800,
+    "stderr_bytes_per_task": 16384,
+    "stdout_bytes_per_task": 98304,
+    "task_timeout_seconds": 300,
+    "thermal_bytes_per_segment": 2097152
+  },
+  "preparation": {
+    "base_replay_smoke_cases": 9,
+    "controller_matches_frozen_sha256": true,
+    "fresh_exact_commit_builds": true,
+    "regenerated_after_retry_cap_and_recovery_fix": true
+  },
+  "schema": "wirehair.wh2.degree_balanced_allk_holdout.v1.preparation_receipt",
+  "seeds": {
+    "derivation": "first 64 bits of SHA-256(wirehair.wh2.degree-balanced.allk.holdout.v1|seed|i), i=0..2",
+    "development_overlap": [],
+    "holdout": [
+      "0x475b1dd3864534a3",
+      "0x65eda454ed6be8ec",
+      "0x6fd9d0c558cad523"
+    ]
+  },
+  "thermal_and_ownership": {
+    "controller_does_not_own_existing_sampler": true,
+    "controller_sampler_policy": "refuse launch unless sole sampler; then use sudo -n and validate CPU Tctl, all eight DIMM fields, zero DIMM/EDAC errors, 0.5..2.5 second cadence, full start/end coverage, and mean busy >=95 percent",
+    "external_sampler_command": "/usr/bin/python3 /tmp/wh2-grouped-pinned-timing-243f8ed-v1/frozen/wirehair_expo_thermal_sampler.py --csv /tmp/wirehair-posttiming-thermal.csv --pid-file /tmp/wirehair-posttiming-thermal.pid --interval 1 --dimm-attempts 5 --dimm-retry-delay 0.01",
+    "external_sampler_pid_at_preflight": 1495219,
+    "external_sampler_was_not_signaled": true
+  },
+  "validation_gates": [
+    "python3 -m py_compile",
+    "selftest under normal Python",
+    "selftest under python3 -O",
+    "selftest under python3 -X dev",
+    "git diff --check",
+    "line-by-line controller bug and tamper pass"
+  ]
+}
