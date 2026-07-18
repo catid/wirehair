@@ -174,6 +174,18 @@ EDAC counter, and immutable file hash before they accept the result.
 Preparation smoke output is explicitly non-timing evidence; only an isolated
 `run` can produce promotional timing evidence.
 
+The sealed isolated run completed all 108 cells and 864 process launches with
+zero retries.  Base and lazy binaries matched exactly in graph trace, recovery,
+and deterministic work.  Across 10,368 timed rows per binary, the lazy/base
+ratio of elapsed-time sums was 0.989357 (paired-bootstrap 95% interval
+0.988177--0.990481): about 1.06% faster overall.  Lazy won 102 of 108 cells,
+and every aggregate K, block-width, cache-state, and hard-schedule stratum had
+a ratio and bootstrap upper bound below one.  Cold and warm ratios were
+0.989808 and 0.988904; 64/1280/4096-byte ratios were 0.991232, 0.991649, and
+0.988163.  The 1,545-sample thermal interval reached 65 C CPU and 53.5 C on
+the hottest DIMM, with zero DIMM-read or EDAC errors.  The replayed summary
+SHA-256 is `5d08a6da46580876d5f95041d52e4aff6b1cb7198df5dab63e774a6ef5e81574`.
+
 ```sh
 python3 bench/wh2_lazy_solve_timing.py prepare \
   --repo . --result-dir /tmp/wh2-lazy-paired \
