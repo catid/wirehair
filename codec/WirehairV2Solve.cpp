@@ -596,6 +596,40 @@ private:
     bool Initialized = false;
 };
 
+// Reconstruct one binary pivot directly from its affine RHS and the solved
+// free variables.  Shipping mixed completion has H == 12, so the complete
+// source set (pivot RHS plus every selected free value) fits in the
+// initializer's 16-source set-form batch; larger test-hook geometries safely
+// spill into its additive batch.  BlockXors remains a logical equation-work
+// receipt: the affine RHS initializes the value and only the selected relation
+// terms count as XORs.
+void InitializeMixedBinaryPivotValue(
+    uint8_t* value,
+    uint32_t block_bytes,
+    const uint8_t* pivot_rhs,
+    const uint64_t* relation,
+    const std::vector<uint32_t>& free_columns,
+    const std::vector<uint32_t>& inactive_columns,
+    const std::vector<uint8_t>& values,
+    PrecodeSolveStats& stats)
+{
+    BatchedBlockXorInitializer value_xor(
+        value, block_bytes, pivot_rhs);
+    for (uint32_t free_column : free_columns)
+    {
+        if ((relation[free_column >> 6] &
+                (UINT64_C(1) << (free_column & 63u))) == 0u)
+        {
+            continue;
+        }
+        value_xor.Add(
+            values.data() +
+                (size_t)inactive_columns[free_column] * block_bytes);
+        ++stats.BlockXors;
+    }
+    value_xor.Flush();
+}
+
 template<uint32_t Count>
 struct ProjectionSourceBatch
 {
@@ -3367,27 +3401,13 @@ mixed_rhs_accumulated:
         if (!binary_have_pivot[pivot]) continue;
         uint8_t* value = values.data() +
             (size_t)inactive_columns[pivot] * block_bytes;
-        std::memcpy(
-            value,
-            binary_pivot_rhs.data() + (size_t)pivot * block_bytes,
-            block_bytes);
         const uint64_t* relation =
             binary_pivot_coeff.data() +
                 (size_t)pivot * projection_words;
-        for (uint32_t i = 0; i < quotient_columns; ++i) {
-            const uint32_t free_column = free_columns[i];
-            if ((relation[free_column >> 6] &
-                    (UINT64_C(1) << (free_column & 63u))) == 0u)
-            {
-                continue;
-            }
-            gf256_add_mem(
-                value,
-                values.data() +
-                    (size_t)inactive_columns[free_columns[i]] * block_bytes,
-                (int)block_bytes);
-            ++stats.BlockXors;
-        }
+        InitializeMixedBinaryPivotValue(
+            value, block_bytes,
+            binary_pivot_rhs.data() + (size_t)pivot * block_bytes,
+            relation, free_columns, inactive_columns, values, stats);
     }
     return Wirehair_Success;
 }
@@ -4747,17 +4767,17 @@ static WirehairResult SolvePrecodeSystemImpl(
         {
             // No residual variables: every unused binary row and every actual
             // heavy equation must reduce to zero.
+            std::vector<uint8_t> rhs;
             for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
             {
                 if (peel.UsedRows[r]) {
                     continue;
                 }
-                std::vector<uint8_t> rhs(block_bytes, 0u);
-                if (rows[r].Data) {
-                    std::memcpy(rhs.data(), rows[r].Data, block_bytes);
+                if (rhs.empty()) {
+                    rhs.resize(block_bytes);
                 }
-                BatchedBlockXorAccumulator rhs_xor(
-                    rhs.data(), block_bytes);
+                BatchedBlockXorInitializer rhs_xor(
+                    rhs.data(), block_bytes, rows[r].Data);
                 for (uint32_t column : rows[r].Columns) {
                     rhs_xor.Add(
                         values.data() + (size_t)column * block_bytes);
@@ -4830,11 +4850,8 @@ static WirehairResult SolvePrecodeSystemImpl(
             ++st.ResidualRows;
             std::fill(
                 accumulator.begin(), accumulator.end(), uint64_t{0});
-            std::fill(rhs.begin(), rhs.end(), uint8_t{0});
-            if (rows[r].Data) {
-                std::memcpy(rhs.data(), rows[r].Data, block_bytes);
-            }
-            BatchedBlockXorAccumulator rhs_xor(rhs.data(), block_bytes);
+            BatchedBlockXorInitializer rhs_xor(
+                rhs.data(), block_bytes, rows[r].Data);
             BatchedProjectionXorAccumulator projection_xor(
                 accumulator.data(), projection.data(), words);
             for (uint32_t column : rows[r].Columns)
@@ -7378,6 +7395,371 @@ WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
                 {
                     return false;
                 }
+            }
+        }
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
+}
+
+WH2_TEST_NOINLINE bool CheckMixedRhsFusionOracleForTesting()
+{
+    if (gf256_init() != 0) return false;
+
+    try
+    {
+        // Include scalar tails and both sides of the major SIMD/fusion policy
+        // boundaries.  The primitive is byte-oriented even though production
+        // mixed completion admits only even payload widths.
+        const uint32_t block_sizes[] = {
+            1u, 2u, 3u,
+            15u, 16u, 17u,
+            31u, 32u, 33u,
+            63u, 64u, 65u,
+            127u, 128u, 129u,
+            255u, 256u, 257u,
+            511u, 512u, 513u,
+            1279u, 1280u, 1281u,
+            4095u, 4096u, 4097u
+        };
+        uint64_t random_state = UINT64_C(0x243f6a8885a308d3);
+        const auto next_random = [&random_state]() -> uint64_t {
+            random_state += UINT64_C(0x9e3779b97f4a7c15);
+            uint64_t value = random_state;
+            value = (value ^ (value >> 30)) *
+                UINT64_C(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)) *
+                UINT64_C(0x94d049bb133111eb);
+            return value ^ (value >> 31);
+        };
+
+        for (uint32_t block_bytes : block_sizes)
+        {
+            // q=0..12 covers shipping H.  q=13..16 exercises the test-hook
+            // extension and the 16-source set-form/additive spill boundary.
+            for (uint32_t q = 0u; q <= 16u; ++q)
+            {
+                std::vector<uint8_t> pivot_rhs(block_bytes);
+                std::vector<uint8_t> values(
+                    (size_t)(q + 1u) * block_bytes);
+                for (uint8_t& byte : pivot_rhs) {
+                    byte = (uint8_t)next_random();
+                }
+                for (uint8_t& byte : values) {
+                    byte = (uint8_t)next_random();
+                }
+                std::vector<uint32_t> free_columns(q);
+                std::vector<uint32_t> inactive_columns(q + 1u);
+                for (uint32_t i = 0u; i < q; ++i) {
+                    free_columns[i] = i;
+                    inactive_columns[i] = q - i - 1u;
+                }
+                inactive_columns[q] = q;
+
+                const uint64_t all = q == 0u ? UINT64_C(0) :
+                    (UINT64_C(1) << q) - UINT64_C(1);
+                const uint64_t patterns[] = {
+                    UINT64_C(0), all,
+                    all & UINT64_C(0x5555555555555555),
+                    all & UINT64_C(0xaaaaaaaaaaaaaaaa)
+                };
+                for (uint64_t relation_word : patterns)
+                {
+                    std::vector<uint8_t> expected = pivot_rhs;
+                    PrecodeSolveStats expected_stats = {};
+                    expected_stats.BlockXors = 19u;
+                    expected_stats.BlockMulAdds = 23u;
+                    for (uint32_t free_column : free_columns)
+                    {
+                        if ((relation_word &
+                                (UINT64_C(1) << free_column)) == 0u)
+                        {
+                            continue;
+                        }
+                        gf256_add_mem(
+                            expected.data(),
+                            values.data() +
+                                (size_t)inactive_columns[free_column] *
+                                    block_bytes,
+                            (int)block_bytes);
+                        ++expected_stats.BlockXors;
+                    }
+
+                    std::vector<uint8_t> actual_values = values;
+                    std::memset(
+                        actual_values.data() + (size_t)q * block_bytes,
+                        0xa5, block_bytes);
+                    PrecodeSolveStats actual_stats = {};
+                    actual_stats.BlockXors = 19u;
+                    actual_stats.BlockMulAdds = 23u;
+                    InitializeMixedBinaryPivotValue(
+                        actual_values.data() + (size_t)q * block_bytes,
+                        block_bytes, pivot_rhs.data(), &relation_word,
+                        free_columns, inactive_columns, actual_values,
+                        actual_stats);
+                    if (std::memcmp(
+                            expected.data(),
+                            actual_values.data() + (size_t)q * block_bytes,
+                            block_bytes) != 0 ||
+                        actual_stats.BlockXors !=
+                            expected_stats.BlockXors ||
+                        actual_stats.BlockMulAdds !=
+                            expected_stats.BlockMulAdds)
+                    {
+                        return false;
+                    }
+                }
+
+                // Exercise packet-data and null-data initialization with the
+                // same number of logical known-constant XORs as production.
+                std::vector<uint8_t> packet_data(block_bytes);
+                std::vector<uint8_t> sources((size_t)q * block_bytes);
+                for (uint8_t& byte : packet_data) {
+                    byte = (uint8_t)next_random();
+                }
+                for (uint8_t& byte : sources) {
+                    byte = (uint8_t)next_random();
+                }
+                for (uint32_t data_mode = 0u; data_mode < 2u; ++data_mode)
+                {
+                    const uint8_t* data = data_mode != 0u ?
+                        packet_data.data() : nullptr;
+                    std::vector<uint8_t> expected(block_bytes, 0u);
+                    if (data) {
+                        std::memcpy(expected.data(), data, block_bytes);
+                    }
+                    BatchedBlockXorAccumulator expected_xor(
+                        expected.data(), block_bytes);
+                    for (uint32_t i = 0u; i < q; ++i) {
+                        expected_xor.Add(
+                            sources.data() + (size_t)i * block_bytes);
+                    }
+                    expected_xor.Flush();
+
+                    std::vector<uint8_t> actual(block_bytes, 0xa5u);
+                    BatchedBlockXorInitializer actual_xor(
+                        actual.data(), block_bytes, data);
+                    for (uint32_t i = 0u; i < q; ++i) {
+                        actual_xor.Add(
+                            sources.data() + (size_t)i * block_bytes);
+                    }
+                    actual_xor.Flush();
+                    if (actual != expected) return false;
+                }
+            }
+
+            // The first set-form batch also has to transition correctly to
+            // additive batches for unusually dense unused equations.
+            const uint32_t source_count = 33u;
+            std::vector<uint8_t> sources(
+                (size_t)source_count * block_bytes);
+            std::vector<uint8_t> data(block_bytes);
+            for (uint8_t& byte : sources) {
+                byte = (uint8_t)next_random();
+            }
+            for (uint8_t& byte : data) {
+                byte = (uint8_t)next_random();
+            }
+            for (uint32_t data_mode = 0u; data_mode < 2u; ++data_mode)
+            {
+                const uint8_t* first = data_mode != 0u ?
+                    data.data() : nullptr;
+                std::vector<uint8_t> expected(block_bytes, 0u);
+                if (first) {
+                    std::memcpy(expected.data(), first, block_bytes);
+                }
+                BatchedBlockXorAccumulator expected_xor(
+                    expected.data(), block_bytes);
+                std::vector<uint8_t> actual(block_bytes, 0x5au);
+                BatchedBlockXorInitializer actual_xor(
+                    actual.data(), block_bytes, first);
+                for (uint32_t i = 0u; i < source_count; ++i)
+                {
+                    const uint8_t* source =
+                        sources.data() + (size_t)i * block_bytes;
+                    expected_xor.Add(source);
+                    actual_xor.Add(source);
+                }
+                expected_xor.Flush();
+                actual_xor.Flush();
+                if (actual != expected) return false;
+            }
+        }
+
+        // Real inactive-coordinate layouts are not generally contiguous.
+        // Cross all packed relation-word boundaries used by larger test-hook
+        // systems and verify that the helper indexes the inverse map, not the
+        // ordinal position in free_columns.
+        {
+            const uint32_t block_bytes = 257u;
+            const uint32_t inactive_count = 130u;
+            const uint32_t free_count = 7u;
+            const uint32_t destination_index = free_count;
+            const uint32_t free_data[free_count] = {
+                0u, 1u, 63u, 64u, 65u, 127u, 129u
+            };
+            const std::vector<uint32_t> free_columns(
+                free_data, free_data + free_count);
+            std::vector<uint32_t> inactive_columns(inactive_count, 0u);
+            for (uint32_t i = 0u; i < free_count; ++i) {
+                inactive_columns[free_columns[i]] = free_count - i - 1u;
+            }
+            std::vector<uint8_t> values(
+                (size_t)(free_count + 1u) * block_bytes);
+            std::vector<uint8_t> pivot_rhs(block_bytes);
+            for (uint8_t& byte : values) {
+                byte = (uint8_t)next_random();
+            }
+            for (uint8_t& byte : pivot_rhs) {
+                byte = (uint8_t)next_random();
+            }
+            std::vector<uint64_t> relation(
+                PackedWordCount(inactive_count), UINT64_C(0));
+            const uint32_t selected_data[] = {
+                0u, 63u, 64u, 127u, 129u
+            };
+            for (uint32_t selected : selected_data) {
+                relation[selected >> 6] |=
+                    UINT64_C(1) << (selected & 63u);
+            }
+            std::vector<uint8_t> expected = pivot_rhs;
+            PrecodeSolveStats expected_stats = {};
+            expected_stats.BlockXors = 11u;
+            for (uint32_t free_column : free_columns)
+            {
+                if ((relation[free_column >> 6] &
+                        (UINT64_C(1) << (free_column & 63u))) == 0u)
+                {
+                    continue;
+                }
+                gf256_add_mem(
+                    expected.data(),
+                    values.data() +
+                        (size_t)inactive_columns[free_column] * block_bytes,
+                    (int)block_bytes);
+                ++expected_stats.BlockXors;
+            }
+            std::vector<uint8_t> actual_values = values;
+            std::memset(
+                actual_values.data() +
+                    (size_t)destination_index * block_bytes,
+                0xa5, block_bytes);
+            PrecodeSolveStats actual_stats = {};
+            actual_stats.BlockXors = 11u;
+            InitializeMixedBinaryPivotValue(
+                actual_values.data() +
+                    (size_t)destination_index * block_bytes,
+                block_bytes, pivot_rhs.data(), relation.data(),
+                free_columns, inactive_columns, actual_values,
+                actual_stats);
+            if (std::memcmp(
+                    expected.data(),
+                    actual_values.data() +
+                        (size_t)destination_index * block_bytes,
+                    block_bytes) != 0 ||
+                actual_stats.BlockXors != expected_stats.BlockXors ||
+                actual_stats.BlockMulAdds != expected_stats.BlockMulAdds)
+            {
+                return false;
+            }
+        }
+
+        // Feed fused and legacy initializations through packed residual
+        // insertion.  This locks down independent/dependent/inconsistent
+        // classification as well as exact pivot bytes and logical receipts.
+        const uint32_t R = 13u;
+        const uint32_t words = PackedWordCount(R);
+        const uint32_t block_bytes = 513u;
+        for (uint32_t data_mode = 0u; data_mode < 2u; ++data_mode)
+        {
+            std::vector<uint8_t> data(block_bytes);
+            std::vector<uint8_t> source(block_bytes);
+            for (uint8_t& byte : data) {
+                byte = (uint8_t)next_random();
+            }
+            for (uint8_t& byte : source) {
+                byte = (uint8_t)next_random();
+            }
+            const uint8_t* first = data_mode != 0u ? data.data() : nullptr;
+            std::vector<uint8_t> legacy_rhs(block_bytes, 0u);
+            if (first) {
+                std::memcpy(legacy_rhs.data(), first, block_bytes);
+            }
+            BatchedBlockXorAccumulator legacy_xor(
+                legacy_rhs.data(), block_bytes);
+            legacy_xor.Add(source.data());
+            legacy_xor.Flush();
+            std::vector<uint8_t> fused_rhs(block_bytes, 0xa5u);
+            BatchedBlockXorInitializer fused_xor(
+                fused_rhs.data(), block_bytes, first);
+            fused_xor.Add(source.data());
+            fused_xor.Flush();
+            if (legacy_rhs != fused_rhs) return false;
+
+            std::vector<uint64_t> legacy_pivots((size_t)R * words, 0u);
+            std::vector<uint64_t> fused_pivots((size_t)R * words, 0u);
+            std::vector<uint8_t> legacy_pivot_rhs(
+                (size_t)R * block_bytes, 0u);
+            std::vector<uint8_t> fused_pivot_rhs(
+                (size_t)R * block_bytes, 0u);
+            std::vector<uint8_t> legacy_have(R, 0u);
+            std::vector<uint8_t> fused_have(R, 0u);
+            uint32_t legacy_rank = 0u;
+            uint32_t fused_rank = 0u;
+            PrecodeSolveStats legacy_stats = {};
+            PrecodeSolveStats fused_stats = {};
+            const auto insert_pair = [&](
+                const std::vector<uint8_t>& left_rhs,
+                const std::vector<uint8_t>& right_rhs,
+                ResidualInsertResult expected) -> bool
+            {
+                std::vector<uint64_t> left_coeff(words, 0u);
+                left_coeff[0] =
+                    (UINT64_C(1) << 0u) |
+                    (UINT64_C(1) << 6u) |
+                    (UINT64_C(1) << 12u);
+                std::vector<uint64_t> right_coeff = left_coeff;
+                std::vector<uint8_t> left = left_rhs;
+                std::vector<uint8_t> right = right_rhs;
+                const ResidualInsertResult left_result =
+                    InsertPackedBinaryResidualRow(
+                        left_coeff, left, R, words, block_bytes,
+                        legacy_pivots, legacy_pivot_rhs, legacy_have,
+                        legacy_rank, legacy_stats,
+                        kBatchedResidualRhsMinBlockBytes);
+                const ResidualInsertResult right_result =
+                    InsertPackedBinaryResidualRow(
+                        right_coeff, right, R, words, block_bytes,
+                        fused_pivots, fused_pivot_rhs, fused_have,
+                        fused_rank, fused_stats,
+                        kBatchedResidualRhsMinBlockBytes);
+                return left_result == expected && right_result == expected &&
+                    left_coeff == right_coeff && left == right &&
+                    legacy_pivots == fused_pivots &&
+                    legacy_pivot_rhs == fused_pivot_rhs &&
+                    legacy_have == fused_have &&
+                    legacy_rank == fused_rank &&
+                    legacy_stats.BlockXors == fused_stats.BlockXors &&
+                    legacy_stats.BlockMulAdds == fused_stats.BlockMulAdds;
+            };
+            if (!insert_pair(
+                    legacy_rhs, fused_rhs,
+                    ResidualInsertResult::Inserted) ||
+                !insert_pair(
+                    legacy_rhs, fused_rhs,
+                    ResidualInsertResult::Dependent))
+            {
+                return false;
+            }
+            legacy_rhs[block_bytes / 2u] ^= 1u;
+            fused_rhs[block_bytes / 2u] ^= 1u;
+            if (!insert_pair(
+                    legacy_rhs, fused_rhs,
+                    ResidualInsertResult::Inconsistent))
+            {
+                return false;
             }
         }
     }

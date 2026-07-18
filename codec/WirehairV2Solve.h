@@ -163,6 +163,14 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
 */
 bool CheckPackedBinaryResidualOracleForTesting();
 
+/**
+    Compare fused mixed-pivot and unused-row RHS initialization against the
+    legacy copy/zero-plus-XOR sequence across every production quotient width,
+    extended test-hook widths, packed-word boundaries, SIMD boundary block
+    sizes, null packet data, and residual classifications.
+*/
+bool CheckMixedRhsFusionOracleForTesting();
+
 enum class MixedNullWitnessStatus : uint32_t
 {
     None = 0,
