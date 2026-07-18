@@ -144,6 +144,10 @@ evicts the requested `--evict-bytes` before every sample; `warm` retains the
 working set.  Here `cold` means data-cache-cold after both arm preflights;
 the command intentionally does not measure fresh-process allocator or first-
 use TLS setup costs, and receipts this as `allocator_tls_state=preflight-warmed`.
+Schema v2 also runs both preflights and timed samples through the codec-owned
+no-init solve arena, then records its allocated bytes, eager-zero bytes, and
+commit-copy bytes.  Valid production-route observations require the last two
+receipts to be zero; the completed arena is published by ownership swap.
 Only rows whose preflight classification is `common-success`
 are valid paired speed observations.  All test-only TLS settings are reapplied
 outside the timer before every arm, and this command changes no named profile
