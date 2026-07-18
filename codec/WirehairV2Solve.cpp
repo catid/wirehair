@@ -1225,7 +1225,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
     const uint32_t extension_rows = ActiveMixedGF16Rows();
-    const uint32_t grouped_gf256_rows = ActiveMixedGroupedGF256Rows();
+    const uint32_t configured_grouped_gf256_rows =
+        ActiveMixedGroupedGF256Rows();
     const uint32_t H = subfield_rows + extension_rows;
     const uint32_t populated_residues =
         std::min(coefficient_period, column_count);
@@ -1235,7 +1236,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         (uint64_t)inactive_count * packed_words;
     if (coefficient_period < H || column_count < H ||
         coefficient_period > kMixedCoefficientPeriod ||
-        grouped_gf256_rows > subfield_rows ||
+        configured_grouped_gf256_rows > subfield_rows ||
         inactive_index.size() != column_count ||
         projection_words != expected_projection_words ||
         projection_words == 0u ||
@@ -1245,9 +1246,18 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         return false;
     }
+    const uint32_t first_heavy_column = column_count - H;
+    // Both A and C start at residue shift zero.  If the complete non-corner
+    // prefix fits in block zero, every grouped coefficient is therefore
+    // canonical A; the final H corner columns are defined to stay on A too.
+    // Treat that exact identity as an r=0 execution while leaving the active
+    // experiment configuration and its receipts unchanged.
+    const uint32_t grouped_gf256_rows =
+        configured_grouped_gf256_rows != 0u &&
+            first_heavy_column <= coefficient_period ?
+        0u : configured_grouped_gf256_rows;
     const uint32_t first_grouped_gf256_row =
         subfield_rows - grouped_gf256_rows;
-    const uint32_t first_heavy_column = column_count - H;
     if (grouped_gf256_rows != 0u)
     {
         const uint32_t grouped_block_count =
@@ -1289,11 +1299,41 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
 #endif
     };
 
+    // Grouped suffixes partition whole 16-bit coefficient lanes, so either
+    // side can leave a complete packed word unused.  Avoid the corresponding
+    // coefficient load, AND and projected read/modify/write for every set bit
+    // in that residue bucket.  The explicit three-word form is the production
+    // H12 fast path; the optional fourth word preserves extended test hooks.
+    const auto xor_masked_projected = [&](
+        uint32_t index,
+        const uint64_t* coefficients,
+        const uint64_t* masks)
+    {
+        uint64_t* destination =
+            projected.data() + (size_t)index * packed_words;
+        if (masks[0] != 0u) {
+            destination[0] ^= coefficients[0] & masks[0];
+        }
+        if (masks[1] != 0u) {
+            destination[1] ^= coefficients[1] & masks[1];
+        }
+        if (masks[2] != 0u) {
+            destination[2] ^= coefficients[2] & masks[2];
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (packed_words == 4u && masks[3] != 0u) {
+            destination[3] ^= coefficients[3] & masks[3];
+        }
+#endif
+    };
+
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
     const bool secondary_schedule =
         independent_extension_residues || grouped_gf256_rows != 0u;
-    if (independent_extension_residues && grouped_gf256_rows != 0u) {
+    if (independent_extension_residues &&
+        configured_grouped_gf256_rows != 0u)
+    {
         return false;
     }
     uint64_t primary_masks[kMixedPackedCoefficientWords] = {};
@@ -1326,31 +1366,10 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
     {
         for (uint32_t column = 0; column < column_count; ++column)
         {
-            uint64_t combined_coefficients[
-                kMixedPackedCoefficientWords] = {};
             const uint32_t primary_residue =
                 ActiveMixedCoefficientResidue(column);
             const uint64_t* coefficients = cached_packed.ByResidue[
                 primary_residue];
-            // Preserve the established one-period independent-extension
-            // solve path exactly.  Grouped GF(256) still composes A/C masks
-            // explicitly even though both schedules currently start at zero;
-            // that keeps the row partition and corner override invariant
-            // visible instead of relying on today's block-zero coincidence.
-            if (grouped_gf256_rows != 0u)
-            {
-                const uint32_t secondary_residue =
-                    grouped_residue_at(column, primary_residue);
-                const uint64_t* secondary_coefficients =
-                    cached_packed.ByResidue[secondary_residue];
-                for (uint32_t word = 0u; word < packed_words; ++word) {
-                    combined_coefficients[word] =
-                        (coefficients[word] & primary_masks[word]) |
-                        (secondary_coefficients[word] &
-                            secondary_masks[word]);
-                }
-                coefficients = combined_coefficients;
-            }
             const uint32_t inactive = inactive_index[column];
             if (inactive != UINT32_MAX)
             {
@@ -1501,14 +1520,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                     }
                     else
                     {
-                        uint64_t* destination = projected.data() +
-                            (size_t)index * packed_words;
-                        for (uint32_t packed = 0u;
-                             packed < packed_words; ++packed)
-                        {
-                            destination[packed] ^=
-                                coefficients[packed] & primary_masks[packed];
-                        }
+                        xor_masked_projected(
+                            index, coefficients, primary_masks);
                     }
                 }
                 word &= word - 1u;
@@ -1535,14 +1548,8 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
                     const uint32_t index = (word_index << 6) + bit;
                     if (index < inactive_count)
                     {
-                        uint64_t* destination = projected.data() +
-                            (size_t)index * packed_words;
-                        for (uint32_t packed = 0u;
-                             packed < packed_words; ++packed)
-                        {
-                            destination[packed] ^=
-                                coefficients[packed] & secondary_masks[packed];
-                        }
+                        xor_masked_projected(
+                            index, coefficients, secondary_masks);
                     }
                     word &= word - 1u;
                 }
@@ -2408,7 +2415,8 @@ WirehairResult SolveMixedCompletionQuotient(
     const uint32_t subfield_rows = ActiveMixedGF256Rows();
     const uint32_t extension_rows = ActiveMixedGF16Rows();
     const uint32_t H = subfield_rows + extension_rows;
-    const uint32_t grouped_gf256_rows = ActiveMixedGroupedGF256Rows();
+    const uint32_t configured_grouped_gf256_rows =
+        ActiveMixedGroupedGF256Rows();
     const bool independent_extension_residues =
         ActiveMixedIndependentExtensionResidues();
     const uint64_t projection_elements =
@@ -2419,8 +2427,8 @@ WirehairResult SolveMixedCompletionQuotient(
         (uint64_t)inactive_count * block_bytes;
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
         system.Params.HeavyRows != H || column_count < H ||
-        grouped_gf256_rows > subfield_rows ||
-        (grouped_gf256_rows != 0u &&
+        configured_grouped_gf256_rows > subfield_rows ||
+        (configured_grouped_gf256_rows != 0u &&
          independent_extension_residues) ||
         (block_bytes & 1u) != 0u ||
         binary_rank > inactive_count ||
@@ -2437,9 +2445,18 @@ WirehairResult SolveMixedCompletionQuotient(
     {
         return Wirehair_InvalidInput;
     }
+    const uint32_t first_heavy_column = column_count - H;
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    // C and A are identical throughout block zero, and the H-column corner
+    // remains canonical A.  Route this exact small-system identity through
+    // the established single-schedule solve so projection, RHS accumulation,
+    // and their work counters all match r=0.
+    const uint32_t grouped_gf256_rows =
+        configured_grouped_gf256_rows != 0u &&
+            first_heavy_column <= coefficient_period ?
+        0u : configured_grouped_gf256_rows;
     const uint32_t first_grouped_gf256_row =
         subfield_rows - grouped_gf256_rows;
-    const uint32_t first_heavy_column = column_count - H;
     for (uint32_t index = 0; index < inactive_count; ++index)
     {
         const uint32_t column = inactive_columns[index];
@@ -2469,7 +2486,6 @@ WirehairResult SolveMixedCompletionQuotient(
         return Wirehair_Error;
     }
 
-    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
     const uint8_t* grouped_block_shifts = nullptr;
     uint32_t grouped_block_shift_count = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)

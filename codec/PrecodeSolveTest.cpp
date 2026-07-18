@@ -1819,6 +1819,36 @@ bool CheckIncrementalResume()
             wirehair_v2::kBinaryQuotientMinBlockBytes);
 }
 
+bool SamePrecodeSolveWork(
+    const wirehair_v2::PrecodeSolveStats& a,
+    const wirehair_v2::PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.BlockXors == b.BlockXors &&
+        a.BlockMulAdds == b.BlockMulAdds &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        && a.MixedJointSourceXors == b.MixedJointSourceXors
+        && a.MixedJointMarginalXors == b.MixedJointMarginalXors
+        && a.MixedJointMarginalCopies == b.MixedJointMarginalCopies
+        && a.MixedJointScratchBytes == b.MixedJointScratchBytes
+        && a.MixedJointActiveDeltas == b.MixedJointActiveDeltas
+        && a.MixedDualSourceColumns == b.MixedDualSourceColumns
+#endif
+        ;
+}
+
 bool CheckMixedProjectionResidueBucketsOracleForPeriod(
     uint32_t period,
     wirehair_v2::MixedCoefficientGeometry geometry,
@@ -1882,15 +1912,30 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // mixed-RHS path selected by SolveMixedCompletionQuotient.
         30000u
     };
-    // S=26 throughout this pair, hence L-H=K+S+D2 is 127 and 129.
-    // Those are respectively P-1 and P+1 modulo both P32 and P64, covering
-    // the final partial-period block on both sides of its boundary without
-    // inheriting the broad legacy oracle's large-system cases.
-    static const uint32_t kGroupedBlockCounts[] = {89u, 91u};
+    // The first pair straddles the block-zero identity boundary L-H <= P;
+    // the second pair straddles a later partial-period boundary.  The tiny
+    // table is intentionally explicit because its certified S varies by K.
+    static const uint32_t kGroupedBlockCountsP32[] = {
+        10u, 11u, 89u, 91u
+    };
+    static const uint32_t kGroupedBlockCountsP48[] = {
+        20u, 21u, 60u, 65u
+    };
+    static const uint32_t kGroupedBlockCountsP64[] = {
+        35u, 31u, 89u, 91u
+    };
+    const uint32_t* grouped_block_counts = kGroupedBlockCountsP64;
+    if (period == 32u) {
+        grouped_block_counts = kGroupedBlockCountsP32;
+    }
+    else if (period == 48u) {
+        grouped_block_counts = kGroupedBlockCountsP48;
+    }
     const uint32_t* const block_counts = grouped_gf256_rows != 0u ?
-        kGroupedBlockCounts : kBlockCounts;
+        grouped_block_counts : kBlockCounts;
     const size_t configured_case_count = grouped_gf256_rows != 0u ?
-        sizeof(kGroupedBlockCounts) / sizeof(kGroupedBlockCounts[0]) :
+        sizeof(kGroupedBlockCountsP32) /
+            sizeof(kGroupedBlockCountsP32[0]) :
         sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
     size_t expected_case_count = 0u;
     for (size_t case_index = 0;
@@ -1931,19 +1976,32 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             column_count - system.Params.HeavyRows;
         if (grouped_gf256_rows != 0u)
         {
-            const uint32_t expected_remainder =
-                K == 89u ? period - 1u : 1u;
-            if (first_heavy_column % period != expected_remainder)
+            const bool identity_boundary_case = case_index < 2u;
+            const bool boundary_side_ok = identity_boundary_case ?
+                (case_index == 0u ?
+                    first_heavy_column <= period :
+                    first_heavy_column > period) :
+                (period == 48u ?
+                    (case_index == 2u ?
+                        first_heavy_column < 2u * period :
+                        first_heavy_column > 2u * period) :
+                    first_heavy_column % period ==
+                        (K == 89u ? period - 1u : 1u));
+            if (!boundary_side_ok)
             {
                 std::fprintf(stderr,
-                    "solve: grouped mixed projection partial-period "
-                    "boundary K=%u L-H=%u P=%u\n",
+                    "solve: grouped mixed projection boundary "
+                    "case=%zu K=%u L-H=%u P=%u\n",
+                    case_index,
                     K, first_heavy_column, period);
                 return false;
             }
         }
+        const bool grouped_block_zero_identity =
+            grouped_gf256_rows != 0u && first_heavy_column <= period;
         const bool secondary_schedule =
-            independent_extension_residues || grouped_gf256_rows != 0u;
+            independent_extension_residues ||
+            (grouped_gf256_rows != 0u && !grouped_block_zero_identity);
         const bool automatic_joint_bucketed =
             bucket_mode == wirehair_v2::MixedResidueBucketMode::Automatic &&
             wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
@@ -2063,6 +2121,39 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 K);
             return false;
         }
+        if (grouped_block_zero_identity)
+        {
+            std::vector<uint8_t> canonical;
+            wirehair_v2::PrecodeSolveStats canonical_stats;
+            WirehairResult canonical_result = Wirehair_Error;
+            bool canonical_verified = false;
+            {
+                MixedGroupedGF256RowsScope canonical_scope(0u);
+                if (!canonical_scope.IsValid()) return false;
+                canonical_result = wirehair_v2::SolvePrecodeSystem(
+                    system, config, systematic, block_bytes,
+                    canonical, &canonical_stats);
+                canonical_verified = canonical_result == Wirehair_Success &&
+                    wirehair_v2::VerifyPrecodeSolution(
+                        system, config, systematic,
+                        canonical.data(), block_bytes);
+            }
+            if (canonical_result != Wirehair_Success ||
+                !canonical_verified || canonical != expected ||
+                !SamePrecodeSolveWork(systematic_stats, canonical_stats))
+            {
+                std::fprintf(stderr,
+                    "solve: grouped block-zero systematic identity/work "
+                    "mismatch K=%u L-H=%u P=%u result=%d "
+                    "xors=%llu/%llu muladds=%llu/%llu\n",
+                    K, first_heavy_column, period, (int)canonical_result,
+                    (unsigned long long)systematic_stats.BlockXors,
+                    (unsigned long long)canonical_stats.BlockXors,
+                    (unsigned long long)systematic_stats.BlockMulAdds,
+                    (unsigned long long)canonical_stats.BlockMulAdds);
+                return false;
+            }
+        }
         if (joint_bucketed || dual_bucketed)
         {
             std::vector<uint8_t> separate_expected;
@@ -2134,6 +2225,45 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             std::fprintf(stderr,
                 "solve: mixed bucket repair accounting failed K=%u\n", K);
             return false;
+        }
+        if (grouped_block_zero_identity)
+        {
+            std::vector<uint8_t> canonical;
+            wirehair_v2::PrecodeSolveStats canonical_stats;
+            WirehairResult canonical_result = Wirehair_Error;
+            bool canonical_verified = false;
+            {
+                MixedGroupedGF256RowsScope canonical_scope(0u);
+                if (!canonical_scope.IsValid()) return false;
+                canonical_result = wirehair_v2::SolvePrecodeSystem(
+                    system, config, delivered, block_bytes,
+                    canonical, &canonical_stats);
+                canonical_verified = canonical_result == Wirehair_Success &&
+                    wirehair_v2::VerifyPrecodeSolution(
+                        system, config, delivered,
+                        canonical.data(), block_bytes);
+            }
+            if (canonical_result != Wirehair_Success ||
+                !canonical_verified || canonical != recovered ||
+                !SamePrecodeSolveWork(repair_stats, canonical_stats))
+            {
+                std::fprintf(stderr,
+                    "solve: grouped block-zero repair identity/work "
+                    "mismatch K=%u L-H=%u P=%u result=%d "
+                    "xors=%llu/%llu muladds=%llu/%llu\n",
+                    K, first_heavy_column, period, (int)canonical_result,
+                    (unsigned long long)repair_stats.BlockXors,
+                    (unsigned long long)canonical_stats.BlockXors,
+                    (unsigned long long)repair_stats.BlockMulAdds,
+                    (unsigned long long)canonical_stats.BlockMulAdds);
+                return false;
+            }
+            std::printf(
+                "grouped block-zero identity K=%u L-H=%u P=%u "
+                "xors=%llu muladds=%llu: PASS\n",
+                K, first_heavy_column, period,
+                (unsigned long long)repair_stats.BlockXors,
+                (unsigned long long)repair_stats.BlockMulAdds);
         }
         if (joint_bucketed || dual_bucketed)
         {
@@ -2292,11 +2422,11 @@ bool CheckMixedProjectionResidueBucketsOracle()
     {
         return false;
     }
-    // The grouped C experiment deliberately uses only the tiny boundary pair
-    // above: every solve still compares optimized projection against the
-    // dense expansion, while explicit separate/joint modes cover both P32
-    // and P64 at the minimum and maximum useful grouped suffix sizes.
-    const uint32_t grouped_periods[] = {32u, 64u};
+    // Keep grouped coverage bounded to the two boundary pairs above: every
+    // solve still compares optimized projection against the dense expansion,
+    // while explicit separate/joint modes cover P32, P48, and P64 at the
+    // minimum, finalist, and maximum useful grouped suffix sizes.
+    const uint32_t grouped_periods[] = {32u, 48u, 64u};
     for (const uint32_t period : grouped_periods)
     {
         if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
@@ -2310,6 +2440,17 @@ bool CheckMixedProjectionResidueBucketsOracle()
                 wirehair_v2::MixedResidueBucketMode::Separate,
                 false,
                 1u) ||
+            !CheckMixedProjectionResidueBucketsOracleForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows,
+                0u,
+                wirehair_v2::MixedResidueSchedule::Constant,
+                false,
+                wirehair_v2::kMixedGF256Rows,
+                wirehair_v2::MixedResidueBucketMode::Separate,
+                false,
+                period == 32u ? 7u : 3u) ||
             !CheckMixedProjectionResidueBucketsOracleForPeriod(
                 period,
                 wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
