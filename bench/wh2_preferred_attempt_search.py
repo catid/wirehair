@@ -3163,7 +3163,11 @@ def q0_control_identity(
 PINNED_NPM_ENVIRONMENT = {
     "NPM_CONFIG_AUDIT": "false",
     "NPM_CONFIG_FUND": "false",
-    "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+    # npm 9 rejects loading one pathname as both its user and global config.
+    # /dev is root-owned on the supported Linux host, so this absent path
+    # cannot be populated by the unprivileged campaign controller.
+    "NPM_CONFIG_GLOBALCONFIG":
+        "/dev/wirehair-npm-global-config-must-not-exist",
     "NPM_CONFIG_IGNORE_SCRIPTS": "true",
     "NPM_CONFIG_UPDATE_NOTIFIER": "false",
     "NPM_CONFIG_USERCONFIG": "/dev/null",
@@ -3200,11 +3204,14 @@ def validate_frozen_node_environment(
         if (key.upper().startswith("NODE_") or
             (key.upper().startswith("NPM_") and
              key not in PINNED_NPM_ENVIRONMENT))))
+    global_config = environment.get("NPM_CONFIG_GLOBALCONFIG")
     if (unexpected or environment.get("PATH") != expected_path or
             environment.get("LANG") != "C" or
             environment.get("LC_ALL") != "C" or
             any(environment.get(key) != value
-                for key, value in PINNED_NPM_ENVIRONMENT.items())):
+                for key, value in PINNED_NPM_ENVIRONMENT.items()) or
+            not isinstance(global_config, str) or
+            os.path.lexists(global_config)):
         die("frozen Node environment differs from its exact policy")
 
 
@@ -3237,9 +3244,12 @@ def command_version(
     except UnicodeDecodeError:
         observed = ""
     if result.returncode or result.stderr or observed != expected:
+        detail = result.stderr[-2048:].decode(
+            "utf-8", errors="replace").strip()
         die(
             f"{executable.name} version mismatch: expected {expected!r}, "
-            f"observed {observed!r}"
+            f"observed {observed!r}, rc={result.returncode}, "
+            f"stderr={detail!r}"
         )
     return observed
 

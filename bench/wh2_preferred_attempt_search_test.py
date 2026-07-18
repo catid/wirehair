@@ -1141,6 +1141,17 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 self.assertNotIn(key, environment)
             subject.validate_frozen_node_environment(
                 Path(contract["node"]["path"]), environment)
+            self.assertNotEqual(
+                environment["NPM_CONFIG_GLOBALCONFIG"],
+                environment["NPM_CONFIG_USERCONFIG"])
+            self.assertFalse(os.path.lexists(
+                environment["NPM_CONFIG_GLOBALCONFIG"]))
+            with mock.patch.object(
+                    subject.os.path, "lexists", return_value=True), \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "Node environment"):
+                subject.validate_frozen_node_environment(
+                    Path(contract["node"]["path"]), environment)
 
             def inject_preload(*_args, **kwargs):
                 kwargs["env"]["NODE_OPTIONS"] = \
@@ -1154,6 +1165,24 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 subject.run_frozen_drand(
                     contract, result, "offline-selftest", timeout=1.0,
                     context="mutated Node environment")
+
+    def test_frozen_node_environment_can_start_local_npm(self) -> None:
+        node_name = shutil.which("node")
+        npm_name = shutil.which("npm")
+        if node_name is None or npm_name is None:
+            self.skipTest("local Node/npm runtime is unavailable")
+        node = Path(node_name).resolve(strict=True)
+        npm = Path(npm_name).resolve(strict=True)
+        environment = subject.frozen_node_environment(node)
+        subject.validate_frozen_node_environment(node, environment)
+        result = subject.common.run_bounded_process_group(
+            (str(npm), "--version"), timeout=30.0,
+            context="test frozen npm version probe", env=environment)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b"")
+        self.assertRegex(
+            result.stdout.decode("ascii").strip(),
+            r"^[0-9]+(?:\.[0-9]+){1,3}$")
 
     def test_root_publication_revalidates_drand_inputs_before_write(self) -> None:
         with tempfile.TemporaryDirectory(
