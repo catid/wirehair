@@ -1431,7 +1431,7 @@ void PrecodeEncoder::Swap(PrecodeEncoder& other) noexcept
 WirehairResult PrecodeEncoder::InitializeSolvedSystem(
     const PrecodeSystem& system,
     const PacketRowConfig& packet_config,
-    std::vector<uint8_t>& intermediate_blocks,
+    SolveValueStorage& intermediate_blocks,
     uint32_t block_bytes)
 {
     const uint64_t precode_count_wide =
@@ -2073,7 +2073,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
             packets.push_back(packet);
         }
         GuardedAllocation();
-        std::vector<uint8_t> intermediate_blocks;
+        SolveValueStorage intermediate_blocks;
         PrecodeSolveStats solve_stats;
         WirehairResult solve_result =
             SolvePrecodeSystemForValidatedSystemWithRuntime(

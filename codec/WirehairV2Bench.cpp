@@ -6940,14 +6940,33 @@ bool RunGroupedTimingObservation(
     GroupedTimingObservation& observation)
 {
     if (!ConfigureGroupedTimingArm(arm)) return false;
-    std::vector<uint8_t> intermediate;
+    wirehair_v2::SolveValueStorage intermediate;
     observation = GroupedTimingObservation{};
     observation.Result =
         wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
             system, config, cell.Runtime, cell.Packets, block_bytes,
             intermediate, &observation.Stats);
-    return observation.Result == Wirehair_Success ||
-        observation.Result == Wirehair_NeedMore;
+    const uint64_t expected_arena_bytes =
+        ((uint64_t)system.Params.BlockCount + system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows) * block_bytes;
+    const bool valid = (observation.Result == Wirehair_Success ||
+            observation.Result == Wirehair_NeedMore) &&
+        observation.Stats.SolveValueArenaBytes == expected_arena_bytes &&
+        observation.Stats.SolveValueArenaEagerZeroBytes == 0u &&
+        observation.Stats.SolveValueArenaCommitCopyBytes == 0u;
+    if (!valid) {
+        std::fprintf(stderr,
+            "groupedtiming solve-arena preflight receipt mismatch "
+            "result=%d arena=%llu expected=%llu eager_zero=%llu copy=%llu\n",
+            (int)observation.Result,
+            (unsigned long long)observation.Stats.SolveValueArenaBytes,
+            (unsigned long long)expected_arena_bytes,
+            (unsigned long long)
+                observation.Stats.SolveValueArenaEagerZeroBytes,
+            (unsigned long long)
+                observation.Stats.SolveValueArenaCommitCopyBytes);
+    }
+    return valid;
 }
 
 const char* GroupedTimingOutcomeClass(
@@ -7342,7 +7361,7 @@ int CmdGroupedTiming(int argc, char** argv)
     const uint64_t packet_payload_bytes =
         ((uint64_t)K + overhead) * block_bytes;
     std::printf(
-        "# groupedtiming: schema=v1 policy=h12-q0-grouped "
+        "# groupedtiming: schema=v2 policy=h12-q0-grouped "
         "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
         "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
         "loss=%.17g seed=%llu schedule=%s cache_state=%s "
@@ -7362,6 +7381,7 @@ int CmdGroupedTiming(int argc, char** argv)
         "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
         "system_build=outside-timer tls_reapply=full-per-slot-outside-timer "
         "allocator_tls_state=preflight-warmed "
+        "solve_value_storage=owned-noinit solve_value_publish=swap "
         "preflight_control_result=%d preflight_candidate_result=%d "
         "cell_class=%s common_success=%u trace_sha256=%s\n",
         have_cycle_index ? 1u : 4u,
@@ -7400,7 +7420,9 @@ int CmdGroupedTiming(int argc, char** argv)
         "block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,"
         "joint_source_xors,joint_marginal_xors,joint_marginal_copies,"
         "joint_active_deltas,joint_scratch_bytes,dual_source_columns,"
-        "source_bytes,packet_payload_bytes,intermediate_bytes\n");
+        "source_bytes,packet_payload_bytes,intermediate_bytes,"
+        "solve_value_arena_bytes,solve_value_eager_zero_bytes,"
+        "solve_value_commit_copy_bytes\n");
 
     const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
     const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
@@ -7433,7 +7455,7 @@ int CmdGroupedTiming(int argc, char** argv)
             const int cpu_before = PreferredTimingCurrentCpu();
             const Clock::time_point begin = Clock::now();
             wirehair_v2::PrecodeSolveStats stats;
-            std::vector<uint8_t> intermediate;
+            wirehair_v2::SolveValueStorage intermediate;
             const WirehairResult result =
                 wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                     active_system, active_config,
@@ -7463,7 +7485,7 @@ int CmdGroupedTiming(int argc, char** argv)
                 "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%u,"
                 "0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,%d,%d,%lld,%lld,"
                 "%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu\n",
+                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu,%llu,%llu,%llu\n",
                 K, block_bytes, overhead, PacketScheduleName(schedule),
                 (unsigned long long)seed, loss,
                 GroupedTimingCacheStateName(cache_state), cycle, slot,
@@ -7497,8 +7519,18 @@ int CmdGroupedTiming(int argc, char** argv)
                 (unsigned long long)stats.MixedDualSourceColumns,
                 (unsigned long long)((uint64_t)K * block_bytes),
                 (unsigned long long)packet_payload_bytes,
-                intermediate.size());
+                intermediate.size(),
+                (unsigned long long)stats.SolveValueArenaBytes,
+                (unsigned long long)stats.SolveValueArenaEagerZeroBytes,
+                (unsigned long long)stats.SolveValueArenaCommitCopyBytes);
+            const uint64_t expected_arena_bytes =
+                ((uint64_t)K + active_system.Params.Staircase +
+                    active_system.Params.DenseRows +
+                    active_system.Params.HeavyRows) * block_bytes;
             if (saturated || !outcome_stable ||
+                stats.SolveValueArenaBytes != expected_arena_bytes ||
+                stats.SolveValueArenaEagerZeroBytes != 0u ||
+                stats.SolveValueArenaCommitCopyBytes != 0u ||
                 (result != Wirehair_Success && result != Wirehair_NeedMore))
             {
                 std::fprintf(stderr,

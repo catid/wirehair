@@ -268,7 +268,7 @@ private:
     WirehairResult InitializeSolvedSystem(
         const PrecodeSystem& system,
         const PacketRowConfig& packet_config,
-        std::vector<uint8_t>& intermediate_blocks,
+        SolveValueStorage& intermediate_blocks,
         uint32_t block_bytes);
 
     PrecodeSystem SystemValue = {};
@@ -278,7 +278,7 @@ private:
     const uint8_t* SourceBlocks = nullptr;
     uint32_t BlockBytesValue = 0;
     std::vector<uint8_t> ParityBlockStorage;
-    std::vector<uint8_t> SolvedIntermediateStorage;
+    SolveValueStorage SolvedIntermediateStorage;
     PacketRowConfig PacketConfigValue = {};
     PacketRowRuntime PacketRuntimeValue = {};
     PrecodeEncodeStats StatsValue = {};
