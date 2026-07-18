@@ -62,6 +62,20 @@ struct PrecodeParams
     CompletionField Field = CompletionField::GF256;
 
     /**
+        Experiment-only degree-balanced staircase matching.
+
+        The certified construction independently places each source's N1
+        distinct hits, so staircase-row source degrees fluctuate.  This option
+        instead gives every row floor(K*min(N1,S)/S) or
+        ceil(K*min(N1,S)/S) source columns
+        while keeping every source degree, edge count, parity/link column, and
+        downstream dense RNG stream unchanged.  A separately keyed randomized
+        capacity matching avoids affine/cyclic placement.  Named profiles never
+        enable this flag.
+    */
+    bool DegreeBalancedStaircase = false;
+
+    /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
         K + S source/staircase columns and dense row r additionally
         references exactly its own dense column K + S + r.
@@ -134,7 +148,9 @@ struct PrecodeSystem
         plus the own-parity column K + j, plus the staircase link column
         K + j - 1 for j > 0.  Column lists are sorted and deduplicated
         (every column appears exactly once; construction cannot produce
-        duplicates because per-source hits are distinct).
+        duplicates because per-source hits are distinct).  The optional
+        degree-balanced experiment additionally makes every row's source
+        degree floor(K*min(N1,S)/S) or ceil(K*min(N1,S)/S).
     */
     std::vector<std::vector<uint32_t>> StaircaseRows;
 

@@ -42,6 +42,7 @@ bool TestParams()
             params.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
             params.SourceHits != c.SourceHits ||
+            params.DegreeBalancedStaircase ||
             params.DenseTwoAnchor || params.DenseTwoAnchorPhase != 0u)
         {
             std::fprintf(stderr,
@@ -201,6 +202,213 @@ bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
             std::fprintf(stderr,
                 "K=%u: source column %u has %u parity hits, want %u\n",
                 K, c, source_hits[c], hits);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestDegreeBalancedStaircase(uint32_t K, uint64_t seed)
+{
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(K, seed);
+    wirehair_v2::PrecodeSystem baseline;
+    if (!BuildPrecodeSystem(params, baseline)) {
+        std::fprintf(stderr, "K=%u: balanced baseline build failed\n", K);
+        return false;
+    }
+
+    params.DegreeBalancedStaircase = true;
+    wirehair_v2::PrecodeSystem balanced, repeat;
+    if (!BuildPrecodeSystem(params, balanced) ||
+        !BuildPrecodeSystem(params, repeat) ||
+        !TestStaircase(balanced) ||
+        !wirehair_v2::ValidatePrecodeSystem(balanced))
+    {
+        std::fprintf(stderr, "K=%u: balanced staircase build failed\n", K);
+        return false;
+    }
+    if (!balanced.Params.DegreeBalancedStaircase ||
+        balanced.StaircaseRows != repeat.StaircaseRows ||
+        balanced.DenseRowColumns != repeat.DenseRowColumns ||
+        balanced.DenseRowColumns != baseline.DenseRowColumns)
+    {
+        std::fprintf(stderr,
+            "K=%u: balanced determinism/dense-stream identity failed\n", K);
+        return false;
+    }
+
+    const uint32_t S = params.Staircase;
+    const uint32_t hits = std::min(params.SourceHits, S);
+    const uint32_t edges = K * hits;
+    const uint32_t low = edges / S;
+    const uint32_t extra = edges % S;
+    uint32_t high_rows = 0u;
+    std::vector<uint32_t> row_degrees(S, 0u);
+    std::vector<std::vector<uint32_t>> rows_by_source(K);
+    for (uint32_t row_index = 0; row_index < S; ++row_index)
+    {
+        uint32_t degree = 0u;
+        for (uint32_t column : balanced.StaircaseRows[row_index])
+        {
+            if (column >= K) {
+                break;
+            }
+            ++degree;
+            rows_by_source[column].push_back(row_index);
+        }
+        row_degrees[row_index] = degree;
+        if (degree == low + 1u && extra != 0u) {
+            ++high_rows;
+        }
+        else if (degree != low) {
+            std::fprintf(stderr,
+                "K=%u: balanced row %u degree=%u expected %u/%u\n",
+                K, row_index, degree, low, low + (extra != 0u));
+            return false;
+        }
+    }
+    if (high_rows != extra) {
+        std::fprintf(stderr,
+            "K=%u: balanced high rows=%u expected=%u\n", K, high_rows, extra);
+        return false;
+    }
+
+    if (K >= 64u)
+    {
+        wirehair_v2::PrecodeSystem malformed = balanced;
+        uint32_t move_from = UINT32_MAX;
+        uint32_t move_to = UINT32_MAX;
+        uint32_t move_source = UINT32_MAX;
+        for (uint32_t from = 0; from < S && move_source == UINT32_MAX; ++from)
+        {
+            for (uint32_t source : malformed.StaircaseRows[from])
+            {
+                if (source >= K) {
+                    break;
+                }
+                for (uint32_t to = 0; to < S; ++to)
+                {
+                    if (from == to || row_degrees[from] > row_degrees[to] ||
+                        std::binary_search(
+                            malformed.StaircaseRows[to].begin(),
+                            malformed.StaircaseRows[to].end(), source))
+                    {
+                        continue;
+                    }
+                    move_from = from;
+                    move_to = to;
+                    move_source = source;
+                    break;
+                }
+                if (move_source != UINT32_MAX) {
+                    break;
+                }
+            }
+        }
+        if (move_source == UINT32_MAX) {
+            std::fprintf(stderr,
+                "K=%u: could not construct unbalanced mutation\n", K);
+            return false;
+        }
+        std::vector<uint32_t>& from_row = malformed.StaircaseRows[move_from];
+        std::vector<uint32_t>& to_row = malformed.StaircaseRows[move_to];
+        from_row.erase(std::lower_bound(
+            from_row.begin(), from_row.end(), move_source));
+        to_row.insert(std::lower_bound(
+            to_row.begin(), to_row.end(), move_source), move_source);
+        if (wirehair_v2::ValidatePrecodeSystem(malformed)) {
+            std::fprintf(stderr,
+                "K=%u: unbalanced staircase mutation was accepted\n", K);
+            return false;
+        }
+    }
+
+    // Reject a disguised affine/cyclic construction.  Random coincidence can
+    // match a few sources, but not a material fraction of a nontrivial K.
+    if (K >= 64u)
+    {
+        uint32_t cyclic_matches = 0u;
+        for (uint32_t source = 0; source < K; ++source)
+        {
+            std::vector<uint32_t> cyclic;
+            for (uint32_t hit = 0; hit < hits; ++hit) {
+                cyclic.push_back((source * hits + hit) % S);
+            }
+            std::sort(cyclic.begin(), cyclic.end());
+            cyclic_matches += rows_by_source[source] == cyclic;
+        }
+        if (cyclic_matches >= K / 4u) {
+            std::fprintf(stderr,
+                "K=%u: balanced matching remains cyclic (%u matches)\n",
+                K, cyclic_matches);
+            return false;
+        }
+    }
+
+    wirehair_v2::PrecodeParams alternate_params = params;
+    alternate_params.Seed ^= UINT64_C(0x9e3779b97f4a7c15);
+    wirehair_v2::PrecodeSystem alternate;
+    if (!BuildPrecodeSystem(alternate_params, alternate) ||
+        (S > hits && alternate.StaircaseRows == balanced.StaircaseRows))
+    {
+        std::fprintf(stderr,
+            "K=%u: balanced matching is not keyed by seed\n", K);
+        return false;
+    }
+    return true;
+}
+
+bool TestDegreeBalancedRemainderSymmetry()
+{
+    // K=5, S=3, N1=2 has exactly one high-degree row.  Across this fixed
+    // seed ensemble every row label must be eligible.  A Sattolo-prefix
+    // selector deterministically excludes row zero and fails this test.
+    bool seen_high[3] = {false, false, false};
+    for (uint64_t seed = 0; seed < 256u; ++seed)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeCertifiedParams(5u, seed);
+        params.Staircase = 3u;
+        params.SourceHits = 2u;
+        params.DegreeBalancedStaircase = true;
+        wirehair_v2::PrecodeSystem system;
+        if (!BuildPrecodeSystem(params, system)) {
+            std::fprintf(stderr,
+                "balanced remainder seed=%llu build failed\n",
+                (unsigned long long)seed);
+            return false;
+        }
+        uint32_t high_row = UINT32_MAX;
+        for (uint32_t row = 0; row < 3u; ++row)
+        {
+            uint32_t source_degree = 0u;
+            for (uint32_t column : system.StaircaseRows[row]) {
+                source_degree += column < params.BlockCount;
+            }
+            if (source_degree == 4u) {
+                if (high_row != UINT32_MAX) {
+                    std::fprintf(stderr,
+                        "balanced remainder seed=%llu has two high rows\n",
+                        (unsigned long long)seed);
+                    return false;
+                }
+                high_row = row;
+            }
+        }
+        if (high_row == UINT32_MAX) {
+            std::fprintf(stderr,
+                "balanced remainder seed=%llu lacks high row\n",
+                (unsigned long long)seed);
+            return false;
+        }
+        seen_high[high_row] = true;
+    }
+    for (uint32_t row = 0; row < 3u; ++row)
+    {
+        if (!seen_high[row]) {
+            std::fprintf(stderr,
+                "balanced remainder never selected row %u\n", row);
             return false;
         }
     }
@@ -595,6 +803,18 @@ int main()
         }
     }
 
+    for (uint32_t K : Ks)
+    {
+        if (!TestDegreeBalancedStaircase(
+                K, UINT64_C(0x62616c616e636564) ^ K))
+        {
+            return 1;
+        }
+    }
+    if (!TestDegreeBalancedRemainderSymmetry()) {
+        return 1;
+    }
+
     const uint32_t detKs[] = {64u, 3200u, 64000u};
     for (uint32_t K : detKs) {
         if (!TestDeterminism(K)) {
@@ -722,6 +942,18 @@ int main()
         {
             std::fprintf(stderr,
                 "random two-anchor builder validation failed at K=%u\n", K);
+            return 1;
+        }
+
+        params.DenseTwoAnchor = false;
+        params.DenseTwoAnchorPhase = 0u;
+        params.DegreeBalancedStaircase = true;
+        if (!BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::ValidatePrecodeSystem(system) ||
+            !TestStaircase(system))
+        {
+            std::fprintf(stderr,
+                "random balanced builder validation failed at K=%u\n", K);
             return 1;
         }
     }

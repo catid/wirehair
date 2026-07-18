@@ -30,8 +30,10 @@ bool SameParams(
         a.SourceHits == b.SourceHits &&
         a.Field == b.Field &&
         a.HeavyFamily == b.HeavyFamily &&
+        a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
         a.Seed == b.Seed;
 }
 
@@ -55,7 +57,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     const uint32_t K = 2u + input.U8() % 127u;
     wirehair_v2::PrecodeParams params =
         wirehair_v2::MakeCertifiedParams(K, input.U64());
-    const unsigned mutation = input.U8() % 16u;
+    const unsigned mutation = input.U8() % 17u;
     bool expected_valid = false;
     switch (mutation)
     {
@@ -87,6 +89,10 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
         break;
     case 14:
         params.Field = static_cast<wirehair_v2::CompletionField>(UINT32_MAX);
+        break;
+    case 15:
+        params.DegreeBalancedStaircase = true;
+        expected_valid = true;
         break;
     default:
         params = wirehair_v2::MakeMixedParams(K, params.Seed);
