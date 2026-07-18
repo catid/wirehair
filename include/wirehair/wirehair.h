@@ -573,6 +573,10 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_profile_ex(
        systematic block (`blockId == N - 1`) may use the exact shorter final
        message remainder when the message is not block-aligned.
 
+    dataBytesOut is required.  On ordinary failure it is set to zero and the
+    packet output is unchanged.  It must not overlap the required packet output
+    range; overlap returns Wirehair_InvalidInput without writing either range.
+
     Returns Wirehair_Success on success.
     Returns other codes on error.
 */
@@ -758,6 +762,8 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
 
     outputCapacity is the number of writable bytes at blockData.  On failure,
     blockData is unchanged and bytesOut is set to zero when it is non-null.
+    bytesOut must not overlap the required block output range; overlap returns
+    Wirehair_InvalidInput without writing either range.
     Successful output has the same application-layer integrity requirement as
     wirehair_recover().
 */

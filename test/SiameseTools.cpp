@@ -98,9 +98,12 @@ uint64_t GetTimeUsec()
     // the product wraps every ~4295 seconds.
     return UINT64_C(1000000) * tv.tv_sec + tv.tv_nsec / 1000;
 #else
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    return 1000000 * tv.tv_sec + tv.tv_usec;
+    struct timeval tv = {};
+    if (gettimeofday(&tv, nullptr) != 0) {
+        return 0;
+    }
+    return UINT64_C(1000000) * static_cast<uint64_t>(tv.tv_sec) +
+        static_cast<uint64_t>(tv.tv_usec);
 #endif
 }
 

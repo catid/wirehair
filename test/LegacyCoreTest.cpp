@@ -164,6 +164,45 @@ void TestDenseCountInterpolation()
         static_cast<unsigned long long>(fingerprint));
 }
 
+#ifdef WH_SEED_KNOBS
+void TestPeelCapConcurrentInitialization()
+{
+    CHECK(SetEnv("WH_PEELCAP", "17"));
+    const unsigned thread_count = 32;
+    std::atomic<unsigned> ready(0);
+    std::atomic<bool> start(false);
+    std::atomic<bool> failed(false);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (unsigned thread_i = 0; thread_i < thread_count; ++thread_i)
+    {
+        threads.emplace_back([&]() {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (unsigned i = 0; i < 1024; ++i)
+            {
+                const uint16_t weight = wirehair::GeneratePeelRowWeight(
+                    UINT32_MAX - i, 64000);
+                if (weight < 2 || weight > 17) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != thread_count) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    CHECK(!failed.load(std::memory_order_relaxed));
+    CHECK(SetEnv("WH_PEELCAP", nullptr));
+}
+#endif
+
 uint64_t SeedProfileFingerprint(bool base)
 {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -1001,6 +1040,159 @@ WirehairCodec DecodeLossy(
         decoder, recovered.data(), recovered.size()) == Wirehair_Success);
     CHECK(recovered == expected);
     return decoder;
+}
+
+void TestLegacyOutputCountOverlap()
+{
+    const uint32_t block_bytes = 32;
+    const size_t message_bytes = block_bytes * 2u - 4u;
+    const std::vector<uint8_t> message = MakeMessage(message_bytes, 113);
+    WirehairCodec encoder = wirehair_encoder_create_owned(
+        nullptr, message.data(), message.size(), block_bytes);
+    WirehairCodec decoder = wirehair_decoder_create(
+        nullptr, message.size(), block_bytes);
+    CHECK(encoder != nullptr);
+    CHECK(decoder != nullptr);
+    if (!encoder || !decoder) {
+        wirehair_free(encoder);
+        wirehair_free(decoder);
+        return;
+    }
+
+    uint8_t packet[block_bytes];
+    WirehairResult decode_result = Wirehair_NeedMore;
+    for (uint32_t id = 0; id < 2; ++id)
+    {
+        uint32_t written = 0;
+        CHECK(wirehair_encode(
+            encoder, id, packet, sizeof(packet), &written) ==
+            Wirehair_Success);
+        decode_result = wirehair_decode(decoder, id, packet, written);
+    }
+    CHECK(decode_result == Wirehair_Success);
+
+    const size_t overlap_offsets[] = { 0, 4, 28 };
+    for (size_t offset : overlap_offsets)
+    {
+        uint32_t storage_words[(block_bytes + sizeof(uint32_t)) /
+            sizeof(uint32_t)];
+        uint8_t* storage = reinterpret_cast<uint8_t*>(storage_words);
+        std::memset(storage, 0xa5, sizeof(storage_words));
+        uint32_t* count = storage_words + offset / sizeof(uint32_t);
+        *count = UINT32_C(0x12345678);
+        uint8_t before[sizeof(storage_words)];
+        std::memcpy(before, storage, sizeof(storage_words));
+
+        CHECK(wirehair_encode(
+            encoder, 0, storage, block_bytes, count) ==
+            Wirehair_InvalidInput);
+        CHECK(std::memcmp(storage, before, sizeof(storage_words)) == 0);
+
+        CHECK(wirehair_recover_block_ex(
+            decoder, 0, storage, block_bytes, count) ==
+            Wirehair_InvalidInput);
+        CHECK(std::memcmp(storage, before, sizeof(storage_words)) == 0);
+    }
+
+    // The old capacity-unchecked recovery entry point delegates to the same
+    // overlap guard and must preserve both ranges too.
+    uint32_t legacy_words[(block_bytes + sizeof(uint32_t)) /
+        sizeof(uint32_t)];
+    uint8_t* legacy_storage = reinterpret_cast<uint8_t*>(legacy_words);
+    std::memset(legacy_storage, 0x6b, sizeof(legacy_words));
+    uint32_t* legacy_count = legacy_words + 1;
+    *legacy_count = UINT32_C(0x89abcdef);
+    uint8_t legacy_before[sizeof(legacy_words)];
+    std::memcpy(legacy_before, legacy_storage, sizeof(legacy_words));
+    CHECK(wirehair_recover_block(
+        decoder, 0, legacy_storage, legacy_count) == Wirehair_InvalidInput);
+    CHECK(std::memcmp(
+        legacy_storage, legacy_before, sizeof(legacy_words)) == 0);
+
+    // A zero-capacity output interval is empty even when its pointer lies
+    // within the count object, so ordinary failure must still zero the count.
+    uint32_t zero_capacity_count = UINT32_C(0x12345678);
+    CHECK(wirehair_recover_block_ex(
+        nullptr, 0,
+        reinterpret_cast<uint8_t*>(&zero_capacity_count) + 1,
+        0, &zero_capacity_count) == Wirehair_InvalidInput);
+    CHECK(zero_capacity_count == 0);
+
+    // The capacity-unchecked wrapper must not use UINT32_MAX as a synthetic
+    // output range when no codec exists: an exactly adjacent count is an
+    // ordinary failure output and is therefore zeroed deterministically.
+    uint32_t null_codec_words[block_bytes / sizeof(uint32_t) + 1];
+    uint8_t* null_codec_output =
+        reinterpret_cast<uint8_t*>(null_codec_words);
+    uint32_t* null_codec_count =
+        null_codec_words + block_bytes / sizeof(uint32_t);
+    *null_codec_count = UINT32_C(0x12345678);
+    CHECK(wirehair_recover_block(
+        nullptr, 0, null_codec_output, null_codec_count) ==
+        Wirehair_InvalidInput);
+    CHECK(*null_codec_count == 0);
+
+    // Even without a valid codec, an aliased count pointer must not mutate
+    // the caller's declared output range while reporting invalid input.
+    std::memset(legacy_storage, 0x6b, sizeof(legacy_words));
+    legacy_count = legacy_words + 1;
+    *legacy_count = UINT32_C(0x89abcdef);
+    std::memcpy(legacy_before, legacy_storage, sizeof(legacy_words));
+    CHECK(wirehair_recover_block_ex(
+        nullptr, 0, legacy_storage, block_bytes, legacy_count) ==
+        Wirehair_InvalidInput);
+    CHECK(std::memcmp(
+        legacy_storage, legacy_before, sizeof(legacy_words)) == 0);
+
+    // Exact endpoint adjacency is not overlap.  For the partial final block,
+    // this is based on the actual encoded/recovered bytes, not full capacity.
+    uint32_t adjacent_words[(block_bytes + sizeof(uint32_t)) /
+        sizeof(uint32_t)];
+    uint8_t* adjacent = reinterpret_cast<uint8_t*>(adjacent_words);
+    std::memset(adjacent, 0xa5, sizeof(adjacent_words));
+    uint32_t* full_count = adjacent_words + block_bytes / sizeof(uint32_t);
+    *full_count = UINT32_C(0x12345678);
+    CHECK(wirehair_encode(
+        encoder, 0, adjacent, block_bytes, full_count) == Wirehair_Success);
+    CHECK(*full_count == block_bytes);
+    CHECK(std::memcmp(adjacent, message.data(), block_bytes) == 0);
+
+    const uint32_t final_bytes =
+        static_cast<uint32_t>(message_bytes - block_bytes);
+    std::memset(adjacent, 0xa5, sizeof(adjacent_words));
+    uint32_t* final_count = adjacent_words + final_bytes / sizeof(uint32_t);
+    *final_count = UINT32_C(0x12345678);
+    CHECK(wirehair_encode(
+        encoder, 1, adjacent, block_bytes, final_count) == Wirehair_Success);
+    CHECK(*final_count == final_bytes);
+    CHECK(std::memcmp(
+        adjacent, message.data() + block_bytes, final_bytes) == 0);
+
+    std::memset(adjacent, 0xa5, sizeof(adjacent_words));
+    final_count = adjacent_words + final_bytes / sizeof(uint32_t);
+    *final_count = UINT32_C(0x12345678);
+    CHECK(wirehair_recover_block_ex(
+        decoder, 1, adjacent, block_bytes, final_count) ==
+        Wirehair_Success);
+    CHECK(*final_count == final_bytes);
+    CHECK(std::memcmp(
+        adjacent, message.data() + block_bytes, final_bytes) == 0);
+
+    // A non-overlapping ordinary failure retains the established zero-count
+    // behavior while leaving the would-be packet output untouched.
+    std::memset(adjacent, 0xa5, sizeof(adjacent_words));
+    final_count = adjacent_words + final_bytes / sizeof(uint32_t);
+    *final_count = UINT32_C(0x12345678);
+    CHECK(wirehair_recover_block_ex(
+        decoder, 1, adjacent, final_bytes - 1u, final_count) ==
+        Wirehair_InvalidInput);
+    CHECK(*final_count == 0);
+    CHECK(std::all_of(
+        adjacent, adjacent + final_bytes,
+        [](uint8_t value) { return value == 0xa5; }));
+
+    wirehair_free(decoder);
+    wirehair_free(encoder);
 }
 
 void TestOwnedInputAndRecoverBlock()
@@ -2032,6 +2224,19 @@ int main(int argc, char** argv)
     if (argc == 2 && std::strcmp(argv[1], "--cold-start") == 0) {
         return RunColdStart();
     }
+#ifdef WH_SEED_KNOBS
+    if (argc == 2 && std::strcmp(argv[1], "--peelcap-threads") == 0)
+    {
+        TestPeelCapConcurrentInitialization();
+        if (Failures != 0) {
+            std::fprintf(stderr,
+                "WH_PEELCAP concurrency test failed: %d checks\n", Failures);
+            return 1;
+        }
+        std::puts("WH_PEELCAP concurrency test passed");
+        return 0;
+    }
+#endif
     if (argc == 2 && std::strcmp(argv[1], "--duplicates") == 0)
     {
         CHECK(wirehair_init() == Wirehair_Success);
@@ -2080,6 +2285,7 @@ int main(int argc, char** argv)
     TestDenseCountInterpolation();
     TestLegacyWireProfiles();
     TestCreationResultsAndBoundaries();
+    TestLegacyOutputCountOverlap();
     TestOwnedInputAndRecoverBlock();
     TestLifecycleAndBorrowedMutation();
     TestPacketFingerprintVectors();

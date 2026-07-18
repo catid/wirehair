@@ -1683,48 +1683,66 @@ def _execute_timing_process(
     """Execute one timing scope and reap its entire local process group."""
     if check:
         raise TimingError("timing executor must use explicit return-code handling")
-    process = subprocess.Popen(
-        command, stdout=stdout, stderr=stderr, start_new_session=True)
+    process: subprocess.Popen[Any] | None = None
+    cleanup_proven = False
+
+    def reap(context: str, grace_seconds: float = 1.0) -> None:
+        nonlocal cleanup_proven
+        # A repeated host signal must be replayed only after group absence has
+        # been proved.  The common helper gives actual teardown failure a
+        # distinct type, while a replayed host handler keeps its semantics.
+        if cleanup_proven:
+            return
+        def mark_reaped() -> None:
+            nonlocal cleanup_proven
+            cleanup_proven = True
+        try:
+            common.stop_and_reap_process_group_deferred(
+                process, grace_seconds, on_reaped=mark_reaped)
+        except common.ProcessGroupCleanupError as error:
+            raise TimingError(context) from error
+
     try:
-        output, errors = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+        # A terminal signal may raise from the controller's installed handler.
+        # Defer delivery until the returned handle has been stored so the
+        # encompassing cleanup can always identify the private process group.
+        with common.deferred_process_group_acquisition():
+            process = subprocess.Popen(
+                command, stdout=stdout, stderr=stderr,
+                start_new_session=True)
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        output = exc.output if exc.output is not None else b""
-        errors = exc.stderr if exc.stderr is not None else b""
-        try:
+            output, errors = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            output = exc.output if exc.output is not None else b""
+            errors = exc.stderr if exc.stderr is not None else b""
+            with common.deferred_terminal_signals():
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             # Never perform an unbounded drain here: an escaped session could
             # retain our pipe descriptors after the original group is dead.
-            common.stop_and_reap_process_group(process, 1.0)
-        except common.CampaignError as cleanup_error:
+            reap("timed-out process group cleanup could not be proven")
+            exc.stdout = output
+            exc.output = output
+            exc.stderr = errors
+            raise
+        if common.process_group_exists(process):
+            reap("timing process group cleanup could not be proven", 5.0)
             raise TimingError(
-                "timed-out process group cleanup could not be proven") \
-                from cleanup_error
-        exc.stdout = output
-        exc.output = output
-        exc.stderr = errors
+                "timing process left an unexpected child process")
+        cleanup_proven = True
+        common.close_process_streams(process)
+        return subprocess.CompletedProcess(
+            command, process.returncode, stdout=output, stderr=errors)
+    except subprocess.TimeoutExpired:
+        # The timeout branch above has already proved group absence and bound
+        # the partial output onto this exact exception.
         raise
-    except BaseException as error:
-        try:
-            common.stop_and_reap_process_group(process, 1.0)
-        except common.CampaignError as cleanup_error:
-            raise TimingError(
-                "interrupted process group cleanup could not be proven") \
-                from cleanup_error
+    except BaseException:
+        if process is not None and not cleanup_proven:
+            reap("interrupted process group cleanup could not be proven")
         raise
-    descendants_live = common.process_group_exists(process)
-    if descendants_live:
-        try:
-            common.stop_and_reap_process_group(process)
-        except common.CampaignError as exc:
-            raise TimingError(
-                "timing process group cleanup could not be proven") from exc
-        raise TimingError("timing process left an unexpected child process")
-    common.close_process_streams(process)
-    return subprocess.CompletedProcess(
-        command, process.returncode, stdout=output, stderr=errors)
 
 
 def run_timing_panel(

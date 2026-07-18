@@ -543,6 +543,86 @@ class IsolationTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_default_executor_reaps_signal_during_process_acquisition(self):
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        real_popen = subprocess.Popen
+        launched = []
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def launch(*args, **kwargs):
+            process = real_popen(
+                ("/bin/sh", "-c", "sleep 20 & wait"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True)
+            launched.append(process)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    timing.subprocess, "Popen", side_effect=launch), \
+                 self.assertRaises(InjectedSignal):
+                timing._execute_timing_process(
+                    ("timing",), stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=False, timeout=2.0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(len(launched), 1)
+        self.assertFalse(timing.common.process_group_exists(launched[0]))
+
+    def test_default_executor_reaps_signal_during_descendant_proof(self):
+        real_popen = subprocess.Popen
+        real_exists = timing.common.process_group_exists
+        launched = []
+        proof_calls = []
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            launched.append(process)
+            return process
+
+        def interrupt_once(process):
+            proof_calls.append(process.pid)
+            if len(proof_calls) == 1:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return real_exists(process)
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    timing.subprocess, "Popen", side_effect=launch), \
+                 mock.patch.object(
+                     timing.common, "process_group_exists",
+                     side_effect=interrupt_once), \
+                 self.assertRaises(InjectedSignal):
+                timing._execute_timing_process(
+                    (
+                        "/bin/sh", "-c",
+                        "(sleep 20) >/dev/null 2>&1 & exit 0",
+                    ),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False, timeout=2.0)
+            self.assertEqual(len(launched), 1)
+            self.assertGreaterEqual(len(proof_calls), 2)
+            self.assertFalse(real_exists(launched[0]))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            for process in launched:
+                if real_exists(process):
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2.0)
+
     def test_atomic_write_discards_only_dead_pid_temporaries(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -623,7 +703,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raised.exception.stderr, b"partial err")
 
     def test_default_executor_rejects_success_with_surviving_child(self):
-        with self.assertRaisesRegex(
+        with mock.patch.object(
+                timing.common, "stop_and_reap_process_group_deferred",
+                wraps=timing.common.stop_and_reap_process_group_deferred
+        ) as cleanup, self.assertRaisesRegex(
                 timing.TimingError, "unexpected child process"):
             timing._execute_timing_process(
                 (
@@ -632,6 +715,38 @@ class RunnerTests(unittest.TestCase):
                 ),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=False, timeout=2.0)
+        cleanup.assert_called_once()
+
+    def test_default_executor_does_not_reap_twice_after_signal_replay(self):
+        process = mock.Mock()
+        process.pid = 12345
+        process.returncode = 0
+        process.communicate.return_value = (b"", b"")
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def reap_then_signal(_process, _grace_seconds):
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    timing.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(
+                     timing.common, "process_group_exists", return_value=True), \
+                 mock.patch.object(
+                     timing.common, "stop_and_reap_process_group",
+                     side_effect=reap_then_signal) as cleanup, \
+                 self.assertRaises(InjectedSignal):
+                timing._execute_timing_process(
+                    ("timing",), stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=False, timeout=2.0)
+            cleanup.assert_called_once_with(process, 5.0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
     def test_probe_start_failure_is_retained_as_unsealed_evidence(self):
         class FailingProbe:

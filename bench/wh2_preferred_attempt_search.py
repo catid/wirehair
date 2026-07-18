@@ -1389,6 +1389,8 @@ TIMING_HOST_JOURNAL_PATH = Path(
     "/tmp/wirehair-wh2-timing-host.journal.json")
 TIMING_HOST_JOURNAL_SCHEMA = "wirehair.wh2.timing_host_journal.v1"
 TIMING_HOST_UNITS = ("system.slice", "user.slice", "machine.slice")
+TIMING_HOST_COMMAND_TIMEOUT_SECONDS = 60.0
+TIMING_EVIDENCE_STARTUP_DRAIN_TIMEOUT_SECONDS = 1.0
 TIMING_HOST_RECOVERY_TOOLS = (
     "bash", "sudo", "systemctl", "taskset", "tee",
 )
@@ -1921,9 +1923,9 @@ class TimingHostSession:
                 "timing host could not quiesce signal handlers: " +
                 "; ".join(str(error) for error in errors))
 
-    def _restore_signal_handlers(self) -> None:
+    def _restore_signal_handlers(self) -> BaseException | None:
         if not self.signals_installed:
-            return
+            return None
         errors: list[BaseException] = []
         signals = tuple(self.previous_signal_handlers)
         try:
@@ -1944,14 +1946,20 @@ class TimingHostSession:
         self.previous_signal_handlers = failed
         self.signals_installed = bool(failed)
         self.closing = bool(failed)
+        replayed_error: BaseException | None = None
         try:
+            # A signal queued after its original handler was restored may
+            # raise here.  Return that exact exception to close(), which has
+            # already repaired the host and released the journal/lock, so its
+            # original KeyboardInterrupt/custom-handler semantics survive.
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         except BaseException as error:
-            errors.append(error)
+            replayed_error = error
         if errors:
             raise CampaignError(
                 "timing host could not restore signal handlers: " +
                 "; ".join(str(error) for error in errors))
+        return replayed_error
 
     def tool(self, name: str) -> str:
         return str(frozen_tool_path(self.tools, name))
@@ -1961,13 +1969,31 @@ class TimingHostSession:
         command: Sequence[str],
         input_bytes: bytes | None = None,
     ) -> bytes:
-        result = subprocess.run(
-            tuple(command), input=input_bytes, capture_output=True,
-            check=False, timeout=60)
+        command_tuple = tuple(command)
+        used_tools = tuple(
+            name for name, record in self.tools.items()
+            if isinstance(record, dict) and
+            record.get("path") in command_tuple)
+        verified_paths = {
+            name: self.tool(name) for name in used_tools
+        }
+        if not command_tuple or command_tuple[0] not in \
+                set(verified_paths.values()):
+            die("timing host command does not start with a frozen tool")
+        # TimingHostSession owns the outer signal policy.  During live host
+        # mutation its handler raises and this wrapper reaps the group; during
+        # restoration it deliberately defers signals so repair can complete.
+        result = common.run_bounded_process_group(
+            command_tuple, input_bytes=input_bytes,
+            timeout=TIMING_HOST_COMMAND_TIMEOUT_SECONDS,
+            context="timing host command", manage_signals=False)
+        if any(self.tool(name) != path
+               for name, path in verified_paths.items()):
+            die("timing host executable changed during command")
         if result.returncode or result.stderr:
             die(
                 "timing host command failed: " +
-                " ".join(command[:3]) +
+                " ".join(command_tuple[:3]) +
                 f" (rc={result.returncode})")
         return result.stdout
 
@@ -2476,8 +2502,9 @@ class TimingHostSession:
                 os.close(lock_fd)
             except BaseException as error:
                 errors.append(error)
+        replayed_signal_error: BaseException | None = None
         try:
-            self._restore_signal_handlers()
+            replayed_signal_error = self._restore_signal_handlers()
         except BaseException as error:
             errors.append(error)
         pending = tuple(self.pending_cleanup_signals)
@@ -2490,6 +2517,8 @@ class TimingHostSession:
             raise CampaignError(
                 "timing host restoration failed: " +
                 "; ".join(str(error) for error in errors) + interrupted)
+        if replayed_signal_error is not None:
+            raise replayed_signal_error
         if pending:
             if pending[0] == signal.SIGINT:
                 raise KeyboardInterrupt
@@ -2561,16 +2590,25 @@ class LinuxTimingEvidenceProbe:
             "--quiet", "--cpu", str(self.host.core), "--interval", "0.1",
             "--show", "Core,CPU,Avg_MHz,Busy%,Bzy_MHz,TSC_MHz",
         )
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True)
+        process: subprocess.Popen[bytes] | None = None
         try:
+            # The timing host owns signal policy and its handlers may raise.
+            # Defer terminal-signal delivery through Popen and handle storage
+            # so cleanup can never lose a newly-created private process group.
+            with common.deferred_process_group_acquisition():
+                process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
             # Do not prefill the 100 ms frequency window with an idle target
             # core; that would manufacture an APERF/MPERF excursion before the
             # measured process even starts.  A launch-failure check suffices.
             time.sleep(0.02)
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=TIMING_EVIDENCE_STARTUP_DRAIN_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    die("turbostat exited with a pipe-holding descendant")
                 common.atomic_write(
                     performance_path,
                     b"wirehair-wh2-timing-performance-failed-v1\n" +
@@ -2582,12 +2620,13 @@ class LinuxTimingEvidenceProbe:
                  for cpu in self.host.isolation.sibling_cpus},
                 thermal_path, performance_path, command)
         except BaseException as error:
-            try:
-                common.stop_and_reap_process_group(process)
-            except BaseException as cleanup_error:
-                raise CampaignError(
-                    "turbostat cleanup failed after interrupted evidence "
-                    f"startup: {cleanup_error}") from error
+            if process is not None:
+                try:
+                    common.stop_and_reap_process_group_deferred(process)
+                except common.ProcessGroupCleanupError as cleanup_error:
+                    raise CampaignError(
+                        "turbostat cleanup failed after interrupted evidence "
+                        f"startup: {cleanup_error}") from error
             raise
 
     def _performance_samples(
@@ -2633,38 +2672,46 @@ class LinuxTimingEvidenceProbe:
 
     def finish(self, token: TimingEvidenceToken) -> Any:
         process = token.performance_process
-        if process.poll() is None:
+        cleanup_proven = False
+
+        def reap(context: str) -> None:
+            nonlocal cleanup_proven
+            if cleanup_proven:
+                return
+            def mark_reaped() -> None:
+                nonlocal cleanup_proven
+                cleanup_proven = True
             try:
-                os.killpg(process.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
+                common.stop_and_reap_process_group_deferred(
+                    process, on_reaped=mark_reaped)
+            except common.ProcessGroupCleanupError as cleanup_error:
+                raise CampaignError(
+                    f"{context}: {cleanup_error}") from cleanup_error
+
         try:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGINT)
+                except ProcessLookupError:
+                    pass
             try:
                 stdout, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                with common.deferred_terminal_signals():
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 stdout, stderr = process.communicate(timeout=5)
-        except BaseException as error:
-            try:
-                common.stop_and_reap_process_group(process)
-            except BaseException as cleanup_error:
-                raise CampaignError(
-                    "turbostat cleanup failed after interrupted evidence "
-                    f"collection: {cleanup_error}") from error
+            if common.process_group_exists(process):
+                reap("turbostat descendant cleanup could not be proven")
+                die("turbostat left an unexpected child process")
+            cleanup_proven = True
+            common.close_process_streams(process)
+        except BaseException:
+            if not cleanup_proven:
+                reap("turbostat cleanup failed after interrupted evidence collection")
             raise
-        descendants_live = common.process_group_exists(process)
-        if descendants_live:
-            try:
-                common.stop_and_reap_process_group(process)
-            except BaseException as cleanup_error:
-                raise CampaignError(
-                    "turbostat descendant cleanup could not be proven: "
-                    f"{cleanup_error}") from cleanup_error
-            die("turbostat left an unexpected child process")
-        common.close_process_streams(process)
         returncode = process.returncode
         envelope = (
             b"wirehair-wh2-timing-performance-interval-v1\n" +
@@ -2784,62 +2831,67 @@ def tracked_clean_sources(
     if not paths:
         die("no tracked source paths")
     git = str(frozen_tool_path(tool_records, "git"))
-    repo = Path(subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(paths[0].parent),
-            "rev-parse", "--show-toplevel",
-        ),
-        text=True,
-    ).strip()).resolve(strict=True)
+    local_git_environment = common.pinned_git_environment()
+    common.validate_pinned_git_environment(local_git_environment)
+
+    def git_text(
+        arguments: Sequence[str], context: str, timeout: float = 30.0,
+    ) -> str:
+        result = common.run_bounded_process_group(
+            (git, "--no-replace-objects", *arguments), timeout=timeout,
+            context=context, env=local_git_environment)
+        if result.returncode or result.stderr:
+            die(f"{context} failed")
+        try:
+            return result.stdout.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise CampaignError(f"{context} output is not UTF-8") from error
+
+    repo_text = git_text(
+        ("-C", str(paths[0].parent), "rev-parse", "--show-toplevel"),
+        "preferred source repository discovery")
+    if not repo_text:
+        die("preferred source repository discovery returned an empty path")
+    repo = Path(repo_text).resolve(strict=True)
     for args, label in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run(
-                (git, "--no-replace-objects", "-C", str(repo), *args),
-                check=False).returncode:
+        result = common.run_bounded_process_group(
+            (git, "--no-replace-objects", "-C", str(repo), *args),
+            timeout=30.0, context=f"preferred source {label} status",
+            env=local_git_environment)
+        if result.returncode or result.stdout or result.stderr:
             die(f"tracked source {label} is dirty")
-    head = subprocess.check_output(
-        (git, "--no-replace-objects", "-C", str(repo), "rev-parse", "HEAD"),
-        text=True,
-    ).strip()
-    upstream = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "rev-parse", "@{upstream}",
-        ), text=True,
-    ).strip()
+    head = git_text(
+        ("-C", str(repo), "rev-parse", "HEAD"),
+        "preferred source HEAD discovery")
+    upstream = git_text(
+        ("-C", str(repo), "rev-parse", "@{upstream}"),
+        "preferred source upstream discovery")
+    if (re.fullmatch(r"[0-9a-f]{40}", head) is None or
+            re.fullmatch(r"[0-9a-f]{40}", upstream) is None):
+        die("preferred source commit identity is malformed")
     if head != upstream:
         die("prepare requires immutable HEAD already pushed to its upstream")
-    branch = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "symbolic-ref", "--short", "HEAD",
-        ),
-        text=True,
-    ).strip()
-    remote = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo), "config", "--get",
-            f"branch.{branch}.remote",
-        ),
-        text=True,
-    ).strip()
-    merge_ref = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo), "config", "--get",
-            f"branch.{branch}.merge",
-        ),
-        text=True,
-    ).strip()
-    remote_rows = subprocess.run(
-        (
-            git, "--no-replace-objects", "-C", str(repo), "ls-remote",
-            "--exit-code", remote, merge_ref,
-        ),
-        text=True, capture_output=True, check=False, timeout=60,
-    )
-    expected_remote_line = f"{head}\t{merge_ref}\n"
+    branch = git_text(
+        ("-C", str(repo), "symbolic-ref", "--short", "HEAD"),
+        "preferred source branch discovery")
+    remote = git_text(
+        ("-C", str(repo), "config", "--get", f"branch.{branch}.remote"),
+        "preferred source remote discovery")
+    merge_ref = git_text(
+        ("-C", str(repo), "config", "--get", f"branch.{branch}.merge"),
+        "preferred source merge-ref discovery")
+    # Git may otherwise select SSH through ambient PATH/configuration and a
+    # stale forwarded socket.  Bind the remote proof to the newest authenticated
+    # socket and the exact frozen SSH executable just like tag publication.
+    remote_environment = newest_github_agent_environment(tool_records)
+    remote_rows = run_frozen_git(
+        repo, ("ls-remote", "--exit-code", remote, merge_ref),
+        tool_records, "preferred source remote proof",
+        environment=remote_environment, timeout=60.0)
+    expected_remote_line = f"{head}\t{merge_ref}\n".encode("ascii")
     if remote_rows.returncode or remote_rows.stdout != expected_remote_line:
         die(
             "prepare remote proof failed: upstream branch does not advertise "
@@ -2847,17 +2899,22 @@ def tracked_clean_sources(
         )
     for path in paths:
         relative = path.relative_to(repo)
-        if subprocess.check_output(
-                (
-                    git, "--no-replace-objects", "-C", str(repo),
-                    "cat-file", "blob", f"{head}:{relative}",
-                )) != \
-                common.stable_bytes(path):
+        tracked = common.run_bounded_process_group(
+            (
+                git, "--no-replace-objects", "-C", str(repo),
+                "cat-file", "blob", f"{head}:{relative}",
+            ), timeout=30.0, env=local_git_environment,
+            context=f"preferred source object {relative}")
+        if (tracked.returncode or tracked.stderr or
+                tracked.stdout != common.stable_bytes(path)):
             die(f"tracked source does not match HEAD: {relative}")
     return repo, head, upstream
 
 
-def q0_control_identity(binary: Path) -> dict[str, Any]:
+def q0_control_identity(
+    binary: Path,
+    binary_sha256: str,
+) -> dict[str, Any]:
     # Compare the dedicated cached-control path against the historical
     # precodefail q0 path.  Timings are ignored; every algebra/work statistic
     # must match exactly at both sides of the adaptive cutoff.
@@ -2899,14 +2956,16 @@ def q0_control_identity(binary: Path) -> dict[str, Any]:
             parsed[key] = value
         return parsed
 
-    dedicated = subprocess.run([
+    common.verify_frozen_binary(binary, binary_sha256)
+    dedicated = common.run_bounded_process_group((
         str(binary), "preferredattempt", "--mode", "control", "--N",
         ",".join(map(str, cases)), "--bb-list",
         ",".join(map(str, widths)), "--loss", "0.50",
         "--seed", seed, "--schedule", schedule,
-    ], capture_output=True, check=False, timeout=600)
+    ), timeout=600.0, context="dedicated q0 identity command")
     if dedicated.returncode or dedicated.stderr:
         die("dedicated q0 identity command failed")
+    common.verify_frozen_binary(binary, binary_sha256)
     dedicated_all_lines = dedicated.stdout.decode("utf-8").splitlines()
     dedicated_preamble = preamble_tokens(
         dedicated_all_lines[0] if dedicated_all_lines else "",
@@ -2954,10 +3013,13 @@ def q0_control_identity(binary: Path) -> dict[str, Any]:
         ]
         if K >= CUTOFF:
             legacy_command.append("--binary-dense-two-anchor")
-        legacy = subprocess.run(
-            legacy_command, capture_output=True, check=False, timeout=600)
+        common.verify_frozen_binary(binary, binary_sha256)
+        legacy = common.run_bounded_process_group(
+            legacy_command, timeout=600.0,
+            context=f"legacy q0 identity K={K}")
         if legacy.returncode or legacy.stderr:
             die(f"legacy q0 identity failed at K={K}")
+        common.verify_frozen_binary(binary, binary_sha256)
         legacy_all_lines = legacy.stdout.decode("utf-8").splitlines()
         legacy_preamble = preamble_tokens(
             legacy_all_lines[0] if legacy_all_lines else "",
@@ -3098,12 +3160,82 @@ def q0_control_identity(binary: Path) -> dict[str, Any]:
     }
 
 
-def command_version(executable: Path, expected: str) -> str:
-    result = subprocess.run(
-        (str(executable), "--version"), text=True, capture_output=True,
-        check=False, timeout=30,
-    )
-    observed = result.stdout.strip()
+PINNED_NPM_ENVIRONMENT = {
+    "NPM_CONFIG_AUDIT": "false",
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+    "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+    "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+    "NPM_CONFIG_USERCONFIG": "/dev/null",
+}
+
+
+def frozen_node_environment(node: Path) -> dict[str, str]:
+    """Build an explicit Node/npm environment without code-loading hooks."""
+    environment = os.environ.copy()
+    for key in tuple(environment):
+        upper = key.upper()
+        if upper.startswith("NODE_") or upper.startswith("NPM_"):
+            environment.pop(key)
+    path_parts = (str(node.parent), *common.PINNED_BUILD_PATH.split(":"))
+    environment["PATH"] = ":".join(dict.fromkeys(path_parts))
+    environment["LANG"] = "C"
+    environment["LC_ALL"] = "C"
+    environment.update(PINNED_NPM_ENVIRONMENT)
+    return environment
+
+
+def validate_frozen_node_environment(
+    node: Path,
+    environment: Any,
+) -> None:
+    if not isinstance(environment, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()):
+        die("frozen Node environment is not a string mapping")
+    expected_path = ":".join(dict.fromkeys(
+        (str(node.parent), *common.PINNED_BUILD_PATH.split(":"))))
+    unexpected = tuple(sorted(
+        key for key in environment
+        if (key.upper().startswith("NODE_") or
+            (key.upper().startswith("NPM_") and
+             key not in PINNED_NPM_ENVIRONMENT))))
+    if (unexpected or environment.get("PATH") != expected_path or
+            environment.get("LANG") != "C" or
+            environment.get("LC_ALL") != "C" or
+            any(environment.get(key) != value
+                for key, value in PINNED_NPM_ENVIRONMENT.items())):
+        die("frozen Node environment differs from its exact policy")
+
+
+def command_version(
+    executable: Path,
+    expected: str,
+    *,
+    node: Path | None = None,
+) -> str:
+    before = common.sha256_file(executable, require_unique=False)
+    node_path = executable if node is None else node
+    node_before = common.sha256_file(node_path, require_unique=False)
+    environment = frozen_node_environment(node_path)
+    environment_snapshot = dict(environment)
+    validate_frozen_node_environment(node_path, environment)
+    try:
+        result = common.run_bounded_process_group(
+            (str(executable), "--version"), timeout=30.0,
+            context=f"{executable.name} version probe", env=environment)
+    finally:
+        validate_frozen_node_environment(node_path, environment)
+        if (environment != environment_snapshot or
+                common.sha256_file(
+                    executable, require_unique=False) != before or
+                common.sha256_file(
+                    node_path, require_unique=False) != node_before):
+            die(f"{executable.name} runtime changed during version probe")
+    try:
+        observed = result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        observed = ""
     if result.returncode or result.stderr or observed != expected:
         die(
             f"{executable.name} version mismatch: expected {expected!r}, "
@@ -3175,6 +3307,8 @@ def frozen_runtime_path(
     record: Any,
     name: str,
     expected_version: str,
+    *,
+    node: Path | None = None,
 ) -> Path:
     if (not isinstance(record, dict) or
             set(record) != {"path", "version", "sha256"}):
@@ -3195,7 +3329,8 @@ def frozen_runtime_path(
     if (not path.is_absolute() or resolved != path or
             not os.access(path, os.X_OK) or
             common.sha256_file(path, require_unique=False) != digest or
-            command_version(path, expected_version) != expected_version):
+            command_version(
+                path, expected_version, node=node) != expected_version):
         die(f"PERMANENT: frozen {name} runtime changed")
     return path
 
@@ -3244,21 +3379,40 @@ def obtain_drand_verifier(
         die("pinned drand verification requires node and npm")
     node = Path(node_name).resolve(strict=True)
     npm = Path(npm_name).resolve(strict=True)
-    node_version = command_version(node, DRAND_NODE_VERSION)
-    npm_version = command_version(npm, DRAND_NPM_VERSION)
+    node_sha256 = common.sha256_file(node, require_unique=False)
+    npm_sha256 = common.sha256_file(npm, require_unique=False)
+    node_environment = frozen_node_environment(node)
+    validate_frozen_node_environment(node, node_environment)
+    node_version = command_version(node, DRAND_NODE_VERSION, node=node)
+    npm_version = command_version(npm, DRAND_NPM_VERSION, node=node)
     with tempfile.TemporaryDirectory(prefix="wh2-drand-client-") as temporary:
         temp = Path(temporary)
         common.atomic_write(temp / "package.json", common.stable_bytes(package_json))
         common.atomic_write(
             temp / "package-lock.json", common.stable_bytes(package_lock))
-        result = subprocess.run(
-            (
-                str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-            ),
-            cwd=temp, text=True, capture_output=True, check=False, timeout=120,
-        )
+        node_environment_snapshot = dict(node_environment)
+        try:
+            result = common.run_bounded_process_group(
+                (
+                    str(npm), "ci", "--ignore-scripts", "--no-audit",
+                    "--no-fund",
+                ),
+                cwd=temp, timeout=120.0, context="pinned npm install",
+                env=node_environment)
+        finally:
+            validate_frozen_node_environment(node, node_environment)
+            if (node_environment != node_environment_snapshot or
+                    common.sha256_file(
+                        node, require_unique=False) != node_sha256 or
+                    common.sha256_file(
+                        npm, require_unique=False) != npm_sha256):
+                die("Node/npm identity changed during pinned drand install")
         if result.returncode:
-            die(f"failed to install pinned drand-client lock: {result.stderr.strip()}")
+            detail = result.stderr[-4096:].decode(
+                "utf-8", errors="replace").strip()
+            die(f"failed to install pinned drand-client lock: {detail}")
+        if common.sha256_file(npm, require_unique=False) != npm_sha256:
+            die("npm executable changed during pinned drand install")
         installed_package = temp / "node_modules/drand-client/package.json"
         try:
             installed = json.loads(common.stable_bytes(installed_package))
@@ -3278,15 +3432,27 @@ def obtain_drand_verifier(
         if (len(bundle) != DRAND_CLIENT_BUNDLE_BYTES or
                 sha256_bytes(bundle) != DRAND_CLIENT_BUNDLE_SHA256):
             die("installed drand-client CJS bundle content mismatch")
-        selftest = subprocess.run(
-            (str(node), str(wrapper), str(bundle_path), "offline-selftest"),
-            text=True, capture_output=True, check=False, timeout=90,
-        )
-        if selftest.returncode or selftest.stderr:
-            die(f"pinned drand offline self-test failed: {selftest.stderr.strip()}")
         try:
-            selftest_record = json.loads(selftest.stdout)
-        except json.JSONDecodeError:
+            selftest = common.run_bounded_process_group(
+                (str(node), str(wrapper), str(bundle_path), "offline-selftest"),
+                timeout=90.0, context="pinned drand offline self-test",
+                env=node_environment)
+        finally:
+            validate_frozen_node_environment(node, node_environment)
+            if (node_environment != node_environment_snapshot or
+                    common.sha256_file(
+                        node, require_unique=False) != node_sha256):
+                die("Node identity changed during pinned drand self-test")
+        if selftest.returncode or selftest.stderr:
+            detail = selftest.stderr[-4096:].decode(
+                "utf-8", errors="replace").strip()
+            die(f"pinned drand offline self-test failed: {detail}")
+        if common.sha256_file(node, require_unique=False) != node_sha256:
+            die("node executable changed during pinned drand self-test")
+        validate_frozen_node_environment(node, node_environment)
+        try:
+            selftest_record = json.loads(selftest.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             die("pinned drand offline self-test returned malformed JSON")
         if (not isinstance(selftest_record, dict) or
                 selftest_record.get("schema") !=
@@ -3299,10 +3465,10 @@ def obtain_drand_verifier(
         "bundle": bundle,
         "node": str(node),
         "node_version": node_version,
-        "node_sha256": common.sha256_file(node, require_unique=False),
+        "node_sha256": node_sha256,
         "npm": str(npm),
         "npm_version": npm_version,
-        "npm_sha256": common.sha256_file(npm, require_unique=False),
+        "npm_sha256": npm_sha256,
         "offline_selftest": selftest_record,
     }
 
@@ -3793,8 +3959,11 @@ def verify_frozen_controller_runtime(
     if (current_script != expected_script or
             common.sha256_file(current_script) != contract.get("script_sha256")):
         die("PERMANENT: controller must execute the exact frozen script")
-    frozen_runtime_path(contract.get("node"), "node", DRAND_NODE_VERSION)
-    frozen_runtime_path(contract.get("npm"), "npm", DRAND_NPM_VERSION)
+    node_runtime = frozen_runtime_path(
+        contract.get("node"), "node", DRAND_NODE_VERSION)
+    frozen_runtime_path(
+        contract.get("npm"), "npm", DRAND_NPM_VERSION,
+        node=node_runtime)
     tool_records = contract.get("system_tools")
     expected_tool_names = {
         "bash", "cmake", "git", "readelf", "ssh", "ssh-add",
@@ -3932,29 +4101,47 @@ def clean_source_commit(contract: dict[str, Any]) -> tuple[Path, str]:
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         die("frozen source commit is invalid")
     git = str(frozen_tool_path(contract.get("system_tools"), "git"))
-    head = subprocess.check_output(
+    git_environment = common.pinned_git_environment()
+    common.validate_pinned_git_environment(git_environment)
+    head_result = common.run_bounded_process_group(
         (git, "--no-replace-objects", "-C", str(repo), "rev-parse", "HEAD"),
-        text=True,
-    ).strip()
+        timeout=30.0, context="frozen source HEAD check",
+        env=git_environment)
+    try:
+        head = head_result.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        head = ""
+    if head_result.returncode or head_result.stderr:
+        die("PERMANENT: frozen source HEAD check failed")
     if head != commit:
         die("PERMANENT: source worktree no longer names the frozen commit")
     for arguments in (("diff", "--quiet", "HEAD", "--"),
                       ("diff", "--cached", "--quiet", "HEAD", "--")):
-        if subprocess.run(
-                (git, "--no-replace-objects", "-C", str(repo), *arguments),
-                check=False).returncode:
+        status = common.run_bounded_process_group(
+            (git, "--no-replace-objects", "-C", str(repo), *arguments),
+            timeout=30.0, context="frozen source status check",
+            env=git_environment)
+        if status.returncode or status.stdout or status.stderr:
             die("PERMANENT: source worktree or index became dirty")
     return repo, commit
 
 
 def github_remote_url(repo: Path, git_path: Path | str) -> str:
-    url = subprocess.check_output(
+    git_environment = common.pinned_git_environment()
+    common.validate_pinned_git_environment(git_environment)
+    result = common.run_bounded_process_group(
         (
             str(git_path), "--no-replace-objects", "-C", str(repo),
             "remote", "get-url", "origin",
         ),
-        text=True,
-    ).strip()
+        timeout=30.0, context="GitHub remote discovery",
+        env=git_environment)
+    try:
+        url = result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        url = ""
+    if result.returncode or result.stderr:
+        die("GitHub remote discovery failed")
     if not (re.fullmatch(r"git@github\.com:[^\s]+", url) or
             re.fullmatch(r"ssh://git@github\.com/[^\s]+", url)):
         die("holdout seal publication requires origin over github.com SSH")
@@ -4034,22 +4221,95 @@ def build_seal_record(
     return record, encoded
 
 
+def frozen_drand_inputs(
+    contract: dict[str, Any],
+    result_dir: Path,
+) -> tuple[Path, Path, Path]:
+    """Return the exact frozen Node/wrapper/bundle after hashing all three."""
+    node_record = contract.get("node")
+    if (not isinstance(node_record, dict) or
+            set(node_record) != {"path", "version", "sha256"} or
+            node_record.get("version") != DRAND_NODE_VERSION):
+        die("PERMANENT: frozen drand Node identity record changed")
+    node_text = node_record.get("path")
+    node_sha256 = node_record.get("sha256")
+    if (not isinstance(node_text, str) or not node_text or
+            not isinstance(node_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", node_sha256) is None):
+        die("PERMANENT: frozen drand Node identity is malformed")
+    node = Path(node_text)
+    try:
+        resolved_node = node.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise CampaignError(
+            f"PERMANENT: frozen drand Node is unavailable: {error}") from error
+    if (not node.is_absolute() or resolved_node != node or
+            not os.access(node, os.X_OK) or
+            common.sha256_file(node, require_unique=False) != node_sha256):
+        die("PERMANENT: frozen drand Node executable changed")
+
+    frozen = result_dir / "frozen"
+    inputs = (
+        (frozen / "wh2_drand_verify.cjs",
+         contract.get("drand_wrapper_sha256"), "wrapper"),
+        (frozen / "drand-client.cjs",
+         contract.get("drand_client_bundle_sha256"), "bundle"),
+    )
+    verified: list[Path] = []
+    for path, expected, name in inputs:
+        if (not isinstance(expected, str) or
+                re.fullmatch(r"[0-9a-f]{64}", expected) is None):
+            die(f"PERMANENT: frozen drand {name} identity is malformed")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise CampaignError(
+                f"PERMANENT: frozen drand {name} is unavailable: {error}") \
+                from error
+        if (not path.is_absolute() or resolved != path or
+                common.sha256_file(path) != expected):
+            die(f"PERMANENT: frozen drand {name} changed")
+        verified.append(path)
+    return node, verified[0], verified[1]
+
+
+def run_frozen_drand(
+    contract: dict[str, Any],
+    result_dir: Path,
+    operation: str,
+    *,
+    timeout: float,
+    context: str,
+    input_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the frozen drand verifier and revalidate every input on all exits."""
+    if not isinstance(operation, str) or not operation:
+        die("invalid frozen drand operation")
+    before = frozen_drand_inputs(contract, result_dir)
+    command = tuple(str(path) for path in before) + (operation,)
+    environment = frozen_node_environment(before[0])
+    environment_snapshot = dict(environment)
+    validate_frozen_node_environment(before[0], environment)
+    try:
+        return common.run_bounded_process_group(
+            command, input_bytes=input_bytes, timeout=timeout,
+            context=context, env=environment)
+    finally:
+        validate_frozen_node_environment(before[0], environment)
+        if environment != environment_snapshot:
+            die(f"PERMANENT: frozen Node environment changed during {context}")
+        if frozen_drand_inputs(contract, result_dir) != before:
+            die(f"PERMANENT: frozen drand inputs changed during {context}")
+
+
 def obtain_verified_latest_bound(
     contract: dict[str, Any],
     result_dir: Path,
 ) -> dict[str, Any]:
     """Verify latest only as a lower bound; never return its beacon entropy."""
-    command = (
-        str(contract["node"]["path"]),
-        str(result_dir / "frozen/wh2_drand_verify.cjs"),
-        str(result_dir / "frozen/drand-client.cjs"),
-        "latest-bound",
-    )
-    try:
-        result = subprocess.run(
-            command, capture_output=True, check=False, timeout=30)
-    except subprocess.TimeoutExpired:
-        die("verified-latest Quicknet quorum timed out; no seal was created")
+    result = run_frozen_drand(
+        contract, result_dir, "latest-bound", timeout=30.0,
+        context="verified-latest Quicknet quorum")
     try:
         wave = json.loads(result.stdout)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -4131,6 +4391,53 @@ def seal_tag_annotation(
     )
 
 
+GITHUB_SSH_OPTIONS = (
+    "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+)
+
+GITHUB_SSH_GIT_ENVIRONMENT = frozenset((
+    "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+))
+
+GITHUB_SSH_FORBIDDEN_ENVIRONMENT = frozenset((
+    "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
+))
+
+
+def frozen_ssh_environment_identity(
+    tool_records: Any,
+    environment: dict[str, str],
+) -> tuple[str, str, int, int]:
+    """Validate exact Git/SSH policy and bind the forwarded socket inode."""
+    if not isinstance(environment, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()):
+        die("GitHub SSH environment is not a string mapping")
+    common.validate_pinned_git_environment(
+        environment, GITHUB_SSH_GIT_ENVIRONMENT)
+    ssh = str(frozen_tool_path(tool_records, "ssh"))
+    expected_command = shlex.join((ssh, *GITHUB_SSH_OPTIONS))
+    socket_text = environment.get("SSH_AUTH_SOCK")
+    if (any(key in environment
+                for key in GITHUB_SSH_FORBIDDEN_ENVIRONMENT) or
+            environment.get("GIT_SSH_COMMAND") != expected_command or
+            environment.get("GIT_SSH_VARIANT") != "ssh" or
+            not isinstance(socket_text, str) or not socket_text):
+        die("GitHub SSH environment is not the exact frozen policy")
+    socket_path = Path(socket_text)
+    try:
+        metadata = socket_path.lstat()
+        resolved = socket_path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise CampaignError(
+            f"forwarded SSH agent socket is unavailable: {error}") from error
+    if (not socket_path.is_absolute() or resolved != socket_path or
+            not stat_module.S_ISSOCK(metadata.st_mode) or
+            metadata.st_uid != os.geteuid()):
+        die("forwarded SSH agent is not an exact owned socket")
+    return ssh, socket_text, metadata.st_dev, metadata.st_ino
+
+
 def newest_github_agent_environment(
     tool_records: Any,
 ) -> dict[str, str]:
@@ -4147,31 +4454,48 @@ def newest_github_agent_environment(
             continue
     candidates.sort(key=lambda item: item[0], reverse=True)
     for _mtime_ns, socket_path in candidates:
-        environment = os.environ.copy()
+        environment = common.pinned_git_environment()
+        for key in tuple(environment):
+            if (key in GITHUB_SSH_FORBIDDEN_ENVIRONMENT or
+                    key == "SSH_AUTH_SOCK"):
+                environment.pop(key)
         environment["SSH_AUTH_SOCK"] = str(socket_path)
         # Override user/repository Git SSH configuration with the exact frozen
-        # client.  Its absolute path does not depend on the ambient PATH.
-        environment.pop("GIT_SSH", None)
-        environment["GIT_SSH_COMMAND"] = shlex.join((
-            ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"))
+        # client.  Its absolute path does not depend on the ambient PATH, and
+        # -F /dev/null prevents user or system SSH configuration from changing
+        # host, proxy, or executable selection.
+        environment["GIT_SSH_COMMAND"] = shlex.join(
+            (ssh, *GITHUB_SSH_OPTIONS))
         environment["GIT_SSH_VARIANT"] = "ssh"
-        listed = subprocess.run(
-            (ssh_add, "-l"), env=environment, text=True,
-            capture_output=True, check=False, timeout=15,
-        )
+        try:
+            ssh_environment_identity = frozen_ssh_environment_identity(
+                tool_records, environment)
+        except CampaignError:
+            # Forwarded sockets routinely disappear as the client reconnects.
+            # The frozen executable was already validated above; try the next
+            # independently discovered live socket rather than retaining this.
+            if str(frozen_tool_path(tool_records, "ssh")) != ssh:
+                raise
+            continue
+        listed = common.run_bounded_process_group(
+            (ssh_add, "-l"), env=environment, timeout=15.0,
+            context="forwarded SSH identity listing")
+        if (str(frozen_tool_path(tool_records, "ssh-add")) != ssh_add or
+                frozen_ssh_environment_identity(
+                    tool_records, environment) != ssh_environment_identity):
+            die("frozen SSH tools changed during agent refresh")
         if listed.returncode:
             continue
-        authenticated = subprocess.run(
-            (
-                ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                "-T", "git@github.com",
-            ),
-            env=environment, text=True, capture_output=True,
-            check=False, timeout=20,
-        )
+        authenticated = common.run_bounded_process_group(
+            (ssh, *GITHUB_SSH_OPTIONS, "-T", "git@github.com"),
+            env=environment, timeout=20.0,
+            context="forwarded GitHub authentication")
+        if frozen_ssh_environment_identity(
+                tool_records, environment) != ssh_environment_identity:
+            die("frozen SSH client changed during authentication")
         combined = authenticated.stdout + authenticated.stderr
         if (authenticated.returncode == 1 and
-                "successfully authenticated" in combined):
+                b"successfully authenticated" in combined):
             return environment
     die("no current forwarded SSH agent authenticates to GitHub")
 
@@ -4182,15 +4506,14 @@ def tag_remote_rows(
     environment: dict[str, str],
     tool_records: Any,
 ) -> tuple[bytes, dict[str, str]]:
-    git = str(frozen_tool_path(tool_records, "git"))
-    result = subprocess.run(
+    result = run_frozen_git(
+        repo,
         (
-            git, "--no-replace-objects", "-C", str(repo),
             "ls-remote", "--tags", "origin",
             f"refs/tags/{tag_name}", f"refs/tags/{tag_name}^{{}}",
         ),
-        env=environment, capture_output=True, check=False, timeout=60,
-    )
+        tool_records, "GitHub tag verification",
+        environment=environment, timeout=60.0)
     if result.returncode or result.stderr:
         die("GitHub tag verification failed")
     rows: dict[str, str] = {}
@@ -4203,6 +4526,42 @@ def tag_remote_rows(
     return result.stdout, rows
 
 
+def run_frozen_git(
+    repo: Path,
+    arguments: Sequence[str],
+    tool_records: Any,
+    context: str,
+    *,
+    environment: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run exact Git and, for remote calls, bind exact SSH/socket identity."""
+    git = str(frozen_tool_path(tool_records, "git"))
+    effective_environment = (
+        common.pinned_git_environment()
+        if environment is None else environment)
+    common.validate_pinned_git_environment(
+        effective_environment,
+        GITHUB_SSH_GIT_ENVIRONMENT if environment is not None else ())
+    ssh_identity = (
+        frozen_ssh_environment_identity(tool_records, effective_environment)
+        if environment is not None else None)
+    try:
+        return common.run_bounded_process_group(
+            (git, "--no-replace-objects", "-C", str(repo), *arguments),
+            env=effective_environment, timeout=timeout, context=context)
+    finally:
+        if str(frozen_tool_path(tool_records, "git")) != git:
+            die(f"frozen Git executable changed during {context}")
+        common.validate_pinned_git_environment(
+            effective_environment,
+            GITHUB_SSH_GIT_ENVIRONMENT if environment is not None else ())
+        if (environment is not None and
+                frozen_ssh_environment_identity(
+                    tool_records, effective_environment) != ssh_identity):
+            die(f"frozen SSH environment changed during {context}")
+
+
 def publish_seal_tag(
     repo: Path,
     phase: str,
@@ -4211,7 +4570,6 @@ def publish_seal_tag(
     seal_record: dict[str, Any],
     tool_records: Any,
 ) -> dict[str, Any]:
-    git = str(frozen_tool_path(tool_records, "git"))
     environment = newest_github_agent_environment(tool_records)
     tag_name = f"wh2-h12-kpreferred-{phase}-seal-{seal_sha256[:16]}"
     if not re.fullmatch(r"wh2-h12-kpreferred-(?:h1|h2)-seal-[0-9a-f]{16}", tag_name):
@@ -4219,41 +4577,42 @@ def publish_seal_tag(
     annotation = seal_tag_annotation(
         phase, seal_sha256, manifest_sha256, seal_record)
     local_ref = f"refs/tags/{tag_name}"
-    local_exists = subprocess.run(
-        (
-            git, "--no-replace-objects", "-C", str(repo), "show-ref",
-            "--verify", "--quiet", local_ref,
-        ),
-        check=False,
-    ).returncode == 0
+    local_probe = run_frozen_git(
+        repo, ("show-ref", "--verify", "--quiet", local_ref),
+        tool_records, "local seal-tag lookup")
+    if local_probe.returncode not in (0, 1):
+        die("local seal-tag lookup failed")
+    local_exists = local_probe.returncode == 0
     if not local_exists:
-        subprocess.run(
+        created = run_frozen_git(
+            repo,
             (
-                git, "--no-replace-objects", "-C", str(repo),
                 "tag", "-a", tag_name,
                 seal_record["source_commit"], "-m", annotation,
             ),
-            check=True, timeout=30,
-        )
-    tag_object = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "rev-parse", f"{tag_name}^{{tag}}",
-        ),
-        text=True,
-    ).strip()
-    peeled = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "rev-parse", f"{tag_name}^{{}}",
-        ),
-        text=True,
-    ).strip()
-    tag_bytes = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "cat-file", "tag", tag_object,
-        ))
+            tool_records, "local seal-tag creation")
+        if created.returncode:
+            die("local seal-tag creation failed")
+    tag_result = run_frozen_git(
+        repo, ("rev-parse", f"{tag_name}^{{tag}}"),
+        tool_records, "local seal-tag object lookup")
+    peeled_result = run_frozen_git(
+        repo, ("rev-parse", f"{tag_name}^{{}}"),
+        tool_records, "local seal-tag peeled lookup")
+    if (tag_result.returncode or tag_result.stderr or
+            peeled_result.returncode or peeled_result.stderr):
+        die("local seal-tag object lookup failed")
+    try:
+        tag_object = tag_result.stdout.decode("ascii").strip()
+        peeled = peeled_result.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        die("local seal-tag object lookup was not ASCII")
+    tag_result = run_frozen_git(
+        repo, ("cat-file", "tag", tag_object),
+        tool_records, "local seal-tag object read")
+    if tag_result.returncode or tag_result.stderr:
+        die("local seal-tag object read failed")
+    tag_bytes = tag_result.stdout
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -4272,17 +4631,14 @@ def publish_seal_tag(
     if not remote_rows:
         if now_utc_ms() >= seal_record["round_time_ms"]:
             die("holdout seal publication deadline passed before tag push")
-        pushed = subprocess.run(
-            (
-                git, "--no-replace-objects", "-C", str(repo),
-                "push", "origin",
-                f"{local_ref}:{local_ref}",
-            ),
-            env=environment, text=True, capture_output=True,
-            check=False, timeout=60,
-        )
+        pushed = run_frozen_git(
+            repo, ("push", "origin", f"{local_ref}:{local_ref}"),
+            tool_records, "GitHub seal-tag push",
+            environment=environment, timeout=60.0)
         if pushed.returncode:
-            die(f"GitHub seal tag push failed: {pushed.stderr.strip()}")
+            detail = pushed.stderr[-4096:].decode(
+                "utf-8", errors="replace").strip()
+            die(f"GitHub seal tag push failed: {detail}")
         remote_raw, remote_rows = tag_remote_rows(
             repo, tag_name, environment, tool_records)
     confirmed_ms = now_utc_ms()
@@ -4332,7 +4688,6 @@ def publish_r1_freeze_tag(
     prepare_sha256: str,
     tool_records: Any,
 ) -> dict[str, Any]:
-    git = str(frozen_tool_path(tool_records, "git"))
     environment = newest_github_agent_environment(tool_records)
     tag_name = f"wh2-h12-kpreferred-r1-freeze-{prepare_sha256[:16]}"
     if not re.fullmatch(
@@ -4340,41 +4695,42 @@ def publish_r1_freeze_tag(
         die("internal R1 freeze tag name mismatch")
     annotation = r1_freeze_tag_annotation(prepare_record, prepare_sha256)
     local_ref = f"refs/tags/{tag_name}"
-    local_exists = subprocess.run(
-        (
-            git, "--no-replace-objects", "-C", str(repo), "show-ref",
-            "--verify", "--quiet", local_ref,
-        ),
-        check=False,
-    ).returncode == 0
+    local_probe = run_frozen_git(
+        repo, ("show-ref", "--verify", "--quiet", local_ref),
+        tool_records, "local R1 freeze-tag lookup")
+    if local_probe.returncode not in (0, 1):
+        die("local R1 freeze-tag lookup failed")
+    local_exists = local_probe.returncode == 0
     if not local_exists:
-        subprocess.run(
+        created = run_frozen_git(
+            repo,
             (
-                git, "--no-replace-objects", "-C", str(repo),
                 "tag", "-a", tag_name,
                 prepare_record["source_commit"], "-m", annotation,
             ),
-            check=True, timeout=30,
-        )
-    tag_object = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "rev-parse", f"{tag_name}^{{tag}}",
-        ),
-        text=True,
-    ).strip()
-    peeled = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "rev-parse", f"{tag_name}^{{}}",
-        ),
-        text=True,
-    ).strip()
-    tag_bytes = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "cat-file", "tag", tag_object,
-        ))
+            tool_records, "local R1 freeze-tag creation")
+        if created.returncode:
+            die("local R1 freeze-tag creation failed")
+    tag_result = run_frozen_git(
+        repo, ("rev-parse", f"{tag_name}^{{tag}}"),
+        tool_records, "local R1 freeze-tag object lookup")
+    peeled_result = run_frozen_git(
+        repo, ("rev-parse", f"{tag_name}^{{}}"),
+        tool_records, "local R1 freeze-tag peeled lookup")
+    if (tag_result.returncode or tag_result.stderr or
+            peeled_result.returncode or peeled_result.stderr):
+        die("local R1 freeze-tag object lookup failed")
+    try:
+        tag_object = tag_result.stdout.decode("ascii").strip()
+        peeled = peeled_result.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        die("local R1 freeze-tag object lookup was not ASCII")
+    tag_result = run_frozen_git(
+        repo, ("cat-file", "tag", tag_object),
+        tool_records, "local R1 freeze-tag object read")
+    if tag_result.returncode or tag_result.stderr:
+        die("local R1 freeze-tag object read failed")
+    tag_bytes = tag_result.stdout
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -4389,17 +4745,14 @@ def publish_r1_freeze_tag(
     if remote_rows and remote_rows != expected_rows:
         die("PERMANENT: R1 freeze tag name collides with another object")
     if not remote_rows:
-        pushed = subprocess.run(
-            (
-                git, "--no-replace-objects", "-C", str(repo),
-                "push", "origin",
-                f"{local_ref}:{local_ref}",
-            ),
-            env=environment, text=True, capture_output=True,
-            check=False, timeout=60,
-        )
+        pushed = run_frozen_git(
+            repo, ("push", "origin", f"{local_ref}:{local_ref}"),
+            tool_records, "GitHub R1 freeze-tag push",
+            environment=environment, timeout=60.0)
         if pushed.returncode:
-            die(f"R1 freeze tag push failed: {pushed.stderr.strip()}")
+            detail = pushed.stderr[-4096:].decode(
+                "utf-8", errors="replace").strip()
+            die(f"R1 freeze tag push failed: {detail}")
         remote_raw, remote_rows = tag_remote_rows(
             repo, tag_name, environment, tool_records)
     if remote_rows != expected_rows:
@@ -4467,20 +4820,23 @@ def verify_r1_freeze_publication(
         die("PERMANENT: R1 freeze annotation binding changed")
     repo = Path(str(contract["source_repo"])).resolve(strict=True)
     tool_records = contract.get("system_tools")
-    git = str(frozen_tool_path(tool_records, "git"))
-    current_remote = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "remote", "get-url", "origin",
-        ), text=True,
-    ).strip()
+    remote_result = run_frozen_git(
+        repo, ("remote", "get-url", "origin"), tool_records,
+        "R1 freeze remote revalidation")
+    try:
+        current_remote = remote_result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        current_remote = ""
+    if remote_result.returncode or remote_result.stderr:
+        die("PERMANENT: R1 freeze remote revalidation failed")
     if prepare_record.get("github_remote") != current_remote:
         die("PERMANENT: R1 freeze GitHub remote binding changed")
-    tag_bytes = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "cat-file", "tag", publication["tag_object"],
-        ))
+    tag_result = run_frozen_git(
+        repo, ("cat-file", "tag", publication["tag_object"]),
+        tool_records, "R1 freeze tag revalidation")
+    if tag_result.returncode or tag_result.stderr:
+        die("PERMANENT: local R1 freeze tag object is unavailable")
+    tag_bytes = tag_result.stdout
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -5103,12 +5459,12 @@ def verify_seal_publication(
     if publication.get("annotation_sha256") != sha256_bytes(annotation.encode("utf-8")):
         die("PERMANENT: holdout seal tag annotation binding changed")
     tool_records = contract.get("system_tools")
-    git = str(frozen_tool_path(tool_records, "git"))
-    tag_bytes = subprocess.check_output(
-        (
-            git, "--no-replace-objects", "-C", str(repo),
-            "cat-file", "tag", publication["tag_object"],
-        ))
+    tag_result = run_frozen_git(
+        repo, ("cat-file", "tag", publication["tag_object"]),
+        tool_records, "holdout seal tag revalidation")
+    if tag_result.returncode or tag_result.stderr:
+        die("PERMANENT: local holdout seal tag object is unavailable")
+    tag_bytes = tag_result.stdout
     try:
         tag_message = tag_bytes.split(b"\n\n", 1)[1].decode("utf-8")
     except (IndexError, UnicodeDecodeError):
@@ -5137,15 +5493,9 @@ def offline_verify_beacon(
     beacon: dict[str, Any],
 ) -> dict[str, Any]:
     canonical = canonical_beacon_bytes(beacon)
-    result = subprocess.run(
-        (
-            str(contract["node"]["path"]),
-            str(result_dir / "frozen/wh2_drand_verify.cjs"),
-            str(result_dir / "frozen/drand-client.cjs"),
-            "offline-verify",
-        ),
-        input=canonical, capture_output=True, check=False, timeout=30,
-    )
+    result = run_frozen_drand(
+        contract, result_dir, "offline-verify", input_bytes=canonical,
+        timeout=30.0, context="offline Quicknet verification")
     if result.returncode or result.stderr:
         die("PERMANENT: stored Quicknet beacon failed offline BLS verification")
     try:
@@ -5585,6 +5935,10 @@ def publish_root_from_quorum_wave(
         result_dir, root_path.parent, "holdout root directory")
     if root_path.exists() or root_path.is_symlink():
         die("holdout root file appeared before atomic publication")
+    # The controller may have waited for the future round for a long time.
+    # Re-prove every executable verifier input at the irreversible publication
+    # boundary, even though the immediately preceding offline check did so too.
+    frozen_drand_inputs(contract, result_dir)
     atomic_fixed_json_once(root_path, rooted)
     verify_manifest_bytes(result_dir, spec, manifest)
     verify_rooted_record(
@@ -5672,18 +6026,19 @@ def acquire_holdout(args: argparse.Namespace) -> int:
         while True:
             verify_manifest_bytes(result_dir, spec, manifest)
             wave_number += 1
+            operation = str(seal_record["round"])
             command = (
                 str(contract["node"]["path"]),
                 str(result_dir / "frozen/wh2_drand_verify.cjs"),
-                str(result_dir / "frozen/drand-client.cjs"),
-                str(seal_record["round"]),
+                str(result_dir / "frozen/drand-client.cjs"), operation,
             )
             try:
-                wave = subprocess.run(
-                    command, capture_output=True, check=False, timeout=30)
-            except subprocess.TimeoutExpired as exc:
+                wave = run_frozen_drand(
+                    contract, result_dir, operation, timeout=30.0,
+                    context="holdout Quicknet wave")
+            except common.BoundedProcessTimeout as error:
                 wave = subprocess.CompletedProcess(
-                    command, 124, exc.stdout or b"", exc.stderr or b"")
+                    command, 124, b"", str(error).encode("utf-8"))
             try:
                 wave_record = json.loads(wave.stdout)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -6106,13 +6461,19 @@ def atomic_result_directory(
 
 
 def elf_build_id(binary: Path, readelf: Path) -> str:
-    result = subprocess.run(
-        (str(readelf), "--notes", str(binary)), text=True,
-        capture_output=True, check=False, timeout=30,
-    )
+    readelf_sha256 = common.sha256_file(readelf, require_unique=False)
+    result = common.run_bounded_process_group(
+        (str(readelf), "--notes", str(binary)), timeout=30.0,
+        context="ELF build-id probe")
+    try:
+        stdout = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        stdout = ""
     matches = re.findall(r"^[ \t]*Build ID: ([0-9a-f]+)[ \t]*$",
-                         result.stdout, flags=re.MULTILINE)
-    if result.returncode or len(matches) != 1:
+                         stdout, flags=re.MULTILINE)
+    if (result.returncode or result.stderr or len(matches) != 1 or
+            common.sha256_file(readelf, require_unique=False) !=
+            readelf_sha256):
         die("frozen benchmark must expose one lowercase ELF build ID")
     return matches[0]
 
@@ -6164,7 +6525,8 @@ def prepare(args: argparse.Namespace) -> int:
         build_command = fresh_build.record["build_command"]
         live_binary_sha256 = fresh_build.record["binary_sha256"]
         live_build_id = fresh_build.record["binary_elf_build_id"]
-        live_identity = q0_control_identity(fresh_build.binary)
+        live_identity = q0_control_identity(
+            fresh_build.binary, live_binary_sha256)
         if (common.sha256_file(fresh_build.binary) != live_binary_sha256 or
                 elf_build_id(fresh_build.binary, readelf) != live_build_id):
             die("fresh benchmark changed during q0 identity validation")
@@ -6241,24 +6603,51 @@ def prepare(args: argparse.Namespace) -> int:
         if (common.sha256_file(copied["binary"]) != live_binary_sha256 or
                 elf_build_id(copied["binary"], readelf) != live_build_id):
             die("frozen benchmark differs from the q0-tested binary")
-        identity = q0_control_identity(copied["binary"])
+        identity = q0_control_identity(
+            copied["binary"], live_binary_sha256)
         if identity != live_identity:
             die("frozen benchmark q0 identity differs after copy")
-        frozen_selftest = subprocess.run(
-            (
-                drand["node"], str(copied["drand_wrapper"]),
-                str(copied["drand_bundle"]), "offline-selftest",
-            ),
-            text=True, capture_output=True, check=False, timeout=90,
-        )
+        frozen_node = Path(drand["node"])
+        if common.sha256_file(
+                frozen_node, require_unique=False) != drand["node_sha256"]:
+            die("node executable changed before frozen drand self-test")
+        frozen_node_environment_map = frozen_node_environment(frozen_node)
+        frozen_node_environment_snapshot = dict(frozen_node_environment_map)
+        validate_frozen_node_environment(
+            frozen_node, frozen_node_environment_map)
+        try:
+            frozen_selftest = common.run_bounded_process_group(
+                (
+                    drand["node"], str(copied["drand_wrapper"]),
+                    str(copied["drand_bundle"]), "offline-selftest",
+                ),
+                timeout=90.0, context="frozen drand offline self-test",
+                env=frozen_node_environment_map)
+        finally:
+            validate_frozen_node_environment(
+                frozen_node, frozen_node_environment_map)
+            if (frozen_node_environment_map !=
+                    frozen_node_environment_snapshot or
+                    common.sha256_file(
+                        frozen_node, require_unique=False) !=
+                    drand["node_sha256"]):
+                die("Node identity changed during frozen drand self-test")
         if frozen_selftest.returncode or frozen_selftest.stderr:
+            detail = frozen_selftest.stderr[-4096:].decode(
+                "utf-8", errors="replace").strip()
             die(
                 "frozen drand known-round self-test failed: "
-                f"{frozen_selftest.stderr.strip()}"
+                f"{detail}"
             )
+        if common.sha256_file(
+                frozen_node, require_unique=False) != drand["node_sha256"]:
+            die("node executable changed during frozen drand self-test")
+        validate_frozen_node_environment(
+            frozen_node, frozen_node_environment_map)
         try:
-            frozen_selftest_record = json.loads(frozen_selftest.stdout)
-        except json.JSONDecodeError:
+            frozen_selftest_record = json.loads(
+                frozen_selftest.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             die("frozen drand known-round self-test returned malformed JSON")
         if (frozen_selftest_record.get("schema") !=
                 "wirehair.wh2.drand_quicknet_offline_kat.v1" or

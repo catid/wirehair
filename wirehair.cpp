@@ -31,7 +31,9 @@
 #include "WirehairEnvironment.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <new> // std::nothrow
 
@@ -80,6 +82,28 @@ bool NamedLegacyWireProfilesAvailable()
 #else
     return true;
 #endif
+}
+
+bool MemoryRangesOverlap(
+    const void* first,
+    size_t firstBytes,
+    const void* second,
+    size_t secondBytes)
+{
+    if (firstBytes == 0 || secondBytes == 0) {
+        return false;
+    }
+    const uintptr_t firstBegin = reinterpret_cast<uintptr_t>(first);
+    const uintptr_t secondBegin = reinterpret_cast<uintptr_t>(second);
+    const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+    if (firstBytes > limit - firstBegin ||
+        secondBytes > limit - secondBegin)
+    {
+        return true;
+    }
+    const uintptr_t firstEnd = firstBegin + firstBytes;
+    const uintptr_t secondEnd = secondBegin + secondBytes;
+    return firstBegin < secondEnd && secondBegin < firstEnd;
 }
 
 WirehairResult GetPublishedInitResult()
@@ -389,14 +413,30 @@ WIREHAIR_EXPORT WirehairResult wirehair_encode(
     uint32_t* dataBytesOut  ///< Number of bytes written <= blockBytes
 )
 {
-    if (dataBytesOut) {
-        *dataBytesOut = 0;
+    if (!dataBytesOut) {
+        return Wirehair_InvalidInput;
     }
-    if (!codec || !blockDataOut || !dataBytesOut) {
+    if (!codec || !blockDataOut) {
+        if (blockDataOut && MemoryRangesOverlap(
+                blockDataOut, outBytes,
+                dataBytesOut, sizeof(*dataBytesOut)))
+        {
+            return Wirehair_InvalidInput;
+        }
+        *dataBytesOut = 0;
         return Wirehair_InvalidInput;
     }
 
     wirehair::Codec* session = reinterpret_cast<wirehair::Codec*>(codec);
+    const uint32_t requiredBytes = session->EncodedBlockBytes(blockId);
+    if (MemoryRangesOverlap(
+            blockDataOut, requiredBytes,
+            dataBytesOut, sizeof(*dataBytesOut)))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    *dataBytesOut = 0;
     if (!session->CanEncode()) {
         return Wirehair_InvalidInput;
     }
@@ -515,8 +555,16 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
     uint32_t*  bytesOut  ///< Set to the number of data bytes in the block
 )
 {
+    if (!bytesOut) {
+        return Wirehair_InvalidInput;
+    }
+    if (!codec) {
+        *bytesOut = 0;
+        return Wirehair_InvalidInput;
+    }
+    wirehair::Codec* decoder = reinterpret_cast<wirehair::Codec*>(codec);
     return wirehair_recover_block_ex(
-        codec, blockId, blockDataOut, UINT32_MAX, bytesOut);
+        codec, blockId, blockDataOut, decoder->BlockBytes(), bytesOut);
 }
 
 WIREHAIR_EXPORT WirehairResult wirehair_recover_block_ex(
@@ -526,14 +574,38 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block_ex(
     uint32_t outputCapacity,
     uint32_t* bytesOut)
 {
-    if (bytesOut) {
-        *bytesOut = 0;
+    if (!bytesOut) {
+        return Wirehair_InvalidInput;
     }
-    if (!codec || !blockDataOut || !bytesOut || blockId > 0xffffu) {
+    if (!codec || !blockDataOut) {
+        if (blockDataOut && MemoryRangesOverlap(
+                blockDataOut, outputCapacity,
+                bytesOut, sizeof(*bytesOut)))
+        {
+            return Wirehair_InvalidInput;
+        }
+        *bytesOut = 0;
         return Wirehair_InvalidInput;
     }
 
     wirehair::Codec* decoder = reinterpret_cast<wirehair::Codec*>(codec);
+    uint32_t requiredBytes = decoder->BlockBytes();
+    if (blockId < decoder->BlockCount() &&
+        blockId + 1u == decoder->BlockCount())
+    {
+        requiredBytes = decoder->FinalBytes();
+    }
+    if (MemoryRangesOverlap(
+            blockDataOut, requiredBytes,
+            bytesOut, sizeof(*bytesOut)))
+    {
+        return Wirehair_InvalidInput;
+    }
+
+    *bytesOut = 0;
+    if (blockId > 0xffffu) {
+        return Wirehair_InvalidInput;
+    }
     return decoder->ReconstructBlock(
         static_cast<uint16_t>(blockId),
         blockDataOut,

@@ -104,6 +104,53 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             "system_tools": tools,
         }
 
+    def fake_drand_runtime(
+        self,
+        root: Path,
+    ) -> tuple[Path, dict[str, object], tuple[Path, Path, Path]]:
+        result = root / "campaign"
+        frozen = result / "frozen"
+        frozen.mkdir(parents=True)
+        node = root / "node"
+        wrapper = frozen / "wh2_drand_verify.cjs"
+        bundle = frozen / "drand-client.cjs"
+        node.write_bytes(b"mock frozen Node\n")
+        node.chmod(0o755)
+        wrapper.write_bytes(b"mock frozen wrapper\n")
+        bundle.write_bytes(b"mock frozen bundle\n")
+        contract: dict[str, object] = {
+            "node": {
+                "path": str(node), "version": subject.DRAND_NODE_VERSION,
+                "sha256": subject.common.sha256_file(node),
+            },
+            "drand_wrapper_sha256": subject.common.sha256_file(wrapper),
+            "drand_client_bundle_sha256":
+                subject.common.sha256_file(bundle),
+        }
+        return result, contract, (node, wrapper, bundle)
+
+    def fake_frozen_ssh_environment(
+        self,
+        tools: object,
+        socket_path: Path,
+    ) -> dict[str, str]:
+        if not isinstance(tools, dict):
+            self.fail("fake SSH tools are not a mapping")
+        ssh_record = tools.get("ssh")
+        if not isinstance(ssh_record, dict):
+            self.fail("fake SSH tool record is unavailable")
+        ssh = str(ssh_record["path"])
+        environment = subject.common.pinned_git_environment()
+        for name in tuple(environment):
+            if (name in subject.GITHUB_SSH_FORBIDDEN_ENVIRONMENT or
+                    name == "SSH_AUTH_SOCK"):
+                environment.pop(name)
+        environment["SSH_AUTH_SOCK"] = str(socket_path)
+        environment["GIT_SSH_COMMAND"] = subject.shlex.join(
+            (ssh, *subject.GITHUB_SSH_OPTIONS))
+        environment["GIT_SSH_VARIANT"] = "ssh"
+        return environment
+
     def required_h1_tree(self, result: Path) -> None:
         for relative in subject.HOLDOUT_PHASES["h1"].required_files:
             path = result / relative
@@ -788,10 +835,13 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             staging.mkdir()
             prepare, contract = self.complete_prepare_staging(
                 staging, final, repo, commit, remote)
-            environment = os.environ.copy()
+            environment = subject.common.pinned_git_environment()
             with mock.patch.object(
                     subject, "newest_github_agent_environment",
                     return_value=environment), \
+                 mock.patch.object(
+                     subject, "frozen_ssh_environment_identity",
+                     return_value=("fixture", "fixture", 1, 1)), \
                  mock.patch.object(
                      subject, "verify_recoverable_prepare_sources"):
                 prepare_sha256 = subject.common.sha256_file(
@@ -842,6 +892,9 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     subject, "newest_github_agent_environment",
                     return_value=environment), \
                  mock.patch.object(
+                     subject, "frozen_ssh_environment_identity",
+                     return_value=("fixture", "fixture", 1, 1)), \
+                 mock.patch.object(
                      subject, "verify_recoverable_prepare_sources"), \
                  self.assertRaises(
                         subject.CampaignError):
@@ -870,7 +923,10 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 "import wh2_preferred_attempt_search as subject",
                 "final, template, ready = map(Path, sys.argv[1:])",
                 "subject.newest_github_agent_environment = "
-                "lambda _tools: os.environ.copy()",
+                "lambda _tools: subject.common.pinned_git_environment()",
+                "subject.frozen_ssh_environment_identity = "
+                "lambda _tools, _environment: "
+                "('fixture', 'fixture', 1, 1)",
                 "subject.verify_recoverable_prepare_sources = "
                 "lambda _frozen, _contract: None",
                 "with subject.atomic_result_directory(final) as transaction:",
@@ -902,7 +958,10 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 (final / "frozen/r1_freeze_publication.json").is_file())
             with mock.patch.object(
                     subject, "newest_github_agent_environment",
-                    return_value=os.environ.copy()):
+                    return_value=subject.common.pinned_git_environment()), \
+                 mock.patch.object(
+                     subject, "frozen_ssh_environment_identity",
+                     return_value=("fixture", "fixture", 1, 1)):
                 subject.verify_r1_freeze_publication(
                     final, prepare, contract)
 
@@ -971,9 +1030,17 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             json.dumps(wave).encode("ascii"), b"",
         )
         contract = {"node": {"path": "/usr/bin/node"}}
+        frozen_inputs = (
+            Path("/usr/bin/node"), Path("/does/not/matter/frozen/") /
+            "wh2_drand_verify.cjs",
+            Path("/does/not/matter/frozen/drand-client.cjs"),
+        )
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(
-                subject.subprocess, "run", return_value=completed))
+                subject, "frozen_drand_inputs", return_value=frozen_inputs))
+            stack.enter_context(mock.patch.object(
+                subject.common, "run_bounded_process_group",
+                return_value=completed))
             stack.enter_context(mock.patch.object(
                 subject, "offline_verify_beacon", return_value={}))
             bound = subject.obtain_verified_latest_bound(
@@ -985,16 +1052,163 @@ class PreferredAttemptSearchTest(unittest.TestCase):
         no_quorum["status"] = "TEMPORARY_NO_QUORUM"
         failed = subprocess.CompletedProcess(
             completed.args, 2, json.dumps(no_quorum).encode("ascii"), b"")
-        with mock.patch.object(subject.subprocess, "run", return_value=failed):
+        with mock.patch.object(
+                subject, "frozen_drand_inputs", return_value=frozen_inputs), \
+             mock.patch.object(
+                 subject.common, "run_bounded_process_group",
+                 return_value=failed):
             with self.assertRaises(subject.CampaignError):
                 subject.obtain_verified_latest_bound(
                     contract, Path("/does/not/matter"))
         malformed = subprocess.CompletedProcess(
             completed.args, 0, b"\xff", b"")
-        with mock.patch.object(subject.subprocess, "run", return_value=malformed):
+        with mock.patch.object(
+                subject, "frozen_drand_inputs", return_value=frozen_inputs), \
+             mock.patch.object(
+                 subject.common, "run_bounded_process_group",
+                 return_value=malformed):
             with self.assertRaises(subject.CampaignError):
                 subject.obtain_verified_latest_bound(
                     contract, Path("/does/not/matter"))
+
+    def test_frozen_drand_runner_revalidates_every_input_on_all_exits(
+            self) -> None:
+        for changed_index, changed_name in enumerate(
+                ("Node", "wrapper", "bundle")):
+            with self.subTest(changed=changed_name), \
+                    tempfile.TemporaryDirectory(
+                        prefix="wh2-drand-identity-") as temporary:
+                result, contract, inputs = self.fake_drand_runtime(
+                    Path(temporary).resolve())
+                completed = subprocess.CompletedProcess(
+                    (), 0, b"verified\n", b"")
+
+                def mutate_then_complete(*_args, **_kwargs):
+                    inputs[changed_index].write_bytes(
+                        f"mutated {changed_name}\n".encode("ascii"))
+                    if changed_index == 0:
+                        inputs[changed_index].chmod(0o755)
+                    return completed
+
+                with mock.patch.object(
+                        subject.common, "run_bounded_process_group",
+                        side_effect=mutate_then_complete), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, f"drand {changed_name}"):
+                    subject.run_frozen_drand(
+                        contract, result, "offline-selftest", timeout=1.0,
+                        context=f"{changed_name} mutation fixture")
+
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-drand-timeout-identity-") as temporary:
+            result, contract, inputs = self.fake_drand_runtime(
+                Path(temporary).resolve())
+
+            def mutate_then_timeout(*_args, **_kwargs):
+                inputs[1].write_bytes(b"mutated wrapper on timeout\n")
+                raise subject.common.BoundedProcessTimeout("fixture timeout")
+
+            with mock.patch.object(
+                    subject.common, "run_bounded_process_group",
+                    side_effect=mutate_then_timeout), \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "drand wrapper"):
+                subject.run_frozen_drand(
+                    contract, result, "latest-bound", timeout=1.0,
+                    context="timeout mutation fixture")
+
+    def test_frozen_drand_runner_removes_node_code_loading_environment(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-drand-environment-") as temporary:
+            result, contract, _inputs = self.fake_drand_runtime(
+                Path(temporary).resolve())
+            completed = subprocess.CompletedProcess((), 0, b"verified\n", b"")
+            poison = {
+                "NODE_OPTIONS": "--require=/poison/preload.cjs",
+                "NODE_PATH": "/poison/modules",
+                "NPM_CONFIG_NODE_OPTIONS": "--require=/poison/npm.cjs",
+                "npm_execpath": "/poison/npm-cli.js",
+            }
+            with mock.patch.dict(os.environ, poison), mock.patch.object(
+                    subject.common, "run_bounded_process_group",
+                    return_value=completed) as runner:
+                self.assertIs(subject.run_frozen_drand(
+                    contract, result, "offline-selftest", timeout=1.0,
+                    context="poisoned Node environment"), completed)
+            environment = runner.call_args.kwargs["env"]
+            for key in poison:
+                self.assertNotIn(key, environment)
+            subject.validate_frozen_node_environment(
+                Path(contract["node"]["path"]), environment)
+
+            def inject_preload(*_args, **kwargs):
+                kwargs["env"]["NODE_OPTIONS"] = \
+                    "--require=/late/preload.cjs"
+                return completed
+
+            with mock.patch.object(
+                    subject.common, "run_bounded_process_group",
+                    side_effect=inject_preload), self.assertRaisesRegex(
+                        subject.CampaignError, "Node environment"):
+                subject.run_frozen_drand(
+                    contract, result, "offline-selftest", timeout=1.0,
+                    context="mutated Node environment")
+
+    def test_root_publication_revalidates_drand_inputs_before_write(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-root-drand-boundary-") as temporary:
+            result = Path(temporary).resolve() / "campaign"
+            (result / "holdout").mkdir(parents=True)
+            wave_path = result / "wave.json"
+            wave_path.write_bytes(b"wave fixture\n")
+            beacon = dict(subject.DRAND_KNOWN_ROUND)
+            origins = [f"https://{host}" for host in subject.DRAND_RELAYS]
+            canonical_sha256 = hashlib.sha256(
+                subject.canonical_beacon_bytes(beacon)).hexdigest()
+            observations = [{
+                "origin": origin, "ok": True, "beacon": beacon,
+                "canonical_sha256": canonical_sha256,
+                "fetch_started_ms": 2 * index + 1,
+                "fetch_completed_ms": 2 * index + 2,
+                "raw_response_sha256": f"{index + 1:x}" * 64,
+            } for index, origin in enumerate(origins[:3])]
+            observations.append({
+                "origin": origins[3], "ok": False, "error": "fixture timeout",
+            })
+            wave = {
+                "schema": "wirehair.wh2.drand_quicknet_wave.v1",
+                "status": "QUORUM", "chain_hash": subject.DRAND_CHAIN_HASH,
+                "consensus_origins": origins[:3],
+                "observations": observations, "beacon": beacon,
+            }
+            persisted = {
+                "wrapper_returncode": 0,
+                "wrapper_stderr_sha256": subject.EMPTY_SHA256,
+                "wave": 1, "result": wave,
+            }
+            seal = {
+                "round": beacon["round"], "round_time_ms": 0,
+                "manifest_sha256": "a" * 64,
+            }
+            atomic = mock.Mock()
+            with mock.patch.object(
+                    subject, "offline_verify_beacon", return_value={
+                        "canonical_sha256": canonical_sha256,
+                    }), mock.patch.object(
+                        subject, "frozen_drand_inputs",
+                        side_effect=subject.CampaignError(
+                            "PERMANENT: frozen drand bundle changed")), \
+                 mock.patch.object(
+                     subject, "atomic_fixed_json_once", atomic), \
+                 self.assertRaisesRegex(
+                     subject.CampaignError, "drand bundle changed"):
+                subject.publish_root_from_quorum_wave(
+                    result, subject.HOLDOUT_PHASES["h1"], {},
+                    {"tag_name": "fixture", "tag_object": "b" * 40},
+                    b"manifest fixture", seal, "c" * 64,
+                    wave_path, persisted)
+            atomic.assert_not_called()
 
     def test_agent_refresh_uses_frozen_absolute_ssh_tools(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -1007,29 +1221,225 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             listener.bind(str(socket_path))
             try:
                 listed = subprocess.CompletedProcess(
-                    (), 0, "2048 SHA256:test forwarded-key\n", "")
+                    (), 0, b"2048 SHA256:test forwarded-key\n", b"")
                 authenticated = subprocess.CompletedProcess(
-                    (), 1, "", "Hi! You've successfully authenticated.\n")
-                with mock.patch.object(
+                    (), 1, b"", b"Hi! You've successfully authenticated.\n")
+                poisoned = {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.sshCommand",
+                    "GIT_CONFIG_VALUE_0": "/poison/ssh",
+                    "GIT_CONFIG_GLOBAL": "/poison/gitconfig",
+                    "GIT_DIR": "/poison/repository",
+                    "GIT_WORK_TREE": "/poison/work-tree",
+                    "GIT_NAMESPACE": "poison",
+                    "GIT_OBJECT_DIRECTORY": "/poison/objects",
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/poison/alternate",
+                    "GIT_PROXY_COMMAND": "/poison/proxy",
+                    "GIT_SSH": "/poison/ssh",
+                    "SSH_ASKPASS": "/poison/askpass",
+                    "SSH_ASKPASS_REQUIRE": "force",
+                }
+                with mock.patch.dict(os.environ, poisoned), mock.patch.object(
                         subject.Path, "glob", return_value=[socket_path]), \
                      mock.patch.object(
-                         subject.subprocess, "run",
+                         subject.common, "run_bounded_process_group",
                          side_effect=(listed, authenticated)) as run:
                     environment = subject.newest_github_agent_environment(tools)
                 ssh = str(tools["ssh"]["path"])
                 ssh_add = str(tools["ssh-add"]["path"])
                 self.assertEqual(run.call_count, 2)
                 self.assertEqual(run.call_args_list[0].args[0][0], ssh_add)
-                self.assertEqual(run.call_args_list[1].args[0][0], ssh)
+                self.assertEqual(subject.GITHUB_SSH_OPTIONS, (
+                    "-F", "/dev/null", "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=10",
+                ))
+                self.assertEqual(run.call_args_list[1].args[0], (
+                    ssh, *subject.GITHUB_SSH_OPTIONS,
+                    "-T", "git@github.com",
+                ))
                 self.assertEqual(environment["SSH_AUTH_SOCK"], str(socket_path))
                 self.assertEqual(
                     environment["GIT_SSH_COMMAND"], subject.shlex.join((
-                        ssh, "-o", "BatchMode=yes", "-o",
-                        "ConnectTimeout=10")))
+                        ssh, *subject.GITHUB_SSH_OPTIONS)))
                 self.assertEqual(environment["GIT_SSH_VARIANT"], "ssh")
-                self.assertNotIn("GIT_SSH", environment)
+                for key in poisoned:
+                    if key in subject.common.PINNED_GIT_ENVIRONMENT:
+                        self.assertEqual(
+                            environment[key],
+                            subject.common.PINNED_GIT_ENVIRONMENT[key])
+                    else:
+                        self.assertNotIn(key, environment)
             finally:
                 listener.close()
+
+    def test_frozen_git_revalidates_exact_ssh_environment_on_all_exits(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-frozen-git-ssh-") as temporary:
+            root = Path(temporary).resolve()
+            tools: dict[str, dict[str, str]] = {}
+            for name in ("git", "ssh"):
+                path = root / name
+                path.write_bytes(f"mock {name}\n".encode("ascii"))
+                path.chmod(0o755)
+                tools[name] = {
+                    "path": str(path),
+                    "sha256": subject.common.sha256_file(path),
+                }
+            socket_path = root / "agent.1"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            try:
+                environment = self.fake_frozen_ssh_environment(
+                    tools, socket_path)
+                completed = subprocess.CompletedProcess((), 0, b"", b"")
+                with mock.patch.object(
+                        subject.common, "run_bounded_process_group",
+                        return_value=completed) as run:
+                    self.assertIs(subject.run_frozen_git(
+                        root, ("status",), tools, "SSH fixture",
+                        environment=environment), completed)
+                self.assertEqual(run.call_args.kwargs["env"], environment)
+                self.assertEqual(run.call_args.args[0][0], tools["git"]["path"])
+
+                for field, changed in (
+                        ("GIT_SSH_COMMAND", "/unfrozen/ssh"),
+                        ("GIT_SSH_VARIANT", "plink"),
+                        ("SSH_AUTH_SOCK", str(root / "missing-agent")),
+                        ("GIT_CONFIG_COUNT", "1"),
+                        ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+                        ("GIT_DIR", str(root / "poison-repository")),
+                        ("GIT_PROXY_COMMAND", str(root / "poison-proxy"))):
+                    malformed = dict(environment)
+                    malformed[field] = changed
+                    with self.subTest(field=field), mock.patch.object(
+                            subject.common,
+                            "run_bounded_process_group") as rejected, \
+                         self.assertRaises(subject.CampaignError):
+                        subject.run_frozen_git(
+                            root, ("status",), tools, "malformed SSH fixture",
+                            environment=malformed)
+                    rejected.assert_not_called()
+
+                def mutate_environment(*_args, **_kwargs):
+                    environment["GIT_SSH_VARIANT"] = "plink"
+                    return completed
+
+                with mock.patch.object(
+                        subject.common, "run_bounded_process_group",
+                        side_effect=mutate_environment), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "environment"):
+                    subject.run_frozen_git(
+                        root, ("status",), tools, "mutated SSH environment",
+                        environment=environment)
+                environment["GIT_SSH_VARIANT"] = "ssh"
+
+                def inject_git_override(*_args, **_kwargs):
+                    environment["GIT_CONFIG_GLOBAL"] = "/poison/gitconfig"
+                    return completed
+
+                with mock.patch.object(
+                        subject.common, "run_bounded_process_group",
+                        side_effect=inject_git_override), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "environment"):
+                    subject.run_frozen_git(
+                        root, ("status",), tools, "injected Git environment",
+                        environment=environment)
+                environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+                def mutate_ssh_then_timeout(*_args, **_kwargs):
+                    ssh = Path(tools["ssh"]["path"])
+                    ssh.write_bytes(b"mutated SSH executable\n")
+                    ssh.chmod(0o755)
+                    raise subject.common.BoundedProcessTimeout("fixture timeout")
+
+                with mock.patch.object(
+                        subject.common, "run_bounded_process_group",
+                        side_effect=mutate_ssh_then_timeout), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, "ssh executable changed"):
+                    subject.run_frozen_git(
+                        root, ("status",), tools, "mutated SSH executable",
+                        environment=environment)
+            finally:
+                listener.close()
+
+    def test_tracked_remote_proof_uses_frozen_ssh_environment(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-tracked-remote-ssh-") as temporary:
+            root = Path(temporary).resolve()
+            repo, _commit = self.fake_repo(root)
+            tracked = repo / "tracked.txt"
+            tracked.write_text("tracked fixture\n", encoding="ascii")
+            subprocess.run(
+                ("git", "-C", str(repo), "add", tracked.name), check=True)
+            subprocess.run(
+                ("git", "-C", str(repo), "commit", "-qm", "tracked fixture"),
+                check=True)
+            subprocess.run(
+                ("git", "-C", str(repo), "push", "-qu", "origin", "HEAD"),
+                check=True)
+            commit = subprocess.check_output(
+                ("git", "-C", str(repo), "rev-parse", "HEAD"),
+                text=True).strip()
+            tools = self.fake_contract(repo, commit)["system_tools"]
+            socket_path = root / "agent.2"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            try:
+                environment = self.fake_frozen_ssh_environment(
+                    tools, socket_path)
+                real_run_frozen_git = subject.run_frozen_git
+                with mock.patch.object(
+                        subject, "newest_github_agent_environment",
+                        return_value=environment) as newest, \
+                     mock.patch.object(
+                         subject, "run_frozen_git",
+                         wraps=real_run_frozen_git) as remote_run:
+                    observed = subject.tracked_clean_sources((tracked,), tools)
+                self.assertEqual(observed, (repo, commit, commit))
+                newest.assert_called_once_with(tools)
+                remote_run.assert_called_once()
+                self.assertIs(
+                    remote_run.call_args.kwargs["environment"], environment)
+                self.assertEqual(
+                    remote_run.call_args.args[1][:2],
+                    ("ls-remote", "--exit-code"))
+            finally:
+                listener.close()
+
+    def test_local_frozen_git_ignores_ambient_repository_redirects(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-local-git-environment-") as temporary:
+            root = Path(temporary).resolve()
+            repo_a, commit_a = self.fake_repo(root / "a")
+            repo_b, _commit_b = self.fake_repo(root / "b")
+            subprocess.run(
+                ("git", "-C", str(repo_b), "commit", "--allow-empty",
+                 "-qm", "distinct redirected fixture"),
+                check=True)
+            commit_b = subprocess.check_output(
+                ("git", "-C", str(repo_b), "rev-parse", "HEAD"),
+                text=True).strip()
+            self.assertNotEqual(commit_a, commit_b)
+            tools = self.fake_contract(repo_a, commit_a)["system_tools"]
+            poisoned = {
+                "GIT_DIR": str(repo_b / ".git"),
+                "GIT_WORK_TREE": str(repo_b),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": "/poison/fsmonitor",
+                "GIT_CONFIG_GLOBAL": "/poison/gitconfig",
+            }
+            with mock.patch.dict(os.environ, poisoned):
+                result = subject.run_frozen_git(
+                    repo_a, ("rev-parse", "HEAD"), tools,
+                    "local poisoned-environment regression")
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, b"")
+            self.assertEqual(result.stdout, (commit_a + "\n").encode("ascii"))
 
     def test_frozen_executable_records_allow_hardlinks_not_indirection(
         self,
@@ -1099,7 +1509,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             repo, commit = self.fake_repo(Path(temporary))
             contract = self.fake_contract(repo, commit)
             tools = contract["system_tools"]
-            environment = os.environ.copy()
+            environment = subject.common.pinned_git_environment()
             poison = Path(temporary) / "poison-path"
             poison.mkdir()
             fake_git = poison / "git"
@@ -1109,6 +1519,9 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(
                     subject, "newest_github_agent_environment",
                     return_value=environment))
+                stack.enter_context(mock.patch.object(
+                    subject, "frozen_ssh_environment_identity",
+                    return_value=("fixture", "fixture", 1, 1)))
                 stack.enter_context(mock.patch.dict(os.environ, {
                     "PATH": str(poison) + os.pathsep +
                     environment.get("PATH", ""),
@@ -1873,7 +2286,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(
                     session, "_quiesce_signal_handlers"))
                 stack.enter_context(mock.patch.object(
-                    session, "_restore_signal_handlers"))
+                    session, "_restore_signal_handlers", return_value=None))
                 stack.enter_context(mock.patch.object(
                     session, "checked", return_value=b""))
                 stack.enter_context(mock.patch.object(
@@ -2015,6 +2428,57 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 os.fstat(descriptors[0])
 
+    def test_timing_host_checked_reaps_timeout_and_surviving_child(
+            self) -> None:
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-timing-checked-process-") as temporary:
+            root = Path(temporary).resolve()
+            tool = root / "fixture-tool"
+            tool.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, subprocess, sys, time\n"
+                "mode = sys.argv[1]\n"
+                "if mode == 'echo':\n"
+                "    sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
+                "elif mode == 'hang':\n"
+                "    pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))\n"
+                "    subprocess.Popen(('/bin/sleep', '60'))\n"
+                "    time.sleep(60)\n"
+                "elif mode == 'orphan':\n"
+                "    pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))\n"
+                "    subprocess.Popen(('/bin/sleep', '60'))\n",
+                encoding="utf-8",
+            )
+            tool.chmod(0o755)
+            tool_record = {
+                "path": str(tool),
+                "sha256": subject.common.sha256_file(
+                    tool, require_unique=False),
+            }
+            session = subject.TimingHostSession(
+                {"system_tools": {"fixture": tool_record}}, timing, 0)
+            self.assertEqual(
+                session.checked((str(tool), "echo"), b"payload\n"),
+                b"payload\n")
+
+            for mode, expected in (
+                    ("hang", "timed out"),
+                    ("orphan", "surviving descendant")):
+                marker = root / f"{mode}.pid"
+                with self.subTest(mode=mode), \
+                     mock.patch.object(
+                         subject, "TIMING_HOST_COMMAND_TIMEOUT_SECONDS",
+                         0.05), \
+                     self.assertRaisesRegex(
+                         subject.CampaignError, expected):
+                    session.checked((str(tool), mode, str(marker)))
+                leader = int(marker.read_text(encoding="ascii"))
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(leader, 0)
+
     def test_timing_host_malformed_journal_closes_bound_descriptor(self) -> None:
         timing = mock.Mock()
         timing.inspect_linux_isolation.return_value = argparse.Namespace(
@@ -2045,7 +2509,8 @@ class PreferredAttemptSearchTest(unittest.TestCase):
             session.lock_fd = descriptor
             with mock.patch.object(
                     session, "_quiesce_signal_handlers"), \
-                 mock.patch.object(session, "_restore_signal_handlers"), \
+                 mock.patch.object(
+                     session, "_restore_signal_handlers", return_value=None), \
                  mock.patch.object(
                      session, "_clear_host_snapshot",
                      side_effect=OSError("journal close fault")), \
@@ -2294,6 +2759,63 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 session.pending_cleanup_signals.clear()
                 session._restore_signal_handlers()
 
+    def test_timing_host_replays_signal_queued_during_handler_restoration(
+            self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        timing = mock.Mock()
+        timing.inspect_linux_isolation.return_value = argparse.Namespace(
+            sibling_cpus=(), numa_node=0)
+        session = subject.TimingHostSession({}, timing, 0)
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        caller_mask = set(original_mask).difference({
+            signal.SIGINT, signal.SIGTERM})
+        original_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
+
+        def replay_int(_signum, _frame):
+            raise KeyboardInterrupt
+
+        def replay_term(_signum, _frame):
+            return None
+
+        real_signal = signal.signal
+        injected = [False]
+
+        def install(signum, handler):
+            result = real_signal(signum, handler)
+            if handler is replay_int and not injected[0]:
+                injected[0] = True
+                os.kill(os.getpid(), signal.SIGINT)
+            return result
+
+        signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)
+        real_signal(signal.SIGINT, replay_int)
+        real_signal(signal.SIGTERM, replay_term)
+        session._install_signal_handlers()
+        try:
+            with mock.patch.object(
+                    subject.signal, "signal", side_effect=install), \
+                 self.assertRaises(KeyboardInterrupt):
+                session.close()
+            self.assertTrue(injected[0])
+            self.assertFalse(session.active)
+            self.assertFalse(session.signals_installed)
+            self.assertEqual(session.previous_signal_handlers, {})
+            self.assertIs(signal.getsignal(signal.SIGINT), replay_int)
+            self.assertIs(signal.getsignal(signal.SIGTERM), replay_term)
+            self.assertEqual(
+                signal.pthread_sigmask(signal.SIG_BLOCK, ()), caller_mask)
+        finally:
+            if session.signals_installed:
+                session.pending_cleanup_signals.clear()
+                session._restore_signal_handlers()
+            for signum, handler in original_handlers.items():
+                real_signal(signum, handler)
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
     def test_interrupted_turbostat_communication_is_reaped(self) -> None:
         probe = subject.LinuxTimingEvidenceProbe(
             mock.Mock(), mock.Mock(), Path("/thermal"), Path("/evidence"))
@@ -2315,7 +2837,96 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                         subject.common, "stop_and_reap_process_group"))
                     with self.assertRaises(KeyboardInterrupt):
                         probe.finish(token)
-                reap.assert_called_once_with(process)
+                reap.assert_called_once_with(process, 5.0)
+
+    def test_turbostat_finish_reaps_interruption_during_initial_poll(
+            self) -> None:
+        real_process = subprocess.Popen(
+            ("/bin/sh", "-c", "sleep 20 & wait"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+
+        class InjectedSignal(BaseException):
+            pass
+
+        class InterruptingPoll:
+            def __init__(self, process):
+                self.process = process
+                self.injected = False
+
+            def __getattr__(self, name):
+                return getattr(self.process, name)
+
+            def poll(self):
+                if not self.injected:
+                    self.injected = True
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return self.process.poll()
+
+        wrapped = InterruptingPoll(real_process)
+        probe = subject.LinuxTimingEvidenceProbe(
+            mock.Mock(), mock.Mock(), Path("/thermal"), Path("/evidence"))
+        token = subject.TimingEvidenceToken(
+            {}, wrapped, {}, Path("/thermal-out"),
+            Path("/performance-out"), ("turbostat",))
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with self.assertRaises(InjectedSignal):
+                probe.finish(token)
+            self.assertTrue(wrapped.injected)
+            self.assertFalse(subject.common.process_group_exists(real_process))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            if subject.common.process_group_exists(real_process):
+                os.killpg(real_process.pid, signal.SIGKILL)
+                real_process.wait(timeout=2.0)
+
+    def test_turbostat_finish_reaps_interruption_during_descendant_proof(
+            self) -> None:
+        process = subprocess.Popen(
+            (
+                "/bin/sh", "-c",
+                "(sleep 20) >/dev/null 2>&1 & exit 0",
+            ),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        process.wait(timeout=2.0)
+
+        class InjectedSignal(BaseException):
+            pass
+
+        probe = subject.LinuxTimingEvidenceProbe(
+            mock.Mock(), mock.Mock(), Path("/thermal"), Path("/evidence"))
+        token = subject.TimingEvidenceToken(
+            {}, process, {}, Path("/thermal-out"),
+            Path("/performance-out"), ("turbostat",))
+        real_exists = subject.common.process_group_exists
+        calls = []
+
+        def interrupt_once(candidate):
+            calls.append(candidate.pid)
+            if len(calls) == 1:
+                os.kill(os.getpid(), signal.SIGTERM)
+            return real_exists(candidate)
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    subject.common, "process_group_exists",
+                    side_effect=interrupt_once), \
+                 self.assertRaises(InjectedSignal):
+                probe.finish(token)
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertFalse(real_exists(process))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            if real_exists(process):
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2.0)
 
     def test_successful_turbostat_leader_cannot_leave_a_child(self) -> None:
         process = subprocess.Popen(
@@ -2331,10 +2942,48 @@ class PreferredAttemptSearchTest(unittest.TestCase):
         token = subject.TimingEvidenceToken(
             {}, process, {}, Path("/thermal-out"),
             Path("/performance-out"), ("turbostat",))
-        with self.assertRaisesRegex(
+        with mock.patch.object(
+                subject.common, "stop_and_reap_process_group_deferred",
+                wraps=subject.common.stop_and_reap_process_group_deferred
+        ) as cleanup, self.assertRaisesRegex(
                 subject.CampaignError, "unexpected child process"):
             probe.finish(token)
+        cleanup.assert_called_once()
         self.assertFalse(subject.common.process_group_exists(process))
+
+    def test_turbostat_finish_does_not_reap_twice_after_signal_replay(
+            self) -> None:
+        process = mock.Mock()
+        process.pid = 12345
+        process.returncode = 0
+        process.poll.return_value = 0
+        process.communicate.return_value = (b"", b"")
+        probe = subject.LinuxTimingEvidenceProbe(
+            mock.Mock(), mock.Mock(), Path("/thermal"), Path("/evidence"))
+        token = subject.TimingEvidenceToken(
+            {}, process, {}, Path("/thermal-out"),
+            Path("/performance-out"), ("turbostat",))
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def reap_then_signal(_process, _grace_seconds):
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    subject.common, "process_group_exists", return_value=True), \
+                 mock.patch.object(
+                     subject.common, "stop_and_reap_process_group",
+                     side_effect=reap_then_signal) as cleanup, \
+                 self.assertRaises(InjectedSignal):
+                probe.finish(token)
+            cleanup.assert_called_once_with(process, 5.0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
     def test_interrupted_turbostat_startup_is_reaped(self) -> None:
         with tempfile.TemporaryDirectory(
@@ -2363,7 +3012,86 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     subject.common, "stop_and_reap_process_group"))
                 with self.assertRaises(KeyboardInterrupt):
                     probe.start(mock.Mock(), 1, None)
-            reap.assert_called_once_with(process)
+            reap.assert_called_once_with(process, 5.0)
+
+    def test_early_turbostat_exit_with_pipe_holder_has_bounded_drain(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-turbostat-pipe-holder-") as temporary:
+            host = mock.Mock()
+            host.isolation_is_live.return_value = True
+            host.core = 0
+            host.isolation.sibling_cpus = ()
+            host.tool.side_effect = lambda name: f"/frozen/{name}"
+            probe = subject.LinuxTimingEvidenceProbe(
+                mock.Mock(), host, Path("/thermal"), Path(temporary),
+                (1, 2, 5, 6))
+            process = mock.Mock()
+            process.pid = 12345
+            process.poll.return_value = 0
+            process.communicate.side_effect = subprocess.TimeoutExpired(
+                "turbostat", subject.TIMING_EVIDENCE_STARTUP_DRAIN_TIMEOUT_SECONDS)
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(
+                    subject, "thermal_start", return_value={
+                        "dev": 1, "ino": 2, "edac_ce": 5, "edac_ue": 6,
+                    }))
+                stack.enter_context(mock.patch.object(
+                    subject.subprocess, "Popen", return_value=process))
+                stack.enter_context(mock.patch.object(subject.time, "sleep"))
+                cleanup = stack.enter_context(mock.patch.object(
+                    subject.common, "stop_and_reap_process_group_deferred"))
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "pipe-holding descendant"):
+                    probe.start(mock.Mock(), 1, None)
+            process.communicate.assert_called_once_with(
+                timeout=subject.TIMING_EVIDENCE_STARTUP_DRAIN_TIMEOUT_SECONDS)
+            cleanup.assert_called_once_with(process)
+
+    def test_turbostat_start_reaps_signal_during_process_acquisition(
+            self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        real_popen = subprocess.Popen
+        launched = []
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def launch(*args, **kwargs):
+            process = real_popen(
+                ("/bin/sh", "-c", "sleep 20 & wait"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True)
+            launched.append(process)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-turbostat-acquisition-") as temporary:
+            host = mock.Mock()
+            host.isolation_is_live.return_value = True
+            host.core = 0
+            host.isolation.sibling_cpus = ()
+            host.tool.side_effect = lambda name: f"/frozen/{name}"
+            probe = subject.LinuxTimingEvidenceProbe(
+                mock.Mock(), host, Path("/thermal"), Path(temporary),
+                (1, 2, 5, 6))
+            previous = signal.signal(
+                signal.SIGTERM,
+                lambda _signum, _frame: (
+                    _ for _ in ()).throw(InjectedSignal()))
+            try:
+                with mock.patch.object(subject, "thermal_start", return_value={
+                         "dev": 1, "ino": 2, "edac_ce": 5, "edac_ue": 6,
+                     }), mock.patch.object(
+                         subject.subprocess, "Popen", side_effect=launch), \
+                     self.assertRaises(InjectedSignal):
+                    probe.start(mock.Mock(), 1, None)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(len(launched), 1)
+        self.assertFalse(subject.common.process_group_exists(launched[0]))
 
     def test_state_root_restart_and_manifest_mutation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="wh2-state-test-") as temporary:
@@ -2388,7 +3116,19 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 ))
                 stack.enter_context(mock.patch.object(
                     subject, "newest_github_agent_environment",
-                    return_value=os.environ.copy(),
+                    return_value=subject.common.pinned_git_environment(),
+                ))
+                stack.enter_context(mock.patch.object(
+                    subject, "frozen_ssh_environment_identity",
+                    return_value=("fixture", "fixture", 1, 1),
+                ))
+                stack.enter_context(mock.patch.object(
+                    subject, "frozen_drand_inputs",
+                    return_value=(
+                        Path("/usr/bin/node"),
+                        result / "frozen/wh2_drand_verify.cjs",
+                        result / "frozen/drand-client.cjs",
+                    ),
                 ))
                 stack.enter_context(mock.patch.object(
                     subject, "obtain_verified_latest_bound",
@@ -2589,7 +3329,7 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                     }],
                     "beacon": beacon,
                 }
-                real_run = subject.subprocess.run
+                real_run = subject.common.run_bounded_process_group
                 drand_calls: list[object] = []
                 drand_wave = [wave]
                 drand_returncode = [0]
@@ -2632,7 +3372,8 @@ class PreferredAttemptSearchTest(unittest.TestCase):
                 )
                 with ExitStack() as acquire_stack:
                     acquire_stack.enter_context(mock.patch.object(
-                        subject.subprocess, "run", side_effect=run))
+                        subject.common, "run_bounded_process_group",
+                        side_effect=run))
                     acquire_stack.enter_context(mock.patch.object(
                         subject, "now_utc_ms",
                         return_value=seal["round_time_ms"] + 1,

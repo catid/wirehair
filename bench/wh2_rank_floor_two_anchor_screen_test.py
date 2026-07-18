@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -55,7 +56,279 @@ def thermal_row(
     return (",".join(fields) + "\n").encode("ascii")
 
 
+def allk_receipt_fixture(root: Path) -> SimpleNamespace:
+    """Create a tiny, structurally complete all-K receipt tree."""
+    result_dir = root / "campaign"
+    result_root = result_dir / "results"
+    frozen = result_dir / "frozen"
+    frozen.mkdir(parents=True)
+    for name in ("commands", "stdout", "stderr"):
+        (result_root / name).mkdir(parents=True, exist_ok=True)
+    binary = (frozen / "wirehair_v2_bench").resolve()
+    taskset = (root / "taskset").resolve()
+    binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+    taskset.write_bytes(b"#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    taskset.chmod(0o700)
+    contract = {
+        "source_commit": "a" * 40,
+        "binary_sha256": allk.sha256_file(binary),
+        "timeout_seconds": 5.0,
+        "thermal_policy": {
+            "limit_c": 90.0, "consecutive_samples": 3,
+            "stale_seconds": 5.0, "min_cpu_busy_pct": 95.0,
+        },
+        "taskset": {
+            "path": str(taskset),
+            "sha256": allk.sha256_file(taskset),
+        },
+    }
+    jobs = [
+        allk.Job(
+            0, "d12", "small", 0, allk.SEEDS[0], "burst",
+            0, "0x11", (2, 3),
+        ),
+        allk.Job(
+            1, "two_anchor_adaptive", "large", 1, allk.SEEDS[1],
+            "adversarial", 1, "0x22", (4096,),
+        ),
+    ]
+    cpus = (2, 7)
+    records = []
+    base_wall_ns = time.time_ns() - 1_000_000
+    base_monotonic_ns = time.monotonic_ns() - 1_000_000
+    for job, cpu in zip(jobs, cpus):
+        stdout_path = result_root / "stdout" / f"{job.stem}.csv"
+        stderr_path = result_root / "stderr" / f"{job.stem}.txt"
+        command_path = result_root / "commands" / f"{job.stem}.json"
+        stdout_path.write_bytes(f"fixture {job.job}\n".encode("ascii"))
+        stderr_path.write_bytes(b"")
+        start_ns = base_wall_ns + 100_000 * job.job
+        end_ns = start_ns + 50_000
+        start_monotonic_ns = base_monotonic_ns + 100_000 * job.job
+        end_monotonic_ns = start_monotonic_ns + 50_000
+        record = {
+            "job": job.job, "arm": job.arm, "band": job.band,
+            "seed_index": job.seed_index, "seed": job.seed,
+            "schedule": job.schedule, "group": job.group,
+            "group_ledger_salt_unused": job.ledger_salt,
+            "active_packet_peel_seed_xor": "0x0",
+            "K_count": len(job.ks), "cpu": cpu,
+            "command": [
+                str(taskset), "-c", str(cpu), *allk.make_command(binary, job)
+            ],
+            "start_ns": start_ns, "end_ns": end_ns,
+            "start_monotonic_ns": start_monotonic_ns,
+            "end_monotonic_ns": end_monotonic_ns,
+            "elapsed_ns": end_monotonic_ns - start_monotonic_ns,
+            "returncode": 0,
+            "stdout": str(stdout_path.relative_to(result_root)),
+            "stdout_sha256": allk.sha256_file(stdout_path),
+            "stderr": str(stderr_path.relative_to(result_root)),
+            "stderr_sha256": allk.sha256_file(stderr_path),
+            "saturated_timing_speed_claim_valid": False,
+        }
+        allk.atomic_json(command_path, record)
+        records.append(record)
+    tasks_data = b"".join(
+        (screen.canonical_json(record) + "\n").encode("utf-8")
+        for record in records
+    )
+    allk.atomic_write(result_root / "tasks.jsonl", tasks_data)
+    thermal_start_s = (
+        min(record["start_monotonic_ns"] for record in records) - 1_000_000
+    ) / 1_000_000_000
+    thermal_end_s = (
+        max(record["end_monotonic_ns"] for record in records) + 1_000_000
+    ) / 1_000_000_000
+    thermal_baseline_row = thermal_row(thermal_start_s)
+    thermal_summary = {
+        "samples": 1, "sealed_samples_including_baseline": 2,
+        "cpu_busy_min_pct": 100.0, "cpu_tctl_max_c": 60.0,
+        "dimm_max_c": 57.0, "dimm_read_errors_max": 0,
+        "edac_ce_delta": 0, "edac_ue_delta": 0,
+        "thermal_limit_c": 90.0, "thermal_high_samples": 0,
+        "thermal_high_max_consecutive_samples": 0,
+        "guard_poll_iterations": 0, "guard_samples": 0,
+        "guard_high_samples": 0, "guard_limit_c": 90.0,
+        "guard_error": None,
+        "baseline_row_sha256": allk.sha256_bytes(thermal_baseline_row),
+    }
+    thermal_data = (
+        (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii") +
+        thermal_baseline_row + thermal_row(thermal_end_s)
+    )
+    (result_root / "thermal_interval.csv").write_bytes(thermal_data)
+    allk.atomic_json(result_root / "run.json", {
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v5",
+        "source_commit": contract["source_commit"],
+        "binary_sha256": contract["binary_sha256"],
+        "jobs": len(jobs), "workers": len(cpus),
+        "worker_cpus": list(cpus),
+        "start_ns": min(record["start_ns"] for record in records),
+        "end_ns": max(record["end_ns"] for record in records),
+        "start_monotonic_ns": min(
+            record["start_monotonic_ns"] for record in records),
+        "end_monotonic_ns": max(
+            record["end_monotonic_ns"] for record in records),
+        "recovery_cells": sum(len(job.ks) for job in jobs),
+        "thermal": thermal_summary,
+        "saturated_timing_speed_claim_valid": False,
+    })
+    return SimpleNamespace(
+        result_dir=result_dir, result_root=result_root, contract=contract,
+        jobs=jobs, binary=binary, taskset=taskset, cpus=cpus,
+        thermal_summary=thermal_summary, records=records,
+        thermal_baseline_row_sha256=allk.sha256_bytes(thermal_baseline_row),
+    )
+
+
+def refresh_allk_tasks(fixture: SimpleNamespace) -> list[dict]:
+    records = [
+        json.loads((
+            fixture.result_root / "commands" / f"{job.stem}.json"
+        ).read_bytes())
+        for job in fixture.jobs
+    ]
+    allk.atomic_write(
+        fixture.result_root / "tasks.jsonl",
+        b"".join(
+            (screen.canonical_json(record) + "\n").encode("utf-8")
+            for record in records
+        ),
+    )
+    return records
+
+
+def canonical_allk_stdout(job: allk.Job) -> bytes:
+    options = allk.arm_options(job.arm, job.band)
+    preamble = {
+        "trials": "1", "threads": "1", "loss": "0.5",
+        "completion": "mixed", "mixed_period": "244",
+        "mixed_gf256_rows": "10", "mixed_gf16_rows": "2",
+        "mixed_geometry": "frozen", "mixed_residue_skew": "0",
+        "mixed_residue_schedule": "constant",
+        "mixed_residue_hash_seed": "0x0",
+        "mixed_residue_hash_keyed": "0",
+        "mixed_independent_extension_residues": "0",
+        "mixed_residue_buckets_requested": "auto",
+        "mixed_extension_residue_seed_xor": "0x4e",
+        "source_hits_override": "0", "packet_peel_seed_table": "none",
+        "binary_dense_rows_override": (
+            "13" if "--binary-dense-rows" in options else "0"),
+        "binary_dense_two_anchor": (
+            "1" if "--binary-dense-two-anchor" in options else "0"),
+        "gf256_heavy_rows_override": "0", "odd_packet_peel_seed_xor": "0x0",
+        "packet_row_seed_multiplier": "0x1",
+        "packet_row_seed_avalanche": "0", "seed_block_bytes_override": "0",
+        "overhead_stream": "salted", "full_payload_solve": "0",
+        "schedule": job.schedule, "packet_peel_seed_xor": "0x0",
+        "seed": job.seed,
+    }
+    lines = [
+        "# precodefail: " + " ".join(
+            f"{key}={value}" for key, value in preamble.items()),
+        ",".join(screen.BENCH_HEADER_JOINT_DELTA),
+    ]
+    for K in job.ks:
+        row = {field: "0" for field in screen.BENCH_HEADER_JOINT_DELTA}
+        row.update({
+            "N": str(K), "bb": "64", "heavy_family": "periodic",
+            "mix_count": "2", "overhead": "0", "trials": "1",
+            "success": "1", "active_packet_peel_seed_xor": "0x0",
+        })
+        lines.append(",".join(
+            row[field] for field in screen.BENCH_HEADER_JOINT_DELTA))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def install_canonical_allk_stdout(fixture: SimpleNamespace) -> None:
+    for job in fixture.jobs:
+        stdout_path = fixture.result_root / "stdout" / f"{job.stem}.csv"
+        command_path = fixture.result_root / "commands" / f"{job.stem}.json"
+        stdout_path.write_bytes(canonical_allk_stdout(job))
+        record = json.loads(command_path.read_bytes())
+        record["stdout_sha256"] = allk.sha256_file(stdout_path)
+        allk.atomic_json(command_path, record)
+    refresh_allk_tasks(fixture)
+
+
 class ThermalParserTest(unittest.TestCase):
+    def test_retired_standalone_runners_fail_closed_without_launching(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "legacy-child-ran"
+            binary = root / "grandchild-fixture.py"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('ran\\n')\n"
+                "raise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            baseline = root / "baseline"
+            baseline.write_bytes(binary.read_bytes())
+            baseline.chmod(0o755)
+            cells = root / "cells.csv"
+            cells.write_text("not,sealed,evidence\n", encoding="utf-8")
+            thermal = root / "thermal.csv"
+            thermal.write_text("not,sealed,telemetry\n", encoding="utf-8")
+
+            cases = (
+                (
+                    Path(screen.__file__).resolve(),
+                    (
+                        "--cells", str(cells), "--binary", str(binary),
+                        "--baseline-binary", str(baseline), "--thermal",
+                        str(thermal), "--result-dir", str(root / "screen"),
+                    ),
+                    "wh2_rank_floor_two_anchor_allk.py prepare",
+                    root / "screen",
+                ),
+                (
+                    Path(screen.__file__).resolve().with_name(
+                        "wh2_rank_floor_two_anchor_timing.py"),
+                    (
+                        "--binary", str(binary), "--result-dir",
+                        str(root / "timing"),
+                    ),
+                    "wh2_preferred_attempt_search.py run-timing",
+                    root / "timing",
+                ),
+            )
+            for script, arguments, migration, result_dir in cases:
+                with self.subTest(script=script.name):
+                    started = time.monotonic()
+                    completed = subprocess.run(
+                        (sys.executable, str(script), *arguments),
+                        check=False, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=5,
+                    )
+                    self.assertLess(time.monotonic() - started, 4.0)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stdout, b"")
+                    self.assertIn(b"standalone WH2 rank-floor", completed.stderr)
+                    self.assertIn(migration.encode("ascii"), completed.stderr)
+                    self.assertFalse(result_dir.exists())
+                    self.assertFalse(marker.exists())
+
+            with self.assertRaisesRegex(RuntimeError, "screen is retired"):
+                screen.execute(
+                    (str(binary),), screen.CpuPool((0,), 1), timeout=5.0)
+            legacy_identity_dir = root / "legacy-identity-api"
+            with self.assertRaisesRegex(RuntimeError, "screen is retired"):
+                screen.run_identity(
+                    baseline, binary, legacy_identity_dir,
+                    screen.CpuPool((0,), 1), timeout=5.0)
+            with self.assertRaisesRegex(RuntimeError, "screen is retired"):
+                screen.run_task(
+                    {}, binary, root / "legacy-task-api",
+                    screen.CpuPool((0,), 1), timeout=5.0)
+            self.assertFalse(legacy_identity_dir.exists())
+            self.assertFalse(marker.exists())
+
     def test_stable_readers_reject_same_inode_change_after_final_fstat(
             self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -262,6 +535,272 @@ class ThermalParserTest(unittest.TestCase):
 
 
 class AllKProvenanceTest(unittest.TestCase):
+    @staticmethod
+    def _verify_allk_fixture(fixture: SimpleNamespace) -> dict[Path, str]:
+        def replay(_stdout, expected_ks, *_args, **_kwargs):
+            return [{} for _ in expected_ks]
+
+        with mock.patch.object(
+                allk, "parse_bench_output", side_effect=replay):
+            return allk.verify_allk_receipts(
+                fixture.result_dir, fixture.contract, fixture.jobs,
+                fixture.binary, fixture.taskset, len(fixture.cpus),
+                fixture.cpus, fixture.thermal_summary,
+                fixture.thermal_baseline_row_sha256,
+            )
+
+    def test_allk_receipts_replay_exact_canonical_artifact_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = allk_receipt_fixture(Path(temporary))
+            hashes = self._verify_allk_fixture(fixture)
+            self.assertEqual(len(hashes), 3 * len(fixture.jobs) + 3)
+            self.assertEqual(
+                set(hashes), {
+                    path.resolve(strict=True)
+                    for path in fixture.result_root.rglob("*")
+                    if path.is_file()
+                })
+            changed = next(
+                fixture.result_root.glob("stdout/*.csv")
+            )
+            changed.write_bytes(changed.read_bytes() + b"late mutation\n")
+            with self.assertRaisesRegex(
+                    allk.CampaignError, "changed after the phase seal"):
+                allk.sealed_phase_bytes(changed, hashes, "injected stdout")
+            phase_seal = fixture.result_root / "phase_complete.sha256"
+            allk.atomic_write(
+                phase_seal, allk.sha_manifest(fixture.result_dir, hashes))
+            self.assertNotEqual(
+                allk.verify_sha_manifest(fixture.result_dir, phase_seal),
+                hashes,
+            )
+            run_source = inspect.getsource(allk.run)
+            replay = run_source.index("receipt_hashes = verify_allk_receipts")
+            seal = run_source.index("phase_seal =")
+            self.assertLess(replay, seal)
+            self.assertIn("phase_hashes != receipt_hashes", run_source)
+            self.assertIn("verify_analysis_publication", run_source)
+            self.assertIn("phase artifacts changed during analysis", run_source)
+
+    def test_allk_final_analysis_publication_reopens_exact_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_dir = Path(temporary)
+            analysis = result_dir / "analysis"
+            analysis.mkdir()
+            summary = {"schema": "fixture", "phase_seal_sha256": "a" * 64}
+            for name in (
+                    "paired_cells.csv", "failures_and_shortfalls.csv",
+                    "exact_k_changes.csv", "scopes.csv"):
+                (analysis / name).write_bytes((name + "\n").encode("ascii"))
+            allk.atomic_json(analysis / "summary.json", summary)
+            artifacts = [
+                path for path in analysis.iterdir()
+                if path.name != "analysis_complete.sha256"
+            ]
+            seal = analysis / "analysis_complete.sha256"
+            allk.atomic_write(seal, allk.sha_manifest(result_dir, artifacts))
+            verified = allk.verify_analysis_publication(result_dir, summary)
+            self.assertEqual(len(verified), 5)
+            allk.atomic_json(
+                analysis / "summary.json", {**summary, "mutated": True})
+            with self.assertRaises(allk.CampaignError):
+                allk.verify_analysis_publication(result_dir, summary)
+
+    def test_allk_receipts_reject_omissions_and_semantic_mutations(
+            self) -> None:
+        cases = (
+            "missing_command", "missing_run", "unexpected_artifact",
+            "tasks_omission", "tasks_duplicate", "tasks_reorder",
+            "stdout_hash", "timestamp", "cpu", "command", "run_summary",
+            "noncanonical_command", "thermal_corruption", "thermal_summary",
+            "thermal_noncoverage", "thermal_baseline_swap",
+            "huge_timestamps", "cpu_overlap",
+        )
+        for case in cases:
+            with self.subTest(case=case), \
+                    tempfile.TemporaryDirectory() as temporary:
+                fixture = allk_receipt_fixture(Path(temporary))
+                job = fixture.jobs[0]
+                command_path = (
+                    fixture.result_root / "commands" / f"{job.stem}.json"
+                )
+                if case == "missing_command":
+                    command_path.unlink()
+                elif case == "missing_run":
+                    (fixture.result_root / "run.json").unlink()
+                elif case == "unexpected_artifact":
+                    (fixture.result_root / "unexpected.txt").write_bytes(b"x")
+                elif case in (
+                        "tasks_omission", "tasks_duplicate", "tasks_reorder"):
+                    tasks_path = fixture.result_root / "tasks.jsonl"
+                    lines = tasks_path.read_bytes().splitlines(keepends=True)
+                    if case == "tasks_omission":
+                        changed_tasks = b"".join(lines[:1])
+                    elif case == "tasks_duplicate":
+                        changed_tasks = b"".join((lines[0], *lines))
+                    else:
+                        changed_tasks = b"".join(reversed(lines))
+                    tasks_path.write_bytes(changed_tasks)
+                elif case == "stdout_hash":
+                    stdout_path = (
+                        fixture.result_root / "stdout" / f"{job.stem}.csv"
+                    )
+                    stdout_path.write_bytes(b"mutated stdout\n")
+                elif case in ("timestamp", "cpu", "command"):
+                    record = json.loads(command_path.read_bytes())
+                    if case == "timestamp":
+                        record["start_ns"] = 0
+                    elif case == "cpu":
+                        record["cpu"] = 99
+                        record["command"][2] = "99"
+                    else:
+                        record["command"].append("--mutated")
+                    allk.atomic_json(command_path, record)
+                elif case == "run_summary":
+                    run_path = fixture.result_root / "run.json"
+                    run_record = json.loads(run_path.read_bytes())
+                    run_record["workers"] = 1
+                    allk.atomic_json(run_path, run_record)
+                elif case == "noncanonical_command":
+                    record = json.loads(command_path.read_bytes())
+                    command_path.write_bytes(json.dumps(
+                        record, sort_keys=True).encode("utf-8"))
+                elif case == "thermal_corruption":
+                    (fixture.result_root / "thermal_interval.csv").write_bytes(
+                        b"not thermal evidence at all\n")
+                elif case == "thermal_summary":
+                    fixture.thermal_summary = dict(fixture.thermal_summary)
+                    fixture.thermal_summary["samples"] = 2
+                    run_path = fixture.result_root / "run.json"
+                    run_record = json.loads(run_path.read_bytes())
+                    run_record["thermal"] = fixture.thermal_summary
+                    allk.atomic_json(run_path, run_record)
+                elif case in ("thermal_noncoverage", "thermal_baseline_swap"):
+                    thermal_path = fixture.result_root / "thermal_interval.csv"
+                    lines = thermal_path.read_bytes().splitlines(keepends=True)
+                    if case == "thermal_noncoverage":
+                        uncovered_end_s = (
+                            min(record["start_monotonic_ns"]
+                                for record in fixture.records) - 100_000
+                        ) / 1_000_000_000
+                        replacement = lines[1] + thermal_row(uncovered_end_s)
+                    else:
+                        baseline_seconds = float(
+                            fixture.records[0]["start_monotonic_ns"]
+                        ) / 1_000_000_000 - 0.001
+                        replacement = (
+                            thermal_row(baseline_seconds, cpu_tctl_c=61.0) +
+                            lines[2])
+                        fixture.thermal_summary = dict(
+                            fixture.thermal_summary)
+                        fixture.thermal_summary["cpu_tctl_max_c"] = 61.0
+                        fixture.thermal_summary["baseline_row_sha256"] = \
+                            allk.sha256_bytes(replacement.splitlines(
+                                keepends=True)[0])
+                        run_path = fixture.result_root / "run.json"
+                        run_record = json.loads(run_path.read_bytes())
+                        run_record["thermal"] = fixture.thermal_summary
+                        allk.atomic_json(run_path, run_record)
+                    thermal_path.write_bytes(lines[0] + replacement)
+                elif case == "huge_timestamps":
+                    record = json.loads(command_path.read_bytes())
+                    for field in (
+                            "start_ns", "end_ns", "start_monotonic_ns",
+                            "end_monotonic_ns"):
+                        record[field] = 10 ** 100
+                    record["elapsed_ns"] = 0
+                    allk.atomic_json(command_path, record)
+                    refresh_allk_tasks(fixture)
+                elif case == "cpu_overlap":
+                    fixture.cpus = (2,)
+                    first_record = json.loads(command_path.read_bytes())
+                    for overlap_job in fixture.jobs:
+                        overlap_path = (
+                            fixture.result_root / "commands" /
+                            f"{overlap_job.stem}.json"
+                        )
+                        record = json.loads(overlap_path.read_bytes())
+                        record["cpu"] = 2
+                        record["command"][2] = "2"
+                        record["start_ns"] = first_record["start_ns"]
+                        record["end_ns"] = first_record["end_ns"]
+                        record["start_monotonic_ns"] = \
+                            first_record["start_monotonic_ns"]
+                        record["end_monotonic_ns"] = \
+                            first_record["end_monotonic_ns"]
+                        record["elapsed_ns"] = first_record["elapsed_ns"]
+                        allk.atomic_json(overlap_path, record)
+                    records = refresh_allk_tasks(fixture)
+                    run_path = fixture.result_root / "run.json"
+                    run_record = json.loads(run_path.read_bytes())
+                    run_record.update({
+                        "workers": 1, "worker_cpus": [2],
+                        "start_ns": min(r["start_ns"] for r in records),
+                        "end_ns": max(r["end_ns"] for r in records),
+                        "start_monotonic_ns": min(
+                            r["start_monotonic_ns"] for r in records),
+                        "end_monotonic_ns": max(
+                            r["end_monotonic_ns"] for r in records),
+                    })
+                    allk.atomic_json(run_path, run_record)
+                else:  # pragma: no cover - cases is deliberately closed.
+                    self.fail(f"unhandled receipt mutation {case}")
+                with self.assertRaises(allk.CampaignError):
+                    self._verify_allk_fixture(fixture)
+
+    def test_allk_stdout_semantic_replay_is_not_mocked_or_hash_only(
+            self) -> None:
+        mutations = ("seed", "schedule", "K_order", "geometry", "anchor")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), \
+                    tempfile.TemporaryDirectory() as temporary:
+                fixture = allk_receipt_fixture(Path(temporary))
+                install_canonical_allk_stdout(fixture)
+                allk.verify_allk_receipts(
+                    fixture.result_dir, fixture.contract, fixture.jobs,
+                    fixture.binary, fixture.taskset, len(fixture.cpus),
+                    fixture.cpus, fixture.thermal_summary,
+                    fixture.thermal_baseline_row_sha256,
+                )
+                job = fixture.jobs[1 if mutation == "anchor" else 0]
+                stdout_path = (
+                    fixture.result_root / "stdout" / f"{job.stem}.csv"
+                )
+                output = stdout_path.read_text(encoding="utf-8")
+                if mutation == "seed":
+                    output = output.replace(
+                        f"seed={job.seed}", "seed=0x1", 1)
+                elif mutation == "schedule":
+                    output = output.replace(
+                        f"schedule={job.schedule}", "schedule=repair-only", 1)
+                elif mutation == "K_order":
+                    lines = output.splitlines()
+                    lines[2], lines[3] = lines[3], lines[2]
+                    output = "\n".join(lines) + "\n"
+                elif mutation == "geometry":
+                    output = output.replace(
+                        "mixed_period=244", "mixed_period=245", 1)
+                else:
+                    output = output.replace(
+                        "binary_dense_two_anchor=1",
+                        "binary_dense_two_anchor=0", 1)
+                stdout_path.write_text(output, encoding="utf-8")
+                command_path = (
+                    fixture.result_root / "commands" / f"{job.stem}.json"
+                )
+                record = json.loads(command_path.read_bytes())
+                record["stdout_sha256"] = allk.sha256_file(stdout_path)
+                allk.atomic_json(command_path, record)
+                refresh_allk_tasks(fixture)
+                with self.assertRaisesRegex(
+                        allk.CampaignError, "semantic replay"):
+                    allk.verify_allk_receipts(
+                        fixture.result_dir, fixture.contract, fixture.jobs,
+                        fixture.binary, fixture.taskset, len(fixture.cpus),
+                        fixture.cpus, fixture.thermal_summary,
+                        fixture.thermal_baseline_row_sha256,
+                    )
+
     def test_all_prepare_paths_use_the_shared_fresh_builder(self) -> None:
         for prepare in (
                 allk.prepare, phase_screen.prepare, preferred_search.prepare):
@@ -435,6 +974,475 @@ class AllKProvenanceTest(unittest.TestCase):
                         (sys.executable, "-c", writer), environment, scratch,
                         10.0, "bounded-output fixture", guard)
                 self.assertLess(time.monotonic() - started, 0.75)
+
+                writes_on_term = (
+                    "import os, signal, time; "
+                    "signal.signal(signal.SIGTERM, "
+                    "lambda *_: os.write(1, b'x' * 65536)); "
+                    "time.sleep(20)"
+                )
+                started = time.monotonic()
+                with mock.patch.object(
+                        allk, "PINNED_OUTPUT_MAX_BYTES", 4096), \
+                     self.assertRaisesRegex(allk.CampaignError, "timed out"):
+                    allk._run_pinned_command(
+                        (sys.executable, "-c", writes_on_term), environment,
+                        scratch, 0.05, "TERM-output timeout fixture", guard)
+                self.assertLess(time.monotonic() - started, 0.75)
+
+    def test_bounded_process_group_input_and_descendant_cleanup(self) -> None:
+        completed = allk.run_bounded_process_group(
+            (
+                sys.executable, "-c",
+                "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+            ),
+            timeout=5.0, context="input fixture", input_bytes=b"payload\n",
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, b"payload\n")
+        self.assertEqual(completed.stderr, b"")
+
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-bounded-descendant-") as temporary:
+            leader_path = Path(temporary) / "leader.pid"
+            script = (
+                "import pathlib, subprocess, os; "
+                f"pathlib.Path({str(leader_path)!r}).write_text(str(os.getpid())); "
+                "subprocess.Popen(('/bin/sleep', '60'));"
+            )
+            with self.assertRaisesRegex(
+                    allk.CampaignError, "surviving descendant"):
+                allk.run_bounded_process_group(
+                    (sys.executable, "-c", script), timeout=5.0,
+                    context="surviving-child fixture")
+            leader = int(leader_path.read_text(encoding="ascii"))
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(leader, 0)
+
+        writes_on_term = (
+            "import os, signal, time; "
+            "signal.signal(signal.SIGTERM, "
+            "lambda *_: os.write(2, b'x' * 65536)); "
+            "time.sleep(20)"
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(allk.BoundedProcessTimeout, "timed out"):
+            allk.run_bounded_process_group(
+                (sys.executable, "-c", writes_on_term), timeout=0.05,
+                context="TERM-output timeout fixture", output_limit=4096)
+        self.assertLess(time.monotonic() - started, 0.75)
+
+    def test_allk_and_phase_jobs_bound_both_output_streams_and_reap(
+            self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-bounded-job-output-") as temporary:
+            root = Path(temporary).resolve()
+            binary = (root / "wirehair_v2_bench").resolve()
+            binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+            binary.chmod(0o700)
+            result_root = root / "results"
+            for name in ("stdout", "stderr", "commands"):
+                (result_root / name).mkdir(parents=True, exist_ok=True)
+            allk_job = allk.Job(
+                0, "d12", "small", 0, allk.SEEDS[0], "burst",
+                0, "0x0", (2,))
+            phase_job = phase_screen.Job(
+                0, "d12", "small", 0, phase_screen.SEEDS[0],
+                "burst", 0, (2,))
+
+            for module, job in (
+                    (allk, allk_job), (phase_screen, phase_job)):
+                for descriptor in (1, 2):
+                    with self.subTest(
+                            runner=module.__name__, descriptor=descriptor):
+                        marker = root / (
+                            f"{module.__name__}-{descriptor}.pid")
+                        taskset = (root / (
+                            f"{module.__name__}-{descriptor}-taskset.py"
+                        )).resolve()
+                        taskset.write_text(
+                            f"#!{sys.executable}\n"
+                            "import os, signal\n"
+                            "from pathlib import Path\n"
+                            f"Path({str(marker)!r}).write_text("
+                            "str(os.getpid()), encoding='ascii')\n"
+                            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                            f"descriptor = {descriptor}\n"
+                            "chunk = b'x' * 65536\n"
+                            "while True:\n"
+                            "    os.write(descriptor, chunk)\n",
+                            encoding="utf-8")
+                        taskset.chmod(0o700)
+                        taskset_record = {
+                            "path": str(taskset),
+                            "sha256": allk.sha256_file(
+                                taskset, require_unique=False),
+                        }
+                        registry = allk.ProcessRegistry()
+                        started = time.monotonic()
+                        try:
+                            with mock.patch.object(
+                                    allk, "JOB_OUTPUT_MAX_BYTES", 4096), \
+                                 self.assertRaisesRegex(
+                                     allk.CampaignError,
+                                     "bounded capture limit"):
+                                module.run_job(
+                                    job, binary,
+                                    allk.sha256_file(
+                                        binary, require_unique=False),
+                                    taskset, taskset_record, result_root,
+                                    allk.CpuPool((0,), 1), threading.Event(),
+                                    registry, 5.0)
+                        finally:
+                            if marker.exists():
+                                process_group = int(marker.read_text(
+                                    encoding="ascii"))
+                                try:
+                                    os.killpg(process_group, 0)
+                                except ProcessLookupError:
+                                    pass
+                                else:
+                                    os.killpg(process_group, signal.SIGKILL)
+                                    self.fail(
+                                        "overflowing job group survived")
+                        self.assertLess(time.monotonic() - started, 2.0)
+                        self.assertTrue(marker.exists())
+                        self.assertEqual(registry.count(), 0)
+
+    def test_allk_and_phase_job_timeouts_prove_group_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-bounded-job-timeout-") as temporary:
+            root = Path(temporary).resolve()
+            binary = (root / "wirehair_v2_bench").resolve()
+            binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+            binary.chmod(0o700)
+            taskset = (root / "taskset.py").resolve()
+            taskset.write_text(
+                f"#!{sys.executable}\n"
+                "import signal, subprocess\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "subprocess.Popen(('/bin/sleep', '20')).wait()\n",
+                encoding="utf-8")
+            taskset.chmod(0o700)
+            taskset_record = {
+                "path": str(taskset),
+                "sha256": allk.sha256_file(
+                    taskset, require_unique=False),
+            }
+            result_root = root / "results"
+            for name in ("stdout", "stderr", "commands"):
+                (result_root / name).mkdir(parents=True, exist_ok=True)
+            jobs = (
+                (allk, allk.Job(
+                    0, "d12", "small", 0, allk.SEEDS[0], "burst",
+                    0, "0x0", (2,))),
+                (phase_screen, phase_screen.Job(
+                    0, "d12", "small", 0, phase_screen.SEEDS[0],
+                    "burst", 0, (2,))),
+            )
+            real_popen = allk.subprocess.Popen
+            for module, job in jobs:
+                with self.subTest(runner=module.__name__):
+                    launched = []
+
+                    def launch(*args, **kwargs):
+                        process = real_popen(*args, **kwargs)
+                        launched.append(process)
+                        return process
+
+                    registry = allk.ProcessRegistry()
+                    started = time.monotonic()
+                    with mock.patch.object(
+                            allk.subprocess, "Popen", side_effect=launch), \
+                         self.assertRaisesRegex(
+                             allk.CampaignError, "timeout"):
+                        module.run_job(
+                            job, binary,
+                            allk.sha256_file(
+                                binary, require_unique=False),
+                            taskset, taskset_record, result_root,
+                            allk.CpuPool((0,), 1), threading.Event(),
+                            registry, 0.1)
+                    self.assertLess(time.monotonic() - started, 1.0)
+                    self.assertEqual(len(launched), 1)
+                    self.assertFalse(allk.process_group_exists(launched[0]))
+                    self.assertEqual(registry.count(), 0)
+
+    def test_bounded_process_group_sigterm_reaps_group(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-bounded-sigterm-") as temporary:
+            ready = Path(temporary) / "worker.pid"
+            worker = (
+                "import os, pathlib, time; "
+                f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            controller = "\n".join((
+                "import sys",
+                f"sys.path.insert(0, {str(Path(__file__).parent)!r})",
+                "import wh2_rank_floor_two_anchor_allk as common",
+                f"common.run_bounded_process_group((sys.executable, '-c', {worker!r}), timeout=60.0, context='signal fixture')",
+            ))
+            process = subprocess.Popen((sys.executable, "-c", controller))
+            for _ in range(500):
+                if ready.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            process.terminate()
+            self.assertEqual(process.wait(timeout=5), -signal.SIGTERM)
+            worker_pid = int(ready.read_text(encoding="ascii"))
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(worker_pid, 0)
+
+    def test_bounded_process_group_unmanaged_signal_acquisition(self) -> None:
+        real_popen = allk.subprocess.Popen
+        launched: list[int] = []
+        delivered: list[int] = []
+
+        def launch_then_signal(*_args, **kwargs):
+            process = real_popen(("/bin/sleep", "0.05"), **kwargs)
+            launched.append(process.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        previous = signal.signal(
+            signal.SIGTERM, lambda signum, _frame: delivered.append(signum))
+        try:
+            with mock.patch.object(
+                    allk.subprocess, "Popen",
+                    side_effect=launch_then_signal):
+                completed = allk.run_bounded_process_group(
+                    ("/ignored",), timeout=5.0,
+                    context="returning-handler fixture", manage_signals=False)
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(delivered, [signal.SIGTERM])
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(launched[-1], 0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+        def raise_signal(_signum, _frame):
+            raise RuntimeError("fixture interruption")
+
+        previous = signal.signal(signal.SIGTERM, raise_signal)
+        try:
+            with mock.patch.object(
+                    allk.subprocess, "Popen",
+                    side_effect=launch_then_signal), \
+                 self.assertRaisesRegex(RuntimeError, "fixture interruption"):
+                allk.run_bounded_process_group(
+                    ("/ignored",), timeout=5.0,
+                    context="raising-handler fixture", manage_signals=False)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(launched[-1], 0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+    def test_unmanaged_bounded_child_inherits_original_signal_mask(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        caller_mask = set(original_mask).difference({
+            signal.SIGINT, signal.SIGTERM})
+        signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)
+        try:
+            script = (
+                "import json, signal; "
+                "print(json.dumps(sorted(int(item) for item in "
+                "signal.pthread_sigmask(signal.SIG_BLOCK, ()))))"
+            )
+            completed = allk.run_bounded_process_group(
+                (sys.executable, "-c", script), timeout=5.0,
+                context="unmanaged child-mask fixture", manage_signals=False)
+            self.assertEqual(completed.returncode, 0)
+            child_mask = json.loads(completed.stdout)
+            self.assertNotIn(signal.SIGINT, child_mask)
+            self.assertNotIn(signal.SIGTERM, child_mask)
+            self.assertEqual(
+                signal.pthread_sigmask(signal.SIG_BLOCK, ()), caller_mask)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+    def test_deferred_acquisition_restores_handlers_and_mask_when_queued(
+            self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        caller_mask = set(original_mask).difference({
+            signal.SIGINT, signal.SIGTERM})
+        original_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
+        delivered = []
+
+        def on_int(signum, _frame):
+            delivered.append(signum)
+
+        def on_term(signum, _frame):
+            delivered.append(signum)
+
+        signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)
+        signal.signal(signal.SIGINT, on_int)
+        signal.signal(signal.SIGTERM, on_term)
+        real_signal = signal.signal
+        injected = [False]
+
+        def install(signum, handler):
+            result = real_signal(signum, handler)
+            if handler is on_int and not injected[0]:
+                injected[0] = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            return result
+
+        try:
+            with mock.patch.object(allk.signal, "signal", side_effect=install):
+                with allk.deferred_process_group_acquisition():
+                    pass
+            self.assertTrue(injected[0])
+            self.assertEqual(delivered, [signal.SIGTERM])
+            self.assertIs(signal.getsignal(signal.SIGINT), on_int)
+            self.assertIs(signal.getsignal(signal.SIGTERM), on_term)
+            self.assertEqual(
+                signal.pthread_sigmask(signal.SIG_BLOCK, ()), caller_mask)
+        finally:
+            for signum, handler in original_handlers.items():
+                real_signal(signum, handler)
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+    def test_unmanaged_timeout_cleanup_defers_signal_until_group_is_reaped(
+            self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        real_popen = allk.subprocess.Popen
+        real_terminate = allk._terminate_process_group
+        launched = []
+        cleanup_masks = []
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            launched.append(process)
+            return process
+
+        def terminate(
+                process, *, graceful=True, capture_streams=(),
+                output_limit=None):
+            cleanup_masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, ()))
+            self.assertEqual(len(capture_streams), 2)
+            self.assertEqual(output_limit, allk.PINNED_OUTPUT_MAX_BYTES)
+            os.kill(os.getpid(), signal.SIGTERM)
+            real_terminate(
+                process, graceful=graceful,
+                capture_streams=capture_streams, output_limit=output_limit)
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    allk.subprocess, "Popen", side_effect=launch), \
+                 mock.patch.object(
+                     allk, "_terminate_process_group", side_effect=terminate), \
+                 self.assertRaises(InjectedSignal):
+                allk.run_bounded_process_group(
+                    ("/bin/sh", "-c", "sleep 20 & wait"), timeout=0.03,
+                    context="unmanaged timeout-signal fixture",
+                    manage_signals=False)
+            self.assertEqual(len(launched), 1)
+            self.assertTrue(cleanup_masks)
+            self.assertIn(signal.SIGTERM, cleanup_masks[0])
+            self.assertFalse(allk.process_group_exists(launched[0]))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            for process in launched:
+                if allk.process_group_exists(process):
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2.0)
+
+    def test_deferred_cleanup_failure_outweighs_replayed_signal(self) -> None:
+        if not hasattr(signal, "pthread_sigmask"):
+            self.skipTest("POSIX signal masking is unavailable")
+        process = mock.Mock()
+        process.pid = 12345
+
+        class InjectedSignal(BaseException):
+            pass
+
+        def fail_cleanup(_process, _grace_seconds):
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise allk.CampaignError("fixture group survived")
+
+        previous = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: (_ for _ in ()).throw(InjectedSignal()))
+        try:
+            with mock.patch.object(
+                    allk, "stop_and_reap_process_group",
+                    side_effect=fail_cleanup), \
+                 self.assertRaisesRegex(
+                     allk.ProcessGroupCleanupError, "cleanup failed") as raised:
+                allk.stop_and_reap_process_group_deferred(process, 0.1)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertIsInstance(raised.exception.__cause__, InjectedSignal)
+        self.assertIn("fixture group survived", str(raised.exception))
+
+    def test_process_wait_interruption_is_replayed_after_cleanup_proof(
+            self) -> None:
+        process = subprocess.Popen(
+            ("/bin/sleep", "20"), start_new_session=True)
+
+        class InjectedInterruption(BaseException):
+            pass
+
+        class InterruptingWait:
+            def __init__(self, child):
+                self.child = child
+                self.interrupted = False
+
+            def __getattr__(self, name):
+                return getattr(self.child, name)
+
+            def wait(self, *args, **kwargs):
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise InjectedInterruption()
+                return self.child.wait(*args, **kwargs)
+
+        wrapped = InterruptingWait(process)
+        try:
+            with self.assertRaises(InjectedInterruption):
+                allk.stop_and_reap_process_group(
+                    wrapped, 0.2, graceful=False)
+            self.assertTrue(wrapped.interrupted)
+            self.assertFalse(allk.process_group_exists(process))
+        finally:
+            if allk.process_group_exists(process):
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2.0)
+
+    def test_cleanup_failure_dominates_preserved_wait_interruption(
+            self) -> None:
+        class InjectedInterruption(BaseException):
+            pass
+
+        process = mock.Mock()
+        process.pid = 12345
+        process.poll.return_value = None
+        process.wait.side_effect = InjectedInterruption()
+        with mock.patch.object(
+                allk, "process_group_exists", return_value=True), \
+             mock.patch.object(allk, "signal_process_group"), \
+             self.assertRaisesRegex(
+                 allk.CampaignError, "was not reaped") as raised:
+            allk.stop_and_reap_process_group(
+                process, 0.0, graceful=False)
+        self.assertIsInstance(
+            raised.exception.__cause__, InjectedInterruption)
 
     def test_prepare_exit_failure_does_not_publish_partial_result(self) -> None:
         class FailAfterYield:
@@ -1255,6 +2263,42 @@ class AllKProvenanceTest(unittest.TestCase):
                 guard.stop_event.set()
                 guard.thread.join(timeout=2.0)
 
+    def test_live_guard_finish_waits_for_final_job_coverage(self) -> None:
+        header = (",".join(screen.THERMAL_FIELDS) + "\n").encode("ascii")
+        now = time.monotonic()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "thermal.csv"
+            sealed = root / "sealed.csv"
+            baseline = thermal_row(now)
+            log.write_bytes(header + baseline)
+            guard = allk.ThermalGuard(
+                log, allk.threading.Event(), stale_seconds=2.0,
+                limit_c=90.0)
+            guard.start()
+            target_ns = int((now + 0.05) * 1_000_000_000)
+
+            def append_covering_sample() -> None:
+                time.sleep(0.1)
+                with log.open("ab") as output:
+                    output.write(thermal_row(time.monotonic()))
+
+            writer = allk.threading.Thread(target=append_covering_sample)
+            writer.start()
+            try:
+                summary = guard.finish(
+                    sealed, cover_through_monotonic_ns=target_ns)
+            finally:
+                writer.join(timeout=2.0)
+            self.assertFalse(writer.is_alive())
+            self.assertEqual(
+                summary["baseline_row_sha256"], allk.sha256_bytes(baseline))
+            final_row = sealed.read_bytes().splitlines(keepends=True)[-1]
+            final_sample = screen.parse_thermal_sample(
+                final_row, "end-coverage fixture")
+            self.assertGreaterEqual(
+                final_sample["monotonic_s"], target_ns / 1_000_000_000)
+
     def test_prepare_anchor_rejects_resealed_staged_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -1472,8 +2516,12 @@ class AllKProvenanceTest(unittest.TestCase):
                     self.assertEqual(
                         set(build.record["environment"]),
                         {"PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR",
-                         "LANG", "LC_ALL", "TZ", "SOURCE_DATE_EPOCH"},
+                         "LANG", "LC_ALL", "TZ", "SOURCE_DATE_EPOCH",
+                         *allk.PINNED_GIT_ENVIRONMENT},
                     )
+                    for key, value in allk.PINNED_GIT_ENVIRONMENT.items():
+                        self.assertEqual(
+                            build.record["environment"][key], value)
                     command_text = "\0".join(
                         build.record["configure_command"] +
                         build.record["build_command"])

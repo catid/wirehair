@@ -7,9 +7,11 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from typing import List, Optional, Set, Tuple
@@ -536,6 +538,76 @@ class ParserAndLedgerTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_subprocess_executor_bounds_both_streams_and_reaps(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="wh2-preferred-bounded-output-") as temporary:
+            root = Path(temporary)
+            for descriptor in (1, 2):
+                with self.subTest(descriptor=descriptor):
+                    marker = root / "{}.pid".format(descriptor)
+                    writer = (
+                        "import os, pathlib, signal; "
+                        "pathlib.Path({!r}).write_text(str(os.getpid()), "
+                        "encoding='ascii'); "
+                        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        "descriptor={}; chunk=b'x'*65536; "
+                        "exec('while True:\\n os.write(descriptor, chunk)')"
+                    ).format(str(marker), descriptor)
+                    registry = campaign.common.ProcessRegistry()
+                    started = time.monotonic()
+                    try:
+                        with mock.patch.object(
+                                campaign.common, "JOB_OUTPUT_MAX_BYTES", 4096), \
+                             self.assertRaisesRegex(
+                                 campaign.CampaignError,
+                                 "bounded capture limit"):
+                            campaign.subprocess_executor(
+                                (sys.executable, "-c", writer), 5.0,
+                                threading.Event(), registry, 0)
+                    finally:
+                        if marker.exists():
+                            process_group = int(marker.read_text(
+                                encoding="ascii"))
+                            try:
+                                os.killpg(process_group, 0)
+                            except ProcessLookupError:
+                                pass
+                            else:
+                                os.killpg(process_group, signal.SIGKILL)
+                                self.fail("overflowing executor group survived")
+                    self.assertLess(time.monotonic() - started, 2.0)
+                    self.assertTrue(marker.exists())
+                    self.assertEqual(registry.count(), 0)
+
+    def test_subprocess_executor_abort_and_timeout_prove_group_cleanup(
+            self) -> None:
+        real_popen = campaign.subprocess.Popen
+        for reason in ("campaign abort", "timeout"):
+            with self.subTest(reason=reason):
+                launched = []
+
+                def launch(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    launched.append(process)
+                    return process
+
+                abort = threading.Event()
+                if reason == "campaign abort":
+                    abort.set()
+                timeout = 5.0 if abort.is_set() else 0.03
+                started = time.monotonic()
+                with mock.patch.object(
+                        campaign.subprocess, "Popen", side_effect=launch), \
+                     self.assertRaisesRegex(
+                         campaign.CampaignError, reason):
+                    campaign.subprocess_executor(
+                        ("/bin/sh", "-c", "trap '' TERM; sleep 20 & wait"),
+                        timeout, abort, campaign.common.ProcessRegistry(), 0)
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertEqual(len(launched), 1)
+                self.assertFalse(
+                    campaign.common.process_group_exists(launched[0]))
+
     def test_end_history_rescan_rejects_streak_split_across_guard_mark(
             self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

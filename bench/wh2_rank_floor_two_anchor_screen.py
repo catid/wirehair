@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Paired production-H12 two-anchor screen over revealed development inputs.
+"""Shared parsing, statistics, and thermal helpers for WH2 campaigns.
 
-This one-off development screen consumes only the published gen2b all-K
-analysis, but evaluates the exact mixed10-GF(256)/2-GF(65536), period-244,
-mix2 production geometry.  Its selected inputs are not independent evidence;
-the companion all-K campaign provides the independent confirmation.  This
-script does not locate, inspect, or depend on any H15-v5 holdout material.
+The one-off standalone rank-floor screen that originally lived in this module
+is retired: it predates the frozen-executable and process-group guarantees of
+the supported controllers and cannot produce supported evidence.  The helper
+APIs remain because the hardened all-K, phase, and preferred-attempt
+controllers freeze and import this module.
 """
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ import sys
 # This module is imported from exact-inventory frozen campaign directories.
 sys.dont_write_bytecode = True
 
-import argparse
-import concurrent.futures
 import csv
 import errno
 import hashlib
@@ -28,10 +26,9 @@ from pathlib import Path
 import queue
 import re
 import stat
-import subprocess
 import time
 from collections import defaultdict
-from decimal import Decimal, getcontext
+from decimal import Decimal
 from typing import Any, BinaryIO, Iterable, Sequence
 
 
@@ -90,6 +87,12 @@ BASE_OPTIONS = (
     "--loss", "0.50",
     "--completion", "mixed",
     "--mix-count", "2",
+)
+
+STANDALONE_RETIREMENT_MESSAGE = (
+    "the standalone WH2 rank-floor screen is retired and cannot produce "
+    "supported evidence; use wh2_rank_floor_two_anchor_allk.py prepare, then "
+    "execute the exact frozen run_command recorded in prepare.json"
 )
 
 
@@ -540,21 +543,8 @@ class CpuPool:
 def execute(
     command: Sequence[str], cpu_pool: CpuPool, timeout: float
 ) -> tuple[list[str], int, str, str, int, int]:
-    cpu = cpu_pool.acquire()
-    pinned = ["taskset", "-c", str(cpu), *command]
-    start_ns = time.time_ns()
-    try:
-        process = subprocess.run(
-            pinned, check=False, text=True, encoding="utf-8",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-    finally:
-        cpu_pool.release(cpu)
-    return (
-        pinned, process.returncode, process.stdout, process.stderr,
-        start_ns, time.time_ns(),
-    )
+    del command, cpu_pool, timeout
+    raise RuntimeError(STANDALONE_RETIREMENT_MESSAGE)
 
 
 def run_identity(
@@ -564,79 +554,8 @@ def run_identity(
     cpu_pool: CpuPool,
     timeout: float,
 ) -> dict[str, Any]:
-    identity_dir = result_dir / "identity"
-    identity_dir.mkdir()
-    jobs: list[tuple[str, Path, int, str, str]] = []
-    for role, binary in (("baseline", baseline), ("candidate", candidate)):
-        for seed_index, seed, schedule in expected_strata():
-            jobs.append((role, binary, seed_index, seed, schedule))
-
-    def one(job: tuple[str, Path, int, str, str]) -> dict[str, Any]:
-        role, binary, seed_index, seed, schedule = job
-        command = make_command(binary, IDENTITY_KS, seed, schedule, "0x0")
-        pinned, returncode, stdout, stderr, start_ns, end_ns = execute(
-            command, cpu_pool, timeout
-        )
-        stem = f"{role}.seed{seed_index}.{schedule}"
-        out_path = identity_dir / f"{stem}.stdout"
-        err_path = identity_dir / f"{stem}.stderr"
-        out_path.write_text(stdout, encoding="utf-8", newline="\n")
-        err_path.write_text(stderr, encoding="utf-8", newline="\n")
-        if returncode != 0 or stderr:
-            raise RuntimeError(f"identity {stem} failed rc={returncode}: {stderr[-1000:]}")
-        rows = parse_bench_output(
-            stdout, IDENTITY_KS, "0x0", seed, schedule, BASE_OPTIONS,
-            role == "candidate"
-        )
-        return {
-            "role": role, "seed_index": seed_index, "schedule": schedule,
-            "command": pinned, "start_ns": start_ns, "end_ns": end_ns,
-            "stdout": str(out_path.relative_to(result_dir)),
-            "stdout_sha256": sha256_file(out_path),
-            "stderr": str(err_path.relative_to(result_dir)),
-            "stderr_sha256": sha256_file(err_path), "rows": rows,
-        }
-
-    results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-        futures = [executor.submit(one, job) for job in jobs]
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
-    indexed: dict[tuple[str, int, str, int], dict[str, str]] = {}
-    for result in results:
-        for row in result.pop("rows"):
-            indexed[(
-                result["role"], result["seed_index"], result["schedule"],
-                int(row["N"]),
-            )] = row
-    comparisons = 0
-    for seed_index, _, schedule in expected_strata():
-        for K in IDENTITY_KS:
-            base = indexed[("baseline", seed_index, schedule, K)]
-            cand = indexed[("candidate", seed_index, schedule, K)]
-            if base.keys() != cand.keys():
-                raise ValueError("identity CSV schemas differ")
-            for field in base:
-                if field in TIMING_FIELDS:
-                    continue
-                comparisons += 1
-                if base[field] != cand[field]:
-                    raise ValueError(
-                        f"disabled-hook identity mismatch seed={seed_index} "
-                        f"schedule={schedule} K={K} field={field}: "
-                        f"{base[field]} != {cand[field]}"
-                    )
-    results.sort(key=lambda value: (
-        value["role"], value["seed_index"], value["schedule"]
-    ))
-    return {
-        "passed": True,
-        "cells_per_binary": len(expected_strata()) * len(IDENTITY_KS),
-        "non_timing_field_comparisons": comparisons,
-        "baseline_binary_sha256": sha256_file(baseline),
-        "candidate_binary_sha256": sha256_file(candidate),
-        "jobs": results,
-    }
+    del baseline, candidate, result_dir, cpu_pool, timeout
+    raise RuntimeError(STANDALONE_RETIREMENT_MESSAGE)
 
 
 def run_task(
@@ -646,42 +565,8 @@ def run_task(
     cpu_pool: CpuPool,
     timeout: float,
 ) -> dict[str, Any]:
-    options = arm_options(task["arm"], task["band"])
-    command = make_command(
-        binary, task["Ks"], task["seed"], task["schedule"],
-        task["salt"], options,
-    )
-    pinned, returncode, stdout, stderr, start_ns, end_ns = execute(
-        command, cpu_pool, timeout
-    )
-    stem = f"job{task['job']:04d}.{task['arm']}.seed{task['seed_index']}.{task['schedule']}.{task['band']}"
-    out_path = result_dir / "stdout" / f"{stem}.csv"
-    err_path = result_dir / "stderr" / f"{stem}.txt"
-    out_path.write_text(stdout, encoding="utf-8", newline="\n")
-    err_path.write_text(stderr, encoding="utf-8", newline="\n")
-    if returncode != 0 or stderr:
-        raise RuntimeError(f"{stem} failed rc={returncode}: {stderr[-1000:]}")
-    rows = parse_bench_output(
-        stdout, task["Ks"], task["salt"], task["seed"],
-        task["schedule"], options, True
-    )
-    for row in rows:
-        row.update({
-            "arm": task["arm"], "band": task["band"],
-            "seed_index": str(task["seed_index"]), "seed": task["seed"],
-            "schedule": task["schedule"], "salt": task["salt"],
-        })
-    return {
-        "job": task["job"], "arm": task["arm"], "band": task["band"],
-        "seed_index": task["seed_index"], "seed": task["seed"],
-        "schedule": task["schedule"], "salt": task["salt"],
-        "Ks": task["Ks"], "command": pinned,
-        "start_ns": start_ns, "end_ns": end_ns, "returncode": returncode,
-        "stdout": str(out_path.relative_to(result_dir)),
-        "stdout_sha256": sha256_file(out_path),
-        "stderr": str(err_path.relative_to(result_dir)),
-        "stderr_sha256": sha256_file(err_path), "records": rows,
-    }
+    del task, binary, result_dir, cpu_pool, timeout
+    raise RuntimeError(STANDALONE_RETIREMENT_MESSAGE)
 
 
 def binomial_one_sided(repairs: int, introductions: int) -> dict[str, Any]:
@@ -1297,174 +1182,10 @@ def thermal_finish(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cells", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--baseline-binary", type=Path, required=True)
-    parser.add_argument("--thermal", type=Path, required=True)
-    parser.add_argument("--result-dir", type=Path, required=True)
-    parser.add_argument("--controls", type=int, default=512)
-    parser.add_argument("--workers", type=int, default=120)
-    parser.add_argument("--chunk-size", type=int, default=16)
-    parser.add_argument("--timeout", type=float, default=600.0)
-    args = parser.parse_args()
-    if args.controls < 512 or args.workers <= 0 or args.chunk_size <= 0 or args.timeout <= 0:
-        raise ValueError("controls>=512 and positive workers/chunk-size/timeout required")
-
-    cells = args.cells.resolve(strict=True)
-    binary = args.binary.resolve(strict=True)
-    baseline = args.baseline_binary.resolve(strict=True)
-    thermal = args.thermal.resolve(strict=True)
-    for name, path in (("binary", binary), ("baseline binary", baseline)):
-        if not path.is_file() or not os.access(path, os.X_OK):
-            raise ValueError(f"{name} is not an executable regular file")
-    if sha256_file(baseline) != BASELINE_BINARY_SHA256:
-        raise ValueError("baseline binary is not the exact preserved 09d44f1 build")
-
-    result_dir = args.result_dir.resolve()
-    result_dir.mkdir(parents=True, exist_ok=False)
-    (result_dir / "stdout").mkdir()
-    (result_dir / "stderr").mkdir()
-    thermal_mark = thermal_start(thermal)
-
-    source = load_source_cells(cells)
-    scopes = select_scopes(source, args.controls)
-    selected = set().union(*scopes.values())
-    tasks = build_tasks(selected, source["states"], args.chunk_size)
-    cpus = sorted(os.sched_getaffinity(0))
-    workers = min(args.workers, len(cpus), len(tasks))
-    cpu_pool = CpuPool(cpus, workers)
-    identity = run_identity(
-        baseline, binary, result_dir, cpu_pool, args.timeout
-    )
-
-    task_results: list[dict[str, Any]] = []
-    completed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(
-                run_task, task, binary, result_dir, cpu_pool, args.timeout
-            ) for task in tasks
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            task_results.append(future.result())
-            completed += 1
-            if completed % 100 == 0 or completed == len(tasks):
-                print(f"screen progress {completed}/{len(tasks)}", flush=True)
-    task_results.sort(key=lambda result: result["job"])
-
-    records: list[dict[str, str]] = []
-    command_records: list[dict[str, Any]] = []
-    for task_result in task_results:
-        records.extend(task_result.pop("records"))
-        command_records.append(task_result)
-    records.sort(key=lambda row: (
-        row["arm"], int(row["seed_index"]), row["schedule"], int(row["N"])
-    ))
-    record_fields = [
-        "arm", "band", "seed_index", "seed", "schedule", "salt",
-        *[field for field in records[0] if field not in {
-            "arm", "band", "seed_index", "seed", "schedule", "salt"
-        }],
-    ]
-    write_csv(result_dir / "results.csv", records, record_fields)
-    with (result_dir / "commands.jsonl").open(
-        "w", encoding="utf-8", newline="\n"
-    ) as output:
-        for record in command_records:
-            output.write(canonical_json(record) + "\n")
-    (result_dir / "identity.json").write_text(
-        json.dumps(identity, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8", newline="\n",
-    )
-
-    hard_fields = [
-        "case", "K", "salt", "schedule", "seed_index", "seed",
-        "base_failed", "candidate_failed", "base_rank_fail",
-        "candidate_rank_fail", "base_error", "candidate_error",
-    ]
-    hard_rows = []
-    for case, row in enumerate(source["hard_cases"]):
-        value = dict(row)
-        value["case"] = case
-        hard_rows.append(value)
-    write_csv(result_dir / "revealed_hard_cases.csv", hard_rows, hard_fields)
-    selection_rows = []
-    for K in sorted(selected):
-        selection_rows.append({
-            "K": K, "salt": source["states"][K]["salt"],
-            "revealed_hard_k": int(K in scopes["revealed_hard_k"]),
-            "shared_success_control_k": int(K in scopes["shared_success_control_k"]),
-            "cutoff_neighbor": int(K in scopes["cutoff_neighbors"]),
-        })
-    write_csv(
-        result_dir / "selected_k.csv", selection_rows,
-        ("K", "salt", "revealed_hard_k", "shared_success_control_k", "cutoff_neighbor"),
-    )
-
-    getcontext().prec = 80
-    summary, per_k = analyze(scopes, source, records)
-    per_k_fields = list(per_k[0])
-    write_csv(result_dir / "per_k.csv", per_k, per_k_fields)
-    thermal_summary = thermal_finish(
-        thermal, thermal_mark, result_dir / "thermal_interval.csv",
-        dimm_limit_c=90.0,
-    )
-    summary["thermal"] = thermal_summary
-    summary_path = result_dir / "summary.json"
-    summary_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8", newline="\n",
-    )
-
-    repo = Path(__file__).resolve().parents[1]
-    head = subprocess.check_output(
-        ("git", "rev-parse", "HEAD"), cwd=repo
-    ).strip().decode("ascii")
-    diff = subprocess.check_output(
-        ("git", "diff", "--binary", "--no-ext-diff"), cwd=repo
-    )
-    status = subprocess.check_output(
-        ("git", "status", "--short"), cwd=repo
-    ).decode("utf-8")
-    artifact_hashes = {
-        str(path.relative_to(result_dir)): sha256_file(path)
-        for path in sorted(result_dir.rglob("*")) if path.is_file()
-    }
-    manifest = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_screen.v1",
-        "source_cells": str(cells),
-        "source_cells_sha256": sha256_file(cells),
-        "script": str(Path(__file__).resolve()),
-        "script_sha256": sha256_file(Path(__file__).resolve()),
-        "binary": str(binary), "binary_sha256": sha256_file(binary),
-        "baseline_binary": str(baseline),
-        "baseline_binary_sha256": sha256_file(baseline),
-        "git_head": head, "git_diff_sha256": sha256_bytes(diff),
-        "git_status": status, "workers": workers,
-        "chunk_size": args.chunk_size, "controls": args.controls,
-        "hard_source_cases": len(source["hard_cases"]),
-        "hard_unique_K": len(source["hard_ks"]),
-        "selected_unique_K": len(selected), "jobs": len(tasks),
-        "arms": ARMS, "cutoff": CUTOFF,
-        "artifacts": artifact_hashes,
-    }
-    manifest_path = result_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8", newline="\n",
-    )
-    print(canonical_json({
-        "result_dir": str(result_dir),
-        "manifest_sha256": sha256_file(manifest_path),
-        "summary": summary,
-    }))
-    return 0
+    """Reject the retired standalone runner before touching any input."""
+    print(STANDALONE_RETIREMENT_MESSAGE, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"rank-floor two-anchor screen: {exc}", file=sys.stderr)
-        raise
+    raise SystemExit(main())

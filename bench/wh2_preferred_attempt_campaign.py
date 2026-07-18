@@ -33,6 +33,7 @@ import re
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from typing import (
@@ -1716,40 +1717,55 @@ def subprocess_executor(
     cpu: int,
 ) -> ExecutionResult:
     start_ns = time.time_ns()
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True)
-    registered = False
-    try:
-        registry.add(process)
-        registered = True
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=max(0.001, min(0.25, remaining)))
-                break
-            except subprocess.TimeoutExpired:
-                if not abort.is_set() and remaining > 0:
-                    continue
-                common.stop_and_reap_process_group(process)
-                reason = "campaign abort" if abort.is_set() else \
-                    "timeout after {:g}s".format(timeout)
-                die("job process terminated on " + reason)
-    finally:
-        leader_live = process.poll() is None
-        descendants_live = common.process_group_exists(process)
-        if leader_live or descendants_live:
-            common.stop_and_reap_process_group(process)
-        else:
-            common.close_process_streams(process)
-        if registered:
-            registry.remove(process)
-        if process.poll() is None or common.process_group_exists(process):
-            die("job child process group cleanup was not proven")
-        if not leader_live and descendants_live:
-            die("job left an unexpected child process")
+    with tempfile.TemporaryFile() as stdout_file, \
+            tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(
+            command, stdout=stdout_file, stderr=stderr_file,
+            start_new_session=True)
+        registered = False
+        try:
+            registry.add(process)
+            registered = True
+            deadline = time.monotonic() + timeout
+            while True:
+                returncode = process.poll()
+                if common.bounded_capture_exceeded(
+                        (stdout_file, stderr_file),
+                        common.JOB_OUTPUT_MAX_BYTES):
+                    common.stop_and_reap_process_group(
+                        process, graceful=False)
+                    die("job output exceeded the bounded capture limit")
+                if returncode is not None:
+                    break
+                remaining = deadline - time.monotonic()
+                reason = None
+                if abort.is_set():
+                    reason = "campaign abort"
+                elif remaining <= 0:
+                    reason = "timeout after {:g}s".format(timeout)
+                if reason is not None:
+                    common.stop_and_reap_process_group(
+                        process, graceful=False)
+                    die("job process terminated on " + reason)
+                time.sleep(min(common.PROCESS_POLL_SECONDS, remaining))
+        finally:
+            leader_live = process.poll() is None
+            descendants_live = common.process_group_exists(process)
+            if leader_live or descendants_live:
+                common.stop_and_reap_process_group(
+                    process, graceful=False)
+            else:
+                common.close_process_streams(process)
+            if registered:
+                registry.remove(process)
+            if process.poll() is None or common.process_group_exists(process):
+                die("job child process group cleanup was not proven")
+            if not leader_live and descendants_live:
+                die("job left an unexpected child process")
+        stdout = common.read_bounded_capture(
+            stdout_file, common.JOB_OUTPUT_MAX_BYTES, "job stdout")
+        stderr = common.read_bounded_capture(
+            stderr_file, common.JOB_OUTPUT_MAX_BYTES, "job stderr")
     return ExecutionResult(
         int(process.returncode), stdout, stderr, start_ns, time.time_ns(), cpu)
 
@@ -1874,6 +1890,13 @@ class JobRunner:
                     tuple(command), self.timeout, abort, registry, cpu)
             finally:
                 pool.release(cpu)
+            # Bind the observation to the same executable identities at both
+            # sides of the launch.  A transient replacement that is restored
+            # before the phase-level check must never yield a valid receipt.
+            verify_frozen_binary(self.binary, contract)
+            if frozen_taskset_path(contract) != taskset_path:
+                die("frozen taskset changed during {} launch".format(
+                    job.job_id))
             validate_execution_result(execution)
             if execution.returncode != 0 or execution.stderr:
                 die("{} failed with rc={}".format(

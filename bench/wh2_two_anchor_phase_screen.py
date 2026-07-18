@@ -32,10 +32,12 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Sequence
@@ -360,46 +362,61 @@ def run_job(
             die("frozen taskset path changed before job launch")
         command = [str(taskset), "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        registered = False
-        stdout_bytes = stderr_bytes = b""
-        try:
-            registry.add(process)
-            registered = True
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                try:
-                    stdout_bytes, stderr_bytes = process.communicate(
-                        timeout=max(0.001, min(0.25, remaining))
-                    )
-                    break
-                except subprocess.TimeoutExpired:
+        with tempfile.TemporaryFile() as stdout_file, \
+                tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command, stdout=stdout_file, stderr=stderr_file,
+                start_new_session=True,
+            )
+            registered = False
+            try:
+                registry.add(process)
+                registered = True
+                deadline = time.monotonic() + timeout
+                while True:
+                    returncode = process.poll()
+                    if common.bounded_capture_exceeded(
+                            (stdout_file, stderr_file),
+                            common.JOB_OUTPUT_MAX_BYTES):
+                        common.stop_and_reap_process_group(
+                            process, graceful=False)
+                        die(
+                            f"job {job.job} output exceeded the bounded "
+                            "capture limit")
+                    if returncode is not None:
+                        break
+                    remaining = deadline - time.monotonic()
                     reason = None
                     if abort.is_set():
                         reason = "campaign abort"
                     elif remaining <= 0:
                         reason = f"timeout after {timeout:g}s"
-                    if reason is None:
-                        continue
-                    common.stop_and_reap_process_group(process)
-                    die(f"job {job.job} terminated on {reason}")
-        finally:
-            leader_live = process.poll() is None
-            descendants_live = common.process_group_exists(process)
-            if leader_live or descendants_live:
-                common.stop_and_reap_process_group(process)
-            else:
-                common.close_process_streams(process)
-            if process.poll() is None or common.process_group_exists(process):
-                die(f"job {job.job} child cleanup was not proven")
-            if registered:
-                registry.remove(process)
-            if not leader_live and descendants_live:
-                die(f"job {job.job} left an unexpected child process")
+                    if reason is not None:
+                        common.stop_and_reap_process_group(
+                            process, graceful=False)
+                        die(f"job {job.job} terminated on {reason}")
+                    time.sleep(min(common.PROCESS_POLL_SECONDS, remaining))
+            finally:
+                leader_live = process.poll() is None
+                descendants_live = common.process_group_exists(process)
+                if leader_live or descendants_live:
+                    common.stop_and_reap_process_group(
+                        process, graceful=False)
+                else:
+                    common.close_process_streams(process)
+                if (process.poll() is None or
+                        common.process_group_exists(process)):
+                    die(f"job {job.job} child cleanup was not proven")
+                if registered:
+                    registry.remove(process)
+                if not leader_live and descendants_live:
+                    die(f"job {job.job} left an unexpected child process")
+            stdout_bytes = common.read_bounded_capture(
+                stdout_file, common.JOB_OUTPUT_MAX_BYTES,
+                f"job {job.job} stdout")
+            stderr_bytes = common.read_bounded_capture(
+                stderr_file, common.JOB_OUTPUT_MAX_BYTES,
+                f"job {job.job} stderr")
         end_ns = time.time_ns()
     finally:
         pool.release(cpu)
@@ -448,36 +465,56 @@ def tracked_clean_sources(
 ) -> tuple[Path, str]:
     if not paths:
         die("no tracked sources supplied")
-    repo = Path(subprocess.check_output(
+    git_environment = common.pinned_git_environment()
+    common.validate_pinned_git_environment(git_environment)
+    root_result = common.run_bounded_process_group(
         (
             str(git), "--no-replace-objects", "-C", str(paths[0].parent),
             "rev-parse", "--show-toplevel",
         ),
-        text=True,
-    ).strip()).resolve(strict=True)
+        timeout=30.0, context="phase source repository discovery",
+        env=git_environment)
+    try:
+        root_text = root_result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise common.CampaignError(
+            "phase source repository path is not UTF-8") from exc
+    if root_result.returncode or root_result.stderr or not root_text:
+        die("phase source repository discovery failed")
+    repo = Path(root_text).resolve(strict=True)
     for args, name in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run(
-                (str(git), "--no-replace-objects", "-C", str(repo), *args),
-                check=False).returncode:
+        result = common.run_bounded_process_group(
+            (str(git), "--no-replace-objects", "-C", str(repo), *args),
+            timeout=30.0, context=f"phase source {name} status",
+            env=git_environment)
+        if result.returncode or result.stdout or result.stderr:
             die(f"tracked source {name} is dirty")
-    head = subprocess.check_output(
+    head_result = common.run_bounded_process_group(
         (
             str(git), "--no-replace-objects", "-C", str(repo),
             "rev-parse", "HEAD",
-        ), text=True,
-    ).strip()
+        ), timeout=30.0, context="phase source HEAD discovery",
+        env=git_environment)
+    try:
+        head = head_result.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        head = ""
+    if (head_result.returncode or head_result.stderr or
+            re.fullmatch(r"[0-9a-f]{40}", head) is None):
+        die("phase source HEAD discovery failed")
     for path in paths:
         relative = path.relative_to(repo)
-        tracked = subprocess.check_output(
+        tracked = common.run_bounded_process_group(
             (
                 str(git), "--no-replace-objects", "-C", str(repo),
                 "cat-file", "blob", f"{head}:{relative}",
-            ),
-        )
-        if tracked != common.stable_bytes(path):
+            ), timeout=30.0, context=f"phase source object {relative}",
+            env=git_environment)
+        if (tracked.returncode or tracked.stderr or
+                tracked.stdout != common.stable_bytes(path)):
             die(f"{relative} does not exactly match immutable HEAD")
     return repo, head
 
@@ -508,12 +545,14 @@ def q0_identity(
         if common.frozen_executable_path(
                 taskset_record, "taskset") != taskset:
             die("frozen taskset changed before q0 identity launch")
-        completed = subprocess.run(
-            command, capture_output=True,
-            check=False, timeout=300,
-        )
+        completed = common.run_bounded_process_group(
+            command, timeout=300.0, context="q0 identity command")
         if completed.returncode != 0 or completed.stderr:
             die("q0 implicit/explicit identity command failed")
+        common.verify_frozen_binary(binary, binary_sha256)
+        if common.frozen_executable_path(
+                taskset_record, "taskset") != taskset:
+            die("frozen taskset changed during q0 identity launch")
         output = completed.stdout.decode("utf-8")
         outputs.append(output)
         preamble = parse_preamble(output.splitlines()[0])

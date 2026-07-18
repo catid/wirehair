@@ -47,7 +47,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from wh2_rank_floor_two_anchor_screen import (
     THERMAL_FIELDS,
@@ -96,6 +96,8 @@ BASE_OPTIONS = (
     "--completion", "mixed",
     "--mix-count", "2",
 )
+JOB_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+PROCESS_POLL_SECONDS = 0.01
 PAIRED_HEADER = (
     "K", "group", "group_ledger_salt_unused",
     "active_packet_peel_seed_xor", "schedule", "seed_index", "seed",
@@ -112,6 +114,14 @@ PAIRED_HEADER = (
 
 
 class CampaignError(RuntimeError):
+    pass
+
+
+class BoundedProcessTimeout(CampaignError):
+    pass
+
+
+class ProcessGroupCleanupError(CampaignError):
     pass
 
 
@@ -852,35 +862,98 @@ def close_process_streams(process: subprocess.Popen[bytes]) -> None:
                 pass
 
 
+def bounded_capture_exceeded(
+    streams: Sequence[Any], output_limit: int,
+) -> bool:
+    """Check tempfile-backed captures without reading them into memory."""
+    if (not isinstance(output_limit, int) or isinstance(output_limit, bool) or
+            output_limit <= 0):
+        die("bounded capture limit is invalid")
+    try:
+        return any(
+            os.fstat(stream.fileno()).st_size > output_limit
+            for stream in streams
+        )
+    except (AttributeError, OSError, ValueError) as exc:
+        raise CampaignError(f"bounded capture inspection failed: {exc}") \
+            from exc
+
+
+def read_bounded_capture(
+    stream: Any,
+    output_limit: int,
+    context: str,
+) -> bytes:
+    """Read at most one byte past the cap, after the writer group is gone."""
+    if (not isinstance(output_limit, int) or isinstance(output_limit, bool) or
+            output_limit <= 0 or not isinstance(context, str) or not context):
+        die("bounded capture read arguments are invalid")
+    try:
+        size_before = os.fstat(stream.fileno()).st_size
+        if size_before > output_limit:
+            die(f"{context} exceeded the bounded capture limit")
+        stream.seek(0)
+        data = stream.read(output_limit + 1)
+        size_after = os.fstat(stream.fileno()).st_size
+    except CampaignError:
+        raise
+    except (AttributeError, OSError, ValueError) as exc:
+        raise CampaignError(f"{context} capture read failed: {exc}") from exc
+    if (len(data) > output_limit or size_after > output_limit or
+            size_after != size_before or len(data) != size_after):
+        die(f"{context} exceeded or changed during bounded capture")
+    return data
+
+
 def stop_and_reap_process_group(
     process: subprocess.Popen[bytes], grace_seconds: float = 5.0,
+    *,
+    graceful: bool = True,
 ) -> None:
+    if (not math.isfinite(grace_seconds) or grace_seconds < 0 or
+            not isinstance(graceful, bool)):
+        die("process-group cleanup grace is invalid")
+    wait_error: BaseException | None = None
     try:
-        signal_process_group(process, signal.SIGTERM)
-        try:
-            process.communicate(timeout=grace_seconds)
-        except BaseException:
-            # Cleanup must continue even if pipe communication itself fails.
-            pass
-        if process.poll() is None:
+        if graceful:
+            signal_process_group(process, signal.SIGTERM)
+        # Never drain pipes while cleaning up.  A TERM-ignoring writer can
+        # otherwise make communicate() accumulate without a memory bound.
+        term_deadline = time.monotonic() + min(grace_seconds, 0.25)
+        while (graceful and process_group_exists(process) and
+               time.monotonic() < term_deadline):
+            process.poll()
+            time.sleep(PROCESS_POLL_SECONDS)
+        if process_group_exists(process):
             signal_process_group(process, signal.SIGKILL)
-            try:
-                process.wait(timeout=grace_seconds)
-            except BaseException:
-                pass
+        try:
+            process.wait(timeout=max(grace_seconds, 0.25))
+        except subprocess.TimeoutExpired:
+            pass
+        except BaseException as error:
+            # Finish the kill/proof sequence before replaying an interruption.
+            wait_error = error
         deadline = time.monotonic() + grace_seconds
         while process_group_exists(process) and time.monotonic() < deadline:
-            time.sleep(0.05)
+            process.poll()
+            time.sleep(PROCESS_POLL_SECONDS)
         if process_group_exists(process):
             signal_process_group(process, signal.SIGKILL)
             kill_deadline = time.monotonic() + grace_seconds
             while (process_group_exists(process) and
                     time.monotonic() < kill_deadline):
-                time.sleep(0.05)
+                process.poll()
+                time.sleep(PROCESS_POLL_SECONDS)
     finally:
         close_process_streams(process)
     if process.poll() is None or process_group_exists(process):
-        raise CampaignError(f"child process group {process.pid} was not reaped")
+        cleanup_error = CampaignError(
+            f"child process group {process.pid} was not reaped")
+        if wait_error is not None:
+            raise cleanup_error from wait_error
+        raise cleanup_error
+    if wait_error is not None:
+        raise wait_error
 
 
 class ProcessRegistry:
@@ -1318,11 +1391,37 @@ class ThermalGuard:
                 self.abort.set()
                 return
 
-    def finish(self, output: Path) -> dict[str, Any]:
+    def finish(
+        self,
+        output: Path,
+        *,
+        cover_through_monotonic_ns: int | None = None,
+    ) -> dict[str, Any]:
         if not self.started:
             die("thermal guard was never started")
         self.stop_event.set()
         self.thread.join()
+        if cover_through_monotonic_ns is not None:
+            if (type(cover_through_monotonic_ns) is not int or
+                    not 0 < cover_through_monotonic_ns < 1 << 64):
+                die("thermal coverage target is malformed")
+            target_seconds = cover_through_monotonic_ns / 1_000_000_000
+            deadline = time.monotonic() + min(
+                max(self.stale_seconds, 1.0), 10.0)
+            while True:
+                current = thermal_start(
+                    self.path, stale_seconds=self.stale_seconds,
+                    require_zero_edac=False)
+                if ((current["dev"], current["ino"]) !=
+                        (self.mark["dev"], self.mark["ino"])):
+                    die("thermal logger changed before end coverage")
+                self._validate_sample(
+                    current["baseline"], "thermal end-coverage sample")
+                if current["monotonic_s"] >= target_seconds:
+                    break
+                if time.monotonic() >= deadline:
+                    die("thermal logger did not cover the final job end")
+                time.sleep(0.05)
         summary = thermal_finish(
             self.path, self.mark, output,
             limit_c=self.limit_c, stale_seconds=self.stale_seconds,
@@ -1331,6 +1430,7 @@ class ThermalGuard:
         if summary["edac_ce_delta"] != 0 or summary["edac_ue_delta"] != 0:
             die("thermal interval changed the frozen EDAC counters")
         summary.update({
+            "baseline_row_sha256": sha256_bytes(self.mark["baseline_row"]),
             "guard_poll_iterations": self.poll_iterations,
             "guard_samples": self.samples,
             "guard_high_samples": self.high_samples,
@@ -1363,45 +1463,62 @@ def run_job(
             die("frozen taskset path changed before job launch")
         command = [str(taskset), "-c", str(cpu), *make_command(binary, job)]
         start_ns = time.time_ns()
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        registered = False
-        try:
-            registry.add(process)
-            registered = True
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                try:
-                    stdout_bytes, stderr_bytes = process.communicate(
-                        timeout=max(0.001, min(0.25, remaining))
-                    )
-                    break
-                except subprocess.TimeoutExpired:
+        start_monotonic_ns = time.monotonic_ns()
+        with tempfile.TemporaryFile() as stdout_file, \
+                tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command, stdout=stdout_file, stderr=stderr_file,
+                start_new_session=True,
+            )
+            registered = False
+            try:
+                registry.add(process)
+                registered = True
+                deadline = time.monotonic() + timeout
+                while True:
+                    returncode = process.poll()
+                    if bounded_capture_exceeded(
+                            (stdout_file, stderr_file),
+                            JOB_OUTPUT_MAX_BYTES):
+                        stop_and_reap_process_group(
+                            process, graceful=False)
+                        die(
+                            f"job {job.job} output exceeded the bounded "
+                            "capture limit")
+                    if returncode is not None:
+                        break
+                    remaining = deadline - time.monotonic()
                     reason = None
                     if abort.is_set():
                         reason = "campaign abort"
                     elif remaining <= 0:
                         reason = f"timeout after {timeout:g}s"
-                    if reason is None:
-                        continue
-                    stop_and_reap_process_group(process)
-                    die(f"job {job.job} terminated on {reason}")
-        finally:
-            leader_live = process.poll() is None
-            descendants_live = process_group_exists(process)
-            if leader_live or descendants_live:
-                stop_and_reap_process_group(process)
-            else:
-                close_process_streams(process)
-            if process.poll() is None or process_group_exists(process):
-                die(f"job {job.job} child cleanup was not proven")
-            if registered:
-                registry.remove(process)
-            if not leader_live and descendants_live:
-                die(f"job {job.job} left an unexpected child process")
+                    if reason is not None:
+                        stop_and_reap_process_group(
+                            process, graceful=False)
+                        die(f"job {job.job} terminated on {reason}")
+                    time.sleep(min(PROCESS_POLL_SECONDS, remaining))
+            finally:
+                leader_live = process.poll() is None
+                descendants_live = process_group_exists(process)
+                if leader_live or descendants_live:
+                    stop_and_reap_process_group(
+                        process, graceful=False)
+                else:
+                    close_process_streams(process)
+                if process.poll() is None or process_group_exists(process):
+                    die(f"job {job.job} child cleanup was not proven")
+                if registered:
+                    registry.remove(process)
+                if not leader_live and descendants_live:
+                    die(f"job {job.job} left an unexpected child process")
+            stdout_bytes = read_bounded_capture(
+                stdout_file, JOB_OUTPUT_MAX_BYTES,
+                f"job {job.job} stdout")
+            stderr_bytes = read_bounded_capture(
+                stderr_file, JOB_OUTPUT_MAX_BYTES,
+                f"job {job.job} stderr")
+        end_monotonic_ns = time.monotonic_ns()
         end_ns = time.time_ns()
     finally:
         pool.release(cpu)
@@ -1436,7 +1553,10 @@ def run_job(
         "active_packet_peel_seed_xor": "0x0",
         "K_count": len(job.ks), "cpu": cpu, "command": command,
         "start_ns": start_ns, "end_ns": end_ns,
-        "elapsed_ns": end_ns - start_ns, "returncode": process.returncode,
+        "start_monotonic_ns": start_monotonic_ns,
+        "end_monotonic_ns": end_monotonic_ns,
+        "elapsed_ns": end_monotonic_ns - start_monotonic_ns,
+        "returncode": process.returncode,
         "stdout": str(stdout_path.relative_to(result_root)),
         "stdout_sha256": sha256_file(stdout_path),
         "stderr": str(stderr_path.relative_to(result_root)),
@@ -1479,41 +1599,104 @@ def verify_sha_manifest(root: Path, manifest: Path) -> dict[Path, str]:
     return result
 
 
+PINNED_GIT_ENVIRONMENT = {
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def pinned_git_environment() -> dict[str, str]:
+    """Return an ambient-copy environment with Git redirects removed."""
+    environment = os.environ.copy()
+    for key in tuple(environment):
+        if key.startswith("GIT_"):
+            environment.pop(key)
+    environment.update(PINNED_GIT_ENVIRONMENT)
+    environment["LANG"] = "C"
+    environment["LC_ALL"] = "C"
+    return environment
+
+
+def validate_pinned_git_environment(
+    environment: Any,
+    extra_git_fields: Iterable[str] = (),
+) -> None:
+    """Reject ambient Git control variables outside an explicit policy."""
+    if not isinstance(environment, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()):
+        die("pinned Git environment is not a string mapping")
+    extra = set(extra_git_fields)
+    if any(not isinstance(key, str) or not key.startswith("GIT_")
+           for key in extra):
+        die("pinned Git environment extension is malformed")
+    allowed = set(PINNED_GIT_ENVIRONMENT) | extra
+    unexpected = {key for key in environment
+                  if key.startswith("GIT_") and key not in allowed}
+    if (unexpected or
+            any(environment.get(key) != value
+                for key, value in PINNED_GIT_ENVIRONMENT.items()) or
+            environment.get("LANG") != "C" or
+            environment.get("LC_ALL") != "C"):
+        die("pinned Git environment differs from its exact policy")
+
+
 def tracked_clean_source(
     script: Path,
     helper: Path,
     git: Path,
 ) -> tuple[Path, str]:
-    repo = Path(subprocess.check_output(
+    git_environment = pinned_git_environment()
+    validate_pinned_git_environment(git_environment)
+    root_result = run_bounded_process_group(
         (
             str(git), "--no-replace-objects", "-C", str(script.parent),
             "rev-parse", "--show-toplevel",
         ),
-        text=True,
-    ).strip()).resolve(strict=True)
+        timeout=30.0, context="source repository discovery",
+        env=git_environment)
+    try:
+        root_text = root_result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise CampaignError("source repository path is not UTF-8") from exc
+    if root_result.returncode or root_result.stderr or not root_text:
+        die("source repository discovery failed")
+    repo = Path(root_text).resolve(strict=True)
     for args, name in (
         (("diff", "--quiet", "HEAD", "--"), "worktree"),
         (("diff", "--cached", "--quiet", "HEAD", "--"), "index"),
     ):
-        if subprocess.run(
-                (str(git), "--no-replace-objects", "-C", str(repo), *args),
-                check=False).returncode:
+        result = run_bounded_process_group(
+            (str(git), "--no-replace-objects", "-C", str(repo), *args),
+            timeout=30.0, context=f"source {name} status",
+            env=git_environment)
+        if result.returncode or result.stdout or result.stderr:
             die(f"tracked source {name} is dirty")
-    head = subprocess.check_output(
+    head_result = run_bounded_process_group(
         (
             str(git), "--no-replace-objects", "-C", str(repo),
             "rev-parse", "HEAD",
-        ), text=True,
-    ).strip()
+        ), timeout=30.0, context="source HEAD discovery",
+        env=git_environment)
+    try:
+        head = head_result.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        head = ""
+    if (head_result.returncode or head_result.stderr or
+            re.fullmatch(r"[0-9a-f]{40}", head) is None):
+        die("source HEAD discovery failed")
     for path in (script, helper):
         relative = path.relative_to(repo)
-        tracked = subprocess.check_output(
+        tracked_result = run_bounded_process_group(
             (
                 str(git), "--no-replace-objects", "-C", str(repo),
                 "cat-file", "blob", f"{head}:{relative}",
-            ),
-        )
-        if tracked != stable_bytes(path):
+            ), timeout=30.0, context=f"immutable source {relative}",
+            env=git_environment)
+        if (tracked_result.returncode or tracked_result.stderr or
+                tracked_result.stdout != stable_bytes(path)):
             die(f"{relative} does not exactly match immutable HEAD")
     return repo, head
 
@@ -1527,6 +1710,8 @@ def verify_frozen_sources_at_commit(
     """Bind copied controller bytes to immutable Git objects, not the worktree."""
     if not sources or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         die("frozen source verification lacks an immutable commit")
+    git_environment = pinned_git_environment()
+    validate_pinned_git_environment(git_environment)
     for source, frozen in sources:
         try:
             if not source.is_absolute() or ".." in source.parts:
@@ -1535,13 +1720,17 @@ def verify_frozen_sources_at_commit(
             # lexical repository identity here: resolving it again would let a
             # transient symlink swap redirect this check to another Git path.
             relative = source.relative_to(repo)
-            expected = subprocess.check_output(
+            result = run_bounded_process_group(
                 (
                     str(git), "--no-replace-objects", "-C", str(repo),
                     "cat-file", "blob", f"{commit}:{relative}",
-                ),
-            )
-        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+                ), timeout=30.0,
+                context=f"frozen source object {relative}",
+                env=git_environment)
+            if result.returncode or result.stderr:
+                die(f"cannot read immutable source object for {source}")
+            expected = result.stdout
+        except (OSError, ValueError) as exc:
             raise CampaignError(
                 f"cannot read immutable source object for {source}") from exc
         if stable_bytes(frozen) != expected:
@@ -1554,7 +1743,7 @@ def verify_frozen_sources_at_commit(
 PINNED_BUILD_PATH = "/usr/bin:/bin"
 PINNED_BUILD_TIMEOUT_SECONDS = 900.0
 PINNED_CONFIGURE_TIMEOUT_SECONDS = 180.0
-PINNED_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
+PINNED_OUTPUT_MAX_BYTES = JOB_OUTPUT_MAX_BYTES
 PINNED_PROJECT_CACHE = {
     "BUILD_SHARED_LIBS": ("BOOL", "OFF"),
     "BUILD_TESTS": ("BOOL", "ON"),
@@ -1801,8 +1990,22 @@ class _PinnedBuildSignalGuard:
 
 
 def _terminate_process_group(
-    process: subprocess.Popen[Any], *, graceful: bool = True,
+    process: subprocess.Popen[Any],
+    *,
+    graceful: bool = True,
+    capture_streams: Sequence[Any] = (),
+    output_limit: int | None = None,
 ) -> None:
+    if ((capture_streams and output_limit is None) or
+            (output_limit is not None and
+             (not isinstance(output_limit, int) or
+              isinstance(output_limit, bool) or output_limit <= 0))):
+        die("process-group cleanup capture policy is invalid")
+
+    def capture_overflowed() -> bool:
+        return output_limit is not None and bounded_capture_exceeded(
+            capture_streams, output_limit)
+
     if graceful and _process_group_exists(process.pid):
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -1813,7 +2016,9 @@ def _terminate_process_group(
         while (_process_group_exists(process.pid) and
                time.monotonic() < deadline):
             process.poll()
-            time.sleep(0.01)
+            if capture_overflowed():
+                break
+            time.sleep(PROCESS_POLL_SECONDS)
     if _process_group_exists(process.pid):
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -1822,7 +2027,7 @@ def _terminate_process_group(
     deadline = time.monotonic() + 2.0
     while _process_group_exists(process.pid) and time.monotonic() < deadline:
         process.poll()
-        time.sleep(0.01)
+        time.sleep(PROCESS_POLL_SECONDS)
     try:
         process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
@@ -1860,21 +2065,30 @@ def _run_pinned_command(
                 sizes = (os.fstat(stdout_file.fileno()).st_size,
                          os.fstat(stderr_file.fileno()).st_size)
                 if any(size > PINNED_OUTPUT_MAX_BYTES for size in sizes):
-                    _terminate_process_group(process, graceful=False)
+                    _terminate_process_group(
+                        process, graceful=False,
+                        capture_streams=(stdout_file, stderr_file),
+                        output_limit=PINNED_OUTPUT_MAX_BYTES)
                     die(f"{context} output exceeded the bounded capture limit")
                 if returncode is not None:
                     break
                 if time.monotonic() >= deadline:
-                    _terminate_process_group(process)
+                    _terminate_process_group(
+                        process,
+                        capture_streams=(stdout_file, stderr_file),
+                        output_limit=PINNED_OUTPUT_MAX_BYTES)
                     die(f"{context} timed out")
-                time.sleep(0.01)
+                time.sleep(PROCESS_POLL_SECONDS)
             if _process_group_exists(process.pid):
-                _terminate_process_group(process)
+                _terminate_process_group(
+                    process,
+                    capture_streams=(stdout_file, stderr_file),
+                    output_limit=PINNED_OUTPUT_MAX_BYTES)
                 die(f"{context} left a surviving descendant")
-            stdout_file.seek(0)
-            stderr_file.seek(0)
-            stdout = stdout_file.read()
-            stderr = stderr_file.read()
+            stdout = read_bounded_capture(
+                stdout_file, PINNED_OUTPUT_MAX_BYTES, f"{context} stdout")
+            stderr = read_bounded_capture(
+                stderr_file, PINNED_OUTPUT_MAX_BYTES, f"{context} stderr")
             if returncode:
                 detail = stderr[-4096:].decode("utf-8", errors="replace")
                 die(f"{context} failed ({returncode}): {detail.strip()}")
@@ -1883,8 +2097,229 @@ def _run_pinned_command(
             if (process is not None and
                     (process.poll() is None or
                      _process_group_exists(process.pid))):
-                _terminate_process_group(process)
+                _terminate_process_group(
+                    process,
+                    capture_streams=(stdout_file, stderr_file),
+                    output_limit=PINNED_OUTPUT_MAX_BYTES)
             raise
+
+
+@contextmanager
+def deferred_process_group_acquisition() -> Iterator[None]:
+    """Defer terminal handlers until a Popen handle has been assigned.
+
+    Blocking signals across ``Popen`` is not safe here: the child inherits the
+    caller's signal mask and would then ignore controller TERM/INT requests
+    after exec.  Temporarily catching the signals leaves the child mask
+    unchanged; caught dispositions reset to default on exec.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        die("process-group acquisition must run on the main thread")
+    signals = (signal.SIGINT, signal.SIGTERM)
+    previous: dict[int, Any] = {}
+    pending: list[tuple[int, Any]] = []
+
+    def defer(signum: int, frame: Any) -> None:
+        if not pending:
+            pending.append((signum, frame))
+
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    try:
+        for signum in signals:
+            previous[signum] = signal.getsignal(signum)
+            if previous[signum] != signal.SIG_IGN:
+                signal.signal(signum, defer)
+    except BaseException:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        raise
+    # The child must inherit the entry mask, never our atomic-transition mask.
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    try:
+        yield
+    finally:
+        # Restore both handlers atomically with respect to terminal delivery.
+        # The process handle has already been assigned, so a handler raised by
+        # the final unmask is covered by the caller's lifecycle cleanup.
+        signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        restore_error: BaseException | None = None
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except BaseException as error:
+                if restore_error is None:
+                    restore_error = error
+        unmask_error: BaseException | None = None
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException as error:
+            unmask_error = error
+        if restore_error is not None:
+            raise restore_error
+        if unmask_error is not None:
+            raise unmask_error
+        if pending:
+            signum, frame = pending[0]
+            handler = previous[signum]
+            if callable(handler):
+                handler(signum, frame)
+            elif handler == signal.SIG_DFL:
+                # Re-sending a default-fatal signal here would terminate the
+                # controller before its encompassing exception handler could
+                # reap the just-created group.  Raise only after handle
+                # assignment.  The managed wrapper uses its own replaying
+                # guard; unmanaged production callers install explicit
+                # TimingHost handlers.
+                if signum == signal.SIGINT:
+                    signal.default_int_handler(signum, frame)
+                die("process-group acquisition interrupted by SIGTERM")
+
+
+@contextmanager
+def deferred_terminal_signals() -> Iterator[None]:
+    """Block terminal signals only while an existing group is reaped."""
+    previous_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM))
+    try:
+        yield
+    except BaseException as cleanup_error:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException as replay_error:
+            # A failed teardown can mean descendants remain live.  Preserve
+            # that safety-critical failure while retaining the deferred
+            # interruption as its cause.
+            raise cleanup_error from replay_error
+        raise
+    else:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def stop_and_reap_process_group_deferred(
+    process: subprocess.Popen[bytes], grace_seconds: float = 5.0,
+    *,
+    on_reaped: Callable[[], None] | None = None,
+) -> None:
+    """Reap a group before replaying signals, distinguishing cleanup failure."""
+    if on_reaped is not None and not callable(on_reaped):
+        die("process-group cleanup callback is not callable")
+    with deferred_terminal_signals():
+        try:
+            stop_and_reap_process_group(process, grace_seconds)
+        except CampaignError as error:
+            raise ProcessGroupCleanupError(
+                f"child process group {process.pid} cleanup failed: {error}"
+            ) from error
+        if on_reaped is not None:
+            on_reaped()
+
+
+def run_bounded_process_group(
+    command: Sequence[str],
+    *,
+    timeout: float,
+    context: str,
+    input_bytes: bytes | None = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    output_limit: int | None = None,
+    manage_signals: bool = True,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one command in a private session and prove full-group teardown."""
+    if output_limit is None:
+        output_limit = PINNED_OUTPUT_MAX_BYTES
+    if (not command or any(not isinstance(part, str) or not part
+                           for part in command) or
+            not isinstance(context, str) or not context or
+            not math.isfinite(timeout) or timeout <= 0 or
+            not isinstance(output_limit, int) or
+            isinstance(output_limit, bool) or output_limit <= 0 or
+            not isinstance(manage_signals, bool) or
+            (input_bytes is not None and
+             not isinstance(input_bytes, bytes))):
+        die("invalid bounded process-group command")
+
+    def execute(
+        signal_guard: _PinnedBuildSignalGuard | None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        def terminate(
+            process: subprocess.Popen[Any], *, graceful: bool = True,
+        ) -> None:
+            if signal_guard is not None:
+                signal_guard.block_for_cleanup()
+                _terminate_process_group(
+                    process, graceful=graceful,
+                    capture_streams=(stdout_file, stderr_file),
+                    output_limit=output_limit)
+                return
+            with deferred_terminal_signals():
+                _terminate_process_group(
+                    process, graceful=graceful,
+                    capture_streams=(stdout_file, stderr_file),
+                    output_limit=output_limit)
+
+        with tempfile.TemporaryFile() as stdout_file, \
+                tempfile.TemporaryFile() as stderr_file:
+            input_file: Any | None = None
+            process: subprocess.Popen[Any] | None = None
+            try:
+                if input_bytes is not None:
+                    input_file = tempfile.TemporaryFile()
+                    input_file.write(input_bytes)
+                    input_file.seek(0)
+                acquisition = (
+                    signal_guard.deferred_acquisition()
+                    if signal_guard is not None else
+                    deferred_process_group_acquisition())
+                with acquisition:
+                    process = subprocess.Popen(
+                        tuple(command),
+                        stdin=(input_file if input_file is not None
+                               else subprocess.DEVNULL),
+                        stdout=stdout_file, stderr=stderr_file,
+                        cwd=(str(cwd) if cwd is not None else None), env=env,
+                        start_new_session=True,
+                    )
+                deadline = time.monotonic() + timeout
+                while True:
+                    returncode = process.poll()
+                    sizes = (os.fstat(stdout_file.fileno()).st_size,
+                             os.fstat(stderr_file.fileno()).st_size)
+                    if any(size > output_limit for size in sizes):
+                        terminate(process, graceful=False)
+                        die(f"{context} output exceeded the bounded capture limit")
+                    if returncode is not None:
+                        break
+                    if time.monotonic() >= deadline:
+                        terminate(process)
+                        raise BoundedProcessTimeout(f"{context} timed out")
+                    time.sleep(PROCESS_POLL_SECONDS)
+                if _process_group_exists(process.pid):
+                    terminate(process)
+                    die(f"{context} left a surviving descendant")
+                return subprocess.CompletedProcess(
+                    tuple(command), returncode,
+                    stdout=read_bounded_capture(
+                        stdout_file, output_limit, f"{context} stdout"),
+                    stderr=read_bounded_capture(
+                        stderr_file, output_limit, f"{context} stderr"))
+            except BaseException:
+                if (process is not None and
+                        (process.poll() is None or
+                         _process_group_exists(process.pid))):
+                    terminate(process)
+                raise
+            finally:
+                if input_file is not None:
+                    input_file.close()
+
+    if not manage_signals:
+        return execute(None)
+    signal_guard = _PinnedBuildSignalGuard()
+    with signal_guard:
+        signal_guard.activate()
+        return execute(signal_guard)
 
 
 def _snapshot_path(path_bytes: bytes) -> tuple[str, ...]:
@@ -2926,7 +3361,7 @@ def validate_pinned_build_record(
     environment = record["environment"]
     expected_environment_keys = {
         "PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "LANG", "LC_ALL",
-        "TZ", "SOURCE_DATE_EPOCH",
+        "TZ", "SOURCE_DATE_EPOCH", *PINNED_GIT_ENVIRONMENT,
     }
     workspace = Path(source["materialized_path"]).parent
     if (set(environment) != expected_environment_keys or
@@ -2934,6 +3369,8 @@ def validate_pinned_build_record(
             environment.get("PATH") != PINNED_BUILD_PATH or
             environment.get("LANG") != "C" or
             environment.get("LC_ALL") != "C" or
+            any(environment.get(key) != value
+                for key, value in PINNED_GIT_ENVIRONMENT.items()) or
             environment.get("TZ") != "UTC" or
             environment.get("SOURCE_DATE_EPOCH") !=
             str(source.get("commit_timestamp")) or
@@ -3114,6 +3551,7 @@ def _fresh_pinned_benchmark_build_impl(
             "XDG_CONFIG_HOME": str(xdg),
             "TMPDIR": str(temporary),
             "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            **PINNED_GIT_ENVIRONMENT,
         }
         source = workspace / "source"
         source_record = _materialize_commit_snapshot(
@@ -3741,6 +4179,401 @@ class ArmData:
         self.muladds = array("Q", [0]) * size
 
 
+ALLK_COMMAND_RECORD_FIELDS = frozenset({
+    "job", "arm", "band", "seed_index", "seed", "schedule", "group",
+    "group_ledger_salt_unused", "active_packet_peel_seed_xor", "K_count",
+    "cpu", "command", "start_ns", "end_ns", "start_monotonic_ns",
+    "end_monotonic_ns", "elapsed_ns", "returncode",
+    "stdout", "stdout_sha256", "stderr", "stderr_sha256",
+    "saturated_timing_speed_claim_valid",
+})
+
+ALLK_THERMAL_SUMMARY_FIELDS = frozenset({
+    "samples", "sealed_samples_including_baseline", "cpu_busy_min_pct",
+    "cpu_tctl_max_c", "dimm_max_c", "dimm_read_errors_max",
+    "edac_ce_delta", "edac_ue_delta", "thermal_limit_c",
+    "thermal_high_samples", "thermal_high_max_consecutive_samples",
+    "guard_poll_iterations", "guard_samples", "guard_high_samples",
+    "guard_limit_c", "guard_error",
+    "baseline_row_sha256",
+})
+
+
+def _canonical_json_record(path: Path, context: str) -> tuple[bytes, Any]:
+    """Load one strict canonical pretty-JSON receipt byte-for-byte."""
+    data = stable_bytes(path)
+    try:
+        record = json.loads(data)
+        canonical = json_bytes(record)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise CampaignError(f"{context} is not valid canonical JSON") from exc
+    if data != canonical:
+        die(f"{context} is not exact canonical JSON")
+    return data, record
+
+
+def _require_exact_receipt_directory(
+    directory: Path,
+    expected_names: set[str],
+    context: str,
+) -> None:
+    """Reject missing, extra, indirect, or non-regular receipt entries."""
+    try:
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        raise CampaignError(f"cannot inspect {context}: {exc}") from exc
+    if {entry.name for entry in entries} != expected_names:
+        die(f"{context} does not contain the exact expected artifact set")
+    for entry in entries:
+        try:
+            metadata = entry.lstat()
+        except OSError as exc:
+            raise CampaignError(f"cannot inspect {context} entry: {exc}") from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            die(f"{context} contains a non-regular artifact: {entry.name}")
+
+
+def _thermal_counter_delta(values: Sequence[int]) -> int:
+    steps = [current - previous
+             for previous, current in zip(values, values[1:])]
+    rollback = min(steps, default=0)
+    return rollback if rollback < 0 else values[-1] - values[0]
+
+
+def _verify_allk_thermal_receipt(
+    data: bytes,
+    summary: dict[str, Any],
+    policy: dict[str, Any],
+    interval_start_monotonic_ns: int,
+    interval_end_monotonic_ns: int,
+) -> None:
+    """Recompute the sealed thermal interval and exact guard summary."""
+    if set(summary) != ALLK_THERMAL_SUMMARY_FIELDS:
+        die("all-K thermal summary has the wrong schema")
+    lines = data.splitlines(keepends=True)
+    expected_header = (",".join(THERMAL_FIELDS) + "\n").encode("ascii")
+    if len(lines) < 3 or lines[0] != expected_header:
+        die("all-K thermal receipt lacks its exact header/baseline/interval")
+    if any(not line.endswith(b"\n") or len(line) > THERMAL_ROW_MAX_BYTES
+           for line in lines[1:]):
+        die("all-K thermal receipt has a partial or oversized row")
+    try:
+        samples = [
+            parse_thermal_sample(line, f"sealed thermal row {number}")
+            for number, line in enumerate(lines[1:], 1)
+        ]
+        stale_seconds = float(policy["stale_seconds"])
+        limit_c = float(policy["limit_c"])
+        min_busy = float(policy["min_cpu_busy_pct"])
+        consecutive_limit = int(policy["consecutive_samples"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CampaignError(f"all-K thermal receipt is malformed: {exc}") from exc
+    if (
+        type(interval_start_monotonic_ns) is not int or
+        type(interval_end_monotonic_ns) is not int or
+        not 0 < interval_start_monotonic_ns <=
+            interval_end_monotonic_ns < 1 << 64 or
+        not math.isfinite(stale_seconds) or stale_seconds <= 0 or
+        not math.isfinite(limit_c) or not 0 <= limit_c <= 120 or
+        not math.isfinite(min_busy) or not 0 <= min_busy <= 100 or
+        type(policy.get("consecutive_samples")) is not int or
+        consecutive_limit <= 0
+    ):
+        die("all-K thermal policy is malformed")
+    if (not _canonical_digest(summary.get("baseline_row_sha256")) or
+            summary["baseline_row_sha256"] != sha256_bytes(lines[1])):
+        die("all-K thermal receipt does not bind the live guard baseline")
+    start_seconds = interval_start_monotonic_ns / 1_000_000_000
+    end_seconds = interval_end_monotonic_ns / 1_000_000_000
+    if (samples[0]["monotonic_s"] > start_seconds or
+            samples[-1]["monotonic_s"] < end_seconds):
+        die("all-K thermal receipt does not cover the full job interval")
+    for number, (previous, current) in enumerate(
+            zip(samples, samples[1:]), 1):
+        delta = current["monotonic_s"] - previous["monotonic_s"]
+        if delta <= 0 or delta > stale_seconds:
+            die(f"all-K thermal row {number} is nonmonotonic or follows a gap")
+    interval_samples = samples[1:]
+    consecutive_high = 0
+    high_samples = 0
+    max_consecutive_high = 0
+    for sample in samples:
+        high = (
+            sample["cpu_tctl_c"] >= limit_c or
+            max(sample["dimm_temperatures"]) >= limit_c
+        )
+        if high:
+            consecutive_high += 1
+            high_samples += 1
+            max_consecutive_high = max(
+                max_consecutive_high, consecutive_high)
+        else:
+            consecutive_high = 0
+    computed = {
+        "samples": len(interval_samples),
+        "sealed_samples_including_baseline": len(samples),
+        "cpu_busy_min_pct": min(
+            sample["cpu_busy_pct"] for sample in interval_samples),
+        "cpu_tctl_max_c": max(sample["cpu_tctl_c"] for sample in samples),
+        "dimm_max_c": max(
+            value for sample in samples
+            for value in sample["dimm_temperatures"]),
+        "dimm_read_errors_max": max(
+            sample["dimm_read_errors"] for sample in samples),
+        "edac_ce_delta": _thermal_counter_delta(
+            [sample["edac_ce"] for sample in samples]),
+        "edac_ue_delta": _thermal_counter_delta(
+            [sample["edac_ue"] for sample in samples]),
+        "thermal_limit_c": limit_c,
+        "thermal_high_samples": high_samples,
+        "thermal_high_max_consecutive_samples": max_consecutive_high,
+    }
+    for field, expected in computed.items():
+        if type(summary.get(field)) is not type(expected) or \
+                summary[field] != expected:
+            die(f"all-K thermal summary field {field} does not replay")
+    guard_integer_fields = (
+        "guard_poll_iterations", "guard_samples", "guard_high_samples")
+    if (
+        any(type(summary.get(field)) is not int or summary[field] < 0
+            for field in guard_integer_fields) or
+        type(summary.get("guard_limit_c")) is not float or
+        summary["guard_limit_c"] != limit_c or
+        summary.get("guard_error") is not None or
+        summary["guard_samples"] > computed["samples"] or
+        summary["guard_high_samples"] > summary["guard_samples"] or
+        summary["guard_high_samples"] > computed["thermal_high_samples"] or
+        (summary["guard_samples"] > 0 and
+         summary["guard_poll_iterations"] == 0)
+    ):
+        die("all-K live thermal guard summary is inconsistent")
+    if (
+        computed["thermal_high_max_consecutive_samples"] >=
+            consecutive_limit or
+        computed["dimm_read_errors_max"] != 0 or
+        computed["edac_ce_delta"] != 0 or
+        computed["edac_ue_delta"] != 0 or
+        computed["cpu_busy_min_pct"] < min_busy
+    ):
+        die("all-K thermal receipt fails the campaign health gate")
+
+
+def verify_allk_receipts(
+    result_dir: Path,
+    contract: dict[str, Any],
+    jobs: Sequence[Job],
+    binary: Path,
+    taskset: Path,
+    workers: int,
+    worker_cpus: Sequence[int],
+    thermal_summary: dict[str, Any],
+    thermal_baseline_row_sha256: str,
+) -> dict[Path, str]:
+    """Replay every all-K receipt and return its exact pre-seal hashes."""
+    result_root = result_dir / "results"
+    if not jobs:
+        die("all-K receipt verification has an empty job ledger")
+    if any(job.job != ordinal for ordinal, job in enumerate(jobs)):
+        die("all-K job ledger is not in exact contiguous job order")
+    stems = [job.stem for job in jobs]
+    if len(set(stems)) != len(stems):
+        die("all-K job ledger contains duplicate artifact stems")
+    cpus = tuple(worker_cpus)
+    if (
+        type(workers) is not int or workers <= 0 or len(cpus) != workers or
+        any(type(cpu) is not int or cpu < 0 for cpu in cpus) or
+        tuple(sorted(set(cpus))) != cpus
+    ):
+        die("all-K worker CPU ledger is not canonical")
+    if (not isinstance(thermal_summary, dict) or
+            not _canonical_digest(thermal_baseline_row_sha256) or
+            thermal_summary.get("baseline_row_sha256") !=
+                thermal_baseline_row_sha256):
+        die("all-K thermal summary is not an object")
+    try:
+        timeout_seconds = float(contract["timeout_seconds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CampaignError("all-K timeout contract is malformed") from exc
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        die("all-K timeout contract is malformed")
+    verification_wall_ns = time.time_ns()
+    verification_monotonic_ns = time.monotonic_ns()
+    verify_frozen_binary(binary, contract.get("binary_sha256"))
+    if frozen_executable_path(contract.get("taskset"), "taskset") != taskset:
+        die("frozen taskset path changed before receipt verification")
+
+    command_names = {f"{stem}.json" for stem in stems}
+    stdout_names = {f"{stem}.csv" for stem in stems}
+    stderr_names = {f"{stem}.txt" for stem in stems}
+    _require_exact_receipt_directory(
+        result_root / "commands", command_names, "all-K command directory")
+    _require_exact_receipt_directory(
+        result_root / "stdout", stdout_names, "all-K stdout directory")
+    _require_exact_receipt_directory(
+        result_root / "stderr", stderr_names, "all-K stderr directory")
+    try:
+        root_entries = list(result_root.iterdir())
+    except OSError as exc:
+        raise CampaignError(f"cannot inspect all-K result directory: {exc}") from exc
+    expected_root_names = {
+        "commands", "stdout", "stderr", "tasks.jsonl", "run.json",
+        "thermal_interval.csv",
+    }
+    if {entry.name for entry in root_entries} != expected_root_names:
+        die("all-K result directory does not have the exact receipt layout")
+    for name in ("commands", "stdout", "stderr"):
+        try:
+            metadata = (result_root / name).lstat()
+        except OSError as exc:
+            raise CampaignError(f"cannot inspect all-K {name}: {exc}") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            die(f"all-K {name} is not a direct directory")
+
+    hashes: dict[Path, str] = {}
+    records: list[dict[str, Any]] = []
+    allowed_cpus = set(cpus)
+    integer_fields = {
+        "job", "seed_index", "group", "K_count", "cpu", "start_ns",
+        "end_ns", "start_monotonic_ns", "end_monotonic_ns", "elapsed_ns",
+        "returncode",
+    }
+    intervals_by_cpu: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
+    for job in jobs:
+        command_path = result_root / "commands" / f"{job.stem}.json"
+        stdout_path = result_root / "stdout" / f"{job.stem}.csv"
+        stderr_path = result_root / "stderr" / f"{job.stem}.txt"
+        command_data, record = _canonical_json_record(
+            command_path, f"job {job.job} command receipt")
+        if not isinstance(record, dict) or set(record) != \
+                ALLK_COMMAND_RECORD_FIELDS:
+            die(f"job {job.job} command receipt has the wrong schema")
+        if any(type(record.get(field)) is not int for field in integer_fields):
+            die(f"job {job.job} command receipt has a non-integer field")
+        cpu = record["cpu"]
+        expected_command = [
+            str(taskset), "-c", str(cpu), *make_command(binary, job)
+        ]
+        start_ns = record["start_ns"]
+        end_ns = record["end_ns"]
+        start_monotonic_ns = record["start_monotonic_ns"]
+        end_monotonic_ns = record["end_monotonic_ns"]
+        expected_stdout = str(stdout_path.relative_to(result_root))
+        expected_stderr = str(stderr_path.relative_to(result_root))
+        stdout_data = stable_bytes(stdout_path)
+        stderr_data = stable_bytes(stderr_path)
+        if (
+            record["job"] != job.job or record.get("arm") != job.arm or
+            record.get("band") != job.band or
+            record["seed_index"] != job.seed_index or
+            record.get("seed") != job.seed or
+            record.get("schedule") != job.schedule or
+            record["group"] != job.group or
+            record.get("group_ledger_salt_unused") != job.ledger_salt or
+            record.get("active_packet_peel_seed_xor") != "0x0" or
+            record["K_count"] != len(job.ks) or cpu not in allowed_cpus or
+            record.get("command") != expected_command or
+            min(start_ns, end_ns, start_monotonic_ns,
+                end_monotonic_ns) <= 0 or
+            max(start_ns, end_ns, start_monotonic_ns,
+                end_monotonic_ns) >= 1 << 64 or
+            end_ns < start_ns or end_monotonic_ns < start_monotonic_ns or
+            end_ns > verification_wall_ns + 1_000_000_000 or
+            end_monotonic_ns > verification_monotonic_ns or
+            abs((start_ns - start_monotonic_ns) -
+                (verification_wall_ns - verification_monotonic_ns)) >
+                5_000_000_000 or
+            abs((end_ns - end_monotonic_ns) -
+                (verification_wall_ns - verification_monotonic_ns)) >
+                5_000_000_000 or
+            record["elapsed_ns"] != end_monotonic_ns - start_monotonic_ns or
+            record["elapsed_ns"] >
+                math.ceil((timeout_seconds + 1.0) * 1_000_000_000) or
+            record["returncode"] != 0 or
+            record.get("stdout") != expected_stdout or
+            record.get("stderr") != expected_stderr or
+            not _canonical_digest(record.get("stdout_sha256")) or
+            record["stdout_sha256"] != sha256_bytes(stdout_data) or
+            not _canonical_digest(record.get("stderr_sha256")) or
+            record["stderr_sha256"] != sha256_bytes(stderr_data) or
+            stderr_data != b"" or
+            record.get("saturated_timing_speed_claim_valid") is not False
+        ):
+            die(f"job {job.job} command/provenance receipt mismatch")
+        intervals_by_cpu[cpu].append(
+            (start_monotonic_ns, end_monotonic_ns, job.job))
+        try:
+            stdout = stdout_data.decode("utf-8")
+            rows = parse_bench_output(
+                stdout, job.ks, "0x0", job.seed, job.schedule,
+                arm_options(job.arm, job.band), True,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise CampaignError(
+                f"job {job.job} stdout semantic replay failed: {exc}") from exc
+        if len(rows) != len(job.ks):
+            die(f"job {job.job} stdout replay cardinality changed")
+        records.append(record)
+        hashes[command_path.resolve(strict=True)] = sha256_bytes(command_data)
+        hashes[stdout_path.resolve(strict=True)] = sha256_bytes(stdout_data)
+        hashes[stderr_path.resolve(strict=True)] = sha256_bytes(stderr_data)
+
+    if set(intervals_by_cpu) != allowed_cpus:
+        die("all-K receipts do not exercise the exact worker CPU ledger")
+    for cpu, intervals in intervals_by_cpu.items():
+        ordered = sorted(intervals)
+        for previous, current in zip(ordered, ordered[1:]):
+            if previous[1] > current[0]:
+                die(
+                    f"all-K CPU {cpu} has overlapping jobs "
+                    f"{previous[2]} and {current[2]}"
+                )
+
+    tasks_path = result_root / "tasks.jsonl"
+    expected_tasks = b"".join(
+        (canonical_json(record) + "\n").encode("utf-8") for record in records
+    )
+    tasks_data = stable_bytes(tasks_path)
+    if tasks_data != expected_tasks:
+        die("all-K tasks ledger is not the exact canonical ordered receipt set")
+    hashes[tasks_path.resolve(strict=True)] = sha256_bytes(tasks_data)
+
+    thermal_path = result_root / "thermal_interval.csv"
+    thermal_data = stable_bytes(thermal_path)
+    _verify_allk_thermal_receipt(
+        thermal_data, thermal_summary, contract["thermal_policy"],
+        min(record["start_monotonic_ns"] for record in records),
+        max(record["end_monotonic_ns"] for record in records))
+    hashes[thermal_path.resolve(strict=True)] = sha256_bytes(thermal_data)
+
+    expected_run = {
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v5",
+        "source_commit": contract["source_commit"],
+        "binary_sha256": contract["binary_sha256"],
+        "jobs": len(jobs), "workers": workers,
+        "worker_cpus": list(cpus),
+        "start_ns": min(record["start_ns"] for record in records),
+        "end_ns": max(record["end_ns"] for record in records),
+        "start_monotonic_ns": min(
+            record["start_monotonic_ns"] for record in records),
+        "end_monotonic_ns": max(
+            record["end_monotonic_ns"] for record in records),
+        "recovery_cells": sum(len(job.ks) for job in jobs),
+        "thermal": thermal_summary,
+        "saturated_timing_speed_claim_valid": False,
+    }
+    run_path = result_root / "run.json"
+    run_data, run_record = _canonical_json_record(
+        run_path, "all-K run receipt")
+    if not isinstance(run_record, dict) or run_data != json_bytes(expected_run):
+        die("all-K run receipt does not exactly bind the campaign ledger")
+    hashes[run_path.resolve(strict=True)] = sha256_bytes(run_data)
+
+    expected_artifacts = 3 * len(jobs) + 3
+    if len(hashes) != expected_artifacts:
+        die("all-K receipt verification did not cover every artifact exactly")
+    return hashes
+
+
 def cell_index(seed_index: int, schedule: str, K: int) -> int:
     stratum = seed_index * len(SCHEDULES) + SCHEDULES.index(schedule)
     return stratum * K_COUNT + K - K_MIN
@@ -3760,13 +4593,28 @@ def milli(text: str, context: str) -> int:
     return result
 
 
+def sealed_phase_bytes(
+    path: Path,
+    phase_hashes: dict[Path, str],
+    context: str,
+) -> bytes:
+    """Read one artifact and prove it is still the phase-sealed version."""
+    resolved = path.resolve(strict=True)
+    expected = phase_hashes.get(resolved)
+    data = stable_bytes(path)
+    if not _canonical_digest(expected) or sha256_bytes(data) != expected:
+        die(f"{context} changed after the phase seal")
+    return data
+
+
 def load_arm_data(
-    jobs: Sequence[Job], result_root: Path,
+    jobs: Sequence[Job], result_root: Path, phase_hashes: dict[Path, str],
 ) -> dict[str, ArmData]:
     data = {arm: ArmData() for arm in ARMS}
     for ordinal, job in enumerate(jobs, 1):
         stdout_path = result_root / "stdout" / f"{job.stem}.csv"
-        text = stable_bytes(stdout_path).decode("utf-8")
+        text = sealed_phase_bytes(
+            stdout_path, phase_hashes, f"{job.stem} stdout").decode("utf-8")
         rows = parse_bench_output(
             text, job.ks, "0x0", job.seed, job.schedule,
             arm_options(job.arm, job.band), True,
@@ -3805,7 +4653,7 @@ def load_arm_data(
 
 
 def verify_low_identity(
-    jobs: Sequence[Job], result_root: Path,
+    jobs: Sequence[Job], result_root: Path, phase_hashes: dict[Path, str],
 ) -> dict[str, int]:
     low: dict[tuple[int, str, int], dict[str, Job]] = defaultdict(dict)
     for job in jobs:
@@ -3819,7 +4667,9 @@ def verify_low_identity(
         for arm, job in arms.items():
             path = result_root / "stdout" / f"{job.stem}.csv"
             parsed[arm] = parse_bench_output(
-                stable_bytes(path).decode("utf-8"), job.ks, "0x0",
+                sealed_phase_bytes(
+                    path, phase_hashes, f"{job.stem} identity stdout"
+                ).decode("utf-8"), job.ks, "0x0",
                 job.seed, job.schedule, (), True,
             )
         base = parsed["d12"]
@@ -3957,8 +4807,8 @@ def analyze(
     }
     if set(phase_hashes) != expected_result_paths:
         die("result phase seal does not cover the exact result artifact set")
-    identity = verify_low_identity(jobs, result_root)
-    data = load_arm_data(jobs, result_root)
+    identity = verify_low_identity(jobs, result_root, phase_hashes)
+    data = load_arm_data(jobs, result_root, phase_hashes)
     group_by_k = [-1] * (K_MAX + 1)
     ledger_salt_by_k = [""] * (K_MAX + 1)
     for group in groups:
@@ -4146,6 +4996,37 @@ def analyze(
     return summary
 
 
+def verify_analysis_publication(
+    result_dir: Path,
+    summary: dict[str, Any],
+) -> dict[Path, str]:
+    """Reopen the exact analysis inventory and bind its summary object."""
+    analysis = result_dir / "analysis"
+    artifact_names = {
+        "paired_cells.csv", "failures_and_shortfalls.csv",
+        "exact_k_changes.csv", "scopes.csv", "summary.json",
+    }
+    _require_exact_receipt_directory(
+        analysis, artifact_names | {"analysis_complete.sha256"},
+        "all-K analysis directory")
+    seal = analysis / "analysis_complete.sha256"
+    verified = verify_sha_manifest(result_dir, seal)
+    expected_paths = {
+        (analysis / name).resolve(strict=True) for name in artifact_names
+    }
+    if set(verified) != expected_paths:
+        die("analysis seal does not cover the exact five analysis artifacts")
+    summary_path = analysis / "summary.json"
+    summary_data = stable_bytes(summary_path)
+    if (
+        summary_data != json_bytes(summary) or
+        verified.get(summary_path.resolve(strict=True)) !=
+            sha256_bytes(summary_data)
+    ):
+        die("analysis summary differs from its sealed in-memory result")
+    return verified
+
+
 def run(args: argparse.Namespace) -> int:
     result_dir = args.result_dir.resolve(strict=True)
     contract, binary, taskset, thermal, thermal_identity, groups = \
@@ -4219,9 +5100,13 @@ def run(args: argparse.Namespace) -> int:
                         future.cancel()
         finally:
             if guard.started:
+                coverage_end = (
+                    max(record["end_monotonic_ns"] for record in records)
+                    if campaign_error is None and len(records) == len(jobs)
+                    else None)
                 thermal_summary = guard.finish(
-                    result_root / "thermal_interval.csv"
-                )
+                    result_root / "thermal_interval.csv",
+                    cover_through_monotonic_ns=coverage_end)
     if guard.error:
         die(f"thermal guard failed: {guard.error}")
     if thermal_summary is None:
@@ -4256,41 +5141,70 @@ def run(args: argparse.Namespace) -> int:
     records.sort(key=lambda record: record["job"])
     if len(records) != len(jobs):
         die(f"completed {len(records)} jobs, want {len(jobs)}")
-    with (result_root / "tasks.jsonl").open(
-        "w", encoding="utf-8", newline="\n"
-    ) as output:
-        for record in records:
-            output.write(canonical_json(record) + "\n")
+    tasks_data = b"".join(
+        (canonical_json(record) + "\n").encode("utf-8")
+        for record in records
+    )
+    atomic_write(result_root / "tasks.jsonl", tasks_data)
     run_summary = {
-        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v3",
+        "schema": "wirehair.wh2.rank_floor_two_anchor_allk.run.v5",
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "jobs": len(jobs), "workers": workers,
-        "recovery_cells": len(ARMS) * len(SEEDS) * len(SCHEDULES) * K_COUNT,
+        "worker_cpus": cpus[:workers],
+        "start_ns": min(record["start_ns"] for record in records),
+        "end_ns": max(record["end_ns"] for record in records),
+        "start_monotonic_ns": min(
+            record["start_monotonic_ns"] for record in records),
+        "end_monotonic_ns": max(
+            record["end_monotonic_ns"] for record in records),
+        "recovery_cells": sum(len(job.ks) for job in jobs),
         "thermal": thermal_summary,
         "saturated_timing_speed_claim_valid": False,
     }
     atomic_json(result_root / "run.json", run_summary)
-    phase_files = [
-        path for path in result_root.rglob("*")
-        if path.is_file() and path.name != "phase_complete.sha256"
-    ]
+    receipt_hashes = verify_allk_receipts(
+        result_dir, contract, jobs, binary, taskset, workers,
+        cpus[:workers], thermal_summary,
+        sha256_bytes(guard.mark["baseline_row"]),
+    )
+    phase_files = list(receipt_hashes)
     phase_seal = result_root / "phase_complete.sha256"
     atomic_write(phase_seal, sha_manifest(result_dir, phase_files))
     phase_hashes = verify_sha_manifest(result_dir, phase_seal)
+    if phase_hashes != receipt_hashes:
+        die("all-K receipts changed between semantic replay and phase seal")
     summary = analyze(result_dir, contract, groups, jobs, phase_hashes)
+    if verify_sha_manifest(result_dir, phase_seal) != receipt_hashes:
+        die("all-K phase artifacts changed during analysis")
+    analysis_hashes = verify_analysis_publication(result_dir, summary)
+    phase_seal_sha256 = sha256_file(phase_seal)
+    analysis_seal = result_dir / "analysis/analysis_complete.sha256"
+    analysis_seal_sha256 = sha256_file(analysis_seal)
+    if summary.get("phase_seal_sha256") != phase_seal_sha256:
+        die("analysis summary does not bind the final phase seal")
+    # Recheck after hashing both manifests so a concurrent replacement cannot
+    # splice the in-memory summary to a different final complete record.
+    if (
+        verify_sha_manifest(result_dir, phase_seal) != receipt_hashes or
+        verify_analysis_publication(result_dir, summary) != analysis_hashes or
+        sha256_file(phase_seal) != phase_seal_sha256 or
+        sha256_file(analysis_seal) != analysis_seal_sha256
+    ):
+        die("all-K evidence changed before final publication")
     complete = {
         "result_dir": str(result_dir),
         "source_commit": contract["source_commit"],
         "binary_sha256": contract["binary_sha256"],
         "staged_seal_sha256": sha256_file(result_dir / "frozen/staged.sha256"),
-        "phase_seal_sha256": sha256_file(phase_seal),
-        "analysis_seal_sha256": sha256_file(
-            result_dir / "analysis/analysis_complete.sha256"
-        ),
+        "phase_seal_sha256": phase_seal_sha256,
+        "analysis_seal_sha256": analysis_seal_sha256,
         "summary": summary,
     }
-    atomic_json(result_dir / "complete.json", complete)
+    complete_path = result_dir / "complete.json"
+    atomic_json(complete_path, complete)
+    if stable_bytes(complete_path) != json_bytes(complete):
+        die("final all-K publication record changed after creation")
     print(canonical_json(complete))
     return 0
 
