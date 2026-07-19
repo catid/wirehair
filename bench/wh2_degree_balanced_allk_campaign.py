@@ -1780,14 +1780,21 @@ def reconcile_incomplete_segments(root: Path, tasks: Sequence[dict]) -> List[dic
     return reconciled
 
 
-def read_thermal_rows(path: Path) -> List[Dict[str, str]]:
+def read_bounded_thermal_artifact(path: Path) -> bytes:
     try:
-        if path.stat().st_size > MAX_THERMAL_BYTES_PER_SEGMENT:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_THERMAL_BYTES_PER_SEGMENT + 1)
+        if len(data) > MAX_THERMAL_BYTES_PER_SEGMENT:
             die("thermal stream exceeds its sealed segment bound")
     except OSError as exc:
-        die("cannot stat thermal stream {}: {}".format(path, exc))
+        die("cannot read thermal stream {}: {}".format(path, exc))
+    return data
+
+
+def read_thermal_rows(path: Path) -> List[Dict[str, str]]:
+    data = read_bounded_thermal_artifact(path)
     try:
-        with path.open(newline="", encoding="ascii") as stream:
+        with io.StringIO(data.decode("ascii"), newline="") as stream:
             reader = csv.DictReader(stream)
             if tuple(reader.fieldnames or ()) != THERMAL_FIELDS:
                 die("thermal header mismatch: {}".format(path))
@@ -2481,6 +2488,34 @@ def validate_thermal_rows(
     }
 
 
+def thermal_busy_values_for_window(
+    rows: Sequence[Mapping[str, str]],
+    monotonic: Sequence[Decimal],
+    *,
+    start: Decimal,
+    end: Decimal,
+    segment: int,
+) -> List[Decimal]:
+    if end <= start:
+        die("successful segment {} has an empty load interval".format(segment))
+    # cpu_busy_pct on row i describes (monotonic[i - 1], monotonic[i]].
+    # Therefore the first relevant endpoint is strictly after start; the
+    # endpoint immediately before/equal to start describes pre-load work.
+    first = next(index for index, value in enumerate(monotonic) if value > start)
+    last = next(index for index, value in enumerate(monotonic) if value >= end)
+    selected = list(range(first, last + 1))
+    if not selected or any(not rows[index]["cpu_busy_pct"] for index in selected):
+        die("successful segment {} lacks CPU busy data over its load interval".format(
+            segment))
+    values = [
+        decimal_field(rows[index], "cpu_busy_pct") for index in selected
+    ]
+    if sum(values) / len(values) < CPU_BUSY_FLOOR:
+        die("successful segment {} CPU busy mean is below the sealed floor".format(
+            segment))
+    return values
+
+
 def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[dict]) -> Dict[str, object]:
     indices = segment_indices(root)
     if not indices:
@@ -2492,6 +2527,8 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
     all_busy: List[Decimal] = []
     all_cpu: List[Decimal] = []
     dimm_maxima: Dict[str, Decimal] = {}
+    non_success_thermal_evidence_only: List[int] = []
+    non_success_sampler_stderr: List[int] = []
     last_success_stage_index = -1
     expected_thermal_files: Set[str] = set()
     task_by_job = {int(task["job"]): task for task in tasks}
@@ -2582,9 +2619,13 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
         if ready is not None and (not csv_exists or not stderr_exists):
             die("ready segment lacks complete thermal artifacts")
         if csv_exists:
+            read_bounded_thermal_artifact(csv_path)
             expected_thermal_files.add(csv_path.name)
         if stderr_exists:
+            read_bounded_thermal_artifact(stderr_path)
             expected_thermal_files.add(stderr_path.name)
+            if state != "success" and stderr_path.stat().st_size:
+                non_success_sampler_stderr.append(segment)
         thermal: Optional[Dict[str, object]] = None
         rows: List[Dict[str, str]] = []
         if csv_exists:
@@ -2592,10 +2633,17 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
                     final.get("thermal_csv_sha256") != sha256_file(csv_path) or \
                     (stderr_exists and final.get("thermal_stderr") != stderr_path.name):
                 die("segment thermal hash binding mismatch")
-            if ready is not None and stderr_path.stat().st_size:
-                die("thermal sampler stderr is nonempty")
-            rows = read_thermal_rows(csv_path)
-            if ready is not None:
+            if state == "success":
+                if not stderr_exists or stderr_path.stat().st_size:
+                    die("thermal sampler stderr is nonempty")
+                rows = read_thermal_rows(csv_path)
+            else:
+                # Failed/interrupted streams are immutable diagnostic evidence,
+                # not health evidence.  They remain regular, bounded, and
+                # exactly hash-bound, but may end in a torn CSV record or carry
+                # the sampler exception that caused the attempt to fail.
+                non_success_thermal_evidence_only.append(segment)
+            if state == "success" and ready is not None:
                 thermal = validate_thermal_rows(rows, segment=segment)
                 count = int(ready["samples_at_ready"])
                 if count > len(rows) or \
@@ -2625,18 +2673,8 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
             monotonic = thermal["monotonic"]
             if end < start or monotonic[0] > start or monotonic[-1] < end:
                 die("successful thermal segment lacks full launch start/end coverage")
-            # Include the first sample at/after the end boundary and the sample
-            # immediately before start, since CPU busy is interval-derived.
-            first_after_end = next(index for index, value in enumerate(monotonic) if value >= end)
-            first_after_start = next(index for index, value in enumerate(monotonic) if value >= start)
-            coverage_set = set(range(max(0, first_after_start - 1), first_after_end + 1))
-            coverage_busy = [
-                decimal_field(rows[index], "cpu_busy_pct")
-                for index in sorted(coverage_set)
-                if rows[index]["cpu_busy_pct"]
-            ]
-            if not coverage_busy or sum(coverage_busy) / len(coverage_busy) < CPU_BUSY_FLOOR:
-                die("successful segment CPU busy mean is below the sealed floor")
+            coverage_busy = thermal_busy_values_for_window(
+                rows, monotonic, start=start, end=end, segment=segment)
             all_busy.extend(coverage_busy)
             if stage_index != last_success_stage_index + 1:
                 die("successful holdout strata are not in the sealed order")
@@ -2707,7 +2745,11 @@ def validate_thermal(root: Path, design: Mapping[str, object], tasks: Sequence[d
         "segments": len(indices), "successful_segments": successful_segments,
         "failed_segments": failed_segments,
         "interrupted_segments": interrupted_segments, "samples": samples,
+        "successful_busy_samples": len(all_busy),
         "successful_busy_mean": str(sum(all_busy) / len(all_busy)),
+        "non_success_thermal_evidence_only_segments":
+            non_success_thermal_evidence_only,
+        "non_success_sampler_stderr_segments": non_success_sampler_stderr,
         "cpu_max_c": str(max(all_cpu)) if all_cpu else None,
         "dimm_max_c_by_field": {
             key: str(dimm_maxima[key]) for key in sorted(dimm_maxima)
@@ -2994,8 +3036,15 @@ def command_selftest(_: argparse.Namespace) -> None:
             return
         die("{} tamper selftest was accepted".format(label))
 
-    def thermal_bytes(monotonic_values: Sequence[str], *, edac_ce: str = "0",
-                      blank_dimm: bool = False) -> bytes:
+    def thermal_bytes(
+        monotonic_values: Sequence[str],
+        *,
+        busy_values: Optional[Sequence[str]] = None,
+        edac_ce: str = "0",
+        blank_dimm: bool = False,
+    ) -> bytes:
+        if busy_values is not None and len(busy_values) != len(monotonic_values):
+            die("thermal selftest busy-value cardinality mismatch")
         output = io.StringIO(newline="")
         writer = csv.DictWriter(output, fieldnames=THERMAL_FIELDS, lineterminator="\n")
         writer.writeheader()
@@ -3003,7 +3052,9 @@ def command_selftest(_: argparse.Namespace) -> None:
             row = {key: "0" for key in THERMAL_FIELDS}
             row.update({
                 "utc": "2026-07-18T00:00:{:02d}.000Z".format(index),
-                "monotonic_s": monotonic_value, "cpu_busy_pct": "99.5",
+                "monotonic_s": monotonic_value,
+                "cpu_busy_pct": (
+                    busy_values[index] if busy_values is not None else "99.5"),
                 "cpu_avg_mhz": "5000", "cpu_tctl_c": "60",
                 "dimm_read_errors": "0", "load1": "128", "load5": "128",
                 "load15": "128", "edac_ce": edac_ce, "edac_ue": "0",
@@ -3039,18 +3090,95 @@ def command_selftest(_: argparse.Namespace) -> None:
         writer.writerow(row)
         return output.getvalue().encode("ascii")
 
-    def make_success_fixture(root: Path) -> Tuple[List[dict], dict]:
-        for directory in (
-                "raw", "stderr", "exit", "thermal", "segments",
-                "attempts", "job_receipts"):
-            (root / directory).mkdir(parents=True, exist_ok=True)
-        task = {
+    def success_fixture_task() -> dict:
+        return {
             "job": 0, "arm": "base", "stage": STAGES[0],
             "seed_index": 0, "seed": SEEDS[0], "schedule": SCHEDULES[0],
             "Ks": [2], "output_name": "job.csv", "argv": ["/bin/true"],
             "stdout_max_bytes": MAX_STDOUT_BYTES_PER_TASK,
             "stderr_max_bytes": MAX_STDERR_BYTES_PER_TASK,
         }
+
+    def make_success_fixture(
+        root: Path,
+        *,
+        segment: int = 0,
+        monotonic_values: Sequence[str] = ("100.0", "101.0", "102.0"),
+        busy_values: Optional[Sequence[str]] = None,
+        jobs_started: float = 101.1,
+        jobs_ended: float = 101.5,
+    ) -> Tuple[List[dict], dict]:
+        for directory in (
+                "raw", "stderr", "exit", "thermal", "segments",
+                "attempts", "job_receipts"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        task = success_fixture_task()
+        intent = {
+            "schema": SCHEMA + ".segment_intent", "segment": segment,
+            "created_utc": "2026-07-18T00:00:00+00:00",
+            "created_monotonic_s": 99.5, "stage": STAGES[0], "jobs": [0],
+            "jobs_sha256": sha256_bytes(json_lines([0])), "workers": 1,
+            "previously_complete": 0, "resume": segment != 0,
+            "retry_policy": "stage-atomic non-selective retry",
+        }
+        write_once(segment_path(root, segment, "intent"), canonical_json(intent))
+        attempt_dir = root / "attempts" / "segment{:03d}".format(segment)
+        attempt_dir.mkdir()
+        (attempt_dir / "job00000.pid").write_bytes(
+            canonical_json({"pid": 99999999, "start_ticks": 1}))
+        ready = {
+            "schema": SCHEMA + ".segment_ready", "segment": segment,
+            "intent_sha256": sha256_file(segment_path(root, segment, "intent")),
+            "ready_utc": "2026-07-18T00:00:00+00:00",
+            "jobs_started_monotonic_s": jobs_started,
+            "sampler_pid": 99999999,
+            "sampler_start_ticks": 1,
+            "samples_at_ready": 2,
+            "last_sample_monotonic_s": monotonic_values[1],
+        }
+        write_once(segment_path(root, segment, "ready"), canonical_json(ready))
+        thermal_csv = root / "thermal" / "segment{:03d}.csv".format(segment)
+        thermal_stderr = root / "thermal" / "segment{:03d}.stderr".format(segment)
+        thermal_csv.write_bytes(thermal_bytes(
+            monotonic_values, busy_values=busy_values))
+        thermal_stderr.write_bytes(b"")
+        raw = root / "raw" / "job.csv"
+        stderr = root / "stderr" / "job.csv.stderr"
+        exit_path = root / "exit" / "job.csv.exit"
+        raw.write_bytes(benchmark_bytes(task))
+        stderr.write_bytes(b"")
+        exit_path.write_bytes(b"0\n")
+        (attempt_dir / "job00000.stdout").write_bytes(raw.read_bytes())
+        (attempt_dir / "job00000.stderr").write_bytes(b"")
+        (attempt_dir / "job00000.exit").write_bytes(b"0\n")
+        duration = jobs_ended - jobs_started
+        write_once(job_receipt_path(root, 0), canonical_json({
+            "schema": SCHEMA + ".job", "job": 0, "segment": segment,
+            "stage": STAGES[0], "output_name": "job.csv", "returncode": 0,
+            "started_monotonic_s": jobs_started + duration / 4,
+            "ended_monotonic_s": jobs_ended - duration / 4,
+            "stdout_sha256": sha256_file(raw), "stdout_bytes": raw.stat().st_size,
+            "stderr_sha256": sha256_file(stderr), "stderr_bytes": 0,
+            "exit_sha256": sha256_file(exit_path),
+        }))
+        write_segment_final(
+            root, segment, intent, "success", failures=[], rolled_back=[],
+            process_actions=[], jobs_ended_monotonic_s=jobs_ended,
+            sampler_returncode=0,
+        )
+        return [task], {"worker_count": 1}
+
+    def make_ready_retry_attempt(
+        root: Path,
+        *,
+        thermal_data: bytes,
+        sampler_stderr: bytes,
+    ) -> Tuple[dict, dict]:
+        for directory in (
+                "raw", "stderr", "exit", "thermal", "segments",
+                "attempts", "job_receipts"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+        task = success_fixture_task()
         intent = {
             "schema": SCHEMA + ".segment_intent", "segment": 0,
             "created_utc": "2026-07-18T00:00:00+00:00",
@@ -3061,59 +3189,70 @@ def command_selftest(_: argparse.Namespace) -> None:
         }
         write_once(segment_path(root, 0, "intent"), canonical_json(intent))
         (root / "attempts" / "segment000").mkdir()
-        (root / "attempts" / "segment000" / "job00000.pid").write_bytes(
-            canonical_json({"pid": 99999999, "start_ticks": 1}))
         ready = {
             "schema": SCHEMA + ".segment_ready", "segment": 0,
             "intent_sha256": sha256_file(segment_path(root, 0, "intent")),
             "ready_utc": "2026-07-18T00:00:00+00:00",
-            "jobs_started_monotonic_s": 101.1, "sampler_pid": 99999999,
-            "sampler_start_ticks": 1,
+            "jobs_started_monotonic_s": 101.1,
+            "sampler_pid": 99999999, "sampler_start_ticks": 1,
             "samples_at_ready": 2, "last_sample_monotonic_s": "101.0",
         }
         write_once(segment_path(root, 0, "ready"), canonical_json(ready))
-        thermal_csv = root / "thermal" / "segment000.csv"
-        thermal_stderr = root / "thermal" / "segment000.stderr"
-        thermal_csv.write_bytes(thermal_bytes(("100.0", "101.0", "102.0")))
-        thermal_stderr.write_bytes(b"")
-        raw = root / "raw" / "job.csv"
-        stderr = root / "stderr" / "job.csv.stderr"
-        exit_path = root / "exit" / "job.csv.exit"
-        raw.write_bytes(benchmark_bytes(task))
-        stderr.write_bytes(b"")
-        exit_path.write_bytes(b"0\n")
-        (root / "attempts" / "segment000" / "job00000.stdout").write_bytes(
-            raw.read_bytes())
-        (root / "attempts" / "segment000" / "job00000.stderr").write_bytes(b"")
-        (root / "attempts" / "segment000" / "job00000.exit").write_bytes(b"0\n")
-        write_once(job_receipt_path(root, 0), canonical_json({
-            "schema": SCHEMA + ".job", "job": 0, "segment": 0,
-            "stage": STAGES[0], "output_name": "job.csv", "returncode": 0,
-            "started_monotonic_s": 101.2, "ended_monotonic_s": 101.4,
-            "stdout_sha256": sha256_file(raw), "stdout_bytes": raw.stat().st_size,
-            "stderr_sha256": sha256_file(stderr), "stderr_bytes": 0,
-            "exit_sha256": sha256_file(exit_path),
-        }))
-        write_segment_final(
-            root, 0, intent, "success", failures=[], rolled_back=[],
-            process_actions=[], jobs_ended_monotonic_s=101.5,
-            sampler_returncode=0,
-        )
-        return [task], {"worker_count": 1}
+        (root / "thermal" / "segment000.csv").write_bytes(thermal_data)
+        (root / "thermal" / "segment000.stderr").write_bytes(sampler_stderr)
+        return task, intent
 
     with tempfile.TemporaryDirectory(
             prefix="wirehair-degree-balanced-allk-selftest-") as temporary:
         fixture = Path(temporary) / "success"
         fixture.mkdir()
-        fixture_tasks, fixture_design = make_success_fixture(fixture)
+        # Row 1's utilization describes the interval ending exactly when load
+        # starts and must be excluded.  Row 2 is the only load interval.
+        fixture_tasks, fixture_design = make_success_fixture(
+            fixture,
+            busy_values=("", "0", "99.5"),
+            jobs_started=101.0,
+            jobs_ended=102.0,
+        )
         receipt = validate_thermal(fixture, fixture_design, fixture_tasks)
-        if receipt["successful_segments"] != 1 or receipt["samples"] != 3:
+        if receipt["successful_segments"] != 1 or receipt["samples"] != 3 or \
+                receipt["successful_busy_samples"] != 1 or \
+                receipt["successful_busy_mean"] != "99.5":
             die("synthetic segment validation selftest failed")
 
         def tampered_copy(name: str) -> Path:
             target = Path(temporary) / name
             shutil.copytree(fixture, target)
             return target
+
+        busy_before = tampered_copy("busy-before-idle-during")
+        busy_before_csv = busy_before / "thermal" / "segment000.csv"
+        busy_before_csv.write_bytes(thermal_bytes(
+            ("100.0", "101.0", "102.0"),
+            busy_values=("", "100", "90"),
+        ))
+        busy_before_final = load_json(segment_path(busy_before, 0, "final"))
+        busy_before_final["thermal_csv_sha256"] = sha256_file(busy_before_csv)
+        segment_path(busy_before, 0, "final").write_bytes(
+            canonical_json(busy_before_final))
+        expect_reject(
+            lambda: validate_thermal(
+                busy_before, fixture_design, fixture_tasks),
+            "busy before but idle during load",
+        )
+
+        sparse = Path(temporary) / "sparse-cadence"
+        sparse.mkdir()
+        sparse_tasks, sparse_design = make_success_fixture(
+            sparse,
+            monotonic_values=("100.0", "102.0", "104.0"),
+            busy_values=("", "0", "99.5"),
+            jobs_started=102.0,
+            jobs_ended=103.0,
+        )
+        sparse_receipt = validate_thermal(sparse, sparse_design, sparse_tasks)
+        if sparse_receipt["successful_busy_mean"] != "99.5":
+            die("sparse-cadence busy interval selftest failed")
 
         cadence = tampered_copy("cadence")
         cadence_csv = cadence / "thermal" / "segment000.csv"
@@ -3176,6 +3315,38 @@ def command_selftest(_: argparse.Namespace) -> None:
             "sampler exit",
         )
 
+        successful_torn = tampered_copy("successful-torn-thermal")
+        successful_torn_csv = successful_torn / "thermal" / "segment000.csv"
+        with successful_torn_csv.open("ab") as stream:
+            stream.write(b"2026-07-18T00:00:03.000Z,103.0,99")
+        successful_torn_final = load_json(
+            segment_path(successful_torn, 0, "final"))
+        successful_torn_final["thermal_csv_sha256"] = sha256_file(
+            successful_torn_csv)
+        segment_path(successful_torn, 0, "final").write_bytes(
+            canonical_json(successful_torn_final))
+        expect_reject(
+            lambda: validate_thermal(
+                successful_torn, fixture_design, fixture_tasks),
+            "successful torn thermal row",
+        )
+
+        successful_stderr = tampered_copy("successful-sampler-stderr")
+        successful_stderr_path = (
+            successful_stderr / "thermal" / "segment000.stderr")
+        successful_stderr_path.write_bytes(b"sampler exception\n")
+        successful_stderr_final = load_json(
+            segment_path(successful_stderr, 0, "final"))
+        successful_stderr_final["thermal_stderr_sha256"] = sha256_file(
+            successful_stderr_path)
+        segment_path(successful_stderr, 0, "final").write_bytes(
+            canonical_json(successful_stderr_final))
+        expect_reject(
+            lambda: validate_thermal(
+                successful_stderr, fixture_design, fixture_tasks),
+            "successful sampler stderr",
+        )
+
         interrupted = Path(temporary) / "interrupted"
         for directory in (
                 "raw", "stderr", "exit", "thermal", "segments",
@@ -3207,6 +3378,129 @@ def command_selftest(_: argparse.Namespace) -> None:
                         ("exit", "retry.csv.exit"))) or \
                 reconcile_incomplete_segments(interrupted, [retry_task]):
             die("interrupted failed-triplet resume selftest failed")
+
+        torn_retry = Path(temporary) / "torn-ready-retry"
+        torn_data = thermal_bytes(
+            ("100.0", "101.0"), busy_values=("", "99.5")) + \
+            b"2026-07-18T00:00:02.000Z,102.0,99"
+        torn_task, _ = make_ready_retry_attempt(
+            torn_retry, thermal_data=torn_data, sampler_stderr=b"")
+        torn_csv = torn_retry / "thermal" / "segment000.csv"
+        torn_stderr = torn_retry / "thermal" / "segment000.stderr"
+        torn_csv_hash = sha256_file(torn_csv)
+        torn_stderr_hash = sha256_file(torn_stderr)
+        unrelated = subprocess.Popen(["sleep", "30"])
+        try:
+            (torn_retry / "thermal" / "segment000.pid").write_text(
+                "{}\n".format(unrelated.pid), encoding="ascii")
+            torn_reconciled = reconcile_incomplete_segments(
+                torn_retry, [torn_task])
+            if len(torn_reconciled) != 1 or \
+                    torn_reconciled[0]["state"] != "interrupted" or \
+                    torn_reconciled[0]["thermal_csv_sha256"] != torn_csv_hash or \
+                    torn_reconciled[0]["thermal_stderr_sha256"] != torn_stderr_hash or \
+                    torn_csv.read_bytes() != torn_data or \
+                    torn_reconciled[0]["process_actions"] != [{
+                        "kind": "thermal", "pid": unrelated.pid,
+                        "action": "stale_changed_command",
+                    }] or unrelated.poll() is not None or \
+                    (torn_retry / "thermal" / "segment000.pid").exists():
+                die("torn thermal reconciliation evidence selftest failed")
+        finally:
+            if unrelated.poll() is None:
+                unrelated.terminate()
+            unrelated.wait(timeout=5.0)
+        torn_tasks, torn_design = make_success_fixture(
+            torn_retry, segment=1)
+        torn_receipt = validate_thermal(
+            torn_retry, torn_design, torn_tasks)
+        if torn_receipt["segments"] != 2 or \
+                torn_receipt["interrupted_segments"] != 1 or \
+                torn_receipt["successful_segments"] != 1 or \
+                torn_receipt["non_success_thermal_evidence_only_segments"] != [0] or \
+                torn_receipt["non_success_sampler_stderr_segments"] != [] or \
+                reconcile_incomplete_segments(torn_retry, torn_tasks):
+            die("torn thermal clean-retry reduction selftest failed")
+
+        failed_retry = Path(temporary) / "failed-sampler-retry"
+        failed_task, failed_intent = make_ready_retry_attempt(
+            failed_retry,
+            thermal_data=thermal_bytes(("100.0", "101.0", "102.0")),
+            sampler_stderr=b"sampler exception\n",
+        )
+        write_segment_final(
+            failed_retry, 0, failed_intent, "failed",
+            failures=[{"status": "sampler_returncode", "returncode": 1}],
+            rolled_back=[], process_actions=[],
+            jobs_ended_monotonic_s=101.5, sampler_returncode=1,
+        )
+        failed_tasks, failed_design = make_success_fixture(
+            failed_retry, segment=1)
+        failed_receipt = validate_thermal(
+            failed_retry, failed_design, failed_tasks)
+        if failed_task != failed_tasks[0] or \
+                failed_receipt["failed_segments"] != 1 or \
+                failed_receipt["successful_segments"] != 1 or \
+                failed_receipt["non_success_thermal_evidence_only_segments"] != [0] or \
+                failed_receipt["non_success_sampler_stderr_segments"] != [0]:
+            die("failed sampler stderr clean-retry reduction selftest failed")
+
+        failed_stderr_tamper = Path(temporary) / "failed-stderr-tamper"
+        shutil.copytree(failed_retry, failed_stderr_tamper)
+        (failed_stderr_tamper / "thermal" / "segment000.stderr").write_bytes(
+            b"changed sampler exception\n")
+        expect_reject(
+            lambda: validate_thermal(
+                failed_stderr_tamper, failed_design, failed_tasks),
+            "failed sampler stderr hash",
+        )
+
+        failed_symlink = Path(temporary) / "failed-thermal-symlink"
+        shutil.copytree(failed_retry, failed_symlink)
+        failed_symlink_csv = failed_symlink / "thermal" / "segment000.csv"
+        failed_symlink_csv.unlink()
+        failed_symlink_csv.symlink_to("/dev/null")
+        expect_reject(
+            lambda: validate_thermal(
+                failed_symlink, failed_design, failed_tasks),
+            "failed thermal symlink",
+        )
+
+        failed_oversize = Path(temporary) / "failed-thermal-oversize"
+        shutil.copytree(failed_retry, failed_oversize)
+        failed_oversize_csv = failed_oversize / "thermal" / "segment000.csv"
+        failed_oversize_csv.write_bytes(
+            b"x" * (MAX_THERMAL_BYTES_PER_SEGMENT + 1))
+        failed_oversize_final = load_json(
+            segment_path(failed_oversize, 0, "final"))
+        failed_oversize_final["thermal_csv_sha256"] = sha256_file(
+            failed_oversize_csv)
+        segment_path(failed_oversize, 0, "final").write_bytes(
+            canonical_json(failed_oversize_final))
+        expect_reject(
+            lambda: validate_thermal(
+                failed_oversize, failed_design, failed_tasks),
+            "failed thermal bound",
+        )
+
+        failed_stderr_oversize = Path(temporary) / "failed-stderr-oversize"
+        shutil.copytree(failed_retry, failed_stderr_oversize)
+        failed_stderr_oversize_path = (
+            failed_stderr_oversize / "thermal" / "segment000.stderr")
+        failed_stderr_oversize_path.write_bytes(
+            b"x" * (MAX_THERMAL_BYTES_PER_SEGMENT + 1))
+        failed_stderr_oversize_final = load_json(
+            segment_path(failed_stderr_oversize, 0, "final"))
+        failed_stderr_oversize_final["thermal_stderr_sha256"] = sha256_file(
+            failed_stderr_oversize_path)
+        segment_path(failed_stderr_oversize, 0, "final").write_bytes(
+            canonical_json(failed_stderr_oversize_final))
+        expect_reject(
+            lambda: validate_thermal(
+                failed_stderr_oversize, failed_design, failed_tasks),
+            "failed sampler stderr bound",
+        )
+
         expect_reject(
             lambda: validate_thermal_rows([], segment=0),
             "header-only thermal",
