@@ -1,0 +1,153 @@
+{
+  "schema": "wirehair.wh2.degree_socket.dev_result.v1",
+  "promotional": false,
+  "verdict": "reject_socket_shuffle_retain_greedy_degree_balance",
+  "architecture": {
+    "base_commit": "bf418cabbfc70e8da89e938a6f68c439e4234948",
+    "socket_commit": "2d630dab98d9753f300864794eb9c39beb7ad325",
+    "socket_tree": "8e15789da9d8a57ab94b7ca41b1955afdf5a2be5",
+    "base_to_socket_patch_sha256": "88d9b2eef2669e8000f4d5a45d3e77f220a9c464a1b68953d3c440b3599f22df",
+    "measured_pre_fastpath_binary_sha256": "7e65053aabcb4848872271588dc28b8c77dc65994c9a4cb22b6d63031bc19765",
+    "reviewed_post_fastpath_binary_sha256": "fd14d7c4b1a33f962fe11b0eb5f28a4d930dbfc2e72a9ef13618a8d6179dd6bf",
+    "post_fastpath_semantic_replay": {
+      "reason": "K=2 is the only measured production-profile K for which SourceHits equals Staircase",
+      "cells": 27,
+      "excluded_fields": [
+        "solve_ms_mu",
+        "build_ms_mu",
+        "peel_ms_mu",
+        "project_ms_mu",
+        "residual_ms_mu",
+        "backsub_ms_mu"
+      ],
+      "result": "27/27 exact semantic matches"
+    }
+  },
+  "design": {
+    "artifact_root": "/tmp/wh2-degree-socket-smoke-v1",
+    "K_count": 1378,
+    "prior_allk_weak_union_K": 873,
+    "grid_only_K": 505,
+    "K_list_sha256": "600594faa0466eeaafe28499b18023a9beed5c4bd50979853e53ae5a6b5edad6",
+    "selection_rows_sha256": "11ff7ea60688d24f317a4d7b039a5f0bd249e0c905d050c86ef46f167fbe686f",
+    "arms": [
+      "base",
+      "greedy_degree_balanced",
+      "socket_shuffled_degree_balanced"
+    ],
+    "seeds": [
+      "0x840c39aede728745",
+      "0x0ed3e6677a0a7646",
+      "0x9bed18cfb64136fa",
+      "0xa612e1c97a2d38d1",
+      "0x9861c87536fcd7b3",
+      "0x4a2e98a38d686e59",
+      "0x1965158a15495de7",
+      "0x3ee31ce03d5269ae",
+      "0x380c98301fe6dc5d"
+    ],
+    "seed_derivation_domain": "wirehair.wh2.degree-socket.dev-smoke.v1|seed|i",
+    "schedules": [
+      "burst",
+      "adversarial",
+      "repair-only"
+    ],
+    "block_bytes": 64,
+    "loss": 0.5,
+    "overhead": 0,
+    "trials_per_cell": 1,
+    "completion": "mixed",
+    "gf256_rows": 10,
+    "gf16_rows": 2,
+    "coefficient_period": 244,
+    "coefficient_geometry": "frozen",
+    "mix_count": 2,
+    "binary_dense_two_anchor": true,
+    "binary_dense_two_anchor_phase": 0,
+    "cells_per_arm": 37206,
+    "total_cells": 111618,
+    "output_files": 243,
+    "output_bytes": 21261080,
+    "canonical_output_manifest_format": "SHA-256 of canonical compact JSON array sorted by filename; each entry contains name, byte count, and content SHA-256",
+    "canonical_output_manifest_sha256": "885e0db68798e61044628673e5cb74b4fc2560b4368f857fdcdc25ef03c1833d",
+    "execution": "81/81 processes exited zero; every stderr was empty; every CSV contained exactly 1378 data rows"
+  },
+  "results": {
+    "base": {
+      "failures": 183,
+      "weak_K": 111,
+      "max_weak_K_multiplicity": 13,
+      "failures_by_schedule": {
+        "burst": 39,
+        "adversarial": 66,
+        "repair-only": 78
+      }
+    },
+    "greedy_degree_balanced": {
+      "failures": 156,
+      "weak_K": 101,
+      "max_weak_K_multiplicity": 10,
+      "failures_by_schedule": {
+        "burst": 41,
+        "adversarial": 54,
+        "repair-only": 61
+      },
+      "versus_base": {
+        "repairs": 58,
+        "introductions": 31,
+        "both_fail": 125,
+        "both_success": 36992,
+        "net_failure_reduction": 27,
+        "paired_exact_two_sided_p": 0.005544959035344678,
+        "common_success_xor_ratio": 0.9999481257955407,
+        "common_success_muladd_ratio": 1.0000023058084817,
+        "common_success_inactivation_ratio": 0.9999990588009111
+      }
+    },
+    "socket_shuffled_degree_balanced": {
+      "failures": 184,
+      "weak_K": 106,
+      "max_weak_K_multiplicity": 16,
+      "failures_by_schedule": {
+        "burst": 45,
+        "adversarial": 65,
+        "repair-only": 74
+      },
+      "versus_base": {
+        "repairs": 39,
+        "introductions": 40,
+        "both_fail": 144,
+        "both_success": 36983,
+        "net_failure_reduction": -1,
+        "paired_exact_two_sided_p": 1.0,
+        "common_success_xor_ratio": 0.9999953299692698,
+        "common_success_muladd_ratio": 0.9999975725530442,
+        "common_success_inactivation_ratio": 0.9999849994338699
+      },
+      "versus_greedy": {
+        "repairs": 32,
+        "introductions": 60,
+        "both_fail": 124,
+        "both_success": 36990,
+        "net_failure_reduction": -28,
+        "paired_exact_two_sided_p": 0.004609105461459266
+      }
+    }
+  },
+  "validation": {
+    "root_parameter_sweep_builds": 96256,
+    "independent_parameter_sweep_builds": 1130496,
+    "independent_hits_less_than_staircase_builds": 706560,
+    "resolved_review_finding": "complete-graph SourceHits==Staircase construction bypasses randomized repair",
+    "focused_gates": [
+      "Release precode_test",
+      "strict-warning precode_test",
+      "bench CLI identity and conflict tests",
+      "profile fuzz",
+      "ASan+UBSan precode_test",
+      "ASan+UBSan profile fuzz",
+      "independent codec source review"
+    ],
+    "thermal_observation": "100% host utilization; CPU approximately 62 C; hottest DIMM approximately 60.5 C; zero DIMM-read and EDAC errors"
+  }
+}
