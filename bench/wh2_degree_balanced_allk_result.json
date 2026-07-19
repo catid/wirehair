@@ -1,0 +1,96 @@
+{
+  "architecture": {
+    "base_commit": "3c8a7a31e0e0b592f906d52bf7fef0bafebbf2f9",
+    "candidate_commit": "bf418cabbfc70e8da89e938a6f68c439e4234948",
+    "candidate_kind": "raw corrected degree-balanced staircase",
+    "seed_fixes_applied": false
+  },
+  "artifacts": {
+    "data_manifest_sha256": "8be8c802fbaacd9bc7337b4ea8d8f709402cbf6247ac8041fc66e77adf915c3e",
+    "prelaunch_receipts_sha256": "00215d89c9a1c2441359cb7a56bdbf80345755509ba6bf86cb06a591f6585f1c",
+    "result_root": "/tmp/wh2-degree-balanced-allk-holdout-bf418ca-v1",
+    "validated_summary_sha256": "bd34669900fc5fce12a2a9e8fa76e3ea34e64ea07d2d29c0d7fa6e497d05d215"
+  },
+  "campaign": {
+    "K_range": [
+      2,
+      64000
+    ],
+    "cells_per_arm": 575991,
+    "hard_loss": 0.5,
+    "independent_holdout_seeds": 3,
+    "reconciled_segments": 0,
+    "schedules": [
+      "burst",
+      "adversarial",
+      "repair-only"
+    ],
+    "successful_first_attempt_segments": 9,
+    "tasks": 4500,
+    "total_cells": 1151982,
+    "workers": 128
+  },
+  "created_utc": "2026-07-19T00:20:56Z",
+  "independent_verification": {
+    "corrected_busy_samples": 1135,
+    "corrected_busy_pct": "100.000000000000",
+    "manifest_files": 36054,
+    "raw_cells_reduced": 1151982,
+    "status": "PASS"
+  },
+  "paired_comparison": {
+    "both_fail": 533,
+    "both_success": 575080,
+    "common_success_inactivation_ratio": "1.000027334144132",
+    "common_success_muladd_ratio": "1.000016638686226",
+    "common_success_xor_ratio": "1.000013171921654",
+    "introductions": 178,
+    "net_failure_change": -22,
+    "repairs": 200
+  },
+  "recovery": {
+    "base": {
+      "failure_rate_pct": "0.12725893286527046",
+      "failures": 733,
+      "maximum_weak_K_multiplicity": 8,
+      "weak_K": 703
+    },
+    "candidate": {
+      "failure_rate_pct": "0.12343942874107408",
+      "failures": 711,
+      "maximum_weak_K_multiplicity": 5,
+      "weak_K": 687
+    },
+    "failure_relative_change_pct": "-3.0013642564802185",
+    "failure_schedule_base_to_candidate": {
+      "adversarial": [
+        216,
+        221
+      ],
+      "burst": [
+        279,
+        247
+      ],
+      "repair-only": [
+        238,
+        243
+      ]
+    },
+    "weak_K_relative_change_pct": "-2.275960170697013"
+  },
+  "schema": "wirehair.wh2.degree_balanced_allk_holdout.v1.result_receipt",
+  "thermal": {
+    "cadence_errors": 0,
+    "cpu_max_c": "64.0",
+    "dimm_read_errors": 0,
+    "edac_ce": 0,
+    "edac_ue": 0,
+    "hottest_dimm_c": "77.0",
+    "samples": 1162
+  },
+  "tracked_non_live_harness_issues": [
+    "wirehair-sxvz.16.1.16.3",
+    "wirehair-sxvz.16.1.16.5"
+  ],
+  "verdict": "favorable but mixed raw architecture evidence; full-payload timing and promotion decision remain"
+}
