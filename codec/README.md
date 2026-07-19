@@ -144,16 +144,86 @@ evicts the requested `--evict-bytes` before every sample; `warm` retains the
 working set.  Here `cold` means data-cache-cold after both arm preflights;
 the command intentionally does not measure fresh-process allocator or first-
 use TLS setup costs, and receipts this as `allocator_tls_state=preflight-warmed`.
-Schema v2 also runs both preflights and timed samples through the codec-owned
+Schema v5 also runs both preflights and timed samples through the codec-owned
 no-init solve arena, then records its allocated bytes, eager-zero bytes, and
-commit-copy bytes.  Valid production-route observations require the last two
-receipts to be zero; the completed arena is published by ownership swap.
-Only rows whose preflight classification is `common-success`
-are valid paired speed observations.  All test-only TLS settings are reapplied
+commit-copy bytes.  It additionally receipts each arm's staircase, dense, and
+heavy graph fingerprints, the actual active 10+2 mixed-coefficient table,
+payload/packet-trace fingerprint, precode dimensions, decoded-source
+fingerprint, complete experiment configuration, and the test-only
+`degree_balanced_staircase` selector.  It also records the expected and actual
+mixed-completion RHS route on every solve.  Valid P244/r0 observations require
+the streamed route, zero joint/dual work, and zero eager-zero and commit-copy
+work; the completed arena is published by ownership swap.  All test-only TLS
+settings are reapplied
 outside the timer before every arm, and this command changes no named profile
 or production equation.  The benchmark records the CPU before and after each
 sample but does not choose an affinity itself; promotion runners must pin each
 process and reject rows reporting migration, faults, or saturated timing.
+
+`bench/wh2_degree_balanced_timing.py` is the sealed full-payload runner for the
+degree-balanced staircase experiment.  `prepare` builds and freezes the exact
+base `07c13ecfe03c45e9195336792606c3d74a7be262`, its direct architecture child
+`176c098dadeab4666bd04a79c199e3d1ec0d0bbe`, and measurement-only child
+`13d4e548e13a54dfe278970b25495769188d91ec` under one compiler/configuration.
+A bounded compatibility smoke proves the legacy binaries and measurement
+binary agree with the selector off under their shared-X CLI path.  Separate
+measurement-binary smokes then pin the actual P244/r0 FrozenPowerX geometry
+with 10 GF(256) rows, two GF(2^16) rows, mix2, D12 two-anchor phase zero, a
+non-secondary streamed RHS route, zero joint/dual work, and the active 10+2
+coefficient fingerprint `0xdcff9be773c1a37c`, and prove that the selector
+changes only the staircase graph.  A second preparation replay at the exact
+K=10000 boundary verifies the production source-hit transition from two to
+three hits; this setting is receipted per cell rather than frozen to the
+K=3200 smoke value.  The exact production `GetDenseCount` staircase rows are
+also frozen for the timing grid: 62, 86, 86, 134, 190, 374, and 346 rows at
+K=3200, 9999, 10000, 20000, 32000, 48466, and 64000 respectively, with the
+resulting total column count checked per cell.  The immutable 252-cell ledger
+covers seven K values through 64000, widths 64/1280/4096, two fresh seeds for
+each hard packet schedule, and cold/warm cache state at P244/r0.  Promotional
+timing uses only the measurement
+binary: outer `ABBABAAB` processes swap control/candidate semantics, while
+each process retains four inner `ABBABAAB` cycles and discards cycle zero.
+
+The timing design hash-binds the sealed 575,991-cell-per-arm all-K holdout at
+BlockBytes=64: raw degree balancing reduced failures 733 to 711 and weak K
+counts 703 to 687, with 200 repairs and 178 introductions and no seed fixes.
+The holdout's candidate diff and the timing architecture have the same stable
+patch ID, so the recovery result is tied to the architecture rather than only
+to a prose configuration description.
+That is favorable but mixed raw-architecture evidence, not a claim that every
+loss stratum improves.  Because `MatrixSeedFromProfile` includes BlockBytes,
+only the 64-byte timing stratum is recovery-backed by that holdout; the
+1280/4096-byte strata are speed-only until the separate cross-payload recovery
+holdout is sealed.
+
+`run` is fresh-only: load fillers must already be stopped, the timing core and
+SMT sibling must be quiet, and exactly one compatible external CPU/eight-DIMM
+sampler must be the sole I2C reader.  The runner discovers and verifies that
+reader, requires the frozen CPU layout (timing CPU 8, sibling 72, controller
+126, sampler 127, NUMA node 0), never stops or signals it, and seals only the
+minimal thermal slice bracketing the campaign.  There is deliberately no
+resume path: a substantive mid-run failure invalidates the partial directory,
+which must be discarded and prepared again before another launch.  `reduce`
+retains every fixed cell regardless of
+outcome, reports unconditional attempt latency and outcome strata, and permits
+a timing promotion only when every cell is common-success and the frozen
+overall/cache/stratum confidence gates pass.  `verify-prepared`, `reduce`, and
+`verify` replay the relevant immutable hashes and semantic receipts;
+preparation smoke is explicitly non-timing evidence.
+
+```sh
+python3 bench/wh2_degree_balanced_timing.py prepare \
+  --repo . --result-dir /tmp/wh2-degree-balanced-paired \
+  --core 8 --controller-core 126 --numa-node 0
+python3 /tmp/wh2-degree-balanced-paired/frozen/wh2_degree_balanced_timing.py \
+  verify-prepared --result-dir /tmp/wh2-degree-balanced-paired
+python3 /tmp/wh2-degree-balanced-paired/frozen/wh2_degree_balanced_timing.py \
+  run --result-dir /tmp/wh2-degree-balanced-paired
+python3 /tmp/wh2-degree-balanced-paired/frozen/wh2_degree_balanced_timing.py \
+  reduce --result-dir /tmp/wh2-degree-balanced-paired
+python3 /tmp/wh2-degree-balanced-paired/frozen/wh2_degree_balanced_timing.py \
+  verify --result-dir /tmp/wh2-degree-balanced-paired
+```
 
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
