@@ -1206,7 +1206,9 @@ expect_failure("bad --seed value" preferredtiming
 # common-success classification remains trustworthy.
 run_bench(grouped_timing_result grouped_timing grouped_timing_err
     groupedtiming --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule adversarial)
@@ -1252,7 +1254,9 @@ endforeach()
 # comparisons without splicing partial output from a full run.
 run_bench(grouped_warm_result grouped_warm grouped_warm_err groupedtiming
     --N 3200 --bb 64 --overhead 0
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 32 --candidate-grouped-rows 7
     --candidate-buckets joint-delta --evict-bytes 4096 --cache-state warm
     --cycle-index 2 --loss 0.5 --seed 4660 --schedule repair-only)
@@ -1275,47 +1279,113 @@ endif()
 # this bounded to the explicit sealed-campaign width set.
 run_bench(grouped_width_result grouped_width_out grouped_width_err groupedtiming
     --N 4096 --bb 512 --overhead 4
+    --control-geometry frozen
     --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 32 --candidate-grouped-rows 7
     --candidate-buckets auto --evict-bytes 4096 --cache-state warm
     --cycle-index 2 --loss 0.5 --seed 15111065706836454659
     --schedule burst)
 if(NOT grouped_width_result EQUAL 0 OR NOT grouped_width_err STREQUAL "" OR
    NOT grouped_width_out MATCHES
-       "schema=v2.*N=4096 bb=512.*control_period=244 control_grouped_rows=0.*candidate_period=32 candidate_grouped_rows=7")
+       "schema=v2.*N=4096 bb=512.*control_period=244 control_grouped_rows=0.*candidate_period=32 candidate_grouped_rows=7.*control_geometry=frozen.*control_rhs_route_expected=streamed.*candidate_geometry=shared-x.*candidate_rhs_route_expected=streamed" OR
+   NOT grouped_width_out MATCHES
+       ",control,244,0,auto,.*frozen,10,2,0,constant,0x0,0,0,0x4e,0x0,0x0,1,0,0x0,0,1,0,.*streamed,streamed" OR
+   NOT grouped_width_out MATCHES
+       ",candidate,32,7,auto,.*shared-x,10,2,0,constant,0x0,0,0,0x4e,0x0,0xb7e15162,1,0,0x0,0,1,0,.*streamed,streamed")
     message(FATAL_ERROR
         "groupedtiming intermediate-width smoke failed: ${grouped_width_err}\n${grouped_width_out}")
 endif()
 
+# The automatic grouped RHS route has two production crossover boundaries.
+# Exercise both sides with the exact P32/r7 architecture and require every
+# physical solve to receipt the actual route rather than inferring it from
+# zero/nonzero work counters.
+foreach(route_cell IN ITEMS
+        "3199;4096;streamed"
+        "3200;4096;joint-delta"
+        "9999;1280;streamed"
+        "10000;1280;joint-delta")
+    list(GET route_cell 0 route_N)
+    list(GET route_cell 1 route_bb)
+    list(GET route_cell 2 route_expected)
+    run_bench(route_result route_out route_err groupedtiming
+        --N ${route_N} --bb ${route_bb} --overhead 4
+        --control-geometry frozen
+        --control-period 244 --control-grouped-rows 0 --control-buckets auto
+        --candidate-geometry shared-x
+        --candidate-period 32 --candidate-grouped-rows 7
+        --candidate-buckets auto --evict-bytes 4096 --cache-state warm
+        --cycle-index 2 --loss 0.5 --seed 15111065706836454659
+        --schedule burst)
+    string(REGEX MATCHALL
+        ",candidate,32,7,auto,[^\n]*,${route_expected},${route_expected}"
+        route_candidate_rows "${route_out}")
+    list(LENGTH route_candidate_rows route_candidate_count)
+    if(NOT route_result EQUAL 0 OR NOT route_err STREQUAL "" OR
+       NOT route_out MATCHES
+           "control_geometry=frozen.*control_rhs_route_expected=streamed.*candidate_geometry=shared-x.*candidate_rhs_route_expected=${route_expected}.*candidate_preflight_rhs_route=${route_expected}" OR
+       NOT route_candidate_count EQUAL 4)
+        message(FATAL_ERROR
+            "groupedtiming automatic route boundary failed "
+            "N=${route_N} bb=${route_bb} expected=${route_expected}: "
+            "${route_err}\n${route_out}")
+    endif()
+endforeach()
+
 expect_failure("requires --N" groupedtiming)
+expect_failure("requires .*--control-geometry" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x --candidate-period 32
+    --candidate-grouped-rows 7 --candidate-buckets auto
+    --evict-bytes 4096 --cache-state cold --loss 0.5 --seed 4660
+    --schedule burst)
+expect_failure("requires .*--candidate-geometry" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-geometry frozen --control-period 244
+    --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 32 --candidate-grouped-rows 7
+    --candidate-buckets auto --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 11 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0
     --control-buckets separate
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 10
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("bad --seed value" groupedtiming
     --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 0x1234 --schedule burst)
 expect_failure("cache-state must be cold or warm" groupedtiming
     --N 4096 --bb 64 --overhead 4
+    --control-geometry shared-x
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --candidate-geometry shared-x
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
     --loss 0.5 --seed 4660 --schedule burst)

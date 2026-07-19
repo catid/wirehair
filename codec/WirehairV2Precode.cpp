@@ -834,6 +834,11 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
     MixedIndependentExtensionResiduesForTesting = false;
 }
 
+uint32_t ActiveMixedIndependentExtensionSeedXorForTesting()
+{
+    return MixedIndependentExtensionSeedXorForTesting;
+}
+
 bool SetMixedGroupedGF256RowsForTesting(uint32_t rows)
 {
     if (rows > 9u ||
@@ -1191,6 +1196,16 @@ bool ActiveMixedIndependentExtensionResidues()
     return MixedIndependentExtensionResiduesForTesting;
 #else
     return false;
+#endif
+}
+
+uint32_t ActiveMixedExtensionResidueHashSeed()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return MixedIndependentExtensionResiduesForTesting ?
+        MixedExtensionResidueHashSeedForTesting : 0u;
+#else
+    return 0u;
 #endif
 }
 

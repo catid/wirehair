@@ -135,8 +135,11 @@ cost rather than relying on a peel-only proxy.
 Test builds also expose `groupedtiming` for promotion-grade, paired timing of
 the raw grouped-GF(256) completion experiments.  Each invocation binds one
 hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
-`--schedule`) and compares explicit control/candidate period, grouped-row, and
-residue-bucket settings.  It uses distinct 64-byte-aligned, prefaulted packet
+`--schedule`) and compares explicit control/candidate geometry, period,
+grouped-row, and residue-bucket settings.  Both `--control-geometry` and
+`--candidate-geometry` are mandatory so a frozen production arm cannot
+silently inherit the experimental `shared-x` default.  It uses distinct
+64-byte-aligned, prefaulted packet
 payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
 requested replacement cycle) with raw nanoseconds, internal solve phases,
 work counters, CPU migration, and fault receipts.  `--cache-state cold`

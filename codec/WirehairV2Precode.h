@@ -266,6 +266,8 @@ MixedResidueSchedule ActiveMixedResidueSchedule();
 uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
 bool ActiveMixedIndependentExtensionResidues();
+/// Actual selected independent-extension schedule seed, or zero when off.
+uint32_t ActiveMixedExtensionResidueHashSeed();
 uint32_t ActiveMixedGroupedGF256Rows();
 uint32_t ActiveMixedGroupedGF256HashSeed();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
@@ -323,6 +325,8 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
+/// Read back the independent-extension schedule seed XOR on this thread.
+uint32_t ActiveMixedIndependentExtensionSeedXorForTesting();
 ///
 /// Assign one shared schedule C to the final 0..9 rows of the fixed H12
 /// GF(256) prefix.  This raw-architecture hook is intentionally restricted to

@@ -768,6 +768,18 @@ if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
                 TIMEOUT 120)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(
+                NAME wh2_p32_dispatch_timing_test
+                COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/bench/wh2_p32_dispatch_timing_test.py
+                    -v)
+            set_tests_properties(wh2_p32_dispatch_timing_test
+                PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/bench"
+                    LABELS "v2;research;timing;p32;thermal;transactional"
+                    TIMEOUT 120)
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(
                 NAME wh2_rank_floor_two_anchor_screen_test
                 COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/bench/wh2_rank_floor_two_anchor_screen_test.py

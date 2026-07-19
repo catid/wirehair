@@ -2945,6 +2945,12 @@ WirehairResult SolveMixedCompletionQuotient(
         MixedJointResidueBucketStorageFits(
             coefficient_period, block_bytes,
             kMixedJointResidueBucketDataByteCap);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    stats.MixedRhsRoute = use_joint_residue_buckets ?
+        MixedCompletionRhsRoute::JointDelta :
+        (use_dual_residue_buckets ? MixedCompletionRhsRoute::Dual :
+            MixedCompletionRhsRoute::Streamed);
+#endif
     // Keep the streamed fallback unallocated on joint/dual paths.  Besides
     // avoiding one block-sized zero-fill, this makes their dominant scratch
     // exactly the selected bucket data planes plus scheduling metadata.
@@ -3789,14 +3795,29 @@ bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)
     return true;
 }
 
+uint32_t ActivePacketRowSeedMultiplierForTesting()
+{
+    return PacketRowSeedMultiplier;
+}
+
 void SetPacketRowSeedAvalancheForTesting(bool enabled)
 {
     PacketRowSeedAvalanche = enabled;
 }
 
+bool ActivePacketRowSeedAvalancheForTesting()
+{
+    return PacketRowSeedAvalanche;
+}
+
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor)
 {
     OddPacketPeelSeedXor = seed_xor;
+}
+
+uint32_t ActiveOddPacketPeelSeedXorForTesting()
+{
+    return OddPacketPeelSeedXor;
 }
 
 void SetMixedNullWitnessDiagnosticForTesting(

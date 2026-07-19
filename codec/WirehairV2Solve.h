@@ -164,6 +164,17 @@ struct SolvePacket
     const uint8_t* Data = nullptr;
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/** Actual mixed-completion RHS implementation selected by one solve. */
+enum class MixedCompletionRhsRoute : uint32_t
+{
+    NotReached = 0,
+    Streamed = 1,
+    Dual = 2,
+    JointDelta = 3
+};
+#endif
+
 struct PrecodeSolveStats
 {
     uint32_t PacketRows = 0;
@@ -186,6 +197,8 @@ struct PrecodeSolveStats
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    MixedCompletionRhsRoute MixedRhsRoute =
+        MixedCompletionRhsRoute::NotReached;
     uint64_t MixedJointSourceXors = 0;
     uint64_t MixedJointMarginalXors = 0;
     uint64_t MixedJointMarginalCopies = 0;
@@ -210,8 +223,14 @@ static const uint32_t kMaxMixedNullWitnessQuotientColumns = 15u;
 */
 bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier);
 
+/** Read back the exact packet-row multiplier active on this thread. */
+uint32_t ActivePacketRowSeedMultiplierForTesting();
+
 /** Apply a bijective 32-bit avalanche permutation after id multiplication. */
 void SetPacketRowSeedAvalancheForTesting(bool enabled);
+
+/** Read back whether packet-row seed avalanche is active on this thread. */
+bool ActivePacketRowSeedAvalancheForTesting();
 
 /**
     XOR the peel seed for odd packet ids in the calling thread.  This is a
@@ -220,6 +239,9 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     production equation mapping.
 */
 void SetOddPacketPeelSeedXorForTesting(uint32_t seed_xor);
+
+/** Read back the odd-packet peel-seed XOR active on this thread. */
+uint32_t ActiveOddPacketPeelSeedXorForTesting();
 
 /**
     Enable an independent dense-expansion oracle for mixed completion
