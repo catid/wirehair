@@ -31,6 +31,8 @@ bool SameParams(
         a.Field == b.Field &&
         a.HeavyFamily == b.HeavyFamily &&
         a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
+        a.DegreeSocketShuffleStaircase ==
+            b.DegreeSocketShuffleStaircase &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
         a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
@@ -57,7 +59,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     const uint32_t K = 2u + input.U8() % 127u;
     wirehair_v2::PrecodeParams params =
         wirehair_v2::MakeCertifiedParams(K, input.U64());
-    const unsigned mutation = input.U8() % 17u;
+    const unsigned mutation = input.U8() % 19u;
     bool expected_valid = false;
     switch (mutation)
     {
@@ -93,6 +95,14 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     case 15:
         params.DegreeBalancedStaircase = true;
         expected_valid = true;
+        break;
+    case 16:
+        params.DegreeSocketShuffleStaircase = true;
+        expected_valid = true;
+        break;
+    case 17:
+        params.DegreeBalancedStaircase = true;
+        params.DegreeSocketShuffleStaircase = true;
         break;
     default:
         params = wirehair_v2::MakeMixedParams(K, params.Seed);

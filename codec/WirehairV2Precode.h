@@ -76,6 +76,19 @@ struct PrecodeParams
     bool DegreeBalancedStaircase = false;
 
     /**
+        Experiment-only socket-shuffled degree-balanced staircase matching.
+
+        This has the same exact source- and row-degree contract as
+        DegreeBalancedStaircase, but samples a shuffled configuration-model
+        socket assignment and removes duplicate source/row edges with bounded
+        degree-preserving switches.  It is a separate raw architecture for
+        measuring whether the greedy highest-capacity matcher leaves useful
+        sequential structure.  The two degree-balanced flags are mutually
+        exclusive, and named profiles never enable either one.
+    */
+    bool DegreeSocketShuffleStaircase = false;
+
+    /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
         K + S source/staircase columns and dense row r additionally
         references exactly its own dense column K + S + r.

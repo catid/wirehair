@@ -175,6 +175,194 @@ bool AppendDegreeBalancedStaircaseEdges(
     return true;
 }
 
+bool SocketSourceContains(
+    const std::vector<uint16_t>& sockets,
+    uint32_t hits,
+    uint32_t source,
+    uint16_t row,
+    uint32_t except_position)
+{
+    const uint32_t begin = source * hits;
+    const uint32_t end = begin + hits;
+    for (uint32_t position = begin; position < end; ++position)
+    {
+        if (position != except_position && sockets[position] == row) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RepairSocketDuplicate(
+    wirehair::PCGRandom& prng,
+    std::vector<uint16_t>& sockets,
+    uint32_t hits,
+    uint32_t duplicate_position)
+{
+    const uint32_t edge_count = (uint32_t)sockets.size();
+    const uint32_t source = duplicate_position / hits;
+    const uint16_t duplicate_row = sockets[duplicate_position];
+
+    // A random switch succeeds with high probability for the production
+    // degree sequences.  The complete cyclic scan makes the attempt exact
+    // and fail-closed rather than silently accepting a duplicate if a rare
+    // shuffled configuration has no valid direct switch.
+    const uint32_t random_attempts = std::min(64u, edge_count);
+    const uint32_t scan_start = UniformBelow(prng, edge_count);
+    for (uint32_t attempt = 0;
+         attempt < random_attempts + edge_count;
+         ++attempt)
+    {
+        const uint32_t candidate_position =
+            attempt < random_attempts ?
+                UniformBelow(prng, edge_count) :
+                (scan_start + attempt - random_attempts) % edge_count;
+        const uint32_t candidate_source = candidate_position / hits;
+        if (candidate_source == source) {
+            continue;
+        }
+        const uint16_t candidate_row = sockets[candidate_position];
+        if (candidate_row == duplicate_row ||
+            SocketSourceContains(
+                sockets, hits, source, candidate_row,
+                duplicate_position) ||
+            SocketSourceContains(
+                sockets, hits, candidate_source, duplicate_row,
+                candidate_position))
+        {
+            continue;
+        }
+        std::swap(
+            sockets[duplicate_position], sockets[candidate_position]);
+        return true;
+    }
+    return false;
+}
+
+bool RepairSocketDuplicates(
+    wirehair::PCGRandom& prng,
+    std::vector<uint16_t>& sockets,
+    uint32_t hits)
+{
+    const uint32_t source_count = (uint32_t)sockets.size() / hits;
+    for (uint32_t source = 0; source < source_count; ++source)
+    {
+        const uint32_t begin = source * hits;
+        for (uint32_t slot = 1; slot < hits; ++slot)
+        {
+            const uint32_t position = begin + slot;
+            bool duplicate = false;
+            for (uint32_t prior = begin; prior < position; ++prior) {
+                duplicate |= sockets[prior] == sockets[position];
+            }
+            if (duplicate &&
+                !RepairSocketDuplicate(prng, sockets, hits, position))
+            {
+                return false;
+            }
+        }
+    }
+
+    // Switches can touch sources on either side of the current source.  Each
+    // switch explicitly preserves uniqueness in its target, but verify the
+    // complete assignment before committing rows so future changes fail safe.
+    for (uint32_t source = 0; source < source_count; ++source)
+    {
+        const uint32_t begin = source * hits;
+        for (uint32_t a = 0; a < hits; ++a) {
+            for (uint32_t b = a + 1u; b < hits; ++b) {
+                if (sockets[begin + a] == sockets[begin + b]) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool AppendSocketShuffledStaircaseEdges(
+    const PrecodeParams& params,
+    std::vector<std::vector<uint32_t>>& rows)
+{
+    const uint32_t K = params.BlockCount;
+    const uint32_t S = params.Staircase;
+    const uint32_t hits = std::min(params.SourceHits, S);
+    const uint32_t edge_count = K * hits;
+    const uint32_t low_degree = edge_count / S;
+    const uint32_t extra_rows = edge_count % S;
+
+    // When every source hits every row there is exactly one simple bipartite
+    // graph.  Shuffling sockets only creates duplicates that must be repaired,
+    // can be pathologically slow for large custom parameters, and can exhaust
+    // the bounded retry budget despite the trivial valid solution.
+    if (hits == S) {
+        for (uint32_t row = 0; row < S; ++row) {
+            for (uint32_t source = 0; source < K; ++source) {
+                rows[row].push_back(source);
+            }
+        }
+        return true;
+    }
+
+    wirehair::PCGRandom matching_prng;
+    matching_prng.Seed(
+        params.Seed ^ UINT64_C(0xa0761d6478bd642f),
+        ((uint64_t)K << 32) ^ ((uint64_t)S << 16) ^
+            (uint64_t)params.SourceHits ^ UINT64_C(0x736f636b65747331));
+
+    std::vector<uint16_t> row_deck(S);
+    UnbiasedShufflePermutation(matching_prng, row_deck.data(), S);
+    std::vector<uint8_t> high_row(S, 0u);
+    for (uint32_t i = 0; i < extra_rows; ++i) {
+        high_row[row_deck[i]] = 1u;
+    }
+
+    std::vector<uint16_t> ordered_sockets;
+    ordered_sockets.reserve(edge_count);
+    for (uint32_t row = 0; row < S; ++row)
+    {
+        const uint32_t degree = low_degree + high_row[row];
+        for (uint32_t socket = 0; socket < degree; ++socket) {
+            ordered_sockets.push_back((uint16_t)row);
+        }
+    }
+    if (ordered_sockets.size() != edge_count) {
+        return false;
+    }
+
+    // A direct two-edge switch is sufficient almost always.  Retry a bounded
+    // number of independently shuffled configurations if a pathological
+    // assignment has no valid direct switch, and fail closed after that.
+    std::vector<uint16_t> sockets;
+    static const uint32_t kShuffleAttempts = 8u;
+    bool repaired = false;
+    for (uint32_t shuffle_attempt = 0;
+         shuffle_attempt < kShuffleAttempts;
+         ++shuffle_attempt)
+    {
+        sockets = ordered_sockets;
+        for (uint32_t remaining = edge_count; remaining > 1u; --remaining)
+        {
+            const uint32_t pick = UniformBelow(matching_prng, remaining);
+            std::swap(sockets[pick], sockets[remaining - 1u]);
+        }
+        if (RepairSocketDuplicates(matching_prng, sockets, hits)) {
+            repaired = true;
+            break;
+        }
+    }
+    if (!repaired) {
+        return false;
+    }
+
+    for (uint32_t source = 0; source < K; ++source) {
+        for (uint32_t hit = 0; hit < hits; ++hit) {
+            rows[sockets[source * hits + hit]].push_back(source);
+        }
+    }
+    return true;
+}
+
 size_t SymmetricDifferenceCountBelow(
     const std::vector<uint32_t>& a,
     const std::vector<uint32_t>& b,
@@ -222,7 +410,9 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
          params.Field != CompletionField::MixedGF256GF16) ||
         (params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy &&
          params.HeavyFamily != HeavyCoefficientFamily::HashedNonzero) ||
-        binary_span > UINT16_MAX || total_span > UINT16_MAX)
+        binary_span > UINT16_MAX || total_span > UINT16_MAX ||
+        (params.DegreeBalancedStaircase &&
+         params.DegreeSocketShuffleStaircase))
     {
         return false;
     }
@@ -261,6 +451,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);
     params.DegreeBalancedStaircase = false;
+    params.DegreeSocketShuffleStaircase = false;
     params.DenseIdentityCorner = false;
     params.DenseTwoAnchor = false;
     params.DenseTwoAnchorPhase = 0u;
@@ -331,7 +522,9 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     }
                 } while (collide);
                 picks[hit] = p;
-                if (!params.DegreeBalancedStaircase) {
+                if (!params.DegreeBalancedStaircase &&
+                    !params.DegreeSocketShuffleStaircase)
+                {
                     out.StaircaseRows[p].push_back(c);
                 }
             }
@@ -339,6 +532,11 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     }
     if (params.DegreeBalancedStaircase &&
         !AppendDegreeBalancedStaircaseEdges(params, out.StaircaseRows))
+    {
+        return false;
+    }
+    if (params.DegreeSocketShuffleStaircase &&
+        !AppendSocketShuffledStaircaseEdges(params, out.StaircaseRows))
     {
         return false;
     }
@@ -498,7 +696,8 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         if (!have_own || !have_link) {
             return false;
         }
-        if (params.DegreeBalancedStaircase)
+        if (params.DegreeBalancedStaircase ||
+            params.DegreeSocketShuffleStaircase)
         {
             if (source_degree == balanced_low + 1u && balanced_extra != 0u) {
                 ++balanced_high_rows;
@@ -508,7 +707,8 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
             }
         }
     }
-    if (params.DegreeBalancedStaircase &&
+    if ((params.DegreeBalancedStaircase ||
+         params.DegreeSocketShuffleStaircase) &&
         balanced_high_rows != balanced_extra)
     {
         return false;
