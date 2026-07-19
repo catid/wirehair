@@ -963,6 +963,11 @@ void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor)
     MixedIndependentExtensionResiduesForTesting = false;
 }
 
+uint32_t ActiveMixedIndependentExtensionSeedXorForTesting()
+{
+    return MixedIndependentExtensionSeedXorForTesting;
+}
+
 bool SetMixedGroupedGF256RowsForTesting(uint32_t rows)
 {
     if (rows > 9u ||

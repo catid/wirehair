@@ -339,6 +339,8 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
+/// Read back the independent-extension schedule seed XOR on this thread.
+uint32_t ActiveMixedIndependentExtensionSeedXorForTesting();
 ///
 /// Assign one shared schedule C to the final 0..9 rows of the fixed H12
 /// GF(256) prefix.  This raw-architecture hook is intentionally restricted to

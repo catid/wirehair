@@ -6854,15 +6854,34 @@ struct GroupedTimingArm
     uint32_t GroupedRows = 0u;
     wirehair_v2::MixedResidueBucketMode Buckets =
         wirehair_v2::MixedResidueBucketMode::Automatic;
+    wirehair_v2::MixedCoefficientGeometry Geometry =
+        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    bool DegreeBalancedStaircase = false;
 };
+
+const char* GroupedTimingRhsRouteName(
+    wirehair_v2::MixedCompletionRhsRoute route)
+{
+    switch (route)
+    {
+    case wirehair_v2::MixedCompletionRhsRoute::NotReached:
+        return "not-reached";
+    case wirehair_v2::MixedCompletionRhsRoute::Streamed:
+        return "streamed";
+    case wirehair_v2::MixedCompletionRhsRoute::Dual:
+        return "dual";
+    case wirehair_v2::MixedCompletionRhsRoute::JointDelta:
+        return "joint-delta";
+    }
+    return "invalid";
+}
 
 bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
 {
     // Reapply the complete thread-local experiment state for every physical
     // solve.  Several setters deliberately clear secondary schedules, so the
     // grouped suffix must remain last.  None of this setup is timed.
-    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(arm.Geometry) ||
         !wirehair_v2::SetMixedGF16RowsForTesting(
             wirehair_v2::kMixedGF16Rows) ||
         !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
@@ -6889,8 +6908,7 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
     {
         return false;
     }
-    return wirehair_v2::ActiveMixedCoefficientGeometry() ==
-            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
+    return wirehair_v2::ActiveMixedCoefficientGeometry() == arm.Geometry &&
         wirehair_v2::ActiveMixedGF256Rows() ==
             wirehair_v2::kMixedGF256Rows &&
         wirehair_v2::ActiveMixedGF16Rows() ==
@@ -6899,9 +6917,72 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
         wirehair_v2::ActiveMixedResidueSkew() == 0u &&
         wirehair_v2::ActiveMixedResidueSchedule() ==
             wirehair_v2::MixedResidueSchedule::Constant &&
+        wirehair_v2::ActiveMixedResidueHashSeed() == 0u &&
+        !wirehair_v2::ActiveMixedResiduesRotated() &&
         !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
+        wirehair_v2::ActiveMixedIndependentExtensionSeedXorForTesting() ==
+            78u &&
         wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
-        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
+        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets &&
+        wirehair_v2::ActivePacketRowSeedMultiplierForTesting() == 1u &&
+        !wirehair_v2::ActivePacketRowSeedAvalancheForTesting() &&
+        wirehair_v2::ActiveOddPacketPeelSeedXorForTesting() == 0u;
+}
+
+bool GroupedTimingUsesSecondarySchedule(
+    const GroupedTimingArm& arm,
+    const wirehair_v2::PrecodeSystem& system)
+{
+    const uint64_t column_count =
+        (uint64_t)system.Params.BlockCount + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const uint64_t first_heavy_column =
+        column_count - system.Params.HeavyRows;
+    // The solver collapses grouped C back to A while every non-heavy column
+    // still lies in residue block zero.
+    const bool effective_grouped =
+        arm.GroupedRows != 0u && first_heavy_column > arm.Period;
+    return effective_grouped;
+}
+
+wirehair_v2::MixedCompletionRhsRoute GroupedTimingExpectedRhsRoute(
+    const GroupedTimingArm& arm,
+    const wirehair_v2::PrecodeSystem& system,
+    uint32_t block_bytes)
+{
+    if (!GroupedTimingUsesSecondarySchedule(arm, system)) {
+        return wirehair_v2::MixedCompletionRhsRoute::Streamed;
+    }
+    const uint64_t column_count =
+        (uint64_t)system.Params.BlockCount + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const bool automatic_joint =
+        wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
+            system.Params.BlockCount, block_bytes, arm.Period);
+    const bool request_joint =
+        arm.Buckets == wirehair_v2::MixedResidueBucketMode::JointDelta ||
+        (arm.Buckets == wirehair_v2::MixedResidueBucketMode::Automatic &&
+         automatic_joint);
+    if (request_joint && wirehair_v2::MixedJointResidueBucketStorageFits(
+            arm.Period, block_bytes,
+            wirehair_v2::kMixedJointResidueBucketDataByteCap))
+    {
+        return wirehair_v2::MixedCompletionRhsRoute::JointDelta;
+    }
+    const uint64_t one_plane_bytes = (uint64_t)arm.Period * block_bytes;
+    const bool request_dual =
+        arm.Buckets == wirehair_v2::MixedResidueBucketMode::Dual ||
+        (arm.Buckets == wirehair_v2::MixedResidueBucketMode::Automatic &&
+         !automatic_joint && column_count >= 30000u &&
+         block_bytes >= 1024u &&
+         one_plane_bytes * 2u <= (UINT64_C(128) << 10));
+    if (request_dual &&
+        one_plane_bytes <=
+            wirehair_v2::kMixedJointResidueBucketDataByteCap / 2u)
+    {
+        return wirehair_v2::MixedCompletionRhsRoute::Dual;
+    }
+    return wirehair_v2::MixedCompletionRhsRoute::Streamed;
 }
 
 bool SameGroupedTimingBaseGraph(
@@ -6916,8 +6997,6 @@ bool SameGroupedTimingBaseGraph(
         a_params.HeavyRows == b_params.HeavyRows &&
         a_params.SourceHits == b_params.SourceHits &&
         a_params.Field == b_params.Field &&
-        a_params.DegreeBalancedStaircase ==
-            b_params.DegreeBalancedStaircase &&
         a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
         a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
         a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
@@ -6927,10 +7006,140 @@ bool SameGroupedTimingBaseGraph(
         a_config.MixCount == b_config.MixCount;
 }
 
+uint64_t GroupedTimingFingerprintByte(uint64_t hash, uint8_t value)
+{
+    hash ^= value;
+    return hash * UINT64_C(1099511628211);
+}
+
+uint64_t GroupedTimingFingerprintU32(uint64_t hash, uint32_t value)
+{
+    for (uint32_t shift = 0u; shift < 32u; shift += 8u) {
+        hash = GroupedTimingFingerprintByte(hash, (uint8_t)(value >> shift));
+    }
+    return hash;
+}
+
+uint64_t GroupedTimingFingerprintRows(
+    uint32_t domain,
+    const std::vector<std::vector<uint32_t>>& rows)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    hash = GroupedTimingFingerprintU32(hash, domain);
+    hash = GroupedTimingFingerprintU32(hash, (uint32_t)rows.size());
+    for (size_t row_index = 0u; row_index < rows.size(); ++row_index)
+    {
+        const std::vector<uint32_t>& row = rows[row_index];
+        hash = GroupedTimingFingerprintU32(hash, (uint32_t)row_index);
+        hash = GroupedTimingFingerprintU32(hash, (uint32_t)row.size());
+        for (uint32_t column : row) {
+            hash = GroupedTimingFingerprintU32(hash, column);
+        }
+    }
+    return hash;
+}
+
+uint64_t GroupedTimingFingerprintHeavy(
+    const wirehair_v2::PrecodeSystem& system)
+{
+    const wirehair_v2::PrecodeParams& params = system.Params;
+    const uint32_t columns = params.BlockCount + params.Staircase +
+        params.DenseRows + params.HeavyRows;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    hash = GroupedTimingFingerprintU32(hash, UINT32_C(0x48563130));
+    hash = GroupedTimingFingerprintU32(hash, columns);
+    hash = GroupedTimingFingerprintU32(hash, params.HeavyRows);
+    hash = GroupedTimingFingerprintU32(
+        hash, (uint32_t)params.HeavyFamily);
+    for (uint32_t row = 0u; row < params.HeavyRows; ++row) {
+        for (uint32_t column = 0u; column < columns; ++column) {
+            hash = GroupedTimingFingerprintByte(
+                hash, wirehair_v2::HeavyCoefficientForParams(
+                    params, row, column));
+        }
+    }
+    return hash;
+}
+
+uint64_t GroupedTimingFingerprintMixedCoefficients()
+{
+    const wirehair_v2::MixedCoefficientRows* rows =
+        wirehair_v2::GetMixedCoefficientRows();
+    if (!rows) return 0u;
+    const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
+    const uint32_t subfield_rows = wirehair_v2::ActiveMixedGF256Rows();
+    const uint32_t extension_rows = wirehair_v2::ActiveMixedGF16Rows();
+    uint64_t hash = UINT64_C(14695981039346656037);
+    hash = GroupedTimingFingerprintU32(hash, UINT32_C(0x4d563130));
+    hash = GroupedTimingFingerprintU32(hash, period);
+    hash = GroupedTimingFingerprintU32(hash, subfield_rows);
+    hash = GroupedTimingFingerprintU32(hash, extension_rows);
+    for (uint32_t row = 0u; row < subfield_rows; ++row) {
+        for (uint32_t residue = 0u; residue < period; ++residue) {
+            hash = GroupedTimingFingerprintByte(
+                hash, rows->Subfield[row][residue]);
+        }
+    }
+    for (uint32_t row = 0u; row < extension_rows; ++row) {
+        for (uint32_t residue = 0u; residue < period; ++residue) {
+            hash = GroupedTimingFingerprintU32(
+                hash, rows->Extension[row][residue]);
+        }
+    }
+    return hash;
+}
+
+uint64_t GroupedTimingFingerprintBytes(
+    const uint8_t* data,
+    size_t bytes)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    hash = GroupedTimingFingerprintU32(hash, UINT32_C(0x42563130));
+    hash = GroupedTimingFingerprintU32(hash, (uint32_t)bytes);
+    hash = GroupedTimingFingerprintU32(
+        hash, (uint32_t)((uint64_t)bytes >> 32));
+    for (size_t i = 0u; i < bytes; ++i) {
+        hash = GroupedTimingFingerprintByte(hash, data[i]);
+    }
+    return hash;
+}
+
+std::string GroupedTimingFingerprintText(uint64_t fingerprint)
+{
+    std::ostringstream text;
+    text << "0x" << std::hex << std::setfill('0') << std::setw(16)
+         << fingerprint;
+    return text.str();
+}
+
+struct GroupedTimingSystemReceipt
+{
+    uint64_t StaircaseFingerprint = 0u;
+    uint64_t DenseFingerprint = 0u;
+    uint64_t HeavyFingerprint = 0u;
+    uint64_t MixedCoefficientFingerprint = 0u;
+};
+
+GroupedTimingSystemReceipt MakeGroupedTimingSystemReceipt(
+    const wirehair_v2::PrecodeSystem& system)
+{
+    GroupedTimingSystemReceipt receipt;
+    receipt.StaircaseFingerprint = GroupedTimingFingerprintRows(
+        UINT32_C(0x53563130), system.StaircaseRows);
+    receipt.DenseFingerprint = GroupedTimingFingerprintRows(
+        UINT32_C(0x44563130), system.DenseRowColumns);
+    receipt.HeavyFingerprint = GroupedTimingFingerprintHeavy(system);
+    receipt.MixedCoefficientFingerprint =
+        GroupedTimingFingerprintMixedCoefficients();
+    return receipt;
+}
+
 struct GroupedTimingObservation
 {
     WirehairResult Result = Wirehair_Error;
     wirehair_v2::PrecodeSolveStats Stats;
+    uint64_t DecodedFingerprint = 0u;
+    bool HasDecodedFingerprint = false;
 };
 
 bool RunGroupedTimingObservation(
@@ -6948,6 +7157,14 @@ bool RunGroupedTimingObservation(
         wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
             system, config, cell.Runtime, cell.Packets, block_bytes,
             intermediate, &observation.Stats);
+    if (observation.Result == Wirehair_Success) {
+        const uint64_t source_bytes_wide =
+            (uint64_t)system.Params.BlockCount * block_bytes;
+        if (source_bytes_wide > intermediate.size()) return false;
+        observation.DecodedFingerprint = GroupedTimingFingerprintBytes(
+            intermediate.data(), (size_t)source_bytes_wide);
+        observation.HasDecodedFingerprint = true;
+    }
     const uint64_t expected_arena_bytes =
         ((uint64_t)system.Params.BlockCount + system.Params.Staircase +
             system.Params.DenseRows + system.Params.HeavyRows) * block_bytes;
@@ -6955,18 +7172,33 @@ bool RunGroupedTimingObservation(
             observation.Result == Wirehair_NeedMore) &&
         observation.Stats.SolveValueArenaBytes == expected_arena_bytes &&
         observation.Stats.SolveValueArenaEagerZeroBytes == 0u &&
-        observation.Stats.SolveValueArenaCommitCopyBytes == 0u;
+        observation.Stats.SolveValueArenaCommitCopyBytes == 0u &&
+        (observation.Result != Wirehair_Success ||
+         observation.Stats.MixedRhsRoute ==
+            GroupedTimingExpectedRhsRoute(arm, system, block_bytes)) &&
+        (GroupedTimingUsesSecondarySchedule(arm, system) ||
+         (observation.Stats.MixedJointSourceXors == 0u &&
+          observation.Stats.MixedJointMarginalXors == 0u &&
+          observation.Stats.MixedJointMarginalCopies == 0u &&
+          observation.Stats.MixedJointActiveDeltas == 0u &&
+          observation.Stats.MixedJointScratchBytes == 0u &&
+          observation.Stats.MixedDualSourceColumns == 0u));
     if (!valid) {
         std::fprintf(stderr,
             "groupedtiming solve-arena preflight receipt mismatch "
-            "result=%d arena=%llu expected=%llu eager_zero=%llu copy=%llu\n",
+            "result=%d arena=%llu expected=%llu eager_zero=%llu copy=%llu "
+            "rhs_route=%s expected_route=%s secondary=%u\n",
             (int)observation.Result,
             (unsigned long long)observation.Stats.SolveValueArenaBytes,
             (unsigned long long)expected_arena_bytes,
             (unsigned long long)
                 observation.Stats.SolveValueArenaEagerZeroBytes,
             (unsigned long long)
-                observation.Stats.SolveValueArenaCommitCopyBytes);
+                observation.Stats.SolveValueArenaCommitCopyBytes,
+            GroupedTimingRhsRouteName(observation.Stats.MixedRhsRoute),
+            GroupedTimingRhsRouteName(
+                GroupedTimingExpectedRhsRoute(arm, system, block_bytes)),
+            GroupedTimingUsesSecondarySchedule(arm, system) ? 1u : 0u);
     }
     return valid;
 }
@@ -7015,9 +7247,13 @@ int CmdGroupedTiming(int argc, char** argv)
     bool have_control_period = false;
     bool have_control_rows = false;
     bool have_control_buckets = false;
+    bool have_control_geometry = false;
+    bool have_control_degree_balanced = false;
     bool have_candidate_period = false;
     bool have_candidate_rows = false;
     bool have_candidate_buckets = false;
+    bool have_candidate_geometry = false;
+    bool have_candidate_degree_balanced = false;
     bool have_eviction = false;
     bool have_cache_state = false;
     bool have_loss = false;
@@ -7085,6 +7321,37 @@ int CmdGroupedTiming(int argc, char** argv)
             }
             have_control_buckets = true;
         }
+        else if (!std::strcmp(argv[i], "--control-geometry")) {
+            if (have_control_geometry || !TakeArg(
+                    "groupedtiming", "--control-geometry", argc, argv, i,
+                    value) || !ParseMixedCoefficientGeometry(
+                        value, control_arm.Geometry))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --control-geometry must be frozen or "
+                    "shared-x\n");
+                return 1;
+            }
+            have_control_geometry = true;
+        }
+        else if (!std::strcmp(
+                    argv[i], "--control-degree-balanced-staircase"))
+        {
+            uint32_t enabled = 0u;
+            if (have_control_degree_balanced || !TakeArg(
+                    "groupedtiming", "--control-degree-balanced-staircase",
+                    argc, argv, i, value) || !ParseCanonicalU32Arg(
+                        "--control-degree-balanced-staircase", value,
+                        enabled) || enabled > 1u)
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --control-degree-balanced-staircase "
+                    "must be 0 or 1\n");
+                return 1;
+            }
+            control_arm.DegreeBalancedStaircase = enabled != 0u;
+            have_control_degree_balanced = true;
+        }
         else if (!std::strcmp(argv[i], "--candidate-period")) {
             if (have_candidate_period || !TakeArg(
                     "groupedtiming", "--candidate-period",
@@ -7120,6 +7387,38 @@ int CmdGroupedTiming(int argc, char** argv)
                 return 1;
             }
             have_candidate_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-geometry")) {
+            if (have_candidate_geometry || !TakeArg(
+                    "groupedtiming", "--candidate-geometry", argc, argv, i,
+                    value) || !ParseMixedCoefficientGeometry(
+                        value, candidate_arm.Geometry))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --candidate-geometry must be frozen or "
+                    "shared-x\n");
+                return 1;
+            }
+            have_candidate_geometry = true;
+        }
+        else if (!std::strcmp(
+                    argv[i], "--candidate-degree-balanced-staircase"))
+        {
+            uint32_t enabled = 0u;
+            if (have_candidate_degree_balanced || !TakeArg(
+                    "groupedtiming",
+                    "--candidate-degree-balanced-staircase",
+                    argc, argv, i, value) || !ParseCanonicalU32Arg(
+                        "--candidate-degree-balanced-staircase", value,
+                        enabled) || enabled > 1u)
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --candidate-degree-balanced-staircase "
+                    "must be 0 or 1\n");
+                return 1;
+            }
+            candidate_arm.DegreeBalancedStaircase = enabled != 0u;
+            have_candidate_degree_balanced = true;
         }
         else if (!std::strcmp(argv[i], "--evict-bytes")) {
             if (have_eviction || !TakeArg(
@@ -7191,16 +7490,23 @@ int CmdGroupedTiming(int argc, char** argv)
     }
     if (!have_K || !have_block_bytes || !have_overhead ||
         !have_control_period || !have_control_rows ||
-        !have_control_buckets || !have_candidate_period ||
-        !have_candidate_rows || !have_candidate_buckets || !have_eviction ||
+        !have_control_buckets || !have_control_geometry ||
+        !have_control_degree_balanced ||
+        !have_candidate_period || !have_candidate_rows ||
+        !have_candidate_buckets || !have_candidate_geometry ||
+        !have_candidate_degree_balanced ||
+        !have_eviction ||
         !have_cache_state || !have_loss || !have_seed || !have_schedule)
     {
         std::fprintf(stderr,
             "groupedtiming requires --N, --bb, --overhead, "
             "--control-period, --control-grouped-rows, --control-buckets, "
+            "--control-geometry, "
+            "--control-degree-balanced-staircase, "
             "--candidate-period, --candidate-grouped-rows, "
-            "--candidate-buckets, --evict-bytes, --cache-state, --loss, "
-            "--seed, and --schedule\n");
+            "--candidate-buckets, --candidate-geometry, "
+            "--candidate-degree-balanced-staircase, "
+            "--evict-bytes, --cache-state, --loss, --seed, and --schedule\n");
         return 1;
     }
     const auto invalid_arm = [](const GroupedTimingArm& arm) {
@@ -7263,6 +7569,8 @@ int CmdGroupedTiming(int argc, char** argv)
     // The grouped reliability campaign used the raw two-anchor architecture
     // at every K, rather than the later adaptive named-profile cutoff.
     control_base_params.DenseTwoAnchor = true;
+    control_base_params.DegreeBalancedStaircase =
+        control_arm.DegreeBalancedStaircase;
     if (control_arm.GroupedRows != 0u) {
         control_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
@@ -7286,11 +7594,14 @@ int CmdGroupedTiming(int argc, char** argv)
         return 2;
     }
     candidate_base_params.DenseTwoAnchor = true;
+    candidate_base_params.DegreeBalancedStaircase =
+        candidate_arm.DegreeBalancedStaircase;
     if (candidate_arm.GroupedRows != 0u) {
         candidate_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
     }
-    if (!SameGroupedTimingBaseGraph(
+    if (control_arm.Geometry != candidate_arm.Geometry ||
+        !SameGroupedTimingBaseGraph(
             control_base_params, control_base_config,
             candidate_base_params, candidate_base_config))
     {
@@ -7306,6 +7617,52 @@ int CmdGroupedTiming(int argc, char** argv)
         std::fprintf(stderr,
             "groupedtiming candidate seed selection failed result=%d\n",
             (int)candidate_select);
+        return 2;
+    }
+    if (control_attempt != candidate_attempt ||
+        control_system.Params.Seed != candidate_system.Params.Seed ||
+        control_config.PeelSeed != candidate_config.PeelSeed)
+    {
+        std::fprintf(stderr,
+            "groupedtiming arms selected different attempts or seeds\n");
+        return 2;
+    }
+    // Receipt the actual active 10+2 coefficient tables, including the two
+    // GF(2^16) rows that are intentionally outside the byte-valued heavy
+    // graph fingerprint.  Reconfigure each arm immediately before hashing so
+    // future TLS changes cannot silently bind both receipts to the last arm.
+    if (!ConfigureGroupedTimingArm(control_arm)) {
+        std::fprintf(stderr,
+            "groupedtiming could not receipt the control coefficients\n");
+        return 2;
+    }
+    const GroupedTimingSystemReceipt control_system_receipt =
+        MakeGroupedTimingSystemReceipt(control_system);
+    if (!ConfigureGroupedTimingArm(candidate_arm)) {
+        std::fprintf(stderr,
+            "groupedtiming could not receipt the candidate coefficients\n");
+        return 2;
+    }
+    const GroupedTimingSystemReceipt candidate_system_receipt =
+        MakeGroupedTimingSystemReceipt(candidate_system);
+    if (control_system_receipt.MixedCoefficientFingerprint == 0u ||
+        candidate_system_receipt.MixedCoefficientFingerprint == 0u)
+    {
+        std::fprintf(stderr,
+            "groupedtiming coefficient fingerprint construction failed\n");
+        return 2;
+    }
+    if (control_system_receipt.DenseFingerprint !=
+            candidate_system_receipt.DenseFingerprint ||
+        control_system_receipt.HeavyFingerprint !=
+            candidate_system_receipt.HeavyFingerprint ||
+        (control_arm.DegreeBalancedStaircase ==
+             candidate_arm.DegreeBalancedStaircase) !=
+            (control_system_receipt.StaircaseFingerprint ==
+             candidate_system_receipt.StaircaseFingerprint))
+    {
+        std::fprintf(stderr,
+            "groupedtiming graph fingerprint relationship mismatch\n");
         return 2;
     }
 
@@ -7356,35 +7713,94 @@ int CmdGroupedTiming(int argc, char** argv)
     const bool common_success =
         control_preflight.Result == Wirehair_Success &&
         candidate_preflight.Result == Wirehair_Success;
+    const bool control_secondary_schedule =
+        GroupedTimingUsesSecondarySchedule(control_arm, control_system);
+    const bool candidate_secondary_schedule =
+        GroupedTimingUsesSecondarySchedule(candidate_arm, candidate_system);
+    const wirehair_v2::MixedCompletionRhsRoute control_expected_route =
+        GroupedTimingExpectedRhsRoute(
+            control_arm, control_system, block_bytes);
+    const wirehair_v2::MixedCompletionRhsRoute candidate_expected_route =
+        GroupedTimingExpectedRhsRoute(
+            candidate_arm, candidate_system, block_bytes);
+    if (common_success &&
+        (!control_preflight.HasDecodedFingerprint ||
+         !candidate_preflight.HasDecodedFingerprint ||
+         control_preflight.DecodedFingerprint !=
+            candidate_preflight.DecodedFingerprint))
+    {
+        std::fprintf(stderr,
+            "groupedtiming common-success decoded output mismatch\n");
+        return 2;
+    }
 
     static const char kOrder[] = {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
     const std::string cycle_index_text =
         have_cycle_index ? std::to_string(cycle_index) : "all";
     const uint64_t packet_payload_bytes =
         ((uint64_t)K + overhead) * block_bytes;
+    const uint64_t payload_fingerprint = GroupedTimingFingerprintBytes(
+        cell.Payload, (size_t)packet_payload_bytes);
+    const std::string control_decoded_fingerprint =
+        control_preflight.HasDecodedFingerprint ?
+            GroupedTimingFingerprintText(
+                control_preflight.DecodedFingerprint) : "none";
+    const std::string candidate_decoded_fingerprint =
+        candidate_preflight.HasDecodedFingerprint ?
+            GroupedTimingFingerprintText(
+                candidate_preflight.DecodedFingerprint) : "none";
     std::printf(
-        "# groupedtiming: schema=v2 policy=h12-q0-grouped "
+        "# groupedtiming: schema=v5 policy=h12-q0-grouped "
         "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
         "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
         "loss=%.17g seed=%llu schedule=%s cache_state=%s "
         "overhead_stream=salted "
         "evict_bytes=%llu eviction_prefaulted=1 "
         "control_period=%u control_grouped_rows=%u "
-        "control_buckets=%s control_grouped_hash_seed=0x%x "
-        "control_final_h_a_columns=%u candidate_period=%u "
+        "control_buckets=%s control_geometry=%s "
+        "control_secondary_schedule=%u control_rhs_route_expected=%s "
+        "control_preflight_rhs_route=%s "
+        "control_degree_balanced_staircase=%u "
+        "control_grouped_hash_seed=0x%x "
+        "control_final_h_a_columns=%u "
+        "control_staircase_fingerprint=%s control_dense_fingerprint=%s "
+        "control_heavy_fingerprint=%s "
+        "control_mixed_coefficient_fingerprint=%s candidate_period=%u "
         "candidate_grouped_rows=%u candidate_buckets=%s "
+        "candidate_geometry=%s "
+        "candidate_secondary_schedule=%u candidate_rhs_route_expected=%s "
+        "candidate_preflight_rhs_route=%s "
+        "candidate_degree_balanced_staircase=%u "
         "candidate_grouped_hash_seed=0x%x "
-        "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
-        "dense_two_anchor=1 control_attempt=%u "
+        "candidate_final_h_a_columns=%u "
+        "candidate_staircase_fingerprint=%s "
+        "candidate_dense_fingerprint=%s candidate_heavy_fingerprint=%s "
+        "candidate_mixed_coefficient_fingerprint=%s "
+        "staircase_rows=%u dense_rows=%u heavy_rows=%u columns=%u "
+        "gf256_rows=10 gf16_rows=2 "
+        "mixed_residue_skew=0 mixed_residue_schedule=constant "
+        "mixed_residue_hash_seed=0x0 "
+        "mixed_independent_extension_residues=0 "
+        "mixed_extension_residue_seed_xor=0x4e "
+        "packet_peel_seed_xor=0x0 packet_peel_seed_table=none "
+        "binary_dense_rows_override=0 gf256_heavy_rows_override=0 "
+        "source_hits_override=0 seed_block_bytes_override=0 "
+        "packet_row_seed_multiplier=0x1 packet_row_seed_avalanche=0 "
+        "odd_packet_peel_seed_xor=0x0 "
+        "source_hits=%u field=%u dense_identity_corner=%u heavy_family=%u "
+        "dense_two_anchor=1 dense_two_anchor_phase=0 control_attempt=%u "
         "control_matrix_seed=0x%llx control_peel_seed=0x%x "
         "candidate_attempt=%u candidate_matrix_seed=0x%llx "
         "candidate_peel_seed=0x%x mix=2 "
         "payload=distinct-packet-zero-v1 payload_count=%u "
         "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
+        "payload_fingerprint=%s packet_trace_sha256=%s "
         "system_build=outside-timer tls_reapply=full-per-slot-outside-timer "
         "allocator_tls_state=preflight-warmed "
         "solve_value_storage=owned-noinit solve_value_publish=swap "
         "preflight_control_result=%d preflight_candidate_result=%d "
+        "preflight_control_decoded_fingerprint=%s "
+        "preflight_candidate_decoded_fingerprint=%s "
         "cell_class=%s common_success=%u trace_sha256=%s\n",
         have_cycle_index ? 1u : 4u,
         have_cycle_index ? "replacement" : "full",
@@ -7394,14 +7810,49 @@ int CmdGroupedTiming(int argc, char** argv)
         (unsigned long long)eviction_bytes,
         control_arm.Period, control_arm.GroupedRows,
         MixedResidueBucketModeName(control_arm.Buckets),
+        MixedCoefficientGeometryName(control_arm.Geometry),
+        control_secondary_schedule ? 1u : 0u,
+        GroupedTimingRhsRouteName(control_expected_route),
+        GroupedTimingRhsRouteName(control_preflight.Stats.MixedRhsRoute),
+        control_arm.DegreeBalancedStaircase ? 1u : 0u,
         control_grouped_hash_seed,
         control_arm.GroupedRows != 0u ?
             control_system.Params.HeavyRows : 0u,
+        GroupedTimingFingerprintText(
+            control_system_receipt.StaircaseFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            control_system_receipt.DenseFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            control_system_receipt.HeavyFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            control_system_receipt.MixedCoefficientFingerprint).c_str(),
         candidate_arm.Period, candidate_arm.GroupedRows,
         MixedResidueBucketModeName(candidate_arm.Buckets),
+        MixedCoefficientGeometryName(candidate_arm.Geometry),
+        candidate_secondary_schedule ? 1u : 0u,
+        GroupedTimingRhsRouteName(candidate_expected_route),
+        GroupedTimingRhsRouteName(candidate_preflight.Stats.MixedRhsRoute),
+        candidate_arm.DegreeBalancedStaircase ? 1u : 0u,
         candidate_grouped_hash_seed,
         candidate_arm.GroupedRows != 0u ?
             candidate_system.Params.HeavyRows : 0u,
+        GroupedTimingFingerprintText(
+            candidate_system_receipt.StaircaseFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            candidate_system_receipt.DenseFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            candidate_system_receipt.HeavyFingerprint).c_str(),
+        GroupedTimingFingerprintText(
+            candidate_system_receipt.MixedCoefficientFingerprint).c_str(),
+        control_system.Params.Staircase,
+        control_system.Params.DenseRows,
+        control_system.Params.HeavyRows,
+        control_system.Params.BlockCount + control_system.Params.Staircase +
+            control_system.Params.DenseRows + control_system.Params.HeavyRows,
+        control_system.Params.SourceHits,
+        (uint32_t)control_system.Params.Field,
+        control_system.Params.DenseIdentityCorner ? 1u : 0u,
+        (uint32_t)control_system.Params.HeavyFamily,
         control_attempt,
         (unsigned long long)control_system.Params.Seed,
         control_config.PeelSeed, candidate_attempt,
@@ -7409,12 +7860,18 @@ int CmdGroupedTiming(int argc, char** argv)
         candidate_config.PeelSeed,
         K + overhead,
         (unsigned long long)packet_payload_bytes,
+        GroupedTimingFingerprintText(payload_fingerprint).c_str(),
+        cell.TraceSha256.c_str(),
         (int)control_preflight.Result, (int)candidate_preflight.Result,
+        control_decoded_fingerprint.c_str(),
+        candidate_decoded_fingerprint.c_str(),
         outcome_class, common_success ? 1u : 0u,
         cell.TraceSha256.c_str());
     std::printf(
         "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
-        "period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,"
+        "period,grouped_rows,buckets_requested,mixed_geometry,"
+        "degree_balanced_staircase,"
+        "seed_attempt,matrix_seed,"
         "peel_seed,preflight_result,cell_class,common_success,result,"
         "outcome_stable,elapsed_ns,saturated,"
         "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
@@ -7424,7 +7881,8 @@ int CmdGroupedTiming(int argc, char** argv)
         "joint_active_deltas,joint_scratch_bytes,dual_source_columns,"
         "source_bytes,packet_payload_bytes,intermediate_bytes,"
         "solve_value_arena_bytes,solve_value_eager_zero_bytes,"
-        "solve_value_commit_copy_bytes\n");
+        "solve_value_commit_copy_bytes,rhs_route_expected,"
+        "rhs_route_actual\n");
 
     const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
     const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
@@ -7443,6 +7901,13 @@ int CmdGroupedTiming(int argc, char** argv)
                 control_attempt : candidate_attempt;
             const WirehairResult preflight_result = control ?
                 control_preflight.Result : candidate_preflight.Result;
+            const wirehair_v2::MixedCompletionRhsRoute preflight_route =
+                control ? control_preflight.Stats.MixedRhsRoute :
+                    candidate_preflight.Stats.MixedRhsRoute;
+            const wirehair_v2::MixedCompletionRhsRoute expected_route =
+                control ? control_expected_route : candidate_expected_route;
+            const bool secondary_schedule = control ?
+                control_secondary_schedule : candidate_secondary_schedule;
             if (!ConfigureGroupedTimingArm(arm)) {
                 std::fprintf(stderr,
                     "groupedtiming TLS reapplication failed cycle=%u "
@@ -7484,15 +7949,18 @@ int CmdGroupedTiming(int argc, char** argv)
                 stats.ResidualRank - stats.BinaryResidualRank : 0u;
             const bool outcome_stable = result == preflight_result;
             std::printf(
-                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%u,"
+                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%s,%u,%u,"
                 "0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,%d,%d,%lld,%lld,"
                 "%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu,%llu,%llu,%llu\n",
+                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu,%llu,%llu,%llu,"
+                "%s,%s\n",
                 K, block_bytes, overhead, PacketScheduleName(schedule),
                 (unsigned long long)seed, loss,
                 GroupedTimingCacheStateName(cache_state), cycle, slot,
                 control ? "control" : "candidate", arm.Period,
                 arm.GroupedRows, MixedResidueBucketModeName(arm.Buckets),
+                MixedCoefficientGeometryName(arm.Geometry),
+                arm.DegreeBalancedStaircase ? 1u : 0u,
                 active_attempt,
                 (unsigned long long)active_system.Params.Seed,
                 active_config.PeelSeed,
@@ -7524,7 +7992,9 @@ int CmdGroupedTiming(int argc, char** argv)
                 intermediate.size(),
                 (unsigned long long)stats.SolveValueArenaBytes,
                 (unsigned long long)stats.SolveValueArenaEagerZeroBytes,
-                (unsigned long long)stats.SolveValueArenaCommitCopyBytes);
+                (unsigned long long)stats.SolveValueArenaCommitCopyBytes,
+                GroupedTimingRhsRouteName(expected_route),
+                GroupedTimingRhsRouteName(stats.MixedRhsRoute));
             const uint64_t expected_arena_bytes =
                 ((uint64_t)K + active_system.Params.Staircase +
                     active_system.Params.DenseRows +
@@ -7533,6 +8003,16 @@ int CmdGroupedTiming(int argc, char** argv)
                 stats.SolveValueArenaBytes != expected_arena_bytes ||
                 stats.SolveValueArenaEagerZeroBytes != 0u ||
                 stats.SolveValueArenaCommitCopyBytes != 0u ||
+                stats.MixedRhsRoute != preflight_route ||
+                (result == Wirehair_Success &&
+                 stats.MixedRhsRoute != expected_route) ||
+                (!secondary_schedule &&
+                 (stats.MixedJointSourceXors != 0u ||
+                  stats.MixedJointMarginalXors != 0u ||
+                  stats.MixedJointMarginalCopies != 0u ||
+                  stats.MixedJointActiveDeltas != 0u ||
+                  stats.MixedJointScratchBytes != 0u ||
+                  stats.MixedDualSourceColumns != 0u)) ||
                 (result != Wirehair_Success && result != Wirehair_NeedMore))
             {
                 std::fprintf(stderr,

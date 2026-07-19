@@ -1220,28 +1220,32 @@ expect_failure("bad --seed value" preferredtiming
 run_bench(grouped_timing_result grouped_timing grouped_timing_err
     groupedtiming --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule adversarial)
 string(REGEX MATCHALL
     "\n4096,64,4,adversarial,4660,0.5,cold," grouped_timing_rows
     "${grouped_timing}")
 list(LENGTH grouped_timing_rows grouped_timing_row_count)
 string(REGEX MATCHALL
-    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],(control|candidate),(48),(0|3),(auto|separate),[0-9]+,0x[0-9a-f]+,0x[0-9a-f]+,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
+    "\n4096,64,4,adversarial,4660,0.5,cold,[0-3],[0-7],(control|candidate),(48),(0|3),(auto|separate),shared-x,0,[0-9]+,0x[0-9a-f]+,0x[0-9a-f]+,[01],(common-success|control-only|candidate-only|common-failure),[01],[01],1,[0-9]+,0,"
     grouped_timing_valid_rows "${grouped_timing}")
 list(LENGTH grouped_timing_valid_rows grouped_timing_valid_row_count)
 if(NOT grouped_timing_result EQUAL 0 OR grouped_timing_err OR
    NOT grouped_timing_row_count EQUAL 32 OR
    NOT grouped_timing_valid_row_count EQUAL 32 OR
    NOT grouped_timing MATCHES
-       "schema=v2.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_grouped_rows=0 control_buckets=auto control_grouped_hash_seed=0x0 control_final_h_a_columns=0.*candidate_period=48 candidate_grouped_rows=3 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15162 candidate_final_h_a_columns=12.*dense_two_anchor=1 control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer allocator_tls_state=preflight-warmed solve_value_storage=owned-noinit solve_value_publish=swap" OR
+       "schema=v5.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_grouped_rows=0 control_buckets=auto control_geometry=shared-x control_secondary_schedule=0 control_rhs_route_expected=streamed control_preflight_rhs_route=streamed control_degree_balanced_staircase=0 control_grouped_hash_seed=0x0 control_final_h_a_columns=0.*control_mixed_coefficient_fingerprint=0x[0-9a-f]+.*candidate_period=48 candidate_grouped_rows=3 candidate_buckets=separate candidate_geometry=shared-x candidate_secondary_schedule=1 candidate_rhs_route_expected=streamed candidate_preflight_rhs_route=streamed candidate_degree_balanced_staircase=0 candidate_grouped_hash_seed=0xb7e15162 candidate_final_h_a_columns=12.*candidate_mixed_coefficient_fingerprint=0x[0-9a-f]+.*dense_two_anchor=1 dense_two_anchor_phase=0 control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*payload_fingerprint=0x[0-9a-f]+ packet_trace_sha256=[0-9a-f]+.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer allocator_tls_state=preflight-warmed solve_value_storage=owned-noinit solve_value_publish=swap" OR
    NOT grouped_timing MATCHES
-       "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes,solve_value_arena_bytes,solve_value_eager_zero_bytes,solve_value_commit_copy_bytes" OR
+       "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,grouped_rows,buckets_requested,mixed_geometry,degree_balanced_staircase,seed_attempt,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes,solve_value_arena_bytes,solve_value_eager_zero_bytes,solve_value_commit_copy_bytes,rhs_route_expected,rhs_route_actual" OR
    NOT grouped_timing MATCHES
-       ",control,48,0,auto,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,90775,1973," OR
+       ",control,48,0,auto,shared-x,0,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,90775,1973," OR
    NOT grouped_timing MATCHES
-       ",candidate,48,3,separate,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,94847,1974,")
+       ",candidate,48,3,separate,shared-x,0,0,0x136889600063cbf,0x382fe3a7,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,117,8,8,94847,1974,")
     message(FATAL_ERROR
         "grouped cold timing fixture failed\n"
         "${grouped_timing}\n${grouped_timing_err}")
@@ -1266,8 +1270,12 @@ endforeach()
 run_bench(grouped_warm_result grouped_warm grouped_warm_err groupedtiming
     --N 3200 --bb 64 --overhead 0
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 32 --candidate-grouped-rows 7
-    --candidate-buckets joint-delta --evict-bytes 4096 --cache-state warm
+    --candidate-buckets joint-delta --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state warm
     --cycle-index 2 --loss 0.5 --seed 4660 --schedule repair-only)
 string(REGEX MATCHALL
     "\n3200,64,0,repair-only,4660,0.5,warm,2," grouped_warm_rows
@@ -1275,46 +1283,152 @@ string(REGEX MATCHALL
 list(LENGTH grouped_warm_rows grouped_warm_row_count)
 if(NOT grouped_warm_result EQUAL 0 OR grouped_warm_err OR
    NOT grouped_warm_row_count EQUAL 8 OR NOT grouped_warm MATCHES
-       "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_grouped_rows=0 control_buckets=auto.*candidate_period=32 candidate_grouped_rows=7 candidate_buckets=joint-delta.*dense_two_anchor=1" OR
+       "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_grouped_rows=0 control_buckets=auto control_geometry=shared-x control_secondary_schedule=0 control_rhs_route_expected=streamed control_preflight_rhs_route=streamed.*candidate_period=32 candidate_grouped_rows=7 candidate_buckets=joint-delta candidate_geometry=shared-x candidate_secondary_schedule=1 candidate_rhs_route_expected=joint-delta candidate_preflight_rhs_route=joint-delta.*dense_two_anchor=1" OR
    NOT grouped_warm MATCHES
-       ",candidate,32,7,joint-delta,0,0x13a1a9dd5eb58b9d,0xf226e3bc,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,115,12,12,73665,1756,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3172,1984,64,32,6144,0,204800,204800,210304,210304,0,0")
+       ",candidate,32,7,joint-delta,shared-x,0,0,0x13a1a9dd5eb58b9d,0xf226e3bc,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,115,12,12,73665,1756,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3172,1984,64,32,6144,0,204800,204800,210304,210304,0,0")
     message(FATAL_ERROR
         "grouped warm replacement fixture failed\n"
         "${grouped_warm}\n${grouped_warm_err}")
+endif()
+
+# The degree-balanced timing selector is measurement-only.  It holds every
+# grouped-completion choice fixed, requires identical selected attempts,
+# dense/heavy receipts, packet trace, payload, and successful decoded output,
+# and requires only the staircase fingerprint to change.
+run_bench(degree_timing_result degree_timing degree_timing_err groupedtiming
+    --N 3200 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry frozen
+    --control-degree-balanced-staircase 0
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --candidate-geometry frozen
+    --candidate-degree-balanced-staircase 1
+    --evict-bytes 4096 --cache-state warm --cycle-index 1
+    --loss 0.5 --seed 4660 --schedule burst)
+string(REGEX MATCH "control_staircase_fingerprint=(0x[0-9a-f]+)"
+    degree_control_staircase_match "${degree_timing}")
+set(degree_control_staircase "${CMAKE_MATCH_1}")
+string(REGEX MATCH "candidate_staircase_fingerprint=(0x[0-9a-f]+)"
+    degree_candidate_staircase_match "${degree_timing}")
+set(degree_candidate_staircase "${CMAKE_MATCH_1}")
+string(REGEX MATCH "control_mixed_coefficient_fingerprint=(0x[0-9a-f]+)"
+    degree_control_coefficients_match "${degree_timing}")
+set(degree_control_coefficients "${CMAKE_MATCH_1}")
+string(REGEX MATCH "candidate_mixed_coefficient_fingerprint=(0x[0-9a-f]+)"
+    degree_candidate_coefficients_match "${degree_timing}")
+set(degree_candidate_coefficients "${CMAKE_MATCH_1}")
+if(NOT degree_timing_result EQUAL 0 OR degree_timing_err OR
+   NOT degree_timing MATCHES
+       "schema=v5.*control_period=244 control_grouped_rows=0 control_buckets=auto control_geometry=frozen control_secondary_schedule=0 control_rhs_route_expected=streamed control_preflight_rhs_route=streamed control_degree_balanced_staircase=0.*candidate_period=244 candidate_grouped_rows=0 candidate_buckets=auto candidate_geometry=frozen candidate_secondary_schedule=0 candidate_rhs_route_expected=streamed candidate_preflight_rhs_route=streamed candidate_degree_balanced_staircase=1.*gf256_rows=10 gf16_rows=2.*dense_two_anchor=1 dense_two_anchor_phase=0.*control_attempt=0.*candidate_attempt=0.*payload_fingerprint=0x[0-9a-f]+.*packet_trace_sha256=[0-9a-f]+.*preflight_control_decoded_fingerprint=0x[0-9a-f]+ preflight_candidate_decoded_fingerprint=0x[0-9a-f]+.*cell_class=common-success common_success=1" OR
+   NOT degree_control_staircase_match OR
+   NOT degree_candidate_staircase_match OR
+   degree_control_staircase STREQUAL degree_candidate_staircase OR
+   NOT degree_control_coefficients_match OR
+   NOT degree_candidate_coefficients_match OR
+   NOT degree_control_coefficients STREQUAL degree_candidate_coefficients OR
+   NOT degree_timing MATCHES
+       ",0,0,0,0,0,0,204800,205056,210304,210304,0,0,streamed,streamed")
+    message(FATAL_ERROR
+        "degree-balanced grouped timing fixture failed\n"
+        "${degree_timing}\n${degree_timing_err}")
 endif()
 
 expect_failure("requires --N" groupedtiming)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 11 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0
-    --control-buckets separate
+    --control-buckets separate --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 10
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("bad --seed value" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 0x1234 --schedule burst)
 expect_failure("cache-state must be cold or warm" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
+    --candidate-buckets separate --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state tepid
     --loss 0.5 --seed 4660 --schedule burst)
+
+expect_failure("--control-geometry" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-degree-balanced-staircase 0
+    --candidate-period 48 --candidate-grouped-rows 0
+    --candidate-buckets auto --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+
+expect_failure("--candidate-geometry" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 48 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry shared-x
+    --control-degree-balanced-staircase 0
+    --candidate-period 48 --candidate-grouped-rows 0
+    --candidate-buckets auto
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+
+run_bench(geometry_mismatch_result geometry_mismatch_out geometry_mismatch_err
+    groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-geometry frozen
+    --control-degree-balanced-staircase 0
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --candidate-geometry shared-x
+    --candidate-degree-balanced-staircase 0
+    --evict-bytes 4096 --cache-state cold
+    --loss 0.5 --seed 4660 --schedule burst)
+if(NOT geometry_mismatch_result EQUAL 2 OR
+   NOT geometry_mismatch_out STREQUAL "" OR
+   NOT geometry_mismatch_err MATCHES
+       "arms do not share one base graph/configuration")
+    message(FATAL_ERROR
+        "groupedtiming geometry mismatch rejection failed\n"
+        "result=${geometry_mismatch_result}\n"
+        "stdout=${geometry_mismatch_out}\n"
+        "stderr=${geometry_mismatch_err}")
+endif()
+reject_sanitizer("${geometry_mismatch_out}${geometry_mismatch_err}"
+    "groupedtiming geometry mismatch rejection")
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64
