@@ -538,6 +538,16 @@ major phases so payload-size bottlenecks can be distinguished from matrix
 construction and peeling costs.
 These flags are benchmarking hooks, not wire-format selection controls.
 
+Raw architecture recovery comparisons that follow a bb64 all-K screen use the
+two-phase protocol in `bench/WH2_CROSS_PAYLOAD_RECOVERY.md`.  It scans the
+natural graph seed independently at block sizes 64/256/1280/4096, forms a
+weak-K union using development roots only, and then evaluates IID plus hard
+loss with disjoint roots and nested OH0/OH1/OH2 packet prefixes.  This is
+necessary because `BlockBytes` participates in `MatrixSeedFromProfile`; wider
+payload timing alone does not extend bb64 recovery evidence to another graph
+domain.  The protocol rejects K-indexed seed tables and seed-width
+normalization while raw architectures are being selected.
+
 `compare`, `precodecheck`, and `precodefail` accept deterministic common packet
 schedules via
 `--schedule iid|burst|permutation|systematic-first|repair-only|adversarial`.
