@@ -8052,27 +8052,43 @@ static WirehairResult ResumePrecodeSystemImpl(
     const uint32_t K = system.Params.BlockCount;
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
+    const uint64_t L_wide = (uint64_t)K + P_wide;
+    const uint64_t projection_size_wide =
+        (uint64_t)state.ColumnCount * state.ProjectionWords;
+    const uint64_t value_size_wide =
+        (uint64_t)state.ColumnCount * block_bytes;
+    const uint64_t pivot_coefficient_size_wide =
+        (uint64_t)state.InactiveCount * state.InactiveCount;
+    const uint64_t pivot_rhs_size_wide =
+        (uint64_t)state.InactiveCount * block_bytes;
+    const uint64_t size_limit =
+        (uint64_t)std::numeric_limits<size_t>::max();
     if (system.Params.Field == CompletionField::MixedGF256GF16 ||
         !block_data || !state.Active || P_wide > UINT32_MAX ||
+        L_wide > UINT32_MAX ||
         state.SourceCount != K || state.PrecodeCount != (uint32_t)P_wide ||
-        state.ColumnCount != K + (uint32_t)P_wide ||
+        state.ColumnCount != (uint32_t)L_wide ||
         state.BlockBytes != block_bytes || block_bytes == 0u ||
+        block_bytes > UINT32_C(0x7fffffff) ||
         state.Config.PeelSeed != config.PeelSeed ||
         state.Config.MixCount != config.MixCount ||
         !state.Runtime.IsValidFor(
             K, (uint32_t)P_wide, config.MixCount) ||
         state.InactiveCount == 0u ||
+        state.InactiveCount > kMaxInactiveColumns ||
         state.Rank >= state.InactiveCount ||
         state.ProjectionWords != PackedWordCount(state.InactiveCount) ||
         state.InactiveIndex.size() != state.ColumnCount ||
         state.InactiveColumns.size() != state.InactiveCount ||
-        state.Projection.size() !=
-            (size_t)state.ColumnCount * state.ProjectionWords ||
-        state.Values.size() != (size_t)state.ColumnCount * block_bytes ||
+        projection_size_wide > size_limit ||
+        state.Projection.size() != (size_t)projection_size_wide ||
+        value_size_wide > size_limit ||
+        state.Values.size() != (size_t)value_size_wide ||
+        pivot_coefficient_size_wide > size_limit ||
         state.PivotCoefficients.size() !=
-            (size_t)state.InactiveCount * state.InactiveCount ||
-        state.PivotRhs.size() !=
-            (size_t)state.InactiveCount * block_bytes ||
+            (size_t)pivot_coefficient_size_wide ||
+        pivot_rhs_size_wide > size_limit ||
+        state.PivotRhs.size() != (size_t)pivot_rhs_size_wide ||
         state.HavePivot.size() != state.InactiveCount ||
         state.CoefficientScratch.size() != state.InactiveCount ||
         state.RhsScratch.size() != block_bytes)
@@ -8089,6 +8105,42 @@ static WirehairResult ResumePrecodeSystemImpl(
                 K, (uint32_t)P_wide, block_id, config, state.Runtime);
         if (columns.empty()) {
             return Wirehair_InvalidInput;
+        }
+
+        // The checkpoint is an internal movable value, but its coordinate
+        // vectors are public.  Validate only the entries this packet can
+        // touch.  This prevents a corrupted checkpoint from indexing past
+        // coefficient scratch without adding an O(L) scan to every resume.
+        for (uint32_t column : columns)
+        {
+            if (column >= state.ColumnCount) {
+                return Wirehair_InvalidInput;
+            }
+            const uint32_t inactive = state.InactiveIndex[column];
+            if (inactive != UINT32_MAX &&
+                (inactive >= state.InactiveCount ||
+                 state.InactiveColumns[inactive] != column))
+            {
+                return Wirehair_InvalidInput;
+            }
+        }
+
+        // InactiveColumns is dereferenced only when the next independent row
+        // can complete the solve.  Check its inverse mapping before any pivot
+        // or scratch mutation, keeping the ordinary NeedMore path O(1).
+        if (allow_insert && state.Rank + 1u == state.InactiveCount)
+        {
+            for (uint32_t inactive = 0u;
+                 inactive < state.InactiveCount;
+                 ++inactive)
+            {
+                const uint32_t column = state.InactiveColumns[inactive];
+                if (column >= state.ColumnCount ||
+                    state.InactiveIndex[column] != inactive)
+                {
+                    return Wirehair_InvalidInput;
+                }
+            }
         }
 
         SolveValueStorage owned_output;
@@ -8125,9 +8177,6 @@ static WirehairResult ResumePrecodeSystemImpl(
         std::memcpy(rhs.data(), block_data, block_bytes);
         for (uint32_t column : columns)
         {
-            if (column >= state.ColumnCount) {
-                return Wirehair_InvalidInput;
-            }
             const uint32_t inactive = state.InactiveIndex[column];
             if (inactive != UINT32_MAX) {
                 coeff[inactive] ^= 1u;

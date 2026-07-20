@@ -2227,6 +2227,9 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
             catch (const std::bad_alloc&) {
                 return Wirehair_OOM;
             }
+            catch (const std::length_error&) {
+                return Wirehair_OOM;
+            }
         }
         *data_bytes_out = bytes;
         return Wirehair_Success;

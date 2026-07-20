@@ -697,6 +697,9 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
         catch (const std::bad_alloc&) {
             return Wirehair_OOM;
         }
+        catch (const std::length_error&) {
+            return Wirehair_OOM;
+        }
     }
 
     if (ResumeState.Active)

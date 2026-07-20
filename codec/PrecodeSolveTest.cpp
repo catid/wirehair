@@ -1737,6 +1737,52 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         return false;
     }
 
+    // A checkpoint is an internal movable value, but its fields are public.
+    // Reject a corrupted inactive-coordinate entry instead of indexing past
+    // the reusable coefficient scratch during duplicate validation.
+    const std::vector<uint32_t> malformed_columns =
+        wirehair_v2::GeneratePacketMatrixRow(
+            K, L - K, 1u, config);
+    if (malformed_columns.empty()) {
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState malformed_resume = resume;
+    malformed_resume.InactiveIndex[malformed_columns[0]] =
+        malformed_resume.InactiveCount;
+    const wirehair_v2::PrecodeSolveResumeState malformed_before =
+        malformed_resume;
+    std::vector<uint8_t> malformed_output = sentinel;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u,
+            message.data() + block_bytes, block_bytes,
+            malformed_resume, malformed_output, nullptr, false) !=
+            Wirehair_InvalidInput ||
+        !SameResumeState(malformed_resume, malformed_before) ||
+        malformed_output != sentinel)
+    {
+        std::fprintf(stderr,
+            "solve: malformed checkpoint inactive index was accepted\n");
+        return false;
+    }
+
+    malformed_resume = resume;
+    malformed_resume.Rank = malformed_resume.InactiveCount - 1u;
+    malformed_resume.InactiveColumns[0] = malformed_resume.ColumnCount;
+    const wirehair_v2::PrecodeSolveResumeState malformed_column_before =
+        malformed_resume;
+    if (wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u,
+            message.data() + block_bytes, block_bytes,
+            malformed_resume, malformed_output, nullptr, true) !=
+            Wirehair_InvalidInput ||
+        !SameResumeState(malformed_resume, malformed_column_before) ||
+        malformed_output != sentinel)
+    {
+        std::fprintf(stderr,
+            "solve: malformed checkpoint inactive column was accepted\n");
+        return false;
+    }
+
     const uint32_t rank_before = resume.Rank;
     const size_t bytes_before = resume.PersistentBytes();
     const std::vector<uint8_t> coefficient_scratch_before =
