@@ -191,6 +191,44 @@ python3 /tmp/wh2-lazy-paired/frozen/wh2_lazy_solve_timing.py verify \
   --result-dir /tmp/wh2-lazy-paired
 ```
 
+`bench/wh2_p32_dispatch_timing.py` applies the same transactional standard to
+the bounded P32/r7 dispatch experiment.  Its controller launches and owns the
+sole CPU/eight-DIMM sampler, receipts the sampler PID, start tick, command,
+root UID, affinity, CSV inode, and I2C-reader set, and uses an identity-checked pidfd
+SIGTERM path on both normal shutdown and provable bootstrap/coverage failure.
+The sampler freezes the nonempty CE/UE EDAC path inventories and rejects any
+missing, malformed, unreadable, or changing counter.  The sampler exclusively
+creates its live CSV as root-owned mode `0444` with one link, keeps only its
+creating descriptor writable, and fsyncs and re-seals that evidence on graceful
+shutdown.  The controller verifies the original device/inode, owner, mode, and
+single-link state before renaming, and offline replay checks the same metadata
+again.
+Prepare freezes the runner and sampler from the pinned Git `HEAD` blobs and
+requires the active files to match; every later command must in turn match the
+frozen runner hash.  Controller termination is deferred across owned sampler
+and detached-child cleanup.  Malformed or incomplete thermal evidence
+invalidates the timing segment even when cleanup succeeds, and is moved into a
+sealed resumable failure archive rather than left as an unbound live-looking
+CSV.  Privileged helpers carry an independent root-side timeout; interruption
+invokes an exact boot-ID/start-tick session sweep that pidfd-kills members even
+when a root descendant created another process group, and the controller does
+not return until no live member remains.  On the prepared EXPO host, canonical
+sampler evidence is checked before timing, continuously while each bounded
+child runs, and between every task;
+the installed V-Color kit's 85 C operating limit is protected by a fail-closed
+84 C DIMM abort threshold.  The reducer keeps cold and warm observations
+together inside each
+`(K, block width, seed, schedule)` cluster and reports deterministic
+20,000-resample paired ratio-of-sums bounds overall and for every K/width route.
+A route is speed-eligible only when all fixed cells are common-success, its
+observed ratio is no worse than production P244/r0, and its one-sided 95%
+upper bound is below 1.01.  That is timing eligibility, not architecture
+promotion: independent cross-payload recovery evidence is still required.
+Run, reduce, and verify hold the same exclusive campaign lock before any
+recovery or publication.  A valid root receipt left before its atomic link, or
+an identical link remnant left just after it, is recovered under that lock and
+then semantically replayed.
+
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
 `both` replays the same message seed and packet-ID schedule through both WH2
