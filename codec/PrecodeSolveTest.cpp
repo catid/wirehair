@@ -1549,7 +1549,9 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         wirehair_v2::MixedResidueBucketMode::Automatic,
     bool dense_two_anchor = false,
     uint32_t grouped_gf256_rows = 0u,
-    uint32_t grouped_gf256_row_mask = UINT32_MAX)
+    uint32_t grouped_gf256_row_mask = UINT32_MAX,
+    wirehair_v2::DenseAnchorLayout segmented_dense_anchors =
+        wirehair_v2::DenseAnchorLayout::Disabled)
 {
     MixedCoefficientGeometryScope geometry_scope(geometry);
     MixedGF16RowsScope rows_scope(extension_rows);
@@ -1655,6 +1657,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 UINT64_C(0x70726f6a65637400) ^
                     ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)));
         params.DenseTwoAnchor = dense_two_anchor;
+        params.SegmentedDenseAnchors = segmented_dense_anchors;
         wirehair_v2::PacketRowConfig base_config;
         base_config.PeelSeed =
             UINT32_C(0x6f72636c) ^ K * UINT32_C(0x9e3779b9);
@@ -1666,6 +1669,25 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         {
             std::fprintf(stderr,
                 "solve: mixed projection oracle selection failed K=%u\n", K);
+            return false;
+        }
+        if ((dense_two_anchor || segmented_dense_anchors !=
+                wirehair_v2::DenseAnchorLayout::Disabled) &&
+            (system.Params.DenseRows != 12u ||
+             system.Params.HeavyRows != subfield_rows + extension_rows ||
+             system.Params.Field !=
+                wirehair_v2::CompletionField::MixedGF256GF16 ||
+             system.Params.DenseTwoAnchor != dense_two_anchor ||
+             system.Params.SegmentedDenseAnchors !=
+                segmented_dense_anchors))
+        {
+            std::fprintf(stderr,
+                "solve: anchor layout/config changed K=%u D=%u H=%u "
+                "expected_H=%u two_anchor=%u segmented=%u\n",
+                K, system.Params.DenseRows, system.Params.HeavyRows,
+                subfield_rows + extension_rows,
+                system.Params.DenseTwoAnchor ? 1u : 0u,
+                (uint32_t)system.Params.SegmentedDenseAnchors);
             return false;
         }
         const uint32_t column_count = K + system.Params.Staircase +
@@ -1912,6 +1934,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         "mixed residue-bucket projection oracle period=%u geometry=%u "
         "gf256_rows=%u gf16_rows=%u skew=%u schedule=%u "
         "independent_extension=%u bucket_mode=%u dense_two_anchor=%u "
+        "segmented_dense_anchors=%u "
         "grouped_gf256_rows=%u grouped_gf256_row_mask=0x%x "
         "grouped_hash_seed=0x%x "
         "comparisons=%llu: PASS\n",
@@ -1920,6 +1943,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         independent_extension_residues ? 1u : 0u,
         (uint32_t)bucket_mode,
         dense_two_anchor ? 1u : 0u,
+        (uint32_t)segmented_dense_anchors,
         grouped_gf256_rows,
         wirehair_v2::ActiveMixedGroupedGF256RowMask(),
         wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
@@ -2037,11 +2061,35 @@ bool CheckMixedProjectionResidueBucketsOracle()
     {
         return false;
     }
-    // The grouped C experiment deliberately uses only the tiny boundary pair
-    // above: every solve still compares optimized projection against the
-    // dense expansion, while explicit separate/joint modes cover both P32
-    // and P64 at the minimum and maximum useful grouped suffix sizes.
-    const uint32_t grouped_periods[] = {32u, 64u};
+    const wirehair_v2::DenseAnchorLayout segmented_layouts[] = {
+        wirehair_v2::DenseAnchorLayout::Three048,
+        wirehair_v2::DenseAnchorLayout::Three059,
+        wirehair_v2::DenseAnchorLayout::Four0369,
+    };
+    for (const wirehair_v2::DenseAnchorLayout layout : segmented_layouts)
+    {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                32u,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16RowsMax,
+                0u,
+                wirehair_v2::MixedResidueSchedule::Hashed,
+                true,
+                11u,
+                wirehair_v2::MixedResidueBucketMode::Automatic,
+                false,
+                0u,
+                UINT32_MAX,
+                layout))
+        {
+            return false;
+        }
+    }
+    // Keep grouped coverage bounded to the two boundary pairs above: every
+    // solve still compares optimized projection against the dense expansion,
+    // while explicit separate/joint modes cover P32, P48, and P64 at the
+    // minimum, finalist, and maximum useful grouped suffix sizes.
+    const uint32_t grouped_periods[] = {32u, 48u, 64u};
     for (const uint32_t period : grouped_periods)
     {
         if (!CheckMixedProjectionResidueBucketsOracleForPeriod(

@@ -34,6 +34,7 @@ bool SameParams(
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
         a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
         a.Seed == b.Seed;
 }
 
