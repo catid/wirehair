@@ -45,6 +45,7 @@ sys.dont_write_bytecode = True
 SCHEMA = "wirehair.wh2.segmented_anchor_solve_timing.v1"
 CONTROLLER_NAME = "wh2_segmented_anchor_solve_timing.py"
 BUILD_HELPER_NAME = "wh2_rank_floor_two_anchor_allk.py"
+BUILD_SUPPORT_NAME = "wh2_rank_floor_two_anchor_screen.py"
 ISOLATION_HELPER_NAME = "wh2_p32_dispatch_timing.py"
 ISOLATION_HELPER_TEST_NAME = "wh2_p32_dispatch_timing_test.py"
 SAMPLER_NAME = "wirehair_expo_thermal_sampler.py"
@@ -1295,6 +1296,7 @@ def prepare_campaign(args: argparse.Namespace) -> None:
     source_dir = Path(__file__).resolve().parent
     sources = (
         Path(__file__).resolve(), source_dir / BUILD_HELPER_NAME,
+        source_dir / BUILD_SUPPORT_NAME,
         source_dir / ISOLATION_HELPER_NAME,
         source_dir / ISOLATION_HELPER_TEST_NAME, source_dir / SAMPLER_NAME,
         source_dir / RECOVERY_RESULT_NAME,

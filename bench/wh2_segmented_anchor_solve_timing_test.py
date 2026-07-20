@@ -9,6 +9,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -388,6 +390,28 @@ class SegmentedAnchorTimingTest(unittest.TestCase):
                       b"GroupedTimingRhsRouteName",
                       b"GroupedTimingExpectedRhsRoute"):
             self.assertNotIn(token, grouped_sources)
+
+    def test_frozen_controller_has_complete_local_import_closure(self) -> None:
+        source = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as temporary:
+            frozen = Path(temporary) / "frozen"
+            frozen.mkdir()
+            for name in (
+                    timing.CONTROLLER_NAME, timing.BUILD_HELPER_NAME,
+                    timing.BUILD_SUPPORT_NAME, timing.ISOLATION_HELPER_NAME):
+                shutil.copyfile(source / name, frozen / name)
+            command = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import wh2_segmented_anchor_solve_timing as timing; "
+                "timing.build_module(); timing.isolation_module()")
+            result = subprocess.run(
+                (sys.executable, "-I", "-c", command, str(frozen)),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=30.0, check=False,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C",
+                     "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1"})
+            self.assertEqual(result.returncode, 0, result.stderr.decode(
+                "utf-8", errors="replace"))
 
     def test_sealed_records_and_busy_ticks(self) -> None:
         value = timing.sealed_record("example.v1", {"answer": 42})
