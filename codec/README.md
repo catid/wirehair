@@ -225,6 +225,22 @@ python3 /tmp/wh2-degree-balanced-paired/frozen/wh2_degree_balanced_timing.py \
   verify --result-dir /tmp/wh2-degree-balanced-paired
 ```
 
+The completed sealed campaign is recorded in
+`bench/wh2_degree_balanced_timing_result.json`.  All 252 fixed tasks were
+common successes.  The degree-balanced/base solve-time ratio was
+`1.000769578416`, with task-clustered paired 95% interval
+`[0.999886574860, 1.001737050504]`; cold and warm intervals also crossed one.
+Thus degree balancing was speed-neutral within this panel's resolution, not a
+speed improvement, although every frozen K/width/schedule stratum remained
+within the one-sided 1% noninferiority gate.  The burst stratum did resolve a
+small slowdown (`1.002154837800`, 95% interval
+`[1.000757181566, 1.003884444433]`), consistent with the candidate's small
+increases in inactivation, XOR, and muladd work.  Combined with the raw
+BlockBytes=64 all-K improvement (failures 733 to 711, weak K 703 to 687, and
+maximum multiplicity 8 to 5), the architecture remains a reliability-only
+candidate.  It is not promoted by this result, and BlockBytes=1280/4096 still
+need the separate cross-payload recovery evidence.
+
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
 `both` replays the same message seed and packet-ID schedule through both WH2

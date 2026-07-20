@@ -1,0 +1,328 @@
+{
+  "schema": "wirehair.wh2.degree_balanced_timing.v1.result_receipt",
+  "promotional": false,
+  "verdict": "retain_as_reliability_only_speed_neutral_candidate",
+  "architecture": {
+    "base_commit": "07c13ecfe03c45e9195336792606c3d74a7be262",
+    "architecture_commit": "176c098dadeab4666bd04a79c199e3d1ec0d0bbe",
+    "measurement_commit": "13d4e548e13a54dfe278970b25495769188d91ec",
+    "timing_harness_commit": "7fbafd953d95d4824f606d430af40987ccdb88ab",
+    "prior_all_K_result_commit": "c4ba11a666256ee8a8802d1e595cd111126d6998",
+    "difference": "degree-balanced staircase only",
+    "seed_fixes_applied": false,
+    "geometry": {
+      "coefficient_period": 244,
+      "gf256_rows": 10,
+      "gf16_rows": 2,
+      "heavy_rows": 12,
+      "mix_count": 2,
+      "dense_two_anchor": true,
+      "dense_two_anchor_phase": 0,
+      "grouped_rows": 0,
+      "seed_block_bytes_override": 0
+    }
+  },
+  "artifacts": {
+    "result_root": "/tmp/wh2-degree-balanced-full-payload-timing-13d4e54-v1",
+    "design_sha256": "3fccdb96b001ca88e48a7e7294b85b457b8a9dd2e3ba4bb2717c1a0a3f9d2211",
+    "prepare_receipt_sha256": "a8590dc14a087c40fa316748b30b7f0362101d2eb1c702a55dac34161d0b9980",
+    "launch_receipt_sha256": "c2f5f273350145e488cae9f0a4ef09422194253c0253ec89aa62ac843c33dcfd",
+    "validated_summary_sha256": "d2bfb5c996e1515bc7af056ed431d6ac96112e65d5e2e297f83366f8576567de",
+    "data_manifest_sha256": "9cb78ca76edf087667048bb38938a0e3ec1c3b65c092945784b10220583f2680",
+    "tasks_manifest_sha256": "0c6ad33cc63ac5ca9e9345aa64a26f3590a44835cecca4c1042565739675ac38",
+    "thermal_interval_sha256": "77bc05460818d9a3566b2a6271529ba46f2cdee1559a7aa297e241834f4f5e92",
+    "frozen_harness_sha256": "402152209b2c557fa3addd223237e205befc8a12037982127ed8c52c6db58c38",
+    "exact_base_binary_sha256": "831c9309e99f3373039299fd37a0118b94bd01ed2dba9941002c30aa10067fd0",
+    "exact_architecture_binary_sha256": "3e75ca1f0c01778a0c1190b62cc4b1b3f54a43eb5e3fd732522bb140478fb0c2",
+    "measurement_binary_sha256": "25f03e1256786c543a855333f6ca3efdedd125516a616bae2f9a01b46037ba19",
+    "frozen_verification": {
+      "status": "PASS",
+      "file_count": 8361
+    }
+  },
+  "campaign": {
+    "started_utc": "2026-07-20T06:27:45.906Z",
+    "ended_utc": "2026-07-20T07:25:11.379Z",
+    "duration_s": 3443.991680899984,
+    "task_count": 252,
+    "execution_count": 2016,
+    "timed_rows_per_architecture": 24192,
+    "K": [
+      3200,
+      9999,
+      10000,
+      20000,
+      32000,
+      48466,
+      64000
+    ],
+    "block_bytes": [
+      64,
+      1280,
+      4096
+    ],
+    "schedules": [
+      "burst",
+      "adversarial",
+      "repair-only"
+    ],
+    "cache_states": [
+      "cold",
+      "warm"
+    ],
+    "independent_seeds_per_schedule": 2,
+    "loss": 0.5,
+    "overhead": 4,
+    "retry_count": 0,
+    "load_workers_stopped": true,
+    "timing_core": 8,
+    "idle_sibling": 72,
+    "controller_core": 126,
+    "sampler_core": 127,
+    "preflight_quiet_core_ticks": 0,
+    "preflight_quiet_sibling_ticks": 0,
+    "campaign_sibling_busy_ticks": 0
+  },
+  "correctness": {
+    "outcome_counts": {
+      "common-success": 252,
+      "common-failure": 0,
+      "base-only": 0,
+      "balanced-only": 0
+    },
+    "all_fixed_cells_common_success": true,
+    "no_post_outcome_filtering": true,
+    "trace_payload_dimensions_seed_receipts_exact": true,
+    "cold_warm_graph_trace_work_exact": true
+  },
+  "latency": {
+    "ratio_convention": "balanced/base; below 1 favors degree balancing",
+    "confidence_method": {
+      "schema": "paired-task-ratio-of-sums-bootstrap-v1",
+      "cluster_coordinates": "K,bb,schedule,seed (cold/warm together when present)",
+      "repetitions": 20000
+    },
+    "overall": {
+      "ratio": "1.000769578416",
+      "lower_95": "0.999886574860",
+      "upper_95": "1.001737050504",
+      "upper_one_sided_95": "1.001572919456",
+      "base_elapsed_ns": 959804042555,
+      "balanced_elapsed_ns": 960542687030,
+      "balanced_faster_slower_tied_tasks": [
+        101,
+        151,
+        0
+      ]
+    },
+    "common_success_diagnostic": {
+      "ratio": "1.000769578416",
+      "lower_95": "0.999885447364",
+      "upper_95": "1.001750096062",
+      "upper_one_sided_95": "1.001570850416",
+      "base_elapsed_ns": 959804042555,
+      "balanced_elapsed_ns": 960542687030,
+      "task_count": 252
+    },
+    "by_cache_state": {
+      "cold": {
+        "ratio": "1.000726865606",
+        "lower_95": "0.999834993482",
+        "upper_95": "1.001746565890",
+        "upper_one_sided_95": "1.001572517107"
+      },
+      "warm": {
+        "ratio": "1.000812572014",
+        "lower_95": "0.999929724711",
+        "upper_95": "1.001792887102",
+        "upper_one_sided_95": "1.001621977460"
+      }
+    },
+    "by_block_bytes": {
+      "64": {
+        "ratio": "1.000782647536",
+        "lower_95": "0.998198822480",
+        "upper_95": "1.003195186615",
+        "upper_one_sided_95": "1.002825506938"
+      },
+      "1280": {
+        "ratio": "1.000411721321",
+        "lower_95": "0.999925872963",
+        "upper_95": "1.001009660401",
+        "upper_one_sided_95": "1.000900839491"
+      },
+      "4096": {
+        "ratio": "1.000916748430",
+        "lower_95": "0.999613310093",
+        "upper_95": "1.002390227976",
+        "upper_one_sided_95": "1.002135329960"
+      }
+    },
+    "by_schedule": {
+      "adversarial": {
+        "ratio": "1.000675989165",
+        "lower_95": "0.999121695353",
+        "upper_95": "1.002649293362",
+        "upper_one_sided_95": "1.002303407107"
+      },
+      "burst": {
+        "ratio": "1.002154837800",
+        "lower_95": "1.000757181566",
+        "upper_95": "1.003884444433",
+        "upper_one_sided_95": "1.003566548728"
+      },
+      "repair-only": {
+        "ratio": "0.999489937059",
+        "lower_95": "0.998665073850",
+        "upper_95": "1.000164470315",
+        "upper_one_sided_95": "1.000056777462"
+      }
+    },
+    "by_K": {
+      "3200": {
+        "ratio": "0.999449513253",
+        "lower_95": "0.997897010915",
+        "upper_95": "1.000851549222",
+        "upper_one_sided_95": "1.000643222618"
+      },
+      "9999": {
+        "ratio": "1.000087112973",
+        "lower_95": "0.996535769109",
+        "upper_95": "1.003776673242",
+        "upper_one_sided_95": "1.003105780732"
+      },
+      "10000": {
+        "ratio": "1.000259348272",
+        "lower_95": "0.999711919459",
+        "upper_95": "1.000843412241",
+        "upper_one_sided_95": "1.000749670681"
+      },
+      "20000": {
+        "ratio": "1.000837252209",
+        "lower_95": "1.000309732076",
+        "upper_95": "1.001728867253",
+        "upper_one_sided_95": "1.001542398794"
+      },
+      "32000": {
+        "ratio": "1.001147654562",
+        "lower_95": "1.000062649694",
+        "upper_95": "1.002581332800",
+        "upper_one_sided_95": "1.002309785115"
+      },
+      "48466": {
+        "ratio": "0.999900726104",
+        "lower_95": "0.999630535978",
+        "upper_95": "1.000144545777",
+        "upper_one_sided_95": "1.000105282908"
+      },
+      "64000": {
+        "ratio": "1.001400614181",
+        "lower_95": "0.999156925562",
+        "upper_95": "1.003697524142",
+        "upper_one_sided_95": "1.003303020561"
+      }
+    }
+  },
+  "deterministic_work": {
+    "binary_def": {
+      "base": 2016,
+      "balanced": 2016,
+      "ratio": "1.000000000000"
+    },
+    "heavy_gain": {
+      "base": 2016,
+      "balanced": 2016,
+      "ratio": "1.000000000000"
+    },
+    "inactivated": {
+      "base": 80184,
+      "balanced": 80222,
+      "ratio": "1.000473910007"
+    },
+    "block_xors": {
+      "base": 168638536,
+      "balanced": 168654356,
+      "ratio": "1.000093810112"
+    },
+    "block_muladds": {
+      "base": 1693724,
+      "balanced": 1694394,
+      "ratio": "1.000395578028"
+    },
+    "joint_and_dual_counters": {
+      "base": 0,
+      "balanced": 0
+    }
+  },
+  "sealed_all_K_raw_recovery": {
+    "evidence_scope": "BlockBytes=64 graph-seed profile only",
+    "K_range": [
+      2,
+      64000
+    ],
+    "cells_per_arm": 575991,
+    "seed_fixes_applied": false,
+    "base_failures": 733,
+    "balanced_failures": 711,
+    "failure_relative_change_pct": "-3.0013642564802185",
+    "base_weak_K": 703,
+    "balanced_weak_K": 687,
+    "weak_K_relative_change_pct": "-2.275960170697013",
+    "base_maximum_weak_K_multiplicity": 8,
+    "balanced_maximum_weak_K_multiplicity": 5,
+    "repairs": 200,
+    "introductions": 178,
+    "both_fail": 533,
+    "both_success": 575080,
+    "failures_by_schedule_base_to_balanced": {
+      "adversarial": [
+        216,
+        221
+      ],
+      "burst": [
+        279,
+        247
+      ],
+      "repair-only": [
+        238,
+        243
+      ]
+    },
+    "frozen_result_sha256": "4507d0f6717cfbd866e7ca24e1639818c5f6946e22b864f37dadc2f4a5f24ffc",
+    "validated_summary_sha256": "bd34669900fc5fce12a2a9e8fa76e3ea34e64ea07d2d29c0d7fa6e497d05d215",
+    "data_manifest_sha256": "8be8c802fbaacd9bc7337b4ea8d8f709402cbf6247ac8041fc66e77adf915c3e"
+  },
+  "thermal": {
+    "sample_count": 3446,
+    "cpu_max_c": 55.75,
+    "dimm_max_c": {
+      "dimm_i2c1_50_c": 44.25,
+      "dimm_i2c1_51_c": 46.25,
+      "dimm_i2c1_52_c": 49.0,
+      "dimm_i2c1_53_c": 49.0,
+      "dimm_i2c2_50_c": 48.75,
+      "dimm_i2c2_51_c": 51.25,
+      "dimm_i2c2_52_c": 52.5,
+      "dimm_i2c2_53_c": 49.25
+    },
+    "max_gap_s": 1.000067999935709,
+    "start_margin_s": 0.4311792909866199,
+    "end_margin_s": 0.5771488090977073,
+    "dimm_read_errors": 0,
+    "edac_ce_delta": 0,
+    "edac_ue_delta": 0
+  },
+  "promotion_gates": {
+    "overall_paired_95_upper_below_one": false,
+    "cold_and_warm_95_uppers_below_one": false,
+    "every_K_width_schedule_one_sided_95_upper_below_1_01": true,
+    "all_fixed_cells_common_success": true,
+    "timing_promotional": false
+  },
+  "recommendation": {
+    "classification": "reliability-only, speed-neutral",
+    "decision": "Do not promote the architecture from this result alone.",
+    "reason": "Raw BlockBytes=64 all-K recovery improves aggregate failures, weak-K count, and maximum multiplicity, but the full-payload solve ratio is 1.000769578416 and its paired 95% interval crosses 1.0. Burst resolves a small slowdown consistent with the candidate's slightly higher inactivation, XOR, and muladd work. The result establishes less than 1% timing noninferiority across every frozen K, width, and schedule stratum, not a speed win.",
+    "next_evidence": "Retain degree balancing as the leading raw reliability candidate while the separate cross-payload recovery holdout resolves the BlockBytes=1280/4096 reliability scope; keep seed repair work staged until raw architecture selection is complete."
+  }
+}
