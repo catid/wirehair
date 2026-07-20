@@ -1235,7 +1235,8 @@ run_bench(grouped_timing_result grouped_timing grouped_timing_err
     groupedtiming --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule adversarial)
 string(REGEX MATCHALL
     "\n4096,64,4,adversarial,4660,0.5,cold," grouped_timing_rows
@@ -1249,7 +1250,7 @@ if(NOT grouped_timing_result EQUAL 0 OR grouped_timing_err OR
    NOT grouped_timing_row_count EQUAL 32 OR
    NOT grouped_timing_valid_row_count EQUAL 32 OR
    NOT grouped_timing MATCHES
-       "schema=v2.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_grouped_rows=0 control_buckets=auto control_grouped_hash_seed=0x0 control_final_h_a_columns=0.*candidate_period=48 candidate_grouped_rows=3 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15162 candidate_final_h_a_columns=12.*dense_two_anchor=1 control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer allocator_tls_state=preflight-warmed solve_value_storage=owned-noinit solve_value_publish=swap" OR
+       "schema=v2.*timing_scope=solve.*cycles=4 order=ABBABAAB discard_cycle=0.*cycle_mode=full cycle_index=all.*overhead=4.*overhead_stream=salted.*control_period=48 control_grouped_rows=0 control_buckets=auto control_grouped_hash_seed=0x0 control_final_h_a_columns=0.*candidate_period=48 candidate_grouped_rows=3 candidate_buckets=separate candidate_grouped_hash_seed=0xb7e15162 candidate_final_h_a_columns=12.*gf256_rows=10 gf16_rows=2 dense_two_anchor=1.*control_attempt=0 control_matrix_seed=0x136889600063cbf control_peel_seed=0x382fe3a7 candidate_attempt=0 candidate_matrix_seed=0x136889600063cbf candidate_peel_seed=0x382fe3a7.*payload=distinct-packet-zero-v1.*payload_count=4100.*payload_alignment=64 payload_prefaulted=1.*system_build=outside-timer tls_reapply=full-per-slot-outside-timer allocator_tls_state=preflight-warmed solve_value_storage=owned-noinit solve_value_publish=swap" OR
    NOT grouped_timing MATCHES
        "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,peel_seed,preflight_result,cell_class,common_success,result,outcome_stable,elapsed_ns,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,joint_source_xors,joint_marginal_xors,joint_marginal_copies,joint_active_deltas,joint_scratch_bytes,dual_source_columns,source_bytes,packet_payload_bytes,intermediate_bytes,solve_value_arena_bytes,solve_value_eager_zero_bytes,solve_value_commit_copy_bytes" OR
    NOT grouped_timing MATCHES
@@ -1281,7 +1282,8 @@ run_bench(grouped_warm_result grouped_warm grouped_warm_err groupedtiming
     --N 3200 --bb 64 --overhead 0
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 32 --candidate-grouped-rows 7
-    --candidate-buckets joint-delta --evict-bytes 4096 --cache-state warm
+    --candidate-buckets joint-delta
+    --evict-bytes 4096 --cache-state warm
     --cycle-index 2 --loss 0.5 --seed 4660 --schedule repair-only)
 string(REGEX MATCHALL
     "\n3200,64,0,repair-only,4660,0.5,warm,2," grouped_warm_rows
@@ -1289,7 +1291,7 @@ string(REGEX MATCHALL
 list(LENGTH grouped_warm_rows grouped_warm_row_count)
 if(NOT grouped_warm_result EQUAL 0 OR grouped_warm_err OR
    NOT grouped_warm_row_count EQUAL 8 OR NOT grouped_warm MATCHES
-       "cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_grouped_rows=0 control_buckets=auto.*candidate_period=32 candidate_grouped_rows=7 candidate_buckets=joint-delta.*dense_two_anchor=1" OR
+       "schema=v2.*cycles=1 order=ABBABAAB discard_cycle=0 cycle_mode=replacement cycle_index=2.*control_period=48 control_grouped_rows=0 control_buckets=auto.*candidate_period=32 candidate_grouped_rows=7 candidate_buckets=joint-delta.*gf256_rows=10 gf16_rows=2 dense_two_anchor=1" OR
    NOT grouped_warm MATCHES
        ",candidate,32,7,joint-delta,0,0x13a1a9dd5eb58b9d,0xf226e3bc,0,common-success,1,0,1,[0-9]+,0,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,115,12,12,73665,1756,[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+,3172,1984,64,32,6144,0,204800,204800,210304,210304,0,0")
     message(FATAL_ERROR
@@ -1304,7 +1306,8 @@ run_bench(grouped_width_result grouped_width_out grouped_width_err groupedtiming
     --N 4096 --bb 512 --overhead 4
     --control-period 244 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 32 --candidate-grouped-rows 7
-    --candidate-buckets auto --evict-bytes 4096 --cache-state warm
+    --candidate-buckets auto
+    --evict-bytes 4096 --cache-state warm
     --cycle-index 2 --loss 0.5 --seed 15111065706836454659
     --schedule burst)
 if(NOT grouped_width_result EQUAL 0 OR NOT grouped_width_err STREQUAL "" OR
@@ -1319,33 +1322,102 @@ expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 11 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0
     --control-buckets separate
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("argument domain mismatch" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 48 --candidate-grouped-rows 10
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 4660 --schedule burst)
 expect_failure("bad --seed value" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state cold
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state cold
     --loss 0.5 --seed 0x1234 --schedule burst)
 expect_failure("cache-state must be cold or warm" groupedtiming
     --N 4096 --bb 64 --overhead 4
     --control-period 48 --control-grouped-rows 0 --control-buckets auto
     --candidate-period 48 --candidate-grouped-rows 3
-    --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
+    --candidate-buckets separate
+    --evict-bytes 4096 --cache-state tepid
     --loss 0.5 --seed 4660 --schedule burst)
+
+expect_failure("candidate-dense-layout must be" groupedtiming
+    --N 4096 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-dense-layout two-anchor
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --candidate-dense-layout four-0379
+    --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule burst)
+
+expect_failure("selectors must be supplied for both arms or neither" groupedtiming
+    --N 3200 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-dense-layout two-anchor
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule burst)
+
+expect_failure("identical non-layout arm settings" groupedtiming
+    --N 3200 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-dense-layout two-anchor
+    --candidate-period 48 --candidate-grouped-rows 3
+    --candidate-buckets separate --candidate-dense-layout four-0369
+    --evict-bytes 4096 --cache-state warm
+    --loss 0.5 --seed 4660 --schedule burst)
+
+# Keep the pre-existing sealed two-anchor timing controllers replayable.  The
+# no-selector pair retains the exact v2 preamble; explicit raw-layout work uses
+# the richer v3 schema below.
+run_bench(grouped_legacy_result grouped_legacy grouped_legacy_err
+    groupedtiming --N 3200 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --evict-bytes 4096 --cache-state warm
+    --cycle-index 2 --loss 0.5 --seed 4660 --schedule burst)
+if(NOT grouped_legacy_result EQUAL 0 OR grouped_legacy_err OR
+   NOT grouped_legacy MATCHES
+       "schema=v2.*gf256_rows=10 gf16_rows=2 dense_two_anchor=1.*solve_value_storage=owned-noinit solve_value_publish=swap" OR
+   grouped_legacy MATCHES "dense_layout_is_only_architecture_selector")
+    message(FATAL_ERROR
+        "legacy grouped two-anchor timing fixture failed\n"
+        "${grouped_legacy}\n${grouped_legacy_err}")
+endif()
+
+# The segmented-anchor timing selector changes only the raw D12 row layout;
+# both arms retain P244 q0 mixed 10+2 and the same full-payload packet trace.
+run_bench(grouped_segmented_result grouped_segmented grouped_segmented_err
+    groupedtiming --N 3200 --bb 64 --overhead 4
+    --control-period 244 --control-grouped-rows 0 --control-buckets auto
+    --control-dense-layout two-anchor
+    --candidate-period 244 --candidate-grouped-rows 0
+    --candidate-buckets auto --candidate-dense-layout four-0369
+    --evict-bytes 4096 --cache-state warm --cycle-index 2
+    --loss 0.5 --seed 15111065706836454659 --schedule burst)
+if(NOT grouped_segmented_result EQUAL 0 OR grouped_segmented_err OR
+   NOT grouped_segmented MATCHES
+       "schema=v3.*control_period=244 control_grouped_rows=0 control_buckets=auto.*candidate_period=244 candidate_grouped_rows=0 candidate_buckets=auto.*gf256_rows=10 gf16_rows=2 control_dense_layout=two-anchor candidate_dense_layout=four-0369 dense_layout_is_only_architecture_selector=1 control_staircase_rows=62 control_dense_rows=12 control_heavy_rows=12 control_source_hits=2 control_field=1 control_dense_identity_corner=0 control_dense_two_anchor_exact=1 control_dense_two_anchor_phase=0 control_segmented_dense_anchors=none control_heavy_family=0 control_mix_count=2 candidate_staircase_rows=62 candidate_dense_rows=12 candidate_heavy_rows=12 candidate_source_hits=2 candidate_field=1 candidate_dense_identity_corner=0 candidate_dense_two_anchor_exact=0 candidate_dense_two_anchor_phase=0 candidate_segmented_dense_anchors=four-0369 candidate_heavy_family=0 candidate_mix_count=2.*payload=distinct-packet-zero-v1.*common_success=1" OR
+   NOT grouped_segmented MATCHES ",control,244,0,auto," OR
+   NOT grouped_segmented MATCHES ",candidate,244,0,auto,")
+    message(FATAL_ERROR
+        "grouped segmented-anchor timing fixture failed\n"
+        "${grouped_segmented}\n${grouped_segmented_err}")
+endif()
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64

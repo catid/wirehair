@@ -6891,7 +6891,51 @@ struct GroupedTimingArm
     uint32_t GroupedRows = 0u;
     wirehair_v2::MixedResidueBucketMode Buckets =
         wirehair_v2::MixedResidueBucketMode::Automatic;
+    // Disabled names the raw D12 two-anchor phase-zero layout for this arm.
+    // Nonzero values select exactly one experiment-only segmented
+    // layout; named/profile routing is deliberately bypassed for both arms.
+    wirehair_v2::DenseAnchorLayout SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Disabled;
 };
+
+const char* GroupedTimingDenseLayoutName(const GroupedTimingArm& arm)
+{
+    return arm.SegmentedDenseAnchors ==
+            wirehair_v2::DenseAnchorLayout::Disabled ?
+        "two-anchor" : DenseAnchorLayoutName(arm.SegmentedDenseAnchors);
+}
+
+bool ParseGroupedTimingDenseLayout(
+    const char* text,
+    wirehair_v2::DenseAnchorLayout& segmented_layout)
+{
+    if (!std::strcmp(text, "two-anchor")) {
+        segmented_layout = wirehair_v2::DenseAnchorLayout::Disabled;
+        return true;
+    }
+    return ParseDenseAnchorLayout(text, segmented_layout);
+}
+
+void ApplyGroupedTimingDenseLayout(
+    const GroupedTimingArm& arm,
+    wirehair_v2::PrecodeParams& params)
+{
+    params.DenseTwoAnchor = arm.SegmentedDenseAnchors ==
+        wirehair_v2::DenseAnchorLayout::Disabled;
+    params.DenseTwoAnchorPhase = 0u;
+    params.SegmentedDenseAnchors = arm.SegmentedDenseAnchors;
+}
+
+bool GroupedTimingDenseLayoutMatches(
+    const GroupedTimingArm& arm,
+    const wirehair_v2::PrecodeParams& params)
+{
+    const bool two_anchor = arm.SegmentedDenseAnchors ==
+        wirehair_v2::DenseAnchorLayout::Disabled;
+    return params.DenseTwoAnchor == two_anchor &&
+        params.DenseTwoAnchorPhase == 0u &&
+        params.SegmentedDenseAnchors == arm.SegmentedDenseAnchors;
+}
 
 bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
 {
@@ -6941,7 +6985,7 @@ bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
         wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
 }
 
-bool SameGroupedTimingBaseGraph(
+bool SameGroupedTimingNonLayoutConfiguration(
     const wirehair_v2::PrecodeParams& a_params,
     const wirehair_v2::PacketRowConfig& a_config,
     const wirehair_v2::PrecodeParams& b_params,
@@ -6954,13 +6998,30 @@ bool SameGroupedTimingBaseGraph(
         a_params.SourceHits == b_params.SourceHits &&
         a_params.Field == b_params.Field &&
         a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
-        a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
         a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
-        a_params.SegmentedDenseAnchors ==
-            b_params.SegmentedDenseAnchors &&
         a_params.HeavyFamily == b_params.HeavyFamily &&
         a_params.Seed == b_params.Seed &&
         a_config.PeelSeed == b_config.PeelSeed &&
+        a_config.MixCount == b_config.MixCount;
+}
+
+bool SameGroupedTimingSelectedDimensions(
+    const wirehair_v2::PrecodeSystem& a_system,
+    const wirehair_v2::PacketRowConfig& a_config,
+    const wirehair_v2::PrecodeSystem& b_system,
+    const wirehair_v2::PacketRowConfig& b_config)
+{
+    const wirehair_v2::PrecodeParams& a = a_system.Params;
+    const wirehair_v2::PrecodeParams& b = b_system.Params;
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.Field == b.Field &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.HeavyFamily == b.HeavyFamily &&
         a_config.MixCount == b_config.MixCount;
 }
 
@@ -7052,9 +7113,11 @@ int CmdGroupedTiming(int argc, char** argv)
     bool have_control_period = false;
     bool have_control_rows = false;
     bool have_control_buckets = false;
+    bool have_control_dense_layout = false;
     bool have_candidate_period = false;
     bool have_candidate_rows = false;
     bool have_candidate_buckets = false;
+    bool have_candidate_dense_layout = false;
     bool have_eviction = false;
     bool have_cache_state = false;
     bool have_loss = false;
@@ -7122,6 +7185,20 @@ int CmdGroupedTiming(int argc, char** argv)
             }
             have_control_buckets = true;
         }
+        else if (!std::strcmp(argv[i], "--control-dense-layout")) {
+            if (have_control_dense_layout || !TakeArg(
+                    "groupedtiming", "--control-dense-layout",
+                    argc, argv, i, value) ||
+                !ParseGroupedTimingDenseLayout(
+                    value, control_arm.SegmentedDenseAnchors))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --control-dense-layout must be "
+                    "two-anchor, three-048, three-059, or four-0369\n");
+                return 1;
+            }
+            have_control_dense_layout = true;
+        }
         else if (!std::strcmp(argv[i], "--candidate-period")) {
             if (have_candidate_period || !TakeArg(
                     "groupedtiming", "--candidate-period",
@@ -7157,6 +7234,20 @@ int CmdGroupedTiming(int argc, char** argv)
                 return 1;
             }
             have_candidate_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-dense-layout")) {
+            if (have_candidate_dense_layout || !TakeArg(
+                    "groupedtiming", "--candidate-dense-layout",
+                    argc, argv, i, value) ||
+                !ParseGroupedTimingDenseLayout(
+                    value, candidate_arm.SegmentedDenseAnchors))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --candidate-dense-layout must be "
+                    "two-anchor, three-048, three-059, or four-0369\n");
+                return 1;
+            }
+            have_candidate_dense_layout = true;
         }
         else if (!std::strcmp(argv[i], "--evict-bytes")) {
             if (have_eviction || !TakeArg(
@@ -7226,6 +7317,15 @@ int CmdGroupedTiming(int argc, char** argv)
             return 1;
         }
     }
+    if (have_control_dense_layout != have_candidate_dense_layout)
+    {
+        std::fprintf(stderr,
+            "groupedtiming dense-layout selectors must be supplied for "
+            "both arms or neither arm\n");
+        return 1;
+    }
+    const bool explicit_dense_layouts =
+        have_control_dense_layout && have_candidate_dense_layout;
     if (!have_K || !have_block_bytes || !have_overhead ||
         !have_control_period || !have_control_rows ||
         !have_control_buckets || !have_candidate_period ||
@@ -7236,8 +7336,10 @@ int CmdGroupedTiming(int argc, char** argv)
             "groupedtiming requires --N, --bb, --overhead, "
             "--control-period, --control-grouped-rows, --control-buckets, "
             "--candidate-period, --candidate-grouped-rows, "
-            "--candidate-buckets, --evict-bytes, --cache-state, --loss, "
-            "--seed, and --schedule\n");
+            "--candidate-buckets, --evict-bytes, "
+            "--cache-state, --loss, "
+            "--seed, and --schedule; dense-layout selectors are optional "
+            "only as a legacy two-anchor pair\n");
         return 1;
     }
     const auto invalid_arm = [](const GroupedTimingArm& arm) {
@@ -7270,6 +7372,16 @@ int CmdGroupedTiming(int argc, char** argv)
         std::fprintf(stderr, "groupedtiming argument domain mismatch\n");
         return 1;
     }
+    if (explicit_dense_layouts &&
+        (control_arm.Period != candidate_arm.Period ||
+         control_arm.GroupedRows != candidate_arm.GroupedRows ||
+         control_arm.Buckets != candidate_arm.Buckets))
+    {
+        std::fprintf(stderr,
+            "groupedtiming explicit dense-layout comparison requires "
+            "identical non-layout arm settings\n");
+        return 1;
+    }
     const std::vector<int> one_K(1u, (int)K);
     const std::vector<int> one_bb(1u, (int)block_bytes);
     if (!ValidatePayloadE2EInputs(
@@ -7298,9 +7410,7 @@ int CmdGroupedTiming(int argc, char** argv)
             "groupedtiming could not construct the control arm\n");
         return 2;
     }
-    // The grouped reliability campaign used the raw two-anchor architecture
-    // at every K, rather than the later adaptive named-profile cutoff.
-    control_base_params.DenseTwoAnchor = true;
+    ApplyGroupedTimingDenseLayout(control_arm, control_base_params);
     if (control_arm.GroupedRows != 0u) {
         control_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
@@ -7323,14 +7433,19 @@ int CmdGroupedTiming(int argc, char** argv)
             "groupedtiming could not construct the candidate arm\n");
         return 2;
     }
-    candidate_base_params.DenseTwoAnchor = true;
+    ApplyGroupedTimingDenseLayout(candidate_arm, candidate_base_params);
     if (candidate_arm.GroupedRows != 0u) {
         candidate_grouped_hash_seed =
             wirehair_v2::ActiveMixedGroupedGF256HashSeed();
     }
-    if (!SameGroupedTimingBaseGraph(
+    // The raw dense layout is the sole allowed graph difference.  In
+    // particular, both arms retain D=12, mixed 10+2, q0, phase zero, and the
+    // same unspecialized seed/profile inputs.
+    if (!SameGroupedTimingNonLayoutConfiguration(
             control_base_params, control_base_config,
-            candidate_base_params, candidate_base_config))
+            candidate_base_params, candidate_base_config) ||
+        control_base_params.DenseTwoAnchorPhase != 0u ||
+        candidate_base_params.DenseTwoAnchorPhase != 0u)
     {
         std::fprintf(stderr,
             "groupedtiming arms do not share one base graph/configuration\n");
@@ -7344,6 +7459,18 @@ int CmdGroupedTiming(int argc, char** argv)
         std::fprintf(stderr,
             "groupedtiming candidate seed selection failed result=%d\n",
             (int)candidate_select);
+        return 2;
+    }
+    if (!GroupedTimingDenseLayoutMatches(control_arm, control_system.Params) ||
+        !GroupedTimingDenseLayoutMatches(
+            candidate_arm, candidate_system.Params) ||
+        !SameGroupedTimingSelectedDimensions(
+            control_system, control_config,
+            candidate_system, candidate_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming selected arms changed their layout identity or "
+            "a non-layout dimension\n");
         return 2;
     }
 
@@ -7400,8 +7527,10 @@ int CmdGroupedTiming(int argc, char** argv)
         have_cycle_index ? std::to_string(cycle_index) : "all";
     const uint64_t packet_payload_bytes =
         ((uint64_t)K + overhead) * block_bytes;
-    std::printf(
-        "# groupedtiming: schema=v2 policy=h12-q0-grouped "
+    if (explicit_dense_layouts)
+    {
+        std::printf(
+        "# groupedtiming: schema=v3 policy=h12-q0-grouped "
         "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
         "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
         "loss=%.17g seed=%llu schedule=%s cache_state=%s "
@@ -7413,7 +7542,22 @@ int CmdGroupedTiming(int argc, char** argv)
         "candidate_grouped_rows=%u candidate_buckets=%s "
         "candidate_grouped_hash_seed=0x%x "
         "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
-        "dense_two_anchor=1 control_attempt=%u "
+        "control_dense_layout=%s candidate_dense_layout=%s "
+        "dense_layout_is_only_architecture_selector=1 "
+        "control_staircase_rows=%u control_dense_rows=%u "
+        "control_heavy_rows=%u control_source_hits=%u control_field=%u "
+        "control_dense_identity_corner=%u "
+        "control_dense_two_anchor_exact=%u "
+        "control_dense_two_anchor_phase=%u "
+        "control_segmented_dense_anchors=%s control_heavy_family=%u "
+        "control_mix_count=%u "
+        "candidate_staircase_rows=%u candidate_dense_rows=%u "
+        "candidate_heavy_rows=%u candidate_source_hits=%u "
+        "candidate_field=%u candidate_dense_identity_corner=%u "
+        "candidate_dense_two_anchor_exact=%u "
+        "candidate_dense_two_anchor_phase=%u "
+        "candidate_segmented_dense_anchors=%s candidate_heavy_family=%u "
+        "candidate_mix_count=%u control_attempt=%u "
         "control_matrix_seed=0x%llx control_peel_seed=0x%x "
         "candidate_attempt=%u candidate_matrix_seed=0x%llx "
         "candidate_peel_seed=0x%x mix=2 "
@@ -7440,6 +7584,32 @@ int CmdGroupedTiming(int argc, char** argv)
         candidate_grouped_hash_seed,
         candidate_arm.GroupedRows != 0u ?
             candidate_system.Params.HeavyRows : 0u,
+        GroupedTimingDenseLayoutName(control_arm),
+        GroupedTimingDenseLayoutName(candidate_arm),
+        control_system.Params.Staircase,
+        control_system.Params.DenseRows,
+        control_system.Params.HeavyRows,
+        control_system.Params.SourceHits,
+        static_cast<uint32_t>(control_system.Params.Field),
+        control_system.Params.DenseIdentityCorner ? 1u : 0u,
+        control_system.Params.DenseTwoAnchor ? 1u : 0u,
+        control_system.Params.DenseTwoAnchorPhase,
+        DenseAnchorLayoutName(
+            control_system.Params.SegmentedDenseAnchors),
+        static_cast<uint32_t>(control_system.Params.HeavyFamily),
+        control_config.MixCount,
+        candidate_system.Params.Staircase,
+        candidate_system.Params.DenseRows,
+        candidate_system.Params.HeavyRows,
+        candidate_system.Params.SourceHits,
+        static_cast<uint32_t>(candidate_system.Params.Field),
+        candidate_system.Params.DenseIdentityCorner ? 1u : 0u,
+        candidate_system.Params.DenseTwoAnchor ? 1u : 0u,
+        candidate_system.Params.DenseTwoAnchorPhase,
+        DenseAnchorLayoutName(
+            candidate_system.Params.SegmentedDenseAnchors),
+        static_cast<uint32_t>(candidate_system.Params.HeavyFamily),
+        candidate_config.MixCount,
         control_attempt,
         (unsigned long long)control_system.Params.Seed,
         control_config.PeelSeed, candidate_attempt,
@@ -7450,6 +7620,64 @@ int CmdGroupedTiming(int argc, char** argv)
         (int)control_preflight.Result, (int)candidate_preflight.Result,
         outcome_class, common_success ? 1u : 0u,
         cell.TraceSha256.c_str());
+    }
+    else
+    {
+        // Preserve the sealed v2 interface for older two-anchor timing
+        // controllers.  New architecture comparisons always opt into the
+        // explicit selectors and the richer v3 receipt above.
+        std::printf(
+            "# groupedtiming: schema=v2 policy=h12-q0-grouped "
+            "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
+            "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
+            "loss=%.17g seed=%llu schedule=%s cache_state=%s "
+            "overhead_stream=salted "
+            "evict_bytes=%llu eviction_prefaulted=1 "
+            "control_period=%u control_grouped_rows=%u "
+            "control_buckets=%s control_grouped_hash_seed=0x%x "
+            "control_final_h_a_columns=%u candidate_period=%u "
+            "candidate_grouped_rows=%u candidate_buckets=%s "
+            "candidate_grouped_hash_seed=0x%x "
+            "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
+            "dense_two_anchor=1 control_attempt=%u "
+            "control_matrix_seed=0x%llx control_peel_seed=0x%x "
+            "candidate_attempt=%u candidate_matrix_seed=0x%llx "
+            "candidate_peel_seed=0x%x mix=2 "
+            "payload=distinct-packet-zero-v1 payload_count=%u "
+            "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
+            "system_build=outside-timer "
+            "tls_reapply=full-per-slot-outside-timer "
+            "allocator_tls_state=preflight-warmed "
+            "solve_value_storage=owned-noinit solve_value_publish=swap "
+            "preflight_control_result=%d preflight_candidate_result=%d "
+            "cell_class=%s common_success=%u trace_sha256=%s\n",
+            have_cycle_index ? 1u : 4u,
+            have_cycle_index ? "replacement" : "full",
+            cycle_index_text.c_str(), K, block_bytes, overhead, loss,
+            (unsigned long long)seed, PacketScheduleName(schedule),
+            GroupedTimingCacheStateName(cache_state),
+            (unsigned long long)eviction_bytes,
+            control_arm.Period, control_arm.GroupedRows,
+            MixedResidueBucketModeName(control_arm.Buckets),
+            control_grouped_hash_seed,
+            control_arm.GroupedRows != 0u ?
+                control_system.Params.HeavyRows : 0u,
+            candidate_arm.Period, candidate_arm.GroupedRows,
+            MixedResidueBucketModeName(candidate_arm.Buckets),
+            candidate_grouped_hash_seed,
+            candidate_arm.GroupedRows != 0u ?
+                candidate_system.Params.HeavyRows : 0u,
+            control_attempt,
+            (unsigned long long)control_system.Params.Seed,
+            control_config.PeelSeed, candidate_attempt,
+            (unsigned long long)candidate_system.Params.Seed,
+            candidate_config.PeelSeed,
+            K + overhead,
+            (unsigned long long)packet_payload_bytes,
+            (int)control_preflight.Result, (int)candidate_preflight.Result,
+            outcome_class, common_success ? 1u : 0u,
+            cell.TraceSha256.c_str());
+    }
     std::printf(
         "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
         "period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,"

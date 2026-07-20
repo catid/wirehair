@@ -135,25 +135,85 @@ cost rather than relying on a peel-only proxy.
 Test builds also expose `groupedtiming` for promotion-grade, paired timing of
 the raw grouped-GF(256) completion experiments.  Each invocation binds one
 hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
-`--schedule`) and compares explicit control/candidate period, grouped-row, and
-residue-bucket settings.  It uses distinct 64-byte-aligned, prefaulted packet
-payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
-requested replacement cycle) with raw nanoseconds, internal solve phases,
-work counters, CPU migration, and fault receipts.  `--cache-state cold`
+`--schedule`) and compares explicit control/candidate period, grouped-row,
+residue-bucket, and raw dense-layout settings.  New architecture comparisons
+name both `--control-dense-layout` and `--candidate-dense-layout` as
+`two-anchor`, `three-048`, `three-059`, or `four-0369`; these selectors
+bypass adaptive named-profile routing without applying any additional weak-K
+architecture seed repair.  Explicit layout comparisons require identical
+period, grouped-row, and residue-bucket settings on both arms, so the layout
+is the only architecture selector; omit both layout flags for the legacy
+grouped-GF period/row/bucket comparisons.  It uses distinct 64-byte-aligned,
+prefaulted packet payloads, preflights both arms, then emits four `ABBABAAB`
+cycles (or one requested replacement cycle) with raw nanoseconds, internal
+solve phases, work counters, CPU migration, and fault receipts.
+`--cache-state cold`
 evicts the requested `--evict-bytes` before every sample; `warm` retains the
 working set.  Here `cold` means data-cache-cold after both arm preflights;
 the command intentionally does not measure fresh-process allocator or first-
 use TLS setup costs, and receipts this as `allocator_tls_state=preflight-warmed`.
-Schema v2 also runs both preflights and timed samples through the codec-owned
-no-init solve arena, then records its allocated bytes, eager-zero bytes, and
-commit-copy bytes.  Valid production-route observations require the last two
-receipts to be zero; the completed arena is published by ownership swap.
+Both schemas run preflights and timed samples through the codec-owned no-init
+solve arena, then record its allocated bytes, eager-zero bytes, and commit-copy
+bytes.  Schema v3 additionally receipts both raw dense-layout identities.  For
+replay compatibility, omitting both dense-layout selectors retains the prior
+raw two-anchor behavior and exact schema-v2 preamble; supplying only one
+selector is rejected.  Valid production-route observations require the last
+two arena receipts to be zero; the completed arena is published by ownership
+swap.
 Only rows whose preflight classification is `common-success`
 are valid paired speed observations.  All test-only TLS settings are reapplied
 outside the timer before every arm, and this command changes no named profile
 or production equation.  The benchmark records the CPU before and after each
 sample but does not choose an affinity itself; promotion runners must pin each
 process and reject rows reporting migration, faults, or saturated timing.
+
+`bench/wh2_segmented_anchor_solve_timing.py` seals the promotion comparison
+for raw `three-048` and `four-0369`, each independently paired with the raw
+two-anchor q0 baseline.  Its 648-task manifest crosses six K values, block
+widths 64/1280/4096, three independent packet seeds, all three hard schedules,
+and cold/warm cache state.  The four members of each candidate/cache cluster
+remain adjacent and are rolled back together after an interruption.  The run
+executes 20,736 physical solves; discarding cycle zero leaves 15,552 retained
+timing observations.  Preparation freezes
+the exact committed source, native Release binary, controller, thermal
+isolation code, CPU/DIMM sampler, and raw all-K recovery result; it does not
+launch quiet timing.  The isolation helper, its tests, and sampler are imported
+byte-exact from reviewed commit `97a3a0b941f3efe34a6e18609b7681d3a1110982`;
+the design records that commit, its tree, and every imported Git-blob and file
+digest.  A typical invocation is:
+
+```bash
+python3 bench/wh2_segmented_anchor_solve_timing.py prepare \
+  --repo "$PWD" --binary build/codec/wirehair_v2_bench \
+  --result-dir /tmp/wh2-segmented-anchor-solve-timing-v1 \
+  --core 8 --controller-core 126 --thermal-core 127 --numa-node 0
+/tmp/wh2-segmented-anchor-solve-timing-v1/frozen/wh2_segmented_anchor_solve_timing.py \
+  preflight --result-dir /tmp/wh2-segmented-anchor-solve-timing-v1
+/tmp/wh2-segmented-anchor-solve-timing-v1/frozen/wh2_segmented_anchor_solve_timing.py \
+  run --result-dir /tmp/wh2-segmented-anchor-solve-timing-v1 --max-tasks 36
+/tmp/wh2-segmented-anchor-solve-timing-v1/frozen/wh2_segmented_anchor_solve_timing.py \
+  verify --result-dir /tmp/wh2-segmented-anchor-solve-timing-v1
+/tmp/wh2-segmented-anchor-solve-timing-v1/frozen/wh2_segmented_anchor_solve_timing.py \
+  reduce --result-dir /tmp/wh2-segmented-anchor-solve-timing-v1
+```
+
+`run` refuses to start while fillers, another Wirehair campaign, another I2C
+reader, or activity on any CPU sharing the timing LLC remains.  It owns the
+sole CPU/DIMM sampler through a post-end sample and rejects CPU temperatures
+at or above 85 C, DIMM temperatures at or above 84 C, DIMM read errors, EDAC
+changes, thermal cadence gaps, process migration, per-task activity above one
+busy tick on any other logical CPU in the timing LLC, more than 64 minor faults
+or any major fault, and saturated timers.  A raw candidate passes the speed
+gate only when every fixed cell is common-success, its observed ratio of sums
+is at most 1.01, and the paired cluster bootstrap's
+one-sided 95% upper bound is below 1.01.  When both candidates pass that gate,
+the runner also bootstraps their candidate solve times on the identical
+clusters, normalizing each by its cotimed identical two-anchor baseline.  It
+selects `three-048` only when that ratio-of-ratios is at least 0.5% faster and
+its one-sided 95% upper bound is below parity; otherwise
+`four-0369` retains the decision edge from its stronger all-K recovery.  No
+additional weak-K architecture seed repair is applied during this comparison;
+both arms retain the identical baseline profile seed inputs.
 
 `bench/wh2_lazy_solve_timing.py` is the sealed cross-binary runner for the
 solve-arena change.  Its `prepare` command builds exact commits
