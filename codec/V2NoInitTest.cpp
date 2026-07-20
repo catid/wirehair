@@ -83,6 +83,10 @@ bool CheckPatternInitializedAccessors()
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
         system.Params.DenseTwoAnchor ||
+        system.Params.DenseTwoAnchorPhase != 0u ||
+        system.Params.Field != wirehair_v2::CompletionField::GF256 ||
+        system.Params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
         system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
         !system.DenseRowColumns.empty() || stats.StaircaseBlockOps != 0u ||
         stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||
@@ -151,6 +155,18 @@ bool CheckPatternInitializedAccessors()
         decoder_options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
         decoder_system.Params.BlockCount != 0u ||
+        decoder_system.Params.Staircase != 0u ||
+        decoder_system.Params.DenseRows != 0u ||
+        decoder_system.Params.HeavyRows != 0u ||
+        decoder_system.Params.SourceHits != 0u ||
+        decoder_system.Params.Field !=
+            wirehair_v2::CompletionField::GF256 ||
+        decoder_system.Params.DenseIdentityCorner ||
+        decoder_system.Params.DenseTwoAnchor ||
+        decoder_system.Params.DenseTwoAnchorPhase != 0u ||
+        decoder_system.Params.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
+        decoder_system.Params.Seed != 0u ||
         !decoder_system.StaircaseRows.empty() ||
         !decoder_system.DenseRowColumns.empty() ||
         solve_stats.PacketRows != 0u ||

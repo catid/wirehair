@@ -4803,6 +4803,14 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
 #endif
         values.reserve(value_bytes);
+        // SolveNoInitAllocator makes this resize a lifetime operation without
+        // touching the byte payload.  Complete it before consulting data():
+        // the standard does not require an empty vector to expose reserved
+        // storage through data(), whereas a non-empty vector must expose its
+        // contiguous element array.  This keeps the Linux huge-page hint
+        // effective with conforming standard-library implementations while
+        // still issuing it before the solver's first byte write.
+        values.resize(value_bytes);
 #if defined(__linux__) && defined(MADV_HUGEPAGE)
         // Request transparent huge pages before the first touch.  The value
         // workspace is both large and repeatedly scanned by payload XORs;
@@ -4849,7 +4857,6 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
         }
 #endif
-        values.resize(value_bytes);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         st.SolveValueArenaBytes = value_bytes;
         st.SolveValueArenaEagerZeroBytes = 0u;

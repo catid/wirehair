@@ -32,6 +32,7 @@ bool SameParams(
         a.HeavyFamily == b.HeavyFamily &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
         a.Seed == b.Seed;
 }
 
@@ -55,7 +56,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     const uint32_t K = 2u + input.U8() % 127u;
     wirehair_v2::PrecodeParams params =
         wirehair_v2::MakeCertifiedParams(K, input.U64());
-    const unsigned mutation = input.U8() % 16u;
+    const unsigned mutation = input.U8() % 21u;
     bool expected_valid = false;
     switch (mutation)
     {
@@ -88,9 +89,30 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     case 14:
         params.Field = static_cast<wirehair_v2::CompletionField>(UINT32_MAX);
         break;
-    default:
+    case 15:
         params = wirehair_v2::MakeMixedParams(K, params.Seed);
         expected_valid = true;
+        break;
+    case 16:
+        // A phase has no meaning without the two-anchor construction.
+        params.DenseTwoAnchorPhase = 1u;
+        break;
+    case 17:
+        params.DenseTwoAnchor = true;
+        params.DenseTwoAnchorPhase = 3u;
+        break;
+    case 18:
+        params.DenseTwoAnchor = true;
+        params.DenseTwoAnchorPhase = input.U8() % 3u;
+        expected_valid = true;
+        break;
+    case 19:
+        params.HeavyFamily =
+            static_cast<wirehair_v2::HeavyCoefficientFamily>(UINT32_MAX);
+        break;
+    default:
+        params.DenseIdentityCorner = true;
+        params.DenseTwoAnchor = true;
         break;
     }
 
