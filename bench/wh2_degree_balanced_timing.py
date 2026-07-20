@@ -1973,6 +1973,8 @@ def prepare_campaign(args: argparse.Namespace) -> None:
                 "required_cpu": SAMPLER_CORE,
                 "source_is_growing": True,
                 "seal_minimal_bracketing_slice_transactionally": True,
+                "temperature_validation_scope":
+                    "latest-baseline-and-minimal-bracket",
             },
             "tasks_manifest_sha256": sha256_bytes(manifest),
             "immutable_files": immutable_files, "tools": tool_records,
@@ -2066,6 +2068,8 @@ def _load_design(root: Path) -> Dict[str, object]:
             "required_cpu": SAMPLER_CORE,
             "source_is_growing": True,
             "seal_minimal_bracketing_slice_transactionally": True,
+            "temperature_validation_scope":
+                "latest-baseline-and-minimal-bracket",
         },
     }
     for key, value in expected.items():
@@ -2626,7 +2630,9 @@ def _discover_external_thermal_reader(
     return reader, csv_path, pid_file
 
 
-def _parse_thermal(raw: bytes) -> Tuple[Tuple[Dict[str, str], ...], Tuple[bytes, ...]]:
+def _parse_thermal(
+    raw: bytes, *, validate_temperatures: bool = True,
+) -> Tuple[Tuple[Dict[str, str], ...], Tuple[bytes, ...]]:
     # The frozen sampler uses csv.DictWriter's canonical Excel line ending.
     if (not raw or not raw.endswith(b"\r\n") or b"\0" in raw or b'"' in raw):
         raise TimingError("thermal CSV is not canonical CRLF text")
@@ -2658,30 +2664,37 @@ def _parse_thermal(raw: bytes) -> Tuple[Tuple[Dict[str, str], ...], Tuple[bytes,
         if not math.isfinite(monotonic) or monotonic <= previous:
             raise TimingError("thermal monotonic timestamps are not increasing")
         previous = monotonic
-        for field in ("cpu_tctl_c", *DIMM_FIELDS):
-            try:
-                value = float(row[field])
-            except ValueError as exc:
-                raise TimingError("thermal temperature is missing") from exc
-            if not math.isfinite(value):
-                raise TimingError("thermal temperature is nonfinite")
-            if ((field == "cpu_tctl_c" and not 0.0 < value < 130.0) or
-                    (field != "cpu_tctl_c" and not -40.0 < value < 130.0)):
-                raise TimingError("thermal temperature is implausible")
+        if validate_temperatures:
+            for field in ("cpu_tctl_c", *DIMM_FIELDS):
+                try:
+                    value = float(row[field])
+                except ValueError as exc:
+                    raise TimingError("thermal temperature is missing") from exc
+                if not math.isfinite(value):
+                    raise TimingError("thermal temperature is nonfinite")
+                if ((field == "cpu_tctl_c" and not 0.0 < value < 130.0) or
+                        (field != "cpu_tctl_c" and
+                         not -40.0 < value < 130.0)):
+                    raise TimingError("thermal temperature is implausible")
         for field in ("dimm_read_errors", "edac_ce", "edac_ue"):
             parse_uint(row[field], "thermal " + field)
     return rows, lines
 
 
 def _latest_thermal_row(path: Path) -> Dict[str, str]:
-    rows, _lines, _raw = _stable_thermal_snapshot(path)
+    rows, lines, _raw = _stable_thermal_snapshot(
+        path, validate_temperatures=False)
     if not rows:
         raise TimingError("thermal CSV has no samples")
-    return rows[-1]
+    latest_rows, _latest_lines = _parse_thermal(lines[0] + lines[-1])
+    if len(latest_rows) != 1:
+        raise TimingError("thermal latest-row accounting mismatch")
+    return latest_rows[0]
 
 
 def _stable_thermal_snapshot(
-    path: Path, timeout_s: float = 1.0,
+    path: Path, timeout_s: float = 1.0, *,
+    validate_temperatures: bool = True,
 ) -> Tuple[Tuple[Dict[str, str], ...], Tuple[bytes, ...], bytes]:
     """Read around a concurrent append without accepting malformed evidence."""
     deadline = time.monotonic() + timeout_s
@@ -2689,7 +2702,8 @@ def _stable_thermal_snapshot(
     while True:
         try:
             raw = stable_bytes(path, attempts=3)
-            rows, lines = _parse_thermal(raw)
+            rows, lines = _parse_thermal(
+                raw, validate_temperatures=validate_temperatures)
             return rows, lines, raw
         except (OSError, TimingError) as exc:
             last_error = exc
@@ -2753,7 +2767,8 @@ def collect_thermal_interval(
 ) -> Tuple[bytes, Dict[str, object]]:
     deadline = time.monotonic() + 10.0
     while True:
-        rows, lines, _raw = _stable_thermal_snapshot(path)
+        rows, lines, _raw = _stable_thermal_snapshot(
+            path, validate_temperatures=False)
         if rows and float(rows[-1]["monotonic_s"]) >= end_s:
             break
         if time.monotonic() >= deadline:

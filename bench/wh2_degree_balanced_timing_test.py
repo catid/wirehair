@@ -643,6 +643,46 @@ class ReceiptStatisticsAndThermalTests(unittest.TestCase):
         self.assertEqual(raw, complete)
         self.assertEqual(len(rows) + 1, len(lines))
 
+    def test_historical_bad_temperature_does_not_poison_latest_or_interval(self):
+        text = thermal_csv((8.0, 9.0, 10.0, 11.0, 12.0)).decode(
+            "ascii").splitlines()
+        header = text[0].split(",")
+        fields = text[1].split(",")
+        fields[header.index("dimm_i2c2_52_c")] = "240.75"
+        text[1] = ",".join(fields)
+        raw = ("\r\n".join(text) + "\r\n").encode("ascii")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "thermal.csv"
+            path.write_bytes(raw)
+            latest = timing._latest_thermal_row(path)
+            selected, summary = timing.collect_thermal_interval(
+                path, 10.25, 11.75)
+        self.assertEqual(latest["monotonic_s"], "12.0")
+        rows, _lines = timing._parse_thermal(selected)
+        self.assertEqual(
+            [float(row["monotonic_s"]) for row in rows],
+            [10.0, 11.0, 12.0])
+        self.assertEqual(summary["sample_count"], 3)
+
+    def test_latest_and_in_interval_bad_temperatures_fail_closed(self):
+        for line_index, operation in ((-1, "latest"), (2, "interval")):
+            with self.subTest(operation=operation):
+                text = thermal_csv().decode("ascii").splitlines()
+                header = text[0].split(",")
+                fields = text[line_index].split(",")
+                fields[header.index("dimm_i2c2_52_c")] = "240.75"
+                text[line_index] = ",".join(fields)
+                raw = ("\r\n".join(text) + "\r\n").encode("ascii")
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "thermal.csv"
+                    path.write_bytes(raw)
+                    with self.assertRaisesRegex(
+                            timing.TimingError, "temperature is implausible"):
+                        if operation == "latest":
+                            timing._latest_thermal_row(path)
+                        else:
+                            timing.collect_thermal_interval(path, 9.25, 11.75)
+
     def test_thermal_gap_and_edac_change_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "thermal.csv"
