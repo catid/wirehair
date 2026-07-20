@@ -71,6 +71,21 @@ introductions remain report-only during raw architecture selection, matching
 the project methodology.  A passing recovery result still records
 `promotion_ready=false`: independent full-payload timing evidence is required.
 
+## Invalidated artifacts
+
+An abandoned campaign root is never a resume source.  The controller recognizes
+the sealed root-level markers `INVALIDATED_TIMEOUT.json` and
+`INVALIDATED_THERMAL_SAFETY.json`.  Their schemas and self hashes are verified
+before reporting them, and the presence of either marker makes preparation,
+preflight or execution, cohort sealing, and reduction fail closed.  A broken,
+indirect, noncanonical, or incorrectly sealed recognized marker also blocks the
+root; malformed invalidation evidence must not make an artifact resumable.
+
+`audit-invalidation` is the only operation permitted on such a root.  It reads
+no codec output and reports only each marker's filename, schema, file hash,
+reason, and whether outcomes informed the invalidation decision.  Replacement
+campaigns must always use a fresh root and fresh receipts.
+
 ## Frozen input and commands
 
 The canonical input JSON has schema
@@ -99,6 +114,9 @@ python3 bench/wh2_cross_payload_recovery.py prepare \
 
 /tmp/wh2-cross-payload-v1/frozen/wh2_cross_payload_recovery.py reduce \
   --root /tmp/wh2-cross-payload-v1
+
+/tmp/wh2-cross-payload-v1/frozen/wh2_cross_payload_recovery.py \
+  audit-invalidation --root /tmp/wh2-cross-payload-v1
 ```
 
 The first `run` command is a receipt preflight; only `--execute` starts codec

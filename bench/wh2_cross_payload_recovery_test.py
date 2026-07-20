@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 from copy import deepcopy
 from decimal import Decimal
+import io
 import os
 from pathlib import Path
 import sys
@@ -424,6 +426,95 @@ class CanonicalArtifactTests(unittest.TestCase):
                     subject.load_canonical_object(path, "fixture")
             path.write_bytes(subject.canonical_json({"a": 1}))
             self.assertEqual(subject.load_canonical_object(path, "fixture"), {"a": 1})
+
+
+class InvalidationGuardTests(unittest.TestCase):
+    @staticmethod
+    def marker_payload(schema: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "reason": "bounded fixture invalidation",
+            "outcomes_inspected_for_decision": False,
+        }
+        if schema.endswith(".invalidated_thermal_safety"):
+            payload.update({
+                "artifact_resume_forbidden": True,
+                "nonpromotional": True,
+            })
+        return payload
+
+    def write_marker(self, root: Path, filename: str, schema: str) -> Path:
+        marker = subject.sealed_record(schema, self.marker_payload(schema))
+        path = root / filename
+        path.write_bytes(subject.canonical_json(marker))
+        return path
+
+    def test_clean_fresh_root_has_no_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(subject.present_invalidation_markers(root), [])
+            subject.refuse_invalidated_root(root)
+
+    def test_timeout_and_thermal_markers_self_verify_and_block(self) -> None:
+        for filename, schema in subject.INVALIDATION_MARKERS:
+            with self.subTest(filename=filename), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = self.write_marker(root, filename, schema)
+                audited = subject.audit_invalidation_markers(root)
+                self.assertEqual(len(audited), 1)
+                self.assertEqual(audited[0]["filename"], filename)
+                self.assertEqual(audited[0]["schema"], schema)
+                self.assertEqual(audited[0]["sha256"], subject.sha256_file(path))
+                with self.assertRaisesRegex(
+                        subject.CampaignError, "campaign root is invalidated"):
+                    subject.refuse_invalidated_root(root)
+
+    def test_malformed_recognized_marker_fails_closed(self) -> None:
+        filename, schema = subject.INVALIDATION_MARKERS[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = subject.sealed_record(schema, self.marker_payload(schema))
+            marker["self_sha256_excluding_field"] = "0" * 64
+            (root / filename).write_bytes(subject.canonical_json(marker))
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "malformed invalidation marker"):
+                subject.refuse_invalidated_root(root)
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "self hash mismatch"):
+                subject.audit_invalidation_markers(root)
+            (root / filename).write_bytes(
+                b"x" * (subject.MAX_INVALIDATION_BYTES + 1))
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "exceeds its byte bound"):
+                subject.audit_invalidation_markers(root)
+            (root / filename).unlink()
+            (root / filename).symlink_to(root / "missing-marker")
+            with self.assertRaisesRegex(
+                    subject.CampaignError, "malformed invalidation marker"):
+                subject.refuse_invalidated_root(root)
+
+    def test_invalidated_root_blocks_campaign_commands_but_allows_audit(self) -> None:
+        filename, schema = subject.INVALIDATION_MARKERS[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_marker(root, filename, schema)
+            commands = (
+                ["prepare", "--root", str(root), "--design", str(root / "input")],
+                ["run", "--root", str(root), "--phase", "discovery"],
+                ["seal-cohort", "--root", str(root)],
+                ["reduce", "--root", str(root)],
+            )
+            for argv in commands:
+                stderr = io.StringIO()
+                with self.subTest(command=argv[0]), \
+                        contextlib.redirect_stderr(stderr):
+                    self.assertEqual(subject.main(argv), 1)
+                self.assertIn("campaign root is invalidated", stderr.getvalue())
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(subject.main([
+                    "audit-invalidation", "--root", str(root)]), 0)
+            self.assertIn("CAMPAIGN_INVALIDATED", stdout.getvalue())
 
 
 class ExecutionBoundTests(unittest.TestCase):

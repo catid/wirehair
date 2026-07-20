@@ -66,6 +66,7 @@ MAX_STDOUT_BYTES = {
     "evaluation": 4 * 1024 * 1024,
 }
 MAX_STDERR_BYTES = 16 * 1024
+MAX_INVALIDATION_BYTES = 64 * 1024
 # Discovery jobs cover 256 K values x four widths.  Evaluation jobs cover four
 # K values x four widths x three nested overheads x 64 trials, exactly three
 # times as many trial-solves.  The original 300-second bound was invalidated
@@ -77,6 +78,11 @@ MAX_WORKERS = 256
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OBJECT_RE = re.compile(r"[0-9a-f]{40}\Z")
 OPTION_RE = re.compile(r"--[a-z0-9][a-z0-9-]*\Z")
+INVALIDATION_MARKERS = (
+    ("INVALIDATED_TIMEOUT.json", SCHEMA + ".invalidated_timeout"),
+    ("INVALIDATED_THERMAL_SAFETY.json",
+     SCHEMA + ".invalidated_thermal_safety"),
+)
 
 # These fields are printed from wall-clock measurements and are not semantic
 # recovery evidence.  The raw stdout remains hash-bound in every receipt.
@@ -213,11 +219,16 @@ def _reject_duplicate_pairs(pairs: Sequence[Tuple[str, object]]) -> Dict[str, ob
     return result
 
 
-def load_canonical_object(path: Path, context: str) -> Dict[str, object]:
+def load_canonical_object(
+    path: Path, context: str, maximum: Optional[int] = None,
+) -> Dict[str, object]:
     if not path.is_file() or path.is_symlink():
         die("{} is missing or indirect".format(context))
     try:
-        data = path.read_bytes()
+        with path.open("rb") as stream:
+            data = stream.read() if maximum is None else stream.read(maximum + 1)
+        if maximum is not None and len(data) > maximum:
+            die("{} exceeds its byte bound".format(context))
         value = json.loads(
             data.decode("ascii"), object_pairs_hook=_reject_duplicate_pairs,
             parse_constant=lambda token: (_ for _ in ()).throw(
@@ -228,6 +239,68 @@ def load_canonical_object(path: Path, context: str) -> Dict[str, object]:
     if not isinstance(value, dict) or canonical_json(value) != data:
         die("{} is not one canonical JSON object".format(context))
     return value
+
+
+def present_invalidation_markers(root: Path) -> List[Tuple[Path, str]]:
+    """Return recognized markers without following an indirect marker."""
+    present: List[Tuple[Path, str]] = []
+    for filename, schema in INVALIDATION_MARKERS:
+        path = root / filename
+        # Path.exists() is false for a broken symlink.  A recognized broken
+        # marker must still fail closed instead of making the root resumable.
+        if path.exists() or path.is_symlink():
+            present.append((path, schema))
+    return present
+
+
+def load_invalidation_marker(path: Path, schema: str) -> Dict[str, object]:
+    marker = load_canonical_object(
+        path, "campaign invalidation marker", MAX_INVALIDATION_BYTES)
+    verify_sealed(marker, schema)
+    require_ascii_text(marker.get("reason"), "invalidation reason", 1024)
+    if not isinstance(marker.get("outcomes_inspected_for_decision"), bool):
+        die("invalidation outcome-inspection flag is malformed")
+    if schema == SCHEMA + ".invalidated_thermal_safety" and (
+            marker.get("artifact_resume_forbidden") is not True or
+            marker.get("nonpromotional") is not True):
+        die("thermal invalidation does not forbid resume and promotion")
+    return marker
+
+
+def audit_invalidation_markers(root: Path) -> List[Dict[str, object]]:
+    paths = present_invalidation_markers(root)
+    if not paths:
+        die("campaign root has no recognized invalidation marker")
+    audited: List[Dict[str, object]] = []
+    for path, schema in paths:
+        marker = load_invalidation_marker(path, schema)
+        audited.append({
+            "filename": path.name,
+            "schema": schema,
+            # load_canonical_object proved that these are the exact file bytes,
+            # so this hash cannot race a second read of mutable path content.
+            "sha256": sha256_bytes(canonical_json(marker)),
+            "reason": marker["reason"],
+            "outcomes_inspected_for_decision":
+                marker["outcomes_inspected_for_decision"],
+        })
+    return audited
+
+
+def refuse_invalidated_root(root: Path) -> None:
+    paths = present_invalidation_markers(root)
+    if not paths:
+        return
+    names: List[str] = []
+    for path, schema in paths:
+        try:
+            load_invalidation_marker(path, schema)
+        except CampaignError as exc:
+            die("campaign root contains malformed invalidation marker {}: {}; "
+                "refusing operation".format(path.name, exc))
+        names.append(path.name)
+    die("campaign root is invalidated by {}; use audit-invalidation for "
+        "read-only inspection".format(", ".join(names)))
 
 
 def load_jsonl(path: Path, context: str) -> List[Dict[str, object]]:
@@ -962,6 +1035,7 @@ def prepare_config(
 def verify_config(
     root: Path, *, require_frozen_controller: bool = True,
 ) -> Dict[str, object]:
+    refuse_invalidated_root(root)
     config = load_canonical_object(root / "config.json", "campaign config")
     verify_sealed(config, SCHEMA + ".config")
     expected_top = {
@@ -1785,6 +1859,7 @@ def command_prepare(args: argparse.Namespace) -> None:
     root = resolve_direct_path(args.root, "campaign root")
     design_path = resolve_direct_path(args.design, "input design")
     controller = Path(__file__).resolve()
+    refuse_invalidated_root(root)
     if root.exists() or root.is_symlink():
         die("campaign root already exists")
     input_record, arms = load_input_design(design_path)
@@ -1837,6 +1912,16 @@ def command_reduce(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def command_audit_invalidation(args: argparse.Namespace) -> None:
+    root = resolve_direct_path(args.root, "campaign root")
+    markers = audit_invalidation_markers(root)
+    print(json.dumps({
+        "status": "CAMPAIGN_INVALIDATED",
+        "root": str(root),
+        "markers": markers,
+    }, indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1857,6 +1942,11 @@ def build_parser() -> argparse.ArgumentParser:
     reduce_parser = sub.add_parser("reduce", help="strictly reduce completed evaluation")
     reduce_parser.add_argument("--root", required=True)
     reduce_parser.set_defaults(function=command_reduce)
+    audit = sub.add_parser(
+        "audit-invalidation",
+        help="read and self-verify invalidation markers without campaign work")
+    audit.add_argument("--root", required=True)
+    audit.set_defaults(function=command_audit_invalidation)
     return parser
 
 
