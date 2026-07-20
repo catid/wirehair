@@ -17,6 +17,24 @@
 
 namespace {
 
+bool IsSegmentedAnchor(
+    wirehair_v2::DenseAnchorLayout layout,
+    uint32_t row)
+{
+    switch (layout)
+    {
+    case wirehair_v2::DenseAnchorLayout::Disabled:
+        return false;
+    case wirehair_v2::DenseAnchorLayout::Three048:
+        return row == 4u || row == 8u;
+    case wirehair_v2::DenseAnchorLayout::Three059:
+        return row == 5u || row == 9u;
+    case wirehair_v2::DenseAnchorLayout::Four0369:
+        return row == 3u || row == 6u || row == 9u;
+    }
+    return false;
+}
+
 bool TestParams()
 {
     struct ParamCase
@@ -42,7 +60,9 @@ bool TestParams()
             params.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
             params.SourceHits != c.SourceHits ||
-            params.DenseTwoAnchor || params.DenseTwoAnchorPhase != 0u)
+            params.DenseTwoAnchor || params.DenseTwoAnchorPhase != 0u ||
+            params.SegmentedDenseAnchors !=
+                wirehair_v2::DenseAnchorLayout::Disabled)
         {
             std::fprintf(stderr,
                 "certified params wrong for K=%u (N1=%u, want %u)\n",
@@ -116,6 +136,25 @@ bool TestParams()
     invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
     invalid.DenseTwoAnchor = true;
     invalid.DenseTwoAnchorPhase = 3u;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.SegmentedDenseAnchors =
+        static_cast<wirehair_v2::DenseAnchorLayout>(UINT32_MAX);
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseRows = 13u;
+    invalid.SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Three048;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseIdentityCorner = true;
+    invalid.SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Three059;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.DenseTwoAnchor = true;
+    invalid.SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Four0369;
     invalid_params.push_back(invalid);
 
     for (size_t i = 0; i < invalid_params.size(); ++i)
@@ -240,7 +279,8 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
     for (uint32_t r = 0; r < D2; ++r)
     {
         if ((r == 0u ||
-             (system.Params.DenseTwoAnchor && r == second_anchor)) &&
+             (system.Params.DenseTwoAnchor && r == second_anchor) ||
+             IsSegmentedAnchor(system.Params.SegmentedDenseAnchors, r)) &&
             system.DenseRowColumns[r].size() != set_count)
         {
             std::fprintf(stderr,
@@ -259,7 +299,9 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
     std::vector<std::vector<uint32_t>> flips(D2);
     for (uint32_t r = 1; r < D2; ++r)
     {
-        if (system.Params.DenseTwoAnchor && r == second_anchor) {
+        if ((system.Params.DenseTwoAnchor && r == second_anchor) ||
+            IsSegmentedAnchor(system.Params.SegmentedDenseAnchors, r))
+        {
             continue;
         }
         const std::vector<uint32_t>& prev = system.DenseRowColumns[r - 1u];
@@ -277,23 +319,49 @@ bool TestDenseRows(const wirehair_v2::PrecodeSystem& system)
             return false;
         }
     }
-    const uint32_t half1_end = 1u + (D2 >> 1); // flips[1 .. half1_end)
-    for (uint32_t half = 0; half < 2u; ++half)
+    if (system.Params.SegmentedDenseAnchors !=
+        wirehair_v2::DenseAnchorLayout::Disabled)
     {
-        const uint32_t begin = half == 0u ? 1u :
-            half1_end + (system.Params.DenseTwoAnchor ? 1u : 0u);
-        const uint32_t end = half == 0u ? half1_end : D2;
         std::vector<uint32_t> seen;
-        for (uint32_t r = begin; r < end; ++r) {
-            seen.insert(seen.end(), flips[r].begin(), flips[r].end());
-        }
-        std::sort(seen.begin(), seen.end());
-        if (std::adjacent_find(seen.begin(), seen.end()) != seen.end())
+        for (uint32_t r = 1u; r < D2; ++r)
         {
-            std::fprintf(stderr,
-                "K=%u: dense flip columns repeat within half %u "
-                "(reshuffle cadence broken)\n", K, half);
-            return false;
+            if (IsSegmentedAnchor(
+                    system.Params.SegmentedDenseAnchors, r))
+            {
+                seen.clear();
+                continue;
+            }
+            seen.insert(seen.end(), flips[r].begin(), flips[r].end());
+            std::sort(seen.begin(), seen.end());
+            if (std::adjacent_find(seen.begin(), seen.end()) != seen.end())
+            {
+                std::fprintf(stderr,
+                    "K=%u: segmented dense flip columns repeat before row "
+                    "%u\n", K, r);
+                return false;
+            }
+        }
+    }
+    else
+    {
+        const uint32_t half1_end = 1u + (D2 >> 1);
+        for (uint32_t half = 0; half < 2u; ++half)
+        {
+            const uint32_t begin = half == 0u ? 1u :
+                half1_end + (system.Params.DenseTwoAnchor ? 1u : 0u);
+            const uint32_t end = half == 0u ? half1_end : D2;
+            std::vector<uint32_t> seen;
+            for (uint32_t r = begin; r < end; ++r) {
+                seen.insert(seen.end(), flips[r].begin(), flips[r].end());
+            }
+            std::sort(seen.begin(), seen.end());
+            if (std::adjacent_find(seen.begin(), seen.end()) != seen.end())
+            {
+                std::fprintf(stderr,
+                    "K=%u: dense flip columns repeat within half %u "
+                    "(reshuffle cadence broken)\n", K, half);
+                return false;
+            }
         }
     }
     return true;
@@ -343,6 +411,27 @@ uint64_t DenseRowsFingerprint(const wirehair_v2::PrecodeSystem& system)
         for (uint32_t col : row) {
             mix_u32(col);
         }
+    }
+    return hash;
+}
+
+uint64_t DenseRowFingerprint(
+    const wirehair_v2::PrecodeSystem& system,
+    uint32_t row_index)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    const auto mix_u32 = [&](uint32_t value) {
+        for (uint32_t shift = 0u; shift < 32u; shift += 8u) {
+            hash ^= (uint8_t)(value >> shift);
+            hash *= UINT64_C(1099511628211);
+        }
+    };
+    const std::vector<uint32_t>& row = system.DenseRowColumns[row_index];
+    mix_u32(system.Params.BlockCount);
+    mix_u32(row_index);
+    mix_u32((uint32_t)row.size());
+    for (uint32_t col : row) {
+        mix_u32(col);
     }
     return hash;
 }
@@ -478,6 +567,188 @@ bool TestTwoAnchorDeterminism(uint32_t K)
     return true;
 }
 
+bool TestSegmentedAnchorDeterminism(uint32_t K)
+{
+    struct LayoutCase
+    {
+        wirehair_v2::DenseAnchorLayout Layout;
+        const char* Name;
+        uint32_t FirstNewAnchor;
+        uint64_t Golden945;
+        const uint64_t* RowGolden945;
+    };
+    const uint64_t three_048_rows[12] = {
+        UINT64_C(0xb71983b36aa95920), UINT64_C(0x6758d728ae434ebb),
+        UINT64_C(0xbd256d5bc82201c0), UINT64_C(0x321c23f70f8b278b),
+        UINT64_C(0xfe1b14d9cbcb97d5), UINT64_C(0xaa213233381d7dfa),
+        UINT64_C(0xad163627fb14754d), UINT64_C(0xbc6a8a1532f254e0),
+        UINT64_C(0x34f9f35926725e67), UINT64_C(0xb6c79175988edd33),
+        UINT64_C(0x4eb4c4eb12decec1), UINT64_C(0x55fdcb082e68ea35),
+    };
+    const uint64_t three_059_rows[12] = {
+        UINT64_C(0xb71983b36aa95920), UINT64_C(0x6758d728ae434ebb),
+        UINT64_C(0xbd256d5bc82201c0), UINT64_C(0x321c23f70f8b278b),
+        UINT64_C(0xfbc675aac5533238), UINT64_C(0x0ec7d053d8037254),
+        UINT64_C(0x7d328ddfcbb877f5), UINT64_C(0x0e8f69adedf7368c),
+        UINT64_C(0xb9a7fe707f0c4e17), UINT64_C(0x13699362e519a812),
+        UINT64_C(0x9894b2e32de20114), UINT64_C(0x4e63cd329f9e71bc),
+    };
+    const uint64_t four_0369_rows[12] = {
+        UINT64_C(0xb71983b36aa95920), UINT64_C(0x6758d728ae434ebb),
+        UINT64_C(0xbd256d5bc82201c0), UINT64_C(0x203809eb42fe52aa),
+        UINT64_C(0xe6d346a8f13b1b6b), UINT64_C(0xad885cf139ea1172),
+        UINT64_C(0x4e41003d3c0d59ed), UINT64_C(0x8e0f6f089707d0b9),
+        UINT64_C(0x7ffec0c15a0ab1cb), UINT64_C(0x01ee8d462c7d77d4),
+        UINT64_C(0x42871ee9300586cd), UINT64_C(0x0e83d6fcaa2339ea),
+    };
+    const LayoutCase cases[] = {
+        { wirehair_v2::DenseAnchorLayout::Three048,
+          "three-048", 4u, UINT64_C(0xad50fc11e0b275a3),
+          three_048_rows },
+        { wirehair_v2::DenseAnchorLayout::Three059,
+          "three-059", 5u, UINT64_C(0xa09ac7ab786d41a1),
+          three_059_rows },
+        { wirehair_v2::DenseAnchorLayout::Four0369,
+          "four-0369", 3u, UINT64_C(0x89f570b207ae565d),
+          four_0369_rows },
+    };
+
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeMixedParams(K, UINT64_C(0x5eed7a12));
+    wirehair_v2::PrecodeSystem baseline;
+    if (!BuildPrecodeSystem(params, baseline)) {
+        std::fprintf(stderr, "K=%u: segmented baseline build failed\n", K);
+        return false;
+    }
+    params.DenseTwoAnchor = true;
+    wirehair_v2::PrecodeSystem two_anchor;
+    if (!BuildPrecodeSystem(params, two_anchor)) {
+        std::fprintf(stderr, "K=%u: raw two-anchor comparator build failed\n", K);
+        return false;
+    }
+    params.DenseTwoAnchor = false;
+
+    std::vector<std::vector<std::vector<uint32_t>>> candidate_rows;
+    for (const LayoutCase& c : cases)
+    {
+        params.SegmentedDenseAnchors = c.Layout;
+        wirehair_v2::PrecodeSystem system, repeat;
+        if (!BuildPrecodeSystem(params, system) ||
+            !BuildPrecodeSystem(params, repeat) ||
+            !TestStaircase(system) || !TestDenseRows(system) ||
+            system.StaircaseRows != repeat.StaircaseRows ||
+            system.DenseRowColumns != repeat.DenseRowColumns)
+        {
+            std::fprintf(stderr,
+                "K=%u: segmented %s deterministic build failed\n", K, c.Name);
+            return false;
+        }
+        if (system.Params.DenseRows != 12u ||
+            system.Params.Staircase != baseline.Params.Staircase ||
+            system.Params.HeavyRows != baseline.Params.HeavyRows ||
+            system.Params.SourceHits != baseline.Params.SourceHits ||
+            system.Params.Field != baseline.Params.Field ||
+            system.Params.HeavyFamily != baseline.Params.HeavyFamily ||
+            system.Params.DenseIdentityCorner ||
+            system.StaircaseRows != baseline.StaircaseRows ||
+            system.Params.DenseTwoAnchor ||
+            system.Params.DenseTwoAnchorPhase != 0u ||
+            system.Params.SegmentedDenseAnchors != c.Layout ||
+            system.Params.Seed != baseline.Params.Seed)
+        {
+            std::fprintf(stderr,
+                "K=%u: segmented %s changed row/GF counts or staircase\n",
+                K, c.Name);
+            return false;
+        }
+        for (uint32_t row = 0u; row < c.FirstNewAnchor; ++row)
+        {
+            if (system.DenseRowColumns[row] !=
+                baseline.DenseRowColumns[row])
+            {
+                std::fprintf(stderr,
+                    "K=%u: segmented %s changed preserved row %u\n",
+                    K, c.Name, row);
+                return false;
+            }
+        }
+        for (uint32_t row = 1u; row < 12u; ++row)
+        {
+            std::vector<uint32_t> transition;
+            std::set_symmetric_difference(
+                system.DenseRowColumns[row - 1u].begin(),
+                system.DenseRowColumns[row - 1u].end(),
+                system.DenseRowColumns[row].begin(),
+                system.DenseRowColumns[row].end(),
+                std::back_inserter(transition));
+            const bool anchor = IsSegmentedAnchor(c.Layout, row);
+            if ((!anchor && transition.size() != 2u) ||
+                (anchor && transition.size() <= 2u))
+            {
+                std::fprintf(stderr,
+                    "K=%u: segmented %s row %u transition=%zu anchor=%u\n",
+                    K, c.Name, row, transition.size(), anchor ? 1u : 0u);
+                return false;
+            }
+            if (anchor)
+            {
+                wirehair_v2::PrecodeSystem bad = system;
+                bad.DenseRowColumns[row].pop_back();
+                if (wirehair_v2::ValidatePrecodeSystem(bad))
+                {
+                    std::fprintf(stderr,
+                        "K=%u: validator accepted damaged %s anchor %u\n",
+                        K, c.Name, row);
+                    return false;
+                }
+            }
+        }
+        if (system.DenseRowColumns == two_anchor.DenseRowColumns)
+        {
+            std::fprintf(stderr,
+                "K=%u: segmented %s aliases raw two-anchor comparator\n",
+                K, c.Name);
+            return false;
+        }
+        for (const auto& prior : candidate_rows) {
+            if (system.DenseRowColumns == prior) {
+                std::fprintf(stderr,
+                    "K=%u: segmented %s aliases another candidate\n",
+                    K, c.Name);
+                return false;
+            }
+        }
+        candidate_rows.push_back(system.DenseRowColumns);
+
+        if (K == 945u)
+        {
+            const uint64_t hash = DenseRowsFingerprint(system);
+            if (hash != c.Golden945)
+            {
+                std::fprintf(stderr,
+                    "K=945: segmented %s fingerprint=%016llx want=%016llx\n",
+                    c.Name, (unsigned long long)hash,
+                    (unsigned long long)c.Golden945);
+                return false;
+            }
+            for (uint32_t row = 0u; row < 12u; ++row)
+            {
+                const uint64_t row_hash = DenseRowFingerprint(system, row);
+                if (row_hash != c.RowGolden945[row])
+                {
+                    std::fprintf(stderr,
+                        "K=945: segmented %s row %u fingerprint=%016llx "
+                        "want=%016llx\n",
+                        c.Name, row, (unsigned long long)row_hash,
+                        (unsigned long long)c.RowGolden945[row]);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // GF(256) GE rank of an h x h matrix (destructive)
 unsigned SquareRank(std::vector<uint8_t>& m, unsigned h)
 {
@@ -606,6 +877,9 @@ int main()
         if (!TestTwoAnchorDeterminism(K)) {
             return 1;
         }
+        if (!TestSegmentedAnchorDeterminism(K)) {
+            return 1;
+        }
     }
 
     // Identity-corner dense variant: deck spans only K + S, and dense row
@@ -723,6 +997,27 @@ int main()
             std::fprintf(stderr,
                 "random two-anchor builder validation failed at K=%u\n", K);
             return 1;
+        }
+
+        const wirehair_v2::DenseAnchorLayout layouts[] = {
+            wirehair_v2::DenseAnchorLayout::Three048,
+            wirehair_v2::DenseAnchorLayout::Three059,
+            wirehair_v2::DenseAnchorLayout::Four0369,
+        };
+        params.DenseTwoAnchor = false;
+        params.DenseTwoAnchorPhase = 0u;
+        for (const wirehair_v2::DenseAnchorLayout layout : layouts)
+        {
+            params.SegmentedDenseAnchors = layout;
+            if (!BuildPrecodeSystem(params, system) ||
+                !wirehair_v2::ValidatePrecodeSystem(system) ||
+                !TestDenseRows(system))
+            {
+                std::fprintf(stderr,
+                    "random segmented-anchor builder validation failed "
+                    "at K=%u layout=%u\n", K, (uint32_t)layout);
+                return 1;
+            }
         }
     }
 

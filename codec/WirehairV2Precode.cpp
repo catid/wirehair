@@ -109,6 +109,32 @@ size_t SymmetricDifferenceCountBelow(
     return count;
 }
 
+bool IsSegmentedDenseAnchor(
+    DenseAnchorLayout layout,
+    uint32_t row_index)
+{
+    switch (layout)
+    {
+    case DenseAnchorLayout::Disabled:
+        return false;
+    case DenseAnchorLayout::Three048:
+        return row_index == 4u || row_index == 8u;
+    case DenseAnchorLayout::Three059:
+        return row_index == 5u || row_index == 9u;
+    case DenseAnchorLayout::Four0369:
+        return row_index == 3u || row_index == 6u || row_index == 9u;
+    }
+    return false;
+}
+
+bool IsValidDenseAnchorLayout(DenseAnchorLayout layout)
+{
+    return layout == DenseAnchorLayout::Disabled ||
+        layout == DenseAnchorLayout::Three048 ||
+        layout == DenseAnchorLayout::Three059 ||
+        layout == DenseAnchorLayout::Four0369;
+}
+
 bool ValidatePrecodeParams(const PrecodeParams& params)
 {
     const uint64_t binary_span =
@@ -123,6 +149,7 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
          params.Field != CompletionField::MixedGF256GF16) ||
         (params.HeavyFamily != HeavyCoefficientFamily::PeriodicCauchy &&
          params.HeavyFamily != HeavyCoefficientFamily::HashedNonzero) ||
+        !IsValidDenseAnchorLayout(params.SegmentedDenseAnchors) ||
         binary_span > UINT16_MAX || total_span > UINT16_MAX)
     {
         return false;
@@ -140,8 +167,14 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
     }
     if ((params.DenseTwoAnchor &&
          (params.DenseRows != 12u || params.DenseIdentityCorner ||
-          params.DenseTwoAnchorPhase > 2u)) ||
+          params.DenseTwoAnchorPhase > 2u ||
+          params.SegmentedDenseAnchors != DenseAnchorLayout::Disabled)) ||
         (!params.DenseTwoAnchor && params.DenseTwoAnchorPhase != 0u))
+    {
+        return false;
+    }
+    if (params.SegmentedDenseAnchors != DenseAnchorLayout::Disabled &&
+        (params.DenseRows != 12u || params.DenseIdentityCorner))
     {
         return false;
     }
@@ -164,6 +197,7 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.DenseIdentityCorner = false;
     params.DenseTwoAnchor = false;
     params.DenseTwoAnchorPhase = 0u;
+    params.SegmentedDenseAnchors = DenseAnchorLayout::Disabled;
     params.Seed = seed;
     return params;
 }
@@ -286,47 +320,76 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         };
         emit_row();
 
-        const uint32_t halves[2] = {
-            D2 >> 1,
-            (D2 >> 1) + (D2 & 1u) - 1u
-        };
-        for (uint32_t half = 0; half < 2u; ++half)
+        if (params.SegmentedDenseAnchors != DenseAnchorLayout::Disabled)
         {
+            // Match the certified first segment's RNG convention: row 0 is
+            // the balanced half of the initial deck, while its cheap flips
+            // use one fresh shuffle.  Every later segment starts with the
+            // balanced half of a fresh deck and continues through distinct
+            // set/clear swap pairs from that same deck.
             UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-            uint32_t flip_count = halves[half];
-            uint32_t flip_offset = 0u;
-            if (params.DenseTwoAnchor && half == 1u)
+            uint32_t flip_index = 0u;
+            while (row_i < D2)
             {
-                // Reuse the certified second-half shuffle, but turn its
-                // balanced set-half into a new dense equation.  One of the
-                // five baseline flips becomes the anchor emission, keeping
-                // D2, RNG consumption, and all rows 0..6 unchanged.
-                std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
-                for (uint32_t i = 0; i < set_count; ++i) {
-                    bitmap[deck[i]] = 1u;
-                }
-                // Experimental q1/q2 phases rotate the five-row anchor
-                // window forward within this same deck.  Each pre-applied
-                // pair swaps one set and one clear column, so the anchor
-                // remains exactly balanced.  The fixed upper bound of two
-                // is validated before any output is modified.
-                flip_offset = params.DenseTwoAnchorPhase;
-                for (uint32_t ii = 0; ii < flip_offset; ++ii)
+                if (IsSegmentedDenseAnchor(
+                        params.SegmentedDenseAnchors, row_i))
                 {
-                    bitmap[deck[ii]] ^= 1u;
-                    bitmap[deck[set_count + ii]] ^= 1u;
+                    UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                    for (uint32_t i = 0; i < set_count; ++i) {
+                        bitmap[deck[i]] = 1u;
+                    }
+                    flip_index = 0u;
+                    emit_row();
+                    continue;
                 }
+                bitmap[deck[flip_index]] ^= 1u;
+                bitmap[deck[set_count + flip_index]] ^= 1u;
+                ++flip_index;
                 emit_row();
-                --flip_count;
             }
-            for (uint32_t ii = 0; ii < flip_count; ++ii)
+        }
+        else
+        {
+            const uint32_t halves[2] = {
+                D2 >> 1,
+                (D2 >> 1) + (D2 & 1u) - 1u
+            };
+            for (uint32_t half = 0; half < 2u; ++half)
             {
-                // Deck entries at distinct positions are distinct columns,
-                // so each flip pair changes exactly two columns
-                const uint32_t deck_index = flip_offset + ii;
-                bitmap[deck[deck_index]] ^= 1u;
-                bitmap[deck[set_count + deck_index]] ^= 1u;
-                emit_row();
+                UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                uint32_t flip_count = halves[half];
+                uint32_t flip_offset = 0u;
+                if (params.DenseTwoAnchor && half == 1u)
+                {
+                    // Reuse the certified second-half shuffle, but turn its
+                    // balanced set-half into a new dense equation.  One of
+                    // the five baseline flips becomes the anchor emission,
+                    // keeping D2, RNG consumption, and rows 0..6 unchanged.
+                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                    for (uint32_t i = 0; i < set_count; ++i) {
+                        bitmap[deck[i]] = 1u;
+                    }
+                    // Experimental q1/q2 phases rotate the five-row anchor
+                    // window forward within this same deck.
+                    flip_offset = params.DenseTwoAnchorPhase;
+                    for (uint32_t ii = 0; ii < flip_offset; ++ii)
+                    {
+                        bitmap[deck[ii]] ^= 1u;
+                        bitmap[deck[set_count + ii]] ^= 1u;
+                    }
+                    emit_row();
+                    --flip_count;
+                }
+                for (uint32_t ii = 0; ii < flip_count; ++ii)
+                {
+                    // Deck entries at distinct positions are distinct
+                    // columns, so each flip pair changes exactly two columns.
+                    const uint32_t deck_index = flip_offset + ii;
+                    bitmap[deck[deck_index]] ^= 1u;
+                    bitmap[deck[set_count + deck_index]] ^= 1u;
+                    emit_row();
+                }
             }
         }
     }
@@ -425,7 +488,9 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         }
         const uint32_t second_anchor = 1u + (D2 >> 1);
         const bool is_anchor = row_index == 0u ||
-            (params.DenseTwoAnchor && row_index == second_anchor);
+            (params.DenseTwoAnchor && row_index == second_anchor) ||
+            IsSegmentedDenseAnchor(
+                params.SegmentedDenseAnchors, row_index);
         if (is_anchor)
         {
             const size_t first_count = params.DenseIdentityCorner ?

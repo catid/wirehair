@@ -590,3 +590,10 @@ Test-hook builds of `precodefail` also accept
 all-GF(256) completion-row count.  These controls compare denser binary and
 larger subfield alternatives on identical packet traces; they do not change
 named or production profiles.
+
+The experiment-only `--binary-dense-segmented-anchors` option accepts
+`three-048`, `three-059`, or `four-0369`.  Each keeps exactly 12 binary dense
+rows and the selected completion-field row counts, resets the named D=12 rows
+to independently shuffled balanced anchors, and retains two-column Shuffle-2
+flips inside each segment.  Compare these raw arms against the separate
+`--binary-dense-two-anchor` q0 arm; do not combine the options.

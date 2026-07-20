@@ -83,6 +83,9 @@ bool CheckPatternInitializedAccessors()
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
         system.Params.DenseTwoAnchor ||
+        system.Params.DenseTwoAnchorPhase != 0u ||
+        system.Params.SegmentedDenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Disabled ||
         system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
         !system.DenseRowColumns.empty() || stats.StaircaseBlockOps != 0u ||
         stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||

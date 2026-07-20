@@ -32,6 +32,8 @@ bool SameParams(
         a.HeavyFamily == b.HeavyFamily &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
         a.Seed == b.Seed;
 }
 

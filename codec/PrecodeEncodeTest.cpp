@@ -1165,6 +1165,64 @@ bool TestTwoAnchorPhasedEncoder()
     return false;
 }
 
+bool TestSegmentedAnchorPhasedEncoder()
+{
+    const wirehair_v2::DenseAnchorLayout layouts[] = {
+        wirehair_v2::DenseAnchorLayout::Three048,
+        wirehair_v2::DenseAnchorLayout::Three059,
+        wirehair_v2::DenseAnchorLayout::Four0369,
+    };
+    const uint32_t K = 2u;
+    const uint32_t block_bytes = 13u;
+    for (const wirehair_v2::DenseAnchorLayout layout : layouts)
+    {
+        bool found = false;
+        for (uint32_t seed = 0u; seed < 10000u; ++seed)
+        {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(K, seed);
+            params.SegmentedDenseAnchors = layout;
+            wirehair_v2::PrecodeSystem system;
+            if (!BuildPrecodeSystem(params, system)) {
+                return false;
+            }
+            if (!wirehair_v2::DenseCornerInvertible(system)) {
+                continue;
+            }
+
+            const uint32_t parity_count = system.Params.Staircase +
+                system.Params.DenseRows + system.Params.HeavyRows;
+            std::vector<uint8_t> source((size_t)K * block_bytes);
+            std::vector<uint8_t> parity((size_t)parity_count * block_bytes);
+            FillRandomBlocks(
+                source.data(), source.size(),
+                UINT64_C(0x5e6d3a12) + seed + (uint32_t)layout * 10000u);
+            if (!wirehair_v2::ComputePrecodeValues(
+                    system, source.data(), block_bytes, parity.data()) ||
+                !VerifyValues(
+                    system, source.data(), parity.data(), block_bytes,
+                    "segmented-anchor"))
+            {
+                std::fprintf(stderr,
+                    "segmented-anchor phased encode failed layout=%u "
+                    "seed=%u\n", (uint32_t)layout, seed);
+                return false;
+            }
+            found = true;
+            break;
+        }
+        if (!found)
+        {
+            std::fprintf(stderr,
+                "segmented-anchor phased encoder found no feasible tiny "
+                "corner layout=%u\n", (uint32_t)layout);
+            return false;
+        }
+    }
+    std::printf("segmented-anchor phased encoder: PASS\n");
+    return true;
+}
+
 bool TestFeasibility(uint32_t trials)
 {
     const uint32_t Ks[] = {1000u, 3200u, 32000u};
@@ -3621,6 +3679,7 @@ int main(int argc, char** argv)
     ok = TestCorrectnessAsBuilt() && ok;
     ok = TestCorrectnessDoctored() && ok;
     ok = TestTwoAnchorPhasedEncoder() && ok;
+    ok = TestSegmentedAnchorPhasedEncoder() && ok;
     ok = TestMalformedDenseCorner() && ok;
     ok = TestStrictSystemValidation() && ok;
     ok = TestCostModel() && ok;

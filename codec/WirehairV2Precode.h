@@ -24,7 +24,8 @@
       the halves boundary.  Consecutive rows differ in exactly two columns.
       In the experiment-only two-anchor variant, row 7 is instead reset to
       the balanced half of the second shuffled deck; rows 8..11 resume the
-      two-flip cadence.
+      two-flip cadence.  Segmented experiments instead reset anchors at
+      {0,4,8}, {0,5,9}, or {0,3,6,9} and retain that cadence within segments.
     - H = 12 explicit Cauchy heavy rows.  Coefficients come from a Cauchy
       construction that is exactly MDS within any window of up to
       256 - H = 244 GE columns (W99 band requirement is >= 20); columns wrap
@@ -50,6 +51,22 @@ enum class HeavyCoefficientFamily : uint32_t
     /// select this; it distinguishes a periodic-coefficient artifact from the
     /// generic GF(256) square-completion floor in actual-solver trials.
     HashedNonzero = 1
+};
+
+/**
+    Experiment-only segmented D=12 dense-row layouts.
+
+    Each nonzero layout replaces sparse inter-segment transitions with fresh
+    balanced anchors at the named row indices.  Rows inside a segment retain
+    the Shuffle-2 one-set/one-clear flip cadence.  Named/public profiles never
+    select these values.
+*/
+enum class DenseAnchorLayout : uint32_t
+{
+    Disabled = 0,
+    Three048 = 1, ///< anchors at rows {0, 4, 8}
+    Three059 = 2, ///< anchors at rows {0, 5, 9}
+    Four0369 = 3 ///< anchors at rows {0, 3, 6, 9}
 };
 
 struct PrecodeParams
@@ -109,6 +126,15 @@ struct PrecodeParams
     */
     uint32_t DenseTwoAnchorPhase = 0;
 
+    /**
+        Experiment-only segmented three/four-anchor layout.
+
+        This is mutually exclusive with DenseTwoAnchor and
+        DenseIdentityCorner and is valid only for DenseRows == 12.  It does
+        not change the staircase, dense-row, or heavy-row counts.
+    */
+    DenseAnchorLayout SegmentedDenseAnchors = DenseAnchorLayout::Disabled;
+
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
 
@@ -150,7 +176,9 @@ struct PrecodeSystem
         differ in four columns, but their known-column part still changes by
         exactly two deck flips.  In the two-anchor variant, row 7 is another
         balanced row and only the row 6 -> 7 transition is exempt from the
-        two-column-difference rule.
+        two-column-difference rule.  In a segmented-anchor experiment, every
+        listed anchor transition is exempt and all within-segment transitions
+        still differ in exactly two columns.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified

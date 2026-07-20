@@ -4260,6 +4260,43 @@ bool ParsePrecodeFailCompletion(
     return false;
 }
 
+const char* DenseAnchorLayoutName(wirehair_v2::DenseAnchorLayout layout)
+{
+    switch (layout)
+    {
+    case wirehair_v2::DenseAnchorLayout::Disabled:
+        return "none";
+    case wirehair_v2::DenseAnchorLayout::Three048:
+        return "three-048";
+    case wirehair_v2::DenseAnchorLayout::Three059:
+        return "three-059";
+    case wirehair_v2::DenseAnchorLayout::Four0369:
+        return "four-0369";
+    }
+    return "invalid";
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ParseDenseAnchorLayout(
+    const char* text,
+    wirehair_v2::DenseAnchorLayout& layout)
+{
+    if (!std::strcmp(text, "three-048")) {
+        layout = wirehair_v2::DenseAnchorLayout::Three048;
+        return true;
+    }
+    if (!std::strcmp(text, "three-059")) {
+        layout = wirehair_v2::DenseAnchorLayout::Three059;
+        return true;
+    }
+    if (!std::strcmp(text, "four-0369")) {
+        layout = wirehair_v2::DenseAnchorLayout::Four0369;
+        return true;
+    }
+    return false;
+}
+#endif
+
 struct PairedMixOutcomes
 {
     std::vector<bool> Mix2Failures;
@@ -6919,6 +6956,8 @@ bool SameGroupedTimingBaseGraph(
         a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
         a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
         a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
+        a_params.SegmentedDenseAnchors ==
+            b_params.SegmentedDenseAnchors &&
         a_params.HeavyFamily == b_params.HeavyFamily &&
         a_params.Seed == b_params.Seed &&
         a_config.PeelSeed == b_config.PeelSeed &&
@@ -7579,12 +7618,15 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_null_witnesses = false;
     bool binary_dense_two_anchor = false;
     uint32_t binary_dense_two_anchor_phase = 0u;
+    wirehair_v2::DenseAnchorLayout binary_dense_segmented_anchors =
+        wirehair_v2::DenseAnchorLayout::Disabled;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool binary_dense_two_anchor_phase_explicit = false;
+    bool binary_dense_segmented_anchors_explicit = false;
     bool gf256_heavy_rows_explicit = false;
     bool packet_peel_seed_xor_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
@@ -7747,6 +7789,26 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
             binary_dense_two_anchor = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--binary-dense-segmented-anchors"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--binary-dense-segmented-anchors",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!ParseDenseAnchorLayout(
+                    value, binary_dense_segmented_anchors))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --binary-dense-segmented-anchors "
+                    "token %s (expected three-048, three-059, or "
+                    "four-0369)\n", value);
+                return 1;
+            }
+            binary_dense_segmented_anchors_explicit = true;
         }
         else if (!std::strcmp(
                      argv[i], "--binary-dense-two-anchor-phase"))
@@ -8149,6 +8211,22 @@ int CmdPrecodeFail(int argc, char** argv)
             "dense rows\n");
         return 1;
     }
+    if (binary_dense_segmented_anchors_explicit &&
+        binary_dense_rows_override != 0u &&
+        binary_dense_rows_override != 12u)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-segmented-anchors requires 12 "
+            "binary dense rows\n");
+        return 1;
+    }
+    if (binary_dense_two_anchor && binary_dense_segmented_anchors_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-segmented-anchors conflicts with "
+            "--binary-dense-two-anchor\n");
+        return 1;
+    }
     if (binary_dense_two_anchor_phase_explicit &&
         !binary_dense_two_anchor)
     {
@@ -8329,6 +8407,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
             "binary_dense_two_anchor_phase=%u "
+            "binary_dense_segmented_anchors=%s "
             "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -8341,6 +8420,7 @@ int CmdPrecodeFail(int argc, char** argv)
             binary_dense_rows_override,
             binary_dense_two_anchor ? 1u : 0u,
             binary_dense_two_anchor_phase,
+            DenseAnchorLayoutName(binary_dense_segmented_anchors),
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -8370,6 +8450,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "packet_peel_seed_table=%s "
             "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
             "binary_dense_two_anchor_phase=%u "
+            "binary_dense_segmented_anchors=%s "
             "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
@@ -8405,6 +8486,7 @@ int CmdPrecodeFail(int argc, char** argv)
             binary_dense_rows_override,
             binary_dense_two_anchor ? 1u : 0u,
             binary_dense_two_anchor_phase,
+            DenseAnchorLayoutName(binary_dense_segmented_anchors),
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -8541,6 +8623,8 @@ int CmdPrecodeFail(int argc, char** argv)
             base_params.DenseTwoAnchor = binary_dense_two_anchor;
             base_params.DenseTwoAnchorPhase =
                 binary_dense_two_anchor_phase;
+            base_params.SegmentedDenseAnchors =
+                binary_dense_segmented_anchors;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }

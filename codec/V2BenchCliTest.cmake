@@ -911,6 +911,33 @@ expect_success(
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor
     --binary-dense-two-anchor-phase 2)
+foreach(segmented_layout IN ITEMS three-048 three-059 four-0369)
+    expect_success(
+        "binary_dense_two_anchor=0.*binary_dense_segmented_anchors=${segmented_layout}"
+        precodefail
+        --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+        --completion mixed
+        --binary-dense-segmented-anchors ${segmented_layout})
+endforeach()
+expect_success(
+    "binary_dense_segmented_anchors=three-048.*gf256_heavy_rows_override=0"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion certified --binary-dense-segmented-anchors three-048)
+expect_failure("unknown --binary-dense-segmented-anchors token" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-segmented-anchors unknown)
+expect_failure("--binary-dense-segmented-anchors requires a value" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-segmented-anchors)
+expect_failure("--binary-dense-segmented-anchors conflicts with" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-two-anchor
+    --binary-dense-segmented-anchors three-048)
+expect_failure("--binary-dense-segmented-anchors requires 12" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --binary-dense-rows 13
+    --binary-dense-segmented-anchors four-0369)
 expect_failure("--binary-dense-two-anchor-phase requires" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --binary-dense-two-anchor-phase 1)
