@@ -57,6 +57,14 @@ field-operation work sums are retained in each one-dimensional axis and each
 width/schedule/loss/overhead stratum so reliability changes can be compared
 with their decode-work cost.
 
+Each job has a frozen 1200-second fail-closed timeout.  The earlier 300-second
+draft was invalidated before evaluation: operational receipts from its sealed
+discovery grid reached 128.55 seconds around K=52.6k, while an evaluation job
+performs exactly three times as many trial-solves and projected beyond 300
+seconds before the high-K tail.  The replacement adds more than 2.5x margin
+over the projected roughly 470-second high-K tail without changing any job
+grid, seed, architecture, cohort rule, or observed recovery outcome.
+
 The recovery gate requires zero codec errors and no aggregate failure increase
 at any of OH0, OH1, or OH2.  Per-width/schedule/loss deltas and weak-seed
 introductions remain report-only during raw architecture selection, matching

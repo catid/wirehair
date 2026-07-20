@@ -239,6 +239,9 @@ class SeedAndArchitectureTests(unittest.TestCase):
 
 
 class LedgerTests(unittest.TestCase):
+    def test_evaluation_timeout_has_predeclared_high_k_margin(self) -> None:
+        self.assertEqual(subject.TIMEOUT_SECONDS, 1200)
+
     def test_bounded_discovery_is_cartesian_and_paired(self) -> None:
         config = config_fixture()
         jobs = subject.build_discovery_jobs(config, k_lo=2, k_hi=8, chunk=3)

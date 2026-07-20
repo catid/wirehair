@@ -66,7 +66,13 @@ MAX_STDOUT_BYTES = {
     "evaluation": 4 * 1024 * 1024,
 }
 MAX_STDERR_BYTES = 16 * 1024
-TIMEOUT_SECONDS = 300
+# Discovery jobs cover 256 K values x four widths.  Evaluation jobs cover four
+# K values x four widths x three nested overheads x 64 trials, exactly three
+# times as many trial-solves.  The original 300-second bound was invalidated
+# before evaluation after sealed discovery-runtime receipts projected its
+# high-K tail past that cap.  1200 seconds is more than 2.5x the projected
+# ~470-second tail and changes no seed, cell, outcome, or selection rule.
+TIMEOUT_SECONDS = 1200
 MAX_WORKERS = 256
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OBJECT_RE = re.compile(r"[0-9a-f]{40}\Z")
