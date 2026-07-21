@@ -208,6 +208,44 @@ every measured payload size: median gains were 5.56% at two bytes, 9.89% at
 counts remained exact. These measurements supported a separate opt-in
 profile; they do not alter either older profile or the current default.
 
+## Equation freeze and compatibility boundary
+
+All equation-affecting inputs consumed under each public V2 profile ID are
+frozen as of July 2026. The frozen surface is everything the expansion of a
+descriptor transitively consumes, not only the constants listed per profile
+above:
+
+- the legacy dense-count, dense-seed, and peel-seed selection tables at every
+  supported block count;
+- the block-byte peel-policy classification and the policy fields folded into
+  the matrix seed derivation;
+- the matrix-seed and packet-peel-seed derivation rules with both fixed
+  salts, and the deterministic attempt-stepping rules over the full attempt
+  domain;
+- the certified/mixed precode parameter rules and the complete staircase and
+  Shuffle-2 dense row constructions;
+- the GF(256) Cauchy-heavy and mixed GF(256)/GF(2^16) completion coefficient
+  tables, residue schedules, and window-wrap rules; and
+- version-4 packet-row generation: the production integer degree sampler,
+  the peel and mix iterators, prime selection, and packet-ID addressing.
+
+These inputs are pinned by one all-K SHA-256 equation fingerprint per public
+profile ID, computed over every supported block count `K = 2..64000` as a
+single streaming digest of the complete equation-affecting expansion. The
+exact digest stream is documented in `codec/WirehairV2Fingerprint.h`; the
+frozen constants live in `codec/V2FingerprintTest.cpp` and representative
+exact descriptor/packet byte goldens live in `codec/V2PacketGoldenTest.cpp`
+(with additional small-K packet goldens in `codec/V2ProfileTest.cpp`). After
+building, `wirehair_v2_fingerprint_test --print-goldens` and
+`wirehair_v2_packet_golden_test --print-goldens` print the paste-ready
+constant blocks; unset constants fail the tests rather than skip.
+
+A changed fingerprint or packet golden under an existing profile ID is a
+compatibility bug, never a golden to refresh. Any payload-normalized,
+re-tuned, or otherwise equation-changing contract must ship under a new
+profile ID with its own documented canonical name, fingerprints, and packet
+goldens, exactly as the mixed and mixed/mix2 profiles did.
+
 ## APIs and errors
 
 `wirehair_v2_encoder_create()` copies the message, chooses the deterministic

@@ -3,6 +3,8 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2GF16.h
     WirehairV2Codec.cpp
     WirehairV2Codec.h
+    WirehairV2Fingerprint.cpp
+    WirehairV2Fingerprint.h
     WirehairV2Peel.cpp
     WirehairV2Peel.h
     WirehairV2Plan.cpp
@@ -136,6 +138,36 @@ if (BUILD_TESTS)
     set_tests_properties(wirehair_v2_profile_test PROPERTIES
         LABELS "v2;profile;serialization;golden;e2e;abi"
         TIMEOUT 120)
+
+    # All-K equation-freeze fingerprints for every public V2 profile ID.
+    # This sweeps the complete K=2..64000 expansion, so it runs serially
+    # with a generous timeout.
+    add_executable(wirehair_v2_fingerprint_test V2FingerprintTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_fingerprint_test)
+    target_link_libraries(wirehair_v2_fingerprint_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_fingerprint_test
+        COMMAND wirehair_v2_fingerprint_test)
+    set_tests_properties(wirehair_v2_fingerprint_test PROPERTIES
+        LABELS "v2;golden;fingerprint;freeze"
+        TIMEOUT 3600
+        RUN_SERIAL TRUE)
+
+    # Representative frozen packet bytes through the public V2 API.
+    add_executable(wirehair_v2_packet_golden_test V2PacketGoldenTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_packet_golden_test)
+    target_link_libraries(wirehair_v2_packet_golden_test wirehair)
+    if(WIN32 AND WIREHAIR_PRIMARY_VARIANT STREQUAL "SHARED")
+        # Same build-tree DLL staging rule as wirehair_v2_profile_test.
+        add_custom_command(TARGET wirehair_v2_packet_golden_test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:wirehair>
+                $<TARGET_FILE_DIR:wirehair_v2_packet_golden_test>)
+    endif()
+    add_test(NAME wirehair_v2_packet_golden_test
+        COMMAND wirehair_v2_packet_golden_test)
+    set_tests_properties(wirehair_v2_packet_golden_test PROPERTIES
+        LABELS "v2;golden;freeze;e2e"
+        TIMEOUT 300)
 
     set(_wirehair_v2_fuzz_common
         fuzz/V2FuzzDriver.cpp
