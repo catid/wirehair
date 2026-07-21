@@ -139,6 +139,17 @@ class LivenessTest(FakeProcTestCase):
 
 
 class ScanTest(FakeProcTestCase):
+    def test_sampler_wrapper_chain_is_not_a_reader(self) -> None:
+        """sudo/env/taskset wrappers carry the sampler path but no bus."""
+        wrapper = ("sudo", "-n", "-b", "env", "-i", "/usr/bin/taskset",
+                   "-c", "127", "/usr/bin/python3") + SAMPLER_CMD[1:]
+        self.proc.add(90, wrapper, start_ticks=9, uid=0)
+        self.proc.add(91, SAMPLER_CMD, start_ticks=10, uid=0)
+        records = janitor.scan_processes(
+            proc_root=self.proc.root, affinity_fn=self.proc.affinity_fn)
+        self.assertEqual(
+            [(r["pid"], r["role"]) for r in records], [(91, "reader")])
+
     def test_scan_classifies_and_receipts_identity(self) -> None:
         self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
         self.proc.add(200, FILLER_CMD, start_ticks=22, uid=0)

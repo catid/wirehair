@@ -112,12 +112,26 @@ def _read_affinity(
         return None
 
 
+WRAPPER_BASENAMES = frozenset((
+    "sudo", "env", "taskset", "numactl", "nice", "setpriv", "setsid",
+    "sh", "bash", "timeout",
+))
+
+
 def classify_command(cmdline: Sequence[str]) -> str | None:
-    """Classify a command line as ``reader``, ``filler`` or None."""
+    """Classify a command line as ``reader``, ``filler`` or None.
+
+    A launcher chain like ``sudo -b env taskset -c 127 python3 sampler``
+    leaves the wrapper alive as the sampler's parent with the sampler
+    path in its own cmdline; only the process whose executable is the
+    interpreter actually holds the I2C bus, so wrapper processes are
+    not counted as readers.
+    """
     joined = " ".join(cmdline)
-    for token in cmdline:
-        if Path(token).name == SAMPLER_BASENAME:
-            return "reader"
+    if any(Path(token).name == SAMPLER_BASENAME for token in cmdline):
+        if cmdline and Path(cmdline[0]).name in WRAPPER_BASENAMES:
+            return None
+        return "reader"
     if any(signature in joined for signature in FILLER_SIGNATURES):
         return "filler"
     return None
