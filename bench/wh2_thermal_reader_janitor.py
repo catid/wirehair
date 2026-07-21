@@ -45,6 +45,9 @@ FILLER_SIGNATURES = ("wirehair_load_fillers.sh", "while :; do :; done")
 TERM_WAIT_SECONDS = 10.0
 KILL_WAIT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.25
+OWNER_MARKER_PATH = Path("/tmp/wirehair-environment-owner.json")
+OWNER_MARKER_SCHEMA = "wirehair.environment_owner.v1"
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 
 
 class JanitorError(Exception):
@@ -270,6 +273,64 @@ def stop_process(
     return action
 
 
+def load_owner_marker(
+    *,
+    marker_path: Path = OWNER_MARKER_PATH,
+    boot_id_path: Path = BOOT_ID_PATH,
+    now_utc: str | None = None,
+) -> dict[str, Any] | None:
+    """Load the environment-ownership marker, failing closed.
+
+    A live campaign writes this marker so cleanup tooling never kills its
+    sealed environment (stopping the sampler or fillers formally
+    invalidates the campaign).  A marker that is present but unreadable
+    or malformed is treated as ACTIVE with an ``ambiguous`` flag — the
+    one direction that can never cost a multi-day run.  Markers from a
+    previous boot or past their expiry are inert.
+    """
+    try:
+        raw = marker_path.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"ambiguous": True}
+    try:
+        marker = json.loads(raw)
+    except ValueError:
+        return {"ambiguous": True}
+    if not isinstance(marker, dict) or \
+            marker.get("schema") != OWNER_MARKER_SCHEMA:
+        return {"ambiguous": True}
+    if marker.get("phase") == "complete":
+        return None
+    try:
+        boot_id = boot_id_path.read_text(encoding="ascii").strip()
+    except OSError:
+        boot_id = None
+    if boot_id is not None and marker.get("boot_id") not in (None, boot_id):
+        return None
+    expires = marker.get("expires_utc")
+    current = now_utc
+    if current is None:
+        result = subprocess.run(
+            ("date", "-u", "+%Y-%m-%dT%H:%M:%S+00:00"),
+            stdout=subprocess.PIPE, check=False)
+        current = result.stdout.decode("ascii", "replace").strip()
+    if isinstance(expires, str) and current and expires < current:
+        return None
+    return marker
+
+
+def _protected_identities(marker: Mapping[str, Any]) -> set[tuple[int, int]]:
+    identities: set[tuple[int, int]] = set()
+    for entry in marker.get("protected", ()):
+        if isinstance(entry, dict) and \
+                isinstance(entry.get("pid"), int) and \
+                isinstance(entry.get("start_ticks"), int):
+            identities.add((entry["pid"], entry["start_ticks"]))
+    return identities
+
+
 def sudo_available(
     run_fn: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> bool:
@@ -283,14 +344,37 @@ def run_janitor(
     mode: str,
     *,
     expect_pid_file: Path | None = None,
+    override_owner: str | None = None,
     proc_root: Path = Path("/proc"),
     kill_fn: Callable[[int, int], None] = os.kill,
     run_fn: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     affinity_fn: Callable[[int], set] = os.sched_getaffinity,
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    marker_path: Path = OWNER_MARKER_PATH,
+    boot_id_path: Path = BOOT_ID_PATH,
+    now_utc: str | None = None,
 ) -> dict[str, Any]:
     """Execute one janitor pass and return the receipt."""
+    marker = load_owner_marker(
+        marker_path=marker_path, boot_id_path=boot_id_path, now_utc=now_utc)
+    marker_ambiguous = bool(marker and marker.get("ambiguous"))
+    protected = (_protected_identities(marker)
+                 if marker and not marker_ambiguous else set())
+
+    filler_leader_protected = bool(marker and not marker_ambiguous and any(
+        isinstance(entry, dict) and entry.get("role") == "filler_leader"
+        for entry in marker.get("protected", ())))
+
+    def is_protected(record: Mapping[str, Any]) -> bool:
+        if marker_ambiguous:
+            return True
+        if (int(record["pid"]), int(record["start_ticks"])) in protected:
+            return True
+        # The marker lists only the filler supervisor; its worker children
+        # (one busy loop per CPU) belong to the same sealed environment.
+        return record["role"] == "filler" and filler_leader_protected
+
     records = scan_processes(proc_root=proc_root, affinity_fn=affinity_fn)
     for record in records:
         record["liveness"] = pid_liveness(
@@ -307,7 +391,17 @@ def run_janitor(
         "fillers": fillers,
         "actions": [],
         "violations": [],
+        "owner_marker": (None if marker is None else
+                         {"ambiguous": True} if marker_ambiguous else
+                         {"campaign_root": marker.get("campaign_root"),
+                          "phase": marker.get("phase"),
+                          "expires_utc": marker.get("expires_utc")}),
+        "protected_skipped": [],
     }
+    if marker_ambiguous:
+        receipt["violations"].append(
+            "environment-owner marker is unreadable or malformed; "
+            "treating every matched process as protected")
     unknown = [r for r in records if r["liveness"] == "unknown"]
     for record in unknown:
         receipt["violations"].append(
@@ -322,7 +416,8 @@ def run_janitor(
             matching = [
                 r for r in live_readers if int(r["pid"]) == expected_pid]
             extra = [
-                r for r in live_readers if int(r["pid"]) != expected_pid]
+                r for r in live_readers
+                if int(r["pid"]) != expected_pid and not is_protected(r)]
             if not matching:
                 receipt["violations"].append(
                     "expected sole I2C reader PID %d is not a live sampler"
@@ -332,16 +427,29 @@ def run_janitor(
                     "unexpected extra I2C reader PID %d" % record["pid"])
         else:
             for record in live_readers:
+                if is_protected(record):
+                    continue
                 receipt["violations"].append(
                     "no I2C reader expected but PID %d is live"
                     % record["pid"])
         for record in fillers:
-            if record["liveness"] != "dead":
+            if record["liveness"] != "dead" and not is_protected(record):
                 receipt["violations"].append(
                     "load filler PID %d is still present" % record["pid"])
         return receipt
     if mode == "stop-orphans":
         targets = [r for r in records if r["liveness"] != "dead"]
+        if marker is not None:
+            owner_root = None if marker_ambiguous else marker.get(
+                "campaign_root")
+            if override_owner is None or override_owner != owner_root:
+                receipt["protected_skipped"] = [
+                    {"pid": r["pid"], "role": r["role"]} for r in targets]
+                receipt["violations"].append(
+                    "environment-owner marker is active; refusing every "
+                    "kill (pass --override-owner with the exact campaign "
+                    "root to tear down that campaign's own environment)")
+                return receipt
         if targets and not sudo_available(run_fn):
             receipt["violations"].append(
                 "sudo -n is unavailable; cannot stop root-owned orphans")
@@ -374,13 +482,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--expect-pid-file", type=Path, default=None,
         help="enforce mode: PID file naming the sole allowed I2C reader")
+    parser.add_argument(
+        "--override-owner", default=None,
+        help="stop-orphans: campaign root whose owner marker authorizes "
+             "tearing down its own protected environment")
     parser.add_argument("--json-out", type=Path, default=None)
     arguments = parser.parse_args(argv)
     if arguments.expect_pid_file is not None and arguments.mode != "enforce":
         parser.error("--expect-pid-file requires --mode enforce")
+    if arguments.override_owner is not None and \
+            arguments.mode != "stop-orphans":
+        parser.error("--override-owner requires --mode stop-orphans")
     try:
         receipt = run_janitor(
-            arguments.mode, expect_pid_file=arguments.expect_pid_file)
+            arguments.mode, expect_pid_file=arguments.expect_pid_file,
+            override_owner=arguments.override_owner)
     except JanitorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

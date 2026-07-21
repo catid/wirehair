@@ -108,9 +108,14 @@ class FakeProcTestCase(unittest.TestCase):
             affinity_fn=self.proc.affinity_fn,
             sleep_fn=lambda _seconds: None,
             monotonic_fn=lambda: 0.0,
+            marker_path=self.proc.root / "no-such-marker.json",
+            boot_id_path=self.proc.root / "no-such-boot-id",
         )
         parameters.update(overrides)
         return janitor.run_janitor(mode, **parameters)
+
+    def kill_signals(self):
+        return [c for c in self.proc.sudo_kill_log if c[3] != "-0"]
 
 
 class LivenessTest(FakeProcTestCase):
@@ -263,6 +268,106 @@ class StopOrphansTest(FakeProcTestCase):
         self.assertIn(
             "sudo -n is unavailable; cannot stop root-owned orphans",
             receipt["violations"])
+
+
+class OwnerMarkerTest(FakeProcTestCase):
+    BOOT_ID = "1788608a-7aa1-48de-8f7c-848485be3cc3"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.boot_path = self.proc.root / "boot_id"
+        self.boot_path.write_text(self.BOOT_ID + "\n", encoding="ascii")
+        self.marker_path = self.proc.root / "owner.json"
+
+    def write_marker(self, **overrides) -> None:
+        import json
+        marker = {
+            "schema": "wirehair.environment_owner.v1",
+            "campaign_root": "/tmp/campaign-v4",
+            "phase": "evaluation",
+            "boot_id": self.BOOT_ID,
+            "expires_utc": "2099-01-01T00:00:00+00:00",
+            "protected": [
+                {"role": "sampler", "pid": 100, "start_ticks": 11},
+                {"role": "filler_leader", "pid": 200, "start_ticks": 22},
+            ],
+        }
+        marker.update(overrides)
+        self.marker_path.write_text(
+            json.dumps(marker), encoding="ascii")
+
+    def run_with_marker(self, mode: str, **overrides):
+        return self.run_janitor(
+            mode, marker_path=self.marker_path,
+            boot_id_path=self.boot_path,
+            now_utc="2026-07-21T00:00:00+00:00", **overrides)
+
+    def test_stop_orphans_refuses_kills_under_active_marker(self) -> None:
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        self.proc.add(200, FILLER_CMD, start_ticks=22, uid=0)
+        self.write_marker()
+        receipt = self.run_with_marker("stop-orphans")
+        self.assertEqual(receipt["actions"], [])
+        self.assertEqual(self.kill_signals(), [])
+        self.assertEqual(
+            [p["pid"] for p in receipt["protected_skipped"]], [100, 200])
+        self.assertTrue(any("owner marker is active" in v
+                            for v in receipt["violations"]))
+
+    def test_override_owner_allows_own_teardown(self) -> None:
+        self.write_marker()
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        receipt = self.run_with_marker(
+            "stop-orphans", override_owner="/tmp/campaign-v4")
+        self.assertEqual(
+            [(a["pid"], a["outcome"]) for a in receipt["actions"]],
+            [(100, "stopped")])
+
+    def test_wrong_override_still_refuses(self) -> None:
+        self.write_marker()
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        receipt = self.run_with_marker(
+            "stop-orphans", override_owner="/tmp/other-root")
+        self.assertEqual(receipt["actions"], [])
+
+    def test_enforce_treats_protected_as_expected(self) -> None:
+        self.write_marker()
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        self.proc.add(200, FILLER_CMD, start_ticks=22, uid=0)
+        receipt = self.run_with_marker("enforce")
+        self.assertEqual(receipt["violations"], [])
+
+    def test_enforce_still_flags_unprotected_extras(self) -> None:
+        self.write_marker()
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        self.proc.add(101, SAMPLER_CMD, start_ticks=99, uid=0)
+        receipt = self.run_with_marker("enforce")
+        self.assertEqual(
+            receipt["violations"],
+            ["no I2C reader expected but PID 101 is live"])
+
+    def test_completed_or_stale_markers_are_inert(self) -> None:
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        for overrides in (
+                {"phase": "complete"},
+                {"boot_id": "00000000-0000-0000-0000-000000000000"},
+                {"expires_utc": "2020-01-01T00:00:00+00:00"}):
+            self.write_marker(**overrides)
+            receipt = self.run_with_marker("stop-orphans")
+            self.assertEqual(
+                [(a["pid"], a["outcome"]) for a in receipt["actions"]],
+                [(100, "stopped")], overrides)
+            self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+
+    def test_malformed_marker_fails_closed(self) -> None:
+        self.marker_path.write_text("{not json", encoding="ascii")
+        self.proc.add(100, SAMPLER_CMD, start_ticks=11, uid=0)
+        self.proc.add(300, ("/usr/bin/vim",), start_ticks=33, uid=1000)
+        receipt = self.run_with_marker("stop-orphans")
+        self.assertEqual(receipt["actions"], [])
+        self.assertEqual(self.kill_signals(), [])
+        self.assertTrue(any("unreadable or malformed" in v
+                            for v in receipt["violations"]))
 
 
 class RealProcSmokeTest(unittest.TestCase):
