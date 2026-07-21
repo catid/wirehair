@@ -65,40 +65,40 @@ const uint32_t kDeepRepairId = 54321u;
 // and pasting the printed block over this one.
 static const char* const kPacketGoldens[kPacketCaseCount][4] = {
     { // certified_k1000_b32
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000c9f9f447bb5b294bf17c0000000000002000000000000000",
+        "83ceaf2f3d105b82c9ae2c3cbe5a81c8a9e6f249673519f4ce142e81f2ff9328",
+        "c9e872d3cb2f8196382d32948bde7767fde270d3f8cd4380db0c5784ad3f04a7",
+        "4b7f73abe1d8ea4a7872a8e03aeb49797543325ba31215f06f49d6d82f6e7d14"
     },
     { // mixed_k1000_b32
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000b79b6f455dce61e1f17c0000000000002000000000000000",
+        "4c4caf8e758b3f3b93d334dbff0e15ce86c4295563a6dad41a039e33953f25d7",
+        "0a47a3044585bb5be10e9bd003c9fd8fd1e54a7a1db81c28afdaeda37dd18290",
+        "a730980ab08786e3d86b6308bc1503682030b9103b7f2b65e09281205f5e37af"
     },
     { // mixed_mix2_k1000_b32
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000a21206877af2a420f17c0000000000002000000000000000",
+        "459ec5533a5a85eb47e525e6ef85c4cad4c36bf3aa6f7249be0b5c712274ef93",
+        "6c8f0e017bf42b11093e057d0ba3b18754cb3b1db58943fbd1deb46a40f3fab5",
+        "c9a7ce1fc0daf53c46e4f1ed3a2c54958931765a1874aa8532caf0cfcb5d0d8a"
     },
     { // certified_k10000_b2
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000c9f9f447bb5b294b1f4e0000000000000200000000000000",
+        "6279",
+        "b185",
+        "09e3"
     },
     { // mixed_k10000_b2
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000b79b6f455dce61e11f4e0000000000000200000000000000",
+        "54dc",
+        "089c",
+        "b398"
     },
     { // mixed_mix2_k10000_b2
-        "UNSET",
-        "UNSET",
-        "UNSET",
-        "UNSET"
+        "5748563201002000a21206877af2a4201f4e0000000000000200000000000000",
+        "c23c",
+        "2f5f",
+        "fb58"
     }
 };
 // --- END FROZEN V2 PACKET GOLDENS ---

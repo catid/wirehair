@@ -31,9 +31,12 @@ namespace {
 // Fill by building, then running:
 //   wirehair_v2_fingerprint_test --print-goldens
 // and pasting the printed block over this one.
-static const char kCertifiedAllKFingerprint[] = "UNSET";
-static const char kMixedAllKFingerprint[] = "UNSET";
-static const char kMixedMix2AllKFingerprint[] = "UNSET";
+static const char kCertifiedAllKFingerprint[] =
+    "e6146e7fea89089689a819c72e7e82f799344b451f5e4653b125f622dee3de0b";
+static const char kMixedAllKFingerprint[] =
+    "47bca161ff7b51684f39d19db3b5b0d11137f21335ec5c74d818d06756d93627";
+static const char kMixedMix2AllKFingerprint[] =
+    "858321c2c0a07103b2615bb6586ce310105d37dd9b2120eb5b63527a6fcb5404";
 // --- END FROZEN V2 EQUATION FINGERPRINTS ---
 
 struct GoldenBinding
