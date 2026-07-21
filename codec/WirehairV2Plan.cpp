@@ -1,5 +1,7 @@
 #include "WirehairV2Plan.h"
 
+#include "WirehairV2Policy.h"
+
 namespace wirehair_v2 {
 namespace {
 
@@ -13,9 +15,7 @@ uint64_t Mix64(uint64_t x)
     return x;
 }
 
-} // namespace
-
-uint64_t MatrixSeedFromProfile(
+uint64_t MatrixSeedHashFromProfile(
     const SeedProfile& profile,
     uint32_t row_count,
     uint64_t salt)
@@ -34,6 +34,59 @@ uint64_t MatrixSeedFromProfile(
         static_cast<uint64_t>(profile.Policy.Solver));
     return Mix64(seed);
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+// Experiment-only payload-independent seeding profile
+// (wirehair-sxvz.16.1.5.2).  Thread-local and default-off: production builds
+// compile the gate away entirely and test builds keep the production hash
+// until a bench/test explicitly opts a thread in, so named/public profiles
+// keep their frozen equation inputs byte for byte.
+thread_local bool PayloadIndependentEquationSeeding = false;
+#endif
+
+} // namespace
+
+SeedProfile NormalizeProfileForEquationSeeding(
+    const SeedProfile& profile,
+    uint32_t canonical_block_bytes)
+{
+    SeedProfile normalized = profile;
+    if (canonical_block_bytes == 0u) {
+        return normalized;
+    }
+    normalized.BlockBytes = canonical_block_bytes;
+    normalized.Policy = SelectPeelPolicy(
+        profile.BlockCount, canonical_block_bytes);
+    return normalized;
+}
+
+uint64_t MatrixSeedFromProfile(
+    const SeedProfile& profile,
+    uint32_t row_count,
+    uint64_t salt)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (PayloadIndependentEquationSeeding)
+    {
+        const SeedProfile normalized = NormalizeProfileForEquationSeeding(
+            profile, kPayloadIndependentEquationSeedBlockBytes);
+        return MatrixSeedHashFromProfile(normalized, row_count, salt);
+    }
+#endif
+    return MatrixSeedHashFromProfile(profile, row_count, salt);
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+void SetPayloadIndependentEquationSeedingForTesting(bool enabled)
+{
+    PayloadIndependentEquationSeeding = enabled;
+}
+
+bool PayloadIndependentEquationSeedingForTesting()
+{
+    return PayloadIndependentEquationSeeding;
+}
+#endif
 
 PeelSolvePlan BuildPeelSolvePlan(
     const SeedProfile& profile,

@@ -514,6 +514,24 @@ expect_success("seed_block_bytes_override=2" precodefail
 expect_failure("--seed-block-bytes must be nonzero" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --seed-block-bytes 0)
+expect_success(
+    "payload_independent_seeding=1 payload_independent_seed_bb=2"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
+    --payload-independent-seeding --payload-e2e)
+expect_success(
+    "payload_independent_seeding=0 payload_independent_seed_bb=0"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1)
+expect_failure(
+    "--payload-independent-seeding conflicts with --seed-block-bytes"
+    precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --payload-independent-seeding --seed-block-bytes 2)
+expect_success(
+    "payload_independent_seeding=1 payload_independent_seed_bb=2"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
+    --loss 0.1 --payload-independent-seeding)
 expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29

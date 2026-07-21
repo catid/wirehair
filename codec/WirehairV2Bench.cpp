@@ -1888,6 +1888,7 @@ int CmdCompare(int argc, char** argv)
     uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
+    bool payload_independent_seeding = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_mix_count_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
@@ -2134,6 +2135,11 @@ int CmdCompare(int argc, char** argv)
         {
             packet_row_seed_avalanche = true;
         }
+        else if (!std::strcmp(
+                     argv[i], "--payload-independent-seeding"))
+        {
+            payload_independent_seeding = true;
+        }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
             if (!TakeArg("compare", "--schedule", argc, argv, i, value) ||
@@ -2371,6 +2377,10 @@ int CmdCompare(int argc, char** argv)
     }
     wirehair_v2::SetPacketRowSeedAvalancheForTesting(
         packet_row_seed_avalanche);
+    // Payload-independent seeding lives outside the mixed-schedule
+    // thread-local state, so no earlier setter can clear it.
+    wirehair_v2::SetPayloadIndependentEquationSeedingForTesting(
+        payload_independent_seeding);
     // Every earlier mixed configuration setter may clear schedule experiments.
     // Activate the grouped suffix only after the complete thread state is set.
     if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
@@ -2463,6 +2473,8 @@ int CmdCompare(int argc, char** argv)
         "mixed_residue_buckets_requested=%s "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
+        "payload_independent_seeding=%u "
+        "payload_independent_seed_bb=%u "
         "loss_trace=common-id-v2 "
         "precode_profile_handoff=encoder-selected-v1\n",
         nlo,
@@ -2511,7 +2523,10 @@ int CmdCompare(int argc, char** argv)
         "auto",
 #endif
         packet_row_seed_multiplier,
-        packet_row_seed_avalanche ? 1u : 0u);
+        packet_row_seed_avalanche ? 1u : 0u,
+        payload_independent_seeding ? 1u : 0u,
+        payload_independent_seeding ?
+            wirehair_v2::kPayloadIndependentEquationSeedBlockBytes : 0u);
     std::printf(
         "%-15s %-8s %-7s %-7s %-10s %-10s %-8s "
         "%-6s %-6s %-6s %-8s "
@@ -7575,6 +7590,7 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
     uint32_t seed_block_bytes_override = 0u;
+    bool payload_independent_seeding = false;
     bool paired_overhead_stream = false;
     bool mixed_null_witnesses = false;
     bool binary_dense_two_anchor = false;
@@ -8000,6 +8016,11 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             seed_block_bytes_explicit = true;
         }
+        else if (!std::strcmp(
+                     argv[i], "--payload-independent-seeding"))
+        {
+            payload_independent_seeding = true;
+        }
         else if (!std::strcmp(argv[i], "--fail-thread-launch-after")) {
             if (!TakeArg(
                     "precodefail", "--fail-thread-launch-after",
@@ -8287,6 +8308,17 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --seed-block-bytes must be nonzero\n");
         return 1;
     }
+    if (payload_independent_seeding && seed_block_bytes_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --payload-independent-seeding conflicts with "
+            "--seed-block-bytes\n");
+        return 1;
+    }
+    // Payload-independent seeding lives outside the mixed-schedule
+    // thread-local state, so no earlier setter can clear it.
+    wirehair_v2::SetPayloadIndependentEquationSeedingForTesting(
+        payload_independent_seeding);
     if (packet_peel_seed_table != PacketPeelSeedTable::None &&
         packet_peel_seed_xor_explicit)
     {
@@ -8333,6 +8365,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
+            "payload_independent_seeding=%u payload_independent_seed_bb=%u "
             "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
@@ -8346,6 +8379,9 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
+            payload_independent_seeding ? 1u : 0u,
+            payload_independent_seeding ?
+                wirehair_v2::kPayloadIndependentEquationSeedBlockBytes : 0u,
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
@@ -8374,6 +8410,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
+            "payload_independent_seeding=%u payload_independent_seed_bb=%u "
             "overhead_stream=%s full_payload_solve=%u schedule=%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
@@ -8410,6 +8447,9 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_row_seed_multiplier,
             packet_row_seed_avalanche ? 1u : 0u,
             seed_block_bytes_override,
+            payload_independent_seeding ? 1u : 0u,
+            payload_independent_seeding ?
+                wirehair_v2::kPayloadIndependentEquationSeedBlockBytes : 0u,
             paired_overhead_stream ? "paired" : "salted",
             full_payload_solve ? 1u : 0u,
             PacketScheduleName(schedule_kind),
@@ -8495,6 +8535,8 @@ int CmdPrecodeFail(int argc, char** argv)
                      packet_row_seed_avalanche), true) &&
                 (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
                      odd_packet_peel_seed_xor), true) &&
+                (wirehair_v2::SetPayloadIndependentEquationSeedingForTesting(
+                     payload_independent_seeding), true) &&
                 wirehair_v2::SetMixedGroupedGF256RowsForTesting(
                     mixed_grouped_gf256_rows);
         };
