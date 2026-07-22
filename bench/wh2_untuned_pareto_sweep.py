@@ -657,7 +657,8 @@ def wh1_timing_command(whx, k_values, reps, protocol):
 
 
 def build_tasks(manifest, out_dir, bench, whx, whx_count, method_filter,
-                timing_reps, skip_timing, region_filter=None):
+                timing_reps, skip_timing, region_filter=None,
+                timing_only=False):
     protocol = manifest["protocol"]
     tasks = []
     methods = manifest["methods"]
@@ -684,6 +685,8 @@ def build_tasks(manifest, out_dir, bench, whx, whx_count, method_filter,
             groups = method_cell_groups(method, region["k_values"])
             for seed_index, construction_seed in enumerate(
                     region["construction_seeds"]):
+                if timing_only:
+                    break
                 loss_seed = region["loss_seeds"][seed_index]
                 for chunk_index, (chunk, extra_flags) in enumerate(groups):
                     out_path = os.path.join(
@@ -820,7 +823,8 @@ def cmd_run(args):
         manifest, out_dir, bench, whx, whx_count,
         args.methods.split(",") if args.methods else None,
         args.timing_reps, args.skip_timing,
-        args.regions.split(",") if args.regions else None)
+        args.regions.split(",") if args.regions else None,
+        args.timing_only)
     for task in tasks:
         arm_binary = task["command"][0]
         if arm_binary is None or not os.path.exists(arm_binary):
@@ -1710,6 +1714,9 @@ def main():
     run.add_argument("--timing-reps", type=int, default=3)
     run.add_argument("--max-tasks", type=int, default=None)
     run.add_argument("--skip-timing", action="store_true")
+    run.add_argument("--timing-only", action="store_true",
+                     help="run only the encoder-timing tasks (single "
+                          "hardware baseline for the x-axis)")
     run.add_argument("--force-owner", action="store_true")
 
     collect = sub.add_parser("collect", help="aggregate raw outputs to JSON")
