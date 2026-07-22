@@ -4487,6 +4487,15 @@ int CmdPrecodeFail(int argc, char** argv)
     bool construction_seed_explicit = false;
     bool overhead_early_stop = false;
     uint32_t encode_timing_reps = 0u;
+    // Exact-overhead ladder: per-K overhead levels 0..min(cap, ladder_min)
+    // densely, then v += ceil(v/2) geometric steps to the cap
+    // max(ladder_min, ceil(ladder_pct% * K)).  With ascending early stop the
+    // first-success level is an exact extra count in the dense range and a
+    // bracketing upper bound in the geometric range.
+    uint32_t overhead_ladder_pct = 0u;
+    uint32_t overhead_ladder_min = 8u;
+    bool overhead_ladder_min_explicit = false;
+    bool overhead_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -4513,6 +4522,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             overhead_list = value;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            overhead_explicit = true;
+#endif
         }
         else if (!std::strcmp(argv[i], "--heavy-family")) {
             if (!TakeArg(
@@ -4865,6 +4877,27 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--overhead-ladder-pct")) {
+            if (!TakeArg(
+                    "precodefail", "--overhead-ladder-pct",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--overhead-ladder-pct", value, overhead_ladder_pct))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--overhead-ladder-min")) {
+            if (!TakeArg(
+                    "precodefail", "--overhead-ladder-min",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--overhead-ladder-min", value, overhead_ladder_min))
+            {
+                return 1;
+            }
+            overhead_ladder_min_explicit = true;
+        }
 #endif
         else if (!UnknownArg("precodefail", argv[i])) {
             return 1;
@@ -5169,6 +5202,35 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --encode-timing must be in [0,99]\n");
         return 1;
     }
+    if (overhead_ladder_pct > 100u)
+    {
+        std::fprintf(stderr,
+            "precodefail --overhead-ladder-pct must be in [1,100]\n");
+        return 1;
+    }
+    if (overhead_ladder_min_explicit &&
+        (overhead_ladder_pct == 0u || overhead_ladder_min == 0u ||
+         overhead_ladder_min > 64000u))
+    {
+        std::fprintf(stderr,
+            "precodefail --overhead-ladder-min requires "
+            "--overhead-ladder-pct and a value in [1,64000]\n");
+        return 1;
+    }
+    if (overhead_ladder_pct != 0u && overhead_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --overhead-ladder-pct conflicts with an explicit "
+            "--overhead list\n");
+        return 1;
+    }
+    if (overhead_ladder_pct != 0u && pair_mix_counts)
+    {
+        std::fprintf(stderr,
+            "precodefail --overhead-ladder-pct conflicts with paired "
+            "mix-count reporting\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -5245,7 +5307,7 @@ int CmdPrecodeFail(int argc, char** argv)
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if (construction_seed_explicit || overhead_early_stop ||
-        encode_timing_reps != 0u)
+        encode_timing_reps != 0u || overhead_ladder_pct != 0u)
     {
         // Untuned-protocol receipt: echo the uniform construction seed and
         // the fixed single-attempt policy so downstream harnesses can audit
@@ -5253,12 +5315,15 @@ int CmdPrecodeFail(int argc, char** argv)
         std::printf(
             "# untuned: construction_seed_explicit=%u "
             "construction_seed=0x%llx construction_attempts=%u "
-            "overhead_early_stop=%u encode_timing_reps=%u\n",
+            "overhead_early_stop=%u encode_timing_reps=%u "
+            "overhead_ladder_pct=%u overhead_ladder_min=%u\n",
             construction_seed_explicit ? 1u : 0u,
             (unsigned long long)construction_seed,
             construction_seed_explicit ? 1u : 0u,
             overhead_early_stop ? 1u : 0u,
-            encode_timing_reps);
+            encode_timing_reps,
+            overhead_ladder_pct,
+            overhead_ladder_pct != 0u ? overhead_ladder_min : 0u);
     }
 #endif
     std::printf(
@@ -5558,7 +5623,31 @@ int CmdPrecodeFail(int argc, char** argv)
             }
 #endif
 
-        for (int overhead_value : overheads)
+        std::vector<int> active_overheads = overheads;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (overhead_ladder_pct != 0u)
+        {
+            // Exact-overhead ladder for this K: dense levels 0..ladder_min,
+            // then v += ceil(v/2) geometric levels, ending exactly at the
+            // cap max(ladder_min, ceil(ladder_pct% * K)).
+            const uint64_t cap_wide =
+                ((uint64_t)overhead_ladder_pct * K + 99u) / 100u;
+            const uint32_t cap = cap_wide > overhead_ladder_min ?
+                (uint32_t)cap_wide : overhead_ladder_min;
+            active_overheads.clear();
+            const uint32_t dense_top = std::min(cap, overhead_ladder_min);
+            for (uint32_t level = 0; level <= dense_top; ++level) {
+                active_overheads.push_back((int)level);
+            }
+            uint32_t level = overhead_ladder_min;
+            while (level < cap)
+            {
+                level += (level + 1u) / 2u;
+                active_overheads.push_back((int)std::min(level, cap));
+            }
+        }
+#endif
+        for (int overhead_value : active_overheads)
         {
             const uint32_t overhead = (uint32_t)overhead_value;
             uint32_t solve_block_bytes =

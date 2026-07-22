@@ -728,7 +728,8 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     static const char* fuzz_values[] = { "--secs", "--nmax", "--seed", nullptr };
     static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", "--samples-out", nullptr };
     static const char* scan_values[] = { "--nlo", "--nhi", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
-    static const char* untunedcells_values[] = { "--nlist", "--nfile", "--cseed", "--seed", "--loss", "--maxoh", "--pairbb", "--trial", nullptr };
+    static const char* untunedcells_values[] = { "--nlist", "--nfile", "--cseed", "--seed", "--loss", "--maxoh", "--cap-pct", "--cap-min", "--pairbb", "--trial", nullptr };
+    static const char* untunedcells_flags[] = { "--tuned", nullptr };
     static const char* enctime_values[] = { "--nlist", "--nfile", "--reps", "--bb", "--cseed", "--seed", nullptr };
 #ifdef WH_SEED_KNOBS
     static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
@@ -747,7 +748,10 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     else if (mode == "repro") value_options = none;
     else if (mode == "ohead") value_options = ohead_values;
     else if (mode == "scan") value_options = scan_values;
-    else if (mode == "untunedcells") value_options = untunedcells_values;
+    else if (mode == "untunedcells") {
+        value_options = untunedcells_values;
+        flag_options = untunedcells_flags;
+    }
     else if (mode == "enctime") value_options = enctime_values;
 #ifdef WH_SEED_KNOBS
     else if (mode == "seedmean") value_options = seedmean_values;
@@ -2186,8 +2190,11 @@ static int cmd_selftest(int argc, char**) {
 // untunedcells: one uniform construction seed for every K (no per-K seed
 // tables, exactly one construction attempt), matrix-only structure solves,
 // and the same paired delivered-id stream as the WH2 precodefail arm.  Each
-// cell feeds delivered symbols until first decode success, censored at
-// K + maxoh delivered.
+// cell feeds delivered symbols incrementally until first decode success and
+// records the EXACT extra count, censored at K + cap delivered where cap is
+// either the absolute --maxoh or max(--cap-min, ceil(--cap-pct% * K)).
+// --tuned runs the production per-K seed-table control arm instead of the
+// uniform-seed override; loss streams are unchanged so cells pair exactly.
 //
 // enctime: encoder throughput screen - wall time to initialize the encoder
 // and produce the FIRST K systematic symbols at a minimal block size.
@@ -2206,19 +2213,35 @@ static uint64_t untuned_loss_seed(uint64_t base, uint64_t N, uint64_t pairbb, ui
 
 struct UntunedCellResult {
     int enc_ok = 0;
-    int first_oh = -1;   // -1 = censored at the overhead cap
-    int hard_error = 0;  // decoder rejected a feed outright
+    int first_oh = -1;    // extra delivered symbols at first success; -1 = censored at the cap
+    int decode_limit = 0; // decoder returned ExtraInsufficient: its bounded
+                          // extra-row replacement pool could no longer make
+                          // progress, a terminal WH1 decode outcome (cell is
+                          // censored regardless of further symbols)
+    int hard_error = 0;   // decoder rejected a feed outright
 };
 
-static UntunedCellResult untuned_cell(int N, uint16_t pseed, uint16_t dseed,
-                                      uint64_t loss_seed, double loss, int maxoh) {
+// Extra delivered symbols for a percentage overhead threshold K + ceil(q*K),
+// with q given in percent.  Integral percents use exact integer arithmetic.
+static unsigned pct_extra_symbols(int N, double q_pct) {
+    const double rounded = floor(q_pct + 0.5);
+    if (fabs(q_pct - rounded) < 1e-9) {
+        const unsigned long long q = (unsigned long long)rounded;
+        return (unsigned)((q * (unsigned long long)N + 99ULL) / 100ULL);
+    }
+    return (unsigned)ceil(q_pct * (double)N / 100.0);
+}
+
+static UntunedCellResult untuned_cell(int N, bool tuned, uint16_t pseed, uint16_t dseed,
+                                      uint64_t loss_seed, double loss, unsigned max_extra) {
     UntunedCellResult r;
     const uint16_t dense = wirehair::GetDenseCount((unsigned)N);
     {
         // One construction attempt: WH1 chooses seeds only in ChooseMatrix,
-        // so overriding them and building once is escalation-free.
+        // so overriding them and building once is escalation-free.  The
+        // tuned control arm takes the production per-K table path instead.
         wirehair::Codec enc;
-        enc.OverrideSeeds(dense, pseed, dseed);
+        if (!tuned) enc.OverrideSeeds(dense, pseed, dseed);
         WirehairResult er = enc.InitializeEncoder((uint64_t)N, 1);
         if (er == Wirehair_Success) er = enc.EncodeFeedMatrixOnly();
         r.enc_ok = (er == Wirehair_Success) ? 1 : 0;
@@ -2229,7 +2252,7 @@ static UntunedCellResult untuned_cell(int N, uint16_t pseed, uint16_t dseed,
         return r;
     }
     wirehair::Codec dec;
-    dec.OverrideSeeds(dense, pseed, dseed);
+    if (!tuned) dec.OverrideSeeds(dense, pseed, dseed);
     if (dec.InitializeDecoder((uint64_t)N, 1) != Wirehair_Success) {
         r.hard_error = 1;
         return r;
@@ -2237,7 +2260,7 @@ static UntunedCellResult untuned_cell(int N, uint16_t pseed, uint16_t dseed,
     Rng rng(loss_seed);
     unsigned delivered = 0;
     unsigned blockId = 0;
-    const unsigned cap = (unsigned)N + (unsigned)maxoh;
+    const unsigned cap = (unsigned)N + max_extra;
     while (delivered < cap) {
         const unsigned id = blockId++;
         if (rng.unit() < loss) continue;
@@ -2245,6 +2268,10 @@ static UntunedCellResult untuned_cell(int N, uint16_t pseed, uint16_t dseed,
         const WirehairResult dr = dec.DecodeFeedMatrixOnly(id);
         if (dr == Wirehair_Success) {
             r.first_oh = (int)(delivered - (unsigned)N);
+            return r;
+        }
+        if (dr == Wirehair_ExtraInsufficient) {
+            r.decode_limit = 1;
             return r;
         }
         if (dr != Wirehair_NeedMore) {
@@ -2284,9 +2311,11 @@ static int cmd_untunedcells(int argc, char** argv) {
     string nlist, nfile;
     uint64_t cseed = 0, base = 0x5eedf411ULL;
     double loss = 0.10;
-    int maxoh = 4, pairbb = 2;
+    int maxoh = 4, pairbb = 2, cap_min = 8;
+    double cap_pct = 0.0;   // 0 = absolute --maxoh cap; >0 = percentage cap
     long trial = 0;
     bool have_cseed = false;
+    bool tuned = false;
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i], "--nlist") && i + 1 < argc) nlist = argv[++i];
         else if (!strcmp(argv[i], "--nfile") && i + 1 < argc) nfile = argv[++i];
@@ -2294,26 +2323,40 @@ static int cmd_untunedcells(int argc, char** argv) {
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], base)) return 2; }
         else if (!strcmp(argv[i], "--loss") && i + 1 < argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
         else if (!strcmp(argv[i], "--maxoh") && i + 1 < argc) { if (!parse_int_strict(argv[++i], maxoh)) return 2; }
+        else if (!strcmp(argv[i], "--cap-pct") && i + 1 < argc) { if (!parse_double_strict(argv[++i], cap_pct)) return 2; }
+        else if (!strcmp(argv[i], "--cap-min") && i + 1 < argc) { if (!parse_int_strict(argv[++i], cap_min)) return 2; }
         else if (!strcmp(argv[i], "--pairbb") && i + 1 < argc) { if (!parse_int_strict(argv[++i], pairbb)) return 2; }
         else if (!strcmp(argv[i], "--trial") && i + 1 < argc) { if (!parse_long_strict(argv[++i], trial)) return 2; }
+        else if (!strcmp(argv[i], "--tuned")) tuned = true;
     }
     vector<int> Ns;
     if (!load_untuned_n_values("untunedcells", nfile, nlist, Ns)) return 2;
-    if (!have_cseed || maxoh < 0 || maxoh > 64 || pairbb < 1 || trial < 0 ||
-        !std::isfinite(loss) || loss < 0.0 || loss > 0.99)
+    if (tuned && have_cseed) {
+        fprintf(stderr, "untunedcells: --tuned (production per-K seed tables) "
+                        "forbids --cseed\n");
+        return 2;
+    }
+    if ((!tuned && !have_cseed) || maxoh < 0 || maxoh > 64 || pairbb < 1 ||
+        trial < 0 || !std::isfinite(loss) || loss < 0.0 || loss > 0.99 ||
+        cap_pct < 0.0 || cap_pct > 100.0 || !std::isfinite(cap_pct) ||
+        cap_min < 1 || cap_min > 64000)
     {
-        fprintf(stderr, "untunedcells requires --cseed, 0 <= --loss <= 0.99, "
-                        "0 <= --maxoh <= 64, --pairbb >= 1, and --trial >= 0\n");
+        fprintf(stderr, "untunedcells requires --cseed (or --tuned), "
+                        "0 <= --loss <= 0.99, 0 <= --maxoh <= 64, "
+                        "0 < --cap-pct <= 100, 1 <= --cap-min <= 64000, "
+                        "--pairbb >= 1, and --trial >= 0\n");
         return 2;
     }
     const uint16_t pseed = (uint16_t)(cseed & 0xFFFFu);
     const uint16_t dseed = (uint16_t)((cseed >> 16) & 0xFFFFu);
     if (threads > (int)Ns.size()) threads = (int)Ns.size();
-    printf("# untunedcells: cseed=0x%llx construction_attempts=1 pseed=%u dseed=%u "
-           "seed=0x%llx loss=%.17g pairbb=%d maxoh=%d trial=%ld threads=%d cells=%zu\n",
+    printf("# untunedcells: arm=%s cseed=0x%llx construction_attempts=1 "
+           "pseed=%u dseed=%u seed=0x%llx loss=%.17g pairbb=%d maxoh=%d "
+           "cap_pct=%.17g cap_min=%d trial=%ld threads=%d cells=%zu\n",
+           tuned ? "tuned" : "untuned",
            (unsigned long long)cseed, pseed, dseed, (unsigned long long)base,
-           loss, pairbb, maxoh, trial, threads, Ns.size());
-    printf("K,enc_ok,first_oh,censored\n");
+           loss, pairbb, maxoh, cap_pct, cap_min, trial, threads, Ns.size());
+    printf("K,enc_ok,extra,censored,decode_limit\n");
     vector<UntunedCellResult> results(Ns.size());
     std::atomic<size_t> next{0};
     std::atomic<int> hard_fail{0};
@@ -2325,7 +2368,14 @@ static int cmd_untunedcells(int argc, char** argv) {
             const int N = Ns[i];
             const uint64_t ls = untuned_loss_seed(
                 base, (uint64_t)N, (uint64_t)pairbb, (uint64_t)trial);
-            results[i] = untuned_cell(N, pseed, dseed, ls, loss, maxoh);
+            // Exact first-success extra via incremental feeding, capped at
+            // max(cap_min, ceil(cap_pct% * N)); absolute --maxoh otherwise.
+            unsigned cap_extra = (unsigned)maxoh;
+            if (cap_pct > 0.0) {
+                cap_extra = pct_extra_symbols(N, cap_pct);
+                if (cap_extra < (unsigned)cap_min) cap_extra = (unsigned)cap_min;
+            }
+            results[i] = untuned_cell(N, tuned, pseed, dseed, ls, loss, cap_extra);
             if (results[i].hard_error) hard_fail.store(1);
         }
     });
@@ -2336,7 +2386,8 @@ static int cmd_untunedcells(int argc, char** argv) {
     }
     for (size_t i = 0; i < Ns.size(); ++i) {
         const UntunedCellResult& r = results[i];
-        printf("%d,%d,%d,%d\n", Ns[i], r.enc_ok, r.first_oh, r.first_oh < 0 ? 1 : 0);
+        printf("%d,%d,%d,%d,%d\n", Ns[i], r.enc_ok, r.first_oh,
+               r.first_oh < 0 ? 1 : 0, r.decode_limit);
     }
     return 0;
 }

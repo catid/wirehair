@@ -468,6 +468,47 @@ expect_failure("--overhead-early-stop conflicts with paired" precodefail
 expect_failure("--encode-timing must be in" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --encode-timing 100)
+# Exact-overhead ladder: dense 0..min, then v += ceil(v/2) to the cap
+# max(min, ceil(pct% * K)).  K=64 at 50%/8 walks 0..8,12,18,27,32.
+expect_success("overhead_ladder_pct=50 overhead_ladder_min=8" precodefail
+    --N 64 --bb-list 2 --trials 1 --threads 1 --loss 0
+    --construction-seed 999999 --overhead-ladder-pct 50
+    --overhead-ladder-min 8)
+run_bench(result ladder_out ladder_err precodefail
+    --N 64 --bb-list 2 --trials 1 --threads 1 --loss 0 --seed 1
+    --construction-seed 999999 --overhead-ladder-pct 50
+    --overhead-ladder-min 8)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "ladder run failed: ${ladder_err}")
+endif()
+set(ladder_levels "")
+string(REPLACE "\n" ";" ladder_lines "${ladder_out}")
+foreach(line IN LISTS ladder_lines)
+    if(line MATCHES "^64,")
+        # Placeholder the empty fields: CMake lists drop empty elements.
+        while(line MATCHES ",,")
+            string(REPLACE ",," ",<empty>," line "${line}")
+        endwhile()
+        string(REPLACE "," ";" ladder_fields "${line}")
+        list(GET ladder_fields 4 ladder_level)
+        list(APPEND ladder_levels "${ladder_level}")
+    endif()
+endforeach()
+string(REPLACE ";" "," ladder_levels_text "${ladder_levels}")
+if(NOT ladder_levels_text MATCHES "^0(,1,2,3,4,5,6,7,8(,12(,18(,27(,32)?)?)?)?)?$")
+    message(FATAL_ERROR
+        "unexpected ladder level walk: ${ladder_levels_text}")
+endif()
+expect_failure("--overhead-ladder-pct must be in" precodefail
+    --N 64 --bb-list 2 --trials 1 --threads 1 --overhead-ladder-pct 101)
+expect_failure("--overhead-ladder-min requires" precodefail
+    --N 64 --bb-list 2 --trials 1 --threads 1 --overhead-ladder-min 8)
+expect_failure("--overhead-ladder-pct conflicts with an explicit"
+    precodefail --N 64 --bb-list 2 --overhead 0,1 --trials 1 --threads 1
+    --overhead-ladder-pct 50)
+expect_failure("--overhead-ladder-pct conflicts with paired" precodefail
+    --N 64 --bb-list 2 --trials 1 --threads 1 --mix-count 2,3
+    --overhead-ladder-pct 50)
 
 # Fixed-seed reproducibility: two runs of the same untuned cell must agree
 # on every non-timing column, and seed_attempt must always be zero.

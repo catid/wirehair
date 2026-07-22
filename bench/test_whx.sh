@@ -187,13 +187,14 @@ bash bench/test_verify_fix.sh
 
 # Untuned architecture-comparison protocol (wirehair-g8iv): WH1 arm gates.
 # One uniform construction seed, single construction attempt, matrix-only
-# cells, and the encoder init + first-K-symbols timing screen.
+# cells with EXACT incremental first-success extras, and the encoder init +
+# first-K-symbols timing screen.
 "$NORMAL" untunedcells --threads 1 --nlist 2,3,7,19,63,500 \
     --cseed 0xdeadbeefcafef00d --seed 0x1234 --loss 0.1 --pairbb 2 \
     --maxoh 4 >"$TMP/untuned-a.out"
-grep -Fq '# untunedcells: cseed=0xdeadbeefcafef00d construction_attempts=1' \
+grep -Fq '# untunedcells: arm=untuned cseed=0xdeadbeefcafef00d construction_attempts=1' \
     "$TMP/untuned-a.out"
-grep -Eq '^K,enc_ok,first_oh,censored$' "$TMP/untuned-a.out"
+grep -Eq '^K,enc_ok,extra,censored,decode_limit$' "$TMP/untuned-a.out"
 [ "$(grep -Ec '^[0-9]+,' "$TMP/untuned-a.out")" -eq 6 ]
 # Fixed-seed reproducibility: identical cells across runs and thread counts.
 "$NORMAL" untunedcells --threads 6 --nlist 2,3,7,19,63,500 \
@@ -201,7 +202,7 @@ grep -Eq '^K,enc_ok,first_oh,censored$' "$TMP/untuned-a.out"
     --maxoh 4 >"$TMP/untuned-b.out"
 diff <(grep -E '^[0-9]+,' "$TMP/untuned-a.out") \
     <(grep -E '^[0-9]+,' "$TMP/untuned-b.out")
-# Censoring semantics: first_oh=-1 rows must be flagged censored=1.
+# Censoring semantics: extra=-1 rows must be flagged censored=1.
 awk -F, '/^[0-9]+,/ { if (($3 < 0) != ($4 == 1)) exit 1 }' "$TMP/untuned-a.out"
 set +e
 "$NORMAL" untunedcells --nlist 64 --seed 1 >"$TMP/untuned-nocseed.out" \
@@ -210,6 +211,26 @@ untuned_rc=$?
 set -e
 [ "$untuned_rc" -eq 2 ]
 grep -Fq 'requires --cseed' "$TMP/untuned-nocseed.err"
+# Percentage cap: cap = max(cap_min, ceil(cap_pct% * K)); the tuned control
+# arm takes the production per-K seed tables and forbids --cseed.
+"$NORMAL" untunedcells --threads 2 --nlist 2,500,5000 \
+    --cseed 0xdeadbeefcafef00d --seed 0x1234 --loss 0.1 --pairbb 2 \
+    --cap-pct 50 --cap-min 8 >"$TMP/untuned-pct.out"
+grep -Fq 'cap_pct=50 cap_min=8' "$TMP/untuned-pct.out"
+[ "$(grep -Ec '^[0-9]+,' "$TMP/untuned-pct.out")" -eq 3 ]
+"$NORMAL" untunedcells --threads 2 --nlist 2,500,5000 --tuned \
+    --seed 0x1234 --loss 0.1 --pairbb 2 --cap-pct 50 --cap-min 8 \
+    >"$TMP/tuned-pct.out"
+grep -Fq '# untunedcells: arm=tuned ' "$TMP/tuned-pct.out"
+# The tuned production tables must decode every gate cell without censoring.
+awk -F, '/^[0-9]+,/ { if ($2 != 1 || $4 != 0) exit 1 }' "$TMP/tuned-pct.out"
+set +e
+"$NORMAL" untunedcells --nlist 64 --tuned --cseed 5 --seed 1 \
+    >/dev/null 2>"$TMP/tuned-cseed.err"
+tuned_rc=$?
+set -e
+[ "$tuned_rc" -eq 2 ]
+grep -Fq 'forbids --cseed' "$TMP/tuned-cseed.err"
 
 "$NORMAL" enctime --nlist 100,1000 --reps 3 --bb 1 >"$TMP/enctime.out"
 grep -Fq '# enctime: reps=3 bb=1 cseed_explicit=0 cseed=0x0 counted=0' \
