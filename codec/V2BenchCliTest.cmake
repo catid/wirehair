@@ -425,6 +425,113 @@ expect_success("seed_block_bytes_override=2" precodefail
 expect_failure("--seed-block-bytes must be nonzero" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --seed-block-bytes 0)
+
+# Untuned architecture-comparison protocol hooks (wirehair-g8iv): one
+# uniform construction seed, one construction attempt, per-cell overhead
+# early stop, encoder init + first-K-symbols timing.
+expect_success(
+    "# untuned: construction_seed_explicit=1 construction_seed=0xdeadbeefcafef00d construction_attempts=1 overhead_early_stop=1 encode_timing_reps=3"
+    precodefail --N 50,500 --bb-list 2 --overhead 0,1,2,3,4 --trials 1
+    --threads 1 --loss 0.1 --seed 4660 --completion mixed
+    --construction-seed 0xdeadbeefcafef00d --paired-overhead-stream
+    --overhead-early-stop --encode-timing 3)
+expect_success("# encode_timing,N=64,bb=2,heavy_family=periodic,mix_count=3,reps=3,solve_ok="
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0 --encode-timing 3)
+run_bench(result untuned_out untuned_err precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1)
+if(NOT result EQUAL 0 OR untuned_out MATCHES "# untuned:")
+    message(FATAL_ERROR
+        "default precodefail must not emit the untuned receipt\n"
+        "result=${result}\nstdout=${untuned_out}")
+endif()
+expect_failure("--construction-seed does not support --payload-e2e"
+    precodefail --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
+    --construction-seed 5 --payload-e2e)
+expect_failure("--construction-seed ignores seed profiles" precodefail
+    --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1
+    --construction-seed 5 --seed-block-bytes 1280)
+expect_failure("--construction-seed forbids per-K" precodefail
+    --N 64 --bb-list 1280 --overhead 0 --trials 1 --threads 1
+    --completion mixed --mix-count 2 --mixed-geometry shared-x
+    --mixed-gf256-rows 11 --mixed-gf16-rows 4 --mixed-period 32
+    --mixed-residue-schedule hashed --mixed-residue-hash-seed 68
+    --mixed-residue-hash-keyed --mixed-independent-extension-residues
+    --mixed-extension-residue-seed-xor 78 --seed-block-bytes 1280
+    --packet-peel-seed-table normalized-h15-v4 --construction-seed 5)
+expect_failure("--overhead-early-stop requires a strictly ascending"
+    precodefail --N 64 --bb-list 2 --overhead 0,2,1 --trials 1 --threads 1
+    --overhead-early-stop)
+expect_failure("--overhead-early-stop conflicts with paired" precodefail
+    --N 64 --bb-list 2 --overhead 0,1 --trials 1 --threads 1
+    --mix-count 2,3 --overhead-early-stop)
+expect_failure("--encode-timing must be in" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --encode-timing 100)
+
+# Fixed-seed reproducibility: two runs of the same untuned cell must agree
+# on every non-timing column, and seed_attempt must always be zero.
+run_bench(result untuned_a untuned_err precodefail
+    --N 40,400,2100 --bb-list 2 --overhead 0,1,2,3,4 --trials 1 --threads 1
+    --loss 0.1 --seed 4660 --completion mixed --construction-seed 3
+    --paired-overhead-stream --overhead-early-stop)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "untuned reproducibility run A failed: ${untuned_err}")
+endif()
+run_bench(result untuned_b untuned_err precodefail
+    --N 40,400,2100 --bb-list 2 --overhead 0,1,2,3,4 --trials 1 --threads 1
+    --loss 0.1 --seed 4660 --completion mixed --construction-seed 3
+    --paired-overhead-stream --overhead-early-stop)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "untuned reproducibility run B failed: ${untuned_err}")
+endif()
+set(untuned_stable_a "")
+set(untuned_stable_b "")
+foreach(pair "a" "b")
+    set(stable "")
+    string(REPLACE "\n" ";" lines "${untuned_${pair}}")
+    foreach(line IN LISTS lines)
+        if(line MATCHES "^[0-9]")
+            # Drop the six wall-time columns (17-22, zero-based) so only
+            # deterministic algebraic fields are compared.  Placeholder the
+            # empty fields first: CMake lists drop empty elements.
+            while(line MATCHES ",,")
+                string(REPLACE ",," ",<empty>," line "${line}")
+            endwhile()
+            if(line MATCHES ",$")
+                set(line "${line}<empty>")
+            endif()
+            string(REPLACE "," ";" fields "${line}")
+            list(LENGTH fields field_count)
+            if(NOT field_count EQUAL 31)
+                message(FATAL_ERROR
+                    "unexpected precodefail column count ${field_count}: ${line}")
+            endif()
+            set(kept "")
+            set(index 0)
+            foreach(field IN LISTS fields)
+                if(index LESS 17 OR index GREATER 22)
+                    list(APPEND kept "${field}")
+                endif()
+                math(EXPR index "${index} + 1")
+            endforeach()
+            list(GET fields 23 attempt_field)
+            if(NOT attempt_field STREQUAL "0")
+                message(FATAL_ERROR
+                    "untuned seed_attempt must be zero: ${line}")
+            endif()
+            string(REPLACE ";" "," kept_line "${kept}")
+            set(stable "${stable}${kept_line}\n")
+        endif()
+    endforeach()
+    set(untuned_stable_${pair} "${stable}")
+endforeach()
+if(NOT untuned_stable_a STREQUAL untuned_stable_b OR
+    untuned_stable_a STREQUAL "")
+    message(FATAL_ERROR
+        "untuned fixed-seed runs disagree on stable columns\n"
+        "A=${untuned_stable_a}\nB=${untuned_stable_b}")
+endif()
 expect_success("mixed_residue_skew=14" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 2 --threads 2 --loss 0.1
     --completion mixed --mixed-gf16-rows 4 --mixed-period 29

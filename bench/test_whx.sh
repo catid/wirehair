@@ -185,6 +185,49 @@ grep -Fq 'data column count does not match header' "$TMP/mixed.stderr"
 
 bash bench/test_verify_fix.sh
 
+# Untuned architecture-comparison protocol (wirehair-g8iv): WH1 arm gates.
+# One uniform construction seed, single construction attempt, matrix-only
+# cells, and the encoder init + first-K-symbols timing screen.
+"$NORMAL" untunedcells --threads 1 --nlist 2,3,7,19,63,500 \
+    --cseed 0xdeadbeefcafef00d --seed 0x1234 --loss 0.1 --pairbb 2 \
+    --maxoh 4 >"$TMP/untuned-a.out"
+grep -Fq '# untunedcells: cseed=0xdeadbeefcafef00d construction_attempts=1' \
+    "$TMP/untuned-a.out"
+grep -Eq '^K,enc_ok,first_oh,censored$' "$TMP/untuned-a.out"
+[ "$(grep -Ec '^[0-9]+,' "$TMP/untuned-a.out")" -eq 6 ]
+# Fixed-seed reproducibility: identical cells across runs and thread counts.
+"$NORMAL" untunedcells --threads 6 --nlist 2,3,7,19,63,500 \
+    --cseed 0xdeadbeefcafef00d --seed 0x1234 --loss 0.1 --pairbb 2 \
+    --maxoh 4 >"$TMP/untuned-b.out"
+diff <(grep -E '^[0-9]+,' "$TMP/untuned-a.out") \
+    <(grep -E '^[0-9]+,' "$TMP/untuned-b.out")
+# Censoring semantics: first_oh=-1 rows must be flagged censored=1.
+awk -F, '/^[0-9]+,/ { if (($3 < 0) != ($4 == 1)) exit 1 }' "$TMP/untuned-a.out"
+set +e
+"$NORMAL" untunedcells --nlist 64 --seed 1 >"$TMP/untuned-nocseed.out" \
+    2>"$TMP/untuned-nocseed.err"
+untuned_rc=$?
+set -e
+[ "$untuned_rc" -eq 2 ]
+grep -Fq 'requires --cseed' "$TMP/untuned-nocseed.err"
+
+"$NORMAL" enctime --nlist 100,1000 --reps 3 --bb 1 >"$TMP/enctime.out"
+grep -Fq '# enctime: reps=3 bb=1 cseed_explicit=0 cseed=0x0 counted=0' \
+    "$TMP/enctime.out"
+[ "$(grep -Ec '^[0-9]+,' "$TMP/enctime.out")" -eq 2 ]
+# Every timed K must succeed with a positive median and zero counters in
+# the uncounted build.
+awk -F, '/^[0-9]+,/ { if ($3 != 1 || $4 <= 0 || $7 != 0 || $8 != 0) exit 1 }' \
+    "$TMP/enctime.out"
+
+COUNTED="$TMP/whx-counted"
+OUT="$COUNTED" TAG=test-whx-counted EXTRA=-DWH_COUNT=1 bash bench/build.sh \
+    >/dev/null
+"$COUNTED" enctime --nlist 100,1000 --reps 3 --bb 1 >"$TMP/enctime-count.out"
+grep -Fq 'counted=1' "$TMP/enctime-count.out"
+# The WH_COUNT build must report nonzero XOR-class work for the encode.
+awk -F, '/^[0-9]+,/ { if ($3 != 1 || $7 <= 0) exit 1 }' "$TMP/enctime-count.out"
+
 if [ "${RUN_SANITIZERS:-0}" = 1 ]; then
     SAN="$TMP/whx-san"
     SAN_FLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'

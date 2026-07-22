@@ -4479,6 +4479,14 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_residue_hash_seed_explicit = false;
     bool mixed_extension_residue_seed_xor_explicit = false;
     bool seed_block_bytes_explicit = false;
+    // Untuned architecture-comparison protocol hooks (wirehair-g8iv): one
+    // uniform construction seed for every K, exactly one construction
+    // attempt, optional per-cell overhead early stop, and an encoder
+    // init + first-K-symbols timing pass.
+    uint64_t construction_seed = 0u;
+    bool construction_seed_explicit = false;
+    bool overhead_early_stop = false;
+    uint32_t encode_timing_reps = 0u;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -4833,6 +4841,30 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (!TakeArg(
+                    "precodefail", "--construction-seed",
+                    argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--construction-seed", value, construction_seed))
+            {
+                return 1;
+            }
+            construction_seed_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead-early-stop")) {
+            overhead_early_stop = true;
+        }
+        else if (!std::strcmp(argv[i], "--encode-timing")) {
+            if (!TakeArg(
+                    "precodefail", "--encode-timing",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--encode-timing", value, encode_timing_reps))
+            {
+                return 1;
+            }
+        }
 #endif
         else if (!UnknownArg("precodefail", argv[i])) {
             return 1;
@@ -5088,6 +5120,55 @@ int CmdPrecodeFail(int argc, char** argv)
             "its normalized H15/mix2 geometry\n");
         return 1;
     }
+    if (construction_seed_explicit &&
+        packet_peel_seed_table != PacketPeelSeedTable::None)
+    {
+        std::fprintf(stderr,
+            "precodefail --construction-seed forbids per-K "
+            "--packet-peel-seed-table rescues\n");
+        return 1;
+    }
+    if (construction_seed_explicit && payload_e2e)
+    {
+        std::fprintf(stderr,
+            "precodefail --construction-seed does not support "
+            "--payload-e2e (the untuned configuration is not "
+            "systematically verified)\n");
+        return 1;
+    }
+    if (construction_seed_explicit && seed_block_bytes_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --construction-seed ignores seed profiles; "
+            "--seed-block-bytes has no effect\n");
+        return 1;
+    }
+    if (overhead_early_stop && pair_mix_counts)
+    {
+        std::fprintf(stderr,
+            "precodefail --overhead-early-stop conflicts with paired "
+            "mix-count reporting\n");
+        return 1;
+    }
+    if (overhead_early_stop)
+    {
+        for (size_t i = 1u; i < overheads.size(); ++i)
+        {
+            if (overheads[i] <= overheads[i - 1u])
+            {
+                std::fprintf(stderr,
+                    "precodefail --overhead-early-stop requires a "
+                    "strictly ascending --overhead list\n");
+                return 1;
+            }
+        }
+    }
+    if (encode_timing_reps > 99u)
+    {
+        std::fprintf(stderr,
+            "precodefail --encode-timing must be in [0,99]\n");
+        return 1;
+    }
 #endif
 
     if (completion == PrecodeFailCompletion::Certified)
@@ -5162,6 +5243,24 @@ int CmdPrecodeFail(int argc, char** argv)
             PacketScheduleName(schedule_kind),
             mixed_null_witnesses ? " mixed_null_witnesses=1" : "");
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (construction_seed_explicit || overhead_early_stop ||
+        encode_timing_reps != 0u)
+    {
+        // Untuned-protocol receipt: echo the uniform construction seed and
+        // the fixed single-attempt policy so downstream harnesses can audit
+        // that no per-K derivation or escalation was in effect.
+        std::printf(
+            "# untuned: construction_seed_explicit=%u "
+            "construction_seed=0x%llx construction_attempts=%u "
+            "overhead_early_stop=%u encode_timing_reps=%u\n",
+            construction_seed_explicit ? 1u : 0u,
+            (unsigned long long)construction_seed,
+            construction_seed_explicit ? 1u : 0u,
+            overhead_early_stop ? 1u : 0u,
+            encode_timing_reps);
+    }
+#endif
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -5255,15 +5354,27 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::SelectSeedProfile(
                     K, seed_block_bytes_override) :
                 profile;
-        const uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
+        uint64_t matrix_seed = wirehair_v2::MatrixSeedFromProfile(
             seed_profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt);
+        uint32_t packet_peel_seed = wirehair_v2::PacketPeelSeedFromProfile(
+            seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (construction_seed_explicit)
+        {
+            // Untuned protocol: the same construction seed for every K,
+            // with no per-K profile-derived component in either the matrix
+            // seed or the packet peel seed.
+            matrix_seed = construction_seed;
+            packet_peel_seed = (uint32_t)construction_seed ^
+                (uint32_t)(construction_seed >> 32);
+        }
+#endif
         const wirehair_v2::PrecodeParams canonical_params =
             completion == PrecodeFailCompletion::Mixed ?
                 wirehair_v2::MakeMixedParams(K, matrix_seed) :
                 wirehair_v2::MakeCertifiedParams(K, matrix_seed);
         wirehair_v2::PacketRowConfig base_config;
-        base_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-            seed_profile, wirehair_v2::kMessageRecoveryRowSeedSalt) ^
+        base_config.PeelSeed = packet_peel_seed ^
             active_packet_peel_seed_xor;
         for (wirehair_v2::HeavyCoefficientFamily heavy_family : heavy_families)
         {
@@ -5285,6 +5396,27 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PrecodeSystem system;
             wirehair_v2::PacketRowConfig config;
             uint32_t seed_attempt = 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (construction_seed_explicit)
+            {
+                // Untuned protocol: exactly one construction attempt.  The
+                // systematic probe and its seed escalation are both skipped;
+                // any rank deficiency of this fixed construction surfaces in
+                // the overhead trials below, never as a seed rescue.
+                if (!wirehair_v2::BuildPrecodeSystem(base_params, system))
+                {
+                    std::fprintf(stderr,
+                        "precodefail untuned construction rejected N=%u "
+                        "bb=%u heavy_family=%s mix_count=%u\n",
+                        K, bb, HeavyFamilyName(heavy_family),
+                        (uint32_t)mix_count_value);
+                    return 2;
+                }
+                config = base_config;
+            }
+            else
+#endif
+            {
             const WirehairResult select_result =
                 wirehair_v2::SelectSystematicConfiguration(
                     base_params, base_config, system, config, &seed_attempt);
@@ -5296,6 +5428,7 @@ int CmdPrecodeFail(int argc, char** argv)
                     (uint32_t)mix_count_value,
                     (int)select_result);
                 return 2;
+            }
             }
             const uint64_t precode_count_wide =
                 (uint64_t)system.Params.Staircase +
@@ -5329,6 +5462,101 @@ int CmdPrecodeFail(int argc, char** argv)
                     (uint32_t)mix_count_value);
                 return 2;
             }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (encode_timing_reps != 0u)
+            {
+                // Encoder throughput screen: wall time to initialize the
+                // encoder (precode system build + runtime + systematic
+                // intermediate solve) and produce the first K systematic
+                // symbols, at the minimal legal block size.  Repair symbols
+                // and all decoding are excluded.  Runs single-threaded on
+                // the main thread; the receipt reports the median rep.
+                const uint32_t timing_bytes =
+                    completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+                std::vector<uint8_t> timing_source(
+                    (size_t)K * timing_bytes, uint8_t{0});
+                std::vector<uint8_t> timing_symbols(
+                    (size_t)K * timing_bytes, uint8_t{0});
+                std::vector<wirehair_v2::SolvePacket> timing_packets(K);
+                std::vector<uint64_t> rep_ns;
+                rep_ns.reserve(encode_timing_reps);
+                bool timing_setup_failed = false;
+                bool timing_solve_ok = true;
+                uint32_t timing_sink = 0u;
+                for (uint32_t rep = 0; rep < encode_timing_reps; ++rep)
+                {
+                    const Clock::time_point t0 = Clock::now();
+                    wirehair_v2::PrecodeSystem timing_system;
+                    wirehair_v2::PacketRowRuntime timing_runtime;
+                    if (!wirehair_v2::BuildPrecodeSystem(
+                            system.Params, timing_system) ||
+                        !timing_runtime.Initialize(
+                            K, precode_count, config.MixCount))
+                    {
+                        timing_setup_failed = true;
+                        break;
+                    }
+                    for (uint32_t block_id = 0; block_id < K; ++block_id)
+                    {
+                        timing_packets[block_id].BlockId = block_id;
+                        timing_packets[block_id].Data =
+                            timing_source.data() +
+                            (size_t)block_id * timing_bytes;
+                    }
+                    std::vector<uint8_t> timing_intermediate;
+                    const WirehairResult timing_result =
+                        wirehair_v2::
+                            SolvePrecodeSystemForValidatedSystemWithRuntime(
+                                timing_system, config, timing_runtime,
+                                timing_packets, timing_bytes,
+                                timing_intermediate);
+                    if (timing_result != Wirehair_Success) {
+                        timing_solve_ok = false;
+                    }
+                    // A systematic encoder emits source blocks unchanged for
+                    // ids below K: one block copy per symbol.
+                    std::memcpy(
+                        timing_symbols.data(), timing_source.data(),
+                        (size_t)K * timing_bytes);
+                    const Clock::time_point t1 = Clock::now();
+                    timing_sink ^= (uint32_t)timing_symbols[
+                        (size_t)(K - 1u) * timing_bytes];
+                    if (!timing_intermediate.empty()) {
+                        timing_sink ^= (uint32_t)timing_intermediate[0];
+                    }
+                    rep_ns.push_back((uint64_t)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            t1 - t0).count());
+                }
+                if (timing_setup_failed || rep_ns.empty())
+                {
+                    std::fprintf(stderr,
+                        "precodefail encode timing setup failed N=%u bb=%u "
+                        "heavy_family=%s mix_count=%u\n",
+                        K, bb, HeavyFamilyName(heavy_family),
+                        (uint32_t)mix_count_value);
+                    return 2;
+                }
+                std::sort(rep_ns.begin(), rep_ns.end());
+                const uint64_t median_ns = rep_ns[rep_ns.size() / 2u];
+                const double median_seconds = (double)median_ns / 1e9;
+                std::printf(
+                    "# encode_timing,N=%u,bb=%u,heavy_family=%s,"
+                    "mix_count=%u,reps=%u,solve_ok=%u,solve_block_bytes=%u,"
+                    "median_ns=%llu,seconds_per_k_symbols=%.9g,"
+                    "symbols_per_sec=%.9g,sink=%u\n",
+                    K, bb, HeavyFamilyName(heavy_family),
+                    (uint32_t)mix_count_value,
+                    encode_timing_reps,
+                    timing_solve_ok ? 1u : 0u,
+                    timing_bytes,
+                    (unsigned long long)median_ns,
+                    median_seconds,
+                    median_seconds > 0.0 ? (double)K / median_seconds : 0.0,
+                    timing_sink & 0xffu);
+            }
+#endif
 
         for (int overhead_value : overheads)
         {
@@ -5807,6 +6035,15 @@ int CmdPrecodeFail(int argc, char** argv)
                         std::printf("%s\n", line.c_str());
                     }
                 }
+            }
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            // Untuned protocol: once every trial decoded at this overhead,
+            // higher overheads for this cell group are implied successes and
+            // are skipped.  Downstream readers treat the missing ascending
+            // rows as decoded.
+            if (overhead_early_stop && successes == trials) {
+                break;
             }
 #endif
         }

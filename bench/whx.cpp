@@ -728,6 +728,8 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     static const char* fuzz_values[] = { "--secs", "--nmax", "--seed", nullptr };
     static const char* ohead_values[] = { "--nlo", "--nhi", "--nstep", "--trials", "--bb", "--startmode", "--loss", "--seed", "--samples-out", nullptr };
     static const char* scan_values[] = { "--nlo", "--nhi", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
+    static const char* untunedcells_values[] = { "--nlist", "--nfile", "--cseed", "--seed", "--loss", "--maxoh", "--pairbb", "--trial", nullptr };
+    static const char* enctime_values[] = { "--nlist", "--nfile", "--reps", "--bb", "--cseed", "--seed", nullptr };
 #ifdef WH_SEED_KNOBS
     static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
     static const char* seedsearch_values[] = { "--nlist", "--nfile", "--tsearch", "--tverify", "--nseeds", "--bb", "--loss", "--startmode", "--dseeds", "--goodthr", nullptr };
@@ -745,6 +747,8 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     else if (mode == "repro") value_options = none;
     else if (mode == "ohead") value_options = ohead_values;
     else if (mode == "scan") value_options = scan_values;
+    else if (mode == "untunedcells") value_options = untunedcells_values;
+    else if (mode == "enctime") value_options = enctime_values;
 #ifdef WH_SEED_KNOBS
     else if (mode == "seedmean") value_options = seedmean_values;
     else if (mode == "seedsearch") value_options = seedsearch_values;
@@ -2176,22 +2180,268 @@ static int cmd_selftest(int argc, char**) {
     return 0;
 }
 
+//------------------------------------------------------------------------------
+// Untuned architecture-comparison protocol (wirehair-g8iv): WH1 arm.
+//
+// untunedcells: one uniform construction seed for every K (no per-K seed
+// tables, exactly one construction attempt), matrix-only structure solves,
+// and the same paired delivered-id stream as the WH2 precodefail arm.  Each
+// cell feeds delivered symbols until first decode success, censored at
+// K + maxoh delivered.
+//
+// enctime: encoder throughput screen - wall time to initialize the encoder
+// and produce the FIRST K systematic symbols at a minimal block size.
+// Repair symbols and decoding are excluded; measurements are sequential and
+// single-threaded.  With -DWH_COUNT the first rep also reports gf256
+// XOR-class and muladd-class byte counters as a work proxy.
+
+// Matches wirehair_v2_bench precodefail's paired-overhead-stream loss seed
+// derivation so both arms replay the identical delivered-id stream.
+static uint64_t untuned_loss_seed(uint64_t base, uint64_t N, uint64_t pairbb, uint64_t trial) {
+    return base
+        ^ (N * 0x9E3779B97F4A7C15ULL)
+        ^ (pairbb * 0xBF58476D1CE4E5B9ULL)
+        ^ (trial * 0xD6E8FEB86659FD93ULL);
+}
+
+struct UntunedCellResult {
+    int enc_ok = 0;
+    int first_oh = -1;   // -1 = censored at the overhead cap
+    int hard_error = 0;  // decoder rejected a feed outright
+};
+
+static UntunedCellResult untuned_cell(int N, uint16_t pseed, uint16_t dseed,
+                                      uint64_t loss_seed, double loss, int maxoh) {
+    UntunedCellResult r;
+    const uint16_t dense = wirehair::GetDenseCount((unsigned)N);
+    {
+        // One construction attempt: WH1 chooses seeds only in ChooseMatrix,
+        // so overriding them and building once is escalation-free.
+        wirehair::Codec enc;
+        enc.OverrideSeeds(dense, pseed, dseed);
+        WirehairResult er = enc.InitializeEncoder((uint64_t)N, 1);
+        if (er == Wirehair_Success) er = enc.EncodeFeedMatrixOnly();
+        r.enc_ok = (er == Wirehair_Success) ? 1 : 0;
+    }
+    if (!r.enc_ok) {
+        // Unconstructable code for this (K, seed): the cell fails at every
+        // overhead and is reported as censored with enc_ok=0.
+        return r;
+    }
+    wirehair::Codec dec;
+    dec.OverrideSeeds(dense, pseed, dseed);
+    if (dec.InitializeDecoder((uint64_t)N, 1) != Wirehair_Success) {
+        r.hard_error = 1;
+        return r;
+    }
+    Rng rng(loss_seed);
+    unsigned delivered = 0;
+    unsigned blockId = 0;
+    const unsigned cap = (unsigned)N + (unsigned)maxoh;
+    while (delivered < cap) {
+        const unsigned id = blockId++;
+        if (rng.unit() < loss) continue;
+        ++delivered;
+        const WirehairResult dr = dec.DecodeFeedMatrixOnly(id);
+        if (dr == Wirehair_Success) {
+            r.first_oh = (int)(delivered - (unsigned)N);
+            return r;
+        }
+        if (dr != Wirehair_NeedMore) {
+            r.hard_error = 1;
+            return r;
+        }
+    }
+    return r;
+}
+
+static bool load_untuned_n_values(const char* command, const string& nfile,
+                                  const string& nlist, vector<int>& Ns) {
+    if (!nfile.empty() && !read_n_file_strict(nfile, command, Ns)) return false;
+    if (!nlist.empty()) {
+        vector<int> listed;
+        if (!parse_positive_int_list(nlist, listed)) {
+            fprintf(stderr, "%s: bad --nlist\n", command);
+            return false;
+        }
+        Ns.insert(Ns.end(), listed.begin(), listed.end());
+    }
+    if (Ns.empty()) {
+        fprintf(stderr, "%s requires --nfile or --nlist\n", command);
+        return false;
+    }
+    for (int N : Ns) {
+        if (N < 2 || N > 64000) {
+            fprintf(stderr, "%s requires every N in 2..64000\n", command);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int cmd_untunedcells(int argc, char** argv) {
+    int threads = resolve_threads();
+    string nlist, nfile;
+    uint64_t cseed = 0, base = 0x5eedf411ULL;
+    double loss = 0.10;
+    int maxoh = 4, pairbb = 2;
+    long trial = 0;
+    bool have_cseed = false;
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--nlist") && i + 1 < argc) nlist = argv[++i];
+        else if (!strcmp(argv[i], "--nfile") && i + 1 < argc) nfile = argv[++i];
+        else if (!strcmp(argv[i], "--cseed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], cseed)) return 2; have_cseed = true; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], base)) return 2; }
+        else if (!strcmp(argv[i], "--loss") && i + 1 < argc) { if (!parse_double_strict(argv[++i], loss)) return 2; }
+        else if (!strcmp(argv[i], "--maxoh") && i + 1 < argc) { if (!parse_int_strict(argv[++i], maxoh)) return 2; }
+        else if (!strcmp(argv[i], "--pairbb") && i + 1 < argc) { if (!parse_int_strict(argv[++i], pairbb)) return 2; }
+        else if (!strcmp(argv[i], "--trial") && i + 1 < argc) { if (!parse_long_strict(argv[++i], trial)) return 2; }
+    }
+    vector<int> Ns;
+    if (!load_untuned_n_values("untunedcells", nfile, nlist, Ns)) return 2;
+    if (!have_cseed || maxoh < 0 || maxoh > 64 || pairbb < 1 || trial < 0 ||
+        !std::isfinite(loss) || loss < 0.0 || loss > 0.99)
+    {
+        fprintf(stderr, "untunedcells requires --cseed, 0 <= --loss <= 0.99, "
+                        "0 <= --maxoh <= 64, --pairbb >= 1, and --trial >= 0\n");
+        return 2;
+    }
+    const uint16_t pseed = (uint16_t)(cseed & 0xFFFFu);
+    const uint16_t dseed = (uint16_t)((cseed >> 16) & 0xFFFFu);
+    if (threads > (int)Ns.size()) threads = (int)Ns.size();
+    printf("# untunedcells: cseed=0x%llx construction_attempts=1 pseed=%u dseed=%u "
+           "seed=0x%llx loss=%.17g pairbb=%d maxoh=%d trial=%ld threads=%d cells=%zu\n",
+           (unsigned long long)cseed, pseed, dseed, (unsigned long long)base,
+           loss, pairbb, maxoh, trial, threads, Ns.size());
+    printf("K,enc_ok,first_oh,censored\n");
+    vector<UntunedCellResult> results(Ns.size());
+    std::atomic<size_t> next{0};
+    std::atomic<int> hard_fail{0};
+    vector<thread> ts;
+    for (int t = 0; t < threads; ++t) ts.emplace_back([&]() {
+        for (;;) {
+            const size_t i = next.fetch_add(1);
+            if (i >= Ns.size()) break;
+            const int N = Ns[i];
+            const uint64_t ls = untuned_loss_seed(
+                base, (uint64_t)N, (uint64_t)pairbb, (uint64_t)trial);
+            results[i] = untuned_cell(N, pseed, dseed, ls, loss, maxoh);
+            if (results[i].hard_error) hard_fail.store(1);
+        }
+    });
+    for (auto& th : ts) th.join();
+    if (hard_fail.load()) {
+        fprintf(stderr, "untunedcells: decoder hard error\n");
+        return 3;
+    }
+    for (size_t i = 0; i < Ns.size(); ++i) {
+        const UntunedCellResult& r = results[i];
+        printf("%d,%d,%d,%d\n", Ns[i], r.enc_ok, r.first_oh, r.first_oh < 0 ? 1 : 0);
+    }
+    return 0;
+}
+
+static int cmd_enctime(int argc, char** argv) {
+    string nlist, nfile;
+    int reps = 3, bb = 1;
+    uint64_t cseed = 0, mseed = 0x517ULL;
+    bool have_cseed = false;
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--nlist") && i + 1 < argc) nlist = argv[++i];
+        else if (!strcmp(argv[i], "--nfile") && i + 1 < argc) nfile = argv[++i];
+        else if (!strcmp(argv[i], "--reps") && i + 1 < argc) { if (!parse_int_strict(argv[++i], reps)) return 2; }
+        else if (!strcmp(argv[i], "--bb") && i + 1 < argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
+        else if (!strcmp(argv[i], "--cseed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], cseed)) return 2; have_cseed = true; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], mseed)) return 2; }
+    }
+    vector<int> Ns;
+    if (!load_untuned_n_values("enctime", nfile, nlist, Ns)) return 2;
+    if (reps < 1 || reps > 99 || bb < 1 || bb > 4096) {
+        fprintf(stderr, "enctime requires 1 <= --reps <= 99 and 1 <= --bb <= 4096\n");
+        return 2;
+    }
+    int counted = 0;
+#ifdef WH_COUNT
+    counted = 1;
+#endif
+    printf("# enctime: reps=%d bb=%d cseed_explicit=%d cseed=0x%llx counted=%d "
+           "single_threaded=1 seed=0x%llx\n",
+           reps, bb, have_cseed ? 1 : 0, (unsigned long long)cseed, counted,
+           (unsigned long long)mseed);
+    printf("K,reps,ok,median_ns,seconds_per_k_symbols,symbols_per_sec,"
+           "xor_bytes,muladd_bytes,sink\n");
+    for (int N : Ns) {
+        const uint64_t messageBytes = (uint64_t)N * (uint64_t)bb;
+        vector<uint8_t> message(messageBytes);
+        Rng rng(mseed ^ (uint64_t)N);
+        for (uint64_t i = 0; i < messageBytes; ++i) message[i] = (uint8_t)rng.u32();
+        vector<uint8_t> block((size_t)bb);
+        vector<uint64_t> rep_ns;
+        rep_ns.reserve((size_t)reps);
+        int ok = 1;
+        uint32_t sink = 0;
+        uint64_t xor_bytes = 0, muladd_bytes = 0;
+        for (int rep = 0; rep < reps; ++rep) {
+#ifdef WH_COUNT
+            gf256_count_reset();
+#endif
+            const double t0 = now_sec();
+            wirehair::Codec enc;
+            if (have_cseed) {
+                enc.OverrideSeeds(wirehair::GetDenseCount((unsigned)N),
+                                  (uint16_t)(cseed & 0xFFFFu),
+                                  (uint16_t)((cseed >> 16) & 0xFFFFu));
+            }
+            WirehairResult er = enc.InitializeEncoder(messageBytes, (unsigned)bb);
+            if (er == Wirehair_Success) er = enc.EncodeFeed(message.data());
+            if (er != Wirehair_Success) {
+                ok = 0;
+            } else {
+                for (int id = 0; id < N; ++id) {
+                    const uint32_t written = enc.Encode((uint32_t)id, block.data(), (uint32_t)bb);
+                    if (written == 0) { ok = 0; break; }
+                    sink ^= block[0];
+                }
+            }
+            const double t1 = now_sec();
+            rep_ns.push_back((uint64_t)((t1 - t0) * 1e9));
+#ifdef WH_COUNT
+            if (rep == 0) {
+                // 0=add 1=add2 2=addset are XOR-class; 3=mul 4=muladd are
+                // multiply-class.  Bytes at bb=1 approximate operation counts.
+                xor_bytes = gf256_count_bytes(0) + gf256_count_bytes(1) + gf256_count_bytes(2);
+                muladd_bytes = gf256_count_bytes(3) + gf256_count_bytes(4);
+            }
+#endif
+        }
+        sort(rep_ns.begin(), rep_ns.end());
+        const uint64_t median_ns = rep_ns[rep_ns.size() / 2];
+        const double sec = (double)median_ns / 1e9;
+        printf("%d,%d,%d,%llu,%.9g,%.9g,%llu,%llu,%u\n", N, reps, ok,
+               (unsigned long long)median_ns, sec,
+               sec > 0.0 ? (double)N / sec : 0.0,
+               (unsigned long long)xor_bytes, (unsigned long long)muladd_bytes,
+               sink & 0xffu);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (wirehair_init() != Wirehair_Success) { fprintf(stderr, "wirehair_init failed\n"); return 2; }
     if (argc < 2) {
 #ifdef WH_COUNT
 #ifdef WH_SEED_KNOBS
-        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch|peelstat] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|untunedcells|enctime|seedmean|seedsearch|peelstat] [--threads T] [opts]\n");
 #else
-        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|peelstat] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|untunedcells|enctime|peelstat] [--threads T] [opts]\n");
 #endif
         fprintf(stderr, "  bench/count/peelstat accept --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
         fprintf(stderr, "  bench memory is capped by --memory-mib (default 4096; env WHX_BENCH_MEMORY_MIB)\n");
 #else
 #ifdef WH_SEED_KNOBS
-        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|seedmean|seedsearch] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|untunedcells|enctime|seedmean|seedsearch] [--threads T] [opts]\n");
 #else
-        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan] [--threads T] [opts]\n");
+        fprintf(stderr, "usage: whx [selftest|micro|bench|fuzz|repro|ohead|scan|untunedcells|enctime] [--threads T] [opts]\n");
 #endif
         fprintf(stderr, "  bench accepts --N csv and --bb/--bb-list csv for block-count x block-size sweeps\n");
         fprintf(stderr, "  bench memory is capped by --memory-mib (default 4096; env WHX_BENCH_MEMORY_MIB)\n");
@@ -2228,6 +2478,8 @@ int main(int argc, char** argv) {
     if (mode == "bench") return cmd_bench(ac, av);
     if (mode == "fuzz")  return cmd_fuzz(ac, av);
     if (mode == "ohead") return cmd_ohead(ac, av);
+    if (mode == "untunedcells") return cmd_untunedcells(ac, av);
+    if (mode == "enctime") return cmd_enctime(ac, av);
 #ifdef WH_COUNT
     if (mode == "count") return cmd_count(ac, av);
     if (mode == "peelstat") return cmd_peelstat(ac, av);
