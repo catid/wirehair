@@ -1,0 +1,21 @@
+{
+  "schema": "wirehair.wh2_untuned_pareto.provenance.v1",
+  "git_commit": "9e8b103f31c459a3945a4c9b2db29d725ab673e2",
+  "manifest_sha256": "b524ee1bb1305f12bd4da8cf676eaa17f2c123427eaa436ac9689a4ecf8cae91",
+  "hosts": {
+    "loki": {
+      "role": "regions r1_2_100..r4_5000_10000 cells + ALL encoder-timing tasks (single hardware baseline)",
+      "bench_sha256": "77cabbca51a00ed31aed0a65beff72e9e815a7be12a95063572a65db3c12b3dd",
+      "whx_sha256": "ee602c56c172945b80c24b0d40b72dd4409d52a2c2f31e47cdcb73c4a877a448",
+      "whx_count_sha256": "188d3bd5ed5f7afda1008919cdae0b3033e660108b48ff780a2592fe85797c9b"
+    },
+    "foureyes": {
+      "role": "regions r5_10000_20000 + r6_20000_64000 cells (no timing)",
+      "bench_sha256": "77cabbca51a00ed31aed0a65beff72e9e815a7be12a95063572a65db3c12b3dd",
+      "whx_sha256": "ee602c56c172945b80c24b0d40b72dd4409d52a2c2f31e47cdcb73c4a877a448",
+      "whx_count_sha256": "188d3bd5ed5f7afda1008919cdae0b3033e660108b48ff780a2592fe85797c9b",
+      "binaries_reproducible": true,
+      "worktree": "~/wirehair-pareto at same commit"
+    }
+  }
+}

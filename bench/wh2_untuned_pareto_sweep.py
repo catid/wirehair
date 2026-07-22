@@ -1339,6 +1339,10 @@ def cmd_collect(args):
             region = result["regions"][region_name]
             timing = region.get("timing", {})
             rate = timing.get("median_symbols_per_sec")
+            if region["expected_overhead"] is None:
+                print("%-24s %-16s cells=0 (no collected cells)" % (
+                    method["id"], region_name))
+                continue
             print("%-24s %-16s cells=%-6d Eoh=%-9.6f fail0=%-8.5f "
                   "fail2=%-8.5f dead=%-8.5f hardK=%-8.5f cfail=%-4d "
                   "excl=%-4d sym/s=%s" % (
