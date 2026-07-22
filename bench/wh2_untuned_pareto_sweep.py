@@ -30,18 +30,21 @@ candidates and legacy Wirehair1:
   level recorded as bracket_low).
 * Zero-byte/minimal payloads: WH2 runs structure-only solves
   (full_payload_solve=0, probe bytes 1/2); WH1 uses matrix-only feeds.
-* Metrics per (method, tuning point, region) are FLOAT aggregates of the
-  overhead fraction extra/K: mean over decoded cells, p50 and p99 over the
+* Metrics per (method, tuning point, region) are aggregates of ABSOLUTE
+  EXTRA SYMBOLS (the float-ness comes from aggregating many cells'
+  integer extras, not from normalizing by K): mean extra symbols over
+  decoded cells, linearly interpolated p50 and p99 extra symbols over the
   full empirical distribution across all cells (censored cells enter as
-  +infinity; a percentile landing in censored mass reports null), the
-  censored fraction and the encoder-construct-failure fraction, plus CDF
-  readouts (success rate at 1%/10%/25%/50% received overhead).  Raw
-  per-cell [K, extra, bracket_low] triples are kept in the result JSON so
-  any percentile or CDF point is recomputable.  Secondary work counters
-  (WH2: solver block XOR/muladd counts; WH1: gf256 byte counters at bb=1
-  from a WH_COUNT build, as a documented proxy) and measured encoder
-  throughput ride along.  The Pareto plot y-axes are y1 = p99 overhead
-  fraction and y2 = mean overhead fraction.
+  +infinity; a percentile touching censored mass reports null), the
+  censored fraction and the encoder-construct-failure fraction.
+  Percentage-of-K CDF readouts (success rate at 1%/10%/25%/50% received
+  overhead) stay in the JSON as secondary data.  Raw per-cell
+  [K, extra, bracket_low] triples are kept in the result JSON so any view
+  is recomputable.  Secondary work counters (WH2: solver block XOR/muladd
+  counts; WH1: gf256 byte counters at bb=1 from a WH_COUNT build, as a
+  documented proxy) and measured encoder throughput ride along.  The
+  Pareto plot y-axes are y1 = p99 extra symbols and y2 = mean extra
+  symbols.
 * Encoder throughput = wall time to initialize the encoder and produce the
   FIRST K systematic symbols only (no repair symbols, no decoding), at the
   minimal legal block size (WH2 mixed: 2 bytes, WH2 certified: 1 byte,
@@ -81,8 +84,8 @@ import time
 
 MASK64 = (1 << 64) - 1
 
-SCHEMA_MANIFEST = "wirehair.wh2_untuned_pareto.manifest.v2"
-SCHEMA_RESULT = "wirehair.wh2_untuned_pareto.result.v2"
+SCHEMA_MANIFEST = "wirehair.wh2_untuned_pareto.manifest.v3"
+SCHEMA_RESULT = "wirehair.wh2_untuned_pareto.result.v3"
 SCHEMA_OWNER = "wirehair.environment_owner.v1"
 
 OWNER_MARKER_PATH = "/tmp/wirehair.environment_owner.v1.json"
@@ -130,10 +133,14 @@ PROTOCOL = {
         "range, a bracketing upper bound above it; the last failing level "
         "is recorded as bracket_low)",
     "percentile_policy":
-        "mean over decoded cells only; p50/p99 over all cells with "
-        "censored as +infinity (null when the rank lands in censored "
-        "mass); success_rate_at_pct counts cells with extra <= "
-        "ceil(q% * K) over all cells",
+        "aggregates are ABSOLUTE extra symbols: mean over decoded cells "
+        "only; p50/p99 linearly interpolated over the empirical "
+        "distribution across all cells with censored as +infinity (null "
+        "when the interpolation touches censored mass); secondary "
+        "success_rate_at_pct counts cells with extra <= ceil(q% * K) over "
+        "all cells",
+    "plot_axes": "y1 = p99 extra symbols, y2 = mean extra symbols, "
+                 "x = encoder throughput; untuned architectures only",
     "wh2_solve_block_bytes": {"certified": 1, "mixed": 2},
     "wh1_block_bytes": 1,
     "timing_block_bytes": {"wh2-certified": 1, "wh2-mixed": 2, "wh1": 1},
@@ -326,22 +333,15 @@ def build_methods():
             "hyperparameters": hyper,
         })
 
+    # The protocol compares untuned architectures only.  (whx untunedcells
+    # retains a --tuned production-table mode for one-off control
+    # questions, but it is deliberately not a tuning point.)
     add("wh1-legacy", "wh1", "wh1", [], {
         "codec": "legacy wirehair.cpp lineage",
         "dense_count": "GetDenseCount(K) table (structural)",
         "construction_seed_mapping":
             "pseed=cseed[15:0], dseed=cseed[31:16]",
     })
-    # Tuned control arm: the production per-K seed tables (normal
-    # ChooseMatrix path, no override), same cells and same delivered-id
-    # streams, quantifying what WH1's per-K seed tuning buys.
-    methods[-1]["tuned"] = False
-    add("wh1-legacy-tuned", "wh1", "wh1", [], {
-        "codec": "legacy wirehair.cpp lineage",
-        "dense_count": "GetDenseCount(K) table (structural)",
-        "seed_source": "production per-K seed tables (tuned control)",
-    })
-    methods[-1]["tuned"] = True
 
     flags, hyper = _certified_flags()
     add("cert-baseline", "wh2-certified", "wh2", flags, hyper)
@@ -571,9 +571,8 @@ def wh2_timing_command(bench, method, k_values, reps, protocol):
     ] + list(method["flags"])
 
 
-def wh1_cell_command(whx, k_values, construction_seed, loss_seed, protocol,
-                     tuned=False):
-    command = [
+def wh1_cell_command(whx, k_values, construction_seed, loss_seed, protocol):
+    return [
         whx, "untunedcells",
         "--threads", "1",
         "--nlist", ",".join(str(k) for k in k_values),
@@ -583,12 +582,8 @@ def wh1_cell_command(whx, k_values, construction_seed, loss_seed, protocol,
         "--cap-pct", str(protocol["overhead_cap_pct"]),
         "--cap-min", str(protocol["overhead_cap_min"]),
         "--trial", str(protocol["trial_index"]),
+        "--cseed", "0x%x" % construction_seed,
     ]
-    if tuned:
-        command.append("--tuned")
-    else:
-        command += ["--cseed", "0x%x" % construction_seed]
-    return command
 
 
 def wh1_timing_command(whx, k_values, reps, protocol):
@@ -640,7 +635,7 @@ def build_tasks(manifest, out_dir, bench, whx, whx_count, method_filter,
                     else:
                         command = wh1_cell_command(
                             whx, chunk, construction_seed, loss_seed,
-                            protocol, tuned=method.get("tuned", False))
+                            protocol)
                     tasks.append({
                         "kind": "cells",
                         "method": method["id"],
@@ -935,10 +930,12 @@ def parse_wh2_cells(text, expected_cseed, cap_pct, cap_min):
     return cells
 
 
-def parse_wh1_cells(text, expected_cseed, tuned=False):
+def parse_wh1_cells(text, expected_cseed):
     """Parse a whx untunedcells output (exact incremental extras).
 
     Returns {K: {"extra": int or None, "enc_ok": bool, "bracket_low": ...}}.
+    The protocol compares untuned architectures only, so the receipt must
+    show the untuned arm with the expected uniform construction seed.
     """
     cells = {}
     saw_receipt = False
@@ -949,11 +946,9 @@ def parse_wh1_cells(text, expected_cseed, tuned=False):
             continue
         if line.startswith("# untunedcells:"):
             saw_receipt = True
-            expected_arm = "arm=tuned " if tuned else "arm=untuned "
-            if expected_arm not in line + " ":
+            if "arm=untuned " not in line + " ":
                 raise ParseError("untunedcells arm mismatch: %s" % line)
-            if not tuned and \
-                    "cseed=0x%x " % expected_cseed not in line + " ":
+            if "cseed=0x%x " % expected_cseed not in line + " ":
                 raise ParseError("untunedcells cseed mismatch: %s" % line)
             if "construction_attempts=1" not in line:
                 raise ParseError("untunedcells attempts != 1")
@@ -1055,35 +1050,44 @@ def parse_wh1_timing(text):
 # aggregation
 
 
-def percentile_with_censoring(sorted_fractions, censored, p):
-    """Nearest-rank percentile over all cells; censored cells sit above
-    every finite value.  Returns None when the rank lands in censored
-    mass."""
-    total = len(sorted_fractions) + censored
+def percentile_interpolated(sorted_values, censored, p):
+    """Linearly interpolated percentile over the empirical distribution
+    across all cells; censored cells sit above every finite value as
+    +infinity.  Returns a float, or None when the interpolation touches
+    censored mass."""
+    total = len(sorted_values) + censored
     if total == 0:
         return None
-    rank = ceil_div(int(round(p * 10000)) * total, 10000)
-    if rank < 1:
-        rank = 1
-    if rank > len(sorted_fractions):
+    position = p * (total - 1)
+    low_index = int(position)
+    high_index = min(low_index + 1, total - 1)
+    if high_index >= len(sorted_values) and position > low_index:
         return None
-    return sorted_fractions[rank - 1]
+    if low_index >= len(sorted_values):
+        return None
+    low_value = sorted_values[low_index]
+    if position == low_index or high_index == low_index:
+        return float(low_value)
+    high_value = sorted_values[high_index]
+    fraction = position - low_index
+    return float(low_value) * (1.0 - fraction) + float(high_value) * fraction
 
 
 def aggregate_region(cell_outcomes, protocol):
     """cell_outcomes: list of dicts with k, extra (int or None),
     bracket_low, optional work (xors, muladds), optional enc_ok.
 
-    Float schema: mean(extra/K) over decoded cells; p50/p99 over all cells
-    with censored as +infinity; success rate at the readout percentages;
-    per-cell triples retained for recomputable CDF/percentiles.
+    Absolute-symbol schema: mean extra symbols over decoded cells;
+    interpolated p50/p99 extra symbols over all cells with censored as
+    +infinity; percentage-of-K CDF readouts kept as secondary data;
+    per-cell triples retained so any view is recomputable.
     """
     readouts = protocol["success_rate_readout_pcts"]
     construct_failures = 0
     decoder_limit = 0
     censored = 0
-    fractions = []
-    fraction_sum = 0.0
+    extras = []
+    extra_sum = 0
     success_at = {str(q): 0 for q in readouts}
     cells_detail = []
     work_xors = 0.0
@@ -1104,9 +1108,8 @@ def aggregate_region(cell_outcomes, protocol):
         if extra is None:
             censored += 1
             continue
-        fraction = extra / k
-        fractions.append(fraction)
-        fraction_sum += fraction
+        extras.append(extra)
+        extra_sum += extra
         for q in readouts:
             if extra <= pct_threshold(k, q):
                 success_at[str(q)] += 1
@@ -1116,8 +1119,8 @@ def aggregate_region(cell_outcomes, protocol):
             work_muladds += work[1]
             work_cells += 1
     cells = len(cell_outcomes)
-    decoded = len(fractions)
-    fractions.sort()
+    decoded = len(extras)
+    extras.sort()
     return {
         "cells": cells,
         "decoded": decoded,
@@ -1127,11 +1130,13 @@ def aggregate_region(cell_outcomes, protocol):
         "censored_fraction": (censored / cells) if cells else 0.0,
         "decoder_limit_fraction":
             (decoder_limit / cells) if cells else 0.0,
-        "overhead_fraction": {
-            "mean_decoded": (fraction_sum / decoded) if decoded else None,
-            "p50": percentile_with_censoring(fractions, censored, 0.50),
-            "p99": percentile_with_censoring(fractions, censored, 0.99),
+        # THE plot y-axes: y1 = p99 extra symbols, y2 = mean extra symbols.
+        "overhead_extra_symbols": {
+            "mean_decoded": (extra_sum / decoded) if decoded else None,
+            "p50": percentile_interpolated(extras, censored, 0.50),
+            "p99": percentile_interpolated(extras, censored, 0.99),
         },
+        # Secondary percentage-of-K readouts (not the headline).
         "success_rate_at_pct": {
             q: (success_at[q] / cells) if cells else 0.0
             for q in success_at
@@ -1202,9 +1207,7 @@ def collect_method(manifest, manifest_sha, out_dir, method, allow_partial):
                     cells = parse_wh2_cells(
                         text, construction_seed, cap_pct, cap_min)
                 else:
-                    cells = parse_wh1_cells(
-                        text, construction_seed,
-                        tuned=method.get("tuned", False))
+                    cells = parse_wh1_cells(text, construction_seed)
                 chunk_set = set(chunk)
                 if set(cells) != chunk_set:
                     raise ParseError(
@@ -1290,22 +1293,18 @@ def cmd_collect(args):
             region = result["regions"][region_name]
             timing = region.get("timing", {})
             rate = timing.get("median_symbols_per_sec")
-            fraction = region["overhead_fraction"]
+            symbols = region["overhead_extra_symbols"]
 
             def fmt(value):
-                return "%.6f" % value if value is not None else "cens"
+                return "%.4f" % value if value is not None else "cens"
 
-            success = region["success_rate_at_pct"]
-            print("%-24s %-16s cells=%-6d mean=%-9s p50=%-9s p99=%-9s "
-                  "cens=%-8.5f cfail=%-8.5f sr@1/10/25/50=%s sym/s=%s" % (
+            print("%-24s %-16s cells=%-6d mean_extra=%-9s p50=%-8s "
+                  "p99=%-9s cens=%-8.5f cfail=%-8.5f sym/s=%s" % (
                       method["id"], region_name, region["cells"],
-                      fmt(fraction["mean_decoded"]),
-                      fmt(fraction["p50"]), fmt(fraction["p99"]),
+                      fmt(symbols["mean_decoded"]),
+                      fmt(symbols["p50"]), fmt(symbols["p99"]),
                       region["censored_fraction"],
                       region["construct_failure_fraction"],
-                      "/".join("%.4f" % success[str(q)] for q in
-                               result["protocol"][
-                                   "success_rate_readout_pcts"]),
                       ("%.0f" % rate) if rate else "n/a"))
     with open(os.path.join(results_dir, "index.json"), "w") as handle:
         handle.write(canonical_json({
@@ -1379,6 +1378,9 @@ def selftest():
 
     methods = build_methods()
     check("tuning grid within cap", 1 <= len(methods) <= 100)
+    check("tuning grid is 52 untuned points",
+          len(methods) == 52 and
+          not any("tuned" in m["id"] for m in methods))
     check("tuning grid has wh1 arm",
           any(m["arm"] == "wh1" for m in methods))
     check("tuning grid has h15 family",
@@ -1496,33 +1498,36 @@ def selftest():
         check("wh1 parser rejects cseed mismatch", False)
     except ParseError:
         check("wh1 parser rejects cseed mismatch", True)
-    try:
-        parse_wh1_cells(wh1_text, 0x1F, tuned=True)
-        check("wh1 parser rejects arm mismatch", False)
-    except ParseError:
-        check("wh1 parser rejects arm mismatch", True)
+    # The protocol compares untuned architectures only: a tuned-arm
+    # receipt must be rejected outright.
     wh1_tuned_text = wh1_text.replace(
-        "arm=untuned cseed=0x1f", "arm=tuned cseed=0x0")
-    check("wh1 parser tuned arm",
-          parse_wh1_cells(wh1_tuned_text, 0, tuned=True)[10]["extra"] == 0)
+        "arm=untuned cseed=0x1f", "arm=tuned cseed=0x1f")
+    try:
+        parse_wh1_cells(wh1_tuned_text, 0x1F)
+        check("wh1 parser rejects tuned-arm receipts", False)
+    except ParseError:
+        check("wh1 parser rejects tuned-arm receipts", True)
 
-    check("percentile with censoring",
-          percentile_with_censoring([0.1, 0.2, 0.3, 0.4], 0, 0.50) == 0.2 and
-          percentile_with_censoring([0.1, 0.2, 0.3], 1, 0.99) is None and
-          percentile_with_censoring([], 4, 0.50) is None and
-          percentile_with_censoring([0.1] * 99, 1, 0.99) == 0.1)
+    check("interpolated percentile",
+          percentile_interpolated([1, 2, 3, 4], 0, 0.50) == 2.5 and
+          percentile_interpolated([5], 0, 0.50) == 5.0 and
+          percentile_interpolated([0, 1, 2], 1, 0.50) == 1.5 and
+          percentile_interpolated([0, 0, 10], 1, 0.99) is None and
+          percentile_interpolated([], 4, 0.50) is None and
+          percentile_interpolated([7] * 99, 1, 0.99) is None and
+          percentile_interpolated([7] * 99, 0, 0.99) == 7.0)
 
     outcomes = ([{"k": 100, "extra": 0}] * 985 +
                 [{"k": 100, "extra": 1}] * 10 +
                 [{"k": 100, "extra": 30}] * 3 +
                 [{"k": 100, "extra": None, "enc_ok": False}] * 2)
     aggregate = aggregate_region(outcomes, PROTOCOL)
-    check("aggregate float means over decoded only",
-          abs(aggregate["overhead_fraction"]["mean_decoded"] -
-              (10 * 0.01 + 3 * 0.30) / 998.0) < 1e-12)
-    check("aggregate percentiles",
-          aggregate["overhead_fraction"]["p50"] == 0.0 and
-          aggregate["overhead_fraction"]["p99"] == 0.01)
+    check("aggregate mean extra symbols over decoded only",
+          abs(aggregate["overhead_extra_symbols"]["mean_decoded"] -
+              (10 * 1 + 3 * 30) / 998.0) < 1e-12)
+    check("aggregate interpolated percentiles",
+          aggregate["overhead_extra_symbols"]["p50"] == 0.0 and
+          aggregate["overhead_extra_symbols"]["p99"] == 1.0)
     check("aggregate censoring fractions",
           abs(aggregate["censored_fraction"] - 0.002) < 1e-12 and
           abs(aggregate["construct_failure_fraction"] - 0.002) < 1e-12)
@@ -1543,8 +1548,8 @@ def selftest():
     all_censored = aggregate_region(
         [{"k": 10, "extra": None}] * 4, PROTOCOL)
     check("aggregate all-censored",
-          all_censored["overhead_fraction"]["p50"] is None and
-          all_censored["overhead_fraction"]["mean_decoded"] is None)
+          all_censored["overhead_extra_symbols"]["p50"] is None and
+          all_censored["overhead_extra_symbols"]["mean_decoded"] is None)
 
     wh2_timing_text = "\n".join([
         "# precodefail: ...",
@@ -1602,14 +1607,13 @@ def selftest():
                     for r in manifest["regions"])
         check("smoke sample is 200 cells", total == 200)
         tasks = build_tasks(manifest, tmp, "/bin/bench", "/bin/whx", None,
-                            ["wh1-legacy", "wh1-legacy-tuned",
-                             "mixed-p244-baseline"],
+                            ["wh1-legacy", "mixed-p244-baseline"],
                             3, False)
         cells_tasks = [t for t in tasks if t["kind"] == "cells"]
         timing_tasks = [t for t in tasks if t["kind"] == "timing"]
         check("task construction",
-              len(timing_tasks) == 3 * 6 and
-              len(cells_tasks) >= 3 * 6 * 2 and
+              len(timing_tasks) == 2 * 6 and
+              len(cells_tasks) >= 2 * 6 * 2 and
               all(t["out"].startswith(tmp) for t in tasks))
         wh2_task = next(t for t in cells_tasks
                         if t["method"] == "mixed-p244-baseline")
@@ -1626,11 +1630,6 @@ def selftest():
               "--cseed" in wh1_task["command"] and
               "--cap-pct" in wh1_task["command"] and
               "--tuned" not in wh1_task["command"])
-        wh1_tuned_task = next(t for t in cells_tasks
-                              if t["method"] == "wh1-legacy-tuned")
-        check("wh1 tuned task command shape",
-              "--tuned" in wh1_tuned_task["command"] and
-              "--cseed" not in wh1_tuned_task["command"])
         region_tasks = build_tasks(
             manifest, tmp, "/bin/bench", "/bin/whx", None,
             ["wh1-legacy"], 3, True, ["r6_20000_64000"])
