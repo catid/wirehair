@@ -17,34 +17,26 @@ candidates and legacy Wirehair1:
   EVERY method and tuning point; everything is drawn from one recorded
   sample seed with an in-file SplitMix64 so the sample is sealed and
   language/version stable.
-* EXACT per-cell first-success overhead, capped at
-  max(cap_min=8, ceil(50% * K)) delivered extras; beyond the cap the cell
-  is censored (censored cells are reported separately and never folded
-  into means).  WH1 feeds the delivered iid stream one symbol at a time
-  (incremental DecodeFeed) and records extra = received - K exactly.  WH2
-  structure-only trials cannot feed incrementally in the mixed completion,
-  so precodefail evaluates a per-K overhead ladder: dense levels 0..8 then
-  v += ceil(v/2) geometric levels to the cap, with ascending early stop;
-  the first-success level is the recorded extra (exact in the dense range,
-  a bracketing upper bound in the geometric range, with the last failing
-  level recorded as bracket_low).
+* EXACT per-cell first-success overhead, censored at +4 ABSOLUTE extra
+  symbols; dead cells contribute 4.  WH1 feeds the delivered iid stream
+  one symbol at a time (incremental DecodeFeed) and records
+  extra = received - K exactly; WH2 evaluates the dense overhead levels
+  0..4 with ascending early stop (exact within the cap).
 * Zero-byte/minimal payloads: WH2 runs structure-only solves
   (full_payload_solve=0, probe bytes 1/2); WH1 uses matrix-only feeds.
-* Metrics per (method, tuning point, region) are aggregates of ABSOLUTE
-  EXTRA SYMBOLS (the float-ness comes from aggregating many cells'
-  integer extras, not from normalizing by K): mean extra symbols over
-  decoded cells, linearly interpolated p50 and p99 extra symbols over the
-  full empirical distribution across all cells (censored cells enter as
-  +infinity; a percentile touching censored mass reports null), the
-  censored fraction and the encoder-construct-failure fraction.
-  Percentage-of-K CDF readouts (success rate at 1%/10%/25%/50% received
-  overhead) stay in the JSON as secondary data.  Raw per-cell
-  [K, extra, bracket_low] triples are kept in the result JSON so any view
-  is recomputable.  Secondary work counters (WH2: solver block XOR/muladd
+* THE metric per (method, tuning point, region) is a single float:
+  expected overhead = mean extra symbols to decode per cell, with dead
+  cells contributing the cap value 4.  Kept in the JSON as secondary
+  data: fail@+0 and fail@+2 fractions, dead@cap fraction, hard-K
+  fraction (share of sampled K where every construction seed fails at
+  +2), the per-cell [K, extra] list, and the WH1 encoder-construct
+  failure count.  Secondary work counters (WH2: solver block XOR/muladd
   counts; WH1: gf256 byte counters at bb=1 from a WH_COUNT build, as a
   documented proxy) and measured encoder throughput ride along.  The
-  Pareto plot y-axes are y1 = p99 extra symbols and y2 = mean extra
-  symbols.
+  Pareto plot y-axis is expected overhead; x is encoder throughput.
+* Identity-corner dense is structurally unavailable for K=2..5: those
+  cells are EXCLUDED for that tuning point (counted as excluded, never
+  censored).
 * Encoder throughput = wall time to initialize the encoder and produce the
   FIRST K systematic symbols only (no repair symbols, no decoding), at the
   minimal legal block size (WH2 mixed: 2 bytes, WH2 certified: 1 byte,
@@ -84,8 +76,8 @@ import time
 
 MASK64 = (1 << 64) - 1
 
-SCHEMA_MANIFEST = "wirehair.wh2_untuned_pareto.manifest.v3"
-SCHEMA_RESULT = "wirehair.wh2_untuned_pareto.result.v3"
+SCHEMA_MANIFEST = "wirehair.wh2_untuned_pareto.manifest.v4"
+SCHEMA_RESULT = "wirehair.wh2_untuned_pareto.result.v4"
 SCHEMA_OWNER = "wirehair.environment_owner.v1"
 
 OWNER_MARKER_PATH = "/tmp/wirehair.environment_owner.v1.json"
@@ -110,13 +102,13 @@ SMOKE_REGIONS = [
     ("r6_20000_64000", 20001, 64000, 35, 2),
 ]
 
+OVERHEAD_CAP = 4
+
 PROTOCOL = {
     "loss": 0.1,
     "schedule": "iid",
     "pair_bb": 2,
-    "overhead_cap_pct": 50,
-    "overhead_cap_min": 8,
-    "success_rate_readout_pcts": [1, 10, 25, 50],
+    "overhead_cap_absolute": OVERHEAD_CAP,
     "trials_per_cell": 1,
     "trial_index": 0,
     "paired_overhead_stream": True,
@@ -125,22 +117,19 @@ PROTOCOL = {
     "structure_only": True,
     "wh1_measurement":
         "exact first-success extra via incremental matrix-only DecodeFeed, "
-        "censored at max(cap_min, ceil(cap_pct% * K)) extras",
+        "censored at +4 absolute extras",
     "wh2_measurement":
-        "per-K overhead ladder: dense levels 0..cap_min then v += "
-        "ceil(v/2) geometric levels to the cap, ascending early stop; the "
-        "first-success level is the recorded extra (exact in the dense "
-        "range, a bracketing upper bound above it; the last failing level "
-        "is recorded as bracket_low)",
-    "percentile_policy":
-        "aggregates are ABSOLUTE extra symbols: mean over decoded cells "
-        "only; p50/p99 linearly interpolated over the empirical "
-        "distribution across all cells with censored as +infinity (null "
-        "when the interpolation touches censored mass); secondary "
-        "success_rate_at_pct counts cells with extra <= ceil(q% * K) over "
-        "all cells",
-    "plot_axes": "y1 = p99 extra symbols, y2 = mean extra symbols, "
-                 "x = encoder throughput; untuned architectures only",
+        "dense overhead levels 0..4 with ascending early stop (exact "
+        "within the cap); censored at +4",
+    "metric_policy":
+        "expected overhead = mean extra symbols to decode per cell, with "
+        "dead cells contributing the cap value 4; secondary: fail@+0 and "
+        "fail@+2 fractions, dead@cap fraction, hard-K fraction (share of "
+        "sampled K where every construction seed fails at +2), per-cell "
+        "[K, extra] list, WH1 construct-failure count",
+    "plot_axes": "y = expected overhead (mean extra symbols, dead cells "
+                 "contribute 4), x = encoder throughput; untuned "
+                 "architectures only",
     "wh2_solve_block_bytes": {"certified": 1, "mixed": 2},
     "wh1_block_bytes": 1,
     "timing_block_bytes": {"wh2-certified": 1, "wh2-mixed": 2, "wh1": 1},
@@ -152,30 +141,6 @@ PROTOCOL = {
         "init + first K symbols at bb=1 from a WH_COUNT build; bytes at "
         "bb=1 approximate operation counts",
 }
-
-
-def ceil_div(numerator, denominator):
-    return -(-numerator // denominator)
-
-
-def pct_threshold(k, q_pct):
-    """Extra symbols for a q% received-overhead threshold: ceil(q% * K)."""
-    return ceil_div(q_pct * k, 100)
-
-
-def overhead_cap(k, cap_pct, cap_min):
-    return max(cap_min, pct_threshold(k, cap_pct))
-
-
-def overhead_ladder(k, cap_pct, cap_min):
-    """Per-K WH2 ladder; mirrors wirehair_v2_bench --overhead-ladder-pct."""
-    cap = overhead_cap(k, cap_pct, cap_min)
-    levels = list(range(0, min(cap, cap_min) + 1))
-    level = cap_min
-    while level < cap:
-        level += (level + 1) // 2
-        levels.append(min(level, cap))
-    return levels
 
 TIMING_K_PER_REGION_FULL = 24
 TIMING_K_PER_REGION_SMOKE = 4
@@ -425,6 +390,61 @@ def build_methods():
         flags, hyper = _mixed_flags(dense_rows=dense)
         add("mixed-p244-d%d" % dense, "wh2-mixed-frozen", "wh2", flags, hyper)
 
+    # Integrated experiment arms (cherry-picked codec experiments).
+    flags, hyper = _mixed_flags()
+    hyper = dict(hyper, degree_balanced_staircase=True)
+    add("dbstair-p244", "wh2-degree-balanced", "wh2",
+        flags + ["--degree-balanced-staircase"], hyper)
+    flags, hyper = _mixed_flags(
+        period=32, geometry="shared-x", gf256_rows=11, gf16_rows=4,
+        schedule="hashed", hash_seed=68, hash_keyed=True,
+        independent_ext=True, ext_seed_xor=78, mix_count=2)
+    hyper = dict(hyper, degree_balanced_staircase=True)
+    add("dbstair-h15-p32", "wh2-degree-balanced", "wh2",
+        flags + ["--degree-balanced-staircase"], hyper)
+
+    for layout in ("three-048", "four-0369"):
+        flags, hyper = _mixed_flags()
+        hyper = dict(hyper, segmented_dense_anchors=layout)
+        add("seganchor-%s" % layout.replace("-", ""),
+            "wh2-segmented-anchors", "wh2",
+            flags + ["--binary-dense-segmented-anchors", layout], hyper)
+
+    # Grouped GF256 row-membership masks: shared-x constant-A 10+2 only.
+    for period, grouped_rows, mask, label in (
+            (32, 7, 0x07F, "suffix"),
+            (32, 7, 0x3F8, "prefix"),
+            (48, 3, 0x007, "suffix"),
+            (48, 3, 0x380, "prefix")):
+        flags, hyper = _mixed_flags(period=period, geometry="shared-x")
+        hyper = dict(hyper, grouped_gf256_rows=grouped_rows,
+                     grouped_gf256_row_mask="0x%03x" % mask)
+        add("mask-p%d-r%d-%s" % (period, grouped_rows, label),
+            "wh2-grouped-masks", "wh2",
+            flags + ["--mixed-grouped-gf256-rows", str(grouped_rows),
+                     "--mixed-grouped-gf256-row-mask", "0x%03x" % mask],
+            hyper)
+
+    flags, hyper = _mixed_flags()
+    hyper = dict(hyper, dense_two_anchor="on (phase 0)")
+    add("twoanchor-p244", "wh2-two-anchor", "wh2",
+        flags + ["--binary-dense-two-anchor"], hyper)
+    flags, hyper = _mixed_flags()
+    hyper = dict(hyper, dense_two_anchor="adaptive default (K >= 4096)")
+    add("twoanchor-adaptive-p244", "wh2-two-anchor", "wh2", flags, hyper)
+    methods[-1]["adaptive_flags"] = {
+        "threshold": 4096,
+        "flags": ["--binary-dense-two-anchor"],
+    }
+
+    flags, hyper = _mixed_flags()
+    hyper = dict(hyper, dense_identity_corner=True)
+    add("identcorner-p244", "wh2-identity-corner", "wh2",
+        flags + ["--dense-identity-corner"], hyper)
+    # Identity-corner dense is structurally unavailable for K=2..5: those
+    # cells are excluded for this tuning point, never censored.
+    methods[-1]["k_min"] = 6
+
     ids = [m["id"] for m in methods]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate method ids in tuning grid")
@@ -539,13 +559,13 @@ def chunk_k_values(k_values):
 
 
 def wh2_cell_command(bench, method, k_values, construction_seed, loss_seed,
-                     protocol):
+                     protocol, extra_flags=()):
+    cap = protocol["overhead_cap_absolute"]
     return [
         bench, "precodefail",
         "--N", ",".join(str(k) for k in k_values),
         "--bb-list", str(protocol["pair_bb"]),
-        "--overhead-ladder-pct", str(protocol["overhead_cap_pct"]),
-        "--overhead-ladder-min", str(protocol["overhead_cap_min"]),
+        "--overhead", ",".join(str(o) for o in range(cap + 1)),
         "--trials", str(protocol["trials_per_cell"]),
         "--threads", "1",
         "--loss", repr(protocol["loss"]),
@@ -554,10 +574,11 @@ def wh2_cell_command(bench, method, k_values, construction_seed, loss_seed,
         "--paired-overhead-stream",
         "--overhead-early-stop",
         "--construction-seed", "0x%x" % construction_seed,
-    ] + list(method["flags"])
+    ] + list(method["flags"]) + list(extra_flags)
 
 
-def wh2_timing_command(bench, method, k_values, reps, protocol):
+def wh2_timing_command(bench, method, k_values, reps, protocol,
+                       extra_flags=()):
     return [
         bench, "precodefail",
         "--N", ",".join(str(k) for k in k_values),
@@ -568,7 +589,7 @@ def wh2_timing_command(bench, method, k_values, reps, protocol):
         "--loss", "0",
         "--seed", "1",
         "--encode-timing", str(reps),
-    ] + list(method["flags"])
+    ] + list(method["flags"]) + list(extra_flags)
 
 
 def wh1_cell_command(whx, k_values, construction_seed, loss_seed, protocol):
@@ -579,11 +600,51 @@ def wh1_cell_command(whx, k_values, construction_seed, loss_seed, protocol):
         "--seed", "0x%x" % loss_seed,
         "--loss", repr(protocol["loss"]),
         "--pairbb", str(protocol["pair_bb"]),
-        "--cap-pct", str(protocol["overhead_cap_pct"]),
-        "--cap-min", str(protocol["overhead_cap_min"]),
+        "--maxoh", str(protocol["overhead_cap_absolute"]),
         "--trial", str(protocol["trial_index"]),
         "--cseed", "0x%x" % construction_seed,
     ]
+
+
+def method_cell_groups(method, k_values):
+    """Split a region's K list into (chunk, extra_flags) task groups.
+
+    Applies the method's k_min exclusion (identity-corner) and adaptive
+    K-threshold flag switching (two-anchor adaptive default).  Both the
+    runner and the collector derive the same deterministic grouping.
+    """
+    k_min = method.get("k_min")
+    if k_min:
+        k_values = [k for k in k_values if k >= k_min]
+    adaptive = method.get("adaptive_flags")
+    if not adaptive:
+        return [(chunk, ()) for chunk in chunk_k_values(k_values)]
+    threshold = adaptive["threshold"]
+    extra = tuple(adaptive["flags"])
+    below = [k for k in k_values if k < threshold]
+    above = [k for k in k_values if k >= threshold]
+    return ([(chunk, ()) for chunk in chunk_k_values(below)] +
+            [(chunk, extra) for chunk in chunk_k_values(above)])
+
+
+def method_timing_groups(method, timing_k):
+    """Timing K subsets with their extra flags, keyed by file suffix."""
+    k_min = method.get("k_min")
+    if k_min:
+        timing_k = [k for k in timing_k if k >= k_min]
+    adaptive = method.get("adaptive_flags")
+    if not adaptive:
+        return [("", timing_k, ())] if timing_k else []
+    threshold = adaptive["threshold"]
+    extra = tuple(adaptive["flags"])
+    below = [k for k in timing_k if k < threshold]
+    above = [k for k in timing_k if k >= threshold]
+    groups = []
+    if below:
+        groups.append(("", below, ()))
+    if above:
+        groups.append(("_hi", above, extra))
+    return groups
 
 
 def wh1_timing_command(whx, k_values, reps, protocol):
@@ -620,18 +681,18 @@ def build_tasks(manifest, out_dir, bench, whx, whx_count, method_filter,
     for method in methods:
         for region in regions:
             base = os.path.join(out_dir, "raw", method["id"], region["name"])
-            chunks = chunk_k_values(region["k_values"])
+            groups = method_cell_groups(method, region["k_values"])
             for seed_index, construction_seed in enumerate(
                     region["construction_seeds"]):
                 loss_seed = region["loss_seeds"][seed_index]
-                for chunk_index, chunk in enumerate(chunks):
+                for chunk_index, (chunk, extra_flags) in enumerate(groups):
                     out_path = os.path.join(
                         base, "cells_cs%d_chunk%04d.csv" %
                         (seed_index, chunk_index))
                     if method["arm"] == "wh2":
                         command = wh2_cell_command(
                             bench, method, chunk, construction_seed,
-                            loss_seed, protocol)
+                            loss_seed, protocol, extra_flags)
                     else:
                         command = wh1_cell_command(
                             whx, chunk, construction_seed, loss_seed,
@@ -646,31 +707,34 @@ def build_tasks(manifest, out_dir, bench, whx, whx_count, method_filter,
                     })
             if skip_timing:
                 continue
-            timing_k = region["timing_k_values"]
-            if method["arm"] == "wh2":
-                command = wh2_timing_command(
-                    bench, method, timing_k, timing_reps, protocol)
-            else:
-                command = wh1_timing_command(
-                    whx, timing_k, timing_reps, protocol)
-            tasks.append({
-                "kind": "timing",
-                "method": method["id"],
-                "region": region["name"],
-                "out": os.path.join(base, "timing.csv"),
-                "command": command,
-                "cost": sum(timing_k) * timing_reps,
-            })
-            if method["arm"] == "wh1" and whx_count:
+            for suffix, timing_k, extra_flags in method_timing_groups(
+                    method, region["timing_k_values"]):
+                if method["arm"] == "wh2":
+                    command = wh2_timing_command(
+                        bench, method, timing_k, timing_reps, protocol,
+                        extra_flags)
+                else:
+                    command = wh1_timing_command(
+                        whx, timing_k, timing_reps, protocol)
                 tasks.append({
-                    "kind": "counters",
+                    "kind": "timing",
                     "method": method["id"],
                     "region": region["name"],
-                    "out": os.path.join(base, "counters.csv"),
-                    "command": wh1_timing_command(
-                        whx_count, timing_k, timing_reps, protocol),
+                    "out": os.path.join(base, "timing%s.csv" % suffix),
+                    "command": command,
                     "cost": sum(timing_k) * timing_reps,
                 })
+                if method["arm"] == "wh1" and whx_count:
+                    tasks.append({
+                        "kind": "counters",
+                        "method": method["id"],
+                        "region": region["name"],
+                        "out": os.path.join(
+                            base, "counters%s.csv" % suffix),
+                        "command": wh1_timing_command(
+                            whx_count, timing_k, timing_reps, protocol),
+                        "cost": sum(timing_k) * timing_reps,
+                    })
     return tasks
 
 
@@ -852,13 +916,12 @@ class ParseError(RuntimeError):
     pass
 
 
-def parse_wh2_cells(text, expected_cseed, cap_pct, cap_min):
-    """Parse a precodefail exact-ladder cell task output.
+def parse_wh2_cells(text, expected_cseed, cap):
+    """Parse a precodefail dense-ladder cell task output.
 
-    Returns {K: {"extra": int or None, "bracket_low": int, "work": ...}}.
-    Rows per K must walk the per-K ladder in order; the first success row
-    is the recorded extra (upper bound above the dense range) with the
-    previous level as bracket_low.  A censored cell must show every ladder
+    Returns {K: {"extra": int or None, "work": (xors, muladds) or None}}.
+    Rows per K must walk the dense overhead levels 0..cap in order; the
+    first success row is the exact extra.  A censored cell must show every
     level failing.  Enforces seed_attempt == 0 on every row and the
     untuned receipt echo.
     """
@@ -878,8 +941,6 @@ def parse_wh2_cells(text, expected_cseed, cap_pct, cap_min):
                     "untuned receipt seed mismatch: %s" % line)
             if "construction_attempts=1" not in line:
                 raise ParseError("untuned receipt attempts != 1")
-            if "overhead_ladder_pct=%d " % cap_pct not in line + " ":
-                raise ParseError("untuned receipt ladder pct mismatch")
             continue
         if line.startswith("#"):
             continue
@@ -903,29 +964,25 @@ def parse_wh2_cells(text, expected_cseed, cap_pct, cap_min):
             raise ParseError("solver error at K=%d: %s" % (k, line))
         success = int(row["success"]) == 1
         cell = cells.setdefault(
-            k, {"extra": None, "bracket_low": -1, "work": None, "rows": 0})
-        ladder = overhead_ladder(k, cap_pct, cap_min)
+            k, {"extra": None, "work": None, "rows": 0})
         if cell["extra"] is not None:
             raise ParseError("row after success at K=%d: %s" % (k, line))
-        if cell["rows"] >= len(ladder) or overhead != ladder[cell["rows"]]:
+        if cell["rows"] > cap or overhead != cell["rows"]:
             raise ParseError(
-                "K=%d row %d overhead %d does not walk the ladder %r" %
-                (k, cell["rows"], overhead, ladder))
+                "K=%d row %d overhead %d does not walk levels 0..%d" %
+                (k, cell["rows"], overhead, cap))
         cell["rows"] += 1
         if success:
             cell["extra"] = overhead
-            cell["bracket_low"] = (
-                ladder[cell["rows"] - 2] if cell["rows"] >= 2 else -1)
             cell["work"] = (float(row["block_xors_mu"]),
                             float(row["block_muladds_mu"]))
     if not saw_untuned:
         raise ParseError("missing untuned receipt")
     for k, cell in cells.items():
-        ladder = overhead_ladder(k, cap_pct, cap_min)
-        if cell["extra"] is None and cell["rows"] != len(ladder):
+        if cell["extra"] is None and cell["rows"] != cap + 1:
             raise ParseError(
                 "censored cell K=%d has %d rows, expected %d" %
-                (k, cell["rows"], len(ladder)))
+                (k, cell["rows"], cap + 1))
         del cell["rows"]
     return cells
 
@@ -970,13 +1027,10 @@ def parse_wh1_cells(text, expected_cseed):
             raise ParseError("decode_limit without censoring at K=%d" % k)
         cells[k] = {
             "extra": None if extra < 0 else extra,
-            # Incremental feeding is exact: the previous delivered count
-            # failed by construction.
-            "bracket_low": -1 if extra <= 0 else extra - 1,
             "enc_ok": enc_ok == 1,
             # WH1's bounded extra-row replacement pool gave up before the
             # cap (Wirehair_ExtraInsufficient): a terminal decode outcome,
-            # counted inside the censored fraction and reported separately.
+            # counted inside the dead fraction and reported separately.
             "decode_limit": decode_limit == 1,
         }
     if not saw_receipt or not saw_header:
@@ -1050,45 +1104,26 @@ def parse_wh1_timing(text):
 # aggregation
 
 
-def percentile_interpolated(sorted_values, censored, p):
-    """Linearly interpolated percentile over the empirical distribution
-    across all cells; censored cells sit above every finite value as
-    +infinity.  Returns a float, or None when the interpolation touches
-    censored mass."""
-    total = len(sorted_values) + censored
-    if total == 0:
-        return None
-    position = p * (total - 1)
-    low_index = int(position)
-    high_index = min(low_index + 1, total - 1)
-    if high_index >= len(sorted_values) and position > low_index:
-        return None
-    if low_index >= len(sorted_values):
-        return None
-    low_value = sorted_values[low_index]
-    if position == low_index or high_index == low_index:
-        return float(low_value)
-    high_value = sorted_values[high_index]
-    fraction = position - low_index
-    return float(low_value) * (1.0 - fraction) + float(high_value) * fraction
+def aggregate_region(cell_outcomes, protocol, excluded_cells=0):
+    """cell_outcomes: list of dicts with k, extra (int or None), optional
+    work (xors, muladds), optional enc_ok/decode_limit.
 
-
-def aggregate_region(cell_outcomes, protocol):
-    """cell_outcomes: list of dicts with k, extra (int or None),
-    bracket_low, optional work (xors, muladds), optional enc_ok.
-
-    Absolute-symbol schema: mean extra symbols over decoded cells;
-    interpolated p50/p99 extra symbols over all cells with censored as
-    +infinity; percentage-of-K CDF readouts kept as secondary data;
-    per-cell triples retained so any view is recomputable.
+    Final metric: expected overhead = mean extra symbols to decode per
+    cell, censored at the absolute cap with dead cells contributing the
+    cap value.  Secondary: fail@+0 and fail@+2 fractions, dead@cap
+    fraction, hard-K fraction (share of sampled K where every
+    construction seed fails at +2), per-cell [K, extra] pairs, and the
+    construct-failure count.
     """
-    readouts = protocol["success_rate_readout_pcts"]
+    cap = protocol["overhead_cap_absolute"]
     construct_failures = 0
     decoder_limit = 0
-    censored = 0
-    extras = []
-    extra_sum = 0
-    success_at = {str(q): 0 for q in readouts}
+    dead = 0
+    decoded = 0
+    metric_sum = 0
+    fail_at_0 = 0
+    fail_at_2 = 0
+    k_worst = {}
     cells_detail = []
     work_xors = 0.0
     work_muladds = 0.0
@@ -1100,47 +1135,42 @@ def aggregate_region(cell_outcomes, protocol):
             construct_failures += 1
         if outcome.get("decode_limit"):
             decoder_limit += 1
-        cells_detail.append([
-            k,
-            -1 if extra is None else extra,
-            outcome.get("bracket_low", -1),
-        ])
+        cells_detail.append([k, -1 if extra is None else extra])
+        effective = cap if extra is None else extra
+        metric_sum += effective
         if extra is None:
-            censored += 1
-            continue
-        extras.append(extra)
-        extra_sum += extra
-        for q in readouts:
-            if extra <= pct_threshold(k, q):
-                success_at[str(q)] += 1
-        work = outcome.get("work")
-        if work is not None:
-            work_xors += work[0]
-            work_muladds += work[1]
-            work_cells += 1
+            dead += 1
+        else:
+            decoded += 1
+            work = outcome.get("work")
+            if work is not None:
+                work_xors += work[0]
+                work_muladds += work[1]
+                work_cells += 1
+        if extra is None or extra > 0:
+            fail_at_0 += 1
+        fails_at_2 = extra is None or extra > 2
+        if fails_at_2:
+            fail_at_2 += 1
+        k_worst[k] = k_worst.get(k, True) and fails_at_2
     cells = len(cell_outcomes)
-    decoded = len(extras)
-    extras.sort()
+    hard_k = sum(1 for all_fail in k_worst.values() if all_fail)
     return {
         "cells": cells,
+        "excluded_cells": excluded_cells,
         "decoded": decoded,
         "construct_failures": construct_failures,
         "construct_failure_fraction":
             (construct_failures / cells) if cells else 0.0,
-        "censored_fraction": (censored / cells) if cells else 0.0,
         "decoder_limit_fraction":
             (decoder_limit / cells) if cells else 0.0,
-        # THE plot y-axes: y1 = p99 extra symbols, y2 = mean extra symbols.
-        "overhead_extra_symbols": {
-            "mean_decoded": (extra_sum / decoded) if decoded else None,
-            "p50": percentile_interpolated(extras, censored, 0.50),
-            "p99": percentile_interpolated(extras, censored, 0.99),
-        },
-        # Secondary percentage-of-K readouts (not the headline).
-        "success_rate_at_pct": {
-            q: (success_at[q] / cells) if cells else 0.0
-            for q in success_at
-        },
+        # THE plot y-axis: mean extra symbols with dead cells at the cap.
+        "expected_overhead": (metric_sum / cells) if cells else None,
+        "fail_at_0_fraction": (fail_at_0 / cells) if cells else 0.0,
+        "fail_at_2_fraction": (fail_at_2 / cells) if cells else 0.0,
+        "dead_fraction": (dead / cells) if cells else 0.0,
+        "hard_k_fraction": (hard_k / len(k_worst)) if k_worst else 0.0,
+        "sampled_k": len(k_worst),
         "cells_detail": cells_detail,
         "work": {
             "decoded_cells_with_work": work_cells,
@@ -1184,17 +1214,19 @@ def aggregate_timing(timing_by_k, reps, counted=False):
 
 def collect_method(manifest, manifest_sha, out_dir, method, allow_partial):
     protocol = manifest["protocol"]
-    cap_pct = protocol["overhead_cap_pct"]
-    cap_min = protocol["overhead_cap_min"]
+    cap = protocol["overhead_cap_absolute"]
     missing = []
     result_regions = {}
     for region in manifest["regions"]:
         base = os.path.join(out_dir, "raw", method["id"], region["name"])
-        chunks = chunk_k_values(region["k_values"])
+        groups = method_cell_groups(method, region["k_values"])
+        grouped_k = sum(len(chunk) for chunk, _ in groups)
+        excluded = (len(region["k_values"]) - grouped_k) * \
+            len(region["construction_seeds"])
         outcomes = []
         for seed_index, construction_seed in enumerate(
                 region["construction_seeds"]):
-            for chunk_index, chunk in enumerate(chunks):
+            for chunk_index, (chunk, _extra_flags) in enumerate(groups):
                 path = os.path.join(
                     base, "cells_cs%d_chunk%04d.csv" %
                     (seed_index, chunk_index))
@@ -1204,8 +1236,7 @@ def collect_method(manifest, manifest_sha, out_dir, method, allow_partial):
                 with open(path, "r") as handle:
                     text = handle.read()
                 if method["arm"] == "wh2":
-                    cells = parse_wh2_cells(
-                        text, construction_seed, cap_pct, cap_min)
+                    cells = parse_wh2_cells(text, construction_seed, cap)
                 else:
                     cells = parse_wh1_cells(text, construction_seed)
                 chunk_set = set(chunk)
@@ -1217,36 +1248,47 @@ def collect_method(manifest, manifest_sha, out_dir, method, allow_partial):
                     outcome = cells[k]
                     outcome["k"] = k
                     outcomes.append(outcome)
-        entry = aggregate_region(outcomes, protocol)
-        timing_path = os.path.join(base, "timing.csv")
-        if os.path.exists(timing_path):
+        entry = aggregate_region(outcomes, protocol, excluded_cells=excluded)
+        timing = {}
+        counted = False
+        found_timing = False
+        for suffix, _timing_k, _extra in method_timing_groups(
+                method, region["timing_k_values"]) or [("", [], ())]:
+            timing_path = os.path.join(base, "timing%s.csv" % suffix)
+            if not os.path.exists(timing_path):
+                missing.append(timing_path)
+                continue
+            found_timing = True
             with open(timing_path, "r") as handle:
                 text = handle.read()
             if method["arm"] == "wh2":
-                timing = parse_wh2_timing(text)
-                entry["timing"] = aggregate_timing(
-                    timing, reps=None)
+                timing.update(parse_wh2_timing(text))
+            else:
+                part, part_counted = parse_wh1_timing(text)
+                counted = counted or part_counted
+                counters_path = os.path.join(
+                    base, "counters%s.csv" % suffix)
+                if not part_counted and os.path.exists(counters_path):
+                    with open(counters_path, "r") as handle:
+                        counter_timing, part_counted = parse_wh1_timing(
+                            handle.read())
+                    if part_counted:
+                        counted = True
+                        for k, values in counter_timing.items():
+                            if k in part:
+                                part[k]["xor_bytes"] = values["xor_bytes"]
+                                part[k]["muladd_bytes"] = \
+                                    values["muladd_bytes"]
+                timing.update(part)
+        if found_timing and timing:
+            entry["timing"] = aggregate_timing(
+                timing, reps=None, counted=counted)
+            if method["arm"] == "wh2":
                 entry["timing"]["block_bytes"] = (
                     2 if "mixed" in method["hyperparameters"].get(
                         "completion", "") else 1)
             else:
-                timing, counted = parse_wh1_timing(text)
-                counters_path = os.path.join(base, "counters.csv")
-                if not counted and os.path.exists(counters_path):
-                    with open(counters_path, "r") as handle:
-                        counter_timing, counted = parse_wh1_timing(
-                            handle.read())
-                    if counted:
-                        for k, values in counter_timing.items():
-                            if k in timing:
-                                timing[k]["xor_bytes"] = values["xor_bytes"]
-                                timing[k]["muladd_bytes"] = \
-                                    values["muladd_bytes"]
-                entry["timing"] = aggregate_timing(
-                    timing, reps=None, counted=counted)
                 entry["timing"]["block_bytes"] = protocol["wh1_block_bytes"]
-        else:
-            missing.append(timing_path)
         result_regions[region["name"]] = entry
     if missing and not allow_partial:
         raise ParseError(
@@ -1293,18 +1335,17 @@ def cmd_collect(args):
             region = result["regions"][region_name]
             timing = region.get("timing", {})
             rate = timing.get("median_symbols_per_sec")
-            symbols = region["overhead_extra_symbols"]
-
-            def fmt(value):
-                return "%.4f" % value if value is not None else "cens"
-
-            print("%-24s %-16s cells=%-6d mean_extra=%-9s p50=%-8s "
-                  "p99=%-9s cens=%-8.5f cfail=%-8.5f sym/s=%s" % (
+            print("%-24s %-16s cells=%-6d Eoh=%-9.6f fail0=%-8.5f "
+                  "fail2=%-8.5f dead=%-8.5f hardK=%-8.5f cfail=%-4d "
+                  "excl=%-4d sym/s=%s" % (
                       method["id"], region_name, region["cells"],
-                      fmt(symbols["mean_decoded"]),
-                      fmt(symbols["p50"]), fmt(symbols["p99"]),
-                      region["censored_fraction"],
-                      region["construct_failure_fraction"],
+                      region["expected_overhead"],
+                      region["fail_at_0_fraction"],
+                      region["fail_at_2_fraction"],
+                      region["dead_fraction"],
+                      region["hard_k_fraction"],
+                      region["construct_failures"],
+                      region["excluded_cells"],
                       ("%.0f" % rate) if rate else "n/a"))
     with open(os.path.join(results_dir, "index.json"), "w") as handle:
         handle.write(canonical_json({
@@ -1378,32 +1419,42 @@ def selftest():
 
     methods = build_methods()
     check("tuning grid within cap", 1 <= len(methods) <= 100)
-    check("tuning grid is 52 untuned points",
-          len(methods) == 52 and
-          not any("tuned" in m["id"] for m in methods))
+    check("tuning grid is 63 untuned points",
+          len(methods) == 63 and
+          not any(m["id"].endswith("-tuned") for m in methods))
     check("tuning grid has wh1 arm",
           any(m["arm"] == "wh1" for m in methods))
     check("tuning grid has h15 family",
           any(m["family"] == "wh2-mixed-h15" for m in methods))
+    check("tuning grid has integrated arms",
+          any(m["family"] == "wh2-degree-balanced" for m in methods) and
+          any(m["family"] == "wh2-segmented-anchors" for m in methods) and
+          any(m["family"] == "wh2-grouped-masks" for m in methods) and
+          any(m["family"] == "wh2-two-anchor" for m in methods) and
+          any(m["family"] == "wh2-identity-corner" for m in methods))
+    identity = next(m for m in methods
+                    if m["family"] == "wh2-identity-corner")
+    check("identity corner excludes K=2..5",
+          identity["k_min"] == 6 and
+          method_cell_groups(identity, [2, 3, 4, 5, 6, 7])[0][0] == [6, 7])
+    adaptive = next(m for m in methods if m["id"] == "twoanchor-adaptive-p244")
+    adaptive_groups = method_cell_groups(adaptive, [100, 4095, 4096, 9000])
+    check("adaptive two-anchor splits at 4096",
+          adaptive_groups[0][0] == [100, 4095] and
+          adaptive_groups[0][1] == () and
+          adaptive_groups[1][0] == [4096, 9000] and
+          adaptive_groups[1][1] == ("--binary-dense-two-anchor",))
+    adaptive_timing = method_timing_groups(adaptive, [100, 5000])
+    check("adaptive two-anchor timing groups",
+          adaptive_timing == [("", [100], ()),
+                              ("_hi", [5000],
+                               ("--binary-dense-two-anchor",))])
 
     chunks = chunk_k_values(list(range(2, 5000)))
     flattened = [k for chunk in chunks for k in chunk]
     check("chunking preserves K order/multiset",
           flattened == list(range(2, 5000)) and
           all(len(c) <= CHUNK_MAX_VALUES for c in chunks))
-
-    check("ladder shape at K=64",
-          overhead_ladder(64, 50, 8) ==
-          [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 18, 27, 32])
-    ladder_64000 = overhead_ladder(64000, 50, 8)
-    check("ladder reaches the cap exactly",
-          ladder_64000[-1] == 32000 and
-          ladder_64000[:10] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 12] and
-          all(b > a for a, b in zip(ladder_64000, ladder_64000[1:])))
-    check("ladder small-K floor",
-          overhead_ladder(2, 50, 8) == [0, 1, 2, 3, 4, 5, 6, 7, 8])
-    check("pct threshold ceil", pct_threshold(30, 1) == 1 and
-          pct_threshold(300, 1) == 3 and pct_threshold(2, 50) == 1)
 
     header = ("N,bb,heavy_family,mix_count,overhead,trials,success,"
               "rank_fail,error,fail_rate,inact_mu,inact_max,binary_def_mu,"
@@ -1421,9 +1472,8 @@ def selftest():
                  seed_attempt, xors, muladds))
 
     def wh2_cell_rows(k, success_extra):
-        ladder = overhead_ladder(k, 50, 8)
         rows = []
-        for level in ladder:
+        for level in range(OVERHEAD_CAP + 1):
             if success_extra is not None and level == success_extra:
                 rows.append(wh2_row(k, level, 1, xors=30.0, muladds=8.0))
                 break
@@ -1433,20 +1483,19 @@ def selftest():
     receipt = ("# untuned: construction_seed_explicit=1 "
                "construction_seed=0xabc construction_attempts=1 "
                "overhead_early_stop=1 encode_timing_reps=0 "
-               "overhead_ladder_pct=50 overhead_ladder_min=8")
+               "overhead_ladder_pct=0 overhead_ladder_min=0")
     text = "\n".join(
         ["# precodefail: trials=1", receipt, header] +
         wh2_cell_rows(10, 0) +
         wh2_cell_rows(20, 1) +
-        wh2_cell_rows(100, 18) +
+        wh2_cell_rows(100, 4) +
         wh2_cell_rows(30, None))
-    cells = parse_wh2_cells(text, 0xABC, 50, 8)
+    cells = parse_wh2_cells(text, 0xABC, OVERHEAD_CAP)
     check("wh2 parser exact extras",
-          cells[10]["extra"] == 0 and cells[10]["bracket_low"] == -1 and
-          cells[20]["extra"] == 1 and cells[20]["bracket_low"] == 0 and
+          cells[10]["extra"] == 0 and
+          cells[20]["extra"] == 1 and
+          cells[100]["extra"] == 4 and
           cells[20]["work"] == (30.0, 8.0))
-    check("wh2 parser geometric bracketing",
-          cells[100]["extra"] == 18 and cells[100]["bracket_low"] == 12)
     check("wh2 parser censoring", cells[30]["extra"] is None)
 
     for bad_text, name in (
@@ -1455,9 +1504,6 @@ def selftest():
              "wh2 parser rejects multi-attempt receipt"),
             (text.replace(receipt, "# other"),
              "wh2 parser requires untuned receipt"),
-            (text.replace("overhead_ladder_pct=50",
-                          "overhead_ladder_pct=0"),
-             "wh2 parser rejects ladder mismatch"),
             ("\n".join([receipt, header, wh2_row(9, 0, 1, seed_attempt=3)]),
              "wh2 parser rejects seed escalation"),
             ("\n".join([receipt, header,
@@ -1469,7 +1515,7 @@ def selftest():
             ("\n".join([receipt, header, wh2_row(9, 0, 0, error=1)]),
              "wh2 parser rejects solver errors")):
         try:
-            parse_wh2_cells(bad_text, 0xABC, 50, 8)
+            parse_wh2_cells(bad_text, 0xABC, OVERHEAD_CAP)
             check(name, False)
         except ParseError:
             check(name, True)
@@ -1488,7 +1534,6 @@ def selftest():
     check("wh1 parser",
           wh1_cells[10]["extra"] == 0 and
           wh1_cells[20]["extra"] == 3 and
-          wh1_cells[20]["bracket_low"] == 2 and
           wh1_cells[30]["extra"] is None and
           wh1_cells[30]["enc_ok"] is False and
           wh1_cells[40]["decode_limit"] is True and
@@ -1508,48 +1553,43 @@ def selftest():
     except ParseError:
         check("wh1 parser rejects tuned-arm receipts", True)
 
-    check("interpolated percentile",
-          percentile_interpolated([1, 2, 3, 4], 0, 0.50) == 2.5 and
-          percentile_interpolated([5], 0, 0.50) == 5.0 and
-          percentile_interpolated([0, 1, 2], 1, 0.50) == 1.5 and
-          percentile_interpolated([0, 0, 10], 1, 0.99) is None and
-          percentile_interpolated([], 4, 0.50) is None and
-          percentile_interpolated([7] * 99, 1, 0.99) is None and
-          percentile_interpolated([7] * 99, 0, 0.99) == 7.0)
-
-    outcomes = ([{"k": 100, "extra": 0}] * 985 +
-                [{"k": 100, "extra": 1}] * 10 +
-                [{"k": 100, "extra": 30}] * 3 +
-                [{"k": 100, "extra": None, "enc_ok": False}] * 2)
+    # Two K values, two seeds each: K=100 decodes at 0 then 3 (fails at
+    # +2 once), K=200 is dead for both seeds (hard K).
+    outcomes = [
+        {"k": 100, "extra": 0},
+        {"k": 100, "extra": 3},
+        {"k": 200, "extra": None, "enc_ok": False},
+        {"k": 200, "extra": None},
+    ]
     aggregate = aggregate_region(outcomes, PROTOCOL)
-    check("aggregate mean extra symbols over decoded only",
-          abs(aggregate["overhead_extra_symbols"]["mean_decoded"] -
-              (10 * 1 + 3 * 30) / 998.0) < 1e-12)
-    check("aggregate interpolated percentiles",
-          aggregate["overhead_extra_symbols"]["p50"] == 0.0 and
-          aggregate["overhead_extra_symbols"]["p99"] == 1.0)
-    check("aggregate censoring fractions",
-          abs(aggregate["censored_fraction"] - 0.002) < 1e-12 and
-          abs(aggregate["construct_failure_fraction"] - 0.002) < 1e-12)
+    check("aggregate expected overhead with dead at cap",
+          abs(aggregate["expected_overhead"] - (0 + 3 + 4 + 4) / 4.0)
+          < 1e-12)
+    check("aggregate fail fractions",
+          abs(aggregate["fail_at_0_fraction"] - 0.75) < 1e-12 and
+          abs(aggregate["fail_at_2_fraction"] - 0.75) < 1e-12 and
+          abs(aggregate["dead_fraction"] - 0.5) < 1e-12)
+    check("aggregate hard-K fraction",
+          aggregate["sampled_k"] == 2 and
+          abs(aggregate["hard_k_fraction"] - 0.5) < 1e-12)
+    check("aggregate construct failures",
+          aggregate["construct_failures"] == 1)
+    check("aggregate keeps per-cell extras",
+          aggregate["cells_detail"] ==
+          [[100, 0], [100, 3], [200, -1], [200, -1]])
+    check("aggregate excluded cells",
+          aggregate_region(outcomes, PROTOCOL,
+                           excluded_cells=8)["excluded_cells"] == 8)
     limit_aggregate = aggregate_region(
         [{"k": 10, "extra": 0}] * 3 +
         [{"k": 10, "extra": None, "decode_limit": True}], PROTOCOL)
     check("aggregate decoder-limit fraction",
           abs(limit_aggregate["decoder_limit_fraction"] - 0.25) < 1e-12 and
-          abs(limit_aggregate["censored_fraction"] - 0.25) < 1e-12)
-    check("aggregate success-rate CDF readouts",
-          abs(aggregate["success_rate_at_pct"]["1"] - 995 / 1000.0) < 1e-12
-          and abs(aggregate["success_rate_at_pct"]["10"] - 995 / 1000.0)
-          < 1e-12 and
-          abs(aggregate["success_rate_at_pct"]["50"] - 998 / 1000.0) < 1e-12)
-    check("aggregate keeps per-cell detail",
-          len(aggregate["cells_detail"]) == 1000 and
-          aggregate["cells_detail"][-1][1] == -1)
-    all_censored = aggregate_region(
-        [{"k": 10, "extra": None}] * 4, PROTOCOL)
-    check("aggregate all-censored",
-          all_censored["overhead_extra_symbols"]["p50"] is None and
-          all_censored["overhead_extra_symbols"]["mean_decoded"] is None)
+          abs(limit_aggregate["dead_fraction"] - 0.25) < 1e-12)
+    all_dead = aggregate_region([{"k": 10, "extra": None}] * 4, PROTOCOL)
+    check("aggregate all-dead expected overhead is the cap",
+          all_dead["expected_overhead"] == 4.0 and
+          all_dead["hard_k_fraction"] == 1.0)
 
     wh2_timing_text = "\n".join([
         "# precodefail: ...",
@@ -1621,14 +1661,14 @@ def selftest():
               "--construction-seed" in wh2_task["command"] and
               "--overhead-early-stop" in wh2_task["command"] and
               "--paired-overhead-stream" in wh2_task["command"] and
-              "--overhead-ladder-pct" in wh2_task["command"] and
-              "--overhead" not in wh2_task["command"])
+              "--overhead" in wh2_task["command"] and
+              "0,1,2,3,4" in wh2_task["command"])
         wh1_task = next(t for t in cells_tasks
                         if t["method"] == "wh1-legacy")
         check("wh1 task command shape",
               "untunedcells" in wh1_task["command"] and
               "--cseed" in wh1_task["command"] and
-              "--cap-pct" in wh1_task["command"] and
+              "--maxoh" in wh1_task["command"] and
               "--tuned" not in wh1_task["command"])
         region_tasks = build_tasks(
             manifest, tmp, "/bin/bench", "/bin/whx", None,

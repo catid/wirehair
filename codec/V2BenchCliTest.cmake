@@ -648,7 +648,8 @@ foreach(pair "a" "b")
             endif()
             string(REPLACE "," ";" fields "${line}")
             list(LENGTH fields field_count)
-            if(NOT field_count EQUAL 31)
+            # 31 base columns; mixed completion appends joint-delta columns.
+            if(field_count LESS 31)
                 message(FATAL_ERROR
                     "unexpected precodefail column count ${field_count}: ${line}")
             endif()

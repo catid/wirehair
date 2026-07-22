@@ -7641,6 +7641,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool degree_balanced_staircase = false;
     wirehair_v2::DenseAnchorLayout binary_dense_segmented_anchors =
         wirehair_v2::DenseAnchorLayout::Disabled;
+    bool dense_identity_corner = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
@@ -7835,6 +7836,9 @@ int CmdPrecodeFail(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--degree-balanced-staircase")) {
             degree_balanced_staircase = true;
+        }
+        else if (!std::strcmp(argv[i], "--dense-identity-corner")) {
+            dense_identity_corner = true;
         }
         else if (!std::strcmp(
                      argv[i], "--binary-dense-segmented-anchors"))
@@ -8610,7 +8614,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -8629,7 +8633,8 @@ int CmdPrecodeFail(int argc, char** argv)
             PacketScheduleName(schedule_kind),
             mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
             degree_balanced_staircase ?
-                " degree_balanced_staircase=1" : "");
+                " degree_balanced_staircase=1" : "",
+            dense_identity_corner ? " dense_identity_corner=1" : "");
     }
     else
     {
@@ -8656,7 +8661,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s\n",
+            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -8699,7 +8704,8 @@ int CmdPrecodeFail(int argc, char** argv)
             PacketScheduleName(schedule_kind),
             mixed_null_witnesses ? " mixed_null_witnesses=1" : "",
             degree_balanced_staircase ?
-                " degree_balanced_staircase=1" : "");
+                " degree_balanced_staircase=1" : "",
+            dense_identity_corner ? " dense_identity_corner=1" : "");
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if (construction_seed_explicit || overhead_early_stop ||
@@ -8867,6 +8873,7 @@ int CmdPrecodeFail(int argc, char** argv)
                 degree_balanced_staircase;
             base_params.SegmentedDenseAnchors =
                 binary_dense_segmented_anchors;
+            base_params.DenseIdentityCorner = dense_identity_corner;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }
