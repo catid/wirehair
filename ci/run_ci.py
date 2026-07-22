@@ -576,6 +576,7 @@ def run_data_integrity(args):
         [bash, str(ROOT / "experiments" / "precode" /
                    "check_results_integrity.sh")],
         [bash, str(ROOT / "experiments" / "test_byte_metrics.sh")],
+        [bash, str(ROOT / "experiments" / "test_wh2_thermal_runner.sh")],
     )
     for command in commands:
         run(command)

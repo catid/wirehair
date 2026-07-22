@@ -25,6 +25,8 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         profile.V2PacketPeelSeed == 0u &&
         profile.V2RecoveryMixCount == 0u &&
         !profile.V2DenseIdentityCorner &&
+        !profile.V2DenseTwoAnchor &&
+        !profile.V2AdaptiveDenseTwoAnchor &&
         profile.V2PrecodeSeedSalt == 0u &&
         profile.V2RecoveryRowSeedSalt == 0u &&
         !profile.Tuned &&
@@ -80,6 +82,7 @@ bool CheckPatternInitializedAccessors()
         system.Params.BlockCount != 0u || system.Params.Staircase != 0u ||
         system.Params.DenseRows != 0u || system.Params.HeavyRows != 0u ||
         system.Params.SourceHits != 0u || system.Params.DenseIdentityCorner ||
+        system.Params.DenseTwoAnchor ||
         system.Params.Seed != 0u || !system.StaircaseRows.empty() ||
         !system.DenseRowColumns.empty() || stats.StaircaseBlockOps != 0u ||
         stats.DenseKnownBlockOps != 0u || stats.DenseSolveBlockOps != 0u ||
@@ -108,6 +111,7 @@ bool CheckPatternInitializedAccessors()
         !IsDefaultProfile(message_encoder->Profile()) ||
         options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
         options.DenseIdentityCorner ||
+        options.AdaptiveDenseTwoAnchor ||
         options.PrecodeSeedSalt != wirehair_v2::kMessagePrecodeSeedSalt ||
         options.RecoveryRowSeedSalt !=
             wirehair_v2::kMessageRecoveryRowSeedSalt ||
@@ -141,6 +145,7 @@ bool CheckPatternInitializedAccessors()
         decoder_options.RecoveryMixCount !=
             wirehair_v2::kDefaultRecoveryMixCount ||
         decoder_options.DenseIdentityCorner ||
+        decoder_options.AdaptiveDenseTwoAnchor ||
         decoder_options.PrecodeSeedSalt !=
             wirehair_v2::kMessagePrecodeSeedSalt ||
         decoder_options.RecoveryRowSeedSalt !=

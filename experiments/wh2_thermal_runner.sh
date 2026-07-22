@@ -147,7 +147,7 @@ summarize_thermal_csv()
             ++rows
             if (NF==19 && number($2)) {
                 if (have_row_mono) {
-                    if ($2 < row_mono) row_order_invalid=1
+                    if ($2 <= row_mono) row_order_invalid=1
                     if ($2-row_mono > 5.0) row_sampling_gap=1
                 }
                 if (expected_start != "" &&
@@ -196,7 +196,7 @@ summarize_thermal_csv()
             ++valid_rows
             if (valid_rows == 1) first_valid_mono=$2
             if (have_valid_mono &&
-                ($2 < valid_mono || $2-valid_mono > 5.0))
+                ($2 <= valid_mono || $2-valid_mono > 5.0))
                 sampling_gap=1
             valid_mono=$2
             have_valid_mono=1

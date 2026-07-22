@@ -239,6 +239,15 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07 \
     UINT64_C(0x20a4f27a870612a2)
 
+/**
+    Mixed/mix2 profile with an adaptive second D12 anchor from K=4096.
+
+    This is an explicit opt-in equation profile.  Existing mixed and default
+    profile identifiers retain their original equations and serialized bytes.
+*/
+#define WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07 \
+    UINT64_C(0x7d8c2436401ba9eb)
+
 /** Current serialized V2 equation profile. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
@@ -269,8 +278,9 @@ typedef enum WirehairV2Result_t
 /**
     Host-native representation of the canonical serialized V2 profile.
 
-    This structure is exactly 32 bytes in ABI version 2.  It is not itself a
-    wire image: use wirehair_v2_profile_serialize() and
+    This Wirehair V2 structure is exactly 32 bytes in profile-structure
+    version 1 (WIREHAIR_V2_PROFILE_VERSION).  It is not itself a wire image:
+    use wirehair_v2_profile_serialize() and
     wirehair_v2_profile_deserialize() at persistence or transport boundaries.
     All reserved fields must be zero.  seed_attempt is the selected
     deterministic equation-seed attempt in [0, 255].
@@ -349,10 +359,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     Select an explicit supported V2 equation profile and create an encoder.
 
     The current/default profile remains available through
-    wirehair_v2_encoder_create().  Both mixed profiles require a positive even
-    blockBytes value.  Their distinct IDs bind exactly three and exactly two
-    packet mix columns respectively.  Unknown IDs and invalid mixed dimensions
-    are rejected before codec allocation or serialized-profile output writes.
+    wirehair_v2_encoder_create().  All mixed profiles require a positive even
+    blockBytes value.  The original mixed ID binds exactly three packet mix
+    columns; both mixed/mix2 IDs bind exactly two, with the two-anchor ID also
+    binding its adaptive dense construction.  Unknown IDs and invalid mixed
+    dimensions are rejected before codec allocation or serialized-profile
+    output writes.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint64_t profileId,
@@ -392,7 +404,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     dataBytesOut is required.  On success it receives the bytes written.  A
     non-null output buffer shorter than the exact systematic or repair packet
     reports WirehairV2_BufferTooSmall, reports the required size through
-    dataBytesOut, and is not modified.
+    dataBytesOut, and is not modified.  dataBytesOut must not overlap the
+    packet output range; overlap reports WirehairV2_InvalidInput without
+    modifying either range.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     WirehairV2Codec codec,
@@ -555,7 +569,13 @@ WIREHAIR_EXPORT WirehairResult wirehair_encoder_create_profile_ex(
     The `blockId` >= N blocks are generated on demand.
 
     Preconditions:
-       Block is at least `blockBytes` in size
+       Block is at least `blockBytes` in size, except that the final
+       systematic block (`blockId == N - 1`) may use the exact shorter final
+       message remainder when the message is not block-aligned.
+
+    dataBytesOut is required.  On ordinary failure it is set to zero and the
+    packet output is unchanged.  It must not overlap the required packet output
+    range; overlap returns Wirehair_InvalidInput without writing either range.
 
     Returns Wirehair_Success on success.
     Returns other codes on error.
@@ -742,6 +762,8 @@ WIREHAIR_EXPORT WirehairResult wirehair_recover_block(
 
     outputCapacity is the number of writable bytes at blockData.  On failure,
     blockData is unchanged and bytesOut is set to zero when it is non-null.
+    bytesOut must not overlap the required block output range; overlap returns
+    Wirehair_InvalidInput without writing either range.
     Successful output has the same application-layer integrity requirement as
     wirehair_recover().
 */

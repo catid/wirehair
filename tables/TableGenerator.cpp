@@ -1644,12 +1644,14 @@ static uint16_t LinearInterpolate(
 {
     SIAMESE_DEBUG_ASSERT(N >= N0 && N <= N1);
 
-    const int numerator = (N - N0) * (Count1 - Count0);
-    const int denominator = N1 - N0;
+    const int64_t numerator =
+        static_cast<int64_t>(N - N0) * (Count1 - Count0);
+    const int64_t denominator = N1 - N0;
 
-    const int count = Count0 + (unsigned)(numerator / denominator);
+    const int64_t count = Count0 + numerator / denominator;
 
     SIAMESE_DEBUG_ASSERT(count > 0);
+    SIAMESE_DEBUG_ASSERT(count <= UINT16_MAX);
 
     return static_cast<uint16_t>(count);
 }

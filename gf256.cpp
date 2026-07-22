@@ -143,7 +143,7 @@ static GF256_ALIGNED SelfTestBuffersT m_SelfTestBuffers;
 
 static bool gf256_self_test()
 {
-    if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0)
+    if ((uintptr_t)&GF256Ctx % GF256_ALIGN_BYTES != 0)
         return false;
     if ((uintptr_t)m_SelfTestBuffers.A % GF256_ALIGN_BYTES != 0)
         return false;
@@ -938,18 +938,11 @@ static unsigned char kEndianTestData[4] = { 1, 2, 3, 4 };
 static unsigned char kEndianTestData[4] = { 4, 3, 2, 1 };
 #endif
 
-union UnionType
-{
-    uint32_t IntValue;
-    char CharArray[4];
-};
-
 static bool IsExpectedEndian()
 {
-    UnionType type;
-    for (unsigned i = 0; i < 4; ++i)
-        type.CharArray[i] = kEndianTestData[i];
-    return 0x01020304 == type.IntValue;
+    uint32_t value;
+    std::memcpy(&value, kEndianTestData, sizeof(value));
+    return 0x01020304 == value;
 }
 
 extern "C" int gf256_init_(int version)

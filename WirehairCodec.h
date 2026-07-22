@@ -1405,6 +1405,11 @@ public:
     GF256_FORCE_INLINE uint32_t BlockCount() const { return _block_count; }
     GF256_FORCE_INLINE uint32_t BlockBytes() const { return static_cast<uint32_t>(_block_bytes); }
     GF256_FORCE_INLINE uint32_t FinalBytes() const { return _output_final_bytes; }
+    GF256_FORCE_INLINE uint32_t EncodedBlockBytes(uint32_t block_id) const
+    {
+        return block_id == static_cast<uint32_t>(_block_count - 1u) ?
+            _input_final_bytes : BlockBytes();
+    }
     GF256_FORCE_INLINE Mode GetMode() const { return _mode; }
     GF256_FORCE_INLINE bool CanEncode() const
     {

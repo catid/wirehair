@@ -608,8 +608,10 @@ uint16_t GeneratePeelRowWeight(
 
 #ifdef WH_SEED_KNOBS
     // Experiment (task6): cap peel-row weight to make rows lighter (fewer symbol XORs).
-    { static int cap = -2; if (cap == -2) cap = ReadPeelCap();
-      if (cap > 3 && weight > (uint16_t)cap) weight = (uint16_t)cap; }
+    static const int cap = ReadPeelCap();
+    if (cap > 3 && weight > (uint16_t)cap) {
+        weight = (uint16_t)cap;
+    }
 #endif
 
     return weight;

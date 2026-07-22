@@ -17,8 +17,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <map>
 #include <new>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -26,8 +29,17 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
+#endif
+
+#if defined(__linux__)
+#include <sched.h>
 #endif
 
 namespace {
@@ -343,6 +355,12 @@ struct TrialResult
     uint64_t EncodedBytes;
     uint64_t DecodedBytes;
     uint64_t RecoveredBytes;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint64_t MixedEncoderJointSourceColumns;
+    uint64_t MixedDecoderJointSourceColumns;
+    uint64_t MixedEncoderDualSourceColumns;
+    uint64_t MixedDecoderDualSourceColumns;
+#endif
 };
 
 struct Accum
@@ -406,6 +424,7 @@ const char* MixedCoefficientGeometryName(
         "shared-x" : "frozen";
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseMixedCoefficientGeometry(
     const char* text,
     wirehair_v2::MixedCoefficientGeometry& geometry)
@@ -420,6 +439,7 @@ bool ParseMixedCoefficientGeometry(
     }
     return false;
 }
+#endif
 
 const char* MixedResidueScheduleName(
     wirehair_v2::MixedResidueSchedule schedule)
@@ -432,6 +452,7 @@ const char* MixedResidueScheduleName(
     }
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseMixedResidueSchedule(
     const char* text,
     wirehair_v2::MixedResidueSchedule& schedule)
@@ -450,6 +471,45 @@ bool ParseMixedResidueSchedule(
     }
     return false;
 }
+#endif
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+const char* MixedResidueBucketModeName(
+    wirehair_v2::MixedResidueBucketMode mode)
+{
+    switch (mode)
+    {
+    case wirehair_v2::MixedResidueBucketMode::Separate: return "separate";
+    case wirehair_v2::MixedResidueBucketMode::Dual: return "dual";
+    case wirehair_v2::MixedResidueBucketMode::JointDelta:
+        return "joint-delta";
+    default: return "auto";
+    }
+}
+
+bool ParseMixedResidueBucketMode(
+    const char* text,
+    wirehair_v2::MixedResidueBucketMode& mode)
+{
+    if (!std::strcmp(text, "auto")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Automatic;
+        return true;
+    }
+    if (!std::strcmp(text, "separate")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Separate;
+        return true;
+    }
+    if (!std::strcmp(text, "dual")) {
+        mode = wirehair_v2::MixedResidueBucketMode::Dual;
+        return true;
+    }
+    if (!std::strcmp(text, "joint-delta")) {
+        mode = wirehair_v2::MixedResidueBucketMode::JointDelta;
+        return true;
+    }
+    return false;
+}
+#endif
 
 struct CompareOptions
 {
@@ -1181,6 +1241,20 @@ TrialResult RunV2PrecodeTrial(
         }
     }
     tr.TerminalResult = result;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (const wirehair_v2::PrecodeSolveStats* stats =
+            enc.PrecodeEncoderSolveStatsForTesting())
+    {
+        tr.MixedEncoderJointSourceColumns = stats->MixedJointSourceXors;
+        tr.MixedEncoderDualSourceColumns = stats->MixedDualSourceColumns;
+    }
+    if (const wirehair_v2::PrecodeSolveStats* stats =
+            dec.PrecodeSolveStatsForTesting())
+    {
+        tr.MixedDecoderJointSourceColumns = stats->MixedJointSourceXors;
+        tr.MixedDecoderDualSourceColumns = stats->MixedDualSourceColumns;
+    }
+#endif
     return tr;
 }
 
@@ -1820,6 +1894,8 @@ int CmdCompare(int argc, char** argv)
     bool mixed_period_explicit = false;
     uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
     bool mixed_gf256_rows_explicit = false;
+    uint32_t mixed_grouped_gf256_rows = 0u;
+    bool mixed_grouped_gf256_rows_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -1832,6 +1908,9 @@ int CmdCompare(int argc, char** argv)
     bool mixed_residue_schedule_explicit = false;
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
+    wirehair_v2::MixedResidueBucketMode mixed_residue_bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+    bool mixed_residue_bucket_mode_explicit = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -1939,6 +2018,20 @@ int CmdCompare(int argc, char** argv)
             }
             mixed_gf256_rows_explicit = true;
         }
+        else if (!std::strcmp(
+                     argv[i], "--mixed-grouped-gf256-rows"))
+        {
+            if (!TakeArg(
+                    "compare", "--mixed-grouped-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-grouped-gf256-rows", value,
+                    mixed_grouped_gf256_rows))
+            {
+                return 1;
+            }
+            mixed_grouped_gf256_rows_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
                     "compare", "--mixed-period", argc, argv, i, value) ||
@@ -2006,6 +2099,22 @@ int CmdCompare(int argc, char** argv)
                      "--mixed-independent-extension-residues"))
         {
             mixed_independent_extension_residues = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-buckets"))
+        {
+            if (!TakeArg(
+                    "compare", "--mixed-residue-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(
+                    value, mixed_residue_bucket_mode))
+            {
+                std::fprintf(stderr,
+                    "compare unknown --mixed-residue-buckets token %s "
+                    "(expected auto, separate, dual, or joint-delta)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_bucket_mode_explicit = true;
         }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-multiplier"))
@@ -2150,12 +2259,15 @@ int CmdCompare(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_mix_count_explicit || mixed_period_explicit ||
              mixed_geometry_explicit ||
-             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+             mixed_gf256_rows_explicit ||
+             mixed_grouped_gf256_rows_explicit ||
+             mixed_gf16_rows_explicit ||
              mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
+             mixed_independent_extension_residues ||
+             mixed_residue_bucket_mode_explicit)
     {
         std::fprintf(stderr,
             "compare mixed experiment flags require a mixed precode "
@@ -2233,6 +2345,22 @@ int CmdCompare(int argc, char** argv)
             "shared-x hashed scheduling with P>H\n");
         return 1;
     }
+    if (mixed_residue_bucket_mode !=
+            wirehair_v2::MixedResidueBucketMode::Automatic &&
+        !mixed_independent_extension_residues &&
+        mixed_grouped_gf256_rows == 0u)
+    {
+        std::fprintf(stderr,
+            "compare explicit --mixed-residue-buckets requires "
+            "--mixed-independent-extension-residues or nonzero "
+            "--mixed-grouped-gf256-rows\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedResidueBucketModeForTesting(
+            mixed_residue_bucket_mode))
+    {
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -2243,6 +2371,17 @@ int CmdCompare(int argc, char** argv)
     }
     wirehair_v2::SetPacketRowSeedAvalancheForTesting(
         packet_row_seed_avalanche);
+    // Every earlier mixed configuration setter may clear schedule experiments.
+    // Activate the grouped suffix only after the complete thread state is set.
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+            mixed_grouped_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "compare --mixed-grouped-gf256-rows must be in [0,9]; "
+            "nonzero grouping requires shared-x constant-A 10+2 geometry, "
+            "P>H, and no independent extension residues\n");
+        return 1;
+    }
 #endif
     const uint64_t max_message_bytes = max_message_mib > 0u ?
         (uint64_t)max_message_mib * 1024u * 1024u : 0u;
@@ -2318,6 +2457,10 @@ int CmdCompare(int argc, char** argv)
         "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
         "mixed_residue_hash_keyed=%u "
         "mixed_independent_extension_residues=%u "
+        "mixed_grouped_gf256_rows=%u "
+        "mixed_grouped_gf256_hash_seed=0x%x "
+        "mixed_grouped_final_h_a_columns=%u "
+        "mixed_residue_buckets_requested=%s "
         "packet_row_seed_multiplier=0x%x "
         "packet_row_seed_avalanche=%u "
         "loss_trace=common-id-v2 "
@@ -2357,6 +2500,16 @@ int CmdCompare(int argc, char** argv)
         wirehair_v2::ActiveMixedResidueHashSeed(),
         mixed_residue_hash_keyed ? 1u : 0u,
         mixed_independent_extension_residues ? 1u : 0u,
+        wirehair_v2::ActiveMixedGroupedGF256Rows(),
+        wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
+        wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ?
+            wirehair_v2::ActiveMixedGF256Rows() +
+                wirehair_v2::ActiveMixedGF16Rows() : 0u,
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        MixedResidueBucketModeName(mixed_residue_bucket_mode),
+#else
+        "auto",
+#endif
         packet_row_seed_multiplier,
         packet_row_seed_avalanche ? 1u : 0u);
     std::printf(
@@ -2425,6 +2578,14 @@ int CmdCompare(int argc, char** argv)
             if (!wirehair_v2::
                     SetMixedIndependentExtensionResiduesForTesting(
                         mixed_independent_extension_residues))
+            {
+                return 1;
+            }
+            // Keyed seed selection and independent-schedule replay above may
+            // clear schedule experiments.  Keep grouped C last for every
+            // trial, not only for the command's initial TLS configuration.
+            if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+                    mixed_grouped_gf256_rows))
             {
                 return 1;
             }
@@ -2500,6 +2661,44 @@ int CmdCompare(int argc, char** argv)
                         mixed_precode_result, mixed_cache_result);
                 }
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            const auto validate_effective_bucket_mode = [&](
+                const TrialResult& result, const char* arm) -> bool
+            {
+                if (mixed_residue_bucket_mode ==
+                        wirehair_v2::MixedResidueBucketMode::Automatic ||
+                    mixed_residue_bucket_mode ==
+                        wirehair_v2::MixedResidueBucketMode::Separate)
+                {
+                    return true;
+                }
+                const bool joint = mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta;
+                const bool encoder_used = joint ?
+                    result.MixedEncoderJointSourceColumns != 0u :
+                    result.MixedEncoderDualSourceColumns != 0u;
+                const bool decoder_used = joint ?
+                    result.MixedDecoderJointSourceColumns != 0u :
+                    result.MixedDecoderDualSourceColumns != 0u;
+                if (encoder_used && decoder_used) return true;
+                std::fprintf(stderr,
+                    "compare requested mixed residue bucket mode %s but "
+                    "arm %s fell back (N=%u bb=%u encoder_used=%u "
+                    "decoder_used=%u)\n",
+                    MixedResidueBucketModeName(mixed_residue_bucket_mode),
+                    arm, N, block_bytes,
+                    encoder_used ? 1u : 0u, decoder_used ? 1u : 0u);
+                return false;
+            };
+            if (include_mixed &&
+                ((include_precode && !validate_effective_bucket_mode(
+                    mixed_precode_result, "precode")) ||
+                 (include_precode_cache && !validate_effective_bucket_mode(
+                    mixed_cache_result, "precode-cache"))))
+            {
+                return 1;
+            }
+#endif
             AddTrial(baseline, N, baseline_result);
             AddTrial(v2, N, v2_result);
             if (include_precode && include_certified) {
@@ -3693,6 +3892,12 @@ struct MatrixFailureTrial
     uint64_t ProjectNanoseconds = 0u;
     uint64_t ResidualNanoseconds = 0u;
     uint64_t BackSubNanoseconds = 0u;
+    uint64_t MixedJointSourceXors = 0u;
+    uint64_t MixedJointMarginalXors = 0u;
+    uint64_t MixedJointMarginalCopies = 0u;
+    uint64_t MixedJointScratchBytes = 0u;
+    uint32_t MixedJointActiveDeltas = 0u;
+    uint64_t MixedDualSourceColumns = 0u;
 };
 
 uint64_t TotalSolveNanoseconds(
@@ -3722,6 +3927,12 @@ bool SameNonTimingSolveStats(
             b.BinaryAdjacencyStorageAllocations &&
         a.BlockXors == b.BlockXors &&
         a.BlockMulAdds == b.BlockMulAdds &&
+        a.MixedJointSourceXors == b.MixedJointSourceXors &&
+        a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
+        a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
+        a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
+        a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
+        a.MixedDualSourceColumns == b.MixedDualSourceColumns &&
         a.PacketSeedAttempt == b.PacketSeedAttempt;
 }
 
@@ -3869,12 +4080,18 @@ bool BuildMixedNullClassification(
     const uint32_t L = witness.ColumnCount;
     const uint32_t d = witness.KernelDimension;
     const uint32_t period = wirehair_v2::ActiveMixedCoefficientPeriod();
+    const uint32_t subfield_rows = wirehair_v2::ActiveMixedGF256Rows();
+    const uint32_t extension_rows = wirehair_v2::ActiveMixedGF16Rows();
+    const uint32_t heavy_rows = subfield_rows + extension_rows;
+    const uint32_t grouped_gf256_rows =
+        wirehair_v2::ActiveMixedGroupedGF256Rows();
     const bool basis_size_overflow = d != 0u &&
         (size_t)L > std::numeric_limits<size_t>::max() / d;
     if (witness.Status != wirehair_v2::MixedNullWitnessStatus::Captured ||
         d == 0u ||
         d > wirehair_v2::kMaxMixedNullWitnessQuotientColumns ||
         period == 0u || period > 244u ||
+        grouped_gf256_rows > subfield_rows || L < heavy_rows ||
         basis_size_overflow || source_count > L ||
         witness.InactiveMask.size() != L ||
         witness.CanonicalBasis.size() != (size_t)d * L)
@@ -3888,15 +4105,25 @@ bool BuildMixedNullClassification(
         inactive_count += inactive;
     }
     if (inactive_count != witness.InactiveCount) return false;
+    const uint32_t first_grouped_gf256_row =
+        subfield_rows - grouped_gf256_rows;
+    const uint32_t first_heavy_column = L - heavy_rows;
     std::vector<MixedNullBucket> subfield(period), extension(period);
+    std::vector<MixedNullBucket> grouped_subfield(period);
     std::vector<MixedNullBucket> joint((size_t)period * period);
+    std::vector<MixedNullBucket> grouped_joint((size_t)period * period);
     lines.clear();
     lines.reserve(d);
     for (uint32_t row = 0u; row < d; ++row)
     {
         std::fill(subfield.begin(), subfield.end(), MixedNullBucket{});
         std::fill(extension.begin(), extension.end(), MixedNullBucket{});
+        std::fill(
+            grouped_subfield.begin(), grouped_subfield.end(),
+            MixedNullBucket{});
         std::fill(joint.begin(), joint.end(), MixedNullBucket{});
+        std::fill(
+            grouped_joint.begin(), grouped_joint.end(), MixedNullBucket{});
         uint32_t parts[4] = {};
         uint32_t gf256_values = 0u;
         uint32_t gf16_values = 0u;
@@ -3915,14 +4142,29 @@ bool BuildMixedNullClassification(
                 wirehair_v2::ActiveMixedCoefficientResidue(column);
             const uint32_t ex =
                 wirehair_v2::ActiveMixedExtensionCoefficientResidue(column);
-            if (sf >= period || ex >= period) return false;
+            // Grouped suffix rows use C only before the final H completion
+            // columns.  The accessor intentionally maps that final corner
+            // back to canonical A, matching the encoder and direct syndrome
+            // verifier rather than treating all L columns as C-scheduled.
+            const uint32_t grouped_sf = wirehair_v2::
+                ActiveMixedGroupedGF256CoefficientResidue(
+                    column, first_heavy_column);
+            if (sf >= period || ex >= period || grouped_sf >= period) {
+                return false;
+            }
             ++subfield[sf].Count;
             subfield[sf].Sum ^= value;
             ++extension[ex].Count;
             extension[ex].Sum ^= value;
+            ++grouped_subfield[grouped_sf].Count;
+            grouped_subfield[grouped_sf].Sum ^= value;
             MixedNullBucket& pair = joint[(size_t)sf * period + ex];
             ++pair.Count;
             pair.Sum ^= value;
+            MixedNullBucket& grouped_pair =
+                grouped_joint[(size_t)sf * period + grouped_sf];
+            ++grouped_pair.Count;
+            grouped_pair.Sum ^= value;
         }
         const uint32_t support =
             parts[0] + parts[1] + parts[2] + parts[3];
@@ -3932,9 +4174,17 @@ bool BuildMixedNullClassification(
             UINT8_C(0x45), row, period, extension, true);
         const MixedNullBucketSummary pair = SummarizeMixedNullBuckets(
             UINT8_C(0x4a), row, period, joint, false);
+        const MixedNullBucketSummary grouped_sf = SummarizeMixedNullBuckets(
+            UINT8_C(0x43), row, period, grouped_subfield, true);
+        const MixedNullBucketSummary grouped_pair =
+            SummarizeMixedNullBuckets(
+                UINT8_C(0x4b), row, period, grouped_joint, false);
         if (support != gf256_values + gf16_values ||
             pair.Occupied < std::max(sf.Occupied, ex.Occupied) ||
-            pair.Occupied > support)
+            pair.Occupied > support ||
+            grouped_pair.Occupied <
+                std::max(sf.Occupied, grouped_sf.Occupied) ||
+            grouped_pair.Occupied > support)
         {
             return false;
         }
@@ -3949,7 +4199,12 @@ bool BuildMixedNullClassification(
             "ex_occ=%u,ex_cancel=%u,ex_cancel_terms=%u,ex_max=%u,"
             "ex_hash=%016llx,pair_occ=%u,pair_cancel=%u,"
             "pair_cancel_terms=%u,pair_max=%u,pair_hash=%016llx,"
-            "sf_top=%s,ex_top=%s",
+            "sf_top=%s,ex_top=%s,grouped_gf256_rows=%u,"
+            "grouped_first_row=%u,grouped_final_h_a_columns=%u,"
+            "c_occ=%u,c_cancel=%u,c_cancel_terms=%u,c_max=%u,"
+            "c_hash=%016llx,ac_pair_occ=%u,ac_pair_cancel=%u,"
+            "ac_pair_cancel_terms=%u,ac_pair_max=%u,"
+            "ac_pair_hash=%016llx,c_top=%s",
             row, support, parts[0] + parts[1], parts[2] + parts[3],
             parts[0], parts[1], parts[2], parts[3],
             gf256_values, gf16_values,
@@ -3959,7 +4214,16 @@ bool BuildMixedNullClassification(
             (unsigned long long)ex.Hash,
             pair.Occupied, pair.Cancelled, pair.CancelledTerms, pair.Maximum,
             (unsigned long long)pair.Hash,
-            sf.Top.c_str(), ex.Top.c_str());
+            sf.Top.c_str(), ex.Top.c_str(),
+            grouped_gf256_rows, first_grouped_gf256_row,
+            grouped_gf256_rows != 0u ? heavy_rows : 0u,
+            grouped_sf.Occupied, grouped_sf.Cancelled,
+            grouped_sf.CancelledTerms, grouped_sf.Maximum,
+            (unsigned long long)grouped_sf.Hash,
+            grouped_pair.Occupied, grouped_pair.Cancelled,
+            grouped_pair.CancelledTerms, grouped_pair.Maximum,
+            (unsigned long long)grouped_pair.Hash,
+            grouped_sf.Top.c_str());
         if (written < 0 || (size_t)written >= sizeof(line)) return false;
         lines.push_back(line);
     }
@@ -4424,6 +4688,2832 @@ const char* PacketPeelSeedTableName(PacketPeelSeedTable table)
     }
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
+
+enum class PreferredAttemptMode
+{
+    Control,
+    Route,
+    Candidate,
+    Paired
+};
+
+const char* PreferredAttemptModeName(PreferredAttemptMode mode)
+{
+    switch (mode)
+    {
+    case PreferredAttemptMode::Control:   return "control";
+    case PreferredAttemptMode::Route:     return "route";
+    case PreferredAttemptMode::Candidate: return "candidate";
+    case PreferredAttemptMode::Paired:    return "paired";
+    }
+    return "unknown";
+}
+
+bool ParsePreferredAttemptMode(
+    const char* text,
+    PreferredAttemptMode& mode)
+{
+    if (!std::strcmp(text, "control")) {
+        mode = PreferredAttemptMode::Control;
+    }
+    else if (!std::strcmp(text, "route")) {
+        mode = PreferredAttemptMode::Route;
+    }
+    else if (!std::strcmp(text, "candidate")) {
+        mode = PreferredAttemptMode::Candidate;
+    }
+    else if (!std::strcmp(text, "paired")) {
+        mode = PreferredAttemptMode::Paired;
+    }
+    else {
+        return false;
+    }
+    return true;
+}
+
+bool MarkPreferredOptionOnce(
+    const char* option,
+    bool& seen)
+{
+    if (seen) {
+        std::fprintf(stderr,
+            "preferredattempt %s specified more than once\n", option);
+        return false;
+    }
+    seen = true;
+    return true;
+}
+
+bool IsCanonicalPreferredIntList(
+    const std::string& text,
+    const std::vector<int>& values)
+{
+    std::ostringstream canonical;
+    for (size_t i = 0u; i < values.size(); ++i) {
+        if (i != 0u) canonical << ',';
+        canonical << values[i];
+    }
+    return text == canonical.str();
+}
+
+typedef std::pair<uint32_t, uint32_t> PreferredAttemptKey;
+typedef std::map<PreferredAttemptKey, std::vector<uint32_t> >
+    PreferredAttemptMap;
+
+// Parse a compact, shell-independent map used only by the frozen experiment
+// harness.  Each record is K@block_bytes=p[,p...] and records are separated by
+// '|'.  Candidate order is significant to the external survivor ledger.
+bool ParsePreferredAttemptMap(
+    const std::string& text,
+    PreferredAttemptMap& output)
+{
+    output.clear();
+    if (text == "none") {
+        return true;
+    }
+    size_t record_pos = 0u;
+    while (record_pos <= text.size())
+    {
+        const size_t record_end = text.find('|', record_pos);
+        const std::string record = text.substr(
+            record_pos,
+            record_end == std::string::npos ?
+                std::string::npos : record_end - record_pos);
+        const size_t at = record.find('@');
+        const size_t equals = record.find('=');
+        if (record.empty() || at == std::string::npos ||
+            equals == std::string::npos || at == 0u || equals <= at + 1u ||
+            record.find('@', at + 1u) != std::string::npos ||
+            record.find('=', equals + 1u) != std::string::npos)
+        {
+            output.clear();
+            return false;
+        }
+        uint32_t K = 0u;
+        uint32_t block_bytes = 0u;
+        if (!ParseU32Scalar(record.substr(0u, at).c_str(), K) ||
+            !ParseU32Scalar(
+                record.substr(at + 1u, equals - at - 1u).c_str(),
+                block_bytes))
+        {
+            output.clear();
+            return false;
+        }
+        std::vector<uint32_t> attempts;
+        const bool explicit_control = record.substr(equals + 1u) == "none";
+        if (!explicit_control)
+        {
+            size_t attempt_pos = equals + 1u;
+            while (attempt_pos <= record.size())
+            {
+                const size_t attempt_end = record.find(',', attempt_pos);
+                const std::string token = record.substr(
+                    attempt_pos,
+                    attempt_end == std::string::npos ?
+                        std::string::npos : attempt_end - attempt_pos);
+                uint32_t attempt = 0u;
+                if (!ParseU32Scalar(token.c_str(), attempt) ||
+                    attempt >= wirehair_v2::kMaxPacketSeedAttempts ||
+                    std::find(attempts.begin(), attempts.end(), attempt) !=
+                        attempts.end())
+                {
+                    output.clear();
+                    return false;
+                }
+                attempts.push_back(attempt);
+                if (attempts.size() > 32u) {
+                    output.clear();
+                    return false;
+                }
+                if (attempt_end == std::string::npos) {
+                    break;
+                }
+                attempt_pos = attempt_end + 1u;
+            }
+        }
+        if ((!explicit_control && attempts.empty()) ||
+            !output.insert(std::make_pair(
+                PreferredAttemptKey(K, block_bytes), attempts)).second)
+        {
+            output.clear();
+            return false;
+        }
+        if (record_end == std::string::npos) {
+            break;
+        }
+        record_pos = record_end + 1u;
+    }
+    return true;
+}
+
+std::string CanonicalPreferredAttemptMapText(
+    const std::vector<int>& Ns,
+    const std::vector<int>& BBs,
+    const PreferredAttemptMap& preferred)
+{
+    if (preferred.empty()) return "none";
+    std::ostringstream canonical;
+    bool first_record = true;
+    for (int n_value : Ns) for (int bb_value : BBs)
+    {
+        const PreferredAttemptMap::const_iterator it = preferred.find(
+            PreferredAttemptKey(
+                (uint32_t)n_value, (uint32_t)bb_value));
+        if (it == preferred.end()) continue;
+        if (!first_record) canonical << '|';
+        first_record = false;
+        canonical << n_value << '@' << bb_value << '=';
+        if (it->second.empty()) {
+            canonical << "none";
+            continue;
+        }
+        for (size_t i = 0u; i < it->second.size(); ++i) {
+            if (i != 0u) canonical << ',';
+            canonical << it->second[i];
+        }
+    }
+    return canonical.str();
+}
+
+bool IsLowerHexSha256(const std::string& text)
+{
+    if (text.size() != 64u) return false;
+    for (char ch : text) {
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
+{
+    return (value >> shift) | (value << (32u - shift));
+}
+
+// Small benchmark-only SHA-256 implementation used to bind a trusted route
+// manifest to the exact bytes produced by route mode.  Keeping verification in
+// the consumer prevents a stale or forged preferred map from being blessed by
+// an unrelated digest supplied on the command line.
+std::string Sha256Hex(const std::string& input)
+{
+    static const uint32_t kRound[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
+    };
+    uint32_t state[8] = {
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+    };
+    std::vector<uint8_t> bytes(input.begin(), input.end());
+    const uint64_t bit_count = (uint64_t)bytes.size() * 8u;
+    bytes.push_back(0x80u);
+    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.push_back((uint8_t)(bit_count >> shift));
+    }
+    for (size_t offset = 0u; offset < bytes.size(); offset += 64u)
+    {
+        uint32_t words[64];
+        for (uint32_t i = 0u; i < 16u; ++i) {
+            const size_t pos = offset + (size_t)i * 4u;
+            words[i] = ((uint32_t)bytes[pos] << 24) |
+                ((uint32_t)bytes[pos + 1u] << 16) |
+                ((uint32_t)bytes[pos + 2u] << 8) |
+                (uint32_t)bytes[pos + 3u];
+        }
+        for (uint32_t i = 16u; i < 64u; ++i) {
+            const uint32_t x = words[i - 15u];
+            const uint32_t y = words[i - 2u];
+            const uint32_t s0 = Sha256RotateRight(x, 7u) ^
+                Sha256RotateRight(x, 18u) ^ (x >> 3u);
+            const uint32_t s1 = Sha256RotateRight(y, 17u) ^
+                Sha256RotateRight(y, 19u) ^ (y >> 10u);
+            words[i] = words[i - 16u] + s0 + words[i - 7u] + s1;
+        }
+        uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+        uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+        for (uint32_t i = 0u; i < 64u; ++i) {
+            const uint32_t s1 = Sha256RotateRight(e, 6u) ^
+                Sha256RotateRight(e, 11u) ^ Sha256RotateRight(e, 25u);
+            const uint32_t choose = (e & f) ^ ((~e) & g);
+            const uint32_t temp1 = h + s1 + choose + kRound[i] + words[i];
+            const uint32_t s0 = Sha256RotateRight(a, 2u) ^
+                Sha256RotateRight(a, 13u) ^ Sha256RotateRight(a, 22u);
+            const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t temp2 = s0 + majority;
+            h = g; g = f; f = e; e = d + temp1;
+            d = c; c = b; b = a; a = temp1 + temp2;
+        }
+        state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+        state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+    }
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (uint32_t value : state) output << std::setw(8) << value;
+    return output.str();
+}
+
+bool ReadBoundedFile(
+    const std::string& path,
+    size_t max_bytes,
+    std::string& bytes)
+{
+    bytes.clear();
+    std::ifstream input(path.c_str(), std::ios::binary | std::ios::ate);
+    if (!input) return false;
+    const std::ifstream::pos_type end = input.tellg();
+    if (end < 0 || (uint64_t)end > max_bytes) return false;
+    bytes.resize((size_t)end);
+    input.seekg(0, std::ios::beg);
+    if (!bytes.empty() &&
+        !input.read(&bytes[0], (std::streamsize)bytes.size()))
+    {
+        bytes.clear();
+        return false;
+    }
+    return true;
+}
+
+bool ParseCanonicalU32(const std::string& text, uint32_t& value)
+{
+    if (!ParseU32Scalar(text.c_str(), value)) return false;
+    char canonical[16];
+    std::snprintf(canonical, sizeof(canonical), "%u", value);
+    return text == canonical;
+}
+
+bool ParseCanonicalU64Decimal(const std::string& text, uint64_t& value)
+{
+    if (text.empty() || text[0] < '0' || text[0] > '9') return false;
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(text.c_str(), &end, 10);
+    if (errno != 0 || !end || *end != '\0' ||
+        parsed > std::numeric_limits<uint64_t>::max())
+    {
+        return false;
+    }
+    value = (uint64_t)parsed;
+    return text == std::to_string(value);
+}
+
+bool ParseCanonicalU32Arg(
+    const char* option,
+    const char* text,
+    uint32_t& value)
+{
+    return ParseCanonicalU32(text ? text : "", value) || BadArg(option, text);
+}
+
+bool ParseCanonicalU64Arg(
+    const char* option,
+    const char* text,
+    uint64_t& value)
+{
+    return ParseCanonicalU64Decimal(text ? text : "", value) ||
+        BadArg(option, text);
+}
+
+struct PreferredRouteRecord
+{
+    uint32_t PreferredAttempt = 0u;
+    uint32_t CanonicalAttempt = 0u;
+    uint32_t ActualAttempt = 0u;
+    bool PreferredValid = false;
+    bool Fallback = false;
+    bool NoOp = false;
+    bool Direct = false;
+    uint32_t CanonicalProbeSolves = 0u;
+    uint32_t PreferredProbeSolves = 0u;
+};
+
+struct PreferredRouteKeyRecords
+{
+    uint32_t CanonicalAttempt = UINT32_MAX;
+    bool ControlOnly = false;
+    uint32_t ControlCanonicalProbeSolves = 0u;
+    // Preserve manifest order independently of the lookup map.  Candidate
+    // jobs must consume the exact ordered attempt batch that produced their
+    // bound route artifact; accepting a strict subset silently changes the
+    // frozen logical/physical-work accounting.
+    std::vector<uint32_t> AttemptOrder;
+    std::map<uint32_t, PreferredRouteRecord> Attempts;
+};
+
+typedef std::map<PreferredAttemptKey, PreferredRouteKeyRecords>
+    PreferredRouteCache;
+
+bool SplitExactCsv(
+    const std::string& line,
+    size_t field_count,
+    std::vector<std::string>& fields)
+{
+    fields.clear();
+    size_t begin = 0u;
+    while (begin <= line.size()) {
+        const size_t comma = line.find(',', begin);
+        fields.push_back(line.substr(
+            begin, comma == std::string::npos ? std::string::npos :
+                comma - begin));
+        if (comma == std::string::npos) break;
+        begin = comma + 1u;
+    }
+    if (fields.size() != field_count) return false;
+    for (const std::string& field : fields) {
+        if (field.empty()) return false;
+    }
+    return true;
+}
+
+bool ParsePreferredRouteManifest(
+    const std::string& bytes,
+    const std::string& expected_context_sha256,
+    PreferredRouteCache& cache,
+    std::string& error)
+{
+    static const char kMagicPrefix[] =
+        "# preferredattempt-route-manifest: schema=v1 "
+        "policy=h12-q0-adaptive canonical=ascending-first-valid-v1 "
+        "max_attempt=255 context_sha256=";
+    static const char kHeader[] =
+        "N,bb,route_status,preferred_attempt,canonical_attempt,actual_attempt,"
+        "preferred_valid,fallback,no_op,direct,canonical_probe_solves,"
+        "preferred_probe_solves";
+    cache.clear();
+    if (bytes.empty() || bytes.back() != '\n' ||
+        bytes.find('\r') != std::string::npos ||
+        bytes.find('\0') != std::string::npos)
+    {
+        error = "route manifest must be nonempty canonical LF text";
+        return false;
+    }
+    std::istringstream input(bytes);
+    std::string line;
+    if (!std::getline(input, line) ||
+        line.size() != std::strlen(kMagicPrefix) + 64u ||
+        line.compare(0u, std::strlen(kMagicPrefix), kMagicPrefix) != 0 ||
+        line.substr(std::strlen(kMagicPrefix)) != expected_context_sha256 ||
+        !std::getline(input, line) || line != kHeader)
+    {
+        error = "route manifest magic/schema mismatch";
+        return false;
+    }
+    size_t row_count = 0u;
+    bool have_previous_key = false;
+    PreferredAttemptKey previous_key;
+    std::vector<std::string> fields;
+    while (std::getline(input, line))
+    {
+        if (!SplitExactCsv(line, 12u, fields)) {
+            error = "route manifest has a malformed row";
+            return false;
+        }
+        uint32_t K = 0u;
+        uint32_t block_bytes = 0u;
+        uint32_t values[8];
+        if (!ParseCanonicalU32(fields[0], K) ||
+            !ParseCanonicalU32(fields[1], block_bytes))
+        {
+            error = "route manifest has a noncanonical integer";
+            return false;
+        }
+        for (size_t i = 0u; i < 8u; ++i) {
+            if (!ParseCanonicalU32(fields[i + 4u], values[i])) {
+                error = "route manifest has a noncanonical integer";
+                return false;
+            }
+        }
+        const bool control_only = fields[2] == "control";
+        const bool preferred_route = fields[2] == "preferred";
+        uint32_t p = 0u;
+        if ((!control_only && !preferred_route) ||
+            (control_only && fields[3] != "-1") ||
+            (preferred_route && !ParseCanonicalU32(fields[3], p)))
+        {
+            error = "route manifest has an invalid route status";
+            return false;
+        }
+        const uint32_t a0 = values[0];
+        const uint32_t actual = values[1];
+        if (K < 2u || K > 64000u ||
+            (block_bytes != 64u && block_bytes != 256u &&
+             block_bytes != 1280u && block_bytes != 4096u) ||
+            (preferred_route &&
+             p >= wirehair_v2::kMaxPacketSeedAttempts) ||
+            a0 >= wirehair_v2::kMaxPacketSeedAttempts ||
+            actual >= wirehair_v2::kMaxPacketSeedAttempts ||
+            values[2] > 1u || values[3] > 1u || values[4] > 1u ||
+            values[5] > 1u)
+        {
+            error = "route manifest has an out-of-domain value";
+            return false;
+        }
+        const bool valid = values[2] != 0u;
+        const bool fallback = values[3] != 0u;
+        const bool no_op = values[4] != 0u;
+        const bool direct = values[5] != 0u;
+        const uint32_t canonical_probe_solves = values[6];
+        const uint32_t preferred_probe_solves = values[7];
+        const bool control_consistent = control_only &&
+            actual == a0 && valid && !fallback && no_op && !direct &&
+            canonical_probe_solves == a0 + 1u &&
+            preferred_probe_solves == 0u;
+        const bool preferred_consistent = preferred_route &&
+            !(p < a0 && valid) && !(p == a0 && !valid) &&
+            actual == (valid ? p : a0) && fallback != valid &&
+            no_op == (p == a0) && direct == (valid && !no_op) &&
+            (canonical_probe_solves == 0u ||
+             canonical_probe_solves == a0 + 1u) &&
+            preferred_probe_solves == (p > a0 ? 1u : 0u);
+        if (!control_consistent && !preferred_consistent)
+        {
+            error = "route manifest has an inconsistent classification";
+            return false;
+        }
+        const PreferredAttemptKey key(K, block_bytes);
+        if (have_previous_key && key != previous_key && key < previous_key) {
+            error = "route manifest key groups are reordered";
+            return false;
+        }
+        previous_key = key;
+        have_previous_key = true;
+        PreferredRouteKeyRecords& key_records = cache[key];
+        if (key_records.CanonicalAttempt != UINT32_MAX &&
+            key_records.CanonicalAttempt != a0)
+        {
+            error = "route manifest disagrees on canonical attempt";
+            return false;
+        }
+        key_records.CanonicalAttempt = a0;
+        if (control_only) {
+            if (key_records.ControlOnly || !key_records.Attempts.empty()) {
+                error = "route manifest mixes control and preferred routes";
+                return false;
+            }
+            key_records.ControlOnly = true;
+            key_records.ControlCanonicalProbeSolves =
+                canonical_probe_solves;
+            ++row_count;
+            continue;
+        }
+        if (key_records.ControlOnly) {
+            error = "route manifest mixes control and preferred routes";
+            return false;
+        }
+        const uint32_t expected_canonical_probe_solves =
+            key_records.AttemptOrder.empty() ? a0 + 1u : 0u;
+        if (canonical_probe_solves != expected_canonical_probe_solves) {
+            error = "route manifest first-row canonical probe accounting is "
+                "noncanonical";
+            return false;
+        }
+        PreferredRouteRecord record;
+        record.PreferredAttempt = p;
+        record.CanonicalAttempt = a0;
+        record.ActualAttempt = actual;
+        record.PreferredValid = valid;
+        record.Fallback = fallback;
+        record.NoOp = no_op;
+        record.Direct = direct;
+        record.CanonicalProbeSolves = canonical_probe_solves;
+        record.PreferredProbeSolves = preferred_probe_solves;
+        if (!key_records.Attempts.insert(std::make_pair(p, record)).second) {
+            error = "route manifest has a duplicate K@bb,p row";
+            return false;
+        }
+        key_records.AttemptOrder.push_back(p);
+        if (key_records.Attempts.size() > 32u) {
+            error = "route manifest has more than 32 attempts for one K@bb";
+            return false;
+        }
+        ++row_count;
+    }
+    if (row_count == 0u) {
+        error = "route manifest has no rows";
+        return false;
+    }
+    for (const std::pair<const PreferredAttemptKey,
+             PreferredRouteKeyRecords>& key : cache)
+    {
+        uint64_t canonical_probe_total =
+            key.second.ControlCanonicalProbeSolves;
+        for (const std::pair<const uint32_t, PreferredRouteRecord>& attempt :
+             key.second.Attempts)
+        {
+            canonical_probe_total += attempt.second.CanonicalProbeSolves;
+        }
+        if (canonical_probe_total != key.second.CanonicalAttempt + 1u) {
+            error = "route manifest canonical probe accounting is not additive";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool LoadPreferredRouteCache(
+    const std::string& path,
+    const std::string& expected_sha256,
+    const std::string& expected_context_sha256,
+    PreferredRouteCache& cache)
+{
+    std::string bytes;
+    if (!ReadBoundedFile(path, 64u * 1024u * 1024u, bytes)) {
+        std::fprintf(stderr,
+            "preferredattempt cannot read bounded route cache: %s\n",
+            path.c_str());
+        return false;
+    }
+    const std::string actual_sha256 = Sha256Hex(bytes);
+    if (actual_sha256 != expected_sha256) {
+        std::fprintf(stderr,
+            "preferredattempt route cache SHA-256 mismatch: got %s\n",
+            actual_sha256.c_str());
+        return false;
+    }
+    std::string error;
+    if (!ParsePreferredRouteManifest(
+            bytes, expected_context_sha256, cache, error))
+    {
+        std::fprintf(stderr, "preferredattempt %s\n", error.c_str());
+        return false;
+    }
+    return true;
+}
+
+struct PreferredRecoveryMetrics
+{
+    WirehairResult Result = Wirehair_Error;
+    uint32_t Inactivated = 0u;
+    uint32_t BinaryDeficit = 0u;
+    uint32_t HeavyGain = 0u;
+    uint64_t BlockXors = 0u;
+    uint64_t BlockMulAdds = 0u;
+    bool HeavyShortfall = false;
+};
+
+bool MakeH12Q0Configuration(
+    uint32_t K,
+    uint32_t block_bytes,
+    wirehair_v2::PrecodeParams& params,
+    wirehair_v2::PacketRowConfig& config)
+{
+    const wirehair_v2::SeedProfile profile =
+        wirehair_v2::SelectSeedProfile(K, block_bytes);
+    params = wirehair_v2::MakeMixedParams(
+        K,
+        wirehair_v2::MatrixSeedFromProfile(
+            profile, 0u, wirehair_v2::kMessagePrecodeSeedSalt));
+    params.Staircase = profile.DenseCount;
+    params.DenseTwoAnchor =
+        K >= wirehair_v2::kDenseTwoAnchorMinBlockCount;
+    params.DenseTwoAnchorPhase = 0u;
+    config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
+        profile, wirehair_v2::kMessageRecoveryRowSeedSalt);
+    config.MixCount = 2u;
+    return true;
+}
+
+WirehairResult ProbePreferredAttempt(
+    const wirehair_v2::PrecodeParams& base_params,
+    const wirehair_v2::PacketRowConfig& base_config,
+    uint32_t attempt,
+    const std::vector<wirehair_v2::SolvePacket>& systematic_packets,
+    wirehair_v2::PrecodeSystem& system,
+    wirehair_v2::PacketRowConfig& config)
+{
+    if (attempt >= wirehair_v2::kMaxPacketSeedAttempts ||
+        systematic_packets.size() != base_params.BlockCount)
+    {
+        return Wirehair_InvalidInput;
+    }
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::PrecodeParamsForAttempt(base_params, attempt),
+            system))
+    {
+        return Wirehair_InvalidInput;
+    }
+    config = wirehair_v2::PacketConfigForAttempt(base_config, attempt);
+    std::vector<uint8_t> intermediate;
+    return wirehair_v2::SolvePrecodeSystem(
+        system, config, systematic_packets, 2u, intermediate);
+}
+
+struct PreferredRecoveryCell
+{
+    wirehair_v2::PacketRowRuntime Runtime;
+    std::vector<wirehair_v2::SolvePacket> Packets;
+    uint8_t Zero[2] = {0u, 0u};
+};
+
+WirehairResult BuildPreferredRecoveryCell(
+    const wirehair_v2::PrecodeParams& params,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_bytes,
+    double loss,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    PreferredRecoveryCell& cell)
+{
+    const uint32_t K = params.BlockCount;
+    const uint64_t precode_count_wide =
+        (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
+    if (precode_count_wide > UINT32_MAX) {
+        return Wirehair_InvalidInput;
+    }
+    if (!cell.Runtime.Initialize(
+            K, (uint32_t)precode_count_wide, config.MixCount))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const uint64_t loss_seed = external_seed ^
+        ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9));
+    const std::vector<uint32_t> ids = BuildPacketSchedule(
+        K, K, loss, loss_seed, schedule);
+    if (ids.size() != K) {
+        return Wirehair_InvalidInput;
+    }
+    cell.Packets.resize(K);
+    for (uint32_t i = 0u; i < K; ++i) {
+        cell.Packets[i].BlockId = ids[i];
+        cell.Packets[i].Data = cell.Zero;
+    }
+    return Wirehair_Success;
+}
+
+WirehairResult EvaluatePreferredRecovery(
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const PreferredRecoveryCell& cell,
+    PreferredRecoveryMetrics& metrics)
+{
+    if (cell.Packets.size() != system.Params.BlockCount) {
+        return Wirehair_InvalidInput;
+    }
+    std::vector<uint8_t> intermediate;
+    wirehair_v2::PrecodeSolveStats stats;
+    metrics.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, cell.Runtime, cell.Packets, 2u,
+            intermediate, &stats);
+    metrics.Inactivated = stats.InactivatedColumns;
+    metrics.BinaryDeficit = stats.InactivatedColumns >=
+            stats.BinaryResidualRank ?
+        stats.InactivatedColumns - stats.BinaryResidualRank : 0u;
+    metrics.HeavyGain = stats.ResidualRank >= stats.BinaryResidualRank ?
+        stats.ResidualRank - stats.BinaryResidualRank : 0u;
+    metrics.BlockXors = stats.BlockXors;
+    metrics.BlockMulAdds = stats.BlockMulAdds;
+    metrics.HeavyShortfall = metrics.Result == Wirehair_NeedMore &&
+        metrics.BinaryDeficit <= system.Params.HeavyRows &&
+        metrics.HeavyGain < metrics.BinaryDeficit;
+    return Wirehair_Success;
+}
+
+void PrintPreferredRecoveryRow(
+    uint32_t K,
+    uint32_t block_bytes,
+    const char* arm,
+    int preferred_attempt,
+    uint32_t canonical_attempt,
+    uint32_t actual_attempt,
+    bool routed,
+    bool preferred_valid,
+    bool fallback,
+    bool no_op,
+    bool direct,
+    bool physical_solve,
+    const PreferredRecoveryMetrics& metrics)
+{
+    const uint32_t rank_fail = metrics.Result == Wirehair_NeedMore ? 1u : 0u;
+    const uint32_t error =
+        metrics.Result == Wirehair_Success ||
+        metrics.Result == Wirehair_NeedMore ? 0u : 1u;
+    std::printf(
+        "%u,%u,%s,%d,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%u,%u,%u,%llu,%llu\n",
+        K, block_bytes, arm, preferred_attempt, canonical_attempt,
+        actual_attempt, routed ? 1u : 0u, preferred_valid ? 1u : 0u,
+        fallback ? 1u : 0u, no_op ? 1u : 0u, direct ? 1u : 0u,
+        physical_solve ? 1u : 0u, (int)metrics.Result, rank_fail, error,
+        metrics.HeavyShortfall ? 1u : 0u, metrics.Inactivated,
+        metrics.BinaryDeficit, metrics.HeavyGain,
+        (unsigned long long)metrics.BlockXors,
+        (unsigned long long)metrics.BlockMulAdds);
+}
+
+int CmdPreferredAttempt(int argc, char** argv)
+{
+    std::string nlist;
+    std::string bb_list;
+    std::string preferred_map_text;
+    std::string route_cache_path;
+    std::string route_cache_sha256;
+    std::string route_context_sha256;
+    PreferredAttemptMode mode = PreferredAttemptMode::Control;
+    bool nlist_explicit = false;
+    bool bb_list_explicit = false;
+    bool mode_explicit = false;
+    bool map_explicit = false;
+    bool route_cache_path_explicit = false;
+    bool route_cache_explicit = false;
+    bool route_context_explicit = false;
+    bool probe_route = false;
+    bool probe_route_explicit = false;
+    bool loss_explicit = false;
+    bool seed_explicit = false;
+    bool schedule_explicit = false;
+    double loss = 0.50;
+    uint64_t seed = UINT64_C(0x5eedf411);
+    PacketScheduleKind schedule = PacketScheduleKind::Burst;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!MarkPreferredOptionOnce("--N", nlist_explicit) || !TakeArg(
+                    "preferredattempt", "--N", argc, argv, i, value))
+            {
+                return 1;
+            }
+            nlist = value;
+        }
+        else if (!std::strcmp(argv[i], "--bb-list")) {
+            if (!MarkPreferredOptionOnce("--bb-list", bb_list_explicit) ||
+                !TakeArg(
+                    "preferredattempt", "--bb-list", argc, argv, i, value))
+            {
+                return 1;
+            }
+            bb_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--mode")) {
+            if (!MarkPreferredOptionOnce("--mode", mode_explicit) || !TakeArg(
+                    "preferredattempt", "--mode", argc, argv, i, value) ||
+                !ParsePreferredAttemptMode(value, mode))
+            {
+                std::fprintf(stderr,
+                    "preferredattempt --mode must be control, route, "
+                    "candidate, or paired\n");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--preferred-map")) {
+            if (!MarkPreferredOptionOnce("--preferred-map", map_explicit) ||
+                !TakeArg(
+                    "preferredattempt", "--preferred-map",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            preferred_map_text = value;
+        }
+        else if (!std::strcmp(argv[i], "--route-cache-sha256")) {
+            if (!MarkPreferredOptionOnce(
+                    "--route-cache-sha256", route_cache_explicit) ||
+                !TakeArg(
+                    "preferredattempt", "--route-cache-sha256",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            route_cache_sha256 = value;
+        }
+        else if (!std::strcmp(argv[i], "--route-cache")) {
+            if (!MarkPreferredOptionOnce(
+                    "--route-cache", route_cache_path_explicit) ||
+                !TakeArg(
+                    "preferredattempt", "--route-cache",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            route_cache_path = value;
+        }
+        else if (!std::strcmp(argv[i], "--route-context-sha256")) {
+            if (!MarkPreferredOptionOnce(
+                    "--route-context-sha256", route_context_explicit) ||
+                !TakeArg(
+                    "preferredattempt", "--route-context-sha256",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            route_context_sha256 = value;
+        }
+        else if (!std::strcmp(argv[i], "--probe-route")) {
+            if (!MarkPreferredOptionOnce("--probe-route", probe_route_explicit)) {
+                return 1;
+            }
+            probe_route = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!MarkPreferredOptionOnce("--loss", loss_explicit) || !TakeArg(
+                    "preferredattempt", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!MarkPreferredOptionOnce("--seed", seed_explicit) || !TakeArg(
+                    "preferredattempt", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, seed))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!MarkPreferredOptionOnce(
+                    "--schedule", schedule_explicit) || !TakeArg(
+                    "preferredattempt", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "preferredattempt --schedule must be burst, "
+                    "adversarial, or repair-only\n");
+                return 1;
+            }
+        }
+        else if (!UnknownArg("preferredattempt", argv[i])) {
+            return 1;
+        }
+    }
+
+    const std::vector<int> Ns = ParseIntList(nlist);
+    const std::vector<int> BBs = ParseIntList(bb_list);
+    PreferredAttemptMap preferred;
+    if (!mode_explicit || Ns.empty() || BBs.empty() ||
+        !ValidateBlockCounts(Ns, "preferredattempt") ||
+        !ValidateMessageInputs(Ns, BBs, "preferredattempt") ||
+        !ValidateLoss(loss, "preferredattempt"))
+    {
+        if (!mode_explicit || Ns.empty() || BBs.empty()) {
+            std::fprintf(stderr,
+                "preferredattempt requires explicit --mode, --N, and "
+                "--bb-list\n");
+        }
+        return 1;
+    }
+    if (!IsCanonicalPreferredIntList(nlist, Ns) ||
+        !IsCanonicalPreferredIntList(bb_list, BBs) ||
+        !std::is_sorted(Ns.begin(), Ns.end()) ||
+        !std::is_sorted(BBs.begin(), BBs.end()))
+    {
+        std::fprintf(stderr,
+            "preferredattempt --N and --bb-list must be canonical ascending "
+            "decimal lists\n");
+        return 1;
+    }
+    if (schedule != PacketScheduleKind::Burst &&
+        schedule != PacketScheduleKind::Adversarial &&
+        schedule != PacketScheduleKind::RepairOnly)
+    {
+        std::fprintf(stderr,
+            "preferredattempt --schedule must be burst, adversarial, or "
+            "repair-only\n");
+        return 1;
+    }
+    for (size_t i = 0u; i < Ns.size(); ++i) {
+        if (std::find(Ns.begin(), Ns.begin() + (ptrdiff_t)i, Ns[i]) !=
+            Ns.begin() + (ptrdiff_t)i)
+        {
+            std::fprintf(stderr, "preferredattempt --N contains duplicates\n");
+            return 1;
+        }
+    }
+    for (size_t i = 0u; i < BBs.size(); ++i) {
+        if ((BBs[i] & 1) != 0 ||
+            std::find(BBs.begin(), BBs.begin() + (ptrdiff_t)i, BBs[i]) !=
+                BBs.begin() + (ptrdiff_t)i)
+        {
+            std::fprintf(stderr,
+                "preferredattempt --bb-list must contain unique even values\n");
+            return 1;
+        }
+    }
+    if (BBs.size() > 4u) {
+        std::fprintf(stderr,
+            "preferredattempt --bb-list supports at most four widths\n");
+        return 1;
+    }
+    for (int block_bytes : BBs) {
+        if (block_bytes != 64 && block_bytes != 256 &&
+            block_bytes != 1280 && block_bytes != 4096)
+        {
+            std::fprintf(stderr,
+                "preferredattempt --bb-list supports only "
+                "64,256,1280,4096\n");
+            return 1;
+        }
+    }
+    if (map_explicit && !ParsePreferredAttemptMap(
+            preferred_map_text, preferred))
+    {
+        std::fprintf(stderr,
+            "preferredattempt malformed --preferred-map (expected "
+            "K@bb=p[,p...] or route-only K@bb=none, max 32 unique p "
+            "values)\n");
+        return 1;
+    }
+    for (PreferredAttemptMap::const_iterator it = preferred.begin();
+         it != preferred.end(); ++it)
+    {
+        const bool known_K = std::find_if(
+            Ns.begin(), Ns.end(), [&](int value) {
+                return (uint32_t)value == it->first.first;
+            }) != Ns.end();
+        const bool known_width = std::find_if(
+            BBs.begin(), BBs.end(), [&](int value) {
+                return (uint32_t)value == it->first.second;
+            }) != BBs.end();
+        if (!known_K || !known_width)
+        {
+            std::fprintf(stderr,
+                "preferredattempt map key is outside --N x --bb-list\n");
+            return 1;
+        }
+        if (mode == PreferredAttemptMode::Paired && it->second.size() != 1u) {
+            std::fprintf(stderr,
+                "preferredattempt paired mode requires one p per mapped "
+                "K@bb\n");
+            return 1;
+        }
+        if (mode == PreferredAttemptMode::Candidate && it->second.empty()) {
+            std::fprintf(stderr,
+                "preferredattempt candidate logical p list cannot be empty\n");
+            return 1;
+        }
+    }
+    if (mode == PreferredAttemptMode::Control && map_explicit) {
+        std::fprintf(stderr,
+            "preferredattempt control mode rejects --preferred-map\n");
+        return 1;
+    }
+    if (mode == PreferredAttemptMode::Control) {
+        if (route_context_explicit) {
+            std::fprintf(stderr,
+                "preferredattempt control mode rejects route context\n");
+            return 1;
+        }
+    }
+    else if (!route_context_explicit ||
+             !IsLowerHexSha256(route_context_sha256))
+    {
+        std::fprintf(stderr,
+            "preferredattempt route/candidate/paired modes require a "
+            "lowercase --route-context-sha256\n");
+        return 1;
+    }
+    if ((mode == PreferredAttemptMode::Route ||
+         mode == PreferredAttemptMode::Candidate) &&
+        (!map_explicit || preferred.empty()))
+    {
+        std::fprintf(stderr,
+            "preferredattempt route/candidate mode requires a nonempty map\n");
+        return 1;
+    }
+    if ((mode == PreferredAttemptMode::Route ||
+         mode == PreferredAttemptMode::Candidate) &&
+        preferred.size() != Ns.size() * BBs.size())
+    {
+        std::fprintf(stderr,
+            "preferredattempt route/candidate map must cover the exact "
+            "--N x --bb-list cross-product\n");
+        return 1;
+    }
+    if (map_explicit)
+    {
+        for (int n_value : Ns)
+        {
+            const std::vector<uint32_t>* logical_attempts = nullptr;
+            size_t present_widths = 0u;
+            for (int bb_value : BBs)
+            {
+                const PreferredAttemptMap::const_iterator it = preferred.find(
+                    PreferredAttemptKey(
+                        (uint32_t)n_value, (uint32_t)bb_value));
+                if (it == preferred.end()) continue;
+                ++present_widths;
+                if (!logical_attempts) {
+                    logical_attempts = &it->second;
+                }
+                else if (*logical_attempts != it->second) {
+                    std::fprintf(stderr,
+                        "preferredattempt logical p list must be identical "
+                        "across widths for N=%d\n", n_value);
+                    return 1;
+                }
+            }
+            if (mode == PreferredAttemptMode::Paired && present_widths != 0u &&
+                present_widths != BBs.size())
+            {
+                std::fprintf(stderr,
+                    "preferredattempt paired routing must cover all or no "
+                    "widths for N=%d\n", n_value);
+                return 1;
+            }
+        }
+    }
+    if (map_explicit && preferred_map_text !=
+            CanonicalPreferredAttemptMapText(Ns, BBs, preferred))
+    {
+        std::fprintf(stderr,
+            "preferredattempt --preferred-map must use canonical K/width "
+            "record order and decimal spelling\n");
+        return 1;
+    }
+    if (mode == PreferredAttemptMode::Paired && !map_explicit) {
+        std::fprintf(stderr,
+            "preferredattempt paired mode requires explicit "
+            "--preferred-map (use none for all aliases)\n");
+        return 1;
+    }
+    if (mode == PreferredAttemptMode::Candidate) {
+        const bool have_bound_cache =
+            route_cache_path_explicit && route_cache_explicit;
+        if (route_cache_path_explicit != route_cache_explicit ||
+            probe_route == have_bound_cache ||
+            (route_cache_explicit &&
+             !IsLowerHexSha256(route_cache_sha256)))
+        {
+            std::fprintf(stderr,
+                "preferredattempt candidate mode requires exactly one of "
+                "--probe-route or --route-cache PATH plus a lowercase "
+                "--route-cache-sha256\n");
+            return 1;
+        }
+    }
+    else if (mode == PreferredAttemptMode::Paired) {
+        if (!route_cache_path_explicit || !route_cache_explicit ||
+            !IsLowerHexSha256(route_cache_sha256) || probe_route)
+        {
+            std::fprintf(stderr,
+                "preferredattempt paired mode requires --route-cache PATH "
+                "and a lowercase --route-cache-sha256\n");
+            return 1;
+        }
+    }
+    else if (route_cache_path_explicit || route_cache_explicit || probe_route) {
+        std::fprintf(stderr,
+            "preferredattempt route-cache options are candidate/paired-only\n");
+        return 1;
+    }
+    if (mode == PreferredAttemptMode::Route) {
+        if (loss_explicit || seed_explicit || schedule_explicit) {
+            std::fprintf(stderr,
+                "preferredattempt route mode rejects recovery-only "
+                "--loss/--seed/--schedule options\n");
+            return 1;
+        }
+    }
+    else if (!loss_explicit || !seed_explicit || !schedule_explicit) {
+        std::fprintf(stderr,
+            "preferredattempt control/candidate/paired modes require explicit "
+            "--loss, --seed, and --schedule\n");
+        return 1;
+    }
+
+    PreferredRouteCache route_cache;
+    if (route_cache_path_explicit &&
+        !LoadPreferredRouteCache(
+            route_cache_path, route_cache_sha256,
+            route_context_sha256, route_cache))
+    {
+        return 1;
+    }
+    if (!route_cache.empty()) {
+        if (route_cache.size() != Ns.size() * BBs.size()) {
+            std::fprintf(stderr,
+                "preferredattempt route cache keys must exactly match "
+                "--N x --bb-list\n");
+            return 1;
+        }
+        for (int n_value : Ns) for (int bb_value : BBs) {
+            const PreferredAttemptKey key(
+                (uint32_t)n_value, (uint32_t)bb_value);
+            const PreferredRouteCache::const_iterator cache_key =
+                route_cache.find(key);
+            if (cache_key == route_cache.end()) {
+                std::fprintf(stderr,
+                    "preferredattempt route cache lacks N=%u bb=%u\n",
+                    key.first, key.second);
+                return 1;
+            }
+            const bool mapped = preferred.find(key) != preferred.end();
+            if (mode == PreferredAttemptMode::Candidate &&
+                cache_key->second.ControlOnly)
+            {
+                std::fprintf(stderr,
+                    "preferredattempt candidate cache contains a control-only "
+                    "key N=%u bb=%u\n", key.first, key.second);
+                return 1;
+            }
+            if (mode == PreferredAttemptMode::Candidate)
+            {
+                const PreferredAttemptMap::const_iterator requested =
+                    preferred.find(key);
+                if (requested == preferred.end() ||
+                    cache_key->second.AttemptOrder != requested->second)
+                {
+                    std::fprintf(stderr,
+                        "preferredattempt candidate route-cache attempt rows "
+                        "must exactly match --preferred-map for N=%u bb=%u\n",
+                        key.first, key.second);
+                    return 1;
+                }
+            }
+            if (mode == PreferredAttemptMode::Paired &&
+                cache_key->second.ControlOnly == mapped)
+            {
+                std::fprintf(stderr,
+                    "preferredattempt paired map/cache route-status mismatch "
+                    "N=%u bb=%u\n", key.first, key.second);
+                return 1;
+            }
+            if (mode == PreferredAttemptMode::Paired && mapped)
+            {
+                const PreferredAttemptMap::const_iterator requested =
+                    preferred.find(key);
+                if (requested == preferred.end() ||
+                    cache_key->second.AttemptOrder != requested->second)
+                {
+                    std::fprintf(stderr,
+                        "preferredattempt paired route-cache selected attempt "
+                        "row must exactly match --preferred-map for N=%u "
+                        "bb=%u\n", key.first, key.second);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    if (mode == PreferredAttemptMode::Route) {
+#if defined(_WIN32)
+        if (_setmode(_fileno(stdout), _O_BINARY) == -1) {
+            std::fprintf(stderr,
+                "preferredattempt cannot force canonical LF output\n");
+            return 1;
+        }
+#endif
+        std::printf(
+            "# preferredattempt-route-manifest: schema=v1 "
+            "policy=h12-q0-adaptive canonical=ascending-first-valid-v1 "
+            "max_attempt=255 context_sha256=%s\n"
+            "N,bb,route_status,preferred_attempt,canonical_attempt,actual_attempt,"
+            "preferred_valid,fallback,no_op,direct,canonical_probe_solves,"
+            "preferred_probe_solves\n",
+            route_context_sha256.c_str());
+    }
+    else {
+        std::printf(
+            "# preferredattempt: schema=v2 policy=h12-q0-adaptive "
+            "canonical=ascending-first-valid-v1 mode=%s loss=%.17g "
+            "seed=0x%llx schedule=%s preferred_batch_max=32 "
+            "route_cache_sha256=%s route_context_sha256=%s probe_route=%u "
+            "physical_solve_accounting=explicit "
+            "systematic_probe_accounting=explicit\n",
+            PreferredAttemptModeName(mode), loss, (unsigned long long)seed,
+            PacketScheduleName(schedule),
+            route_cache_explicit ? route_cache_sha256.c_str() : "none",
+            mode == PreferredAttemptMode::Control ?
+                "none" : route_context_sha256.c_str(),
+            probe_route ? 1u : 0u);
+        std::printf(
+            "N,bb,arm,preferred_attempt,canonical_attempt,actual_attempt,"
+            "routed,preferred_valid,fallback,no_op,direct,physical_solve,"
+            "result,rank_fail,error,heavy_shortfall,inactivated,binary_def,heavy_gain,"
+            "block_xors,block_muladds\n");
+    }
+
+    for (int n_value : Ns) for (int bb_value : BBs)
+    {
+        const uint32_t K = (uint32_t)n_value;
+        const uint32_t block_bytes = (uint32_t)bb_value;
+        const PreferredAttemptKey key(K, block_bytes);
+        const PreferredAttemptMap::const_iterator map_it = preferred.find(key);
+        const PreferredRouteCache::const_iterator cache_it =
+            route_cache.find(key);
+        wirehair_v2::PrecodeParams base_params;
+        wirehair_v2::PacketRowConfig base_config;
+        MakeH12Q0Configuration(K, block_bytes, base_params, base_config);
+
+        wirehair_v2::PrecodeSystem canonical_system;
+        wirehair_v2::PacketRowConfig canonical_config;
+        uint32_t canonical_attempt = UINT32_MAX;
+        uint32_t canonical_probe_solves = 0u;
+        if (cache_it != route_cache.end())
+        {
+            canonical_attempt = cache_it->second.CanonicalAttempt;
+            if (canonical_attempt >= wirehair_v2::kMaxPacketSeedAttempts)
+            {
+                std::fprintf(stderr,
+                    "preferredattempt cached canonical attempt invalid "
+                    "N=%u bb=%u a0=%u\n",
+                    K, block_bytes, canonical_attempt);
+                return 2;
+            }
+            // Candidate-only cached jobs never consume canonical_system: alias
+            // observations are joined to the separately cached control cube.
+            if (mode == PreferredAttemptMode::Paired)
+            {
+                if (!wirehair_v2::BuildPrecodeSystem(
+                        wirehair_v2::PrecodeParamsForAttempt(
+                            base_params, canonical_attempt), canonical_system))
+                {
+                    std::fprintf(stderr,
+                        "preferredattempt cached canonical build failed "
+                        "N=%u bb=%u a0=%u\n",
+                        K, block_bytes, canonical_attempt);
+                    return 2;
+                }
+                canonical_config = wirehair_v2::PacketConfigForAttempt(
+                    base_config, canonical_attempt);
+            }
+        }
+        else
+        {
+            const WirehairResult canonical_result =
+                wirehair_v2::SelectSystematicConfiguration(
+                    base_params, base_config, canonical_system,
+                    canonical_config, &canonical_attempt);
+            if (canonical_result != Wirehair_Success ||
+                canonical_attempt >= wirehair_v2::kMaxPacketSeedAttempts)
+            {
+                std::fprintf(stderr,
+                    "preferredattempt canonical selection failed N=%u bb=%u "
+                    "result=%d attempt=%u\n",
+                    K, block_bytes, (int)canonical_result,
+                    canonical_attempt);
+                return 2;
+            }
+            canonical_probe_solves = canonical_attempt + 1u;
+        }
+        if (mode == PreferredAttemptMode::Route ||
+            (mode == PreferredAttemptMode::Candidate && probe_route))
+        {
+            // Route-only work consumes the selected attempt number, not the
+            // potentially large canonical system.  Drop it before preferred
+            // probing so only one full candidate graph is live at a time.
+            canonical_system = wirehair_v2::PrecodeSystem{};
+        }
+
+        const uint8_t systematic_zero[2] = {0u, 0u};
+        std::vector<wirehair_v2::SolvePacket> systematic_packets;
+        if (mode == PreferredAttemptMode::Route || probe_route) {
+            systematic_packets.resize(K);
+            for (uint32_t block_id = 0u; block_id < K; ++block_id) {
+                systematic_packets[block_id].BlockId = block_id;
+                systematic_packets[block_id].Data = systematic_zero;
+            }
+        }
+
+        if (mode == PreferredAttemptMode::Route)
+        {
+            // Exact map coverage was checked before any output was emitted.
+            if (map_it->second.empty()) {
+                std::printf(
+                    "%u,%u,control,-1,%u,%u,1,0,1,0,%u,0\n",
+                    K, block_bytes, canonical_attempt, canonical_attempt,
+                    canonical_probe_solves);
+                continue;
+            }
+            bool charge_canonical_probe = true;
+            for (uint32_t attempt : map_it->second)
+            {
+                bool valid = attempt == canonical_attempt;
+                if (attempt > canonical_attempt)
+                {
+                    wirehair_v2::PrecodeSystem candidate_system;
+                    wirehair_v2::PacketRowConfig candidate_config;
+                    const WirehairResult probe_result = ProbePreferredAttempt(
+                        base_params, base_config, attempt,
+                        systematic_packets, candidate_system,
+                        candidate_config);
+                    if (probe_result == Wirehair_Success) {
+                        valid = true;
+                    }
+                    else if (probe_result != Wirehair_NeedMore) {
+                        std::fprintf(stderr,
+                            "preferredattempt route probe failed N=%u bb=%u "
+                            "p=%u result=%d\n",
+                            K, block_bytes, attempt, (int)probe_result);
+                        return 2;
+                    }
+                }
+                const bool no_op = attempt == canonical_attempt;
+                const bool fallback = !valid;
+                const bool direct = valid && !no_op;
+                std::printf(
+                    "%u,%u,preferred,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                    K, block_bytes, attempt, canonical_attempt,
+                    valid ? attempt : canonical_attempt,
+                    valid ? 1u : 0u, fallback ? 1u : 0u,
+                    no_op ? 1u : 0u, direct ? 1u : 0u,
+                    charge_canonical_probe ? canonical_probe_solves : 0u,
+                    attempt > canonical_attempt ? 1u : 0u);
+                charge_canonical_probe = false;
+            }
+            continue;
+        }
+
+        if (mode == PreferredAttemptMode::Candidate && !probe_route)
+        {
+            bool any_direct = false;
+            for (uint32_t attempt : map_it->second) {
+                const std::map<uint32_t, PreferredRouteRecord>::const_iterator
+                    record = cache_it->second.Attempts.find(attempt);
+                if (record == cache_it->second.Attempts.end()) {
+                    std::fprintf(stderr,
+                        "preferredattempt route cache lacks N=%u bb=%u p=%u\n",
+                        K, block_bytes, attempt);
+                    return 1;
+                }
+                any_direct = any_direct || record->second.Direct;
+            }
+            if (!any_direct) {
+                for (uint32_t attempt : map_it->second) {
+                    const PreferredRouteRecord& record =
+                        cache_it->second.Attempts.find(attempt)->second;
+                    std::printf(
+                        "# preferred_candidate_alias: N=%u bb=%u p=%u "
+                        "a0=%u actual=%u valid=%u fallback=%u no_op=%u "
+                        "direct=0 physical_solve=0\n",
+                        K, block_bytes, attempt, canonical_attempt,
+                        record.ActualAttempt,
+                        record.PreferredValid ? 1u : 0u,
+                        record.Fallback ? 1u : 0u,
+                        record.NoOp ? 1u : 0u);
+                }
+                continue;
+            }
+        }
+
+        PreferredRecoveryCell recovery_cell;
+        const WirehairResult cell_result = BuildPreferredRecoveryCell(
+            base_params, base_config, block_bytes, loss, seed, schedule,
+            recovery_cell);
+        if (cell_result != Wirehair_Success) {
+            std::fprintf(stderr,
+                "preferredattempt recovery cell setup failed N=%u bb=%u "
+                "result=%d\n", K, block_bytes, (int)cell_result);
+            return 2;
+        }
+
+        PreferredRecoveryMetrics control_metrics;
+        if (mode == PreferredAttemptMode::Control ||
+            mode == PreferredAttemptMode::Paired)
+        {
+            const WirehairResult evaluate_result = EvaluatePreferredRecovery(
+                canonical_system, canonical_config, recovery_cell,
+                control_metrics);
+            if (evaluate_result != Wirehair_Success) {
+                std::fprintf(stderr,
+                    "preferredattempt control evaluation failed N=%u bb=%u "
+                    "result=%d\n",
+                    K, block_bytes, (int)evaluate_result);
+                return 2;
+            }
+            if (canonical_probe_solves != 0u) {
+                std::printf(
+                    "# preferred_probe_accounting: N=%u bb=%u "
+                    "canonical_probe_solves=%u preferred_probe_solves=0\n",
+                    K, block_bytes, canonical_probe_solves);
+            }
+            PrintPreferredRecoveryRow(
+                K, block_bytes, "control", -1, canonical_attempt,
+                canonical_attempt, false, true, false, false, false, true,
+                control_metrics);
+        }
+        if (mode == PreferredAttemptMode::Paired) {
+            // The paired control observation is complete.  Candidate systems
+            // are independent, so avoid retaining both full graphs at once.
+            canonical_system = wirehair_v2::PrecodeSystem{};
+        }
+        if (mode == PreferredAttemptMode::Control) continue;
+
+        if (mode == PreferredAttemptMode::Paired && map_it == preferred.end())
+        {
+            PrintPreferredRecoveryRow(
+                K, block_bytes, "candidate", -1, canonical_attempt,
+                canonical_attempt, false, true, false, true, false, false,
+                control_metrics);
+            continue;
+        }
+
+        if (probe_route) {
+            std::printf(
+                "# preferred_probe_accounting: N=%u bb=%u "
+                "canonical_probe_solves=%u\n",
+                K, block_bytes, canonical_probe_solves);
+        }
+        for (uint32_t attempt : map_it->second)
+        {
+            wirehair_v2::PrecodeSystem candidate_system;
+            wirehair_v2::PacketRowConfig candidate_config =
+                wirehair_v2::PacketConfigForAttempt(base_config, attempt);
+            bool valid = false;
+            bool fallback = false;
+            bool no_op = false;
+            bool direct = false;
+            uint32_t actual_attempt = canonical_attempt;
+            uint32_t preferred_probe_solves = 0u;
+
+            if (probe_route)
+            {
+                valid = attempt == canonical_attempt;
+                if (attempt > canonical_attempt)
+                {
+                    preferred_probe_solves = 1u;
+                    const WirehairResult probe_result = ProbePreferredAttempt(
+                        base_params, base_config, attempt,
+                        systematic_packets, candidate_system,
+                        candidate_config);
+                    if (probe_result == Wirehair_Success) {
+                        valid = true;
+                    }
+                    else if (probe_result != Wirehair_NeedMore) {
+                        std::fprintf(stderr,
+                            "preferredattempt route probe failed N=%u bb=%u "
+                            "p=%u result=%d\n",
+                            K, block_bytes, attempt, (int)probe_result);
+                        return 2;
+                    }
+                }
+                // Attempts below a0 are known invalid from the ascending
+                // selector; p==a0 is a neutral alias and is never copied.
+                no_op = attempt == canonical_attempt;
+                fallback = !valid;
+                direct = valid && !no_op;
+                actual_attempt = direct ? attempt : canonical_attempt;
+                std::printf(
+                    "# preferred_route: N=%u bb=%u p=%u a0=%u actual=%u "
+                    "valid=%u fallback=%u no_op=%u direct=%u "
+                    "preferred_probe_solves=%u\n",
+                    K, block_bytes, attempt, canonical_attempt,
+                    actual_attempt, valid ? 1u : 0u,
+                    fallback ? 1u : 0u, no_op ? 1u : 0u,
+                    direct ? 1u : 0u, preferred_probe_solves);
+                if (!direct) continue;
+            }
+            else
+            {
+                const PreferredRouteKeyRecords& key_records = cache_it->second;
+                const std::map<uint32_t, PreferredRouteRecord>::const_iterator
+                    record_it = key_records.Attempts.find(attempt);
+                if (record_it == key_records.Attempts.end()) {
+                    std::fprintf(stderr,
+                        "preferredattempt route cache lacks N=%u bb=%u p=%u\n",
+                        K, block_bytes, attempt);
+                    return 1;
+                }
+                const PreferredRouteRecord& record = record_it->second;
+                valid = record.PreferredValid;
+                fallback = record.Fallback;
+                no_op = record.NoOp;
+                direct = record.Direct;
+                actual_attempt = record.ActualAttempt;
+                if (!direct)
+                {
+                    if (mode == PreferredAttemptMode::Candidate) {
+                        std::printf(
+                            "# preferred_candidate_alias: N=%u bb=%u p=%u "
+                            "a0=%u actual=%u valid=%u fallback=%u no_op=%u "
+                            "direct=0 physical_solve=0\n",
+                            K, block_bytes, attempt, canonical_attempt,
+                            actual_attempt, valid ? 1u : 0u,
+                            fallback ? 1u : 0u, no_op ? 1u : 0u);
+                        continue;
+                    }
+                    PrintPreferredRecoveryRow(
+                        K, block_bytes, "candidate", (int)attempt,
+                        canonical_attempt, canonical_attempt, true, valid,
+                        fallback, no_op, false, false, control_metrics);
+                    continue;
+                }
+                if (attempt <= canonical_attempt) {
+                    std::fprintf(stderr,
+                        "preferredattempt direct cache record is not above "
+                        "a0 N=%u bb=%u p=%u a0=%u\n",
+                        K, block_bytes, attempt, canonical_attempt);
+                    return 1;
+                }
+                if (!wirehair_v2::BuildPrecodeSystem(
+                        wirehair_v2::PrecodeParamsForAttempt(
+                            base_params, attempt), candidate_system))
+                {
+                    std::fprintf(stderr,
+                        "preferredattempt cached candidate build failed "
+                        "N=%u bb=%u p=%u\n", K, block_bytes, attempt);
+                    return 2;
+                }
+            }
+
+            PreferredRecoveryMetrics candidate_metrics;
+            const WirehairResult evaluate_result = EvaluatePreferredRecovery(
+                candidate_system, candidate_config, recovery_cell,
+                candidate_metrics);
+            if (evaluate_result != Wirehair_Success) {
+                std::fprintf(stderr,
+                    "preferredattempt candidate evaluation failed "
+                    "N=%u bb=%u p=%u result=%d\n",
+                    K, block_bytes, attempt, (int)evaluate_result);
+                return 2;
+            }
+            PrintPreferredRecoveryRow(
+                K, block_bytes, "candidate", (int)attempt,
+                canonical_attempt, actual_attempt, true, valid,
+                fallback, no_op, direct, true, candidate_metrics);
+        }
+    }
+    return 0;
+}
+
+enum class PreferredTimingMetric
+{
+    Solve,
+    Setup
+};
+
+const char* PreferredTimingMetricName(PreferredTimingMetric metric)
+{
+    return metric == PreferredTimingMetric::Solve ? "solve" : "setup";
+}
+
+struct PreferredTimingCell
+{
+    wirehair_v2::PacketRowRuntime Runtime;
+    std::vector<wirehair_v2::SolvePacket> Packets;
+    std::vector<uint8_t> PayloadStorage;
+    uint8_t* Payload = nullptr;
+    std::string TraceSha256;
+};
+
+bool BuildFullPayloadTimingCell(
+    const wirehair_v2::PrecodeParams& params,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_bytes,
+    uint32_t overhead,
+    double loss,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    bool salt_overhead,
+    const char* trace_tag,
+    PreferredTimingCell& cell)
+{
+    const uint32_t K = params.BlockCount;
+    const uint64_t delivered_wide = (uint64_t)K + overhead;
+    const uint64_t precode_count_wide =
+        (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
+    const uint64_t payload_bytes_wide = delivered_wide * block_bytes;
+    if (delivered_wide > UINT32_MAX || precode_count_wide > UINT32_MAX ||
+        payload_bytes_wide > (uint64_t)std::numeric_limits<size_t>::max() - 63u)
+    {
+        return false;
+    }
+    if (!cell.Runtime.Initialize(
+            K, (uint32_t)precode_count_wide, config.MixCount))
+    {
+        return false;
+    }
+    const uint64_t loss_seed = external_seed ^
+        ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+        ((uint64_t)block_bytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+        ((uint64_t)(salt_overhead ? overhead : 0u) *
+            UINT64_C(0x94d049bb133111eb));
+    const std::vector<uint32_t> ids = BuildPacketSchedule(
+        K, (uint32_t)delivered_wide, loss, loss_seed, schedule);
+    if (ids.size() != (size_t)delivered_wide) return false;
+
+    const size_t payload_bytes = (size_t)payload_bytes_wide;
+    cell.PayloadStorage.resize(payload_bytes + 63u);
+    const uintptr_t unaligned =
+        reinterpret_cast<uintptr_t>(cell.PayloadStorage.data());
+    if (unaligned > std::numeric_limits<uintptr_t>::max() - 63u) {
+        return false;
+    }
+    const uintptr_t aligned = (unaligned + 63u) & ~(uintptr_t)63u;
+    cell.Payload = reinterpret_cast<uint8_t*>(aligned);
+    if ((aligned & 63u) != 0u || aligned < unaligned ||
+        aligned - unaligned > 63u)
+    {
+        return false;
+    }
+    // Distinct aligned RHS blocks are all zero so every delivered fountain
+    // equation is consistent without timing a separate encoder.  resize()
+    // zeroes and first-touches the complete allocation before either arm.
+    std::memset(cell.Payload, 0, payload_bytes);
+
+    cell.Packets.resize((size_t)delivered_wide);
+    std::ostringstream trace;
+    trace << trace_tag << "\n"
+          << "K=" << K << "\nblock_bytes=" << block_bytes
+          << "\nseed=" << external_seed << "\nloss="
+          << std::setprecision(17) << loss << "\nschedule="
+          << PacketScheduleName(schedule) << "\nids=";
+    for (size_t i = 0u; i < ids.size(); ++i) {
+        if (i != 0u) trace << ',';
+        trace << ids[i];
+        cell.Packets[i].BlockId = ids[i];
+        cell.Packets[i].Data = cell.Payload + i * (size_t)block_bytes;
+    }
+    trace << '\n';
+    cell.TraceSha256 = Sha256Hex(trace.str());
+    return true;
+}
+
+bool BuildPreferredTimingCell(
+    const wirehair_v2::PrecodeParams& params,
+    const wirehair_v2::PacketRowConfig& config,
+    uint32_t block_bytes,
+    double loss,
+    uint64_t external_seed,
+    PacketScheduleKind schedule,
+    PreferredTimingCell& cell)
+{
+    return BuildFullPayloadTimingCell(
+        params, config, block_bytes, 4u, loss, external_seed, schedule,
+        false, "wirehair-wh2-preferred-timing-trace-v1", cell);
+}
+
+static volatile uint8_t PreferredTimingEvictionSink = 0u;
+
+void EvictPreferredTimingCache(std::vector<uint8_t>& eviction)
+{
+    uint8_t accumulator = PreferredTimingEvictionSink;
+    for (size_t offset = 0u; offset < eviction.size(); offset += 64u) {
+        eviction[offset] = (uint8_t)(eviction[offset] + 1u);
+        accumulator ^= eviction[offset];
+    }
+    if (!eviction.empty()) {
+        eviction.back() = (uint8_t)(eviction.back() + 1u);
+        accumulator ^= eviction.back();
+    }
+    PreferredTimingEvictionSink = accumulator;
+}
+
+int PreferredTimingCurrentCpu()
+{
+#if defined(__linux__)
+    return sched_getcpu();
+#else
+    return -1;
+#endif
+}
+
+struct PreferredTimingUsage
+{
+    int64_t MinorFaults = -1;
+    int64_t MajorFaults = -1;
+};
+
+PreferredTimingUsage ReadPreferredTimingUsage()
+{
+    PreferredTimingUsage result;
+#if defined(__unix__) || defined(__APPLE__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        result.MinorFaults = (int64_t)usage.ru_minflt;
+        result.MajorFaults = (int64_t)usage.ru_majflt;
+    }
+#endif
+    return result;
+}
+
+uint64_t PreferredTimingElapsedNanoseconds(
+    Clock::time_point begin,
+    Clock::time_point end,
+    bool& saturated)
+{
+    const std::chrono::nanoseconds elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+    if (elapsed.count() < 0) {
+        saturated = true;
+        return UINT64_MAX;
+    }
+    saturated = false;
+    return (uint64_t)elapsed.count();
+}
+
+int CmdPreferredTiming(int argc, char** argv)
+{
+    uint32_t K = 0u;
+    uint32_t block_bytes = 0u;
+    uint32_t preferred_attempt = UINT32_MAX;
+    uint32_t cycle_index = 0u;
+    uint64_t eviction_bytes = 0u;
+    double loss = 0.50;
+    uint64_t seed = UINT64_C(0x5eedf411);
+    PacketScheduleKind schedule = PacketScheduleKind::Burst;
+    PreferredTimingMetric metric = PreferredTimingMetric::Solve;
+    std::string route_cache_path;
+    std::string route_cache_sha256;
+    std::string route_context_sha256;
+    bool have_K = false;
+    bool have_block_bytes = false;
+    bool have_preferred = false;
+    bool have_eviction = false;
+    bool have_metric = false;
+    bool have_cache_path = false;
+    bool have_cache_sha256 = false;
+    bool have_context = false;
+    bool have_loss = false;
+    bool have_seed = false;
+    bool have_schedule = false;
+    bool have_cycle_index = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (have_K ||
+                !TakeArg("preferredtiming", "--N", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--N", value, K)) return 1;
+            have_K = true;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (have_block_bytes ||
+                !TakeArg("preferredtiming", "--bb", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--bb", value, block_bytes)) return 1;
+            have_block_bytes = true;
+        }
+        else if (!std::strcmp(argv[i], "--preferred-attempt")) {
+            if (have_preferred || !TakeArg(
+                    "preferredtiming", "--preferred-attempt",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--preferred-attempt", value, preferred_attempt))
+            {
+                return 1;
+            }
+            have_preferred = true;
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (have_eviction || !TakeArg(
+                    "preferredtiming", "--evict-bytes", argc, argv, i,
+                    value) || !ParseCanonicalU64Arg(
+                        "--evict-bytes", value, eviction_bytes))
+            {
+                return 1;
+            }
+            have_eviction = true;
+        }
+        else if (!std::strcmp(argv[i], "--metric")) {
+            if (have_metric || !TakeArg(
+                    "preferredtiming", "--metric", argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "solve")) {
+                metric = PreferredTimingMetric::Solve;
+            }
+            else if (!std::strcmp(value, "setup")) {
+                metric = PreferredTimingMetric::Setup;
+            }
+            else {
+                std::fprintf(stderr,
+                    "preferredtiming --metric must be solve or setup\n");
+                return 1;
+            }
+            have_metric = true;
+        }
+        else if (!std::strcmp(argv[i], "--cycle-index")) {
+            if (have_cycle_index || !TakeArg(
+                    "preferredtiming", "--cycle-index", argc, argv, i,
+                    value) || !ParseCanonicalU32Arg(
+                        "--cycle-index", value, cycle_index))
+            {
+                return 1;
+            }
+            have_cycle_index = true;
+        }
+        else if (!std::strcmp(argv[i], "--route-cache")) {
+            if (have_cache_path || !TakeArg(
+                    "preferredtiming", "--route-cache", argc, argv, i,
+                    value)) return 1;
+            route_cache_path = value;
+            have_cache_path = true;
+        }
+        else if (!std::strcmp(argv[i], "--route-cache-sha256")) {
+            if (have_cache_sha256 || !TakeArg(
+                    "preferredtiming", "--route-cache-sha256", argc, argv,
+                    i, value)) return 1;
+            route_cache_sha256 = value;
+            have_cache_sha256 = true;
+        }
+        else if (!std::strcmp(argv[i], "--route-context-sha256")) {
+            if (have_context || !TakeArg(
+                    "preferredtiming", "--route-context-sha256", argc, argv,
+                    i, value)) return 1;
+            route_context_sha256 = value;
+            have_context = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (have_loss || !TakeArg(
+                    "preferredtiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
+            have_loss = true;
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (have_seed || !TakeArg(
+                    "preferredtiming", "--seed", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg("--seed", value, seed)) return 1;
+            have_seed = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (have_schedule || !TakeArg(
+                    "preferredtiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "preferredtiming --schedule must be burst, adversarial, "
+                    "or repair-only\n");
+                return 1;
+            }
+            have_schedule = true;
+        }
+        else if (!UnknownArg("preferredtiming", argv[i])) {
+            return 1;
+        }
+    }
+    if (!have_K || !have_block_bytes || !have_preferred || !have_eviction ||
+        !have_metric || !have_cache_path || !have_cache_sha256 ||
+        !have_context || !have_loss || !have_seed || !have_schedule)
+    {
+        std::fprintf(stderr,
+            "preferredtiming requires --N, --bb, --preferred-attempt, "
+            "--evict-bytes, --metric, --route-cache, --route-cache-sha256, "
+            "--route-context-sha256, --loss, --seed, and --schedule\n");
+        return 1;
+    }
+    if (K < 2u || K > 64000u ||
+        (block_bytes != 64u && block_bytes != 1280u && block_bytes != 4096u) ||
+        preferred_attempt >= wirehair_v2::kMaxPacketSeedAttempts ||
+        (have_cycle_index && cycle_index > 3u) ||
+        eviction_bytes < 4096u ||
+        eviction_bytes > (uint64_t)std::numeric_limits<size_t>::max() ||
+        !IsLowerHexSha256(route_cache_sha256) ||
+        !IsLowerHexSha256(route_context_sha256) ||
+        !ValidateLoss(loss, "preferredtiming") ||
+        (schedule != PacketScheduleKind::Burst &&
+         schedule != PacketScheduleKind::Adversarial &&
+         schedule != PacketScheduleKind::RepairOnly))
+    {
+        std::fprintf(stderr, "preferredtiming argument domain mismatch\n");
+        return 1;
+    }
+
+    PreferredRouteCache route_cache;
+    if (!LoadPreferredRouteCache(
+            route_cache_path, route_cache_sha256,
+            route_context_sha256, route_cache))
+    {
+        return 1;
+    }
+    const PreferredAttemptKey key(K, block_bytes);
+    const PreferredRouteCache::const_iterator key_it = route_cache.find(key);
+    if (key_it == route_cache.end() || key_it->second.ControlOnly) {
+        std::fprintf(stderr,
+            "preferredtiming route cache lacks a preferred K@bb key\n");
+        return 1;
+    }
+    const PreferredRouteKeyRecords& route = key_it->second;
+    if (route.AttemptOrder.size() != 1u ||
+        route.AttemptOrder[0] != preferred_attempt)
+    {
+        std::fprintf(stderr,
+            "preferredtiming requires an exact selected-attempt route row\n");
+        return 1;
+    }
+    const std::map<uint32_t, PreferredRouteRecord>::const_iterator p_it =
+        route.Attempts.find(preferred_attempt);
+    bool direct_route = false;
+    bool wide_no_op_route = false;
+    if (p_it != route.Attempts.end())
+    {
+        const PreferredRouteRecord& record = p_it->second;
+        direct_route = record.Direct && !record.Fallback && !record.NoOp &&
+            record.PreferredValid &&
+            record.ActualAttempt == preferred_attempt &&
+            record.CanonicalAttempt == route.CanonicalAttempt &&
+            preferred_attempt > route.CanonicalAttempt;
+        // Development requires a direct route at bb64, but explicitly treats
+        // a valid p==a0 observation at an encountered wider block size as a
+        // neutral alias.  Time that alias as two identical actual-attempt
+        // arms so the frozen all-width panel can retain it without inventing
+        // work or substituting another K.
+        wide_no_op_route = block_bytes != 64u && !record.Direct &&
+            !record.Fallback && record.NoOp && record.PreferredValid &&
+            record.ActualAttempt == preferred_attempt &&
+            record.CanonicalAttempt == route.CanonicalAttempt &&
+            preferred_attempt == route.CanonicalAttempt;
+    }
+    if (!direct_route && !wide_no_op_route)
+    {
+        std::fprintf(stderr,
+            "preferredtiming requires a cached direct route or valid "
+            "wide no-op alias\n");
+        return 1;
+    }
+
+    wirehair_v2::PrecodeParams base_params;
+    wirehair_v2::PacketRowConfig base_config;
+    MakeH12Q0Configuration(K, block_bytes, base_params, base_config);
+    const wirehair_v2::PrecodeParams control_params =
+        wirehair_v2::PrecodeParamsForAttempt(
+            base_params, route.CanonicalAttempt);
+    const wirehair_v2::PrecodeParams preferred_params =
+        wirehair_v2::PrecodeParamsForAttempt(base_params, preferred_attempt);
+    const wirehair_v2::PacketRowConfig control_config =
+        wirehair_v2::PacketConfigForAttempt(
+            base_config, route.CanonicalAttempt);
+    const wirehair_v2::PacketRowConfig preferred_config =
+        wirehair_v2::PacketConfigForAttempt(base_config, preferred_attempt);
+
+    wirehair_v2::PrecodeSystem control_system;
+    wirehair_v2::PrecodeSystem preferred_system;
+    PreferredTimingCell cell;
+    if (metric == PreferredTimingMetric::Solve)
+    {
+        if (!wirehair_v2::BuildPrecodeSystem(
+                control_params, control_system) ||
+            !wirehair_v2::BuildPrecodeSystem(
+                preferred_params, preferred_system) ||
+            !BuildPreferredTimingCell(
+                base_params, base_config, block_bytes, loss, seed,
+                schedule, cell))
+        {
+            std::fprintf(stderr, "preferredtiming solve setup failed\n");
+            return 2;
+        }
+    }
+    else {
+        std::ostringstream trace;
+        trace << "wirehair-wh2-preferred-timing-setup-v1\nK=" << K
+              << "\nblock_bytes=" << block_bytes << "\nseed=" << seed
+              << "\nloss=" << std::setprecision(17) << loss
+              << "\nschedule=" << PacketScheduleName(schedule) << '\n';
+        cell.TraceSha256 = Sha256Hex(trace.str());
+    }
+
+    std::vector<uint8_t> eviction((size_t)eviction_bytes, 0u);
+    EvictPreferredTimingCache(eviction);
+    static const char kOrder[] = {'C', 'T', 'T', 'C', 'T', 'C', 'C', 'T'};
+    const std::string cycle_index_text =
+        have_cycle_index ? std::to_string(cycle_index) : "all";
+    std::printf(
+        "# preferredtiming: schema=v1 policy=h12-q0-adaptive metric=%s "
+        "cycles=%u order=CTTCTCCT discard_cycle=0 cycle_mode=%s "
+        "cycle_index=%s overhead=%s "
+        "payload=%s payload_alignment=%s payload_prefaulted=%s "
+        "route_cache_sha256=%s route_context_sha256=%s trace_sha256=%s\n",
+        PreferredTimingMetricName(metric),
+        have_cycle_index ? 1u : 4u,
+        have_cycle_index ? "replacement" : "full",
+        cycle_index_text.c_str(),
+        metric == PreferredTimingMetric::Solve ? "4" : "none",
+        metric == PreferredTimingMetric::Solve ? "distinct-zero-v1" : "none",
+        metric == PreferredTimingMetric::Solve ? "64" : "none",
+        metric == PreferredTimingMetric::Solve ? "1" : "none",
+        route_cache_sha256.c_str(),
+        route_context_sha256.c_str(), cell.TraceSha256.c_str());
+    std::printf(
+        "N,bb,metric,cycle,slot,arm,attempt,result,elapsed_ns,saturated,"
+        "cpu_before,cpu_after,minflt_delta,majflt_delta,inactivated,"
+        "binary_def,heavy_gain,block_xors,block_muladds,source_bytes,"
+        "intermediate_bytes\n");
+
+    const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
+    const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
+    for (uint32_t cycle = first_cycle; cycle < end_cycle; ++cycle)
+    {
+        for (uint32_t slot = 0u; slot < 8u; ++slot)
+        {
+            const bool control = kOrder[slot] == 'C';
+            const uint32_t attempt = control ?
+                route.CanonicalAttempt : preferred_attempt;
+            EvictPreferredTimingCache(eviction);
+            const PreferredTimingUsage usage_before =
+                ReadPreferredTimingUsage();
+            const int cpu_before = PreferredTimingCurrentCpu();
+            const Clock::time_point begin = Clock::now();
+            WirehairResult result = Wirehair_Success;
+            wirehair_v2::PrecodeSolveStats stats;
+            std::vector<uint8_t> intermediate;
+            Clock::time_point end;
+            if (metric == PreferredTimingMetric::Solve)
+            {
+                result = wirehair_v2::
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        control ? control_system : preferred_system,
+                        control ? control_config : preferred_config,
+                        cell.Runtime, cell.Packets, block_bytes,
+                        intermediate, &stats);
+                end = Clock::now();
+            }
+            else
+            {
+                wirehair_v2::PrecodeSystem setup_system;
+                wirehair_v2::PacketRowRuntime setup_runtime;
+                const wirehair_v2::PrecodeParams& setup_params =
+                    control ? control_params : preferred_params;
+                const wirehair_v2::PacketRowConfig& setup_config =
+                    control ? control_config : preferred_config;
+                const uint64_t setup_precode_wide =
+                    (uint64_t)setup_params.Staircase +
+                    setup_params.DenseRows + setup_params.HeavyRows;
+                if (setup_precode_wide > UINT32_MAX ||
+                    !wirehair_v2::BuildPrecodeSystem(
+                        setup_params, setup_system) ||
+                    !setup_runtime.Initialize(
+                        K, (uint32_t)setup_precode_wide,
+                        setup_config.MixCount))
+                {
+                    result = Wirehair_Error;
+                }
+                // Stop while both objects are still alive: decoder setup is
+                // construction plus runtime initialization, not teardown.
+                end = Clock::now();
+            }
+            const int cpu_after = PreferredTimingCurrentCpu();
+            const PreferredTimingUsage usage_after =
+                ReadPreferredTimingUsage();
+            bool saturated = false;
+            const uint64_t elapsed_ns =
+                PreferredTimingElapsedNanoseconds(begin, end, saturated);
+            const int64_t minflt_delta =
+                usage_before.MinorFaults < 0 || usage_after.MinorFaults < 0 ?
+                -1 : usage_after.MinorFaults - usage_before.MinorFaults;
+            const int64_t majflt_delta =
+                usage_before.MajorFaults < 0 || usage_after.MajorFaults < 0 ?
+                -1 : usage_after.MajorFaults - usage_before.MajorFaults;
+            const uint32_t binary_def =
+                stats.InactivatedColumns >= stats.BinaryResidualRank ?
+                stats.InactivatedColumns - stats.BinaryResidualRank : 0u;
+            const uint32_t heavy_gain =
+                stats.ResidualRank >= stats.BinaryResidualRank ?
+                stats.ResidualRank - stats.BinaryResidualRank : 0u;
+            std::printf(
+                "%u,%u,%s,%u,%u,%s,%u,%d,%llu,%u,%d,%d,%lld,%lld,"
+                "%u,%u,%u,%llu,%llu,%zu,%zu\n",
+                K, block_bytes, PreferredTimingMetricName(metric), cycle,
+                slot, control ? "control" : "candidate", attempt,
+                (int)result, (unsigned long long)elapsed_ns,
+                saturated ? 1u : 0u, cpu_before, cpu_after,
+                (long long)minflt_delta, (long long)majflt_delta,
+                stats.InactivatedColumns, binary_def, heavy_gain,
+                (unsigned long long)stats.BlockXors,
+                (unsigned long long)stats.BlockMulAdds,
+                metric == PreferredTimingMetric::Solve &&
+                    result == Wirehair_Success ?
+                    (size_t)K * block_bytes : 0u,
+                intermediate.size());
+            if (saturated || result != Wirehair_Success)
+            {
+                std::fprintf(stderr,
+                    "preferredtiming run failed cycle=%u slot=%u result=%d\n",
+                    cycle, slot, (int)result);
+                return 2;
+            }
+        }
+    }
+    return 0;
+}
+
+enum class GroupedTimingCacheState
+{
+    Cold,
+    Warm
+};
+
+const char* GroupedTimingCacheStateName(GroupedTimingCacheState state)
+{
+    return state == GroupedTimingCacheState::Cold ? "cold" : "warm";
+}
+
+struct GroupedTimingArm
+{
+    uint32_t Period = 0u;
+    uint32_t GroupedRows = 0u;
+    wirehair_v2::MixedResidueBucketMode Buckets =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+};
+
+bool ConfigureGroupedTimingArm(const GroupedTimingArm& arm)
+{
+    // Reapply the complete thread-local experiment state for every physical
+    // solve.  Several setters deliberately clear secondary schedules, so the
+    // grouped suffix must remain last.  None of this setup is timed.
+    if (!wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(arm.Period) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows) ||
+        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
+        !wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Constant))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(arm.Buckets) ||
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u))
+    {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+            arm.GroupedRows))
+    {
+        return false;
+    }
+    return wirehair_v2::ActiveMixedCoefficientGeometry() ==
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX &&
+        wirehair_v2::ActiveMixedGF256Rows() ==
+            wirehair_v2::kMixedGF256Rows &&
+        wirehair_v2::ActiveMixedGF16Rows() ==
+            wirehair_v2::kMixedGF16Rows &&
+        wirehair_v2::ActiveMixedCoefficientPeriod() == arm.Period &&
+        wirehair_v2::ActiveMixedResidueSkew() == 0u &&
+        wirehair_v2::ActiveMixedResidueSchedule() ==
+            wirehair_v2::MixedResidueSchedule::Constant &&
+        !wirehair_v2::ActiveMixedIndependentExtensionResidues() &&
+        wirehair_v2::ActiveMixedGroupedGF256Rows() == arm.GroupedRows &&
+        wirehair_v2::ActiveMixedResidueBucketModeForTesting() == arm.Buckets;
+}
+
+bool SameGroupedTimingBaseGraph(
+    const wirehair_v2::PrecodeParams& a_params,
+    const wirehair_v2::PacketRowConfig& a_config,
+    const wirehair_v2::PrecodeParams& b_params,
+    const wirehair_v2::PacketRowConfig& b_config)
+{
+    return a_params.BlockCount == b_params.BlockCount &&
+        a_params.Staircase == b_params.Staircase &&
+        a_params.DenseRows == b_params.DenseRows &&
+        a_params.HeavyRows == b_params.HeavyRows &&
+        a_params.SourceHits == b_params.SourceHits &&
+        a_params.Field == b_params.Field &&
+        a_params.DenseIdentityCorner == b_params.DenseIdentityCorner &&
+        a_params.DenseTwoAnchor == b_params.DenseTwoAnchor &&
+        a_params.DenseTwoAnchorPhase == b_params.DenseTwoAnchorPhase &&
+        a_params.HeavyFamily == b_params.HeavyFamily &&
+        a_params.Seed == b_params.Seed &&
+        a_config.PeelSeed == b_config.PeelSeed &&
+        a_config.MixCount == b_config.MixCount;
+}
+
+struct GroupedTimingObservation
+{
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+};
+
+bool RunGroupedTimingObservation(
+    const GroupedTimingArm& arm,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const PreferredTimingCell& cell,
+    uint32_t block_bytes,
+    GroupedTimingObservation& observation)
+{
+    if (!ConfigureGroupedTimingArm(arm)) return false;
+    std::vector<uint8_t> intermediate;
+    observation = GroupedTimingObservation{};
+    observation.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, cell.Runtime, cell.Packets, block_bytes,
+            intermediate, &observation.Stats);
+    return observation.Result == Wirehair_Success ||
+        observation.Result == Wirehair_NeedMore;
+}
+
+const char* GroupedTimingOutcomeClass(
+    WirehairResult control,
+    WirehairResult candidate)
+{
+    const bool control_success = control == Wirehair_Success;
+    const bool candidate_success = candidate == Wirehair_Success;
+    if (control_success && candidate_success) return "common-success";
+    if (control_success) return "control-only";
+    if (candidate_success) return "candidate-only";
+    return "common-failure";
+}
+
+int GroupedTimingCpuMigrated(int before, int after)
+{
+    return before < 0 || after < 0 ? -1 : (before != after ? 1 : 0);
+}
+
+int GroupedTimingFaultContaminated(
+    int64_t minor_delta,
+    int64_t major_delta)
+{
+    return minor_delta < 0 || major_delta < 0 ?
+        -1 : (minor_delta != 0 || major_delta != 0 ? 1 : 0);
+}
+
+int CmdGroupedTiming(int argc, char** argv)
+{
+    uint32_t K = 0u;
+    uint32_t block_bytes = 0u;
+    uint32_t overhead = 0u;
+    uint32_t cycle_index = 0u;
+    uint64_t eviction_bytes = 0u;
+    double loss = 0.0;
+    uint64_t seed = 0u;
+    PacketScheduleKind schedule = PacketScheduleKind::Burst;
+    GroupedTimingCacheState cache_state = GroupedTimingCacheState::Cold;
+    GroupedTimingArm control_arm;
+    GroupedTimingArm candidate_arm;
+    bool have_K = false;
+    bool have_block_bytes = false;
+    bool have_overhead = false;
+    bool have_control_period = false;
+    bool have_control_rows = false;
+    bool have_control_buckets = false;
+    bool have_candidate_period = false;
+    bool have_candidate_rows = false;
+    bool have_candidate_buckets = false;
+    bool have_eviction = false;
+    bool have_cache_state = false;
+    bool have_loss = false;
+    bool have_seed = false;
+    bool have_schedule = false;
+    bool have_cycle_index = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (have_K ||
+                !TakeArg("groupedtiming", "--N", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--N", value, K)) return 1;
+            have_K = true;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (have_block_bytes ||
+                !TakeArg("groupedtiming", "--bb", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--bb", value, block_bytes)) return 1;
+            have_block_bytes = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (have_overhead || !TakeArg(
+                    "groupedtiming", "--overhead", argc, argv, i, value) ||
+                !ParseCanonicalU32Arg("--overhead", value, overhead))
+            {
+                return 1;
+            }
+            have_overhead = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-period")) {
+            if (have_control_period || !TakeArg(
+                    "groupedtiming", "--control-period",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--control-period", value, control_arm.Period))
+            {
+                return 1;
+            }
+            have_control_period = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-grouped-rows")) {
+            if (have_control_rows || !TakeArg(
+                    "groupedtiming", "--control-grouped-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--control-grouped-rows", value,
+                    control_arm.GroupedRows))
+            {
+                return 1;
+            }
+            have_control_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--control-buckets")) {
+            if (have_control_buckets || !TakeArg(
+                    "groupedtiming", "--control-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(value, control_arm.Buckets))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --control-buckets must be auto, "
+                    "separate, dual, or joint-delta\n");
+                return 1;
+            }
+            have_control_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-period")) {
+            if (have_candidate_period || !TakeArg(
+                    "groupedtiming", "--candidate-period",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--candidate-period", value, candidate_arm.Period))
+            {
+                return 1;
+            }
+            have_candidate_period = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-grouped-rows")) {
+            if (have_candidate_rows || !TakeArg(
+                    "groupedtiming", "--candidate-grouped-rows",
+                    argc, argv, i, value) ||
+                !ParseCanonicalU32Arg(
+                    "--candidate-grouped-rows", value,
+                    candidate_arm.GroupedRows))
+            {
+                return 1;
+            }
+            have_candidate_rows = true;
+        }
+        else if (!std::strcmp(argv[i], "--candidate-buckets")) {
+            if (have_candidate_buckets || !TakeArg(
+                    "groupedtiming", "--candidate-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(value, candidate_arm.Buckets))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --candidate-buckets must be auto, "
+                    "separate, dual, or joint-delta\n");
+                return 1;
+            }
+            have_candidate_buckets = true;
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (have_eviction || !TakeArg(
+                    "groupedtiming", "--evict-bytes", argc, argv, i,
+                    value) || !ParseCanonicalU64Arg(
+                        "--evict-bytes", value, eviction_bytes))
+            {
+                return 1;
+            }
+            have_eviction = true;
+        }
+        else if (!std::strcmp(argv[i], "--cache-state")) {
+            if (have_cache_state || !TakeArg(
+                    "groupedtiming", "--cache-state", argc, argv, i,
+                    value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "cold")) {
+                cache_state = GroupedTimingCacheState::Cold;
+            }
+            else if (!std::strcmp(value, "warm")) {
+                cache_state = GroupedTimingCacheState::Warm;
+            }
+            else {
+                std::fprintf(stderr,
+                    "groupedtiming --cache-state must be cold or warm\n");
+                return 1;
+            }
+            have_cache_state = true;
+        }
+        else if (!std::strcmp(argv[i], "--cycle-index")) {
+            if (have_cycle_index || !TakeArg(
+                    "groupedtiming", "--cycle-index", argc, argv, i,
+                    value) || !ParseCanonicalU32Arg(
+                        "--cycle-index", value, cycle_index))
+            {
+                return 1;
+            }
+            have_cycle_index = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (have_loss || !TakeArg(
+                    "groupedtiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, loss)) return 1;
+            have_loss = true;
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (have_seed || !TakeArg(
+                    "groupedtiming", "--seed", argc, argv, i, value) ||
+                !ParseCanonicalU64Arg("--seed", value, seed)) return 1;
+            have_seed = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (have_schedule || !TakeArg(
+                    "groupedtiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, schedule))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming --schedule must be burst, adversarial, "
+                    "or repair-only\n");
+                return 1;
+            }
+            have_schedule = true;
+        }
+        else if (!UnknownArg("groupedtiming", argv[i])) {
+            return 1;
+        }
+    }
+    if (!have_K || !have_block_bytes || !have_overhead ||
+        !have_control_period || !have_control_rows ||
+        !have_control_buckets || !have_candidate_period ||
+        !have_candidate_rows || !have_candidate_buckets || !have_eviction ||
+        !have_cache_state || !have_loss || !have_seed || !have_schedule)
+    {
+        std::fprintf(stderr,
+            "groupedtiming requires --N, --bb, --overhead, "
+            "--control-period, --control-grouped-rows, --control-buckets, "
+            "--candidate-period, --candidate-grouped-rows, "
+            "--candidate-buckets, --evict-bytes, --cache-state, --loss, "
+            "--seed, and --schedule\n");
+        return 1;
+    }
+    const auto invalid_arm = [](const GroupedTimingArm& arm) {
+        return arm.Period <
+                wirehair_v2::kMixedGF256Rows +
+                    wirehair_v2::kMixedGF16Rows ||
+            arm.Period > wirehair_v2::kMixedCoefficientPeriod ||
+            arm.GroupedRows > 9u ||
+            (arm.GroupedRows != 0u &&
+             arm.Period <= wirehair_v2::kMixedGF256Rows +
+                wirehair_v2::kMixedGF16Rows) ||
+            (arm.GroupedRows == 0u &&
+             arm.Buckets !=
+                wirehair_v2::MixedResidueBucketMode::Automatic);
+    };
+    if (K < 2u || K > 64000u ||
+        (block_bytes != 64u && block_bytes != 1280u &&
+         block_bytes != 4096u) ||
+        overhead > 1024u || (uint64_t)K + overhead > UINT32_MAX ||
+        invalid_arm(control_arm) || invalid_arm(candidate_arm) ||
+        (have_cycle_index && cycle_index > 3u) ||
+        eviction_bytes < 4096u ||
+        eviction_bytes > (uint64_t)std::numeric_limits<size_t>::max() ||
+        !ValidateLoss(loss, "groupedtiming") ||
+        (schedule != PacketScheduleKind::Burst &&
+         schedule != PacketScheduleKind::Adversarial &&
+         schedule != PacketScheduleKind::RepairOnly))
+    {
+        std::fprintf(stderr, "groupedtiming argument domain mismatch\n");
+        return 1;
+    }
+    const std::vector<int> one_K(1u, (int)K);
+    const std::vector<int> one_bb(1u, (int)block_bytes);
+    if (!ValidatePayloadE2EInputs(
+            one_K, one_bb, "groupedtiming"))
+    {
+        return 1;
+    }
+
+    wirehair_v2::PrecodeParams control_base_params;
+    wirehair_v2::PacketRowConfig control_base_config;
+    wirehair_v2::PrecodeParams candidate_base_params;
+    wirehair_v2::PacketRowConfig candidate_base_config;
+    wirehair_v2::PrecodeSystem control_system;
+    wirehair_v2::PacketRowConfig control_config;
+    wirehair_v2::PrecodeSystem candidate_system;
+    wirehair_v2::PacketRowConfig candidate_config;
+    uint32_t control_attempt = 0u;
+    uint32_t candidate_attempt = 0u;
+    uint32_t control_grouped_hash_seed = 0u;
+    uint32_t candidate_grouped_hash_seed = 0u;
+    if (!ConfigureGroupedTimingArm(control_arm) ||
+        !MakeH12Q0Configuration(
+            K, block_bytes, control_base_params, control_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming could not construct the control arm\n");
+        return 2;
+    }
+    // The grouped reliability campaign used the raw two-anchor architecture
+    // at every K, rather than the later adaptive named-profile cutoff.
+    control_base_params.DenseTwoAnchor = true;
+    if (control_arm.GroupedRows != 0u) {
+        control_grouped_hash_seed =
+            wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    }
+    const WirehairResult control_select =
+        wirehair_v2::SelectSystematicConfiguration(
+            control_base_params, control_base_config,
+            control_system, control_config, &control_attempt);
+    if (control_select != Wirehair_Success) {
+        std::fprintf(stderr,
+            "groupedtiming control seed selection failed result=%d\n",
+            (int)control_select);
+        return 2;
+    }
+    if (!ConfigureGroupedTimingArm(candidate_arm) ||
+        !MakeH12Q0Configuration(
+            K, block_bytes, candidate_base_params, candidate_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming could not construct the candidate arm\n");
+        return 2;
+    }
+    candidate_base_params.DenseTwoAnchor = true;
+    if (candidate_arm.GroupedRows != 0u) {
+        candidate_grouped_hash_seed =
+            wirehair_v2::ActiveMixedGroupedGF256HashSeed();
+    }
+    if (!SameGroupedTimingBaseGraph(
+            control_base_params, control_base_config,
+            candidate_base_params, candidate_base_config))
+    {
+        std::fprintf(stderr,
+            "groupedtiming arms do not share one base graph/configuration\n");
+        return 2;
+    }
+    const WirehairResult candidate_select =
+        wirehair_v2::SelectSystematicConfiguration(
+            candidate_base_params, candidate_base_config,
+            candidate_system, candidate_config, &candidate_attempt);
+    if (candidate_select != Wirehair_Success) {
+        std::fprintf(stderr,
+            "groupedtiming candidate seed selection failed result=%d\n",
+            (int)candidate_select);
+        return 2;
+    }
+
+    PreferredTimingCell cell;
+    if (!BuildFullPayloadTimingCell(
+            control_system.Params, control_config, block_bytes, overhead, loss,
+            seed, schedule, true,
+            "wirehair-wh2-grouped-timing-trace-v1", cell))
+    {
+        std::fprintf(stderr, "groupedtiming solve setup failed\n");
+        return 2;
+    }
+    const uint64_t candidate_precode_wide =
+        (uint64_t)candidate_system.Params.Staircase +
+        candidate_system.Params.DenseRows + candidate_system.Params.HeavyRows;
+    if (candidate_precode_wide > UINT32_MAX ||
+        !cell.Runtime.IsValidFor(
+            K, (uint32_t)candidate_precode_wide,
+            candidate_config.MixCount) ||
+        cell.Packets.size() != (size_t)K + overhead)
+    {
+        std::fprintf(stderr,
+            "groupedtiming selected arms do not share one packet domain\n");
+        return 2;
+    }
+
+    // Allocate and prefault the eviction working set before either preflight.
+    // In warm mode, touching it afterward would make the first recorded solve
+    // cold; in cold mode, each timed slot explicitly traverses it again.
+    std::vector<uint8_t> eviction((size_t)eviction_bytes, 0u);
+    EvictPreferredTimingCache(eviction);
+
+    GroupedTimingObservation control_preflight;
+    GroupedTimingObservation candidate_preflight;
+    if (!RunGroupedTimingObservation(
+            control_arm, control_system, control_config, cell, block_bytes,
+            control_preflight) ||
+        !RunGroupedTimingObservation(
+            candidate_arm, candidate_system, candidate_config, cell,
+            block_bytes,
+            candidate_preflight))
+    {
+        std::fprintf(stderr, "groupedtiming preflight failed\n");
+        return 2;
+    }
+    const char* const outcome_class = GroupedTimingOutcomeClass(
+        control_preflight.Result, candidate_preflight.Result);
+    const bool common_success =
+        control_preflight.Result == Wirehair_Success &&
+        candidate_preflight.Result == Wirehair_Success;
+
+    static const char kOrder[] = {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
+    const std::string cycle_index_text =
+        have_cycle_index ? std::to_string(cycle_index) : "all";
+    const uint64_t packet_payload_bytes =
+        ((uint64_t)K + overhead) * block_bytes;
+    std::printf(
+        "# groupedtiming: schema=v1 policy=h12-q0-grouped "
+        "timing_scope=solve cycles=%u order=ABBABAAB discard_cycle=0 "
+        "cycle_mode=%s cycle_index=%s N=%u bb=%u overhead=%u "
+        "loss=%.17g seed=%llu schedule=%s cache_state=%s "
+        "overhead_stream=salted "
+        "evict_bytes=%llu eviction_prefaulted=1 "
+        "control_period=%u control_grouped_rows=%u "
+        "control_buckets=%s control_grouped_hash_seed=0x%x "
+        "control_final_h_a_columns=%u candidate_period=%u "
+        "candidate_grouped_rows=%u candidate_buckets=%s "
+        "candidate_grouped_hash_seed=0x%x "
+        "candidate_final_h_a_columns=%u gf256_rows=10 gf16_rows=2 "
+        "dense_two_anchor=1 control_attempt=%u "
+        "control_matrix_seed=0x%llx control_peel_seed=0x%x "
+        "candidate_attempt=%u candidate_matrix_seed=0x%llx "
+        "candidate_peel_seed=0x%x mix=2 "
+        "payload=distinct-packet-zero-v1 payload_count=%u "
+        "payload_bytes=%llu payload_alignment=64 payload_prefaulted=1 "
+        "system_build=outside-timer tls_reapply=full-per-slot-outside-timer "
+        "allocator_tls_state=preflight-warmed "
+        "preflight_control_result=%d preflight_candidate_result=%d "
+        "cell_class=%s common_success=%u trace_sha256=%s\n",
+        have_cycle_index ? 1u : 4u,
+        have_cycle_index ? "replacement" : "full",
+        cycle_index_text.c_str(), K, block_bytes, overhead, loss,
+        (unsigned long long)seed, PacketScheduleName(schedule),
+        GroupedTimingCacheStateName(cache_state),
+        (unsigned long long)eviction_bytes,
+        control_arm.Period, control_arm.GroupedRows,
+        MixedResidueBucketModeName(control_arm.Buckets),
+        control_grouped_hash_seed,
+        control_arm.GroupedRows != 0u ?
+            control_system.Params.HeavyRows : 0u,
+        candidate_arm.Period, candidate_arm.GroupedRows,
+        MixedResidueBucketModeName(candidate_arm.Buckets),
+        candidate_grouped_hash_seed,
+        candidate_arm.GroupedRows != 0u ?
+            candidate_system.Params.HeavyRows : 0u,
+        control_attempt,
+        (unsigned long long)control_system.Params.Seed,
+        control_config.PeelSeed, candidate_attempt,
+        (unsigned long long)candidate_system.Params.Seed,
+        candidate_config.PeelSeed,
+        K + overhead,
+        (unsigned long long)packet_payload_bytes,
+        (int)control_preflight.Result, (int)candidate_preflight.Result,
+        outcome_class, common_success ? 1u : 0u,
+        cell.TraceSha256.c_str());
+    std::printf(
+        "N,bb,overhead,schedule,seed,loss,cache_state,cycle,slot,arm,"
+        "period,grouped_rows,buckets_requested,seed_attempt,matrix_seed,"
+        "peel_seed,preflight_result,cell_class,common_success,result,"
+        "outcome_stable,elapsed_ns,saturated,"
+        "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
+        "fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,"
+        "block_muladds,build_ns,peel_ns,project_ns,residual_ns,backsub_ns,"
+        "joint_source_xors,joint_marginal_xors,joint_marginal_copies,"
+        "joint_active_deltas,joint_scratch_bytes,dual_source_columns,"
+        "source_bytes,packet_payload_bytes,intermediate_bytes\n");
+
+    const uint32_t first_cycle = have_cycle_index ? cycle_index : 0u;
+    const uint32_t end_cycle = have_cycle_index ? cycle_index + 1u : 4u;
+    for (uint32_t cycle = first_cycle; cycle < end_cycle; ++cycle)
+    {
+        for (uint32_t slot = 0u; slot < 8u; ++slot)
+        {
+            const bool control = kOrder[slot] == 'A';
+            const GroupedTimingArm& arm = control ?
+                control_arm : candidate_arm;
+            const wirehair_v2::PrecodeSystem& active_system = control ?
+                control_system : candidate_system;
+            const wirehair_v2::PacketRowConfig& active_config = control ?
+                control_config : candidate_config;
+            const uint32_t active_attempt = control ?
+                control_attempt : candidate_attempt;
+            const WirehairResult preflight_result = control ?
+                control_preflight.Result : candidate_preflight.Result;
+            if (!ConfigureGroupedTimingArm(arm)) {
+                std::fprintf(stderr,
+                    "groupedtiming TLS reapplication failed cycle=%u "
+                    "slot=%u\n", cycle, slot);
+                return 2;
+            }
+            if (cache_state == GroupedTimingCacheState::Cold) {
+                EvictPreferredTimingCache(eviction);
+            }
+            const PreferredTimingUsage usage_before =
+                ReadPreferredTimingUsage();
+            const int cpu_before = PreferredTimingCurrentCpu();
+            const Clock::time_point begin = Clock::now();
+            wirehair_v2::PrecodeSolveStats stats;
+            std::vector<uint8_t> intermediate;
+            const WirehairResult result =
+                wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                    active_system, active_config,
+                    cell.Runtime, cell.Packets, block_bytes,
+                    intermediate, &stats);
+            const Clock::time_point end = Clock::now();
+            const int cpu_after = PreferredTimingCurrentCpu();
+            const PreferredTimingUsage usage_after =
+                ReadPreferredTimingUsage();
+            bool saturated = false;
+            const uint64_t elapsed_ns =
+                PreferredTimingElapsedNanoseconds(begin, end, saturated);
+            const int64_t minflt_delta =
+                usage_before.MinorFaults < 0 || usage_after.MinorFaults < 0 ?
+                -1 : usage_after.MinorFaults - usage_before.MinorFaults;
+            const int64_t majflt_delta =
+                usage_before.MajorFaults < 0 || usage_after.MajorFaults < 0 ?
+                -1 : usage_after.MajorFaults - usage_before.MajorFaults;
+            const uint32_t binary_def =
+                stats.InactivatedColumns >= stats.BinaryResidualRank ?
+                stats.InactivatedColumns - stats.BinaryResidualRank : 0u;
+            const uint32_t heavy_gain =
+                stats.ResidualRank >= stats.BinaryResidualRank ?
+                stats.ResidualRank - stats.BinaryResidualRank : 0u;
+            const bool outcome_stable = result == preflight_result;
+            std::printf(
+                "%u,%u,%u,%s,%llu,%.17g,%s,%u,%u,%s,%u,%u,%s,%u,"
+                "0x%llx,0x%x,%d,%s,%u,%d,%u,%llu,%u,%d,%d,%d,%lld,%lld,"
+                "%d,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+                "%llu,%llu,%u,%llu,%llu,%llu,%llu,%zu\n",
+                K, block_bytes, overhead, PacketScheduleName(schedule),
+                (unsigned long long)seed, loss,
+                GroupedTimingCacheStateName(cache_state), cycle, slot,
+                control ? "control" : "candidate", arm.Period,
+                arm.GroupedRows, MixedResidueBucketModeName(arm.Buckets),
+                active_attempt,
+                (unsigned long long)active_system.Params.Seed,
+                active_config.PeelSeed,
+                (int)preflight_result, outcome_class,
+                common_success ? 1u : 0u, (int)result,
+                outcome_stable ? 1u : 0u,
+                (unsigned long long)elapsed_ns, saturated ? 1u : 0u,
+                cpu_before, cpu_after,
+                GroupedTimingCpuMigrated(cpu_before, cpu_after),
+                (long long)minflt_delta, (long long)majflt_delta,
+                GroupedTimingFaultContaminated(
+                    minflt_delta, majflt_delta),
+                stats.InactivatedColumns, binary_def, heavy_gain,
+                (unsigned long long)stats.BlockXors,
+                (unsigned long long)stats.BlockMulAdds,
+                (unsigned long long)stats.BuildNanoseconds,
+                (unsigned long long)stats.PeelNanoseconds,
+                (unsigned long long)stats.ProjectNanoseconds,
+                (unsigned long long)stats.ResidualNanoseconds,
+                (unsigned long long)stats.BackSubNanoseconds,
+                (unsigned long long)stats.MixedJointSourceXors,
+                (unsigned long long)stats.MixedJointMarginalXors,
+                (unsigned long long)stats.MixedJointMarginalCopies,
+                stats.MixedJointActiveDeltas,
+                (unsigned long long)stats.MixedJointScratchBytes,
+                (unsigned long long)stats.MixedDualSourceColumns,
+                (unsigned long long)((uint64_t)K * block_bytes),
+                (unsigned long long)packet_payload_bytes,
+                intermediate.size());
+            if (saturated || !outcome_stable ||
+                (result != Wirehair_Success && result != Wirehair_NeedMore))
+            {
+                std::fprintf(stderr,
+                    "groupedtiming run failed cycle=%u slot=%u result=%d "
+                    "preflight=%d\n",
+                    cycle, slot, (int)result, (int)preflight_result);
+                return 2;
+            }
+        }
+    }
+    return 0;
+}
+
+#endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
+
 int CmdPrecodeFail(int argc, char** argv)
 {
     std::string nlist = "1000,3200,10000,32000,64000";
@@ -4454,17 +7544,22 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t seed_block_bytes_override = 0u;
     bool paired_overhead_stream = false;
     bool mixed_null_witnesses = false;
+    bool binary_dense_two_anchor = false;
+    uint32_t binary_dense_two_anchor_phase = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
     bool binary_dense_rows_explicit = false;
+    bool binary_dense_two_anchor_phase_explicit = false;
     bool gf256_heavy_rows_explicit = false;
     bool packet_peel_seed_xor_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
     bool mixed_period_explicit = false;
     uint32_t mixed_gf256_rows = wirehair_v2::kMixedGF256Rows;
     bool mixed_gf256_rows_explicit = false;
+    uint32_t mixed_grouped_gf256_rows = 0u;
+    bool mixed_grouped_gf256_rows_explicit = false;
     uint32_t mixed_gf16_rows = wirehair_v2::kMixedGF16Rows;
     bool mixed_gf16_rows_explicit = false;
     wirehair_v2::MixedCoefficientGeometry mixed_geometry =
@@ -4478,6 +7573,9 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t mixed_residue_hash_seed = 0u;
     bool mixed_residue_hash_seed_explicit = false;
     bool mixed_extension_residue_seed_xor_explicit = false;
+    wirehair_v2::MixedResidueBucketMode mixed_residue_bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+    bool mixed_residue_bucket_mode_explicit = false;
     bool seed_block_bytes_explicit = false;
     // Untuned architecture-comparison protocol hooks (wirehair-g8iv): one
     // uniform construction seed for every K, exactly one construction
@@ -4634,6 +7732,23 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             binary_dense_rows_explicit = true;
         }
+        else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
+            binary_dense_two_anchor = true;
+        }
+        else if (!std::strcmp(
+                     argv[i], "--binary-dense-two-anchor-phase"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--binary-dense-two-anchor-phase",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--binary-dense-two-anchor-phase", value,
+                    binary_dense_two_anchor_phase))
+            {
+                return 1;
+            }
+            binary_dense_two_anchor_phase_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--gf256-heavy-rows")) {
             if (!TakeArg(
                     "precodefail", "--gf256-heavy-rows",
@@ -4747,6 +7862,20 @@ int CmdPrecodeFail(int argc, char** argv)
             }
             mixed_gf256_rows_explicit = true;
         }
+        else if (!std::strcmp(
+                     argv[i], "--mixed-grouped-gf256-rows"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--mixed-grouped-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-grouped-gf256-rows", value,
+                    mixed_grouped_gf256_rows))
+            {
+                return 1;
+            }
+            mixed_grouped_gf256_rows_explicit = true;
+        }
         else if (!std::strcmp(argv[i], "--mixed-period")) {
             if (!TakeArg(
                     "precodefail", "--mixed-period", argc, argv, i, value) ||
@@ -4829,6 +7958,22 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             mixed_extension_residue_seed_xor_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-buckets"))
+        {
+            if (!TakeArg(
+                    "precodefail", "--mixed-residue-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(
+                    value, mixed_residue_bucket_mode))
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --mixed-residue-buckets token %s "
+                    "(expected auto, separate, dual, or joint-delta)\n",
+                    value ? value : "");
+                return 1;
+            }
+            mixed_residue_bucket_mode_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--seed-block-bytes")) {
             if (!TakeArg(
@@ -4986,12 +8131,15 @@ int CmdPrecodeFail(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     else if (mixed_null_witnesses || mixed_period_explicit ||
              mixed_geometry_explicit ||
-             mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+             mixed_gf256_rows_explicit ||
+             mixed_grouped_gf256_rows_explicit ||
+             mixed_gf16_rows_explicit ||
              mixed_residue_skew_explicit ||
              mixed_residue_schedule_explicit ||
              mixed_residue_hash_seed_explicit ||
              mixed_residue_hash_keyed ||
-             mixed_independent_extension_residues)
+             mixed_independent_extension_residues ||
+             mixed_residue_bucket_mode_explicit)
     {
         std::fprintf(stderr,
             "precodefail mixed experiment flags require --completion "
@@ -5023,6 +8171,29 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::fprintf(stderr,
             "precodefail --binary-dense-rows must be in [1,64]\n");
+        return 1;
+    }
+    if (binary_dense_two_anchor && binary_dense_rows_override != 0u &&
+        binary_dense_rows_override != 12u)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor requires 12 binary "
+            "dense rows\n");
+        return 1;
+    }
+    if (binary_dense_two_anchor_phase_explicit &&
+        !binary_dense_two_anchor)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor-phase requires "
+            "--binary-dense-two-anchor\n");
+        return 1;
+    }
+    if (binary_dense_two_anchor_phase > 2u)
+    {
+        std::fprintf(stderr,
+            "precodefail --binary-dense-two-anchor-phase must be in "
+            "[0,2]\n");
         return 1;
     }
     if (gf256_heavy_rows_explicit &&
@@ -5103,6 +8274,22 @@ int CmdPrecodeFail(int argc, char** argv)
             "shared-x hashed scheduling with P>H\n");
         return 1;
     }
+    if (mixed_residue_bucket_mode !=
+            wirehair_v2::MixedResidueBucketMode::Automatic &&
+        !mixed_independent_extension_residues &&
+        mixed_grouped_gf256_rows == 0u)
+    {
+        std::fprintf(stderr,
+            "precodefail explicit --mixed-residue-buckets requires "
+            "--mixed-independent-extension-residues or nonzero "
+            "--mixed-grouped-gf256-rows\n");
+        return 1;
+    }
+    if (!wirehair_v2::SetMixedResidueBucketModeForTesting(
+            mixed_residue_bucket_mode))
+    {
+        return 1;
+    }
     if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
             packet_row_seed_multiplier))
     {
@@ -5115,6 +8302,17 @@ int CmdPrecodeFail(int argc, char** argv)
         packet_row_seed_avalanche);
     wirehair_v2::SetOddPacketPeelSeedXorForTesting(
         odd_packet_peel_seed_xor);
+    // All prerequisite setters above intentionally clear schedule experiments.
+    // Grouped C must therefore be the final thread-local codec configuration.
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+            mixed_grouped_gf256_rows))
+    {
+        std::fprintf(stderr,
+            "precodefail --mixed-grouped-gf256-rows must be in [0,9]; "
+            "nonzero grouping requires shared-x constant-A 10+2 geometry, "
+            "P>H, and no independent extension residues\n");
+        return 1;
+    }
     if (seed_block_bytes_explicit && seed_block_bytes_override == 0u)
     {
         std::fprintf(stderr,
@@ -5239,7 +8437,9 @@ int CmdPrecodeFail(int argc, char** argv)
             "# precodefail: trials=%u threads=%u loss=%.17g seed=0x%llx "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+            "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "binary_dense_two_anchor_phase=%u "
+            "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
@@ -5249,6 +8449,8 @@ int CmdPrecodeFail(int argc, char** argv)
             packet_peel_seed_xor,
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
+            binary_dense_two_anchor ? 1u : 0u,
+            binary_dense_two_anchor_phase,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5269,10 +8471,16 @@ int CmdPrecodeFail(int argc, char** argv)
             "mixed_residue_schedule=%s mixed_residue_hash_seed=0x%x "
             "mixed_residue_hash_keyed=%u "
             "mixed_independent_extension_residues=%u "
+            "mixed_grouped_gf256_rows=%u "
+            "mixed_grouped_gf256_hash_seed=0x%x "
+            "mixed_grouped_final_h_a_columns=%u "
+            "mixed_residue_buckets_requested=%s "
             "mixed_extension_residue_seed_xor=0x%x "
             "source_hits_override=%u packet_peel_seed_xor=0x%x "
             "packet_peel_seed_table=%s "
-            "binary_dense_rows_override=%u gf256_heavy_rows_override=%u "
+            "binary_dense_rows_override=%u binary_dense_two_anchor=%u "
+            "binary_dense_two_anchor_phase=%u "
+            "gf256_heavy_rows_override=%u "
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
@@ -5290,11 +8498,23 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::ActiveMixedResidueHashSeed(),
             mixed_residue_hash_keyed ? 1u : 0u,
             mixed_independent_extension_residues ? 1u : 0u,
+            wirehair_v2::ActiveMixedGroupedGF256Rows(),
+            wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
+            wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ?
+                wirehair_v2::ActiveMixedGF256Rows() +
+                    wirehair_v2::ActiveMixedGF16Rows() : 0u,
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            MixedResidueBucketModeName(mixed_residue_bucket_mode),
+#else
+            "auto",
+#endif
             mixed_extension_residue_seed_xor,
             source_hits_override,
             packet_peel_seed_xor,
             PacketPeelSeedTableName(packet_peel_seed_table),
             binary_dense_rows_override,
+            binary_dense_two_anchor ? 1u : 0u,
+            binary_dense_two_anchor_phase,
             gf256_heavy_rows_override,
             odd_packet_peel_seed_xor,
             packet_row_seed_multiplier,
@@ -5333,7 +8553,10 @@ int CmdPrecodeFail(int argc, char** argv)
         "heavy_gain_min,heavy_shortfall,solve_ms_mu,build_ms_mu,peel_ms_mu,"
         "project_ms_mu,residual_ms_mu,backsub_ms_mu,seed_attempt,"
         "block_xors_mu,block_muladds_mu,first_rank_fail,binary_def_hist,"
-        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor\n");
+        "heavy_gain_hist,failure_trials,active_packet_peel_seed_xor,"
+        "mixed_joint_source_xors_mu,mixed_joint_marginal_xors_mu,"
+        "mixed_joint_marginal_copies_mu,mixed_joint_active_deltas_mu,"
+        "mixed_joint_scratch_bytes_mu,mixed_dual_source_columns_mu\n");
 
     for (int bb_value : BBs) for (int n_value : Ns)
     {
@@ -5395,12 +8618,16 @@ int CmdPrecodeFail(int argc, char** argv)
                 wirehair_v2::
                     SetMixedIndependentExtensionResiduesForTesting(
                         mixed_independent_extension_residues) &&
+                wirehair_v2::SetMixedResidueBucketModeForTesting(
+                    mixed_residue_bucket_mode) &&
                 wirehair_v2::SetPacketRowSeedMultiplierForTesting(
                     packet_row_seed_multiplier) &&
                 (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
                      packet_row_seed_avalanche), true) &&
                 (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
-                     odd_packet_peel_seed_xor), true);
+                     odd_packet_peel_seed_xor), true) &&
+                wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+                    mixed_grouped_gf256_rows);
         };
         if (!configure_test_thread())
         {
@@ -5454,6 +8681,9 @@ int CmdPrecodeFail(int argc, char** argv)
             if (binary_dense_rows_override != 0u) {
                 base_params.DenseRows = binary_dense_rows_override;
             }
+            base_params.DenseTwoAnchor = binary_dense_two_anchor;
+            base_params.DenseTwoAnchorPhase =
+                binary_dense_two_anchor_phase;
             if (gf256_heavy_rows_override != 0u) {
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }
@@ -5782,6 +9012,18 @@ int CmdPrecodeFail(int argc, char** argv)
                                 result.BackSubNanoseconds =
                                     solve_stats.BackSubNanoseconds;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                                result.MixedJointSourceXors =
+                                    solve_stats.MixedJointSourceXors;
+                                result.MixedJointMarginalXors =
+                                    solve_stats.MixedJointMarginalXors;
+                                result.MixedJointMarginalCopies =
+                                    solve_stats.MixedJointMarginalCopies;
+                                result.MixedJointScratchBytes =
+                                    solve_stats.MixedJointScratchBytes;
+                                result.MixedJointActiveDeltas =
+                                    solve_stats.MixedJointActiveDeltas;
+                                result.MixedDualSourceColumns =
+                                    solve_stats.MixedDualSourceColumns;
                                 if (mixed_null_witnesses) {
                                     witness_trial_stats[trial] = solve_stats;
                                 }
@@ -5809,6 +9051,42 @@ int CmdPrecodeFail(int argc, char** argv)
             }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta ||
+                mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::Dual)
+            {
+                const bool joint = mixed_residue_bucket_mode ==
+                    wirehair_v2::MixedResidueBucketMode::JointDelta;
+                for (uint32_t trial = 0u; trial < trials; ++trial)
+                {
+                    const MatrixFailureTrial& result = results[trial];
+                    // Both q > H and a coefficient-rank-deficient q <= H
+                    // return before any full mixed payload buckets are built.
+                    const bool stopped_before_mixed_payload_buckets =
+                        result.Result == Wirehair_NeedMore &&
+                        result.Inactivated >= result.BinaryRank &&
+                        result.Rank < result.Inactivated;
+                    if (stopped_before_mixed_payload_buckets) {
+                        continue;
+                    }
+                    const bool used = joint ?
+                        result.MixedJointSourceXors != 0u &&
+                            result.MixedJointMarginalCopies != 0u :
+                        result.MixedDualSourceColumns != 0u;
+                    if (used) continue;
+                    std::fprintf(stderr,
+                        "precodefail requested mixed residue bucket mode %s "
+                        "but trial %u fell back (N=%u bb=%u result=%d "
+                        "inactivated=%u binary_rank=%u heavy_rows=%u)\n",
+                        MixedResidueBucketModeName(
+                            mixed_residue_bucket_mode),
+                        trial, K, bb, (int)result.Result,
+                        result.Inactivated, result.BinaryRank,
+                        system.Params.HeavyRows);
+                    return 1;
+                }
+            }
             if (mixed_null_witnesses)
             {
                 uint32_t first_need_more = UINT32_MAX;
@@ -5939,6 +9217,12 @@ int CmdPrecodeFail(int argc, char** argv)
             uint64_t backsub_ns_sum = 0u;
             uint64_t block_xors_sum = 0u;
             uint64_t block_muladds_sum = 0u;
+            uint64_t mixed_joint_source_xors_sum = 0u;
+            uint64_t mixed_joint_marginal_xors_sum = 0u;
+            uint64_t mixed_joint_marginal_copies_sum = 0u;
+            uint64_t mixed_joint_active_deltas_sum = 0u;
+            uint64_t mixed_joint_scratch_bytes_sum = 0u;
+            uint64_t mixed_dual_source_columns_sum = 0u;
             uint32_t inact_max = 0u;
             uint64_t binary_def_sum = 0u;
             uint32_t binary_def_max = 0u;
@@ -5980,6 +9264,17 @@ int CmdPrecodeFail(int argc, char** argv)
                 backsub_ns_sum += result.BackSubNanoseconds;
                 block_xors_sum += result.BlockXors;
                 block_muladds_sum += result.BlockMulAdds;
+                mixed_joint_source_xors_sum += result.MixedJointSourceXors;
+                mixed_joint_marginal_xors_sum +=
+                    result.MixedJointMarginalXors;
+                mixed_joint_marginal_copies_sum +=
+                    result.MixedJointMarginalCopies;
+                mixed_joint_active_deltas_sum +=
+                    result.MixedJointActiveDeltas;
+                mixed_joint_scratch_bytes_sum +=
+                    result.MixedJointScratchBytes;
+                mixed_dual_source_columns_sum +=
+                    result.MixedDualSourceColumns;
                 inact_max = std::max(
                     inact_max, result.Inactivated);
                 const uint32_t binary_def = result.Inactivated >=
@@ -6021,7 +9316,7 @@ int CmdPrecodeFail(int argc, char** argv)
             std::printf(
                 "%u,%u,%s,%u,%u,%u,%u,%u,%u,%.8f,%.3f,%u,%.3f,%u,%.3f,"
                 "%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%.3f,%d,"
-                "%s,%s,%s,0x%x\n",
+                "%s,%s,%s,0x%x,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                 K, bb, HeavyFamilyName(heavy_family),
                 (uint32_t)mix_count_value, overhead, trials,
                 successes, rank_failures, errors,
@@ -6045,7 +9340,13 @@ int CmdPrecodeFail(int argc, char** argv)
                 first_rank_failure == UINT32_MAX ?
                     -1 : (int)first_rank_failure,
                 binary_hist_text.c_str(), heavy_hist_text.c_str(),
-                failure_trials.c_str(), active_packet_peel_seed_xor);
+                failure_trials.c_str(), active_packet_peel_seed_xor,
+                (double)mixed_joint_source_xors_sum / trials,
+                (double)mixed_joint_marginal_xors_sum / trials,
+                (double)mixed_joint_marginal_copies_sum / trials,
+                (double)mixed_joint_active_deltas_sum / trials,
+                (double)mixed_joint_scratch_bytes_sum / trials,
+                (double)mixed_dual_source_columns_sum / trials);
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
             if (mixed_null_witnesses)
             {
@@ -6089,6 +9390,15 @@ int CmdPrecodeFail(int argc, char** argv)
                     witness.BasisHashHigh : 0u;
                 const uint64_t hash_low = have_diagnostic ?
                     witness.BasisHashLow : 0u;
+                const uint32_t active_subfield_rows =
+                    wirehair_v2::ActiveMixedGF256Rows();
+                const uint32_t active_extension_rows =
+                    wirehair_v2::ActiveMixedGF16Rows();
+                const uint32_t active_grouped_rows =
+                    wirehair_v2::ActiveMixedGroupedGF256Rows();
+                const uint32_t active_first_grouped_row =
+                    active_grouped_rows <= active_subfield_rows ?
+                        active_subfield_rows - active_grouped_rows : 0u;
                 std::printf(
                     "# mixed_null_witness,v=2,N=%u,bb=%u,trial=%d,"
                     "status=%s,reason=%s,diagnostic_status=%u,"
@@ -6097,7 +9407,9 @@ int CmdPrecodeFail(int argc, char** argv)
                     "independent_extension=%u,L=%u,R=%u,binary_rank=%u,q=%u,"
                     "quotient_rank=%u,d=%u,q_ok=%u,A_ok=%u,C_ok=%u,"
                     "canonical_ok=%u,exact_words=%zu,exact_size_ok=%u,"
-                    "hash=%016llx%016llx\n",
+                    "hash=%016llx%016llx,grouped_gf256_rows=%u,"
+                    "grouped_first_row=%u,grouped_hash_seed=0x%x,"
+                    "grouped_final_h_a_columns=%u\n",
                     K, bb, have_trial ? (int)captured_witness_trial : -1,
                     MixedNullReplayStatusName(witness_status),
                     witness_reason, (uint32_t)witness.Status,
@@ -6116,7 +9428,11 @@ int CmdPrecodeFail(int argc, char** argv)
                     have_diagnostic && expected_words == exact_words ?
                         1u : 0u,
                     (unsigned long long)hash_high,
-                    (unsigned long long)hash_low);
+                    (unsigned long long)hash_low,
+                    active_grouped_rows, active_first_grouped_row,
+                    wirehair_v2::ActiveMixedGroupedGF256HashSeed(),
+                    active_grouped_rows != 0u ?
+                        active_subfield_rows + active_extension_rows : 0u);
                 if (witness_status == MixedNullReplayStatus::Captured) {
                     for (const std::string& line :
                          witness_classification_lines)
@@ -6217,10 +9533,19 @@ int main(int argc, char** argv)
     }
 
     if (argc < 2) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
+        std::fprintf(stderr,
+            "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
+            "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
+            "preferredattempt|preferredtiming|groupedtiming|selftest "
+            "[opts]\n");
+#else
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
             "selftest [opts]\n");
+#endif
         return 1;
     }
     try
@@ -6252,6 +9577,18 @@ int main(int argc, char** argv)
         if (!std::strcmp(argv[1], "precodefail")) {
             return CmdPrecodeFail(argc - 2, argv + 2);
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
+        if (!std::strcmp(argv[1], "preferredattempt")) {
+            return CmdPreferredAttempt(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "preferredtiming")) {
+            return CmdPreferredTiming(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "groupedtiming")) {
+            return CmdGroupedTiming(argc - 2, argv + 2);
+        }
+#endif
         if (!std::strcmp(argv[1], "selftest")) {
             if (argc != 2) {
                 std::fprintf(stderr, "selftest takes no options\n");

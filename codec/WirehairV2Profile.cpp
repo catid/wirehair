@@ -56,23 +56,33 @@ struct V2ProfileContract
     uint64_t Id;
     wirehair_v2::CompletionField Completion;
     uint32_t RecoveryMixCount;
+    bool AdaptiveDenseTwoAnchor;
 };
 
 const V2ProfileContract kV2ProfileContracts[] = {
     {
         WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
         wirehair_v2::CompletionField::GF256,
-        wirehair_v2::kCertifiedPacketMixCount
+        wirehair_v2::kCertifiedPacketMixCount,
+        false
     },
     {
         WIREHAIR_V2_PROFILE_MIXED_2026_07,
         wirehair_v2::CompletionField::MixedGF256GF16,
-        wirehair_v2::kCertifiedPacketMixCount
+        wirehair_v2::kCertifiedPacketMixCount,
+        false
     },
     {
         WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
         wirehair_v2::CompletionField::MixedGF256GF16,
-        2u
+        2u,
+        false
+    },
+    {
+        WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07,
+        wirehair_v2::CompletionField::MixedGF256GF16,
+        2u,
+        true
     }
 };
 
@@ -86,11 +96,13 @@ const V2ProfileContract* ProfileContractForId(uint64_t profile_id)
 
 const V2ProfileContract* ProfileContractForConfiguration(
     wirehair_v2::CompletionField completion,
-    uint32_t recovery_mix_count)
+    uint32_t recovery_mix_count,
+    bool adaptive_dense_two_anchor)
 {
     for (const V2ProfileContract& contract : kV2ProfileContracts) {
         if (contract.Completion == completion &&
-            contract.RecoveryMixCount == recovery_mix_count)
+            contract.RecoveryMixCount == recovery_mix_count &&
+            contract.AdaptiveDenseTwoAnchor == adaptive_dense_two_anchor)
         {
             return &contract;
         }
@@ -100,10 +112,11 @@ const V2ProfileContract* ProfileContractForConfiguration(
 
 uint64_t ProfileIdForConfiguration(
     wirehair_v2::CompletionField completion,
-    uint32_t recovery_mix_count)
+    uint32_t recovery_mix_count,
+    bool adaptive_dense_two_anchor)
 {
     const V2ProfileContract* contract = ProfileContractForConfiguration(
-        completion, recovery_mix_count);
+        completion, recovery_mix_count, adaptive_dense_two_anchor);
     return contract ? contract->Id : 0u;
 }
 
@@ -285,6 +298,7 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.Completion = contract->Completion;
     options.RecoveryMixCount = contract->RecoveryMixCount;
+    options.AdaptiveDenseTwoAnchor = contract->AdaptiveDenseTwoAnchor;
 
     wirehair_v2::PrecodeParams params =
         options.Completion ==
@@ -299,6 +313,8 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
                     expanded, 0u, options.PrecodeSeedSalt));
     params.Staircase = expanded.DenseCount;
     params.DenseIdentityCorner = options.DenseIdentityCorner;
+    params.DenseTwoAnchor = options.AdaptiveDenseTwoAnchor &&
+        block_count >= wirehair_v2::kDenseTwoAnchorMinBlockCount;
     params = wirehair_v2::PrecodeParamsForAttempt(
         params, profile.seed_attempt);
 
@@ -325,7 +341,8 @@ WirehairV2Result MakePublicProfile(
         expanded.V2SeedAttempt >= wirehair_v2::kMaxPacketSeedAttempts ||
         expanded.V2PrecodeContractVersion !=
             wirehair_v2::PrecodeContractVersion(
-                expanded.V2CompletionField) ||
+                expanded.V2CompletionField,
+                expanded.V2AdaptiveDenseTwoAnchor) ||
         expanded.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion)
     {
@@ -335,7 +352,8 @@ WirehairV2Result MakePublicProfile(
     profile.struct_bytes = (uint32_t)sizeof(WirehairV2Profile);
     profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
     profile.profile_id = ProfileIdForConfiguration(
-        expanded.V2CompletionField, expanded.V2RecoveryMixCount);
+        expanded.V2CompletionField, expanded.V2RecoveryMixCount,
+        expanded.V2AdaptiveDenseTwoAnchor);
     profile.message_bytes = message_bytes;
     profile.block_bytes = expanded.BlockBytes;
     profile.seed_attempt = (uint8_t)expanded.V2SeedAttempt;
@@ -369,6 +387,9 @@ WirehairV2Result MakePublicProfile(
         canonical.V2RecoveryMixCount != expanded.V2RecoveryMixCount ||
         canonical.V2DenseIdentityCorner !=
             expanded.V2DenseIdentityCorner ||
+        canonical.V2DenseTwoAnchor != expanded.V2DenseTwoAnchor ||
+        canonical.V2AdaptiveDenseTwoAnchor !=
+            expanded.V2AdaptiveDenseTwoAnchor ||
         canonical.V2PrecodeSeedSalt != expanded.V2PrecodeSeedSalt ||
         canonical.V2RecoveryRowSeedSalt !=
             expanded.V2RecoveryRowSeedSalt)
@@ -672,6 +693,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.Completion = contract->Completion;
     options.RecoveryMixCount = contract->RecoveryMixCount;
+    options.AdaptiveDenseTwoAnchor = contract->AdaptiveDenseTwoAnchor;
     PublicCodec* codec = new (std::nothrow) PublicCodec;
     if (!codec) {
         return WirehairV2_OOM;
@@ -781,13 +803,13 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     uint32_t outputCapacity,
     uint32_t* dataBytesOut)
 {
-    if (dataBytesOut) {
-        *dataBytesOut = 0u;
-    }
     PublicCodec* impl = FromHandle(codec);
-    if (!impl || impl->Mode != CodecMode::Encoder ||
-        !blockDataOut || !dataBytesOut)
+    if (!dataBytesOut) {
+        return WirehairV2_InvalidInput;
+    }
+    if (!impl || impl->Mode != CodecMode::Encoder || !blockDataOut)
     {
+        *dataBytesOut = 0u;
         return WirehairV2_InvalidInput;
     }
     const uint64_t block_count = BlockCountWide(
@@ -796,6 +818,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
     if (block_count != 0u && blockId == block_count - 1u) {
         required = (uint32_t)(impl->MessageBytes -
             (block_count - 1u) * impl->BlockBytes);
+    }
+    if (MemoryRangesOverlap(
+            blockDataOut, required, dataBytesOut, sizeof(*dataBytesOut)))
+    {
+        return WirehairV2_InvalidInput;
     }
     *dataBytesOut = required;
     if (outputCapacity < required) {

@@ -132,6 +132,25 @@ beside production and the V1-compatible wrapper arms.  `precodefail` runs a
 threaded fixed-overhead V2 rank/failure grid and reports inactivation and solve
 cost rather than relying on a peel-only proxy.
 
+Test builds also expose `groupedtiming` for promotion-grade, paired timing of
+the raw grouped-GF(256) completion experiments.  Each invocation binds one
+hard packet schedule (`--N`, `--bb`, `--overhead`, `--loss`, `--seed`, and
+`--schedule`) and compares explicit control/candidate period, grouped-row, and
+residue-bucket settings.  It uses distinct 64-byte-aligned, prefaulted packet
+payloads, preflights both arms, then emits four `ABBABAAB` cycles (or one
+requested replacement cycle) with raw nanoseconds, internal solve phases,
+work counters, CPU migration, and fault receipts.  `--cache-state cold`
+evicts the requested `--evict-bytes` before every sample; `warm` retains the
+working set.  Here `cold` means data-cache-cold after both arm preflights;
+the command intentionally does not measure fresh-process allocator or first-
+use TLS setup costs, and receipts this as `allocator_tls_state=preflight-warmed`.
+Only rows whose preflight classification is `common-success`
+are valid paired speed observations.  All test-only TLS settings are reapplied
+outside the timer before every arm, and this command changes no named profile
+or production equation.  The benchmark records the CPU before and after each
+sample but does not choose an affinity itself; promotion runners must pin each
+process and reject rows reporting migration, faults, or saturated timing.
+
 `compare --precode-profile certified|mixed|both` selects the WH2 equation
 profile for the precode and cached-precode arms; the default is `certified`.
 `both` replays the same message seed and packet-ID schedule through both WH2
@@ -283,8 +302,11 @@ The default `precodefail` completion is `certified`.  The `--completion mixed`
 arm exercises the mixed GF(256)/GF(2^16) H12 solver and requires even block
 bytes and the `periodic` heavy family.  Mix count 3 corresponds to
 `WIREHAIR_V2_PROFILE_MIXED_2026_07`; mix count 2 corresponds to the distinct
-opt-in `WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07`.  Neither changes the default
-`WIREHAIR_V2_PROFILE_CURRENT`.  With `--mix-count 2,3`, both selected candidate
+opt-in `WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07`.  The separately versioned
+`WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07` retains the same mixed
+rows and mix2 packet schedule while changing the D12 binary construction only
+at K >= 4096.  None changes the default `WIREHAIR_V2_PROFILE_CURRENT`.  With
+`--mix-count 2,3`, both selected candidate
 profiles receive the same packet-ID trace for each trial; optional payload E2E
 checks also share their message and loss stream.  The
 `precodefail_paired` comment reports all four paired outcome cells, the exact
@@ -358,6 +380,41 @@ nonsingular corner.
 `--mixed-extension-residue-seed-xor U32` with this mode to screen alternate
 full-cycle extension derivations without changing the base GF(256) schedule;
 the default XOR is 78.
+With independent extension residues, test-hook `compare` and `precodefail`
+also accept
+`--mixed-residue-buckets auto|separate|dual|joint-delta`.  The preamble labels
+this as the requested mode; `precodefail` appends effective joint/dual source
+markers, joint source and marginal XORs, the 2*P first-marginal copies, active
+delta classes, and three-plane bytes.  Explicit dual or joint requests fail
+the benchmark if their effective marker is zero instead of silently timing a
+fallback.
+
+`joint-delta` groups P-column source blocks by the difference between their
+subfield and extension shifts.  It streams one active difference at a time
+through P temporary buckets, initializes the two persistent marginals from
+the first temporary plane, then XORs later planes into A[a] and
+B[(a+delta)%P].  Thus every active source column is read once rather than
+contributed to two separate bucket scans.  The data planes occupy exactly
+`3*P*block_bytes` (the reported plane-byte counter deliberately excludes small
+allocator-dependent scheduling vectors), and both dual experiments and the
+joint implementation are capped at 64 MiB.  Partial final P-column blocks and
+decoder-inactive columns use the same path.
+
+Pinned alternating full-payload solves found joint slower at K=945, but
+reproducibly faster beyond the measured crossover: versus dual, about 1.6% at
+K=20000/bb=4096, 1.0% at K=48466/bb=4096, and 0.6% at
+K=64000/bb=1280.  Representative three-way medians improved 2.45% versus
+separate at K=20000/bb=4096 and 2.09% at K=64000/bb=1280.  Accordingly the
+production implementation policy selects joint at P=32 and K>=3200 for block
+sizes >=4096, or at P=32 and K>=10000 for block sizes >=1280; it never selects
+joint below 1280 bytes or at an unmeasured coefficient period.  The policy is
+compiled in hooks-off encoder and decoder paths and is used whenever a future
+versioned profile activates independent subfield/extension residue schedules;
+the current frozen profiles share one schedule, so their equations, payloads,
+profiles, and wire bytes remain unchanged.  Test hooks retain explicit
+`separate`, `dual`, and `joint-delta` overrides around the same production
+automatic decision.
+
 The test-only
 `--packet-peel-seed-table normalized-h15-v1` selects an offline-tuned packet
 seed XOR at the 23 hard block counts in `[4,41]` and leaves every other K at

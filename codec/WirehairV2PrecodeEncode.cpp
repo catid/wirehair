@@ -3,6 +3,7 @@
 #include "../WirehairTools.h"
 #include "../gf256.h"
 
+#include "WirehairV2MixedBuckets.h"
 #include "WirehairV2Plan.h"
 
 #include <algorithm>
@@ -278,10 +279,13 @@ bool ComputePrecodeValues(
     // --- Shuffle-2 dense rows ---
     // Transform to consecutive-row differences: diff row 0 = row 0, diff
     // row r = row r XOR row r-1 (unit bidiagonal row transform: same rank,
-    // same solution).  Each difference is the flip pair, so the known part
-    // of diff row r > 0 costs at most 2 block ops; dense-column flips only
-    // toggle the row's corner mask.  Then Gauss-Jordan solves the D2 x D2
-    // GF(2) corner with the known sums as block-valued RHS.
+    // same solution).  Each certified difference is the flip pair, so the
+    // known part of diff row r > 0 costs at most 2 block ops; dense-column
+    // flips only toggle the row's corner mask.  The experiment-only
+    // two-anchor schedule deliberately makes row 6 -> 7 dense, and this
+    // generic path accumulates that larger difference directly.  Then
+    // Gauss-Jordan solves the D2 x D2 GF(2) corner with the known sums as
+    // block-valued RHS.
     if (D2 > 0u)
     {
         std::vector<uint8_t> rhs((size_t)D2 * block_bytes);
@@ -376,15 +380,22 @@ bool ComputePrecodeValues(
     {
         const uint32_t subfield_rows = ActiveMixedGF256Rows();
         const uint32_t extension_rows = ActiveMixedGF16Rows();
+        const uint32_t grouped_gf256_rows =
+            ActiveMixedGroupedGF256Rows();
+        const bool independent_extension_residues =
+            ActiveMixedIndependentExtensionResidues();
         if (H != subfield_rows + extension_rows ||
+            grouped_gf256_rows > subfield_rows ||
+            (grouped_gf256_rows != 0u &&
+             independent_extension_residues) ||
             !InitializeGF16())
         {
             return false;
         }
+        const uint32_t first_grouped_gf256_row =
+            subfield_rows - grouped_gf256_rows;
         const uint32_t window = ActiveMixedCoefficientPeriod();
         const bool rotate_residues = ActiveMixedResiduesRotated();
-        const bool independent_extension_residues =
-            ActiveMixedIndependentExtensionResidues();
         const uint32_t elements = block_bytes / 2u;
         const int plane_bytes = (int)elements;
 
@@ -430,6 +441,35 @@ bool ComputePrecodeValues(
                 (int)subfield_rows, value, bytes);
             st.HeavyMulAdds += subfield_rows;
 
+            return true;
+        };
+
+        const auto accumulate_primary_subfield_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            for (uint32_t r = 0u;
+                 r < first_grouped_gf256_row; ++r)
+            {
+                gf8_scales[r] = gf8_coefficient_rows[r][m];
+            }
+            gf256_muladd_multi_mem(
+                gf8_destinations, gf8_scales,
+                (int)first_grouped_gf256_row, value, bytes);
+            st.HeavyMulAdds += first_grouped_gf256_row;
+            return true;
+        };
+
+        const auto accumulate_grouped_subfield_residue = [&](
+            uint32_t m, const uint8_t* value) -> bool
+        {
+            for (uint32_t r = 0u; r < grouped_gf256_rows; ++r) {
+                gf8_scales[r] = gf8_coefficient_rows[
+                    first_grouped_gf256_row + r][m];
+            }
+            gf256_muladd_multi_mem(
+                gf8_destinations + first_grouped_gf256_row,
+                gf8_scales, (int)grouped_gf256_rows, value, bytes);
+            st.HeavyMulAdds += grouped_gf256_rows;
             return true;
         };
 
@@ -480,6 +520,10 @@ bool ComputePrecodeValues(
         const auto accumulate_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
         {
+            if (grouped_gf256_rows != 0u) {
+                return accumulate_primary_subfield_residue(m, value) &&
+                    accumulate_extension_residue(m, value);
+            }
             return accumulate_subfield_residue(m, value) &&
                 (independent_extension_residues ||
                  accumulate_extension_residue(m, value));
@@ -490,7 +534,134 @@ bool ComputePrecodeValues(
             use_residue_buckets &&
             (uint64_t)window * block_bytes <=
                 GetHeavyBucketStorageLimit();
-        if (use_full_bucket_storage)
+        bool secondary_buckets_accumulated = false;
+        const bool secondary_schedule =
+            independent_extension_residues || grouped_gf256_rows != 0u;
+        const bool automatic_joint_delta_buckets =
+            secondary_schedule &&
+            UseAutomaticMixedJointResidueBuckets(
+                system.Params.BlockCount, block_bytes, window);
+        bool request_joint_delta_buckets =
+            automatic_joint_delta_buckets;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        const uint64_t one_plane_bytes = (uint64_t)window * block_bytes;
+        bool use_dual_buckets = false;
+        const MixedResidueBucketMode bucket_mode =
+            ActiveMixedResidueBucketModeForTesting();
+        request_joint_delta_buckets =
+            bucket_mode == MixedResidueBucketMode::JointDelta ||
+            (bucket_mode == MixedResidueBucketMode::Automatic &&
+             automatic_joint_delta_buckets);
+        use_dual_buckets =
+            secondary_schedule && use_residue_buckets &&
+            bucket_mode == MixedResidueBucketMode::Dual &&
+            one_plane_bytes <= UINT64_MAX / 2u &&
+            one_plane_bytes * 2u <= GetHeavyBucketStorageLimit();
+#endif
+        const bool use_joint_delta_buckets =
+            secondary_schedule && use_residue_buckets &&
+            request_joint_delta_buckets &&
+            MixedJointResidueBucketStorageFits(
+                window, block_bytes, GetHeavyBucketStorageLimit());
+        if (use_joint_delta_buckets)
+        {
+            MixedJointResidueBuckets buckets;
+            const bool buckets_ok = grouped_gf256_rows != 0u ?
+                AccumulateMixedJointResidueBucketsWithShifts(
+                    heavy_base, window, block_bytes,
+                    [](uint32_t block) {
+                        return ActiveMixedResidueBlockShift(block);
+                    },
+                    [](uint32_t block) {
+                        return ActiveMixedGroupedGF256ResidueBlockShift(
+                            block);
+                    },
+                    column_value, [](uint32_t) { return true; },
+                    false, buckets) :
+                AccumulateMixedJointResidueBuckets(
+                    heavy_base, window, block_bytes, column_value,
+                    [](uint32_t) { return true; }, false, buckets);
+            if (!buckets_ok)
+            {
+                return false;
+            }
+            st.HeavyBucketXors +=
+                buckets.SourceXors + buckets.MarginalXors;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            st.MixedJointSourceXors = buckets.SourceXors;
+            st.MixedJointMarginalXors = buckets.MarginalXors;
+            st.MixedJointMarginalCopies = buckets.MarginalCopies;
+            st.MixedJointScratchBytes = buckets.ScratchBytes;
+            st.MixedJointActiveDeltas = buckets.ActiveDeltas;
+#endif
+            for (uint32_t m = 0u; m < window; ++m)
+            {
+                const uint8_t* const primary_bucket =
+                    buckets.Subfield.get() + (size_t)m * block_bytes;
+                const uint8_t* const secondary_bucket =
+                    buckets.Extension.get() + (size_t)m * block_bytes;
+                const bool accumulated = grouped_gf256_rows != 0u ?
+                    accumulate_primary_subfield_residue(
+                        m, primary_bucket) &&
+                    accumulate_extension_residue(m, primary_bucket) &&
+                    accumulate_grouped_subfield_residue(
+                        m, secondary_bucket) :
+                    accumulate_subfield_residue(m, primary_bucket) &&
+                    accumulate_extension_residue(m, secondary_bucket);
+                if (!accumulated)
+                {
+                    return false;
+                }
+            }
+            secondary_buckets_accumulated = true;
+        }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (use_dual_buckets)
+        {
+            std::vector<uint8_t> subfield_buckets(
+                (size_t)window * block_bytes, uint8_t{0});
+            std::vector<uint8_t> extension_buckets(
+                (size_t)window * block_bytes, uint8_t{0});
+            for (uint32_t c = 0u; c < heavy_base; ++c)
+            {
+                gf256_add_mem(
+                    subfield_buckets.data() +
+                        (size_t)ActiveMixedCoefficientResidue(c) * block_bytes,
+                    column_value(c), bytes);
+                gf256_add_mem(
+                    extension_buckets.data() +
+                        (size_t)(grouped_gf256_rows != 0u ?
+                            ActiveMixedGroupedGF256CoefficientResidue(
+                                c, heavy_base) :
+                            ActiveMixedExtensionCoefficientResidue(c)) *
+                        block_bytes,
+                    column_value(c), bytes);
+                st.HeavyBucketXors += 2u;
+            }
+            st.MixedDualSourceColumns = heavy_base;
+            for (uint32_t m = 0u; m < window; ++m)
+            {
+                const uint8_t* const primary_bucket =
+                    subfield_buckets.data() + (size_t)m * block_bytes;
+                const uint8_t* const secondary_bucket =
+                    extension_buckets.data() + (size_t)m * block_bytes;
+                const bool accumulated = grouped_gf256_rows != 0u ?
+                    accumulate_primary_subfield_residue(
+                        m, primary_bucket) &&
+                    accumulate_extension_residue(m, primary_bucket) &&
+                    accumulate_grouped_subfield_residue(
+                        m, secondary_bucket) :
+                    accumulate_subfield_residue(m, primary_bucket) &&
+                    accumulate_extension_residue(m, secondary_bucket);
+                if (!accumulated)
+                {
+                    return false;
+                }
+            }
+            secondary_buckets_accumulated = true;
+        }
+#endif
+        if (!secondary_buckets_accumulated && use_full_bucket_storage)
         {
             std::vector<uint8_t> bucket((size_t)window * block_bytes, 0u);
             if (!rotate_residues)
@@ -532,7 +703,7 @@ bool ComputePrecodeValues(
                 }
             }
         }
-        else if (use_residue_buckets)
+        else if (!secondary_buckets_accumulated && use_residue_buckets)
         {
             std::vector<uint8_t> bucket(block_bytes, 0u);
             for (uint32_t m = 0; m < window; ++m)
@@ -566,7 +737,7 @@ bool ComputePrecodeValues(
                 if (!accumulate_residue(m, bucket.data())) return false;
             }
         }
-        else
+        else if (!secondary_buckets_accumulated)
         {
             if (!rotate_residues)
             {
@@ -595,7 +766,8 @@ bool ComputePrecodeValues(
             }
         }
 
-        if (independent_extension_residues)
+        if (independent_extension_residues &&
+            !secondary_buckets_accumulated)
         {
             if (use_full_bucket_storage)
             {
@@ -658,6 +830,74 @@ bool ComputePrecodeValues(
                 }
             }
         }
+        if (grouped_gf256_rows != 0u &&
+            !secondary_buckets_accumulated)
+        {
+            if (use_full_bucket_storage)
+            {
+                std::vector<uint8_t> bucket(
+                    (size_t)window * block_bytes, uint8_t{0});
+                for (uint32_t c = 0u; c < heavy_base; ++c)
+                {
+                    const uint32_t m =
+                        ActiveMixedGroupedGF256CoefficientResidue(
+                            c, heavy_base);
+                    gf256_add_mem(
+                        bucket.data() + (size_t)m * block_bytes,
+                        column_value(c), bytes);
+                    ++st.HeavyBucketXors;
+                }
+                for (uint32_t m = 0u; m < window; ++m) {
+                    if (!accumulate_grouped_subfield_residue(
+                            m, bucket.data() + (size_t)m * block_bytes))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (use_residue_buckets)
+            {
+                std::vector<uint8_t> bucket(block_bytes, uint8_t{0});
+                for (uint32_t m = 0u; m < window; ++m)
+                {
+                    std::fill(
+                        bucket.begin(), bucket.end(), uint8_t{0});
+                    uint32_t block_index = 0u;
+                    for (uint32_t block_base = 0u;
+                         block_base < heavy_base;
+                         block_base += window)
+                    {
+                        const uint32_t block_shift =
+                            ActiveMixedGroupedGF256ResidueBlockShift(
+                                block_index++);
+                        const uint32_t unshifted = m >= block_shift ?
+                            m - block_shift : m + window - block_shift;
+                        const uint32_t c = block_base + unshifted;
+                        if (c >= heavy_base) continue;
+                        gf256_add_mem(
+                            bucket.data(), column_value(c), bytes);
+                        ++st.HeavyBucketXors;
+                    }
+                    if (!accumulate_grouped_subfield_residue(
+                            m, bucket.data()))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                for (uint32_t c = 0u; c < heavy_base; ++c) {
+                    if (!accumulate_grouped_subfield_residue(
+                            ActiveMixedGroupedGF256CoefficientResidue(
+                                c, heavy_base),
+                            column_value(c)))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
 
         // Convert the active GF(256) row RHS blocks once, after their fast
         // interleaved accumulation.  The extension rows are already in
@@ -688,8 +928,10 @@ bool ComputePrecodeValues(
             for (uint32_t j = 0; j < H; ++j) {
                 corner[(size_t)r * H + j] =
                     gf16_coefficient_rows[er][
-                        ActiveMixedExtensionCoefficientResidue(
-                            heavy_base + j)];
+                        grouped_gf256_rows != 0u ?
+                            ActiveMixedCoefficientResidue(heavy_base + j) :
+                            ActiveMixedExtensionCoefficientResidue(
+                                heavy_base + j)];
             }
         }
 
@@ -1495,9 +1737,13 @@ PrecodeParams MakeMessagePrecodeParams(
     const MessagePrecodeEncoderOptions& options)
 {
     const uint64_t seed = MessagePrecodeMatrixSeed(profile, options);
-    return options.Completion == CompletionField::MixedGF256GF16 ?
+    PrecodeParams params =
+        options.Completion == CompletionField::MixedGF256GF16 ?
         MakeMixedParams(profile.BlockCount, seed) :
         MakeCertifiedParams(profile.BlockCount, seed);
+    params.DenseTwoAnchor = options.AdaptiveDenseTwoAnchor &&
+        profile.BlockCount >= kDenseTwoAnchorMinBlockCount;
+    return params;
 }
 
 } // namespace
@@ -1516,6 +1762,8 @@ bool HasMessagePrecodeContractState(const SeedProfile& profile)
         profile.V2PacketPeelSeed != 0u ||
         profile.V2RecoveryMixCount != 0u ||
         profile.V2DenseIdentityCorner ||
+        profile.V2DenseTwoAnchor ||
+        profile.V2AdaptiveDenseTwoAnchor ||
         profile.V2PrecodeSeedSalt != 0u ||
         profile.V2RecoveryRowSeedSalt != 0u;
 }
@@ -1535,6 +1783,11 @@ bool ResolveMessagePrecodeOptions(
         return (resolved_options.Completion == CompletionField::GF256 ||
                 resolved_options.Completion ==
                     CompletionField::MixedGF256GF16) &&
+            (!resolved_options.AdaptiveDenseTwoAnchor ||
+             (resolved_options.Completion ==
+                    CompletionField::MixedGF256GF16 &&
+              resolved_options.RecoveryMixCount == 2u &&
+              !resolved_options.DenseIdentityCorner)) &&
             IsSupportedMessagePrecodeContract(
                 resolved_options.Completion,
                 resolved_options.RecoveryMixCount);
@@ -1544,13 +1797,22 @@ bool ResolveMessagePrecodeOptions(
         (profile.V2CompletionField != CompletionField::GF256 &&
          profile.V2CompletionField != CompletionField::MixedGF256GF16) ||
         profile.V2PrecodeContractVersion !=
-            PrecodeContractVersion(profile.V2CompletionField) ||
+            PrecodeContractVersion(
+                profile.V2CompletionField,
+                profile.V2AdaptiveDenseTwoAnchor) ||
         profile.V2PacketRowContractVersion != kPacketRowContractVersion ||
         profile.V2StaircaseCount == 0u ||
         profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2DenseRowCount == 0u ||
         profile.V2HeavyRowCount == 0u ||
         profile.V2SourceHits == 0u ||
+        profile.V2DenseTwoAnchor !=
+            (profile.V2AdaptiveDenseTwoAnchor &&
+             profile.BlockCount >= kDenseTwoAnchorMinBlockCount) ||
+        (profile.V2AdaptiveDenseTwoAnchor &&
+         (profile.V2CompletionField != CompletionField::MixedGF256GF16 ||
+          profile.V2RecoveryMixCount != 2u ||
+          profile.V2DenseIdentityCorner)) ||
         !IsSupportedMessagePrecodeContract(
             profile.V2CompletionField, profile.V2RecoveryMixCount))
     {
@@ -1560,12 +1822,15 @@ bool ResolveMessagePrecodeOptions(
     MessagePrecodeEncoderOptions bound;
     bound.RecoveryMixCount = profile.V2RecoveryMixCount;
     bound.DenseIdentityCorner = profile.V2DenseIdentityCorner;
+    bound.AdaptiveDenseTwoAnchor = profile.V2AdaptiveDenseTwoAnchor;
     bound.PrecodeSeedSalt = profile.V2PrecodeSeedSalt;
     bound.RecoveryRowSeedSalt = profile.V2RecoveryRowSeedSalt;
     bound.Completion = profile.V2CompletionField;
     if (requested_options &&
         (requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
          requested_options->DenseIdentityCorner != bound.DenseIdentityCorner ||
+         requested_options->AdaptiveDenseTwoAnchor !=
+            bound.AdaptiveDenseTwoAnchor ||
          requested_options->PrecodeSeedSalt != bound.PrecodeSeedSalt ||
          requested_options->RecoveryRowSeedSalt != bound.RecoveryRowSeedSalt))
     {
@@ -1637,7 +1902,8 @@ bool ResolveMessagePrecodeConfiguration(
             profile.V2PacketPeelSeed != expected_packet.PeelSeed ||
             profile.V2RecoveryMixCount != expected_packet.MixCount ||
             profile.V2DenseIdentityCorner !=
-                expected.DenseIdentityCorner)
+                expected.DenseIdentityCorner ||
+            profile.V2DenseTwoAnchor != expected.DenseTwoAnchor)
         {
             return false;
         }
@@ -1674,7 +1940,8 @@ void BindMessagePrecodeProfile(
     profile.V2SeedSelected = true;
     profile.V2SeedAttempt = packet_seed_attempt;
     profile.V2PrecodeContractVersion =
-        PrecodeContractVersion(system.Params.Field);
+        PrecodeContractVersion(
+            system.Params.Field, options.AdaptiveDenseTwoAnchor);
     profile.V2PacketRowContractVersion = kPacketRowContractVersion;
     profile.V2StaircaseCount = system.Params.Staircase;
     profile.V2DenseRowCount = system.Params.DenseRows;
@@ -1685,6 +1952,8 @@ void BindMessagePrecodeProfile(
     profile.V2PacketPeelSeed = packet_config.PeelSeed;
     profile.V2RecoveryMixCount = options.RecoveryMixCount;
     profile.V2DenseIdentityCorner = options.DenseIdentityCorner;
+    profile.V2DenseTwoAnchor = system.Params.DenseTwoAnchor;
+    profile.V2AdaptiveDenseTwoAnchor = options.AdaptiveDenseTwoAnchor;
     profile.V2PrecodeSeedSalt = options.PrecodeSeedSalt;
     profile.V2RecoveryRowSeedSalt = options.RecoveryRowSeedSalt;
 }

@@ -156,6 +156,31 @@ expanded encoder state back through that same pair before publishing a
 descriptor. A field-only mapping would incorrectly relabel mix2 equations as
 the older mix3 profile and is not conforming.
 
+`WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07` has numeric ID
+`7d8c2436401ba9eb`. The ID is the first 64 bits of SHA-256 over this exact
+canonical UTF-8/ASCII input, with no newline:
+
+```text
+wirehair:v2:precode-v4-mixed10gf256-2gf65536-even-d12-two-anchor-k4096:packet-v4-mix2:certified-2026-07
+```
+
+The full digest is
+`7d8c2436401ba9eb41a254119470160188d3f602f6217eb5d78bfa77ae5d2c22`.
+This opt-in profile freezes the mixed/mix2 completion and packet rules above,
+plus an adaptive D12 binary construction.  For `K < 4096`, its equations are
+identical to the original mixed/mix2 profile.  For `K >= 4096`, dense rows
+0..6 remain unchanged, row 7 becomes the balanced set-half of the already
+scheduled second shuffled deck, and rows 8..11 resume the two-column flip
+cadence.  This replaces one long sparse-difference direction with a second
+dense binary anchor without adding a row or changing any GF(256) or GF(65536)
+coefficient.
+
+The adaptive policy is part of precode contract 4 and remains bound by the new
+profile ID even below its K cutoff.  Consequently a low-K descriptor cannot be
+silently relabeled with the older mixed/mix2 ID merely because the generated
+equations happen to be identical.  The default, certified, mixed/mix3, and
+original mixed/mix2 identifiers and golden byte sequences remain unchanged.
+
 ### Non-normative July 2026 mixed/mix3 certification snapshot
 
 The production solver was screened with 100,000 common deterministic packet
@@ -223,8 +248,8 @@ implementation copies those bytes before returning.
 explicit supported profile ID. `WIREHAIR_V2_PROFILE_CURRENT` deliberately
 remains an alias for `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07`; existing callers
 and `wirehair_v2_encoder_create()` continue to emit the original GF(256)-only
-equations byte-for-byte. Both mixed/mix3 and mixed/mix2 encoding are explicit
-opt-ins through the selector (or the corresponding C++
+equations byte-for-byte. Mixed/mix3, mixed/mix2, and adaptive two-anchor
+mixed/mix2 encoding are explicit opt-ins through the selector (or the corresponding C++
 `Encoder::Create(profileId, ...)` overload). Unknown IDs return
 `WirehairV2_UnsupportedProfile` without falling back to the current profile.
 

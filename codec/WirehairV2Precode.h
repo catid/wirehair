@@ -21,9 +21,10 @@
       generated Shuffle-2 style: first row = the ceil(span/2) set-half of a
       shuffled deck, every subsequent row = previous row XOR two deck-driven
       flips (one set-half entry, one clear-half entry), with a reshuffle at
-      the halves boundary.  Consecutive rows differ in exactly two columns,
-      so encoder parity generation costs 2 block-XORs per row after the
-      first (the measured 54% precode-gen cut at K=3200 for n12+s2).
+      the halves boundary.  Consecutive rows differ in exactly two columns.
+      In the experiment-only two-anchor variant, row 7 is instead reset to
+      the balanced half of the second shuffled deck; rows 8..11 resume the
+      two-flip cadence.
     - H = 12 explicit Cauchy heavy rows.  Coefficients come from a Cauchy
       construction that is exactly MDS within any window of up to
       256 - H = 244 GE columns (W99 band requirement is >= 20); columns wrap
@@ -37,6 +38,10 @@
 */
 
 namespace wirehair_v2 {
+
+// The opt-in two-anchor profile keeps the certified dense construction below
+// this boundary and replaces only the second D12 shuffle half at larger K.
+static const uint32_t kDenseTwoAnchorMinBlockCount = 4096u;
 
 enum class HeavyCoefficientFamily : uint32_t
 {
@@ -75,6 +80,34 @@ struct PrecodeParams
         encoder-feasible.
     */
     bool DenseIdentityCorner = false;
+
+    /**
+        D=12 Shuffle-2 variant with two balanced anchors.
+
+        The certified construction keeps one balanced row and derives all
+        eleven later rows through two-column flips.  This variant keeps rows
+        0..6 unchanged, resets row 7 to the balanced half of the already
+        scheduled second deck, and derives rows 8..11 through two-column
+        flips.  It therefore trades one sparse difference direction for a
+        second independently shuffled dense equation without adding a row.
+
+        The flag records the active equation construction for one K.  Named
+        profiles bind any adaptive K cutoff separately.  It is deliberately
+        incompatible with DenseIdentityCorner and with DenseRows != 12.
+    */
+    bool DenseTwoAnchor = false;
+
+    /**
+        Experiment-only phase within the independently shuffled second deck.
+
+        Zero emits the second balanced anchor before consuming any swap pair,
+        preserving the versioned two-anchor construction exactly.  Phases one
+        and two consume that many balanced set/clear swap pairs before row 7,
+        then continue with four fresh pairs.  This changes no row count, RNG
+        consumption, or production default.  Nonzero values are valid only
+        when DenseTwoAnchor is enabled.
+    */
+    uint32_t DenseTwoAnchorPhase = 0;
 
     HeavyCoefficientFamily HeavyFamily =
         HeavyCoefficientFamily::PeriodicCauchy;
@@ -115,7 +148,9 @@ struct PrecodeSystem
         identity-corner variant, the deck spans only K+S known columns and
         each row additionally owns dense column K+S+r; consecutive full rows
         differ in four columns, but their known-column part still changes by
-        exactly two deck flips.
+        exactly two deck flips.  In the two-anchor variant, row 7 is another
+        balanced row and only the row 6 -> 7 transition is exempt from the
+        two-column-difference rule.
 
         Known limitation (inherited from the certified reference
         construction): at tiny EVEN spans (K=2 and K=4 with the certified
@@ -134,8 +169,9 @@ struct PrecodeSystem
 
     Returns false for invalid parameters (BlockCount outside [2, 64000],
     Staircase == 0, SourceHits outside [1, 8], DenseRows > 64,
-    HeavyRows > 128, or a full symbol domain that does not fit uint16) or if
-    the generated structure fails ValidatePrecodeSystem().
+    HeavyRows > 128, an invalid dense experiment combination, or a full
+    symbol domain that does not fit uint16) or if the generated structure
+    fails ValidatePrecodeSystem().
 */
 bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out);
 
@@ -210,20 +246,66 @@ uint32_t ActiveMixedCoefficientResidue(uint32_t column);
 /// Residue used by extension-field rows.  Production aliases the shared
 /// residue; test builds may select an independently keyed schedule.
 uint32_t ActiveMixedExtensionCoefficientResidue(uint32_t column);
+/**
+    Residue used by the experiment-only grouped GF(256) suffix rows.
+
+    Non-corner columns use one fixed full-cycle schedule C.  The final H
+    completion columns deliberately remain on canonical schedule A so the
+    encoder corner is byte-for-byte unchanged.  Production and a zero active
+    grouped-row count always alias ActiveMixedCoefficientResidue().
+*/
+uint32_t ActiveMixedGroupedGF256CoefficientResidue(
+    uint32_t column,
+    uint32_t first_heavy_column);
 /// Rotation applied to one complete period-sized block.
 uint32_t ActiveMixedResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedExtensionResidueBlockShift(uint32_t block_index);
+uint32_t ActiveMixedGroupedGF256ResidueBlockShift(uint32_t block_index);
 uint32_t ActiveMixedResidueSkew();
 MixedResidueSchedule ActiveMixedResidueSchedule();
 uint32_t ActiveMixedResidueHashSeed();
 bool ActiveMixedResiduesRotated();
 bool ActiveMixedIndependentExtensionResidues();
+uint32_t ActiveMixedGroupedGF256Rows();
+uint32_t ActiveMixedGroupedGF256HashSeed();
 MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF256Rows();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
 
+// Production data-plane cap for joint A/B residue accumulation.  The small
+// scheduling vectors are bounded by K and P separately; this limit covers the
+// three P * block_bytes planes that dominate scratch use.
+static const uint64_t kMixedJointResidueBucketDataByteCap =
+    UINT64_C(64) << 20;
+
+/// True when three joint-delta data planes fit the supplied scratch budget.
+bool MixedJointResidueBucketStorageFits(
+    uint32_t coefficient_period,
+    uint32_t block_bytes,
+    uint64_t data_byte_limit);
+
+/**
+    Production implementation policy for independently scheduled A/B mixed
+    residues.  This is an execution choice only: it changes neither equations
+    nor wire/profile bytes.  Pinned ABBA measurements currently justify the
+    joint-delta helper only at P=32 and the two conservative K/payload
+    crossovers below; callers must additionally enforce the scratch cap.
+*/
+bool UseAutomaticMixedJointResidueBuckets(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period);
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+enum class MixedResidueBucketMode : uint32_t
+{
+    Automatic = 0,
+    Separate = 1,
+    Dual = 2,
+    JointDelta = 3
+};
+
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
@@ -241,6 +323,20 @@ bool SelectFullCycleMixedResidueKeyedSeedForTesting(
 bool SetMixedIndependentExtensionResiduesForTesting(bool enabled);
 /// Select the XOR used to derive the independent extension schedule seed.
 void SetMixedIndependentExtensionSeedXorForTesting(uint32_t seed_xor);
+///
+/// Assign one shared schedule C to the final 0..9 rows of the fixed H12
+/// GF(256) prefix.  This raw-architecture hook is intentionally restricted to
+/// shared-X, constant-A, 10 GF(256) + 2 GF(2^16), P>H configurations and is
+/// mutually exclusive with independent GF(2^16) scheduling.
+bool SetMixedGroupedGF256RowsForTesting(uint32_t rows);
+/// Select the secondary-schedule RHS accumulation implementation.
+bool SetMixedResidueBucketModeForTesting(MixedResidueBucketMode mode);
+MixedResidueBucketMode ActiveMixedResidueBucketModeForTesting();
+/// Compatibility test accessor for the production implementation policy.
+bool UseAutomaticMixedJointResidueBucketsForTesting(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
 /// Select 10/11 rows generally, or a validated 12+4-row test geometry.

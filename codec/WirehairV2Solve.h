@@ -16,9 +16,17 @@ namespace wirehair_v2 {
 static const uint32_t kPacketRowContractVersion = 4u;
 static const uint32_t kPrecodeContractVersion = 2u; // existing/default alias
 static const uint32_t kMixedPrecodeContractVersion = 3u;
+static const uint32_t kMixedTwoAnchorPrecodeContractVersion = 4u;
 
-inline uint32_t PrecodeContractVersion(CompletionField field)
+inline uint32_t PrecodeContractVersion(
+    CompletionField field,
+    bool adaptive_dense_two_anchor = false)
 {
+    if (adaptive_dense_two_anchor)
+    {
+        return field == CompletionField::MixedGF256GF16 ?
+            kMixedTwoAnchorPrecodeContractVersion : 0u;
+    }
     if (field == CompletionField::GF256) return kPrecodeContractVersion;
     if (field == CompletionField::MixedGF256GF16)
         return kMixedPrecodeContractVersion;
@@ -94,6 +102,14 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint64_t MixedJointSourceXors = 0;
+    uint64_t MixedJointMarginalXors = 0;
+    uint64_t MixedJointMarginalCopies = 0;
+    uint64_t MixedJointScratchBytes = 0;
+    uint32_t MixedJointActiveDeltas = 0;
+    uint64_t MixedDualSourceColumns = 0;
+#endif
 };
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -147,6 +163,14 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
 */
 bool CheckPackedBinaryResidualOracleForTesting();
 
+/**
+    Compare fused mixed-pivot and unused-row RHS initialization against the
+    legacy copy/zero-plus-XOR sequence across every production quotient width,
+    extended test-hook widths, packed-word boundaries, SIMD boundary block
+    sizes, null packet data, and residual classifications.
+*/
+bool CheckMixedRhsFusionOracleForTesting();
+
 enum class MixedNullWitnessStatus : uint32_t
 {
     None = 0,
@@ -187,6 +211,18 @@ void SetMixedNullWitnessDiagnosticForTesting(
 
 /** Pure GF(2^16) nullspace/canonicalization invariance oracle. */
 bool CheckMixedNullWitnessCanonicalizationForTesting();
+
+/**
+    Compare recorded mixed-quotient row plans with direct coefficient/RHS
+    Gauss-Jordan elimination, including the derived left transform.
+*/
+bool CheckMixedQuotientFactorReplayForTesting();
+
+/**
+    Exercise the coefficient-rank-deficient mixed-quotient shortcut with a
+    consistent zero RHS and an algebraically guaranteed inconsistent RHS.
+*/
+bool CheckMixedQuotientDeficientSyndromeForTesting();
 #endif
 
 /**
