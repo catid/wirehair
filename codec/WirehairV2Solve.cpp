@@ -2379,6 +2379,538 @@ bool BuildMixedQuotientTransform(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tiny-K mixed completion fast path.
+//
+// At tiny system sizes the general mixed quotient pipeline (packed
+// coefficient projection by residue buckets, bulk-kernel residue-bucket RHS
+// accumulation, GF(2^16) factorization plans and planar Gauss-Jordan replay)
+// is dominated by per-call and setup overhead: the actual algebra is a dense
+// solve over a handful of columns.  The helpers below evaluate the SAME
+// equations with scalar GF(2^16) arithmetic:
+//
+//   * per-column completion coefficients follow the exact dense-expansion
+//     rule (the oracle the residue-bucket projection is verified against),
+//   * the heavy RHS is the same XOR/muladd sum accumulated column by column,
+//   * the quotient is solved by plain Gauss-Jordan elimination.
+//
+// Every algebraic outcome is identical to the general path: full-rank
+// systems have a unique solution in exact field arithmetic, rank is
+// pivot-order independent, and the dependent completion rows' reduced RHS
+// blocks are a basis of the same left-nullspace syndromes the factorization
+// transform checks, so Success/NeedMore/Error classification and every
+// output byte match.  The fast path never writes to `values` before success
+// is fully decided, preserving the transactional failure contract.
+// ---------------------------------------------------------------------------
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+thread_local int TinyMixedFastPathTestModeValue = 0;
+#endif
+
+// Scalar GF(2^16) row helpers.  Elements are little-endian 16-bit values in
+// the interleaved block layout.  Multiplication by scale (a | b << 8)
+// decomposes over the GF(256) subfield exactly as GF16MulAddPlanar():
+//   low'  ^= a * low ^ (lambda * b) * high
+//   high' ^= b * low ^ (a ^ b) * high
+struct TinyGF16RowTables
+{
+    const uint8_t* A;
+    const uint8_t* B;
+    const uint8_t* LB;
+    const uint8_t* AB;
+};
+
+inline TinyGF16RowTables TinyGF16Rows(uint16_t scale)
+{
+    const uint8_t a = (uint8_t)scale;
+    const uint8_t b = (uint8_t)(scale >> 8);
+    const uint8_t lb = gf256_mul(kGF16Lambda, b);
+    const uint8_t ab = (uint8_t)(a ^ b);
+    TinyGF16RowTables tables;
+    tables.A = &GF256Ctx.GF256_MUL_TABLE[(size_t)a << 8];
+    tables.B = &GF256Ctx.GF256_MUL_TABLE[(size_t)b << 8];
+    tables.LB = &GF256Ctx.GF256_MUL_TABLE[(size_t)lb << 8];
+    tables.AB = &GF256Ctx.GF256_MUL_TABLE[(size_t)ab << 8];
+    return tables;
+}
+
+inline void TinyGF16MulAddRow(
+    uint8_t* GF256_RESTRICT destination,
+    const uint8_t* GF256_RESTRICT source,
+    uint16_t scale,
+    uint32_t block_bytes)
+{
+    if (scale == 0u) {
+        return;
+    }
+    if (scale == 1u) {
+        gf256_add_mem(destination, source, (int)block_bytes);
+        return;
+    }
+    const TinyGF16RowTables tables = TinyGF16Rows(scale);
+    for (uint32_t offset = 0; offset < block_bytes; offset += 2u)
+    {
+        const uint8_t low = source[offset];
+        const uint8_t high = source[offset + 1u];
+        destination[offset] ^= (uint8_t)(tables.A[low] ^ tables.LB[high]);
+        destination[offset + 1u] ^=
+            (uint8_t)(tables.B[low] ^ tables.AB[high]);
+    }
+}
+
+inline void TinyGF16ScaleRow(
+    uint8_t* block,
+    uint16_t scale,
+    uint32_t block_bytes)
+{
+    if (scale == 1u) {
+        return;
+    }
+    if (scale == 0u) {
+        std::memset(block, 0, block_bytes);
+        return;
+    }
+    const TinyGF16RowTables tables = TinyGF16Rows(scale);
+    for (uint32_t offset = 0; offset < block_bytes; offset += 2u)
+    {
+        const uint8_t low = block[offset];
+        const uint8_t high = block[offset + 1u];
+        block[offset] = (uint8_t)(tables.A[low] ^ tables.LB[high]);
+        block[offset + 1u] = (uint8_t)(tables.B[low] ^ tables.AB[high]);
+    }
+}
+
+// Exact GF(2^16) inverse through the GF(256) subfield norm.  With
+// x^2 = x + lambda the conjugate of z = a + b x is (a ^ b) + b x, so
+// z * conj(z) = a^2 ^ a b ^ lambda b^2 lies in GF(256) and
+// z^-1 = conj(z) * norm^-1.  This equals GF16InverseInitialized() for every
+// input (the field inverse is unique); the A/B unit test proves it
+// exhaustively.
+inline uint16_t TinyGF16Inverse(uint16_t value)
+{
+    const uint8_t a = (uint8_t)value;
+    const uint8_t b = (uint8_t)(value >> 8);
+    const uint8_t norm = (uint8_t)(
+        gf256_mul(a, (uint8_t)(a ^ b)) ^
+        gf256_mul(kGF16Lambda, gf256_mul(b, b)));
+    if (norm == 0u) {
+        return 0u; // norm(z) == 0 only for z == 0
+    }
+    const uint8_t norm_inverse = gf256_inv(norm);
+    return (uint16_t)gf256_mul((uint8_t)(a ^ b), norm_inverse) |
+        (uint16_t)((uint16_t)gf256_mul(b, norm_inverse) << 8);
+}
+
+bool UseTinyMixedCompletionFastPath(
+    uint32_t block_count,
+    uint32_t block_bytes)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (TinyMixedFastPathTestModeValue < 0) {
+        return false;
+    }
+    if (TinyMixedFastPathTestModeValue > 0) {
+        return true;
+    }
+#endif
+    return block_count <= TinyMixedFastPathMaxSourceBlocks() &&
+        block_bytes <= TinyMixedFastPathMaxBlockBytes() &&
+        (uint64_t)block_count * block_bytes <=
+            TinyMixedFastPathMaxProductBytes();
+}
+
+/**
+    Direct dense solve of the mixed completion quotient.
+
+    Returns false only for structurally unsupported shapes (the caller then
+    falls through to the general machinery having built nothing).  When it
+    returns true, `result_out` and all outputs are exactly what the general
+    path would have produced for the same inputs.
+*/
+bool TrySolveMixedCompletionQuotientTiny(
+    uint32_t column_count,
+    uint32_t inactive_count,
+    uint32_t quotient_columns,
+    uint32_t subfield_rows,
+    uint32_t extension_rows,
+    uint32_t grouped_gf256_rows,
+    bool independent_extension_residues,
+    uint32_t projection_words,
+    uint32_t block_bytes,
+    const std::vector<uint32_t>& inactive_index,
+    const std::vector<uint32_t>& inactive_columns,
+    const std::vector<uint64_t>& projection,
+    const std::vector<uint64_t>& binary_pivot_coeff,
+    const std::vector<uint8_t>& binary_pivot_rhs,
+    const std::vector<uint8_t>& binary_have_pivot,
+    uint32_t binary_rank,
+    const std::vector<uint32_t>& free_columns,
+    std::vector<uint8_t>& values,
+    PrecodeSolveStats& stats,
+    WirehairResult& result_out)
+{
+    const uint32_t H = subfield_rows + extension_rows;
+    const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
+    const uint32_t coefficient_period = ActiveMixedCoefficientPeriod();
+    if (H == 0u || H > kMixedCompletionRowsMax ||
+        quotient_columns > H ||
+        packed_words == 0u ||
+        packed_words > kMixedPackedCoefficientWords ||
+        packed_words * 4u < H ||
+        coefficient_period == 0u ||
+        coefficient_period > kMixedCoefficientPeriod ||
+        column_count < H ||
+        grouped_gf256_rows > subfield_rows ||
+        (grouped_gf256_rows != 0u && independent_extension_residues) ||
+        free_columns.size() != quotient_columns)
+    {
+        return false;
+    }
+    const MixedPackedCoefficients* cached_packed =
+        GetMixedPackedCoefficients();
+    if (!cached_packed) {
+        return false;
+    }
+
+    const uint32_t first_heavy_column = column_count - H;
+    const bool secondary_schedule =
+        independent_extension_residues || grouped_gf256_rows != 0u;
+    const uint32_t first_grouped_gf256_row =
+        subfield_rows - grouped_gf256_rows;
+    uint64_t primary_masks[kMixedPackedCoefficientWords] = {};
+    uint64_t secondary_masks[kMixedPackedCoefficientWords] = {};
+    if (secondary_schedule)
+    {
+        for (uint32_t row = 0u; row < subfield_rows; ++row)
+        {
+            uint64_t* const masks =
+                grouped_gf256_rows != 0u &&
+                row >= first_grouped_gf256_row ?
+                    secondary_masks : primary_masks;
+            masks[row >> 2] |=
+                UINT64_C(0xffff) << ((row & 3u) * 16u);
+        }
+        for (uint32_t er = 0u; er < extension_rows; ++er)
+        {
+            const uint32_t row = subfield_rows + er;
+            uint64_t* const masks = independent_extension_residues ?
+                secondary_masks : primary_masks;
+            masks[row >> 2] |=
+                UINT64_C(0xffff) << ((row & 3u) * 16u);
+        }
+    }
+
+    std::vector<uint64_t> projected(
+        (size_t)inactive_count * packed_words, uint64_t{0});
+    std::vector<uint8_t> rhs((size_t)H * block_bytes, uint8_t{0});
+
+    // One dense pass over every solver column: completion coefficients
+    // project onto the inactivated variables while each peeled column's
+    // affine constant accumulates directly into the heavy RHS blocks.
+    {
+        uint32_t block_index = 0u;
+        uint32_t block_column = 0u;
+        uint32_t residue = 0u;
+        for (uint32_t column = 0; column < column_count; ++column)
+        {
+            uint64_t combined[kMixedPackedCoefficientWords] = {};
+            const uint64_t* column_coefficients =
+                cached_packed->ByResidue[residue];
+            if (secondary_schedule)
+            {
+                const uint32_t secondary_residue =
+                    independent_extension_residues ?
+                        ActiveMixedExtensionCoefficientResidue(column) :
+                        ActiveMixedGroupedGF256CoefficientResidue(
+                            column, first_heavy_column);
+                if (secondary_residue >= coefficient_period) {
+                    return false;
+                }
+                const uint64_t* secondary_coefficients =
+                    cached_packed->ByResidue[secondary_residue];
+                for (uint32_t word = 0u; word < packed_words; ++word) {
+                    combined[word] =
+                        (column_coefficients[word] &
+                            primary_masks[word]) |
+                        (secondary_coefficients[word] &
+                            secondary_masks[word]);
+                }
+                column_coefficients = combined;
+            }
+            if (++block_column == coefficient_period)
+            {
+                block_column = 0u;
+                residue = ActiveMixedResidueBlockShift(++block_index);
+                if (residue >= coefficient_period) {
+                    return false;
+                }
+            }
+            else if (++residue == coefficient_period) {
+                residue = 0u;
+            }
+            const uint32_t inactive = inactive_index[column];
+            if (inactive != UINT32_MAX)
+            {
+                if (inactive >= inactive_count) {
+                    return false;
+                }
+                uint64_t* destination =
+                    projected.data() + (size_t)inactive * packed_words;
+                for (uint32_t word = 0u; word < packed_words; ++word) {
+                    destination[word] ^= column_coefficients[word];
+                }
+                continue;
+            }
+            const uint64_t* bits =
+                projection.data() + (size_t)column * projection_words;
+            for (uint32_t word_index = 0;
+                 word_index < projection_words; ++word_index)
+            {
+                uint64_t word = bits[word_index];
+                while (word != 0u)
+                {
+                    const uint32_t bit =
+                        wirehair::NonzeroLowestBitIndex64(word);
+                    const uint32_t index = (word_index << 6) + bit;
+                    if (index < inactive_count)
+                    {
+                        uint64_t* destination = projected.data() +
+                            (size_t)index * packed_words;
+                        for (uint32_t w = 0u; w < packed_words; ++w) {
+                            destination[w] ^= column_coefficients[w];
+                        }
+                    }
+                    word &= word - 1u;
+                }
+            }
+            const uint8_t* value =
+                values.data() + (size_t)column * block_bytes;
+            if (RowIsZero(value, block_bytes)) {
+                continue;
+            }
+            for (uint32_t row = 0u; row < H; ++row)
+            {
+                const uint16_t scale = (uint16_t)(
+                    column_coefficients[row >> 2] >>
+                        ((row & 3u) * 16u));
+                if (scale == 0u) {
+                    continue;
+                }
+                TinyGF16MulAddRow(
+                    rhs.data() + (size_t)row * block_bytes,
+                    value, scale, block_bytes);
+                if (scale == 1u) {
+                    ++stats.BlockXors;
+                }
+                else {
+                    ++stats.BlockMulAdds;
+                }
+            }
+        }
+    }
+
+    // Reduce every binary pivot RHS through its projected completion
+    // scales, exactly as the general path does after its bucket pass.
+    for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+    {
+        if (!binary_have_pivot[pivot]) {
+            continue;
+        }
+        const uint64_t* packed_scales =
+            projected.data() + (size_t)pivot * packed_words;
+        bool have_scale = false;
+        for (uint32_t row = 0u; row < H && !have_scale; ++row) {
+            have_scale = (uint16_t)(
+                packed_scales[row >> 2] >> ((row & 3u) * 16u)) != 0u;
+        }
+        if (!have_scale) {
+            continue;
+        }
+        const uint8_t* source =
+            binary_pivot_rhs.data() + (size_t)pivot * block_bytes;
+        if (RowIsZero(source, block_bytes)) {
+            continue;
+        }
+        for (uint32_t row = 0u; row < H; ++row)
+        {
+            const uint16_t scale = (uint16_t)(
+                packed_scales[row >> 2] >> ((row & 3u) * 16u));
+            if (scale == 0u) {
+                continue;
+            }
+            TinyGF16MulAddRow(
+                rhs.data() + (size_t)row * block_bytes,
+                source, scale, block_bytes);
+            if (scale == 1u) {
+                ++stats.BlockXors;
+            }
+            else {
+                ++stats.BlockMulAdds;
+            }
+        }
+    }
+
+    // Quotient coefficients over the free columns via the same binary
+    // pivot substitution the general path performs.
+    uint16_t quotient[kMixedCompletionRowsMax][kMixedCompletionRowsMax];
+    for (uint32_t i = 0u; i < quotient_columns; ++i)
+    {
+        const uint32_t free_column = free_columns[i];
+        if (free_column >= inactive_count) {
+            return false;
+        }
+        uint64_t packed[kMixedPackedCoefficientWords] = {};
+        const uint64_t* free_coefficients =
+            projected.data() + (size_t)free_column * packed_words;
+        for (uint32_t word = 0u; word < packed_words; ++word) {
+            packed[word] = free_coefficients[word];
+        }
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            const uint64_t* relation =
+                binary_pivot_coeff.data() +
+                    (size_t)pivot * projection_words;
+            if (!binary_have_pivot[pivot] ||
+                (relation[free_column >> 6] &
+                    (UINT64_C(1) << (free_column & 63u))) == 0u)
+            {
+                continue;
+            }
+            const uint64_t* pivot_coefficients =
+                projected.data() + (size_t)pivot * packed_words;
+            for (uint32_t word = 0u; word < packed_words; ++word) {
+                packed[word] ^= pivot_coefficients[word];
+            }
+        }
+        for (uint32_t row = 0u; row < H; ++row) {
+            quotient[row][i] = (uint16_t)(
+                packed[row >> 2] >> ((row & 3u) * 16u));
+        }
+    }
+
+    // Dense scalar Gauss-Jordan over GF(2^16) carrying the RHS blocks.
+    // Any pivot choice reaches the same rank and, at full rank, the same
+    // unique solution; skipped columns only occur on the NeedMore path.
+    uint8_t row_used[kMixedCompletionRowsMax] = {};
+    uint8_t pivot_row_of[kMixedCompletionRowsMax];
+    std::memset(pivot_row_of, 0xff, sizeof(pivot_row_of));
+    uint32_t rank = 0u;
+    for (uint32_t column = 0u; column < quotient_columns; ++column)
+    {
+        uint32_t pivot_row = H;
+        for (uint32_t row = 0u; row < H; ++row)
+        {
+            if (!row_used[row] && quotient[row][column] != 0u) {
+                pivot_row = row;
+                break;
+            }
+        }
+        if (pivot_row == H) {
+            continue;
+        }
+        row_used[pivot_row] = 1u;
+        pivot_row_of[column] = (uint8_t)pivot_row;
+        ++rank;
+        const uint16_t pivot_value = quotient[pivot_row][column];
+        if (pivot_value != 1u)
+        {
+            const uint16_t inverse = TinyGF16Inverse(pivot_value);
+            if (inverse == 0u) {
+                return false;
+            }
+            quotient[pivot_row][column] = 1u;
+            for (uint32_t c = column + 1u; c < quotient_columns; ++c) {
+                quotient[pivot_row][c] = GF16MultiplyInitialized(
+                    quotient[pivot_row][c], inverse);
+            }
+            TinyGF16ScaleRow(
+                rhs.data() + (size_t)pivot_row * block_bytes,
+                inverse, block_bytes);
+            ++stats.BlockMulAdds;
+        }
+        for (uint32_t row = 0u; row < H; ++row)
+        {
+            if (row == pivot_row) {
+                continue;
+            }
+            const uint16_t scale = quotient[row][column];
+            if (scale == 0u) {
+                continue;
+            }
+            quotient[row][column] = 0u;
+            for (uint32_t c = column + 1u; c < quotient_columns; ++c) {
+                quotient[row][c] = (uint16_t)(
+                    quotient[row][c] ^ GF16MultiplyInitialized(
+                        scale, quotient[pivot_row][c]));
+            }
+            TinyGF16MulAddRow(
+                rhs.data() + (size_t)row * block_bytes,
+                rhs.data() + (size_t)pivot_row * block_bytes,
+                scale, block_bytes);
+            if (scale == 1u) {
+                ++stats.BlockXors;
+            }
+            else {
+                ++stats.BlockMulAdds;
+            }
+        }
+    }
+
+    // The unused completion rows carry exact left-nullspace syndromes: any
+    // nonzero RHS is an inconsistent payload, matching the general path's
+    // dependency checks in both its full-rank and deficient branches.
+    for (uint32_t row = 0u; row < H; ++row)
+    {
+        if (row_used[row]) {
+            continue;
+        }
+        if (!RowIsZero(
+                rhs.data() + (size_t)row * block_bytes, block_bytes))
+        {
+            stats.ResidualRows += row + 1u;
+            result_out = Wirehair_Error;
+            return true;
+        }
+    }
+    stats.ResidualRows += H;
+    stats.ResidualRank = binary_rank + rank;
+    if (rank < quotient_columns)
+    {
+        result_out = Wirehair_NeedMore;
+        return true;
+    }
+
+    // Unique solution: publish the free values, then rebuild every binary
+    // pivot from its preserved GF(2) relation.
+    for (uint32_t i = 0u; i < quotient_columns; ++i)
+    {
+        const uint8_t pivot_row = pivot_row_of[i];
+        if (pivot_row == UINT8_MAX) {
+            return false;
+        }
+        std::memcpy(
+            values.data() +
+                (size_t)inactive_columns[free_columns[i]] * block_bytes,
+            rhs.data() + (size_t)pivot_row * block_bytes,
+            block_bytes);
+    }
+    for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+    {
+        if (!binary_have_pivot[pivot]) {
+            continue;
+        }
+        InitializeMixedBinaryPivotValue(
+            values.data() +
+                (size_t)inactive_columns[pivot] * block_bytes,
+            block_bytes,
+            binary_pivot_rhs.data() + (size_t)pivot * block_bytes,
+            binary_pivot_coeff.data() + (size_t)pivot * projection_words,
+            free_columns, inactive_columns, values, stats);
+    }
+    result_out = Wirehair_Success;
+    return true;
+}
+
 WirehairResult SolveMixedCompletionQuotient(
     const PrecodeSystem& system,
     uint32_t column_count,
@@ -2449,6 +2981,36 @@ WirehairResult SolveMixedCompletionQuotient(
         if (!binary_have_pivot[column]) free_columns.push_back(column);
     }
     if (free_columns.size() != quotient_columns) return Wirehair_Error;
+
+    // Tiny-K fast path: identical equations solved by one dense scalar
+    // elimination, skipping the residue-bucket/factorization machinery
+    // (which is then never constructed).  The projection-oracle test hook
+    // compares that machinery against its dense oracle, so it pins the
+    // general path.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const bool tiny_fast_path_blocked =
+        MixedProjectionOracleUsers.load(std::memory_order_relaxed) != 0u;
+#else
+    const bool tiny_fast_path_blocked = false;
+#endif
+    if (!tiny_fast_path_blocked &&
+        UseTinyMixedCompletionFastPath(
+            system.Params.BlockCount, block_bytes))
+    {
+        WirehairResult tiny_result = Wirehair_Error;
+        if (TrySolveMixedCompletionQuotientTiny(
+                column_count, inactive_count, quotient_columns,
+                subfield_rows, extension_rows, grouped_gf256_rows,
+                independent_extension_residues,
+                projection_words, block_bytes,
+                inactive_index, inactive_columns, projection,
+                binary_pivot_coeff, binary_pivot_rhs, binary_have_pivot,
+                binary_rank, free_columns, values, stats, tiny_result))
+        {
+            return tiny_result;
+        }
+        // Structurally unsupported shapes fall through with no state built.
+    }
 
     // Every mixed solve previously built the same complete coefficient period.
     // Share immutable row-major and packed representations across all sizes.
@@ -3752,6 +4314,106 @@ bool RowIsZero(const uint8_t* data, uint32_t bytes)
 }
 
 } // namespace
+
+uint32_t TinyMixedFastPathMaxSourceBlocks()
+{
+    return WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_SOURCE_BLOCKS;
+}
+
+uint32_t TinyMixedFastPathMaxBlockBytes()
+{
+    return WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES;
+}
+
+uint32_t TinyMixedFastPathMaxProductBytes()
+{
+    return WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES;
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool SetTinyMixedFastPathModeForTesting(int mode)
+{
+    if (mode < -1 || mode > 1) {
+        return false;
+    }
+    TinyMixedFastPathTestModeValue = mode;
+    return true;
+}
+
+int TinyMixedFastPathModeForTesting()
+{
+    return TinyMixedFastPathTestModeValue;
+}
+
+bool CheckTinyMixedScalarHelpersForTesting()
+{
+    if (!InitializeGF16()) {
+        return false;
+    }
+    // Exhaustive inverse identity against the power-chain reference.
+    if (TinyGF16Inverse(0u) != 0u) {
+        return false;
+    }
+    for (uint32_t value = 1u; value < 65536u; ++value)
+    {
+        const uint16_t inverse = TinyGF16Inverse((uint16_t)value);
+        if (inverse != GF16InverseInitialized((uint16_t)value) ||
+            GF16MultiplyInitialized((uint16_t)value, inverse) != 1u)
+        {
+            return false;
+        }
+    }
+    // Randomized row muladd/scale against the scalar reference kernel,
+    // covering the zero/one scale specials and odd element counts.
+    uint64_t state = UINT64_C(0x243F6A8885A308D3);
+    const auto next = [&state]() {
+        state += UINT64_C(0x9E3779B97F4A7C15);
+        uint64_t z = state;
+        z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
+        return z ^ (z >> 31);
+    };
+    static const uint32_t kWidths[] = {2u, 4u, 6u, 30u, 62u, 64u, 258u};
+    for (uint32_t width : kWidths)
+    {
+        for (uint32_t trial = 0u; trial < 64u; ++trial)
+        {
+            std::vector<uint8_t> source(width);
+            std::vector<uint8_t> destination(width);
+            for (uint32_t i = 0u; i < width; ++i) {
+                source[i] = (uint8_t)next();
+                destination[i] = (uint8_t)next();
+            }
+            uint16_t scale = (uint16_t)next();
+            if (trial == 0u) scale = 0u;
+            if (trial == 1u) scale = 1u;
+            std::vector<uint8_t> expected = destination;
+            if (scale != 0u &&
+                !GF16MulAddMem(
+                    expected.data(), scale, source.data(), width))
+            {
+                return false;
+            }
+            std::vector<uint8_t> actual = destination;
+            TinyGF16MulAddRow(
+                actual.data(), source.data(), scale, width);
+            if (actual != expected) {
+                return false;
+            }
+            std::vector<uint8_t> scaled = destination;
+            if (!GF16ScaleMem(scaled.data(), scale, width)) {
+                return false;
+            }
+            std::vector<uint8_t> tiny_scaled = destination;
+            TinyGF16ScaleRow(tiny_scaled.data(), scale, width);
+            if (tiny_scaled != scaled) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)

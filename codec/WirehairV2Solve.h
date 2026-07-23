@@ -39,6 +39,59 @@ static const uint32_t kMinPacketPrecodeCount = 2u;
 static const uint32_t kMaxPacketPrecodeCount = 65521u;
 static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
 
+/**
+    Tiny-K mixed completion fast-path gate.
+
+    At or below these bounds the mixed GF(256)/GF(2^16) completion quotient
+    is solved by one direct dense scalar elimination over the inactivated
+    system instead of the packed-projection/residue-bucket/factorization
+    machinery.  The fast path evaluates the same equations in the same exact
+    arithmetic, so every solve outcome (result code, solution bytes, and rank
+    receipts) is identical; the bounds are performance tuning only.
+
+    All three bounds are runtime constants with compile-time defaults chosen
+    from paired idle-host nonzero-payload medians (mixed-p244 frozen and the
+    shared-x period-48 experiment): the fast path engages when
+    K <= max_source_blocks, block_bytes <= max_block_bytes, and
+    K * block_bytes <= max_product_bytes.  Every engaged cell measured was a
+    win or parity; the first excluded cells (K=512 at 8-byte blocks, K=768
+    at 2-byte blocks, K=64 at 16-byte blocks) were 7-10%% regressions.
+*/
+#ifndef WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_SOURCE_BLOCKS
+#define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_SOURCE_BLOCKS 512u
+#endif
+#ifndef WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES
+#define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES 8u
+#endif
+#ifndef WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES
+#define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES 2048u
+#endif
+
+/** Active tiny-K mixed fast-path bounds (compile-time defaults). */
+uint32_t TinyMixedFastPathMaxSourceBlocks();
+uint32_t TinyMixedFastPathMaxBlockBytes();
+uint32_t TinyMixedFastPathMaxProductBytes();
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/**
+    Override the tiny mixed fast-path dispatch on the calling thread:
+    -1 disables it, +1 forces it wherever structurally possible, and 0
+    restores the automatic K/block-bytes gate.  Because the fast path is
+    equation-preserving this changes timing only, never solve results;
+    tests use forced on/off pairs to prove exactly that.
+*/
+bool SetTinyMixedFastPathModeForTesting(int mode);
+int TinyMixedFastPathModeForTesting();
+
+/**
+    Exhaustively verify the tiny fast path's scalar GF(2^16) helpers: the
+    subfield-norm inverse against the power-chain reference for every field
+    element, and the fused row muladd/scale kernels against the scalar
+    reference kernels across widths and scale specials.
+*/
+bool CheckTinyMixedScalarHelpersForTesting();
+#endif
+
 struct PacketRowConfig
 {
     uint32_t PeelSeed = 0;

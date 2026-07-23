@@ -7684,6 +7684,10 @@ int CmdPrecodeFail(int argc, char** argv)
     bool construction_seed_explicit = false;
     bool overhead_early_stop = false;
     uint32_t encode_timing_reps = 0u;
+    // Tiny mixed fast-path override: 0 automatic gate, -1 force the general
+    // machinery, +1 force the dense scalar path.  Equation-preserving, so
+    // this is a timing/A-B control only.
+    int tiny_fastpath_mode = 0;
     // Exact-overhead ladder: per-K overhead levels 0..min(cap, ladder_min)
     // densely, then v += ceil(v/2) geometric steps to the cap
     // max(ladder_min, ceil(ladder_pct% * K)).  With ascending early stop the
@@ -8158,6 +8162,29 @@ int CmdPrecodeFail(int argc, char** argv)
                 !ParseU32Arg(
                     "--encode-timing", value, encode_timing_reps))
             {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--tiny-fastpath")) {
+            if (!TakeArg(
+                    "precodefail", "--tiny-fastpath",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "auto")) {
+                tiny_fastpath_mode = 0;
+            }
+            else if (!std::strcmp(value, "on")) {
+                tiny_fastpath_mode = 1;
+            }
+            else if (!std::strcmp(value, "off")) {
+                tiny_fastpath_mode = -1;
+            }
+            else {
+                std::fprintf(stderr,
+                    "precodefail --tiny-fastpath must be auto, on, or "
+                    "off\n");
                 return 1;
             }
         }
@@ -8782,7 +8809,9 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
         const auto configure_test_thread = [&]() -> bool {
-            return wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            return wirehair_v2::SetTinyMixedFastPathModeForTesting(
+                       tiny_fastpath_mode) &&
+                wirehair_v2::SetMixedCoefficientGeometryForTesting(
                        mixed_geometry) &&
                 wirehair_v2::SetMixedGF16RowsForTesting(mixed_gf16_rows) &&
                 wirehair_v2::SetMixedCoefficientPeriodForTesting(
