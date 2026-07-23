@@ -512,6 +512,18 @@ def build_methods():
     flags, hyper = _mixed_flags(period=32, geometry="shared-x", dense_rows=8)
     add2("mixed-p32x-d8", "wh2-r2-denseknee", flags, hyper)
 
+    # K-dispatched composite (versioned constant band map, never per-K
+    # tuning).  v1 = ONE band after the tiny-K fast-path envelope
+    # re-measure: [2,64000] -> mixed frozen P244 10+2 d4; the map is
+    # sealed inside wirehair_v2_bench --dispatch-profile and both encoder
+    # and decoder derive the band config deterministically from K.
+    add("wh2-dispatched-v1", "wh2-dispatched", "wh2",
+        ["--dispatch-profile", "v1"],
+        {"dispatch_profile": "v1",
+         "bands": [{"k_min": 2, "k_max": 64000,
+                    "config": "mixed-p244-frozen-10x2-d4"}]})
+    methods[-1]["round"] = 3
+
     ids = [m["id"] for m in methods]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate method ids in tuning grid")
@@ -1502,10 +1514,14 @@ def selftest():
 
     methods = build_methods()
     check("tuning grid within cap", 1 <= len(methods) <= 100)
-    check("tuning grid is 83 untuned points (63 round-1 + 20 round-2)",
-          len(methods) == 83 and
+    check("tuning grid is 84 untuned points (63 + 20 + dispatched)",
+          len(methods) == 84 and
           sum(1 for m in methods if m.get("round") == 2) == 20 and
           not any(m["id"].endswith("-tuned") for m in methods))
+    dispatched = next(m for m in methods if m["family"] == "wh2-dispatched")
+    check("dispatched composite is a versioned constant map",
+          dispatched["flags"] == ["--dispatch-profile", "v1"] and
+          dispatched["hyperparameters"]["bands"][0]["k_max"] == 64000)
     check("tuning grid has wh1 arm",
           any(m["arm"] == "wh1" for m in methods))
     check("tuning grid has h15 family",

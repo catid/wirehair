@@ -2577,6 +2577,15 @@ bool UseTinyMixedCompletionFastPath(
     if (TinyMixedFastPathTestModeValue > 0) {
         return true;
     }
+    // An explicitly requested residue-bucket mode is a demand for that
+    // projection machinery (experiments assert its use); the automatic
+    // tiny-path gate must not silently bypass it.
+    if (ActiveMixedResidueBucketModeForTesting() !=
+        MixedResidueBucketMode::Automatic)
+    {
+        return false;
+    }
+
 #endif
     return block_count <= TinyMixedFastPathMaxSourceBlocks() &&
         block_bytes <= TinyMixedFastPathMaxBlockBytes() &&

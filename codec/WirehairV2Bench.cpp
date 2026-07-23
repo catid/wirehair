@@ -7697,6 +7697,19 @@ int CmdPrecodeFail(int argc, char** argv)
     uint32_t overhead_ladder_min = 8u;
     bool overhead_ladder_min_explicit = false;
     bool overhead_explicit = false;
+    // Equal-block-bytes timing override so cross-completion envelopes are
+    // measured at one payload width (e.g. certified at two bytes).
+    uint32_t encode_timing_bytes = 0u;
+    // K-dispatched composite profile (versioned constant band map; never
+    // per-K tuning).  v1, from the 2026-07-23 fast-path envelope
+    // re-measure at equal two-byte blocks over K=2..4096 plus the quiet
+    // regional screen above: the former three regimes collapse to ONE
+    // band, [2,64000] -> mixed frozen P244 10+2 with four binary dense
+    // rows (the tiny-K fast path handles the small-K regime inside the
+    // same configuration).  Encoder and decoder both derive the band
+    // config deterministically from K; with one band that derivation is
+    // constant.
+    bool dispatch_profile_v1 = false;
 #endif
 
     for (int i = 0; i < argc; ++i)
@@ -8188,6 +8201,32 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--dispatch-profile")) {
+            if (!TakeArg(
+                    "precodefail", "--dispatch-profile",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (std::strcmp(value, "v1") != 0)
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --dispatch-profile %s "
+                    "(expected v1)\n", value);
+                return 1;
+            }
+            dispatch_profile_v1 = true;
+        }
+        else if (!std::strcmp(argv[i], "--encode-timing-bytes")) {
+            if (!TakeArg(
+                    "precodefail", "--encode-timing-bytes",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--encode-timing-bytes", value, encode_timing_bytes))
+            {
+                return 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--overhead-ladder-pct")) {
             if (!TakeArg(
                     "precodefail", "--overhead-ladder-pct",
@@ -8597,6 +8636,40 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --encode-timing must be in [0,99]\n");
         return 1;
     }
+    if (dispatch_profile_v1)
+    {
+        if (binary_dense_rows_explicit || dense_identity_corner ||
+            binary_dense_two_anchor ||
+            binary_dense_segmented_anchors_explicit ||
+            degree_balanced_staircase || gf256_heavy_rows_explicit ||
+            mixed_period_explicit || mixed_geometry_explicit ||
+            mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+            completion == PrecodeFailCompletion::Mixed)
+        {
+            std::fprintf(stderr,
+                "precodefail --dispatch-profile supplies the complete "
+                "band configuration; it conflicts with explicit "
+                "completion/dense/heavy/mixed knobs\n");
+            return 1;
+        }
+        // v1 single band: [2,64000] -> mixed frozen P244 10+2, four
+        // binary dense rows, mix count from the CLI default.
+        completion = PrecodeFailCompletion::Mixed;
+        binary_dense_rows_override = 4u;
+        std::printf(
+            "# dispatch_profile: name=v1 bands=1 "
+            "band0=k[2,64000]:mixed-p244-frozen-10x2-d4\n");
+    }
+    if (encode_timing_bytes != 0u &&
+        (encode_timing_bytes > 64u ||
+         (completion == PrecodeFailCompletion::Mixed &&
+          (encode_timing_bytes & 1u) != 0u)))
+    {
+        std::fprintf(stderr,
+            "precodefail --encode-timing-bytes must be in [1,64] and even "
+            "for mixed completion\n");
+        return 1;
+    }
     if (overhead_ladder_pct > 100u)
     {
         std::fprintf(stderr,
@@ -8986,8 +9059,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 // symbols, at the minimal legal block size.  Repair symbols
                 // and all decoding are excluded.  Runs single-threaded on
                 // the main thread; the receipt reports the median rep.
-                const uint32_t timing_bytes =
-                    completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+                const uint32_t timing_bytes = encode_timing_bytes != 0u ?
+                    encode_timing_bytes :
+                    (completion == PrecodeFailCompletion::Mixed ? 2u : 1u);
                 std::vector<uint8_t> timing_source(
                     (size_t)K * timing_bytes, uint8_t{0});
                 std::vector<uint8_t> timing_symbols(

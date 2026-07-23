@@ -572,6 +572,26 @@ expect_failure("--overhead-early-stop conflicts with paired" precodefail
 expect_failure("--encode-timing must be in" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --encode-timing 100)
+# Equal-block-bytes timing override (cross-completion envelopes) and the
+# K-dispatched composite profile (versioned constant band map).
+expect_success("solve_block_bytes=2" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0
+    --completion certified --encode-timing 3 --encode-timing-bytes 2)
+expect_failure("--encode-timing-bytes must be in" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --completion mixed --encode-timing 3 --encode-timing-bytes 3)
+expect_success("# dispatch_profile: name=v1 bands=1 band0=k.2,64000.:mixed-p244-frozen-10x2-d4"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --dispatch-profile v1)
+expect_failure("unknown --dispatch-profile" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --dispatch-profile v2)
+expect_failure("--dispatch-profile supplies the complete" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --dispatch-profile v1 --binary-dense-rows 8)
+expect_failure("--dispatch-profile supplies the complete" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --dispatch-profile v1 --completion mixed)
 # Exact-overhead ladder: dense 0..min, then v += ceil(v/2) to the cap
 # max(min, ceil(pct% * K)).  K=64 at 50%/8 walks 0..8,12,18,27,32.
 expect_success("overhead_ladder_pct=50 overhead_ladder_min=8" precodefail
