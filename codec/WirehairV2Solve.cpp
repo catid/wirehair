@@ -2480,6 +2480,31 @@ inline void TinyGF16ScaleRow(
     }
 }
 
+// Coefficient sub-rows are uint16 arrays.  On little-endian hosts their
+// in-memory layout matches the little-endian block element format, so the
+// fused byte kernels apply directly; other hosts use the equivalent scalar
+// loop.  Both compute the identical field products.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define WH2_TINY_LITTLE_ENDIAN 1
+#elif defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || \
+    defined(_M_ARM) || defined(_M_ARM64))
+#define WH2_TINY_LITTLE_ENDIAN 1
+#else
+#define WH2_TINY_LITTLE_ENDIAN 0
+#endif
+
+inline void TinyGF16MulAddCoefficients(
+    uint16_t* destination,
+    const uint16_t* source,
+    uint16_t scale,
+    uint32_t count);
+
+inline void TinyGF16ScaleCoefficients(
+    uint16_t* coefficients,
+    uint16_t scale,
+    uint32_t count);
+
 // Exact GF(2^16) inverse through the GF(256) subfield norm.  With
 // x^2 = x + lambda the conjugate of z = a + b x is (a ^ b) + b x, so
 // z * conj(z) = a^2 ^ a b ^ lambda b^2 lies in GF(256) and
@@ -2499,6 +2524,46 @@ inline uint16_t TinyGF16Inverse(uint16_t value)
     const uint8_t norm_inverse = gf256_inv(norm);
     return (uint16_t)gf256_mul((uint8_t)(a ^ b), norm_inverse) |
         (uint16_t)((uint16_t)gf256_mul(b, norm_inverse) << 8);
+}
+
+inline void TinyGF16MulAddCoefficients(
+    uint16_t* destination,
+    const uint16_t* source,
+    uint16_t scale,
+    uint32_t count)
+{
+    if (count == 0u || scale == 0u) {
+        return;
+    }
+#if WH2_TINY_LITTLE_ENDIAN
+    TinyGF16MulAddRow(
+        reinterpret_cast<uint8_t*>(destination),
+        reinterpret_cast<const uint8_t*>(source),
+        scale, count * 2u);
+#else
+    for (uint32_t i = 0u; i < count; ++i) {
+        destination[i] = (uint16_t)(destination[i] ^
+            GF16MultiplyInitialized(scale, source[i]));
+    }
+#endif
+}
+
+inline void TinyGF16ScaleCoefficients(
+    uint16_t* coefficients,
+    uint16_t scale,
+    uint32_t count)
+{
+    if (count == 0u) {
+        return;
+    }
+#if WH2_TINY_LITTLE_ENDIAN
+    TinyGF16ScaleRow(
+        reinterpret_cast<uint8_t*>(coefficients), scale, count * 2u);
+#else
+    for (uint32_t i = 0u; i < count; ++i) {
+        coefficients[i] = GF16MultiplyInitialized(scale, coefficients[i]);
+    }
+#endif
 }
 
 bool UseTinyMixedCompletionFastPath(
@@ -2811,6 +2876,11 @@ bool TrySolveMixedCompletionQuotientTiny(
         row_used[pivot_row] = 1u;
         pivot_row_of[column] = (uint8_t)pivot_row;
         ++rank;
+        // Earlier pivot columns are already zero in every row, so only the
+        // tail columns need updating; the fused coefficient kernels avoid
+        // one out-of-line scalar multiply per element.
+        const uint32_t tail_columns = quotient_columns - column - 1u;
+        uint16_t* const pivot_tail = &quotient[pivot_row][column + 1u];
         const uint16_t pivot_value = quotient[pivot_row][column];
         if (pivot_value != 1u)
         {
@@ -2819,10 +2889,7 @@ bool TrySolveMixedCompletionQuotientTiny(
                 return false;
             }
             quotient[pivot_row][column] = 1u;
-            for (uint32_t c = column + 1u; c < quotient_columns; ++c) {
-                quotient[pivot_row][c] = GF16MultiplyInitialized(
-                    quotient[pivot_row][c], inverse);
-            }
+            TinyGF16ScaleCoefficients(pivot_tail, inverse, tail_columns);
             TinyGF16ScaleRow(
                 rhs.data() + (size_t)pivot_row * block_bytes,
                 inverse, block_bytes);
@@ -2838,11 +2905,9 @@ bool TrySolveMixedCompletionQuotientTiny(
                 continue;
             }
             quotient[row][column] = 0u;
-            for (uint32_t c = column + 1u; c < quotient_columns; ++c) {
-                quotient[row][c] = (uint16_t)(
-                    quotient[row][c] ^ GF16MultiplyInitialized(
-                        scale, quotient[pivot_row][c]));
-            }
+            TinyGF16MulAddCoefficients(
+                &quotient[row][column + 1u], pivot_tail, scale,
+                tail_columns);
             TinyGF16MulAddRow(
                 rhs.data() + (size_t)row * block_bytes,
                 rhs.data() + (size_t)pivot_row * block_bytes,
