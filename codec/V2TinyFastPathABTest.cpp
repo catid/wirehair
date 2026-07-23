@@ -373,6 +373,11 @@ std::vector<uint32_t> BuildKList(bool full)
         for (uint32_t k = 260u; k <= 512u; k += 4u) {
             k_values.push_back(k);
         }
+        // Fine steps across the product-gate seam (K*bb = 3072 excludes
+        // K=513 at 6-byte blocks): odd K right at the first excluded cells.
+        for (uint32_t k = 513u; k <= 519u; k += 2u) {
+            k_values.push_back(k);
+        }
         for (uint32_t k = 520u; k <= 1024u; k += 8u) {
             k_values.push_back(k);
         }
@@ -399,14 +404,34 @@ namespace {
 // Nonzero-payload solve timing: unlike the bench's zero-payload timing
 // loop, every peeled constant is nonzero here, so the fast path's
 // zero-block skip cannot flatter it.  Prints one median per (K, bb, mode).
-int RunTiming(uint32_t K, uint32_t block_bytes, int mode, uint32_t reps)
+// The optional profile selector times either the frozen baseline or the
+// dispatched mixed-p244-d4 configuration (dense rows 4).
+int RunTiming(
+    uint32_t K,
+    uint32_t block_bytes,
+    int mode,
+    uint32_t reps,
+    const char* profile_name)
 {
     ProfileConfig profile =
         {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u};
+    if (profile_name && !std::strcmp(profile_name, "d4")) {
+        profile.Name = "mixed-p244-d4";
+        profile.DenseRows = 4u;
+    }
+    else if (profile_name && std::strcmp(profile_name, "baseline")) {
+        std::fprintf(stderr,
+            "unknown timing profile %s (want baseline or d4)\n",
+            profile_name);
+        return 1;
+    }
     if (!ApplyProfileHooks(profile)) {
         return 1;
     }
     PrecodeParams params = MakeMixedParams(K, UINT64_C(0xC0FFEE));
+    if (profile.DenseRows != 0u) {
+        params.DenseRows = profile.DenseRows;
+    }
     PrecodeSystem system;
     if (!BuildPrecodeSystem(params, system)) {
         return 1;
@@ -447,8 +472,8 @@ int RunTiming(uint32_t K, uint32_t block_bytes, int mode, uint32_t reps)
                 t1 - t0).count());
     }
     std::sort(rep_ns.begin(), rep_ns.end());
-    std::printf("timing K=%u bb=%u mode=%d median_solve_ns=%llu\n",
-        K, block_bytes, mode,
+    std::printf("timing profile=%s K=%u bb=%u mode=%d median_solve_ns=%llu\n",
+        profile.Name, K, block_bytes, mode,
         (unsigned long long)rep_ns[rep_ns.size() / 2u]);
     return 0;
 }
@@ -472,7 +497,8 @@ int main(int argc, char** argv)
             const int mode = (int)std::strtol(argv[i + 3], nullptr, 0);
             const uint32_t reps = (uint32_t)std::strtoul(
                 argv[i + 4], nullptr, 0);
-            return RunTiming(K, block_bytes, mode, reps);
+            const char* profile_name = i + 5 < argc ? argv[i + 5] : nullptr;
+            return RunTiming(K, block_bytes, mode, reps, profile_name);
         }
         else
         {
@@ -523,6 +549,12 @@ int main(int argc, char** argv)
                 std::vector<uint32_t> widths;
                 widths.push_back(2u);
                 widths.push_back(6u);
+                // 8-byte blocks reach the widened product gate (K*bb <=
+                // 3072 engages bb=8 through K=384); cover the flat-K
+                // region plus the first excluded cells above it.
+                if (K <= 512u) {
+                    widths.push_back(8u);
+                }
                 if ((k_index + seed_index) % 2u == 0u) {
                     widths.push_back(32u);
                 }
