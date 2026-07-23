@@ -3858,20 +3858,30 @@ WirehairResult Codec::ChooseMatrix(
 
 #ifdef WH_COUNT
 // Task 6a: per-stage symbol-XOR attribution (snapshot gf256 byte total around each stage).
+// Mechanism attribution extends each stage record with wall nanoseconds so
+// experiment builds can decompose encoder time by phase.
 #include "gf256.h"
+#include <chrono>
 static thread_local uint64_t wh_t_sbytes[16];
+static thread_local uint64_t wh_t_sns[16];
 static thread_local const char* wh_t_sname[16];
 static thread_local int wh_t_sn = 0;
 static inline uint64_t wh_gf_total() {
     return gf256_count_bytes(0)+gf256_count_bytes(1)+gf256_count_bytes(2)
          + gf256_count_bytes(3)+gf256_count_bytes(4)+gf256_count_bytes(5);
 }
+static inline uint64_t wh_now_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 extern "C" void wh_stage_reset() { wh_t_sn = 0; }
 extern "C" int wh_stage_count() { return wh_t_sn; }
 extern "C" uint64_t wh_stage_bytes(int i) { return (i>=0 && i<wh_t_sn) ? wh_t_sbytes[i] : 0; }
+extern "C" uint64_t wh_stage_ns(int i) { return (i>=0 && i<wh_t_sn) ? wh_t_sns[i] : 0; }
 extern "C" const char* wh_stage_label(int i) { return (i>=0 && i<wh_t_sn) ? wh_t_sname[i] : ""; }
-#define WH_STAGE(nm, call) do { uint64_t _b0 = wh_gf_total(); call; \
-    if (wh_t_sn < 16) { wh_t_sbytes[wh_t_sn] = wh_gf_total() - _b0; wh_t_sname[wh_t_sn] = nm; ++wh_t_sn; } } while(0)
+#define WH_STAGE(nm, call) do { uint64_t _b0 = wh_gf_total(); uint64_t _t0 = wh_now_ns(); call; \
+    if (wh_t_sn < 16) { wh_t_sns[wh_t_sn] = wh_now_ns() - _t0; \
+        wh_t_sbytes[wh_t_sn] = wh_gf_total() - _b0; wh_t_sname[wh_t_sn] = nm; ++wh_t_sn; } } while(0)
 #else
 #define WH_STAGE(nm, call) do { call; } while(0)
 #endif
@@ -3892,7 +3902,9 @@ WirehairResult Codec::SolveMatrix()
 
     // (2) Compression
 
-    if (!AllocateMatrix()) {
+    bool wh_alloc_ok;
+    WH_STAGE("AllocateMatrix", wh_alloc_ok = AllocateMatrix());
+    if (!wh_alloc_ok) {
         return Wirehair_OOM;
     }
 
@@ -3904,7 +3916,7 @@ WirehairResult Codec::SolveMatrix()
     WH_STAGE("PeelDiagonal", PeelDiagonal());
     WH_STAGE("CopyDeferredRows", CopyDeferredRows());
     WH_STAGE("MultiplyDenseRows", MultiplyDenseRows());
-    SetHeavyRows();
+    WH_STAGE("SetHeavyRows", SetHeavyRows());
 
     // Add invertible matrix to mathematically tie dense rows to dense mixing columns
     AddInvertibleGF2Matrix(_ge_matrix, _defer_count, _ge_pitch, _dense_count);

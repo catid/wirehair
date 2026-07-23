@@ -2338,7 +2338,7 @@ int CmdCompare(int argc, char** argv)
             "compare --mixed-gf256-rows must be in [%u,%u], fit the "
             "active period, use shared-x for an extra row, and use the "
             "validated 12+4 geometry for twelve rows\n",
-            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMin,
             wirehair_v2::kMixedGF256RowsMax);
         return 1;
     }
@@ -8383,7 +8383,7 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --mixed-gf256-rows must be in [%u,%u], fit the "
             "active period, use shared-x for an extra row, and use the "
             "validated 12+4 geometry for twelve rows\n",
-            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF256RowsMin,
             wirehair_v2::kMixedGF256RowsMax);
         return 1;
     }
@@ -8965,7 +8965,18 @@ int CmdPrecodeFail(int argc, char** argv)
                     (size_t)K * timing_bytes, uint8_t{0});
                 std::vector<wirehair_v2::SolvePacket> timing_packets(K);
                 std::vector<uint64_t> rep_ns;
+                std::vector<uint64_t> rep_init_ns;
+                std::vector<uint64_t> rep_symbols_ns;
+                std::vector<uint64_t> rep_sysbuild_ns;
+                std::vector<uint64_t> rep_runtime_ns;
+                std::vector<uint64_t> rep_solve_build_ns;
+                std::vector<uint64_t> rep_solve_peel_ns;
+                std::vector<uint64_t> rep_solve_project_ns;
+                std::vector<uint64_t> rep_solve_residual_ns;
+                std::vector<uint64_t> rep_solve_backsub_ns;
                 rep_ns.reserve(encode_timing_reps);
+                rep_init_ns.reserve(encode_timing_reps);
+                rep_symbols_ns.reserve(encode_timing_reps);
                 bool timing_setup_failed = false;
                 bool timing_solve_ok = true;
                 uint32_t timing_sink = 0u;
@@ -8975,13 +8986,19 @@ int CmdPrecodeFail(int argc, char** argv)
                     wirehair_v2::PrecodeSystem timing_system;
                     wirehair_v2::PacketRowRuntime timing_runtime;
                     if (!wirehair_v2::BuildPrecodeSystem(
-                            system.Params, timing_system) ||
-                        !timing_runtime.Initialize(
+                            system.Params, timing_system))
+                    {
+                        timing_setup_failed = true;
+                        break;
+                    }
+                    const Clock::time_point t_sysbuild = Clock::now();
+                    if (!timing_runtime.Initialize(
                             K, precode_count, config.MixCount))
                     {
                         timing_setup_failed = true;
                         break;
                     }
+                    const Clock::time_point t_runtime = Clock::now();
                     for (uint32_t block_id = 0; block_id < K; ++block_id)
                     {
                         timing_packets[block_id].BlockId = block_id;
@@ -8990,15 +9007,20 @@ int CmdPrecodeFail(int argc, char** argv)
                             (size_t)block_id * timing_bytes;
                     }
                     std::vector<uint8_t> timing_intermediate;
+                    wirehair_v2::PrecodeSolveStats timing_stats;
                     const WirehairResult timing_result =
                         wirehair_v2::
                             SolvePrecodeSystemForValidatedSystemWithRuntime(
                                 timing_system, config, timing_runtime,
                                 timing_packets, timing_bytes,
-                                timing_intermediate);
+                                timing_intermediate, &timing_stats);
                     if (timing_result != Wirehair_Success) {
                         timing_solve_ok = false;
                     }
+                    // Phase boundary: everything above is encoder init
+                    // (system build + runtime + precode solve); everything
+                    // below is per-symbol systematic output.
+                    const Clock::time_point t_mid = Clock::now();
                     // A systematic encoder emits source blocks unchanged for
                     // ids below K: one block copy per symbol.
                     std::memcpy(
@@ -9013,6 +9035,28 @@ int CmdPrecodeFail(int argc, char** argv)
                     rep_ns.push_back((uint64_t)
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             t1 - t0).count());
+                    rep_init_ns.push_back((uint64_t)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            t_mid - t0).count());
+                    rep_symbols_ns.push_back((uint64_t)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            t1 - t_mid).count());
+                    rep_sysbuild_ns.push_back((uint64_t)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            t_sysbuild - t0).count());
+                    rep_runtime_ns.push_back((uint64_t)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            t_runtime - t_sysbuild).count());
+                    rep_solve_build_ns.push_back(
+                        timing_stats.BuildNanoseconds);
+                    rep_solve_peel_ns.push_back(
+                        timing_stats.PeelNanoseconds);
+                    rep_solve_project_ns.push_back(
+                        timing_stats.ProjectNanoseconds);
+                    rep_solve_residual_ns.push_back(
+                        timing_stats.ResidualNanoseconds);
+                    rep_solve_backsub_ns.push_back(
+                        timing_stats.BackSubNanoseconds);
                 }
                 if (timing_setup_failed || rep_ns.empty())
                 {
@@ -9023,14 +9067,27 @@ int CmdPrecodeFail(int argc, char** argv)
                         (uint32_t)mix_count_value);
                     return 2;
                 }
+                const auto median_of = [](std::vector<uint64_t>& values) {
+                    std::sort(values.begin(), values.end());
+                    return values[values.size() / 2u];
+                };
                 std::sort(rep_ns.begin(), rep_ns.end());
+                std::sort(rep_init_ns.begin(), rep_init_ns.end());
+                std::sort(rep_symbols_ns.begin(), rep_symbols_ns.end());
                 const uint64_t median_ns = rep_ns[rep_ns.size() / 2u];
+                // Per-phase medians are computed independently, so they need
+                // not sum to the total median.
+                const uint64_t median_init_ns =
+                    rep_init_ns[rep_init_ns.size() / 2u];
+                const uint64_t median_symbols_ns =
+                    rep_symbols_ns[rep_symbols_ns.size() / 2u];
                 const double median_seconds = (double)median_ns / 1e9;
                 std::printf(
                     "# encode_timing,N=%u,bb=%u,heavy_family=%s,"
                     "mix_count=%u,reps=%u,solve_ok=%u,solve_block_bytes=%u,"
                     "median_ns=%llu,seconds_per_k_symbols=%.9g,"
-                    "symbols_per_sec=%.9g,sink=%u\n",
+                    "symbols_per_sec=%.9g,median_init_ns=%llu,"
+                    "median_symbols_ns=%llu,sink=%u\n",
                     K, bb, HeavyFamilyName(heavy_family),
                     (uint32_t)mix_count_value,
                     encode_timing_reps,
@@ -9039,7 +9096,30 @@ int CmdPrecodeFail(int argc, char** argv)
                     (unsigned long long)median_ns,
                     median_seconds,
                     median_seconds > 0.0 ? (double)K / median_seconds : 0.0,
+                    (unsigned long long)median_init_ns,
+                    (unsigned long long)median_symbols_ns,
                     timing_sink & 0xffu);
+                // Mechanism-attribution phase receipt: init split into
+                // precode-system construction (staircase/dense/heavy row
+                // generation), packet-runtime setup, and the solve's own
+                // internal build/peel/project/residual/backsub timers.
+                // Each field is an independent per-rep median.
+                std::printf(
+                    "# encode_timing_phases,N=%u,heavy_family=%s,"
+                    "mix_count=%u,median_sysbuild_ns=%llu,"
+                    "median_runtime_ns=%llu,median_solve_build_ns=%llu,"
+                    "median_solve_peel_ns=%llu,median_solve_project_ns=%llu,"
+                    "median_solve_residual_ns=%llu,"
+                    "median_solve_backsub_ns=%llu\n",
+                    K, HeavyFamilyName(heavy_family),
+                    (uint32_t)mix_count_value,
+                    (unsigned long long)median_of(rep_sysbuild_ns),
+                    (unsigned long long)median_of(rep_runtime_ns),
+                    (unsigned long long)median_of(rep_solve_build_ns),
+                    (unsigned long long)median_of(rep_solve_peel_ns),
+                    (unsigned long long)median_of(rep_solve_project_ns),
+                    (unsigned long long)median_of(rep_solve_residual_ns),
+                    (unsigned long long)median_of(rep_solve_backsub_ns));
             }
 #endif
 

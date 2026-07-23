@@ -2085,6 +2085,31 @@ bool CheckMixedProjectionResidueBucketsOracle()
             return false;
         }
     }
+    // GF256 row trims (leading Cauchy subsets of the frozen table): verify
+    // the optimized projection against the dense expansion for nine and
+    // eight subfield rows in both geometries.
+    for (const uint32_t trimmed_rows : {9u, 8u})
+    {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                wirehair_v2::kMixedCoefficientPeriod,
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+                wirehair_v2::kMixedGF16Rows,
+                0u,
+                wirehair_v2::MixedResidueSchedule::Constant,
+                false,
+                trimmed_rows) ||
+            !CheckMixedProjectionResidueBucketsOracleForPeriod(
+                48u,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows,
+                0u,
+                wirehair_v2::MixedResidueSchedule::Constant,
+                false,
+                trimmed_rows))
+        {
+            return false;
+        }
+    }
     // Keep grouped coverage bounded to the two boundary pairs above: every
     // solve still compares optimized projection against the dense expansion,
     // while explicit separate/joint modes cover P32, P48, and P64 at the

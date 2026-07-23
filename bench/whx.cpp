@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <map>
 
 using namespace std;
 using Clock = std::chrono::steady_clock;
@@ -730,7 +731,8 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
     static const char* scan_values[] = { "--nlo", "--nhi", "--nfile", "--trials", "--bb", "--startmode", "--loss", "--thresh", "--seed", nullptr };
     static const char* untunedcells_values[] = { "--nlist", "--nfile", "--cseed", "--seed", "--loss", "--maxoh", "--cap-pct", "--cap-min", "--pairbb", "--trial", nullptr };
     static const char* untunedcells_flags[] = { "--tuned", nullptr };
-    static const char* enctime_values[] = { "--nlist", "--nfile", "--reps", "--bb", "--cseed", "--seed", nullptr };
+    static const char* enctime_values[] = { "--nlist", "--nfile", "--reps", "--bb", "--cseed", "--seed", "--dense", nullptr };
+    static const char* enctime_flags[] = { "--phases", nullptr };
 #ifdef WH_SEED_KNOBS
     static const char* seedmean_values[] = { "--N", "--n", "--pseed", "--dseed", "--trials", "--bb", "--loss", "--startmode", "--seed", nullptr };
     static const char* seedsearch_values[] = { "--nlist", "--nfile", "--tsearch", "--tverify", "--nseeds", "--bb", "--loss", "--startmode", "--dseeds", "--goodthr", nullptr };
@@ -752,7 +754,10 @@ static bool validate_mode_options(const string& mode, int argc, char** argv) {
         value_options = untunedcells_values;
         flag_options = untunedcells_flags;
     }
-    else if (mode == "enctime") value_options = enctime_values;
+    else if (mode == "enctime") {
+        value_options = enctime_values;
+        flag_options = enctime_flags;
+    }
 #ifdef WH_SEED_KNOBS
     else if (mode == "seedmean") value_options = seedmean_values;
     else if (mode == "seedsearch") value_options = seedsearch_values;
@@ -1854,7 +1859,7 @@ static int cmd_scan(int argc, char** argv) {
 
 #ifdef WH_COUNT
 extern "C" {
-void wh_stage_reset(); int wh_stage_count(); uint64_t wh_stage_bytes(int); const char* wh_stage_label(int);
+void wh_stage_reset(); int wh_stage_count(); uint64_t wh_stage_bytes(int); uint64_t wh_stage_ns(int); const char* wh_stage_label(int);
 unsigned wh_graph_defer_count(); unsigned wh_graph_defer_rows(); unsigned wh_graph_component_count();
 unsigned wh_graph_max_component(); uint64_t wh_graph_component_sum_squares();
 }
@@ -2394,9 +2399,10 @@ static int cmd_untunedcells(int argc, char** argv) {
 
 static int cmd_enctime(int argc, char** argv) {
     string nlist, nfile;
-    int reps = 3, bb = 1;
+    int reps = 3, bb = 1, dense_override = 0;
     uint64_t cseed = 0, mseed = 0x517ULL;
     bool have_cseed = false;
+    bool phases = false;
     for (int i = 0; i < argc; ++i) {
         if (!strcmp(argv[i], "--nlist") && i + 1 < argc) nlist = argv[++i];
         else if (!strcmp(argv[i], "--nfile") && i + 1 < argc) nfile = argv[++i];
@@ -2404,37 +2410,57 @@ static int cmd_enctime(int argc, char** argv) {
         else if (!strcmp(argv[i], "--bb") && i + 1 < argc) { if (!parse_int_strict(argv[++i], bb)) return 2; }
         else if (!strcmp(argv[i], "--cseed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], cseed)) return 2; have_cseed = true; }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) { if (!parse_u64_strict(argv[++i], mseed)) return 2; }
+        else if (!strcmp(argv[i], "--dense") && i + 1 < argc) { if (!parse_int_strict(argv[++i], dense_override)) return 2; }
+        else if (!strcmp(argv[i], "--phases")) phases = true;
     }
     vector<int> Ns;
     if (!load_untuned_n_values("enctime", nfile, nlist, Ns)) return 2;
-    if (reps < 1 || reps > 99 || bb < 1 || bb > 4096) {
-        fprintf(stderr, "enctime requires 1 <= --reps <= 99 and 1 <= --bb <= 4096\n");
+    if (reps < 1 || reps > 99 || bb < 1 || bb > 4096 ||
+        dense_override < 0 || dense_override > 399 ||
+        (dense_override != 0 && have_cseed)) {
+        fprintf(stderr, "enctime requires 1 <= --reps <= 99, 1 <= --bb <= 4096, "
+                        "0 <= --dense <= 399, and --dense without --cseed\n");
         return 2;
     }
+#ifndef WH_COUNT
+    if (phases) {
+        fprintf(stderr, "enctime --phases requires a -DWH_COUNT build\n");
+        return 2;
+    }
+#endif
     int counted = 0;
 #ifdef WH_COUNT
     counted = 1;
 #endif
     printf("# enctime: reps=%d bb=%d cseed_explicit=%d cseed=0x%llx counted=%d "
-           "single_threaded=1 seed=0x%llx\n",
+           "single_threaded=1 seed=0x%llx dense_override=%d phases=%d\n",
            reps, bb, have_cseed ? 1 : 0, (unsigned long long)cseed, counted,
-           (unsigned long long)mseed);
+           (unsigned long long)mseed, dense_override, phases ? 1 : 0);
     printf("K,reps,ok,median_ns,seconds_per_k_symbols,symbols_per_sec,"
-           "xor_bytes,muladd_bytes,sink\n");
+           "xor_bytes,muladd_bytes,init_ns,symbols_ns,sink\n");
     for (int N : Ns) {
         const uint64_t messageBytes = (uint64_t)N * (uint64_t)bb;
         vector<uint8_t> message(messageBytes);
         Rng rng(mseed ^ (uint64_t)N);
         for (uint64_t i = 0; i < messageBytes; ++i) message[i] = (uint8_t)rng.u32();
         vector<uint8_t> block((size_t)bb);
-        vector<uint64_t> rep_ns;
+        vector<uint64_t> rep_ns, rep_init_ns, rep_symbols_ns;
         rep_ns.reserve((size_t)reps);
+        rep_init_ns.reserve((size_t)reps);
+        rep_symbols_ns.reserve((size_t)reps);
+        // Mechanism attribution (--phases, WH_COUNT builds): per-stage wall
+        // time keyed by stage label, plus create (ChooseMatrix + workspace)
+        // and the EncodeFeed remainder outside the instrumented stages
+        // (opportunistic peel-row generation and graph peeling).
+        map<string, vector<uint64_t>> phase_ns;
+        vector<uint64_t> rep_create_ns, rep_feed_other_ns;
         int ok = 1;
         uint32_t sink = 0;
         uint64_t xor_bytes = 0, muladd_bytes = 0;
         for (int rep = 0; rep < reps; ++rep) {
 #ifdef WH_COUNT
             gf256_count_reset();
+            wh_stage_reset();
 #endif
             const double t0 = now_sec();
             wirehair::Codec enc;
@@ -2443,8 +2469,21 @@ static int cmd_enctime(int argc, char** argv) {
                                   (uint16_t)(cseed & 0xFFFFu),
                                   (uint16_t)((cseed >> 16) & 0xFFFFu));
             }
+            else if (dense_override != 0) {
+                // Dense-count ablation with the production tuned tables for
+                // that dense count (the WH_SEED_KNOBS fallback convention).
+                enc.OverrideSeeds((uint16_t)dense_override,
+                                  wirehair::GetPeelSeed((unsigned)N),
+                                  wirehair::GetDenseSeed(
+                                      (unsigned)N,
+                                      (unsigned)dense_override));
+            }
             WirehairResult er = enc.InitializeEncoder(messageBytes, (unsigned)bb);
+            const double tCreate = now_sec();
             if (er == Wirehair_Success) er = enc.EncodeFeed(message.data());
+            // Phase boundary: above is encoder init (matrix choose + solve +
+            // recovery prep), below is the per-symbol systematic output loop.
+            const double tMid = now_sec();
             if (er != Wirehair_Success) {
                 ok = 0;
             } else {
@@ -2456,6 +2495,22 @@ static int cmd_enctime(int argc, char** argv) {
             }
             const double t1 = now_sec();
             rep_ns.push_back((uint64_t)((t1 - t0) * 1e9));
+            rep_init_ns.push_back((uint64_t)((tMid - t0) * 1e9));
+            rep_symbols_ns.push_back((uint64_t)((t1 - tMid) * 1e9));
+#ifdef WH_COUNT
+            if (phases) {
+                uint64_t staged = 0;
+                for (int s = 0; s < wh_stage_count(); ++s) {
+                    phase_ns[wh_stage_label(s)].push_back(wh_stage_ns(s));
+                    staged += wh_stage_ns(s);
+                }
+                const uint64_t feed_total =
+                    (uint64_t)((tMid - tCreate) * 1e9);
+                rep_create_ns.push_back((uint64_t)((tCreate - t0) * 1e9));
+                rep_feed_other_ns.push_back(
+                    feed_total > staged ? feed_total - staged : 0u);
+            }
+#endif
 #ifdef WH_COUNT
             if (rep == 0) {
                 // 0=add 1=add2 2=addset are XOR-class; 3=mul 4=muladd are
@@ -2466,13 +2521,34 @@ static int cmd_enctime(int argc, char** argv) {
 #endif
         }
         sort(rep_ns.begin(), rep_ns.end());
+        sort(rep_init_ns.begin(), rep_init_ns.end());
+        sort(rep_symbols_ns.begin(), rep_symbols_ns.end());
+        // Per-phase medians are independent and need not sum to the total.
         const uint64_t median_ns = rep_ns[rep_ns.size() / 2];
+        const uint64_t init_ns = rep_init_ns[rep_init_ns.size() / 2];
+        const uint64_t symbols_ns = rep_symbols_ns[rep_symbols_ns.size() / 2];
         const double sec = (double)median_ns / 1e9;
-        printf("%d,%d,%d,%llu,%.9g,%.9g,%llu,%llu,%u\n", N, reps, ok,
+        printf("%d,%d,%d,%llu,%.9g,%.9g,%llu,%llu,%llu,%llu,%u\n", N, reps, ok,
                (unsigned long long)median_ns, sec,
                sec > 0.0 ? (double)N / sec : 0.0,
                (unsigned long long)xor_bytes, (unsigned long long)muladd_bytes,
+               (unsigned long long)init_ns, (unsigned long long)symbols_ns,
                sink & 0xffu);
+        if (phases) {
+            const auto phase_median = [](vector<uint64_t>& values) -> unsigned long long {
+                if (values.empty()) return 0;
+                sort(values.begin(), values.end());
+                return (unsigned long long)values[values.size() / 2];
+            };
+            printf("# enctime_phases,K=%d,create_ns=%llu,feed_other_ns=%llu",
+                   N, phase_median(rep_create_ns),
+                   phase_median(rep_feed_other_ns));
+            for (auto& entry : phase_ns) {
+                printf(",%s_ns=%llu", entry.first.c_str(),
+                       phase_median(entry.second));
+            }
+            printf(",output_ns=%llu\n", (unsigned long long)symbols_ns);
+        }
     }
     return 0;
 }

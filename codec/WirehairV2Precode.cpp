@@ -819,6 +819,10 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
             }
             return &grouped_packed;
         }
+        static const MixedPackedCoefficients shared_packed_trim_two =
+            pack_rows(rows, kMixedGF256Rows - 2u);
+        static const MixedPackedCoefficients shared_packed_trim_one =
+            pack_rows(rows, kMixedGF256Rows - 1u);
         static const MixedPackedCoefficients shared_packed_base =
             pack_rows(rows, kMixedGF256Rows);
         static const MixedPackedCoefficients shared_packed_one_extra =
@@ -826,10 +830,28 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
         static const MixedPackedCoefficients shared_packed_two_extra =
             pack_rows(rows, kMixedGF256RowsMax);
         const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        if (subfield_rows == kMixedGF256Rows - 2u)
+            return &shared_packed_trim_two;
+        if (subfield_rows == kMixedGF256Rows - 1u)
+            return &shared_packed_trim_one;
         if (subfield_rows == kMixedGF256Rows) return &shared_packed_base;
         if (subfield_rows == kMixedGF256Rows + 1u)
             return &shared_packed_one_extra;
         return &shared_packed_two_extra;
+    }
+    {
+        // Frozen-geometry row trims pack the extension pair directly after
+        // the trimmed subfield rows so packed lanes match the active layout.
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        if (subfield_rows < kMixedGF256Rows)
+        {
+            static const MixedPackedCoefficients frozen_packed_trim_two =
+                pack_rows(rows, kMixedGF256Rows - 2u);
+            static const MixedPackedCoefficients frozen_packed_trim_one =
+                pack_rows(rows, kMixedGF256Rows - 1u);
+            return subfield_rows == kMixedGF256Rows - 2u ?
+                &frozen_packed_trim_two : &frozen_packed_trim_one;
+        }
     }
 #endif
     static const MixedPackedCoefficients frozen_packed =
@@ -1179,8 +1201,10 @@ bool SetMixedCoefficientGeometryForTesting(
     {
         return false;
     }
+    // Frozen geometry supports the base row count and the trimmed leading
+    // subsets; only EXTRA rows (11/12) require shared-X coordinates.
     if (geometry != MixedCoefficientGeometry::SharedCauchyX &&
-        MixedGF256RowsForTesting != kMixedGF256Rows)
+        MixedGF256RowsForTesting > kMixedGF256Rows)
     {
         return false;
     }
@@ -1212,12 +1236,17 @@ bool SetMixedGF16RowsForTesting(uint32_t rows)
 
 bool SetMixedGF256RowsForTesting(uint32_t rows)
 {
-    if (rows < kMixedGF256Rows || rows > kMixedGF256RowsMax ||
+    // Row trims (eight or nine rows) take the leading subset of the frozen
+    // ten-row Cauchy table: Y stays in [0, rows) against the unchanged
+    // X = 12 + residue coordinates, so the trimmed system remains one
+    // Cauchy matrix in either geometry.  Extra rows (11/12) still require
+    // shared-X coordinates as before.
+    if (rows < kMixedGF256RowsMin || rows > kMixedGF256RowsMax ||
         MixedCoefficientPeriodForTesting < rows + MixedGF16RowsForTesting ||
         (rows >= kMixedGF256Rows + 2u &&
          (!IsValidatedH16Period(MixedCoefficientPeriodForTesting) ||
           MixedGF16RowsForTesting != kMixedGF16RowsMax)) ||
-        (rows != kMixedGF256Rows &&
+        (rows > kMixedGF256Rows &&
          MixedGeometryForTesting != MixedCoefficientGeometry::SharedCauchyX))
     {
         return false;

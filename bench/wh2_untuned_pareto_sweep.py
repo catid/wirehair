@@ -445,6 +445,73 @@ def build_methods():
     # cells are excluded for this tuning point, never censored.
     methods[-1]["k_min"] = 6
 
+    # ---- Round-2 throughput-first combinations (wirehair-g8iv round 2).
+    # Identity corner needs known_span >= dense_rows, so the excluded tiny-K
+    # prefix shrinks with the dense count (d12 -> K<6, d8 -> K<5, d6 -> K<3).
+    # Incompatible by validation (noted, not gridded): two-anchor with any
+    # dense count other than 12, and two-anchor with the identity corner.
+    def add2(method_id, family, flags, hyper, k_min=None):
+        add(method_id, family, "wh2", flags, hyper)
+        methods[-1]["round"] = 2
+        if k_min is not None:
+            methods[-1]["k_min"] = k_min
+
+    def ic(flags, hyper):
+        return flags + ["--dense-identity-corner"], dict(
+            hyper, dense_identity_corner=True)
+
+    flags, hyper = _mixed_flags(dense_rows=8)
+    add2("ic-d8-p244", "wh2-r2-identcorner", *ic(flags, hyper), k_min=5)
+    flags, hyper = _mixed_flags(dense_rows=6)
+    add2("ic-d6-p244", "wh2-r2-identcorner", *ic(flags, hyper), k_min=3)
+    flags, hyper = _mixed_flags(period=48, geometry="shared-x", dense_rows=8)
+    add2("ic-d8-p48x", "wh2-r2-identcorner", *ic(flags, hyper), k_min=5)
+    flags, hyper = _mixed_flags(period=32, geometry="shared-x", dense_rows=8)
+    add2("ic-d8-p32x", "wh2-r2-identcorner", *ic(flags, hyper), k_min=5)
+    flags, hyper = _mixed_flags(period=32, geometry="shared-x")
+    add2("ic-p32x", "wh2-r2-identcorner", *ic(flags, hyper), k_min=6)
+    flags, hyper = _mixed_flags(
+        period=32, geometry="shared-x", gf256_rows=11, gf16_rows=4)
+    add2("ic-11x4-p32", "wh2-r2-identcorner", *ic(flags, hyper), k_min=6)
+    flags, hyper = _mixed_flags(mix_count=2)
+    add2("ic-mix2-p244", "wh2-r2-identcorner", *ic(flags, hyper), k_min=6)
+
+    for dense in (6, 4):
+        flags, hyper = _mixed_flags(dense_rows=dense)
+        add2("mixed-p244-d%d" % dense, "wh2-r2-denseknee", flags, hyper)
+
+    # GF256 row trims keep the GF16 pair: a leading Cauchy subset of the
+    # frozen ten-row table (valid in both geometries after the hook change).
+    for rows in (9, 8):
+        flags, hyper = _mixed_flags(gf256_rows=rows)
+        add2("mixed-p244-%dx2" % rows, "wh2-r2-rowtrim", flags, hyper)
+        flags, hyper = _mixed_flags(
+            period=48, geometry="shared-x", gf256_rows=rows)
+        add2("mixed-p48x-%dx2" % rows, "wh2-r2-rowtrim", flags, hyper)
+
+    flags, hyper = _mixed_flags(period=48, geometry="shared-x", gf256_rows=9)
+    add2("ic-9x2-p48x", "wh2-r2-kitchensink", *ic(flags, hyper), k_min=6)
+    flags, hyper = _mixed_flags(
+        period=48, geometry="shared-x", gf256_rows=9, dense_rows=8)
+    add2("ic-d8-9x2-p48x", "wh2-r2-kitchensink", *ic(flags, hyper), k_min=5)
+
+    flags, hyper = _certified_flags()
+    add2("cert-ic-h12", "wh2-r2-cert-ic", *ic(flags, hyper), k_min=6)
+    flags, hyper = _certified_flags(heavy_rows=8)
+    add2("cert-ic-h8", "wh2-r2-cert-ic", *ic(flags, hyper), k_min=6)
+
+    flags, hyper = _mixed_flags(period=32, geometry="shared-x")
+    hyper = dict(hyper, dense_two_anchor="on (phase 0)")
+    add2("twoanchor-p32x", "wh2-r2-twoanchor",
+         flags + ["--binary-dense-two-anchor"], hyper)
+    flags, hyper = _mixed_flags(mix_count=2)
+    hyper = dict(hyper, dense_two_anchor="on (phase 0)")
+    add2("twoanchor-mix2", "wh2-r2-twoanchor",
+         flags + ["--binary-dense-two-anchor"], hyper)
+
+    flags, hyper = _mixed_flags(period=32, geometry="shared-x", dense_rows=8)
+    add2("mixed-p32x-d8", "wh2-r2-denseknee", flags, hyper)
+
     ids = [m["id"] for m in methods]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate method ids in tuning grid")
@@ -1062,6 +1129,10 @@ def parse_wh2_timing(text):
             "median_ns": int(entries["median_ns"]),
             "solve_ok": entries["solve_ok"] == "1",
             "block_bytes": int(entries["solve_block_bytes"]),
+            "median_init_ns": int(entries["median_init_ns"])
+            if "median_init_ns" in entries else None,
+            "median_symbols_ns": int(entries["median_symbols_ns"])
+            if "median_symbols_ns" in entries else None,
         }
     if not timing:
         raise ParseError("no encode_timing receipts found")
@@ -1089,7 +1160,7 @@ def parse_wh1_timing(text):
             saw_header = True
             continue
         fields = line.split(",")
-        if len(fields) != 9:
+        if len(fields) != 11:
             raise ParseError("bad enctime row: %s" % line)
         k = int(fields[0])
         timing[k] = {
@@ -1098,6 +1169,8 @@ def parse_wh1_timing(text):
             "block_bytes": None,
             "xor_bytes": int(fields[6]),
             "muladd_bytes": int(fields[7]),
+            "median_init_ns": int(fields[8]),
+            "median_symbols_ns": int(fields[9]),
         }
     if not saw_header or not timing:
         raise ParseError("no enctime rows found")
@@ -1188,7 +1261,9 @@ def aggregate_region(cell_outcomes, protocol, excluded_cells=0):
 
 def aggregate_timing(timing_by_k, reps, counted=False):
     ks = sorted(timing_by_k)
-    per_k = [[k, timing_by_k[k]["median_ns"]] for k in ks]
+    per_k = [[k, timing_by_k[k]["median_ns"],
+              timing_by_k[k].get("median_init_ns"),
+              timing_by_k[k].get("median_symbols_ns")] for k in ks]
     rates = sorted(
         k / (timing_by_k[k]["median_ns"] / 1e9)
         for k in ks if timing_by_k[k]["median_ns"] > 0)
@@ -1427,8 +1502,9 @@ def selftest():
 
     methods = build_methods()
     check("tuning grid within cap", 1 <= len(methods) <= 100)
-    check("tuning grid is 63 untuned points",
-          len(methods) == 63 and
+    check("tuning grid is 83 untuned points (63 round-1 + 20 round-2)",
+          len(methods) == 83 and
+          sum(1 for m in methods if m.get("round") == 2) == 20 and
           not any(m["id"].endswith("-tuned") for m in methods))
     check("tuning grid has wh1 arm",
           any(m["arm"] == "wh1" for m in methods))
@@ -1440,6 +1516,13 @@ def selftest():
           any(m["family"] == "wh2-grouped-masks" for m in methods) and
           any(m["family"] == "wh2-two-anchor" for m in methods) and
           any(m["family"] == "wh2-identity-corner" for m in methods))
+    round2_kmins = {m["id"]: m.get("k_min") for m in methods
+                    if m.get("round") == 2}
+    check("round-2 identity-corner exclusions scale with dense rows",
+          round2_kmins["ic-d8-p244"] == 5 and
+          round2_kmins["ic-d6-p244"] == 3 and
+          round2_kmins["cert-ic-h8"] == 6 and
+          round2_kmins["mixed-p244-d4"] is None)
     identity = next(m for m in methods
                     if m["family"] == "wh2-identity-corner")
     check("identity corner excludes K=2..5",
@@ -1604,25 +1687,29 @@ def selftest():
         header,
         "# encode_timing,N=100,bb=2,heavy_family=periodic,mix_count=3,"
         "reps=3,solve_ok=1,solve_block_bytes=2,median_ns=1000000,"
-        "seconds_per_k_symbols=0.001,symbols_per_sec=100000,sink=0",
+        "seconds_per_k_symbols=0.001,symbols_per_sec=100000,"
+        "median_init_ns=990000,median_symbols_ns=9000,sink=0",
         "100,2,periodic,3,0,1,1,0,0,0.0,1.0,1,0.0,0,0.0,0,0,0.1,0.1,0.1,"
         "0.1,0.1,0.1,0,1.0,1.0,-1,0:1,0:1,,0x0",
     ])
     wh2_timing = parse_wh2_timing(wh2_timing_text)
     check("wh2 timing parser",
           wh2_timing[100]["median_ns"] == 1000000 and
-          wh2_timing[100]["solve_ok"])
+          wh2_timing[100]["solve_ok"] and
+          wh2_timing[100]["median_init_ns"] == 990000)
 
     wh1_timing_text = "\n".join([
         "# enctime: reps=3 bb=1 cseed_explicit=0 cseed=0x0 counted=1 "
-        "single_threaded=1 seed=0x517",
+        "single_threaded=1 seed=0x517 dense_override=0 phases=0",
         "K,reps,ok,median_ns,seconds_per_k_symbols,symbols_per_sec,"
-        "xor_bytes,muladd_bytes,sink",
-        "100,3,1,20000,2e-05,5000000,1600,150,7",
+        "xor_bytes,muladd_bytes,init_ns,symbols_ns,sink",
+        "100,3,1,20000,2e-05,5000000,1600,150,19000,900,7",
     ])
     wh1_timing, counted = parse_wh1_timing(wh1_timing_text)
     check("wh1 timing parser",
-          counted and wh1_timing[100]["xor_bytes"] == 1600)
+          counted and wh1_timing[100]["xor_bytes"] == 1600 and
+          wh1_timing[100]["median_init_ns"] == 19000 and
+          wh1_timing[100]["median_symbols_ns"] == 900)
 
     timing_aggregate = aggregate_timing(
         {100: {"median_ns": 1000000, "solve_ok": True},

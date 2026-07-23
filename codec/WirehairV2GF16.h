@@ -11,8 +11,12 @@ static const uint32_t kMixedCoefficientPeriod = 244u;
 static const uint32_t kMixedGF256Rows = 10u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static const uint32_t kMixedGF256RowsMax = 12u;
+/// Test builds may trim the subfield to a leading Cauchy subset of the
+/// frozen ten-row table (Y in [0, rows), X unchanged at 12 + residue).
+static const uint32_t kMixedGF256RowsMin = 8u;
 #else
 static const uint32_t kMixedGF256RowsMax = kMixedGF256Rows;
+static const uint32_t kMixedGF256RowsMin = kMixedGF256Rows;
 #endif
 static const uint32_t kMixedGF16Rows = 2u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)

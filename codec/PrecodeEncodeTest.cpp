@@ -739,8 +739,12 @@ bool TestMixedCornerRank()
             "mixed corner: invalid experiment override was accepted\n");
         return false;
     }
-    if (wirehair_v2::SetMixedGF256RowsForTesting(
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(
             wirehair_v2::kMixedGF256Rows - 1u) ||
+        wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256RowsMin - 1u) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows) ||
         wirehair_v2::SetMixedGF256RowsForTesting(
             wirehair_v2::kMixedGF256RowsMax + 1u) ||
         wirehair_v2::SetMixedGF256RowsForTesting(

@@ -998,9 +998,20 @@ expect_success("mixed_period=31 mixed_gf256_rows=12" precodefail
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues
     --payload-e2e)
+# Row trims (nine or eight subfield rows) are valid leading Cauchy subsets
+# in either geometry; the floor is eight and the ceiling stays twelve.
+foreach(trimmed_rows IN ITEMS 9 8)
+    expect_success("mixed_gf256_rows=${trimmed_rows}" precodefail
+        --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+        --completion mixed --mixed-gf256-rows ${trimmed_rows})
+    expect_success("mixed_gf256_rows=${trimmed_rows}" precodefail
+        --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
+        --completion mixed --mixed-geometry shared-x --mixed-period 48
+        --mixed-gf256-rows ${trimmed_rows})
+endforeach()
 expect_failure("--mixed-gf256-rows must be in" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
-    --completion mixed --mixed-gf256-rows 9)
+    --completion mixed --mixed-gf256-rows 7)
 expect_failure("--mixed-gf256-rows must be in" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf256-rows 13)
