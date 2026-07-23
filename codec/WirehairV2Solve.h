@@ -50,12 +50,25 @@ static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
     receipts) is identical; the bounds are performance tuning only.
 
     All three bounds are runtime constants with compile-time defaults chosen
-    from paired idle-host nonzero-payload medians (mixed-p244 frozen and the
-    shared-x period-48 experiment): the fast path engages when
-    K <= max_source_blocks, block_bytes <= max_block_bytes, and
-    K * block_bytes <= max_product_bytes.  Every engaged cell measured was a
-    win or parity; the first excluded cells (K=512 at 8-byte blocks, K=768
-    at 2-byte blocks, K=64 at 16-byte blocks) were 7-10%% regressions.
+    from paired idle-host nonzero-payload medians (forced-on versus
+    forced-off, mixed-p244-d4 dispatch config plus mixed-p244-baseline as a
+    second probe): the fast path engages when K <= max_source_blocks,
+    block_bytes <= max_block_bytes, and K * block_bytes <= max_product_bytes.
+    The measured forced-on/forced-off crossover sits at a flat K near 530 for
+    2- and 4-byte blocks (a product-only bound would engage ~20%% regressions
+    by K=1536 at 2-byte blocks) and at a product near 3072 bytes for 6- and
+    8-byte blocks, so the flat K bound stays and the product bound carries
+    the narrow-block extension.  Every engaged cell measured win-or-parity
+    (worst boundary cell 1.003x on the dispatch config, 1.008x on the
+    baseline probe, at the edge of noise); the nearest excluded cells
+    measured with forced pairs (K=520 at 6-byte blocks, K=400 at 8-byte
+    blocks, K=544 at 4-byte blocks, K=576 at 2-byte blocks) were 1-2%%
+    regressions growing steadily with K.  A narrow residual win band
+    (K=513..543 at 2-byte blocks, ~2%%) stays excluded: no single product
+    bound can engage it without also engaging the 4-byte regression at the
+    same K.  Bounds must be set from nonzero-payload timing: zero-payload
+    probes let the fast path's zero-block skip flatter it by ~12%% at the
+    2-byte seam.
 */
 #ifndef WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_SOURCE_BLOCKS
 #define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_SOURCE_BLOCKS 512u
@@ -64,7 +77,7 @@ static const uint32_t kBinaryQuotientMinBlockBytes = 2048u;
 #define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES 8u
 #endif
 #ifndef WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES
-#define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES 2048u
+#define WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES 3072u
 #endif
 
 /** Active tiny-K mixed fast-path bounds (compile-time defaults). */
