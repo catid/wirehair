@@ -1,0 +1,325 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:P'
+# Event count (approx.): 3474691494
+#
+# Overhead  Command          Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  ....................  ...............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    20.76%  wirehair_v2_ben  wirehair_v2_bench     [.] gf256_muladd_multi_mem
+            |          
+            |--7.91%--gf256_muladd_multi_mem
+            |          |          
+            |          |--4.87%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |          |          |          
+            |          |          |--3.18%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)::{lambda(unsigned int, unsigned char const*)#1}::operator()(unsigned int, unsigned char const*) const
+            |          |          |          wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |          |          |          wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          |          |          wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |          |          |          |          
+            |          |          |           --3.16%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |          |          |                     main
+            |          |          |                     __libc_start_call_main
+            |          |          |                     __libc_start_main@@GLIBC_2.34
+            |          |          |                     _start
+            |          |          |          
+            |          |           --1.68%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |          |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          |                     wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |          |                     |          
+            |          |                      --1.68%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |          |                                main
+            |          |                                __libc_start_call_main
+            |          |                                __libc_start_main@@GLIBC_2.34
+            |          |                                _start
+            |          |          
+            |           --2.25%--wirehair_v2::GF16MulAddPlanar(void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |                     wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |                     wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |                     |          
+            |                      --2.24%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                                main
+            |                                __libc_start_call_main
+            |                                __libc_start_main@@GLIBC_2.34
+            |                                _start
+            |          
+            |--3.29%--gf256_muladd_multi_mem_ssse3(void* const*, unsigned char const*, int, unsigned char const*, int, int)
+            |          |          
+            |           --3.16%--gf256_muladd_multi_mem
+            |                     |          
+            |                      --2.14%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |                                |          
+            |                                 --1.16%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)::{lambda(unsigned int, unsigned char const*)#1}::operator()(unsigned int, unsigned char const*) const
+            |                                           wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                                           wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |                                           wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |                                           (anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                                           main
+            |                                           __libc_start_call_main
+            |                                           __libc_start_main@@GLIBC_2.34
+            |                                           _start
+            |          
+            |--2.84%--gf256_muladd_multi_mem_avx2_target(void* const*, unsigned char const*, int, unsigned char const*, int, int) [clone .constprop.0]
+            |          |          
+            |           --2.64%--gf256_muladd_multi_mem
+            |                     |          
+            |                      --1.18%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |                                |          
+            |                                 --1.03%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)::{lambda(unsigned int, unsigned char const*)#1}::operator()(unsigned int, unsigned char const*) const
+            |                                           wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                                           wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |                                           wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |                                           |          
+            |                                            --1.02%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                                                      main
+            |                                                      __libc_start_call_main
+            |                                                      __libc_start_main@@GLIBC_2.34
+            |                                                      _start
+            |          
+            |--1.92%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |          |          
+            |           --1.14%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)::{lambda(unsigned int, unsigned char const*)#1}::operator()(unsigned int, unsigned char const*) const
+            |                     wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |                     wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |                     (anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |          
+             --1.60%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       |          
+                        --1.59%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     7.14%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::PeelResult wirehair_v2::(anonymous namespace)::PeelBinaryRowsImplementation<true>(unsigned int, wirehair_v2::(anonymous namespace)::BinaryEquationArena const&)
+            |          
+             --6.24%--wirehair_v2::(anonymous namespace)::PeelResult wirehair_v2::(anonymous namespace)::PeelBinaryRowsImplementation<true>(unsigned int, wirehair_v2::(anonymous namespace)::BinaryEquationArena const&)
+                       wirehair_v2::(anonymous namespace)::PeelBinaryRows(unsigned int, wirehair_v2::(anonymous namespace)::BinaryEquationArena const&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       |          
+                        --6.10%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                                  |          
+                                   --6.07%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                             main
+                                             __libc_start_call_main
+                                             __libc_start_main@@GLIBC_2.34
+                                             _start
+
+     6.90%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          
+             --3.46%--wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       |          
+                        --3.45%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     6.38%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |          
+            |--2.01%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |          wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |          |          
+            |           --1.99%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                     main
+            |                     __libc_start_call_main
+            |                     __libc_start_main@@GLIBC_2.34
+            |                     _start
+            |          
+             --1.91%--gf256_muladd_multi_mem
+
+     6.01%  wirehair_v2_ben  wirehair_v2_bench     [.] gf256_muladd_multi_mem_ssse3(void* const*, unsigned char const*, int, unsigned char const*, int, int)
+            |          
+             --3.20%--gf256_muladd_multi_mem
+                       |          
+                       |--1.55%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+                       |          |          
+                       |           --1.10%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)::{lambda(unsigned int, unsigned char const*)#1}::operator()(unsigned int, unsigned char const*) const
+                       |                     wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       |                     |          
+                       |                      --1.06%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       |                                |          
+                       |                                 --1.05%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                       |                                           main
+                       |                                           __libc_start_call_main
+                       |                                           __libc_start_main@@GLIBC_2.34
+                       |                                           _start
+                       |          
+                        --1.03%--wirehair_v2::GF16MulAddPlanar(void*, void*, unsigned short, void const*, void const*, unsigned int)
+                                  wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                                  wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+
+     5.87%  wirehair_v2_ben  wirehair_v2_bench     [.] gf256_muladd_multi_mem_avx2_target(void* const*, unsigned char const*, int, unsigned char const*, int, int) [clone .constprop.0]
+            |          
+            |--2.20%--gf256_muladd_multi_mem
+            |          |          
+            |           --1.17%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |                     |          
+            |                      --1.14%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |                                |          
+            |                                 --1.13%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |                                           main
+            |                                           __libc_start_call_main
+            |                                           __libc_start_main@@GLIBC_2.34
+            |                                           _start
+            |          
+             --1.28%--gf256_muladd_multi_mem_ssse3(void* const*, unsigned char const*, int, unsigned char const*, int, int)
+                       |          
+                        --1.24%--gf256_muladd_multi_mem
+                                  |          
+                                   --1.03%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+
+     5.12%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::GF16MultiplyInitialized(unsigned short, unsigned short)
+            |          
+            |--3.01%--wirehair_v2::GF16MultiplyInitialized(unsigned short, unsigned short)
+            |          |          
+            |          |--2.01%--wirehair_v2::(anonymous namespace)::FactorMixedCompletionQuotient(std::vector<unsigned short, std::allocator<unsigned short> >&, unsigned int, unsigned int, wirehair_v2::(anonymous namespace)::MixedQuotientFactorization&)
+            |          |          wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |          |          wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          |          |          
+            |          |           --1.94%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+            |          |                     |          
+            |          |                      --1.92%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+            |          |                                main
+            |          |                                __libc_start_call_main
+            |          |                                __libc_start_main@@GLIBC_2.34
+            |          |                                _start
+            |          |          
+            |           --1.00%--wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+            |                     wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+            |          
+             --1.17%--wirehair_v2::(anonymous namespace)::FactorMixedCompletionQuotient(std::vector<unsigned short, std::allocator<unsigned short> >&, unsigned int, unsigned int, wirehair_v2::(anonymous namespace)::MixedQuotientFactorization&)
+                       wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       |          
+                        --1.15%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     3.42%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+            |          
+             --1.79%--gf256_muladd_multi_mem_avx2_target(void* const*, unsigned char const*, int, unsigned char const*, int, int) [clone .constprop.0]
+                       |          
+                        --1.78%--gf256_muladd_multi_mem
+                                  |          
+                                   --1.68%--wirehair_v2::GF16MulAddPlanar2(void*, void*, unsigned short, void*, void*, unsigned short, void const*, void const*, unsigned int)
+
+     3.33%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::BuildPrecodeSystem(wirehair_v2::PrecodeParams const&, wirehair_v2::PrecodeSystem&)
+            |          
+             --2.72%--wirehair_v2::BuildPrecodeSystem(wirehair_v2::PrecodeParams const&, wirehair_v2::PrecodeSystem&)
+                       |          
+                        --2.57%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.75%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::InsertPackedBinaryResidualRow(std::vector<unsigned long, std::allocator<unsigned long> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, unsigned int, unsigned int, unsigned int, std::vector<unsigned long, std::allocator<unsigned long> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, unsigned int&, wirehair_v2::PrecodeSolveStats&, unsigned int)
+            |          
+             --1.64%--wirehair_v2::(anonymous namespace)::InsertPackedBinaryResidualRow(std::vector<unsigned long, std::allocator<unsigned long> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, unsigned int, unsigned int, unsigned int, std::vector<unsigned long, std::allocator<unsigned long> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, std::vector<unsigned char, std::allocator<unsigned char> >&, unsigned int&, wirehair_v2::PrecodeSolveStats&, unsigned int)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       |          
+                        --1.60%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                                  |          
+                                   --1.59%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                             main
+                                             __libc_start_call_main
+                                             __libc_start_main@@GLIBC_2.34
+                                             _start
+
+     2.71%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::GF16InverseInitialized(unsigned short)
+            |          
+             --1.38%--wirehair_v2::GF16InverseInitialized(unsigned short)
+                       wirehair_v2::(anonymous namespace)::FactorMixedCompletionQuotient(std::vector<unsigned short, std::allocator<unsigned short> >&, unsigned int, unsigned int, wirehair_v2::(anonymous namespace)::MixedQuotientFactorization&)
+                       wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       |          
+                        --1.31%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                                  |          
+                                   --1.27%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                             main
+                                             __libc_start_call_main
+                                             __libc_start_main@@GLIBC_2.34
+                                             _start
+
+     2.47%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::FactorMixedCompletionQuotient(std::vector<unsigned short, std::allocator<unsigned short> >&, unsigned int, unsigned int, wirehair_v2::(anonymous namespace)::MixedQuotientFactorization&)
+            |          
+             --1.40%--wirehair_v2::GF16MultiplyInitialized(unsigned short, unsigned short)
+                       |          
+                        --1.05%--wirehair_v2::(anonymous namespace)::FactorMixedCompletionQuotient(std::vector<unsigned short, std::allocator<unsigned short> >&, unsigned int, unsigned int, wirehair_v2::(anonymous namespace)::MixedQuotientFactorization&)
+                                  wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                                  wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                                  |          
+                                   --1.02%--wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                                             |          
+                                              --1.01%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                                        main
+                                                        __libc_start_call_main
+                                                        __libc_start_main@@GLIBC_2.34
+                                                        _start
+
+     2.38%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::ValidatePrecodeSystem(wirehair_v2::PrecodeSystem const&)
+            |          
+             --2.23%--wirehair_v2::ValidatePrecodeSystem(wirehair_v2::PrecodeSystem const&)
+                       |          
+                        --2.20%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.18%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::ProjectMixedCompletionCoefficientsByResidueBuckets(unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, wirehair_v2::MixedPackedCoefficients const&, unsigned char const*, unsigned int, std::vector<unsigned long, std::allocator<unsigned long> >&)
+            |          
+             --1.28%--wirehair_v2::(anonymous namespace)::ProjectMixedCompletionCoefficientsByResidueBuckets(unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, wirehair_v2::MixedPackedCoefficients const&, unsigned char const*, unsigned int, std::vector<unsigned long, std::allocator<unsigned long> >&)
+                       wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       |          
+                        --1.27%--(anonymous namespace)::CmdPrecodeFail(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     1.71%  wirehair_v2_ben  wirehair_v2_bench     [.] void std::__adjust_heap<__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, long, unsigned long, __gnu_cxx::__ops::_Iter_comp_iter<std::less<unsigned long> > >(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, long, long, unsigned long, __gnu_cxx::__ops::_Iter_comp_iter<std::less<unsigned long> >) [clone .isra.0]
+            |          
+             --1.02%--void std::__adjust_heap<__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, long, unsigned long, __gnu_cxx::__ops::_Iter_comp_iter<std::less<unsigned long> > >(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, long, long, unsigned long, __gnu_cxx::__ops::_Iter_comp_iter<std::less<unsigned long> >) [clone .isra.0]
+
+     1.49%  wirehair_v2_ben  wirehair_v2_bench     [.] gf256_add_multi_mem
+     1.33%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::(anonymous namespace)::AddScaledBlocks(void* const*, unsigned char const*, unsigned int, unsigned char const*, unsigned int, wirehair_v2::PrecodeSolveStats&)
+            |          
+             --1.19%--gf256_muladd_multi_mem
+                       wirehair_v2::(anonymous namespace)::SolveMixedCompletionQuotient(wirehair_v2::PrecodeSystem const&, unsigned int, unsigned int, unsigned int, unsigned int, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned int, std::allocator<unsigned int> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, std::vector<unsigned char, std::allocator<unsigned char> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats&)
+                       wirehair_v2::SolvePrecodeSystemImpl(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*, bool)
+                       wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(wirehair_v2::PrecodeSystem const&, wirehair_v2::PacketRowConfig const&, wirehair_v2::PacketRowRuntime const&, std::vector<wirehair_v2::SolvePacket, std::allocator<wirehair_v2::SolvePacket> > const&, unsigned int, std::vector<unsigned char, std::allocator<unsigned char> >&, wirehair_v2::PrecodeSolveStats*, wirehair_v2::PrecodeSolveResumeState*)
+                       (anonymous namespace)::CmdPrecodeFail(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.19%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::GF16MulAddPlanar(void*, void*, unsigned short, void const*, void const*, unsigned int)
+     1.14%  wirehair_v2_ben  wirehair_v2_bench     [.] wirehair_v2::GF16Deinterleave(void const*, void*, void*, unsigned int)
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,16 @@
+{
+  "schema": "wirehair.wh2_untuned_pareto.provenance.v1",
+  "round": 2,
+  "git_commit": "462fe6f7434f229e7a46f21d44cb21d6407d3208",
+  "manifest_sha256": "dd67a70a1d64ebacb59b41950df655911c4de39419150fd065db9f19e44aaf20",
+  "hosts": {
+    "loki": {
+      "role": "ALL round-2 cells (r1-r6) and ALL timing. Deviation from the round-1 dual-host split: foureyes was unreachable (no live forwarded SSH agent socket and no local key at run time). Cell outcomes are deterministic and host-independent, and the timing baseline is required to be single-host loki, so the deviation does not affect comparability.",
+      "bench_sha256": "6b326e746f818e6aba7094940b80d24d413faf7c7d06d0715bc2c02d7df23af2",
+      "whx_sha256": "54f3c7ad69d38f59b91d0157207ff24b888a73b23f0bbfa8764cbd8409548e50",
+      "whx_count_sha256": "518dc318d72e9409c60147f9f83ff53db9508277a879082d1736da171aa9f759"
+    }
+  },
+  "timing_policy": "all 83 methods re-timed quietly (idle box, 24 workers, timing-only mode, 9 reps) so both rounds share one uncontended loki baseline; round-1 committed result JSONs retain their original contended timing and timing_quiet_summary.json supersedes them for throughput comparisons",
+  "mechanism": "mechanism/ carries WH2 phase stacks + ablation ladder, WH1 phase stacks + dense/heavy ablations (dense/heavy override rows with ok=0 time FAILED constructions and bound cost only), five-method micro timing, and perf function profiles (kernel.perf_event_paranoid lowered to 1 via sudo for the session)"
+}

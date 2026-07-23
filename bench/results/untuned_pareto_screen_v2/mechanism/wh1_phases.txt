@@ -1,0 +1,18 @@
+# enctime: reps=33 bb=1 cseed_explicit=0 cseed=0x0 counted=1 single_threaded=1 seed=0x517 dense_override=0 phases=1
+K,reps,ok,median_ns,seconds_per_k_symbols,symbols_per_sec,xor_bytes,muladd_bytes,init_ns,symbols_ns,sink
+8,33,1,2073,2.073e-06,3859141.34,106,141,2033,49,234
+# enctime_phases,K=8,create_ns=89,feed_other_ns=531,AddSubdiagonalValues_ns=230,AllocateMatrix_ns=30,BackSubstituteAboveDiagonal_ns=201,CopyDeferredRows_ns=20,GreedyPeeling_ns=130,InitializeColumnValues_ns=70,MultiplyDenseRows_ns=120,MultiplyDenseValues_ns=130,PeelDiagonal_ns=80,SetHeavyRows_ns=40,Substitute_ns=80,Triangle_ns=281,output_ns=49
+32,33,1,4646,4.646e-06,6887645.29,428,194,4536,110,192
+# enctime_phases,K=32,create_ns=110,feed_other_ns=961,AddSubdiagonalValues_ns=431,AllocateMatrix_ns=40,BackSubstituteAboveDiagonal_ns=341,CopyDeferredRows_ns=20,GreedyPeeling_ns=431,InitializeColumnValues_ns=150,MultiplyDenseRows_ns=451,MultiplyDenseValues_ns=481,PeelDiagonal_ns=330,SetHeavyRows_ns=50,Substitute_ns=301,Triangle_ns=441,output_ns=110
+128,33,1,16234,1.6234e-05,7884686.46,2389,167,15874,360,225
+# enctime_phases,K=128,create_ns=220,feed_other_ns=2954,AddSubdiagonalValues_ns=1122,AllocateMatrix_ns=50,BackSubstituteAboveDiagonal_ns=1212,CopyDeferredRows_ns=30,GreedyPeeling_ns=2264,InitializeColumnValues_ns=340,MultiplyDenseRows_ns=1592,MultiplyDenseValues_ns=1933,PeelDiagonal_ns=1773,SetHeavyRows_ns=50,Substitute_ns=1652,Triangle_ns=691,output_ns=360
+512,33,1,54621,5.4621e-05,9373684.11,7584,183,53280,1342,230
+# enctime_phases,K=512,create_ns=620,feed_other_ns=10436,AddSubdiagonalValues_ns=1913,AllocateMatrix_ns=100,BackSubstituteAboveDiagonal_ns=1732,CopyDeferredRows_ns=40,GreedyPeeling_ns=9444,InitializeColumnValues_ns=571,MultiplyDenseRows_ns=5638,MultiplyDenseValues_ns=6590,PeelDiagonal_ns=7851,SetHeavyRows_ns=50,Substitute_ns=7391,Triangle_ns=922,output_ns=1342
+2048,33,1,343995,0.000343995,5953574.91,26640,196,337937,5277,26
+# enctime_phases,K=2048,create_ns=2192,feed_other_ns=50434,AddSubdiagonalValues_ns=5398,AllocateMatrix_ns=411,BackSubstituteAboveDiagonal_ns=4957,CopyDeferredRows_ns=120,GreedyPeeling_ns=103395,InitializeColumnValues_ns=1081,MultiplyDenseRows_ns=22864,MultiplyDenseValues_ns=25038,PeelDiagonal_ns=71667,SetHeavyRows_ns=50,Substitute_ns=41733,Triangle_ns=8402,output_ns=5277
+8192,33,1,1849284,0.001849284,4429822.57,115959,168,1828182,21112,14
+# enctime_phases,K=8192,create_ns=8852,feed_other_ns=187041,AddSubdiagonalValues_ns=11377,AllocateMatrix_ns=2073,BackSubstituteAboveDiagonal_ns=10285,CopyDeferredRows_ns=261,GreedyPeeling_ns=834002,InitializeColumnValues_ns=3605,MultiplyDenseRows_ns=86410,MultiplyDenseValues_ns=89634,PeelDiagonal_ns=367081,SetHeavyRows_ns=70,Substitute_ns=190786,Triangle_ns=35093,output_ns=21112
+32000,33,1,9124828,0.009124828,3506915.42,459293,167,9053802,71046,13
+# enctime_phases,K=32000,create_ns=36945,feed_other_ns=752097,AddSubdiagonalValues_ns=34242,AllocateMatrix_ns=20841,BackSubstituteAboveDiagonal_ns=38148,CopyDeferredRows_ns=1272,GreedyPeeling_ns=4768975,InitializeColumnValues_ns=12599,MultiplyDenseRows_ns=410546,MultiplyDenseValues_ns=308633,PeelDiagonal_ns=1711258,SetHeavyRows_ns=80,Substitute_ns=704487,Triangle_ns=194452,output_ns=71046
+64000,33,1,23178183,0.023178183,2761217.31,945495,181,23036170,142022,61
+# enctime_phases,K=64000,create_ns=75954,feed_other_ns=1533663,AddSubdiagonalValues_ns=81653,AllocateMatrix_ns=72158,BackSubstituteAboveDiagonal_ns=103064,CopyDeferredRows_ns=2764,GreedyPeeling_ns=14166233,InitializeColumnValues_ns=25188,MultiplyDenseRows_ns=825939,MultiplyDenseValues_ns=597226,PeelDiagonal_ns=3396405,SetHeavyRows_ns=80,Substitute_ns=1529554,Triangle_ns=623045,output_ns=142022

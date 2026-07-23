@@ -1,0 +1,159 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 2510598984
+#
+# Overhead  Command  Shared Object        Symbol                                                                                                 
+# ........  .......  ...................  .......................................................................................................
+#
+    50.26%  whx-g    whx-g                [.] wirehair::Codec::GreedyPeeling()
+            |          
+             --50.21%--wirehair::Codec::GreedyPeeling()
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     9.66%  whx-g    whx-g                [.] wirehair::Codec::PeelDiagonal()
+            |          
+            |--7.92%--wirehair::Codec::PeelDiagonal()
+            |          wirehair::Codec::SolveMatrix() [clone .part.0]
+            |          wirehair::Codec::EncodeFeed(void const*, bool)
+            |          cmd_enctime(int, char**)
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.23%--gf256_add_mem
+                       wirehair::Codec::SolveMatrix() [clone .part.0]
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     8.73%  whx-g    whx-g                [.] wirehair::Codec::PeelAvalancheOnSolve(unsigned short, unsigned short)
+            |          
+             --8.69%--wirehair::Codec::PeelAvalancheOnSolve(unsigned short, unsigned short)
+                       wirehair::Codec::GreedyPeeling()
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     5.14%  whx-g    whx-g                [.] wirehair::Codec::OpportunisticPeeling(unsigned short, unsigned int)
+            |          
+             --4.53%--wirehair::Codec::OpportunisticPeeling(unsigned short, unsigned int)
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.57%  whx-g    whx-g                [.] gf256_add_mem
+            |          
+            |--1.73%--wirehair::Codec::PeelDiagonal()
+            |          wirehair::Codec::SolveMatrix() [clone .part.0]
+            |          wirehair::Codec::EncodeFeed(void const*, bool)
+            |          cmd_enctime(int, char**)
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.06%--wirehair::Codec::Substitute()
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     4.49%  whx-g    whx-g                [.] wirehair::Codec::Substitute()
+            |          
+            |--3.10%--wirehair::Codec::Substitute()
+            |          wirehair::Codec::EncodeFeed(void const*, bool)
+            |          cmd_enctime(int, char**)
+            |          main
+            |          __libc_start_call_main
+            |          __libc_start_main@@GLIBC_2.34
+            |          _start
+            |          
+             --1.02%--gf256_add_mem
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.28%  whx-g    whx-g                [.] wirehair::Codec::MultiplyDenseRows()
+            |          
+             --3.24%--wirehair::Codec::MultiplyDenseRows()
+                       wirehair::Codec::SolveMatrix() [clone .part.0]
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     3.13%  whx-g    whx-g                [.] wirehair::ShuffleDeck16(wirehair::PCGRandom&, unsigned short*, unsigned int)
+            |          
+             --2.92%--wirehair::ShuffleDeck16(wirehair::PCGRandom&, unsigned short*, unsigned int)
+                       |          
+                       |--1.50%--wirehair::Codec::MultiplyDenseRows()
+                       |          wirehair::Codec::SolveMatrix() [clone .part.0]
+                       |          wirehair::Codec::EncodeFeed(void const*, bool)
+                       |          cmd_enctime(int, char**)
+                       |          main
+                       |          __libc_start_call_main
+                       |          __libc_start_main@@GLIBC_2.34
+                       |          _start
+                       |          
+                        --1.42%--wirehair::Codec::MultiplyDenseValues()
+                                  wirehair::Codec::EncodeFeed(void const*, bool)
+                                  cmd_enctime(int, char**)
+                                  main
+                                  __libc_start_call_main
+                                  __libc_start_main@@GLIBC_2.34
+                                  _start
+
+     2.16%  whx-g    whx-g                [.] wirehair::PeelRowParameters::Initialize(unsigned int, unsigned int, unsigned short, unsigned short)
+            |          
+             --2.02%--wirehair::Codec::OpportunisticPeeling(unsigned short, unsigned int)
+                       wirehair::Codec::EncodeFeed(void const*, bool)
+                       cmd_enctime(int, char**)
+                       main
+                       __libc_start_call_main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     1.93%  whx-g    whx-g                [.] wirehair::Codec::TriangleNonHeavy()
+            |
+            ---wirehair::Codec::TriangleNonHeavy()
+               wirehair::Codec::Triangle()
+               wirehair::Codec::SolveMatrix() [clone .part.0]
+               wirehair::Codec::EncodeFeed(void const*, bool)
+               cmd_enctime(int, char**)
+               main
+               __libc_start_call_main
+               __libc_start_main@@GLIBC_2.34
+               _start
+
+     1.33%  whx-g    whx-g                [.] gf256_addset_mem
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
