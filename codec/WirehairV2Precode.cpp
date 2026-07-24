@@ -1,5 +1,6 @@
 #include "WirehairV2Precode.h"
 
+#include "../WirehairEnvironment.h"
 #include "../WirehairTools.h"
 #include "../gf256.h"
 
@@ -661,19 +662,44 @@ uint8_t HeavyCoefficient(
     return gf256_inv((uint8_t)(x ^ y));
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/// When set, a trimmed completion band re-derives its Cauchy X coordinates
+/// from its own row count instead of inheriting the frozen H12 ones.  Read
+/// once from WIREHAIR_V2_BAND_TRACKING_X so a sweep can toggle it per process
+/// without threading a new flag through every bench mode.
+static bool MixedBandTrackingXEnabled()
+{
+    static const bool enabled = [] {
+        const wirehair::EnvironmentValue value(
+            "WIREHAIR_V2_BAND_TRACKING_X");
+        return value.IsSet() && value.Get()[0] == '1';
+    }();
+    return enabled;
+}
+#define MixedBandTrackingXForTesting MixedBandTrackingXEnabled()
+#endif
+
 const MixedCoefficientRows* GetMixedCoefficientRows()
 {
     if (!InitializeGF16()) {
         return nullptr;
     }
-    const auto build_rows = [](MixedCoefficientGeometry geometry) {
+    const auto build_rows = [](MixedCoefficientGeometry geometry,
+                               uint32_t band_h) {
         MixedCoefficientRows result = {};
         // The first ten rows, optional Y=11/Y=46 test rows, and shared-X
         // extension rows deliberately keep
         // the frozen H12 X coordinates [12, 256).  Later test geometries
         // append Y values; moving X with H would rewrite every existing
         // coefficient.
-        const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+        //
+        // EXPERIMENT (small-K speed): band_h lets a trimmed band re-derive its
+        // own X coordinates instead of inheriting the H12 ones.  A Cauchy
+        // matrix needs X and Y drawn from disjoint sets; trimming Y to
+        // [0, H') while X stays at 12 + residue keeps them disjoint but no
+        // longer matches the geometry the coefficients were chosen for, which
+        // is the suspected source of the per-K rank spikes below H=12.
+        const uint32_t H = band_h;
         for (uint32_t residue = 0;
              residue < kMixedCoefficientPeriod;
              ++residue)
@@ -716,7 +742,8 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
         MixedCoefficientGeometry::SharedCauchyX)
     {
         static const MixedCoefficientRows shared_rows =
-            build_rows(MixedCoefficientGeometry::SharedCauchyX);
+            build_rows(MixedCoefficientGeometry::SharedCauchyX,
+                       kMixedGF256Rows + kMixedGF16Rows);
         const uint32_t grouped_rows = ActiveMixedGroupedGF256Rows();
         const uint32_t row_mask = ActiveMixedGroupedGF256RowMask();
         const uint32_t suffix_mask = grouped_rows == 0u ? 0u :
@@ -766,9 +793,25 @@ const MixedCoefficientRows* GetMixedCoefficientRows()
         }
         return &shared_rows;
     }
+    if (MixedBandTrackingXForTesting)
+    {
+        // Rebuilt whenever the active band size changes: the table is a pure
+        // function of (geometry, band H), so caching on H is exact.
+        const uint32_t band_h =
+            ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
+        static thread_local MixedCoefficientRows tracked_rows = {};
+        static thread_local uint32_t cached_band_h = UINT32_MAX;
+        if (cached_band_h != band_h) {
+            tracked_rows =
+                build_rows(MixedCoefficientGeometry::FrozenPowerX, band_h);
+            cached_band_h = band_h;
+        }
+        return &tracked_rows;
+    }
 #endif
     static const MixedCoefficientRows frozen_rows =
-        build_rows(MixedCoefficientGeometry::FrozenPowerX);
+        build_rows(MixedCoefficientGeometry::FrozenPowerX,
+                   kMixedGF256Rows + kMixedGF16Rows);
     return &frozen_rows;
 }
 
@@ -1219,7 +1262,7 @@ bool SetMixedCoefficientGeometryForTesting(
 
 bool SetMixedGF16RowsForTesting(uint32_t rows)
 {
-    if (rows < kMixedGF16Rows || rows > kMixedGF16RowsMax ||
+    if (rows < kMixedGF16RowsMin || rows > kMixedGF16RowsMax ||
         (MixedGF256RowsForTesting >= kMixedGF256Rows + 2u &&
          rows != kMixedGF16RowsMax) ||
         MixedCoefficientPeriodForTesting <

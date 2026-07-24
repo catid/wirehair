@@ -13,7 +13,10 @@ static const uint32_t kMixedGF256Rows = 10u;
 static const uint32_t kMixedGF256RowsMax = 12u;
 /// Test builds may trim the subfield to a leading Cauchy subset of the
 /// frozen ten-row table (Y in [0, rows), X unchanged at 12 + residue).
-static const uint32_t kMixedGF256RowsMin = 8u;
+/// EXPERIMENT (small-K speed): the floor of eight is a reliability policy,
+/// not a structural bound -- the trimmed system is still one Cauchy matrix.
+/// Lowered so the band size can be swept against overhead at K <= 100.
+static const uint32_t kMixedGF256RowsMin = 1u;
 #else
 static const uint32_t kMixedGF256RowsMax = kMixedGF256Rows;
 static const uint32_t kMixedGF256RowsMin = kMixedGF256Rows;
@@ -21,8 +24,14 @@ static const uint32_t kMixedGF256RowsMin = kMixedGF256Rows;
 static const uint32_t kMixedGF16Rows = 2u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static const uint32_t kMixedGF16RowsMax = 4u;
+/// EXPERIMENT (small-K speed): zero extension rows degenerates the mixed
+/// completion to a pure GF(256) Cauchy band, which drops the GF(2^16)
+/// quotient factorization entirely.  Two is the production floor, not a
+/// structural one; this lets the extension band be swept to nothing.
+static const uint32_t kMixedGF16RowsMin = 0u;
 #else
 static const uint32_t kMixedGF16RowsMax = kMixedGF16Rows;
+static const uint32_t kMixedGF16RowsMin = kMixedGF16Rows;
 #endif
 
 enum class CompletionField : uint32_t
