@@ -16,7 +16,7 @@
 
     "<strong>Those two identical arms disagree on x by up to 7.6 percent.</strong> Because they are the same configuration, that spread is the measurement floor rather than a difference. Three further groups of arms whose per-cell outcomes are byte-identical in all six regions spread by 6.3, 6.8 and 20.2 percent, each worst in r1. Treat horizontal gaps below roughly 8 percent — and below 20 percent in r1 — as unresolvable.",
 
-    "<strong>The all-GF(256) hypothesis stays refuted.</strong> The certified arms are slower than the mixed-field arms in every region (region medians 1.88 / 2.63 / 2.39 / 2.38 / 2.07 / 1.23 M sym/s versus 3.09 / 3.19 / 3.17 / 3.23 / 2.98 / 2.23 M), and they are timed at a smaller block, which if anything flatters them on a symbols-per-second axis.",
+    "<strong>The all-GF(256) hypothesis stays refuted.</strong> The certified arms are slower than the mixed-field arms in every region by median — 1.88 / 2.63 / 2.39 / 2.38 / 2.07 / 1.23 M sym/s against 3.09 / 3.19 / 3.17 / 3.23 / 2.98 / 2.23 M — and they are timed at a smaller block, which if anything flatters them on a symbols-per-second axis. The separation is clean arm-by-arm only from r3 up: in r1 one certified arm beats one mixed arm, and in r2 seven beat fourteen, so the claim is about the distributions rather than every pair.",
 
     "<strong>Wirehair 1's y position is constructability, not decode margin.</strong> It is the only arm in the grid with construction failures — 538 across 24,390 cells — and those censored cells supply 81–90 percent of its expected overhead in every region. Excluding them, its mean extra is only 0.015–0.021. Per-K seed tables buy WH1 constructability; this screen deliberately removes them.",
 
