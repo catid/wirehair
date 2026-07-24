@@ -5,10 +5,51 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <vector>
 #include <limits>
 
 namespace wirehair_v2 {
 namespace {
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/// Staircase row-degree distribution for the shaped-construction experiment,
+/// read once from WIREHAIR_V2_STAIRCASE_DEGREES as comma-separated weights for
+/// degrees 1, 2, 3, ...  Unset (the default) keeps the stock construction.
+static const std::vector<double>* ActiveStaircaseDegreeDistribution()
+{
+    static const std::vector<double> parsed = [] {
+        std::vector<double> out;
+        const wirehair::EnvironmentValue value(
+            "WIREHAIR_V2_STAIRCASE_DEGREES");
+        if (!value.IsSet()) {
+            return out;
+        }
+        const char* p = value.Get();
+        while (*p != '\0') {
+            char* end = nullptr;
+            const double w = std::strtod(p, &end);
+            if (end == p) { break; }
+            out.push_back(w);
+            p = end;
+            while (*p == ',' || *p == ' ') { ++p; }
+        }
+        return out;
+    }();
+    return parsed.empty() ? nullptr : &parsed;
+}
+
+/// True when the shaped-degree experiment is active.
+static bool ShapedStaircaseActive()
+{
+    return ActiveStaircaseDegreeDistribution() != nullptr;
+}
+#else
+/// Production builds carry no shaped-degree experiment.
+static bool ShapedStaircaseActive() { return false; }
+#define WIREHAIR_V2_SHAPED_FALLBACK_DEFINED 1
+#endif
+
 
 uint32_t CertifiedSourceHits(uint32_t block_count)
 {
@@ -106,7 +147,19 @@ bool AppendDegreeBalancedStaircaseEdges(
     const uint32_t edge_count = K * hits;
     const uint32_t low_degree = edge_count / S;
     const uint32_t extra_rows = edge_count % S;
-    const uint32_t high_degree = low_degree + (extra_rows != 0u);
+    uint32_t high_degree = low_degree + (extra_rows != 0u);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // EXPERIMENT: shaped row-degree target.
+    //
+    // The column side must stay exactly SourceHits-regular (ValidatePrecodeSystem
+    // enforces it), so the edge budget K*hits is fixed and only its DISTRIBUTION
+    // across rows is free.  The peeling literature says that shape matters: a few
+    // low-degree rows start the ripple, a few high-degree rows finish coverage.
+    // The bucket greedy below realizes ANY feasible target sequence, not just the
+    // balanced one, so shaping is a matter of choosing `remaining` differently.
+    const std::vector<double>* shape = ActiveStaircaseDegreeDistribution();
+#endif
 
     // This stream is deliberately independent of the certified construction
     // stream.  BuildPrecodeSystem still consumes the certified staircase draws
@@ -128,6 +181,67 @@ bool AppendDegreeBalancedStaircaseEdges(
     for (uint32_t i = 0; i < extra_rows; ++i) {
         ++remaining[row_deck[i]];
     }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (shape)
+    {
+        // Draw each row's target degree from the shape, capped at K (a row
+        // cannot touch a source column twice), then repair the total back to
+        // the fixed budget: hand out or reclaim single sockets in shuffled row
+        // order so the correction itself does not bias any particular row.
+        double total = 0.0;
+        for (double w : *shape) { total += w > 0.0 ? w : 0.0; }
+        if (total <= 0.0) { return false; }
+        uint64_t assigned = 0;
+        for (uint32_t row = 0; row < S; ++row)
+        {
+            double u = (double)(matching_prng.Next() >> 8) / 16777216.0 * total;
+            uint32_t degree = 1u;
+            for (uint32_t d = 0; d < (uint32_t)shape->size(); ++d) {
+                const double w = (*shape)[d] > 0.0 ? (*shape)[d] : 0.0;
+                degree = d + 1u;
+                if (u < w) { break; }
+                u -= w;
+            }
+            remaining[row] = degree > K ? K : degree;
+            assigned += remaining[row];
+        }
+        // The column side is SourceHits-regular, so the edge budget K*hits is
+        // fixed and only the SHAPE across rows is free.  Rescale the sampled
+        // degrees multiplicatively onto the budget -- an additive +1/-1 repair
+        // would flatten the very shape being searched, which makes most of the
+        // parameter space degenerate.
+        if (assigned > 0u && assigned != edge_count)
+        {
+            const double scale = (double)edge_count / (double)assigned;
+            assigned = 0;
+            for (uint32_t row = 0; row < S; ++row) {
+                double scaled = (double)remaining[row] * scale + 0.5;
+                uint32_t d = (uint32_t)scaled;
+                if (d < 1u) { d = 1u; }
+                if (d > K) { d = K; }
+                remaining[row] = d;
+                assigned += d;
+            }
+        }
+        // Whatever rounding left over is settled one socket at a time, in
+        // shuffled row order, which perturbs the shape only at the margin.
+        for (uint32_t guard = 0; assigned != edge_count && guard < 4096u * S; ++guard)
+        {
+            const uint32_t row = row_deck[guard % S];
+            if (assigned < edge_count) {
+                if (remaining[row] < K) { ++remaining[row]; ++assigned; }
+            } else if (remaining[row] > 1u) {
+                --remaining[row]; --assigned;
+            }
+        }
+        if (assigned != edge_count) { return false; }
+        high_degree = 0u;
+        for (uint32_t row = 0; row < S; ++row) {
+            high_degree = std::max(high_degree, remaining[row]);
+        }
+    }
+#endif
 
     std::vector<std::vector<uint16_t>> buckets(high_degree + 1u);
     for (uint32_t row = 0; row < S; ++row) {
@@ -366,13 +480,14 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     }
                 } while (collide);
                 picks[hit] = p;
-                if (!params.DegreeBalancedStaircase) {
+                if (!params.DegreeBalancedStaircase &&
+                    !ShapedStaircaseActive()) {
                     out.StaircaseRows[p].push_back(c);
                 }
             }
         }
     }
-    if (params.DegreeBalancedStaircase &&
+    if ((params.DegreeBalancedStaircase || ShapedStaircaseActive()) &&
         !AppendDegreeBalancedStaircaseEdges(params, out.StaircaseRows))
     {
         return false;
@@ -677,6 +792,7 @@ static bool MixedBandTrackingXEnabled()
     return enabled;
 }
 #define MixedBandTrackingXForTesting MixedBandTrackingXEnabled()
+
 #endif
 
 const MixedCoefficientRows* GetMixedCoefficientRows()
