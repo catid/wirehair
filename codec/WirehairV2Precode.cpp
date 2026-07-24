@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 #include <limits>
 
@@ -447,11 +448,19 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     prng.Seed(params.Seed, K);
 
     // --- Staircase rows ---
-    // Reserve for the expected load: K*min(N1,S)/S source hits plus parity
-    // and link columns.
+    // Reserve for the heaviest plausible load, not the mean.  Source hits are
+    // K*min(N1,S) balls thrown into S bins, so a row's source degree is
+    // concentrated around the mean with a spread of order sqrt(mean); a
+    // mean-sized reserve leaves a large fraction of the rows to reallocate
+    // mid-build, which costs a second allocation and a copy on each of them.
     {
         const uint32_t hits = std::min(N1, S);
-        const uint32_t expected = (K * hits) / S + 3u;
+        const uint32_t mean = (K * hits) / S;
+        uint32_t slack = 4u;
+        while (slack * slack < 16u * mean) {
+            ++slack;
+        }
+        const uint32_t expected = mean + slack + 3u;
         for (uint32_t j = 0; j < S; ++j) {
             out.StaircaseRows[j].reserve(expected);
         }
@@ -520,10 +529,27 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         const uint32_t deck_span =
             params.DenseIdentityCorner ? (K + S) : span;
         const uint32_t set_count = (deck_span + 1u) >> 1;
-        std::vector<uint16_t> deck(deck_span);
-        std::vector<uint8_t> bitmap(deck_span, 0);
+        // The deck is overwritten in full by every shuffle and the bitmap is
+        // cleared before use, so neither needs a zero-initialised heap block.
+        // Spans up to the inline bound -- which covers the whole small-K band
+        // this codec is tuned for -- avoid the allocation entirely.
+        static const uint32_t kInlineDeckSpan = 512u;
+        uint16_t deck_inline[kInlineDeckSpan];
+        uint8_t bitmap_inline[kInlineDeckSpan];
+        std::vector<uint16_t> deck_heap;
+        std::vector<uint8_t> bitmap_heap;
+        uint16_t* deck = deck_inline;
+        uint8_t* bitmap = bitmap_inline;
+        if (deck_span > kInlineDeckSpan)
+        {
+            deck_heap.resize(deck_span);
+            bitmap_heap.resize(deck_span);
+            deck = deck_heap.data();
+            bitmap = bitmap_heap.data();
+        }
+        std::memset(bitmap, 0, deck_span);
 
-        UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+        UnbiasedShuffleDeck(prng, deck, deck_span);
         for (uint32_t i = 0; i < set_count; ++i) {
             bitmap[deck[i]] = 1;
         }
@@ -552,15 +578,15 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             // use one fresh shuffle.  Every later segment starts with the
             // balanced half of a fresh deck and continues through distinct
             // set/clear swap pairs from that same deck.
-            UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+            UnbiasedShuffleDeck(prng, deck, deck_span);
             uint32_t flip_index = 0u;
             while (row_i < D2)
             {
                 if (IsSegmentedDenseAnchor(
                         params.SegmentedDenseAnchors, row_i))
                 {
-                    UnbiasedShuffleDeck(prng, deck.data(), deck_span);
-                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                    UnbiasedShuffleDeck(prng, deck, deck_span);
+                    std::memset(bitmap, 0, deck_span);
                     for (uint32_t i = 0; i < set_count; ++i) {
                         bitmap[deck[i]] = 1u;
                     }
@@ -582,7 +608,26 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
             };
             for (uint32_t half = 0; half < 2u; ++half)
             {
-                UnbiasedShuffleDeck(prng, deck.data(), deck_span);
+                // A half's shuffled deck is observable only through the rows
+                // that half emits and through the PRNG state a later half
+                // consumes.  When neither exists -- the D2 == 1 configuration
+                // makes both halves empty, and the generator is not consulted
+                // after this loop -- the shuffle is dead work, and skipping it
+                // leaves the produced system bit-identical.
+                bool deck_observable =
+                    halves[half] != 0u ||
+                    (params.DenseTwoAnchor && half == 1u);
+                for (uint32_t rest = half + 1u; rest < 2u; ++rest) {
+                    if (halves[rest] != 0u ||
+                        (params.DenseTwoAnchor && rest == 1u))
+                    {
+                        deck_observable = true;
+                    }
+                }
+                if (!deck_observable) {
+                    continue;
+                }
+                UnbiasedShuffleDeck(prng, deck, deck_span);
                 uint32_t flip_count = halves[half];
                 uint32_t flip_offset = 0u;
                 if (params.DenseTwoAnchor && half == 1u)
@@ -591,7 +636,7 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     // balanced set-half into a new dense equation.  One of
                     // the five baseline flips becomes the anchor emission,
                     // keeping D2, RNG consumption, and rows 0..6 unchanged.
-                    std::fill(bitmap.begin(), bitmap.end(), uint8_t{0});
+                    std::memset(bitmap, 0, deck_span);
                     for (uint32_t i = 0; i < set_count; ++i) {
                         bitmap[deck[i]] = 1u;
                     }
@@ -638,7 +683,19 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     }
 
     const uint32_t staircase_end = K + S;
-    std::vector<uint8_t> source_hits(K, 0u);
+    // Validation runs on every generated system, so keep the per-source hit
+    // tally off the heap for the block counts this codec is tuned for.
+    static const uint32_t kInlineSourceHits = 1024u;
+    uint8_t source_hits_inline[kInlineSourceHits];
+    std::vector<uint8_t> source_hits_heap;
+    uint8_t* source_hits = source_hits_inline;
+    if (K > kInlineSourceHits) {
+        source_hits_heap.assign(K, uint8_t{0});
+        source_hits = source_hits_heap.data();
+    }
+    else {
+        std::memset(source_hits, 0, K);
+    }
     uint32_t balanced_high_rows = 0u;
     const uint32_t balanced_edges = K * std::min(params.SourceHits, S);
     const uint32_t balanced_low = balanced_edges / S;
@@ -693,8 +750,8 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         return false;
     }
     const uint8_t expected_hits = (uint8_t)std::min(params.SourceHits, S);
-    for (uint8_t hits : source_hits) {
-        if (hits != expected_hits) {
+    for (uint32_t column = 0; column < K; ++column) {
+        if (source_hits[column] != expected_hits) {
             return false;
         }
     }
