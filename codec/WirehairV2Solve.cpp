@@ -12,7 +12,6 @@
 #include <cstring>
 #include <limits>
 #include <new>
-#include <queue>
 #include <stdexcept>
 #include <utility>
 
@@ -4048,6 +4047,43 @@ mixed_rhs_accumulated:
     return Wirehair_Success;
 }
 
+/**
+    Reusable per-thread scratch for PeelBinaryRowsImplementation().
+
+    Every buffer here is sized from the system and fully rewritten at the top
+    of each peel, so retaining capacity across calls is observationally
+    identical to fresh vectors while removing ten small allocations per solve.
+    Measured on its own the saving is small -- glibc already serves these
+    same-sized blocks from tcache, and the assign() that refills each buffer
+    costs what the fresh allocation's zero-fill did -- so this is bookkeeping
+    hygiene rather than the reason the peel got faster.
+
+    The two adjacency buffers (column_offsets / column_rows) deliberately stay
+    per-call vectors: PeelResult reports their allocation count and capacity
+    bytes as the solver's binary-adjacency footprint, and pooling them would
+    make that report a fiction.
+*/
+struct PeelScratch
+{
+    std::vector<PeelRowState> RowState;
+    std::vector<uint8_t> Resolved;
+    std::vector<uint32_t> Queue;
+    std::vector<uint32_t> DegreeTwoRefs;
+    std::vector<uint64_t> DegreeTwoHeap;
+    std::vector<size_t> ReferenceBucketOffsets;
+    std::vector<size_t> ReferenceBucketCursor;
+    std::vector<uint32_t> ReferenceColumns;
+    std::vector<uint32_t> DegreeTwoTieRank;
+    std::vector<uint32_t> DegreeTwoRankColumn;
+};
+
+template<bool UseLowDegreeXor>
+PeelScratch& GetPeelScratch()
+{
+    static thread_local PeelScratch scratch;
+    return scratch;
+}
+
 template<bool UseLowDegreeXor>
 PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
@@ -4058,33 +4094,43 @@ PeelResult PeelBinaryRowsImplementation(
     out.UsedRows.assign(rows.size(), 0u);
     out.PeelOrder.reserve(column_count);
 
-    std::vector<PeelRowState> row_state(rows.size());
+    PeelScratch& scratch = GetPeelScratch<UseLowDegreeXor>();
+    std::vector<PeelRowState>& row_state = scratch.RowState;
+    row_state.assign(rows.size(), PeelRowState());
     std::vector<size_t> column_offsets((size_t)column_count + 1u, 0u);
-    std::vector<uint8_t> resolved(column_count, 0u);
-    std::vector<uint32_t> queue;
+    std::vector<uint8_t>& resolved = scratch.Resolved;
+    resolved.assign(column_count, 0u);
+    std::vector<uint32_t>& queue = scratch.Queue;
+    queue.clear();
     queue.reserve(rows.size());
-    std::vector<uint32_t> degree_two_refs(column_count, 0u);
-    class DegreeTwoQueue : public std::priority_queue<uint64_t>
-    {
-    public:
-        void Reserve(size_t count) { this->c.reserve(count); }
-    };
-    DegreeTwoQueue degree_two_queue;
-    degree_two_queue.Reserve(column_count);
+    std::vector<uint32_t>& degree_two_refs = scratch.DegreeTwoRefs;
+    degree_two_refs.assign(column_count, 0u);
+    // A hand-rolled binary max-heap over the same 64-bit keys as the previous
+    // std::priority_queue, so the pop/push order (and therefore the selection
+    // sequence) is unchanged, but the backing store can be pooled.
+    std::vector<uint64_t>& degree_two_heap = scratch.DegreeTwoHeap;
+    degree_two_heap.clear();
+    degree_two_heap.reserve(column_count);
 
+    // LowDegreeXor is now the XOR of *every* live column in the row, not just
+    // of the one or two live columns at low degree.  The two agree exactly at
+    // degree one and degree two (the only degrees that read it), and keeping
+    // the invariant globally costs one XOR against a word resolve() already
+    // has in a register.
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r)
     {
         CAT_DEBUG_ASSERT(rows[r].Columns.size() <= UINT16_MAX);
         row_state[r].Live = (uint16_t)rows[r].Columns.size();
         if (row_state[r].Live == 1u) {
             queue.push_back(r);
-            row_state[r].LowDegreeXor =
-                (uint16_t)*rows[r].Columns.begin();
         }
+        uint32_t live_xor = 0u;
         for (uint32_t column : rows[r].Columns) {
             CAT_DEBUG_ASSERT(column < column_count);
             ++column_offsets[(size_t)column + 1u];
+            live_xor ^= column;
         }
+        row_state[r].LowDegreeXor = (uint16_t)live_xor;
     }
 
     for (uint32_t column = 0; column < column_count; ++column) {
@@ -4119,8 +4165,9 @@ PeelResult PeelBinaryRowsImplementation(
             (uint32_t)(column_offsets[(size_t)column + 1u] -
                 column_offsets[column]));
     }
-    std::vector<size_t> reference_bucket_offsets(
-        (size_t)max_reference_count + 2u, 0u);
+    std::vector<size_t>& reference_bucket_offsets =
+        scratch.ReferenceBucketOffsets;
+    reference_bucket_offsets.assign((size_t)max_reference_count + 2u, 0u);
     for (uint32_t column = 0; column < column_count; ++column)
     {
         const uint32_t references = (uint32_t)(
@@ -4134,23 +4181,31 @@ PeelResult PeelBinaryRowsImplementation(
         reference_bucket_offsets[(size_t)references + 1u] +=
             reference_bucket_offsets[references];
     }
-    std::vector<size_t> reference_bucket_cursor = reference_bucket_offsets;
-    std::vector<uint32_t> reference_columns(column_count);
+    std::vector<size_t>& reference_bucket_cursor =
+        scratch.ReferenceBucketCursor;
+    reference_bucket_cursor.assign(
+        reference_bucket_offsets.begin(), reference_bucket_offsets.end());
+    std::vector<uint32_t>& reference_columns = scratch.ReferenceColumns;
+    reference_columns.resize(column_count);
     for (uint32_t column = 0; column < column_count; ++column)
     {
         const uint32_t references = (uint32_t)(
             column_offsets[(size_t)column + 1u] - column_offsets[column]);
         reference_columns[reference_bucket_cursor[references]++] = column;
     }
-    reference_bucket_cursor = reference_bucket_offsets;
+    reference_bucket_cursor.assign(
+        reference_bucket_offsets.begin(), reference_bucket_offsets.end());
 
     // Degree-two priorities compare a changing reference count followed by
     // the immutable total-reference count and reverse column id.  Replace
     // the three-field heap node with one 64-bit key.  The low word is a
     // precomputed rank that preserves the exact original tie order: larger
     // total-reference counts first, then lower column ids.
-    std::vector<uint32_t> degree_two_tie_rank(column_count);
-    std::vector<uint32_t> degree_two_rank_column(column_count);
+    std::vector<uint32_t>& degree_two_tie_rank = scratch.DegreeTwoTieRank;
+    degree_two_tie_rank.resize(column_count);
+    std::vector<uint32_t>& degree_two_rank_column =
+        scratch.DegreeTwoRankColumn;
+    degree_two_rank_column.resize(column_count);
     uint32_t next_tie_rank = 0u;
     for (uint32_t references = 0u;
          references <= max_reference_count;
@@ -4183,23 +4238,35 @@ PeelResult PeelBinaryRowsImplementation(
         if (state.Live != 2u) {
             return;
         }
-        uint32_t pair_xor = 0u;
-        uint32_t pair_count = 0u;
+        // state.LowDegreeXor already holds the XOR of the two live columns, so
+        // only the *first* of them has to be located.  The scan stops there
+        // and recovers the second by XOR instead of walking the rest of the
+        // row, and because the second live column is by construction later in
+        // the row's column order the two heap keys are still pushed in the
+        // original row order.  Every row reaches degree two exactly once, so
+        // the old full-row scan cost one pass over the whole system per solve:
+        // at K=100 it examined 1184 columns, this examines 339.
+        const uint32_t pair_xor = state.LowDegreeXor;
+        uint32_t first = UINT32_MAX;
         for (uint32_t column : rows[row].Columns)
         {
-            if (resolved[column]) {
-                continue;
-            }
-            pair_xor ^= column;
-            ++pair_count;
-            ++degree_two_refs[column];
-            if (degree_two_refs[column] > 0u) {
-                degree_two_queue.push(degree_two_key(column));
+            if (!resolved[column]) {
+                first = column;
+                break;
             }
         }
-        (void)pair_count;
-        CAT_DEBUG_ASSERT(pair_count == 2u && pair_xor <= UINT16_MAX);
-        state.LowDegreeXor = (uint16_t)pair_xor;
+        if (first == UINT32_MAX) {
+            return;
+        }
+        const uint32_t second = pair_xor ^ first;
+        CAT_DEBUG_ASSERT(
+            second < column_count && second != first && !resolved[second]);
+        ++degree_two_refs[first];
+        degree_two_heap.push_back(degree_two_key(first));
+        std::push_heap(degree_two_heap.begin(), degree_two_heap.end());
+        ++degree_two_refs[second];
+        degree_two_heap.push_back(degree_two_key(second));
+        std::push_heap(degree_two_heap.begin(), degree_two_heap.end());
     };
     const auto remove_degree_two = [&](
         uint32_t row,
@@ -4219,8 +4286,8 @@ PeelResult PeelBinaryRowsImplementation(
         // the lazy heap from the earlier increment.  It cannot have reached
         // the top while a higher key for this unresolved column existed, so
         // pushing it again here would only create a duplicate.  Degree zero
-        // needs no live heap key.
-        state.LowDegreeXor = (uint16_t)other;
+        // needs no live heap key.  resolve() reduces LowDegreeXor to `other`
+        // for every degree, so this path no longer writes it.
     };
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r) {
         add_degree_two(r);
@@ -4237,6 +4304,7 @@ PeelResult PeelBinaryRowsImplementation(
                 continue;
             }
             remove_degree_two(row, column);
+            row_state[row].LowDegreeXor ^= (uint16_t)column;
             --row_state[row].Live;
             add_degree_two(row);
             if (row_state[row].Live == 1u) {
@@ -4286,15 +4354,17 @@ PeelResult PeelBinaryRowsImplementation(
         }
 
         uint32_t best = UINT32_MAX;
-        while (!degree_two_queue.empty())
+        while (!degree_two_heap.empty())
         {
-            const uint64_t candidate = degree_two_queue.top();
+            const uint64_t candidate = degree_two_heap.front();
             const uint32_t column =
                 degree_two_rank_column[(uint32_t)candidate];
             if (resolved[column] ||
                 degree_two_refs[column] != (uint32_t)(candidate >> 32))
             {
-                degree_two_queue.pop();
+                std::pop_heap(
+                    degree_two_heap.begin(), degree_two_heap.end());
+                degree_two_heap.pop_back();
                 continue;
             }
             best = column;

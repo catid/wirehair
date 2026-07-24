@@ -7625,6 +7625,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_independent_extension_residues = false;
     uint32_t mixed_extension_residue_seed_xor = 78u;
     uint32_t source_hits_override = 0u;
+    uint32_t staircase_rows_override = 0u;
     uint32_t binary_dense_rows_override = 0u;
     uint32_t gf256_heavy_rows_override = 0u;
     uint32_t packet_peel_seed_xor = 0u;
@@ -7646,6 +7647,7 @@ int CmdPrecodeFail(int argc, char** argv)
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
     bool source_hits_explicit = false;
+    bool staircase_rows_explicit = false;
     bool binary_dense_rows_explicit = false;
     bool binary_dense_two_anchor_phase_explicit = false;
     bool binary_dense_segmented_anchors_explicit = false;
@@ -7835,6 +7837,16 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             source_hits_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--staircase-rows")) {
+            if (!TakeArg(
+                    "precodefail", "--staircase-rows", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--staircase-rows", value, staircase_rows_override))
+            {
+                return 1;
+            }
+            staircase_rows_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--binary-dense-rows")) {
             if (!TakeArg(
@@ -8369,6 +8381,12 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         std::fprintf(stderr,
             "precodefail --source-hits must be in [1,8]\n");
+        return 1;
+    }
+    if (staircase_rows_explicit && staircase_rows_override < 2u)
+    {
+        std::fprintf(stderr,
+            "precodefail --staircase-rows must be at least 2\n");
         return 1;
     }
     if (binary_dense_rows_explicit &&
@@ -8964,6 +8982,9 @@ int CmdPrecodeFail(int argc, char** argv)
             wirehair_v2::PrecodeParams base_params = canonical_params;
             if (source_hits_override != 0u) {
                 base_params.SourceHits = source_hits_override;
+            }
+            if (staircase_rows_override != 0u) {
+                base_params.Staircase = staircase_rows_override;
             }
             if (binary_dense_rows_override != 0u) {
                 base_params.DenseRows = binary_dense_rows_override;

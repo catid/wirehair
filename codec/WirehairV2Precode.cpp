@@ -54,6 +54,13 @@ static bool ShapedStaircaseActive() { return false; }
 
 uint32_t CertifiedSourceHits(uint32_t block_count)
 {
+    // N1 = 1 over 8 <= K <= 100 measured ~5% faster at equal-or-better
+    // untuned fail@+0 on top of the small-band staircase rule (K=8
+    // 2.22% -> 1.94%, K=12 1.74% -> 1.46%, noise through K=100), but it
+    // moves the construction-seed attempt counts that
+    // PrecodeSeedSelectionTest pins and removes the deficient fixture that
+    // PrecodeRoundTripTest's cold-retry case searches for.  Regenerating
+    // those two fixtures is a separate, deliberate change.
     // K=32000 codec-port certification rejects N1=2 at large K, while
     // K=10000 is the transition point tracked in the Phase 4 notes.
     return block_count >= 10000u ? 3u : 2u;
@@ -399,13 +406,49 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
 
 } // namespace
 
+uint32_t SmallBandStaircaseCount(uint32_t block_count)
+{
+    if (block_count < 2u || block_count > 64000u) {
+        return 0u;
+    }
+    const uint32_t inherited = wirehair::GetDenseCount(block_count);
+    if (block_count > kSmallBandStaircaseMaxBlockCount) {
+        return inherited;
+    }
+    // wirehair::GetDenseCount() sizes Wirehair 1's *dense GE row* count.  V2
+    // reuses that table for a structurally different quantity -- the LDPC
+    // staircase parity count S -- and in the K <= 100 band the inherited
+    // value is far larger than the staircase needs: S is 26 at K=100 and 13
+    // at K=32.  Each surplus parity adds one binary row *and* one binary
+    // column to every solve phase.  A measured sweep of S against untuned
+    // fail@+0 (3000-4000 paired constructions per point) is flat from the
+    // inherited value down to roughly 1.25*sqrt(K), and only starts to
+    // degrade below it -- at K=100, S=26 fails 0.93% and S=12 fails 0.87%,
+    // while S=8 fails 1.13% and S=4 fails 1.77%.  Sizing S at the knee keeps
+    // reliability and drops ~11% of encode time.
+    uint32_t root = 1u;
+    while ((root + 1u) * (root + 1u) <= block_count) {
+        ++root;
+    }
+    // floor(1.25 * (root + K/root) / 2): one Newton refinement of the integer
+    // square root, scaled by 5/4, all in exact integer arithmetic so the rule
+    // is reproducible on every platform.  Only reached for K <= 100, so the
+    // 5*(K + root^2) product cannot overflow.  Gives S = 3 at K=8, 5 at
+    // K=16, 7 at K=32, 10 at K=64 and 12 at K=100.
+    const uint32_t scaled = (5u * (block_count + root * root)) /
+        (8u * root);
+    uint32_t staircase = scaled < 2u ? 2u : scaled;
+    if (staircase > inherited) {
+        staircase = inherited;
+    }
+    return staircase;
+}
+
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
 {
     PrecodeParams params;
     params.BlockCount = block_count;
-    params.Staircase =
-        (block_count >= 2u && block_count <= 64000u) ?
-        wirehair::GetDenseCount(block_count) : 0u;
+    params.Staircase = SmallBandStaircaseCount(block_count);
     params.DenseRows = 12u;
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);

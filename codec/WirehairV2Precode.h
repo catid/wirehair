@@ -155,7 +155,41 @@ struct PrecodeParams
     uint64_t Seed = 0;         ///< constraint-generation seed
 };
 
-/// Certified rule: S = GetDenseCount(K), D2 = 12, H = 12,
+/// Largest block count that takes the measured small-band staircase rule.
+/// Above it the inherited wirehair::GetDenseCount() value is used unchanged.
+/// The reliability sweep behind the rule covers K = 2..100 only, so the
+/// boundary sits at the top of that measured band; S is discontinuous across
+/// it (S = 12 at K = 100, S = 26 at K = 101), as the inherited table already
+/// is at its own K = 64/65 seam.
+static const uint32_t kSmallBandStaircaseMaxBlockCount = 100u;
+
+/**
+    Staircase parity count S for a block count.
+
+    Equals wirehair::GetDenseCount(block_count) above
+    kSmallBandStaircaseMaxBlockCount.  At or below it, S is the smaller of the
+    inherited value and floor(1.25 * sqrt(K)), never below 2.  See the
+    definition for the reliability sweep behind the coefficient.  Returns 0
+    for block counts outside [2, 64000].
+
+    NOT YET REACHED BY THE SHIPPED MESSAGE CODEC.  MessagePrecodeEncoder and
+    MessagePrecodeDecoder both overwrite Staircase with SeedProfile::DenseCount
+    after calling MakeCertifiedParams (WirehairV2PrecodeEncode.cpp, in
+    ValidateMessagePrecodeContract), as does the equation fingerprint
+    (WirehairV2Fingerprint.cpp).  Encoder and decoder therefore still agree
+    with each other and the public profile fingerprints are unchanged, but they
+    keep the inherited S.  Routing this rule into the shipped codec means
+    (1) sourcing SeedProfile::DenseCount from here in WirehairV2Seeds.cpp,
+    (2) relaxing the DenseCount % 4 == 2 profile invariant, which is another
+    Wirehair-1 dense-count artifact this band violates (S = 12 at K = 100),
+    (3) rechecking GetDenseSeed()/HasDenseFixup(), which are indexed by the
+    dense count, and (4) minting a new profile ID, since changing the
+    equations under an existing one is exactly what the fingerprint freeze
+    exists to prevent.
+*/
+uint32_t SmallBandStaircaseCount(uint32_t block_count);
+
+/// Certified rule: S = SmallBandStaircaseCount(K), D2 = 12, H = 12,
 /// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 
