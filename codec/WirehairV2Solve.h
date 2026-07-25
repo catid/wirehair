@@ -162,6 +162,46 @@ struct PrecodeSolveStats
     uint32_t BinaryAdjacencyStorageAllocations = 0;
     uint64_t BlockXors = 0;
     uint64_t BlockMulAdds = 0;
+    /**
+        Deterministic non-XOR operation counters.
+
+        These complete the block-work receipt so a calibrated cost model can
+        predict solve latency without a stopwatch.  Every counter below is a
+        pure function of the structural configuration and the delivered packet
+        set, so repeated evaluations of one cell reproduce it exactly.
+
+        BlockCopies      whole-payload-block memcpy operations.
+        BlockZeroFills   whole-payload-block zero fills, including the bulk
+                         zero-initialization of the value workspace (counted
+                         in whole blocks, not bytes).
+        PeelAdjacencyVisits  column-to-row adjacency entries visited while
+                         resolving peeled and inactivated columns.
+        PeelRowScanSteps  row-column steps walked by the degree-two scan and
+                         the inactivation fallback cursor.
+        PeelHeapOperations  degree-two heap pushes and lazy pops.
+        ProjectionWordXors  64-bit words XORed while accumulating the affine
+                         projection of a peeled column onto inactive columns.
+        ResidualCoeffWordXors  64-bit words XORed by packed GF(2) residual
+                         elimination (mixed completion).
+        ResidualCoeffByteOps  coefficient bytes touched by GF(256) residual
+                         elimination (certified completion).
+    */
+    uint64_t BlockCopies = 0;
+    uint64_t BlockZeroFills = 0;
+    // gf256_addset_multi_mem writes dst = XOR(sources) in ONE pass, so it is
+    // neither a BlockXor (which accumulates into an existing dst) nor a copy.
+    // Profiling at a 64 KiB payload put it at 8.0% of runtime with no counter
+    // behind it, which is why the cost model could not see it.
+    // BlockAddSets counts the calls; BlockAddSetSources counts the source
+    // blocks consumed, since cost scales with the latter.
+    uint64_t BlockAddSets = 0;
+    uint64_t BlockAddSetSources = 0;
+    uint64_t PeelAdjacencyVisits = 0;
+    uint64_t PeelRowScanSteps = 0;
+    uint64_t PeelHeapOperations = 0;
+    uint64_t ProjectionWordXors = 0;
+    uint64_t ResidualCoeffWordXors = 0;
+    uint64_t ResidualCoeffByteOps = 0;
     uint64_t BuildNanoseconds = 0;
     uint64_t PeelNanoseconds = 0;
     uint64_t ProjectNanoseconds = 0;

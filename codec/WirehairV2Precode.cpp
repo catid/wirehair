@@ -1104,6 +1104,25 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
         const uint32_t subfield_rows = ActiveMixedGF256Rows();
         if (subfield_rows < kMixedGF256Rows)
         {
+            if (MixedBandTrackingXForTesting)
+            {
+                // `rows` is the thread-local band-tracked table, so the
+                // packed lanes are a function of (band H, trim) as well.
+                // A shared static would freeze whichever band H the process
+                // packed first and hand it to every later band.
+                const uint32_t trim = subfield_rows == kMixedGF256Rows - 2u ?
+                    kMixedGF256Rows - 2u : kMixedGF256Rows - 1u;
+                const uint32_t band_h =
+                    ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
+                const uint32_t key = (band_h << 8) | trim;
+                static thread_local MixedPackedCoefficients tracked_trim = {};
+                static thread_local uint32_t cached_trim_key = UINT32_MAX;
+                if (cached_trim_key != key) {
+                    tracked_trim = pack_rows(rows, trim);
+                    cached_trim_key = key;
+                }
+                return &tracked_trim;
+            }
             static const MixedPackedCoefficients frozen_packed_trim_two =
                 pack_rows(rows, kMixedGF256Rows - 2u);
             static const MixedPackedCoefficients frozen_packed_trim_one =
@@ -1111,6 +1130,19 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
             return subfield_rows == kMixedGF256Rows - 2u ?
                 &frozen_packed_trim_two : &frozen_packed_trim_one;
         }
+    }
+    if (MixedBandTrackingXForTesting)
+    {
+        // Same reasoning for the untrimmed frozen band: cache on band H.
+        const uint32_t band_h =
+            ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
+        static thread_local MixedPackedCoefficients tracked_full = {};
+        static thread_local uint32_t cached_full_band = UINT32_MAX;
+        if (cached_full_band != band_h) {
+            tracked_full = pack_rows(rows, kMixedGF256Rows);
+            cached_full_band = band_h;
+        }
+        return &tracked_full;
     }
 #endif
     static const MixedPackedCoefficients frozen_packed =

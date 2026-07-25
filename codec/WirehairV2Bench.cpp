@@ -621,6 +621,64 @@ std::vector<int> ParseIntList(const std::string& text)
     return out;
 }
 
+/**
+    Sentinel for "--solve-block-bytes was not given".
+
+    The default solve width is a property of the completion field, not a
+    number the parser can supply, so the option stores this until the field is
+    known.
+*/
+constexpr uint32_t kSolveBlockBytesUnset = UINT32_MAX;
+
+/**
+    The zero block every rank-trial packet points at.
+
+    The trials carry no payload at any width, so one shared zero block serves
+    every packet.  At width 0 the block is empty, but the address still has to
+    be real: the solver rejects a null SolvePacket::Data outright, and -- more
+    subtly -- it branches on that pointer to choose between copying a packet's
+    constant into the block and zero-filling the block, so a null pointer
+    would silently move a BlockCopies count over to BlockZeroFills and make
+    the width-0 counters disagree with every other width's.  The one byte of
+    slack is never read: the packet is zero bytes wide.
+*/
+std::vector<uint8_t> MakeZeroPacketBlock(uint32_t solve_block_bytes)
+{
+    return std::vector<uint8_t>(
+        solve_block_bytes != 0u ? (size_t)solve_block_bytes : (size_t)1u,
+        uint8_t{0});
+}
+
+/**
+    Parse a solve width, where 0 selects a payload-free solve.
+
+    ParseIntList() and ParseU32Arg() feed block counts, mix counts and packet
+    counts, where 0 is genuinely invalid, so neither is relaxed.  The solve
+    width is the one quantity whose 0 is meaningful -- the solver then does
+    the same sequence of block operations on zero-byte blocks, which is what
+    an operation-count receipt wants -- so it gets a parser of its own.
+
+    The upper bound is the solver's own block-size limit, so a width this
+    parser accepts is a width SolvePrecodeSystem*() will accept.
+*/
+bool ParseSolveBlockBytesArg(
+    const char* command,
+    const char* value,
+    uint32_t& out)
+{
+    uint32_t parsed = 0u;
+    if (!ParseU32Scalar(value, parsed) || parsed > 0x7fffffffu)
+    {
+        std::fprintf(stderr,
+            "%s --solve-block-bytes must be in [0,2147483647], where 0 "
+            "selects a payload-free solve: %s\n",
+            command, value ? value : "");
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
 std::vector<int> ParseSignedIntList(const std::string& text)
 {
     std::vector<int> out;
@@ -7614,6 +7672,12 @@ int CmdPrecodeFail(int argc, char** argv)
     std::string heavy_family_list = "periodic";
     std::string mix_count_list = "3";
     PrecodeFailCompletion completion = PrecodeFailCompletion::Certified;
+    // Width the rank trials solve at.  The rank trials carry no payload --
+    // every packet points at the same zero block -- so this is pure
+    // arithmetic width, independent of --bb-list, which stays the payload
+    // width that selects the seed profile and the loss stream.  Unset keeps
+    // the completion field's own default; see solve_block_bytes below.
+    uint32_t solve_block_bytes_option = kSolveBlockBytesUnset;
     bool payload_e2e = false;
     bool full_payload_solve = false;
     uint32_t trials = 100u;
@@ -7770,6 +7834,16 @@ int CmdPrecodeFail(int argc, char** argv)
                     "precodefail unknown --completion token %s "
                     "(expected certified or mixed)\n",
                     value);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--solve-block-bytes")) {
+            if (!TakeArg(
+                    "precodefail", "--solve-block-bytes", argc, argv, i,
+                    value) ||
+                !ParseSolveBlockBytesArg(
+                    "precodefail", value, solve_block_bytes_option))
+            {
                 return 1;
             }
         }
@@ -8277,6 +8351,18 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail requires non-empty integer lists\n");
         return 1;
     }
+    // --full-payload-solve is the option whose entire job is to set the solve
+    // width, to the payload width bb.  Naming a solve width as well asks for
+    // two different widths at once, so it is a hard error rather than a
+    // silent precedence rule.
+    if (solve_block_bytes_option != kSolveBlockBytesUnset &&
+        full_payload_solve)
+    {
+        std::fprintf(stderr,
+            "precodefail --solve-block-bytes conflicts with "
+            "--full-payload-solve, which solves at the payload width\n");
+        return 1;
+    }
     if (!ValidateBlockCounts(Ns, "precodefail") ||
         !ValidateLoss(loss, "precodefail") ||
         ((payload_e2e || full_payload_solve) &&
@@ -8332,6 +8418,18 @@ int CmdPrecodeFail(int argc, char** argv)
                     bb);
                 return 1;
             }
+        }
+        // The mixed field pairs payload bytes into GF(2^16) symbols, so the
+        // solve width obeys the same rule the payload width does.  0 is even
+        // and needs no exception carved for it.
+        if (solve_block_bytes_option != kSolveBlockBytesUnset &&
+            (solve_block_bytes_option & 1u) != 0u)
+        {
+            std::fprintf(stderr,
+                "precodefail mixed completion requires even solve block "
+                "bytes, got %u\n",
+                solve_block_bytes_option);
+            return 1;
         }
         for (wirehair_v2::HeavyCoefficientFamily family : heavy_families)
         {
@@ -8846,6 +8944,17 @@ int CmdPrecodeFail(int argc, char** argv)
             overhead_ladder_pct != 0u ? overhead_ladder_min : 0u);
     }
 #endif
+    if (solve_block_bytes_option != kSolveBlockBytesUnset)
+    {
+        // Receipt for the one knob that changes the arithmetic the rank
+        // trials perform without changing which packets arrive: the width is
+        // absent from every seed, so the cells this run reports are the same
+        // cells any other width reports.
+        std::printf(
+            "# solve_block_bytes=%u (payload width bb is unchanged and "
+            "still keys the loss stream)\n",
+            solve_block_bytes_option);
+    }
     std::printf(
         "N,bb,heavy_family,mix_count,overhead,trials,success,rank_fail,error,"
         "fail_rate,"
@@ -9274,8 +9383,21 @@ int CmdPrecodeFail(int argc, char** argv)
         for (int overhead_value : active_overheads)
         {
             const uint32_t overhead = (uint32_t)overhead_value;
+            // The rank trials carry no payload: every packet points at the
+            // same zero block, so the solve width only decides how many bytes
+            // of nothing each block operation moves.  The default is the
+            // narrowest width the completion field supports, which is what
+            // this measured before the width became an option;
+            // --solve-block-bytes names it explicitly instead, and
+            // --full-payload-solve is the separate arm that ties it to the
+            // payload width.  None of the three reaches a seed: the loss
+            // stream, the seed profile and the packet peel seed are functions
+            // of (K, bb, overhead, trial) alone, so changing the solve width
+            // changes the arithmetic performed and nothing else.
             uint32_t solve_block_bytes =
-                completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+                solve_block_bytes_option != kSolveBlockBytesUnset ?
+                    solve_block_bytes_option :
+                    (completion == PrecodeFailCompletion::Mixed ? 2u : 1u);
             if (full_payload_solve) solve_block_bytes = bb;
             const auto populate_trial_packets = [&, overhead](
                 uint32_t trial,
@@ -9358,8 +9480,8 @@ int CmdPrecodeFail(int argc, char** argv)
                                     "invalid worker test configuration");
                             }
 #endif
-                            const std::vector<uint8_t> zero(
-                                solve_block_bytes, uint8_t{0});
+                            const std::vector<uint8_t> zero =
+                                MakeZeroPacketBlock(solve_block_bytes);
                             std::vector<wirehair_v2::SolvePacket> packets(
                                 (size_t)K + overhead);
                             for (;;)
@@ -9524,8 +9646,8 @@ int CmdPrecodeFail(int argc, char** argv)
                     {
                         std::vector<wirehair_v2::SolvePacket> packets(
                             (size_t)K + overhead);
-                        const std::vector<uint8_t> replay_zero(
-                            solve_block_bytes, uint8_t{0});
+                        const std::vector<uint8_t> replay_zero =
+                            MakeZeroPacketBlock(solve_block_bytes);
                         if (!configure_test_thread()) {
                             witness_status = MixedNullReplayStatus::Error;
                             witness_reason = "replay_config";
@@ -9868,6 +9990,1593 @@ int CmdPrecodeFail(int argc, char** argv)
 #endif
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+
+/*
+    precodesweep: the untuned per-cell protocol of `precodefail --trials 1`,
+    evaluated for a list of (S, H, N1, D2) structure configs over a range of
+    cell indices, in ONE process with a thread pool over cells.
+
+    One cell i is exactly one untuned precodefail run:
+
+        construction seed  cs(i) = (mul * i) mod 2^32   (mul = 0x9E3779B9)
+        matrix seed        = cs(i)
+        packet peel seed   = (uint32)cs(i) ^ (uint32)(cs(i) >> 32)
+        packet/loss seed   = seed_base + i
+        one trial, one solve; the cell is 0 on Wirehair_Success, else 1.
+
+    That is the same arithmetic CmdPrecodeFail performs for
+    `--construction-seed cs(i) --seed seed_base+i --trials 1`, so a sweep row
+    reproduces the per-cell 0/1 vector of the process-per-cell harness.
+
+    The construction seed changes per cell, so the precode system is rebuilt
+    for every cell inside the worker; nothing about the build is serialized.
+
+    The mixed knobs (period, geometry, GF(256)/GF(2^16) row counts, residue
+    schedule, packet row seeds) are thread_local, so every worker applies the
+    full configure sequence itself before it calls MakeMixedParams() or the
+    solver.  Workers are created fresh for each config so their thread-local
+    codec state starts from the defaults a fresh precodefail process sees.
+
+    A config the codec rejects (invalid knob combination, rejected
+    construction, or a packet runtime that will not initialize) is reported as
+    fail_rate 1.0 over all of its cells and the sweep continues: the
+    process-per-cell harness records exactly that, because a rejected run
+    prints no CSV data row.
+*/
+
+struct PrecodeSweepConfig
+{
+    uint32_t Staircase = 0u;      ///< S; 0 keeps the profile default
+    uint32_t MixedGF256Rows = 0u; ///< H; 0 keeps --mixed-gf256-rows
+    uint32_t SourceHits = 0u;     ///< N1; 0 keeps the profile default
+    uint32_t DenseRows = 0u;      ///< D2; 0 keeps the profile default
+};
+
+struct PrecodeSweepRun
+{
+    // Cell inputs shared by every config.
+    uint32_t BlockCount = 128u;
+    uint32_t BlockBytes = 2u;
+    uint32_t Overhead = 0u;
+    uint32_t MixCount = 3u;
+    uint32_t Trial = 0u;
+    double Loss = 0.10;
+    uint64_t SeedBase = 55u;
+    uint64_t ConstructionSeedMultiplier = UINT64_C(0x9E3779B9);
+    bool PairedOverheadStream = false;
+    PacketScheduleKind Schedule = PacketScheduleKind::Iid;
+    PrecodeFailCompletion Completion = PrecodeFailCompletion::Mixed;
+    wirehair_v2::HeavyCoefficientFamily HeavyFamily =
+        wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy;
+    uint32_t HeavyRowsOverride = 0u;
+    uint32_t PacketPeelSeedXor = 0u;
+    bool DenseTwoAnchor = false;
+    uint32_t DenseTwoAnchorPhase = 0u;
+    bool DegreeBalancedStaircase = false;
+    wirehair_v2::DenseAnchorLayout SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Disabled;
+    bool DenseIdentityCorner = false;
+
+    // Thread-local codec knobs.  Only the GF(256) row count is a sweep axis.
+    int TinyFastPathMode = 0;
+    wirehair_v2::MixedCoefficientGeometry Geometry =
+        wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    uint32_t GF16Rows = wirehair_v2::kMixedGF16Rows;
+    uint32_t Period = wirehair_v2::kMixedCoefficientPeriod;
+    uint32_t MixedGF256Rows = wirehair_v2::kMixedGF256Rows;
+    uint32_t ResidueSkew = 0u;
+    wirehair_v2::MixedResidueSchedule ResidueSchedule =
+        wirehair_v2::MixedResidueSchedule::Constant;
+    uint32_t ResidueHashSeed = 0u;
+    uint32_t ExtensionSeedXor = 78u;
+    bool IndependentExtensionResidues = false;
+    wirehair_v2::MixedResidueBucketMode BucketMode =
+        wirehair_v2::MixedResidueBucketMode::Automatic;
+    uint32_t PacketRowSeedMultiplier = 1u;
+    bool PacketRowSeedAvalanche = false;
+    uint32_t OddPacketPeelSeedXor = 0u;
+    uint32_t GroupedGF256Rows = 0u;
+    uint32_t GroupedGF256RowMask = 0u;
+    bool GroupedGF256RowMaskExplicit = false;
+
+    /**
+        Width the cell solves at.
+
+        A cell carries no payload -- every packet points at the same zero
+        block -- so this is arithmetic width only.  Unset means the narrowest
+        width the completion field supports, which is what the cell protocol
+        used before the width became an option.  It is deliberately not
+        BlockBytes: BlockBytes selects the loss stream, and a solve width that
+        fed the seed would resample the packet set every time the width
+        changed.
+    */
+    uint32_t SolveBlockBytesOverride = kSolveBlockBytesUnset;
+
+    uint32_t SolveBlockBytes() const
+    {
+        if (SolveBlockBytesOverride != kSolveBlockBytesUnset) {
+            return SolveBlockBytesOverride;
+        }
+        return Completion == PrecodeFailCompletion::Mixed ? 2u : 1u;
+    }
+
+    uint32_t ActiveGF256Rows(const PrecodeSweepConfig& config) const
+    {
+        return config.MixedGF256Rows != 0u ?
+            config.MixedGF256Rows : MixedGF256Rows;
+    }
+
+    /**
+        Apply this config's thread-local codec knobs to the calling thread.
+
+        The order is CmdPrecodeFail's configure_test_thread() order and must
+        stay that way: every setter before the last one clears the schedule
+        experiments, so grouped rows have to be configured last.
+    */
+    bool ConfigureThread(const PrecodeSweepConfig& config) const
+    {
+        return wirehair_v2::SetTinyMixedFastPathModeForTesting(
+                   TinyFastPathMode) &&
+            wirehair_v2::SetMixedCoefficientGeometryForTesting(Geometry) &&
+            wirehair_v2::SetMixedGF16RowsForTesting(GF16Rows) &&
+            wirehair_v2::SetMixedCoefficientPeriodForTesting(Period) &&
+            wirehair_v2::SetMixedGF256RowsForTesting(
+                ActiveGF256Rows(config)) &&
+            wirehair_v2::SetMixedResidueSkewForTesting(ResidueSkew) &&
+            wirehair_v2::SetMixedResidueScheduleForTesting(ResidueSchedule) &&
+            (wirehair_v2::SetMixedResidueHashSeedForTesting(
+                 ResidueHashSeed), true) &&
+            (wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(
+                 ExtensionSeedXor), true) &&
+            wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(
+                IndependentExtensionResidues) &&
+            wirehair_v2::SetMixedResidueBucketModeForTesting(BucketMode) &&
+            wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+                PacketRowSeedMultiplier) &&
+            (wirehair_v2::SetPacketRowSeedAvalancheForTesting(
+                 PacketRowSeedAvalanche), true) &&
+            (wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+                 OddPacketPeelSeedXor), true) &&
+            wirehair_v2::SetMixedGroupedGF256RowsForTesting(
+                GroupedGF256Rows) &&
+            (!GroupedGF256RowMaskExplicit ||
+             wirehair_v2::SetMixedGroupedGF256RowMaskForTesting(
+                 GroupedGF256RowMask));
+    }
+
+    uint64_t ConstructionSeed(uint32_t cell) const
+    {
+        return (ConstructionSeedMultiplier * (uint64_t)cell) &
+            UINT64_C(0xFFFFFFFF);
+    }
+
+    /**
+        CmdPrecodeFail's populate_trial_packets() loss seed for this cell.
+
+        Every term is a cell input, not a solve parameter: BlockBytes here is
+        the payload width --bb names, the same one precodefail hashes, so a
+        sweep row reproduces the process-per-cell loss stream.  The solve
+        width is absent on purpose -- see SolveBlockBytesOverride.
+    */
+    uint64_t CellLossSeed(uint32_t cell) const
+    {
+        return (SeedBase + (uint64_t)cell) ^
+            ((uint64_t)BlockCount * UINT64_C(0x9e3779b97f4a7c15)) ^
+            ((uint64_t)BlockBytes * UINT64_C(0xbf58476d1ce4e5b9)) ^
+            ((uint64_t)(PairedOverheadStream ? 0u : Overhead) *
+                UINT64_C(0x94d049bb133111eb)) ^
+            ((uint64_t)Trial * UINT64_C(0xd6e8feb86659fd93));
+    }
+
+    /// Returns 0 when the cell decodes, 1 otherwise (harness convention).
+    uint8_t RunCell(
+        const PrecodeSweepConfig& config,
+        uint32_t cell,
+        std::vector<wirehair_v2::SolvePacket>& packets,
+        const uint8_t* packet_data) const
+    {
+        // Untuned protocol: the construction seed is the matrix seed and the
+        // packet peel seed folds its halves, with no per-K profile component.
+        const uint64_t construction_seed = ConstructionSeed(cell);
+        const uint32_t packet_peel_seed = (uint32_t)construction_seed ^
+            (uint32_t)(construction_seed >> 32);
+        wirehair_v2::PrecodeParams params =
+            Completion == PrecodeFailCompletion::Mixed ?
+                wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :
+                wirehair_v2::MakeCertifiedParams(
+                    BlockCount, construction_seed);
+        if (config.SourceHits != 0u) {
+            params.SourceHits = config.SourceHits;
+        }
+        if (config.Staircase != 0u) {
+            params.Staircase = config.Staircase;
+        }
+        if (config.DenseRows != 0u) {
+            params.DenseRows = config.DenseRows;
+        }
+        params.DenseTwoAnchor = DenseTwoAnchor;
+        params.DenseTwoAnchorPhase = DenseTwoAnchorPhase;
+        params.DegreeBalancedStaircase = DegreeBalancedStaircase;
+        params.SegmentedDenseAnchors = SegmentedDenseAnchors;
+        params.DenseIdentityCorner = DenseIdentityCorner;
+        if (HeavyRowsOverride != 0u) {
+            params.HeavyRows = HeavyRowsOverride;
+        }
+        params.HeavyFamily = HeavyFamily;
+
+        // Untuned protocol: exactly one construction attempt, no systematic
+        // probe and no seed escalation.  A rejected construction is the
+        // cell's outcome, not an abort.
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+            return 1u;
+        }
+        const uint64_t precode_count_wide =
+            (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        if (precode_count_wide > UINT32_MAX) {
+            return 1u;
+        }
+        wirehair_v2::PacketRowRuntime runtime;
+        if (!runtime.Initialize(
+                BlockCount, (uint32_t)precode_count_wide, MixCount))
+        {
+            return 1u;
+        }
+        wirehair_v2::PacketRowConfig row_config;
+        row_config.PeelSeed = packet_peel_seed ^ PacketPeelSeedXor;
+        row_config.MixCount = MixCount;
+
+        const uint64_t loss_seed = CellLossSeed(cell);
+        if (Schedule == PacketScheduleKind::Iid)
+        {
+            Rng rng(loss_seed);
+            uint32_t block_id = 0u;
+            size_t delivered = 0u;
+            while (delivered < packets.size())
+            {
+                const uint32_t id = block_id++;
+                if (ShouldDrop(rng, Loss)) continue;
+                wirehair_v2::SolvePacket& packet = packets[delivered++];
+                packet.BlockId = id;
+                packet.Data = packet_data;
+            }
+        }
+        else
+        {
+            const std::vector<uint32_t> ids = BuildPacketSchedule(
+                BlockCount, (uint32_t)packets.size(), Loss, loss_seed,
+                Schedule);
+            if (ids.size() != packets.size()) {
+                throw std::runtime_error(
+                    "packet schedule construction failed");
+            }
+            for (size_t i = 0u; i < ids.size(); ++i) {
+                packets[i].BlockId = ids[i];
+                packets[i].Data = packet_data;
+            }
+        }
+
+        std::vector<uint8_t> intermediate;
+        wirehair_v2::PrecodeSolveStats solve_stats;
+        const WirehairResult result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system, row_config, runtime, packets, SolveBlockBytes(),
+                intermediate, &solve_stats);
+        return result == Wirehair_Success ? 0u : 1u;
+    }
+};
+
+/// Reject the config combinations CmdPrecodeFail refuses to start on.  The
+/// per-cell harness turns each of those into a run with no CSV data row, so
+/// they count as complete failure here rather than as an abort.
+const char* PrecodeSweepConfigRejection(
+    const PrecodeSweepRun& run,
+    const PrecodeSweepConfig& config)
+{
+    if (config.SourceHits > 8u) {
+        return "source hits must be in [1,8]";
+    }
+    if (config.Staircase != 0u && config.Staircase < 2u) {
+        return "staircase rows must be at least 2";
+    }
+    if (config.DenseRows > 64u) {
+        return "binary dense rows must be in [1,64]";
+    }
+    if (run.DenseTwoAnchor && config.DenseRows != 0u &&
+        config.DenseRows != 12u)
+    {
+        return "--binary-dense-two-anchor requires 12 binary dense rows";
+    }
+    if (run.SegmentedDenseAnchors !=
+            wirehair_v2::DenseAnchorLayout::Disabled &&
+        config.DenseRows != 0u && config.DenseRows != 12u)
+    {
+        return "segmented dense anchors require 12 binary dense rows";
+    }
+    return nullptr;
+}
+
+bool ParsePrecodeSweepConfigText(
+    const std::string& text,
+    std::vector<PrecodeSweepConfig>& configs)
+{
+    std::string token;
+    const auto flush_token = [&]() -> bool {
+        if (token.empty()) {
+            return true;
+        }
+        const std::vector<int> fields = ParseSignedIntList(token);
+        if (fields.size() != 4u) {
+            std::fprintf(stderr,
+                "precodesweep config must be S,H,N1,D2: %s\n", token.c_str());
+            return false;
+        }
+        for (int field : fields) {
+            if (field < 0 || field > (int)UINT16_MAX) {
+                std::fprintf(stderr,
+                    "precodesweep config field out of range: %s\n",
+                    token.c_str());
+                return false;
+            }
+        }
+        PrecodeSweepConfig config;
+        config.Staircase = (uint32_t)fields[0];
+        config.MixedGF256Rows = (uint32_t)fields[1];
+        config.SourceHits = (uint32_t)fields[2];
+        config.DenseRows = (uint32_t)fields[3];
+        configs.push_back(config);
+        token.clear();
+        return true;
+    };
+    for (char ch : text)
+    {
+        if (ch == ';' || ch == '\n' || ch == '\r')
+        {
+            if (!flush_token()) return false;
+            continue;
+        }
+        if (ch == ' ' || ch == '\t') {
+            continue;
+        }
+        token.push_back(ch);
+    }
+    return flush_token();
+}
+
+bool LoadPrecodeSweepConfigFile(
+    const char* path,
+    std::vector<PrecodeSweepConfig>& configs)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::fprintf(stderr,
+            "precodesweep could not open --config-file %s\n", path);
+        return false;
+    }
+    std::string line;
+    while (std::getline(file, line))
+    {
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos) {
+            line.erase(comment);
+        }
+        if (line.find_first_not_of(" \t\r") == std::string::npos) {
+            continue;
+        }
+        if (!ParsePrecodeSweepConfigText(line, configs)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// `A:B` selects the half-open cell range [A, B).  A bare `N` selects
+/// [1, N+1), the 1-based cell numbering the Python harness uses.
+bool ParsePrecodeSweepCells(
+    const char* text,
+    uint32_t& begin,
+    uint32_t& end)
+{
+    const std::string value(text ? text : "");
+    const size_t colon = value.find(':');
+    if (colon == std::string::npos)
+    {
+        uint32_t count = 0u;
+        if (!ParseU32Scalar(value.c_str(), count) || count == 0u) {
+            return BadArg("--cells", text);
+        }
+        begin = 1u;
+        end = count + 1u;
+        return true;
+    }
+    uint32_t low = 0u;
+    uint32_t high = 0u;
+    if (!ParseU32Scalar(value.substr(0u, colon).c_str(), low) ||
+        !ParseU32Scalar(value.substr(colon + 1u).c_str(), high))
+    {
+        return BadArg("--cells", text);
+    }
+    begin = low;
+    end = high;
+    return true;
+}
+
+int CmdPrecodeSweep(int argc, char** argv)
+{
+    PrecodeSweepRun run;
+    std::vector<PrecodeSweepConfig> configs;
+    uint32_t threads = 64u;
+    uint32_t cell_begin = 1u;
+    uint32_t cell_end = 1u;
+    bool cells_explicit = false;
+    bool emit_cells = false;
+    std::string heavy_family_list = "periodic";
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("precodesweep", "--N", argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, run.BlockCount))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--bb") ||
+                 !std::strcmp(argv[i], "--bb-list")) {
+            if (!TakeArg("precodesweep", "--bb", argc, argv, i, value) ||
+                !ParseU32Arg("--bb", value, run.BlockBytes))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--solve-block-bytes")) {
+            if (!TakeArg(
+                    "precodesweep", "--solve-block-bytes", argc, argv, i,
+                    value) ||
+                !ParseSolveBlockBytesArg(
+                    "precodesweep", value, run.SolveBlockBytesOverride))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cells")) {
+            if (!TakeArg("precodesweep", "--cells", argc, argv, i, value) ||
+                !ParsePrecodeSweepCells(value, cell_begin, cell_end))
+            {
+                return 1;
+            }
+            cells_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--configs")) {
+            if (!TakeArg("precodesweep", "--configs", argc, argv, i, value) ||
+                !ParsePrecodeSweepConfigText(value, configs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--config-file")) {
+            if (!TakeArg(
+                    "precodesweep", "--config-file", argc, argv, i, value) ||
+                !LoadPrecodeSweepConfigFile(value, configs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--threads")) {
+            if (!TakeArg("precodesweep", "--threads", argc, argv, i, value) ||
+                !ParseU32Arg("--threads", value, threads))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--emit-cells")) {
+            emit_cells = true;
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (!TakeArg("precodesweep", "--overhead", argc, argv, i, value) ||
+                !ParseU32Arg("--overhead", value, run.Overhead))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mix-count")) {
+            if (!TakeArg(
+                    "precodesweep", "--mix-count", argc, argv, i, value) ||
+                !ParseU32Arg("--mix-count", value, run.MixCount))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--trials")) {
+            // Accepted only in its harness form: one trial per cell.
+            uint32_t trials = 1u;
+            if (!TakeArg("precodesweep", "--trials", argc, argv, i, value) ||
+                !ParseU32Arg("--trials", value, trials))
+            {
+                return 1;
+            }
+            if (trials != 1u) {
+                std::fprintf(stderr,
+                    "precodesweep evaluates one trial per cell; use --cells "
+                    "for more samples\n");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--trial-index")) {
+            if (!TakeArg(
+                    "precodesweep", "--trial-index", argc, argv, i, value) ||
+                !ParseU32Arg("--trial-index", value, run.Trial))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("precodesweep", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, run.Loss))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed-base")) {
+            if (!TakeArg(
+                    "precodesweep", "--seed-base", argc, argv, i, value) ||
+                !ParseU64Arg("--seed-base", value, run.SeedBase))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed-multiplier")) {
+            if (!TakeArg("precodesweep", "--construction-seed-multiplier",
+                    argc, argv, i, value) ||
+                !ParseU64Arg("--construction-seed-multiplier", value,
+                    run.ConstructionSeedMultiplier))
+            {
+                return 1;
+            }
+            if (run.ConstructionSeedMultiplier > UINT32_MAX) {
+                std::fprintf(stderr,
+                    "precodesweep --construction-seed-multiplier must fit "
+                    "32 bits\n");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--paired-overhead-stream")) {
+            run.PairedOverheadStream = true;
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!TakeArg("precodesweep", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, run.Schedule))
+            {
+                std::fprintf(stderr,
+                    "precodesweep unknown --schedule token %s\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--completion")) {
+            if (!TakeArg(
+                    "precodesweep", "--completion", argc, argv, i, value) ||
+                !ParsePrecodeFailCompletion(value, run.Completion))
+            {
+                std::fprintf(stderr,
+                    "precodesweep unknown --completion token %s "
+                    "(expected certified or mixed)\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--heavy-family")) {
+            if (!TakeArg(
+                    "precodesweep", "--heavy-family", argc, argv, i, value))
+            {
+                return 1;
+            }
+            heavy_family_list = value;
+        }
+        else if (!std::strcmp(argv[i], "--gf256-heavy-rows")) {
+            if (!TakeArg("precodesweep", "--gf256-heavy-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--gf256-heavy-rows", value, run.HeavyRowsOverride))
+            {
+                return 1;
+            }
+            if (run.HeavyRowsOverride == 0u || run.HeavyRowsOverride > 128u) {
+                std::fprintf(stderr,
+                    "precodesweep --gf256-heavy-rows must be in [1,128]\n");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--packet-peel-seed-xor")) {
+            if (!TakeArg("precodesweep", "--packet-peel-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--packet-peel-seed-xor", value, run.PacketPeelSeedXor))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--binary-dense-two-anchor")) {
+            run.DenseTwoAnchor = true;
+        }
+        else if (!std::strcmp(argv[i], "--binary-dense-two-anchor-phase")) {
+            if (!TakeArg("precodesweep", "--binary-dense-two-anchor-phase",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--binary-dense-two-anchor-phase", value,
+                    run.DenseTwoAnchorPhase))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--degree-balanced-staircase")) {
+            run.DegreeBalancedStaircase = true;
+        }
+        else if (!std::strcmp(argv[i], "--dense-identity-corner")) {
+            run.DenseIdentityCorner = true;
+        }
+        else if (!std::strcmp(argv[i], "--mixed-geometry")) {
+            if (!TakeArg("precodesweep", "--mixed-geometry",
+                    argc, argv, i, value) ||
+                !ParseMixedCoefficientGeometry(value, run.Geometry))
+            {
+                std::fprintf(stderr,
+                    "precodesweep unknown --mixed-geometry token %s "
+                    "(expected frozen or shared-x)\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
+            if (!TakeArg("precodesweep", "--mixed-gf16-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-gf16-rows", value, run.GF16Rows))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
+            if (!TakeArg("precodesweep", "--mixed-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-gf256-rows", value, run.MixedGF256Rows))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-period")) {
+            if (!TakeArg(
+                    "precodesweep", "--mixed-period", argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-period", value, run.Period))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-skew")) {
+            if (!TakeArg("precodesweep", "--mixed-residue-skew",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-skew", value, run.ResidueSkew))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-schedule")) {
+            if (!TakeArg("precodesweep", "--mixed-residue-schedule",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueSchedule(value, run.ResidueSchedule))
+            {
+                std::fprintf(stderr,
+                    "precodesweep unknown --mixed-residue-schedule token "
+                    "%s\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-hash-seed")) {
+            if (!TakeArg("precodesweep", "--mixed-residue-hash-seed",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--mixed-residue-hash-seed", value, run.ResidueHashSeed))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-residue-buckets")) {
+            if (!TakeArg("precodesweep", "--mixed-residue-buckets",
+                    argc, argv, i, value) ||
+                !ParseMixedResidueBucketMode(value, run.BucketMode))
+            {
+                std::fprintf(stderr,
+                    "precodesweep unknown --mixed-residue-buckets token "
+                    "%s\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-independent-extension-"
+                                       "residues")) {
+            run.IndependentExtensionResidues = true;
+        }
+        else if (!std::strcmp(argv[i],
+                              "--mixed-extension-residue-seed-xor")) {
+            if (!TakeArg("precodesweep", "--mixed-extension-residue-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-extension-residue-seed-xor", value,
+                    run.ExtensionSeedXor))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-grouped-gf256-rows")) {
+            if (!TakeArg("precodesweep", "--mixed-grouped-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-grouped-gf256-rows", value,
+                    run.GroupedGF256Rows))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-grouped-gf256-row-mask")) {
+            if (!TakeArg("precodesweep", "--mixed-grouped-gf256-row-mask",
+                    argc, argv, i, value) ||
+                !ParseU32MaskArg("--mixed-grouped-gf256-row-mask", value,
+                    run.GroupedGF256RowMask))
+            {
+                return 1;
+            }
+            run.GroupedGF256RowMaskExplicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--packet-row-seed-multiplier")) {
+            if (!TakeArg("precodesweep", "--packet-row-seed-multiplier",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--packet-row-seed-multiplier", value,
+                    run.PacketRowSeedMultiplier))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--packet-row-seed-avalanche")) {
+            run.PacketRowSeedAvalanche = true;
+        }
+        else if (!std::strcmp(argv[i], "--odd-packet-peel-seed-xor")) {
+            if (!TakeArg("precodesweep", "--odd-packet-peel-seed-xor",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--odd-packet-peel-seed-xor", value,
+                    run.OddPacketPeelSeedXor))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--tiny-fastpath")) {
+            if (!TakeArg(
+                    "precodesweep", "--tiny-fastpath", argc, argv, i, value))
+            {
+                return 1;
+            }
+            if (!std::strcmp(value, "auto")) {
+                run.TinyFastPathMode = 0;
+            }
+            else if (!std::strcmp(value, "general")) {
+                run.TinyFastPathMode = -1;
+            }
+            else if (!std::strcmp(value, "dense")) {
+                run.TinyFastPathMode = 1;
+            }
+            else {
+                std::fprintf(stderr,
+                    "precodesweep unknown --tiny-fastpath token %s "
+                    "(expected auto, general, or dense)\n",
+                    value);
+                return 1;
+            }
+        }
+        else {
+            UnknownArg("precodesweep", argv[i]);
+            return 1;
+        }
+    }
+
+    std::vector<wirehair_v2::HeavyCoefficientFamily> heavy_families;
+    if (!ParseHeavyFamilies(heavy_family_list, heavy_families) ||
+        heavy_families.size() != 1u)
+    {
+        std::fprintf(stderr,
+            "precodesweep --heavy-family takes one of periodic or hashed\n");
+        return 1;
+    }
+    run.HeavyFamily = heavy_families[0];
+
+    if (configs.empty()) {
+        std::fprintf(stderr,
+            "precodesweep requires --configs or --config-file "
+            "(entries of S,H,N1,D2)\n");
+        return 1;
+    }
+    if (!cells_explicit) {
+        std::fprintf(stderr,
+            "precodesweep requires --cells (A:B for the half-open range "
+            "[A,B), or N for [1,N+1))\n");
+        return 1;
+    }
+    if (cell_end <= cell_begin) {
+        std::fprintf(stderr,
+            "precodesweep --cells range must be non-empty\n");
+        return 1;
+    }
+    if (run.BlockCount < 2u || run.BlockCount > 64000u) {
+        std::fprintf(stderr,
+            "precodesweep --N must be in [2,64000]\n");
+        return 1;
+    }
+    // --bb is the payload width the loss stream is keyed on, matching
+    // precodefail's --bb-list, and it is not the width the cell solves at:
+    // see --solve-block-bytes.  It follows precodefail's rule, so 0 is
+    // rejected here just as ParseIntList() rejects it there.
+    if (run.BlockBytes < 1u || run.BlockBytes > 0x7fffffffu) {
+        std::fprintf(stderr,
+            "precodesweep --bb must be in [1,2147483647]\n");
+        return 1;
+    }
+    if (threads == 0u || threads > 1024u) {
+        std::fprintf(stderr, "precodesweep --threads must be in [1,1024]\n");
+        return 1;
+    }
+    if (run.Overhead > 1024u) {
+        std::fprintf(stderr, "precodesweep --overhead must be in [0,1024]\n");
+        return 1;
+    }
+    if (run.MixCount < 1u ||
+        run.MixCount > wirehair_v2::kCertifiedPacketMixCount)
+    {
+        std::fprintf(stderr,
+            "precodesweep --mix-count must be in [1,%u]\n",
+            wirehair_v2::kCertifiedPacketMixCount);
+        return 1;
+    }
+    if (!ValidateLoss(run.Loss, "precodesweep")) {
+        return 1;
+    }
+    if (run.Completion == PrecodeFailCompletion::Mixed)
+    {
+        if ((run.BlockBytes & 1u) != 0u) {
+            std::fprintf(stderr,
+                "precodesweep mixed completion requires even block bytes, "
+                "got %u\n",
+                run.BlockBytes);
+            return 1;
+        }
+        // The mixed field pairs bytes into GF(2^16) symbols, so the solve
+        // width obeys the same parity rule.  0 is even, so a payload-free
+        // solve needs no exception.
+        if (run.SolveBlockBytesOverride != kSolveBlockBytesUnset &&
+            (run.SolveBlockBytesOverride & 1u) != 0u)
+        {
+            std::fprintf(stderr,
+                "precodesweep mixed completion requires even solve block "
+                "bytes, got %u\n",
+                run.SolveBlockBytesOverride);
+            return 1;
+        }
+        if (run.HeavyFamily !=
+            wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy)
+        {
+            std::fprintf(stderr,
+                "precodesweep mixed completion requires periodic heavy "
+                "family\n");
+            return 1;
+        }
+    }
+    if (run.HeavyRowsOverride != 0u &&
+        run.Completion != PrecodeFailCompletion::Certified)
+    {
+        std::fprintf(stderr,
+            "precodesweep --gf256-heavy-rows requires --completion "
+            "certified\n");
+        return 1;
+    }
+    if (run.DenseTwoAnchorPhase > 2u) {
+        std::fprintf(stderr,
+            "precodesweep --binary-dense-two-anchor-phase must be in "
+            "[0,2]\n");
+        return 1;
+    }
+    if (run.GroupedGF256RowMaskExplicit && run.GroupedGF256Rows == 0u) {
+        std::fprintf(stderr,
+            "precodesweep --mixed-grouped-gf256-row-mask requires nonzero "
+            "--mixed-grouped-gf256-rows\n");
+        return 1;
+    }
+
+    const uint32_t cell_count = cell_end - cell_begin;
+    const char* band_tracking = std::getenv("WIREHAIR_V2_BAND_TRACKING_X");
+    const char* staircase_degrees =
+        std::getenv("WIREHAIR_V2_STAIRCASE_DEGREES");
+    std::printf(
+        "# precodesweep,N=%u,bb=%u,overhead=%u,mix_count=%u,loss=%.6f,"
+        "seed_base=%llu,cseed_mul=0x%llx,trial=%u,cells=[%u,%u),"
+        "configs=%u,threads=%u,completion=%s,heavy_family=%s,schedule=%s,"
+        "paired_overhead_stream=%d,geometry=%s,period=%u,gf16_rows=%u,"
+        "gf256_rows_default=%u,band_tracking_x=%s,staircase_degrees=%s,"
+        "solve_bb=%u\n",
+        run.BlockCount, run.BlockBytes, run.Overhead, run.MixCount, run.Loss,
+        (unsigned long long)run.SeedBase,
+        (unsigned long long)run.ConstructionSeedMultiplier, run.Trial,
+        cell_begin, cell_end, (uint32_t)configs.size(), threads,
+        PrecodeFailCompletionName(run.Completion),
+        HeavyFamilyName(run.HeavyFamily),
+        PacketScheduleName(run.Schedule),
+        run.PairedOverheadStream ? 1 : 0,
+        run.Geometry == wirehair_v2::MixedCoefficientGeometry::FrozenPowerX ?
+            "frozen" : "shared-x",
+        run.Period, run.GF16Rows, run.MixedGF256Rows,
+        band_tracking ? band_tracking : "unset",
+        staircase_degrees ? staircase_degrees : "unset",
+        run.SolveBlockBytes());
+    std::printf("S,H,N1,D2,cells,failures,fail_rate,status\n");
+    std::fflush(stdout);
+
+    const std::chrono::steady_clock::time_point sweep_start =
+        std::chrono::steady_clock::now();
+    uint64_t swept_cells = 0u;
+    for (const PrecodeSweepConfig& config : configs)
+    {
+        std::vector<uint8_t> outcomes(cell_count, uint8_t{1});
+        const char* rejection = PrecodeSweepConfigRejection(run, config);
+        std::atomic<bool> configure_failed(false);
+        std::atomic<bool> worker_failed(false);
+        if (!rejection)
+        {
+            std::atomic<uint32_t> next_cell(0u);
+            std::atomic<bool> cancel_workers(false);
+            const uint32_t worker_count = std::min(threads, cell_count);
+            std::vector<std::thread> workers;
+            ThreadJoinGuard join_guard(workers);
+            workers.reserve(worker_count);
+            try
+            {
+                for (uint32_t worker = 0; worker < worker_count; ++worker)
+                {
+                    // A fresh thread per config: thread-local codec state
+                    // starts at the same defaults a fresh precodefail
+                    // process would see.
+                    workers.push_back(std::thread([&]() {
+                        try
+                        {
+                            if (!run.ConfigureThread(config)) {
+                                configure_failed.store(true);
+                                cancel_workers.store(true);
+                                return;
+                            }
+                            const std::vector<uint8_t> zero =
+                                MakeZeroPacketBlock(run.SolveBlockBytes());
+                            std::vector<wirehair_v2::SolvePacket> packets(
+                                (size_t)run.BlockCount + run.Overhead);
+                            for (;;)
+                            {
+                                if (cancel_workers.load()) {
+                                    break;
+                                }
+                                const uint32_t index =
+                                    next_cell.fetch_add(1u);
+                                if (index >= cell_count) {
+                                    break;
+                                }
+                                outcomes[index] = run.RunCell(
+                                    config, cell_begin + index, packets,
+                                    zero.data());
+                            }
+                        }
+                        catch (...) {
+                            worker_failed.store(true);
+                            cancel_workers.store(true);
+                        }
+                    }));
+                }
+            }
+            catch (const std::system_error& error)
+            {
+                cancel_workers.store(true);
+                join_guard.JoinAll();
+                std::fprintf(stderr,
+                    "precodesweep thread launch failed: %s\n", error.what());
+                return 1;
+            }
+            join_guard.JoinAll();
+        }
+        if (worker_failed.load())
+        {
+            std::fprintf(stderr,
+                "precodesweep worker failed for S=%u H=%u N1=%u D2=%u\n",
+                config.Staircase, config.MixedGF256Rows, config.SourceHits,
+                config.DenseRows);
+            return 2;
+        }
+        const bool rejected = rejection != nullptr || configure_failed.load();
+        if (rejected)
+        {
+            // Every cell of a rejected config counts as a failure, matching
+            // the per-cell harness reading of a run with no CSV data row.
+            std::fill(outcomes.begin(), outcomes.end(), uint8_t{1});
+            std::fprintf(stderr,
+                "precodesweep config S=%u H=%u N1=%u D2=%u rejected: %s\n",
+                config.Staircase, config.MixedGF256Rows, config.SourceHits,
+                config.DenseRows,
+                rejection ? rejection : "invalid codec configuration");
+        }
+        uint64_t failures = 0u;
+        for (uint8_t outcome : outcomes) {
+            failures += outcome;
+        }
+        std::printf("%u,%u,%u,%u,%u,%llu,%.8f,%s\n",
+            config.Staircase, config.MixedGF256Rows, config.SourceHits,
+            config.DenseRows, cell_count, (unsigned long long)failures,
+            (double)failures / (double)cell_count,
+            rejected ? "rejected" : "ok");
+        if (emit_cells)
+        {
+            std::string bits;
+            bits.reserve(outcomes.size());
+            for (uint8_t outcome : outcomes) {
+                bits.push_back((char)('0' + outcome));
+            }
+            std::printf("#cells,%u,%u,%u,%u,%u,%u,%s\n",
+                config.Staircase, config.MixedGF256Rows, config.SourceHits,
+                config.DenseRows, cell_begin, cell_end, bits.c_str());
+        }
+        std::fflush(stdout);
+        swept_cells += cell_count;
+    }
+    const double elapsed_seconds =
+        std::chrono::duration_cast<std::chrono::duration<double>>(
+            std::chrono::steady_clock::now() - sweep_start).count();
+    std::printf(
+        "# precodesweep done,cells=%llu,seconds=%.6f,cells_per_second=%.1f\n",
+        (unsigned long long)swept_cells, elapsed_seconds,
+        elapsed_seconds > 0.0 ?
+            (double)swept_cells / elapsed_seconds : 0.0);
+    return 0;
+}
+
+/*
+    precodecost: the precodesweep cell protocol, evaluated at a real payload
+    block size with a wall-clock stopwatch around encoder initialization.
+
+    One row per (config, cell) reports the deterministic operation counters
+    from PrecodeSolveStats together with per-rep median nanoseconds for
+
+        system build   BuildPrecodeSystem()
+        runtime init   PacketRowRuntime::Initialize()
+        solve          SolvePrecodeSystemForValidatedSystemWithRuntime()
+
+    and the solve's own internal phase timers.  The packet schedule is
+    generated outside the stopwatch, so the measurement covers exactly the
+    codec work an encoder performs before it can emit repair symbols.
+
+    This subcommand exists to calibrate the operation-count cost model.  It
+    is deliberately single-threaded by default: the counters are exact, only
+    the nanoseconds need a quiet machine.
+*/
+
+struct PrecodeCostSample
+{
+    uint8_t Failed = 1u;
+    uint32_t ColumnCount = 0u;
+    wirehair_v2::PrecodeSolveStats Stats;
+    uint64_t TotalNs = 0u;
+    uint64_t SysBuildNs = 0u;
+    uint64_t RuntimeNs = 0u;
+    uint64_t SolveNs = 0u;
+    uint64_t SolveBuildNs = 0u;
+    uint64_t SolvePeelNs = 0u;
+    uint64_t SolveProjectNs = 0u;
+    uint64_t SolveResidualNs = 0u;
+    uint64_t SolveBackSubNs = 0u;
+};
+
+struct PrecodeCostRun : PrecodeSweepRun
+{
+    uint32_t TimingBlockBytes = 1280u;
+
+    static uint64_t MedianOf(std::vector<uint64_t>& values)
+    {
+        if (values.empty()) {
+            return 0u;
+        }
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2u];
+    }
+
+    /// Returns false when the config cannot be constructed at all.
+    bool TimedCell(
+        const PrecodeSweepConfig& config,
+        uint32_t cell,
+        uint32_t reps,
+        uint32_t warmup,
+        std::vector<wirehair_v2::SolvePacket>& packets,
+        const uint8_t* pool,
+        size_t pool_blocks,
+        PrecodeCostSample& out) const
+    {
+        const uint64_t construction_seed = ConstructionSeed(cell);
+        const uint32_t packet_peel_seed = (uint32_t)construction_seed ^
+            (uint32_t)(construction_seed >> 32);
+        wirehair_v2::PrecodeParams params =
+            Completion == PrecodeFailCompletion::Mixed ?
+                wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :
+                wirehair_v2::MakeCertifiedParams(
+                    BlockCount, construction_seed);
+        if (config.SourceHits != 0u) {
+            params.SourceHits = config.SourceHits;
+        }
+        if (config.Staircase != 0u) {
+            params.Staircase = config.Staircase;
+        }
+        if (config.DenseRows != 0u) {
+            params.DenseRows = config.DenseRows;
+        }
+        params.DenseTwoAnchor = DenseTwoAnchor;
+        params.DenseTwoAnchorPhase = DenseTwoAnchorPhase;
+        params.DegreeBalancedStaircase = DegreeBalancedStaircase;
+        params.SegmentedDenseAnchors = SegmentedDenseAnchors;
+        params.DenseIdentityCorner = DenseIdentityCorner;
+        if (HeavyRowsOverride != 0u) {
+            params.HeavyRows = HeavyRowsOverride;
+        }
+        params.HeavyFamily = HeavyFamily;
+
+        wirehair_v2::PrecodeSystem probe;
+        if (!wirehair_v2::BuildPrecodeSystem(params, probe)) {
+            return false;
+        }
+        const uint64_t precode_count_wide =
+            (uint64_t)probe.Params.Staircase +
+            probe.Params.DenseRows + probe.Params.HeavyRows;
+        if (precode_count_wide > UINT32_MAX) {
+            return false;
+        }
+        const uint32_t precode_count = (uint32_t)precode_count_wide;
+        out.ColumnCount = BlockCount + precode_count;
+        {
+            wirehair_v2::PacketRowRuntime probe_runtime;
+            if (!probe_runtime.Initialize(
+                    BlockCount, precode_count, MixCount))
+            {
+                return false;
+            }
+        }
+        wirehair_v2::PacketRowConfig row_config;
+        row_config.PeelSeed = packet_peel_seed ^ PacketPeelSeedXor;
+        row_config.MixCount = MixCount;
+
+        // Packet identities and the loss schedule are harness work, not
+        // codec work: build them once, outside the stopwatch.
+        const uint64_t loss_seed = CellLossSeed(cell);
+        if (Schedule == PacketScheduleKind::Iid)
+        {
+            Rng rng(loss_seed);
+            uint32_t block_id = 0u;
+            size_t delivered = 0u;
+            while (delivered < packets.size())
+            {
+                const uint32_t id = block_id++;
+                if (ShouldDrop(rng, Loss)) continue;
+                wirehair_v2::SolvePacket& packet = packets[delivered];
+                packet.BlockId = id;
+                packet.Data = pool +
+                    (size_t)(delivered % pool_blocks) * TimingBlockBytes;
+                ++delivered;
+            }
+        }
+        else
+        {
+            const std::vector<uint32_t> ids = BuildPacketSchedule(
+                BlockCount, (uint32_t)packets.size(), Loss, loss_seed,
+                Schedule);
+            if (ids.size() != packets.size()) {
+                return false;
+            }
+            for (size_t i = 0u; i < ids.size(); ++i) {
+                packets[i].BlockId = ids[i];
+                packets[i].Data = pool +
+                    (size_t)(i % pool_blocks) * TimingBlockBytes;
+            }
+        }
+
+        std::vector<uint64_t> total_ns, sysbuild_ns, runtime_ns, solve_ns;
+        std::vector<uint64_t> phase_build, phase_peel, phase_project;
+        std::vector<uint64_t> phase_residual, phase_backsub;
+        uint8_t failed = 1u;
+        volatile uint8_t sink = 0u;
+        const uint32_t total_reps = reps + warmup;
+        for (uint32_t rep = 0; rep < total_reps; ++rep)
+        {
+            wirehair_v2::PrecodeSystem system;
+            wirehair_v2::PacketRowRuntime runtime;
+            std::vector<uint8_t> intermediate;
+            wirehair_v2::PrecodeSolveStats stats;
+            const Clock::time_point t0 = Clock::now();
+            if (!wirehair_v2::BuildPrecodeSystem(params, system)) {
+                return false;
+            }
+            const Clock::time_point t1 = Clock::now();
+            if (!runtime.Initialize(
+                    BlockCount, precode_count, MixCount))
+            {
+                return false;
+            }
+            const Clock::time_point t2 = Clock::now();
+            const WirehairResult result =
+                wirehair_v2::
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        system, row_config, runtime, packets,
+                        TimingBlockBytes, intermediate, &stats);
+            const Clock::time_point t3 = Clock::now();
+            if (!intermediate.empty()) {
+                sink = (uint8_t)(sink ^ intermediate[0] ^
+                    intermediate[intermediate.size() - 1u]);
+            }
+            failed = result == Wirehair_Success ? 0u : 1u;
+            if (rep < warmup) {
+                continue;
+            }
+            out.Stats = stats;
+            const auto ns = [](Clock::time_point a, Clock::time_point b) {
+                return (uint64_t)
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        b - a).count();
+            };
+            total_ns.push_back(ns(t0, t3));
+            sysbuild_ns.push_back(ns(t0, t1));
+            runtime_ns.push_back(ns(t1, t2));
+            solve_ns.push_back(ns(t2, t3));
+            phase_build.push_back(stats.BuildNanoseconds);
+            phase_peel.push_back(stats.PeelNanoseconds);
+            phase_project.push_back(stats.ProjectNanoseconds);
+            phase_residual.push_back(stats.ResidualNanoseconds);
+            phase_backsub.push_back(stats.BackSubNanoseconds);
+        }
+        (void)sink;
+        out.Failed = failed;
+        out.TotalNs = MedianOf(total_ns);
+        out.SysBuildNs = MedianOf(sysbuild_ns);
+        out.RuntimeNs = MedianOf(runtime_ns);
+        out.SolveNs = MedianOf(solve_ns);
+        out.SolveBuildNs = MedianOf(phase_build);
+        out.SolvePeelNs = MedianOf(phase_peel);
+        out.SolveProjectNs = MedianOf(phase_project);
+        out.SolveResidualNs = MedianOf(phase_residual);
+        out.SolveBackSubNs = MedianOf(phase_backsub);
+        return true;
+    }
+};
+
+int CmdPrecodeCost(int argc, char** argv)
+{
+    PrecodeCostRun run;
+    run.PairedOverheadStream = true;
+    std::vector<PrecodeSweepConfig> configs;
+    uint32_t cell_begin = 0u;
+    uint32_t cell_end = 0u;
+    bool cells_explicit = false;
+    uint32_t reps = 5u;
+    uint32_t warmup = 2u;
+    uint64_t pool_budget_bytes = UINT64_C(2) << 30;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!TakeArg("precodecost", "--N", argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, run.BlockCount))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--bb") ||
+                 !std::strcmp(argv[i], "--solve-block-bytes")) {
+            // Two spellings of one knob: this subcommand's block size has
+            // always been the width the cell solves at, never the width its
+            // loss stream is keyed on (that is PrecodeSweepRun::BlockBytes,
+            // fixed at the cell protocol's payload width), so the timing
+            // width can move without moving the packet set.
+            if (!TakeArg("precodecost", argv[i], argc, argv, i, value) ||
+                !ParseSolveBlockBytesArg(
+                    "precodecost", value, run.TimingBlockBytes))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cells")) {
+            if (!TakeArg("precodecost", "--cells", argc, argv, i, value) ||
+                !ParsePrecodeSweepCells(value, cell_begin, cell_end))
+            {
+                return 1;
+            }
+            cells_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--configs")) {
+            if (!TakeArg("precodecost", "--configs", argc, argv, i, value) ||
+                !ParsePrecodeSweepConfigText(value, configs))
+            {
+                return 1;
+            }
+        }
+        // precodecost shares PrecodeSweepRun, which already carries a
+        // completion field and already prints it in the receipt, but had no
+        // way to set it -- so the per-cell counter receipt was reachable for
+        // mixed completion only.  ResidualCoeffByteOps is incremented solely
+        // by the GF(256) certified residual path, so without this it read a
+        // constant zero and no width could be checked against any other.
+        // Default is unchanged (mixed), so existing command lines are not
+        // affected.
+        else if (!std::strcmp(argv[i], "--completion")) {
+            if (!TakeArg(
+                    "precodecost", "--completion", argc, argv, i, value) ||
+                !ParsePrecodeFailCompletion(value, run.Completion))
+            {
+                std::fprintf(stderr,
+                    "precodecost unknown --completion token %s "
+                    "(expected certified or mixed)\n",
+                    value ? value : "");
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--config-file")) {
+            if (!TakeArg(
+                    "precodecost", "--config-file", argc, argv, i, value) ||
+                !LoadPrecodeSweepConfigFile(value, configs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--reps")) {
+            if (!TakeArg("precodecost", "--reps", argc, argv, i, value) ||
+                !ParseU32Arg("--reps", value, reps))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--warmup")) {
+            if (!TakeArg("precodecost", "--warmup", argc, argv, i, value) ||
+                !ParseU32Arg("--warmup", value, warmup))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--overhead")) {
+            if (!TakeArg("precodecost", "--overhead", argc, argv, i, value) ||
+                !ParseU32Arg("--overhead", value, run.Overhead))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mix-count")) {
+            if (!TakeArg(
+                    "precodecost", "--mix-count", argc, argv, i, value) ||
+                !ParseU32Arg("--mix-count", value, run.MixCount))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!TakeArg("precodecost", "--loss", argc, argv, i, value)) {
+                return 1;
+            }
+            run.Loss = std::atof(value);
+        }
+        else if (!std::strcmp(argv[i], "--seed-base")) {
+            if (!TakeArg(
+                    "precodecost", "--seed-base", argc, argv, i, value) ||
+                !ParseU64Arg("--seed-base", value, run.SeedBase))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-gf16-rows")) {
+            if (!TakeArg("precodecost", "--mixed-gf16-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-gf16-rows", value, run.GF16Rows))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
+            if (!TakeArg("precodecost", "--mixed-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-gf256-rows", value,
+                    run.MixedGF256Rows))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--mixed-period")) {
+            if (!TakeArg("precodecost", "--mixed-period",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--mixed-period", value, run.Period))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--pool-budget-mib")) {
+            uint32_t mib = 0u;
+            if (!TakeArg("precodecost", "--pool-budget-mib",
+                    argc, argv, i, value) ||
+                !ParseU32Arg("--pool-budget-mib", value, mib) || mib == 0u)
+            {
+                return 1;
+            }
+            pool_budget_bytes = (uint64_t)mib << 20;
+        }
+        else {
+            UnknownArg("precodecost", argv[i]);
+            return 1;
+        }
+    }
+
+    if (configs.empty()) {
+        std::fprintf(stderr,
+            "precodecost requires --configs or --config-file "
+            "(entries of S,H,N1,D2)\n");
+        return 1;
+    }
+    if (!cells_explicit || cell_end <= cell_begin) {
+        std::fprintf(stderr,
+            "precodecost requires a non-empty --cells range\n");
+        return 1;
+    }
+    if (run.BlockCount < 2u || run.BlockCount > 64000u) {
+        std::fprintf(stderr, "precodecost --N must be in [2,64000]\n");
+        return 1;
+    }
+    // 0 is a payload-free solve: every block operation still happens, on
+    // blocks of zero bytes, which is what the operation counters want.  The
+    // only other rule is the completion field's own parity rule, exactly as
+    // precodefail and precodesweep apply it: mixed carries two GF(16)
+    // half-blocks so its width must be even, certified is GF(256) so any
+    // width is legal -- including 1, which is certified's own default width
+    // in the cell protocol and therefore the width a width-0 receipt has to
+    // be checked against.
+    if (run.Completion == PrecodeFailCompletion::Mixed &&
+        (run.TimingBlockBytes & 1u) != 0u)
+    {
+        std::fprintf(stderr,
+            "precodecost --bb must be even for mixed completion, got %u\n",
+            run.TimingBlockBytes);
+        return 1;
+    }
+    if (reps == 0u || reps > 999u || warmup > 999u) {
+        std::fprintf(stderr,
+            "precodecost --reps must be in [1,999] and --warmup in "
+            "[0,999]\n");
+        return 1;
+    }
+    if (!ValidateLoss(run.Loss, "precodecost")) {
+        return 1;
+    }
+
+    const uint32_t cell_count = cell_end - cell_begin;
+    const size_t packet_count = (size_t)run.BlockCount + run.Overhead;
+    // A payload-free solve reads no bytes at all, so one zero-width block is
+    // the whole pool; the budget would otherwise divide by zero.
+    size_t pool_blocks = run.TimingBlockBytes != 0u ?
+        (size_t)(pool_budget_bytes / run.TimingBlockBytes) : (size_t)1u;
+    if (pool_blocks == 0u) {
+        pool_blocks = 1u;
+    }
+    if (pool_blocks > packet_count) {
+        pool_blocks = packet_count;
+    }
+    // Payload bytes stay zero, exactly as the precodefail/precodesweep cell
+    // protocol delivers them: an all-zero right-hand side is consistent for
+    // every packet set, so a rank-deficient cell reports NeedMore instead of
+    // an inconsistency error.  The pool still hands every packet a distinct
+    // address so source reads keep a realistic footprint -- except at width
+    // 0, where every block collapses onto the one address MakeZeroPacketBlock
+    // guarantees is non-null, because there is nothing to read.
+    std::vector<uint8_t> pool = run.TimingBlockBytes != 0u ?
+        std::vector<uint8_t>(
+            pool_blocks * run.TimingBlockBytes, uint8_t{0}) :
+        MakeZeroPacketBlock(0u);
+
+    const char* band_tracking = std::getenv("WIREHAIR_V2_BAND_TRACKING_X");
+    std::printf(
+        "# precodecost,N=%u,bb=%u,overhead=%u,mix_count=%u,loss=%.6f,"
+        "seed_base=%llu,cells=[%u,%u),configs=%u,reps=%u,warmup=%u,"
+        "pool_blocks=%llu,completion=%s,schedule=%s,geometry=%s,period=%u,"
+        "gf16_rows=%u,gf256_rows_default=%u,band_tracking_x=%s\n",
+        run.BlockCount, run.TimingBlockBytes, run.Overhead, run.MixCount,
+        run.Loss, (unsigned long long)run.SeedBase, cell_begin, cell_end,
+        (uint32_t)configs.size(), reps, warmup,
+        (unsigned long long)pool_blocks,
+        PrecodeFailCompletionName(run.Completion),
+        PacketScheduleName(run.Schedule),
+        run.Geometry == wirehair_v2::MixedCoefficientGeometry::FrozenPowerX ?
+            "frozen" : "shared-x",
+        run.Period, run.GF16Rows, run.MixedGF256Rows,
+        band_tracking ? band_tracking : "unset");
+    std::printf(
+        "S,H,N1,D2,cell,ok,L,inact,packet_rows,peeled,residual_rows,"
+        "residual_rank,binary_rank,block_xors,block_muladds,block_copies,"
+        "block_zero_fills,peel_adjacency_visits,peel_row_scan_steps,"
+        "peel_heap_ops,projection_word_xors,residual_coeff_word_xors,"
+        "residual_coeff_byte_ops,binary_row_refs,binary_row_bytes,"
+        "binary_adj_bytes,total_ns,sysbuild_ns,runtime_ns,solve_ns,"
+        "solve_build_ns,solve_peel_ns,solve_project_ns,solve_residual_ns,"
+        "solve_backsub_ns\n");
+    std::fflush(stdout);
+
+    for (const PrecodeSweepConfig& config : configs)
+    {
+        const char* rejection = PrecodeSweepConfigRejection(run, config);
+        if (rejection || !run.ConfigureThread(config))
+        {
+            std::fprintf(stderr,
+                "precodecost config S=%u H=%u N1=%u D2=%u rejected: %s\n",
+                config.Staircase, config.MixedGF256Rows, config.SourceHits,
+                config.DenseRows,
+                rejection ? rejection : "invalid codec configuration");
+            continue;
+        }
+        std::vector<wirehair_v2::SolvePacket> packets(packet_count);
+        for (uint32_t index = 0; index < cell_count; ++index)
+        {
+            PrecodeCostSample sample;
+            if (!run.TimedCell(
+                    config, cell_begin + index, reps, warmup, packets,
+                    pool.data(), pool_blocks, sample))
+            {
+                std::fprintf(stderr,
+                    "precodecost cell %u unusable for S=%u H=%u N1=%u "
+                    "D2=%u\n",
+                    cell_begin + index, config.Staircase,
+                    config.MixedGF256Rows, config.SourceHits,
+                    config.DenseRows);
+                continue;
+            }
+            const wirehair_v2::PrecodeSolveStats& s = sample.Stats;
+            std::printf(
+                "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+                "%llu,%llu,%llu,"
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                config.Staircase, config.MixedGF256Rows, config.SourceHits,
+                config.DenseRows, cell_begin + index,
+                sample.Failed ? 0u : 1u, sample.ColumnCount,
+                s.InactivatedColumns, s.PacketRows, s.PeeledColumns,
+                s.ResidualRows, s.ResidualRank, s.BinaryResidualRank,
+                (unsigned long long)s.BlockXors,
+                (unsigned long long)s.BlockMulAdds,
+                (unsigned long long)s.BlockCopies,
+                (unsigned long long)s.BlockZeroFills,
+                (unsigned long long)s.PeelAdjacencyVisits,
+                (unsigned long long)s.PeelRowScanSteps,
+                (unsigned long long)s.PeelHeapOperations,
+                (unsigned long long)s.ProjectionWordXors,
+                (unsigned long long)s.ResidualCoeffWordXors,
+                (unsigned long long)s.ResidualCoeffByteOps,
+                (unsigned long long)s.BinaryRowReferences,
+                (unsigned long long)s.BinaryRowStorageBytes,
+                (unsigned long long)s.BinaryAdjacencyStorageBytes,
+                (unsigned long long)sample.TotalNs,
+                (unsigned long long)sample.SysBuildNs,
+                (unsigned long long)sample.RuntimeNs,
+                (unsigned long long)sample.SolveNs,
+                (unsigned long long)sample.SolveBuildNs,
+                (unsigned long long)sample.SolvePeelNs,
+                (unsigned long long)sample.SolveProjectNs,
+                (unsigned long long)sample.SolveResidualNs,
+                (unsigned long long)sample.SolveBackSubNs);
+        }
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+#endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
+
 int CmdSelfTest()
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
@@ -9931,19 +11640,29 @@ int main(int argc, char** argv)
     }
 
     if (argc < 2) {
+        // precodesweep exists exactly where the Set*ForTesting knobs it
+        // configures do.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#define WIREHAIR_V2_BENCH_SWEEP_USAGE "precodesweep|"
+#else
+#define WIREHAIR_V2_BENCH_SWEEP_USAGE ""
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
     !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
+            WIREHAIR_V2_BENCH_SWEEP_USAGE
             "preferredattempt|preferredtiming|groupedtiming|selftest "
             "[opts]\n");
 #else
         std::fprintf(stderr,
             "usage: wirehair_v2_bench compare|precodecheck|seedtable|"
             "peelcost|densecheck|densetune|densecount|densegrid|precodefail|"
+            WIREHAIR_V2_BENCH_SWEEP_USAGE
             "selftest [opts]\n");
 #endif
+#undef WIREHAIR_V2_BENCH_SWEEP_USAGE
         return 1;
     }
     try
@@ -9975,6 +11694,14 @@ int main(int argc, char** argv)
         if (!std::strcmp(argv[1], "precodefail")) {
             return CmdPrecodeFail(argc - 2, argv + 2);
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (!std::strcmp(argv[1], "precodesweep")) {
+            return CmdPrecodeSweep(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "precodecost")) {
+            return CmdPrecodeCost(argc - 2, argv + 2);
+        }
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
     !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
         if (!std::strcmp(argv[1], "preferredattempt")) {

@@ -266,6 +266,10 @@ struct PeelResult
     std::vector<uint8_t> UsedRows;
     uint64_t AdjacencyStorageBytes = 0u;
     uint32_t AdjacencyStorageAllocations = 0u;
+    /// Deterministic peel work receipts, see PrecodeSolveStats.
+    uint64_t AdjacencyVisits = 0u;
+    uint64_t RowScanSteps = 0u;
+    uint64_t HeapOperations = 0u;
 };
 
 struct PeelRowState
@@ -304,6 +308,100 @@ bool CheckedBlockStorage(
     }
     bytes_out = (size_t)bytes;
     return true;
+}
+
+/**
+    Backing-store capacity for a block buffer of `bytes`.
+
+    A zero-width solve -- "perform every block operation, carry no payload" --
+    leaves every block buffer empty, and an empty std::vector has a null
+    data().  The solver still forms block base addresses from that pointer and
+    still hands them to memcpy and the GF kernels with a zero length; both are
+    undefined on a null pointer even though they move no bytes.  One byte of
+    capacity keeps every base address real.  Nothing ever reads or writes that
+    byte, because every block is zero bytes wide.
+*/
+size_t BlockStorageCapacity(size_t bytes)
+{
+    return bytes == 0u ? 1u : bytes;
+}
+
+/// Zero-filled block storage of `bytes`, whose data() is never null.
+std::vector<uint8_t> MakeBlockStorage(size_t bytes)
+{
+    std::vector<uint8_t> storage;
+    storage.reserve(BlockStorageCapacity(bytes));
+    storage.resize(bytes, uint8_t{0});
+    return storage;
+}
+
+/*
+    Payload-plane wrappers for the GF(2^16) kernels.
+
+    The GF(16) block API rejects a zero-length operation as invalid input --
+    a deliberate, tested contract, since every caller that means to move bytes
+    has bytes to move.  A zero-width solve is the one caller that legitimately
+    has none: it performs the same sequence of operations on blocks that are
+    zero bytes wide, so each conversion below has nothing to convert.
+
+    These wrappers make that the explicit local rule -- skip the kernel, keep
+    the caller's control flow and its operation counters -- rather than
+    weakening the kernel contract for every other caller.  At any nonzero
+    width they are the kernel call and nothing else.
+*/
+bool DeinterleavePayloadPlanes(
+    const void* source, void* low, void* high, uint32_t bytes)
+{
+    return bytes == 0u || GF16Deinterleave(source, low, high, bytes);
+}
+
+bool InterleavePayloadPlanes(
+    const void* low, const void* high, void* destination, uint32_t bytes)
+{
+    return bytes == 0u || GF16Interleave(low, high, destination, bytes);
+}
+
+bool MulAddPayloadPlanes(
+    void* destination_low,
+    void* destination_high,
+    uint16_t scale,
+    const void* source_low,
+    const void* source_high,
+    uint32_t elements)
+{
+    return elements == 0u ||
+        GF16MulAddPlanar(
+            destination_low, destination_high, scale,
+            source_low, source_high, elements);
+}
+
+bool MulAddPayloadPlanes2(
+    void* destination0_low,
+    void* destination0_high,
+    uint16_t scale0,
+    void* destination1_low,
+    void* destination1_high,
+    uint16_t scale1,
+    const void* source_low,
+    const void* source_high,
+    uint32_t elements)
+{
+    return elements == 0u ||
+        GF16MulAddPlanar2(
+            destination0_low, destination0_high, scale0,
+            destination1_low, destination1_high, scale1,
+            source_low, source_high, elements);
+}
+
+bool ScalePayloadPlanes(
+    void* low,
+    void* high,
+    uint16_t scale,
+    void* scratch,
+    uint32_t elements)
+{
+    return elements == 0u ||
+        GF16ScalePlanar(low, high, scale, scratch, elements);
 }
 
 bool MemoryRangesOverlap(
@@ -885,6 +983,7 @@ static GF256_FORCE_INLINE uint32_t AccumulatePeeledProjectionConstant(
             constant_xor.Add(
                 values.data() + (size_t)other * block_bytes);
             ++stats.BlockXors;
+            stats.ProjectionWordXors += words;
         }
     }
     projection_xor.Flush();
@@ -1069,6 +1168,7 @@ ResidualInsertResult InsertResidualRow(
                 AddScaledResidualCoefficients(
                     coeff.data() + j, scale, pivot + j, R - j);
             }
+            stats.ResidualCoeffByteOps += R - j;
             AddScaledBlock(
                 rhs.data(), scale,
                 pivot_rhs.data() + (size_t)j * block_bytes,
@@ -1107,6 +1207,7 @@ ResidualInsertResult InsertResidualRow(
         const uint8_t inverse = gf256_inv(pivot_value);
         ScaleResidualCoefficients(
             coeff.data() + pivot_column, inverse, R - pivot_column);
+        stats.ResidualCoeffByteOps += R - pivot_column;
         gf256_div_mem(
             rhs.data(), rhs.data(), pivot_value, (int)block_bytes);
         ++stats.BlockMulAdds;
@@ -1134,6 +1235,7 @@ ResidualInsertResult InsertResidualRow(
                 existing_coeff + pivot_column, scale,
                 coeff.data() + pivot_column, R - pivot_column);
         }
+        stats.ResidualCoeffByteOps += R - pivot_column;
         AddScaledBlock(
             pivot_rhs.data() + (size_t)existing * block_bytes,
             scale, rhs.data(), block_bytes, stats);
@@ -1145,6 +1247,7 @@ ResidualInsertResult InsertResidualRow(
     std::memcpy(
         pivot_rhs.data() + (size_t)pivot_column * block_bytes,
         rhs.data(), block_bytes);
+    ++stats.BlockCopies;
     have_pivot[pivot_column] = 1u;
     ++rank;
     return ResidualInsertResult::Inserted;
@@ -1778,7 +1881,7 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
             block_bytes, stats);
         const uint8_t* extension_bucket =
             extension_buckets.data() + (size_t)residue * block_bytes;
-        if (!GF16Deinterleave(
+        if (!DeinterleavePayloadPlanes(
                 extension_bucket,
                 source_low.data(), source_high.data(), block_bytes))
         {
@@ -1786,7 +1889,7 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
         }
         const uint32_t row0 = subfield_rows;
         const uint32_t row1 = row0 + 1u;
-        if (!GF16MulAddPlanar2(
+        if (!MulAddPayloadPlanes2(
                 rhs_low.data() + (size_t)row0 * elements,
                 rhs_high.data() + (size_t)row0 * elements,
                 cached_rows.Extension[0][residue],
@@ -1801,7 +1904,7 @@ static WH2_MIXED_NOINLINE bool AccumulateDualMixedCompletionRhs(
         for (uint32_t er = 2u; er < extension_rows; ++er)
         {
             const uint32_t row = subfield_rows + er;
-            if (!GF16MulAddPlanar(
+            if (!MulAddPayloadPlanes(
                     rhs_low.data() + (size_t)row * elements,
                     rhs_high.data() + (size_t)row * elements,
                     cached_rows.Extension[er][residue],
@@ -1872,7 +1975,7 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
             block_bytes, stats);
         const uint8_t* extension_bucket =
             buckets.Extension.get() + (size_t)residue * block_bytes;
-        if (!GF16Deinterleave(
+        if (!DeinterleavePayloadPlanes(
                 extension_bucket,
                 source_low.data(), source_high.data(), block_bytes))
         {
@@ -1880,7 +1983,7 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
         }
         const uint32_t row0 = subfield_rows;
         const uint32_t row1 = row0 + 1u;
-        if (!GF16MulAddPlanar2(
+        if (!MulAddPayloadPlanes2(
                 rhs_low.data() + (size_t)row0 * elements,
                 rhs_high.data() + (size_t)row0 * elements,
                 cached_rows.Extension[0][residue],
@@ -1895,7 +1998,7 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
         for (uint32_t er = 2u; er < extension_rows; ++er)
         {
             const uint32_t row = subfield_rows + er;
-            if (!GF16MulAddPlanar(
+            if (!MulAddPayloadPlanes(
                     rhs_low.data() + (size_t)row * elements,
                     rhs_high.data() + (size_t)row * elements,
                     cached_rows.Extension[er][residue],
@@ -1961,7 +2064,7 @@ static WH2_MIXED_NOINLINE bool ApplyGroupedMixedCompletionBuckets(
             scales, grouped_gf256_rows, grouped_bucket,
             block_bytes, stats);
 
-        if (!GF16Deinterleave(
+        if (!DeinterleavePayloadPlanes(
                 primary_bucket,
                 source_low.data(), source_high.data(), block_bytes))
         {
@@ -1969,7 +2072,7 @@ static WH2_MIXED_NOINLINE bool ApplyGroupedMixedCompletionBuckets(
         }
         const uint32_t row0 = subfield_rows;
         const uint32_t row1 = row0 + 1u;
-        if (!GF16MulAddPlanar2(
+        if (!MulAddPayloadPlanes2(
                 rhs_low.data() + (size_t)row0 * elements,
                 rhs_high.data() + (size_t)row0 * elements,
                 cached_rows.Extension[0][residue],
@@ -1984,7 +2087,7 @@ static WH2_MIXED_NOINLINE bool ApplyGroupedMixedCompletionBuckets(
         for (uint32_t er = 2u; er < extension_rows; ++er)
         {
             const uint32_t row = subfield_rows + er;
-            if (!GF16MulAddPlanar(
+            if (!MulAddPayloadPlanes(
                     rhs_low.data() + (size_t)row * elements,
                     rhs_high.data() + (size_t)row * elements,
                     cached_rows.Extension[er][residue],
@@ -2675,7 +2778,11 @@ bool TrySolveMixedCompletionQuotientTiny(
 
     std::vector<uint64_t> projected(
         (size_t)inactive_count * packed_words, uint64_t{0});
-    std::vector<uint8_t> rhs((size_t)H * block_bytes, uint8_t{0});
+    std::vector<uint8_t> rhs = MakeBlockStorage((size_t)H * block_bytes);
+    // The general path counts the same H-block RHS allocation zero-fill,
+    // so counting it here keeps the receipt independent of which path the
+    // block width selected.
+    stats.BlockZeroFills += H;
 
     // One dense pass over every solver column: completion coefficients
     // project onto the inactivated variables while each peeled column's
@@ -2966,6 +3073,7 @@ bool TrySolveMixedCompletionQuotientTiny(
                 (size_t)inactive_columns[free_columns[i]] * block_bytes,
             rhs.data() + (size_t)pivot_row * block_bytes,
             block_bytes);
+        ++stats.BlockCopies;
     }
     for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
     {
@@ -3252,13 +3360,14 @@ WirehairResult SolveMixedCompletionQuotient(
         {
             return Wirehair_OOM;
         }
-        std::vector<uint8_t> syndrome_low(
-            (size_t)dependency_count * elements, 0u);
-        std::vector<uint8_t> syndrome_high(
-            (size_t)dependency_count * elements, 0u);
-        std::vector<uint8_t> source_low(elements);
-        std::vector<uint8_t> source_high(elements);
-        std::vector<uint8_t> residue_bucket(block_bytes, uint8_t{0});
+        std::vector<uint8_t> syndrome_low =
+            MakeBlockStorage((size_t)dependency_count * elements);
+        std::vector<uint8_t> syndrome_high =
+            MakeBlockStorage((size_t)dependency_count * elements);
+        std::vector<uint8_t> source_low = MakeBlockStorage(elements);
+        std::vector<uint8_t> source_high = MakeBlockStorage(elements);
+        std::vector<uint8_t> residue_bucket = MakeBlockStorage(block_bytes);
+        ++stats.BlockZeroFills;
 
         const auto add_syndrome_source = [&](
             uint32_t residue,
@@ -3267,7 +3376,7 @@ WirehairResult SolveMixedCompletionQuotient(
             uint32_t last_subfield_row,
             bool include_extension) -> bool
         {
-            if (!GF16Deinterleave(
+            if (!DeinterleavePayloadPlanes(
                     source, source_low.data(),
                     source_high.data(), block_bytes))
             {
@@ -3303,7 +3412,7 @@ WirehairResult SolveMixedCompletionQuotient(
                     gf256_add_mem(high, source_high.data(), (int)elements);
                     ++stats.BlockXors;
                 }
-                else if (!GF16MulAddPlanar(
+                else if (!MulAddPayloadPlanes(
                         low, high, scale,
                         source_low.data(), source_high.data(), elements))
                 {
@@ -3328,6 +3437,7 @@ WirehairResult SolveMixedCompletionQuotient(
             {
                 std::fill(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+                ++stats.BlockZeroFills;
                 BatchedBlockXorAccumulator bucket_xor(
                     residue_bucket.data(), block_bytes);
                 if (schedule == 0u && !rotate_residues)
@@ -3455,7 +3565,7 @@ WirehairResult SolveMixedCompletionQuotient(
                 have_scale = have_scale || scale != 0u;
             }
             if (!have_scale) continue;
-            if (!GF16Deinterleave(
+            if (!DeinterleavePayloadPlanes(
                     binary_pivot_rhs.data() +
                         (size_t)pivot * block_bytes,
                     source_low.data(), source_high.data(), block_bytes))
@@ -3474,7 +3584,7 @@ WirehairResult SolveMixedCompletionQuotient(
                     gf256_add_mem(high, source_high.data(), (int)elements);
                     ++stats.BlockXors;
                 }
-                else if (!GF16MulAddPlanar(
+                else if (!MulAddPayloadPlanes(
                         low, high, scale,
                         source_low.data(), source_high.data(), elements))
                 {
@@ -3502,12 +3612,26 @@ WirehairResult SolveMixedCompletionQuotient(
         return Wirehair_NeedMore;
     }
 
-    std::vector<uint8_t> subfield_rhs(
-        (size_t)subfield_rows * block_bytes, 0u);
-    std::vector<uint8_t> rhs_low((size_t)H * elements, 0u);
-    std::vector<uint8_t> rhs_high((size_t)H * elements, 0u);
-    std::vector<uint8_t> source_low(elements);
-    std::vector<uint8_t> source_high(elements);
+    std::vector<uint8_t> subfield_rhs =
+        MakeBlockStorage((size_t)subfield_rows * block_bytes);
+    // MakeBlockStorage, not a bare vector: at solve width 0, elements is 0, so a
+    // plain vector is EMPTY and data() returns NULL.  The back-substitution
+    // batcher below tracks "is a row pending?" as (pending_existing_low !=
+    // nullptr), and every row address is rhs_low.data() + row*elements == NULL,
+    // so the pending pointer never becomes non-null and the batched
+    // MulAddPayloadPlanes2 branch NEVER RUNS.  That silently dropped 448 of 3956
+    // BlockMulAdds (1.7%) at width 0 while every other counter matched -- exactly
+    // the class of count-only error that would corrupt a calibrated cost model.
+    // Verified: widths 0/2/4/8 now agree exactly at N=1000 and N=2048.
+    std::vector<uint8_t> rhs_low = MakeBlockStorage((size_t)H * elements);
+    std::vector<uint8_t> rhs_high = MakeBlockStorage((size_t)H * elements);
+    std::vector<uint8_t> source_low = MakeBlockStorage(elements);
+    std::vector<uint8_t> source_high = MakeBlockStorage(elements);
+    // Block-sized scratch, zero-filled by the allocation itself.  The
+    // planar buffers hold half a block per plane, so rhs_low with rhs_high
+    // is one block per completion row and source_low with source_high is
+    // one more block.
+    stats.BlockZeroFills += subfield_rows + H + 1u;
     void* subfield_destinations[kMixedGF256RowsMax];
     uint8_t subfield_scales[kMixedGF256RowsMax];
     for (uint32_t row = 0; row < subfield_rows; ++row) {
@@ -3562,7 +3686,7 @@ WirehairResult SolveMixedCompletionQuotient(
         uint32_t residue,
         const uint8_t* bucket) -> bool
     {
-        if (!GF16Deinterleave(
+        if (!DeinterleavePayloadPlanes(
                 bucket, source_low.data(), source_high.data(), block_bytes))
         {
             return false;
@@ -3572,7 +3696,7 @@ WirehairResult SolveMixedCompletionQuotient(
             "mixed completion pair kernel requires two GF16 rows");
         const uint32_t row0 = subfield_rows;
         const uint32_t row1 = row0 + 1u;
-        if (!GF16MulAddPlanar2(
+        if (!MulAddPayloadPlanes2(
                 rhs_low.data() + (size_t)row0 * elements,
                 rhs_high.data() + (size_t)row0 * elements,
                 cached_rows->Extension[0][residue],
@@ -3587,7 +3711,7 @@ WirehairResult SolveMixedCompletionQuotient(
         for (uint32_t er = 2u; er < extension_rows; ++er)
         {
             const uint32_t row = subfield_rows + er;
-            if (!GF16MulAddPlanar(
+            if (!MulAddPayloadPlanes(
                     rhs_low.data() + (size_t)row * elements,
                     rhs_high.data() + (size_t)row * elements,
                     cached_rows->Extension[er][residue],
@@ -3653,11 +3777,15 @@ WirehairResult SolveMixedCompletionQuotient(
         }
         goto mixed_rhs_accumulated;
     }
-    residue_bucket.assign(block_bytes, uint8_t{0});
+    // MakeBlockStorage() keeps data() non-null at zero solve width, where
+    // this bucket is still handed to the XOR kernels with a zero length.
+    residue_bucket = MakeBlockStorage(block_bytes);
+    ++stats.BlockZeroFills;
     for (uint32_t residue = 0u; residue < populated_residues; ++residue)
     {
         std::fill(
             residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+        ++stats.BlockZeroFills;
         BatchedBlockXorAccumulator bucket_xor(
             residue_bucket.data(), block_bytes);
         if (!rotate_residues)
@@ -3716,6 +3844,7 @@ WirehairResult SolveMixedCompletionQuotient(
         {
             std::fill(
                 residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+            ++stats.BlockZeroFills;
             BatchedBlockXorAccumulator bucket_xor(
                 residue_bucket.data(), block_bytes);
             uint32_t block_index = 0u;
@@ -3750,6 +3879,7 @@ WirehairResult SolveMixedCompletionQuotient(
         {
             std::fill(
                 residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+            ++stats.BlockZeroFills;
             BatchedBlockXorAccumulator bucket_xor(
                 residue_bucket.data(), block_bytes);
             uint32_t block_index = 0u;
@@ -3839,14 +3969,14 @@ mixed_rhs_accumulated:
         }
         if (have_extension_scale)
         {
-            if (!GF16Deinterleave(
+            if (!DeinterleavePayloadPlanes(
                     binary_pivot_rhs.data() +
                         (size_t)pivot * block_bytes,
                     source_low.data(), source_high.data(), block_bytes))
             {
                 return Wirehair_Error;
             }
-            if (!GF16MulAddPlanar2(
+            if (!MulAddPayloadPlanes2(
                     rhs_low.data() + (size_t)subfield_rows * elements,
                     rhs_high.data() + (size_t)subfield_rows * elements,
                     extension_scales[0],
@@ -3868,7 +3998,7 @@ mixed_rhs_accumulated:
                 const uint16_t scale = extension_scales[er];
                 if (scale == 0u) continue;
                 const uint32_t row = subfield_rows + er;
-                if (!GF16MulAddPlanar(
+                if (!MulAddPayloadPlanes(
                         rhs_low.data() + (size_t)row * elements,
                         rhs_high.data() + (size_t)row * elements,
                         scale, source_low.data(), source_high.data(),
@@ -3882,8 +4012,11 @@ mixed_rhs_accumulated:
         }
     }
 
+    // One block-sized pass per subfield row that no multiply-add absorbs:
+    // it reads the planar RHS and writes the interleaved block, the same
+    // traffic as a block copy.
     for (uint32_t row = 0; row < subfield_rows; ++row) {
-        if (!GF16Deinterleave(
+        if (!DeinterleavePayloadPlanes(
                 subfield_rhs.data() + (size_t)row * block_bytes,
                 rhs_low.data() + (size_t)row * elements,
                 rhs_high.data() + (size_t)row * elements,
@@ -3891,9 +4024,10 @@ mixed_rhs_accumulated:
         {
             return Wirehair_Error;
         }
+        ++stats.BlockCopies;
     }
 
-    std::vector<uint8_t> scale_scratch(elements);
+    std::vector<uint8_t> scale_scratch = MakeBlockStorage(elements);
     for (uint32_t row = 0u; row < H; ++row)
     {
         const MixedQuotientRowPlan& plan = factor.Rows[row];
@@ -3919,7 +4053,7 @@ mixed_rhs_accumulated:
                 gf256_add_mem(high, pivot_high, (int)elements);
                 ++stats.BlockXors;
             }
-            else if (!GF16MulAddPlanar(
+            else if (!MulAddPayloadPlanes(
                     low, high, scale,
                     pivot_low, pivot_high, elements))
             {
@@ -3946,7 +4080,7 @@ mixed_rhs_accumulated:
         }
         if (plan.NormalizeScale != 1u)
         {
-            if (!GF16ScalePlanar(
+            if (!ScalePayloadPlanes(
                     low, high, plan.NormalizeScale,
                     scale_scratch.data(), elements))
             {
@@ -3978,7 +4112,7 @@ mixed_rhs_accumulated:
             }
             else
             {
-                if (!GF16MulAddPlanar2(
+                if (!MulAddPayloadPlanes2(
                         pending_existing_low, pending_existing_high,
                         pending_existing_scale,
                         existing_low, existing_high, scale,
@@ -4004,7 +4138,7 @@ mixed_rhs_accumulated:
                     pending_existing_high, high, (int)elements);
                 ++stats.BlockXors;
             }
-            else if (!GF16MulAddPlanar(
+            else if (!MulAddPayloadPlanes(
                     pending_existing_low, pending_existing_high,
                     pending_existing_scale, low, high, elements))
             {
@@ -4018,10 +4152,12 @@ mixed_rhs_accumulated:
     stats.ResidualRows += H;
     stats.ResidualRank = binary_rank + factor.Rank;
 
+    // Publishing a free value writes one block, exactly what the tiny
+    // path's memcpy of the same value counts as a block copy.
     for (uint32_t i = 0u; i < quotient_columns; ++i)
     {
         const uint8_t pivot_row = factor.PivotRows[i];
-        if (pivot_row == UINT8_MAX || !GF16Interleave(
+        if (pivot_row == UINT8_MAX || !InterleavePayloadPlanes(
                 rhs_low.data() + (size_t)pivot_row * elements,
                 rhs_high.data() + (size_t)pivot_row * elements,
                 values.data() +
@@ -4030,6 +4166,7 @@ mixed_rhs_accumulated:
         {
             return Wirehair_Error;
         }
+        ++stats.BlockCopies;
     }
     for (uint32_t pivot = 0; pivot < inactive_count; ++pivot)
     {
@@ -4250,6 +4387,7 @@ PeelResult PeelBinaryRowsImplementation(
         uint32_t first = UINT32_MAX;
         for (uint32_t column : rows[row].Columns)
         {
+            ++out.RowScanSteps;
             if (!resolved[column]) {
                 first = column;
                 break;
@@ -4267,6 +4405,7 @@ PeelResult PeelBinaryRowsImplementation(
         ++degree_two_refs[second];
         degree_two_heap.push_back(degree_two_key(second));
         std::push_heap(degree_two_heap.begin(), degree_two_heap.end());
+        out.HeapOperations += 2u;
     };
     const auto remove_degree_two = [&](
         uint32_t row,
@@ -4295,6 +4434,8 @@ PeelResult PeelBinaryRowsImplementation(
 
     const auto resolve = [&](uint32_t column) {
         resolved[column] = 1u;
+        out.AdjacencyVisits += column_offsets[(size_t)column + 1u] -
+            column_offsets[column];
         for (size_t ref = column_offsets[column];
              ref < column_offsets[(size_t)column + 1u];
              ++ref)
@@ -4365,6 +4506,7 @@ PeelResult PeelBinaryRowsImplementation(
                 std::pop_heap(
                     degree_two_heap.begin(), degree_two_heap.end());
                 degree_two_heap.pop_back();
+                ++out.HeapOperations;
                 continue;
             }
             best = column;
@@ -4377,6 +4519,7 @@ PeelResult PeelBinaryRowsImplementation(
                 reference_bucket_offsets[(size_t)max_reference_count + 1u];
             while (cursor < end && resolved[reference_columns[cursor]]) {
                 ++cursor;
+                ++out.RowScanSteps;
             }
             if (cursor < end) {
                 best = reference_columns[cursor];
@@ -5301,8 +5444,24 @@ static WirehairResult SolvePrecodeSystemImpl(
     }
     const uint32_t P = (uint32_t)P_wide;
     const uint32_t L = K + P;
+    // A zero block size is a payload-free solve: the caller wants the
+    // sequence of block operations, not the bytes they would move.  The
+    // storage arithmetic is then exact rather than rejected -- count blocks
+    // of zero bytes really do need zero bytes -- and every block buffer below
+    // still holds real backing store, so no block pointer is null.  The block
+    // count is still required to be nonzero, exactly as CheckedBlockStorage
+    // requires it at every other width.
+    const auto checked_block_storage =
+        [block_bytes](uint32_t block_count, size_t& bytes_out) -> bool
+    {
+        if (block_bytes == 0u) {
+            bytes_out = 0u;
+            return block_count != 0u;
+        }
+        return CheckedBlockStorage(block_count, block_bytes, bytes_out);
+    };
     size_t value_bytes = 0u;
-    if (!CheckedBlockStorage(L, block_bytes, value_bytes))
+    if (!checked_block_storage(L, value_bytes))
     {
         return Wirehair_InvalidInput;
     }
@@ -5426,6 +5585,9 @@ static WirehairResult SolvePrecodeSystemImpl(
         st.BinaryAdjacencyStorageBytes = peel.AdjacencyStorageBytes;
         st.BinaryAdjacencyStorageAllocations =
             peel.AdjacencyStorageAllocations;
+        st.PeelAdjacencyVisits = peel.AdjacencyVisits;
+        st.PeelRowScanSteps = peel.RowScanSteps;
+        st.PeelHeapOperations = peel.HeapOperations;
         if (peel.PeelOrder.size() + peel.InactiveOrder.size() != L) {
             return terminal_error();
         }
@@ -5462,7 +5624,7 @@ static WirehairResult SolvePrecodeSystemImpl(
         projection_words = (size_t)L * words;
         std::vector<uint64_t> projection(projection_words, 0u);
         std::vector<uint8_t> values;
-        values.reserve(value_bytes);
+        values.reserve(BlockStorageCapacity(value_bytes));
 #if defined(__linux__) && defined(MADV_HUGEPAGE)
         // Request transparent huge pages before the first touch.  The value
         // workspace is both large and repeatedly scanned by payload XORs;
@@ -5510,6 +5672,7 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
 #endif
         values.resize(value_bytes, 0u);
+        st.BlockZeroFills += L;
         std::vector<uint64_t> accumulator(words, 0u);
         const bool enable_fused_block_initialization =
             K >= kFusedBlockXorInitMinBlockCount &&
@@ -5537,6 +5700,13 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 BatchedBlockXorInitializer constant_xor(
                     constant, block_bytes, equation.Data, true);
+                // The payload is consumed as the initializer's first
+                // source instead of being copied in.  It is the same
+                // logical block copy the unfused branch below counts, and
+                // it is never Add()ed, so this cannot double count.
+                if (equation.Data) {
+                    ++st.BlockCopies;
+                }
                 solve_column_offset = AccumulatePeeledProjectionConstant(
                     column, equation, inactive_index, words, projection,
                     values, block_bytes, accumulator, constant_xor, st);
@@ -5546,6 +5716,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 if (equation.Data) {
                     std::memcpy(constant, equation.Data, block_bytes);
+                    ++st.BlockCopies;
                 }
                 BatchedBlockXorAccumulator constant_xor(
                     constant, block_bytes);
@@ -5579,21 +5750,36 @@ static WirehairResult SolvePrecodeSystemImpl(
                 if (peel.UsedRows[r]) {
                     continue;
                 }
-                if (rhs.empty()) {
-                    rhs.resize(block_bytes);
+                // Allocated on first use.  The test is on capacity, not
+                // size, because a zero-width solve leaves the buffer
+                // permanently empty and would otherwise keep reallocating a
+                // null data() into the XOR kernels below.
+                if (rhs.capacity() == 0u) {
+                    rhs = MakeBlockStorage(block_bytes);
+                    ++st.BlockZeroFills;
                 }
                 BatchedBlockXorInitializer rhs_xor(
                     rhs.data(), block_bytes, rows[r].Data);
+                if (rows[r].Data) {
+                    ++st.BlockCopies;
+                }
                 for (uint32_t column : rows[r].Columns) {
                     rhs_xor.Add(
                         values.data() + (size_t)column * block_bytes);
+                    ++st.BlockXors;
                 }
                 rhs_xor.Flush();
                 if (!RowIsZero(rhs.data(), block_bytes)) {
                     return terminal_error();
                 }
             }
-            if (!VerifyPrecodeSolution(
+            // A zero-width solve has no payload to re-derive, so every row
+            // it could compare is empty and the check is vacuous.
+            // VerifyPrecodeSolution() keeps rejecting a zero width as invalid
+            // input -- it exists to compare bytes -- so it is skipped here
+            // rather than called with nothing to compare.
+            if (block_bytes != 0u &&
+                !VerifyPrecodeSolution(
                     system,
                     config,
                     packets,
@@ -5634,13 +5820,15 @@ static WirehairResult SolvePrecodeSystemImpl(
         std::vector<uint64_t> binary_pivot_coeff(
             mixed_completion ? (size_t)R * words : 0u, uint64_t{0});
         size_t residual_value_bytes = 0u;
-        if (!CheckedBlockStorage(R, block_bytes, residual_value_bytes)) {
+        if (!checked_block_storage(R, residual_value_bytes)) {
             return Wirehair_OOM;
         }
-        std::vector<uint8_t> pivot_rhs(residual_value_bytes, 0u);
+        std::vector<uint8_t> pivot_rhs =
+            MakeBlockStorage(residual_value_bytes);
+        st.BlockZeroFills += R + 1u;
         std::vector<uint8_t> have_pivot(R, 0u);
         std::vector<uint8_t> coeff(mixed_completion ? 0u : R, 0u);
-        std::vector<uint8_t> rhs(block_bytes, 0u);
+        std::vector<uint8_t> rhs = MakeBlockStorage(block_bytes);
         uint32_t rank = 0u;
         const uint32_t batched_rhs_min_block_bytes =
             system.Params.Field == CompletionField::MixedGF256GF16 ?
@@ -5673,6 +5861,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     rhs_xor.Add(
                         values.data() + (size_t)column * block_bytes);
                     ++st.BlockXors;
+                    st.ProjectionWordXors += words;
                 }
             }
             projection_xor.Flush();
@@ -5842,7 +6031,9 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
         }
 
-        std::vector<uint8_t> heavy_rhs((size_t)H * block_bytes, 0u);
+        std::vector<uint8_t> heavy_rhs =
+            MakeBlockStorage((size_t)H * block_bytes);
+        st.BlockZeroFills += H;
         void* heavy_destinations[128];
         uint8_t heavy_scales[128];
         for (uint32_t heavy = 0; heavy < H; ++heavy) {
@@ -5852,7 +6043,9 @@ static WirehairResult SolvePrecodeSystemImpl(
         if (system.Params.HeavyFamily ==
             HeavyCoefficientFamily::PeriodicCauchy)
         {
-            std::vector<uint8_t> residue_bucket(block_bytes, 0u);
+            std::vector<uint8_t> residue_bucket =
+                MakeBlockStorage(block_bytes);
+            ++st.BlockZeroFills;
             // Residues at or above L cannot contain a column when L is smaller
             // than the coefficient period.  Processing those empty buckets
             // would issue H full-block muladds from an all-zero source, which
@@ -5865,6 +6058,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 std::fill(
                     residue_bucket.begin(), residue_bucket.end(), uint8_t{0});
+                ++st.BlockZeroFills;
                 BatchedBlockXorAccumulator bucket_xor(
                     residue_bucket.data(), block_bytes);
                 for (uint32_t column = residue; column < L; column += window)
@@ -5959,18 +6153,19 @@ static WirehairResult SolvePrecodeSystemImpl(
             (size_t)quotient_columns * quotient_columns, 0u);
         size_t quotient_value_bytes = 0u;
         if (quotient_columns != 0u &&
-            !CheckedBlockStorage(
-                quotient_columns, block_bytes, quotient_value_bytes))
+            !checked_block_storage(quotient_columns, quotient_value_bytes))
         {
             return Wirehair_OOM;
         }
-        std::vector<uint8_t> quotient_pivot_rhs(
-            quotient_value_bytes, 0u);
+        std::vector<uint8_t> quotient_pivot_rhs =
+            MakeBlockStorage(quotient_value_bytes);
+        st.BlockZeroFills += quotient_columns +
+            (use_binary_quotient ? 1u : 0u);
         std::vector<uint8_t> quotient_have_pivot(
             quotient_columns, 0u);
         std::vector<uint8_t> quotient_coeff(quotient_columns, 0u);
-        std::vector<uint8_t> quotient_rhs(
-            use_binary_quotient ? block_bytes : 0u, 0u);
+        std::vector<uint8_t> quotient_rhs =
+            MakeBlockStorage(use_binary_quotient ? block_bytes : 0u);
         uint32_t quotient_rank = 0u;
 
         if (use_binary_quotient)
@@ -5983,6 +6178,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     rhs.data(),
                     heavy_rhs.data() + (size_t)heavy * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
                 for (uint32_t index = 0; index < R; ++index) {
                     coeff[index] = (uint8_t)(
                         projected_heavy[
@@ -6005,6 +6201,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
                 std::memcpy(
                     quotient_rhs.data(), rhs.data(), block_bytes);
+                ++st.BlockCopies;
                 if (InsertResidualRow(
                         quotient_coeff,
                         quotient_rhs,
@@ -6034,6 +6231,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     rhs.data(),
                     heavy_rhs.data() + (size_t)heavy * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
                 for (uint32_t index = 0; index < R; ++index) {
                     coeff[index] = (uint8_t)(
                         projected_heavy[
@@ -6068,6 +6266,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     rhs.data(),
                     heavy_rhs.data() + (size_t)heavy * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
                 for (uint32_t index = 0; index < R; ++index) {
                     coeff[index] = (uint8_t)(
                         projected_heavy[
@@ -6137,6 +6336,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                         (size_t)peel.InactiveOrder[i] * block_bytes,
                     pivot_rhs.data() + (size_t)i * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
             }
         }
         else
@@ -6151,6 +6351,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                         free_columns[i]] * block_bytes,
                     quotient_pivot_rhs.data() + (size_t)i * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
             }
             for (uint32_t pivot = 0; pivot < R; ++pivot)
             {
@@ -6163,6 +6364,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                     value,
                     pivot_rhs.data() + (size_t)pivot * block_bytes,
                     block_bytes);
+                ++st.BlockCopies;
                 const uint8_t* relation =
                     pivot_coeff.data() + (size_t)pivot * R;
                 for (uint32_t i = 0; i < quotient_columns; ++i)
@@ -6249,6 +6451,15 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 BatchedBlockXorInitializer value_xor(
                     value, block_bytes, equation.Data);
+                // Same logical initialization the unfused branch below
+                // counts: the payload is a block copy, and its absence a
+                // block zero fill.  Neither is ever Add()ed.
+                if (equation.Data) {
+                    ++st.BlockCopies;
+                }
+                else {
+                    ++st.BlockZeroFills;
+                }
                 for (uint32_t other : equation.Columns)
                 {
                     value_xor.Add(
@@ -6261,9 +6472,11 @@ static WirehairResult SolvePrecodeSystemImpl(
             {
                 if (equation.Data) {
                     std::memcpy(value, equation.Data, block_bytes);
+                    ++st.BlockCopies;
                 }
                 else {
                     std::memset(value, 0, block_bytes);
+                    ++st.BlockZeroFills;
                 }
                 BatchedBlockXorAccumulator value_xor(value, block_bytes);
                 for (uint32_t other : equation.Columns)
@@ -6436,6 +6649,7 @@ InsertPackedBinaryResidualRow(
             for (uint32_t word = column >> 6; word < words; ++word) {
                 coeff[word] ^= pivot[word];
             }
+            stats.ResidualCoeffWordXors += words - (column >> 6);
             AddScaledBlock(
                 rhs.data(), 1u,
                 pivot_rhs.data() + (size_t)column * block_bytes,
@@ -6458,6 +6672,7 @@ InsertPackedBinaryResidualRow(
             for (uint32_t word = column >> 6; word < words; ++word) {
                 coeff[word] ^= pivot[word];
             }
+            stats.ResidualCoeffWordXors += words - (column >> 6);
             rhs_xor.Add(
                 pivot_rhs.data() + (size_t)column * block_bytes);
             ++stats.BlockXors;
@@ -6505,6 +6720,7 @@ InsertPackedBinaryResidualRow(
             for (uint32_t word = pivot_word; word < words; ++word) {
                 existing_coeff[word] ^= coeff[word];
             }
+            stats.ResidualCoeffWordXors += words - pivot_word;
             AddScaledBlock(
                 pivot_rhs.data() + (size_t)existing * block_bytes,
                 1u, rhs.data(), block_bytes, stats);
@@ -6538,6 +6754,7 @@ InsertPackedBinaryResidualRow(
             for (uint32_t word = pivot_word; word < words; ++word) {
                 existing_coeff[word] ^= coeff[word];
             }
+            stats.ResidualCoeffWordXors += words - pivot_word;
             destinations[destination_count++] =
                 pivot_rhs.data() + (size_t)existing * block_bytes;
             ++stats.BlockXors;
@@ -6554,6 +6771,7 @@ InsertPackedBinaryResidualRow(
     std::memcpy(
         pivot_rhs.data() + (size_t)pivot_column * block_bytes,
         rhs.data(), block_bytes);
+    ++stats.BlockCopies;
     have_pivot[pivot_column] = 1u;
     ++rank;
     return ResidualInsertResult::Inserted;
@@ -6596,6 +6814,7 @@ static WH2_RESIDUAL_COLD_NOINLINE void ReduceResidualRowWithBatchedRhs(
             AddScaledResidualCoefficients(
                 coeff.data() + j, scale, pivot + j, R - j);
         }
+        stats.ResidualCoeffByteOps += R - j;
         const uint8_t* pivot_value =
             pivot_rhs.data() + (size_t)j * block_bytes;
         if (scale == 1u)

@@ -2037,6 +2037,54 @@ expect_failure("unknown --completion" precodefail --N 64 --bb-list 8
 expect_failure("mixed completion requires even block bytes" precodefail --N 64
     --bb-list 7 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed)
+# The solve width is its own option, separate from the payload width --bb-list
+# carries, and 0 is a legal solve width: the rank trials carry no payload, so
+# a 0-byte solve performs the same sequence of block operations on zero-byte
+# blocks.  The receipt line names the width, and the payload width in the CSV
+# is untouched, which is what makes the loss stream width-independent.
+expect_success("# solve_block_bytes=0" precodefail --N 64 --bb-list 2
+    --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion mixed
+    --solve-block-bytes 0)
+expect_success("\n64,2,periodic" precodefail --N 64 --bb-list 2
+    --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion mixed
+    --solve-block-bytes 0)
+expect_success("# solve_block_bytes=0" precodefail --N 64 --bb-list 8
+    --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion certified
+    --solve-block-bytes 0)
+expect_success("solve_bb=0" precodesweep --N 64 --bb 2 --cells 0:2
+    --configs "3,7,1,1" --loss 0.1 --threads 1 --completion mixed
+    --solve-block-bytes 0)
+# 0 is even, so it clears the mixed parity rule with no special case, while
+# the odd solve widths stay rejected.
+expect_failure("mixed completion requires even solve block bytes" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --completion mixed --solve-block-bytes 1)
+expect_failure("mixed completion requires even solve block bytes" precodesweep
+    --N 64 --bb 2 --cells 0:2 --configs "3,7,1,1" --loss 0.1 --threads 1
+    --completion mixed --solve-block-bytes 1)
+expect_failure("--solve-block-bytes must be in .0,2147483647." precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --solve-block-bytes 2147483648)
+expect_failure("--solve-block-bytes must be in .0,2147483647." precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1
+    --solve-block-bytes -1)
+# --full-payload-solve is the option that ties the solve width to the payload
+# width, so naming both asks for two widths at once.
+expect_failure("--solve-block-bytes conflicts with --full-payload-solve"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --full-payload-solve --solve-block-bytes 0)
+# The payload width keeps rejecting 0 on both subcommands: it keys the loss
+# stream and the seed profile, and ParseIntList stays shared with --N and
+# --mix-count.
+expect_failure("requires non-empty integer lists" precodefail --N 64
+    --bb-list 0 --overhead 0 --trials 1 --threads 1 --loss 0.1)
+expect_failure("--bb must be in .1,2147483647." precodesweep --N 64 --bb 0
+    --cells 0:2 --configs "3,7,1,1" --loss 0.1 --threads 1)
+# 0 stays invalid on the lists that share ParseIntList.
+expect_failure("requires non-empty integer lists" precodefail --N 0
+    --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1)
+expect_failure("requires non-empty integer lists" precodefail --N 64
+    --bb-list 8 --mix-count 0 --overhead 0 --trials 1 --threads 1 --loss 0.1)
 expect_failure("mixed completion requires periodic heavy family" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --heavy-family hashed)
@@ -2178,3 +2226,124 @@ if(UNIX AND NOT SKIP_CONSTRAINED)
     endif()
     reject_sanitizer("${out}${err}" "constrained compare failure")
 endif()
+
+# --------------------------------------------------------------------------
+# Solve width 0 must produce the SAME operation counts as the width the
+# completion field used to hard-code, not merely run without failing.
+#
+# This is the assertion the option's whole purpose rests on, and it is the
+# one none of the argument-validation cases above can make: a width-0 solve
+# that quietly skips work still exits 0, still prints a well-formed receipt,
+# and still matches every structural column.  The regression it pins is
+# real -- the mixed-completion back-substitution batcher decided "is a row
+# pending?" by testing a plane pointer against null, and at width 0 every
+# plane address collapsed onto an empty vector's null data(), so the paired
+# multiply-add branch never ran and its BlockMulAdds were never counted
+# (~1.7% low, with all nineteen other counter columns still matching).
+#
+# precodecost emits the full per-cell counter receipt.  Its structural and
+# counter columns are the first 26 fields of every data row; the remaining
+# fields are wall-clock timings and are not reproducible.
+function(precodecost_counters out_var)
+    run_bench(result out err precodecost ${ARGN})
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
+        message(FATAL_ERROR
+            "precodecost failed: ${ARGN}\nstdout=${out}\nstderr=${err}")
+    endif()
+    reject_sanitizer("${out}${err}" "precodecost counters: ${ARGN}")
+    # Data rows start with the config's S; the receipt line starts with '#'
+    # and the column header with 'S'.  Rows contain no semicolons, so
+    # collecting them with MATCHALL cannot be confused by CMake's list
+    # separator.
+    set(counters "")
+    string(REGEX MATCHALL "\n[0-9][^\n]*" rows "\n${out}")
+    foreach(row IN LISTS rows)
+        string(STRIP "${row}" row)
+        # CMake's regex engine has no {n} repetition, so drop the nine
+        # trailing wall-clock fields one at a time.
+        foreach(ignored RANGE 1 9)
+            if(NOT row MATCHES ",[^,]*$")
+                message(FATAL_ERROR
+                    "unexpected precodecost row shape: ${row}")
+            endif()
+            string(REGEX REPLACE ",[^,]*$" "" row "${row}")
+        endforeach()
+        set(counters "${counters}${row}\n")
+    endforeach()
+    if(counters STREQUAL "")
+        message(FATAL_ERROR
+            "precodecost produced no rows: ${ARGN}\nstdout=${out}")
+    endif()
+    set(${out_var} "${counters}" PARENT_SCOPE)
+endfunction()
+
+# Both block counts matter.  N=200 stays inside the tiny mixed-completion
+# fast path, which solves the quotient with one dense scalar elimination;
+# N=700 is past that path's 512-block gate and so runs the general
+# residue-bucket and factorization machinery, which is where the pending-row
+# batcher -- and the pointer-as-boolean bug -- lives.  Checking only the
+# small block count would pass with the bug still present.
+#
+# One config per invocation: a multi-config --configs value needs a
+# semicolon, which CMake would split into separate arguments.
+foreach(completion mixed certified)
+    foreach(blocks 200 700)
+        foreach(config "0,0,0,0" "3,7,1,1" "4,10,2,2")
+            precodecost_counters(counters_width_0
+                --N ${blocks} --bb 0 --completion ${completion} --cells 0:6
+                --configs ${config} --loss 0.15 --reps 1 --warmup 0)
+            precodecost_counters(counters_width_2
+                --N ${blocks} --bb 2 --completion ${completion} --cells 0:6
+                --configs ${config} --loss 0.15 --reps 1 --warmup 0)
+            if(NOT counters_width_0 STREQUAL counters_width_2)
+                message(FATAL_ERROR
+                    "solve width 0 and width 2 disagree for ${completion} "
+                    "completion, N=${blocks}, config ${config}; the "
+                    "width-0 operation counts are wrong\n"
+                    "width 0:\n${counters_width_0}\n"
+                    "width 2:\n${counters_width_2}")
+            endif()
+        endforeach()
+    endforeach()
+endforeach()
+
+# The receipt above is reachable for certified completion only because
+# precodecost accepts --completion; without it ResidualCoeffByteOps, which
+# only the GF(256) certified residual path increments, stays a constant zero
+# and the comparison is vacuous for that column.
+expect_success("completion=certified" precodecost --N 200 --bb 0
+    --completion certified --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --reps 1 --warmup 0)
+expect_failure("unknown --completion" precodecost --N 200 --bb 0
+    --completion bogus --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --reps 1 --warmup 0)
+
+# Certified completion's own default solve width is 1, not 2 -- that is what
+# precodefail and precodesweep use when --solve-block-bytes is unset -- so a
+# width-0 receipt has to be checkable against width 1.  precodecost applies
+# the same parity rule as those two: any width for certified, even widths
+# only for mixed.
+foreach(blocks 200 700)
+    foreach(config "0,0,0,0" "3,7,1,1" "4,10,2,2")
+        precodecost_counters(certified_width_0
+            --N ${blocks} --bb 0 --completion certified --cells 0:6
+            --configs ${config} --loss 0.15 --reps 1 --warmup 0)
+        precodecost_counters(certified_width_1
+            --N ${blocks} --bb 1 --completion certified --cells 0:6
+            --configs ${config} --loss 0.15 --reps 1 --warmup 0)
+        if(NOT certified_width_0 STREQUAL certified_width_1)
+            message(FATAL_ERROR
+                "solve width 0 and width 1 disagree for certified "
+                "completion, N=${blocks}, config ${config}; the width-0 "
+                "operation counts are wrong\n"
+                "width 0:\n${certified_width_0}\n"
+                "width 1:\n${certified_width_1}")
+        endif()
+    endforeach()
+endforeach()
+expect_failure("even for mixed completion" precodecost --N 200 --bb 1
+    --completion mixed --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --reps 1 --warmup 0)
+expect_failure("even for mixed completion" precodecost --N 200 --bb 3
+    --completion mixed --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --reps 1 --warmup 0)
