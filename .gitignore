@@ -96,3 +96,11 @@ experiments/precode/results/*.err
 !experiments/precode/results/*.err
 .claude/worktrees/
 experiments/tiling/rowop_tiling
+
+# Out-of-tree build directories used by the native bench/search work
+build-fast/
+build-*/
+
+# Scratch outputs from precode route/cost experiments
+preferred-route-*.csv
+experiments/dense_structures/
