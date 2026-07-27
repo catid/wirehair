@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,7 @@ bool SameParams(
         a.Field == b.Field &&
         a.HeavyFamily == b.HeavyFamily &&
         a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
+        a.StaircaseDegreeScale == b.StaircaseDegreeScale &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.DenseTwoAnchor == b.DenseTwoAnchor &&
         a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
@@ -58,7 +60,7 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     const uint32_t K = 2u + input.U8() % 127u;
     wirehair_v2::PrecodeParams params =
         wirehair_v2::MakeCertifiedParams(K, input.U64());
-    const unsigned mutation = input.U8() % 17u;
+    const unsigned mutation = input.U8() % 22u;
     bool expected_valid = false;
     switch (mutation)
     {
@@ -94,6 +96,25 @@ bool FuzzParams(wirehair_v2::fuzz::Input& input, std::string& failure)
     case 15:
         params.DegreeBalancedStaircase = true;
         expected_valid = true;
+        break;
+    case 16:
+        params.StaircaseDegreeScale = 0.0;
+        expected_valid = true;
+        break;
+    case 17:
+        params.StaircaseDegreeScale =
+            wirehair_v2::kStaircaseDegreeScaleMax + 1.0;
+        break;
+    case 18:
+        params.StaircaseDegreeScale =
+            std::numeric_limits<double>::quiet_NaN();
+        break;
+    case 19:
+        params.StaircaseDegreeScale = -2.0;
+        break;
+    case 20:
+        params.StaircaseDegreeScale =
+            -std::numeric_limits<double>::infinity();
         break;
     default:
         params = wirehair_v2::MakeMixedParams(K, params.Seed);

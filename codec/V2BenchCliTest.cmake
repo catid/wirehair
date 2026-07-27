@@ -2,9 +2,21 @@ if(NOT DEFINED BENCH)
     message(FATAL_ERROR "BENCH is required")
 endif()
 
+# This script is also useful standalone, outside the CTest registration that
+# cleans its parent environment.  Every ordinary child therefore starts with
+# all process-global experiment hooks unset.  Tests for one hook append only
+# their intended assignment after this common prefix.
+set(clean_hook_env_command
+    "${CMAKE_COMMAND}" -E env
+    --unset=WIREHAIR_V2_PEEL_DEGREES
+    --unset=WIREHAIR_V2_STAIRCASE_DEGREES
+    --unset=WIREHAIR_V2_STAIRCASE_ROW_DEGREES
+    --unset=WIREHAIR_V2_STAIRCASE_DEGREE_SCALE
+    --unset=WIREHAIR_V2_BAND_TRACKING_X)
+
 function(run_bench result_var out_var err_var)
     execute_process(
-        COMMAND "${BENCH}" ${ARGN}
+        COMMAND ${clean_hook_env_command} "${BENCH}" ${ARGN}
         RESULT_VARIABLE result
         OUTPUT_VARIABLE out
         ERROR_VARIABLE err
@@ -49,6 +61,68 @@ function(expect_success pattern)
     endif()
     reject_sanitizer("${out}${err}" "expected success: ${ARGN}")
 endfunction()
+
+function(expect_selftest)
+    run_bench(result out err selftest)
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
+        message(FATAL_ERROR
+            "selftest failed with '${result}'\nstdout=${out}\nstderr=${err}")
+    endif()
+    foreach(pattern IN ITEMS
+            "mixed null-witness exit policy: PASS"
+            "peel tilt exploration scale: PASS"
+            "peel p1 inactive-coordinate freeze: PASS"
+            "mixed config transition/thread parity: PASS"
+            "groupedtiming base graph identity: PASS"
+            "peel canonical fixed-depth CDF: PASS"
+            "peel extreme-range law acceptance: PASS"
+            "loss boundary oracle: PASS"
+            "zero-width joint-delta counter parity: PASS")
+        if(NOT out MATCHES "${pattern}")
+            message(FATAL_ERROR
+                "selftest missing output '${pattern}'\nstdout=${out}")
+        endif()
+    endforeach()
+    reject_sanitizer("${out}${err}" "selftest")
+endfunction()
+
+# WIREHAIR_V2_PEEL_DEGREES is parsed once per process, so exercise each grammar
+# case in a fresh child.  Main validates it before dispatch: malformed
+# experiment input must be an exit-1 configuration error, not a codec failure
+# rate measured under a partial prefix or the shipped fallback.
+function(expect_peel_env result_expected value)
+    execute_process(
+        COMMAND ${clean_hook_env_command}
+            "WIREHAIR_V2_PEEL_DEGREES=${value}"
+            "${BENCH}" peelpmf --N 2
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE out
+        ERROR_VARIABLE err
+        TIMEOUT 30)
+    if(result_expected STREQUAL "success")
+        if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+            NOT out MATCHES "# peelpmf,N=2,")
+            message(FATAL_ERROR
+                "valid peel-degree environment was rejected: '${value}'\n"
+                "result=${result}\nstdout=${out}\nstderr=${err}")
+        endif()
+    else()
+        if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 1 OR
+            NOT err MATCHES "invalid WIREHAIR_V2_PEEL_DEGREES")
+            message(FATAL_ERROR
+                "invalid peel-degree environment was accepted: '${value}'\n"
+                "result=${result}\nstdout=${out}\nstderr=${err}")
+        endif()
+    endif()
+    reject_sanitizer("${out}${err}" "peel-degree environment '${value}'")
+endfunction()
+
+expect_peel_env(success " 1 , 2 ")
+expect_peel_env(failure "")
+foreach(invalid_peel_degrees IN ITEMS
+        "1,junk" "1," "1,,2" "-1,2" "nan,1" "inf,1" "1e309,1")
+    expect_peel_env(failure "${invalid_peel_degrees}")
+endforeach()
 
 # Trial count boundaries, including the old uint16 narrowing boundary.
 expect_failure("trials must be" seedtable --N 2 --bb-list 1
@@ -137,11 +211,23 @@ expect_success("loss=0.98999999999999999" densecount --N 2 --bb-list 1
 expect_success("loss=0.98999999999999999" densegrid --N 2 --bb-list 1
     --deltas 0 --candidates 1 --trials 1 --loss 0.99)
 
-# Valid one-trial smoke for all remaining modes.
-expect_success("loss boundary oracle: PASS" selftest)
-expect_success("mixed null-witness exit policy: PASS" selftest)
+# Valid one-trial smoke for all remaining modes.  Run the expensive selftest
+# once and assert each independent regression receipt from that one process.
+expect_selftest()
 expect_success("# compare:" compare --nlo 2 --nhi 2 --trials 1
     --bb-list 8 --max-message-mib 1 --loss 0)
+# PrintAccum feeds paired-analysis tools through whitespace-delimited tokens.
+# A 7/3 N sum must survive as a round-trip binary64 value, not the old 2.3.
+run_bench(result out err compare --nlo 2 --nhi 3 --trials 3
+    --bb-list 1 --max-message-mib 1 --loss 0 --seed 3)
+if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
+    NOT out MATCHES
+        "baseline[ ]+1[ ]+3[ ]+0[ ]+2\\.3333333333333335([ ]|$)")
+    message(FATAL_ERROR
+        "compare did not preserve a non-round N_mean at round-trip precision\n"
+        "result=${result}\nstdout=${out}\nstderr=${err}")
+endif()
+reject_sanitizer("${out}${err}" "round-trip compare metrics")
 expect_success("64,8,1,1,0,0,0,0,0," precodecheck --N 64 --bb-list 8
     --trials 1 --loss 0)
 expect_success("v2_precode[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
@@ -285,9 +371,15 @@ expect_success("mixed_gf16_rows=3.*mixed_geometry=shared-x" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1 --loss 0
     --precode --precode-profile mixed --mixed-gf16-rows 3
     --mixed-period 64 --mixed-geometry shared-x)
-expect_failure("--mixed-gf16-rows must be in" compare --nlo 64 --nhi 64
+expect_success("mixed_gf16_rows=0" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 0)
+expect_success("mixed_gf16_rows=1" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-gf16-rows 1)
+expect_failure("--mixed-gf16-rows must be in" compare --nlo 64 --nhi 64
+    --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
+    --precode-profile mixed --mixed-gf16-rows 5)
 expect_failure("--mixed-period must be in" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed --mixed-gf16-rows 3 --mixed-period 12)
@@ -432,17 +524,17 @@ reject_sanitizer("${out}${err}" "two-anchor D12 witness repair")
 
 # A second real solve pins canonical full-L ordering and hashes for d=2.
 run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 0
-    --trials 1 --threads 1 --loss 0.35 --seed 3 --schedule adversarial
+    --trials 1 --threads 1 --loss 0.35 --seed 4 --schedule adversarial
     --completion mixed --source-hits 2 --mix-count 2 --mixed-period 12
     --mixed-null-witnesses)
 if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
     NOT out MATCHES "64,8,periodic,2,0,1,0,1,0," OR
     NOT out MATCHES
-        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=captured,reason=verified,diagnostic_status=1,replay_stats_ok=1.*L=107,R=33,binary_rank=21,q=12,quotient_rank=10,d=2.*exact_words=214,exact_size_ok=1,hash=16daf34d0ed35f45b4ac5bf49004e1a1" OR
+        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=captured,reason=verified,diagnostic_status=1,replay_stats_ok=1.*L=98,R=33,binary_rank=21,q=12,quotient_rank=10,d=2.*exact_words=196,exact_size_ok=1,hash=0871ff9e47ec72161512ae045a696678" OR
     NOT out MATCHES
-        "mixed_null_row,v=1,row=0.*sf_hash=cb3ab68d3ac8b9c4.*ex_hash=be52b9be6f9d47a6.*pair_hash=78e77a1db4dacc7b" OR
+        "mixed_null_row,v=1,row=0.*sf_hash=2c5409186ea68b8e.*ex_hash=2427d4d7f248ceac.*pair_hash=de55a27ffcbb7ae1" OR
     NOT out MATCHES
-        "mixed_null_row,v=1,row=1.*sf_hash=596023278d8fd107.*ex_hash=9dd32dc060d03dc5.*pair_hash=86fb1d0bc060b438" OR
+        "mixed_null_row,v=1,row=1.*sf_hash=316c30b48d82cbcd.*ex_hash=bc51de8c328d99af.*pair_hash=cad7eeee51e7af82" OR
     out MATCHES "mixed_null_row,v=1,row=2")
     message(FATAL_ERROR
         "mixed null-witness d=2 classification failed\n"
@@ -464,13 +556,13 @@ endif()
 reject_sanitizer("${out}${err}" "mixed null-witness benign record")
 
 run_bench(result out err precodefail --N 64 --bb-list 8 --overhead 0
-    --trials 1 --threads 1 --loss 0.35 --seed 1 --schedule adversarial
+    --trials 1 --threads 1 --loss 0.35 --seed 57 --schedule adversarial
     --completion mixed --source-hits 2 --mix-count 1
     --mixed-null-witnesses)
 if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
     NOT out MATCHES "64,8,periodic,1,0,1,0,1,0," OR
     NOT out MATCHES
-        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=skipped,reason=ineligible_need_more,diagnostic_status=0,replay_stats_ok=0.*L=107,R=32,binary_rank=19,q=13,quotient_rank=0,d=13.*exact_words=0,exact_size_ok=0,hash=00000000000000000000000000000000" OR
+        "mixed_null_witness,v=2,N=64,bb=8,trial=0,status=skipped,reason=ineligible_need_more,diagnostic_status=0,replay_stats_ok=0.*L=98,R=29,binary_rank=16,q=13,quotient_rank=0,d=13.*exact_words=0,exact_size_ok=0,hash=00000000000000000000000000000000" OR
     out MATCHES "mixed_null_row")
     message(FATAL_ERROR
         "mixed null-witness skipped record failed\n"
@@ -1018,9 +1110,9 @@ expect_success("mixed_period=31 mixed_gf256_rows=12" precodefail
     --mixed-residue-schedule hashed --mixed-residue-hash-seed 7
     --mixed-residue-hash-keyed --mixed-independent-extension-residues
     --payload-e2e)
-# Row trims (nine or eight subfield rows) are valid leading Cauchy subsets
-# in either geometry; the floor is eight and the ceiling stays twelve.
-foreach(trimmed_rows IN ITEMS 9 8)
+# Row trims are valid leading Cauchy subsets in either geometry.  Pin both
+# historically exercised trims and the actual one-row lower boundary.
+foreach(trimmed_rows IN ITEMS 9 8 1)
     expect_success("mixed_gf256_rows=${trimmed_rows}" precodefail
         --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
         --completion mixed --mixed-gf256-rows ${trimmed_rows})
@@ -1031,7 +1123,7 @@ foreach(trimmed_rows IN ITEMS 9 8)
 endforeach()
 expect_failure("--mixed-gf256-rows must be in" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
-    --completion mixed --mixed-gf256-rows 7)
+    --completion mixed --mixed-gf256-rows 0)
 expect_failure("--mixed-gf256-rows must be in" precodefail
     --N 64 --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --mixed-gf256-rows 13)
@@ -2052,7 +2144,7 @@ expect_success("# solve_block_bytes=0" precodefail --N 64 --bb-list 8
     --overhead 0 --trials 1 --threads 1 --loss 0.1 --completion certified
     --solve-block-bytes 0)
 expect_success("solve_bb=0" precodesweep --N 64 --bb 2 --cells 0:2
-    --configs "3,7,1,1" --loss 0.1 --threads 1 --completion mixed
+    --configs "3,7,1,-1.00" --loss 0.1 --threads 1 --completion mixed
     --solve-block-bytes 0)
 # 0 is even, so it clears the mixed parity rule with no special case, while
 # the odd solve widths stay rejected.
@@ -2060,7 +2152,7 @@ expect_failure("mixed completion requires even solve block bytes" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1
     --completion mixed --solve-block-bytes 1)
 expect_failure("mixed completion requires even solve block bytes" precodesweep
-    --N 64 --bb 2 --cells 0:2 --configs "3,7,1,1" --loss 0.1 --threads 1
+    --N 64 --bb 2 --cells 0:2 --configs "3,7,1,-1.00" --loss 0.1 --threads 1
     --completion mixed --solve-block-bytes 1)
 expect_failure("--solve-block-bytes must be in .0,2147483647." precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1 --loss 0.1
@@ -2079,7 +2171,7 @@ expect_failure("--solve-block-bytes conflicts with --full-payload-solve"
 expect_failure("requires non-empty integer lists" precodefail --N 64
     --bb-list 0 --overhead 0 --trials 1 --threads 1 --loss 0.1)
 expect_failure("--bb must be in .1,2147483647." precodesweep --N 64 --bb 0
-    --cells 0:2 --configs "3,7,1,1" --loss 0.1 --threads 1)
+    --cells 0:2 --configs "3,7,1,-1.00" --loss 0.1 --threads 1)
 # 0 stays invalid on the lists that share ParseIntList.
 expect_failure("requires non-empty integer lists" precodefail --N 0
     --bb-list 8 --overhead 0 --trials 1 --threads 1 --loss 0.1)
@@ -2179,7 +2271,8 @@ if(UNIX AND NOT SKIP_CONSTRAINED)
         "densegrid --N 2 --bb-list 100000000 --deltas 0 --candidates 1 --trials 1 --loss 0")
     foreach(command IN LISTS constrained_commands)
         execute_process(
-            COMMAND bash -c "ulimit -v 65536; exec '${BENCH}' ${command}"
+            COMMAND ${clean_hook_env_command} bash -c
+                "ulimit -v 65536; exec '${BENCH}' ${command}"
             RESULT_VARIABLE result
             OUTPUT_VARIABLE out
             ERROR_VARIABLE err
@@ -2195,7 +2288,7 @@ if(UNIX AND NOT SKIP_CONSTRAINED)
     endforeach()
 
     execute_process(
-        COMMAND bash -c
+        COMMAND ${clean_hook_env_command} bash -c
             "ulimit -v 65536; exec '${BENCH}' peelcost --N 2 --bb-list 8 --trials 4294967295 --structures lt_m1_c16 --precode dense --overhead 0"
         RESULT_VARIABLE result
         OUTPUT_VARIABLE out
@@ -2211,7 +2304,7 @@ if(UNIX AND NOT SKIP_CONSTRAINED)
     reject_sanitizer("${out}${err}" "constrained peelcost failure")
 
     execute_process(
-        COMMAND bash -c
+        COMMAND ${clean_hook_env_command} bash -c
             "ulimit -v 65536; exec '${BENCH}' compare --nlo 2 --nhi 2 --trials 1 --bb-list 100000000 --max-message-mib 64 --loss 0"
         RESULT_VARIABLE result
         OUTPUT_VARIABLE out
@@ -2228,8 +2321,8 @@ if(UNIX AND NOT SKIP_CONSTRAINED)
 endif()
 
 # --------------------------------------------------------------------------
-# Solve width 0 must produce the SAME operation counts as the width the
-# completion field used to hard-code, not merely run without failing.
+# Solve width 0 must produce the SAME operation counts as the cost model's
+# declared 1280-byte calibration width, not merely run without failing.
 #
 # This is the assertion the option's whole purpose rests on, and it is the
 # one none of the argument-validation cases above can make: a width-0 solve
@@ -2259,9 +2352,15 @@ function(precodecost_counters out_var)
     string(REGEX MATCHALL "\n[0-9][^\n]*" rows "\n${out}")
     foreach(row IN LISTS rows)
         string(STRIP "${row}" row)
-        # CMake's regex engine has no {n} repetition, so drop the nine
-        # trailing wall-clock fields one at a time.
-        foreach(ignored RANGE 1 9)
+        # CMake's regex engine has no {n} repetition, so drop the trailing
+        # non-counter fields one at a time: nine wall-clock timings
+        # (total_ns..solve_backsub_ns) and the two trailing activity flags,
+        # `shape` and `peel`.  The count must track the row, and it did not:
+        # it still said nine after `shape` was appended, so total_ns was being
+        # compared as if it were a counter.  That never showed up because this
+        # file aborts earlier, at the --mixed-gf16-rows expectation, which went
+        # stale when kMixedGF16RowsMin became 0.
+        foreach(ignored RANGE 1 11)
             if(NOT row MATCHES ",[^,]*$")
                 message(FATAL_ERROR
                     "unexpected precodecost row shape: ${row}")
@@ -2277,6 +2376,51 @@ function(precodecost_counters out_var)
     set(${out_var} "${counters}" PARENT_SCOPE)
 endfunction()
 
+# --threads used to be parsed and then ignored.  Parallel counter harvesting is
+# deterministic at width zero; timed payload runs stay serial because concurrent
+# stopwatches are a biased calibration.
+precodecost_counters(counters_threads_1
+    --N 200 --bb 0 --completion mixed --cells 0:8
+    --configs "3,7,1,-1.00" --loss 0.15 --reps 1 --warmup 0 --threads 1)
+precodecost_counters(counters_threads_4
+    --N 200 --bb 0 --completion mixed --cells 0:8
+    --configs "3,7,1,-1.00" --loss 0.15 --reps 1 --warmup 0 --threads 4)
+if(NOT counters_threads_1 STREQUAL counters_threads_4)
+    message(FATAL_ERROR
+        "precodecost counter receipt changed with thread count\n"
+        "threads 1:\n${counters_threads_1}\n"
+        "threads 4:\n${counters_threads_4}")
+endif()
+expect_failure("--threads > 1 requires --bb 0" precodecost
+    --N 200 --bb 1280 --completion mixed --cells 0:2
+    --configs "3,7,1,-1.00" --loss 0.15 --reps 1 --warmup 0 --threads 2)
+expect_failure("--overhead must be in" precodecost
+    --N 200 --bb 0 --completion mixed --cells 0:1
+    --configs "3,7,1,-1.00" --loss 0.15 --overhead 1025
+    --reps 1 --warmup 0)
+foreach(invalid_mix IN ITEMS 0 4)
+    expect_failure("--mix-count must be in" precodecost
+        --N 200 --bb 0 --completion mixed --cells 0:1
+        --configs "3,7,1,-1.00" --loss 0.15 --mix-count ${invalid_mix}
+        --reps 1 --warmup 0)
+endforeach()
+foreach(invalid_loss IN ITEMS nonsense 0.15junk)
+    expect_failure("bad --loss value" precodecost
+        --N 200 --bb 0 --completion mixed --cells 0:1
+        --configs "3,7,1,-1.00" --loss ${invalid_loss}
+        --reps 1 --warmup 0)
+endforeach()
+foreach(invalid_scale IN ITEMS -0.001 -0.999 64000.004)
+    expect_failure("must be a mean staircase row degree" precodecost
+        --N 200 --bb 0 --completion mixed --cells 0:1
+        --configs "3,7,1,${invalid_scale}" --loss 0.15
+        --reps 1 --warmup 0)
+endforeach()
+expect_failure("could not read --config-file" precodecost
+    --N 200 --bb 0 --completion mixed --cells 0:1
+    --config-file "${CMAKE_CURRENT_BINARY_DIR}" --loss 0.15
+    --reps 1 --warmup 0)
+
 # Both block counts matter.  N=200 stays inside the tiny mixed-completion
 # fast path, which solves the quotient with one dense scalar elimination;
 # N=700 is past that path's 512-block gate and so runs the general
@@ -2288,20 +2432,20 @@ endfunction()
 # semicolon, which CMake would split into separate arguments.
 foreach(completion mixed certified)
     foreach(blocks 200 700)
-        foreach(config "0,0,0,0" "3,7,1,1" "4,10,2,2")
+        foreach(config "0,0,0,-1.00" "3,7,1,-1.00" "4,10,2,-1.00")
             precodecost_counters(counters_width_0
                 --N ${blocks} --bb 0 --completion ${completion} --cells 0:6
                 --configs ${config} --loss 0.15 --reps 1 --warmup 0)
-            precodecost_counters(counters_width_2
-                --N ${blocks} --bb 2 --completion ${completion} --cells 0:6
+            precodecost_counters(counters_width_1280
+                --N ${blocks} --bb 1280 --completion ${completion} --cells 0:6
                 --configs ${config} --loss 0.15 --reps 1 --warmup 0)
-            if(NOT counters_width_0 STREQUAL counters_width_2)
+            if(NOT counters_width_0 STREQUAL counters_width_1280)
                 message(FATAL_ERROR
-                    "solve width 0 and width 2 disagree for ${completion} "
+                    "solve width 0 and width 1280 disagree for ${completion} "
                     "completion, N=${blocks}, config ${config}; the "
                     "width-0 operation counts are wrong\n"
                     "width 0:\n${counters_width_0}\n"
-                    "width 2:\n${counters_width_2}")
+                    "width 1280:\n${counters_width_1280}")
             endif()
         endforeach()
     endforeach()
@@ -2312,38 +2456,318 @@ endforeach()
 # only the GF(256) certified residual path increments, stays a constant zero
 # and the comparison is vacuous for that column.
 expect_success("completion=certified" precodecost --N 200 --bb 0
-    --completion certified --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --completion certified --cells 0:2 --configs "3,7,1,-1.00" --loss 0.15
     --reps 1 --warmup 0)
 expect_failure("unknown --completion" precodecost --N 200 --bb 0
-    --completion bogus --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --completion bogus --cells 0:2 --configs "3,7,1,-1.00" --loss 0.15
     --reps 1 --warmup 0)
 
-# Certified completion's own default solve width is 1, not 2 -- that is what
-# precodefail and precodesweep use when --solve-block-bytes is unset -- so a
-# width-0 receipt has to be checkable against width 1.  precodecost applies
-# the same parity rule as those two: any width for certified, even widths
-# only for mixed.
-foreach(blocks 200 700)
-    foreach(config "0,0,0,0" "3,7,1,1" "4,10,2,2")
-        precodecost_counters(certified_width_0
-            --N ${blocks} --bb 0 --completion certified --cells 0:6
-            --configs ${config} --loss 0.15 --reps 1 --warmup 0)
-        precodecost_counters(certified_width_1
-            --N ${blocks} --bb 1 --completion certified --cells 0:6
-            --configs ${config} --loss 0.15 --reps 1 --warmup 0)
-        if(NOT certified_width_0 STREQUAL certified_width_1)
-            message(FATAL_ERROR
-                "solve width 0 and width 1 disagree for certified "
-                "completion, N=${blocks}, config ${config}; the width-0 "
-                "operation counts are wrong\n"
-                "width 0:\n${certified_width_0}\n"
-                "width 1:\n${certified_width_1}")
-        endif()
-    endforeach()
-endforeach()
+# A config that passes the cheap prefilter can still fail construction in a
+# particular task.  Its deterministic `unusable` diagnostic must not be paired
+# with exit 0, because calibration consumers would otherwise accept a partial
+# table.  This S deliberately makes K+S exceed the codec's uint16 domain.
+expect_failure("accepted cell task" precodecost --N 200 --bb 0
+    --completion mixed --cells 0:1 --configs "65500,7,1,-1.00" --loss 0.15
+    --reps 1 --warmup 0)
+
 expect_failure("even for mixed completion" precodecost --N 200 --bb 1
-    --completion mixed --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --completion mixed --cells 0:2 --configs "3,7,1,-1.00" --loss 0.15
     --reps 1 --warmup 0)
 expect_failure("even for mixed completion" precodecost --N 200 --bb 3
-    --completion mixed --cells 0:2 --configs "3,7,1,1" --loss 0.15
+    --completion mixed --cells 0:2 --configs "3,7,1,-1.00" --loss 0.15
     --reps 1 --warmup 0)
+
+# Training tools obtain the native degree law and structural metadata from the
+# codec instead of maintaining a second transcription.
+expect_success("# peelpmf,N=128,degrees=64,staircase=" peelpmf --N 128)
+expect_success("degree,probability" peelpmf --N 4096)
+expect_failure("peelpmf --N must be in" peelpmf --N 1)
+
+# EsEvaluator ultimately keys RunCell with a uint32 cell id.  Search/holdout
+# spans outside that domain must be refused instead of aliasing 2^32 to zero.
+expect_failure("REFUSED the embedded cost model"
+    essearch --N 128 --target 0.01 --lam 1 --s-hi 30 --gens 1 --pairs 1)
+expect_success("cost_model_verified=0,band_tracking_x=1"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --measure --threads 1 --cells 0:1
+    --configs "3,7,1,-1.00")
+expect_failure("search cell span exceeds the uint32 cell identifier domain"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --gens 1 --pairs 1 --nseeds 1 --holdout 0
+    --cell-seed0 4294967296)
+expect_failure("holdout cell span exceeds the uint32 cell identifier domain"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --gens 1 --pairs 1 --nseeds 1 --holdout 1
+    --holdout-base 4294967296)
+
+# --noise-file is a strict replay receipt, not a permissive CSV import.  The
+# old atoi/atof loader accepted numeric prefixes and mapped junk to zero; a
+# negative init index wrapped to size_t and attempted a huge allocation, while
+# NaN/Inf perturbations reached a floating-to-uint32 conversion in EsQuantize.
+# Build one canonical 17-coordinate pair row and mutate individual fields.
+function(make_es_noise_pair out_var run generation pair eps0 uniform0)
+    # An optional seventh argument sets epsilon for H.  The canonical valid
+    # fixture uses +2 so its mirrored pair contains the known-usable H=9 arm;
+    # all malformed-record fixtures can omit it and retain zero.
+    if(ARGC GREATER 6)
+        set(eps1 "${ARGV6}")
+    else()
+        set(eps1 0)
+    endif()
+    set(row "pair,${run},${generation},${pair},${eps0},${eps1}")
+    foreach(index RANGE 3 17)
+        string(APPEND row ",0")
+    endforeach()
+    string(APPEND row ",${uniform0}")
+    foreach(index RANGE 2 17)
+        string(APPEND row ",0")
+    endforeach()
+    set(${out_var} "${row}" PARENT_SCOPE)
+endfunction()
+
+set(es_noise_path
+    "${CMAKE_CURRENT_BINARY_DIR}/wirehair_v2_bench_cli_noise.csv")
+set(es_noise_args
+    essearch --allow-unverified-cost-model
+    --N 128 --target 0.01 --lam 1 --s-hi 30 --init-scale 14.30
+    --gens 1 --pairs 1 --runs 1 --nseeds 16 --holdout 0 --threads 1)
+
+# Above K=2048 the stock peel law has exactly zero degree-1 mass.  Keep the
+# replay-vector coordinate but expose that it is frozen, instead of logging a
+# meaningless theta that random-walked on rank noise.
+expect_success("peel_p1_state=frozen-at-100-no-stock-mass"
+    essearch --allow-unverified-cost-model
+    --N 4096 --target 0.01 --lam 1 --s-hi 128 --fix-structure 64:10:2
+    --init-scale 14 --no-shape
+    --gens 1 --pairs 1 --runs 1 --nseeds 16 --holdout 0 --threads 1)
+
+# A search with no solved candidate has no operation counters and therefore no
+# cost estimate.  It must not serialize EsBest's zero-initialized config as a
+# successful winner.  This pinned S makes K+S exceed the codec's uint16 domain.
+run_bench(es_no_cost_result es_no_cost_out es_no_cost_err
+    essearch --allow-unverified-cost-model
+    --N 64000 --target 0.01 --lam 1 --s-hi 1000
+    --fix-structure 1000:7:1 --init-scale 14 --no-shape --no-peel-shape
+    --gens 1 --pairs 1 --runs 1 --nseeds 1 --holdout 0 --threads 1)
+if(NOT es_no_cost_result MATCHES "^-?[0-9]+$" OR
+    es_no_cost_result EQUAL 0 OR
+    NOT es_no_cost_err MATCHES "no candidate with a usable cost estimate")
+    message(FATAL_ERROR
+        "essearch accepted a run with no usable cost estimate\n"
+        "result=${es_no_cost_result}\n"
+        "stdout=${es_no_cost_out}\nstderr=${es_no_cost_err}")
+endif()
+reject_sanitizer(
+    "${es_no_cost_out}${es_no_cost_err}" "essearch no-cost refusal")
+
+# Extreme finite objective scales used to overflow only after parsing, then
+# serialize a successful `obj=-inf`; mirrored subtraction consequently produced
+# NaN and violated stable_sort's comparator contract.
+run_bench(es_nonfinite_result es_nonfinite_out es_nonfinite_err
+    essearch --allow-unverified-cost-model
+    --N 128 --target 0.01 --lam 1 --s-hi 30
+    --fix-structure 6:9:1 --init-scale 14.30
+    --shape-surrogate 1e-307
+    --gens 1 --pairs 1 --runs 1 --nseeds 16 --holdout 0 --threads 1)
+if(NOT es_nonfinite_result MATCHES "^-?[0-9]+$" OR
+    NOT es_nonfinite_result EQUAL 2 OR
+    NOT es_nonfinite_err MATCHES "finite objective")
+    message(FATAL_ERROR
+        "essearch accepted a non-finite objective\n"
+        "result=${es_nonfinite_result}\n"
+        "stdout=${es_nonfinite_out}\nstderr=${es_nonfinite_err}")
+endif()
+if(es_nonfinite_out MATCHES "(^|,)-?(inf|nan)(,|$)")
+    message(FATAL_ERROR
+        "essearch serialized a non-finite objective\n${es_nonfinite_out}")
+endif()
+reject_sanitizer(
+    "${es_nonfinite_out}${es_nonfinite_err}" "essearch objective refusal")
+
+# Finite fail-model coefficients can still overflow their products and combine
+# as +inf + -inf.  That NaN used to be clamped to predicted failure 0 by
+# std::max, making an unusable model look perfect.
+run_bench(es_bad_fail_model_result es_bad_fail_model_out
+    es_bad_fail_model_err
+    essearch --allow-unverified-cost-model
+    --N 128 --target 0.01 --lam 1 --s-hi 30
+    --fix-structure 6:9:1 --init-scale 14.30
+    --fail-model "0,1e308,-1e308,0,0"
+    --gens 1 --pairs 1 --runs 1 --nseeds 16 --holdout 0 --threads 1)
+if(NOT es_bad_fail_model_result MATCHES "^-?[0-9]+$" OR
+    NOT es_bad_fail_model_result EQUAL 2 OR
+    NOT es_bad_fail_model_err MATCHES "finite objective")
+    message(FATAL_ERROR
+        "essearch accepted a non-finite fail-model prediction\n"
+        "result=${es_bad_fail_model_result}\n"
+        "stdout=${es_bad_fail_model_out}\n"
+        "stderr=${es_bad_fail_model_err}")
+endif()
+reject_sanitizer(
+    "${es_bad_fail_model_out}${es_bad_fail_model_err}"
+    "essearch fail-model prediction refusal")
+
+# A disabled holdout is not evaluated, including in the banner.  The old
+# unconditional span expression wrapped these otherwise-ignored uint64 values.
+expect_success(
+    "span=\\[18446744073709551615,18446744073709551615"
+    essearch --allow-unverified-cost-model
+    --N 128 --target 0.01 --lam 1 --s-hi 30
+    --fix-structure 6:9:2 --init-scale 14.30 --no-shape --no-peel-shape
+    --gens 1 --pairs 1 --runs 1 --nseeds 16 --no-fresh-elite
+    --holdout-base 18446744073709551615
+    --holdout-stride 18446744073709551615 --threads 1)
+
+# Every reported S start must be inside the same box the candidates use.
+# Out-of-box explicit starts used to be silently reflected to an unrelated
+# interior point while the result row continued to print the requested value.
+foreach(invalid_init IN ITEMS 0 1 31)
+    expect_failure("--init .* outside the S box"
+        ${es_noise_args} --init ${invalid_init})
+endforeach()
+expect_failure("--init .* outside the S box"
+    ${es_noise_args} --s-lo 10 --init 2)
+expect_failure("--init conflicts with --fix-structure"
+    ${es_noise_args} --init 5 --fix-structure 5:7:1)
+expect_failure("S box is inverted"
+    ${es_noise_args} --s-lo 31)
+expect_failure("mean-row-degree box is inverted"
+    ${es_noise_args} --scale-lo 20 --scale-hi 10)
+expect_failure("H box is inverted"
+    ${es_noise_args} --h-lo 9 --h-hi 5)
+expect_failure("--dmax-hi must be at least 4"
+    ${es_noise_args} --dmax-hi 3)
+expect_failure("--threads must be 0 .* or in"
+    ${es_noise_args} --threads 1025)
+expect_success("shape_decay=0.6000"
+    ${es_noise_args} --shape-decay-rate -1)
+expect_failure("--sigma-.*/--alpha-.* scales must be in"
+    ${es_noise_args} --alpha-scale 1001)
+# A singleton box makes the random-init lower bound observable without a
+# probabilistic test: the old hard-coded logUniform[2,hi] could never print 30.
+expect_success("\n0,30.00000,"
+    ${es_noise_args} --s-lo 30)
+expect_failure("--nseeds must be positive"
+    essearch --nseeds 0)
+
+# The fixed-budget banner and winning PMFs are provenance, so verify them as
+# data: the budget must name the value actually run, and each PMF substring
+# must parse unchanged through the environment variable it claims to target.
+run_bench(es_receipt_result es_receipt_out es_receipt_err ${es_noise_args})
+if(NOT es_receipt_result MATCHES "^-?[0-9]+$" OR
+    NOT es_receipt_result EQUAL 0)
+    message(FATAL_ERROR
+        "essearch receipt probe failed\n"
+        "stdout=${es_receipt_out}\nstderr=${es_receipt_err}")
+endif()
+if(NOT es_receipt_out MATCHES "nseeds=16 \\(fixed\\)")
+    message(FATAL_ERROR
+        "fixed nseeds receipt does not name the executed value\n"
+        "${es_receipt_out}")
+endif()
+string(REGEX MATCH
+    "# best shape,[^\n]*weights=([^\n]*)"
+    es_shape_line "${es_receipt_out}")
+set(es_shape_weights "${CMAKE_MATCH_1}")
+string(REGEX MATCH
+    "# best peel,[^\n]*weights=([^\n]*)"
+    es_peel_line "${es_receipt_out}")
+set(es_peel_weights "${CMAKE_MATCH_1}")
+if(es_shape_weights STREQUAL "" OR es_peel_weights STREQUAL "" OR
+    NOT es_shape_weights MATCHES "," OR NOT es_peel_weights MATCHES "," OR
+    es_shape_weights MATCHES ":" OR es_peel_weights MATCHES ":")
+    message(FATAL_ERROR
+        "best-distribution lines are not comma-separated env values\n"
+        "${es_receipt_out}")
+endif()
+execute_process(
+    COMMAND ${clean_hook_env_command}
+        "WIREHAIR_V2_STAIRCASE_DEGREES=${es_shape_weights}"
+        "${BENCH}" precodefail --N 64 --bb-list 2 --overhead 0
+        --trials 1 --threads 1 --loss 0
+    RESULT_VARIABLE es_shape_replay_result
+    OUTPUT_VARIABLE es_shape_replay_out
+    ERROR_VARIABLE es_shape_replay_err
+    TIMEOUT 30)
+if(NOT es_shape_replay_result MATCHES "^-?[0-9]+$" OR
+    NOT es_shape_replay_result EQUAL 0)
+    message(FATAL_ERROR
+        "printed best staircase PMF does not replay through its environment\n"
+        "weights=${es_shape_weights}\n"
+        "stdout=${es_shape_replay_out}\nstderr=${es_shape_replay_err}")
+endif()
+execute_process(
+    COMMAND ${clean_hook_env_command}
+        "WIREHAIR_V2_PEEL_DEGREES=${es_peel_weights}"
+        "${BENCH}" peelpmf --N 128
+    RESULT_VARIABLE es_peel_replay_result
+    OUTPUT_VARIABLE es_peel_replay_out
+    ERROR_VARIABLE es_peel_replay_err
+    TIMEOUT 30)
+if(NOT es_peel_replay_result MATCHES "^-?[0-9]+$" OR
+    NOT es_peel_replay_result EQUAL 0)
+    message(FATAL_ERROR
+        "printed best peel PMF does not replay through its environment\n"
+        "weights=${es_peel_weights}\n"
+        "stdout=${es_peel_replay_out}\nstderr=${es_peel_replay_err}")
+endif()
+set(es_replay_combined
+    "${es_receipt_out}${es_receipt_err}${es_shape_replay_out}"
+    "${es_shape_replay_err}${es_peel_replay_out}${es_peel_replay_err}")
+reject_sanitizer(
+    "${es_replay_combined}" "essearch distribution replay receipts")
+
+if(UNIX AND EXISTS "/dev/full")
+    run_bench(es_full_result es_full_out es_full_err
+        ${es_noise_args} --emit-noise /dev/full)
+    if(NOT es_full_result MATCHES "^-?[0-9]+$" OR
+        NOT es_full_result EQUAL 2 OR
+        NOT es_full_err MATCHES "could not write --emit-noise /dev/full")
+        message(FATAL_ERROR
+            "essearch ignored an emit-noise write failure\n"
+            "result=${es_full_result}\n"
+            "stdout=${es_full_out}\nstderr=${es_full_err}")
+    endif()
+    reject_sanitizer(
+        "${es_full_out}${es_full_err}" "essearch emit-noise write failure")
+endif()
+
+make_es_noise_pair(es_valid_pair 0 0 0 0 0 2)
+file(WRITE "${es_noise_path}" "init,0,6\n${es_valid_pair}\n")
+expect_success("# tie census,run=0" ${es_noise_args}
+    --noise-file "${es_noise_path}")
+
+function(expect_bad_es_noise label contents)
+    file(WRITE "${es_noise_path}" "${contents}\n")
+    expect_failure("bad --noise-file record|incomplete --noise-file"
+        ${es_noise_args} --noise-file "${es_noise_path}")
+endfunction()
+
+expect_bad_es_noise(negative_init_index "init,-1,2\n${es_valid_pair}")
+expect_bad_es_noise(overflow_init_index
+    "init,18446744073709551615,2\n${es_valid_pair}")
+expect_bad_es_noise(partial_init_value "init,0,2junk\n${es_valid_pair}")
+expect_bad_es_noise(nonfinite_init "init,0,nan\n${es_valid_pair}")
+expect_bad_es_noise(init_below_s_box "init,0,1\n${es_valid_pair}")
+
+make_es_noise_pair(es_partial_index_pair 0junk 0 0 0 0)
+expect_bad_es_noise(partial_pair_index
+    "init,0,6\n${es_partial_index_pair}")
+make_es_noise_pair(es_nan_pair 0 0 0 nan 0)
+expect_bad_es_noise(nan_epsilon "init,0,6\n${es_nan_pair}")
+make_es_noise_pair(es_inf_pair 0 0 0 1e309 0)
+expect_bad_es_noise(infinite_epsilon "init,0,6\n${es_inf_pair}")
+make_es_noise_pair(es_impossible_pair 0 0 0 9 0)
+expect_bad_es_noise(impossible_epsilon
+    "init,0,6\n${es_impossible_pair}")
+make_es_noise_pair(es_negative_uniform_pair 0 0 0 0 -0.1)
+expect_bad_es_noise(negative_uniform
+    "init,0,6\n${es_negative_uniform_pair}")
+make_es_noise_pair(es_one_uniform_pair 0 0 0 0 1)
+expect_bad_es_noise(one_uniform "init,0,6\n${es_one_uniform_pair}")
+
+expect_bad_es_noise(pair_before_init "${es_valid_pair}")
+expect_bad_es_noise(missing_pair "init,0,6")
+expect_bad_es_noise(extra_pair
+    "init,0,6\n${es_valid_pair}\n${es_valid_pair}")
+file(REMOVE "${es_noise_path}")

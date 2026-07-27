@@ -69,28 +69,101 @@ enum class DenseAnchorLayout : uint32_t
     Four0369 = 3 ///< anchors at rows {0, 3, 6, 9}
 };
 
+/**
+    Sentinel for PrecodeParams::StaircaseDegreeScale meaning "not supplied".
+
+    Negative rather than zero because ZERO IS A LEGAL SCALE: a learned target
+    mean row degree of 0.0 asks for an empty staircase edge budget, and the
+    search is allowed to walk there and be rejected by its own failure
+    constraint rather than by a floor built into the codec.
+
+    When the scale is unset the certified legacy rule supplies the budget
+    instead (K * min(SourceHits, S)).  That rule is the one thing this
+    parameter replaces, so it must not run when a scale IS supplied.
+*/
+static const double kStaircaseDegreeScaleUnset = -1.0;
+
+/**
+    Accepted domain of a SUPPLIED PrecodeParams::StaircaseDegreeScale.
+
+    The scale is an absolute mean row degree, so its domain is exactly the
+    realizable range of a row degree: zero through the largest block count the
+    codec accepts.  This is a validity domain, not a model -- nothing here
+    picks a value, and the construction clamps the resolved budget to the
+    K*S edges a simple bipartite graph can hold.
+*/
+static const double kStaircaseDegreeScaleMin = 0.0;
+static const double kStaircaseDegreeScaleMax = 64000.0;
+
+/// Largest per-source-column staircase degree the system can carry.
+/// ValidatePrecodeSystem tallies per-column hits in a byte; mixture
+/// construction rejects a larger degree before building, and validation also
+/// guards the increment so malformed external systems fail rather than wrap.
+static const uint32_t kStaircaseColumnHitsMax = 255u;
+
 struct PrecodeParams
 {
     uint32_t BlockCount = 0;   ///< K: source blocks
     uint32_t Staircase = 0;    ///< S: staircase parity columns
     uint32_t DenseRows = 0;    ///< D2: Shuffle-2 dense binary rows
     uint32_t HeavyRows = 0;    ///< H: Cauchy heavy rows
-    uint32_t SourceHits = 0;   ///< N1: staircase parities per source column
+    uint32_t SourceHits = 0;   ///< N1: legacy hits when degree scale is unset
     CompletionField Field = CompletionField::GF256;
 
     /**
         Experiment-only degree-balanced staircase matching.
 
-        The certified construction independently places each source's N1
+        The certified construction independently places each source column's
         distinct hits, so staircase-row source degrees fluctuate.  This option
-        instead gives every row floor(K*min(N1,S)/S) or
-        ceil(K*min(N1,S)/S) source columns
-        while keeping every source degree, edge count, parity/link column, and
-        downstream dense RNG stream unchanged.  A separately keyed randomized
-        capacity matching avoids affine/cyclic placement.  Named profiles never
-        enable this flag.
+        instead gives every row floor(EdgeCount/S) or ceil(EdgeCount/S) source
+        columns while keeping every source degree, edge count, parity/link
+        column, and downstream dense RNG stream unchanged.  A separately keyed
+        randomized capacity matching avoids affine/cyclic placement.  Named
+        profiles never enable this flag.
     */
     bool DegreeBalancedStaircase = false;
+
+    /**
+        Experiment-only TARGET MEAN STAIRCASE ROW DEGREE.
+
+        This is an absolute number of source columns per staircase row.  It is
+        not a multiple of anything, not a fraction of K, and not derived from
+        S, H or D2.  With S staircase rows the total source->staircase edge
+        budget is the definitional identity total = mean x count:
+
+            edge_count = llround(StaircaseDegreeScale * S)
+
+        clamped only at the K*S edges a simple bipartite graph can hold.  K
+        does not appear, and neither does SourceHits.
+
+        WHY IT EXISTS.  The certified construction pins the edge total at
+        K * min(N1,S), because every source column carries EXACTLY min(N1,S)
+        parities.  N1 is an integer, so that budget moves only in steps of K
+        edges -- 128 at K=128 -- which is why N1 is near-frozen in any search
+        over this structure (87.7% of mirrored pairs tied) and why a shaped
+        row-degree distribution can only ever redistribute a budget it cannot
+        resize.  A learned mean row degree moves the same budget by ONE edge
+        at its finest step.
+
+        COLUMN SIDE.  The edge total counted row-wise equals the total counted
+        column-wise, so a freely chosen budget cannot leave every column at a
+        constant hit count.  The exact-regularity invariant generalizes to an
+        exact TWO-VALUED MIXTURE (see StaircaseDegreeMixture): every source
+        column carries either lo or lo+1 parities, with exactly n_hi columns
+        at lo+1.  lo may legitimately be ZERO -- the budget is not floored up
+        to cover every column, because that would be a K-derived rule.  This
+        is still a strict invariant and ValidatePrecodeSystem enforces it
+        exactly, counts included.
+
+        kStaircaseDegreeScaleUnset (the default, and what MakeCertifiedParams
+        sets) means NOT SUPPLIED: the legacy K * min(N1,S) rule provides the
+        budget instead and the construction is the certified one, bit for bit.
+        Setting the scale to K*min(N1,S)/S reproduces that construction
+        exactly -- same budget, n_hi = 0, every column at min(N1,S), and the
+        identical PRNG draw order, because the mixture is exactly regular and
+        no extra draw is made.  Named and public profiles never set it.
+    */
+    double StaircaseDegreeScale = kStaircaseDegreeScaleUnset;
 
     /**
         Identity-corner dense variant: the Shuffle-2 deck spans only the
@@ -196,6 +269,47 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 /// Versioned mixed 10-row GF(256) + 2-row GF(2^16) completion rule.
 PrecodeParams MakeMixedParams(uint32_t block_count, uint64_t seed);
 
+/**
+    Exact two-valued source-column degree mixture implied by a parameter set.
+
+    The staircase edge total counted row-wise must equal the total counted
+    column-wise, so a freely chosen edge budget necessarily moves the column
+    side off a single integer.  It moves it by the smallest possible amount:
+    to a mixture of exactly two ADJACENT degrees.
+
+        EdgeCount   = min(llround(scale * S), K*S)   [scale supplied]
+        EdgeCount   = K * min(SourceHits, S)         [scale unset: legacy]
+        LowHits     = EdgeCount / K                (floor; may be 0)
+        HighColumns = EdgeCount - LowHits * K      (columns at LowHits + 1)
+        LowColumns  = K - HighColumns
+
+    HighColumns == 0 is the exactly-regular case, which is what the legacy
+    budget always produces -- the certified construction unchanged.
+*/
+struct StaircaseDegreeMixture
+{
+    uint32_t EdgeCount = 0;   ///< total source->staircase edges
+    uint32_t LowHits = 0;     ///< parities carried by a LowColumns column
+    uint32_t HighHits = 0;    ///< LowHits + 1; meaningful when HighColumns > 0
+    uint32_t LowColumns = 0;  ///< columns carrying LowHits parities
+    uint32_t HighColumns = 0; ///< columns carrying HighHits parities
+    uint32_t MaxHits = 0;     ///< largest realized column degree
+};
+
+/**
+    Resolve the column-degree mixture for a parameter set.
+
+    Returns false when the block count, staircase count, source hits or scale
+    are outside their domains, or when the budget cannot be realized as a
+    two-valued mixture (a column cannot touch a staircase row twice, so the
+    top degree must stay within [0, min(S, kStaircaseColumnHitsMax)]).  It is
+    a pure function of `params` -- no PRNG, no thread-local state -- so the
+    builder and the validator agree by construction.
+*/
+bool MakeStaircaseDegreeMixture(
+    const PrecodeParams& params,
+    StaircaseDegreeMixture& out);
+
 struct PrecodeSystem
 {
     PrecodeParams Params = {};
@@ -204,13 +318,14 @@ struct PrecodeSystem
         Staircase parity rows.
 
         Row j (j in [0, S)) is a GF(2) constraint over binary columns
-        [0, K + S): the source columns whose N1 hits landed on parity j,
-        plus the own-parity column K + j, plus the staircase link column
+        [0, K + S): the source columns whose staircase hits landed on parity
+        j, plus the own-parity column K + j, plus the staircase link column
         K + j - 1 for j > 0.  Column lists are sorted and deduplicated
         (every column appears exactly once; construction cannot produce
         duplicates because per-source hits are distinct).  The optional
         degree-balanced experiment additionally makes every row's source
-        degree floor(K*min(N1,S)/S) or ceil(K*min(N1,S)/S).
+        degree floor(EdgeCount/S) or ceil(EdgeCount/S), where EdgeCount is
+        the resolved StaircaseDegreeMixture budget.
     */
     std::vector<std::vector<uint32_t>> StaircaseRows;
 
@@ -386,6 +501,56 @@ enum class MixedResidueBucketMode : uint32_t
     JointDelta = 3
 };
 
+/// Strict parsers shared by the environment hooks and their focused tests.
+/// Lists are comma-separated with optional surrounding ASCII whitespace.
+/// Invalid, non-finite, overflowing, partially parsed, or empty inputs return
+/// false without modifying the output.
+bool ParseStaircaseDegreesForTesting(
+    const char* text,
+    std::vector<double>& weights);
+bool ParseStaircaseRowDegreesForTesting(
+    const char* text,
+    std::vector<uint32_t>& degrees);
+bool ParseStaircaseDegreeScaleForTesting(
+    const char* text,
+    double& scale);
+
+/// Per-thread staircase row-degree distribution (weights for degrees 1,2,3...).
+/// Empty clears the override and restores the stock construction.  Thread-local
+/// so concurrent workers can evaluate different shapes.
+void SetStaircaseDegreesForTesting(const std::vector<double>& weights);
+void ClearStaircaseDegreesForTesting();
+
+/// Per-thread override of PrecodeParams::StaircaseDegreeScale -- the target
+/// mean staircase row degree -- in [kStaircaseDegreeScaleMin,
+/// kStaircaseDegreeScaleMax].  Set wins over the params field and over
+/// WIREHAIR_V2_STAIRCASE_DEGREE_SCALE; Clear restores the params field (or the
+/// environment value, if one is set).  Thread-local, matching
+/// SetStaircaseDegreesForTesting, so concurrent search workers can each
+/// evaluate a different scale.  Passing the exact
+/// kStaircaseDegreeScaleUnset sentinel is equivalent to Clear; every other
+/// negative value remains an active invalid override and fails construction.
+void SetStaircaseDegreeScaleForTesting(double scale);
+void ClearStaircaseDegreeScaleForTesting();
+
+/// Per-thread override of the REALIZED staircase row-degree sequence: exactly
+/// S integers, one per staircase row in row order, summing to the resolved edge
+/// budget.  This names the object the shape knob only samples -- the sampler
+/// draws S degrees from a distribution and rescales them onto the budget, so
+/// one shape produces a different sequence on every construction seed -- and
+/// lets a sequence be evaluated as itself.  Empty clears the override.
+///
+/// The matching stream still consumes the S draws the sampler would have made,
+/// so a pinned sequence reproduces the shaped path CONDITIONED on that sequence
+/// bit for bit rather than landing on a different random stream.
+///
+/// Wins over SetStaircaseDegreesForTesting and over
+/// WIREHAIR_V2_STAIRCASE_ROW_DEGREES; a sequence whose length is not S, whose
+/// entries are not in [0, K], or whose sum is not the resolved edge budget is a
+/// REFUSED construction, not a silently repaired one.
+void SetStaircaseRowDegreesForTesting(const std::vector<uint32_t>& degrees);
+void ClearStaircaseRowDegreesForTesting();
+
 /// Set the current thread's experiment-only period in [H, 244].
 bool SetMixedCoefficientPeriodForTesting(uint32_t period);
 /// Rotate each period block by a corner-preserving skew in [0, P-H].
@@ -426,10 +591,17 @@ bool UseAutomaticMixedJointResidueBucketsForTesting(
     uint32_t coefficient_period);
 /// Select frozen or shared-X mixed coefficients on the current test thread.
 bool SetMixedCoefficientGeometryForTesting(MixedCoefficientGeometry geometry);
-/// Select 10/11 rows generally, or a validated 12+4-row test geometry.
+/// Select a leading 1..10-row subset of the frozen GF(256) table, or guarded
+/// shared-X 11/12-row experiments (12 requires the validated four-row
+/// extension geometry).
 bool SetMixedGF256RowsForTesting(uint32_t rows);
-/// Select two, three, or four extension rows; twelve GF(256) rows require four.
+/// Select zero through four extension rows; twelve GF(256) rows require four.
 bool SetMixedGF16RowsForTesting(uint32_t rows);
+/// Force every worker onto the cost model's trimmed-band X-coordinate regime.
+/// Process-wide: configure before launching workers.  Clear restores the
+/// WIREHAIR_V2_BAND_TRACKING_X environment-controlled experiment.
+void SetMixedBandTrackingXForTesting(bool enabled);
+void ClearMixedBandTrackingXForTesting();
 #endif
 
 /// Coefficient dispatch for actual encoder/decoder equations.  Alternate

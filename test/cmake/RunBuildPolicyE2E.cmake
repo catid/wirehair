@@ -210,7 +210,9 @@ run_checked(tools_configure_output "tools configure"
     -DBUILD_TESTS=OFF
     -DBUILD_CODEC_V2=ON
     -DWIREHAIR_BUILD_TOOLS=OFF
-    -DWIREHAIR_BUILD_BENCHMARKS=OFF)
+    -DWIREHAIR_BUILD_BENCHMARKS=OFF
+    -DWIREHAIR_STRICT_WARNINGS=ON
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
 run_checked(default_build_output "default tools-excluded build"
     "${CMAKE_COMMAND}" --build "${tools_dir}"
     --config "${TEST_CONFIG}" --parallel 2)
@@ -237,6 +239,21 @@ run_checked(explicit_build_output "explicit tool build"
     --config "${TEST_CONFIG}" --parallel 2 --target
     gen_small_dseeds gen_peel_seeds gen_most_dseeds gen_dcounts gen_tables
     wirehair_v2_bench)
+file(READ "${tools_dir}/compile_commands.json" tools_compile_commands)
+string(REGEX MATCH
+    "\\{[^{}]*WirehairV2Bench\\.cpp[^{}]*\\}"
+    v2_bench_compile_command "${tools_compile_commands}")
+if(v2_bench_compile_command STREQUAL "")
+    message(FATAL_ERROR
+        "BUILD_TESTS=OFF compile database has no WirehairV2Bench.cpp entry")
+endif()
+require_match("${v2_bench_compile_command}" "-Werror"
+    "BUILD_TESTS=OFF strict V2 benchmark compile")
+if(v2_bench_compile_command MATCHES "WIREHAIR_V2_ENABLE_TEST_HOOKS")
+    message(FATAL_ERROR
+        "BUILD_TESTS=OFF V2 benchmark inherited test hooks:\n"
+        "${v2_bench_compile_command}")
+endif()
 run_checked(small_output "small dense seed smoke"
     "${exe_dir}/gen_small_dseeds${TEST_EXE_SUFFIX}"
     --selection-self-test)
@@ -270,6 +287,20 @@ run_checked(bench_output "v2 benchmark smoke"
     "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
     compare --nlo 2 --nhi 2 --trials 1 --bb-list 8
     --max-message-mib 1 --loss 0)
+execute_process(
+    COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
+        preferredattempt
+    RESULT_VARIABLE preferred_result
+    OUTPUT_VARIABLE preferred_out
+    ERROR_VARIABLE preferred_err
+    TIMEOUT 10)
+if(NOT preferred_result EQUAL 1 OR NOT preferred_out STREQUAL "" OR
+   NOT preferred_err STREQUAL "unknown mode: preferredattempt\n")
+    message(FATAL_ERROR
+        "BUILD_TESTS=OFF benchmark exposed preferredattempt\n"
+        "rc=${preferred_result}\nstdout=${preferred_out}\n"
+        "stderr=${preferred_err}")
+endif()
 
 file(READ "${PROJECT_SOURCE_DIR}/CMakeLists.txt" root_cmake)
 if(root_cmake MATCHES "add_compile_options[ \t\r\n]*\\([ \t\r\n]*-w" OR

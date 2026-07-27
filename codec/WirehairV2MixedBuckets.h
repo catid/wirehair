@@ -106,12 +106,20 @@ bool AccumulateMixedJointResidueBucketsWithShifts(
     SourceAt source_at,
     IsActive is_active,
     bool batch_sources,
-    MixedJointResidueBuckets& output)
+    MixedJointResidueBuckets& output,
+    // A zero block width is a payload-free solve: the same bucket schedule
+    // is walked and the same operation counts are produced, on planes that
+    // are zero bytes wide.  Only the solver opts in.  The encoder keeps the
+    // default and stays rejected at zero, exactly as its own entry guards
+    // already require, because splitting a message into zero-byte blocks
+    // has no defined block count.
+    bool allow_empty_blocks = false)
 {
     output = MixedJointResidueBuckets{};
     if (coefficient_period == 0u ||
         coefficient_period > kMixedCoefficientPeriod ||
-        block_bytes == 0u || block_bytes > 0x7fffffffu)
+        (block_bytes == 0u && !allow_empty_blocks) ||
+        block_bytes > 0x7fffffffu)
     {
         return false;
     }
@@ -310,7 +318,8 @@ bool AccumulateMixedJointResidueBuckets(
     SourceAt source_at,
     IsActive is_active,
     bool batch_sources,
-    MixedJointResidueBuckets& output)
+    MixedJointResidueBuckets& output,
+    bool allow_empty_blocks = false)
 {
     return AccumulateMixedJointResidueBucketsWithShifts(
         column_count,
@@ -325,7 +334,8 @@ bool AccumulateMixedJointResidueBuckets(
         source_at,
         is_active,
         batch_sources,
-        output);
+        output,
+        allow_empty_blocks);
 }
 
 } // namespace wirehair_v2

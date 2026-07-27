@@ -13,9 +13,9 @@ static const uint32_t kMixedGF256Rows = 10u;
 static const uint32_t kMixedGF256RowsMax = 12u;
 /// Test builds may trim the subfield to a leading Cauchy subset of the
 /// frozen ten-row table (Y in [0, rows), X unchanged at 12 + residue).
-/// EXPERIMENT (small-K speed): the floor of eight is a reliability policy,
-/// not a structural bound -- the trimmed system is still one Cauchy matrix.
-/// Lowered so the band size can be swept against overhead at K <= 100.
+/// EXPERIMENT (small-K speed): production's ten rows are a reliability policy,
+/// not a structural bound -- every nonempty prefix remains a Cauchy matrix.
+/// The floor is one so band size can be swept against overhead at K <= 100.
 static const uint32_t kMixedGF256RowsMin = 1u;
 #else
 static const uint32_t kMixedGF256RowsMax = kMixedGF256Rows;

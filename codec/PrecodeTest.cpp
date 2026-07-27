@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -60,6 +61,8 @@ bool TestParams()
             params.HeavyFamily !=
                 wirehair_v2::HeavyCoefficientFamily::PeriodicCauchy ||
             params.SourceHits != c.SourceHits ||
+            params.StaircaseDegreeScale !=
+                wirehair_v2::kStaircaseDegreeScaleUnset ||
             params.DegreeBalancedStaircase ||
             params.DenseTwoAnchor || params.DenseTwoAnchorPhase != 0u ||
             params.SegmentedDenseAnchors !=
@@ -157,6 +160,21 @@ bool TestParams()
     invalid.SegmentedDenseAnchors =
         wirehair_v2::DenseAnchorLayout::Four0369;
     invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.StaircaseDegreeScale =
+        wirehair_v2::kStaircaseDegreeScaleMax + 1.0;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.StaircaseDegreeScale =
+        std::numeric_limits<double>::quiet_NaN();
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.StaircaseDegreeScale = -2.0;
+    invalid_params.push_back(invalid);
+    invalid = wirehair_v2::MakeCertifiedParams(16u, 1u);
+    invalid.StaircaseDegreeScale =
+        -std::numeric_limits<double>::infinity();
+    invalid_params.push_back(invalid);
 
     for (size_t i = 0; i < invalid_params.size(); ++i)
     {
@@ -174,6 +192,281 @@ bool TestParams()
     }
     return true;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+class StaircaseExperimentScope
+{
+public:
+    ~StaircaseExperimentScope()
+    {
+        wirehair_v2::ClearStaircaseRowDegreesForTesting();
+        wirehair_v2::ClearStaircaseDegreesForTesting();
+        wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    }
+};
+
+uint32_t StaircaseSourceDegree(
+    const wirehair_v2::PrecodeSystem& system,
+    uint32_t row)
+{
+    uint32_t degree = 0u;
+    for (uint32_t column : system.StaircaseRows[row]) {
+        degree += column < system.Params.BlockCount;
+    }
+    return degree;
+}
+
+bool TestStaircaseExperimentParsing()
+{
+    std::vector<double> weights{9.0};
+    if (!wirehair_v2::ParseStaircaseDegreesForTesting(
+            " 0, 1.5, 2 ", weights) ||
+        weights != std::vector<double>({0.0, 1.5, 2.0}))
+    {
+        std::fprintf(stderr, "staircase weight parser rejected valid list\n");
+        return false;
+    }
+    const std::vector<double> weight_sentinel{7.0};
+    static const char* const bad_weights[] = {
+        "", "1junk", "1,2,", "1,,2", "-1,2", "nan", "1e9999"
+    };
+    for (const char* text : bad_weights)
+    {
+        weights = weight_sentinel;
+        if (wirehair_v2::ParseStaircaseDegreesForTesting(text, weights) ||
+            weights != weight_sentinel)
+        {
+            std::fprintf(stderr,
+                "staircase weight parser accepted '%s'\n", text);
+            return false;
+        }
+    }
+
+    std::vector<uint32_t> rows{9u};
+    if (!wirehair_v2::ParseStaircaseRowDegreesForTesting(
+            " 0, 1, 4294967295 ", rows) ||
+        rows != std::vector<uint32_t>({0u, 1u, UINT32_MAX}))
+    {
+        std::fprintf(stderr, "staircase row parser rejected valid list\n");
+        return false;
+    }
+    const std::vector<uint32_t> row_sentinel{7u};
+    static const char* const bad_rows[] = {
+        "", "-1", "+1", "1junk", "1,2,", "1,,2", "4294967296",
+        "18446744073709551616"
+    };
+    for (const char* text : bad_rows)
+    {
+        rows = row_sentinel;
+        if (wirehair_v2::ParseStaircaseRowDegreesForTesting(text, rows) ||
+            rows != row_sentinel)
+        {
+            std::fprintf(stderr,
+                "staircase row parser accepted '%s'\n", text);
+            return false;
+        }
+    }
+
+    double scale = 7.0;
+    if (!wirehair_v2::ParseStaircaseDegreeScaleForTesting(
+            " 0.0 ", scale) ||
+        scale != 0.0)
+    {
+        std::fprintf(stderr, "staircase scale parser rejected zero\n");
+        return false;
+    }
+    static const char* const bad_scales[] = {
+        "", "1junk", "-1", "-0.001", "nan", "inf", "-inf",
+        "1e9999", "64001"
+    };
+    for (const char* text : bad_scales)
+    {
+        scale = 7.0;
+        if (wirehair_v2::ParseStaircaseDegreeScaleForTesting(text, scale) ||
+            scale != 7.0)
+        {
+            std::fprintf(stderr,
+                "staircase scale parser accepted '%s'\n", text);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestStaircaseDegreeExperiments()
+{
+    StaircaseExperimentScope scope;
+    wirehair_v2::ClearStaircaseRowDegreesForTesting();
+    wirehair_v2::ClearStaircaseDegreesForTesting();
+    wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+
+    // A zero target budget is legal.  The shaped sampler starts from a
+    // positive degree but rescaling must be allowed to realize zero rows.
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(64u, UINT64_C(0x7a65726f));
+    wirehair_v2::SetStaircaseDegreesForTesting({1.0});
+    wirehair_v2::SetStaircaseDegreeScaleForTesting(0.0);
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+        !wirehair_v2::ValidatePrecodeSystem(system) ||
+        system.Params.StaircaseDegreeScale != 0.0)
+    {
+        std::fprintf(stderr, "zero-degree shaped staircase failed\n");
+        return false;
+    }
+    for (uint32_t row = 0; row < system.Params.Staircase; ++row)
+    {
+        if (StaircaseSourceDegree(system, row) != 0u) {
+            std::fprintf(stderr, "zero-degree shape retained source edge\n");
+            return false;
+        }
+    }
+
+    // A fractional budget exercises the new two-valued column mixture: three
+    // of five columns carry one hit and two carry zero.  Check both the
+    // independent placement and balanced matcher, including the exact row
+    // shape promised by the balanced flag.
+    wirehair_v2::ClearStaircaseDegreesForTesting();
+    wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    params = wirehair_v2::MakeCertifiedParams(
+        5u, UINT64_C(0x6d697874757265));
+    params.Staircase = 3u;
+    params.StaircaseDegreeScale = 1.0;
+    wirehair_v2::StaircaseDegreeMixture mixture;
+    if (!wirehair_v2::MakeStaircaseDegreeMixture(params, mixture) ||
+        mixture.EdgeCount != 3u ||
+        mixture.LowHits != 0u || mixture.HighHits != 1u ||
+        mixture.LowColumns != 2u || mixture.HighColumns != 3u ||
+        mixture.MaxHits != 1u ||
+        !wirehair_v2::BuildPrecodeSystem(params, system) ||
+        !wirehair_v2::ValidatePrecodeSystem(system))
+    {
+        std::fprintf(stderr, "fractional staircase mixture failed\n");
+        return false;
+    }
+    params.DegreeBalancedStaircase = true;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+        !wirehair_v2::ValidatePrecodeSystem(system))
+    {
+        std::fprintf(stderr, "balanced fractional staircase failed\n");
+        return false;
+    }
+    for (uint32_t row = 0; row < params.Staircase; ++row)
+    {
+        if (StaircaseSourceDegree(system, row) != 1u) {
+            std::fprintf(stderr,
+                "balanced fractional staircase row degree mismatch\n");
+            return false;
+        }
+    }
+
+    // A pinned sequence may likewise contain zero-degree rows.
+    wirehair_v2::SetStaircaseDegreeScaleForTesting(1.0);
+    wirehair_v2::SetStaircaseRowDegreesForTesting({0u, 1u, 2u});
+    params = wirehair_v2::MakeCertifiedParams(
+        4u, UINT64_C(0x70696e6e6564));
+    params.Staircase = 3u;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+        !wirehair_v2::ValidatePrecodeSystem(system) ||
+        StaircaseSourceDegree(system, 0u) != 0u ||
+        StaircaseSourceDegree(system, 1u) != 1u ||
+        StaircaseSourceDegree(system, 2u) != 2u)
+    {
+        std::fprintf(stderr, "zero-degree pinned staircase failed\n");
+        return false;
+    }
+
+    // The hook owns the row shape, so combining it with a flag promising a
+    // balanced shape must fail before the caller's output is modified.
+    wirehair_v2::ClearStaircaseRowDegreesForTesting();
+    wirehair_v2::SetStaircaseDegreesForTesting({1.0});
+    params.DegreeBalancedStaircase = true;
+    wirehair_v2::PrecodeSystem sentinel;
+    sentinel.Params.BlockCount = 7u;
+    sentinel.StaircaseRows.push_back(std::vector<uint32_t>{1u, 2u});
+    sentinel.DenseRowColumns.push_back(std::vector<uint32_t>{3u});
+    system = sentinel;
+    if (wirehair_v2::BuildPrecodeSystem(params, system) ||
+        system.Params.BlockCount != sentinel.Params.BlockCount ||
+        system.StaircaseRows != sentinel.StaircaseRows ||
+        system.DenseRowColumns != sentinel.DenseRowColumns)
+    {
+        std::fprintf(stderr,
+            "balanced staircase accepted an active shape hook\n");
+        return false;
+    }
+
+    // Programmatic hooks are validated to the same standard as environment
+    // hooks, and malformed active values fail before modifying output.
+    params.DegreeBalancedStaircase = false;
+    wirehair_v2::SetStaircaseDegreesForTesting(
+        {1.0, std::numeric_limits<double>::quiet_NaN()});
+    system = sentinel;
+    if (wirehair_v2::BuildPrecodeSystem(params, system) ||
+        system.Params.BlockCount != sentinel.Params.BlockCount ||
+        system.StaircaseRows != sentinel.StaircaseRows ||
+        system.DenseRowColumns != sentinel.DenseRowColumns)
+    {
+        std::fprintf(stderr,
+            "malformed staircase shape modified output\n");
+        return false;
+    }
+
+    // Only the exact -1 sentinel clears a scale override.  Other negatives,
+    // infinities, and NaN are active malformed experiments and must fail
+    // closed instead of falling through to the environment or params field.
+    const double malformed_scales[] = {
+        -2.0,
+        -std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()
+    };
+    wirehair_v2::ClearStaircaseDegreesForTesting();
+    for (double malformed_scale : malformed_scales)
+    {
+        wirehair_v2::SetStaircaseDegreeScaleForTesting(malformed_scale);
+        system = sentinel;
+        if (wirehair_v2::BuildPrecodeSystem(params, system) ||
+            system.Params.BlockCount != sentinel.Params.BlockCount ||
+            system.StaircaseRows != sentinel.StaircaseRows ||
+            system.DenseRowColumns != sentinel.DenseRowColumns)
+        {
+            std::fprintf(stderr,
+                "malformed staircase scale override modified output\n");
+            return false;
+        }
+    }
+    wirehair_v2::SetStaircaseDegreeScaleForTesting(
+        wirehair_v2::kStaircaseDegreeScaleUnset);
+
+    // Endpoint-heavy samples can leave a correction far above the retired
+    // 4096*S single-edge cap after multiplicative scaling and clamping.
+    // Every feasible seed must now complete via the O(S) bulk repair.
+    params = wirehair_v2::MakeCertifiedParams(10000u, 0u);
+    params.Staircase = 2u;
+    params.StaircaseDegreeScale = 10000.0;
+    params.DegreeBalancedStaircase = false;
+    wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    std::vector<double> endpoint_shape(64u, 0.0);
+    endpoint_shape.front() = 1.0;
+    endpoint_shape.back() = 1.0;
+    wirehair_v2::SetStaircaseDegreesForTesting(endpoint_shape);
+    for (uint64_t seed = 0u; seed < 16u; ++seed)
+    {
+        params.Seed = seed;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+            !wirehair_v2::ValidatePrecodeSystem(system) ||
+            StaircaseSourceDegree(system, 0u) != params.BlockCount ||
+            StaircaseSourceDegree(system, 1u) != params.BlockCount)
+        {
+            std::fprintf(stderr,
+                "bulk staircase repair failed at seed=%llu\n",
+                (unsigned long long)seed);
+            return false;
+        }
+    }
+    return true;
+}
+#endif
 
 bool TestStaircase(const wirehair_v2::PrecodeSystem& system)
 {
@@ -1053,6 +1346,13 @@ int main()
     if (!TestParams()) {
         return 1;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (!TestStaircaseExperimentParsing() ||
+        !TestStaircaseDegreeExperiments())
+    {
+        return 1;
+    }
+#endif
     if (!TestHeavyCoefficients()) {
         return 1;
     }

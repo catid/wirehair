@@ -32,6 +32,19 @@ if (BUILD_TESTS)
     target_compile_definitions(wirehair_v2_policy
         PUBLIC WIREHAIR_V2_ENABLE_TEST_HOOKS=1)
 
+    # Test-hook environment variables are useful to one-process experiments,
+    # but a developer shell carrying one must not silently change ordinary
+    # correctness tests.  Keep one cross-platform command prefix for every V2
+    # test process.  Explicit hook tests may append exactly the assignment they
+    # intend after these unsets.
+    set(_wirehair_v2_clean_test_command
+        "${CMAKE_COMMAND}" -E env
+        --unset=WIREHAIR_V2_PEEL_DEGREES
+        --unset=WIREHAIR_V2_STAIRCASE_DEGREES
+        --unset=WIREHAIR_V2_STAIRCASE_ROW_DEGREES
+        --unset=WIREHAIR_V2_STAIRCASE_DEGREE_SCALE
+        --unset=WIREHAIR_V2_BAND_TRACKING_X)
+
     set(_wirehair_v2_compile_flags
         "${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS}")
     if(CMAKE_CONFIGURATION_TYPES)
@@ -56,41 +69,54 @@ if (BUILD_TESTS)
     add_executable(wirehair_v2_policy_test PolicyTest.cpp)
     wirehair_apply_project_options(wirehair_v2_policy_test)
     target_link_libraries(wirehair_v2_policy_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_policy_test COMMAND wirehair_v2_policy_test)
+    add_test(NAME wirehair_v2_policy_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_policy_test>)
 
     add_executable(wirehair_v2_noinit_test V2NoInitTest.cpp)
     wirehair_apply_project_options(wirehair_v2_noinit_test)
     target_link_libraries(wirehair_v2_noinit_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_noinit_test COMMAND wirehair_v2_noinit_test)
+    add_test(NAME wirehair_v2_noinit_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_noinit_test>)
 
     add_executable(wirehair_v2_transactional_test V2TransactionalTest.cpp)
     wirehair_apply_project_options(wirehair_v2_transactional_test)
     target_link_libraries(wirehair_v2_transactional_test
         wirehair_v2_policy Threads::Threads)
     add_test(NAME wirehair_v2_transactional_test
-        COMMAND wirehair_v2_transactional_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_transactional_test>)
     set_tests_properties(wirehair_v2_transactional_test
         PROPERTIES LABELS "state-machine;transactional;v2" TIMEOUT 180)
 
     add_executable(wirehair_v2_precode_test PrecodeTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_test)
     target_link_libraries(wirehair_v2_precode_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_precode_test COMMAND wirehair_v2_precode_test)
+    add_test(NAME wirehair_v2_precode_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_test>)
 
     add_executable(wirehair_v2_gf16_test GF16MixedTest.cpp)
     wirehair_apply_project_options(wirehair_v2_gf16_test)
     target_link_libraries(wirehair_v2_gf16_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_gf16_test COMMAND wirehair_v2_gf16_test)
+    add_test(NAME wirehair_v2_gf16_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_gf16_test>)
 
     add_executable(wirehair_v2_precode_encode_test PrecodeEncodeTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_encode_test)
     target_link_libraries(wirehair_v2_precode_encode_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_precode_encode_test COMMAND wirehair_v2_precode_encode_test)
+    add_test(NAME wirehair_v2_precode_encode_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_encode_test>)
 
     add_executable(wirehair_v2_precode_decode_test PrecodeDecodeTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_decode_test)
     target_link_libraries(wirehair_v2_precode_decode_test wirehair_v2_policy)
-    add_test(NAME wirehair_v2_precode_decode_test COMMAND wirehair_v2_precode_decode_test)
+    add_test(NAME wirehair_v2_precode_decode_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_decode_test>)
 
     add_executable(wirehair_v2_precode_solve_test
         PrecodeSolveTest.cpp
@@ -99,13 +125,15 @@ if (BUILD_TESTS)
     wirehair_apply_project_options(wirehair_v2_precode_solve_test)
     target_link_libraries(wirehair_v2_precode_solve_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_solve_test
-        COMMAND wirehair_v2_precode_solve_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_solve_test>)
 
     add_executable(wirehair_v2_tiny_fastpath_ab_test V2TinyFastPathABTest.cpp)
     wirehair_apply_project_options(wirehair_v2_tiny_fastpath_ab_test)
     target_link_libraries(wirehair_v2_tiny_fastpath_ab_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_tiny_fastpath_ab_test
-        COMMAND wirehair_v2_tiny_fastpath_ab_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_tiny_fastpath_ab_test>)
     set_tests_properties(wirehair_v2_tiny_fastpath_ab_test
         PROPERTIES LABELS "v2" TIMEOUT 600)
 
@@ -113,7 +141,8 @@ if (BUILD_TESTS)
     wirehair_apply_project_options(wirehair_v2_precode_roundtrip_test)
     target_link_libraries(wirehair_v2_precode_roundtrip_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_precode_roundtrip_test
-        COMMAND wirehair_v2_precode_roundtrip_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_roundtrip_test>)
 
     add_executable(wirehair_v2_precode_seed_selection_test
         PrecodeSeedSelectionTest.cpp)
@@ -126,7 +155,8 @@ if (BUILD_TESTS)
         set(_wirehair_v2_seed_selection_args "")
     endif()
     add_test(NAME wirehair_v2_precode_seed_selection_test
-        COMMAND wirehair_v2_precode_seed_selection_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_precode_seed_selection_test>
             ${_wirehair_v2_seed_selection_args})
     set_tests_properties(wirehair_v2_precode_seed_selection_test
         PROPERTIES TIMEOUT 180)
@@ -143,7 +173,9 @@ if (BUILD_TESTS)
                 $<TARGET_FILE:wirehair>
                 $<TARGET_FILE_DIR:wirehair_v2_profile_test>)
     endif()
-    add_test(NAME wirehair_v2_profile_test COMMAND wirehair_v2_profile_test)
+    add_test(NAME wirehair_v2_profile_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_profile_test>)
     set_tests_properties(wirehair_v2_profile_test PROPERTIES
         LABELS "v2;profile;serialization;golden;e2e;abi"
         TIMEOUT 120)
@@ -155,7 +187,8 @@ if (BUILD_TESTS)
     wirehair_apply_project_options(wirehair_v2_fingerprint_test)
     target_link_libraries(wirehair_v2_fingerprint_test wirehair_v2_policy)
     add_test(NAME wirehair_v2_fingerprint_test
-        COMMAND wirehair_v2_fingerprint_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_fingerprint_test>)
     set_tests_properties(wirehair_v2_fingerprint_test PROPERTIES
         LABELS "v2;golden;fingerprint;freeze"
         TIMEOUT 3600
@@ -173,7 +206,8 @@ if (BUILD_TESTS)
                 $<TARGET_FILE_DIR:wirehair_v2_packet_golden_test>)
     endif()
     add_test(NAME wirehair_v2_packet_golden_test
-        COMMAND wirehair_v2_packet_golden_test)
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_packet_golden_test>)
     set_tests_properties(wirehair_v2_packet_golden_test PROPERTIES
         LABELS "v2;golden;freeze;e2e"
         TIMEOUT 300)
@@ -220,14 +254,16 @@ if (BUILD_TESTS)
             "${CMAKE_BINARY_DIR}/Testing/Temporary/v2-fuzz-artifacts")
         file(MAKE_DIRECTORY "${_wirehair_v2_fuzz_artifacts}")
         add_test(NAME wirehair_v2_profile_fuzz_test
-            COMMAND wirehair_v2_profile_fuzz
+            COMMAND ${_wirehair_v2_clean_test_command}
+                $<TARGET_FILE:wirehair_v2_profile_fuzz>
                 --mutations 10000
                 --max-seconds 55
                 --seed 0x243f6a8885a308d3
                 --trace-current
                 --artifact-dir "${_wirehair_v2_fuzz_artifacts}")
         add_test(NAME wirehair_v2_stateful_fuzz_test
-            COMMAND wirehair_v2_stateful_fuzz
+            COMMAND ${_wirehair_v2_clean_test_command}
+                $<TARGET_FILE:wirehair_v2_stateful_fuzz>
                 --mutations 10000
                 --max-seconds 55
                 --seed 0x13198a2e03707344
@@ -245,10 +281,13 @@ if (BUILD_TESTS)
     if(WIREHAIR_ENABLE_SCHEDULED_TESTS)
         add_test(
             NAME wirehair_v2_precode_decode_large
-            COMMAND wirehair_v2_precode_decode_test --large)
+            COMMAND ${_wirehair_v2_clean_test_command}
+                $<TARGET_FILE:wirehair_v2_precode_decode_test> --large)
         add_test(
             NAME wirehair_v2_precode_decode_large_recovery
-            COMMAND wirehair_v2_precode_decode_test --large-recovery)
+            COMMAND ${_wirehair_v2_clean_test_command}
+                $<TARGET_FILE:wirehair_v2_precode_decode_test>
+                --large-recovery)
         set_tests_properties(
             wirehair_v2_precode_decode_large
             wirehair_v2_precode_decode_large_recovery
@@ -258,7 +297,7 @@ if (BUILD_TESTS)
     if(UNIX AND NOT _wirehair_v2_sanitized)
         add_test(
             NAME wirehair_v2_precode_oom_test
-            COMMAND bash -c
+            COMMAND ${_wirehair_v2_clean_test_command} bash -c
                 "ulimit -v 65536; exec '$<TARGET_FILE:wirehair_v2_precode_encode_test>' --oom-probe")
         set_tests_properties(wirehair_v2_precode_oom_test PROPERTIES TIMEOUT 30)
     endif()
@@ -287,15 +326,16 @@ wirehair_apply_project_options(wirehair_v2_resume_bench)
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
     add_test(
         NAME wirehair_v2_bench_cli_test
-        COMMAND ${CMAKE_COMMAND}
+        COMMAND ${_wirehair_v2_clean_test_command} ${CMAKE_COMMAND}
             -DBENCH=$<TARGET_FILE:wirehair_v2_bench>
             -DSKIP_CONSTRAINED=${_wirehair_v2_sanitized}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchCliTest.cmake)
     set_tests_properties(wirehair_v2_bench_cli_test PROPERTIES TIMEOUT 120)
 
-    # Compile the same CLI with only the new benchmark command suppressed.
-    # This exercises the exact preprocessor boundary used by BUILD_TESTS=OFF
-    # without needing a nested configure/build inside CTest.
+    # Compile the test-hook CLI with only the preferred-attempt experiment
+    # suppressed.  This isolates the command-gating macro; build_policy_e2e is
+    # the separate strict BUILD_TESTS=OFF compile/run gate for the real
+    # production preprocessor surface.
     add_executable(wirehair_v2_bench_no_preferred_test WirehairV2Bench.cpp)
     target_compile_definitions(wirehair_v2_bench_no_preferred_test PRIVATE
         WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT=1)
@@ -304,7 +344,7 @@ if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
     wirehair_apply_project_options(wirehair_v2_bench_no_preferred_test)
     add_test(
         NAME wirehair_v2_bench_no_preferred_cli_test
-        COMMAND ${CMAKE_COMMAND}
+        COMMAND ${_wirehair_v2_clean_test_command} ${CMAKE_COMMAND}
             -DBENCH=$<TARGET_FILE:wirehair_v2_bench_no_preferred_test>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchNoPreferredCliTest.cmake)
     set_tests_properties(

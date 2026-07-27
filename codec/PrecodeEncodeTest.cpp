@@ -722,9 +722,9 @@ bool TestMixedCornerRank()
         wirehair_v2::SetMixedCoefficientGeometryForTesting(
             static_cast<wirehair_v2::MixedCoefficientGeometry>(2u)) ||
         wirehair_v2::SetMixedGF16RowsForTesting(
-            wirehair_v2::kMixedGF16Rows - 1u) ||
-        wirehair_v2::SetMixedGF16RowsForTesting(
             wirehair_v2::kMixedGF16RowsMax + 1u) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMin) ||
         !wirehair_v2::SetMixedGF16RowsForTesting(
             wirehair_v2::kMixedGF16RowsMax) ||
         wirehair_v2::SetMixedCoefficientPeriodForTesting(
@@ -1956,7 +1956,8 @@ bool TestMixedCompletionForPeriod(
                 full_stats.MixedGF16MulAdds !=
                     wirehair_v2::ActiveMixedGF16Rows() * residues ||
                 full_stats.MixedPlaneConversions !=
-                    residues + wirehair_v2::ActiveMixedGF256Rows() +
+                    (extension_rows != 0u ? residues : 0u) +
+                        wirehair_v2::ActiveMixedGF256Rows() +
                         params.HeavyRows ||
                 full_stats.HeavyMulAdds != streamed_stats.HeavyMulAdds ||
                 full_stats.HeavySolveBlockOps !=
@@ -2076,6 +2077,39 @@ bool TestMixedCompletion()
         {
             return false;
         }
+    }
+    // Test hooks permit a pure GF(256) completion band and a single
+    // GF(2^16) breaker row.  Both must exercise the direct, streamed, and
+    // residue-bucket encoder paths without entering the production pair
+    // kernel with a missing destination row.
+    for (const uint32_t extension_rows : {0u, 1u})
+    {
+        if (!TestMixedCompletionForPeriod(
+                32u,
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+                extension_rows) ||
+            !TestMixedCompletionForPeriod(
+                32u,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                extension_rows))
+        {
+            return false;
+        }
+    }
+    // A single extension breaker row must also work when it is independently
+    // scheduled.  This drives the secondary joint-bucket RHS through the
+    // one-row kernel instead of only testing the common-residue path above.
+    if (!TestMixedCompletionForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            1u,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::JointDelta))
+    {
+        return false;
     }
     const uint32_t shared_h13_periods[] = {
         wirehair_v2::kMixedCoefficientPeriod, 96u, 64u, 32u, 13u

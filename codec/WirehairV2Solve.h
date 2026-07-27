@@ -244,12 +244,6 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     peeling rows the peeler actually peels.  The two were conflated for a whole
     tuning campaign, so the distinction is spelled out here rather than assumed.
 
-    The stock setting is EXACTLY the ideal soliton and always has been:
-    kPeelCountDistribution is a CDF with entry[i-1] = (i-1)/i, hence
-    P(i) = 1/(i(i-1)) for i >= 2, with P(1) = 1/K set separately and the tail
-    truncated at 64.  So the baseline any override has to beat is the textbook
-    distribution, not an arbitrary one.
-
     Thread-local, matching SetStaircaseDegreesForTesting, because a concurrent
     search evaluates a different distribution per worker; a parse-once
     environment global cannot do that.  WIREHAIR_V2_PEEL_DEGREES is honoured as
@@ -259,30 +253,31 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     the stock weight generator consumes and maps it through the supplied CDF, so
     supplying the stock PMF reproduces the stock construction BIT-IDENTICALLY
     rather than landing on a different random stream.  That identity is the gate
-    that distinguishes a real effect from a broken hook.  It has been VERIFIED BY
-    HAND -- 100,000 cells at (6,9,1) scale 14 reproduce all eight measured
-    columns exactly, 967 failures and 3230067.176097 ns -- but it is NOT yet
-    asserted by any automated test, so a future change to the row PRNG or to the
-    draw order would break it silently.  Adding that assertion to CmdSelfTest is
-    worth doing.
+    that distinguishes a real effect from a broken hook.  CmdSelfTest checks the
+    recovered native PMF against the generator on uniform probes and every exact
+    CDF boundary, including the override sampler itself.
 
     NOTE that the stock PMF is NOT the textbook ideal soliton, and feeding the
     textbook version does NOT reproduce it.  GeneratePeelRowWeight takes the
     weight-1 mass by `rv -= P1`, a SHIFT rather than a carve-out, so that mass
     comes out of the deep tail; and the table's last entry is 0xffffffff, so
-    ALL remaining mass is lumped at d = 64.  Exactly:
+    ALL remaining mass is lumped at d = 64.  Before the later N/2 clamp,
+    exactly:
 
-        P(1)  = P1 / 2^32,           P1 = floor((1/128) * 0xffffffff)
+        P1_eff = N <= 2048 ? floor((1/128) * 0xffffffff) : 0
+        P(1)  = P1_eff / 2^32
         P(2)  = (T[1] + 1) / 2^32  = 1/2
         P(i)  = (T[i-1] - T[i-2]) / 2^32       for 3 <= i <= 63
-        P(64) = (2^32 - P1 - 1 - T[62]) / 2^32 = 0.008061
+        P(64) = (2^32 - P1_eff - 1 - T[62]) / 2^32
+              = 0.008061 for N <= 2048, 0.015873 otherwise
 
     with T = kPeelCountDistribution.
 
-    The d = 64 atom is large -- 0.008061 against the ideal soliton's
-    1/(64*63) = 0.000248, thirty-two times bigger -- because the table lumps
-    all residual tail mass there.  It is NOT load-bearing.  An earlier version
-    of this comment claimed it was, on the strength of a full-codec run in
+    The d = 64 atom is large -- about thirty-two times the ideal soliton's
+    1/(64*63) = 0.000248 through N=2048 and sixty-four times larger above
+    N=2048 -- because the table lumps all residual tail mass there.  It is NOT
+    load-bearing.  An earlier version of this comment claimed it was, on the
+    strength of a full-codec run in
     which replacing that one atom took decoding from 150/150 pass to 150/150
     fail.  That measurement was an artefact of the bug described below, and
     with the bug fixed the same substitution decodes 150/150.  Recorded here
@@ -318,8 +313,29 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     clamps it, so an override cannot silently change the row-weight invariant
     the solver relies on.  Degrees are also clamped into [1, kMaxPeelCount].
 */
-void SetPeelDegreesForTesting(const std::vector<double>& weights);
+/**
+    Install and validate a thread-local PMF.  Returns false for non-finite,
+    negative, all-zero, or overflowing weights and leaves an active-invalid
+    override that makes encoder and decoder row construction fail closed.
+    Passing an empty vector is the explicit clear operation and returns true.
+*/
+bool SetPeelDegreesForTesting(const std::vector<double>& weights);
 void ClearPeelDegreesForTesting();
+/// Validate the active thread-local/environment arm without sampling it.
+bool PeelDegreeConfigurationValidForTesting();
+
+/**
+    Sample the active peel override from an exact uint32 uniform value.
+
+    Returns zero when no override is active.  This is the boundary oracle used
+    by CmdSelfTest; exposing the sampler prevents a test from reimplementing the
+    comparison and missing the same lower_bound/upper_bound mistake.
+*/
+uint32_t SamplePeelDegreeForTesting(
+    uint32_t random_value,
+    uint16_t peel_column_count);
+/// Fixed number of CDF comparisons performed by every override sample.
+uint32_t PeelDegreeSampleComparisonCountForTesting();
 
 /**
     XOR the peel seed for odd packet ids in the calling thread.  This is a

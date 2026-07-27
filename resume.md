@@ -1,200 +1,199 @@
-# Resume notes — WH2 peel degree distribution training
+# Resume notes — WH2 peel-training audit
 
-Branch `feat/wh2-opcount-cost-model`, pushed through `bbf34ab`.
-Beads: `wirehair-tz5b` (stages 3–4) is blocked by `wirehair-mggg` (large-K regression).
-Durable summary is in `bd remember` under `wh2-peel-training-state`.
-Stage 1–2 report: https://claude.ai/code/artifact/406d25e1-6c08-4f02-b0be-1bd3948ef287
+Audit date: 2026-07-27
+Branch: `feat/wh2-opcount-cost-model`
+Primary Beads: `wirehair-d45d`, `wirehair-68o1`, `wirehair-tz5b`
 
----
+## Stop: the inherited peel tables are not production evidence
 
-## Where things actually stand
+Do not deploy, interpolate, benchmark as “trained,” or seed-tune from any of
+these legacy artifacts:
 
-`tools/peel_table_final.json` is the deliverable: **137 block counts, K=2…8192,
-115 trained and 22 held at shipped, median +17.4% goodput, max +35.3%.** Every
-entry was measured end to end against a codec with no overrides.
+- `tools/peel_table.json`
+- `tools/peel_table_small.json`
+- `tools/peel_table_small_validated.json`
+- `tools/peel_table_bigk.json`
+- `tools/peel_table_final.json`
 
-The gain is concentrated, and this matters more than the median:
+The previous `resume.md` described `peel_table_final.json` as a validated
+137-K deliverable with median `+17.4%` goodput. That conclusion does not survive
+replay. The table is retained only as invalidated historical evidence; the
+hardened tools reject its legacy schema.
 
-| K band | median gain |
-|---|---|
-| 2–15 | +4.9% |
-| 16–31 | +5.2% |
-| 32–63 | +16.4% |
-| 64–127 | **+20.4%** |
-| 128–255 | +20.9% |
-| 256–511 | +12.5% |
-| 512–2048 | +4.2% |
-| above 2048 | **negative — ships stock** |
+The audit found:
 
-If the deployment target is large block counts, this work buys close to nothing.
-Worth confirming the target before investing in stages 3–4.
+1. The Python proxy used an analytic degree-one probability of `1/K`.
+   The codec actually ships an approximately `1/128` degree-one prefix through
+   K=2048 and no degree-one prefix above that range.
+2. Proxy and real-codec stages did not interpret all coordinates identically.
+   In particular, the funnel and validator ignored the staircase degree scale,
+   while 131 of 137 final entries did not record one at all.
+3. Search and validation did not carry enough provenance to replay a result:
+   no independent seed domains, no complete tail/failure metrics, no executable
+   identity, and subprocess failures could be mistaken for partial success.
+4. The checked-in cost-model table mixed calibration regimes. Its K=128 row
+   had been replaced with a 64-KiB/GF(2^16)-enabled measurement inside a table
+   whose other rows and receipt describe 1280-byte, zero-GF(2^16) solves.
+5. The pushed branch was not self-contained. Several source/header changes and
+   `WirehairV2EsCostModel.inc` existed only as uncommitted handoff files, so a
+   clean checkout could not build the benchmark.
 
-## The tools, in the order they run
+No gain percentage from the inherited tables should be quoted as a current
+WH2 result. There is presently no production peel-parameter table.
 
-| file | what it does |
-|---|---|
-| `tools/peel_funnel.py` | one K: LHS screen on the cost proxy → local refine → real-codec rank |
-| `tools/peel_direct.py` | one K, **real codec only**. Used for every K ≤ 128 |
-| `tools/peel_sweep.py` | walks the calibrated ladder, warm-starting each K from its neighbour |
-| `tools/peel_params.py` | linear interpolation between anchors; `--check` does hold-out |
-| `tools/peel_validate.py` | **authoritative.** trained vs unmodified codec, reverts losers |
+## Repairs made by this audit
 
-Nothing enters a table without passing `peel_validate.py`. That is not ceremony —
-see below.
+The training pipeline now uses one versioned, fail-closed schema and a shared
+codec helper:
 
----
+- `wirehair_v2_bench peelpmf --N K` exports the native PMF and structural
+  metadata instead of asking Python to transcribe the codec.
+- Native metadata, exact PMF identity, parameter semantics, executable
+  identity, independent search/validation seeds, and complete metrics are
+  recorded and checked.
+- The true shipped control is now a run with no peel or staircase override.
+  Passing an identity-looking vector through a test-hook path is not treated
+  as the shipped arm.
+- Search receipts store the exact binary64 PMF that was measured.  Exact
+  anchors replay that stored PMF; shorthand coordinates are descriptive and
+  are not claimed to be an exact cross-language reconstruction protocol.
+- Writes are atomic. Partial subprocess output and nonzero exits are failures,
+  not candidate records. The source table, executable, and source tree are
+  rechecked as stable snapshots before publication.
+- Legacy/unversioned tables and incomplete entries are rejected.
+- The unverified counter-cost proxy is disabled by default. It requires an
+  explicit experimental opt-in until its raw calibration data and generator
+  are reproducible.
+- Sweep warm starts are bidirectional from an explicit pivot rather than
+  accidentally depending on traversal direction.
+- The shipped arm is the safe default at unmeasured K. Parameter interpolation
+  or clamping requires a separate explicit experimental opt-in.
+- A selected arm with any recovery failure is refused, strict JSON rejects
+  duplicate keys and every non-finite spelling (including exponent overflow),
+  and funnel deduplication keys both PMF and staircase scale.
 
-## Blocker: the search regresses above K=2048
+The codec/benchmark bug hunt also repaired:
 
-Measured, 2000 trials per arm, same payload:
+- strict transactional parsing for staircase shape, pinned row degree, and
+  degree-scale hooks;
+- legal zero-degree shaped/pinned rows and a deterministic O(S) bulk repair
+  with no arbitrary `4096*S` failure cap;
+- rejection of contradictory balanced-plus-shaped configurations;
+- missing degree-scale equality/default/fuzz coverage;
+- the peel-CDF exact-boundary off-by-one (`lower_bound` versus `upper_bound`);
+- variable-depth override sampling, replaced by a canonical 64-bin,
+  six-comparison decision tree;
+- malformed peel PMFs silently falling through to another arm instead of
+  remaining active-invalid and failing closed;
+- cost-only dispatch so width zero follows the table's 1280-byte algorithm
+  paths rather than unrelated 64-KiB paths;
+- silent aliasing of ES cell identifiers at or above 2^32;
+- ignored `precodecost --threads` (parallel counter harvesting now works only
+  at payload width zero; timed runs remain serial);
+- thread-order-dependent mixed-core configuration. Reused workers now pass
+  through a canonical valid bridge before applying each target, and exact
+  receipts are invariant under forward/reverse task order and 1/4 threads;
+- accepted-but-unusable `precodecost` cells, unchecked pool-size arithmetic,
+  invalid overhead/mix ranges, inverted ES boxes, and excessive ES thread
+  counts;
+- successful ES runs with no usable cost, non-finite objectives from extreme
+  finite scales, and NaN fail-model predictions that `std::max` had converted
+  into an apparent zero failure rate;
+- ignored `--emit-noise` close/write failures;
+- ordinary CTests inheriting `WIREHAIR_V2_*` experiment hooks from the
+  developer shell. Every normal V2 test now starts from a hermetic hook
+  environment, and the strict `BUILD_TESTS=OFF` gate verifies that production
+  benchmark compilation contains no test-hook macro;
+- packed mixed-field coefficients for experimental GF(256) row counts below
+  eight. The old cache silently substituted a 9- or 12-row layout, shifting the
+  following GF(2^16) lanes and causing deterministic payload-recovery failures.
+  Historic 8--12-row caches remain immutable and low-row experiments now use
+  an exact active-layout cache; the solver test path also handles every
+  one-through-four packed-word count;
+- phased encode and pivot back-substitution paths that entered two-row
+  GF(2^16) kernels when an experiment selected zero or one extension row.
+  Those legal test configurations now use no extension operation or the
+  one-row kernel respectively, with direct encoder and lossy-solve coverage;
+- stale GF(256), GF(2^16), tiny-fast-path, and null-witness test fixtures.
 
+The K=128 cost row has been replaced with the handoff row claimed to belong to
+the 1280-byte regime, and a runtime receipt checks row count, ordering, ranges,
+and total fit rows. The regime and coefficients cannot be independently
+verified: the original raw observations and exact generator invocation are
+still absent.
+
+## Current validation commands
+
+From the repository root:
+
+```bash
+cmake -S . -B build-audit \
+  -DBUILD_TESTS=ON \
+  -DWIREHAIR_BUILD_BENCHMARKS=ON \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-audit -j"$(nproc)"
+ctest --test-dir build-audit --output-on-failure -j"$(nproc)"
+
+PYTHONWARNINGS=error python3 -m unittest tools.test_peel_tools
+cmake -E env \
+  --unset=WIREHAIR_V2_PEEL_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_ROW_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_DEGREE_SCALE \
+  --unset=WIREHAIR_V2_BAND_TRACKING_X \
+  build-audit/codec/wirehair_v2_bench selftest
+cmake -E env \
+  --unset=WIREHAIR_V2_PEEL_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_ROW_DEGREES \
+  --unset=WIREHAIR_V2_STAIRCASE_DEGREE_SCALE \
+  --unset=WIREHAIR_V2_BAND_TRACKING_X \
+  build-audit/codec/wirehair_v2_bench peelpmf --N 128
 ```
-K=1536   trained 2444.4   shipped 2417.4    +1.1%   keep
-K=2048   trained 2520.8   shipped 2532.1    -0.4%   revert
-K=4096   trained 1023.3   shipped 1222.9   -16.3%   revert
-K=8192   trained  742.5   shipped  993.5   -25.3%   revert
-K=16384  trained  429.4   shipped  945.2   -54.6%   revert
-```
 
-Monotone, and large. **Do not re-run the existing sweep at large K expecting a
-different answer** — it costs 461 s per block count and the validator reverts it.
+The 2026-07-27 audit receipt is:
 
-Cause: stages 1–2 rank on the counter-based cost proxy and only stage 3 sees the
-real codec, so at large K the pool handed to stage 3 is already bad. Best-of-a-bad-pool.
+- strict GCC release: 43/43 CTests passed, including the 1,113-second all-K
+  fingerprint; after the final low-H16 test-hook repair, the exact final tree
+  again passed all 42 other CTests and the default H16=2 fingerprint path was
+  unchanged;
+- Clang 18 ASan+UBSan: the final encode/solve regressions passed for H16=0/1,
+  both coefficient geometries, and constant/independent residue schedules;
+- duration fuzz: 128 parallel workers, 463,477,941 final-tree mutations, all
+  passed with no crash or sanitizer-style diagnostic;
+- Python: 43/43 hardened peel-tool tests passed with warnings promoted to
+  errors, followed by bytecode compilation and the benchmark self-test;
+- two independent final source-reading passes found no additional defect after
+  the low-H8 packed-layout and low-H16 pair-kernel repairs.
 
-### Two ways forward — this is the decision to make first
+## What remains
 
-**(a) Accept shipped above K=2048.** Defensible: headroom up there was already
-+1.1% at 1536 and −0.4% at 2048 before things went wrong, because the cache cliff
-dominates (at K=4096 the intermediates are 16 MB and *both* arms halve). Cost: zero.
-Unblocks stages 3–4 immediately.
-
-**(b) Search large K directly on the real codec** — the `peel_direct.py` approach
-that worked below K=128, with no proxy in the loop at all. Expect roughly 1–3
-minutes per candidate at K=16384 with a realistic payload, so a 40-point screen is
-already an hour per block count. Before spending that, run the cheap experiment
-below to find out whether there is anything to win.
-
-### Cheap experiment worth running before choosing (b)
-
-Take the shipped law at K=4096 and sweep tilt alone over, say, {−100, −50, −20, 0,
-+20, +50} at 400 trials, everything else at stock. Two outcomes:
-
-- If nothing beats stock by more than noise, the answer is (a) and it is settled
-  in about ten minutes.
-- If something does, (b) is worth funding and you already know which direction the
-  optimum lies in.
-
-This is the same one-axis probe that settled the interpolation question at K=256,
-and it is far cheaper than a search.
-
----
-
-## Stage 3 — production seeds (not started)
-
-The WH1 mechanism is confirmed and is exactly the "fallback table" pattern:
-
-- base tables `kDenseSeeds[100]` (N/4 → seed, for N ≥ 2048) and `kPeelSeeds[2048]`
-  (N % 2048 → seed)
-- a sorted **per-N fixup table** consulted *first* by binary search:
-  `kDenseSeedFixups` (164 entries, `WirehairDenseFixups.inc`) and
-  `WirehairPeelFixups.inc` (769 entries)
-- `GetDenseSeedPreFixup` / `GetPeelSeedPreFixup` preserve the originals
-- `WirehairTools.cpp:1109` — "Correction table first (binary search)"
-
-Weakness is judged on **overhead**, and the two tables are searched *jointly* per N
-— the peel fixup header notes cases where a peel-seed change alone cannot fix the
-defect.
-
-WH2 already has the harness: **`wirehair_v2_bench seedtable`**, with
-`--N`, `--bb-list`, `--peel-candidates`, `--trials`. It emits
-`N,bb,solver,structure,bucket,base_peel,tuned_peel,dense,…`. Verified working:
-
-```
-build-fast/codec/wirehair_v2_bench seedtable --N 320 --bb-list 4096 \
-  --peel-candidates 8 --trials 3
-```
-
-**Stage 3 must run after the parameter table is frozen** — seeds are searched
-against a fixed parameter set, so any later parameter change invalidates them.
-
-Design sketch: for each N, generate the peel PMF from `peel_params.py`, sweep
-`--peel-candidates`, keep N where the best candidate's overhead is materially
-better than the base seed's, and emit only those as fixups. Sort ascending, binary
-search at runtime — mirror the WH1 file format so the loader is unchanged.
-
-## Stage 4 — WH2 vs WH1 mainline (not started)
-
-10% of K values chosen at random, speed and overhead, graphs, report.
-`tools/peel_validate.py` already emits exactly this shape (two arms measured back
-to back at identical trials and payload) — extend it to take WH1 as the baseline
-arm instead of shipped-WH2, rather than writing something new.
-
----
-
-## Traps that cost real time this session — do not re-learn these
-
-**`pgrep -f` lies.** It matches your own shell wrapper because the command line
-contains the repo path or script name. I reported a job as running for ~40 minutes
-that had never been created. Verify with `ps -eo pid=,args= | grep '[b]igk.py'`
-(bracket trick) **and** confirm the output file exists.
-
-**Never merge from a file that is still being written.** I built a table from the
-validator's JSON mid-run and silently dropped K=8192. Check the process has exited
-first.
-
-**The proxy is not trustworthy.** Six of 11 small-K anchors and *every* large-K
-anchor were regressions the proxy scored as wins. Nothing reaches a table without
-`peel_validate.py`.
-
-**An in-search incumbent guard cannot work here.** The shipped staircase degree
-scale is a sentinel (`kStaircaseDegreeScaleUnset = -1.0`) that makes the codec
-compute the scale internally, so any pool entry must name *some* scale and is a
-hybrid — shipped law at a searched scale, which is neither arm. That hybrid read
-1145.9 MB/s at K=4096 where true shipped reads 1239.2. The only honest baseline is
-a run with **no overrides at all**.
-
-**Solve rate does not need a payload.** At bb=64 a passing candidate costs 0.25 s
-against 2.44 s at bb=4096, identical verdict; a non-decoder fails 10 of 10. Gate
-cheap, rank expensive, survivors only. (`--bb-list 0` is *rejected* — the "bb 0"
-that skips work is `--solve-block-bytes 0`, and only on the proxy harnesses.)
-
-**Coordinate boxes must span what the codec builds.** `SmallBandStaircaseCount(2)=1`
-and `GetDenseCount(16384)=114` rising to 390 near K=52224. A `[2,80]` box silently
-loses both ends and reports only "FAILED to produce a winner."
-
-**essearch has a calibrated cost model at only 26 block counts** — 2 3 4 6 8 12 16
-24 32 48 64 96 128 192 256 384 512 768 1024 1536 2048 4096 8192 16384 32768 64000 —
-and rejects every other K outright. An every-1024 grid produces nothing above 4096.
-
----
-
-## Things I would do next, in order
-
-1. **Run the cheap tilt probe at K=4096** (above). Ten minutes, settles the
-   large-K question either way.
-2. **Confirm the deployment K range** before funding anything else. The whole
-   result lives in K=32–512.
-3. Unblock `wirehair-mggg` with the answer from (1), then start stage 3.
-4. **Scale the validator's trial count with K.** It uses a flat 2000 everywhere; at
-   K=8192 with a 4096-byte payload that is ~67 GB per arm and 8 minutes for one
-   measurement. Throughput converges fast and failures are ~0 up there.
-5. **Re-check `p1`.** The search pins it at the box ceiling of 400 almost
-   everywhere, but a direct sweep at K=128 showed the objective is *flat* above it
-   (1549.7 at p1=400 vs 1558.2 at p1=3200). It is a near-free parameter and its
-   tabulated values carry no meaning — consider fixing it rather than storing it.
-6. **Revisit `scale`.** The funnel optimises it alongside the peel parameters and
-   picks values well away from the shipped default. That is a second shipped
-   default being changed, and it interacts with stage 3. Worth an ablation: how
-   much of the +20% is peel shape and how much is scale?
-
-## Open questions I did not resolve
-
-- Is the K=32–255 peak a property of the distribution, or of where the completion
-  band and the cache both happen to be comfortable? An ablation against
-  `wirehair-za5v` (the fixed 12-row completion band at K≤100) would tell you.
-- Small-K anchors are erratic (K=27 → tilt +349, K=28 → +668, K=29 → +1218) yet all
-  three validate as wins. That is consistent with a very flat optimum, but it means
-  those exact values are arbitrary within a wide band — do not read them as precise.
-- Nothing here has been tested with gf16 rows enabled; the whole campaign ran
-  `--mixed-gf16-rows 0` per the standing constraint.
+1. Recreate the operation-cost model from checked-in raw observations and a
+   deterministic generator, with separate receipts for every payload width and
+   completion regime used. Until then, prefer direct real-codec ranking
+   (`wirehair-znwn`).
+2. Train a new table from scratch with the hardened schema. Never import or
+   “fill in” fields from the invalid legacy JSON.
+3. Validate candidates on independent seeds, hard/random loss families, the
+   intended payload widths, and all relevant K. Record raw weak-seed counts and
+   overhead distributions for architecture comparisons before seed fixups.
+   Counterbalance/interleave trained and shipped timing arms before trusting
+   small throughput deltas (`wirehair-lnfk`).
+4. Only after the architecture and parameter table are frozen, search targeted
+   seed fixups and compare WH2 against mainline for solve speed and recovery.
+5. Define either a versioned native coordinate-to-PMF reconstruction or consume
+   the stored exact PMF directly, then gate a future production handoff on an
+   exact cross-language grid (`wirehair-2qlw`).
+6. Finish the separate ES-trainer repair (`wirehair-d45d`).  The historical
+   `meta_es.py` and `es_degree.py` named by that Bead are not present in this
+   checkout, so their invalid meta-grid and unconstrained degree-shape results
+   have not been repaired and must not be reused.  A replacement trainer must
+   score its final candidate, constrain recovery on independent held-out seeds,
+   handle ties and both-fail pairs, and either condition inactivation cost on
+   successful solves or assign failed solves an explicit penalty.  The current
+   `precodefail` report stores `InactivatedColumns` for every result at
+   `WirehairV2Bench.cpp:9538-9539`, accumulates it at line 9801, and divides by
+   all trials at line 9867; that all-trial statistic is not by itself a safe ES
+   objective.
+7. Repeat full-codebase bug hunts after each substantial codec change; a clean
+   test run is necessary but is not a source review.

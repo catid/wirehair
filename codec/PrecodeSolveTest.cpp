@@ -1603,6 +1603,15 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
         // mixed-RHS path selected by SolveMixedCompletionQuotient.
         30000u
     };
+    // The independently scheduled one-row experiment is not an MDS
+    // construction at every tiny K (its extension row uses a different X
+    // schedule from the subfield Cauchy rows).  These three deterministic
+    // full-rank systems exercise direct and residue-streamed solve paths
+    // without turning this pair-boundary regression into an architecture
+    // acceptance claim.
+    static const uint32_t kSingleExtensionIndependentBlockCounts[] = {
+        16u, 500u, 1000u
+    };
     // Select one small K on either side of the active period boundary.  S is
     // K-dependent, so a fixed pair that brackets P32/P64 does not generally
     // bracket candidate periods such as P48.
@@ -1632,11 +1641,18 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             return false;
         }
     }
+    const bool single_extension_independent =
+        independent_extension_residues && extension_rows == 1u;
     const uint32_t* const block_counts = grouped_gf256_rows != 0u ?
-        grouped_block_counts : kBlockCounts;
+        grouped_block_counts :
+        (single_extension_independent ?
+            kSingleExtensionIndependentBlockCounts : kBlockCounts);
     const size_t configured_case_count = grouped_gf256_rows != 0u ?
         sizeof(grouped_block_counts) / sizeof(grouped_block_counts[0]) :
-        sizeof(kBlockCounts) / sizeof(kBlockCounts[0]);
+        (single_extension_independent ?
+            sizeof(kSingleExtensionIndependentBlockCounts) /
+                sizeof(kSingleExtensionIndependentBlockCounts[0]) :
+            sizeof(kBlockCounts) / sizeof(kBlockCounts[0]));
     size_t expected_case_count = 0u;
     for (size_t case_index = 0;
          case_index < configured_case_count;
@@ -1714,10 +1730,12 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
             wirehair_v2::UseAutomaticMixedJointResidueBucketsForTesting(
                 K, block_bytes, period);
         const bool joint_bucketed = secondary_schedule &&
+            extension_rows >= 2u &&
             (bucket_mode ==
                  wirehair_v2::MixedResidueBucketMode::JointDelta ||
              automatic_joint_bucketed);
         const bool dual_bucketed = secondary_schedule &&
+            extension_rows >= 2u &&
             (bucket_mode == wirehair_v2::MixedResidueBucketMode::Dual ||
              (bucket_mode ==
                   wirehair_v2::MixedResidueBucketMode::Automatic &&
@@ -2085,10 +2103,11 @@ bool CheckMixedProjectionResidueBucketsOracle()
             return false;
         }
     }
-    // GF256 row trims (leading Cauchy subsets of the frozen table): verify
-    // the optimized projection against the dense expansion for nine and
-    // eight subfield rows in both geometries.
-    for (const uint32_t trimmed_rows : {9u, 8u})
+    // GF256 row trims (leading Cauchy subsets of the frozen table): cover
+    // every packed-word count (1..3), the old 8/9 cache boundary, and both
+    // coefficient geometries.  These are payload round trips, not merely a
+    // packed-vs-packed oracle, so a shifted GF(2^16) lane is observable.
+    for (const uint32_t trimmed_rows : {9u, 8u, 7u, 4u, 1u})
     {
         if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
                 wirehair_v2::kMixedCoefficientPeriod,
@@ -2109,6 +2128,39 @@ bool CheckMixedProjectionResidueBucketsOracle()
         {
             return false;
         }
+    }
+    // The test API also exposes zero or one extension-field row.  Cover both
+    // geometries with systematic and repair payloads so neither RHS
+    // accumulation nor pivot back-substitution can assume a row pair.
+    for (const uint32_t extension_rows : {0u, 1u})
+    {
+        if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+                32u,
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX,
+                extension_rows) ||
+            !CheckMixedProjectionResidueBucketsOracleForPeriod(
+                32u,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                extension_rows))
+        {
+            return false;
+        }
+    }
+    // The solver deliberately disables dual/joint bucket helpers below two
+    // extension rows.  Request that mode with one independently scheduled
+    // row and prove the streamed fallback retains payload correctness and
+    // leaves all bucket-only accounting at zero.
+    if (!CheckMixedProjectionResidueBucketsOracleForPeriod(
+            32u,
+            wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+            1u,
+            0u,
+            wirehair_v2::MixedResidueSchedule::Hashed,
+            true,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::MixedResidueBucketMode::JointDelta))
+    {
+        return false;
     }
     // Keep grouped coverage bounded to the two boundary pairs above: every
     // solve still compares optimized projection against the dense expansion,

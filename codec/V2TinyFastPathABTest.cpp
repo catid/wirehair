@@ -520,8 +520,10 @@ int main(int argc, char** argv)
         // mixed-p244-baseline: frozen geometry defaults
         {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u},
         // ic-d8-9x2-p48x: shared-x, period 48, 9 GF256 rows, D2=8,
-        // identity corner (structurally unavailable below K=5)
-        {"ic-d8-9x2-p48x", true, true, 48u, 9u, 8u, true, 5u},
+        // identity corner.  The small-band staircase gives S=2 at K=5, so
+        // K+S=7 cannot carry the eight distinct corner anchors; K=6 is the
+        // first valid construction.
+        {"ic-d8-9x2-p48x", true, true, 48u, 9u, 8u, true, 6u},
         // certified control: never touches the mixed fast path
         {"cert-baseline", false, false, 0u, 0u, 0u, false, 2u},
     };

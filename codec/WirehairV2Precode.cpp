@@ -5,49 +5,439 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 #include <limits>
+#include <vector>
 
 namespace wirehair_v2 {
-namespace {
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+namespace {
+
+bool IsAsciiSpace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' ||
+        c == '\n' || c == '\f' || c == '\v';
+}
+
+void SkipAsciiSpace(const char*& p)
+{
+    while (IsAsciiSpace(*p)) {
+        ++p;
+    }
+}
+
+} // namespace
+
+bool ParseStaircaseDegreesForTesting(
+    const char* text,
+    std::vector<double>& weights)
+{
+    std::vector<double> parsed;
+    if (!text) {
+        return false;
+    }
+    const char* p = text;
+    SkipAsciiSpace(p);
+    if (*p == '\0') {
+        return false;
+    }
+    for (;;)
+    {
+        errno = 0;
+        char* end = nullptr;
+        const double weight = std::strtod(p, &end);
+        if (end == p || errno == ERANGE || !std::isfinite(weight) ||
+            weight < 0.0)
+        {
+            return false;
+        }
+        parsed.push_back(weight);
+        p = end;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            break;
+        }
+        if (*p != ',') {
+            return false;
+        }
+        ++p;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            return false;
+        }
+    }
+    weights.swap(parsed);
+    return true;
+}
+
+bool ParseStaircaseRowDegreesForTesting(
+    const char* text,
+    std::vector<uint32_t>& degrees)
+{
+    std::vector<uint32_t> parsed;
+    if (!text) {
+        return false;
+    }
+    const char* p = text;
+    SkipAsciiSpace(p);
+    if (*p == '\0') {
+        return false;
+    }
+    for (;;)
+    {
+        // strtoull accepts signs and silently wraps a leading minus.  Row
+        // degrees are unsigned decimal values, so require the first digit.
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long degree = std::strtoull(p, &end, 10);
+        if (end == p || errno == ERANGE || degree > UINT32_MAX) {
+            return false;
+        }
+        parsed.push_back((uint32_t)degree);
+        p = end;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            break;
+        }
+        if (*p != ',') {
+            return false;
+        }
+        ++p;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            return false;
+        }
+    }
+    degrees.swap(parsed);
+    return true;
+}
+
+bool ParseStaircaseDegreeScaleForTesting(
+    const char* text,
+    double& scale)
+{
+    if (!text) {
+        return false;
+    }
+    const char* p = text;
+    SkipAsciiSpace(p);
+    errno = 0;
+    char* end = nullptr;
+    const double parsed = std::strtod(p, &end);
+    if (end == p || errno == ERANGE || !std::isfinite(parsed)) {
+        return false;
+    }
+    const char* tail = end;
+    SkipAsciiSpace(tail);
+    if (*tail != '\0' ||
+        !(parsed >= kStaircaseDegreeScaleMin) ||
+        !(parsed <= kStaircaseDegreeScaleMax))
+    {
+        return false;
+    }
+    scale = parsed;
+    return true;
+}
+
 /// Staircase row-degree distribution for the shaped-construction experiment,
 /// read once from WIREHAIR_V2_STAIRCASE_DEGREES as comma-separated weights for
 /// degrees 1, 2, 3, ...  Unset (the default) keeps the stock construction.
-static const std::vector<double>* ActiveStaircaseDegreeDistribution()
+/// Per-thread override of the staircase degree distribution.
+///
+/// The environment variable below is parsed ONCE per process, which makes it
+/// useless to a search: every candidate in a run would share one distribution.
+/// This is a real optimization target because redistributing the same edge
+/// budget changes both inactivation and XOR work.  No quantitative speed claim
+/// is attached here: the inherited operation-cost model is not reproducible
+/// and remains explicitly opt-in until it is recalibrated.
+/// Thread-local, matching the convention of the other *ForTesting knobs, so
+/// worker threads can each evaluate a different shape concurrently.
+///
+/// These two definitions must stay at wirehair_v2 scope, NOT in the anonymous
+/// namespace below: the header declares them at wirehair_v2 scope, so an
+/// anonymous-namespace definition is a different, internal-linkage function
+/// that leaves the declared symbol undefined (it was silently discarded as an
+/// unused static, and essearch could not link against it).
+static thread_local std::vector<double> g_staircase_degrees_override;
+
+void SetStaircaseDegreesForTesting(const std::vector<double>& weights)
 {
-    static const std::vector<double> parsed = [] {
-        std::vector<double> out;
+    g_staircase_degrees_override = weights;
+}
+
+void ClearStaircaseDegreesForTesting()
+{
+    g_staircase_degrees_override.clear();
+}
+
+/// Per-thread override of the target mean staircase row degree.  The exact
+/// kStaircaseDegreeScaleUnset value means unset; other negative values are
+/// invalid rather than aliases for the sentinel.  Zero cannot be the sentinel
+/// because zero is a legal target mean row degree (an empty edge budget).
+///
+/// Same scope rule as the two definitions above: these MUST stay at
+/// wirehair_v2 scope, NOT in the anonymous namespace below, or the symbol the
+/// header declares is left undefined and essearch fails to link.
+static thread_local double g_staircase_degree_scale_override =
+    kStaircaseDegreeScaleUnset;
+
+void SetStaircaseDegreeScaleForTesting(double scale)
+{
+    // Stored VERBATIM.  A NaN is not negative, so it counts as supplied and
+    // MakeStaircaseDegreeMixture refuses it; silently reinterpreting it as
+    // "unset" would turn a broken caller into a legacy-budget measurement.
+    g_staircase_degree_scale_override = scale;
+}
+
+void ClearStaircaseDegreeScaleForTesting()
+{
+    g_staircase_degree_scale_override = kStaircaseDegreeScaleUnset;
+}
+
+/// Per-thread override of the REALIZED row-degree sequence -- see the header.
+/// Same scope rule as the two overrides above: wirehair_v2 scope, not the
+/// anonymous namespace, or the declared symbol is left undefined.
+static thread_local std::vector<uint32_t> g_staircase_row_degrees_override;
+
+void SetStaircaseRowDegreesForTesting(const std::vector<uint32_t>& degrees)
+{
+    g_staircase_row_degrees_override = degrees;
+}
+
+void ClearStaircaseRowDegreesForTesting()
+{
+    g_staircase_row_degrees_override.clear();
+}
+#endif
+
+namespace {
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+template <typename T>
+struct ParsedListEnvironment
+{
+    bool IsSet = false;
+    bool Valid = true;
+    std::vector<T> Values;
+};
+
+struct ParsedScaleEnvironment
+{
+    bool IsSet = false;
+    bool Valid = true;
+    double Value = kStaircaseDegreeScaleUnset;
+};
+
+static const ParsedListEnvironment<double>& StaircaseDegreesEnvironment()
+{
+    static const ParsedListEnvironment<double> parsed = [] {
+        ParsedListEnvironment<double> out;
         const wirehair::EnvironmentValue value(
             "WIREHAIR_V2_STAIRCASE_DEGREES");
         if (!value.IsSet()) {
             return out;
         }
-        const char* p = value.Get();
-        while (*p != '\0') {
-            char* end = nullptr;
-            const double w = std::strtod(p, &end);
-            if (end == p) { break; }
-            out.push_back(w);
-            p = end;
-            while (*p == ',' || *p == ' ') { ++p; }
-        }
+        out.IsSet = true;
+        out.Valid = ParseStaircaseDegreesForTesting(
+            value.Get(), out.Values);
         return out;
     }();
-    return parsed.empty() ? nullptr : &parsed;
+    return parsed;
+}
+
+static const ParsedListEnvironment<uint32_t>&
+StaircaseRowDegreesEnvironment()
+{
+    static const ParsedListEnvironment<uint32_t> parsed = [] {
+        ParsedListEnvironment<uint32_t> out;
+        const wirehair::EnvironmentValue value(
+            "WIREHAIR_V2_STAIRCASE_ROW_DEGREES");
+        if (!value.IsSet()) {
+            return out;
+        }
+        out.IsSet = true;
+        out.Valid = ParseStaircaseRowDegreesForTesting(
+            value.Get(), out.Values);
+        return out;
+    }();
+    return parsed;
+}
+
+static const ParsedScaleEnvironment& StaircaseDegreeScaleEnvironment()
+{
+    static const ParsedScaleEnvironment parsed = [] {
+        ParsedScaleEnvironment out;
+        const wirehair::EnvironmentValue value(
+            "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
+        if (!value.IsSet()) {
+            return out;
+        }
+        out.IsSet = true;
+        out.Valid = ParseStaircaseDegreeScaleForTesting(
+            value.Get(), out.Value);
+        return out;
+    }();
+    return parsed;
+}
+
+static const std::vector<double>* ActiveStaircaseDegreeDistribution()
+{
+    if (!g_staircase_degrees_override.empty()) {
+        return &g_staircase_degrees_override;
+    }
+    const ParsedListEnvironment<double>& parsed =
+        StaircaseDegreesEnvironment();
+    return parsed.IsSet && parsed.Valid ? &parsed.Values : nullptr;
+}
+
+/// Realized row-degree sequence in force, or null when none is set.
+///
+/// Precedence matches the shape knob: the thread-local the search uses, then
+/// WIREHAIR_V2_STAIRCASE_ROW_DEGREES parsed once per process.  A sequence wins
+/// over a shape, because a shape only SAMPLES a sequence and this names one.
+static const std::vector<uint32_t>* ActiveStaircaseRowDegrees()
+{
+    if (!g_staircase_row_degrees_override.empty()) {
+        return &g_staircase_row_degrees_override;
+    }
+    const ParsedListEnvironment<uint32_t>& parsed =
+        StaircaseRowDegreesEnvironment();
+    return parsed.IsSet && parsed.Valid ? &parsed.Values : nullptr;
+}
+
+/// Validate only the environment arm that wins the documented precedence.
+/// A malformed active value is a refused construction, never a partial list
+/// or a silent fallback to a different experiment.
+static bool StaircaseHookConfigurationValid()
+{
+    bool pinned = !g_staircase_row_degrees_override.empty();
+    if (!pinned)
+    {
+        const ParsedListEnvironment<uint32_t>& row_degrees =
+            StaircaseRowDegreesEnvironment();
+        if (row_degrees.IsSet)
+        {
+            if (!row_degrees.Valid) {
+                return false;
+            }
+            pinned = true;
+        }
+    }
+    if (!pinned && g_staircase_degrees_override.empty())
+    {
+        const ParsedListEnvironment<double>& degrees =
+            StaircaseDegreesEnvironment();
+        if (degrees.IsSet && !degrees.Valid) {
+            return false;
+        }
+    }
+    if (g_staircase_degree_scale_override ==
+        kStaircaseDegreeScaleUnset)
+    {
+        const ParsedScaleEnvironment& scale =
+            StaircaseDegreeScaleEnvironment();
+        if (scale.IsSet && !scale.Valid) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// True when the shaped-degree experiment is active.
 static bool ShapedStaircaseActive()
 {
-    return ActiveStaircaseDegreeDistribution() != nullptr;
+    return ActiveStaircaseDegreeDistribution() != nullptr ||
+        ActiveStaircaseRowDegrees() != nullptr;
+}
+
+static bool ActiveStaircaseHookValuesValid(
+    const PrecodeParams& params,
+    const StaircaseDegreeMixture& mixture)
+{
+    const std::vector<uint32_t>* pinned = ActiveStaircaseRowDegrees();
+    if (pinned)
+    {
+        if (pinned->size() != (size_t)params.Staircase) {
+            return false;
+        }
+        uint64_t total = 0u;
+        for (uint32_t degree : *pinned)
+        {
+            if (degree > params.BlockCount) {
+                return false;
+            }
+            total += degree;
+        }
+        return total == mixture.EdgeCount;
+    }
+
+    const std::vector<double>* shape =
+        ActiveStaircaseDegreeDistribution();
+    if (!shape) {
+        return true;
+    }
+    double total = 0.0;
+    for (double weight : *shape)
+    {
+        if (!std::isfinite(weight) || weight < 0.0) {
+            return false;
+        }
+        total += weight;
+        if (!std::isfinite(total)) {
+            return false;
+        }
+    }
+    return total > 0.0;
+}
+
+/// Effective target mean staircase row degree for a build.
+///
+/// Precedence, matching the shaped-degree knob: the thread-local override the
+/// search uses, then WIREHAIR_V2_STAIRCASE_DEGREE_SCALE (parsed once per
+/// process, which is why it is useless to a search), then the params field.
+/// An unparseable or out-of-domain active environment value makes the build
+/// fail rather than silently selecting the params field instead.
+///
+/// Every "not supplied" state uses the exact
+/// kStaircaseDegreeScaleUnset sentinel, because zero is a legal target mean
+/// row degree and other negative values must remain invalid.
+static double ActiveStaircaseDegreeScale(double param_scale)
+{
+    // Compare only with the exact sentinel.  Thus -2, -infinity and NaN all
+    // reach the mixture validator and fail rather than falling through to an
+    // environment value or the legacy budget.
+    if (g_staircase_degree_scale_override !=
+        kStaircaseDegreeScaleUnset)
+    {
+        return g_staircase_degree_scale_override;
+    }
+    const ParsedScaleEnvironment& parsed =
+        StaircaseDegreeScaleEnvironment();
+    return parsed.IsSet && parsed.Valid ? parsed.Value : param_scale;
 }
 #else
 /// Production builds carry no shaped-degree experiment.
 static bool ShapedStaircaseActive() { return false; }
+static bool StaircaseHookConfigurationValid() { return true; }
+static bool ActiveStaircaseHookValuesValid(
+    const PrecodeParams&,
+    const StaircaseDegreeMixture&)
+{
+    return true;
+}
+/// ... and no scale override: the params field is the whole story.
+static double ActiveStaircaseDegreeScale(double param_scale)
+{
+    return param_scale;
+}
 #define WIREHAIR_V2_SHAPED_FALLBACK_DEFINED 1
 #endif
 
@@ -145,14 +535,28 @@ bool IsStrictlyIncreasingBelow(
     return true;
 }
 
+/// Per-source-column staircase degree under a resolved mixture.
+///
+/// `high_column` is empty in the exactly-regular case (HighColumns == 0), so
+/// the certified construction pays no per-column lookup at all.
+uint32_t StaircaseColumnHits(
+    const StaircaseDegreeMixture& mixture,
+    const std::vector<uint8_t>& high_column,
+    uint32_t column)
+{
+    return mixture.LowHits +
+        (high_column.empty() ? 0u : (uint32_t)high_column[column]);
+}
+
 bool AppendDegreeBalancedStaircaseEdges(
     const PrecodeParams& params,
+    const StaircaseDegreeMixture& mixture,
+    const std::vector<uint8_t>& high_column,
     std::vector<std::vector<uint32_t>>& rows)
 {
     const uint32_t K = params.BlockCount;
     const uint32_t S = params.Staircase;
-    const uint32_t hits = std::min(params.SourceHits, S);
-    const uint32_t edge_count = K * hits;
+    const uint32_t edge_count = mixture.EdgeCount;
     const uint32_t low_degree = edge_count / S;
     const uint32_t extra_rows = edge_count % S;
     uint32_t high_degree = low_degree + (extra_rows != 0u);
@@ -160,23 +564,43 @@ bool AppendDegreeBalancedStaircaseEdges(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     // EXPERIMENT: shaped row-degree target.
     //
-    // The column side must stay exactly SourceHits-regular (ValidatePrecodeSystem
-    // enforces it), so the edge budget K*hits is fixed and only its DISTRIBUTION
-    // across rows is free.  The peeling literature says that shape matters: a few
+    // The column side is an exact two-valued mixture (ValidatePrecodeSystem
+    // enforces it, counts included), so the edge budget is fixed once
+    // StaircaseDegreeScale is chosen and only its DISTRIBUTION across rows is
+    // free.  The peeling literature says that shape matters: a few
     // low-degree rows start the ripple, a few high-degree rows finish coverage.
     // The bucket greedy below realizes ANY feasible target sequence, not just the
     // balanced one, so shaping is a matter of choosing `remaining` differently.
     const std::vector<double>* shape = ActiveStaircaseDegreeDistribution();
+    // A PINNED sequence names the object the shape only samples, so it takes
+    // precedence over one and the shape path below is skipped entirely.
+    const std::vector<uint32_t>* pinned = ActiveStaircaseRowDegrees();
+    if (pinned) { shape = nullptr; }
 #endif
 
     // This stream is deliberately independent of the certified construction
     // stream.  BuildPrecodeSystem still consumes the certified staircase draws
     // before calling here, so dense rows remain bit-identical between arms.
+    //
+    // The key carries K and S because a construction of a different SIZE must
+    // draw a different stream; that is stream selection, and it names no
+    // parameter.  The third word used to be params.SourceHits -- that is,
+    // CertifiedSourceHits(K), the K-THRESHOLDED TABLE `K >= 10000 ? 3 : 2`.
+    // It set no parameter either, but it was still a built-in K table feeding
+    // the construction, and it demonstrably changed the produced system (7 of
+    // 8 SourceHits values gave a different system at every S and scale tested
+    // on this path), so it is replaced by the frozen constant below.  The
+    // constant is the value that table returned for every K < 10000, which
+    // leaves every existing balanced/shaped fixture and the whole K = 128
+    // campaign bit-identical; only balanced/shaped experiments at K >= 10000
+    // re-roll onto a different, equally valid stream.  Nothing here may be
+    // computed from K, from a table, or from another parameter again.
+    static const uint64_t kMatchingKeySalt = 2u;
     wirehair::PCGRandom matching_prng;
     matching_prng.Seed(
         params.Seed ^ UINT64_C(0x8b8b8b8bd3c4a56f),
         ((uint64_t)K << 32) ^ ((uint64_t)S << 16) ^
-            (uint64_t)params.SourceHits ^ UINT64_C(0x6465677265656d61));
+            kMatchingKeySalt ^ UINT64_C(0x6465677265656d61));
 
     // Randomly choose which rows receive the remainder socket, then match each
     // source's sockets to distinct rows with the greatest residual capacity.
@@ -191,7 +615,35 @@ bool AppendDegreeBalancedStaircaseEdges(
     }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (shape)
+    if (pinned)
+    {
+        // Consume exactly the draws the sampler would have made, so a pinned
+        // sequence lands on the SAME matching stream the shape path reaches
+        // when it happens to sample this sequence.  Without this a pinned run
+        // and the shaped run it reproduces would differ in the bucket picks
+        // and could not be compared cell for cell.
+        for (uint32_t row = 0; row < S; ++row) { (void)matching_prng.Next(); }
+        if (pinned->size() != (size_t)S) { return false; }
+        uint64_t assigned = 0;
+        for (uint32_t row = 0; row < S; ++row)
+        {
+            const uint32_t d = (*pinned)[row];
+            if (d > K) { return false; }
+            remaining[row] = d;
+            assigned += d;
+        }
+        // The budget is fixed by StaircaseDegreeScale, so a sequence that does
+        // not sum to it is a different construction than the one requested and
+        // is refused rather than repaired -- a repair would silently evaluate a
+        // NEIGHBOUR of the sequence under test, which is the whole failure mode
+        // this hook exists to remove.
+        if (assigned != (uint64_t)edge_count) { return false; }
+        high_degree = 0u;
+        for (uint32_t row = 0; row < S; ++row) {
+            high_degree = std::max(high_degree, remaining[row]);
+        }
+    }
+    else if (shape)
     {
         // Draw each row's target degree from the shape, capped at K (a row
         // cannot touch a source column twice), then repair the total back to
@@ -214,11 +666,12 @@ bool AppendDegreeBalancedStaircaseEdges(
             remaining[row] = degree > K ? K : degree;
             assigned += remaining[row];
         }
-        // The column side is SourceHits-regular, so the edge budget K*hits is
-        // fixed and only the SHAPE across rows is free.  Rescale the sampled
-        // degrees multiplicatively onto the budget -- an additive +1/-1 repair
-        // would flatten the very shape being searched, which makes most of the
-        // parameter space degenerate.
+        // The edge budget is already fixed by StaircaseDegreeScale (or, with
+        // no scale supplied, by the legacy rule), so only the SHAPE across
+        // rows is free here.  Rescale the sampled degrees multiplicatively
+        // onto that budget -- an additive +1/-1 repair would flatten the very
+        // shape being searched, which makes most of the parameter space
+        // degenerate.
         if (assigned > 0u && assigned != edge_count)
         {
             const double scale = (double)edge_count / (double)assigned;
@@ -226,22 +679,67 @@ bool AppendDegreeBalancedStaircaseEdges(
             for (uint32_t row = 0; row < S; ++row) {
                 double scaled = (double)remaining[row] * scale + 0.5;
                 uint32_t d = (uint32_t)scaled;
-                if (d < 1u) { d = 1u; }
                 if (d > K) { d = K; }
                 remaining[row] = d;
                 assigned += d;
             }
         }
-        // Whatever rounding left over is settled one socket at a time, in
-        // shuffled row order, which perturbs the shape only at the margin.
-        for (uint32_t guard = 0; assigned != edge_count && guard < 4096u * S; ++guard)
+        // Settle rounding and saturation in one deterministic pass.  A
+        // single-edge loop used to stop after 4096*S attempts, which made
+        // feasible shapes fail merely because a capped sample left a large
+        // correction.  Each row takes its even share of the remaining delta,
+        // plus any amount that MUST be taken because the later rows lack the
+        // capacity.  The suffix-capacity term proves completion in O(S).
+        if (assigned < edge_count)
         {
-            const uint32_t row = row_deck[guard % S];
-            if (assigned < edge_count) {
-                if (remaining[row] < K) { ++remaining[row]; ++assigned; }
-            } else if (remaining[row] > 1u) {
-                --remaining[row]; --assigned;
+            uint64_t needed = (uint64_t)edge_count - assigned;
+            uint64_t suffix_capacity = 0u;
+            for (uint32_t row = 0; row < S; ++row) {
+                suffix_capacity += K - remaining[row];
             }
+            if (needed > suffix_capacity) {
+                return false;
+            }
+            for (uint32_t i = 0; i < S && needed != 0u; ++i)
+            {
+                const uint32_t row = row_deck[i];
+                const uint64_t capacity = K - remaining[row];
+                suffix_capacity -= capacity;
+                const uint64_t rows_left = S - i;
+                const uint64_t even_share =
+                    (needed + rows_left - 1u) / rows_left;
+                const uint64_t required =
+                    needed > suffix_capacity ? needed - suffix_capacity : 0u;
+                const uint64_t take = std::min(
+                    capacity, std::max(even_share, required));
+                remaining[row] += (uint32_t)take;
+                needed -= take;
+            }
+            assigned = (uint64_t)edge_count - needed;
+        }
+        else if (assigned > edge_count)
+        {
+            uint64_t excess = assigned - (uint64_t)edge_count;
+            uint64_t suffix_capacity = assigned;
+            if (excess > suffix_capacity) {
+                return false;
+            }
+            for (uint32_t i = 0; i < S && excess != 0u; ++i)
+            {
+                const uint32_t row = row_deck[i];
+                const uint64_t capacity = remaining[row];
+                suffix_capacity -= capacity;
+                const uint64_t rows_left = S - i;
+                const uint64_t even_share =
+                    (excess + rows_left - 1u) / rows_left;
+                const uint64_t required =
+                    excess > suffix_capacity ? excess - suffix_capacity : 0u;
+                const uint64_t take = std::min(
+                    capacity, std::max(even_share, required));
+                remaining[row] -= (uint32_t)take;
+                excess -= take;
+            }
+            assigned = (uint64_t)edge_count + excess;
         }
         if (assigned != edge_count) { return false; }
         high_degree = 0u;
@@ -257,10 +755,31 @@ bool AppendDegreeBalancedStaircaseEdges(
     }
 
     uint32_t active_degree = high_degree;
-    uint16_t selected_rows[8];
-    uint32_t selected_degrees[8];
+    // Per-column degrees are bounded by min(S, kStaircaseColumnHitsMax), not
+    // by the [1,8] SourceHits domain, once the budget is scaled.  The inline
+    // arrays still cover every unscaled configuration.
+    uint16_t selected_rows_inline[8];
+    uint32_t selected_degrees_inline[8];
+    std::vector<uint16_t> selected_rows_heap;
+    std::vector<uint32_t> selected_degrees_heap;
+    uint16_t* selected_rows = selected_rows_inline;
+    uint32_t* selected_degrees = selected_degrees_inline;
+    if (mixture.MaxHits > 8u)
+    {
+        selected_rows_heap.resize(mixture.MaxHits);
+        selected_degrees_heap.resize(mixture.MaxHits);
+        selected_rows = selected_rows_heap.data();
+        selected_degrees = selected_degrees_heap.data();
+    }
     for (uint32_t source = 0; source < K; ++source)
     {
+        // Bipartite Havel-Hakimi: connecting ANY column to the columns' worth
+        // of rows with the largest residual capacity preserves realizability,
+        // so a mixture of column degrees needs no reordering of the sources --
+        // which matters because appending in ascending source order is what
+        // keeps every row's column list sorted.
+        const uint32_t hits =
+            StaircaseColumnHits(mixture, high_column, source);
         for (uint32_t hit = 0; hit < hits; ++hit)
         {
             while (active_degree > 0u && buckets[active_degree].empty()) {
@@ -377,6 +896,14 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
         return false;
     }
 
+    // The scaled edge budget has to resolve to a realizable column mixture.
+    // Rejecting here rather than asserting keeps an out-of-domain scale the
+    // same kind of outcome as any other bad parameter: a refused build.
+    StaircaseDegreeMixture mixture;
+    if (!MakeStaircaseDegreeMixture(params, mixture)) {
+        return false;
+    }
+
     // Identity-corner flips address both halves of the K + S deck.
     const uint64_t known_span =
         (uint64_t)params.BlockCount + params.Staircase;
@@ -405,6 +932,92 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
 }
 
 } // namespace
+
+bool MakeStaircaseDegreeMixture(
+    const PrecodeParams& params,
+    StaircaseDegreeMixture& out)
+{
+    out = StaircaseDegreeMixture();
+
+    const uint32_t K = params.BlockCount;
+    const uint32_t S = params.Staircase;
+    // Deliberately re-checked here instead of calling ValidatePrecodeParams:
+    // that function calls this one, and these are the only inputs the mixture
+    // actually reads.  SourceHits keeps its domain check even when a scale is
+    // supplied and it feeds nothing: it is still a recorded, fingerprinted
+    // field of the certified profile, so an out-of-domain value stays a
+    // refused parameter set rather than a silently ignored one.
+    if (K < 2u || K > 64000u || S == 0u || S > UINT16_MAX ||
+        params.SourceHits == 0u || params.SourceHits > 8u)
+    {
+        return false;
+    }
+    const double scale = params.StaircaseDegreeScale;
+    const bool scale_supplied = scale != kStaircaseDegreeScaleUnset;
+    // Only the declared sentinel means "not supplied."  Treating every
+    // negative value (including -infinity) as the sentinel would let a broken
+    // direct caller silently select the legacy budget.  Written as positive
+    // domain tests so NaN and both infinities are rejected too.
+    if (scale_supplied &&
+        (!(scale >= kStaircaseDegreeScaleMin) ||
+         !(scale <= kStaircaseDegreeScaleMax)))
+    {
+        return false;
+    }
+
+    uint64_t edge_count;
+    if (scale_supplied)
+    {
+        // total = mean x count.  The scale NAMES the mean staircase row
+        // degree and there are S rows, so this product is a definitional
+        // identity, not a model: no K, no SourceHits, no table, no rule.
+        const long long rounded = std::llround(scale * (double)S);
+        edge_count = rounded <= 0 ? 0u : (uint64_t)rounded;
+    }
+    else
+    {
+        // Legacy rule, and the ONLY place it survives: when no scale is
+        // supplied the certified construction's K * min(N1,S) budget applies
+        // unchanged, so production and every un-scaled test is bit-identical.
+        edge_count = (uint64_t)K * std::min(params.SourceHits, S);
+    }
+    // A budget above K*S cannot be realized at all -- a row may not touch a
+    // column twice, so K*S is every edge the bipartite graph can hold.  That
+    // ceiling CLAMPS rather than rejects, so a search walking off the end of
+    // its box lands on the saturated construction instead of on a hole.
+    //
+    // There is deliberately NO floor.  A budget below S leaves some rows with
+    // no source column and a budget below K leaves lo = 0, i.e. some columns
+    // with no parity at all; both are legal here.  Flooring either one up
+    // would put a K-derived (or S-derived) rule back into the construction,
+    // and the search's own failure constraint is what rejects a budget that
+    // is too small.
+    const uint64_t max_edges = (uint64_t)K * S;
+    if (edge_count > max_edges) {
+        edge_count = max_edges;
+    }
+    if (edge_count > UINT32_MAX) {
+        return false;
+    }
+
+    const uint32_t low_hits = (uint32_t)(edge_count / K);
+    const uint32_t high_columns =
+        (uint32_t)(edge_count - (uint64_t)low_hits * K);
+    const uint32_t max_hits = low_hits + (high_columns != 0u ? 1u : 0u);
+    // A column cannot take the same staircase row twice, and the validator
+    // tallies per-column hits in a byte.
+    if (max_hits > S || max_hits > kStaircaseColumnHitsMax) {
+        return false;
+    }
+
+    out.EdgeCount = (uint32_t)edge_count;
+    out.LowHits = low_hits;
+    out.HighHits = low_hits + 1u;
+    out.HighColumns = high_columns;
+    out.LowColumns = K - high_columns;
+    out.MaxHits = max_hits;
+    return true;
+}
 
 uint32_t SmallBandStaircaseCount(uint32_t block_count)
 {
@@ -452,6 +1065,9 @@ PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed)
     params.DenseRows = 12u;
     params.HeavyRows = 12u;
     params.SourceHits = CertifiedSourceHits(block_count);
+    // The certified path supplies NO target mean row degree, so the legacy
+    // K * min(N1,S) budget applies and this function is unchanged.
+    params.StaircaseDegreeScale = kStaircaseDegreeScaleUnset;
     params.DegreeBalancedStaircase = false;
     params.DenseIdentityCorner = false;
     params.DenseTwoAnchor = false;
@@ -474,16 +1090,42 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
     const uint32_t K = params.BlockCount;
     const uint32_t S = params.Staircase;
     const uint32_t D2 = params.DenseRows;
-    const uint32_t N1 = params.SourceHits;
+    // N1 no longer appears anywhere below: the per-column parity count comes
+    // from the resolved degree mixture, which is a function of the target mean
+    // row degree and S alone whenever a scale is supplied.
+    // The target mean row degree is the one parameter a test hook may
+    // override per thread, so the EFFECTIVE parameter set is resolved before
+    // anything else and is what gets validated, built and recorded in
+    // out.Params -- otherwise ValidatePrecodeSystem(out) would check the
+    // system against a scale it was not built at.
+    PrecodeParams effective = params;
+    effective.StaircaseDegreeScale =
+        ActiveStaircaseDegreeScale(params.StaircaseDegreeScale);
+    // Hooks that fail to parse are not silently replaced by the stock graph,
+    // and a shaped or pinned row sequence cannot truthfully be recorded as
+    // DegreeBalancedStaircase.  Reject both conflicts before touching `out`.
+    if (!StaircaseHookConfigurationValid()) {
+        return false;
+    }
+    const bool shaped_staircase = ShapedStaircaseActive();
+    if (effective.DegreeBalancedStaircase && shaped_staircase) {
+        return false;
+    }
     // Reject the complete parameter domain before modifying `out` or
     // allocating row/deck storage.
-    if (!ValidatePrecodeParams(params)) {
+    if (!ValidatePrecodeParams(effective)) {
+        return false;
+    }
+    StaircaseDegreeMixture mixture;
+    if (!MakeStaircaseDegreeMixture(effective, mixture) ||
+        !ActiveStaircaseHookValuesValid(effective, mixture))
+    {
         return false;
     }
     const uint64_t span_wide = (uint64_t)K + S + D2;
     const uint32_t span = (uint32_t)span_wide;
 
-    out.Params = params;
+    out.Params = effective;
     out.StaircaseRows.assign(S, std::vector<uint32_t>());
     out.DenseRowColumns.assign(D2, std::vector<uint32_t>());
 
@@ -492,13 +1134,12 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
 
     // --- Staircase rows ---
     // Reserve for the heaviest plausible load, not the mean.  Source hits are
-    // K*min(N1,S) balls thrown into S bins, so a row's source degree is
+    // EdgeCount balls thrown into S bins, so a row's source degree is
     // concentrated around the mean with a spread of order sqrt(mean); a
     // mean-sized reserve leaves a large fraction of the rows to reallocate
     // mid-build, which costs a second allocation and a copy on each of them.
     {
-        const uint32_t hits = std::min(N1, S);
-        const uint32_t mean = (K * hits) / S;
+        const uint32_t mean = mixture.EdgeCount / S;
         uint32_t slack = 4u;
         while (slack * slack < 16u * mean) {
             ++slack;
@@ -509,14 +1150,40 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
         }
     }
 
+    // Which source columns carry the extra parity, when the scaled budget is
+    // not a whole multiple of K.  Drawn from the construction stream so the
+    // choice is reproducible, and drawn ONLY when the mixture is non-trivial
+    // so that the exactly-regular case (every unscaled construction) consumes
+    // the identical PRNG sequence it always has.
+    std::vector<uint8_t> high_column;
+    if (mixture.HighColumns != 0u)
+    {
+        // K <= 64000 fits the uint16 deck the shuffle helpers use.
+        std::vector<uint16_t> column_deck(K);
+        UnbiasedShufflePermutation(prng, column_deck.data(), K);
+        high_column.assign(K, uint8_t{0});
+        for (uint32_t i = 0; i < mixture.HighColumns; ++i) {
+            high_column[column_deck[i]] = 1u;
+        }
+    }
+
     // Consume the certified independent-placement stream in both modes so the
     // later dense construction remains bit-identical.  In the experimental
     // balanced mode these placements are discarded and replaced below.
     {
-        uint32_t picks[8];
-        const uint32_t hits = N1 < S ? N1 : S;
+        // The [1,8] SourceHits domain bounds the unscaled per-column degree,
+        // but a scaled budget can push it up to min(S, 255).
+        uint32_t picks_inline[8];
+        std::vector<uint32_t> picks_heap;
+        uint32_t* picks = picks_inline;
+        if (mixture.MaxHits > 8u)
+        {
+            picks_heap.resize(mixture.MaxHits);
+            picks = picks_heap.data();
+        }
         for (uint32_t c = 0; c < K; ++c)
         {
+            const uint32_t hits = StaircaseColumnHits(mixture, high_column, c);
             for (uint32_t hit = 0; hit < hits; ++hit)
             {
                 uint32_t p;
@@ -532,15 +1199,16 @@ bool BuildPrecodeSystem(const PrecodeParams& params, PrecodeSystem& out)
                     }
                 } while (collide);
                 picks[hit] = p;
-                if (!params.DegreeBalancedStaircase &&
-                    !ShapedStaircaseActive()) {
+                if (!effective.DegreeBalancedStaircase &&
+                    !shaped_staircase) {
                     out.StaircaseRows[p].push_back(c);
                 }
             }
         }
     }
-    if ((params.DegreeBalancedStaircase || ShapedStaircaseActive()) &&
-        !AppendDegreeBalancedStaircaseEdges(params, out.StaircaseRows))
+    if ((effective.DegreeBalancedStaircase || shaped_staircase) &&
+        !AppendDegreeBalancedStaircaseEdges(
+            effective, mixture, high_column, out.StaircaseRows))
     {
         return false;
     }
@@ -718,7 +1386,9 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     const uint32_t D2 = params.DenseRows;
     const uint64_t binary_span = (uint64_t)K + S + D2;
 
+    StaircaseDegreeMixture mixture;
     if (!ValidatePrecodeParams(params) ||
+        !MakeStaircaseDegreeMixture(params, mixture) ||
         system.StaircaseRows.size() != S ||
         system.DenseRowColumns.size() != D2)
     {
@@ -740,7 +1410,7 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
         std::memset(source_hits, 0, K);
     }
     uint32_t balanced_high_rows = 0u;
-    const uint32_t balanced_edges = K * std::min(params.SourceHits, S);
+    const uint32_t balanced_edges = mixture.EdgeCount;
     const uint32_t balanced_low = balanced_edges / S;
     const uint32_t balanced_extra = balanced_edges % S;
     for (uint32_t row_index = 0; row_index < S; ++row_index)
@@ -792,11 +1462,31 @@ bool ValidatePrecodeSystem(const PrecodeSystem& system)
     {
         return false;
     }
-    const uint8_t expected_hits = (uint8_t)std::min(params.SourceHits, S);
-    for (uint32_t column = 0; column < K; ++column) {
-        if (source_hits[column] != expected_hits) {
+    // Exact two-valued column mixture.  This is the generalization of the old
+    // "every column has exactly min(N1,S) parities" invariant and it is just
+    // as strict: a column outside {lo, hi} is rejected, AND the counts on each
+    // of the two allowed values must match the mixture exactly.  A range check
+    // would accept any split between lo and hi, which is precisely the edge
+    // budget this parameter exists to control.
+    uint32_t low_columns = 0u;
+    uint32_t high_columns = 0u;
+    for (uint32_t column = 0; column < K; ++column)
+    {
+        const uint32_t degree = source_hits[column];
+        if (degree == mixture.LowHits) {
+            ++low_columns;
+        }
+        else if (mixture.HighColumns != 0u && degree == mixture.HighHits) {
+            ++high_columns;
+        }
+        else {
             return false;
         }
+    }
+    if (low_columns != mixture.LowColumns ||
+        high_columns != mixture.HighColumns)
+    {
+        return false;
     }
 
     if (D2 == 0u) {
@@ -882,8 +1572,15 @@ uint8_t HeavyCoefficient(
 /// from its own row count instead of inheriting the frozen H12 ones.  Read
 /// once from WIREHAIR_V2_BAND_TRACKING_X so a sweep can toggle it per process
 /// without threading a new flag through every bench mode.
+static std::atomic<int> MixedBandTrackingXOverride{-1};
+
 static bool MixedBandTrackingXEnabled()
 {
+    const int override_value =
+        MixedBandTrackingXOverride.load(std::memory_order_relaxed);
+    if (override_value >= 0) {
+        return override_value != 0;
+    }
     static const bool enabled = [] {
         const wirehair::EnvironmentValue value(
             "WIREHAIR_V2_BAND_TRACKING_X");
@@ -1078,6 +1775,11 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
             }
             return &grouped_packed;
         }
+        const uint32_t subfield_rows = ActiveMixedGF256Rows();
+        // Retain the original shared immutable caches for the historically
+        // benchmarked 8..12-row arms.  Besides avoiding first-use TLS packing
+        // in their timings, the production-sized H8=10 table is deliberately
+        // published at one process-wide address and has a concurrency oracle.
         static const MixedPackedCoefficients shared_packed_trim_two =
             pack_rows(rows, kMixedGF256Rows - 2u);
         static const MixedPackedCoefficients shared_packed_trim_one =
@@ -1088,7 +1790,6 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
             pack_rows(rows, kMixedGF256Rows + 1u);
         static const MixedPackedCoefficients shared_packed_two_extra =
             pack_rows(rows, kMixedGF256RowsMax);
-        const uint32_t subfield_rows = ActiveMixedGF256Rows();
         if (subfield_rows == kMixedGF256Rows - 2u)
             return &shared_packed_trim_two;
         if (subfield_rows == kMixedGF256Rows - 1u)
@@ -1096,54 +1797,54 @@ const MixedPackedCoefficients* GetMixedPackedCoefficients()
         if (subfield_rows == kMixedGF256Rows) return &shared_packed_base;
         if (subfield_rows == kMixedGF256Rows + 1u)
             return &shared_packed_one_extra;
-        return &shared_packed_two_extra;
-    }
-    {
-        // Frozen-geometry row trims pack the extension pair directly after
-        // the trimmed subfield rows so packed lanes match the active layout.
-        const uint32_t subfield_rows = ActiveMixedGF256Rows();
-        if (subfield_rows < kMixedGF256Rows)
-        {
-            if (MixedBandTrackingXForTesting)
-            {
-                // `rows` is the thread-local band-tracked table, so the
-                // packed lanes are a function of (band H, trim) as well.
-                // A shared static would freeze whichever band H the process
-                // packed first and hand it to every later band.
-                const uint32_t trim = subfield_rows == kMixedGF256Rows - 2u ?
-                    kMixedGF256Rows - 2u : kMixedGF256Rows - 1u;
-                const uint32_t band_h =
-                    ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
-                const uint32_t key = (band_h << 8) | trim;
-                static thread_local MixedPackedCoefficients tracked_trim = {};
-                static thread_local uint32_t cached_trim_key = UINT32_MAX;
-                if (cached_trim_key != key) {
-                    tracked_trim = pack_rows(rows, trim);
-                    cached_trim_key = key;
-                }
-                return &tracked_trim;
-            }
-            static const MixedPackedCoefficients frozen_packed_trim_two =
-                pack_rows(rows, kMixedGF256Rows - 2u);
-            static const MixedPackedCoefficients frozen_packed_trim_one =
-                pack_rows(rows, kMixedGF256Rows - 1u);
-            return subfield_rows == kMixedGF256Rows - 2u ?
-                &frozen_packed_trim_two : &frozen_packed_trim_one;
+        if (subfield_rows == kMixedGF256RowsMax)
+            return &shared_packed_two_extra;
+        // Test builds expose every leading GF(256) prefix from 1 through 12.
+        // The GF(2^16) lanes must begin immediately after that ACTIVE prefix:
+        // reusing an H8=9/12 packed table for a smaller prefix silently shifts
+        // every extension lane and makes the payload equations disagree with
+        // the row-major encoder.  One TLS cache avoids twelve large static
+        // tables while keeping repeated solves at one configuration free of
+        // repacking work.
+        static thread_local MixedPackedCoefficients shared_packed = {};
+        static thread_local uint32_t cached_subfield_rows = UINT32_MAX;
+        if (cached_subfield_rows != subfield_rows) {
+            shared_packed = pack_rows(rows, subfield_rows);
+            cached_subfield_rows = subfield_rows;
         }
+        return &shared_packed;
     }
-    if (MixedBandTrackingXForTesting)
+    // Frozen geometry supports every leading prefix through H8=10.  With
+    // band-tracking enabled the row coefficients also change with H8+H16, so
+    // both quantities belong in the cache key even though the row-table
+    // pointer itself remains the same thread-local object.
+    const uint32_t subfield_rows = ActiveMixedGF256Rows();
+    const bool track_band = MixedBandTrackingXForTesting;
+    if (!track_band)
     {
-        // Same reasoning for the untrimmed frozen band: cache on band H.
-        const uint32_t band_h =
-            ActiveMixedGF256Rows() + ActiveMixedGF16Rows();
-        static thread_local MixedPackedCoefficients tracked_full = {};
-        static thread_local uint32_t cached_full_band = UINT32_MAX;
-        if (cached_full_band != band_h) {
-            tracked_full = pack_rows(rows, kMixedGF256Rows);
-            cached_full_band = band_h;
-        }
-        return &tracked_full;
+        static const MixedPackedCoefficients frozen_packed_trim_two =
+            pack_rows(rows, kMixedGF256Rows - 2u);
+        static const MixedPackedCoefficients frozen_packed_trim_one =
+            pack_rows(rows, kMixedGF256Rows - 1u);
+        static const MixedPackedCoefficients frozen_packed_base =
+            pack_rows(rows, kMixedGF256Rows);
+        if (subfield_rows == kMixedGF256Rows - 2u)
+            return &frozen_packed_trim_two;
+        if (subfield_rows == kMixedGF256Rows - 1u)
+            return &frozen_packed_trim_one;
+        if (subfield_rows == kMixedGF256Rows)
+            return &frozen_packed_base;
     }
+    const uint32_t band_h = track_band ?
+        subfield_rows + ActiveMixedGF16Rows() : 0u;
+    const uint32_t key = (band_h << 8) | subfield_rows;
+    static thread_local MixedPackedCoefficients frozen_test_packed = {};
+    static thread_local uint32_t cached_frozen_key = UINT32_MAX;
+    if (cached_frozen_key != key) {
+        frozen_test_packed = pack_rows(rows, subfield_rows);
+        cached_frozen_key = key;
+    }
+    return &frozen_test_packed;
 #endif
     static const MixedPackedCoefficients frozen_packed =
         pack_rows(rows, kMixedGF256Rows);
@@ -1525,13 +2226,28 @@ bool SetMixedGF16RowsForTesting(uint32_t rows)
     return true;
 }
 
+void SetMixedBandTrackingXForTesting(bool enabled)
+{
+    // Process-wide by design: the cost-model regime is fixed for a whole
+    // benchmark invocation, and evaluator workers must all inherit the same
+    // choice.  Atomic storage also makes an accidental late test change
+    // race-free, although callers should configure it before launching work.
+    MixedBandTrackingXOverride.store(
+        enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+void ClearMixedBandTrackingXForTesting()
+{
+    MixedBandTrackingXOverride.store(-1, std::memory_order_relaxed);
+}
+
 bool SetMixedGF256RowsForTesting(uint32_t rows)
 {
-    // Row trims (eight or nine rows) take the leading subset of the frozen
+    // Row trims (one through nine rows) take the leading subset of the frozen
     // ten-row Cauchy table: Y stays in [0, rows) against the unchanged
-    // X = 12 + residue coordinates, so the trimmed system remains one
-    // Cauchy matrix in either geometry.  Extra rows (11/12) still require
-    // shared-X coordinates as before.
+    // X = 12 + residue coordinates, so the trimmed system remains one Cauchy
+    // matrix in either geometry.  Extra rows (11/12) still require shared-X
+    // coordinates as before.
     if (rows < kMixedGF256RowsMin || rows > kMixedGF256RowsMax ||
         MixedCoefficientPeriodForTesting < rows + MixedGF16RowsForTesting ||
         (rows >= kMixedGF256Rows + 2u &&

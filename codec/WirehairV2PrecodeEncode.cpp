@@ -475,12 +475,37 @@ bool ComputePrecodeValues(
         const auto accumulate_extension_residue = [&](
             uint32_t m, const uint8_t* value) -> bool
         {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            // Production has exactly two extension rows, but experiments may
+            // trim the mixed completion band to zero or one.  Do not
+            // deinterleave a source when there is no extension RHS, and do
+            // not pass a one-past row to the two-destination kernel.
+            if (extension_rows == 0u) {
+                return true;
+            }
+#endif
             if (!GF16Deinterleave(
                     value, source_low.data(), source_high.data(), block_bytes))
             {
                 return false;
             }
             ++st.MixedPlaneConversions;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (extension_rows == 1u)
+            {
+                if (!GF16MulAddPlanar(
+                        rhs_low.data() + (size_t)subfield_rows * elements,
+                        rhs_high.data() + (size_t)subfield_rows * elements,
+                        gf16_coefficient_rows[0][m],
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return false;
+                }
+                ++st.HeavyMulAdds;
+                ++st.MixedGF16MulAdds;
+                return true;
+            }
+#endif
             static_assert(
                 kMixedGF16Rows >= 2u,
                 "mixed completion pair kernel requires two GF16 rows");

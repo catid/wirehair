@@ -6,10 +6,12 @@
 #include "WirehairV2Plan.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -30,10 +32,130 @@ thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 
-/// Peeling row-degree override; see SetPeelDegreesForTesting.  Stored as a
-/// normalized CDF over degrees 1..N so sampling is one comparison scan against
-/// the SAME uniform the stock generator consumes.
-thread_local std::vector<double> PeelDegreeCdf;
+struct PeelDegreeCdfState
+{
+    bool IsSet = false;
+    bool Valid = true;
+    std::vector<double> Cdf;
+};
+
+// PeelRowParameters clamps every sampled degree to 64.  Canonicalizing every
+// override onto exactly 64 bins is therefore semantics-preserving: missing
+// bins have zero mass and all input mass at degrees >= 64 belongs to bin 64.
+// A power-of-two size also permits a genuinely fixed six-comparison sampler.
+constexpr size_t kPeelOverrideCdfSize = 64u;
+static_assert(
+    (kPeelOverrideCdfSize & (kPeelOverrideCdfSize - 1u)) == 0u,
+    "peel override CDF must have a power-of-two size");
+
+/// Peeling row-degree override; see SetPeelDegreesForTesting.  Invalid input
+/// remains an active-invalid state so it cannot silently fall through to an
+/// environment override or the shipped law.
+thread_local PeelDegreeCdfState PeelDegreeOverride;
+
+bool IsAsciiSpace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' ||
+        c == '\n' || c == '\f' || c == '\v';
+}
+
+void SkipAsciiSpace(const char*& p)
+{
+    while (IsAsciiSpace(*p)) {
+        ++p;
+    }
+}
+
+bool MakePeelDegreeCdf(
+    const std::vector<double>& weights,
+    std::vector<double>& cdf)
+{
+    if (weights.empty()) {
+        return false;
+    }
+    double total = 0.0;
+    for (double weight : weights)
+    {
+        if (!std::isfinite(weight) || weight < 0.0) {
+            return false;
+        }
+        total += weight;
+        if (!std::isfinite(total)) {
+            return false;
+        }
+    }
+    if (!(total > 0.0)) {
+        return false;
+    }
+
+    std::vector<double> parsed(kPeelOverrideCdfSize, 1.0);
+    double running = 0.0;
+    const size_t prefix_count = std::min(
+        weights.size(), kPeelOverrideCdfSize - 1u);
+    for (size_t i = 0; i < prefix_count; ++i)
+    {
+        // Divide the cumulative prefix once instead of summing independently
+        // rounded fractions.  The latter can drift above one before a
+        // trailing zero-weight bin; pinning only the final entry would then
+        // make the CDF decrease and violate the binary decision tree's
+        // sorted-CDF invariant.
+        running += weights[i];
+        const double probability = running / total;
+        if (!std::isfinite(probability) ||
+            probability < 0.0 || probability > 1.0)
+        {
+            return false;
+        }
+        parsed[i] = probability;
+    }
+    // The final interval owns every input degree at or above 64, plus all
+    // remaining uniforms.  It is an exclusive upper bound because u < 1.
+    parsed.back() = 1.0;
+    cdf.swap(parsed);
+    return true;
+}
+
+bool ParsePeelDegreeCdf(
+    const char* text,
+    std::vector<double>& cdf)
+{
+    if (!text) {
+        return false;
+    }
+    const char* p = text;
+    SkipAsciiSpace(p);
+    if (*p == '\0') {
+        return false;
+    }
+
+    std::vector<double> weights;
+    for (;;)
+    {
+        errno = 0;
+        char* end = nullptr;
+        const double weight = std::strtod(p, &end);
+        if (end == p || errno == ERANGE ||
+            !std::isfinite(weight) || weight < 0.0)
+        {
+            return false;
+        }
+        weights.push_back(weight);
+        p = end;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            break;
+        }
+        if (*p != ',') {
+            return false;
+        }
+        ++p;
+        SkipAsciiSpace(p);
+        if (*p == '\0') {
+            return false;
+        }
+    }
+    return MakePeelDegreeCdf(weights, cdf);
+}
 
 /**
     WIREHAIR_V2_PEEL_DEGREES, parsed once per process.
@@ -44,48 +166,43 @@ thread_local std::vector<double> PeelDegreeCdf;
     exists for single-config harnesses (the timing protocol) that run one
     distribution per process.
 */
-const std::vector<double>* EnvironmentPeelDegreeCdf()
+const PeelDegreeCdfState& EnvironmentPeelDegreeCdf()
 {
-    static const std::vector<double> parsed = [] {
-        std::vector<double> cdf;
+    static const PeelDegreeCdfState parsed = [] {
+        PeelDegreeCdfState result;
         const char* raw = std::getenv("WIREHAIR_V2_PEEL_DEGREES");
         if (raw == nullptr) {
-            return cdf;
+            return result;
         }
-        std::vector<double> weights;
-        const char* p = raw;
-        while (*p != '\0')
-        {
-            char* end = nullptr;
-            const double w = std::strtod(p, &end);
-            if (end == p) { break; }
-            weights.push_back(w > 0.0 ? w : 0.0);
-            p = end;
-            while (*p == ',' || *p == ' ') { ++p; }
-        }
-        double total = 0.0;
-        for (double w : weights) { total += w; }
-        if (!(total > 0.0)) {
-            return cdf;
-        }
-        double running = 0.0;
-        for (double w : weights)
-        {
-            running += w / total;
-            cdf.push_back(running);
-        }
-        return cdf;
+        result.IsSet = true;
+        result.Valid = ParsePeelDegreeCdf(raw, result.Cdf);
+        return result;
     }();
-    return parsed.empty() ? nullptr : &parsed;
+    return parsed;
 }
 
-/// Thread-local override first, environment second, stock table otherwise.
-const std::vector<double>* ActivePeelDegreeCdf()
+/// Resolve thread-local override first, environment second, stock otherwise.
+/// False means an active source was malformed and the row must be refused.
+bool ActivePeelDegreeCdf(const std::vector<double>*& cdf)
 {
-    if (!PeelDegreeCdf.empty()) {
-        return &PeelDegreeCdf;
+    cdf = nullptr;
+    if (PeelDegreeOverride.IsSet)
+    {
+        if (!PeelDegreeOverride.Valid) {
+            return false;
+        }
+        cdf = &PeelDegreeOverride.Cdf;
+        return true;
     }
-    return EnvironmentPeelDegreeCdf();
+    const PeelDegreeCdfState& environment = EnvironmentPeelDegreeCdf();
+    if (environment.IsSet)
+    {
+        if (!environment.Valid) {
+            return false;
+        }
+        cdf = &environment.Cdf;
+    }
+    return true;
 }
 
 /**
@@ -103,43 +220,57 @@ const std::vector<double>* ActivePeelDegreeCdf()
     The N/2 and kMaxPeelCount clamps are applied exactly as the stock path
     applies them, so an override cannot change the row-weight invariant.
 */
-void ApplyPeelDegreeOverride(
-    uint32_t row_seed,
-    uint32_t p_seed,
+template<bool CountComparisons>
+uint32_t SamplePeelDegreeOverrideImpl(
+    const std::vector<double>& cdf,
+    uint32_t rv,
     uint16_t peel_column_count,
-    wirehair::PeelRowParameters& params)
+    uint32_t fallback,
+    uint32_t* comparison_count)
 {
-    const std::vector<double>* cdf = ActivePeelDegreeCdf();
-    if (cdf == nullptr || peel_column_count == 0u) {
-        return;
+    if (cdf.empty() || peel_column_count == 0u) {
+        return fallback;
     }
-    wirehair::PCGRandom prng;
-    prng.Seed(row_seed, p_seed);
-    const uint32_t rv = prng.Next();
     // The stock generator compares against uint32 thresholds, so the uniform
     // is taken on the same [0,1) scale here.
     const double u = (double)rv * (1.0 / 4294967296.0);
     /*
-        BINARY search, not linear, and the reason is measurement bias rather
-        than speed.
+        FIXED-DEPTH binary decision tree, not std::upper_bound or a linear
+        scan, and the reason is measurement bias rather than speed.
 
         A linear scan exits at the SAMPLED index, so its cost depends on the
         distribution being sampled: a flat law scans further per row than a
         soliton does.  The override's overhead then differs between the arms of
         a comparison, and that difference does NOT cancel when the arms are
         re-baselined against a common reference, because it is not common.
-        lower_bound costs log2(n) comparisons wherever the sample lands, so
-        what remains is a fixed per-row offset that a shared baseline does
-        remove.
+        std::upper_bound is not fixed-depth either: libstdc++ takes seven
+        comparisons near one end of a 64-entry range and six near the other.
+        The canonical 64-bin tree below performs exactly six comparisons for
+        every row, so what remains is a common fixed per-row offset.
 
-        Semantics are unchanged: lower_bound returns the first entry >= u,
-        which is exactly what the scan selected, so the identity gate still
-        reproduces the stock construction bit for bit.
+        The comparison is STRICT.  A CDF entry is the first excluded uniform
+        value for that degree, so an exact boundary belongs to the following
+        degree.  lower_bound used >= and was off by one at every nonempty exact
+        boundary; uniformly spaced self-test probes almost never landed on
+        those 64 values and therefore missed it.
     */
-    const std::vector<double>::const_iterator hit =
-        std::lower_bound(cdf->begin(), cdf->end(), u);
-    size_t index = hit == cdf->end() ?
-        cdf->size() - 1u : (size_t)(hit - cdf->begin());
+    if (cdf.size() != kPeelOverrideCdfSize) {
+        return fallback;
+    }
+    size_t index = 0u;
+    for (size_t step = kPeelOverrideCdfSize >> 1u;
+         step != 0u;
+         step >>= 1u)
+    {
+        if (CountComparisons) {
+            ++*comparison_count;
+        }
+        const size_t boundary = index + step - 1u;
+        // Equality advances to the next interval: CDF entries are exclusive
+        // upper bounds.  Written as an integer add so optimized builds use a
+        // compare/select rather than a data-dependent loop exit.
+        index += (size_t)(u >= cdf[boundary]) * step;
+    }
     uint32_t weight = (uint32_t)index + 1u;
     const uint32_t max_weight = peel_column_count / 2u;
     if (max_weight != 0u && weight > max_weight) {
@@ -152,7 +283,39 @@ void ApplyPeelDegreeOverride(
     if (weight == 0u) {
         weight = 1u;
     }
-    params.PeelCount = (uint16_t)weight;
+    return weight;
+}
+
+uint32_t SamplePeelDegreeOverride(
+    const std::vector<double>& cdf,
+    uint32_t rv,
+    uint16_t peel_column_count,
+    uint32_t fallback)
+{
+    // The false specialization compiles out the counter entirely, so the
+    // test oracle cannot perturb the timing path it verifies.
+    return SamplePeelDegreeOverrideImpl<false>(
+        cdf, rv, peel_column_count, fallback, nullptr);
+}
+
+bool ApplyPeelDegreeOverride(
+    uint32_t row_seed,
+    uint32_t p_seed,
+    uint16_t peel_column_count,
+    wirehair::PeelRowParameters& params)
+{
+    const std::vector<double>* cdf = nullptr;
+    if (!ActivePeelDegreeCdf(cdf)) {
+        return false;
+    }
+    if (cdf == nullptr || peel_column_count == 0u) {
+        return true;
+    }
+    wirehair::PCGRandom prng;
+    prng.Seed(row_seed, p_seed);
+    params.PeelCount = (uint16_t)SamplePeelDegreeOverride(
+        *cdf, prng.Next(), peel_column_count, params.PeelCount);
+    return true;
 }
 #endif
 
@@ -350,8 +513,11 @@ bool InitializePacketRowParameters(
     // V2 overrides the weight AFTER V1 has produced the row, so WirehairTools
     // and the wire-format row layout stay untouched; only PeelCount moves, and
     // only when an override is installed.
-    ApplyPeelDegreeOverride(
-        row_seed, peel_seed, (uint16_t)source_count, params);
+    if (!ApplyPeelDegreeOverride(
+            row_seed, peel_seed, (uint16_t)source_count, params))
+    {
+        return false;
+    }
 #endif
     return true;
 }
@@ -496,13 +662,13 @@ std::vector<uint8_t> MakeBlockStorage(size_t bytes)
     (the binary quotient), and the residue bucket routes at 1280 and 4096 --
     so "large enough" has to mean large enough for ALL of them at once.
 
-    kCountingDispatchBlockBytes therefore sits at or above EVERY minimum
-    dispatch threshold in this file and strictly above every maximum one (see
-    the static_asserts beside the thresholds), so a zero-width solve lands in
-    the widest regime on every gate simultaneously.  It is also the width the
-    parity harness compares against.
+    The dispatch width must be the width the cost model was calibrated at, not
+    merely "large."  WirehairV2EsCostModel.inc is a 1280-byte model: choosing
+    65536 here used different residual/binary-quotient algorithms and made the
+    model multiply coefficients fitted to one operation mix by counters from
+    another.  The parity harness therefore compares zero against 1280 exactly.
 */
-constexpr uint32_t kCountingDispatchBlockBytes = 65536u;
+constexpr uint32_t kCountingDispatchBlockBytes = 1280u;
 
 /**
     Width used for DISPATCH decisions only.
@@ -1192,8 +1358,8 @@ constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
 // payload; the extra wide-kernel setup is neutral or slower at MTU sizes.
 constexpr uint32_t kBatchedResidualRhsMinBlockBytes = 4096u;
 static_assert(
-    kCountingDispatchBlockBytes >= kBatchedResidualRhsMinBlockBytes,
-    "a payload-free solve must dispatch as a batched-RHS payload");
+    kCountingDispatchBlockBytes < kBatchedResidualRhsMinBlockBytes,
+    "count-only dispatch must match the 1280-byte unbatched-RHS model");
 // CheckedBlockStorage caps valid payloads below this sentinel.
 constexpr uint32_t kNeverBatchResidualRhs = UINT32_MAX;
 // The sentinel must stay above the dispatch width so "never batch" keeps
@@ -1267,13 +1433,12 @@ static_assert(
     "a payload-free solve must dispatch into the fused block initializer");
 constexpr uint32_t kFusedBlockXorInitMinBlockCount = 10000u;
 // Remaining payload-width dispatch thresholds in this file, asserted here so
-// the counting dispatch width provably sits in the production regime of every
-// one of them.  kBinaryQuotientMinBlockBytes lives in the header;
-// kMinWideBlockBytes and the batched back-elimination bound are function-local
-// literals repeated here.
+// the counting dispatch stays in the exact 1280-byte regime.  It is above the
+// projected/fused/dual-bucket gates and below the binary-quotient/batched-RHS
+// gates; changing any of those relationships requires a new cost calibration.
 static_assert(
-    kCountingDispatchBlockBytes >= kBinaryQuotientMinBlockBytes,
-    "a payload-free solve must dispatch into the binary quotient");
+    kCountingDispatchBlockBytes < kBinaryQuotientMinBlockBytes,
+    "count-only dispatch must match the 1280-byte pre-quotient model");
 static_assert(
     kCountingDispatchBlockBytes >= 512u,
     "a payload-free solve must dispatch into the wide/batched block routes");
@@ -1287,14 +1452,9 @@ static_assert(
     kCountingDispatchBlockBytes >
         WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES,
     "the counting dispatch width must not select the tiny fast path");
-// kPacketTailPairMaxBlockBytes (32 KiB) is the other maximum gate, and the
-// dispatch width clears it too -- but EvaluatePacketBlockImpl rejects a zero
-// width at its entry, so no payload-free solve ever reaches that comparison
-// and it is deliberately left reading the real width.  Asserted anyway so a
-// future caller that does reach it inherits the production choice.
 static_assert(
-    kCountingDispatchBlockBytes > 32u * 1024u,
-    "the counting dispatch width must clear the packet tail-pair gate");
+    kCountingDispatchBlockBytes == 1280u,
+    "changing the count-only dispatch width requires refitting the cost model");
 
 // The production GF(256) profile fixes H=12, so its periodic coefficient
 // table is immutable across every message.  Keeping that small table in
@@ -1541,8 +1701,7 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
 {
     const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     static_assert(
-        kMixedPackedCoefficientWords >= 3u &&
-            kMixedPackedCoefficientWords <= 4u,
+        kMixedPackedCoefficientWords <= 4u,
         "mixed completion packing must fit the unrolled projection");
     const uint32_t expected_projection_words =
         PackedWordCount(inactive_count);
@@ -1606,10 +1765,15 @@ bool ProjectMixedCompletionCoefficientsByResidueBuckets(
         uint64_t* destination =
             projected.data() + (size_t)index * packed_words;
         destination[0] ^= coefficients[0];
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        // Production is exactly three words.  Test configurations span one
+        // through four as H8/H16 are swept, so guard every optional lane.
+        if (packed_words > 1u) destination[1] ^= coefficients[1];
+        if (packed_words > 2u) destination[2] ^= coefficients[2];
+        if (packed_words == 4u) destination[3] ^= coefficients[3];
+#else
         destination[1] ^= coefficients[1];
         destination[2] ^= coefficients[2];
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-        if (packed_words == 4u) destination[3] ^= coefficients[3];
 #endif
     };
 
@@ -3491,10 +3655,9 @@ WirehairResult SolveMixedCompletionQuotient(
 
     const uint32_t packed_words = ActiveMixedPackedCoefficientWords();
     static_assert(
-        kMixedPackedCoefficientWords >= 3u &&
-            kMixedPackedCoefficientWords <= 4u,
+        kMixedPackedCoefficientWords <= 4u,
         "mixed completion packing changed unexpectedly");
-    if (packed_words < 3u ||
+    if (packed_words == 0u ||
         packed_words > kMixedPackedCoefficientWords)
     {
         return Wirehair_Error;
@@ -3887,7 +4050,8 @@ WirehairResult SolveMixedCompletionQuotient(
     // MulAddPayloadPlanes2 branch NEVER RUNS.  That silently dropped 448 of 3956
     // BlockMulAdds (1.7%) at width 0 while every other counter matched -- exactly
     // the class of count-only error that would corrupt a calibrated cost model.
-    // Verified: widths 0/2/4/8 now agree exactly at N=1000 and N=2048.
+    // Verified: width 0 agrees with its declared dispatch width 1280; other
+    // real widths may deliberately choose different algorithms and counters.
     std::vector<uint8_t> rhs_low = MakeBlockStorage((size_t)H * elements);
     std::vector<uint8_t> rhs_high = MakeBlockStorage((size_t)H * elements);
     std::vector<uint8_t> source_low = MakeBlockStorage(elements);
@@ -4299,6 +4463,23 @@ mixed_rhs_accumulated:
             {
                 return Wirehair_Error;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (extension_rows == 1u)
+            {
+                if (!MulAddPayloadPlanes(
+                        rhs_low.data() +
+                            (size_t)subfield_rows * elements,
+                        rhs_high.data() +
+                            (size_t)subfield_rows * elements,
+                        extension_scales[0],
+                        source_low.data(), source_high.data(), elements))
+                {
+                    return Wirehair_Error;
+                }
+                ++stats.BlockMulAdds;
+                continue;
+            }
+#endif
             if (!MulAddPayloadPlanes2(
                     rhs_low.data() + (size_t)subfield_rows * elements,
                     rhs_high.data() + (size_t)subfield_rows * elements,
@@ -5035,31 +5216,49 @@ bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)
     return true;
 }
 
-void SetPeelDegreesForTesting(const std::vector<double>& weights)
+bool SetPeelDegreesForTesting(const std::vector<double>& weights)
 {
-    // Stored as a normalized CDF so the sampler is a single scan.  A vector
-    // that sums to zero cannot be sampled from and clears the override rather
-    // than producing a degenerate row weight.
-    PeelDegreeCdf.clear();
-    double total = 0.0;
-    for (double w : weights) {
-        total += w > 0.0 ? w : 0.0;
-    }
-    if (!(total > 0.0)) {
-        return;
-    }
-    double running = 0.0;
-    PeelDegreeCdf.reserve(weights.size());
-    for (double w : weights)
+    if (weights.empty())
     {
-        running += (w > 0.0 ? w : 0.0) / total;
-        PeelDegreeCdf.push_back(running);
+        // Empty has always been the explicit clear spelling.
+        PeelDegreeOverride = PeelDegreeCdfState();
+        return true;
     }
+    PeelDegreeCdfState candidate;
+    candidate.IsSet = true;
+    candidate.Valid = MakePeelDegreeCdf(weights, candidate.Cdf);
+    PeelDegreeOverride = std::move(candidate);
+    return PeelDegreeOverride.Valid;
 }
 
 void ClearPeelDegreesForTesting()
 {
-    PeelDegreeCdf.clear();
+    PeelDegreeOverride = PeelDegreeCdfState();
+}
+
+bool PeelDegreeConfigurationValidForTesting()
+{
+    const std::vector<double>* cdf = nullptr;
+    return ActivePeelDegreeCdf(cdf);
+}
+
+uint32_t SamplePeelDegreeForTesting(
+    uint32_t random_value,
+    uint16_t peel_column_count)
+{
+    const std::vector<double>* cdf = nullptr;
+    return !ActivePeelDegreeCdf(cdf) || cdf == nullptr ?
+        0u : SamplePeelDegreeOverride(
+        *cdf, random_value, peel_column_count, 0u);
+}
+
+uint32_t PeelDegreeSampleComparisonCountForTesting()
+{
+    uint32_t comparisons = 0u;
+    const std::vector<double> canonical(kPeelOverrideCdfSize, 1.0);
+    (void)SamplePeelDegreeOverrideImpl<true>(
+        canonical, 0u, 128u, 0u, &comparisons);
+    return comparisons;
 }
 
 void SetPacketRowSeedAvalancheForTesting(bool enabled)
@@ -5522,8 +5721,11 @@ static bool EvaluatePacketBlockImpl(
         OH_mean (with OH95) -- all-degree-1 costs 5.02 extra packets where the
         shipped law costs 0.0000.  A gate reading FAIL is vacuous.
     */
-    ApplyPeelDegreeOverride(
-        packet_row_seed, packet_peel_seed, (uint16_t)K, params);
+    if (!ApplyPeelDegreeOverride(
+            packet_row_seed, packet_peel_seed, (uint16_t)K, params))
+    {
+        return false;
+    }
 #endif
     uint64_t operations = 1u;
     // The existing schedules are already optimal until the row contains six
