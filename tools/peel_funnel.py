@@ -69,16 +69,16 @@ BENCH_DEFAULT = "build-fast/codec/wirehair_v2_bench"
 # not searched -- leaving them free makes the search WANDER OFF-STRUCTURE, where
 # the cost proxy inverts (Spearman +0.10 at 6,9,1 against -0.80 at 30,10,12).
 DENSE_COUNT = {
-    2: 2, 4: 3, 8: 6, 16: 13, 32: 13, 64: 19, 128: 30, 256: 30, 512: 38, 1024: 50, 2048: 54,
-    3072: 62, 4096: 70, 5120: 70, 6144: 74, 7168: 74, 8192: 78, 9216: 78, 10240: 86, 11264:
-    94, 12288: 98, 13312: 106, 14336: 114, 15360: 114, 16384: 114, 17408: 118, 18432: 122,
-    19456: 130, 20480: 138, 21504: 138, 22528: 146, 23552: 154, 24576: 158, 25600: 162,
-    26624: 170, 27648: 174, 28672: 178, 29696: 178, 30720: 182, 31744: 190, 32768: 194,
-    33792: 202, 34816: 206, 35840: 214, 36864: 218, 37888: 226, 38912: 234, 39936: 250,
-    40960: 266, 41984: 286, 43008: 302, 44032: 318, 45056: 330, 46080: 346, 47104: 358,
-    48128: 370, 49152: 378, 50176: 378, 51200: 386, 52224: 390, 53248: 390, 54272: 386,
-    55296: 378, 56320: 370, 57344: 366, 58368: 358, 59392: 354, 60416: 346, 61440: 338,
-    62464: 338, 63488: 342
+    2: 2, 4: 3, 8: 6, 16: 13, 32: 13, 64: 19, 128: 30, 192: 30, 256: 30, 384: 34, 512: 38,
+    768: 42, 1024: 50, 1536: 58, 2048: 54, 3072: 62, 4096: 70, 5120: 70, 6144: 74, 7168: 74,
+    8192: 78, 9216: 78, 10240: 86, 11264: 94, 12288: 98, 13312: 106, 14336: 114, 15360: 114,
+    16384: 114, 17408: 118, 18432: 122, 19456: 130, 20480: 138, 21504: 138, 22528: 146,
+    23552: 154, 24576: 158, 25600: 162, 26624: 170, 27648: 174, 28672: 178, 29696: 178,
+    30720: 182, 31744: 190, 32768: 194, 33792: 202, 34816: 206, 35840: 214, 36864: 218,
+    37888: 226, 38912: 234, 39936: 250, 40960: 266, 41984: 286, 43008: 302, 44032: 318,
+    45056: 330, 46080: 346, 47104: 358, 48128: 370, 49152: 378, 50176: 378, 51200: 386,
+    52224: 390, 53248: 390, 54272: 386, 55296: 378, 56320: 370, 57344: 366, 58368: 358,
+    59392: 354, 60416: 346, 61440: 338, 62464: 338, 63488: 342, 64000: 346
 }
 
 BOX = [("scale", 100, 4000),   # centi; mean staircase row degree
@@ -126,7 +126,15 @@ class Funnel:
             self.calls += 1
             p = subprocess.run(
                 [self.a.bench, "essearch", "--N", str(self.k),
-                 "--fix-structure", self.struct, "--s-hi", "80",
+                 # --s-lo 1 because SmallBandStaircaseCount(2) = 1 and the ES
+                 # coordinate box otherwise floors S at 2, which rejects the
+                 # structure the codec actually builds at the smallest K.
+                 # --s-lo 1 / --s-hi 400 must SPAN the S the codec builds across the
+                 # whole K range: SmallBandStaircaseCount(2) = 1 and
+                 # GetDenseCount(16384) = 114, rising to 390 near K=52224. A
+                 # default box of [2,80] silently rejects both ends -- it cost the
+                 # K=2 anchor and the entire K >= 16384 tail of the first sweep.
+                 "--fix-structure", self.struct, "--s-lo", "1", "--s-hi", "400",
                  "--target", str(self.a.target), "--lam", str(int(self.a.lam)),
                  "--measure", "--threads", str(self.a.threads),
                  "--cells", f"{self.a.cell_base}:{self.a.cell_base + cells}",
@@ -188,16 +196,43 @@ class Funnel:
     def clamp(v):
         return [max(lo, min(hi, int(round(x)))) for x, (_, lo, hi) in zip(v, BOX)]
 
+    def incumbent_fail(self):
+        """Failure of the SHIPPED law at this K, at screen resolution.
+
+        The feasibility gate cannot be an absolute percentage across the whole K
+        range: at K=2 the shipped law itself fails most of the time (measured
+        83.2% for one structure at K=2, 3.5% at K=32), so a flat 1.5% gate
+        rejects every candidate including the incumbent and the search reports
+        no winner. Gate RELATIVE to the incumbent instead -- a candidate has to
+        be no worse than the law we are trying to beat, not better than a
+        constant chosen at K=128.
+        """
+        neutral = [1400, 100, 100, 64, 100]      # scale is irrelevant to the probe
+        (_, f), = self.measure([neutral], self.a.screen_cells)
+        return f
+
     def run(self, seed):
         rng = random.Random(seed)
         t0 = time.time()
 
+        # NO PROXY FEASIBILITY GATE. The proxy failure term is not a usable
+        # gate at any K and is actively misleading at small K -- it reports 100%
+        # at K=2, 24.4% at K=8 and 3.2% at K=32 where the real codec decodes
+        # 0/2000 with OH_mean <= 0.0065, because it ignores seed escalation. A
+        # relative gate merely rescales a meaningless number. So stages 1-2 rank
+        # on COST ALONE, which IS sound (Spearman -1.000 against real throughput
+        # on the tilt axis at the shipped structure), and reality decides in
+        # stage 3. The risk this takes on is that cost alone prefers degenerate
+        # laws, so the finals pool is deliberately wide and every member is put
+        # to the real codec.
+        self.gate = float("inf")
+
         pts = self.lhs(rng, self.a.screen, self.a.init)
         res = self.measure(pts, self.a.screen_cells)
         alive = [(o, f, p) for p, (o, f) in zip(pts, res)
-                 if o is not None and f is not None and f <= self.a.gate]
+                 if o is not None and f is not None and f <= self.gate]
         print(f"  screen  {self.a.screen} pts @{self.a.screen_cells} cells  "
-              f"{time.time()-t0:5.1f}s  {len(alive)} passed <= {self.a.gate}%")
+              f"{time.time()-t0:5.1f}s  {len(alive)} passed <= {self.gate:.2f}%")
         if not alive:
             print("  nothing passed the feasibility gate")
             return None
@@ -221,69 +256,127 @@ class Funnel:
             used += len(cand)
             moved = False
             for p, (o, f) in zip(cand, res):
-                if o is not None and f is not None and f <= self.a.gate and o < best:
+                if o is not None and f is not None and f <= self.gate and o < best:
                     best, bestv, moved = o, p, True
             if not moved:
                 r *= 0.5
         print(f"  refine  {used} pts @{self.a.screen_cells} cells  "
               f"{time.time()-t1:5.1f}s  {alive[0][0]:,.0f} -> {best:,.0f}")
 
+        # THE INCUMBENT IS ALWAYS A FINALIST. Without it the search can return a
+        # REGRESSION and not notice: at K=4096 the funnel picked 1034.9 MB/s
+        # while the shipped law measures 1239.2, because LHS never sampled the
+        # shipped point and nothing else in the pool beat it. Including it costs
+        # one probe and makes "no worse than shipping" a property of the output
+        # rather than a hope.
+        # The incumbent is the SHIPPED point in full: shipped scale 14.00 AND the
+        # shipped law (p1 100 = unchanged degree-1 mass, tilt 0 on the offset
+        # lattice, dmax 64, absorb 100). Carrying the found scale instead makes
+        # this a hybrid that is neither arm -- it measured 1145.9 at K=4096 where
+        # the true shipped point measures 1239.2, so the "guarantee" guaranteed
+        # nothing.
+        incumbent = [1400, 100, 100, 64, 100]
         pool = [bestv] + [v for _, _, v in alive if v != bestv]
-        pool = pool[:self.a.finals]
+        pool = pool[:max(1, self.a.finals - 1)] + [incumbent]
         t2 = time.time()
-        fine = self.measure(pool, self.a.final_cells)
-        ranked = sorted([(o, f, v) for v, (o, f) in zip(pool, fine) if o is not None],
-                        key=lambda r: r[0])
-        print(f"  finals  {len(pool)} pts @{self.a.final_cells} cells  "
-              f"{time.time()-t2:5.1f}s")
-        if not ranked:
+        ok, dead = self.real_select(pool)
+        print(f"  finals  {len(pool)} gated @bb{self.a.gate_bb}/"
+              f"{self.a.gate_trials}tr, top {self.a.rank_top} timed @bb"
+              f"{self.a.rank_bb}/{self.a.real_trials}tr  {time.time()-t2:5.1f}s  "
+              f"{len(dead)} rejected as non-decoding")
+        if not ok:
+            print("  no candidate decoded -- the incumbent stands at this K")
             return None
+        ranked = [(g, oh, mb, fail, v) for g, fail, oh, mb, v in ok]
         print(f"\n  K={self.k}  structure {self.struct}  "
               f"total {time.time()-t0:.1f}s, {self.calls} bench calls\n")
-        print(f"  {'rank':>4} {'objective':>12} {'fail%':>7}  parameters")
-        for i, (o, f, v) in enumerate(ranked[:self.a.show], 1):
-            print(f"  {i:>4} {o:>12,.0f} {f:>6.3f}%  scale={v[0]/100:.2f} "
+        print(f"  {'rank':>4} {'goodput':>10} {'MB/s':>9} {'OH_mean':>9}  parameters")
+        for i, (g, oh, mb, fail, v) in enumerate(ranked[:self.a.show], 1):
+            print(f"  {i:>4} {g:>10.1f} {mb:>9.1f} {oh:>9.4f}  scale={v[0]/100:.2f} "
                   f"p1={v[1]} tilt={v[2]-100} dmax={v[3]} absorb={v[4]}")
         # The 1,000-cell stages are an ordering; only this stage is a value.
-        print(f"\n  NOTE finalist objectives differ by less than the "
-              f"measurement resolves; treat the top few as tied.")
+        print(f"\n  NOTE goodput = MB/s * K/(K+OH); failure is a hard gate, not a "
+              f"term.\n       Top finalists are typically within noise of each other.")
         return ranked
 
-    def check_real(self, ranked, n):
-        """Gate finalists on the REAL codec: fail must be 0, OH is the 2nd axis.
+    def real_probe(self, v, trials, bb):
+        """(fail, OH_mean, decode_MBps) from the REAL codec for one candidate.
 
-        The proxy failure term is non-monotone against real overhead, so a good
-        proxy score is not evidence of a decodable distribution. Distributions
-        that win at K=128 fail EVERY trial at K=512; nothing may be recommended
-        without passing here.
+        This is the only trustworthy recovery measurement. The proxy failure
+        term is a single-shot precode solve at zero overhead and ignores the
+        encoder's seed escalation (up to kMaxPacketSeedAttempts = 256), which
+        absorbs essentially all of it at small K: the proxy reports 100% failure
+        at K=2, 24.4% at K=8 and 3.2% at K=32, while the real codec decodes
+        0/2000 at every one of those with OH_mean <= 0.0065. It is also
+        NON-MONOTONE against real overhead at K=64, so no calibration rescues it.
         """
-        import math
-        print(f"\n  real-codec gate, {self.a.real_trials} trials each\n")
-        print(f"  {'rank':>4} {'fail':>12} {'OH_mean':>9} {'decode MB/s':>12}  verdict")
-        for i, (o, f, v) in enumerate(ranked[:n], 1):
-            stock = self.stock_pmf()
-            w = self.family(stock, v[1], v[2] - 100, v[3], v[4])
-            env = {"WIREHAIR_V2_PEEL_DEGREES": ",".join(f"{x:.9f}" for x in w)}
-            import os
-            p = subprocess.run(
-                [self.a.bench, "compare", "--nlo", str(self.k), "--nhi", str(self.k),
-                 "--bb-list", "4096", "--trials", str(self.a.real_trials),
-                 "--loss", "0.10", "--precode", "--precode-profile", "mixed",
-                 "--mixed-gf16-rows", "0"],
-                capture_output=True, text=True, env=dict(os.environ, **env))
-            hdr = None
-            for line in p.stdout.splitlines():
-                if line.startswith("codec"):
-                    hdr = line.split()
-                elif line.startswith("v2_mixed") and hdr:
-                    g = line.split()
-                    fail = int(g[hdr.index("fail")])
-                    oh = float(g[hdr.index("OH_mean")])
-                    mb = float(g[hdr.index("decode_MBps")])
-                    ok = fail == 0
-                    print(f"  {i:>4} {f'{fail}/{self.a.real_trials}':>12} {oh:>9.4f} "
-                          f"{mb:>12.1f}  {'PASS' if ok else 'FAILS -- REJECT'}")
-                    break
+        import os
+        w = self.family(self.stock_pmf(), v[1], v[2] - 100, v[3], v[4])
+        if w is None:
+            return None
+        env = dict(os.environ,
+                   WIREHAIR_V2_PEEL_DEGREES=",".join(f"{x:.9f}" for x in w))
+        p = subprocess.run(
+            [self.a.bench, "compare", "--nlo", str(self.k), "--nhi", str(self.k),
+             "--bb-list", str(bb), "--trials", str(trials),
+             "--loss", "0.10", "--precode", "--precode-profile", "mixed",
+             "--mixed-gf16-rows", "0"],
+            capture_output=True, text=True, env=env)
+        hdr = None
+        for line in p.stdout.splitlines():
+            if line.startswith("codec"):
+                hdr = line.split()
+            elif line.startswith("v2_mixed") and hdr:
+                g = line.split()
+                try:
+                    return (int(g[hdr.index("fail")]),
+                            float(g[hdr.index("OH_mean")]),
+                            float(g[hdr.index("decode_MBps")]))
+                except (ValueError, IndexError):
+                    return None
+        return None
+
+    def real_select(self, pool):
+        """Two-tier: a cheap solve-rate GATE, then a real-payload RANK.
+
+        The two jobs need completely different measurements, and conflating them
+        was costing about 50x:
+
+          GATE (does it decode?) is a solve-rate question, so it needs neither a
+          real payload nor many trials. A non-decoder fails 10 of 10 -- measured
+          at K=512 -- so 25 trials is ample, and dropping the payload from 4096
+          to 64 bytes takes a passing candidate from 2.44 s to 0.25 s with an
+          identical verdict and overhead. Moving bytes to answer "is the matrix
+          solvable" is pure waste.
+
+          RANK (how fast is it?) is a timing question and DOES need a realistic
+          payload, or decode_MBps measures loop overhead instead of memory
+          traffic. But only the survivors need it, not the whole pool.
+
+        J = decode_MBps * K/(K+OH): overhead is a bandwidth term, since
+        delivering K blocks costs K+OH packets sent, and failure is a HARD GATE
+        rather than a large number -- a distribution that does not decode has no
+        goodput at all. Both facts are measured: at K=512, seven of nineteen
+        arms failed EVERY trial, and they were exactly the arms that win at
+        K=128.
+        """
+        passed, dead = [], []
+        for v in pool:
+            r = self.real_probe(v, self.a.gate_trials, self.a.gate_bb)
+            if r is None:
+                continue
+            fail, oh, mb = r
+            (dead if fail > 0 else passed).append((fail, oh, mb, v))
+        out = []
+        for _, _, _, v in passed[:self.a.rank_top]:
+            r = self.real_probe(v, self.a.real_trials, self.a.rank_bb)
+            if r is None:
+                continue
+            fail, oh, mb = r
+            if fail > 0:                      # slipped through the cheap gate
+                dead.append((fail, oh, mb, v)); continue
+            out.append((mb * self.k / (self.k + oh), fail, oh, mb, v))
+        return sorted(out, key=lambda x: -x[0]), dead
 
     def stock_pmf(self):
         w = [1.0 / self.k] + [1.0 / (d * (d - 1)) for d in range(2, 64)]
@@ -314,6 +407,9 @@ def main():
     ap.add_argument("--finals", type=int, default=20)
     ap.add_argument("--screen-cells", type=int, default=1000)
     ap.add_argument("--final-cells", type=int, default=100000)
+    ap.add_argument("--gate-mult", type=float, default=1.25,
+                    help="gate is max(--gate, this x the incumbent's failure at "
+                         "this K); a flat gate rejects everything at small K")
     ap.add_argument("--gate", type=float, default=1.5,
                     help="coarse feasibility threshold in percent at screen-cells")
     ap.add_argument("--target", type=float, default=0.0095)
@@ -328,16 +424,21 @@ def main():
                          "lattice (tilt = signed + 100), normally the answer "
                          "from a neighbouring K")
     ap.add_argument("--init-frac", type=float, default=0.20)
-    ap.add_argument("--check-real", type=int, default=0,
-                    help="gate this many finalists on the real codec")
-    ap.add_argument("--real-trials", type=int, default=2000)
+    ap.add_argument("--real-trials", type=int, default=2000,
+                    help="trials for the RANK tier (real payload)")
+    ap.add_argument("--gate-trials", type=int, default=25,
+                    help="trials for the cheap solve-rate gate")
+    ap.add_argument("--gate-bb", type=int, default=64,
+                    help="payload for the gate; solve rate does not need bytes")
+    ap.add_argument("--rank-bb", type=int, default=4096,
+                    help="payload for throughput ranking; must be realistic")
+    ap.add_argument("--rank-top", type=int, default=3,
+                    help="how many gate survivors get a real timing measurement")
     a = ap.parse_args()
     if a.init:
         a.init = [int(x) for x in a.init.split(',')]
     f = Funnel(a)
     ranked = f.run(a.seed)
-    if ranked and a.check_real:
-        f.check_real(ranked, a.check_real)
     return 0 if ranked else 1
 
 
