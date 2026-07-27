@@ -2136,5 +2136,18 @@
   "shipped_mbps": 1222.9,
   "gain_pct": 0.0,
   "search_would_have_lost_pct": -16.32
+ },
+ "8192": {
+  "K": 8192,
+  "p1": 100,
+  "tilt": 0,
+  "dmax": 64,
+  "absorb": 100,
+  "reverted_to_shipped": true,
+  "verified_mbps": 993.5,
+  "verified_oh": 0.0025,
+  "shipped_mbps": 993.5,
+  "gain_pct": 0.0,
+  "search_would_have_lost_pct": -25.26
  }
 }
