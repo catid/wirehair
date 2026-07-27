@@ -19,7 +19,9 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
+#include <mutex>
 #include <new>
 #include <sstream>
 #include <stdexcept>
@@ -96,6 +98,27 @@ bool ParseU64Scalar(const char* text, uint64_t& out)
 bool ParseDoubleScalar(const char* text, double& out)
 {
     if (!text || !*text || ((*text < '0' || *text > '9') && *text != '.')) {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (errno != 0 || !end || *end != '\0' || !std::isfinite(value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+/// ParseDoubleScalar with an optional leading sign.  Used only by the target
+/// mean staircase row degree, whose "not supplied" spelling is -1.
+bool ParseSignedDoubleScalar(const char* text, double& out)
+{
+    if (!text || !*text) {
+        return false;
+    }
+    const char* body = (*text == '-' || *text == '+') ? text + 1 : text;
+    if ((*body < '0' || *body > '9') && *body != '.') {
         return false;
     }
     errno = 0;
@@ -9994,7 +10017,7 @@ int CmdPrecodeFail(int argc, char** argv)
 
 /*
     precodesweep: the untuned per-cell protocol of `precodefail --trials 1`,
-    evaluated for a list of (S, H, N1, D2) structure configs over a range of
+    evaluated for a list of (S, H, D2, scale) structure configs over a range of
     cell indices, in ONE process with a thread pool over cells.
 
     One cell i is exactly one untuned precodefail run:
@@ -10025,13 +10048,588 @@ int CmdPrecodeFail(int argc, char** argv)
     prints no CSV data row.
 */
 
+/**
+    Lattice for PrecodeParams::StaircaseDegreeScale -- the TARGET MEAN
+    STAIRCASE ROW DEGREE -- in HUNDREDTHS of a degree ("centi-degrees").
+
+    Every search coordinate in this file is an integer, so the one continuous
+    parameter of the construction is carried on an integer lattice too.  The
+    resolution is one hundredth of a mean row degree, i.e. S/100 edges: at
+    S = 6 that is 0.06 edges, so a ONE-STEP move changes the resolved edge
+    budget by AT MOST ONE EDGE and often by none.  That is the point.  N1 --
+    the integer this parameter replaces -- moved the same budget in steps of
+    K edges (128 at K=128), so it was frozen on 87.7% of mirrored pairs; the
+    finest possible move is now the smallest change the construction admits.
+    Under the stochastic rounder the expected objective is the piecewise
+    linear interpolant between lattice points, so sub-edge steps still carry
+    gradient rather than being dead.
+
+    kDegreeScaleCentiUnset means NO SCALE IS SUPPLIED: the certified
+    K * min(N1,S) budget applies and the construction is unchanged.  It is
+    spelled -1.00 degrees on a command line and in a config, matching
+    wirehair_v2::kStaircaseDegreeScaleUnset, so a printed row is replayable.
+*/
+const uint32_t kDegreeScaleCentiLo = 0u;
+const uint32_t kDegreeScaleCentiHi = 6400000u; ///< 64000.00 degrees
+const uint32_t kDegreeScaleCentiUnset = UINT32_MAX;
+
+/// The one spelling of the unset scale on the centi-degree lattice.
+const long long kDegreeScaleCentiUnsetSpelling = -100;
+
+/**
+    Resolve a textual mean staircase row degree onto the centi-degree lattice.
+
+    Accepts a value in [0, 64000] degrees, or exactly -1 for "unset".  Any
+    other negative value is an error rather than a second spelling of unset,
+    so a sign typo is loud.
+*/
+bool ResolveDegreeScaleCenti(
+    const char* what,
+    double scale,
+    uint32_t& centi_out)
+{
+    if (!std::isfinite(scale))
+    {
+        std::fprintf(stderr, "%s must be a finite mean row degree\n", what);
+        return false;
+    }
+    const long long centi = std::llround(scale * 100.0);
+    if (centi == kDegreeScaleCentiUnsetSpelling)
+    {
+        centi_out = kDegreeScaleCentiUnset;
+        return true;
+    }
+    if (centi < (long long)kDegreeScaleCentiLo ||
+        centi > (long long)kDegreeScaleCentiHi)
+    {
+        std::fprintf(stderr,
+            "%s must be a mean staircase row degree in [%.2f,%.2f], or "
+            "-1 for the certified budget\n", what,
+            (double)kDegreeScaleCentiLo / 100.0,
+            (double)kDegreeScaleCentiHi / 100.0);
+        return false;
+    }
+    centi_out = (uint32_t)centi;
+    return true;
+}
+
+/// Parse a TARGET MEAN STAIRCASE ROW DEGREE argument.  The resolved
+/// centi-degree value is what gets printed in the run banner, so a command
+/// line that asked for a scale finer than one centi-degree says so in its own
+/// receipt.
+///
+/// `flag` is the option the operator actually typed -- --degree-scale on
+/// precodesweep/precodecost, --scale-lo/--scale-hi/--init-scale on essearch.
+/// It is a parameter rather than a hard-coded string because an error that
+/// names a flag the command does not even accept sends the operator looking
+/// for a knob that is not there.
+bool ParseDegreeScaleArg(
+    const char* command,
+    const char* flag,
+    const char* value,
+    uint32_t& centi_out)
+{
+    double scale = 0.0;
+    if (!ParseSignedDoubleScalar(value, scale)) {
+        return BadArg(flag, value);
+    }
+    std::string what(command);
+    what += " ";
+    what += flag;
+    return ResolveDegreeScaleCenti(what.c_str(), scale, centi_out);
+}
+
+/// Printable form of a centi-degree scale: the degrees a config or CSV row
+/// would carry, with the unset sentinel spelled -1.00.
+double DegreeScaleDegrees(uint32_t centi)
+{
+    return centi == kDegreeScaleCentiUnset ?
+        (double)kDegreeScaleCentiUnsetSpelling / 100.0 :
+        (double)centi / 100.0;
+}
+
+/// Fields the staircase shape block occupies in a --configs token: p1,p2,p3,
+/// c1..c5,dmax.  Declared here because the config parser runs long before the
+/// ES section, and cross-checked against kEsShapeCoords there so the two
+/// spellings of "nine" cannot drift apart.
+const size_t kShapeConfigFields = 9u;
+
+/// Highest degree the peel-row weight generator can return, and the degree the
+/// shipped law truncates onto.  kMaxPeelCount in WirehairTools.cpp; named here
+/// because the peel coordinates' box ceiling is this number, not a search
+/// choice.
+const uint32_t kPeelMaxDegree = 64u;
+
+/**
+    Half-width of the peel tilt axis, in centi.
+
+    The tilt is SIGNED everywhere a human reads or writes it -- config tokens,
+    printed configs, the banner -- because zero is its neutral value and the
+    two signs mean opposite things (negative flattens the tail relative to the
+    shipped soliton, positive steepens it).  It is carried on the search
+    lattice OFFSET by this constant, because every ES coordinate is an
+    unsigned integer, and every printer converts back.
+
+    The offset spelling was briefly the only spelling, and it cost a full
+    round trip: a reader wrote peel_tilt = 0 meaning "no tilt" and measured
+    tilt = -1.00, the heaviest tail the box can express, then reported it as a
+    failed identity gate.  A knob whose neutral value is not zero will be
+    written as zero.
+*/
+const uint32_t kPeelTiltRange = 100u;
+
+/**
+    The box is ASYMMETRIC, and the asymmetry is measured rather than assumed.
+
+    kPeelTiltRange above is the lattice OFFSET and also the FLATTENING limit.
+    Steepening needs far more room than flattening, because the two directions
+    are not remotely symmetric in what they buy:
+
+      flattening (negative tilt) is the worst thing this family can do.  Against
+      the shipped law on the full codec at K=128/bb=4096, tilt -20 measures
+      -10.67% decode and tilt -40 measures -14.39%, at t = -28.9 and -42.8
+      against a 0.11% A/A floor.  There is nothing below -100 worth reaching.
+
+      steepening (positive tilt) is the win, and it is still climbing at the old
+      +100 ceiling: +3.5% at +20, +7.9% at +60, +12.8% at +100, and about +27%
+      at +400 -- with fail 0 and OH_mean <= 0.0067 throughout, so it is not
+      bought with overhead.  A box that stops at +100 stops ON the optimum's
+      slope and the search reports a boundary hit as a convergence.
+
+    So the ceiling is raised to +400 while the floor stays at -100.  The neutral
+    point is unchanged at kPeelTiltRange, so (100, 100, 64) is still the shipped
+    law exactly and generation 0 is still an instance of the identity gate.
+
+    NOT A SHIPPING RECOMMENDATION.  The optimum COLLAPSES with K: roughly +20 to
+    +60 at K=512, about 0 at K=2048, and tilt >= +40 fails outright at K=2048.
+    A wide box is correct for SEARCHING at a given K; the value it finds is only
+    valid at that K.
+*/
+const uint32_t kPeelTiltMaxSteepen = 1600u;
+
+/*
+    WHY 1600 AND NOT MORE.  The family SATURATES: as tilt grows it converges on
+    P(1) = 1, an all-degree-1 peel law, and every tilt above roughly 1500 is the
+    SAME distribution.  Measured shape at K=64 -- tilt 800 gives P(1) 0.8875 and
+    mean degree 1.114, tilt 1200 gives 0.9922 and 1.008, tilt 2000 gives exactly
+    1.0000 and 1.000.  A higher ceiling would hand the search a plateau of
+    identical points to wander over, which is worse than a ceiling: it looks like
+    exploration and is not.
+
+    1600 covers the measured optimum wherever the family is still live.  The K
+    scaling law (tilt multiplies by 0.310 per doubling of K) predicts tilt(64) =
+    1061 and the measured K=64 optimum is 800-1200, so the law holds there.  It
+    predicts tilt(32) = 3424 and tilt(16) = 11044, both past saturation, where
+    they denote the identical degenerate law -- so the law must NOT be
+    extrapolated below about K=64, and no ceiling can rescue that.
+*/
+
+/// Full absorption: the truncated tail's whole mass lands on w(dmax).  Also
+/// the value at which the peel family reduces to its pre-absorb behaviour, so
+/// a config written before this coordinate existed still means what it meant.
+const uint32_t kPeelAbsorbFull = 100u;
+
 struct PrecodeSweepConfig
 {
     uint32_t Staircase = 0u;      ///< S; 0 keeps the profile default
     uint32_t MixedGF256Rows = 0u; ///< H; 0 keeps --mixed-gf256-rows
-    uint32_t SourceHits = 0u;     ///< N1; 0 keeps the profile default
     uint32_t DenseRows = 0u;      ///< D2; 0 keeps the profile default
+
+    /**
+        Target MEAN STAIRCASE ROW DEGREE, in centi-degrees.
+
+        kDegreeScaleCentiUnset (the default) inherits --degree-scale, which
+        itself defaults to unset, i.e. the certified K*min(N1,S) budget.
+
+        N1 is deliberately absent from this struct.  It was the coarse integer
+        that pinned the edge budget to multiples of K, this replaces it, and a
+        field that is carried but ignored is exactly the failure mode the
+        config syntax now refuses.
+    */
+    uint32_t DegreeScaleCenti = kDegreeScaleCentiUnset;
+
+    /**
+        Staircase row-degree SHAPE, off unless ShapeActive.
+
+        Parameterization, chosen because the low degrees are what sustains the
+        peeling ripple and deserve individual parameters while the tail needs
+        a curve rather than just an extent:
+
+            P1, P2, P3   probability of degree 1, 2 and 3 in PERCENT [0,100]
+            C1..C5       degree-5 tail polynomial, percents offset by 100
+            DMax         the largest degree the tail spans
+
+        The tail is w(d) = P3 * (1 + c1*t + ... + c5*t^5) with
+        t = (d-3)/(DMax-3), so it is ANCHORED at P3 and the triple is not a
+        mass budget: P1+P2+P3 over 100 is legal and simply means the tail sits
+        low relative to the head, since MakeStaircaseDegreeWeights normalizes
+        the whole vector to unit area.  P3 = 0 kills the tail outright, because
+        the anchor scales it.
+
+        Percent rather than a float: the framework quantizes every search
+        coordinate to an integer anyway, and only S degrees are ever drawn from
+        the distribution (S <= 3*sqrt(K), so 33 at K=128), which makes one
+        percent already finer than one row's worth of mass.  Anything below
+        1/S resolution is sampling noise, so a finer encoding would buy the
+        search nothing and cost it a wider box to travel.
+
+        Only the SHAPE is free.  AppendDegreeBalancedStaircaseEdges rescales
+        the sampled degrees multiplicatively onto the edge budget the degree
+        scale fixes, so the mean degree is pinned at that scale and what
+        survives the rescale is the RATIO between rows.  A point mass at any
+        degree therefore collapses to the same flat sequence -- all six point
+        masses measure bit-identical over 4000 seeds -- which is why the
+        parameterization has to be able to express real dispersion.
+    */
+    bool ShapeActive = false;
+    uint32_t ShapeP1 = 0u;
+    uint32_t ShapeP2 = 0u;
+    uint32_t ShapeP3 = 0u;
+    // Degree-5 polynomial coefficients for the tail from degree 3 to dmax,
+    // stored as percents offset by 100 so [0,200] maps to [-1,+1].
+    uint32_t ShapeC1 = 100u;
+    uint32_t ShapeC2 = 100u;
+    uint32_t ShapeC3 = 100u;
+    uint32_t ShapeC4 = 100u;
+    uint32_t ShapeC5 = 100u;
+    uint32_t ShapeDMax = 0u;
+
+    /**
+        PEELING row-degree law, off unless PeelActive.
+
+        This is the LT output degree distribution -- the K rows the peeler
+        actually peels -- and it is a DIFFERENT object from the staircase shape
+        above, which controls the S-row sparse ladder.  The two were conflated
+        for a whole tuning campaign, so they are separate fields with separate
+        flags rather than one shared block.
+
+            PeelP1     degree-1 mass, in HUNDREDTHS OF THE INCUMBENT's
+                       (100 = the shipped P(1), box [0,400])
+            PeelTilt   exponent tilt, on the OFFSET lattice: the stored value
+                       is tilt_centi + kPeelTiltRange, so 100 is no tilt.
+                       Every human-facing spelling is SIGNED centi in
+                       [-100,+100] with 0 meaning no tilt; the offset exists
+                       only because ES coordinates are unsigned
+            PeelDMax   truncation degree, [4,64], 64 = the shipped truncation
+
+        (100, 100, 64) is the shipped law exactly -- see MakePeelDegreeWeights
+        for why the units are what they are and why that exactness matters.
+    */
+    bool PeelActive = false;
+    uint32_t PeelP1 = 100u;
+    uint32_t PeelTilt = 100u;
+    uint32_t PeelDMax = kPeelMaxDegree;
+    /**
+        Percentage of the residual tail mass ABSORBED into w(dmax) instead of
+        dropped.  100 keeps every truncated degree's mass and piles it on the
+        cut; 0 discards it and renormalizes.
+
+        This coordinate exists because the absorb-only rule put a SPIKE at the
+        cut -- at dmax=20 the atom there was 16x heavier than the discarding
+        rule's -- and a spike at the cut is bad, so the search correctly
+        refused to truncate at all and dmax pinned at its ceiling across 16
+        initializations and three holdout sizes.  The best distribution
+        measured by hand was not a member of the family at any coordinate.
+        The search was right about the family it was given; the family was
+        wrong.
+    */
+    uint32_t PeelAbsorb = kPeelAbsorbFull;
 };
+
+/**
+    Weight vector for degrees 1, 2, 3, ... from the (p1,p2,p3,c1..c5,dmax)
+    percents.
+
+    Degenerate cases are explicit rather than left to the sampler:
+
+      * p3 = 0 collapses the anchored tail to zero whatever c1..c5 and dmax
+        say, so the vector stops at degree 2 (a trailing zero is never kept).
+        p1+p2+p3 over 100 is NOT degenerate: the tail is anchored at p3, not
+        funded by the leftover, and the vector is normalized at the end.
+      * dmax <= 3 has no tail at all, so the vector stops at degree 3.
+      * a vector that would be all zeros (p1=p2=p3=0 with dmax<=3) cannot be
+        sampled from -- AppendDegreeBalancedStaircaseEdges refuses a zero total
+        and the cell would read as a construction failure -- so it falls back to
+        a unit weight on degree 1, which after the multiplicative rescale is
+        exactly the stock balanced sequence.
+
+    Trailing zeros are never emitted: the sampler's "u ran past every weight"
+    fallback lands on the LAST entry, and a zero-weight last entry would hand
+    that residue to a degree the shape gave no mass.
+*/
+/**
+    Peeling row-degree PDF from (p1, p2, p3, c1..c5, dmax).
+
+    Degrees 1, 2 and 3 carry their own learned probabilities, because the low
+    degrees are what sustain the peeling ripple and deserve individual control.
+    From degree 3 onward the curve is a degree-5 POLYNOMIAL in the normalized
+    position t = (d - 3) / (dmax - 3), anchored so that t = 0 reproduces p3:
+
+        w(d) = p3 * (1 + c1*t + c2*t^2 + c3*t^3 + c4*t^4 + c5*t^5)
+
+    A uniform tail cannot express a decaying family at all -- the ideal soliton
+    is rho(d) = 1/(d(d-1)) -- so the tail needs shape, not just extent.  The
+    anchor keeps the curve continuous with the learned head instead of letting
+    the tail start at an unrelated level.
+
+    Coefficients arrive as integer percents offset by 100, i.e. the search sees
+    [0,200] and this maps to [-1,+1]; that keeps every coordinate on the same
+    integer-quantized footing as the rest of theta.
+
+    Negative excursions are clamped to zero: a polynomial is free to dip below
+    the axis and a negative probability is meaningless.  The result is then
+    NORMALIZED to unit area, so the vector is a genuine PDF regardless of what
+    the polynomial does.  (The sampler renormalizes internally as well, but an
+    un-normalized vector would make the learned parameters uninterpretable when
+    reported or plotted.)
+*/
+std::vector<double> MakeStaircaseDegreeWeights(
+    uint32_t p1, uint32_t p2, uint32_t p3,
+    uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4, uint32_t c5,
+    uint32_t dmax)
+{
+    std::vector<double> weights;
+    weights.push_back((double)p1 / 100.0);
+    weights.push_back((double)p2 / 100.0);
+    const double head3 = (double)p3 / 100.0;
+    weights.push_back(head3);
+
+    if (dmax > 3u && head3 > 0.0)
+    {
+        const double a1 = ((double)c1 - 100.0) / 100.0;
+        const double a2 = ((double)c2 - 100.0) / 100.0;
+        const double a3 = ((double)c3 - 100.0) / 100.0;
+        const double a4 = ((double)c4 - 100.0) / 100.0;
+        const double a5 = ((double)c5 - 100.0) / 100.0;
+        const double span = (double)(dmax - 3u);
+        for (uint32_t d = 4u; d <= dmax; ++d)
+        {
+            const double t = (double)(d - 3u) / span;
+            const double t2 = t * t, t3 = t2 * t, t4 = t3 * t, t5 = t4 * t;
+            double w = head3 *
+                (1.0 + a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5);
+            if (!(w > 0.0)) { w = 0.0; }
+            weights.push_back(w);
+        }
+    }
+
+    // Trailing zeros must not be emitted: the sampler's "u ran past every
+    // weight" fallback lands on the LAST entry, so a zero-weight tail entry
+    // would receive residue the shape gave no mass to.
+    while (weights.size() > 1u && !(weights.back() > 0.0)) {
+        weights.pop_back();
+    }
+
+    double total = 0.0;
+    for (double w : weights) { total += w; }
+    if (!(total > 0.0)) {
+        // An all-zero vector cannot be sampled from; fall back to unit mass on
+        // degree 1, which after the multiplicative rescale is exactly the stock
+        // balanced sequence.
+        weights.assign(1u, 1.0);
+        return weights;
+    }
+    for (double& w : weights) { w /= total; }   // unit area: a true PDF
+    return weights;
+}
+
+/**
+    The SHIPPED peel-row degree PMF, recovered from the shipped generator.
+
+    This is deliberately NOT a transcription of kPeelCountDistribution.  That
+    table is file-static in WirehairTools.cpp and, more to the point, a copy of
+    it here could drift from the generator without anything noticing -- and the
+    whole value of the peel search rests on the incumbent being expressible
+    EXACTLY, so a drifting copy would silently move the baseline the search is
+    trying to beat.  Instead the thresholds are recovered by bisection on
+    GeneratePeelRowWeight() itself, which makes the shipped function the single
+    authority by construction.
+
+    The recovered PMF is exact in the strongest available sense: every entry is
+    an integer count of 32-bit random values divided by 2^32, so every entry and
+    every partial sum of them is representable in a double with no rounding, the
+    entries sum to exactly 1.0, and a CDF rebuilt from them lands on exactly the
+    thresholds the generator uses.  That is what makes the identity gate below a
+    bit-for-bit identity rather than an approximate one.
+
+    Weight 1 is handled separately because the generator does not draw it
+    monotonically: `rv < P1` returns 1 and everything above that is monotone in
+    rv, so the weight-1 mass is a PREFIX of the rv domain and the rest is a
+    monotone staircase above it.  Bisection therefore runs on [p1_end, 2^32).
+
+    The N/2 clamp is NOT applied here.  It lives in the sampler and is applied
+    identically to the stock path and to an override, so folding it in here
+    would double-apply it.
+*/
+const std::vector<double>& StockPeelPmf(uint32_t block_count)
+{
+    // Cached per block count: the recovery costs ~2000 generator calls and the
+    // evaluator asks for it once per candidate per worker.
+    static std::mutex mutex;
+    static std::map<uint32_t, std::vector<double>> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto found = cache.find(block_count);
+    if (found != cache.end()) {
+        return found->second;
+    }
+    const auto weight_at = [block_count](uint64_t rv) -> uint32_t {
+        return wirehair::GeneratePeelRowWeight(
+            (uint32_t)rv, (uint16_t)block_count);
+    };
+    const uint64_t kDomain = UINT64_C(1) << 32;
+    // Where the weight-1 prefix ends.  Zero when this block count has no
+    // weight-1 branch at all (block_count > kMaxNForWeight1).
+    uint64_t p1_end = 0;
+    if (weight_at(0) == 1u)
+    {
+        uint64_t lo = 0, hi = kDomain;      // weight_at(lo)==1, invariant
+        while (hi - lo > 1u)
+        {
+            const uint64_t mid = lo + (hi - lo) / 2u;
+            if (weight_at(mid) == 1u) { lo = mid; } else { hi = mid; }
+        }
+        p1_end = hi;
+    }
+    // Above the prefix the weight is monotone non-decreasing in rv, so the
+    // last rv carrying weight <= d bisects cleanly.
+    std::vector<uint64_t> upper(kPeelMaxDegree + 1u, p1_end);
+    for (uint32_t d = 2u; d <= kPeelMaxDegree; ++d)
+    {
+        uint64_t lo = p1_end, hi = kDomain;  // weight_at(hi-1) may exceed d
+        if (weight_at(kDomain - 1u) <= d) { upper[d] = kDomain; continue; }
+        while (hi - lo > 1u)
+        {
+            const uint64_t mid = lo + (hi - lo) / 2u;
+            if (weight_at(mid) <= d) { lo = mid; } else { hi = mid; }
+        }
+        upper[d] = weight_at(lo) <= d ? lo + 1u : lo;
+    }
+    std::vector<double> pmf(kPeelMaxDegree + 1u, 0.0);
+    const double domain = (double)kDomain;
+    pmf[1] = (double)p1_end / domain;
+    uint64_t previous = p1_end;
+    for (uint32_t d = 2u; d <= kPeelMaxDegree; ++d)
+    {
+        const uint64_t end = upper[d] < previous ? previous : upper[d];
+        pmf[d] = (double)(end - previous) / domain;
+        previous = end;
+    }
+    return cache.emplace(block_count, std::move(pmf)).first->second;
+}
+
+/**
+    Peel-row degree PDF from (peel_p1, peel_tilt, peel_dmax).
+
+    THE FAMILY IS AN EXPONENTIAL TILT OF THE SHIPPED LAW, not an analytic
+    soliton written from scratch, and that choice is the whole reason the
+    identity gate can pass:
+
+        w(1)    = (peel_p1 / 100) * P_stock(1)
+        w(d)    = P_stock(d) * d^(-tilt)            2 <= d < dmax
+        w(dmax) = [ a * sum_{i >= dmax} P_stock(i)
+                    + (1 - a) * P_stock(dmax) ] * dmax^(-tilt)
+        tilt    = (peel_tilt - kPeelTiltRange) / 100
+        a       = peel_absorb / 100
+        then normalized to unit area.
+
+    THE TRUNCATION RULE IS A COORDINATE, not a convention.  a = 1 keeps the
+    truncated mass and piles it on the cut; a = 0 drops it and lets the
+    normalization redistribute it.  The two are far apart where it matters --
+    at dmax = 20 the atom at the cut differs by 16x, an L1 distance of 0.12 --
+    and the difference is not a detail: absorb-only builds a spike at the cut,
+    which is bad, so a search given only that rule correctly declines to
+    truncate and pins dmax at its ceiling.  Handing the search one end of this
+    tradeoff excluded the best distribution measured by hand from the family
+    entirely.
+
+    a IS EXACTLY INERT AT dmax = kPeelMaxDegree.  There is nothing above the
+    top degree, so the absorbed sum IS P_stock(dmax) and the blend is a convex
+    combination of two identical numbers.  That is what lets the incumbent stay
+    bit-exact for EVERY value of a, and it is why this coordinate can start at
+    the discarding end without disturbing the identity gate.
+
+    peel_tilt arrives here on the OFFSET lattice; the signed spelling every
+    config token, printed row and banner uses is tilt = peel_tilt - 100, so
+    NEGATIVE tilt flattens the tail relative to the shipped soliton and
+    POSITIVE steepens it.  Sign matters more than magnitude here: flattening
+    is the direction that has beaten stock.
+
+    At (peel_p1, peel_tilt, peel_dmax) = (100, 100, 64) every factor is 1 and
+    the vector IS the shipped PMF, bit for bit, so the incumbent is a lattice
+    point of the family rather than something the family approximates.  Writing
+    the tail as an analytic 1/(d(d-1)) instead would MISS the incumbent in two
+    separate ways -- the shipped table is fixed-point-rounded, and its weight-1
+    mass is a SHIFT taken out of the deep tail rather than a carve-out, so the
+    d=64 atom is 0.00806 and not 1/63 -- and a search whose family excludes what
+    it must beat cannot report that it beat it.
+
+    THE COORDINATE UNITS ARE HUNDREDTHS OF THE INCUMBENT, not ten-thousandths
+    of unit probability as first specified.  P_stock(1) is (2^25 - 1)/2^32,
+    which is not representable on any decimal lattice, so a ten-thousandths
+    coordinate could not express the incumbent: the nearest value, 78/10000,
+    misplaces 1.25e-5 of the rv domain and flips roughly one draw in 80,000 --
+    about 32 rows over a 20,000-cell block, which is not bit-identity and would
+    have left the gate permanently red.  Hundredths-of-incumbent keeps the
+    requested [0,400] box and its ~4x span, makes 100 the neutral setting in
+    the same spelling c1..c5 already use, and is exact at the incumbent.
+
+    TRUNCATION ABSORBS RATHER THAN DISCARDS.  The shipped law truncates at 64 by
+    giving degree 64 all the remaining mass, so moving the truncation point is
+    the same KIND of operation at every dmax and dmax = 64 reproduces stock
+    exactly.  Dropping the tail and renormalizing instead would make dmax = 64
+    differ from stock by a factor of 32 in the top atom, which again is the
+    identity gate.
+*/
+std::vector<double> MakePeelDegreeWeights(
+    uint32_t block_count,
+    uint32_t peel_p1,
+    uint32_t peel_tilt,
+    uint32_t peel_dmax,
+    uint32_t peel_absorb)
+{
+    const std::vector<double>& stock = StockPeelPmf(block_count);
+    uint32_t dmax = peel_dmax;
+    if (dmax < 2u) { dmax = 2u; }
+    if (dmax > kPeelMaxDegree) { dmax = kPeelMaxDegree; }
+    const double tilt = ((double)peel_tilt - 100.0) / 100.0;
+    std::vector<double> weights(dmax + 1u, 0.0);
+    // Index 0 is unused: the codec's degree axis starts at 1 and the sampler
+    // is handed weights for degrees 1..dmax in order, so the vector returned
+    // below drops it.
+    weights[1] = ((double)peel_p1 / 100.0) * stock[1];
+    for (uint32_t d = 2u; d < dmax; ++d)
+    {
+        weights[d] = stock[d] *
+            (tilt == 0.0 ? 1.0 : std::pow((double)d, -tilt));
+    }
+    double absorbed = 0.0;
+    for (uint32_t d = dmax; d <= kPeelMaxDegree; ++d) { absorbed += stock[d]; }
+    const double a = (double)std::min(peel_absorb, 100u) / 100.0;
+    // Written as a blend of the two rules rather than as "stock plus a share
+    // of the surplus", because at a = 1 the first term must be the absorbed
+    // sum EXACTLY -- not the sum reassembled from parts -- or the incumbent
+    // stops being bit-exact.
+    weights[dmax] = (a * absorbed + (1.0 - a) * stock[dmax]) *
+        (tilt == 0.0 ? 1.0 : std::pow((double)dmax, -tilt));
+
+    std::vector<double> out(weights.begin() + 1, weights.end());
+    double total = 0.0;
+    for (double w : out) { total += w > 0.0 ? w : 0.0; }
+    if (!(total > 0.0))
+    {
+        // p1 = 0 with every tail weight underflowed cannot be sampled from.
+        // Fall back to the incumbent rather than to an arbitrary law, so a
+        // degenerate corner of the box measures something meaningful instead
+        // of reading as a construction failure.
+        return MakePeelDegreeWeights(
+            block_count, 100u, kPeelTiltRange, kPeelMaxDegree,
+            kPeelAbsorbFull);
+    }
+    // Exact at the incumbent: total is then exactly 1.0 and this divides by
+    // one, which is why the identity survives normalization.
+    for (double& w : out) { w = (w > 0.0 ? w : 0.0) / total; }
+    return out;
+}
 
 struct PrecodeSweepRun
 {
@@ -10079,6 +10677,9 @@ struct PrecodeSweepRun
     uint32_t GroupedGF256Rows = 0u;
     uint32_t GroupedGF256RowMask = 0u;
     bool GroupedGF256RowMaskExplicit = false;
+    /// Run-wide default target mean staircase row degree, in centi-degrees.
+    /// Unset leaves the certified budget alone; a config's own set value wins.
+    uint32_t DegreeScaleCenti = kDegreeScaleCentiUnset;
 
     /**
         Width the cell solves at.
@@ -10107,15 +10708,86 @@ struct PrecodeSweepRun
             config.MixedGF256Rows : MixedGF256Rows;
     }
 
+    /// Target mean staircase row degree for a config, in centi-degrees.  Same
+    /// rule as ActiveGF256Rows: the config wins when it carries one.
+    uint32_t ActiveDegreeScaleCenti(const PrecodeSweepConfig& config) const
+    {
+        return config.DegreeScaleCenti != kDegreeScaleCentiUnset ?
+            config.DegreeScaleCenti : DegreeScaleCenti;
+    }
+
     /**
         Apply this config's thread-local codec knobs to the calling thread.
 
         The order is CmdPrecodeFail's configure_test_thread() order and must
         stay that way: every setter before the last one clears the schedule
-        experiments, so grouped rows have to be configured last.
+        experiments, so grouped rows have to be configured last.  The staircase
+        degree shape is appended after them because it touches none of that
+        state -- it only replaces this thread's degree distribution.
+
+        The shape is applied UNCONDITIONALLY, set when the config carries one
+        and CLEARED when it does not.  Workers are reused across candidates, so
+        an early return here would let one candidate's shape leak into the next
+        candidate scheduled on the same thread; clearing on the stock path is
+        what makes a reused worker equivalent to a fresh one.
     */
     bool ConfigureThread(const PrecodeSweepConfig& config) const
     {
+        if (config.ShapeActive)
+        {
+            wirehair_v2::SetStaircaseDegreesForTesting(
+                MakeStaircaseDegreeWeights(
+                    config.ShapeP1, config.ShapeP2, config.ShapeP3,
+                    config.ShapeC1, config.ShapeC2, config.ShapeC3,
+                    config.ShapeC4, config.ShapeC5, config.ShapeDMax));
+        }
+        else
+        {
+            // Only the thread-local override is cleared, so a run driven by
+            // WIREHAIR_V2_STAIRCASE_DEGREES still sees its distribution.
+            wirehair_v2::ClearStaircaseDegreesForTesting();
+        }
+        /*
+            The PEELING row-degree law, on the same unconditional
+            set-or-CLEAR discipline as the staircase shape above and for the
+            same reason: workers are reused across candidates, so a conditional
+            set would let one candidate's distribution leak into the next one
+            scheduled on the same thread.
+
+            This is applied HERE rather than bracketed around each solve in
+            RunCell.  ConfigureThread is the one function every cell-running
+            path calls before its cells -- precodesweep, precodecost and the
+            essearch evaluator all do -- so a set-or-clear here cannot be
+            skipped by an early return the way a bracket inside the cell loop
+            could, and it does not rebuild a 64-entry weight vector on every
+            one of millions of cells.
+        */
+        if (config.PeelActive)
+        {
+            wirehair_v2::SetPeelDegreesForTesting(
+                MakePeelDegreeWeights(
+                    BlockCount, config.PeelP1, config.PeelTilt,
+                    config.PeelDMax, config.PeelAbsorb));
+        }
+        else {
+            // Again only the thread-local, so WIREHAIR_V2_PEEL_DEGREES still
+            // drives a single-config harness.
+            wirehair_v2::ClearPeelDegreesForTesting();
+        }
+        // Same unconditional set-or-clear discipline as the shape above: a
+        // worker is reused across configs, so leaving a previous config's
+        // scale in place would silently mis-measure the next one.  The unset
+        // sentinel CLEARS rather than setting a value, so a run driven by
+        // WIREHAIR_V2_STAIRCASE_DEGREE_SCALE still sees its scale.
+        const uint32_t degree_scale_centi = ActiveDegreeScaleCenti(config);
+        if (degree_scale_centi != kDegreeScaleCentiUnset)
+        {
+            wirehair_v2::SetStaircaseDegreeScaleForTesting(
+                (double)degree_scale_centi / 100.0);
+        }
+        else {
+            wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+        }
         return wirehair_v2::SetTinyMixedFastPathModeForTesting(
                    TinyFastPathMode) &&
             wirehair_v2::SetMixedCoefficientGeometryForTesting(Geometry) &&
@@ -10169,12 +10841,21 @@ struct PrecodeSweepRun
             ((uint64_t)Trial * UINT64_C(0xd6e8feb86659fd93));
     }
 
-    /// Returns 0 when the cell decodes, 1 otherwise (harness convention).
+    /**
+        Returns 0 when the cell decodes, 1 otherwise (harness convention).
+
+        stats_out, when given, receives the solve's deterministic operation
+        counters -- but only for a cell that decoded.  A cell that gives up
+        part way through stopped counting part way through, so its counters
+        do not describe the work an encoder performs and must not be averaged
+        in with the ones that do.
+    */
     uint8_t RunCell(
         const PrecodeSweepConfig& config,
         uint32_t cell,
         std::vector<wirehair_v2::SolvePacket>& packets,
-        const uint8_t* packet_data) const
+        const uint8_t* packet_data,
+        wirehair_v2::PrecodeSolveStats* stats_out = nullptr) const
     {
         // Untuned protocol: the construction seed is the matrix seed and the
         // packet peel seed folds its halves, with no per-K profile component.
@@ -10186,9 +10867,9 @@ struct PrecodeSweepRun
                 wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :
                 wirehair_v2::MakeCertifiedParams(
                     BlockCount, construction_seed);
-        if (config.SourceHits != 0u) {
-            params.SourceHits = config.SourceHits;
-        }
+        // N1 is deliberately not settable here: the staircase edge budget is
+        // the degree scale's job now, and ConfigureThread has already applied
+        // it to this thread.
         if (config.Staircase != 0u) {
             params.Staircase = config.Staircase;
         }
@@ -10264,6 +10945,9 @@ struct PrecodeSweepRun
             wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
                 system, row_config, runtime, packets, SolveBlockBytes(),
                 intermediate, &solve_stats);
+        if (stats_out != nullptr && result == Wirehair_Success) {
+            *stats_out = solve_stats;
+        }
         return result == Wirehair_Success ? 0u : 1u;
     }
 };
@@ -10275,9 +10959,6 @@ const char* PrecodeSweepConfigRejection(
     const PrecodeSweepRun& run,
     const PrecodeSweepConfig& config)
 {
-    if (config.SourceHits > 8u) {
-        return "source hits must be in [1,8]";
-    }
     if (config.Staircase != 0u && config.Staircase < 2u) {
         return "staircase rows must be at least 2";
     }
@@ -10295,37 +10976,312 @@ const char* PrecodeSweepConfigRejection(
     {
         return "segmented dense anchors require 12 binary dense rows";
     }
+    const uint32_t degree_scale_centi = run.ActiveDegreeScaleCenti(config);
+    if (degree_scale_centi != kDegreeScaleCentiUnset &&
+        (degree_scale_centi < kDegreeScaleCentiLo ||
+         degree_scale_centi > kDegreeScaleCentiHi))
+    {
+        return "mean staircase row degree must be in [0.00,64000.00]";
+    }
     return nullptr;
 }
 
+/// Split on commas without interpreting the tokens.  ParseSignedIntList
+/// refuses anything with a decimal point, and the scale field must have one.
+std::vector<std::string> SplitCommaTokens(const std::string& text)
+{
+    std::vector<std::string> out;
+    size_t pos = 0;
+    for (;;)
+    {
+        const size_t comma = text.find(',', pos);
+        out.push_back(text.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos));
+        if (comma == std::string::npos) {
+            break;
+        }
+        pos = comma + 1u;
+    }
+    return out;
+}
+
+/**
+    CONFIG SYNTAX (the ONLY accepted forms; see kEsDim's coordinate list):
+
+        S,H,D2,scale                                     structural short form
+                                                         (the shape is OFF)
+        S,H,D2,scale,p1,p2,p3,c1,c2,c3,c4,c5,dmax        full ES coordinate
+                                                         vector, in theta
+                                                         order (shape ON)
+        S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax  the same vector with
+                                                         the shape state
+                                                         written down
+        ...,shape,p1..dmax,peel,peel_p1,peel_tilt,peel_dmax
+                                                         18 fields: the full
+                                                         vector with BOTH
+                                                         activity flags
+
+    peel_p1 is in HUNDREDTHS OF THE SHIPPED degree-1 mass (100 = shipped),
+    peel_tilt is SIGNED centi in [-100,+100] (0 = the shipped soliton tail,
+    negative flattens it, positive steepens it) and is the ONLY field that may
+    carry a minus sign, and peel_dmax is a degree in [2,64] (64 = shipped).
+    So `...,1,100,0,64` is the shipped peeling law exactly.
+
+    The 18-field form is the only one that carries the peeling coordinates, and
+    it requires BOTH flags to be written down.  There is deliberately no
+    17-field "peel block with an implicit shape flag" spelling: the two blocks
+    are independent knobs on independent parts of the codec, and a form that
+    states one activity and infers the other is exactly the ambiguity the
+    14-field form was introduced to remove.  A token with any other arity is
+    REFUSED -- in particular a 15, 16 or 17-field token is not read as an
+    18-field token with missing fields, and a 19-field token is not read as an
+    18-field token with a spare, because a silently ignored trailing field is
+    the failure mode this syntax exists to eliminate.
+
+    `scale` is the TARGET MEAN STAIRCASE ROW DEGREE and MUST be written with a
+    decimal point -- `21.33`, not `21`.  -1.00 means "no scale supplied", i.e.
+    the certified K*min(N1,S) budget.  Everything else is an integer.
+
+    `shape` is 0 or 1 and says whether the row-degree PDF that follows it is
+    APPLIED.  The 14-field form exists because the shape state is part of a
+    config's identity and the 13-field form cannot express "off": a --no-shape
+    search freezes p1..dmax at their starting values and the codec ignores
+    them, so reporting that elite as a 13-field token described a config that
+    had never been measured -- replaying it re-activated the shape and
+    returned a different failure rate and a different predicted cost.  Its
+    column order is exactly the `S,H,D2,scale,shape,p1..dmax` prefix that
+    `essearch --measure` already prints, so a measure row's leading columns
+    replay verbatim.  With shape = 0 the nine PDF fields are still parsed and
+    range-checked -- they are declared inactive, not silently dropped.
+
+    The decimal point is load-bearing, not decoration.  The legacy forms were
+    S,H,N1,D2 and S,H,N1,D2,p1,p2,p3,c1..c5,dmax -- the SAME arities as the
+    first two forms above -- so an all-integer 4- or 13-field token is
+    ambiguous between "N1 in slot 2" and "D2 in slot 2".  Accepting it either
+    way would silently measure a config nobody asked for, which is the exact
+    failure mode that wasted a previous campaign, so it is refused with an
+    error naming the new syntax instead.  The legacy 5- and 14-field forms
+    carried a scale PERCENT (a multiplier on K*min(N1,S)); that quantity no
+    longer exists.  The 5-field arity is refused outright, and a legacy
+    14-field token is caught by the same decimal-point test, because its
+    fourth field was the integer D2.
+*/
 bool ParsePrecodeSweepConfigText(
     const std::string& text,
     std::vector<PrecodeSweepConfig>& configs)
 {
+    static const char* kSyntax =
+        "precodesweep config must be S,H,D2,scale or "
+        "S,H,D2,scale,p1,p2,p3,c1,c2,c3,c4,c5,dmax or "
+        "S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax or "
+        "S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax,peel,peel_p1,"
+        "peel_tilt,peel_dmax[,peel_absorb], where scale is the "
+        "target MEAN STAIRCASE ROW DEGREE written with a decimal point (e.g. "
+        "21.33, or -1.00 for the certified budget), shape and peel are 0 or 1, "
+        "and every other field is an integer.  N1 is gone: the staircase edge "
+        "budget is scale*S now";
     std::string token;
     const auto flush_token = [&]() -> bool {
         if (token.empty()) {
             return true;
         }
-        const std::vector<int> fields = ParseSignedIntList(token);
-        if (fields.size() != 4u) {
-            std::fprintf(stderr,
-                "precodesweep config must be S,H,N1,D2: %s\n", token.c_str());
+        const std::vector<std::string> parts = SplitCommaTokens(token);
+        if (parts.size() != 4u && parts.size() != 13u &&
+            parts.size() != 14u && parts.size() != 18u &&
+            parts.size() != 19u)
+        {
+            std::fprintf(stderr, "%s: %s\n", kSyntax, token.c_str());
             return false;
         }
-        for (int field : fields) {
-            if (field < 0 || field > (int)UINT16_MAX) {
+        // The scale sits at coordinate 3 in every form, exactly where the ES
+        // vector carries it, so a reported config replays verbatim.
+        const size_t kScaleIndex = 3u;
+        if (parts[kScaleIndex].find('.') == std::string::npos)
+        {
+            std::fprintf(stderr,
+                "%s.  Field 4 (`%s`) has no decimal point, so this looks like "
+                "the retired S,H,N1,D2 form: %s\n",
+                kSyntax, parts[kScaleIndex].c_str(), token.c_str());
+            return false;
+        }
+        PrecodeSweepConfig config;
+        double scale = 0.0;
+        if (!ParseSignedDoubleScalar(parts[kScaleIndex].c_str(), scale))
+        {
+            std::fprintf(stderr,
+                "precodesweep config scale `%s` is not a number: %s\n",
+                parts[kScaleIndex].c_str(), token.c_str());
+            return false;
+        }
+        if (!ResolveDegreeScaleCenti(
+                "precodesweep config scale", scale, config.DegreeScaleCenti))
+        {
+            std::fprintf(stderr, "precodesweep config: %s\n", token.c_str());
+            return false;
+        }
+        // Every non-scale field is a plain integer.  peel_tilt is the one that
+        // may be NEGATIVE: it is an exponent tilt about the shipped tail, so
+        // zero is the neutral value and the two signs mean opposite things.
+        // Spelling it unsigned-with-an-offset is what made a reader write 0
+        // for "no tilt" and measure the heaviest tail in the box instead.
+        const size_t kTiltIndex =
+            (parts.size() == 18u || parts.size() == 19u) ?
+                kScaleIndex + 2u + kShapeConfigFields + 2u : (size_t)-1;
+        std::vector<int> fields(parts.size(), 0);
+        for (size_t i = 0; i < parts.size(); ++i)
+        {
+            if (i == kScaleIndex) {
+                continue;
+            }
+            const std::vector<int> one = ParseSignedIntList(parts[i]);
+            if (one.size() != 1u ||
+                (one[0] < 0 && i != kTiltIndex) ||
+                one[0] > (int)UINT16_MAX)
+            {
                 std::fprintf(stderr,
                     "precodesweep config field out of range: %s\n",
                     token.c_str());
                 return false;
             }
+            fields[i] = one[0];
         }
-        PrecodeSweepConfig config;
         config.Staircase = (uint32_t)fields[0];
         config.MixedGF256Rows = (uint32_t)fields[1];
-        config.SourceHits = (uint32_t)fields[2];
-        config.DenseRows = (uint32_t)fields[3];
+        config.DenseRows = (uint32_t)fields[2];
+        if (parts.size() >= 13u)
+        {
+            // 13 fields: the shape is implicitly ON, the historical spelling.
+            // 14 fields: an explicit 0/1 flag sits between the scale and the
+            // PDF, which is the only form that can express "these nine
+            // coordinates were carried but NOT applied".
+            const bool explicit_shape = parts.size() == 14u ||
+                parts.size() == 18u || parts.size() == 19u;
+            bool shape_active = true;
+            if (explicit_shape)
+            {
+                if (fields[kScaleIndex + 1u] > 1) {
+                    std::fprintf(stderr,
+                        "precodesweep config shape flag must be 0 or 1: %s\n",
+                        token.c_str());
+                    return false;
+                }
+                shape_active = fields[kScaleIndex + 1u] != 0;
+            }
+            const size_t shape_base =
+                kScaleIndex + (explicit_shape ? 2u : 1u);
+            for (size_t i = shape_base; i < shape_base + 3u; ++i)
+            {
+                if (fields[i] > 100) {
+                    std::fprintf(stderr,
+                        "precodesweep config p1/p2/p3 are percents in "
+                        "[0,100]: %s\n", token.c_str());
+                    return false;
+                }
+            }
+            // The shape block is a FIXED nine fields starting at shape_base,
+            // so dmax is found from the block, not from the end of the token.
+            // Reading it as parts.size()-1 is how the peel block would have
+            // silently stolen the dmax slot.
+            const size_t dmax_index = shape_base + 8u;
+            if (fields[dmax_index] < 1) {
+                std::fprintf(stderr,
+                    "precodesweep config dmax must be at least 1: %s\n",
+                    token.c_str());
+                return false;
+            }
+            // Coefficients are percents offset by 100, so the box the search
+            // travels, [0,200], is the accepted range here too.
+            for (size_t i = shape_base + 3u; i < shape_base + 8u; ++i)
+            {
+                if (fields[i] > 200) {
+                    std::fprintf(stderr,
+                        "precodesweep config c1..c5 are percents offset "
+                        "by 100, in [0,200]: %s\n", token.c_str());
+                    return false;
+                }
+            }
+            config.ShapeActive = shape_active;
+            config.ShapeP1 = (uint32_t)fields[shape_base + 0u];
+            config.ShapeP2 = (uint32_t)fields[shape_base + 1u];
+            config.ShapeP3 = (uint32_t)fields[shape_base + 2u];
+            config.ShapeC1 = (uint32_t)fields[shape_base + 3u];
+            config.ShapeC2 = (uint32_t)fields[shape_base + 4u];
+            config.ShapeC3 = (uint32_t)fields[shape_base + 5u];
+            config.ShapeC4 = (uint32_t)fields[shape_base + 6u];
+            config.ShapeC5 = (uint32_t)fields[shape_base + 7u];
+            config.ShapeDMax = (uint32_t)fields[dmax_index];
+        }
+        if (parts.size() == 18u || parts.size() == 19u)
+        {
+            // peel flag, then the three peeling coordinates.  Range-checked
+            // against the same boxes the search travels, and carried even when
+            // the flag is 0 -- declared inactive, not silently dropped, which
+            // is the rule the shape flag already follows.
+            // Derived from the shape block, never written as a literal: an
+            // 18-field token always carries the explicit shape flag, so the
+            // peel flag is one past dmax.  A hand-counted index here is the
+            // same mistake as reading dmax from the end of the token.
+            const size_t peel_flag = kScaleIndex + 2u + kShapeConfigFields;
+            if (fields[peel_flag] > 1) {
+                std::fprintf(stderr,
+                    "precodesweep config peel flag must be 0 or 1: %s\n",
+                    token.c_str());
+                return false;
+            }
+            if (fields[peel_flag + 1u] > 400) {
+                std::fprintf(stderr,
+                    "precodesweep config peel_p1 is HUNDREDTHS OF THE STOCK "
+                    "degree-1 mass, in [0,400] (100 = stock): %s\n",
+                    token.c_str());
+                return false;
+            }
+            if (fields[peel_flag + 2u] < -(int)kPeelTiltRange ||
+                fields[peel_flag + 2u] > (int)kPeelTiltMaxSteepen)
+            {
+                std::fprintf(stderr,
+                    "precodesweep config peel_tilt is SIGNED centi in "
+                    "[-%u,+%u] (asymmetric: flattening is measurably harmful "
+                    "and steepening is the win), 0 = the shipped soliton "
+                    "tail: %s\n",
+                    kPeelTiltRange, kPeelTiltMaxSteepen, token.c_str());
+                return false;
+            }
+            if (fields[peel_flag + 3u] < 2 ||
+                fields[peel_flag + 3u] > (int)kPeelMaxDegree)
+            {
+                std::fprintf(stderr,
+                    "precodesweep config peel_dmax must be in [2,%u]: %s\n",
+                    kPeelMaxDegree, token.c_str());
+                return false;
+            }
+            config.PeelActive = fields[peel_flag] != 0;
+            config.PeelP1 = (uint32_t)fields[peel_flag + 1u];
+            // Signed on the command line, offset on the search lattice: every
+            // ES coordinate is an unsigned integer, so the coordinate carries
+            // tilt + kPeelTiltRange and every printer converts back.
+            config.PeelTilt =
+                (uint32_t)(fields[peel_flag + 2u] + (int)kPeelTiltRange);
+            config.PeelDMax = (uint32_t)fields[peel_flag + 3u];
+            // The 18-field form predates peel_absorb and means exactly what it
+            // meant then: full absorption.  That is a DEFAULT, not an ignored
+            // field -- a token that omits the coordinate keeps the behaviour
+            // it was written under, and every printed config carries all
+            // nineteen so a round trip is never lossy.
+            if (parts.size() == 19u)
+            {
+                if (fields[peel_flag + 4u] > 100) {
+                    std::fprintf(stderr,
+                        "precodesweep config peel_absorb is a percent in "
+                        "[0,100] (100 = absorb the cut tail onto w(dmax), "
+                        "0 = discard it): %s\n", token.c_str());
+                    return false;
+                }
+                config.PeelAbsorb = (uint32_t)fields[peel_flag + 4u];
+            }
+            else {
+                config.PeelAbsorb = kPeelAbsorbFull;
+            }
+        }
         configs.push_back(config);
         token.clear();
         return true;
@@ -10637,6 +11593,16 @@ int CmdPrecodeSweep(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--degree-scale")) {
+            if (!TakeArg("precodesweep", "--degree-scale",
+                    argc, argv, i, value) ||
+                !ParseDegreeScaleArg(
+                    "precodesweep", "--degree-scale", value,
+                    run.DegreeScaleCenti))
+            {
+                return 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
             if (!TakeArg("precodesweep", "--mixed-gf256-rows",
                     argc, argv, i, value) ||
@@ -10792,7 +11758,7 @@ int CmdPrecodeSweep(int argc, char** argv)
     if (configs.empty()) {
         std::fprintf(stderr,
             "precodesweep requires --configs or --config-file "
-            "(entries of S,H,N1,D2)\n");
+            "(entries of S,H,D2,scale)\n");
         return 1;
     }
     if (!cells_explicit) {
@@ -10894,13 +11860,15 @@ int CmdPrecodeSweep(int argc, char** argv)
     const char* band_tracking = std::getenv("WIREHAIR_V2_BAND_TRACKING_X");
     const char* staircase_degrees =
         std::getenv("WIREHAIR_V2_STAIRCASE_DEGREES");
+    const char* staircase_degree_scale =
+        std::getenv("WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
     std::printf(
         "# precodesweep,N=%u,bb=%u,overhead=%u,mix_count=%u,loss=%.6f,"
         "seed_base=%llu,cseed_mul=0x%llx,trial=%u,cells=[%u,%u),"
         "configs=%u,threads=%u,completion=%s,heavy_family=%s,schedule=%s,"
         "paired_overhead_stream=%d,geometry=%s,period=%u,gf16_rows=%u,"
         "gf256_rows_default=%u,band_tracking_x=%s,staircase_degrees=%s,"
-        "solve_bb=%u\n",
+        "solve_bb=%u,degree_scale_default=%.2f,staircase_degree_scale=%s\n",
         run.BlockCount, run.BlockBytes, run.Overhead, run.MixCount, run.Loss,
         (unsigned long long)run.SeedBase,
         (unsigned long long)run.ConstructionSeedMultiplier, run.Trial,
@@ -10914,8 +11882,20 @@ int CmdPrecodeSweep(int argc, char** argv)
         run.Period, run.GF16Rows, run.MixedGF256Rows,
         band_tracking ? band_tracking : "unset",
         staircase_degrees ? staircase_degrees : "unset",
-        run.SolveBlockBytes());
-    std::printf("S,H,N1,D2,cells,failures,fail_rate,status\n");
+        run.SolveBlockBytes(), DegreeScaleDegrees(run.DegreeScaleCenti),
+        staircase_degree_scale ? staircase_degree_scale : "unset");
+    // The leading tuple is the config, in the ES coordinate order.  It stays
+    // FOUR columns wide -- N1 left, the degree scale took its place in the
+    // vector -- because harnesses index this file's CSV rows by position
+    // (precodecost's total_ns is column 27) and nothing may renumber.
+    //
+    // Four columns cannot identify a shaped config, so the shape-active flag
+    // is APPENDED instead of inserted: two rows that both read 6,9,1,21.33
+    // measured 4 and 8 failures over the same 500 cells because one carried a
+    // 13-field config and the other a 4-field one.  A trailing column
+    // distinguishes them without moving anything a script already indexes.
+    std::printf(
+        "S,H,D2,scale,cells,failures,fail_rate,status,shape,peel\n");
     std::fflush(stdout);
 
     const std::chrono::steady_clock::time_point sweep_start =
@@ -10989,9 +11969,10 @@ int CmdPrecodeSweep(int argc, char** argv)
         if (worker_failed.load())
         {
             std::fprintf(stderr,
-                "precodesweep worker failed for S=%u H=%u N1=%u D2=%u\n",
-                config.Staircase, config.MixedGF256Rows, config.SourceHits,
-                config.DenseRows);
+                "precodesweep worker failed for S=%u H=%u D2=%u "
+                "scale=%.2f\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)));
             return 2;
         }
         const bool rejected = rejection != nullptr || configure_failed.load();
@@ -11001,20 +11982,24 @@ int CmdPrecodeSweep(int argc, char** argv)
             // the per-cell harness reading of a run with no CSV data row.
             std::fill(outcomes.begin(), outcomes.end(), uint8_t{1});
             std::fprintf(stderr,
-                "precodesweep config S=%u H=%u N1=%u D2=%u rejected: %s\n",
-                config.Staircase, config.MixedGF256Rows, config.SourceHits,
-                config.DenseRows,
+                "precodesweep config S=%u H=%u D2=%u scale=%.2f "
+                "rejected: %s\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
                 rejection ? rejection : "invalid codec configuration");
         }
         uint64_t failures = 0u;
         for (uint8_t outcome : outcomes) {
             failures += outcome;
         }
-        std::printf("%u,%u,%u,%u,%u,%llu,%.8f,%s\n",
-            config.Staircase, config.MixedGF256Rows, config.SourceHits,
-            config.DenseRows, cell_count, (unsigned long long)failures,
+        std::printf("%u,%u,%u,%.2f,%u,%llu,%.8f,%s,%u,%u\n",
+            config.Staircase, config.MixedGF256Rows, config.DenseRows,
+            DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
+            cell_count, (unsigned long long)failures,
             (double)failures / (double)cell_count,
-            rejected ? "rejected" : "ok");
+            rejected ? "rejected" : "ok",
+            config.ShapeActive ? 1u : 0u,
+            config.PeelActive ? 1u : 0u);
         if (emit_cells)
         {
             std::string bits;
@@ -11022,9 +12007,16 @@ int CmdPrecodeSweep(int argc, char** argv)
             for (uint8_t outcome : outcomes) {
                 bits.push_back((char)('0' + outcome));
             }
-            std::printf("#cells,%u,%u,%u,%u,%u,%u,%s\n",
-                config.Staircase, config.MixedGF256Rows, config.SourceHits,
-                config.DenseRows, cell_begin, cell_end, bits.c_str());
+            // #cells,S,H,D2,scale,shape,peel,cell_begin,cell_end,bits
+            // The leading S,H,D2,scale,shape,peel names the exact config the
+            // trace came from; both activity flags are carried because either
+            // one alone cannot identify it.
+            std::printf("#cells,%u,%u,%u,%.2f,%u,%u,%u,%u,%s\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
+                config.ShapeActive ? 1u : 0u,
+                config.PeelActive ? 1u : 0u,
+                cell_begin, cell_end, bits.c_str());
         }
         std::fflush(stdout);
         swept_cells += cell_count;
@@ -11108,9 +12100,7 @@ struct PrecodeCostRun : PrecodeSweepRun
                 wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :
                 wirehair_v2::MakeCertifiedParams(
                     BlockCount, construction_seed);
-        if (config.SourceHits != 0u) {
-            params.SourceHits = config.SourceHits;
-        }
+        // N1 is deliberately not settable here either; see RunCell.
         if (config.Staircase != 0u) {
             params.Staircase = config.Staircase;
         }
@@ -11255,6 +12245,12 @@ struct PrecodeCostRun : PrecodeSweepRun
 
 int CmdPrecodeCost(int argc, char** argv)
 {
+    // Cell evaluation parallelism.  Only safe when nothing is being TIMED:
+    // concurrent timing runs contend and inflate each other (measured: same
+    // estimator at concurrency 4 gives sd 8 ns, at 120 gives 250-400 ns with
+    // a +3% mean bias).  So --threads > 1 is rejected below unless the solve
+    // width is 0, where no bytes move and the counters are all that is read.
+    uint32_t cost_threads = 1u;
     PrecodeCostRun run;
     run.PairedOverheadStream = true;
     std::vector<PrecodeSweepConfig> configs;
@@ -11339,7 +12335,19 @@ int CmdPrecodeCost(int argc, char** argv)
                 return 1;
             }
         }
-        else if (!std::strcmp(argv[i], "--warmup")) {
+                else if (!std::strcmp(argv[i], "--threads")) {
+            if (!TakeArg("precodecost", "--threads", argc, argv, i, value) ||
+                !ParseU32Arg("--threads", value, cost_threads))
+            {
+                return 1;
+            }
+            if (cost_threads == 0u || cost_threads > 512u) {
+                std::fprintf(stderr,
+                    "precodecost --threads must be in [1,512]\n");
+                return 1;
+            }
+        }
+else if (!std::strcmp(argv[i], "--warmup")) {
             if (!TakeArg("precodecost", "--warmup", argc, argv, i, value) ||
                 !ParseU32Arg("--warmup", value, warmup))
             {
@@ -11383,6 +12391,16 @@ int CmdPrecodeCost(int argc, char** argv)
                 return 1;
             }
         }
+        else if (!std::strcmp(argv[i], "--degree-scale")) {
+            if (!TakeArg("precodecost", "--degree-scale",
+                    argc, argv, i, value) ||
+                !ParseDegreeScaleArg(
+                    "precodecost", "--degree-scale", value,
+                    run.DegreeScaleCenti))
+            {
+                return 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--mixed-gf256-rows")) {
             if (!TakeArg("precodecost", "--mixed-gf256-rows",
                     argc, argv, i, value) ||
@@ -11419,7 +12437,7 @@ int CmdPrecodeCost(int argc, char** argv)
     if (configs.empty()) {
         std::fprintf(stderr,
             "precodecost requires --configs or --config-file "
-            "(entries of S,H,N1,D2)\n");
+            "(entries of S,H,D2,scale)\n");
         return 1;
     }
     if (!cells_explicit || cell_end <= cell_begin) {
@@ -11486,7 +12504,8 @@ int CmdPrecodeCost(int argc, char** argv)
         "# precodecost,N=%u,bb=%u,overhead=%u,mix_count=%u,loss=%.6f,"
         "seed_base=%llu,cells=[%u,%u),configs=%u,reps=%u,warmup=%u,"
         "pool_blocks=%llu,completion=%s,schedule=%s,geometry=%s,period=%u,"
-        "gf16_rows=%u,gf256_rows_default=%u,band_tracking_x=%s\n",
+        "gf16_rows=%u,gf256_rows_default=%u,band_tracking_x=%s,"
+        "degree_scale_default=%.2f\n",
         run.BlockCount, run.TimingBlockBytes, run.Overhead, run.MixCount,
         run.Loss, (unsigned long long)run.SeedBase, cell_begin, cell_end,
         (uint32_t)configs.size(), reps, warmup,
@@ -11496,16 +12515,25 @@ int CmdPrecodeCost(int argc, char** argv)
         run.Geometry == wirehair_v2::MixedCoefficientGeometry::FrozenPowerX ?
             "frozen" : "shared-x",
         run.Period, run.GF16Rows, run.MixedGF256Rows,
-        band_tracking ? band_tracking : "unset");
+        band_tracking ? band_tracking : "unset",
+        DegreeScaleDegrees(run.DegreeScaleCenti));
+    // The leading tuple is the config in ES coordinate order and is still
+    // FOUR columns wide -- N1 left, the degree scale took its slot -- because
+    // paired-timing harnesses read total_ns positionally at column 27 and
+    // nothing may renumber ahead of it.  The shape-active flag is therefore
+    // APPENDED as the last column: without it a shaped and an unshaped config
+    // both print 6,9,1,21.33 while measuring different constructions
+    // (block_xors 1782 vs 1764 on the same cell), and a trailing column
+    // resolves that without moving total_ns or ok.
     std::printf(
-        "S,H,N1,D2,cell,ok,L,inact,packet_rows,peeled,residual_rows,"
+        "S,H,D2,scale,cell,ok,L,inact,packet_rows,peeled,residual_rows,"
         "residual_rank,binary_rank,block_xors,block_muladds,block_copies,"
         "block_zero_fills,peel_adjacency_visits,peel_row_scan_steps,"
         "peel_heap_ops,projection_word_xors,residual_coeff_word_xors,"
         "residual_coeff_byte_ops,binary_row_refs,binary_row_bytes,"
         "binary_adj_bytes,total_ns,sysbuild_ns,runtime_ns,solve_ns,"
         "solve_build_ns,solve_peel_ns,solve_project_ns,solve_residual_ns,"
-        "solve_backsub_ns\n");
+        "solve_backsub_ns,shape,peel\n");
     std::fflush(stdout);
 
     for (const PrecodeSweepConfig& config : configs)
@@ -11514,9 +12542,10 @@ int CmdPrecodeCost(int argc, char** argv)
         if (rejection || !run.ConfigureThread(config))
         {
             std::fprintf(stderr,
-                "precodecost config S=%u H=%u N1=%u D2=%u rejected: %s\n",
-                config.Staircase, config.MixedGF256Rows, config.SourceHits,
-                config.DenseRows,
+                "precodecost config S=%u H=%u D2=%u scale=%.2f "
+                "rejected: %s\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
                 rejection ? rejection : "invalid codec configuration");
             continue;
         }
@@ -11529,21 +12558,23 @@ int CmdPrecodeCost(int argc, char** argv)
                     pool.data(), pool_blocks, sample))
             {
                 std::fprintf(stderr,
-                    "precodecost cell %u unusable for S=%u H=%u N1=%u "
-                    "D2=%u\n",
+                    "precodecost cell %u unusable for S=%u H=%u D2=%u "
+                    "scale=%.2f\n",
                     cell_begin + index, config.Staircase,
-                    config.MixedGF256Rows, config.SourceHits,
-                    config.DenseRows);
+                    config.MixedGF256Rows, config.DenseRows,
+                    DegreeScaleDegrees(
+                        run.ActiveDegreeScaleCenti(config)));
                 continue;
             }
             const wirehair_v2::PrecodeSolveStats& s = sample.Stats;
             std::printf(
-                "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                "%u,%u,%u,%.2f,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
                 "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
                 "%llu,%llu,%llu,"
-                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-                config.Staircase, config.MixedGF256Rows, config.SourceHits,
-                config.DenseRows, cell_begin + index,
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
+                cell_begin + index,
                 sample.Failed ? 0u : 1u, sample.ColumnCount,
                 s.InactivatedColumns, s.PacketRows, s.PeeledColumns,
                 s.ResidualRows, s.ResidualRank, s.BinaryResidualRank,
@@ -11568,13 +12599,3383 @@ int CmdPrecodeCost(int argc, char** argv)
                 (unsigned long long)sample.SolvePeelNs,
                 (unsigned long long)sample.SolveProjectNs,
                 (unsigned long long)sample.SolveResidualNs,
-                (unsigned long long)sample.SolveBackSubNs);
+                (unsigned long long)sample.SolveBackSubNs,
+                config.ShapeActive ? 1u : 0u,
+                config.PeelActive ? 1u : 0u);
         }
         std::fflush(stdout);
     }
     return 0;
 }
 
+/*
+    essearch: the mirrored-pair evolution strategy over the precode structure
+    (S, H, D2, mean staircase row degree), run end to end inside this process.
+
+    WHAT IT OPTIMIZES.  Lower is better:
+
+        obj = predicted_cost_ns + lam * max(0, fail + z*se - target)
+
+    The cost term is NOT a stopwatch reading.  It is a calibrated linear model
+    over the deterministic block-operation counters PrecodeSolveStats already
+    reports:
+
+        total_ns ~ c0 + cx*BlockXors + cm*BlockMulAdds
+                      + cc*BlockCopies + cz*BlockZeroFills
+
+    fitted per block count by NON-NEGATIVE least squares (see
+    WirehairV2EsCostModel.inc for the table, the fit rows and the fit
+    quality).  Non-negativity is load-bearing: BlockMulAdds and BlockCopies
+    correlate at +0.988, so an unconstrained fit returns physically impossible
+    coefficients -- measured -27.6 ns per BlockXor at K=24576 and -14471 ns per
+    BlockCopy at K=2048.  Constraining the signs costs almost no accuracy
+    (R2 0.962 -> 0.899 on a clean run) and lands the per-op costs on the same
+    order as an independent memory-bandwidth argument.
+
+    WHY COUNTERS RATHER THAN WALL CLOCK, so this is not quietly reverted:
+
+      * the first timings taken in a fresh process read 47% high (frequency
+        governor ramp), so whatever a search measured first was penalized;
+      * two hosts with the same CPU model differed by 8%;
+      * timing runs contend with each other, so MORE parallelism made the
+        estimate WORSE -- concurrency 4 gave sd 8 ns, concurrency 120 gave
+        sd 250-400 ns with a +3% mean inflation.
+
+    Counters have none of that: they are an exact function of (config, cell).
+    Decisively, the fitted model predicts a run better than a repeat of that
+    run does -- model RMSE 2.90% versus 4.25% run-to-run noise at K=2048 with
+    64 KiB blocks.
+
+    The counters are harvested at SOLVE WIDTH 0, the payload-free mode where
+    the solver performs the same sequence of block operations on zero-byte
+    blocks.  The counts are identical to any nonzero width, so the search pays
+    no memory traffic for them.
+
+    FAILURE SEMANTICS are precodesweep's, unchanged: cell i is construction
+    seed (0x9E3779B9 * i) mod 2^32, packet/loss seed 55 + i, one trial, one
+    solve.  essearch calls PrecodeSweepRun::RunCell() itself, so there is one
+    definition of a cell in this binary.
+
+    REPRODUCIBILITY.  Every random draw is made on the calling thread, in a
+    fixed order, before any work is dispatched; worker threads only evaluate
+    deterministic (config, cell) pairs and accumulate INTEGER counter sums, so
+    a merge in any order gives the same total.  Thread count and scheduling
+    therefore cannot change a single number this command prints.  Each
+    generation draws from its own sub-stream keyed by (seed, run, generation),
+    so a generation's noise does not depend on how many draws earlier
+    generations made.
+*/
+
+struct EsCostModelEntry
+{
+    uint32_t BlockCount;
+    double Intercept;
+    double PerBlockXor;
+    double PerBlockMulAdd;
+    double PerBlockCopy;
+    double PerBlockZeroFill;
+    uint32_t FitRows;
+    double FitR2;
+    double FitMedianAbsPercent;
+};
+
+const EsCostModelEntry kEsCostModel[] = {
+#include "WirehairV2EsCostModel.inc"
+};
+
+const EsCostModelEntry* FindEsCostModel(uint32_t block_count)
+{
+    for (const EsCostModelEntry& entry : kEsCostModel)
+    {
+        if (entry.BlockCount == block_count) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+void PrintEsCostModelBlockCounts()
+{
+    std::fprintf(stderr, "essearch calibrated block counts:");
+    for (const EsCostModelEntry& entry : kEsCostModel) {
+        std::fprintf(stderr, " %u", entry.BlockCount);
+    }
+    std::fprintf(stderr, "\n");
+}
+
+/// Objective assigned to a candidate with no usable cost estimate.  The
+/// reference used +inf; a large finite sentinel keeps the paired difference
+/// arithmetic defined, and two such candidates still difference to exactly 0,
+/// which is the "no signal" case the rank shaping already zeroes out.
+const double kEsBadObjective = 1.0e18;
+
+/**
+    Search coordinates, in order:
+
+        0  S      staircase rows
+        1  H      GF(256) mixed rows
+        2  D2     binary dense rows
+        3  scale  target MEAN STAIRCASE ROW DEGREE, in CENTI-DEGREES
+        4  p1     P[degree 1] in percent
+        5  p2     P[degree 2] in percent
+        6  p3     P[degree 3] in percent
+        7  c1     tail polynomial coefficient, percent offset by 100
+        8  c2     "
+        9  c3     "
+        10 c4     "
+        11 c5     "
+        12 dmax   largest degree the tail polynomial spans
+        13 peel_p1    PEELING P[degree 1], hundredths of the shipped value
+                      (100 = the shipped mass, so the box [0,400] is 0x to 4x)
+        14 peel_tilt  PEELING tail exponent tilt, SIGNED centi in [-100,+100]
+                      with 0 = the shipped soliton tail.  Carried on the
+                      lattice offset by kPeelTiltRange because coordinates are
+                      unsigned; every printer converts back
+        15 peel_dmax  PEELING truncation degree, 64 = the shipped truncation
+        16 peel_absorb PEELING truncation RULE, percent of the cut tail kept
+                       on w(dmax): 100 absorbs it, 0 discards it.  Inert at
+                       peel_dmax = 64, where there is no tail to cut
+
+    N1 IS GONE.  It used to sit at coordinate 2 and it was the only thing that
+    could resize the staircase edge budget, which the certified construction
+    pins at K*min(N1,S).  Being an integer, it moved that budget only in steps
+    of K -- 128 edges at K=128 -- so it was frozen on 87.7% of mirrored pairs
+    in the tie census, and the shape coordinates below could only redistribute
+    a budget they were unable to resize.
+
+    Coordinate 3 replaces it with the budget itself, expressed as the mean
+    number of source columns per staircase row.  The construction takes
+
+        edge_count = llround(scale * S)
+
+    which is total = mean x count and nothing else: no K, no table, no rule.
+    The lattice is hundredths of a degree, so one step moves the budget by at
+    most ONE edge -- the smallest change the construction admits, against N1's
+    128.  It sits next to the structural coordinates rather than inside the
+    shape block because it is not part of the degree PDF: --no-shape freezes
+    the shape and leaves this coordinate free.
+
+    Coordinates 4..12 are the staircase row-degree SHAPE: the head probabilities of
+    degrees 1..3, the degree-5 tail polynomial anchored at p3, and the tail's
+    extent.  They are worth their own coordinates: at K=128 with
+    (S,H,D2) = (40,7,2) and the legacy N1=2 budget, measured over 6000 cells at
+    solve width 0, moving mass to both degree extremes took the inactivated
+    count from 47.39 to 42.68 and block XORs from 2503 to 2388, which is 4.3%
+    of predicted 64 KiB cost -- larger than the entire 2.5% gap between this
+    search and an exhaustive grid search over the structure.
+*/
+const uint32_t kEsDim = 17u;
+
+/// Index of the target mean staircase row degree, in centi-degrees.
+const uint32_t kEsDegreeScaleCoord = 3u;
+
+/// Index of the first shape coordinate within an ES config vector.
+const uint32_t kEsShapeBase = 4u;
+
+/// Shape coordinates the config vector carries: p1,p2,p3,c1..c5,dmax.
+const uint32_t kEsShapeCoords = 9u;
+
+/**
+    Index of the first PEELING coordinate, and how many there are.
+
+    The peel block is peel_p1, peel_tilt, peel_dmax -- see
+    PrecodeSweepConfig::PeelActive for the units and MakePeelDegreeWeights for
+    why they are what they are.
+
+    THREE, not nine.  The staircase carried nine coordinates over an outcome
+    space with two measurable dimensions and the result was that independent
+    searches scattered: every objective tried produced a PDF concentration at or
+    below zero, because the map from coordinates to measured outcome was
+    many-to-one and the optimum was a level set rather than a point.  Measured
+    on that family, a shape's predicted cost was 98.8% explained by a SINGLE
+    scalar functional of it, and across 78 shape pairs the correlation between
+    parameter distance and outcome distance was 0.19 while the correlation
+    between that one functional and outcome distance was 0.99.  Three
+    coordinates over the same two-dimensional outcome space is already
+    generous; it is not a budget to spend up to.
+*/
+const uint32_t kEsPeelBase = 13u;
+const uint32_t kEsPeelCoords = 4u;
+
+// The shape block must exactly fill the vector from kEsShapeBase to the peel
+// block, the peel block must fill it to the end, and the scale coordinate must
+// sit immediately before the shape.  Forwarding a block by hand is what let
+// dmax read the c1 slot while c1..c5 were never forwarded at all, so every
+// relationship is checked by the compiler rather than by inspection.
+static_assert(kEsShapeBase + kEsShapeCoords == kEsPeelBase,
+    "ES shape coordinates must run from kEsShapeBase to the peel block");
+static_assert(kEsPeelBase + kEsPeelCoords == kEsDim,
+    "ES peel coordinates must fill the config vector tail");
+static_assert(kEsShapeCoords == kShapeConfigFields,
+    "the config parser's shape block width must match the search vector's");
+static_assert(kEsDegreeScaleCoord + 1u == kEsShapeBase,
+    "the degree-scale coordinate must sit just before the shape block");
+static_assert(kEsDegreeScaleCoord == 3u,
+    "the degree-scale coordinate must follow S,H,D2");
+
+/**
+    Coordinate groups for the per-group step-size knobs.
+
+    The sixteen coordinates fall into eight families whose boxes share no
+    scale: structural integers (S in [2,~34], H in [1,10], D2 in [1,12]), the
+    mean row degree in centi-degrees (a box thousands of units wide), degree
+    percents in [0,100], polynomial coefficients in [0,200] and dmax in
+    [4,64].  One sigma cannot serve all five -- a step that is a whole
+    quantization unit for H is invisible on a centi-degree axis -- so the
+    tuning knobs are per group, and this is the single place the membership is
+    defined.
+*/
+enum class EsCoordGroup
+{
+    Structural,  ///< 0..2: S, H, D2
+    DegreeScale, ///< 3: target mean staircase row degree, centi-degrees
+    Percent,     ///< 4..6: p1, p2, p3
+    Polynomial,  ///< 7..11: c1..c5
+    DMax,        ///< 12: dmax
+    /*
+        The three peeling coordinates get three groups, not one.  Their boxes
+        are [0,400], [0,200] and [4,64] -- they share no scale with each other
+        any more than the staircase groups do, and the whole reason this enum
+        exists is that one sigma cannot serve boxes of different widths.  A
+        single "Peel" group would have reintroduced exactly the problem the
+        per-group knobs were added to fix, on the block the search is now
+        actually meant to learn.
+    */
+    PeelP1,      ///< 13: degree-1 mass, hundredths of the incumbent
+    PeelTilt,    ///< 14: exponent tilt, signed centi carried offset by 100
+    PeelDMax,    ///< 15: truncation degree
+    PeelAbsorb   ///< 16: truncation rule, percent absorbed onto the cut
+};
+
+EsCoordGroup EsGroupOf(uint32_t coord)
+{
+    if (coord < kEsDegreeScaleCoord) {
+        return EsCoordGroup::Structural;
+    }
+    if (coord == kEsDegreeScaleCoord) {
+        return EsCoordGroup::DegreeScale;
+    }
+    if (coord < kEsShapeBase + 3u) {
+        return EsCoordGroup::Percent;
+    }
+    if (coord < kEsShapeBase + 8u) {
+        return EsCoordGroup::Polynomial;
+    }
+    if (coord < kEsPeelBase) {
+        return EsCoordGroup::DMax;
+    }
+    if (coord == kEsPeelBase) {
+        return EsCoordGroup::PeelP1;
+    }
+    if (coord == kEsPeelBase + 1u) {
+        return EsCoordGroup::PeelTilt;
+    }
+    if (coord == kEsPeelBase + 2u) {
+        return EsCoordGroup::PeelDMax;
+    }
+    return EsCoordGroup::PeelAbsorb;
+}
+
+/**
+    True when a coordinate follows the STRUCTURAL decay schedule.
+
+    The mean row degree is a structural knob that merely happens to live on a
+    centi-degree lattice: it resizes the constraint graph, it is not part of
+    the degree PDF, so it decays with S rather than with the shape and
+    --no-shape does not freeze it.
+*/
+bool EsIsStructuralSchedule(uint32_t coord)
+{
+    const EsCoordGroup group = EsGroupOf(coord);
+    return group == EsCoordGroup::Structural ||
+        group == EsCoordGroup::DegreeScale;
+}
+
+/// Select the per-group scale for a coordinate.
+double EsGroupScale(
+    uint32_t coord,
+    double structural,
+    double degree_scale,
+    double percent,
+    double polynomial,
+    double dmax,
+    double peel_p1,
+    double peel_tilt,
+    double peel_dmax,
+    double peel_absorb)
+{
+    switch (EsGroupOf(coord))
+    {
+    case EsCoordGroup::Structural:  return structural;
+    case EsCoordGroup::DegreeScale: return degree_scale;
+    case EsCoordGroup::Percent:     return percent;
+    case EsCoordGroup::Polynomial:  return polynomial;
+    case EsCoordGroup::PeelP1:      return peel_p1;
+    case EsCoordGroup::PeelTilt:    return peel_tilt;
+    case EsCoordGroup::PeelDMax:    return peel_dmax;
+    case EsCoordGroup::PeelAbsorb:  return peel_absorb;
+    case EsCoordGroup::DMax:        break;
+    }
+    return dmax;
+}
+
+/**
+    Copy the shape block of an ES config vector into a sweep config.
+
+    The evaluator and every reporting path go through this one function, so the
+    coordinate-to-field mapping exists exactly once.  It previously existed
+    three times and all three disagreed: the evaluator dropped c1..c5 and read
+    dmax from the c1 slot, the per-generation trace read dmax from the c1 slot
+    while using c1..c5 as coefficients, and the end-of-run line used the
+    intended mapping -- so a single elite was reported with two shapes, neither
+    of which was the one that had been measured.
+*/
+void EsFillShape(const uint32_t* fields, PrecodeSweepConfig& config)
+{
+    config.ShapeP1 = fields[kEsShapeBase + 0u];
+    config.ShapeP2 = fields[kEsShapeBase + 1u];
+    config.ShapeP3 = fields[kEsShapeBase + 2u];
+    config.ShapeC1 = fields[kEsShapeBase + 3u];
+    config.ShapeC2 = fields[kEsShapeBase + 4u];
+    config.ShapeC3 = fields[kEsShapeBase + 5u];
+    config.ShapeC4 = fields[kEsShapeBase + 6u];
+    config.ShapeC5 = fields[kEsShapeBase + 7u];
+    config.ShapeDMax = fields[kEsShapeBase + 8u];
+}
+
+/**
+    Copy the peel block of an ES config vector into a sweep config.
+
+    Separate from EsFillShape and for the same single-definition reason: the
+    evaluator and every reporting path go through this one function, so the
+    coordinate-to-field mapping exists exactly once.  The staircase block's
+    history is the argument -- when that mapping existed in three places, all
+    three disagreed and a single elite was reported with a shape that had never
+    been measured.
+*/
+void EsFillPeel(const uint32_t* fields, PrecodeSweepConfig& config)
+{
+    config.PeelP1 = fields[kEsPeelBase + 0u];
+    config.PeelTilt = fields[kEsPeelBase + 1u];
+    config.PeelDMax = fields[kEsPeelBase + 2u];
+    config.PeelAbsorb = fields[kEsPeelBase + 3u];
+}
+
+/**
+    Copy a COMPLETE ES config vector into a sweep config.
+
+    Same discipline as EsFillShape, extended to the whole vector: the
+    evaluator and every reporting path go through this one function, so the
+    coordinate-to-field mapping exists exactly once.  The bug this guards
+    against is the one that already happened here -- the evaluator forwarded a
+    different set of coordinates from the one the reports printed, so an elite
+    was reported with a config that had never been measured.
+*/
+void EsFillConfig(
+    const uint32_t* fields,
+    bool shape_active,
+    bool peel_active,
+    PrecodeSweepConfig& config)
+{
+    config.Staircase = fields[0];
+    config.MixedGF256Rows = fields[1];
+    config.DenseRows = fields[2];
+    config.DegreeScaleCenti = fields[kEsDegreeScaleCoord];
+    config.ShapeActive = shape_active;
+    EsFillShape(fields, config);
+    config.PeelActive = peel_active;
+    EsFillPeel(fields, config);
+}
+
+/**
+    Print an ES config vector as CSV columns, leading comma per column.
+
+    Same single-definition discipline as EsFillConfig: every report path prints
+    a config through this one function, so a row can never describe a different
+    vector from the one the evaluator was handed.  The scale coordinate prints
+    in DEGREES, exactly the spelling --configs accepts, so any reported config
+    replays verbatim; every other coordinate is already an integer.
+
+    The SHAPE-ACTIVE FLAG is printed with the vector, between the scale and the
+    PDF, because it is part of the config's identity and is not one of the
+    sixteen coordinates: --no-shape freezes p1..dmax at their starting values
+    and the codec ignores them.  Without the flag a --no-shape elite printed as
+    thirteen columns fed straight back through --configs, which reads a
+    13-field token as shape-ON -- measured at K=128, the reported elite
+    8,9,1,27.79 came back with holdout failure 0.867% and predicted cost
+    1,849,099 ns against the 0.500% / 1,850,381 ns that had actually been
+    measured.  A silently different replay is exactly what this file's
+    single-definition discipline exists to prevent, so the flag rides along
+    and --configs accepts the 14-field form it produces.
+*/
+void EsPrintConfigFields(
+    const uint32_t* fields,
+    bool shape_active,
+    bool peel_active)
+{
+    for (uint32_t j = 0; j < kEsDim; ++j)
+    {
+        // The PEEL-ACTIVE FLAG rides with the vector for exactly the reason
+        // the shape flag does: --no-peel-shape freezes the three peeling
+        // coordinates and the codec ignores them, so a row printed without the
+        // flag would replay through --configs as a peel-ON config and measure
+        // something that was never measured.
+        if (j == kEsPeelBase) {
+            std::printf(",%u", peel_active ? 1u : 0u);
+        }
+        if (j == kEsPeelBase + 1u)
+        {
+            // The tilt prints SIGNED, in the spelling --configs accepts, so a
+            // reported config replays verbatim.  Printing the offset lattice
+            // value here would round-trip into a different distribution.
+            std::printf(",%d", (int)fields[j] - (int)kPeelTiltRange);
+            continue;
+        }
+        if (j == kEsDegreeScaleCoord)
+        {
+            std::printf(",%.2f", (double)fields[j] / 100.0);
+            // Column order matches the S,H,D2,scale,shape,p1..dmax prefix
+            // that `essearch --measure` already prints.
+            std::printf(",%u", shape_active ? 1u : 0u);
+        }
+        else {
+            std::printf(",%u", fields[j]);
+        }
+    }
+}
+
+/// Print a theta vector, with the scale coordinate converted to degrees so it
+/// reads on the same axis as the config column beside it.
+void EsPrintThetaFields(const double* theta)
+{
+    for (uint32_t j = 0; j < kEsDim; ++j)
+    {
+        if (j == kEsDegreeScaleCoord) {
+            std::printf(",%.5f", theta[j] / 100.0);
+        }
+        else if (j == kEsPeelBase + 1u) {
+            // Same axis the config column prints, so the two agree on sign.
+            std::printf(",%.5f", theta[j] - (double)kPeelTiltRange);
+        }
+        else {
+            std::printf(",%.5f", theta[j]);
+        }
+    }
+}
+
+/// The realized degree PDF of an ES config vector, by the same mapping the
+/// evaluator uses.
+std::vector<double> EsShapeWeights(const uint32_t* fields)
+{
+    PrecodeSweepConfig config;
+    EsFillShape(fields, config);
+    return MakeStaircaseDegreeWeights(
+        config.ShapeP1, config.ShapeP2, config.ShapeP3,
+        config.ShapeC1, config.ShapeC2, config.ShapeC3,
+        config.ShapeC4, config.ShapeC5, config.ShapeDMax);
+}
+
+/// The realized PEELING degree law of an ES config vector, by the same mapping
+/// the evaluator uses.  Same single-definition rule as EsShapeWeights: a
+/// plotted curve has to be the curve that was measured.
+std::vector<double> EsPeelWeights(uint32_t block_count, const uint32_t* fields)
+{
+    PrecodeSweepConfig config;
+    EsFillPeel(fields, config);
+    return MakePeelDegreeWeights(
+        block_count, config.PeelP1, config.PeelTilt, config.PeelDMax,
+        config.PeelAbsorb);
+}
+
+/**
+    SplitMix64.  Used only on the calling thread, and only to fill the noise
+    arrays before a generation dispatches any work.
+*/
+struct EsRandom
+{
+    uint64_t State = 0u;
+    bool HasSpareNormal = false;
+    double SpareNormal = 0.0;
+
+    explicit EsRandom(uint64_t seed) : State(seed) {}
+
+    uint64_t NextU64()
+    {
+        uint64_t z = (State += UINT64_C(0x9E3779B97F4A7C15));
+        z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
+        return z ^ (z >> 31);
+    }
+
+    /// Uniform on [0,1) with 53 significant bits.
+    double NextUniform()
+    {
+        return (double)(NextU64() >> 11) * (1.0 / 9007199254740992.0);
+    }
+
+    /// Box-Muller.  Deterministic consumption: two uniforms yield two normals.
+    double NextNormal()
+    {
+        if (HasSpareNormal) {
+            HasSpareNormal = false;
+            return SpareNormal;
+        }
+        double u1 = 0.0;
+        do {
+            u1 = NextUniform();
+        } while (u1 <= 0.0);
+        const double u2 = NextUniform();
+        const double radius = std::sqrt(-2.0 * std::log(u1));
+        const double angle = 2.0 * 3.14159265358979323846 * u2;
+        SpareNormal = radius * std::sin(angle);
+        HasSpareNormal = true;
+        return radius * std::cos(angle);
+    }
+};
+
+uint64_t EsMixSeed(uint64_t a, uint64_t b)
+{
+    EsRandom mixer(a ^ (b + UINT64_C(0x9E3779B97F4A7C15) +
+        (a << 6) + (a >> 2)));
+    return mixer.NextU64();
+}
+
+/**
+    Reflect into [lo, hi] instead of clipping.
+
+    Clipping maps a whole half-line onto the boundary, so probability mass
+    piles up there and the paired difference along that coordinate collapses --
+    a sibling run had S stuck bouncing off its bound at large sigma.
+    Reflection keeps the perturbation distribution symmetric near an edge.
+*/
+double EsReflect(double x, double lo, double hi)
+{
+    const double span = hi - lo;
+    if (!(span > 0.0)) {
+        return lo;
+    }
+    // Floored modulo, matching numpy's np.mod (std::fmod truncates).
+    double y = std::fmod(x - lo, 2.0 * span);
+    if (y < 0.0) {
+        y += 2.0 * span;
+    }
+    if (y > span) {
+        y = 2.0 * span - y;
+    }
+    return y + lo;
+}
+
+/**
+    Straight-through stochastic rounding: q = floor(x) + 1[u < frac(x)].
+
+    E[q] = x exactly, which makes the expected objective the piecewise LINEAR
+    interpolant between integer lattice points rather than a step function.
+    Its slope is the discrete difference f(n+1) - f(n), so an estimated
+    gradient means "which neighbouring integer is better".  The uniform u is
+    SHARED between the two members of a mirrored pair, which cancels the
+    rounding noise in their difference.
+*/
+uint32_t EsQuantize(double x, double u, uint32_t lo, uint32_t hi)
+{
+    const double floored = std::floor(x);
+    double value = floored + (u < (x - floored) ? 1.0 : 0.0);
+    if (value < (double)lo) {
+        value = (double)lo;
+    }
+    if (value > (double)hi) {
+        value = (double)hi;
+    }
+    return (uint32_t)value;
+}
+
+/// Geometric budget ramp, rounded half-to-even like the reference's round().
+uint32_t EsRamp(uint32_t lo, uint32_t hi, uint32_t generation, uint32_t gens)
+{
+    if (gens <= 1u || lo == 0u) {
+        return hi;
+    }
+    const double fraction = (double)generation / (double)(gens - 1u);
+    const double value = (double)lo *
+        std::pow((double)hi / (double)lo, fraction);
+    return (uint32_t)std::nearbyint(value);
+}
+
+/// One structure config's outcome over one seed set.
+struct EsCandidateResult
+{
+    uint64_t Cells = 0u;
+    uint64_t Failures = 0u;
+    uint64_t Solved = 0u;
+    uint64_t SumBlockXors = 0u;
+    uint64_t SumBlockMulAdds = 0u;
+    uint64_t SumBlockCopies = 0u;
+    uint64_t SumBlockZeroFills = 0u;
+    bool Rejected = false;
+
+    void Add(const EsCandidateResult& other)
+    {
+        Cells += other.Cells;
+        Failures += other.Failures;
+        Solved += other.Solved;
+        SumBlockXors += other.SumBlockXors;
+        SumBlockMulAdds += other.SumBlockMulAdds;
+        SumBlockCopies += other.SumBlockCopies;
+        SumBlockZeroFills += other.SumBlockZeroFills;
+        Rejected = Rejected || other.Rejected;
+    }
+
+    double FailRate() const
+    {
+        return Cells != 0u ?
+            (double)Failures / (double)Cells : 1.0;
+    }
+
+    bool HasCost() const { return Solved != 0u; }
+
+    /**
+        Predicted encoder-setup nanoseconds for this config.
+
+        The counters are averaged over the cells that SOLVED: a cell that
+        gives up part way through does not represent the work an encoder
+        performs, and including its truncated counts would make a config look
+        cheaper the more often it fails.
+    */
+    double PredictedNs(const EsCostModelEntry& model) const
+    {
+        if (Solved == 0u) {
+            return kEsBadObjective;
+        }
+        const double n = (double)Solved;
+        return model.Intercept +
+            model.PerBlockXor * ((double)SumBlockXors / n) +
+            model.PerBlockMulAdd * ((double)SumBlockMulAdds / n) +
+            model.PerBlockCopy * ((double)SumBlockCopies / n) +
+            model.PerBlockZeroFill * ((double)SumBlockZeroFills / n);
+    }
+};
+
+/**
+    Failure rate predicted from the four op counters, per solved cell.
+
+        fail ~ b0 + b_xor*xors + b_muladd*muladds + b_copy*copies
+                  + b_zero*zerofills
+
+    WHY THIS EXISTS.  The search's binomial failure column is the most
+    expensive thing it measures and the least informative per cell, and the
+    scalar cost model throws away exactly the information that makes the shape
+    identifiable.  Measured at K=128, (S,H,D2)=(6,9,1), scale 14, 40 shapes at
+    12,000,000 cells each:
+
+      * failure regressed on the SCALAR predicted cost      R2 = 0.914
+      * failure regressed on the FOUR counters as a vector  R2 = 0.992
+        (leave-one-out R2 = 0.981, residual 3.5e-5, against a binomial
+        standard error of 2.85e-5 at that cell count)
+
+    So the counter vector determines the failure rate to within the noise of a
+    12-million-cell measurement, while the scalar cost does not.  That gap is
+    the whole problem: cost and failure are collinear ACROSS SHAPES at
+    r = -0.85 to -0.92, so an objective reading only cost is reading one
+    coordinate of a map that has at least two.  The second is real and not
+    small -- split-half residual reliability 0.915 over disjoint cell blocks,
+    carrying 28.7% of the shape's cost variation, and orthogonal to the
+    along-line coordinate (corr with the PDF's coefficient of variation
+    -0.024, against -0.917 for cost).  It is a Pareto direction: lower cost at
+    the SAME failure.
+
+    Reading it through the binomial column is unaffordable -- resolving a
+    1,064 ns off-line effect needs ~1.5e7 cells PER CANDIDATE -- and common
+    random numbers do not rescue it (two configs sharing a block agree on only
+    r = 0.23 to 0.36 of their failures, a 1.2-1.7x variance reduction against
+    the ~20x required).  Reading it through the counters costs nothing extra,
+    because the counters are already harvested for the cost model.
+
+    CALIBRATION IS LOCAL.  The coefficients are fitted at one structure and one
+    mean row degree and are not claimed to hold elsewhere, which is why
+    --fail-model requires --fix-structure.  Refit rather than reuse.
+*/
+struct EsFailModel
+{
+    bool Set = false;
+    double B0 = 0.0;
+    double BXor = 0.0;
+    double BMulAdd = 0.0;
+    double BCopy = 0.0;
+    double BZeroFill = 0.0;
+
+    bool Active() const { return Set; }
+
+    double Predict(const EsCandidateResult& result) const;
+};
+
+/**
+    obj = cost + lam * max(0, fail + z*se - target) + margin_reward * fail.
+
+    z > 0 applies the multiplicity margin: a config counts as feasible only if
+    it clears the target by z standard errors, so a lucky binomial draw cannot
+    buy feasibility.  The relevant statistic is the min over every candidate
+    seen so far, which is why z is sqrt(2 ln N) and not the 2 of a single
+    comparison -- measured, at N=600 a 2-sigma margin still violated the
+    constraint 100% of the time while 3.8 sigma violated it under 1% of the
+    time.
+
+    margin_reward is the LINEAR failure price of --margin-reward, zero by
+    default, and it is applied to the raw failure rate rather than to the
+    excess: pricing the margin `-rate * (target - fail)` and pricing the rate
+    `+rate * fail` differ by the constant `rate * target`, which cannot change
+    any ranking, so the simpler form is the one computed.  Its whole purpose is
+    to be nonzero where the hinge is not.  See EsOptions::MarginReward for the
+    measurements that fix the usable range.
+
+    shape_surrogate > 0 REPLACES all of the above with
+
+        obj = -cost / shape_surrogate
+
+    which is the shape axis's own failure rate read off the op counters.  It is
+    only meaningful with the structure and the mean row degree both pinned;
+    CmdEsSearch refuses it otherwise, and EsOptions::ShapeSurrogate carries the
+    measurements.  The failure column is not consulted at all on this path --
+    that is the point of it -- so the target, lambda and the multiplicity
+    margin have nothing to act on and are deliberately not applied.
+*/
+double EsObjective(
+    const EsCandidateResult& result,
+    const EsCostModelEntry& model,
+    double target,
+    double lam,
+    bool log_time,
+    double z,
+    double margin_reward,
+    double shape_surrogate,
+    const EsFailModel& fail_model)
+{
+    if (!result.HasCost()) {
+        return kEsBadObjective;
+    }
+    if (shape_surrogate > 0.0) {
+        return -result.PredictedNs(model) / shape_surrogate;
+    }
+    // The failure ESTIMATE, from the op counters when a model is supplied and
+    // from the binomial count otherwise.  Only the point estimate is replaced:
+    // the multiplicity margin below keeps using the binomial standard error,
+    // which is far larger than the model's own residual and therefore the
+    // conservative choice.
+    const double p = fail_model.Active() ?
+        fail_model.Predict(result) : result.FailRate();
+    const double n = (double)(result.Cells != 0u ? result.Cells : 1u);
+    const double measured = result.FailRate();
+    const double se = std::sqrt(
+        std::max(measured * (1.0 - measured), 1e-12) / n);
+    const double excess = std::max(0.0, p + z * se - target);
+    const double cost = result.PredictedNs(model);
+    return (log_time ? std::log(cost) : cost) + lam * excess +
+        margin_reward * p;
+}
+
+/**
+    Counter means are taken over the cells that SOLVED, matching
+    EsCandidateResult::PredictedNs, because the model was fitted against means
+    computed that way.  A config that never solved has no counters to read and
+    falls back to the measured failure rate, which is 1.0 for such a config and
+    is already the correct answer.
+*/
+double EsFailModel::Predict(const EsCandidateResult& result) const
+{
+    if (result.Solved == 0u) {
+        return result.FailRate();
+    }
+    const double n = (double)result.Solved;
+    const double predicted = B0 +
+        BXor * ((double)result.SumBlockXors / n) +
+        BMulAdd * ((double)result.SumBlockMulAdds / n) +
+        BCopy * ((double)result.SumBlockCopies / n) +
+        BZeroFill * ((double)result.SumBlockZeroFills / n);
+    // A probability, whatever the linear fit says off its calibration range.
+    return std::min(1.0, std::max(0.0, predicted));
+}
+
+/**
+    Config x cell cross product on a thread pool, harvesting both the 0/1
+    outcome and the block-operation counters of every solved cell.
+
+    The reduction is over uint64 counter sums, so it is exact and independent
+    of the order the workers finish in.  Each worker re-applies the config's
+    thread-local codec knobs before every task, which is what makes a reused
+    worker equivalent to the fresh-thread-per-config rule precodesweep uses.
+*/
+class EsEvaluator
+{
+public:
+    EsEvaluator(const PrecodeSweepRun& run, uint32_t threads)
+        : Run(run), Threads(threads == 0u ? 1u : threads)
+    {
+    }
+
+    /// Returns false only when a worker threw or a thread could not launch.
+    bool Evaluate(
+        const std::vector<PrecodeSweepConfig>& configs,
+        uint64_t cell_begin,
+        uint64_t cell_count,
+        std::vector<EsCandidateResult>& out)
+    {
+        out.assign(configs.size(), EsCandidateResult());
+        if (configs.empty() || cell_count == 0u) {
+            return true;
+        }
+
+        // Tasks are built here, on the calling thread, in a fixed order.
+        struct Task
+        {
+            uint32_t Config;
+            uint64_t Begin;
+            uint64_t Count;
+        };
+        // Size the chunk from the WHOLE batch, not from one config's cell
+        // range: a single-config batch (the held-out elite re-score) would
+        // otherwise split into as many pieces as one config needs and leave
+        // most of the pool idle for the rest of the generation.
+        uint64_t chunk = ((uint64_t)cell_count * configs.size() +
+            (uint64_t)Threads * 4u - 1u) / ((uint64_t)Threads * 4u);
+        chunk = std::max<uint64_t>(chunk, 8u);
+        chunk = std::min<uint64_t>(chunk, cell_count);
+        std::vector<Task> tasks;
+        for (uint32_t index = 0; index < (uint32_t)configs.size(); ++index)
+        {
+            const char* rejection =
+                PrecodeSweepConfigRejection(Run, configs[index]);
+            if (rejection != nullptr)
+            {
+                // The per-cell harness records a refused config as a run with
+                // no data row, i.e. total failure over every cell.
+                out[index].Cells = cell_count;
+                out[index].Failures = cell_count;
+                out[index].Rejected = true;
+                continue;
+            }
+            for (uint64_t at = 0u; at < cell_count; at += chunk)
+            {
+                Task task;
+                task.Config = index;
+                task.Begin = cell_begin + at;
+                task.Count = std::min<uint64_t>(chunk, cell_count - at);
+                tasks.push_back(task);
+            }
+        }
+        if (tasks.empty()) {
+            return true;
+        }
+
+        std::atomic<size_t> next_task(0u);
+        // A codec-knob combination the codec REFUSES is that CONFIG's
+        // outcome, not the batch's.  This used to be a single run-wide flag
+        // that made every worker abandon the whole task list, so one
+        // infeasible candidate reported every OTHER candidate in the same
+        // call as a total failure.  Measured at K=128 over 20000 cells:
+        // `--configs 6,9,1,21.33;6,10,1,21.33` reads 0.855% and 0.840%, and
+        // the identical two configs read fail_rate 1.00000000 "rejected"
+        // when 6,11,1,21.33 -- which the codec refuses -- is placed first in
+        // the same list.
+        std::atomic<bool> aborted(false);
+        std::atomic<bool> worker_failed(false);
+        std::mutex refused_mutex;
+        std::vector<uint8_t> config_refused(configs.size(), uint8_t{0});
+        std::mutex merge_mutex;
+        const uint32_t worker_count =
+            (uint32_t)std::min<size_t>(Threads, tasks.size());
+        std::vector<std::thread> workers;
+        ThreadJoinGuard join_guard(workers);
+        workers.reserve(worker_count);
+        try
+        {
+            for (uint32_t worker = 0; worker < worker_count; ++worker)
+            {
+                workers.push_back(std::thread([&]() {
+                    try
+                    {
+                        std::vector<EsCandidateResult> local(configs.size());
+                        const std::vector<uint8_t> zero =
+                            MakeZeroPacketBlock(Run.SolveBlockBytes());
+                        std::vector<wirehair_v2::SolvePacket> packets(
+                            (size_t)Run.BlockCount + Run.Overhead);
+                        for (;;)
+                        {
+                            const size_t index = next_task.fetch_add(1u);
+                            if (index >= tasks.size() || aborted.load())
+                            {
+                                break;
+                            }
+                            const Task& task = tasks[index];
+                            const PrecodeSweepConfig& config =
+                                configs[task.Config];
+                            if (!Run.ConfigureThread(config)) {
+                                // Refuse THIS config and keep going; every
+                                // other config in the batch is still a valid
+                                // measurement.
+                                std::lock_guard<std::mutex> lock(
+                                    refused_mutex);
+                                config_refused[task.Config] = 1u;
+                                continue;
+                            }
+                            EsCandidateResult& slot = local[task.Config];
+                            for (uint64_t at = 0u; at < task.Count; ++at)
+                            {
+                                wirehair_v2::PrecodeSolveStats stats;
+                                const uint8_t failed = Run.RunCell(
+                                    config, (uint32_t)(task.Begin + at),
+                                    packets, zero.data(), &stats);
+                                slot.Cells += 1u;
+                                slot.Failures += failed;
+                                if (failed == 0u)
+                                {
+                                    slot.Solved += 1u;
+                                    slot.SumBlockXors += stats.BlockXors;
+                                    slot.SumBlockMulAdds += stats.BlockMulAdds;
+                                    slot.SumBlockCopies += stats.BlockCopies;
+                                    slot.SumBlockZeroFills +=
+                                        stats.BlockZeroFills;
+                                }
+                            }
+                        }
+                        // Integer sums: the merge order cannot change the
+                        // totals, so a mutex is enough for determinism.
+                        std::lock_guard<std::mutex> lock(merge_mutex);
+                        for (size_t index = 0u; index < local.size(); ++index) {
+                            out[index].Add(local[index]);
+                        }
+                    }
+                    catch (...) {
+                        worker_failed.store(true);
+                        aborted.store(true);
+                    }
+                }));
+            }
+        }
+        catch (const std::system_error& error)
+        {
+            aborted.store(true);
+            join_guard.JoinAll();
+            std::fprintf(stderr,
+                "essearch thread launch failed: %s\n", error.what());
+            return false;
+        }
+        join_guard.JoinAll();
+        if (worker_failed.load()) {
+            std::fprintf(stderr, "essearch worker failed\n");
+            return false;
+        }
+        // A refused config -- and, defensively, any config that did not
+        // receive its full cell count -- is total failure over every cell,
+        // exactly as the per-cell harness records a refused config.  Every
+        // config that completed keeps the measurement it actually produced.
+        for (size_t index = 0u; index < out.size(); ++index)
+        {
+            if (config_refused[index] == 0u &&
+                out[index].Cells >= cell_count)
+            {
+                continue;
+            }
+            out[index] = EsCandidateResult();
+            out[index].Cells = cell_count;
+            out[index].Failures = cell_count;
+            out[index].Rejected = true;
+        }
+        return true;
+    }
+
+private:
+    const PrecodeSweepRun& Run;
+    uint32_t Threads;
+};
+
+struct EsNoiseRecord
+{
+    uint32_t Run = 0u;
+    uint32_t Generation = 0u;
+    uint32_t Pair = 0u;
+    double Eps[kEsDim] = {};
+    double Uniform[kEsDim] = {};
+};
+
+/// Sentinel for an option that has no default and must be supplied.  NaN is
+/// used deliberately: it compares false against every threshold, so a missed
+/// required-check surfaces as an obviously broken objective rather than as a
+/// silently plausible one.
+const double kEsUnsetDouble = std::numeric_limits<double>::quiet_NaN();
+
+struct EsOptions
+{
+    uint32_t BlockCount = 128u;
+    uint32_t Generations = 80u;
+    uint32_t Pairs = 12u;
+    uint32_t Runs = 1u;
+    uint64_t Seed = 1u;
+    uint64_t CellSeed0 = 1u;
+    uint32_t NseedsFixed = 0u;
+    uint32_t NseedsLow = 1000u;
+    uint32_t NseedsHigh = 12000u;
+    uint32_t HoldoutCells = 8000u;
+    uint64_t HoldoutBase = UINT64_C(10000000);
+    /**
+        --holdout-stride: advance the holdout block by this many cells per
+        GENERATION.  Zero (the default) keeps the historical fixed block.
+
+        The fixed block re-introduces the selection bias the holdout exists to
+        remove.  The elite is re-scored on the holdout every generation and the
+        reported answer is the argmin over generations, so with one fixed block
+        that is a minimum over `gens` draws of the SAME noisy statistic -- a
+        winner's curse on the holdout itself, not on the search sample.
+
+        Measured at K=128, six 80-generation runs, --h-lo 9, holdout 8000
+        cells: the six winners reported 0.900, 0.7625, 0.950, 0.9625, 0.8875
+        and 0.950 percent, and the same six configs re-measured on 4,000,000
+        cells disjoint from every search and holdout seed failed at 1.0662,
+        1.0440, 1.0581, 1.2281, 1.0474 and 1.0471 percent.  Every one of them
+        understates its failure, by 0.10 to 0.27 points, and every one of them
+        is over the 0.95% target it was reported as meeting.  The bias is the
+        size the model predicts: one standard error at 8000 cells is 0.109
+        points and the expected minimum of 80 such draws sits about 2.4 of them
+        low.
+
+        Setting the stride to the holdout size gives every generation its own
+        block, which makes the per-generation scores independent; the argmin is
+        then still optimistic across generations but by far less, and the
+        answer stops being a property of one unlucky block.  It is off by
+        default only so that a run started before this existed stays
+        reproducible -- new work should set it.
+    */
+    uint64_t HoldoutStride = 0u;
+    /**
+        Failure target.  REQUIRED -- there is deliberately no default.
+
+        A wrong target does not fail loudly, it silently returns an
+        unconstrained search: at the old 0.034595 default a config failing at
+        3.05% carries zero excess, so it is "feasible" and wins outright by
+        155,984 ns over a 0.94% config.  The winner under that default was
+        edge_count = 2 -- two staircase edges for 128 source columns, 126 of
+        them with no parity at all -- which is worse than the incumbent AND
+        worse than the WH1 reference it is supposed to beat.  A plausible
+        looking answer from a constraint that never bound is far more
+        expensive than an error message, so the caller must state the target.
+    */
+    double Target = kEsUnsetDouble;
+    /**
+        Failure-constraint weight, in the SAME UNITS AS THE COST MODEL.
+
+        obj = predicted_cost_ns + Lambda * max(0, fail + z*se - target), so
+        Lambda has to be large against the cost the search is trading away.
+        397075 was derived against a ~16,000 ns objective (the small-payload
+        fits).  The K=128 row of WirehairV2EsCostModel.inc is currently the
+        64 KiB fit, where costs run ~4,500,000 ns; at that scale the default
+        makes the constraint worthless -- it returned a config sitting at
+        3.33% failure against a 1% target, which cannot decode at 64 KiB.
+        Use --lam 112500000 with the 64 KiB model (same 25000:1 ratio of
+        Lambda to typical cost that 397075 had at 16,000 ns).  Anyone
+        re-fitting the cost table at a different payload must rescale it.
+    */
+    double Lambda = kEsUnsetDouble;
+    /**
+        Lower bound for H, the GF(256) mixed row count.
+
+        Feasibility is NOT width-invariant: at K=128 an H=6 config solves every
+        cell at the search's width 0 and fails EVERY cell at solve width 65536.
+        The search cannot observe that, so the floor has to be supplied.  See
+        the bound_lo comment in RunEsSearch for the measurements.
+    */
+    uint32_t HLow = 1u;
+    double AlphaScale = 1.0;
+    /**
+        Per-group sigma and alpha multipliers, and the per-group decay.
+
+        All default to 1.0 / to the structural schedule, so an unflagged run
+        is bit-identical to the hand-set behaviour.  Groups are
+        structural (S,H,D2), degree scale, percent (p1..p3),
+        polynomial (c1..c5), dmax, and one group per peel coordinate.
+        The shape schedule covers all nine shape coordinates at once: the
+        question it exists to answer is whether the SHAPE wants to keep
+        exploring after the structure has settled, and that is one question,
+        not three.
+    */
+    double SigmaStruct = 1.0;
+    /// Mean-row-degree group, moved by --sigma-degscale/--alpha-degscale.
+    /// Spelled out separately from --alpha-scale, which is the GLOBAL alpha
+    /// multiplier and has nothing to do with this coordinate.
+    double SigmaDegScale = 1.0;
+    double SigmaPct = 1.0;
+    double SigmaPoly = 1.0;
+    double SigmaDMax = 1.0;
+    /// Peeling groups, one per coordinate: their boxes are [0,400], [0,200]
+    /// and [4,64], which share no scale, so they cannot share a multiplier.
+    double SigmaPeelP1 = 1.0;
+    double SigmaPeelTilt = 1.0;
+    double SigmaPeelDMax = 1.0;
+    double SigmaPeelAbsorb = 1.0;
+    double AlphaStruct = 1.0;
+    double AlphaDegScale = 1.0;
+    double AlphaPct = 1.0;
+    double AlphaPoly = 1.0;
+    double AlphaDMax = 1.0;
+    double AlphaPeelP1 = 1.0;
+    double AlphaPeelTilt = 1.0;
+    double AlphaPeelDMax = 1.0;
+    double AlphaPeelAbsorb = 1.0;
+    /// sigma *= DecayRate at generations DecayAt1*gens and DecayAt2*gens.
+    double DecayRate = 0.6;
+    double DecayAt1 = 0.60;
+    double DecayAt2 = 0.85;
+    /// Shape-coordinate schedule; negative means "follow the structural one".
+    double ShapeDecayRate = -1.0;
+    double ShapeDecayAt1 = -1.0;
+    double ShapeDecayAt2 = -1.0;
+    double InitS = 0.0;
+    bool InitExplicit = false;
+    /**
+        Box for the mean-row-degree coordinate, in CENTI-DEGREES, and its
+        starting point.
+
+        The default box spans 0.00 to 64.00 mean source columns per staircase
+        row.  It is a SEARCH box, not a codec rule -- the codec's own domain
+        runs to 64000 -- and it is on the command line precisely so that no
+        K relationship has to be built in: a block count whose optimum sits
+        above 64 raises --scale-hi rather than having the harness guess.
+
+        The start defaults to the MIDPOINT of the box.  A start derived from
+        the legacy budget would be K*N1/S, i.e. exactly the modelled quantity
+        this coordinate exists to stop assuming, so the search is handed a
+        neutral point and travels from there.
+    */
+    uint32_t ScaleLoCenti = 0u;
+    uint32_t ScaleHiCenti = 6400u;
+    uint32_t InitScaleCenti = 0u;
+    bool InitScaleExplicit = false;
+    /**
+        Boxes for the remaining optimized coordinates.  Zero keeps the
+        historical default, which is printed in the banner either way.
+
+        These exist so that NO box a searched coordinate reflects off is a
+        built-in K relationship that cannot be overridden.  S's default
+        ceiling is 3*sqrt(K) and dmax's is min(64, K); both are search
+        heuristics, not construction rules, and a run that disagrees with
+        either says so on its own command line instead of being silently
+        bounded by a model.  H's ceiling is capped at 10 whatever is asked
+        for, because that is the codec's own GF(256) row domain rather than a
+        search choice.
+    */
+    uint32_t SLow = 0u;
+    uint32_t SHigh = 0u;
+    uint32_t HHigh = 0u;
+    uint32_t D2High = 0u;
+    uint32_t DMaxHigh = 0u;
+    bool Decay = true;
+    /**
+        Learn the staircase row-degree shape.  --no-shape freezes the nine
+        shape coordinates and leaves the stock construction in place.
+
+        MEASURED VERDICT AT K=128: --no-shape IS THE BETTER SETTING.  The
+        unshaped construction is not merely competitive with the nine-parameter
+        family, it is outside it -- at (S,H,D2)=(5,9,1), 48 random shapes per
+        scale, 400,000 cells each, the stock construction's predicted cost
+        exceeded the cost of EVERY sampled shape at EVERY one of seven scales
+        (336 of 336 comparisons).  On this axis higher cost is lower failure --
+        cost and failure are collinear across shapes at r = -0.85 to -0.92 --
+        so the stock point is past the reachable end of the family, and a
+        shaped run can only travel away from it.
+
+        The end-to-end comparison agrees.  Sweeping nine distributions and the
+        unshaped construction over the same ten-point mean-row-degree grid at
+        4,000,000 cells each, and scoring by cost + R*failure with R the
+        measured price of decodability on the scale axis, the best figure of
+        merit each could reach was:
+
+            stock (unshaped)          3,709,606       <-- best
+            best fine-tuned shape     3,711,413   (+1,807, inside the 2,566 ns
+                                                   measurement noise, and the
+                                                   best of twelve runs)
+            ideal soliton dmax=20     3,720,449   (+10,842)
+            this search's own flat
+              starting shape          3,725,944   (+16,337)
+            ideal soliton dmax=128    3,737,907   (+28,301)
+
+        The R-free check says the same: of 90 shaped (failure, cost) points,
+        exactly ONE sat below the unshaped frontier by more than the noise --
+        the count chance produces from 90 tests -- and every distribution's
+        MEAN offset from that frontier was positive.
+
+        So the soliton family is not merely inexpressible here (the tail
+        polynomial cannot make 1/d^2 decay without clamping), it is not wanted:
+        a true ideal soliton injected through WIREHAIR_V2_STAIRCASE_DEGREES,
+        which sidesteps the parameterization entirely, loses to the stock
+        construction by four standard errors at dmax=20 and eleven at dmax=128.
+
+        The coordinates are kept rather than deleted because the verdict was
+        measured at ONE block count.  Anyone turning them back on at another K
+        should first re-run the 336-comparison check above: if stock is again
+        past the end of the family, the search is being asked to find something
+        that is not there.
+    */
+    bool Shape = true;
+    /**
+        Learn the PEELING row-degree law.  --no-peel-shape freezes the three
+        peel coordinates and leaves the shipped distribution in place.
+
+        ON BY DEFAULT, unlike the staircase shape's measured verdict above,
+        because this is the distribution the project is trying to learn and the
+        family is built so that its neutral point IS the incumbent: a run that
+        cannot beat stock reports the incumbent's own coordinates rather than
+        drifting away from them.
+
+        --no-peel-shape is what the identity gate is measured against.  A run
+        with the peel coordinates pinned at (100,100,64) must reproduce a
+        --no-peel-shape run bit for bit; if it ever does not, the wiring is
+        broken and every peel number in the campaign is meaningless, which is
+        why that check is a gate and not a nicety.
+    */
+    bool Peel = true;
+    /**
+        --fix-structure S:H:D2 -- pin the three structural coordinates and
+        search only the mean row degree and the nine shape coordinates.
+
+        This is stage TWO of a two-stage protocol, and it exists because the
+        shape cannot be learned while the structure is still moving.  Measured
+        at K=128, 300,000 cells per config, solve width 0, holding
+        (S,H,D2)=(6,10,1):
+
+          * one step of S moves predicted cost by ~41,000 ns and one step of D2
+            by ~97,000 ns, while the ENTIRE spread of predicted cost over 48
+            random shapes at a fixed scale is 17,800 ns (sd 3,384 ns).
+
+        So while S, H and D2 are free, a mirrored pair's objective difference
+        is dominated by whichever structural coordinate happened to move, the
+        rank shaping is driven almost entirely by that, and the shape
+        coordinates receive a gradient that is essentially the projection of
+        structural noise.  Freezing the structure is what makes the shape the
+        only thing the ranking can respond to.
+
+        The pinned values must lie INSIDE the coordinate boxes; a pin outside
+        its box is refused rather than silently reflected to an unrelated
+        interior point, for the same reason --init-scale is.
+    */
+    bool FixStructure = false;
+    uint32_t FixS = 0u;
+    uint32_t FixH = 0u;
+    uint32_t FixD2 = 0u;
+    /**
+        --margin-reward RATE -- price failure LINEARLY, in ns per unit failure,
+        in ADDITION to the target hinge.  Zero (the default) is exactly the
+        historical objective.
+
+        The hinge alone gives the shape no reason to prefer a reliable
+        distribution over an unreliable one, because it is EXACTLY ZERO
+        everywhere below the target.  Measured at K=128 over 48 random shapes
+        at (S,H,D2)=(6,10,1), scale 6.07, 300,000 cells each: 46 of 48 sat
+        below a 0.95% target, so 46 of 48 carried a penalty of precisely 0 and
+        were ranked on predicted cost alone.  That is not a flat objective --
+        the cost term's shape signal is large and highly repeatable (sd
+        3,384 ns, split-block r = 1.000) -- but it points the WRONG WAY:
+        across shapes, cost and failure are collinear with r = -0.97, so
+        minimizing cost maximizes failure.  The search is therefore rewarded
+        for degrading decodability right up to the target, and the only thing
+        opposing it is a hinge that cannot see the shape at all.
+
+        A linear price restores a two-sided gradient: below the target a shape
+        is still rewarded for failing less, so the objective has an interior
+        optimum instead of a boundary the search slides along.
+
+        RATE has to sit STRICTLY BETWEEN the two axes' measured exchange rates
+        or it does not do its job.  Measured at the anchor above, dcost/dfail
+        is -1.27e7 ns per unit failure along the SHAPE axis and -3.18e7 along
+        the mean-row-degree axis.  Below the shape rate the price is too weak
+        to reverse the shape's incentive; above the scale rate it also reverses
+        the scale's, and the scale runs away to its ceiling instead of settling
+        where the target puts it.  2.0e7 is the midpoint of the measured pair.
+    */
+    double MarginReward = 0.0;
+    /**
+        --init-random-shape -- start each run's TEN fine-tune coordinates (the
+        mean row degree and the nine shape coordinates) at an independent
+        uniform draw inside their boxes.
+
+        Without it every run starts the shape at the same dispersed point, so
+        `--runs N` measures N draws of the search NOISE from ONE starting
+        point.  That cannot answer the question a fine-tune has to answer --
+        whether the learned distribution is a property of the problem or of the
+        initialization -- because a shared start is exactly the confound.  The
+        draw is taken from --seed and the run index, so a set of independent
+        starts is still reproducible from the command line alone.
+
+        --init-scale still wins for the mean-row-degree coordinate when it is
+        given explicitly: a run that pins the scale is asking for the shape to
+        be explored at that scale, and silently overwriting the pin would make
+        the banner wrong.
+    */
+    bool InitRandomShape = false;
+    /**
+        --shape-surrogate RATE -- score a candidate by a failure rate ESTIMATED
+        FROM THE OP COUNTERS instead of by the binomial failure count, at a
+        pinned structure and a pinned mean row degree.  Zero (the default) is
+        off.  RATE is |dcost/dfail| along the shape axis, in ns per unit
+        failure, measured at the structure and scale being fine-tuned.
+
+        The reason this exists is a 22x sampling-efficiency gap.  With
+        everything but the shape held fixed, the shape's effect on cost and its
+        effect on failure are the SAME effect -- measured at K=128,
+        (S,H,D2)=(5,9,1), 48 random shapes per scale, 400,000 cells each, the
+        two correlate at r = -0.85 to -0.92 across seven scales, and the
+        regression residual (1,193 to 1,617 ns) is at or below the residual the
+        binomial noise on the failure column alone would produce (1,345 to
+        1,546 ns).  There is no measurable second dimension: cost is a
+        deterministic decreasing function of failure across shapes.
+
+        The two channels estimate that one quantity at wildly different
+        precision.  Per candidate at n cells, and taking the shape-induced
+        spread as the signal:
+
+            failure channel SNR ~ 3.5e-3 * sqrt(n)
+            cost    channel SNR ~ 7.9e-2 * sqrt(n)
+
+        so the cost channel is worth 22x the sample size.  A three-sigma call
+        on two ADJACENT shapes needed 1.7e7 cells through the failure column
+        and 1.9e5 through the cost column -- and common random numbers do not
+        rescue the failure column, because two configs sharing a cell block
+        agree on only r = 0.23 to 0.36 of their failures, a variance reduction
+        of 1.2x to 1.7x against the ~20x that would be needed.
+
+        So the surrogate reads the cheap channel and reports it in the units of
+        the expensive one:
+
+            fail_surrogate = -pred_cost_ns / RATE     (+ an additive constant,
+                                                       which no ranking sees)
+
+        WHAT THIS IS NOT.  It is not a claim that a slower encoder decodes
+        better in general.  It is an affine recalibration whose slope is a
+        property of ONE structure at ONE scale, which is exactly why both must
+        be pinned and why RATE has to be supplied rather than assumed: at
+        (6,10,1) scale 6.07 the same rate is 1.27e7 and at (5,9,1) scale 17 it
+        is 8.3e6.  Used with the structure or the scale still moving it is
+        simply wrong -- along the SCALE axis the rate is 9.65e7, an order of
+        magnitude away, and a search free to move scale under this objective
+        would drive the mean row degree to its ceiling and call it a shape.
+    */
+    double ShapeSurrogate = 0.0;
+    /**
+        --fail-model b0,b_xor,b_muladd,b_copy,b_zero -- estimate the failure
+        rate from the op counters instead of counting failures.  See
+        EsFailModel for the measurements; the short version is that the four
+        counters determine failure at leave-one-out R2 = 0.981 while the scalar
+        cost the objective currently reads manages 0.914, and the difference is
+        exactly the second dimension that makes the shape identifiable.
+
+        Requires --fix-structure: the fit is calibrated at one structure.
+    */
+    EsFailModel FailModel;
+    bool MultiplicityMargin = true;
+    /**
+        --tie-mask: drop a pair's contribution to coordinate j when both
+        members of the pair quantized to the same integer on j.
+
+        Such a pair provably carries no information about j and contributes a
+        zero-mean noise term, so masking it is unbiased variance reduction, and
+        the tie census showed it is not a rare event on the previous
+        coordinate set (N1 and D2 tied on ~87% of pairs).  It is nevertheless
+        OFF by default because it MEASURED NEUTRAL: paired over four seeds at
+        N=128, gens=80, pairs=12, the winners were the same structure in every
+        seed and mean predicted cost moved 1,655,856 -> 1,655,814 ns (0.002%),
+        well inside run-to-run scatter.
+        It is exposed so the tuning phase can re-test it at whatever sigma it
+        settles on -- smaller sigma means more ties, which is where masking
+        should start to pay.
+    */
+    bool TieMask = false;
+    bool FreshElite = true;
+    bool LogTime = false;
+    bool EmitTrace = false;
+    bool EmitCandidates = false;
+    uint32_t Threads = 0u;
+    std::string EmitNoisePath;
+    std::string NoisePath;
+    // --measure exposes the search's own evaluator for one explicit config
+    // list over one explicit cell range, and runs no search.  It exists so
+    // the failure column can be diffed against precodesweep and so an
+    // external reference implementation of the search loop can be driven from
+    // exactly the numbers this binary would have used.
+    bool Measure = false;
+    uint64_t MeasureCellBegin = 0u;
+    uint64_t MeasureCellEnd = 0u;
+};
+
+struct EsBest
+{
+    double Objective = kEsBadObjective;
+    uint32_t Config[kEsDim] = {};
+    double Fail = 1.0;
+    uint64_t Cells = 0u;
+    double PredictedNs = 0.0;
+    uint32_t Generation = 0u;
+};
+
+/**
+    Default ceiling for S.
+
+    3*sqrt(K) is a SEARCH heuristic, not a construction rule -- it says where
+    a sensible staircase count stops being worth evaluating, which is why it
+    is overridable with --s-hi.  Nothing downstream of the search depends on
+    it and the construction never consults it.
+*/
+/// Upper bound for S.  REQUIRED via --s-hi; there is deliberately no default.
+///
+/// The old fallback was max(8, 3*sqrt(K)) -- a K model, and not only in a
+/// bound: the initial theta is drawn logUniform[2, s_high], so every unpinned
+/// run's STARTING S was a function of K.  Parameters are supposed to come from
+/// what the search learns, with cross-K generalization handled later by
+/// interpolating per-K optima, so a sqrt(K) rule reaching the init distribution
+/// is exactly the class of hidden formula being removed.
+uint32_t EsDefaultSHigh(const EsOptions& options)
+{
+    return options.SHigh;
+}
+
+/// Default ceiling for dmax.  A row cannot touch a source column twice, so a
+/// degree above K is meaningless (that part is definitional); the 64 is a
+/// search heuristic and --dmax-hi overrides the pair.
+uint32_t EsDefaultDMaxHigh(const EsOptions& options)
+{
+    const uint32_t requested = options.DMaxHigh != 0u ?
+        options.DMaxHigh : 64u;
+    return std::max<uint32_t>(
+        4u, std::min(requested, options.BlockCount));
+}
+
+/// Default ceiling for H.  Capped at 10 whatever --h-hi asks for: that is the
+/// codec's own GF(256) mixed-row domain, not a search choice.
+uint32_t EsDefaultHHigh(const EsOptions& options)
+{
+    return std::min<uint32_t>(options.HHigh != 0u ? options.HHigh : 10u, 10u);
+}
+
+/**
+    One independent search.  Returns false on an evaluation failure.
+
+    Everything statistical here was measured, not chosen for taste:
+
+      * gens defaults to 80 because at 25 the search provably fails to travel
+        -- final S was ~0.55x init S, so the starting point decided the
+        outcome.  At 80 it is init-independent: final S was 4,4,4,4,5,4 from
+        inits spanning 3.9 to 28.
+      * the seed budget ramps geometrically because a fixed budget is wrong at
+        both ends.  Early, candidates differ by hundreds of nanoseconds and
+        precision is wasted; late, the decision is between near-ties and the
+        multiplicity margin needs a small standard error to be meaningful.
+      * the margin is GATED OFF while z*se is large against the target.  At
+        nseeds=800 the ungated margin adds 2.5 points to a 3.46% target,
+        nearly every candidate reads infeasible, the objective degenerates
+        into penalty noise, and the search stops travelling entirely (S moved
+        17.6 -> 13.9 in 30 generations instead of reaching 4).
+      * the reported elite is re-scored on a FIXED HOLDOUT seed set disjoint
+        from every search seed.  An argmin over N noisy candidates is
+        selection-biased: simulated at a 3% rate with 600 candidates at 1000
+        seeds, the winner understates its failure by 1.52 points, and a
+        sibling study found H systematically one too low at nine anchors.
+*/
+bool RunEsSearch(
+    const EsOptions& options,
+    const EsCostModelEntry& model,
+    uint32_t run_index,
+    double init_s,
+    EsEvaluator& evaluator,
+    const std::vector<EsNoiseRecord>* replay,
+    size_t& replay_cursor,
+    std::FILE* noise_out,
+    EsBest& best,
+    double theta_out[kEsDim])
+{
+    const uint32_t pairs = options.Pairs;
+    const uint32_t gens = options.Generations;
+    const uint32_t s_low = options.SLow != 0u ? options.SLow : 2u;
+    const uint32_t s_high = std::max(s_low, EsDefaultSHigh(options));
+    // dmax's ceiling is min(64, K).  A row cannot touch a source column twice,
+    // so a degree above K is meaningless, and the multiplicative rescale puts
+    // the realized top degree near dmax * scale / mean_sampled -- with the
+    // mean pinned at the learned scale, a dmax past ~64 lands on the K clamp
+    // and stops changing the shape, so the extra box would only slow the
+    // search down.
+    const uint32_t dmax_high = EsDefaultDMaxHigh(options);
+    /*
+        H's floor is a COMMAND-LINE knob because feasibility is not
+        width-invariant and this search cannot see it.
+
+        Every cell here solves at width 0, where a small GF(256) band decodes
+        fine.  Measured at K=128, solve width 65536, 40 cells: (7,6,1,1) and
+        (6,6,1,1) fail 40/40, while (5,7,2,2) and (7,7,1,1) fail 0/40.  The
+        same H=6 configs fail 0/40 at solve width 2.  So H <= 6 is free cost
+        at the width the search measures and total failure at the width the
+        cost model is fitted to.
+
+        The consequence is not hypothetical: twelve full 80-generation runs
+        (four seeds x three estimator arms) returned an H=6 winner TWELVE
+        times out of twelve.  Left at the default, this search reports a
+        config that cannot decode a 64 KiB payload at all.
+
+        The floor is not defaulted upward because the feasible H depends on K
+        and on the payload width, and neither is derivable here -- it has to
+        be measured at the width the answer will be used at, then passed in
+        with --h-lo.
+    */
+    const uint32_t h_high = EsDefaultHHigh(options);
+    const uint32_t h_low = std::min(
+        std::max<uint32_t>(1u, options.HLow), h_high);
+    const uint32_t d2_high = options.D2High != 0u ? options.D2High : 12u;
+    /*
+        The mean-row-degree box, in centi-degrees, straight off the command
+        line: --scale-lo / --scale-hi, defaulting to [0.00, 64.00] mean source
+        columns per staircase row.
+
+        The floor is ZERO on purpose.  A mean row degree below 1 leaves rows
+        with no source column and a budget below K leaves lo = 0, i.e. source
+        columns with no staircase parity at all.  Both are legal
+        constructions; the failure constraint is what rejects them, not a
+        floor that would smuggle a K relationship back in.
+    */
+    const uint32_t scale_lo = options.ScaleLoCenti;
+    const uint32_t scale_hi = std::max(options.ScaleHiCenti, scale_lo);
+    /*
+        The peel block's boxes.  peel_p1 spans [0,400] hundredths of the
+        incumbent's degree-1 mass, i.e. zero to four times it, with 100 the
+        incumbent.  peel_tilt spans [0,200] centi offset by 100, i.e. a
+        d^(+1) to d^(-1) reweighting of the tail with 100 the untilted law.
+        peel_dmax spans [2,64]: 64 is where the shipped law truncates and
+        nothing above it exists, and the floor is 2 rather than 4 because
+        degree 2 carries half the rows and a family that cannot collapse onto
+        it cannot express the shortest tail the theory asks about.
+    */
+    const uint32_t peel_dmax_high = std::min<uint32_t>(
+        kPeelMaxDegree, std::max<uint32_t>(2u, options.BlockCount));
+    const uint32_t bound_lo[kEsDim] =
+        {s_low, h_low, 1u, scale_lo, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 4u,
+         0u, 0u, 2u, 0u};
+    // Polynomial coefficients are percents offset by 100: [0,200] -> [-1,+1].
+    const uint32_t bound_hi[kEsDim] =
+        {s_high, h_high, d2_high, scale_hi, 100u, 100u, 100u,
+         200u, 200u, 200u, 200u, 200u, dmax_high,
+         400u, kPeelTiltRange + kPeelTiltMaxSteepen,
+         peel_dmax_high, 100u};
+
+    // The shape starts DISPERSED, at 20% on each of degrees 1, 2 and 3 with
+    // the remaining 40% spread over 4..16.  A concentrated start would be the
+    // one family that provably cannot move: the rescale onto the fixed edge
+    // budget preserves ratios only, so any point mass collapses to the same
+    // flat sequence and the whole neighbourhood reads identical.
+    // Coefficients start at 100 (= 0.0), i.e. a FLAT tail, so the search begins
+    // from the previous uniform-tail behaviour and any curvature it adopts is
+    // something it actually found rather than something it was handed.
+    // The mean row degree starts at the MIDPOINT of its box unless
+    // --init-scale pins it.  A start of "whatever K*N1/S happens to be" would
+    // hand the search the modelled quantity this coordinate exists to remove,
+    // so any budget the search adopts is something it found rather than
+    // something it was given.
+    const double init_scale = options.InitScaleExplicit ?
+        (double)options.InitScaleCenti :
+        0.5 * ((double)scale_lo + (double)scale_hi);
+    // The peel block starts AT THE INCUMBENT (100, 100, 64), which is the
+    // shipped law exactly.  That is the opposite of the staircase shape's
+    // deliberately dispersed start, and deliberately so: the staircase start
+    // was chosen so that any structure the search adopted was something it
+    // found rather than something it was handed, but here the question is
+    // whether anything BEATS the shipped law, and a search that starts
+    // somewhere else answers a different question -- it would have to travel
+    // back to the incumbent before it could improve on it, and a run that ends
+    // worse than stock would be uninterpretable.  Starting here also makes
+    // generation 0 of every run an instance of the identity gate.
+    double theta[kEsDim] =
+        {init_s, 7.0, 1.6, init_scale, 20.0, 20.0, 20.0,
+         100.0, 100.0, 100.0, 100.0, 100.0, 16.0,
+         100.0, (double)kPeelTiltRange, (double)kPeelMaxDegree, 0.0};
+    // A raised H floor must move the start with it, or the run opens outside
+    // its own box and spends generations reflecting back in.
+    if (theta[1] < (double)h_low) {
+        theta[1] = (double)h_low;
+    }
+    if (options.InitRandomShape)
+    {
+        // Independent starts for the ten fine-tune coordinates.  Drawn from
+        // --seed and the run index on this thread, before any evaluation, so
+        // the set of starts is a function of the command line alone.  The
+        // stream is separate from the per-generation noise so that turning
+        // this on does not shift the perturbations a run would otherwise draw.
+        EsRandom init_shape_rng(EsMixSeed(
+            EsMixSeed(options.Seed, run_index + 1u), UINT64_C(0xB0A5E)));
+        // The PEEL block is deliberately outside this loop.  --init-random-shape
+        // exists to test whether the learned STAIRCASE shape is a property of
+        // the problem or of the initialization, and the peel block's start is
+        // not a free choice to be randomized away: it is the incumbent, the
+        // thing the run is trying to beat.  Randomizing it would make a run
+        // that ends worse than stock impossible to interpret, and would take
+        // the identity gate out of generation 0.
+        for (uint32_t j = kEsDegreeScaleCoord; j < kEsPeelBase; ++j)
+        {
+            const double u = init_shape_rng.NextUniform();
+            const double drawn = (double)bound_lo[j] +
+                u * ((double)bound_hi[j] - (double)bound_lo[j]);
+            if (j == kEsDegreeScaleCoord && options.InitScaleExplicit) {
+                continue;   // an explicit --init-scale is the caller's answer
+            }
+            theta[j] = drawn;
+        }
+    }
+    // Every integer coordinate must be able to cross its quantization step or
+    // both members of a mirrored pair round to the same config, the paired
+    // difference is exactly 0, and the pair is wasted.  The waste rate is
+    // reported per generation so this stays visible.  The percent coordinates
+    // therefore get sigma 8 (of a 100-wide box) and dmax gets sigma 4 (of a
+    // 60-wide box): both are ~7% of their range, matching what S, H and D2
+    // already use, and both stay above one quantization step after the two
+    // 0.6x decays (2.88 and 1.44).
+    // ~7% of each coordinate's range, matching what S, H and D2 already use:
+    // percents 8/100, coefficients 14/200, dmax 4/60.  The mean-row-degree box
+    // is command-line sized, so its sigma is computed from the box rather than
+    // hand-set, and floored at one lattice step so the coordinate can always
+    // cross its own quantization.
+    const double sigma_scale = std::max(
+        1.0, 0.07 * ((double)scale_hi - (double)scale_lo));
+    // The peel block follows the same ~7%-of-range rule as everything else:
+    // 28 of a 400-wide box, 14 of a 200-wide box, 4 of a 62-wide box.  All
+    // three stay above one quantization step after the two 0.6x decays
+    // (10.1, 5.0, 1.44), so no peel coordinate is frozen by its own schedule.
+    double sigma[kEsDim] =
+        {std::max(1.2, 0.10 * theta[0]), 1.0, 0.8, sigma_scale, 8.0, 8.0, 8.0,
+         14.0, 14.0, 14.0, 14.0, 14.0, 4.0,
+         28.0, 14.0, 4.0, 7.0};
+    // alpha is scale-free here because the update is alpha*sigma*gradient, so
+    // the new coordinates keep the 0.45 the other non-S coordinates use and
+    // inherit their travel rate from sigma.
+    double alpha[kEsDim] =
+        {0.55, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45,
+         0.45, 0.45, 0.45, 0.45, 0.45, 0.45,
+         0.45, 0.45, 0.45, 0.45};
+    /*
+        Per-GROUP sigma and alpha scales.
+
+        The hand-set values above are ~7% of each coordinate's range, which is
+        a guess, not a measurement.  The four groups have ranges that share no
+        scale at all -- structural integers in boxes 8 to 12 wide, percents in
+        [0,100], polynomial coefficients in [0,200], dmax in [4,64] -- so a
+        single global knob cannot tune them: --alpha-scale moves all sixteen
+        together and is exactly the knob that cannot answer "does the shape
+        want a different step size than S".  These are MULTIPLIERS on the
+        vector above so that the S-dependent rule (sigma_S = 0.10*S) and the
+        base ratios survive, and so that every default is 1.0 and reproduces
+        the pre-existing behaviour bit-for-bit.
+    */
+    for (uint32_t j = 0; j < kEsDim; ++j)
+    {
+        const double sigma_group = EsGroupScale(
+            j, options.SigmaStruct, options.SigmaDegScale, options.SigmaPct,
+            options.SigmaPoly, options.SigmaDMax, options.SigmaPeelP1,
+            options.SigmaPeelTilt, options.SigmaPeelDMax,
+            options.SigmaPeelAbsorb);
+        const double alpha_group = EsGroupScale(
+            j, options.AlphaStruct, options.AlphaDegScale, options.AlphaPct,
+            options.AlphaPoly, options.AlphaDMax, options.AlphaPeelP1,
+            options.AlphaPeelTilt, options.AlphaPeelDMax,
+            options.AlphaPeelAbsorb);
+        sigma[j] *= sigma_group;
+        alpha[j] *= alpha_group;
+    }
+    if (options.FixStructure)
+    {
+        // Stage two of the two-stage protocol: the structure is an ANSWER from
+        // stage one, not a coordinate any more.  Freezing is done the same way
+        // --no-shape does it -- sigma and alpha to zero, the coordinate left in
+        // the vector -- so the noise stream keeps its width and a pinned run
+        // with a given --seed perturbs the remaining coordinates identically to
+        // an unpinned one.  With sigma zero the stochastic rounder is exact on
+        // an integer theta, so every candidate carries the pinned structure and
+        // the tie census will report these three at 100%, which is the
+        // intended state rather than the frozen-coordinate failure it normally
+        // flags.
+        theta[0] = (double)options.FixS;
+        theta[1] = (double)options.FixH;
+        theta[2] = (double)options.FixD2;
+        for (uint32_t j = 0; j < kEsDegreeScaleCoord; ++j)
+        {
+            sigma[j] = 0.0;
+            alpha[j] = 0.0;
+        }
+    }
+    if (options.ShapeSurrogate > 0.0)
+    {
+        // The surrogate's calibration is a property of one structure at one
+        // scale, so the scale coordinate is frozen with the structure.  A
+        // surrogate run that could still move the scale would read the scale
+        // axis's 9.65e7 rate through a constant calibrated for the shape
+        // axis's 8.3e6 and drive the mean row degree to its ceiling.
+        sigma[kEsDegreeScaleCoord] = 0.0;
+        alpha[kEsDegreeScaleCoord] = 0.0;
+    }
+    if (!options.Shape)
+    {
+        // --no-shape freezes the shape coordinates rather than dropping them:
+        // the noise stream keeps its width, so a shaped and an unshaped run
+        // with the same --seed still perturb S, H, D2 and the mean row degree
+        // identically and the two are directly comparable.  The scale is
+        // deliberately NOT in this range: it resizes the constraint graph
+        // rather than shaping a degree PDF, so an unshaped run still searches
+        // it.
+        for (uint32_t j = kEsShapeBase; j < kEsPeelBase; ++j)
+        {
+            sigma[j] = 0.0;
+            alpha[j] = 0.0;
+        }
+    }
+    if (!options.Peel)
+    {
+        // --no-peel-shape freezes the three peeling coordinates the same way,
+        // and stops BEFORE the shape block for the same reason the shape freeze
+        // stops before the peel block: the two are independent knobs on
+        // independent parts of the codec, and one flag must not silently
+        // disable the other.  The noise stream keeps its width, so a peel run
+        // and a --no-peel-shape run with the same --seed perturb S, H, D2, the
+        // mean row degree and the staircase shape identically.
+        for (uint32_t j = kEsPeelBase; j < kEsDim; ++j)
+        {
+            sigma[j] = 0.0;
+            alpha[j] = 0.0;
+        }
+    }
+    // A negative shape schedule means "follow the structural one", so the
+    // default is one schedule for all sixteen coordinates exactly as before.
+    const double shape_decay_rate = options.ShapeDecayRate < 0.0 ?
+        options.DecayRate : options.ShapeDecayRate;
+    const double shape_decay_at1 = options.ShapeDecayAt1 < 0.0 ?
+        options.DecayAt1 : options.ShapeDecayAt1;
+    const double shape_decay_at2 = options.ShapeDecayAt2 < 0.0 ?
+        options.DecayAt2 : options.ShapeDecayAt2;
+    double lo[kEsDim];
+    double hi[kEsDim];
+    for (uint32_t j = 0; j < kEsDim; ++j)
+    {
+        alpha[j] *= options.AlphaScale;
+        // The bounds are widened by +-0.45 so the stochastic rounder can
+        // actually reach the endpoint integers.
+        lo[j] = (double)bound_lo[j] - 0.45;
+        hi[j] = (double)bound_hi[j] + 0.45;
+    }
+
+    std::vector<double> eps((size_t)pairs * kEsDim, 0.0);
+    std::vector<double> uniform((size_t)pairs * kEsDim, 0.0);
+    std::vector<PrecodeSweepConfig> configs;
+    std::vector<uint32_t> config_fields((size_t)pairs * 2u * kEsDim, 0u);
+    std::vector<EsCandidateResult> results;
+    std::vector<double> fv((size_t)pairs * 2u, 0.0);
+    std::vector<double> diff(pairs, 0.0);
+    std::vector<double> weight(pairs, 0.0);
+    std::vector<uint32_t> order(pairs, 0u);
+    // Mirrored pairs that quantized to the same integer on each coordinate:
+    // per pair, per coordinate this generation, and cumulative over the run.
+    std::vector<uint8_t> coord_tied((size_t)pairs * kEsDim, 0u);
+    std::vector<uint32_t> coord_ties(kEsDim, 0u);
+    std::vector<uint64_t> coord_ties_total(kEsDim, 0u);
+
+    uint64_t seed_cursor = options.CellSeed0;
+    uint64_t seen = 0u;
+    uint64_t margin_binding = 0u;
+    uint64_t no_cost_candidates = 0u;
+
+    for (uint32_t g = 0; g < gens; ++g)
+    {
+        const uint32_t nseeds = options.NseedsFixed != 0u ?
+            options.NseedsFixed :
+            EsRamp(options.NseedsLow, options.NseedsHigh, g, gens);
+        const uint64_t base = seed_cursor;
+        seed_cursor += nseeds;
+        if (seed_cursor > options.HoldoutBase)
+        {
+            std::fprintf(stderr,
+                "essearch search seeds reached the holdout base %llu; raise "
+                "--holdout-base\n",
+                (unsigned long long)options.HoldoutBase);
+            return false;
+        }
+
+        // ---- noise, drawn here and only here -------------------------------
+        EsRandom rng(EsMixSeed(
+            EsMixSeed(options.Seed, run_index + 1u), g + 1u));
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            for (uint32_t j = 0; j < kEsDim; ++j) {
+                eps[(size_t)i * kEsDim + j] = rng.NextNormal();
+            }
+        }
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            for (uint32_t j = 0; j < kEsDim; ++j) {
+                uniform[(size_t)i * kEsDim + j] = rng.NextUniform();
+            }
+        }
+        if (replay != nullptr)
+        {
+            for (uint32_t i = 0; i < pairs; ++i)
+            {
+                if (replay_cursor >= replay->size()) {
+                    std::fprintf(stderr, "essearch noise file exhausted\n");
+                    return false;
+                }
+                const EsNoiseRecord& record = (*replay)[replay_cursor++];
+                if (record.Run != run_index || record.Generation != g ||
+                    record.Pair != i)
+                {
+                    std::fprintf(stderr,
+                        "essearch noise file out of order at run=%u gen=%u "
+                        "pair=%u\n", run_index, g, i);
+                    return false;
+                }
+                for (uint32_t j = 0; j < kEsDim; ++j)
+                {
+                    eps[(size_t)i * kEsDim + j] = record.Eps[j];
+                    uniform[(size_t)i * kEsDim + j] = record.Uniform[j];
+                }
+            }
+        }
+        if (noise_out != nullptr)
+        {
+            for (uint32_t i = 0; i < pairs; ++i)
+            {
+                std::fprintf(noise_out, "pair,%u,%u,%u", run_index, g, i);
+                for (uint32_t j = 0; j < kEsDim; ++j) {
+                    std::fprintf(noise_out, ",%.17g",
+                        eps[(size_t)i * kEsDim + j]);
+                }
+                for (uint32_t j = 0; j < kEsDim; ++j) {
+                    std::fprintf(noise_out, ",%.17g",
+                        uniform[(size_t)i * kEsDim + j]);
+                }
+                std::fprintf(noise_out, "\n");
+            }
+        }
+
+        // ---- mirrored pairs ------------------------------------------------
+        configs.clear();
+        std::fill(coord_ties.begin(), coord_ties.end(), 0u);
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            for (int sign = 1; sign >= -1; sign -= 2)
+            {
+                PrecodeSweepConfig config;
+                uint32_t fields[kEsDim];
+                for (uint32_t j = 0; j < kEsDim; ++j)
+                {
+                    const double perturbed = theta[j] + (double)sign *
+                        sigma[j] * eps[(size_t)i * kEsDim + j];
+                    fields[j] = EsQuantize(
+                        EsReflect(perturbed, lo[j], hi[j]),
+                        uniform[(size_t)i * kEsDim + j],
+                        bound_lo[j], bound_hi[j]);
+                }
+                EsFillConfig(fields, options.Shape, options.Peel, config);
+                const size_t slot = configs.size();
+                for (uint32_t j = 0; j < kEsDim; ++j) {
+                    config_fields[slot * kEsDim + j] = fields[j];
+                }
+                configs.push_back(config);
+            }
+        }
+
+        // ---- per-coordinate dead-coordinate census -------------------------
+        // A pair whose two members quantize to the SAME integer on coordinate
+        // j carries no information about j: the objective difference cannot
+        // depend on it, so every gradient contribution along j from that pair
+        // is noise.  A coordinate that ties on every pair of every generation
+        // is silently frozen -- sigma too small against its quantization step
+        // -- which is exactly the failure mode hand-set sigma produces.  This
+        // is counted for every run, not just under --emit-trace, because a
+        // frozen coordinate invalidates any conclusion drawn from the search.
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            const size_t plus = (size_t)2u * i;
+            const size_t minus = plus + 1u;
+            for (uint32_t j = 0; j < kEsDim; ++j)
+            {
+                const bool tie = config_fields[plus * kEsDim + j] ==
+                    config_fields[minus * kEsDim + j];
+                coord_tied[(size_t)i * kEsDim + j] = tie ? 1u : 0u;
+                if (tie) {
+                    ++coord_ties[j];
+                }
+            }
+        }
+
+        seen += configs.size();
+        const double z_full = options.MultiplicityMargin ?
+            std::sqrt(2.0 * std::log((double)std::max<uint64_t>(2u, seen))) :
+            0.0;
+        // A confidence margin is meaningless when the confidence interval is
+        // wider than the quantity under test, so it is disabled until it is
+        // small against the target.  The gate must be evaluated against the
+        // sample the score is actually computed on: the search candidates are
+        // scored on nseeds cells, but the reported elite is re-scored on the
+        // fixed holdout, which is far larger early on.  Gating the ELITE by
+        // the search sample made the margin inert for the reported answer --
+        // measured over four full 80-generation runs, every winning generation
+        // was gated, so all four winners were selected with no margin at all
+        // and landed at 2.78-3.43% holdout failure against a 3.46% target,
+        // which is exactly the lucky-draw feasibility the margin exists to
+        // stop.
+        const auto gate_z = [&](uint64_t cells) -> double {
+            const double se_typical = std::sqrt(
+                std::max(options.Target * (1.0 - options.Target), 1e-12) /
+                (double)std::max<uint64_t>(1u, cells));
+            return z_full * se_typical > 0.25 * options.Target ? 0.0 : z_full;
+        };
+        const double z = gate_z(nseeds);
+        const bool gated = z == 0.0 && z_full != 0.0;
+        const uint64_t elite_cells =
+            options.FreshElite && options.HoldoutCells != 0u ?
+                options.HoldoutCells : nseeds;
+        const double z_elite = gate_z(elite_cells);
+
+        if (!evaluator.Evaluate(configs, base, nseeds, results)) {
+            return false;
+        }
+
+        for (size_t index = 0u; index < configs.size(); ++index)
+        {
+            const EsCandidateResult& result = results[index];
+            fv[index] = EsObjective(
+                result, model, options.Target, options.Lambda,
+                options.LogTime, z, options.MarginReward,
+                options.ShapeSurrogate, options.FailModel);
+            if (!result.HasCost()) {
+                ++no_cost_candidates;
+            }
+            // How often is the MARGIN the binding constraint rather than real
+            // infeasibility?  If this stays high, nseeds is too low for the
+            // margin to mean anything and the search is being pushed to
+            // over-provision H.
+            const double p = result.FailRate();
+            const double se = std::sqrt(std::max(p * (1.0 - p), 1e-12) /
+                (double)std::max<uint64_t>(1u, result.Cells));
+            if (p <= options.Target && options.Target < p + z * se) {
+                ++margin_binding;
+            }
+            if (options.EmitCandidates)
+            {
+                // Every coordinate, so a candidate row is a complete config:
+                // printing only the first eight described a different config
+                // from the one that was evaluated.
+                std::printf("#cand,%u,%u,%u", run_index, g, (uint32_t)index);
+                EsPrintConfigFields(
+                    &config_fields[index * kEsDim], options.Shape,
+                    options.Peel);
+                std::printf(
+                    ",%llu,%llu,%.8f,%.3f,%.6f\n",
+                    (unsigned long long)result.Cells,
+                    (unsigned long long)result.Failures,
+                    result.FailRate(),
+                    result.HasCost() ? result.PredictedNs(model) : 0.0,
+                    fv[index]);
+            }
+        }
+
+        // ---- rank-shape the DIFFERENCES, not the population ----------------
+        uint32_t ties = 0u;
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            diff[i] = fv[(size_t)2u * i] - fv[(size_t)2u * i + 1u];
+            order[i] = i;
+            if (diff[i] == 0.0) {
+                ++ties;
+            }
+        }
+        std::stable_sort(order.begin(), order.end(),
+            [&diff](uint32_t a, uint32_t b) { return diff[a] < diff[b]; });
+        const double denom = (double)std::max<uint32_t>(1u, pairs - 1u);
+        for (uint32_t rank = 0; rank < pairs; ++rank) {
+            weight[order[rank]] = -(2.0 * (double)rank / denom - 1.0);
+        }
+        for (uint32_t i = 0; i < pairs; ++i)
+        {
+            if (diff[i] == 0.0) {
+                // A pair whose members quantized to the same config carries
+                // no signal at all.
+                weight[i] = 0.0;
+            }
+        }
+
+        for (uint32_t j = 0; j < kEsDim; ++j)
+        {
+            double gradient = 0.0;
+            for (uint32_t i = 0; i < pairs; ++i)
+            {
+                // A pair whose two members quantized to the SAME integer on
+                // coordinate j cannot have an objective difference that
+                // depends on j, so weight[i]*eps[i][j] is pure variance.  It
+                // is also exactly zero-mean: given the tie, flipping eps[i][j]
+                // leaves both members' configs unchanged (it only swaps which
+                // side of the mirror produced which, and both quantize to the
+                // same integer) while flipping the sign of the term.  Dropping
+                // it is therefore unbiased and strictly reduces variance.
+                // This matters because it is not a rare event: measured over
+                // four 80-generation runs of the previous coordinate set, N1
+                // and D2 tied on 87% of pairs and were fully tied -- zero
+                // informative pairs in the whole generation -- in 158 and 147
+                // of 320 generations.  N1's share of that is exactly what the
+                // mean-row-degree coordinate replaces.
+                // The divisor stays `pairs`, not the informative count, so a
+                // coordinate with little information takes a correspondingly
+                // small step instead of having its noise renormalized up.
+                if (options.TieMask &&
+                    coord_tied[(size_t)i * kEsDim + j] != 0u)
+                {
+                    continue;
+                }
+                gradient += weight[i] * eps[(size_t)i * kEsDim + j];
+            }
+            gradient /= (double)pairs;
+            theta[j] = EsReflect(
+                theta[j] + alpha[j] * sigma[j] * gradient, lo[j], hi[j]);
+        }
+        if (options.Decay)
+        {
+            // The structural and shape coordinates decay on their OWN
+            // schedules.  They are separable because a shape coordinate's
+            // signal only exists once the structure it sits inside has
+            // stopped moving, so the shape may want to keep its step size
+            // alive for longer than S does; a single schedule cannot express
+            // that and cannot be measured against the alternative.
+            const bool struct_step =
+                g == (uint32_t)((double)gens * options.DecayAt1) ||
+                g == (uint32_t)((double)gens * options.DecayAt2);
+            const bool shape_step =
+                g == (uint32_t)((double)gens * shape_decay_at1) ||
+                g == (uint32_t)((double)gens * shape_decay_at2);
+            for (uint32_t j = 0; j < kEsDim; ++j)
+            {
+                const bool structural = EsIsStructuralSchedule(j);
+                if (structural ? struct_step : shape_step) {
+                    sigma[j] *= structural ?
+                        options.DecayRate : shape_decay_rate;
+                }
+            }
+        }
+
+        // ---- unbiased elite ------------------------------------------------
+        size_t leader = 0u;
+        for (size_t index = 1u; index < fv.size(); ++index)
+        {
+            if (fv[index] < fv[leader]) {
+                leader = index;
+            }
+        }
+        double elite_objective = fv[leader];
+        EsCandidateResult elite = results[leader];
+        if (options.FreshElite && options.HoldoutCells != 0u)
+        {
+            std::vector<PrecodeSweepConfig> holdout_config(
+                1u, configs[leader]);
+            std::vector<EsCandidateResult> holdout_result;
+            // A per-generation stride gives each generation its own block, so
+            // the argmin over generations is not a minimum over repeated draws
+            // of one block's noise.  See EsOptions::HoldoutStride.
+            const uint64_t holdout_base = options.HoldoutBase +
+                options.HoldoutStride * (uint64_t)g;
+            if (!evaluator.Evaluate(
+                    holdout_config, holdout_base,
+                    options.HoldoutCells, holdout_result))
+            {
+                return false;
+            }
+            elite = holdout_result[0];
+            // Scored with the holdout's own gate, not the search sample's.
+            elite_objective = EsObjective(
+                elite, model, options.Target, options.Lambda,
+                options.LogTime, z_elite, options.MarginReward,
+                options.ShapeSurrogate, options.FailModel);
+        }
+        if (elite_objective < best.Objective)
+        {
+            best.Objective = elite_objective;
+            best.Fail = elite.FailRate();
+            best.Cells = elite.Cells;
+            best.PredictedNs = elite.HasCost() ?
+                elite.PredictedNs(model) : 0.0;
+            best.Generation = g;
+            for (uint32_t j = 0; j < kEsDim; ++j) {
+                best.Config[j] = config_fields[leader * kEsDim + j];
+            }
+        }
+
+        if (options.EmitTrace)
+        {
+            std::printf(
+                "#gen,%u,%u,%.6f,%.6f,%.6f,%u,%u,%u,%u,%.4f,%u,%.4f,"
+                "%llu,%llu",
+                run_index, g, fv[leader], elite_objective, best.Objective,
+                nseeds, ties, pairs, gated ? 1u : 0u, z,
+                (z_elite == 0.0 && z_full != 0.0) ? 1u : 0u, z_elite,
+                (unsigned long long)margin_binding,
+                (unsigned long long)no_cost_candidates);
+            EsPrintThetaFields(theta);
+            EsPrintConfigFields(
+                &config_fields[leader * kEsDim], options.Shape, options.Peel);
+            std::printf(",%.8f\n", elite.FailRate());
+            // Mirrored pairs that quantized identically, per coordinate: the
+            // count that says whether a coordinate is actually moving.
+            std::printf("#tie,%u,%u,%u", run_index, g, pairs);
+            for (uint32_t j = 0; j < kEsDim; ++j) {
+                std::printf(",%u", coord_ties[j]);
+            }
+            std::printf("\n");
+            // The elite's realized weight vector, so the distribution the
+            // search settled on can be plotted straight out of the trace
+            // instead of being reconstructed from the percents by hand.
+            if (options.Shape)
+            {
+                const std::vector<double> weights =
+                    EsShapeWeights(&config_fields[leader * kEsDim]);
+                std::printf("#shape,%u,%u,%u", run_index, g,
+                    (uint32_t)weights.size());
+                for (double w : weights) {
+                    std::printf(",%.6f", w);
+                }
+                std::printf("\n");
+            }
+            if (options.Peel)
+            {
+                // The realized PEELING law, by the same mapping the evaluator
+                // uses, so a plotted curve is the one that was measured.
+                const std::vector<double> peel = EsPeelWeights(
+                    options.BlockCount, &config_fields[leader * kEsDim]);
+                std::printf("#peel,%u,%u,%u", run_index, g,
+                    (uint32_t)peel.size());
+                for (double w : peel) {
+                    std::printf(",%.6f", w);
+                }
+                std::printf("\n");
+            }
+            std::fflush(stdout);
+        }
+        for (uint32_t j = 0; j < kEsDim; ++j) {
+            coord_ties_total[j] += coord_ties[j];
+        }
+    }
+
+    // A frozen coordinate silently invalidates the search, so the census is
+    // reported for every run whether or not a trace was requested.
+    std::printf("# tie census,run=%u,pairs=%llu,per_coord=",
+        run_index, (unsigned long long)((uint64_t)pairs * gens));
+    for (uint32_t j = 0; j < kEsDim; ++j) {
+        std::printf("%s%llu", j == 0u ? "" : ":",
+            (unsigned long long)coord_ties_total[j]);
+    }
+    std::printf("\n");
+
+    for (uint32_t j = 0; j < kEsDim; ++j) {
+        theta_out[j] = theta[j];
+    }
+    return true;
+}
+
+bool LoadEsNoiseFile(
+    const char* path,
+    std::vector<EsNoiseRecord>& records,
+    std::vector<double>& inits)
+{
+    std::ifstream input(path);
+    if (!input.is_open())
+    {
+        std::fprintf(stderr, "essearch could not open --noise-file %s\n",
+            path ? path : "");
+        return false;
+    }
+    std::string line;
+    while (std::getline(input, line))
+    {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::vector<std::string> fields;
+        std::string token;
+        std::istringstream stream(line);
+        while (std::getline(stream, token, ',')) {
+            fields.push_back(token);
+        }
+        if (fields.empty()) {
+            continue;
+        }
+        if (fields[0] == "init" && fields.size() == 3u)
+        {
+            const size_t index = (size_t)std::atoi(fields[1].c_str());
+            if (inits.size() <= index) {
+                inits.resize(index + 1u, 0.0);
+            }
+            inits[index] = std::atof(fields[2].c_str());
+            continue;
+        }
+        if (fields[0] != "pair" || fields.size() != 4u + 2u * kEsDim)
+        {
+            std::fprintf(stderr,
+                "essearch bad noise record: %s\n", line.c_str());
+            return false;
+        }
+        EsNoiseRecord record;
+        record.Run = (uint32_t)std::atoi(fields[1].c_str());
+        record.Generation = (uint32_t)std::atoi(fields[2].c_str());
+        record.Pair = (uint32_t)std::atoi(fields[3].c_str());
+        for (uint32_t j = 0; j < kEsDim; ++j)
+        {
+            record.Eps[j] = std::atof(fields[4u + j].c_str());
+            record.Uniform[j] = std::atof(fields[4u + kEsDim + j].c_str());
+        }
+        records.push_back(record);
+    }
+    return true;
+}
+
+int CmdEsSearch(int argc, char** argv)
+{
+    EsOptions options;
+    std::vector<PrecodeSweepConfig> measure_configs;
+    PrecodeSweepRun run;
+
+    // The cell protocol the failure numbers are defined by.  These are not
+    // defaults to be tuned from the command line: they are the protocol
+    // precodesweep implements, so essearch pins them here and does not expose
+    // knobs that would silently redefine what "failure" means.
+    run.BlockBytes = 2u;
+    run.Overhead = 0u;
+    run.MixCount = 3u;
+    run.Loss = 0.10;
+    run.SeedBase = 55u;
+    run.PairedOverheadStream = true;
+    run.Schedule = PacketScheduleKind::Iid;
+    run.Completion = PrecodeFailCompletion::Mixed;
+    run.Geometry = wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    run.GF16Rows = 0u;
+    run.Period = 244u;
+    // Count-only solve: every block operation runs, on zero-byte blocks, so the
+    // counters are exact and no payload bytes move.
+    //
+    // This was briefly pinned to 64 as a workaround, because width 0 used to
+    // select TrySolveMixedCompletionQuotientTiny -- a different algorithm --
+    // and several further optimisations were width-gated, so the harvested mix
+    // was not the codec's.  Mul-adds read 80 where a real solve performs 1493.
+    // DispatchBlockBytes() in WirehairV2Solve.cpp now makes a zero-width solve
+    // take exactly the production paths, and `selftest` pins width 0 against
+    // width 65536 on all four counters, so the workaround is retired.
+    //
+    // Zero is preferred over 64 for two reasons.  It moves no payload at all
+    // (1.67M cells/s against 1.18M), and 64 is only equivalent for the MIXED
+    // completion: generic GF(256) completion changes its mix between 64 and
+    // 2048 at the binary-quotient gate, so a 64-byte harvest would silently
+    // diverge there while zero stays correct for every completion field.
+    run.SolveBlockBytesOverride = 0u;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N") || !std::strcmp(argv[i], "--K")) {
+            if (!TakeArg("essearch", argv[i], argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, options.BlockCount))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--gens")) {
+            if (!TakeArg("essearch", "--gens", argc, argv, i, value) ||
+                !ParseU32Arg("--gens", value, options.Generations))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--pairs")) {
+            if (!TakeArg("essearch", "--pairs", argc, argv, i, value) ||
+                !ParseU32Arg("--pairs", value, options.Pairs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--runs")) {
+            if (!TakeArg("essearch", "--runs", argc, argv, i, value) ||
+                !ParseU32Arg("--runs", value, options.Runs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed")) {
+            if (!TakeArg("essearch", "--seed", argc, argv, i, value) ||
+                !ParseU64Arg("--seed", value, options.Seed))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cell-seed0")) {
+            if (!TakeArg("essearch", "--cell-seed0", argc, argv, i, value) ||
+                !ParseU64Arg("--cell-seed0", value, options.CellSeed0))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--nseeds")) {
+            if (!TakeArg("essearch", "--nseeds", argc, argv, i, value) ||
+                !ParseU32Arg("--nseeds", value, options.NseedsFixed))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--nseeds-low")) {
+            if (!TakeArg("essearch", "--nseeds-low", argc, argv, i, value) ||
+                !ParseU32Arg("--nseeds-low", value, options.NseedsLow))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--nseeds-high")) {
+            if (!TakeArg("essearch", "--nseeds-high", argc, argv, i, value) ||
+                !ParseU32Arg("--nseeds-high", value, options.NseedsHigh))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--holdout")) {
+            if (!TakeArg("essearch", "--holdout", argc, argv, i, value) ||
+                !ParseU32Arg("--holdout", value, options.HoldoutCells))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--holdout-stride")) {
+            if (!TakeArg(
+                    "essearch", "--holdout-stride", argc, argv, i, value) ||
+                !ParseU64Arg("--holdout-stride", value, options.HoldoutStride))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--holdout-base")) {
+            if (!TakeArg(
+                    "essearch", "--holdout-base", argc, argv, i, value) ||
+                !ParseU64Arg("--holdout-base", value, options.HoldoutBase))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--target")) {
+            if (!TakeArg("essearch", "--target", argc, argv, i, value) ||
+                !ParseDoubleArg("--target", value, options.Target))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--lam")) {
+            if (!TakeArg("essearch", "--lam", argc, argv, i, value) ||
+                !ParseDoubleArg("--lam", value, options.Lambda))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--h-lo")) {
+            if (!TakeArg("essearch", "--h-lo", argc, argv, i, value) ||
+                !ParseU32Arg("--h-lo", value, options.HLow))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--alpha-scale")) {
+            if (!TakeArg("essearch", "--alpha-scale", argc, argv, i, value) ||
+                !ParseDoubleArg("--alpha-scale", value, options.AlphaScale))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--s-lo") ||
+                 !std::strcmp(argv[i], "--s-hi") ||
+                 !std::strcmp(argv[i], "--h-hi") ||
+                 !std::strcmp(argv[i], "--d2-hi") ||
+                 !std::strcmp(argv[i], "--dmax-hi"))
+        {
+            // Boxes for the remaining searched integers.  See EsOptions: the
+            // point is that no coordinate reflects off a bound this binary
+            // derived from K without the run being able to say otherwise.
+            const char* name = argv[i];
+            uint32_t* slot =
+                !std::strcmp(name, "--s-lo") ? &options.SLow :
+                !std::strcmp(name, "--s-hi") ? &options.SHigh :
+                !std::strcmp(name, "--h-hi") ? &options.HHigh :
+                !std::strcmp(name, "--d2-hi") ? &options.D2High :
+                &options.DMaxHigh;
+            if (!TakeArg("essearch", name, argc, argv, i, value) ||
+                !ParseU32Arg(name, value, *slot) || *slot == 0u)
+            {
+                std::fprintf(stderr, "essearch %s must be nonzero\n", name);
+                return 1;
+            }
+        }
+        // The mean-row-degree box and start, in DEGREES on the command line
+        // and centi-degrees internally.  They are options rather than a
+        // built-in rule so that widening the box for a different block count
+        // never requires a K relationship inside the binary.
+        else if (!std::strcmp(argv[i], "--scale-lo") ||
+                 !std::strcmp(argv[i], "--scale-hi") ||
+                 !std::strcmp(argv[i], "--init-scale"))
+        {
+            const char* name = argv[i];
+            const bool lo = !std::strcmp(name, "--scale-lo");
+            const bool hi = !std::strcmp(name, "--scale-hi");
+            uint32_t centi = 0u;
+            if (!TakeArg("essearch", name, argc, argv, i, value) ||
+                !ParseDegreeScaleArg("essearch", name, value, centi))
+            {
+                return 1;
+            }
+            if (centi == kDegreeScaleCentiUnset)
+            {
+                std::fprintf(stderr,
+                    "essearch %s must be a mean staircase row degree; the "
+                    "search always supplies a scale, so -1 has no meaning "
+                    "here\n", name);
+                return 1;
+            }
+            if (lo) { options.ScaleLoCenti = centi; }
+            else if (hi) { options.ScaleHiCenti = centi; }
+            else
+            {
+                options.InitScaleCenti = centi;
+                options.InitScaleExplicit = true;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--sigma-struct") ||
+                 !std::strcmp(argv[i], "--sigma-degscale") ||
+                 !std::strcmp(argv[i], "--sigma-pct") ||
+                 !std::strcmp(argv[i], "--sigma-poly") ||
+                 !std::strcmp(argv[i], "--sigma-dmax") ||
+                 !std::strcmp(argv[i], "--sigma-peel-p1") ||
+                 !std::strcmp(argv[i], "--sigma-peel-tilt") ||
+                 !std::strcmp(argv[i], "--sigma-peel-dmax") ||
+                 !std::strcmp(argv[i], "--sigma-peel-absorb") ||
+                 !std::strcmp(argv[i], "--alpha-peel-p1") ||
+                 !std::strcmp(argv[i], "--alpha-peel-tilt") ||
+                 !std::strcmp(argv[i], "--alpha-peel-dmax") ||
+                 !std::strcmp(argv[i], "--alpha-peel-absorb") ||
+                 !std::strcmp(argv[i], "--alpha-struct") ||
+                 !std::strcmp(argv[i], "--alpha-degscale") ||
+                 !std::strcmp(argv[i], "--alpha-pct") ||
+                 !std::strcmp(argv[i], "--alpha-poly") ||
+                 !std::strcmp(argv[i], "--alpha-dmax") ||
+                 !std::strcmp(argv[i], "--decay-rate") ||
+                 !std::strcmp(argv[i], "--shape-decay-rate"))
+        {
+            const char* name = argv[i];
+            double* slot =
+                !std::strcmp(name, "--sigma-struct") ? &options.SigmaStruct :
+                !std::strcmp(name, "--sigma-degscale") ?
+                    &options.SigmaDegScale :
+                !std::strcmp(name, "--sigma-pct") ? &options.SigmaPct :
+                !std::strcmp(name, "--sigma-poly") ? &options.SigmaPoly :
+                !std::strcmp(name, "--sigma-dmax") ? &options.SigmaDMax :
+                !std::strcmp(name, "--sigma-peel-p1") ?
+                    &options.SigmaPeelP1 :
+                !std::strcmp(name, "--sigma-peel-tilt") ?
+                    &options.SigmaPeelTilt :
+                !std::strcmp(name, "--sigma-peel-dmax") ?
+                    &options.SigmaPeelDMax :
+                !std::strcmp(name, "--sigma-peel-absorb") ?
+                    &options.SigmaPeelAbsorb :
+                !std::strcmp(name, "--alpha-peel-p1") ?
+                    &options.AlphaPeelP1 :
+                !std::strcmp(name, "--alpha-peel-tilt") ?
+                    &options.AlphaPeelTilt :
+                !std::strcmp(name, "--alpha-peel-dmax") ?
+                    &options.AlphaPeelDMax :
+                !std::strcmp(name, "--alpha-peel-absorb") ?
+                    &options.AlphaPeelAbsorb :
+                !std::strcmp(name, "--alpha-struct") ? &options.AlphaStruct :
+                !std::strcmp(name, "--alpha-degscale") ?
+                    &options.AlphaDegScale :
+                !std::strcmp(name, "--alpha-pct") ? &options.AlphaPct :
+                !std::strcmp(name, "--alpha-poly") ? &options.AlphaPoly :
+                !std::strcmp(name, "--alpha-dmax") ? &options.AlphaDMax :
+                !std::strcmp(name, "--decay-rate") ? &options.DecayRate :
+                &options.ShapeDecayRate;
+            if (!TakeArg("essearch", name, argc, argv, i, value) ||
+                !ParseDoubleArg(name, value, *slot))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--decay-at") ||
+                 !std::strcmp(argv[i], "--shape-decay-at"))
+        {
+            const bool shape = !std::strcmp(argv[i], "--shape-decay-at");
+            const char* name = argv[i];
+            if (!TakeArg("essearch", name, argc, argv, i, value)) {
+                return 1;
+            }
+            const char* colon = std::strchr(value, ':');
+            std::string first(value, colon != nullptr ?
+                (size_t)(colon - value) : std::strlen(value));
+            double a = 0.0;
+            double b = 0.0;
+            if (colon == nullptr ||
+                !ParseDoubleArg(name, first.c_str(), a) ||
+                !ParseDoubleArg(name, colon + 1, b))
+            {
+                std::fprintf(stderr, "essearch %s wants A:B\n", name);
+                return 1;
+            }
+            if (shape) {
+                options.ShapeDecayAt1 = a;
+                options.ShapeDecayAt2 = b;
+            } else {
+                options.DecayAt1 = a;
+                options.DecayAt2 = b;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--init")) {
+            if (!TakeArg("essearch", "--init", argc, argv, i, value) ||
+                !ParseDoubleArg("--init", value, options.InitS))
+            {
+                return 1;
+            }
+            options.InitExplicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--threads")) {
+            if (!TakeArg("essearch", "--threads", argc, argv, i, value) ||
+                !ParseU32Arg("--threads", value, options.Threads))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--emit-trace")) {
+            options.EmitTrace = true;
+        }
+        else if (!std::strcmp(argv[i], "--emit-candidates")) {
+            options.EmitCandidates = true;
+        }
+        else if (!std::strcmp(argv[i], "--log-time")) {
+            options.LogTime = true;
+        }
+        else if (!std::strcmp(argv[i], "--no-decay")) {
+            options.Decay = false;
+        }
+        else if (!std::strcmp(argv[i], "--no-shape")) {
+            options.Shape = false;
+        }
+        else if (!std::strcmp(argv[i], "--no-peel-shape")) {
+            options.Peel = false;
+        }
+        else if (!std::strcmp(argv[i], "--fix-structure"))
+        {
+            // S:H:D2, matching the colon spelling --decay-at already uses.
+            if (!TakeArg(
+                    "essearch", "--fix-structure", argc, argv, i, value))
+            {
+                return 1;
+            }
+            uint32_t pinned[3] = {0u, 0u, 0u};
+            const char* cursor = value;
+            for (uint32_t field = 0; field < 3u; ++field)
+            {
+                const char* colon = std::strchr(cursor, ':');
+                const std::string text(cursor, colon != nullptr ?
+                    (size_t)(colon - cursor) : std::strlen(cursor));
+                if ((field < 2u) == (colon == nullptr) ||
+                    !ParseU32Arg("--fix-structure", text.c_str(),
+                                 pinned[field]))
+                {
+                    std::fprintf(stderr,
+                        "essearch --fix-structure wants S:H:D2\n");
+                    return 1;
+                }
+                cursor = colon != nullptr ? colon + 1 : cursor;
+            }
+            options.FixStructure = true;
+            options.FixS = pinned[0];
+            options.FixH = pinned[1];
+            options.FixD2 = pinned[2];
+        }
+        else if (!std::strcmp(argv[i], "--init-random-shape")) {
+            options.InitRandomShape = true;
+        }
+        else if (!std::strcmp(argv[i], "--fail-model"))
+        {
+            if (!TakeArg("essearch", "--fail-model", argc, argv, i, value)) {
+                return 1;
+            }
+            double coeff[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+            const char* cursor = value;
+            for (uint32_t field = 0; field < 5u; ++field)
+            {
+                const char* comma = std::strchr(cursor, ',');
+                const std::string text(cursor, comma != nullptr ?
+                    (size_t)(comma - cursor) : std::strlen(cursor));
+                // Signed: three of the five fitted coefficients are
+                // negative, so the unsigned scalar parser cannot read them.
+                if ((field < 4u) == (comma == nullptr) ||
+                    !(ParseSignedDoubleScalar(text.c_str(), coeff[field]) ||
+                      BadArg("--fail-model", text.c_str())))
+                {
+                    std::fprintf(stderr,
+                        "essearch --fail-model wants "
+                        "b0,b_xor,b_muladd,b_copy,b_zero\n");
+                    return 1;
+                }
+                cursor = comma != nullptr ? comma + 1 : cursor;
+            }
+            options.FailModel.Set = true;
+            options.FailModel.B0 = coeff[0];
+            options.FailModel.BXor = coeff[1];
+            options.FailModel.BMulAdd = coeff[2];
+            options.FailModel.BCopy = coeff[3];
+            options.FailModel.BZeroFill = coeff[4];
+        }
+        else if (!std::strcmp(argv[i], "--shape-surrogate")) {
+            if (!TakeArg(
+                    "essearch", "--shape-surrogate", argc, argv, i, value) ||
+                !ParseDoubleArg(
+                    "--shape-surrogate", value, options.ShapeSurrogate))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--margin-reward")) {
+            if (!TakeArg(
+                    "essearch", "--margin-reward", argc, argv, i, value) ||
+                !ParseDoubleArg("--margin-reward", value, options.MarginReward))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--no-margin")) {
+            options.MultiplicityMargin = false;
+        }
+        else if (!std::strcmp(argv[i], "--tie-mask")) {
+            options.TieMask = true;
+        }
+        else if (!std::strcmp(argv[i], "--no-fresh-elite")) {
+            options.FreshElite = false;
+        }
+        else if (!std::strcmp(argv[i], "--emit-noise")) {
+            if (!TakeArg("essearch", "--emit-noise", argc, argv, i, value)) {
+                return 1;
+            }
+            options.EmitNoisePath = value;
+        }
+        else if (!std::strcmp(argv[i], "--noise-file")) {
+            if (!TakeArg("essearch", "--noise-file", argc, argv, i, value)) {
+                return 1;
+            }
+            options.NoisePath = value;
+        }
+        else if (!std::strcmp(argv[i], "--measure")) {
+            options.Measure = true;
+        }
+        else if (!std::strcmp(argv[i], "--configs")) {
+            if (!TakeArg("essearch", "--configs", argc, argv, i, value) ||
+                !ParsePrecodeSweepConfigText(value, measure_configs))
+            {
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cells")) {
+            uint32_t begin = 0u;
+            uint32_t end = 0u;
+            if (!TakeArg("essearch", "--cells", argc, argv, i, value) ||
+                !ParsePrecodeSweepCells(value, begin, end))
+            {
+                return 1;
+            }
+            options.MeasureCellBegin = begin;
+            options.MeasureCellEnd = end;
+        }
+        else {
+            UnknownArg("essearch", argv[i]);
+            return 1;
+        }
+    }
+
+    if (options.BlockCount < 2u || options.BlockCount > 64000u) {
+        std::fprintf(stderr, "essearch --N must be in [2,64000]\n");
+        return 1;
+    }
+    // Options with NO default.  Each one, wrongly defaulted, yields a search
+    // that runs to completion and reports a plausible winner that is simply
+    // not the thing asked for -- the failure mode that is expensive to catch
+    // downstream and cheap to catch here.
+    if (!(options.Target == options.Target)) {
+        std::fprintf(stderr,
+            "essearch requires --target: the failure rate the search must "
+            "hold to (e.g. 0.0095 for 0.95%%).  There is no default because a "
+            "loose target silently returns an unconstrained search.\n");
+        return 1;
+    }
+    if (!(options.Lambda == options.Lambda)) {
+        std::fprintf(stderr,
+            "essearch requires --lam: the failure-constraint weight, in the "
+            "same units as the cost model.  It must be large against the cost "
+            "being traded away -- at K=128/64 KiB the objective runs ~1.7e6 "
+            "ns, so 1pp of excess failure needs ~8.5e7 to bind.  There is no "
+            "default because a small lambda does not fail, it just stops "
+            "constraining.\n");
+        return 1;
+    }
+    if (options.SHigh == 0u) {
+        std::fprintf(stderr,
+            "essearch requires --s-hi: the upper bound for S.  There is no "
+            "default because the old one, max(8, 3*sqrt(K)), was a K model "
+            "that also set the initial theta (logUniform[2, s_hi]).\n");
+        return 1;
+    }
+    if (options.Pairs == 0u || options.Pairs > 4096u) {
+        std::fprintf(stderr, "essearch --pairs must be in [1,4096]\n");
+        return 1;
+    }
+    if (options.Generations == 0u || options.Generations > 100000u) {
+        std::fprintf(stderr, "essearch --gens must be in [1,100000]\n");
+        return 1;
+    }
+    if (options.Runs == 0u || options.Runs > 4096u) {
+        std::fprintf(stderr, "essearch --runs must be in [1,4096]\n");
+        return 1;
+    }
+    if (options.NseedsLow == 0u || options.NseedsHigh == 0u) {
+        std::fprintf(stderr,
+            "essearch --nseeds-low/--nseeds-high must be positive\n");
+        return 1;
+    }
+    if (!(options.Target > 0.0 && options.Target < 1.0)) {
+        std::fprintf(stderr, "essearch --target must be in (0,1)\n");
+        return 1;
+    }
+    if (!(options.Lambda >= 0.0)) {
+        std::fprintf(stderr, "essearch --lam must be non-negative\n");
+        return 1;
+    }
+    if (options.HLow < 1u || options.HLow > 10u) {
+        std::fprintf(stderr, "essearch --h-lo must be in [1,10]\n");
+        return 1;
+    }
+    /*
+        The surrogate is only a failure estimator at a FIXED structure and a
+        FIXED mean row degree; see EsOptions::ShapeSurrogate.  Both pins are
+        required rather than assumed, because the failure mode of getting this
+        wrong is not an error -- it is a run that completes and reports a
+        "learned shape" that is really the scale coordinate pinned to its
+        ceiling.
+    */
+    if (options.ShapeSurrogate != 0.0)
+    {
+        if (!(options.ShapeSurrogate > 0.0))
+        {
+            std::fprintf(stderr,
+                "essearch --shape-surrogate must be positive: it is the "
+                "MAGNITUDE of |dcost/dfail| along the shape axis, in ns per "
+                "unit failure\n");
+            return 1;
+        }
+        if (!options.FixStructure || !options.InitScaleExplicit)
+        {
+            std::fprintf(stderr,
+                "essearch --shape-surrogate requires BOTH --fix-structure and "
+                "--init-scale: the surrogate's calibration is a property of "
+                "one structure at one mean row degree, and it is measurably "
+                "different elsewhere (8.3e6 ns per unit failure at (5,9,1) "
+                "scale 17, 1.27e7 at (6,10,1) scale 6.07, and 9.65e7 along "
+                "the scale axis itself)\n");
+            return 1;
+        }
+    }
+    if (options.FailModel.Active() && !options.FixStructure)
+    {
+        std::fprintf(stderr,
+            "essearch --fail-model requires --fix-structure: the coefficients "
+            "are fitted at one structure and are not claimed to hold at "
+            "another\n");
+        return 1;
+    }
+    if (!(options.MarginReward >= 0.0)) {
+        std::fprintf(stderr,
+            "essearch --margin-reward must be non-negative; it is a PRICE on "
+            "failure, and a negative one pays the search to fail\n");
+        return 1;
+    }
+    /*
+        A pinned structure has to lie inside the coordinate boxes.
+
+        Reflection, not clipping, is what keeps theta in its box, so an
+        out-of-box pin is not clamped to the nearest legal value -- it is
+        folded to an unrelated interior point, and the run would then report a
+        structure it never searched at.  This is the same refusal --init-scale
+        already makes, for the same reason.
+    */
+    if (options.FixStructure)
+    {
+        const uint32_t pin_s_low = options.SLow != 0u ? options.SLow : 2u;
+        const uint32_t pin_s_high =
+            std::max(pin_s_low, EsDefaultSHigh(options));
+        const uint32_t pin_h_high = EsDefaultHHigh(options);
+        const uint32_t pin_h_low =
+            std::min(std::max<uint32_t>(1u, options.HLow), pin_h_high);
+        const uint32_t pin_d2_high =
+            options.D2High != 0u ? options.D2High : 12u;
+        if (options.FixS < pin_s_low || options.FixS > pin_s_high ||
+            options.FixH < pin_h_low || options.FixH > pin_h_high ||
+            options.FixD2 < 1u || options.FixD2 > pin_d2_high)
+        {
+            std::fprintf(stderr,
+                "essearch --fix-structure %u:%u:%u is outside the coordinate "
+                "boxes S[%u,%u] H[%u,%u] D2[1,%u]; widen them with "
+                "--s-lo/--s-hi, --h-lo/--h-hi and --d2-hi\n",
+                options.FixS, options.FixH, options.FixD2,
+                pin_s_low, pin_s_high, pin_h_low, pin_h_high, pin_d2_high);
+            return 1;
+        }
+    }
+    /*
+        --init-scale has to lie INSIDE the mean-row-degree box.
+
+        theta is reflected into [lo,hi] on the very first perturbation, so an
+        out-of-box start is not clamped to the nearest edge -- it is folded to
+        an unrelated interior point.  Measured: --scale-hi 10.00 with
+        --init-scale 50.00 started the search at 9.96 while the banner still
+        reported degree_scale_init=50.00, so the run's own receipt named a
+        starting point it never used.  A silently relocated start is refused
+        rather than reported wrongly.
+    */
+    if (options.InitScaleExplicit)
+    {
+        const uint32_t scale_lo = options.ScaleLoCenti;
+        const uint32_t scale_hi = std::max(options.ScaleHiCenti, scale_lo);
+        if (options.InitScaleCenti < scale_lo ||
+            options.InitScaleCenti > scale_hi)
+        {
+            std::fprintf(stderr,
+                "essearch --init-scale %.2f is outside the mean-row-degree "
+                "box [%.2f,%.2f]; widen it with --scale-lo/--scale-hi\n",
+                (double)options.InitScaleCenti / 100.0,
+                (double)scale_lo / 100.0, (double)scale_hi / 100.0);
+            return 1;
+        }
+    }
+    {
+        const double scales[18] =
+            {options.SigmaStruct, options.SigmaDegScale, options.SigmaPct,
+             options.SigmaPoly, options.SigmaDMax,
+             options.SigmaPeelP1, options.SigmaPeelTilt,
+             options.SigmaPeelDMax, options.SigmaPeelAbsorb,
+             options.AlphaStruct, options.AlphaDegScale, options.AlphaPct,
+             options.AlphaPoly, options.AlphaDMax,
+             options.AlphaPeelP1, options.AlphaPeelTilt,
+             options.AlphaPeelDMax, options.AlphaPeelAbsorb};
+        for (double scale : scales)
+        {
+            if (!(scale >= 0.0 && scale <= 1000.0))
+            {
+                std::fprintf(stderr,
+                    "essearch --sigma-*/--alpha-* scales must be in "
+                    "[0,1000]\n");
+                return 1;
+            }
+        }
+        if (!(options.DecayRate > 0.0 && options.DecayRate <= 1.0) ||
+            !(options.ShapeDecayRate <= 1.0) ||
+            (options.ShapeDecayRate >= 0.0 && options.ShapeDecayRate == 0.0))
+        {
+            std::fprintf(stderr,
+                "essearch --decay-rate/--shape-decay-rate must be in "
+                "(0,1] (negative shape rate = follow structural)\n");
+            return 1;
+        }
+        const double at[4] =
+            {options.DecayAt1, options.DecayAt2,
+             options.ShapeDecayAt1 < 0.0 ? 0.0 : options.ShapeDecayAt1,
+             options.ShapeDecayAt2 < 0.0 ? 0.0 : options.ShapeDecayAt2};
+        for (double position : at)
+        {
+            if (!(position >= 0.0 && position <= 1.0))
+            {
+                std::fprintf(stderr,
+                    "essearch --decay-at/--shape-decay-at positions must be "
+                    "in [0,1]\n");
+                return 1;
+            }
+        }
+    }
+    run.BlockCount = options.BlockCount;
+
+    // Fail loudly rather than extrapolate: the cost coefficients are fitted
+    // per block count and there is no defensible interpolation between them.
+    const EsCostModelEntry* model = FindEsCostModel(options.BlockCount);
+    if (model == nullptr)
+    {
+        std::fprintf(stderr,
+            "essearch has no calibrated cost model for N=%u\n",
+            options.BlockCount);
+        PrintEsCostModelBlockCounts();
+        return 1;
+    }
+
+    const uint32_t measure_threads = options.Threads != 0u ? options.Threads :
+        std::max<uint32_t>(1u, (uint32_t)std::thread::hardware_concurrency());
+    if (options.Measure)
+    {
+        if (measure_configs.empty()) {
+            std::fprintf(stderr,
+                "essearch --measure requires --configs (S,H,D2,scale, the "
+                "full search vector "
+                "S,H,D2,scale,p1,p2,p3,c1,c2,c3,c4,c5,dmax, the same "
+                "vector with an explicit shape flag "
+                "S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax, or that "
+                "vector with the peel block "
+                "...,peel,peel_p1,peel_tilt,peel_dmax; scale is "
+                "the target mean staircase row degree and must carry a "
+                "decimal point)\n");
+            return 1;
+        }
+        if (options.MeasureCellEnd <= options.MeasureCellBegin) {
+            std::fprintf(stderr,
+                "essearch --measure requires a non-empty --cells A:B\n");
+            return 1;
+        }
+        EsEvaluator measure_evaluator(run, measure_threads);
+        std::vector<EsCandidateResult> results;
+        if (!measure_evaluator.Evaluate(
+                measure_configs, options.MeasureCellBegin,
+                options.MeasureCellEnd - options.MeasureCellBegin, results))
+        {
+            return 2;
+        }
+        std::printf(
+            "# essearch measure,N=%u,cells=[%llu,%llu),solve_bb=%u,"
+            "loss=%.6f,seed_base=%llu,completion=%s,geometry=frozen,"
+            "period=%u,gf16_rows=%u,threads=%u\n",
+            options.BlockCount,
+            (unsigned long long)options.MeasureCellBegin,
+            (unsigned long long)options.MeasureCellEnd,
+            run.SolveBlockBytes(), run.Loss,
+            (unsigned long long)run.SeedBase,
+            PrecodeFailCompletionName(run.Completion), run.Period,
+            run.GF16Rows, measure_threads);
+        // scale sits where the search's own coordinate 3 sits, so a
+        // --measure row reads in theta order.
+        std::printf("S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax,"
+            "peel,peel_p1,peel_tilt,peel_dmax,peel_absorb,"
+            "cells,failures,fail_rate,solved,pred_ns,xors,muladds,copies,"
+            "zerofills,status\n");
+        for (size_t index = 0u; index < measure_configs.size(); ++index)
+        {
+            const PrecodeSweepConfig& config = measure_configs[index];
+            const EsCandidateResult& result = results[index];
+            const double solved =
+                (double)(result.Solved != 0u ? result.Solved : 1u);
+            std::printf(
+                "%u,%u,%u,%.2f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                "%u,%u,%d,%u,%u,"
+                "%llu,%llu,%.8f,%llu,%.6f,"
+                "%.3f,%.3f,%.3f,%.3f,%s\n",
+                config.Staircase, config.MixedGF256Rows, config.DenseRows,
+                DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
+                config.ShapeActive ? 1u : 0u,
+                config.ShapeP1, config.ShapeP2, config.ShapeP3,
+                config.ShapeC1, config.ShapeC2, config.ShapeC3,
+                config.ShapeC4, config.ShapeC5,
+                config.ShapeDMax,
+                config.PeelActive ? 1u : 0u,
+                config.PeelP1,
+                (int)config.PeelTilt - (int)kPeelTiltRange,
+                config.PeelDMax, config.PeelAbsorb,
+                (unsigned long long)result.Cells,
+                (unsigned long long)result.Failures, result.FailRate(),
+                (unsigned long long)result.Solved,
+                result.HasCost() ? result.PredictedNs(*model) : 0.0,
+                (double)result.SumBlockXors / solved,
+                (double)result.SumBlockMulAdds / solved,
+                (double)result.SumBlockCopies / solved,
+                (double)result.SumBlockZeroFills / solved,
+                result.Rejected ? "rejected" : "ok");
+        }
+        std::fflush(stdout);
+        return 0;
+    }
+    if (!measure_configs.empty())
+    {
+        std::fprintf(stderr,
+            "essearch --configs/--cells only apply to --measure\n");
+        return 1;
+    }
+
+    std::vector<EsNoiseRecord> replay_records;
+    std::vector<double> replay_inits;
+    if (!options.NoisePath.empty() &&
+        !LoadEsNoiseFile(
+            options.NoisePath.c_str(), replay_records, replay_inits))
+    {
+        return 1;
+    }
+    std::FILE* noise_out = nullptr;
+    if (!options.EmitNoisePath.empty())
+    {
+        noise_out = std::fopen(options.EmitNoisePath.c_str(), "w");
+        if (noise_out == nullptr)
+        {
+            std::fprintf(stderr,
+                "essearch could not open --emit-noise %s\n",
+                options.EmitNoisePath.c_str());
+            return 1;
+        }
+    }
+
+    const uint32_t threads = measure_threads;
+    // Banner only; RunEsSearch resolves the same way through these helpers.
+    const uint32_t s_low = options.SLow != 0u ? options.SLow : 2u;
+    const uint32_t s_high = std::max(s_low, EsDefaultSHigh(options));
+    const uint32_t h_high = EsDefaultHHigh(options);
+    const uint32_t d2_high = options.D2High != 0u ? options.D2High : 12u;
+    const uint32_t dmax_high = EsDefaultDMaxHigh(options);
+
+    const char* band_tracking = std::getenv("WIREHAIR_V2_BAND_TRACKING_X");
+    // The mean-row-degree box and start are printed in the banner because they
+    // are the only search bounds that are not derivable from --N: nothing in
+    // this binary picks them from K, so a run's own log has to record them.
+    // The pinned structure prints as a value, not a flag: a stage-two log has
+    // to name the structure its shape was learned inside, because the shape is
+    // only an answer with respect to that structure.
+    char fix_structure[48];
+    if (options.FixStructure)
+    {
+        std::snprintf(fix_structure, sizeof(fix_structure), "%u:%u:%u",
+            options.FixS, options.FixH, options.FixD2);
+    }
+    else {
+        std::snprintf(fix_structure, sizeof(fix_structure), "off");
+    }
+    char scale_init[32];
+    if (options.InitScaleExplicit)
+    {
+        std::snprintf(scale_init, sizeof(scale_init), "%.2f",
+            (double)options.InitScaleCenti / 100.0);
+    }
+    else
+    {
+        std::snprintf(scale_init, sizeof(scale_init), "midpoint(%.2f)",
+            0.5 * ((double)options.ScaleLoCenti +
+                (double)std::max(options.ScaleHiCenti, options.ScaleLoCenti)) /
+                100.0);
+    }
+    std::printf(
+        "# essearch,N=%u,gens=%u,pairs=%u,runs=%u,seed=%llu,"
+        "nseeds=%u:%u%s,holdout=%u@%llu+%llu/gen(span=[%llu,%llu)),"
+        "target=%.6f,lam=%.1f,"
+        "alpha_scale=%.3f,decay=%d,margin=%d,tie_mask=%d,fresh_elite=%d,"
+        "log_time=%d,"
+        "threads=%u,solve_bb=%u,loss=%.6f,seed_base=%llu,completion=%s,"
+        "geometry=%s,period=%u,gf16_rows=%u,band_tracking_x=%s,"
+        "s_bounds=[%u,%u],shape=%d,dmax_bounds=[4,%u],h_bounds=[%u,%u],"
+        "peel=%d,peel_p1_bounds=[0,400]%%_of_stock,"
+        "peel_tilt_bounds=[-%u,+%u]_centi,"
+        "peel_dmax_bounds=[2,%u],peel_absorb_bounds=[0,100]%%,"
+        "d2_bounds=[1,%u],degree_scale_bounds=[%.2f,%.2f],"
+        "degree_scale_init=%s,fix_structure=%s,margin_reward=%.1f,"
+        "shape_surrogate=%.1f,fail_model=%s\n",
+        options.BlockCount, options.Generations, options.Pairs, options.Runs,
+        (unsigned long long)options.Seed, options.NseedsLow,
+        options.NseedsHigh, options.NseedsFixed != 0u ? " (fixed)" : "",
+        options.HoldoutCells, (unsigned long long)options.HoldoutBase,
+        (unsigned long long)options.HoldoutStride,
+        (unsigned long long)options.HoldoutBase,
+        (unsigned long long)(options.HoldoutBase +
+            options.HoldoutStride * (uint64_t)(options.Generations - 1u) +
+            options.HoldoutCells),
+        options.Target, options.Lambda, options.AlphaScale,
+        options.Decay ? 1 : 0, options.MultiplicityMargin ? 1 : 0,
+        options.TieMask ? 1 : 0,
+        options.FreshElite ? 1 : 0, options.LogTime ? 1 : 0, threads,
+        run.SolveBlockBytes(), run.Loss, (unsigned long long)run.SeedBase,
+        PrecodeFailCompletionName(run.Completion), "frozen", run.Period,
+        run.GF16Rows, band_tracking ? band_tracking : "unset",
+        s_low, s_high,
+        options.Shape ? 1 : 0, dmax_high,
+        std::min(std::max<uint32_t>(1u, options.HLow), h_high), h_high,
+        options.Peel ? 1 : 0, kPeelTiltRange, kPeelTiltMaxSteepen,
+        std::min<uint32_t>(kPeelMaxDegree,
+            std::max<uint32_t>(2u, options.BlockCount)),
+        d2_high,
+        (double)options.ScaleLoCenti / 100.0,
+        (double)std::max(options.ScaleHiCenti, options.ScaleLoCenti) / 100.0,
+        scale_init, fix_structure, options.MarginReward,
+        options.ShapeSurrogate,
+        options.FailModel.Active() ? "on" : "off");
+    // The step-size schedule is printed in full so a run's own log identifies
+    // the setting it was measured under.
+    std::printf(
+        "# steps,sigma_struct=%.4f,sigma_degscale=%.4f,sigma_pct=%.4f,"
+        "sigma_poly=%.4f,"
+        "sigma_dmax=%.4f,alpha_struct=%.4f,alpha_degscale=%.4f,"
+        "alpha_pct=%.4f,alpha_poly=%.4f,"
+        "alpha_dmax=%.4f,"
+        "sigma_peel_p1=%.4f,sigma_peel_tilt=%.4f,sigma_peel_dmax=%.4f,"
+        "sigma_peel_absorb=%.4f,"
+        "alpha_peel_p1=%.4f,alpha_peel_tilt=%.4f,alpha_peel_dmax=%.4f,"
+        "alpha_peel_absorb=%.4f,"
+        "decay=%.4f@%.3f:%.3f,shape_decay=%.4f@%.3f:%.3f\n",
+        options.SigmaStruct, options.SigmaDegScale, options.SigmaPct,
+        options.SigmaPoly,
+        options.SigmaDMax, options.AlphaStruct, options.AlphaDegScale,
+        options.AlphaPct,
+        options.AlphaPoly, options.AlphaDMax,
+        options.SigmaPeelP1, options.SigmaPeelTilt, options.SigmaPeelDMax,
+        options.SigmaPeelAbsorb,
+        options.AlphaPeelP1, options.AlphaPeelTilt, options.AlphaPeelDMax,
+        options.AlphaPeelAbsorb,
+        options.DecayRate, options.DecayAt1, options.DecayAt2,
+        options.ShapeDecayRate < 0.0 ?
+            options.DecayRate : options.ShapeDecayRate,
+        options.ShapeDecayAt1 < 0.0 ?
+            options.DecayAt1 : options.ShapeDecayAt1,
+        options.ShapeDecayAt2 < 0.0 ?
+            options.DecayAt2 : options.ShapeDecayAt2);
+    std::printf(
+        "# cost_model,N=%u,intercept=%.6f,xor=%.6f,muladd=%.6f,copy=%.6f,"
+        "zero=%.6f,fit_rows=%u,fit_r2=%.4f,fit_median_abs_pct=%.2f\n",
+        model->BlockCount, model->Intercept, model->PerBlockXor,
+        model->PerBlockMulAdd, model->PerBlockCopy, model->PerBlockZeroFill,
+        model->FitRows, model->FitR2, model->FitMedianAbsPercent);
+    if (options.EmitTrace)
+    {
+        std::printf(
+            "# gen columns: run,gen,sel_obj,elite_obj,best_obj,nseeds,ties,"
+            "pairs,margin_gated,z,elite_margin_gated,z_elite,"
+            "margin_binding,no_cost,"
+            "theta_S,theta_H,theta_D2,theta_scale,"
+            "theta_p1,theta_p2,theta_p3,"
+            "theta_c1,theta_c2,theta_c3,theta_c4,theta_c5,theta_dmax,"
+            "theta_peel_p1,theta_peel_tilt,theta_peel_dmax,"
+            "theta_peel_absorb,"
+            "elite_S,elite_H,elite_D2,elite_scale,elite_shape,"
+            "elite_p1,elite_p2,elite_p3,"
+            "elite_c1,elite_c2,elite_c3,elite_c4,elite_c5,elite_dmax,"
+            "elite_peel,elite_peel_p1,elite_peel_tilt,elite_peel_dmax,"
+            "elite_peel_absorb,"
+            "elite_fail  (theta_scale and elite_scale are MEAN STAIRCASE ROW "
+            "DEGREES; the coordinate itself is carried in centi-degrees.  "
+            "elite_S..elite_dmax is a --configs token: it carries the "
+            "shape-active flag AND the peel-active flag so a --no-shape or "
+            "--no-peel-shape elite replays as the config that was "
+            "measured)\n");
+        std::printf(
+            "# tie columns: run,gen,pairs,tied_S,tied_H,tied_D2,"
+            "tied_scale,"
+            "tied_p1,tied_p2,tied_p3,tied_c1,tied_c2,tied_c3,tied_c4,"
+            "tied_c5,tied_dmax,tied_peel_p1,tied_peel_tilt,tied_peel_dmax,"
+            "tied_peel_absorb  "
+            "(mirrored pairs that quantized identically on "
+            "that coordinate, so it received no gradient signal)\n");
+        std::printf(
+            "# shape columns: run,gen,degrees,w[degree=1],w[2],...  "
+            "(the elite's STAIRCASE row-degree distribution: w[d]=p_d/100 for "
+            "d<=3 and w[d]=p3*(1+c1*t+...+c5*t^5), t=(d-3)/(dmax-3), for "
+            "4<=d<=dmax, clamped at zero and normalized to unit area)\n");
+        std::printf(
+            "# peel columns: run,gen,degrees,w[degree=1],w[2],...  "
+            "(the elite's PEELING row-degree law: the shipped PMF with its "
+            "degree-1 mass scaled by peel_p1/100, its tail tilted by "
+            "d^(-(peel_tilt-100)/100), truncated onto peel_dmax with the "
+            "tail mass absorbed there, normalized to unit area)\n");
+    }
+    if (options.EmitCandidates)
+    {
+        std::printf(
+            "# cand columns: run,gen,index,S,H,D2,scale,shape,p1,p2,p3,"
+            "c1,c2,c3,c4,c5,dmax,"
+            "peel,peel_p1,peel_tilt,peel_dmax,peel_absorb,"
+            "cells,failures,fail,pred_ns,obj  (S..peel_absorb is a --configs "
+            "token)\n");
+    }
+    std::fflush(stdout);
+
+    EsEvaluator evaluator(run, threads);
+    // Randomized inits are drawn here, on this thread, in run order, so
+    // --runs is reproducible from --seed alone.
+    EsRandom init_rng(EsMixSeed(options.Seed, UINT64_C(0x1F5)));
+    const std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+    size_t replay_cursor = 0u;
+    int status = 0;
+
+    // The config columns are the FULL vector plus the shape-active flag, in
+    // --configs order, so a winner can be replayed through --measure without
+    // reconstructing anything -- INCLUDING a --no-shape winner, whose nine
+    // frozen PDF columns would otherwise read as an active shape.
+    std::printf("run,init_S,S,H,D2,scale,shape,p1,p2,p3,c1,c2,c3,c4,c5,dmax,"
+        "peel,peel_p1,peel_tilt,peel_dmax,peel_absorb,"
+        "obj,pred_ns,holdout_fail,holdout_cells,gen,"
+        "theta_S,theta_H,theta_D2,theta_scale,"
+        "theta_p1,theta_p2,theta_p3,"
+        "theta_c1,theta_c2,theta_c3,theta_c4,theta_c5,theta_dmax,"
+        "theta_peel_p1,theta_peel_tilt,theta_peel_dmax,"
+        "theta_peel_absorb\n");
+    std::fflush(stdout);
+
+    for (uint32_t run_index = 0; run_index < options.Runs; ++run_index)
+    {
+        // EVERY run starts log-uniformly in the S box unless --init pins it.
+        // Run 0 previously kept a deterministic 1.25*sqrt(K) start, which made
+        // --runs N give one fixed start plus N-1 random ones.  That biases any
+        // recovery-rate statistic computed over the runs, because the same
+        // starting point is always in the sample -- and recovery rate is
+        // exactly what a hyperparameter sweep ranks settings by.  Use --init to
+        // get the old deterministic behaviour for a single reproducible run.
+        double init_s = 0.0;
+        if (options.FixStructure)
+        {
+            // A pinned run's init_S column must report the pin, not a draw the
+            // search discarded, or the receipt names a start that never ran.
+            init_s = (double)options.FixS;
+            init_rng.NextUniform();   // keep the stream aligned across modes
+        }
+        else if (options.InitExplicit) {
+            init_s = options.InitS;
+        }
+        else
+        {
+            const double u = init_rng.NextUniform();
+            init_s = std::exp(std::log(2.0) +
+                u * (std::log((double)s_high) - std::log(2.0)));
+        }
+        if (run_index < replay_inits.size() &&
+            replay_inits[run_index] != 0.0)
+        {
+            init_s = replay_inits[run_index];
+        }
+        if (noise_out != nullptr) {
+            std::fprintf(noise_out, "init,%u,%.17g\n", run_index, init_s);
+        }
+
+        EsBest best;
+        double theta[kEsDim] = {};
+        if (!RunEsSearch(
+                options, *model, run_index, init_s, evaluator,
+                replay_records.empty() ? nullptr : &replay_records,
+                replay_cursor, noise_out, best, theta))
+        {
+            status = 2;
+            break;
+        }
+        std::printf("%u,%.5f", run_index, init_s);
+        EsPrintConfigFields(best.Config, options.Shape, options.Peel);
+        std::printf(",%.3f,%.3f,%.8f,%llu,%u",
+            best.Objective, best.PredictedNs, best.Fail,
+            (unsigned long long)best.Cells, best.Generation);
+        EsPrintThetaFields(theta);
+        std::printf("\n");
+        // The winning distribution, spelled out so it can be plotted or fed
+        // straight back through --configs / WIREHAIR_V2_STAIRCASE_DEGREES.
+        if (options.Shape)
+        {
+            const std::vector<double> weights =
+                EsShapeWeights(best.Config);
+            std::printf("# best shape,run=%u,degrees=%u,weights=",
+                run_index, (uint32_t)weights.size());
+            for (size_t i = 0u; i < weights.size(); ++i) {
+                std::printf("%s%.6f", i == 0u ? "" : ":", weights[i]);
+            }
+            std::printf("\n");
+        }
+        // Same for the peeling law, in the spelling WIREHAIR_V2_PEEL_DEGREES
+        // accepts, so a winner can be replayed without reconstructing it from
+        // its three coordinates.
+        if (options.Peel)
+        {
+            const std::vector<double> peel = EsPeelWeights(
+                options.BlockCount, best.Config);
+            std::printf("# best peel,run=%u,degrees=%u,weights=",
+                run_index, (uint32_t)peel.size());
+            for (size_t i = 0u; i < peel.size(); ++i) {
+                std::printf("%s%.9f", i == 0u ? "" : ":", peel[i]);
+            }
+            std::printf("\n");
+        }
+        std::fflush(stdout);
+    }
+
+    if (noise_out != nullptr) {
+        std::fclose(noise_out);
+    }
+    const double seconds =
+        std::chrono::duration_cast<std::chrono::duration<double>>(
+            std::chrono::steady_clock::now() - start).count();
+    std::printf("# essearch done,runs=%u,seconds=%.3f\n",
+        options.Runs, seconds);
+    return status;
+}
+
+#endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
+
+/**
+    Sum the solve counters for one config over a fixed cell span at a given
+    solve width, using the same cell protocol essearch defines.
+
+    Exists for the zero-width parity guard at the end of CmdSelfTest: the whole
+    point is to run the SAME cells through the SAME protocol and vary nothing
+    but the width, so any counter difference is attributable to the width alone.
+*/
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool HarvestParityCounters(
+    const char* config_text,
+    uint32_t solve_block_bytes,
+    wirehair_v2::PrecodeSolveStats& total_out)
+{
+    std::vector<PrecodeSweepConfig> configs;
+    if (!ParsePrecodeSweepConfigText(config_text, configs) ||
+        configs.size() != 1u)
+    {
+        return false;
+    }
+    // This helper calls RunCell WITHOUT ConfigureThread -- it is a width
+    // COMPARISON, and both sides must see whatever thread state the caller has
+    // -- so a peel distribution left behind by an earlier config on this thread
+    // would silently become part of both measurements.  Clearing is not the
+    // same as configuring: it restores the shipped law, which is the state this
+    // helper has always assumed.
+    //
+    // The staircase shape and scale have the same gap and are deliberately NOT
+    // touched here: changing what they do would move the parity fixtures this
+    // helper feeds, which is a separate decision from wiring the peel block.
+    wirehair_v2::ClearPeelDegreesForTesting();
+    PrecodeSweepRun run;
+    run.BlockCount = 128u;
+    run.BlockBytes = 65536u;
+    run.Overhead = 0u;
+    run.MixCount = 3u;
+    run.Loss = 0.10;
+    run.SeedBase = 55u;
+    run.PairedOverheadStream = true;
+    run.Schedule = PacketScheduleKind::Iid;
+    run.Completion = PrecodeFailCompletion::Mixed;
+    run.Geometry = wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+    run.GF16Rows = 0u;
+    run.Period = 244u;
+    run.SolveBlockBytesOverride = solve_block_bytes;
+
+    const uint32_t width = run.SolveBlockBytes();
+    std::vector<uint8_t> packet_data(width != 0u ? width : 1u, 0u);
+    std::vector<wirehair_v2::SolvePacket> packets(run.BlockCount);
+    total_out = wirehair_v2::PrecodeSolveStats();
+    uint32_t solved = 0u;
+    for (uint32_t cell = 30000u; cell < 30040u; ++cell)
+    {
+        wirehair_v2::PrecodeSolveStats stats;
+        const uint8_t failed = run.RunCell(
+            configs[0], cell, packets, packet_data.data(), &stats);
+        if (failed != 0u) {
+            continue;
+        }
+        ++solved;
+        total_out.BlockXors += stats.BlockXors;
+        total_out.BlockMulAdds += stats.BlockMulAdds;
+        total_out.BlockCopies += stats.BlockCopies;
+        total_out.BlockZeroFills += stats.BlockZeroFills;
+    }
+    // A config that never decodes carries no counters to compare, which would
+    // make the parity check pass vacuously.
+    return solved >= 30u;
+}
 #endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
 
 int CmdSelfTest()
@@ -11591,6 +15992,993 @@ int CmdSelfTest()
         return 1;
     }
     std::printf("mixed null-witness exit policy: PASS\n");
+
+    // Row-degree PDF invariants.  A search coordinate is only meaningful if
+    // the vector it produces is a genuine PDF, and the degenerate corners of
+    // the box are reachable by the stochastic rounder on any generation.
+    {
+        struct ShapeCase
+        {
+            const char* Name;
+            uint32_t P1, P2, P3, C1, C2, C3, C4, C5, DMax;
+            size_t ExpectDegrees;   ///< 0 = do not pin the length
+        };
+        const ShapeCase cases[] = {
+            {"flat tail",        20u, 20u, 20u, 100u, 100u, 100u, 100u, 100u,
+             16u, 16u},
+            {"decaying tail",    40u, 25u, 15u,  10u, 100u, 100u, 100u, 100u,
+             32u, 32u},
+            // A polynomial that dives negative must clamp, and the clamped
+            // trailing entries must be dropped, not handed the sampler's
+            // "u ran past every weight" residue.
+            {"clamped tail",     30u, 20u, 10u,   0u,   0u,   0u,   0u,   0u,
+             40u, 0u},
+            {"over-full triple", 60u, 50u, 40u, 100u, 100u, 100u, 100u, 100u,
+             12u, 12u},
+            {"dmax <= 3",        30u, 30u, 30u, 100u, 100u, 100u, 100u, 100u,
+             3u, 3u},
+            {"p3 = 0",           30u, 30u,  0u, 150u, 150u, 150u, 150u, 150u,
+             40u, 2u},
+            {"all zero",          0u,  0u,  0u, 100u, 100u, 100u, 100u, 100u,
+             3u, 1u},
+            {"extreme low box",   0u,  0u,  0u,   0u,   0u,   0u,   0u,   0u,
+             4u, 1u},
+            {"extreme high box",100u,100u,100u, 200u, 200u, 200u, 200u, 200u,
+             64u, 64u},
+        };
+        for (const ShapeCase& shape_case : cases)
+        {
+            const std::vector<double> w = MakeStaircaseDegreeWeights(
+                shape_case.P1, shape_case.P2, shape_case.P3,
+                shape_case.C1, shape_case.C2, shape_case.C3,
+                shape_case.C4, shape_case.C5, shape_case.DMax);
+            double total = 0.0;
+            bool negative = false;
+            for (double value : w)
+            {
+                if (!(value >= 0.0) || !std::isfinite(value)) {
+                    negative = true;
+                }
+                total += value;
+            }
+            const bool trailing_zero = w.empty() || !(w.back() > 0.0);
+            if (w.empty() || negative || trailing_zero ||
+                std::fabs(total - 1.0) > 1e-12 ||
+                (shape_case.ExpectDegrees != 0u &&
+                 w.size() != shape_case.ExpectDegrees))
+            {
+                std::fprintf(stderr,
+                    "staircase degree PDF invariant broken for %s: "
+                    "degrees=%u sum=%.17g negative=%d trailing_zero=%d\n",
+                    shape_case.Name, (uint32_t)w.size(), total,
+                    negative ? 1 : 0, trailing_zero ? 1 : 0);
+                return 1;
+            }
+        }
+        // The clamped case must actually clamp, i.e. the tail has to end
+        // before dmax rather than run to it with zero entries.
+        const std::vector<double> clamped = MakeStaircaseDegreeWeights(
+            30u, 20u, 10u, 0u, 0u, 0u, 0u, 0u, 40u);
+        if (clamped.size() >= 40u)
+        {
+            std::fprintf(stderr,
+                "staircase degree PDF failed to drop a clamped tail: "
+                "degrees=%u\n", (uint32_t)clamped.size());
+            return 1;
+        }
+    }
+    std::printf("staircase degree PDF invariants: PASS\n");
+
+    // Staircase degree scale: the target MEAN STAIRCASE ROW DEGREE.
+    //
+    // Everything this parameter is for is pinned here: that it reproduces the
+    // certified construction BIT-IDENTICALLY at the legacy-equivalent value,
+    // that it realizes an exact two-valued column mixture away from it, that
+    // a small scale is allowed to leave columns with zero parities, that both
+    // clamp corners resolve, and that the mixture invariant still REJECTS a
+    // tampered system rather than range-checking it.
+    {
+        const uint32_t K = 128u;
+        const uint64_t seed = UINT64_C(0x5EED0C7A1E5CA1E0);
+        const auto make_params = [&](uint32_t S, uint32_t N1, double scale) {
+            wirehair_v2::PrecodeParams params =
+                wirehair_v2::MakeCertifiedParams(K, seed);
+            params.Staircase = S;
+            params.DenseRows = 1u;
+            params.SourceHits = N1;
+            params.StaircaseDegreeScale = scale;
+            return params;
+        };
+        // Histogram of per-source-column staircase degrees.
+        const auto degree_histogram =
+            [&](const wirehair_v2::PrecodeSystem& system) {
+                std::map<uint32_t, uint32_t> counts;
+                std::vector<uint32_t> per_column(K, 0u);
+                for (const std::vector<uint32_t>& row : system.StaircaseRows)
+                {
+                    for (uint32_t column : row) {
+                        if (column < K) { ++per_column[column]; }
+                    }
+                }
+                for (uint32_t degree : per_column) { ++counts[degree]; }
+                return counts;
+            };
+
+        /*
+            THE PRIMARY REGRESSION GATE.
+
+            For any legacy configuration, setting the scale to K*N1/S -- the
+            mean row degree that budget implies -- must reproduce the old
+            construction bit for bit.  The expected value is computed HERE, by
+            hand, from K, N1 and S; the codec contains no such formula, which
+            is the whole point of the change.
+        */
+        struct LegacyCase
+        {
+            const char* Name;
+            uint32_t S;
+            uint32_t N1;
+            uint32_t EdgeCount;   ///< K*N1, by hand
+        };
+        const LegacyCase legacy_cases[] = {
+            {"S=6 N1=1",  6u, 1u, 128u},   // scale = 128/6  = 21.3333...
+            {"S=9 N1=1",  9u, 1u, 128u},   // scale = 128/9  = 14.2222...
+            {"S=6 N1=2",  6u, 2u, 256u},   // scale = 256/6  = 42.6666...
+            {"S=12 N1=3", 12u, 3u, 384u},  // scale = 384/12 = 32.0
+        };
+        for (const LegacyCase& legacy : legacy_cases)
+        {
+            const double scale =
+                (double)legacy.EdgeCount / (double)legacy.S;
+            wirehair_v2::PrecodeSystem stock;
+            wirehair_v2::PrecodeSystem scaled;
+            wirehair_v2::PrecodeSystem hooked;
+            wirehair_v2::StaircaseDegreeMixture stock_mix;
+            wirehair_v2::StaircaseDegreeMixture scaled_mix;
+            const wirehair_v2::PrecodeParams stock_params = make_params(
+                legacy.S, legacy.N1,
+                wirehair_v2::kStaircaseDegreeScaleUnset);
+            const wirehair_v2::PrecodeParams scaled_params =
+                make_params(legacy.S, legacy.N1, scale);
+            wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+            const bool ok =
+                wirehair_v2::MakeStaircaseDegreeMixture(
+                    stock_params, stock_mix) &&
+                wirehair_v2::MakeStaircaseDegreeMixture(
+                    scaled_params, scaled_mix) &&
+                wirehair_v2::BuildPrecodeSystem(stock_params, stock) &&
+                wirehair_v2::BuildPrecodeSystem(scaled_params, scaled);
+            // The thread-local hook must reach the identical construction, or
+            // the search measures something --configs cannot replay.
+            wirehair_v2::SetStaircaseDegreeScaleForTesting(scale);
+            const bool hook_ok =
+                wirehair_v2::BuildPrecodeSystem(stock_params, hooked);
+            wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+            const std::map<uint32_t, uint32_t> expected_histogram = {
+                {std::min(legacy.N1, legacy.S), K}
+            };
+            if (!ok || !hook_ok ||
+                stock_mix.EdgeCount != legacy.EdgeCount ||
+                scaled_mix.EdgeCount != legacy.EdgeCount ||
+                scaled_mix.HighColumns != 0u ||
+                scaled_mix.LowColumns != K ||
+                scaled_mix.LowHits != std::min(legacy.N1, legacy.S) ||
+                stock.StaircaseRows != scaled.StaircaseRows ||
+                stock.DenseRowColumns != scaled.DenseRowColumns ||
+                stock.StaircaseRows != hooked.StaircaseRows ||
+                stock.DenseRowColumns != hooked.DenseRowColumns ||
+                degree_histogram(scaled) != expected_histogram)
+            {
+                std::fprintf(stderr,
+                    "staircase degree scale %.10g is not legacy %s "
+                    "bit-identical: edges %u vs %u, n_hi=%u, lo=%u\n",
+                    scale, legacy.Name, scaled_mix.EdgeCount,
+                    stock_mix.EdgeCount, scaled_mix.HighColumns,
+                    scaled_mix.LowHits);
+                return 1;
+            }
+        }
+
+        // Mixtures away from the legacy lattice, all at S = 6, K = 128, where
+        // the legacy-equivalent scale is 128/6 = 21.3333 and one edge is
+        // 1/6 = 0.1667 of a mean row degree.
+        const uint32_t S = 6u;
+        struct MixtureCase
+        {
+            const char* Name;
+            double Scale;
+            uint32_t EdgeCount;
+            uint32_t LowHits;
+            uint32_t LowColumns;
+            uint32_t HighColumns;
+        };
+        const MixtureCase mixture_cases[] = {
+            // Exactly regular, the legacy-equivalent point.
+            {"legacy point", 128.0 / 6.0, 128u, 1u, 128u,   0u},
+            // Genuine two-valued mixtures: 64/64 and 96/32 splits.
+            {"mixture 1:1",  32.0,        192u, 1u,  64u,  64u},
+            {"mixture 3:1",  160.0 / 6.0, 160u, 1u,  96u,  32u},
+            // ONE LATTICE STEP apart, straddling an edge boundary: 21.41
+            // resolves to 128 edges and 21.42 to 129.  This is what makes the
+            // centi-degree lattice usable rather than decorative.
+            {"one step low", 21.41,       128u, 1u, 128u,   0u},
+            {"one step high",21.42,       129u, 1u, 127u,   1u},
+            // lo = 0: most columns carry NO staircase parity at all.  Legal,
+            // deliberately not floored up.
+            {"lo = 0",       0.50,          3u, 0u, 125u,   3u},
+            // The clamp corners.  0.0 is an EMPTY budget; the codec's ceiling
+            // saturates at K*S = 768 edges, every column on every row.
+            {"empty budget", 0.0,           0u, 0u, 128u,   0u},
+            {"saturated",    64000.0,     768u, 6u, 128u,   0u},
+        };
+        for (const MixtureCase& mixture_case : mixture_cases)
+        {
+            const wirehair_v2::PrecodeParams params =
+                make_params(S, 1u, mixture_case.Scale);
+            wirehair_v2::StaircaseDegreeMixture mixture;
+            if (!wirehair_v2::MakeStaircaseDegreeMixture(params, mixture) ||
+                mixture.EdgeCount != mixture_case.EdgeCount ||
+                mixture.LowHits != mixture_case.LowHits ||
+                mixture.HighHits != mixture_case.LowHits + 1u ||
+                mixture.LowColumns != mixture_case.LowColumns ||
+                mixture.HighColumns != mixture_case.HighColumns ||
+                mixture.LowColumns + mixture.HighColumns != K)
+            {
+                std::fprintf(stderr,
+                    "staircase degree mixture wrong for %s: edges=%u lo=%u "
+                    "n_lo=%u n_hi=%u\n",
+                    mixture_case.Name, mixture.EdgeCount, mixture.LowHits,
+                    mixture.LowColumns, mixture.HighColumns);
+                return 1;
+            }
+            wirehair_v2::PrecodeSystem system;
+            if (!wirehair_v2::BuildPrecodeSystem(params, system) ||
+                !wirehair_v2::ValidatePrecodeSystem(system))
+            {
+                std::fprintf(stderr,
+                    "staircase degree scale build/validate failed for %s\n",
+                    mixture_case.Name);
+                return 1;
+            }
+            // The realized system must carry the mixture EXACTLY, counts
+            // included -- not merely degrees inside [lo, hi].
+            const std::map<uint32_t, uint32_t> histogram =
+                degree_histogram(system);
+            std::map<uint32_t, uint32_t> expected;
+            if (mixture_case.LowColumns != 0u) {
+                expected[mixture.LowHits] = mixture_case.LowColumns;
+            }
+            if (mixture_case.HighColumns != 0u) {
+                expected[mixture.HighHits] = mixture_case.HighColumns;
+            }
+            if (histogram != expected)
+            {
+                std::fprintf(stderr,
+                    "staircase degree mixture not realized for %s\n",
+                    mixture_case.Name);
+                for (const std::pair<const uint32_t, uint32_t>& entry :
+                        histogram)
+                {
+                    std::fprintf(stderr, "  degree %u: %u columns\n",
+                        entry.first, entry.second);
+                }
+                return 1;
+            }
+        }
+
+        // The one-step pair must actually produce DIFFERENT systems, or the
+        // lattice resolution is decorative.
+        {
+            wirehair_v2::PrecodeSystem low;
+            wirehair_v2::PrecodeSystem high;
+            if (!wirehair_v2::BuildPrecodeSystem(
+                    make_params(S, 1u, 21.41), low) ||
+                !wirehair_v2::BuildPrecodeSystem(
+                    make_params(S, 1u, 21.42), high) ||
+                low.StaircaseRows == high.StaircaseRows)
+            {
+                std::fprintf(stderr,
+                    "one centi-degree step did not change the construction\n");
+                return 1;
+            }
+        }
+
+        // Out-of-domain scales are REFUSED, not clamped and not asserted on.
+        // NaN counts as SUPPLIED (it is not negative), so it is rejected here
+        // instead of quietly falling back to the legacy budget.
+        const double bad_scales[] = {
+            wirehair_v2::kStaircaseDegreeScaleMax + 1.0, 1.0e9,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity()
+        };
+        for (double bad : bad_scales)
+        {
+            const wirehair_v2::PrecodeParams params =
+                make_params(S, 1u, bad);
+            wirehair_v2::StaircaseDegreeMixture mixture;
+            wirehair_v2::PrecodeSystem system;
+            if (wirehair_v2::MakeStaircaseDegreeMixture(params, mixture) ||
+                wirehair_v2::BuildPrecodeSystem(params, system))
+            {
+                std::fprintf(stderr,
+                    "staircase degree scale accepted out-of-domain %.17g\n",
+                    bad);
+                return 1;
+            }
+        }
+
+        // Malformed systems the mixture invariant must still reject.  Both of
+        // these pass a RANGE check -- every column degree stays inside
+        // {lo, hi} -- and are caught only because the counts are pinned.
+        {
+            // (a) Drop one edge from a high column at the 64/64 mixture: the
+            //     split becomes 65/63 instead of 64/64.
+            wirehair_v2::PrecodeSystem tampered;
+            if (!wirehair_v2::BuildPrecodeSystem(
+                    make_params(S, 1u, 32.0), tampered))
+            {
+                std::fprintf(stderr,
+                    "staircase degree scale tamper fixture build failed\n");
+                return 1;
+            }
+            std::vector<uint32_t> per_column(K, 0u);
+            for (const std::vector<uint32_t>& row : tampered.StaircaseRows) {
+                for (uint32_t column : row) {
+                    if (column < K) { ++per_column[column]; }
+                }
+            }
+            bool dropped = false;
+            for (uint32_t row_index = 0; row_index < S && !dropped;
+                 ++row_index)
+            {
+                std::vector<uint32_t>& row =
+                    tampered.StaircaseRows[row_index];
+                for (size_t i = 0u; i < row.size(); ++i)
+                {
+                    if (row[i] < K && per_column[row[i]] == 2u)
+                    {
+                        row.erase(row.begin() + (ptrdiff_t)i);
+                        dropped = true;
+                        break;
+                    }
+                }
+            }
+            if (!dropped || wirehair_v2::ValidatePrecodeSystem(tampered))
+            {
+                std::fprintf(stderr,
+                    "mixture validation accepted a wrong high/low split\n");
+                return 1;
+            }
+        }
+        {
+            // (b) Give one column a second parity at the legacy point, where
+            //     the mixture is exactly regular: degree 2 is lo+1, which a
+            //     range check would wave through, but no column may sit there
+            //     when HighColumns is zero.
+            wirehair_v2::PrecodeSystem tampered;
+            if (!wirehair_v2::BuildPrecodeSystem(
+                    make_params(S, 1u, 128.0 / 6.0), tampered))
+            {
+                std::fprintf(stderr,
+                    "staircase degree scale tamper fixture build failed\n");
+                return 1;
+            }
+            bool added = false;
+            for (uint32_t row_index = 0; row_index < S && !added; ++row_index)
+            {
+                std::vector<uint32_t>& row =
+                    tampered.StaircaseRows[row_index];
+                if (row.empty() || row[0] != 0u)
+                {
+                    // Column 0 sorts below every other column, so prepending
+                    // keeps the row's sorted-and-unique invariant intact and
+                    // the ONLY thing wrong with the system is the mixture.
+                    row.insert(row.begin(), 0u);
+                    added = true;
+                }
+            }
+            if (!added || wirehair_v2::ValidatePrecodeSystem(tampered))
+            {
+                std::fprintf(stderr,
+                    "mixture validation accepted an off-mixture column\n");
+                return 1;
+            }
+        }
+    }
+    std::printf("staircase degree scale mixture: PASS\n");
+
+    /*
+        Config syntax: the accepted arities, the shape flag, and the legacy
+        forms that must stay refused.
+
+        The shape flag is the part with teeth.  A --no-shape elite is reported
+        with its nine frozen PDF columns, and a 13-field token means "shape
+        ON", so without the 14-field spelling the reported winner replayed as
+        a different construction and no error was raised anywhere.  These
+        cases pin both directions: 14 fields round-trip the flag, 13 fields
+        keep meaning ON, and every legacy spelling is still an error.
+    */
+    {
+        struct SyntaxCase
+        {
+            const char* Text;
+            bool Accept;
+            bool ShapeActive;   ///< only checked when Accept
+            uint32_t Centi;     ///< only checked when Accept
+        };
+        const SyntaxCase cases[] = {
+            // Short form: structure only, shape off.
+            {"6,9,1,21.33",                                  true,  false,
+             2133u},
+            // 13 fields: shape implicitly on, the historical spelling.
+            {"6,9,1,21.33,20,20,20,100,100,100,100,100,16",   true,  true,
+             2133u},
+            // 14 fields: the flag is written down, both ways.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16", true,  true,
+             2133u},
+            {"6,9,1,21.33,0,20,20,20,100,100,100,100,100,16", true,  false,
+             2133u},
+            // The unset sentinel keeps its spelling in every form.
+            {"6,9,1,-1.00",                                   true,  false,
+             kDegreeScaleCentiUnset},
+            {"6,9,1,-1.00,0,20,20,20,100,100,100,100,100,16", true,  false,
+             kDegreeScaleCentiUnset},
+            // Legacy S,H,N1,D2 and its 13-field extension: same arities as
+            // the new forms, caught by the missing decimal point.
+            {"6,9,1,1",                                       false, false,
+             0u},
+            {"6,9,1,1,20,20,20,100,100,100,100,100,16",       false, false,
+             0u},
+            // Legacy 14-field (S,H,N1,D2,p1..dmax,pct): the new 14-field
+            // arity must NOT swallow it -- field 4 is still an integer.
+            {"6,9,1,1,20,20,20,100,100,100,100,100,16,50",    false, false,
+             0u},
+            // Legacy 5-field (S,H,N1,D2,pct): refused on arity.
+            {"6,9,1,1,50",                                    false, false,
+             0u},
+            // The flag is a flag, not a free integer.
+            {"6,9,1,21.33,2,20,20,20,100,100,100,100,100,16", false, false,
+             0u},
+            // 18 fields: the peel block with both flags written down and
+            // peel_absorb defaulted.  The shape flag must still be read from
+            // slot 4 and dmax from slot 13, which is what the ShapeActive
+            // column of this case checks.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,64",
+             true,  true,  2133u},
+            // 19 fields: the truncation rule written down too.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,64,0",
+             true,  true,  2133u},
+            // shape=0 with peel=1 is the configuration the peel search
+            // actually runs in -- stock staircase, learned peeling law -- so
+            // it is spelled out rather than left to inference.
+            {"6,9,1,21.33,0,20,20,20,100,100,100,100,100,16,1,100,-20,20,0",
+             true,  false, 2133u},
+            {"6,9,1,21.33,0,20,20,20,100,100,100,100,100,16,0,400,-100,2,100",
+             true,  false, 2133u},
+            // The peel flag is a flag too.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,2,100,0,64",
+             false, false, 0u},
+            // Every peel coordinate is range-checked against the box the
+            // search travels, so a token that could not be searched is not
+            // measurable either.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,401,0,64",
+             false, false, 0u},
+            // The tilt axis is SIGNED and DELIBERATELY ASYMMETRIC: flattening
+            // stops at -100 because it is measurably harmful well before there
+            // (-10.67% decode at -20, -14.39% at -40), while steepening runs to
+            // +400 because the gain was still climbing at the old +100 ceiling
+            // (+12.8% at +100, about +27% at +400, at no overhead cost).  Both
+            // ends are checked, at their own limits.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,1601,64",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,-101,64",
+             false, false, 0u},
+            // ... and a formerly-rejected steepening value must now be ACCEPTED,
+            // so that widening the box is proven rather than asserted.  Without
+            // this the suite would still pass if the bound silently reverted.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,101,64",
+             true, true, 2133u},
+            // The ceiling has moved twice (100 -> 400 -> 1600) as measurement
+            // found the optimum further out, and each move was caught by this
+            // block failing.  Keep an accept case near the CURRENT ceiling so a
+            // silent narrowing is caught too, not only a silent widening.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,1500,64",
+             true, true, 2133u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,65",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,1",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,64,101",
+             false, false, 0u},
+            // A minus sign is legal ONLY on the tilt: no other peel field is
+            // signed, and neither is any staircase field.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,-1,0,64",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,-16,1,100,0,64",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,64,-1",
+             false, false, 0u},
+            // A TRAILING FIELD IS NOT IGNORED.  17 fields is not an 18-field
+            // token with one missing and 20 is not a 19-field one with a
+            // spare; both are refused on arity, which is the point of the
+            // syntax.  18 is not in that list: it is a SHORTER FORM with a
+            // documented default, checked below to mean full absorption.
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0",
+             false, false, 0u},
+            {"6,9,1,21.33,1,20,20,20,100,100,100,100,100,16,1,100,0,64,0,7",
+             false, false, 0u},
+        };
+        for (const SyntaxCase& c : cases)
+        {
+            std::vector<PrecodeSweepConfig> parsed;
+            const bool ok = ParsePrecodeSweepConfigText(c.Text, parsed);
+            if (ok != c.Accept || (ok && parsed.size() != 1u))
+            {
+                std::fprintf(stderr,
+                    "config syntax `%s`: expected %s\n", c.Text,
+                    c.Accept ? "accept" : "reject");
+                return 1;
+            }
+            if (!ok) {
+                continue;
+            }
+            if (parsed[0].ShapeActive != c.ShapeActive ||
+                parsed[0].DegreeScaleCenti != c.Centi)
+            {
+                std::fprintf(stderr,
+                    "config syntax `%s`: shape=%d centi=%u, expected "
+                    "shape=%d centi=%u\n", c.Text,
+                    parsed[0].ShapeActive ? 1 : 0, parsed[0].DegreeScaleCenti,
+                    c.ShapeActive ? 1 : 0, c.Centi);
+                return 1;
+            }
+        }
+        // A 14-field token and the 13-field token it came from must describe
+        // the SAME config when the flag says on, so the new spelling is a
+        // superset rather than a reinterpretation.
+        std::vector<PrecodeSweepConfig> thirteen;
+        std::vector<PrecodeSweepConfig> fourteen;
+        if (!ParsePrecodeSweepConfigText(
+                "8,9,1,27.79,27,16,23,113,102,119,101,102,19", thirteen) ||
+            !ParsePrecodeSweepConfigText(
+                "8,9,1,27.79,1,27,16,23,113,102,119,101,102,19", fourteen) ||
+            thirteen.size() != 1u || fourteen.size() != 1u ||
+            thirteen[0].Staircase != fourteen[0].Staircase ||
+            thirteen[0].MixedGF256Rows != fourteen[0].MixedGF256Rows ||
+            thirteen[0].DenseRows != fourteen[0].DenseRows ||
+            thirteen[0].DegreeScaleCenti != fourteen[0].DegreeScaleCenti ||
+            thirteen[0].ShapeActive != fourteen[0].ShapeActive ||
+            thirteen[0].ShapeP1 != fourteen[0].ShapeP1 ||
+            thirteen[0].ShapeP2 != fourteen[0].ShapeP2 ||
+            thirteen[0].ShapeP3 != fourteen[0].ShapeP3 ||
+            thirteen[0].ShapeC1 != fourteen[0].ShapeC1 ||
+            thirteen[0].ShapeC2 != fourteen[0].ShapeC2 ||
+            thirteen[0].ShapeC3 != fourteen[0].ShapeC3 ||
+            thirteen[0].ShapeC4 != fourteen[0].ShapeC4 ||
+            thirteen[0].ShapeC5 != fourteen[0].ShapeC5 ||
+            thirteen[0].ShapeDMax != fourteen[0].ShapeDMax)
+        {
+            std::fprintf(stderr,
+                "config syntax: 14-field shape=1 disagrees with 13-field\n");
+            return 1;
+        }
+    }
+    {
+        /*
+            The 18-field form must land every coordinate in its own field, and
+            must leave the SHAPE block exactly where the 14-field form put it.
+            Distinct values throughout, so a transposition cannot pass: this is
+            the check that would have caught the peel flag being read from slot
+            13 instead of 14, which it did.
+        */
+        std::vector<PrecodeSweepConfig> full;
+        std::vector<PrecodeSweepConfig> without;
+        if (!ParsePrecodeSweepConfigText(
+                "8,9,1,27.79,1,27,16,23,113,102,119,101,102,19,"
+                "1,137,-88,41", full) ||
+            !ParsePrecodeSweepConfigText(
+                "8,9,1,27.79,1,27,16,23,113,102,119,101,102,19", without) ||
+            full.size() != 1u || without.size() != 1u ||
+            full[0].ShapeActive != true || full[0].PeelActive != true ||
+            full[0].PeelP1 != 137u ||
+            full[0].PeelTilt != (uint32_t)(-88 + (int)kPeelTiltRange) ||
+            full[0].PeelDMax != 41u ||
+            full[0].Staircase != without[0].Staircase ||
+            full[0].MixedGF256Rows != without[0].MixedGF256Rows ||
+            full[0].DenseRows != without[0].DenseRows ||
+            full[0].DegreeScaleCenti != without[0].DegreeScaleCenti ||
+            full[0].ShapeP1 != without[0].ShapeP1 ||
+            full[0].ShapeP2 != without[0].ShapeP2 ||
+            full[0].ShapeP3 != without[0].ShapeP3 ||
+            full[0].ShapeC1 != without[0].ShapeC1 ||
+            full[0].ShapeC2 != without[0].ShapeC2 ||
+            full[0].ShapeC3 != without[0].ShapeC3 ||
+            full[0].ShapeC4 != without[0].ShapeC4 ||
+            full[0].ShapeC5 != without[0].ShapeC5 ||
+            full[0].ShapeDMax != without[0].ShapeDMax ||
+            // The 14-field form must leave the peel block at the incumbent, or
+            // an unflagged config would silently measure a different codec.
+            without[0].PeelActive != false ||
+            without[0].PeelP1 != 100u ||
+            without[0].PeelTilt != kPeelTiltRange ||
+            without[0].PeelDMax != kPeelMaxDegree)
+        {
+            std::fprintf(stderr,
+                "config syntax: 18-field peel block misplaced\n");
+            return 1;
+        }
+    }
+    {
+        /*
+            THE IDENTITY GATE, as an assertion rather than a hand check.
+
+            The peel coordinates that encode the incumbent must produce the
+            shipped PMF EXACTLY -- every entry an integer count of 32-bit
+            random values over 2^32, summing to exactly 1.0 -- because the
+            sampler rebuilds a CDF from these weights and lands on the
+            generator's own thresholds only if they are exact.  An approximate
+            match here is not a small error: it silently moves a few draws per
+            hundred thousand, which is indistinguishable from a real effect at
+            the cell counts this search runs at.
+
+            Checked at two block counts because the weight-1 branch is
+            conditional on block_count <= kMaxNForWeight1.
+        */
+        for (uint32_t block_count : {128u, 4096u})
+        {
+            const std::vector<double> incumbent = MakePeelDegreeWeights(
+                block_count, 100u, kPeelTiltRange, kPeelMaxDegree,
+                kPeelAbsorbFull);
+            const std::vector<double>& stock = StockPeelPmf(block_count);
+            if (incumbent.size() != (size_t)kPeelMaxDegree) {
+                std::fprintf(stderr,
+                    "peel identity: %u weights at N=%u, expected %u\n",
+                    (uint32_t)incumbent.size(), block_count, kPeelMaxDegree);
+                return 1;
+            }
+            double total = 0.0;
+            for (uint32_t d = 1u; d <= kPeelMaxDegree; ++d)
+            {
+                if (incumbent[d - 1u] != stock[d]) {
+                    std::fprintf(stderr,
+                        "peel identity: degree %u weight %.17g != stock "
+                        "%.17g at N=%u\n",
+                        d, incumbent[d - 1u], stock[d], block_count);
+                    return 1;
+                }
+                total += stock[d];
+            }
+            if (total != 1.0) {
+                std::fprintf(stderr,
+                    "peel identity: stock PMF sums to %.17g, not exactly 1 "
+                    "at N=%u\n", total, block_count);
+                return 1;
+            }
+            // A one-lattice-step move must actually change the law, or the
+            // coordinate is frozen from birth and the gate above is vacuous.
+            const std::vector<double> stepped[2] = {
+                MakePeelDegreeWeights(block_count, 100u, kPeelTiltRange + 1u,
+                    kPeelMaxDegree, kPeelAbsorbFull),
+                MakePeelDegreeWeights(block_count, 100u, kPeelTiltRange,
+                    kPeelMaxDegree - 1u, kPeelAbsorbFull)};
+            for (const std::vector<double>& moved : stepped)
+            {
+                if (moved == incumbent) {
+                    std::fprintf(stderr,
+                        "peel identity: a one-step move left the law "
+                        "unchanged at N=%u\n", block_count);
+                    return 1;
+                }
+            }
+            /*
+                peel_p1 is a special case, and this is the ONE place the fact
+                is written down: GeneratePeelRowWeight only has a weight-1
+                branch for block_count <= kMaxNForWeight1 (2048), so above that
+                the shipped law has NO degree-1 mass and a coordinate that
+                scales it is INERT BY CONSTRUCTION -- not merely small.
+                Asserting it in both directions keeps the search honest: below
+                the threshold the coordinate must move the law, above it the
+                coordinate must be provably dead, and either surprise is a
+                failure rather than a number nobody checked.
+            */
+            const std::vector<double> p1_moved = MakePeelDegreeWeights(
+                block_count, 101u, kPeelTiltRange, kPeelMaxDegree,
+                kPeelAbsorbFull);
+            const bool p1_live = p1_moved != incumbent;
+            if (p1_live != (stock[1] > 0.0)) {
+                std::fprintf(stderr,
+                    "peel identity: peel_p1 is %s at N=%u but stock P(1) is "
+                    "%.17g\n", p1_live ? "live" : "inert", block_count,
+                    stock[1]);
+                return 1;
+            }
+        }
+        /*
+            THE RECOVERED PMF IS THE GENERATOR'S OWN LAW, checked forward.
+
+            The assertions above compare MakePeelDegreeWeights against
+            StockPeelPmf, and both come from the same bisection, so on their
+            own they would only prove the recovery is self-consistent.  This
+            checks the recovery against GeneratePeelRowWeight DIRECTLY: rebuild
+            a CDF from the recovered PMF, and for a sweep of the 32-bit domain
+            require that it selects exactly the degree the shipped generator
+            selects.  A transcribed copy of kPeelCountDistribution could not
+            make this claim -- it would drift silently the day the table moved.
+        */
+        for (uint32_t block_count : {128u, 4096u})
+        {
+            const std::vector<double>& pmf = StockPeelPmf(block_count);
+            std::vector<double> cdf(kPeelMaxDegree + 1u, 0.0);
+            double running = 0.0;
+            for (uint32_t d = 1u; d <= kPeelMaxDegree; ++d) {
+                running += pmf[d];
+                cdf[d] = running;
+            }
+            const uint64_t kProbes = 200000u;
+            for (uint64_t i = 0; i < kProbes; ++i)
+            {
+                // Sweep the domain uniformly, plus every exact CDF boundary,
+                // which is where an off-by-one in the recovery would hide.
+                const uint32_t rv =
+                    (uint32_t)((i * (UINT64_C(1) << 32)) / kProbes);
+                const double u = (double)rv / 4294967296.0;
+                uint32_t predicted = kPeelMaxDegree;
+                for (uint32_t d = 1u; d <= kPeelMaxDegree; ++d) {
+                    if (u < cdf[d]) { predicted = d; break; }
+                }
+                const uint32_t actual = wirehair::GeneratePeelRowWeight(
+                    rv, (uint16_t)block_count);
+                if (predicted != actual) {
+                    std::fprintf(stderr,
+                        "peel identity: recovered CDF gives degree %u where "
+                        "GeneratePeelRowWeight gives %u at rv=%u, N=%u\n",
+                        predicted, actual, rv, block_count);
+                    return 1;
+                }
+            }
+        }
+        /*
+            peel_absorb IS INERT AT THE CEILING AND LIVE BELOW IT.
+
+            At dmax = kPeelMaxDegree there is nothing above the cut, so the
+            absorbed sum IS the top weight and the blend is a convex
+            combination of two identical numbers.  That is what lets the
+            coordinate start at the discarding end without moving the
+            incumbent, so it is asserted rather than assumed.  Below the
+            ceiling it must bite, or the family is back to one truncation rule.
+        */
+        for (uint32_t block_count : {128u, 4096u})
+        {
+            const std::vector<double>& stock = StockPeelPmf(block_count);
+            const std::vector<double> expected(
+                stock.begin() + 1, stock.end());
+            for (uint32_t absorb : {0u, 37u, 100u})
+            {
+                if (MakePeelDegreeWeights(block_count, 100u, kPeelTiltRange,
+                        kPeelMaxDegree, absorb) != expected)
+                {
+                    std::fprintf(stderr,
+                        "peel identity: absorb=%u disturbed the incumbent at "
+                        "the ceiling, N=%u\n", absorb, block_count);
+                    return 1;
+                }
+            }
+            if (MakePeelDegreeWeights(
+                    block_count, 100u, kPeelTiltRange, 20u, 0u) ==
+                MakePeelDegreeWeights(
+                    block_count, 100u, kPeelTiltRange, 20u, 100u))
+            {
+                std::fprintf(stderr,
+                    "peel identity: absorb does not bite below the ceiling "
+                    "at N=%u\n", block_count);
+                return 1;
+            }
+        }
+        /*
+            FAMILY MEMBERSHIP, REPORTED RATHER THAN ASSERTED.
+
+            Anyone comparing this family against an outside generator needs to
+            see immediately whether they are talking about the same
+            distribution.  The named reference below is the one that has
+            actually been confused with it: the analytic ideal soliton,
+            1/(d(d-1)), truncated by DISCARDING and renormalized -- textbook
+            base, textbook truncation.  Both distances are printed at a
+            truncating coordinate, where the two rules disagree most.
+
+            This is a report, not a gate: the L1 to an external PDF is not
+            required to be anything.  It is printed because a full scoring run
+            was lost to the assumption that it was zero.
+        */
+        {
+            const uint32_t kRefDMax = 20u;
+            std::vector<double> reference(kRefDMax, 0.0);
+            double total = 0.0;
+            for (uint32_t d = 1u; d <= kRefDMax; ++d)
+            {
+                reference[d - 1u] = d == 1u ?
+                    1.0 / 128.0 : 1.0 / ((double)d * ((double)d - 1.0));
+                total += reference[d - 1u];
+            }
+            for (double& w : reference) { w /= total; }
+            const auto l1 = [&](uint32_t absorb) {
+                const std::vector<double> mine = MakePeelDegreeWeights(
+                    128u, 100u, kPeelTiltRange, kRefDMax, absorb);
+                double sum = 0.0;
+                for (uint32_t i = 0; i < kRefDMax; ++i) {
+                    sum += std::fabs(mine[i] - reference[i]);
+                }
+                return sum;
+            };
+            std::printf(
+                "# peel family,reference=analytic_soliton_discard_dmax%u,"
+                "l1_at_absorb0=%.6f,l1_at_absorb100=%.6f\n",
+                kRefDMax, l1(0u), l1(kPeelAbsorbFull));
+        }
+        std::printf("peel degree law identity: PASS\n");
+    }
+    {
+        /*
+            THE END-TO-END IDENTITY GATE.
+
+            Everything above is about the PDF.  This one measures: the
+            coordinate triple that encodes the shipped law must produce a
+            construction BIT-IDENTICAL to running with the peel override off,
+            counters and failures alike, over real cells.
+
+            It exists because the PDF being right is not the same claim as the
+            wiring being right.  A search whose family cannot express the
+            incumbent cannot report that it beat the incumbent, and an
+            approximate encoding is the worst case of all -- it looks like a
+            small effect rather than like a bug.  The peel hook has this
+            property at the C++ level; this asserts the ES layer does not lose
+            it on the way through.
+
+            The stock staircase (shape = 0) is deliberately the setting under
+            test, because that is the configuration the peel search runs in.
+        */
+        std::vector<PrecodeSweepConfig> configs;
+        if (!ParsePrecodeSweepConfigText(
+                "6,10,1,14.30,0,20,20,20,100,100,100,100,100,16,0,100,0,64;"
+                "6,10,1,14.30,0,20,20,20,100,100,100,100,100,16,1,100,0,64",
+                configs) ||
+            configs.size() != 2u ||
+            configs[0].PeelActive || !configs[1].PeelActive)
+        {
+            std::fprintf(stderr, "peel end-to-end: config setup failed\n");
+            return 1;
+        }
+        PrecodeSweepRun run;
+        run.BlockCount = 128u;
+        run.BlockBytes = 1280u;
+        run.Overhead = 0u;
+        run.MixCount = 3u;
+        run.Loss = 0.10;
+        run.SeedBase = 55u;
+        run.PairedOverheadStream = true;
+        run.Schedule = PacketScheduleKind::Iid;
+        run.Completion = PrecodeFailCompletion::Mixed;
+        run.Geometry = wirehair_v2::MixedCoefficientGeometry::FrozenPowerX;
+        run.GF16Rows = 0u;
+        run.Period = 244u;
+        run.SolveBlockBytesOverride = 0u;
+
+        const uint32_t width = run.SolveBlockBytes();
+        std::vector<uint8_t> packet_data(width != 0u ? width : 1u, 0u);
+        std::vector<wirehair_v2::SolvePacket> packets(run.BlockCount);
+        const uint32_t kCells = 400u;
+        uint32_t compared = 0u;
+        std::vector<uint8_t> outcome[2];
+        std::vector<wirehair_v2::PrecodeSolveStats> stats[2];
+        for (uint32_t which = 0; which < 2u; ++which)
+        {
+            if (!run.ConfigureThread(configs[which])) {
+                std::fprintf(stderr,
+                    "peel end-to-end: ConfigureThread refused arm %u\n",
+                    which);
+                return 1;
+            }
+            for (uint32_t cell = 0; cell < kCells; ++cell)
+            {
+                wirehair_v2::PrecodeSolveStats one;
+                outcome[which].push_back(run.RunCell(
+                    configs[which], cell, packets, packet_data.data(), &one));
+                stats[which].push_back(one);
+            }
+        }
+        wirehair_v2::ClearPeelDegreesForTesting();
+        for (uint32_t cell = 0; cell < kCells; ++cell)
+        {
+            if (outcome[0][cell] != outcome[1][cell]) {
+                std::fprintf(stderr,
+                    "peel end-to-end: cell %u decodes %u with the peel "
+                    "override off and %u with it pinned at the incumbent\n",
+                    cell, outcome[0][cell], outcome[1][cell]);
+                return 1;
+            }
+            if (outcome[0][cell] != 0u) {
+                continue;   // a cell that gave up counted part way through
+            }
+            const wirehair_v2::PrecodeSolveStats& a = stats[0][cell];
+            const wirehair_v2::PrecodeSolveStats& b = stats[1][cell];
+            if (a.BlockXors != b.BlockXors ||
+                a.BlockMulAdds != b.BlockMulAdds ||
+                a.BlockCopies != b.BlockCopies ||
+                a.BlockZeroFills != b.BlockZeroFills)
+            {
+                std::fprintf(stderr,
+                    "peel end-to-end: cell %u counters differ -- xors "
+                    "%llu vs %llu\n", cell,
+                    (unsigned long long)a.BlockXors,
+                    (unsigned long long)b.BlockXors);
+                return 1;
+            }
+            ++compared;
+        }
+        // A gate that compared nothing would pass for the wrong reason; this
+        // is the check that caught an earlier identity run reporting PASS
+        // over zero rows.
+        if (compared < kCells / 2u) {
+            std::fprintf(stderr,
+                "peel end-to-end: only %u of %u cells solved, too few to "
+                "call this an identity\n", compared, kCells);
+            return 1;
+        }
+        std::printf(
+            "peel end-to-end identity: PASS (%u cells)\n", compared);
+    }
+    {
+        /*
+            NON-STOCK ROW AGREEMENT.
+
+            The identity check above cannot catch a row builder that misses the
+            override, and this is not hypothetical: for most of a campaign the
+            peel override was applied at the DECODER's builder
+            (InitializePacketRowParameters) and not the ENCODER's
+            (EvaluatePacketBlockImpl).  The encoder emitted packets from STOCK
+            rows while the solver built OVERRIDDEN ones, every block id whose
+            degree flipped produced a wrong equation, and Decode plus Recover
+            both returned Wirehair_Success over WRONG BYTES.
+
+            The identity arm passes throughout that, by construction: the stock
+            PMF maps to the stock degrees on BOTH paths, so the two agree and
+            the control is satisfied.  An identity control tests that a hook is
+            FAITHFUL; only a NON-STOCK distribution tests that every row builder
+            HONOURS it.
+
+            So this runs a full encode/loss/decode/Recover trial -- which ends in
+            a memcmp against the original message -- under a distribution that
+            differs from the incumbent at essentially every degree.  If any row
+            builder skips the override, the two sides disagree and the memcmp
+            fails.  Checking the recovered BYTES is the point; solve success is
+            not enough, because the broken build reported success and returned
+            garbage.
+        */
+        std::vector<double> weights(64, 0.0);
+        weights[2] = 1.0;              // all mass on degree 3: every row flips
+        wirehair_v2::SetPeelDegreesForTesting(weights);
+        const uint32_t kTrials = 24u;
+        uint32_t ok_count = 0u;
+        for (uint32_t t = 0; t < kTrials; ++t)
+        {
+            const TrialResult tr = RunV2PrecodeTrial(
+                128u, 1280u, 0.10, 0xC0FFEEull + t, nullptr,
+                wirehair_v2::CompletionField::GF256);
+            if (tr.Ok) { ++ok_count; }
+        }
+        wirehair_v2::ClearPeelDegreesForTesting();
+        if (ok_count != kTrials)
+        {
+            std::fprintf(stderr,
+                "peel non-stock row agreement: %u of %u trials recovered the "
+                "message; a row builder is not applying the peel override, so "
+                "the encoder and the solver disagree about row degrees\n",
+                ok_count, kTrials);
+            return 1;
+        }
+        std::printf(
+            "peel non-stock row agreement: PASS (%u trials)\n", ok_count);
+    }
+    std::printf("precode sweep config syntax: PASS\n");
 #endif
 
     double wilson_lower = 0.0;
@@ -11627,6 +17015,80 @@ int CmdSelfTest()
         }
     }
     std::printf("loss boundary oracle: PASS\n");
+
+    // ZERO-WIDTH COUNTER PARITY.  A regression guard, not a nicety.
+    //
+    // The zero-byte solve exists so op counters can be harvested without moving
+    // payload; those counters ARE the deliverable, because the search's
+    // objective is a linear cost model over them.  Twice this mode silently
+    // stopped describing the shipping decoder:
+    //
+    //   * width <= TinyMixedFastPathMaxBlockBytes() routed a zero-width solve
+    //     into TrySolveMixedCompletionQuotientTiny, a DIFFERENT algorithm.
+    //     Mul-adds read 80 where a real solve performs 1493 -- 18.7x low.
+    //   * several further optimisations are width-gated (projected
+    //     back-substitution at 64 bytes, fused XOR init at 1280, and others),
+    //     so even after the tiny path was excluded the XOR count was wrong.
+    //
+    // Neither failure was loud.  The search ran to completion and reported
+    // plausible winners ranked by an operation mix the codec never performs:
+    // Spearman against real 64 KiB timing was 0.527 and predicted cost sat at
+    // ~1.6M ns where the stopwatch read ~3.1M.
+    //
+    // An earlier audit of exactly this missed it by comparing width 0 against
+    // width 2 -- both inside the tiny path, so the reference was inside the
+    // bug.  THE REFERENCE HERE IS 65536 DELIBERATELY: it is the width the cost
+    // model is meant to predict.  If you change the dispatch rules, this test
+    // is what tells you the counters still mean what the search assumes.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    {
+        struct ParityCase { const char* Config; };
+        static const ParityCase parity_cases[] = {
+            {"6,9,1,21.3333"},   // legacy-equivalent scale
+            {"6,10,1,6.07"},     // low scale, column mixture has lo = 0
+            {"9,9,1,14.2222"},   // grid baseline
+            {"2,10,1,3.00"},     // S at its floor
+            {"33,10,1,64.00"},   // scale saturated at the ceiling
+        };
+        for (const ParityCase& parity_case : parity_cases)
+        {
+            wirehair_v2::PrecodeSolveStats narrow;
+            wirehair_v2::PrecodeSolveStats wide;
+            if (!HarvestParityCounters(parity_case.Config, 0u, narrow) ||
+                !HarvestParityCounters(parity_case.Config, 65536u, wide))
+            {
+                std::fprintf(stderr,
+                    "zero-width parity: could not harvest %s\n",
+                    parity_case.Config);
+                return 1;
+            }
+            if (narrow.BlockXors != wide.BlockXors ||
+                narrow.BlockMulAdds != wide.BlockMulAdds ||
+                narrow.BlockCopies != wide.BlockCopies ||
+                narrow.BlockZeroFills != wide.BlockZeroFills)
+            {
+                std::fprintf(stderr,
+                    "zero-width parity BROKEN for %s\n"
+                    "  width 0     xors=%llu muladds=%llu copies=%llu zerofills=%llu\n"
+                    "  width 65536 xors=%llu muladds=%llu copies=%llu zerofills=%llu\n"
+                    "The count-only mode is describing a different algorithm "
+                    "than the one that ships; every cost-model number derived "
+                    "from it is invalid until this matches.\n",
+                    parity_case.Config,
+                    (unsigned long long)narrow.BlockXors,
+                    (unsigned long long)narrow.BlockMulAdds,
+                    (unsigned long long)narrow.BlockCopies,
+                    (unsigned long long)narrow.BlockZeroFills,
+                    (unsigned long long)wide.BlockXors,
+                    (unsigned long long)wide.BlockMulAdds,
+                    (unsigned long long)wide.BlockCopies,
+                    (unsigned long long)wide.BlockZeroFills);
+                return 1;
+            }
+        }
+    }
+    std::printf("zero-width counter parity: PASS\n");
+#endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
     return 0;
 }
 
@@ -11643,7 +17105,7 @@ int main(int argc, char** argv)
         // precodesweep exists exactly where the Set*ForTesting knobs it
         // configures do.
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-#define WIREHAIR_V2_BENCH_SWEEP_USAGE "precodesweep|"
+#define WIREHAIR_V2_BENCH_SWEEP_USAGE "precodesweep|precodecost|essearch|"
 #else
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE ""
 #endif
@@ -11700,6 +17162,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "precodecost")) {
             return CmdPrecodeCost(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "essearch")) {
+            return CmdEsSearch(argc - 2, argv + 2);
         }
 #endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \

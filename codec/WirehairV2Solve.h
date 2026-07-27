@@ -234,6 +234,94 @@ bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier);
 void SetPacketRowSeedAvalancheForTesting(bool enabled);
 
 /**
+    Per-thread override of the PEELING (packet) row degree distribution --
+    weights for degrees 1, 2, 3, ... -- replacing the frozen table in
+    WirehairTools.cpp.  Empty clears the override.
+
+    THIS IS THE LT OUTPUT DEGREE DISTRIBUTION, the one soliton theory is about.
+    It is not the staircase row-degree knob in WirehairV2Precode.h: that shapes
+    the S-row sparse ladder (S is 5 to 10 at K=128), while this shapes the K
+    peeling rows the peeler actually peels.  The two were conflated for a whole
+    tuning campaign, so the distinction is spelled out here rather than assumed.
+
+    The stock setting is EXACTLY the ideal soliton and always has been:
+    kPeelCountDistribution is a CDF with entry[i-1] = (i-1)/i, hence
+    P(i) = 1/(i(i-1)) for i >= 2, with P(1) = 1/K set separately and the tail
+    truncated at 64.  So the baseline any override has to beat is the textbook
+    distribution, not an arbitrary one.
+
+    Thread-local, matching SetStaircaseDegreesForTesting, because a concurrent
+    search evaluates a different distribution per worker; a parse-once
+    environment global cannot do that.  WIREHAIR_V2_PEEL_DEGREES is honoured as
+    a fallback for single-config harnesses, and the thread-local wins.
+
+    SAMPLING IS STREAM-PRESERVING.  The override consumes the same PRNG draw
+    the stock weight generator consumes and maps it through the supplied CDF, so
+    supplying the stock PMF reproduces the stock construction BIT-IDENTICALLY
+    rather than landing on a different random stream.  That identity is the gate
+    that distinguishes a real effect from a broken hook.  It has been VERIFIED BY
+    HAND -- 100,000 cells at (6,9,1) scale 14 reproduce all eight measured
+    columns exactly, 967 failures and 3230067.176097 ns -- but it is NOT yet
+    asserted by any automated test, so a future change to the row PRNG or to the
+    draw order would break it silently.  Adding that assertion to CmdSelfTest is
+    worth doing.
+
+    NOTE that the stock PMF is NOT the textbook ideal soliton, and feeding the
+    textbook version does NOT reproduce it.  GeneratePeelRowWeight takes the
+    weight-1 mass by `rv -= P1`, a SHIFT rather than a carve-out, so that mass
+    comes out of the deep tail; and the table's last entry is 0xffffffff, so
+    ALL remaining mass is lumped at d = 64.  Exactly:
+
+        P(1)  = P1 / 2^32,           P1 = floor((1/128) * 0xffffffff)
+        P(2)  = (T[1] + 1) / 2^32  = 1/2
+        P(i)  = (T[i-1] - T[i-2]) / 2^32       for 3 <= i <= 63
+        P(64) = (2^32 - P1 - 1 - T[62]) / 2^32 = 0.008061
+
+    with T = kPeelCountDistribution.
+
+    The d = 64 atom is large -- 0.008061 against the ideal soliton's
+    1/(64*63) = 0.000248, thirty-two times bigger -- because the table lumps
+    all residual tail mass there.  It is NOT load-bearing.  An earlier version
+    of this comment claimed it was, on the strength of a full-codec run in
+    which replacing that one atom took decoding from 150/150 pass to 150/150
+    fail.  That measurement was an artefact of the bug described below, and
+    with the bug fixed the same substitution decodes 150/150.  Recorded here
+    because a comment asserting an artefact, in the file a reader reaches
+    first, is worse than no comment.
+
+    THE BUG, and the reason this hook needs applying in TWO places.  The
+    override was originally installed only in InitializePacketRowParameters,
+    the DECODER's row builder.  EvaluatePacketBlockImpl builds the ENCODER's
+    rows and called PeelRowParameters::Initialize raw.  So with any override
+    active the encoder emitted packets built from stock degrees while the
+    solver built equations from overridden ones; every block id whose degree
+    moved produced a wrong equation, the solve returned Wirehair_Success over a
+    system that did not describe the data, and the payload came back corrupt.
+    Deterministic in block id, hence always 0/N or N/N and never partial.
+
+    WHY THE IDENTITY GATE ABOVE CANNOT CATCH IT.  Stock maps to stock degrees
+    on both sides by construction, so the two paths agree and the control
+    passes.  The identity arm is a faithful test of ONE hook and is
+    structurally blind to an asymmetry BETWEEN two, because its only input is
+    the fixed point of both.  It passed for an entire campaign while every
+    non-stock distribution was being corrupted.
+
+    SO THERE ARE TWO GATES AND THEY TEST DIFFERENT THINGS.  The identity gate
+    proves the hook changes nothing when it should change nothing.  A
+    FULL-CODEC gate -- `compare --precode --precode-profile mixed` at OH ~ 0,
+    run on a NON-STOCK distribution -- proves the hook changes the right things
+    everywhere they are built.  Only the second can detect a missing call site,
+    and only a non-stock input exercises it.  Run both.
+
+    The N/2 clamp in PeelRowParameters::Initialize is RESPECTED, not superseded:
+    a weight above peel_column_count/2 is clamped exactly as the stock path
+    clamps it, so an override cannot silently change the row-weight invariant
+    the solver relies on.  Degrees are also clamped into [1, kMaxPeelCount].
+*/
+void SetPeelDegreesForTesting(const std::vector<double>& weights);
+void ClearPeelDegreesForTesting();
+
+/**
     XOR the peel seed for odd packet ids in the calling thread.  This is a
     test-only control for measuring whether interleaving two deterministic
     packet-graph phases reduces block-count resonances.  Zero restores the

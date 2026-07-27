@@ -6,6 +6,7 @@
 #include "WirehairV2Plan.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,131 @@ thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
+
+/// Peeling row-degree override; see SetPeelDegreesForTesting.  Stored as a
+/// normalized CDF over degrees 1..N so sampling is one comparison scan against
+/// the SAME uniform the stock generator consumes.
+thread_local std::vector<double> PeelDegreeCdf;
+
+/**
+    WIREHAIR_V2_PEEL_DEGREES, parsed once per process.
+
+    Deliberately a fallback rather than the primary control: it is a process
+    global, so every worker in a concurrent search would share one
+    distribution, which is exactly what makes it useless to a search.  It
+    exists for single-config harnesses (the timing protocol) that run one
+    distribution per process.
+*/
+const std::vector<double>* EnvironmentPeelDegreeCdf()
+{
+    static const std::vector<double> parsed = [] {
+        std::vector<double> cdf;
+        const char* raw = std::getenv("WIREHAIR_V2_PEEL_DEGREES");
+        if (raw == nullptr) {
+            return cdf;
+        }
+        std::vector<double> weights;
+        const char* p = raw;
+        while (*p != '\0')
+        {
+            char* end = nullptr;
+            const double w = std::strtod(p, &end);
+            if (end == p) { break; }
+            weights.push_back(w > 0.0 ? w : 0.0);
+            p = end;
+            while (*p == ',' || *p == ' ') { ++p; }
+        }
+        double total = 0.0;
+        for (double w : weights) { total += w; }
+        if (!(total > 0.0)) {
+            return cdf;
+        }
+        double running = 0.0;
+        for (double w : weights)
+        {
+            running += w / total;
+            cdf.push_back(running);
+        }
+        return cdf;
+    }();
+    return parsed.empty() ? nullptr : &parsed;
+}
+
+/// Thread-local override first, environment second, stock table otherwise.
+const std::vector<double>* ActivePeelDegreeCdf()
+{
+    if (!PeelDegreeCdf.empty()) {
+        return &PeelDegreeCdf;
+    }
+    return EnvironmentPeelDegreeCdf();
+}
+
+/**
+    Replace params.PeelCount from an overridden degree distribution.
+
+    STREAM PRESERVING.  PeelRowParameters::Initialize consumes its first PRNG
+    draw for the weight and its later draws for the column-selection
+    parameters, so re-seeding an identical PRNG here and taking ONE value
+    recovers exactly the uniform the stock generator used.  Mapping that same
+    uniform through the supplied CDF is what makes an ideal-soliton override
+    reproduce the stock construction bit-identically instead of merely
+    reproducing its distribution; everything downstream of the weight -- the
+    column stride, the first column, the mix columns -- is untouched.
+
+    The N/2 and kMaxPeelCount clamps are applied exactly as the stock path
+    applies them, so an override cannot change the row-weight invariant.
+*/
+void ApplyPeelDegreeOverride(
+    uint32_t row_seed,
+    uint32_t p_seed,
+    uint16_t peel_column_count,
+    wirehair::PeelRowParameters& params)
+{
+    const std::vector<double>* cdf = ActivePeelDegreeCdf();
+    if (cdf == nullptr || peel_column_count == 0u) {
+        return;
+    }
+    wirehair::PCGRandom prng;
+    prng.Seed(row_seed, p_seed);
+    const uint32_t rv = prng.Next();
+    // The stock generator compares against uint32 thresholds, so the uniform
+    // is taken on the same [0,1) scale here.
+    const double u = (double)rv * (1.0 / 4294967296.0);
+    /*
+        BINARY search, not linear, and the reason is measurement bias rather
+        than speed.
+
+        A linear scan exits at the SAMPLED index, so its cost depends on the
+        distribution being sampled: a flat law scans further per row than a
+        soliton does.  The override's overhead then differs between the arms of
+        a comparison, and that difference does NOT cancel when the arms are
+        re-baselined against a common reference, because it is not common.
+        lower_bound costs log2(n) comparisons wherever the sample lands, so
+        what remains is a fixed per-row offset that a shared baseline does
+        remove.
+
+        Semantics are unchanged: lower_bound returns the first entry >= u,
+        which is exactly what the scan selected, so the identity gate still
+        reproduces the stock construction bit for bit.
+    */
+    const std::vector<double>::const_iterator hit =
+        std::lower_bound(cdf->begin(), cdf->end(), u);
+    size_t index = hit == cdf->end() ?
+        cdf->size() - 1u : (size_t)(hit - cdf->begin());
+    uint32_t weight = (uint32_t)index + 1u;
+    const uint32_t max_weight = peel_column_count / 2u;
+    if (max_weight != 0u && weight > max_weight) {
+        weight = max_weight;
+    }
+    // Same ceiling PeelRowParameters::Initialize asserts against.
+    if (weight > 64u) {
+        weight = 64u;
+    }
+    if (weight == 0u) {
+        weight = 1u;
+    }
+    params.PeelCount = (uint16_t)weight;
+}
 #endif
 
 constexpr uint32_t PackedWordCount(uint32_t bit_count)
@@ -213,11 +339,20 @@ bool InitializePacketRowParameters(
     {
         return false;
     }
+    const uint32_t row_seed = PacketRowSeedForBlockId(block_id);
+    const uint32_t peel_seed = PacketPeelSeedForBlockId(block_id, config);
     params.Initialize(
-        PacketRowSeedForBlockId(block_id),
-        PacketPeelSeedForBlockId(block_id, config),
+        row_seed,
+        peel_seed,
         (uint16_t)source_count,
         (uint16_t)precode_count);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // V2 overrides the weight AFTER V1 has produced the row, so WirehairTools
+    // and the wire-format row layout stay untouched; only PeelCount moves, and
+    // only when an override is installed.
+    ApplyPeelDegreeOverride(
+        row_seed, peel_seed, (uint16_t)source_count, params);
+#endif
     return true;
 }
 
@@ -333,6 +468,58 @@ std::vector<uint8_t> MakeBlockStorage(size_t bytes)
     storage.reserve(BlockStorageCapacity(bytes));
     storage.resize(bytes, uint8_t{0});
     return storage;
+}
+
+/**
+    Solve width that a payload-free solve DISPATCHES as.
+
+    Several routines in this file pick between algorithm variants by payload
+    width: batched versus direct RHS reduction, the binary quotient, the
+    projected back-substitution, the fused block initializer, the residue
+    bucket routes.  Every one of those thresholds is a performance crossover,
+    and a zero-byte solve sits below all of them, so it used to select the
+    NARROW variant of each -- a different algorithm from the one the shipping
+    decoder runs at any real payload width.
+
+    That matters because zero width is a MEASUREMENT mode, not a payload size:
+    it exists so the block-operation counters can be harvested without moving
+    bytes, and those counters ARE the deliverable.  Counting a variant the
+    codec never executes makes the counts describe a phantom algorithm.
+    Measured at K=128, mixed completion, on one fixed loss stream, varying
+    only the width:
+
+        width 0     xors 1819   muladds 1493   copies 266   zerofill 336
+        width >=64  xors 1645   muladds 1493   copies 254   zerofill 331
+
+    Mixed completion is constant from 64 up, but that is not the crossover for
+    every configuration -- generic GF(256) completion still moves at 2048
+    (the binary quotient), and the residue bucket routes at 1280 and 4096 --
+    so "large enough" has to mean large enough for ALL of them at once.
+
+    kCountingDispatchBlockBytes therefore sits at or above EVERY minimum
+    dispatch threshold in this file and strictly above every maximum one (see
+    the static_asserts beside the thresholds), so a zero-width solve lands in
+    the widest regime on every gate simultaneously.  It is also the width the
+    parity harness compares against.
+*/
+constexpr uint32_t kCountingDispatchBlockBytes = 65536u;
+
+/**
+    Width used for DISPATCH decisions only.
+
+    A zero-byte solve moves no payload, but must choose the same code paths
+    the shipping decoder chooses, or the harvested counters describe an
+    algorithm that never runs.
+
+    Use this ONLY where the comparison selects an algorithm variant.  Never
+    use it for allocation sizing, buffer capacity, memory caps, or address
+    arithmetic: there the real (zero) byte count is the correct answer, and
+    substituting a fictional width would size or address memory that does not
+    exist.
+*/
+constexpr uint32_t DispatchBlockBytes(uint32_t block_bytes)
+{
+    return block_bytes != 0u ? block_bytes : kCountingDispatchBlockBytes;
 }
 
 /*
@@ -1004,8 +1191,16 @@ constexpr uint32_t kResidualCoefficientBulkThreshold = 16u;
 // Mixed-solver measurements put the multi-source RHS crossover at a 4-KiB
 // payload; the extra wide-kernel setup is neutral or slower at MTU sizes.
 constexpr uint32_t kBatchedResidualRhsMinBlockBytes = 4096u;
+static_assert(
+    kCountingDispatchBlockBytes >= kBatchedResidualRhsMinBlockBytes,
+    "a payload-free solve must dispatch as a batched-RHS payload");
 // CheckedBlockStorage caps valid payloads below this sentinel.
 constexpr uint32_t kNeverBatchResidualRhs = UINT32_MAX;
+// The sentinel must stay above the dispatch width so "never batch" keeps
+// meaning never, including for a payload-free solve.
+static_assert(
+    kNeverBatchResidualRhs > kCountingDispatchBlockBytes,
+    "the never-batch sentinel must outrank the counting dispatch width");
 
 // Keep the 4-KiB path out of line and in the compiler's cold section.
 // Placing it beside the literal loop reproducibly regressed 1280-byte solves,
@@ -1061,10 +1256,45 @@ InsertPackedBinaryResidualRow(
 
 #undef WH2_RESIDUAL_NOINLINE
 constexpr uint32_t kProjectedBackSubMinBlockBytes = 64u;
+static_assert(
+    kCountingDispatchBlockBytes >= kProjectedBackSubMinBlockBytes,
+    "a payload-free solve must dispatch into projected back-substitution");
 // Paired whole-solver runs show the fused path loses below these scales even
 // though the isolated payload kernel is faster.
 constexpr uint32_t kFusedBlockXorInitMinBlockBytes = 1280u;
+static_assert(
+    kCountingDispatchBlockBytes >= kFusedBlockXorInitMinBlockBytes,
+    "a payload-free solve must dispatch into the fused block initializer");
 constexpr uint32_t kFusedBlockXorInitMinBlockCount = 10000u;
+// Remaining payload-width dispatch thresholds in this file, asserted here so
+// the counting dispatch width provably sits in the production regime of every
+// one of them.  kBinaryQuotientMinBlockBytes lives in the header;
+// kMinWideBlockBytes and the batched back-elimination bound are function-local
+// literals repeated here.
+static_assert(
+    kCountingDispatchBlockBytes >= kBinaryQuotientMinBlockBytes,
+    "a payload-free solve must dispatch into the binary quotient");
+static_assert(
+    kCountingDispatchBlockBytes >= 512u,
+    "a payload-free solve must dispatch into the wide/batched block routes");
+static_assert(
+    kCountingDispatchBlockBytes >= 1024u,
+    "a payload-free solve must dispatch into the dual residue bucket route");
+// The tiny mixed fast path is a MAXIMUM gate: the dispatch width must stay
+// clear of it so a payload-free solve keeps running the production algorithm
+// while genuinely tiny payloads keep the fast path.
+static_assert(
+    kCountingDispatchBlockBytes >
+        WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_BLOCK_BYTES,
+    "the counting dispatch width must not select the tiny fast path");
+// kPacketTailPairMaxBlockBytes (32 KiB) is the other maximum gate, and the
+// dispatch width clears it too -- but EvaluatePacketBlockImpl rejects a zero
+// width at its entry, so no payload-free solve ever reaches that comparison
+// and it is deliberately left reading the real width.  Asserted anyway so a
+// future caller that does reach it inherits the production choice.
+static_assert(
+    kCountingDispatchBlockBytes > 32u * 1024u,
+    "the counting dispatch width must clear the packet tail-pair gate");
 
 // The production GF(256) profile fixes H=12, so its periodic coefficient
 // table is immutable across every message.  Keeping that small table in
@@ -1150,7 +1380,9 @@ ResidualInsertResult InsertResidualRow(
     bool allow_insert,
     uint32_t batched_rhs_min_block_bytes)
 {
-    if (block_bytes < batched_rhs_min_block_bytes)
+    // DISPATCH, not sizing: the branch picks a reduction algorithm.  Every
+    // address and length below still uses the real block_bytes.
+    if (DispatchBlockBytes(block_bytes) < batched_rhs_min_block_bytes)
     {
         for (uint32_t j = 0; j < R; ++j)
         {
@@ -1949,7 +2181,10 @@ static WH2_MIXED_NOINLINE bool AccumulateJointMixedCompletionRhs(
                 return inactive_index[column] == UINT32_MAX;
             },
             true,
-            buckets))
+            buckets,
+            // The solve is the one caller whose blocks can legitimately be
+            // empty; see the parameter's declaration.
+            true))
     {
         return false;
     }
@@ -2259,7 +2494,10 @@ static WH2_MIXED_NOINLINE bool AccumulateJointGroupedMixedCompletionRhs(
                 return inactive_index[column] == UINT32_MAX;
             },
             true,
-            buckets))
+            buckets,
+            // The solve is the one caller whose blocks can legitimately be
+            // empty; see the parameter's declaration.
+            true))
     {
         return false;
     }
@@ -2689,9 +2927,36 @@ bool UseTinyMixedCompletionFastPath(
     }
 
 #endif
+    // Zero width is a MEASUREMENT mode, not a tiny payload, and must run the
+    // production algorithm.
+    //
+    // A zero-byte solve exists so op counters can be harvested without moving
+    // payload -- the counts are the point.  Routing it here defeated exactly
+    // that: the tiny path is a different algorithm with a different operation
+    // mix, so the counters described work the codec never performs.  Measured
+    // at K=128 on one fixed loss stream, varying only the width:
+    //
+    //     width 0,2,4,8       xors 1696   muladds   80   <- this path
+    //     width 64 and above  xors 1645   muladds 1493   <- production path
+    //
+    // Mul-adds were understated 18.7x, and a per-site tally showed a disjoint
+    // set of call sites rather than a shortfall on shared ones.  Because the
+    // search's objective is a linear cost model over these counters, it ranked
+    // candidates by that phantom mix: Spearman against real 64 KiB timing was
+    // 0.527 and predicted cost sat at ~1.6M ns where the stopwatch read ~3.1M.
+    //
+    // Genuinely tiny payloads (1..8 bytes) still take the fast path, which is
+    // what it is for.  Zero is not a payload size.
+    //
+    // This is now the same DISPATCH rule the rest of the file uses: zero asks
+    // the gate at kCountingDispatchBlockBytes, which a static_assert keeps
+    // strictly above TinyMixedFastPathMaxBlockBytes, so the answer is "no
+    // fast path" for exactly the reason it should be -- the width it
+    // dispatches as is far too wide -- and 1..8 still answer "yes".
+    const uint32_t dispatch_block_bytes = DispatchBlockBytes(block_bytes);
     return block_count <= TinyMixedFastPathMaxSourceBlocks() &&
-        block_bytes <= TinyMixedFastPathMaxBlockBytes() &&
-        (uint64_t)block_count * block_bytes <=
+        dispatch_block_bytes <= TinyMixedFastPathMaxBlockBytes() &&
+        (uint64_t)block_count * dispatch_block_bytes <=
             TinyMixedFastPathMaxProductBytes();
 }
 
@@ -3640,16 +3905,24 @@ WirehairResult SolveMixedCompletionQuotient(
     }
     const bool secondary_schedule =
         independent_extension_residues || grouped_gf256_rows != 0u;
+    // Every residue-bucket route below is selected by payload width, so all
+    // of them read the DISPATCH width.  The bucket planes themselves are
+    // still allocated and addressed at the real width -- a payload-free solve
+    // walks the same bucket schedule on planes that are zero bytes wide.
+    const uint32_t dispatch_block_bytes = DispatchBlockBytes(block_bytes);
     const bool automatic_joint_residue_buckets =
         secondary_schedule &&
         UseAutomaticMixedJointResidueBuckets(
-            system.Params.BlockCount, block_bytes, coefficient_period);
+            system.Params.BlockCount, dispatch_block_bytes,
+            coefficient_period);
     bool request_joint_residue_buckets =
         automatic_joint_residue_buckets;
     bool use_dual_residue_buckets = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Dispatch-only quantity: the cache-residency estimate the dual route is
+    // gated on, never an allocation size.
     const uint64_t one_bucket_plane_bytes =
-        (uint64_t)coefficient_period * block_bytes;
+        (uint64_t)coefficient_period * dispatch_block_bytes;
     const bool dual_buckets_fit =
         one_bucket_plane_bytes <=
             kMixedJointResidueBucketDataByteCap / 2u;
@@ -3664,19 +3937,38 @@ WirehairResult SolveMixedCompletionQuotient(
     // hurt once the two bucket sets no longer fit comfortably in cache.
     use_dual_residue_buckets =
         secondary_schedule &&
+        // The bucketed completion routines mul-add Extension[0] and
+        // Extension[1] unconditionally and reject extension_rows < 2 outright,
+        // and the caller turns that rejection into Wirehair_Error with no
+        // fallback.  With the GF(2^16) rows removed the streamed path below is
+        // the only one that handles a pure GF(256) band, so keep buckets off
+        // there instead of failing every solve wide enough to select them.
+        extension_rows >= 2u &&
         dual_buckets_fit &&
         (bucket_mode == MixedResidueBucketMode::Dual ||
          (bucket_mode == MixedResidueBucketMode::Automatic &&
           !automatic_joint_residue_buckets &&
           column_count >= 30000u &&
-          block_bytes >= 1024u &&
+          dispatch_block_bytes >= 1024u &&
           one_bucket_plane_bytes * 2u <= (UINT64_C(128) << 10)));
 #endif
     const bool use_joint_residue_buckets =
         secondary_schedule &&
         request_joint_residue_buckets &&
+        // Same two-extension-row assumption as the dual route above.
+        extension_rows >= 2u &&
+        // Scratch-budget gate asked at the DISPATCH width.  A payload-free
+        // solve carries no bucket bytes at all, so the real byte cap could
+        // neither admit nor exclude it: the predicate rejects a zero width
+        // outright, which would silently drop the joint route and fall back
+        // to the streamed path, reporting a different BlockXors count and
+        // zero for every MixedJoint* counter.  Asking the question at the
+        // dispatch width answers it the way a real payload of that size
+        // answers it, instead of exempting zero from the budget entirely.
+        // The predicate itself keeps rejecting zero for the encoder, which
+        // always has bytes to move.
         MixedJointResidueBucketStorageFits(
-            coefficient_period, block_bytes,
+            coefficient_period, dispatch_block_bytes,
             kMixedJointResidueBucketDataByteCap);
     // Keep the streamed fallback unallocated on joint/dual paths.  Besides
     // avoiding one block-sized zero-fill, this makes their dominant scratch
@@ -3686,6 +3978,37 @@ WirehairResult SolveMixedCompletionQuotient(
         uint32_t residue,
         const uint8_t* bucket) -> bool
     {
+        // Removing the GF(2^16) rows degenerates the completion to a pure
+        // GF(256) band: there is no extension RHS to accumulate at all.  This
+        // early-out is load-bearing, not an optimization -- rhs_low/rhs_high
+        // are sized H = subfield_rows + extension_rows, so with zero extension
+        // rows the pair kernel below addresses rows subfield_rows and
+        // subfield_rows+1 past the end of both.  The static_assert only pins
+        // the compile-time production constant, so it never catches a runtime
+        // row count of 0 or 1.
+        if (extension_rows < 2u)
+        {
+            if (extension_rows == 0u)
+            {
+                return true;
+            }
+            if (!DeinterleavePayloadPlanes(
+                    bucket, source_low.data(), source_high.data(),
+                    block_bytes))
+            {
+                return false;
+            }
+            if (!MulAddPayloadPlanes(
+                    rhs_low.data() + (size_t)subfield_rows * elements,
+                    rhs_high.data() + (size_t)subfield_rows * elements,
+                    cached_rows->Extension[0][residue],
+                    source_low.data(), source_high.data(), elements))
+            {
+                return false;
+            }
+            stats.BlockMulAdds += extension_rows;
+            return true;
+        }
         if (!DeinterleavePayloadPlanes(
                 bucket, source_low.data(), source_high.data(), block_bytes))
         {
@@ -4712,6 +5035,33 @@ bool SetPacketRowSeedMultiplierForTesting(uint32_t multiplier)
     return true;
 }
 
+void SetPeelDegreesForTesting(const std::vector<double>& weights)
+{
+    // Stored as a normalized CDF so the sampler is a single scan.  A vector
+    // that sums to zero cannot be sampled from and clears the override rather
+    // than producing a degenerate row weight.
+    PeelDegreeCdf.clear();
+    double total = 0.0;
+    for (double w : weights) {
+        total += w > 0.0 ? w : 0.0;
+    }
+    if (!(total > 0.0)) {
+        return;
+    }
+    double running = 0.0;
+    PeelDegreeCdf.reserve(weights.size());
+    for (double w : weights)
+    {
+        running += (w > 0.0 ? w : 0.0) / total;
+        PeelDegreeCdf.push_back(running);
+    }
+}
+
+void ClearPeelDegreesForTesting()
+{
+    PeelDegreeCdf.clear();
+}
+
 void SetPacketRowSeedAvalancheForTesting(bool enabled)
 {
     PacketRowSeedAvalanche = enabled;
@@ -5121,17 +5471,70 @@ static bool EvaluatePacketBlockImpl(
     const uint32_t P = (uint32_t)P_wide;
 
     wirehair::PeelRowParameters params;
+    const uint32_t packet_row_seed = PacketRowSeedForBlockId(block_id);
+    const uint32_t packet_peel_seed = PacketPeelSeedForBlockId(block_id, config);
     params.Initialize(
-        PacketRowSeedForBlockId(block_id),
-        PacketPeelSeedForBlockId(block_id, config),
+        packet_row_seed,
+        packet_peel_seed,
         (uint16_t)K,
         (uint16_t)P);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /*
+        The peel-degree override MUST be applied here as well as in
+        InitializePacketRowParameters.
+
+        This is the ENCODER's row builder and that one is the DECODER's, and an
+        override applied to only one of them makes the two disagree about the
+        degree of every block id whose weight the override moves.  The encoder
+        then emits a packet built from one equation while the solver builds a
+        different one, the solve returns Wirehair_Success over a system that
+        does not describe the data, and the payload comes back corrupt.
+
+        That is not hypothetical -- it was the state of this file, and it made
+        every non-stock distribution fail 100% end to end while looking like a
+        large win in the precode paths, which build and solve through this same
+        overridden routine and so never disagree with themselves.
+
+        THE IDENTITY CONTROL CANNOT CATCH THIS, which is why it survived a full
+        campaign.  Feeding the stock PMF maps to the stock degrees on BOTH
+        sides by construction, so the two paths agree and the control passes;
+        the control is a faithful test of one hook and is structurally blind to
+        an asymmetry between two, because its only input is the fixed point of
+        both.  Any future hook that alters row construction has to be applied
+        at every site that builds a row, and the check for that is a NON-stock
+        distribution decoding end to end, not a stock one.
+
+        WHAT THE ASYMMETRY LOOKED LIKE FROM THE OUTSIDE, recorded because it was
+        mistaken for physics for most of a day: every candidate distribution
+        "failed 100% of trials", always all-or-nothing and never partial, because
+        the corruption is deterministic in block id.  That produced a published
+        "decodable region" table whose tolerances were really the L1 distance at
+        which the first IN-RANGE block id's sampled degree flips -- so p1 x1.5 at
+        L1 0.00772 passed (first flip at id 159, out of range) while P(2) -1% at
+        the SMALLER L1 0.00503 failed (first flip at id 26).  Distance did not
+        predict; flip position did.  With both sides agreeing, distributions as
+        far as L1 0.676 from stock decode every trial at zero overhead.
+
+        AND NOTE WHAT THE END-TO-END GATE MUST READ.  After this fix, `compare`'s
+        FAIL column does not discriminate peel distributions at all: an
+        all-mass-on-degree-1 peel matrix still reports 0 failures, because the
+        codec spends OVERHEAD rather than failing.  The discriminating column is
+        OH_mean (with OH95) -- all-degree-1 costs 5.02 extra packets where the
+        shipped law costs 0.0000.  A gate reading FAIL is vacuous.
+    */
+    ApplyPeelDegreeOverride(
+        packet_row_seed, packet_peel_seed, (uint16_t)K, params);
+#endif
     uint64_t operations = 1u;
     // The existing schedules are already optimal until the row contains six
     // total terms.  Above that crossover, pairing the complete tail removes
     // at least one destination read/write pass.
     const uint32_t packet_terms =
         (uint32_t)params.PeelCount + config.MixCount;
+    // These two width gates deliberately read the REAL width rather than
+    // DispatchBlockBytes: this routine re-encodes a packet into block_out and
+    // its entry check above rejects a zero width outright, so a payload-free
+    // solve never reaches them and there is no counting mode to preserve.
     if (block_bytes <= kPacketTailPairMaxBlockBytes &&
         packet_terms >= kPacketTailPairMinTerms)
     {
@@ -5674,9 +6077,12 @@ static WirehairResult SolvePrecodeSystemImpl(
         values.resize(value_bytes, 0u);
         st.BlockZeroFills += L;
         std::vector<uint64_t> accumulator(words, 0u);
+        // DISPATCH, not sizing: the fused initializer changes how the peel
+        // projection consumes its sources.
         const bool enable_fused_block_initialization =
             K >= kFusedBlockXorInitMinBlockCount &&
-            block_bytes >= kFusedBlockXorInitMinBlockBytes;
+            DispatchBlockBytes(block_bytes) >=
+                kFusedBlockXorInitMinBlockBytes;
 
         // Affine projection of peeled columns onto inactive variables.  The
         // block stored in values[column] is the constant term.
@@ -6129,8 +6535,12 @@ static WirehairResult SolvePrecodeSystemImpl(
         // scalar coefficient passes.  Keep the original insertion strategy
         // for MTU-sized blocks where measurements show that trade is neutral
         // or slightly negative; large blocks receive the material win.
+        // DISPATCH, not sizing: the quotient trades block operations for
+        // scalar coefficient passes, so it changes the operation mix the
+        // counters report and a payload-free solve must select it exactly as
+        // a large payload does.
         const bool use_binary_quotient =
-            block_bytes >= kBinaryQuotientMinBlockBytes;
+            DispatchBlockBytes(block_bytes) >= kBinaryQuotientMinBlockBytes;
         std::vector<uint32_t> free_columns;
         if (use_binary_quotient)
         {
@@ -6402,7 +6812,11 @@ static WirehairResult SolvePrecodeSystemImpl(
             // full payload-block XORs.  Tiny rank proxies avoid this scalar
             // selection work entirely.
             uint32_t projected_xors = 0u;
-            if (block_bytes >= kProjectedBackSubMinBlockBytes &&
+            // DISPATCH, not sizing: this gate is the one that moves BlockXors
+            // between the sparse row and the affine relation, so a
+            // payload-free solve has to evaluate it in the production regime.
+            if (DispatchBlockBytes(block_bytes) >=
+                    kProjectedBackSubMinBlockBytes &&
                 words != 0u && sparse_xors != 0u)
             {
                 const uint64_t* relation = projection.data() +
@@ -6517,9 +6931,12 @@ static bool ShouldUseWideBlockXor(
     // kernel.
     static const uint32_t kMaxWideBlockCount = 64000u;
     static const uint32_t kMinWideBlockBytes = 512u;
+    // DISPATCH, not sizing: this selects the wide GF kernel family for the
+    // whole solve.  A payload-free solve selects it too -- the kernels then
+    // run on zero-byte blocks -- so its control flow matches production.
     if (system.Params.Field != CompletionField::MixedGF256GF16 ||
         system.Params.BlockCount > kMaxWideBlockCount ||
-        block_bytes < kMinWideBlockBytes ||
+        DispatchBlockBytes(block_bytes) < kMinWideBlockBytes ||
         gf256_init() != 0)
     {
         return false;
@@ -6634,7 +7051,9 @@ InsertPackedBinaryResidualRow(
             (UINT64_C(1) << (R & 63u)) - UINT64_C(1);
     }
 
-    if (block_bytes < batched_rhs_min_block_bytes)
+    // DISPATCH, not sizing: the branch picks a reduction algorithm.  Every
+    // address and length below still uses the real block_bytes.
+    if (DispatchBlockBytes(block_bytes) < batched_rhs_min_block_bytes)
     {
         for (uint32_t column = 0; column < R; ++column)
         {
@@ -6704,7 +7123,9 @@ InsertPackedBinaryResidualRow(
     // Small payloads retain the compact direct loop.  At wider payloads,
     // batch RHS destinations so the newly inserted source row is loaded once
     // per group while the coefficient elimination remains in exact row order.
-    if (block_bytes < 512u ||
+    // DISPATCH, not sizing: a payload-free solve takes the batched route the
+    // shipping decoder takes, on rows that are zero bytes wide.
+    if (DispatchBlockBytes(block_bytes) < 512u ||
         !CanXorBlockIntoDestinationsVectorized())
     {
         for (uint32_t existing = 0; existing < R; ++existing)
