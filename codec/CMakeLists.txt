@@ -240,6 +240,18 @@ if (BUILD_TESTS)
             message(FATAL_ERROR
                 "WIREHAIR_ENABLE_LIBFUZZER requires Clang")
         endif()
+        # The harness translation units alone are only input decoders.  The
+        # branches libFuzzer is meant to guide live in this static WH2 codec
+        # library, so compile it with coverage instrumentation as well while
+        # leaving the fuzzer main to the two executables below.
+        target_compile_options(wirehair_v2_policy
+            PRIVATE -fsanitize=fuzzer-no-link)
+        # Every executable that pulls an instrumented policy object also needs
+        # Clang's no-main coverage runtime.  Propagate only the link option so
+        # ordinary correctness-test sources remain uninstrumented, while the
+        # dedicated fuzz targets still supply the libFuzzer main below.
+        target_link_options(wirehair_v2_policy
+            INTERFACE -fsanitize=fuzzer-no-link)
         foreach(_wirehair_v2_fuzz_target IN ITEMS
                 wirehair_v2_profile_fuzz wirehair_v2_stateful_fuzz)
             target_compile_definitions(${_wirehair_v2_fuzz_target}

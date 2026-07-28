@@ -3,6 +3,7 @@
 #include "../WirehairTools.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits.h>
 #include <math.h>
 #include <queue>
@@ -87,6 +88,18 @@ uint32_t ClampDegree(uint32_t degree, uint32_t block_count)
     return degree;
 }
 
+bool HasValidDegreeRange(
+    const PeelingCodec& codec,
+    uint32_t block_count)
+{
+    // Reject a caller's inverted range before clamping.  At K=1 every
+    // nonzero endpoint clamps to one, which would otherwise turn an explicit
+    // invalid-range sentinel back into a valid degree-one distribution.
+    return codec.MinDegree <= codec.MaxDegree &&
+        ClampDegree(codec.MinDegree, block_count) <=
+        ClampDegree(codec.MaxDegree, block_count);
+}
+
 double LtWeight(uint32_t degree, uint32_t block_count)
 {
     if (degree <= 1u) {
@@ -169,15 +182,51 @@ public:
           BlockCount(block_count),
           UseWirehairDistribution(codec.UseWirehairRowDistribution)
     {
+        switch (codec.Family)
+        {
+        case DegreeFamily::Lt:
+            break;
+        case DegreeFamily::RobustD1D2:
+            Valid = std::isfinite(codec.Degree1Mass) &&
+                std::isfinite(codec.Degree2Mass);
+            break;
+        case DegreeFamily::RobustSoliton:
+            Valid = std::isfinite(codec.RobustC) &&
+                std::isfinite(codec.RobustDelta);
+            break;
+        default:
+            Valid = false;
+            break;
+        }
+        if (!Valid || UseWirehairDistribution) {
+            return;
+        }
+
         Cumulative.reserve(MaxDegree - MinDegree + 1u);
         for (uint32_t d = MinDegree; d <= MaxDegree; ++d)
         {
-            Total += DegreeWeight(codec, d, block_count);
+            const double weight = DegreeWeight(codec, d, block_count);
+            const double next_total = Total + weight;
+            if (!std::isfinite(weight) || weight < 0.0 ||
+                !std::isfinite(next_total))
+            {
+                Valid = false;
+                Cumulative.clear();
+                Total = 0.0;
+                return;
+            }
+            Total = next_total;
             Cumulative.push_back(Total);
         }
-        if (Total <= 0.0) {
+        if (!(Total > 0.0)) {
+            Valid = false;
             Cumulative.clear();
         }
+    }
+
+    bool IsValid() const
+    {
+        return Valid;
     }
 
     uint32_t Sample(Rng& rng) const
@@ -201,7 +250,11 @@ public:
         const double target = rng.Unit() * Total;
         for (size_t i = 0; i < Cumulative.size(); ++i)
         {
-            if (target <= Cumulative[i]) {
+            // Unit() is in [0, 1), so select the first strictly greater CDF
+            // boundary.  A closed comparison would assign target zero to an
+            // initial zero-mass degree; SplitMix64 can produce that endpoint
+            // for a concrete stream seed.
+            if (target < Cumulative[i]) {
                 return MinDegree + (uint32_t)i;
             }
         }
@@ -213,6 +266,7 @@ private:
     uint32_t MaxDegree;
     uint32_t BlockCount;
     bool UseWirehairDistribution;
+    bool Valid = true;
     double Total = 0.0;
     std::vector<double> Cumulative;
 };
@@ -369,7 +423,10 @@ struct ColumnCandidate
     uint32_t LiveRefs;
     uint32_t Degree2Refs;
     uint32_t Weight2Refs;
-    uint32_t Lookahead;
+    // At the 65,536-row contract limit, one candidate can have 65,536 live
+    // degree-two references whose partners each accumulated 65,536 weight-two
+    // references.  Preserve that exact 2^32 score instead of wrapping to zero.
+    uint64_t Lookahead;
     uint32_t Fill;
 };
 
@@ -676,18 +733,21 @@ private:
 
     uint16_t SelectMinRowLowRefColumn() const
     {
-        uint16_t best_row = UINT16_MAX;
-        uint16_t best_live = UINT16_MAX;
+        // Row index 65,535 is valid when Rows.size() reaches the documented
+        // 65,536-row limit, so UINT16_MAX cannot also be the "not found"
+        // sentinel here.
+        uint32_t best_row = UINT32_MAX;
+        uint32_t best_live = UINT32_MAX;
         for (uint32_t r = 0; r < Rows.size(); ++r)
         {
             const RowState& row = Rows[r];
             if (row.Live <= 1u || row.Deferred || row.Live >= best_live) {
                 continue;
             }
-            best_row = (uint16_t)r;
+            best_row = r;
             best_live = row.Live;
         }
-        if (best_row == UINT16_MAX) {
+        if (best_row == UINT32_MAX) {
             return SelectLowRefFallbackColumn();
         }
 
@@ -903,12 +963,16 @@ std::vector<std::vector<uint16_t> > GeneratePeelMatrixRows(
 {
     if (block_count == 0u ||
         block_count > UINT16_MAX ||
-        row_count > kMaxPeelMatrixRows)
+        row_count > kMaxPeelMatrixRows ||
+        !HasValidDegreeRange(codec, block_count))
     {
         return std::vector<std::vector<uint16_t> >();
     }
 
     const DegreeSampler degrees(codec, block_count);
+    if (!degrees.IsValid()) {
+        return std::vector<std::vector<uint16_t> >();
+    }
     std::vector<std::vector<uint16_t> > rows;
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
@@ -926,13 +990,17 @@ std::vector<uint16_t> GeneratePeelMatrixRow(
     uint64_t seed)
 {
     if (block_count == 0u ||
-        block_count > UINT16_MAX)
+        block_count > UINT16_MAX ||
+        !HasValidDegreeRange(codec, block_count))
     {
         return std::vector<uint16_t>();
     }
 
     Rng rng(RowStreamSeed(seed, row_index, kSourceRowStreamSalt));
     const DegreeSampler degrees(codec, block_count);
+    if (!degrees.IsValid()) {
+        return std::vector<uint16_t>();
+    }
     return DrawPeelRow(degrees, block_count, rng);
 }
 
@@ -947,12 +1015,16 @@ std::vector<std::vector<uint32_t> > GenerateRecoveryMatrixRows(
     if (source_count == 0u ||
         source_count > UINT16_MAX ||
         row_count > kMaxPeelMatrixRows ||
-        precode_count > UINT16_MAX - source_count)
+        precode_count > UINT16_MAX - source_count ||
+        !HasValidDegreeRange(codec, source_count))
     {
         return std::vector<std::vector<uint32_t> >();
     }
 
     const DegreeSampler degrees(codec, source_count);
+    if (!degrees.IsValid()) {
+        return std::vector<std::vector<uint32_t> >();
+    }
     std::vector<std::vector<uint32_t> > rows;
     rows.reserve(row_count);
     for (uint32_t r = 0; r < row_count; ++r)
@@ -981,8 +1053,14 @@ std::vector<uint32_t> GenerateRecoveryMatrixRow(
 
     if (source_count == 0u ||
         source_count > UINT16_MAX ||
-        precode_count > UINT16_MAX - source_count)
+        precode_count > UINT16_MAX - source_count ||
+        !HasValidDegreeRange(codec, source_count))
     {
+        return std::vector<uint32_t>();
+    }
+
+    const DegreeSampler degrees(codec, source_count);
+    if (!degrees.IsValid()) {
         return std::vector<uint32_t>();
     }
 
@@ -993,7 +1071,6 @@ std::vector<uint32_t> GenerateRecoveryMatrixRow(
     Rng mix_rng(
         RowStreamSeed(seed, row_index, kMixRowStreamSalt),
         &generation.MixRandomDraws);
-    const DegreeSampler degrees(codec, source_count);
     return DrawRecoveryRow(
         degrees, source_count, precode_count, mix_count,
         source_rng, mix_rng);
@@ -1004,8 +1081,17 @@ PeelEvaluation EvaluatePeeling(
     uint32_t block_count,
     uint64_t seed)
 {
+    if (block_count == 0u ||
+        block_count > UINT16_MAX ||
+        !HasValidDegreeRange(codec, block_count))
+    {
+        return InvalidPeelEvaluation(block_count, block_count);
+    }
     const std::vector<std::vector<uint16_t> > rows =
         GeneratePeelMatrixRows(codec, block_count, block_count, seed);
+    if (rows.size() != block_count) {
+        return InvalidPeelEvaluation(block_count, block_count);
+    }
     return EvaluatePeelingRows(codec, block_count, rows);
 }
 
@@ -1022,14 +1108,26 @@ PeelEvaluation EvaluatePeelingRows(
             rows.size() > UINT32_MAX ? UINT32_MAX : (uint32_t)rows.size(),
             block_count);
     }
+    // A matrix row is a GF(2) set of columns.  Generated rows are unique, and
+    // caller-supplied duplicates cannot be handed to PeelSolverState as
+    // independent references: doing so decrements the same live degree more
+    // than once and evaluates a different matrix from the one GF(2) defines.
+    // Validate in O(total references) with a per-row generation stamp.
+    std::vector<uint32_t> seen(block_count, 0u);
+    uint32_t stamp = 0u;
     for (size_t r = 0; r < rows.size(); ++r)
     {
+        if (rows[r].size() > block_count) {
+            return InvalidPeelEvaluation((uint32_t)rows.size(), block_count);
+        }
+        ++stamp;
         for (uint16_t c : rows[r])
         {
-            if (c >= block_count)
+            if (c >= block_count || seen[c] == stamp)
             {
                 return InvalidPeelEvaluation((uint32_t)rows.size(), block_count);
             }
+            seen[c] = stamp;
         }
     }
 

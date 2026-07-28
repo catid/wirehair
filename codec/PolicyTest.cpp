@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -737,6 +738,99 @@ void CheckPeelRowCountBounds()
             invalid_eval.ResidualColumns == 2u,
         "peel evaluator should reject caller rows with invalid columns");
 
+    wirehair_v2::PeelingCodec inverted = codec;
+    inverted.MinDegree = 64u;
+    inverted.MaxDegree = 1u;
+    Check(wirehair_v2::GeneratePeelMatrixRows(
+              inverted, 64u, 1u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GeneratePeelMatrixRow(
+              inverted, 64u, 0u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GenerateRecoveryMatrixRows(
+              inverted, 64u, 4u, 1u, 3u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GenerateRecoveryMatrixRow(
+              inverted, 64u, 4u, 0u, 3u,
+              UINT64_C(0x1234)).empty(),
+        "peel generators should reject an inverted clamped degree range");
+    const wirehair_v2::PeelEvaluation inverted_eval =
+        wirehair_v2::EvaluatePeeling(inverted, 64u, UINT64_C(0x1234));
+    Check(inverted_eval.TotalXorCost == UINT64_MAX &&
+            inverted_eval.ResidualColumns == 64u,
+        "peel evaluator should reject an inverted clamped degree range");
+    wirehair_v2::SeedProfile inverted_profile =
+        wirehair_v2::SelectSeedProfile(64u, 1280u);
+    inverted_profile.Policy.Codec = inverted;
+    const wirehair_v2::PeelSolvePlan inverted_plan =
+        wirehair_v2::BuildPeelSolvePlan(
+            inverted_profile, 0u, UINT64_C(0x5511));
+    Check(inverted_plan.Rows.empty() &&
+            inverted_plan.RowCount == 64u &&
+            inverted_plan.Evaluation.Rows == 64u &&
+            inverted_plan.Evaluation.ResidualRows == 64u &&
+            inverted_plan.Evaluation.TotalXorCost == UINT64_MAX,
+        "peel solve plan should not reinterpret rejected generation as "
+        "a valid zero-row matrix");
+
+    wirehair_v2::PeelingCodec nonfinite = codec;
+    nonfinite.Family = wirehair_v2::DegreeFamily::RobustSoliton;
+    nonfinite.RobustC = std::numeric_limits<double>::quiet_NaN();
+    wirehair_v2::RecoveryRowGenerationStats nonfinite_stats;
+    Check(wirehair_v2::GeneratePeelMatrixRows(
+              nonfinite, 64u, 1u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GeneratePeelMatrixRow(
+              nonfinite, 64u, 0u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GenerateRecoveryMatrixRows(
+              nonfinite, 64u, 4u, 1u, 3u, UINT64_C(0x1234)).empty() &&
+            wirehair_v2::GenerateRecoveryMatrixRow(
+              nonfinite, 64u, 4u, 0u, 3u,
+              UINT64_C(0x1234), &nonfinite_stats).empty(),
+        "peel generators should reject non-finite degree parameters");
+    Check(nonfinite_stats.SeekWork == 0u &&
+            nonfinite_stats.SourceRandomDraws == 0u &&
+            nonfinite_stats.MixRandomDraws == 0u,
+        "rejected degree parameters should report no generation work");
+    const wirehair_v2::PeelEvaluation nonfinite_eval =
+        wirehair_v2::EvaluatePeeling(nonfinite, 64u, UINT64_C(0x1234));
+    Check(nonfinite_eval.TotalXorCost == UINT64_MAX &&
+            nonfinite_eval.ResidualColumns == 64u,
+        "peel evaluator should reject non-finite degree parameters");
+
+    wirehair_v2::PeelingCodec negative_mass = codec;
+    negative_mass.Family = wirehair_v2::DegreeFamily::RobustD1D2;
+    negative_mass.Degree1Mass = -2.0;
+    Check(wirehair_v2::GeneratePeelMatrixRows(
+              negative_mass, 64u, 1u, UINT64_C(0x1234)).empty(),
+        "peel generators should reject negative degree weights");
+
+    wirehair_v2::PeelingCodec zero_first_weight = codec;
+    zero_first_weight.Family = wirehair_v2::DegreeFamily::RobustD1D2;
+    zero_first_weight.MinDegree = 1u;
+    zero_first_weight.MaxDegree = 2u;
+    zero_first_weight.Degree1Mass = -1.0 / 64.0;
+    zero_first_weight.Degree2Mass = 1.0;
+    // This seed makes row zero's first SplitMix64 output exactly zero.  The
+    // zero-probability degree-1 CDF interval must still be skipped.
+    const std::vector<uint16_t> zero_endpoint_row =
+        wirehair_v2::GeneratePeelMatrixRow(
+            zero_first_weight, 64u, 0u,
+            UINT64_C(0x12241b06c4e5e869));
+    Check(zero_endpoint_row.size() == 2u,
+        "degree sampler should not select a zero-mass CDF interval");
+
+    wirehair_v2::PeelingCodec overflowing_weight = codec;
+    overflowing_weight.Family = wirehair_v2::DegreeFamily::RobustSoliton;
+    overflowing_weight.RobustC = std::numeric_limits<double>::max();
+    Check(wirehair_v2::GeneratePeelMatrixRows(
+              overflowing_weight, 64u, 1u, UINT64_C(0x1234)).empty(),
+        "peel generators should reject overflowing degree weights");
+
+    std::vector<std::vector<uint16_t> > duplicate_columns(1u);
+    duplicate_columns[0] = std::vector<uint16_t>{0u, 0u};
+    const wirehair_v2::PeelEvaluation duplicate_eval =
+        wirehair_v2::EvaluatePeelingRows(codec, 2u, duplicate_columns);
+    Check(duplicate_eval.TotalXorCost == UINT64_MAX &&
+            duplicate_eval.ResidualColumns == 2u,
+        "peel evaluator should reject duplicate GF(2) columns");
+
     const wirehair_v2::SeedProfile profile =
         wirehair_v2::SelectSeedProfile(64000u, 1280u);
     const wirehair_v2::PeelSolvePlan plan =
@@ -1280,6 +1374,53 @@ int main()
         Check(tuned.UsedPeelFixup,
             "seed tuner should update peel fixup metadata after tuning");
     }
+
+    const SeedProfile rejected_high =
+        SelectSeedProfile(CAT_WIREHAIR_MAX_N + 1u, 1280u);
+    Check(rejected_high.BlockCount == CAT_WIREHAIR_MAX_N + 1u &&
+            rejected_high.DenseCount == 0u &&
+            !rejected_high.Tuned,
+        "seed profiles should reject block counts outside codec limits");
+    const SeedProfile rejected_low =
+        SelectSeedProfile(CAT_WIREHAIR_MIN_N - 1u, 1280u);
+    const PeelSolvePlan rejected_low_plan =
+        BuildPeelSolvePlan(rejected_low, 0u, UINT64_C(0x5511));
+    Check(rejected_low.DenseCount == 0u &&
+            rejected_low_plan.Rows.empty() &&
+            rejected_low_plan.RowCount == CAT_WIREHAIR_MIN_N - 1u &&
+            rejected_low_plan.Evaluation.TotalXorCost == UINT64_MAX,
+        "below-minimum seed profiles should remain invalid if passed to a plan");
+    const SeedProfile rejected_bytes = SelectSeedProfile(80u, 0u);
+    Check(rejected_bytes.BlockCount == 80u &&
+            rejected_bytes.BlockBytes == 0u &&
+            rejected_bytes.DenseCount == 0u &&
+            !rejected_bytes.Tuned,
+        "seed profiles should reject invalid block byte counts");
+    SeedTuningOptions rejected_tuning = tuning;
+    rejected_tuning.PeelCandidates = 1u;
+    rejected_tuning.TrialsPerCandidate = 2u;
+    const SeedProfile rejected_high_tuning =
+        TuneSeedProfile(CAT_WIREHAIR_MAX_N + 1u, 1280u, rejected_tuning);
+    const SeedProfile rejected_byte_tuning =
+        TuneSeedProfile(80u, 0u, rejected_tuning);
+    const PeelSolvePlan rejected_byte_plan =
+        BuildPeelSolvePlan(rejected_bytes, 0u, UINT64_C(0x5511));
+    Check(!rejected_high_tuning.Tuned &&
+            rejected_high_tuning.DenseCount == 0u &&
+            rejected_high_tuning.TuningCandidatesCompleted == 0u &&
+            rejected_high_tuning.TuningTrials == 0u &&
+            rejected_high_tuning.TuningXorCost == 0u,
+        "seed tuner should reject out-of-range block counts before table lookup");
+    Check(!rejected_byte_tuning.Tuned &&
+            rejected_byte_tuning.DenseCount == 0u &&
+            rejected_byte_tuning.TuningCandidatesCompleted == 0u &&
+            rejected_byte_tuning.TuningTrials == 0u &&
+            rejected_byte_tuning.TuningXorCost == 0u,
+        "seed tuner should reject invalid block byte counts");
+    Check(rejected_byte_plan.Rows.empty() &&
+            rejected_byte_plan.RowCount == 80u &&
+            rejected_byte_plan.Evaluation.TotalXorCost == UINT64_MAX,
+        "rejected seed profiles should remain invalid if passed to a plan");
 
     SeedTuningOptions capped_tuning = tuning;
     capped_tuning.PeelCandidates = 300u;

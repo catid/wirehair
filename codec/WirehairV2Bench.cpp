@@ -95,6 +95,21 @@ bool ParseU64Scalar(const char* text, uint64_t& out)
     return true;
 }
 
+bool ParseDecimalU64Scalar(const char* text, uint64_t& out)
+{
+    if (!text || !*text || *text < '0' || *text > '9') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    out = (uint64_t)value;
+    return true;
+}
+
 bool ParseDoubleScalar(const char* text, double& out)
 {
     if (!text || !*text || ((*text < '0' || *text > '9') && *text != '.')) {
@@ -11500,6 +11515,47 @@ bool ParsePrecodeSweepCells(
     return true;
 }
 
+/// Wide spelling of ParsePrecodeSweepCells for EsEvaluator.
+///
+/// A uint32 cell identifier has the half-open domain [0, 2^32), so the upper
+/// endpoint itself needs 33 bits in order to name the final cell.  The older
+/// parser stores both endpoints in uint32_t because precodesweep/precodecost
+/// use uint32 work indices; narrowing essearch through that parser made
+/// [4294967295, 4294967296) impossible even though EsEvaluator deliberately
+/// accepts and validates uint64 ranges.
+bool ParseEsMeasureCells(
+    const char* text,
+    uint64_t& begin,
+    uint64_t& end)
+{
+    const std::string value(text ? text : "");
+    const size_t colon = value.find(':');
+    if (colon == std::string::npos)
+    {
+        uint64_t count = 0u;
+        // Bare N means [1, N+1), so at most UINT32_MAX cells fit the uint32
+        // identifier domain without overflowing the wide addition.
+        if (!ParseDecimalU64Scalar(value.c_str(), count) ||
+            count == 0u || count > UINT32_MAX)
+        {
+            return BadArg("--cells", text);
+        }
+        begin = 1u;
+        end = count + 1u;
+        return true;
+    }
+    uint64_t low = 0u;
+    uint64_t high = 0u;
+    if (!ParseDecimalU64Scalar(value.substr(0u, colon).c_str(), low) ||
+        !ParseDecimalU64Scalar(value.substr(colon + 1u).c_str(), high))
+    {
+        return BadArg("--cells", text);
+    }
+    begin = low;
+    end = high;
+    return true;
+}
+
 int CmdPrecodeSweep(int argc, char** argv)
 {
     PrecodeSweepRun run;
@@ -15769,10 +15825,10 @@ int CmdEsSearch(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--cells")) {
-            uint32_t begin = 0u;
-            uint32_t end = 0u;
+            uint64_t begin = 0u;
+            uint64_t end = 0u;
             if (!TakeArg("essearch", "--cells", argc, argv, i, value) ||
-                !ParsePrecodeSweepCells(value, begin, end))
+                !ParseEsMeasureCells(value, begin, end))
             {
                 return 1;
             }

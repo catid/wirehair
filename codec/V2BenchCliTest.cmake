@@ -2491,6 +2491,24 @@ expect_success("cost_model_verified=0,band_tracking_x=1"
     essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
     --s-hi 30 --measure --threads 1 --cells 0:1
     --configs "3,7,1,-1.00")
+# The last uint32 cell id needs the 33-bit exclusive endpoint 2^32.  The
+# evaluator already supports that domain; the CLI parser must not narrow the
+# endpoint before it reaches the evaluator.
+expect_success("cells=\\[4294967295,4294967296\\)"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --measure --threads 1 --cells 4294967295:4294967296
+    --configs "3,7,1,-1.00")
+# Preserve the old decimal-only spelling when widening the endpoints.  Base-0
+# parsing would reject decimal digits 8/9 after a leading zero and silently
+# reinterpret the remaining leading-zero values as octal.
+expect_success("cells=\\[8,9\\)"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --measure --threads 1 --cells 08:09
+    --configs "3,7,1,-1.00")
+expect_success("cells=\\[10,11\\)"
+    essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
+    --s-hi 30 --measure --threads 1 --cells 010:011
+    --configs "3,7,1,-1.00")
 expect_failure("search cell span exceeds the uint32 cell identifier domain"
     essearch --allow-unverified-cost-model --N 128 --target 0.01 --lam 1
     --s-hi 30 --gens 1 --pairs 1 --nseeds 1 --holdout 0

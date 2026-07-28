@@ -74,6 +74,31 @@ SeedProfile MakeBaseProfile(uint32_t block_count, uint32_t block_bytes)
     return profile;
 }
 
+bool HasValidSeedProfileDimensions(
+    uint32_t block_count,
+    uint32_t block_bytes)
+{
+    return block_count >= CAT_WIREHAIR_MIN_N &&
+        block_count <= CAT_WIREHAIR_MAX_N &&
+        block_bytes > 0u &&
+        block_bytes <= UINT32_C(0x7fffffff);
+}
+
+SeedProfile MakeRejectedProfile(uint32_t block_count, uint32_t block_bytes)
+{
+    SeedProfile profile;
+    profile.BlockCount = block_count;
+    profile.BlockBytes = block_bytes;
+    profile.Policy = SelectPeelPolicy(block_count, block_bytes);
+    // SeedProfile has no separate validity bit.  Preserve the requested
+    // dimensions for diagnostics, but make the embedded row generator
+    // intrinsically rejectable so a caller cannot turn a failed selection
+    // into a valid-looking peel plan merely by ignoring DenseCount == 0.
+    profile.Policy.Codec.MinDegree = 2u;
+    profile.Policy.Codec.MaxDegree = 1u;
+    return profile;
+}
+
 double CandidateScore(
     double residual_mean,
     double residual_population_mean,
@@ -141,6 +166,9 @@ uint16_t CandidateDenseSeed(uint16_t base_seed, uint16_t index)
 
 SeedProfile SelectSeedProfile(uint32_t block_count, uint32_t block_bytes)
 {
+    if (!HasValidSeedProfileDimensions(block_count, block_bytes)) {
+        return MakeRejectedProfile(block_count, block_bytes);
+    }
     return MakeBaseProfile(block_count, block_bytes);
 }
 
@@ -149,8 +177,8 @@ SeedProfile TuneSeedProfile(
     uint32_t block_bytes,
     const SeedTuningOptions& options)
 {
-    SeedProfile base = MakeBaseProfile(block_count, block_bytes);
-    if (block_count < 2u) {
+    SeedProfile base = SelectSeedProfile(block_count, block_bytes);
+    if (!HasValidSeedProfileDimensions(block_count, block_bytes)) {
         return base;
     }
 
@@ -178,7 +206,8 @@ SeedProfile TuneSeedProfile(
         candidate.XorCostMean = 0;
         candidate.Score = 0.0;
 
-        uint64_t xor_sum = 0;
+        uint64_t xor_mean_quotient = 0;
+        uint64_t xor_mean_remainder = 0;
         for (uint32_t trial = 0; trial < trials; ++trial)
         {
             SeedProfile trial_profile = base;
@@ -189,14 +218,19 @@ SeedProfile TuneSeedProfile(
                     options.Seed ^
                     ((uint64_t)trial * UINT64_C(0xd6e8feb86659fd93)));
             const PeelEvaluation& eval = plan.Evaluation;
+            if (eval.TotalXorCost == UINT64_MAX) {
+                return base;
+            }
             candidate.ResidualMean += eval.ResidualColumns;
             if (eval.ResidualColumns > candidate.ResidualMax) {
                 candidate.ResidualMax = eval.ResidualColumns;
             }
-            xor_sum += eval.TotalXorCost;
+            xor_mean_quotient += eval.TotalXorCost / trials;
+            xor_mean_remainder += eval.TotalXorCost % trials;
         }
         candidate.ResidualMean /= (double)trials;
-        candidate.XorCostMean = xor_sum / trials;
+        candidate.XorCostMean =
+            xor_mean_quotient + xor_mean_remainder / trials;
         residual_sum += candidate.ResidualMean;
         residual_sq += candidate.ResidualMean * candidate.ResidualMean;
         candidates[i] = candidate;

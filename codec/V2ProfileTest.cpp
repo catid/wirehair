@@ -187,6 +187,66 @@ bool CheckMalformedProfiles(const uint8_t* golden)
         return false;
     }
 
+    uint32_t aliased_output[
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t)];
+    std::fill(
+        aliased_output,
+        aliased_output +
+            WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t),
+        UINT32_C(0xa5a5a5a5));
+    uint32_t aliased_output_before[
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t)];
+    std::memcpy(
+        aliased_output_before, aliased_output, sizeof(aliased_output));
+    if (!Check(wirehair_v2_profile_serialize(
+            &profile, aliased_output, sizeof(aliased_output),
+            &aliased_output[1]) == WirehairV2_InvalidInput,
+            "serialize rejects aliased size output") ||
+        !Check(std::memcmp(
+            aliased_output, aliased_output_before,
+            sizeof(aliased_output)) == 0,
+            "serialize aliased outputs are transactional"))
+    {
+        return false;
+    }
+
+    uint32_t capacity_bounded_output[3] = {
+        UINT32_C(0xa5a5a5a5),
+        UINT32_C(0xa5a5a5a5),
+        UINT32_C(0xa5a5a5a5)
+    };
+    if (!Check(wirehair_v2_profile_serialize(
+            &profile,
+            capacity_bounded_output,
+            sizeof(capacity_bounded_output[0]),
+            &capacity_bounded_output[2]) == WirehairV2_BufferTooSmall &&
+            capacity_bounded_output[0] == UINT32_C(0xa5a5a5a5) &&
+            capacity_bounded_output[2] ==
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+            "serialize alias check respects declared output capacity"))
+    {
+        return false;
+    }
+
+    WirehairV2Profile profile_and_size = profile;
+    uint8_t snapshotted_output[
+        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    if (!Check(wirehair_v2_profile_serialize(
+            &profile_and_size,
+            snapshotted_output,
+            sizeof(snapshotted_output),
+            &profile_and_size.profile_version) == WirehairV2_Success &&
+            profile_and_size.profile_version ==
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+            std::memcmp(
+                snapshotted_output,
+                golden,
+                sizeof(snapshotted_output)) == 0,
+            "serialize snapshots profile before aliased size write"))
+    {
+        return false;
+    }
+
     profile.struct_bytes = 0u;
     if (!Check(wirehair_v2_profile_serialize(
             &profile, untouched, sizeof(untouched), &required) ==
@@ -1056,6 +1116,427 @@ int main()
     uint32_t serialized_bytes = 0u;
     WirehairV2Codec encoder = nullptr;
     {
+        const auto create_with_outputs = [&](bool explicit_profile,
+                const void* message_in,
+                uint64_t message_bytes_in,
+                void* profile_out,
+                uint32_t profile_capacity,
+                uint32_t* profile_bytes_out,
+                WirehairV2Codec* codec_out) {
+            if (explicit_profile) {
+                return wirehair_v2_encoder_create_profile_id(
+                    WIREHAIR_V2_PROFILE_CURRENT,
+                    message_in, message_bytes_in, BlockBytes,
+                    profile_out, profile_capacity,
+                    profile_bytes_out, codec_out);
+            }
+            return wirehair_v2_encoder_create(
+                message_in, message_bytes_in, BlockBytes,
+                profile_out, profile_capacity,
+                profile_bytes_out, codec_out);
+        };
+        for (unsigned explicit_profile = 0;
+            explicit_profile <= 1u;
+            ++explicit_profile)
+        {
+            uint32_t profile_and_size[
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t)];
+            std::fill(
+                profile_and_size,
+                profile_and_size +
+                    WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t),
+                UINT32_C(0xa5a5a5a5));
+            uint32_t profile_and_size_before[
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES / sizeof(uint32_t)];
+            std::memcpy(
+                profile_and_size_before,
+                profile_and_size,
+                sizeof(profile_and_size));
+            WirehairV2Codec separate_codec =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message.data(),
+                    message.size(),
+                    profile_and_size,
+                    sizeof(profile_and_size),
+                    &profile_and_size[1],
+                    &separate_codec) == WirehairV2_InvalidInput &&
+                    separate_codec ==
+                        reinterpret_cast<WirehairV2Codec>(uintptr_t(1)) &&
+                    std::memcmp(
+                        profile_and_size,
+                        profile_and_size_before,
+                        sizeof(profile_and_size)) == 0,
+                    explicit_profile ?
+                        "profile-id create rejects profile/size alias" :
+                        "default create rejects profile/size alias"))
+            {
+                return 1;
+            }
+
+            WirehairV2Codec profile_and_codec[
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES /
+                    sizeof(WirehairV2Codec)];
+            std::memset(
+                profile_and_codec, 0xa5, sizeof(profile_and_codec));
+            WirehairV2Codec profile_and_codec_before[
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES /
+                    sizeof(WirehairV2Codec)];
+            std::memcpy(
+                profile_and_codec_before,
+                profile_and_codec,
+                sizeof(profile_and_codec));
+            uint32_t separate_size = UINT32_C(0xa5a5a5a5);
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message.data(),
+                    message.size(),
+                    profile_and_codec,
+                    sizeof(profile_and_codec),
+                    &separate_size,
+                    &profile_and_codec[1]) == WirehairV2_InvalidInput &&
+                    separate_size == UINT32_C(0xa5a5a5a5) &&
+                    std::memcmp(
+                        profile_and_codec,
+                        profile_and_codec_before,
+                        sizeof(profile_and_codec)) == 0,
+                    explicit_profile ?
+                        "profile-id create rejects profile/codec alias" :
+                        "default create rejects profile/codec alias"))
+            {
+                return 1;
+            }
+
+            WirehairV2Codec size_and_codec =
+                reinterpret_cast<WirehairV2Codec>(
+                    UINTPTR_MAX / uintptr_t(3u));
+            uint8_t size_and_codec_before[sizeof(size_and_codec)];
+            std::memcpy(
+                size_and_codec_before,
+                &size_and_codec,
+                sizeof(size_and_codec));
+            uint8_t separate_profile[
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+            std::memset(
+                separate_profile, 0xa5, sizeof(separate_profile));
+            uint8_t separate_profile_before[sizeof(separate_profile)];
+            std::memcpy(
+                separate_profile_before,
+                separate_profile,
+                sizeof(separate_profile));
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message.data(),
+                    message.size(),
+                    separate_profile,
+                    sizeof(separate_profile),
+                    reinterpret_cast<uint32_t*>(&size_and_codec),
+                    &size_and_codec) == WirehairV2_InvalidInput &&
+                    std::memcmp(
+                        &size_and_codec,
+                        size_and_codec_before,
+                        sizeof(size_and_codec)) == 0 &&
+                    std::memcmp(
+                        separate_profile,
+                        separate_profile_before,
+                        sizeof(separate_profile)) == 0,
+                    explicit_profile ?
+                        "profile-id create rejects size/codec alias" :
+                        "default create rejects size/codec alias"))
+            {
+                return 1;
+            }
+
+            uint32_t message_and_size[
+                (message_bytes + sizeof(uint32_t) - 1u) /
+                    sizeof(uint32_t)] = {};
+            uint32_t message_and_size_before[
+                sizeof(message_and_size) / sizeof(message_and_size[0])];
+            std::memcpy(
+                message_and_size_before,
+                message_and_size,
+                sizeof(message_and_size));
+            separate_codec =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            std::memset(
+                separate_profile, 0xa5, sizeof(separate_profile));
+            std::memcpy(
+                separate_profile_before,
+                separate_profile,
+                sizeof(separate_profile));
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message_and_size,
+                    message_bytes,
+                    separate_profile,
+                    sizeof(separate_profile),
+                    &message_and_size[1],
+                    &separate_codec) == WirehairV2_InvalidInput &&
+                    separate_codec ==
+                        reinterpret_cast<WirehairV2Codec>(uintptr_t(1)) &&
+                    std::memcmp(
+                        message_and_size,
+                        message_and_size_before,
+                        sizeof(message_and_size)) == 0 &&
+                    std::memcmp(
+                        separate_profile,
+                        separate_profile_before,
+                        sizeof(separate_profile)) == 0,
+                    explicit_profile ?
+                        "profile-id create rejects message/size alias" :
+                        "default create rejects message/size alias"))
+            {
+                return 1;
+            }
+
+            WirehairV2Codec message_and_codec[
+                (message_bytes + sizeof(WirehairV2Codec) - 1u) /
+                    sizeof(WirehairV2Codec)] = {};
+            WirehairV2Codec message_and_codec_before[
+                sizeof(message_and_codec) /
+                    sizeof(message_and_codec[0])];
+            std::memcpy(
+                message_and_codec_before,
+                message_and_codec,
+                sizeof(message_and_codec));
+            separate_size = UINT32_C(0xa5a5a5a5);
+            std::memset(
+                separate_profile, 0xa5, sizeof(separate_profile));
+            std::memcpy(
+                separate_profile_before,
+                separate_profile,
+                sizeof(separate_profile));
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message_and_codec,
+                    message_bytes,
+                    separate_profile,
+                    sizeof(separate_profile),
+                    &separate_size,
+                    &message_and_codec[1]) == WirehairV2_InvalidInput &&
+                    separate_size == UINT32_C(0xa5a5a5a5) &&
+                    std::memcmp(
+                        message_and_codec,
+                        message_and_codec_before,
+                        sizeof(message_and_codec)) == 0 &&
+                    std::memcmp(
+                        separate_profile,
+                        separate_profile_before,
+                        sizeof(separate_profile)) == 0,
+                    explicit_profile ?
+                        "profile-id create rejects message/codec alias" :
+                        "default create rejects message/codec alias"))
+            {
+                return 1;
+            }
+
+            uint32_t zero_message_size = UINT32_C(0xa5a5a5a5);
+            WirehairV2Codec zero_message_codec =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            std::memset(
+                separate_profile, 0xa5, sizeof(separate_profile));
+            std::memcpy(
+                separate_profile_before,
+                separate_profile,
+                sizeof(separate_profile));
+            const void* empty_message_inside_size =
+                reinterpret_cast<const uint8_t*>(&zero_message_size) + 1u;
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    empty_message_inside_size,
+                    0u,
+                    separate_profile,
+                    sizeof(separate_profile),
+                    &zero_message_size,
+                    &zero_message_codec) == WirehairV2_InvalidDimensions &&
+                    zero_message_size ==
+                        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+                    zero_message_codec == nullptr &&
+                    std::memcmp(
+                        separate_profile,
+                        separate_profile_before,
+                        sizeof(separate_profile)) == 0,
+                    explicit_profile ?
+                        "profile-id create ignores empty message/size alias" :
+                        "default create ignores empty message/size alias"))
+            {
+                return 1;
+            }
+
+            zero_message_size = UINT32_C(0xa5a5a5a5);
+            zero_message_codec =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            const void* empty_message_inside_codec =
+                reinterpret_cast<const uint8_t*>(&zero_message_codec) + 1u;
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    empty_message_inside_codec,
+                    0u,
+                    separate_profile,
+                    sizeof(separate_profile),
+                    &zero_message_size,
+                    &zero_message_codec) == WirehairV2_InvalidDimensions &&
+                    zero_message_size ==
+                        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+                    zero_message_codec == nullptr &&
+                    std::memcmp(
+                        separate_profile,
+                        separate_profile_before,
+                        sizeof(separate_profile)) == 0,
+                    explicit_profile ?
+                        "profile-id create ignores empty message/codec alias" :
+                        "default create ignores empty message/codec alias"))
+            {
+                return 1;
+            }
+
+            uint32_t capacity_bounded_profile[10];
+            std::fill(
+                capacity_bounded_profile,
+                capacity_bounded_profile + 10,
+                UINT32_C(0xa5a5a5a5));
+            separate_codec =
+                reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+            if (!Check(create_with_outputs(
+                    explicit_profile != 0u,
+                    message.data(),
+                    message.size(),
+                    capacity_bounded_profile,
+                    sizeof(capacity_bounded_profile[0]),
+                    &capacity_bounded_profile[2],
+                    &separate_codec) == WirehairV2_BufferTooSmall &&
+                    capacity_bounded_profile[0] ==
+                        UINT32_C(0xa5a5a5a5) &&
+                    capacity_bounded_profile[2] ==
+                        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+                    separate_codec == nullptr,
+                    explicit_profile ?
+                        "profile-id create alias check respects capacity" :
+                        "default create alias check respects capacity"))
+            {
+                return 1;
+            }
+
+            std::vector<uint8_t> message_and_profile = message;
+            uint32_t overlapping_profile_bytes = 0u;
+            WirehairV2Codec overlapping_profile_codec = nullptr;
+            const WirehairV2Result overlapping_create =
+                create_with_outputs(
+                    explicit_profile != 0u,
+                    message_and_profile.data(),
+                    message_and_profile.size(),
+                    message_and_profile.data(),
+                    WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+                    &overlapping_profile_bytes,
+                    &overlapping_profile_codec);
+            uint8_t systematic_block[BlockBytes] = {};
+            uint32_t systematic_bytes = 0u;
+            const WirehairV2Result overlapping_encode =
+                overlapping_create == WirehairV2_Success ?
+                    wirehair_v2_encode(
+                        overlapping_profile_codec,
+                        0u,
+                        systematic_block,
+                        sizeof(systematic_block),
+                        &systematic_bytes) :
+                    WirehairV2_Error;
+            const bool overlapping_ok =
+                Check(overlapping_create == WirehairV2_Success &&
+                    overlapping_profile_bytes ==
+                        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+                    overlapping_profile_codec != nullptr &&
+                    std::memcmp(
+                        message_and_profile.data(),
+                        ExpectedProfile,
+                        WIREHAIR_V2_PROFILE_SERIALIZED_BYTES) == 0 &&
+                    overlapping_encode == WirehairV2_Success &&
+                    systematic_bytes == BlockBytes &&
+                    std::memcmp(
+                        systematic_block,
+                        message.data(),
+                        BlockBytes) == 0,
+                    explicit_profile ?
+                        "profile-id create consumes message before profile write" :
+                        "default create consumes message before profile write");
+            wirehair_v2_free(overlapping_profile_codec);
+            if (!overlapping_ok) {
+                return 1;
+            }
+        }
+
+        WirehairV2Codec serialized_and_codec[
+            WIREHAIR_V2_PROFILE_SERIALIZED_BYTES /
+                sizeof(WirehairV2Codec)];
+        std::memcpy(
+            serialized_and_codec,
+            ExpectedProfile,
+            sizeof(ExpectedProfile));
+        if (!Check(wirehair_v2_encoder_create_profile(
+                message.data(),
+                serialized_and_codec,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+                &serialized_and_codec[1]) == WirehairV2_Success &&
+                serialized_and_codec[1] != nullptr,
+                "profile recreate consumes descriptor before codec write"))
+        {
+            return 1;
+        }
+        wirehair_v2_free(serialized_and_codec[1]);
+
+        std::memcpy(
+            serialized_and_codec,
+            ExpectedProfile,
+            sizeof(ExpectedProfile));
+        if (!Check(wirehair_v2_decoder_create(
+                serialized_and_codec,
+                WIREHAIR_V2_PROFILE_SERIALIZED_BYTES,
+                &serialized_and_codec[1]) == WirehairV2_Success &&
+                serialized_and_codec[1] != nullptr,
+                "decoder consumes descriptor before codec write"))
+        {
+            return 1;
+        }
+        wirehair_v2_free(serialized_and_codec[1]);
+
+        WirehairV2Codec message_and_codec[
+            (message_bytes + sizeof(WirehairV2Codec) - 1u) /
+                sizeof(WirehairV2Codec)] = {};
+        uint8_t original_first_block[BlockBytes];
+        std::memcpy(
+            original_first_block,
+            message_and_codec,
+            sizeof(original_first_block));
+        if (!Check(wirehair_v2_encoder_create_profile(
+                message_and_codec,
+                ExpectedProfile,
+                sizeof(ExpectedProfile),
+                &message_and_codec[1]) == WirehairV2_Success &&
+                message_and_codec[1] != nullptr,
+                "profile recreate consumes message before codec write"))
+        {
+            return 1;
+        }
+        uint8_t recreated_first_block[BlockBytes] = {};
+        uint32_t recreated_first_bytes = 0u;
+        const bool recreated_message_ok =
+            Check(wirehair_v2_encode(
+                    message_and_codec[1],
+                    0u,
+                    recreated_first_block,
+                    sizeof(recreated_first_block),
+                    &recreated_first_bytes) == WirehairV2_Success &&
+                recreated_first_bytes == BlockBytes &&
+                std::memcmp(
+                    recreated_first_block,
+                    original_first_block,
+                    sizeof(recreated_first_block)) == 0,
+                "profile recreate retained aliased message bytes");
+        wirehair_v2_free(message_and_codec[1]);
+        if (!recreated_message_ok) {
+            return 1;
+        }
+
         WirehairV2Codec rejected_missing_size =
             reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
         if (!Check(wirehair_v2_encoder_create(

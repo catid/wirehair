@@ -309,7 +309,11 @@ WIREHAIR_EXPORT const char* wirehair_v2_result_string(
     The canonical encoding is exactly 32 bytes and uses little-endian integer
     fields.  bytesOut is set to WIREHAIR_V2_PROFILE_SERIALIZED_BYTES whenever
     it is non-null, including BufferTooSmall.  A null output buffer is the
-    supported size-query form when outputCapacity is zero.
+    supported size-query form when outputCapacity is zero.  output and
+    bytesOut must not overlap; overlap reports WirehairV2_InvalidInput without
+    modifying either range, before the normal bytesOut size report.  The
+    profile input is snapshotted before either output is published, so it may
+    overlap either one individually.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
     const WirehairV2Profile* profile,
@@ -344,7 +348,13 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_validate(
     codec allocation.  message must point to at least messageBytes readable
     bytes.  serializedProfileBytesOut and codecOut are required; the former
     receives the required descriptor size and the latter is set to null on
-    every failure.
+    every failure.  The three output ranges must be pairwise disjoint.
+    Overlap reports WirehairV2_InvalidInput without modifying any output,
+    before those normal failure-output guarantees apply.
+    serializedProfileBytesOut and codecOut also must not overlap message
+    because they are initialized before the message is consumed.  The
+    descriptor output itself may overlap message: encoder initialization
+    consumes the complete message before publishing that descriptor.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     const void* message,
@@ -364,7 +374,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     columns; both mixed/mix2 IDs bind exactly two, with the two-anchor ID also
     binding its adaptive dense construction.  Unknown IDs and invalid mixed
     dimensions are rejected before codec allocation or serialized-profile
-    output writes.
+    output writes.  The output-aliasing rules of wirehair_v2_encoder_create()
+    also apply.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint64_t profileId,
@@ -381,7 +392,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
 
     message must point to at least the descriptor's message_bytes readable
     bytes.  The message is copied before return.  codecOut is required and is
-    set to null on every failure.
+    set to null on every failure.  codecOut is published only after the
+    function has finished any reads it needs from either input, so it may
+    overlap either one.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     const void* message,
@@ -391,7 +404,9 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
 
 /**
     Create a decoder using only the serialized descriptor for dimensions and
-    equation selection.  No out-of-band SeedProfile state is consulted.
+    equation selection.  No out-of-band SeedProfile state is consulted.  The
+    descriptor is no longer read when codecOut is published, so the two may
+    overlap.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     const void* serializedProfile,

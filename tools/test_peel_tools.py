@@ -265,6 +265,58 @@ class PeelCodecTests(unittest.TestCase):
         self.assertEqual(
             peel_codec.family(stock, "200", "0", "2", "100"),
             peel_codec.family(stock, 200, 0, 2, 100))
+        huge = 1 << 4096
+        self.assertIsNone(
+            peel_codec.family(stock, huge, 0, 2, 100))
+        with self.assertRaisesRegex(ValueError, "invalid PMF"):
+            peel_codec.pmf_sha256([huge, 1.0])
+        with self.assertRaisesRegex(ValueError, "invalid peel weight vector"):
+            peel_codec.compare_probe(
+                "unused", 64, 10, 64,
+                peel_weights=[huge, 1.0], seed=1)
+        with self.assertRaisesRegex(
+                ValueError, "invalid staircase degree scale"):
+            peel_codec.compare_probe(
+                "unused", 64, 10, 64, degree_scale=huge, seed=1)
+        for trials, block_bytes in (
+                (peel_codec._COMPARE_TRIALS_MAX + 1, 64),
+                (10, peel_codec._COMPARE_BLOCK_BYTES_MAX + 1),
+                (10, 63)):
+            with self.subTest(trials=trials, block_bytes=block_bytes):
+                with self.assertRaisesRegex(
+                        ValueError, "invalid compare K, trial count, or block"):
+                    peel_codec.compare_probe(
+                        "unused", 64, trials, block_bytes, seed=1)
+
+    @mock.patch("peel_codec.subprocess.run")
+    def test_compare_rejects_boolean_numeric_aliases(self, run):
+        with self.assertRaisesRegex(ValueError, "invalid peel weight vector"):
+            peel_codec.compare_probe(
+                "unused", 64, 10, 64,
+                peel_weights=(value for value in (True, 1.0)), seed=1)
+        with self.assertRaisesRegex(
+                ValueError, "invalid staircase degree scale"):
+            peel_codec.compare_probe(
+                "unused", 64, 10, 64, degree_scale=True, seed=1)
+        run.assert_not_called()
+
+    @mock.patch("peel_codec.subprocess.run")
+    def test_native_pmf_rejects_staircase_outside_production_span(self, run):
+        staircase = peel_codec._production_staircase_max(64) + 1
+        probabilities = [1.0 / 64.0] * 64
+        output = [
+            f"# peelpmf,N=64,degrees=64,staircase={staircase},"
+            f"source_hits=2,shipped_mean={64.0 * 2.0 / staircase:.17g}",
+            "degree,probability",
+        ]
+        output.extend(
+            f"{degree},{probability:.17g}"
+            for degree, probability in enumerate(probabilities, 1))
+        run.return_value = subprocess.CompletedProcess(
+            ["bench"], 0, stdout="\n".join(output) + "\n", stderr="")
+        with self.assertRaisesRegex(
+                peel_codec.MeasurementError, "invalid peelpmf metadata"):
+            peel_codec.stock_profile(sys.executable, 64)
 
     @mock.patch("peel_codec.subprocess.run")
     def test_compare_rejects_semantically_wrong_n_mean(self, run):
@@ -444,6 +496,10 @@ class PeelTableTests(unittest.TestCase):
             ("wrong native shipped mean", lambda d:
              d["entries"]["64"]["native"].__setitem__(
                  "shipped_mean", 99.0)),
+            ("boolean top-level fail alias", lambda d:
+             d["entries"]["64"].__setitem__("fail", False)),
+            ("boolean top-level quantile alias", lambda d:
+             d["entries"]["64"].__setitem__("OH95", True)),
         )
         for label, damage in contradictions:
             with self.subTest(label=label):
@@ -518,6 +574,70 @@ class PeelTableTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     peel_codec.MeasurementError, "non-finite JSON number"):
                 peel_codec.read_table_document_snapshot(path)
+
+    def test_huge_integer_fields_fail_as_measurement_errors(self):
+        document = peel_codec.make_table_document(
+            {64: complete_entry(64)},
+            generator="tools/peel_direct.py",
+            bench=sys.executable,
+            base_seed=1,
+            settings={},
+        )
+        huge = 1 << 4096
+        huge_decimal = 1 << 20000
+        overflow_mutations = (
+            ("search scale", lambda entry:
+             entry["search_receipt"]["coordinates"].__setitem__(
+                 "scale", huge)),
+            ("recovery metric", lambda entry:
+             entry["search_receipt"].__setitem__("decode_mbps", huge)),
+            ("PMF probability", lambda entry:
+             entry["search_receipt"]["peel_pmf"].__setitem__(0, huge)),
+            ("native mean", lambda entry:
+             entry["native"].__setitem__("shipped_mean", huge)),
+        )
+        domain_mutations = (
+            ("trial count", lambda entry:
+             entry["search_receipt"].__setitem__("trials", huge_decimal)),
+            ("block bytes", lambda entry:
+             entry["search_receipt"].__setitem__(
+                 "block_bytes", huge_decimal)),
+            ("odd block bytes", lambda entry:
+             entry["search_receipt"].__setitem__("block_bytes", 63)),
+        )
+        for label, mutate in overflow_mutations:
+            with self.subTest(label=label):
+                damaged = json.loads(json.dumps(document))
+                mutate(damaged["entries"]["64"])
+                with self.assertRaisesRegex(
+                        peel_codec.MeasurementError,
+                        "out-of-range numeric value"):
+                    peel_codec.validate_table_document(damaged)
+        for label, mutate in domain_mutations:
+            with self.subTest(label=label):
+                damaged = json.loads(json.dumps(document))
+                mutate(damaged["entries"]["64"])
+                with self.assertRaisesRegex(
+                        peel_codec.MeasurementError,
+                        "invalid search metadata"):
+                    peel_codec.validate_table_document(damaged)
+
+    def test_stored_native_metadata_rejects_impossible_staircase(self):
+        document = peel_codec.make_table_document(
+            {64: complete_entry(64)},
+            generator="tools/peel_direct.py",
+            bench=sys.executable,
+            base_seed=1,
+            settings={},
+        )
+        native = document["entries"]["64"]["native"]
+        native["staircase"] = 10 ** 400
+        # Without a native-domain bound the expected mean underflows to zero,
+        # and the old absolute tolerance accepted this positive subnormal.
+        native["shipped_mean"] = 5e-324
+        with self.assertRaisesRegex(
+                peel_codec.MeasurementError, "invalid native metadata"):
+            peel_codec.validate_table_document(document)
 
     def test_snapshot_rejects_nonregular_input_before_reading_it(self):
         source = mock.MagicMock()
@@ -732,6 +852,85 @@ class PeelTableTests(unittest.TestCase):
                     peel_codec.MeasurementError,
                     "settings contradict|source selection contradicts"):
                 peel_codec.validate_table_document(damaged)
+            for name, replacement in (
+                    ("source_entry_count", True),
+                    ("selected_entry_count", True),
+                    ("source_table", None),
+                    ("trials", "10"),
+                    ("block_bytes", 63),
+                    ("margin_percent", False),
+                    ("loss", False)):
+                with self.subTest(validation_setting=name):
+                    damaged = json.loads(json.dumps(validated))
+                    damaged["provenance"]["settings"][name] = replacement
+                    with self.assertRaisesRegex(
+                            peel_codec.MeasurementError,
+                            "settings contradict"):
+                        peel_codec.validate_table_document(damaged)
+            damaged = json.loads(json.dumps(validated))
+            damaged["provenance"]["settings"]["trials"] = 11
+            with self.assertRaisesRegex(
+                    peel_codec.MeasurementError,
+                    "receipt contradicts"):
+                peel_codec.validate_table_document(damaged)
+            for name, value in (
+                    ("trials", peel_codec._COMPARE_TRIALS_MAX + 1),
+                    ("block_bytes", 63)):
+                with self.subTest(validation_field=name):
+                    damaged = json.loads(json.dumps(validated))
+                    damaged["entries"]["64"]["validation_receipt"][
+                        name] = value
+                    with self.assertRaisesRegex(
+                            peel_codec.MeasurementError,
+                            "invalid validation metadata"):
+                        peel_codec.validate_table_document(damaged)
+
+    @mock.patch(
+        "peel_validate.stock_profile",
+        side_effect=lambda unused_bench, block_count: fake_profile(block_count))
+    @mock.patch("peel_validate.compare_probe")
+    def test_validated_sweep_retains_nested_unverified_opt_in(
+            self, probe, unused_profile):
+        call_count = 0
+
+        def measured(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return metrics(
+                kwargs["seed"],
+                decode_mbps=1100.0 if call_count == 1 else 1000.0)
+
+        probe.side_effect = measured
+        source = peel_codec.make_table_document(
+            {64: funnel_entry(64, "trained")},
+            generator="tools/peel_sweep.py",
+            bench=sys.executable,
+            base_seed=1,
+            settings={"allow_unverified_cost_model": True},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            table = os.path.join(directory, "sweep.json")
+            output = os.path.join(directory, "validated.json")
+            peel_codec.write_json_atomic(table, source)
+            self.assertEqual(peel_validate.main([
+                "--table", table,
+                "--out", output,
+                "--bench", sys.executable,
+                "--trials", "10",
+                "--bb", "64",
+                "--margin", "0",
+                "--seed", "9",
+            ]), 0)
+            validated, _ = peel_codec.read_table_document(output)
+            nested_settings = validated[
+                "source_provenance"]["provenance"]["settings"]
+            self.assertIs(
+                nested_settings["allow_unverified_cost_model"], True)
+            del nested_settings["allow_unverified_cost_model"]
+            with self.assertRaisesRegex(
+                    peel_codec.MeasurementError,
+                    "missing its unverified-cost opt-in"):
+                peel_codec.validate_table_document(validated)
 
     def test_output_identity_check_fails_closed_on_samefile_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -778,7 +977,7 @@ class PeelTableTests(unittest.TestCase):
                 "--margin", "0",
                 "--seed", "9",
             ]), 0)
-            _, entries = peel_codec.read_table_document(output)
+            validated, entries = peel_codec.read_table_document(output)
             entry = entries[64]
             receipt = entry["validation_receipt"]
             self.assertTrue(entry["reverted_to_shipped"])
@@ -789,6 +988,12 @@ class PeelTableTests(unittest.TestCase):
             self.assertEqual(entry["search_receipt"], original_search)
             self.assertEqual(
                 entry["search_receipt"]["coordinates"]["scale"], -1.0)
+            damaged = json.loads(json.dumps(validated))
+            damaged["entries"]["64"]["gain_pct"] = False
+            with self.assertRaisesRegex(
+                    peel_codec.MeasurementError,
+                    "stale validation summary"):
+                peel_codec.validate_table_document(damaged)
 
     @mock.patch(
         "peel_validate.stock_profile",

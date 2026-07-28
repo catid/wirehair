@@ -53,6 +53,22 @@ PRODUCTION_COMPLETION_REGIME = {
     "packet_row_seed_avalanche": "0",
     "precode_profile_handoff": "encoder-selected-v1",
 }
+# ValidatePrecodeParams() bounds K + S + D2 + H to a uint16 span.  The
+# production mixed profile fixes D2 at twelve rows and its completion height
+# to the GF(256) plus GF(2^16) rows named in the receipt above.  Native PMF
+# metadata comes from that exact profile, so a larger S is not merely
+# surprising: it could not have been produced by a valid production build.
+_PRODUCTION_DENSE_ROWS = 12
+_PRODUCTION_TOTAL_SPAN_MAX = 0xffff
+_PRODUCTION_MIXED_HEAVY_ROWS = (
+    int(PRODUCTION_COMPLETION_REGIME["mixed_gf256_rows"]) +
+    int(PRODUCTION_COMPLETION_REGIME["mixed_gf16_rows"])
+)
+# The native compare parser stores --trials in uint32_t and parses --bb-list
+# through a positive int.  The production mixed arm additionally requires an
+# even payload width for its GF(2^16) rows.
+_COMPARE_TRIALS_MAX = 0xffffffff
+_COMPARE_BLOCK_BYTES_MAX = 0x7fffffff
 PRODUCTION_COMPARE_ARM = {
     "v2_profile": "base",
     "peel_candidates": "16",
@@ -363,6 +379,14 @@ def derive_seed(base_seed, *domain):
 _STOCK_CACHE = {}
 
 
+def _production_staircase_max(block_count):
+    """Largest S accepted by the production mixed precode parameter domain."""
+    return (
+        _PRODUCTION_TOTAL_SPAN_MAX - block_count -
+        _PRODUCTION_DENSE_ROWS - _PRODUCTION_MIXED_HEAVY_ROWS
+    )
+
+
 def stock_profile(bench, block_count):
     """Return the exact native PMF and construction metadata for one K."""
     if (isinstance(block_count, bool) or
@@ -448,6 +472,8 @@ def stock_profile(bench, block_count):
     )
     if (metadata["N"] != block_count or metadata["degrees"] != 64 or
             metadata["staircase"] < 1 or
+            metadata["staircase"] >
+            _production_staircase_max(block_count) or
             not 1 <= metadata["source_hits"] <= 8 or
             not math.isfinite(metadata["shipped_mean"]) or
             metadata["shipped_mean"] <= 0.0 or
@@ -487,7 +513,7 @@ def pmf_sha256(pmf):
     try:
         encoded = ",".join(
             f"{float(probability):.17g}" for probability in pmf).encode("ascii")
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         raise ValueError("invalid PMF")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -497,7 +523,7 @@ def family(stock, p1, tilt, dmax, absorb):
     try:
         coordinates = tuple(float(value)
                             for value in (p1, tilt, dmax, absorb))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return None
     if any(not math.isfinite(value) for value in coordinates):
         return None
@@ -533,15 +559,22 @@ def compare_probe(
             not isinstance(block_count, int) or
             not 2 <= block_count <= 64000 or
             isinstance(trials, bool) or
-            not isinstance(trials, int) or trials < 1 or
+            not isinstance(trials, int) or
+            not 1 <= trials <= _COMPARE_TRIALS_MAX or
             isinstance(block_bytes, bool) or
-            not isinstance(block_bytes, int) or block_bytes < 1):
+            not isinstance(block_bytes, int) or
+            not 1 <= block_bytes <= _COMPARE_BLOCK_BYTES_MAX or
+            block_bytes % 2 != 0):
         raise ValueError("invalid compare K, trial count, or block size")
     overrides = {}
     if peel_weights is not None:
         try:
-            numeric_weights = [float(value) for value in peel_weights]
-        except (TypeError, ValueError):
+            numeric_weights = []
+            for value in peel_weights:
+                if isinstance(value, bool):
+                    raise ValueError("Boolean peel weight")
+                numeric_weights.append(float(value))
+        except (OverflowError, TypeError, ValueError):
             raise ValueError("invalid peel weight vector")
         total_weight = sum(numeric_weights)
         if (not 2 <= len(numeric_weights) <= 64 or
@@ -552,9 +585,11 @@ def compare_probe(
         overrides["WIREHAIR_V2_PEEL_DEGREES"] = ",".join(
             f"{value:.17g}" for value in numeric_weights)
     if degree_scale is not None:
+        if isinstance(degree_scale, bool):
+            raise ValueError("invalid staircase degree scale")
         try:
             numeric_scale = float(degree_scale)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             raise ValueError("invalid staircase degree scale")
         if (not math.isfinite(numeric_scale) or
                 not 0.0 <= numeric_scale <= 64000.0):
@@ -830,8 +865,11 @@ def _validate_search_receipt(
     block_bytes = receipt["block_bytes"]
     if (receipt["mode"] not in ("trained", "shipped") or
             isinstance(trials, bool) or not isinstance(trials, int) or
-            trials < 1 or isinstance(block_bytes, bool) or
-            not isinstance(block_bytes, int) or block_bytes < 1 or
+            not 1 <= trials <= _COMPARE_TRIALS_MAX or
+            isinstance(block_bytes, bool) or
+            not isinstance(block_bytes, int) or
+            not 1 <= block_bytes <= _COMPARE_BLOCK_BYTES_MAX or
+            block_bytes % 2 != 0 or
             receipt["search_kind"] != expected_search_kind or
             isinstance(receipt["base_seed"], bool) or
             not isinstance(receipt["base_seed"], int) or
@@ -987,6 +1025,8 @@ def _validate_native_receipt(receipt, block_count, label):
             isinstance(receipt["staircase"], bool) or
             not isinstance(receipt["staircase"], int) or
             receipt["staircase"] < 1 or
+            receipt["staircase"] >
+            _production_staircase_max(block_count) or
             isinstance(receipt["source_hits"], bool) or
             not isinstance(receipt["source_hits"], int) or
             not 1 <= receipt["source_hits"] <= 8 or
@@ -1025,8 +1065,11 @@ def _validate_validation_receipt(
     block_bytes = receipt["block_bytes"]
     if (receipt["verdict"] not in ("keep", "revert") or
             isinstance(trials, bool) or not isinstance(trials, int) or
-            trials < 1 or isinstance(block_bytes, bool) or
-            not isinstance(block_bytes, int) or block_bytes < 1):
+            not 1 <= trials <= _COMPARE_TRIALS_MAX or
+            isinstance(block_bytes, bool) or
+            not isinstance(block_bytes, int) or
+            not 1 <= block_bytes <= _COMPARE_BLOCK_BYTES_MAX or
+            block_bytes % 2 != 0):
         raise MeasurementError(f"{label} has invalid validation metadata")
     value_names = ("margin_percent", "trained_goodput", "shipped_goodput")
     if any(
@@ -1070,8 +1113,8 @@ def _validate_validation_receipt(
             f"{label} keep verdict does not clear its margin")
 
 
-def validate_table_document(document):
-    """Validate an in-memory current table and return its integer-key entries."""
+def _validate_table_document_impl(document):
+    """Implement strict table validation behind the public numeric boundary."""
     if not isinstance(document, dict):
         raise MeasurementError("peel table root must be an object")
     if document.get("schema") != PEEL_TABLE_SCHEMA:
@@ -1160,6 +1203,8 @@ def validate_table_document(document):
         raise MeasurementError("peel table has invalid provenance fields")
     expected_search_base_seed = provenance["base_seed"]
     source_generator = provenance["generator"]
+    source_settings = provenance["settings"]
+    validation_settings = None
     source_selection = None
     if provenance["generator"] == "tools/peel_validate.py":
         source_provenance = document.get("source_provenance")
@@ -1245,18 +1290,60 @@ def validate_table_document(document):
             raise MeasurementError(
                 "validated peel table changed benchmark identity")
         validation_settings = provenance["settings"]
-        if (validation_settings.get("source_table_sha256") !=
+        required_validation_settings = {
+            "source_table", "source_table_sha256", "source_entry_count",
+            "selected_entry_count", "selected_K", "trials", "block_bytes",
+            "kmax", "margin_percent", "loss",
+        }
+        if (set(validation_settings) != required_validation_settings or
+                not isinstance(
+                    validation_settings.get("source_table"), str) or
+                not validation_settings["source_table"] or
+                validation_settings.get("source_table_sha256") !=
                 source_provenance["document_sha256"] or
+                isinstance(
+                    validation_settings.get("source_entry_count"), bool) or
+                not isinstance(
+                    validation_settings.get("source_entry_count"), int) or
                 validation_settings.get("source_entry_count") !=
                 source_provenance["entry_count"] or
+                isinstance(
+                    validation_settings.get("selected_entry_count"), bool) or
+                not isinstance(
+                    validation_settings.get("selected_entry_count"), int) or
                 validation_settings.get("selected_entry_count") !=
                 source_provenance["selected_entry_count"] or
+                not isinstance(
+                    validation_settings.get("selected_K"), list) or
                 validation_settings.get("selected_K") !=
-                source_provenance["selected_K"]):
+                source_provenance["selected_K"] or
+                isinstance(validation_settings.get("trials"), bool) or
+                not isinstance(validation_settings.get("trials"), int) or
+                not 1 <= validation_settings["trials"] <=
+                _COMPARE_TRIALS_MAX or
+                isinstance(validation_settings.get("block_bytes"), bool) or
+                not isinstance(validation_settings.get("block_bytes"), int) or
+                not 1 <= validation_settings["block_bytes"] <=
+                _COMPARE_BLOCK_BYTES_MAX or
+                validation_settings["block_bytes"] % 2 != 0 or
+                isinstance(validation_settings.get("kmax"), bool) or
+                not isinstance(validation_settings.get("kmax"), int) or
+                validation_settings["kmax"] < 2 or
+                isinstance(validation_settings.get("margin_percent"), bool) or
+                not isinstance(
+                    validation_settings.get("margin_percent"), (int, float)) or
+                not math.isfinite(
+                    float(validation_settings["margin_percent"])) or
+                validation_settings["margin_percent"] < 0.0 or
+                isinstance(validation_settings.get("loss"), bool) or
+                not isinstance(
+                    validation_settings.get("loss"), (int, float)) or
+                validation_settings["loss"] != 0.10):
             raise MeasurementError(
                 "validated peel table settings contradict its source receipt")
         expected_search_base_seed = source_receipt["base_seed"]
         source_generator = source_receipt.get("generator")
+        source_settings = source_receipt["settings"]
     search_protocols = {
         "tools/peel_direct.py": (
             "direct-search", "direct-real-codec"),
@@ -1269,9 +1356,8 @@ def validate_table_document(document):
             f"{source_generator!r}")
     expected_seed_domain, expected_search_kind = search_protocols[
         source_generator]
-    if (provenance["generator"] == "tools/peel_sweep.py" and
-            provenance["settings"].get("allow_unverified_cost_model") is
-            not True):
+    if (source_generator == "tools/peel_sweep.py" and
+            source_settings.get("allow_unverified_cost_model") is not True):
         raise MeasurementError(
             "proxy funnel table is missing its unverified-cost opt-in")
     raw_entries = document.get("entries")
@@ -1339,6 +1425,15 @@ def validate_table_document(document):
             _validate_validation_receipt(
                 validation_receipt, block_count, provenance["base_seed"],
                 f"peel table entry {key}.validation_receipt")
+            if (validation_receipt["trials"] !=
+                    validation_settings["trials"] or
+                    validation_receipt["block_bytes"] !=
+                    validation_settings["block_bytes"] or
+                    validation_receipt["margin_percent"] !=
+                    validation_settings["margin_percent"]):
+                raise MeasurementError(
+                    f"peel table entry {key} validation receipt contradicts "
+                    f"its provenance settings")
             expects_shipped = validation_receipt["verdict"] == "revert"
             if expects_shipped != bool(value.get("reverted_to_shipped")):
                 raise MeasurementError(
@@ -1359,6 +1454,7 @@ def validate_table_document(document):
                 "shipped" if expects_shipped else "trained"]
             selected_goodput = validation_receipt[
                 "shipped_goodput" if expects_shipped else "trained_goodput"]
+            selected_trials = validation_receipt["trials"]
             validation_delta = (
                 None if validation_receipt["shipped_goodput"] == 0.0 else
                 round(
@@ -1369,15 +1465,26 @@ def validate_table_document(document):
                     2)
             )
             expected_gain = validation_delta if not expects_shipped else 0.0
-            if (value.get("verified_mbps") !=
-                    selected_metrics["decode_mbps"] or
-                    value.get("verified_oh") != selected_metrics["oh_mean"] or
-                    value.get("shipped_mbps") !=
-                    validation_receipt["shipped"]["decode_mbps"] or
-                    value.get("gain_pct") != expected_gain or
-                    (expects_shipped and
-                     value.get("search_would_have_lost_pct") !=
-                     validation_delta)):
+            expected_summaries = {
+                "verified_mbps": selected_metrics["decode_mbps"],
+                "verified_oh": selected_metrics["oh_mean"],
+                "shipped_mbps":
+                    validation_receipt["shipped"]["decode_mbps"],
+                "gain_pct": expected_gain,
+            }
+            if expects_shipped:
+                expected_summaries[
+                    "search_would_have_lost_pct"] = validation_delta
+            if (any(
+                    name not in value or
+                    (expected is None and value[name] is not None) or
+                    (expected is not None and (
+                        isinstance(value[name], bool) or
+                        not isinstance(value[name], (int, float)) or
+                        value[name] != expected))
+                    for name, expected in expected_summaries.items()) or
+                    (not expects_shipped and
+                     "search_would_have_lost_pct" in value)):
                 raise MeasurementError(
                     f"peel table entry {key} has stale validation summary")
         elif validation_receipt is not None:
@@ -1391,6 +1498,13 @@ def validate_table_document(document):
             expected_selected_pmf = value["search_receipt"]["peel_pmf"]
             selected_metrics = value["search_receipt"]
             selected_goodput = value["search_receipt"]["goodput"]
+            selected_trials = value["search_receipt"]["trials"]
+        _validate_recovery_metrics(
+            value, selected_trials, f"peel table entry {key} top-level")
+        if (isinstance(value.get("goodput"), bool) or
+                not isinstance(value.get("goodput"), (int, float))):
+            raise MeasurementError(
+                f"peel table entry {key} has invalid top-level goodput")
         if selected_metrics["fail"] != 0:
             raise MeasurementError(
                 f"peel table entry {key} selected a non-decoding arm")
@@ -1420,10 +1534,26 @@ def validate_table_document(document):
         if (source_selection["selected_K"] != selected_k or
                 source_selection["selected_entry_count"] != len(selected_k) or
                 source_selection["entry_count"] <
-                source_selection["selected_entry_count"]):
+                source_selection["selected_entry_count"] or
+                any(k > validation_settings["kmax"] for k in selected_k)):
             raise MeasurementError(
                 "validated peel table source selection contradicts its entries")
     return entries
+
+
+def validate_table_document(document):
+    """Validate a current table, normalizing numeric overflow to refusal."""
+    try:
+        return _validate_table_document_impl(document)
+    except (OverflowError, ValueError) as error:
+        # JSON integer tokens have arbitrary precision in Python.  Every
+        # schema numeric eventually enters binary64 or a fixed native integer
+        # domain; an integer too large for binary64 conversion raises
+        # OverflowError, while one too large for Python's guarded decimal
+        # conversion can raise ValueError while deriving a receipt seed.
+        # Both are malformed input, not unexpected validator crashes.
+        raise MeasurementError(
+            f"peel table contains an out-of-range numeric value: {error}")
 
 
 def _strict_json_object(pairs):

@@ -66,6 +66,23 @@ PeelSolvePlan BuildPeelSolvePlan(
         profile.BlockCount,
         plan.RowCount,
         plan.MatrixSeed);
+    // An empty vector is also the generators' fail-closed result.  Since a
+    // valid plan always requests at least BlockCount rows, do not reinterpret
+    // a rejected codec configuration as a successfully generated zero-row
+    // matrix with a merely poor score.
+    if (plan.Rows.size() != plan.RowCount)
+    {
+        plan.Rows.clear();
+        plan.Evaluation.Rows = plan.RowCount;
+        plan.Evaluation.Columns = profile.BlockCount;
+        plan.Evaluation.ResidualRows = plan.RowCount;
+        plan.Evaluation.ResidualColumns = profile.BlockCount;
+        plan.Evaluation.MatrixRefs = 0u;
+        plan.Evaluation.MatrixXors = 0u;
+        plan.Evaluation.SolveDenseXors = UINT64_MAX;
+        plan.Evaluation.TotalXorCost = UINT64_MAX;
+        return plan;
+    }
     plan.Evaluation = EvaluatePeelingRows(
         profile.Policy.Codec,
         profile.BlockCount,

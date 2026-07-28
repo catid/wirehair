@@ -272,6 +272,9 @@ bool MemoryRangesOverlap(
     const void* second,
     size_t secondBytes)
 {
+    if (firstBytes == 0u || secondBytes == 0u) {
+        return false;
+    }
     const uintptr_t firstBegin = reinterpret_cast<uintptr_t>(first);
     const uintptr_t secondBegin = reinterpret_cast<uintptr_t>(second);
     const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
@@ -283,6 +286,74 @@ bool MemoryRangesOverlap(
     const uintptr_t firstEnd = firstBegin + firstBytes;
     const uintptr_t secondEnd = secondBegin + secondBytes;
     return firstBegin < secondEnd && secondBegin < firstEnd;
+}
+
+bool ProfileCreationArgumentsOverlap(
+    const void* message,
+    uint64_t messageBytes,
+    const void* serializedProfileOut,
+    uint32_t serializedProfileCapacity,
+    const uint32_t* serializedProfileBytesOut,
+    const WirehairV2Codec* codecOut)
+{
+    const size_t serialized_profile_bytes =
+        serializedProfileCapacity < WIREHAIR_V2_PROFILE_SERIALIZED_BYTES ?
+            serializedProfileCapacity :
+            WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    if (serializedProfileOut && serialized_profile_bytes != 0u)
+    {
+        if (serializedProfileBytesOut && MemoryRangesOverlap(
+                serializedProfileOut,
+                serialized_profile_bytes,
+                serializedProfileBytesOut,
+                sizeof(*serializedProfileBytesOut)))
+        {
+            return true;
+        }
+        if (codecOut && MemoryRangesOverlap(
+                serializedProfileOut,
+                serialized_profile_bytes,
+                codecOut,
+                sizeof(*codecOut)))
+        {
+            return true;
+        }
+    }
+    if (serializedProfileBytesOut && codecOut && MemoryRangesOverlap(
+            serializedProfileBytesOut,
+            sizeof(*serializedProfileBytesOut),
+            codecOut,
+            sizeof(*codecOut)))
+    {
+        return true;
+    }
+
+    // Encoder initialization synchronously consumes the message and owns the
+    // solved intermediate vector before the descriptor is published, so the
+    // descriptor output may safely overlap message.  The scalar outputs are
+    // initialized before that consumption and therefore may not overlap it.
+    if (message &&
+        messageBytes <= (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        const size_t message_bytes = (size_t)messageBytes;
+        if (serializedProfileBytesOut && MemoryRangesOverlap(
+                message,
+                message_bytes,
+                serializedProfileBytesOut,
+                sizeof(*serializedProfileBytesOut)))
+        {
+            return true;
+        }
+        if (codecOut && MemoryRangesOverlap(
+                message,
+                message_bytes,
+                codecOut,
+                sizeof(*codecOut)))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
@@ -468,13 +539,28 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
     uint32_t outputCapacity,
     uint32_t* bytesOut)
 {
+    const size_t serialized_bytes =
+        outputCapacity < WIREHAIR_V2_PROFILE_SERIALIZED_BYTES ?
+            outputCapacity :
+            WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
+    if (output && serialized_bytes != 0u && bytesOut &&
+        MemoryRangesOverlap(
+            output, serialized_bytes, bytesOut, sizeof(*bytesOut)))
+    {
+        return WirehairV2_InvalidInput;
+    }
+    WirehairV2Profile profile_snapshot = {};
+    if (profile) {
+        profile_snapshot = *profile;
+    }
     if (bytesOut) {
         *bytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
     if (!profile) {
         return WirehairV2_InvalidInput;
     }
-    const WirehairV2Result validation = ValidateHostProfile(*profile);
+    const WirehairV2Result validation =
+        ValidateHostProfile(profile_snapshot);
     if (validation != WirehairV2_Success) {
         return validation;
     }
@@ -488,10 +574,10 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_profile_serialize(
         (uint16_t)WIREHAIR_V2_PROFILE_ENCODING_VERSION);
     Store16LE(encoded + 6,
         (uint16_t)WIREHAIR_V2_PROFILE_SERIALIZED_BYTES);
-    Store64LE(encoded + 8, profile->profile_id);
-    Store64LE(encoded + 16, profile->message_bytes);
-    Store32LE(encoded + 24, profile->block_bytes);
-    encoded[28] = profile->seed_attempt;
+    Store64LE(encoded + 8, profile_snapshot.profile_id);
+    Store64LE(encoded + 16, profile_snapshot.message_bytes);
+    Store32LE(encoded + 24, profile_snapshot.block_bytes);
+    encoded[28] = profile_snapshot.seed_attempt;
     std::memcpy(output, encoded, sizeof(encoded));
     return WirehairV2_Success;
 }
@@ -575,6 +661,16 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     uint32_t* serializedProfileBytesOut,
     WirehairV2Codec* codecOut)
 {
+    if (ProfileCreationArgumentsOverlap(
+            message,
+            messageBytes,
+            serializedProfileOut,
+            serializedProfileCapacity,
+            serializedProfileBytesOut,
+            codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (serializedProfileBytesOut) {
         *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
@@ -651,6 +747,16 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint32_t* serializedProfileBytesOut,
     WirehairV2Codec* codecOut)
 {
+    if (ProfileCreationArgumentsOverlap(
+            message,
+            messageBytes,
+            serializedProfileOut,
+            serializedProfileCapacity,
+            serializedProfileBytesOut,
+            codecOut))
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (serializedProfileBytesOut) {
         *serializedProfileBytesOut = WIREHAIR_V2_PROFILE_SERIALIZED_BYTES;
     }
@@ -740,19 +846,18 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile(
     if (!codecOut) {
         return WirehairV2_InvalidInput;
     }
-    *codecOut = nullptr;
     WirehairV2Profile profile = {};
     const WirehairV2Result parse_result = wirehair_v2_profile_deserialize(
         serializedProfile, serializedProfileBytes, &profile);
     if (parse_result != WirehairV2_Success) {
+        *codecOut = nullptr;
         return parse_result;
     }
     PublicCodec* codec = nullptr;
     const WirehairV2Result create_result =
         CreateEncoderForProfile(message, profile, codec);
-    if (create_result == WirehairV2_Success) {
-        *codecOut = ToHandle(codec);
-    }
+    *codecOut = create_result == WirehairV2_Success ?
+        ToHandle(codec) : nullptr;
     return create_result;
 }
 
@@ -764,10 +869,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     if (!codecOut) {
         return WirehairV2_InvalidInput;
     }
-    *codecOut = nullptr;
     WirehairV2Profile profile = {};
     const WirehairV2Result parse_result = wirehair_v2_profile_deserialize(
         serializedProfile, serializedProfileBytes, &profile);
+    // No later operation reads serializedProfile, so publishing codecOut from
+    // this point onward is safe even when the caller aliases the two.
+    *codecOut = nullptr;
     if (parse_result != WirehairV2_Success) {
         return parse_result;
     }
