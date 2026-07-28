@@ -1,8 +1,82 @@
 # Resume notes — WH2 peel-training audit
 
-Audit date: 2026-07-27
+Audit date: 2026-07-28
 Branch: `feat/wh2-opcount-cost-model`
-Primary Beads: `wirehair-d45d`, `wirehair-68o1`, `wirehair-tz5b`
+Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
+
+## 2026-07-28 verified same-path timing closure
+
+`wirehair-lnfk` is closed after clause-by-clause acceptance verification on the
+current tree.  The test-only
+native `peeltiming` command now emits
+`wirehair.wh2.peeltiming.v2`: candidate and identity controls both use explicit
+thread-local PMF and staircase-scale hooks through the exact nonpublic
+`dispatch-v1` target.  The no-hook path is untimed and must independently prove
+identical equation rows, packets, intermediate solve bytes, counters, overhead,
+full recovery, and payload.  Candidate/control and identity-A/A panels use
+ABBABAAB slots with odd-replicate label swaps, one exact shared loss trace,
+common recovery prefix, startup and cache preparation outside the timer, and
+decoder-solve-only timing.
+
+The native protocol supports all six bound schedules: IID, burst, permutation,
+systematic-first, repair-only, and adversarial.  Every row receipts raw
+construction/loss seeds, trace identity, full recovery, weak-seed result class,
+phase and operation counters, CPU migration/fault/saturation state, and the
+external cache/CPU/thermal context hash.  Python independently authenticates
+the complete native stream and exact cardinality/order/balance, replays
+semantics, aggregates four adjacent paired log ratios per replicate, forms the
+95 percent Student-t interval across replicates, and applies an independent
+identity-A/A timing floor.  Direct, Funnel, Sweep, and Validate use this paired
+measurement for ranking or promotion; `compare` remains only the cheap recovery
+screen.
+
+Final bug-hunt repairs include:
+
+- zero-RHS structural probing, so RHS-dependent solve failures are not
+  mislabeled as weak equation seeds;
+- ratio-consistent asymmetric log bounds for exact practical margins and
+  half-width-only cross-calibration, preventing equal stock-panel bias from
+  legitimizing itself;
+- complete source/build provenance for `.in`, `.map`, `CMakeLists.txt`,
+  tracked, untracked, and self-ignored `.gitignore` files, repository/global
+  excludes, exact environment/configuration and include candidates,
+  linked-worktree `commondir`, local/worktree config, split-index backing,
+  index/HEAD/multi-hop symbolic refs, legacy `GIT_CONFIG`, relative HOME/XDG
+  semantics, and lexical, resolved, symlink, and hardlink aliases;
+- a sanitizer-specific 7200-second all-K fingerprint timeout while preserving
+  the 3600-second release timeout; and
+- exact production `BUILD_TESTS=OFF` rejection of test-only modes and usage.
+
+Verified current-tree gates are: Release 44/44 CTests, including the exact
+all-K fingerprint in 2397.25 seconds; the other 42/43 Clang
+ASan+UBSan CTests plus the separately rerun monolithic fingerprint in 3823.74
+seconds; five independently sharded sanitizer fingerprints with the exact
+certified/mixed/mix2/two-anchor/dispatch digests below; production
+`build_policy_e2e` in 145.20 seconds; and 113/113 warning-strict Python tests,
+bytecode compilation, and `git diff --check`.  A final post-review focused
+replay of seed selection plus both benchmark CLI suites passed 3/3 in both
+Release and ASan+UBSan builds.  Independent final C++ and Python source-reading
+passes are clean.  Through fuzz seed 2130, 1,758/1,758 sanitizer workers passed
+9,119,320,266 mutations with zero artifacts.
+
+The concurrent hardened thermal worker captured 21,130 complete one-second
+rows over 21,129.000251 seconds.  Whole-session maxima were 85.125 C CPU and
+76.000 C DIMM.  Across the 8,655 samples at or above 90 percent CPU busy,
+average busy was 99.019950 percent, CPU peaked at 75.625 C, and DIMM peaked at
+76.000 C.  Sensor read errors and EDAC corrected/uncorrected counts remained
+zero.  The retained CSV SHA-256 is
+`3b602510fc7b52d5b72360e4e64b8db6b4287704d48909cc2513401a2ece639a`.
+
+The next P0 is `wirehair-za5v`.  Its first implementation step is deliberately
+small: add the canonical mixed P244/D4 10+2 profile to the forced tiny-path
+grid, add a per-call test-only `TinyMixedFastPathAcceptances` counter, require
+one acceptance for every successful forced-on mixed solve and zero for
+forced-off/nonmixed solves, and use width four for mixed profiles.  Only after
+the complete audit/sanitizer/build-policy grid passes should the separate
+`wirehair.wh2.bandtiming.v1` experiment begin.  Cross-codec timing must measure
+decoder receive from first feed through first success because WH1 peels during
+feed; fixed-prefix direct-solve timing is valid only for candidate versus
+dispatch.
 
 ## 2026-07-28 architecture reconciliation
 
@@ -20,10 +94,10 @@ serialized profile; production promotion remains `wirehair-2qlw`.
 
 All earlier small-K/proxy evidence that did not bind this exact target is
 invalid for architecture or parameter selection, independently of its reported
-gain.  After the target/profile plumbing is closed (`wirehair-umrh`,
-`wirehair-uvkr`), the next correctness gate is the same-process, same-hook-path
-paired timing protocol in `wirehair-lnfk`; only then should a fresh table be
-trained and independently validated.
+gain.  The target/profile plumbing (`wirehair-umrh`, `wirehair-uvkr`) and the
+same-process, same-hook-path timing gate (`wirehair-lnfk`) are now complete.
+Fresh table training must use those exact contracts and still requires
+independent validation.
 
 ## 2026-07-28 verified target-plumbing closure
 
@@ -244,8 +318,9 @@ The 2026-07-27 audit receipt is:
 3. Validate candidates on independent seeds, hard/random loss families, the
    intended payload widths, and all relevant K. Record raw weak-seed counts and
    overhead distributions for architecture comparisons before seed fixups.
-   Counterbalance/interleave trained and shipped timing arms before trusting
-   small throughput deltas (`wirehair-lnfk`).
+   Use the closed `wirehair-lnfk` same-process paired protocol for peel
+   rankings; use the separate `wirehair.wh2.bandtiming.v1` scope specified by
+   `wirehair-za5v` for small-K completion-band work.
 4. Only after the architecture and parameter table are frozen, search targeted
    seed fixups and compare WH2 against mainline for solve speed and recovery.
 5. Define either a versioned native coordinate-to-PMF reconstruction or consume

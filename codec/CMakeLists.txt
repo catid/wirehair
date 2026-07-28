@@ -182,8 +182,14 @@ if (BUILD_TESTS)
         TIMEOUT 120)
 
     # All-K equation-freeze fingerprints for every public V2 profile ID.
-    # This sweeps the complete K=2..64000 expansion, so it runs serially
-    # with a generous timeout.
+    # This sweeps the complete K=2..64000 expansion, so it runs serially.
+    # Instrumented sanitizer builds can take more than one hour under the
+    # deliberately saturated validation load used by the WH2 campaign.
+    if(_wirehair_v2_sanitized)
+        set(_wirehair_v2_fingerprint_timeout 7200)
+    else()
+        set(_wirehair_v2_fingerprint_timeout 3600)
+    endif()
     add_executable(wirehair_v2_fingerprint_test V2FingerprintTest.cpp)
     wirehair_apply_project_options(wirehair_v2_fingerprint_test)
     target_link_libraries(wirehair_v2_fingerprint_test wirehair_v2_policy)
@@ -192,7 +198,7 @@ if (BUILD_TESTS)
             $<TARGET_FILE:wirehair_v2_fingerprint_test>)
     set_tests_properties(wirehair_v2_fingerprint_test PROPERTIES
         LABELS "v2;golden;fingerprint;freeze"
-        TIMEOUT 3600
+        TIMEOUT ${_wirehair_v2_fingerprint_timeout}
         RUN_SERIAL TRUE)
     add_test(NAME wirehair_v2_fingerprint_cli_test
         COMMAND ${CMAKE_COMMAND}
@@ -344,13 +350,22 @@ target_link_libraries(wirehair_v2_resume_bench wirehair_v2_policy)
 wirehair_apply_project_options(wirehair_v2_resume_bench)
 
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(_wirehair_v2_peeltiming_supported 1)
+    else()
+        set(_wirehair_v2_peeltiming_supported 0)
+    endif()
     add_test(
         NAME wirehair_v2_bench_cli_test
         COMMAND ${_wirehair_v2_clean_test_command} ${CMAKE_COMMAND}
             -DBENCH=$<TARGET_FILE:wirehair_v2_bench>
             -DSKIP_CONSTRAINED=${_wirehair_v2_sanitized}
+            -DPEELTIMING_SUPPORTED=${_wirehair_v2_peeltiming_supported}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchCliTest.cmake)
-    set_tests_properties(wirehair_v2_bench_cli_test PROPERTIES TIMEOUT 120)
+    set_tests_properties(
+        wirehair_v2_bench_cli_test PROPERTIES
+        TIMEOUT 120
+        PROCESSOR_AFFINITY TRUE)
 
     # Compile the test-hook CLI with only the preferred-attempt experiment
     # suppressed.  This isolates the command-gating macro; build_policy_e2e is
@@ -366,7 +381,10 @@ if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
         NAME wirehair_v2_bench_no_preferred_cli_test
         COMMAND ${_wirehair_v2_clean_test_command} ${CMAKE_COMMAND}
             -DBENCH=$<TARGET_FILE:wirehair_v2_bench_no_preferred_test>
+            -DPEELTIMING_SUPPORTED=${_wirehair_v2_peeltiming_supported}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/V2BenchNoPreferredCliTest.cmake)
     set_tests_properties(
-        wirehair_v2_bench_no_preferred_cli_test PROPERTIES TIMEOUT 30)
+        wirehair_v2_bench_no_preferred_cli_test PROPERTIES
+        TIMEOUT 30
+        PROCESSOR_AFFINITY TRUE)
 endif()

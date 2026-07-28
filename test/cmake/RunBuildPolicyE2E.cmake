@@ -318,20 +318,39 @@ foreach(target_override IN ITEMS
     endif()
 endforeach()
 
+set(production_bench_usage
+    "usage: wirehair_v2_bench compare|precodecheck|seedtable|peelcost|densecheck|densetune|densecount|densegrid|precodefail|selftest [opts]\n")
 execute_process(
     COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
-        preferredattempt
-    RESULT_VARIABLE preferred_result
-    OUTPUT_VARIABLE preferred_out
-    ERROR_VARIABLE preferred_err
+    RESULT_VARIABLE production_usage_result
+    OUTPUT_VARIABLE production_usage_out
+    ERROR_VARIABLE production_usage_err
     TIMEOUT 10)
-if(NOT preferred_result EQUAL 1 OR NOT preferred_out STREQUAL "" OR
-   NOT preferred_err STREQUAL "unknown mode: preferredattempt\n")
+if(NOT production_usage_result EQUAL 1 OR
+   NOT production_usage_out STREQUAL "" OR
+   NOT production_usage_err STREQUAL production_bench_usage)
     message(FATAL_ERROR
-        "BUILD_TESTS=OFF benchmark exposed preferredattempt\n"
-        "rc=${preferred_result}\nstdout=${preferred_out}\n"
-        "stderr=${preferred_err}")
+        "BUILD_TESTS=OFF benchmark usage exposed test-only modes\n"
+        "rc=${production_usage_result}\nstdout=${production_usage_out}\n"
+        "stderr=${production_usage_err}")
 endif()
+
+foreach(test_only_mode IN ITEMS preferredattempt peeltiming)
+    execute_process(
+        COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
+            "${test_only_mode}"
+        RESULT_VARIABLE test_only_result
+        OUTPUT_VARIABLE test_only_out
+        ERROR_VARIABLE test_only_err
+        TIMEOUT 10)
+    if(NOT test_only_result EQUAL 1 OR NOT test_only_out STREQUAL "" OR
+       NOT test_only_err STREQUAL "unknown mode: ${test_only_mode}\n")
+        message(FATAL_ERROR
+            "BUILD_TESTS=OFF benchmark exposed ${test_only_mode}\n"
+            "rc=${test_only_result}\nstdout=${test_only_out}\n"
+            "stderr=${test_only_err}")
+    endif()
+endforeach()
 
 file(READ "${PROJECT_SOURCE_DIR}/CMakeLists.txt" root_cmake)
 if(root_cmake MATCHES "add_compile_options[ \t\r\n]*\\([ \t\r\n]*-w" OR

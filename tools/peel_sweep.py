@@ -7,23 +7,32 @@ K produced a complete real-codec receipt.
 """
 import argparse
 import math
+import os
 import subprocess
 import sys
 import time
 
-HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from peel_codec import (                                  # noqa: E402
     MeasurementError,
+    PEELTIMING_EVICT_BYTES_MAX,
     PROXY_K_LADDER,
-    RecoveryMetrics,
+    _native_peel_cdf_signature,
+    _validate_paired_measurement_receipt,
     capture_artifact_identity,
     derive_seed,
     family,
+    make_paired_search_receipt,
     make_table_document,
-    make_search_receipt,
+    paired_context_thermal_source,
+    paired_selected_metrics,
+    require_distinct_from_source_provenance,
+    require_distinct_paths,
     stock_profile,
     strict_json_loads,
+    validate_paired_stock_control_receipt,
+    validate_peeltiming_dimensions,
     valid_loss_rate,
     write_json_atomic,
 )
@@ -64,12 +73,26 @@ def gate_cfg(k):
     return (25, 64, 3)
 
 
-def real_trials_for(k):
-    """Trials for the real-codec ranking stage."""
-    if k <= 512:   return 800
-    if k <= 4096:  return 400
-    if k <= 16384: return 200
-    return 100
+def _close_optional_log(logf, failure=None):
+    """Best-effort failure note and close for a non-authoritative text log."""
+    if logf is None:
+        return []
+    errors = []
+    if failure is not None:
+        try:
+            logf.write(f"=== FAILED ===\n{failure}\n")
+        except OSError as error:
+            errors.append(f"could not append failure note: {error}")
+    try:
+        logf.close()
+    except OSError as error:
+        errors.append(f"could not close log: {error}")
+    return errors
+
+
+def _report_log_errors(errors):
+    for error in errors:
+        print(f"  WARNING: optional log {error}", file=sys.stderr)
 
 
 def warm_start(best):
@@ -83,11 +106,13 @@ def warm_start(best):
 
 
 def run_one(
-        bench, k, init, construction_seed_base, loss_seed_base, real_trials,
-        allow_unverified_cost_model, *, target_profile, seed_policy, loss,
-        schedule):
+        bench, k, init, construction_seed_base, loss_seed_base,
+        paired_replicates, allow_unverified_cost_model, *,
+        target_profile, seed_policy, loss, schedule, paired_context,
+        paired_warmups, paired_inner_reps, max_overhead, cache_state,
+        evict_bytes, rank_margin):
     s, r, f, sc = budget(k)
-    rt = real_trials or real_trials_for(k)
+    rt = paired_replicates
     rank_bb = 4096
     threads = 64
     batch = 60
@@ -121,9 +146,16 @@ def run_one(
     if init is not None:
         cmd += ["--init", ",".join(str(x) for x in init)]
     gt, gbb, rtop = gate_cfg(k)
-    cmd += ["--real-trials", str(rt), "--gate-trials", str(gt),
+    cmd += ["--paired-replicates", str(rt), "--gate-trials", str(gt),
             "--gate-bb", str(gbb), "--rank-bb", str(rank_bb),
-            "--rank-top", str(rtop)]
+            "--rank-top", str(rtop),
+            "--paired-context", paired_context,
+            "--paired-warmups", str(paired_warmups),
+            "--paired-inner-reps", str(paired_inner_reps),
+            "--max-overhead", str(max_overhead),
+            "--cache-state", cache_state,
+            "--evict-bytes", str(evict_bytes),
+            "--rank-margin", f"{rank_margin:.17g}"]
     t0 = time.time()
     try:
         p = subprocess.run(cmd, capture_output=True, text=True)
@@ -152,230 +184,192 @@ def run_one(
             f"peel_funnel emitted no complete winner receipt for K={k}")
     expected_receipt_fields = {
         "schema", "K", "mode", "coordinates", "peel_pmf", "goodput",
-        "trials", "block_bytes", "rejected", "shipped_control",
-        "shipped_goodput", "construction_seed", "loss_seed",
-        "target_receipt", "fail", "oh_mean", "OH_sd", "OH50", "OH95",
-        "OH99", "OH_max", "decode_mbps",
+        "trials", "block_bytes", "rejected", "evaluated_coordinates",
+        "evaluated_pmf", "paired_measurement", "stock_control_source",
+        "stock_control_measurement", "shipped_goodput",
+        "fail", "oh_mean", "OH_sd", "OH50", "OH95", "OH99", "OH_max",
+        "solve_mbps",
+    }
+    coordinate_names = ("scale", "p1", "tilt", "dmax", "absorb")
+    stock_coordinates = {
+        "scale": -1.0, "p1": 100, "tilt": 0,
+        "dmax": 64, "absorb": 100,
     }
     if (set(receipt) != expected_receipt_fields or
             receipt.get("schema") != FUNNEL_RESULT_SCHEMA or
-            receipt.get("K") != k or
-            type(receipt.get("K")) is not int or
-            receipt.get("mode") not in
-            ("trained", "scale-only", "shipped") or
-            receipt.get("trials") != rt or
+            type(receipt.get("K")) is not int or receipt["K"] != k or
+            receipt.get("mode") not in ("trained", "scale-only", "shipped") or
             type(receipt.get("trials")) is not int or
-            receipt.get("block_bytes") != rank_bb or
+            receipt["trials"] != rt or
             type(receipt.get("block_bytes")) is not int or
+            receipt["block_bytes"] != rank_bb or
             type(receipt.get("rejected")) is not int or
-            # Each proxy finalist can add one canonical scale-only gate arm.
             not 0 <= receipt["rejected"] <= 2 * f or
-            not isinstance(receipt.get("coordinates"), dict) or
-            not isinstance(receipt.get("peel_pmf"), list) or
-            not isinstance(receipt.get("shipped_control"), dict)):
+            not isinstance(receipt.get("paired_measurement"), dict) or
+            any(type(receipt.get(name)) is not float for name in (
+                "goodput", "shipped_goodput", "oh_mean", "OH_sd", "OH50",
+                "OH95", "OH99", "OH_max", "solve_mbps")) or
+            type(receipt.get("fail")) is not int):
         raise MeasurementError(
-            f"peel_funnel emitted invalid winner metadata for K={k}")
-    coordinates = receipt["coordinates"]
-    coordinate_names = ("scale", "p1", "tilt", "dmax", "absorb")
-    if (set(coordinates) != set(coordinate_names) or
-            type(coordinates["scale"]) is not float or
-            any(type(coordinates[name]) is not int
-                for name in ("p1", "tilt", "dmax", "absorb")) or
-            any(
-                type(receipt.get(name)) is not int
-                for name in ("construction_seed", "loss_seed")) or
-            not isinstance(receipt.get("target_receipt"), dict) or
-            type(receipt.get("fail")) is not int or
-            any(type(receipt.get(name)) is not float
-                for name in (
-                    "goodput", "decode_mbps", "oh_mean", "OH_sd", "OH50",
-                    "OH95", "OH99", "OH_max", "shipped_goodput"))):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid typed metrics for K={k}")
-    try:
-        best = {
-            "goodput": float(receipt["goodput"]),
-            "decode_mbps": float(receipt["decode_mbps"]),
-            "oh_mean": float(receipt["oh_mean"]),
-            "scale": float(coordinates["scale"]),
-            "p1": int(coordinates["p1"]),
-            "tilt": int(coordinates["tilt"]),
-            "dmax": int(coordinates["dmax"]),
-            "absorb": int(coordinates["absorb"]),
-            "fail": int(receipt["fail"]),
-            "OH_sd": float(receipt["OH_sd"]),
-            "OH50": float(receipt["OH50"]),
-            "OH95": float(receipt["OH95"]),
-            "OH99": float(receipt["OH99"]),
-            "OH_max": float(receipt["OH_max"]),
-            "construction_seed": int(receipt["construction_seed"]),
-            "loss_seed": int(receipt["loss_seed"]),
-            "target_receipt": dict(receipt["target_receipt"]),
-            **({"reverted_to_shipped": True}
-               if receipt["mode"] == "shipped" else {}),
-            "peel_pmf": receipt["peel_pmf"],
-        }
-    except (KeyError, TypeError, ValueError, OverflowError) as error:
-        raise MeasurementError(
-            f"peel_funnel emitted incomplete winner metrics for K={k}: "
-            f"{error}")
-    if (
-            any(best[name] != coordinates[name] for name in coordinate_names)):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid winner coordinates for K={k}")
-    if (receipt["mode"] == "shipped" and
-            coordinates != {
-                "scale": -1.0, "p1": 100, "tilt": 0,
-                "dmax": 64, "absorb": 100,
-            }):
-        raise MeasurementError(
-            f"peel_funnel emitted non-production shipped coordinates for K={k}")
-    if receipt["mode"] in ("trained", "scale-only") and best["scale"] < 0.0:
-        raise MeasurementError(
-            f"peel_funnel emitted an unset scale for a trained arm at K={k}")
-    finite_fields = (
-        "goodput", "decode_mbps", "oh_mean", "OH_sd", "OH50",
-        "OH95", "OH99", "OH_max")
-    if (any(not math.isfinite(best[name]) or best[name] < 0.0
-            for name in finite_fields) or
-            not math.isfinite(best["scale"]) or
-            (best["scale"] != -1.0 and
-             not 0.0 <= best["scale"] <= 64000.0) or
-            not 0 <= best["p1"] <= 400 or
-            not -100 <= best["tilt"] <= 1600 or
-            not 2 <= best["dmax"] <= 64 or
-            not 0 <= best["absorb"] <= 100 or
-            best["fail"] != 0 or
-            not 0 <= best["construction_seed"] <= 0xffffffffffffffff or
-            not 0 <= best["loss_seed"] <= 0xffffffffffffffff or
-            best["oh_mean"] > best["OH_max"] or
-            not (best["OH50"] <= best["OH95"] <= best["OH99"] <=
-                 best["OH_max"])):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid recovery metrics for K={k}")
-    if receipt["mode"] in ("trained", "scale-only"):
-        scale_centi = int(round(best["scale"] * 100.0))
-        if (not box[0][1] <= scale_centi <= box[0][2] or
-                best["scale"] != scale_centi / 100.0):
+            f"peel_funnel emitted invalid paired winner metadata for K={k}")
+
+    def checked_coordinates(value, label):
+        if (not isinstance(value, dict) or
+                set(value) != set(coordinate_names) or
+                type(value.get("scale")) is not float or
+                any(type(value.get(name)) is not int
+                    for name in ("p1", "tilt", "dmax", "absorb"))):
             raise MeasurementError(
-                f"peel_funnel emitted an off-lattice scale for K={k}")
+                f"peel_funnel emitted invalid {label} for K={k}")
+        scale = value["scale"]
+        if (not math.isfinite(scale) or
+                (scale != -1.0 and not 0.0 <= scale <= 64000.0) or
+                not 0 <= value["p1"] <= 400 or
+                not -100 <= value["tilt"] <= 1600 or
+                not 2 <= value["dmax"] <= 64 or
+                not 0 <= value["absorb"] <= 100):
+            raise MeasurementError(
+                f"peel_funnel emitted out-of-domain {label} for K={k}")
+        if scale != -1.0:
+            scale_centi = int(round(scale * 100.0))
+            if (not box[0][1] <= scale_centi <= box[0][2] or
+                    scale != scale_centi / 100.0):
+                raise MeasurementError(
+                    f"peel_funnel emitted off-lattice {label} for K={k}")
+        return dict(value)
+
+    coordinates = checked_coordinates(receipt["coordinates"], "coordinates")
+    evaluated_coordinates = checked_coordinates(
+        receipt["evaluated_coordinates"], "evaluated coordinates")
+    for name in ("peel_pmf", "evaluated_pmf"):
+        pmf = receipt.get(name)
+        if (not isinstance(pmf, list) or
+                any(type(probability) is not float for probability in pmf)):
+            raise MeasurementError(
+                f"peel_funnel emitted invalid {name} for K={k}")
+
+    evaluated_shape_is_stock = (
+        evaluated_coordinates["p1"] == 100 and
+        evaluated_coordinates["tilt"] == 0 and
+        evaluated_coordinates["dmax"] == 64 and
+        evaluated_coordinates["absorb"] == 100
+    )
+    expected_evaluated_pmf = (
+        list(profile.pmf) if evaluated_shape_is_stock else
+        family(
+            profile.pmf,
+            evaluated_coordinates["p1"],
+            evaluated_coordinates["tilt"],
+            evaluated_coordinates["dmax"],
+            evaluated_coordinates["absorb"],
+        )
+    )
+    if (expected_evaluated_pmf is None or
+            receipt["evaluated_pmf"] != expected_evaluated_pmf):
+        raise MeasurementError(
+            f"peel_funnel emitted an evaluated PMF mismatch for K={k}")
+    evaluated_semantics_are_stock = (
+        _native_peel_cdf_signature(receipt["evaluated_pmf"], k) ==
+        _native_peel_cdf_signature(profile.pmf, k)
+    )
     expected_construction_seed = derive_seed(
         construction_seed_base, "funnel-search", k, "rank", rt, rank_bb,
         "construction")
     expected_loss_seed = derive_seed(
         loss_seed_base, "funnel-search", k, "rank", rt, rank_bb, "loss")
-    if (best["construction_seed"] != expected_construction_seed or
-            best["loss_seed"] != expected_loss_seed):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid rank construction/loss seeds "
-            f"for K={k}")
-    expected_pmf = (
-        list(profile.pmf)
-        if receipt["mode"] in ("shipped", "scale-only") else
-        family(
-            profile.pmf, best["p1"], best["tilt"],
-            best["dmax"], best["absorb"])
+    measurement = _validate_paired_measurement_receipt(
+        receipt["paired_measurement"],
+        block_count=k,
+        block_bytes=rank_bb,
+        candidate_pmf=receipt["evaluated_pmf"],
+        degree_scale=(
+            None if evaluated_coordinates["scale"] == -1.0
+            else evaluated_coordinates["scale"]),
+        native=profile.as_dict(),
+        measurement_policy={
+            "target_profile": target_profile,
+            "seed_policy": seed_policy,
+            "loss": float(loss),
+            "schedule": schedule,
+        },
+        construction_seed=expected_construction_seed,
+        loss_seed=expected_loss_seed,
+        label=f"peel_funnel K={k} paired_measurement",
     )
-    if (any(type(probability) is not float
-            for probability in best["peel_pmf"]) or
-            expected_pmf is None or best["peel_pmf"] != expected_pmf):
+    manifest = measurement.manifest
+    if (manifest["warmup_replicates"] != paired_warmups or
+            manifest["replicates"] != paired_replicates or
+            manifest["inner_reps"] != paired_inner_reps or
+            manifest["max_overhead"] != max_overhead or
+            manifest["cache_state"] != cache_state or
+            manifest["evict_bytes"] != evict_bytes or
+            measurement.required_margin != rank_margin):
         raise MeasurementError(
-            f"peel_funnel emitted a PMF/coordinate mismatch for K={k}")
-    measurement = RecoveryMetrics(
-        construction_seed=best["construction_seed"],
-        loss_seed=best["loss_seed"],
-        target_receipt=best["target_receipt"],
-        fail=best["fail"],
-        oh_mean=best["oh_mean"],
-        oh_sd=best["OH_sd"],
-        oh50=best["OH50"],
-        oh95=best["OH95"],
-        oh99=best["OH99"],
-        oh_max=best["OH_max"],
-        decode_mbps=best["decode_mbps"],
-    )
-    candidate_goodput = measurement.goodput(k)
-    if best["goodput"] != candidate_goodput:
-        raise MeasurementError(
-            f"peel_funnel emitted inconsistent goodput for K={k}")
-    shipped_raw = receipt["shipped_control"]
-    expected_metric_fields = {
-        "construction_seed", "loss_seed", "target_receipt", "fail",
-        "oh_mean", "OH_sd", "OH50", "OH95", "OH99", "OH_max",
-        "decode_mbps",
-    }
-    if (set(shipped_raw) != expected_metric_fields or
-            any(
-                type(shipped_raw.get(name)) is not int
-                for name in ("construction_seed", "loss_seed")) or
-            not isinstance(shipped_raw.get("target_receipt"), dict) or
-            type(shipped_raw.get("fail")) is not int or
-            any(type(shipped_raw.get(name)) is not float
-                for name in (
-                    "oh_mean", "OH_sd", "OH50", "OH95", "OH99",
-                    "OH_max", "decode_mbps"))):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid shipped-control types for K={k}")
-    try:
-        shipped_control = RecoveryMetrics(
-            construction_seed=int(shipped_raw["construction_seed"]),
-            loss_seed=int(shipped_raw["loss_seed"]),
-            target_receipt=dict(shipped_raw["target_receipt"]),
-            fail=int(shipped_raw["fail"]),
-            oh_mean=float(shipped_raw["oh_mean"]),
-            oh_sd=float(shipped_raw["OH_sd"]),
-            oh50=float(shipped_raw["OH50"]),
-            oh95=float(shipped_raw["OH95"]),
-            oh99=float(shipped_raw["OH99"]),
-            oh_max=float(shipped_raw["OH_max"]),
-            decode_mbps=float(shipped_raw["decode_mbps"]),
-        )
-        shipped_goodput = receipt["shipped_goodput"]
-    except (KeyError, TypeError, ValueError, OverflowError) as error:
-        raise MeasurementError(
-            f"peel_funnel emitted incomplete shipped-control metrics "
-            f"for K={k}: {error}")
-    shipped_values = (
-        shipped_control.oh_mean, shipped_control.oh_sd,
-        shipped_control.oh50, shipped_control.oh95,
-        shipped_control.oh99, shipped_control.oh_max,
-        shipped_control.decode_mbps,
-    )
-    canonical_shipped_goodput = shipped_control.goodput(k)
-    if (shipped_control.construction_seed != expected_construction_seed or
-            shipped_control.loss_seed != expected_loss_seed or
-            not 0 <= shipped_control.fail <= rt or
-            any(not math.isfinite(value) or value < 0.0
-                for value in shipped_values) or
-            shipped_control.oh_mean > shipped_control.oh_max or
-            not (shipped_control.oh50 <= shipped_control.oh95 <=
-                 shipped_control.oh99 <= shipped_control.oh_max) or
-            not math.isfinite(shipped_goodput) or
-            shipped_goodput != canonical_shipped_goodput):
-        raise MeasurementError(
-            f"peel_funnel emitted invalid shipped-control metrics for K={k}")
-    if (receipt["mode"] in ("trained", "scale-only") and
-            not candidate_goodput > canonical_shipped_goodput):
-        raise MeasurementError(
-            f"peel_funnel selected a candidate that did not beat shipped "
-            f"for K={k}")
-    if (receipt["mode"] == "shipped" and
-            (measurement.as_dict() != shipped_control.as_dict() or
-             candidate_goodput != canonical_shipped_goodput)):
-        raise MeasurementError(
-            f"peel_funnel shipped winner contradicts its control for K={k}")
-    best["goodput"] = candidate_goodput
-    shipped_goodput = canonical_shipped_goodput
+            f"peel_funnel paired receipt contradicts invocation for K={k}")
+
     mode = receipt["mode"]
+    control_measurement = validate_paired_stock_control_receipt(
+        mode=mode,
+        source=receipt["stock_control_source"],
+        receipt=receipt["stock_control_measurement"],
+        selected_measurement=measurement,
+        block_count=k,
+        block_bytes=rank_bb,
+        native=profile.as_dict(),
+        measurement_policy={
+            "target_profile": target_profile,
+            "seed_policy": seed_policy,
+            "loss": float(loss),
+            "schedule": schedule,
+        },
+        construction_seed=expected_construction_seed,
+        loss_seed=expected_loss_seed,
+        label=f"peel_funnel K={k} stock control",
+    )
+    if mode == "shipped":
+        if (coordinates != stock_coordinates or
+                evaluated_coordinates != stock_coordinates or
+                receipt["peel_pmf"] != list(profile.pmf) or
+                receipt["evaluated_pmf"] != list(profile.pmf)):
+            raise MeasurementError(
+                f"peel_funnel shipped fallback is not its predeclared "
+                f"stock control for K={k}")
+        selected = measurement.identity
+    else:
+        expected_mode = (
+            "scale-only"
+            if evaluated_semantics_are_stock
+            else "trained")
+        if (mode != expected_mode or coordinates != evaluated_coordinates or
+                receipt["peel_pmf"] != receipt["evaluated_pmf"] or
+                (expected_mode == "scale-only" and
+                 not evaluated_shape_is_stock) or
+                not measurement.valid_for_promotion):
+            raise MeasurementError(
+                f"peel_funnel selected an ineligible candidate for K={k}")
+        selected = measurement.candidate
+    selected_metrics = selected.as_dict()
+    if (any(receipt[name] != selected_metrics[name]
+            for name in selected_metrics) or
+            receipt["goodput"] != selected.goodput(k) or
+            receipt["shipped_goodput"] != measurement.identity.goodput(k)):
+        raise MeasurementError(
+            f"peel_funnel emitted stale paired summaries for K={k}")
+    best = {
+        **coordinates,
+        **selected_metrics,
+        "goodput": selected.goodput(k),
+        "peel_pmf": list(receipt["peel_pmf"]),
+        **({"reverted_to_shipped": True} if mode == "shipped" else {}),
+    }
     best.update(K=k, S=profile.staircase,
                 source_hits=profile.source_hits,
                 target_mean=profile.target_mean,
                 native=profile.as_dict(),
-                search_receipt=make_search_receipt(
+                search_receipt=make_paired_search_receipt(
                     measurement,
                     mode=mode,
-                    goodput=best["goodput"],
-                    trials=rt,
+                    block_count=k,
                     block_bytes=rank_bb,
                     search_kind="unverified-proxy-funnel",
                     construction_seed_base=construction_seed_base,
@@ -387,8 +381,11 @@ def run_one(
                             "scale", "p1", "tilt", "dmax", "absorb")
                     },
                     peel_pmf=best["peel_pmf"],
-                    shipped_control=shipped_control,
-                    shipped_goodput=shipped_goodput,
+                    evaluated_coordinates=evaluated_coordinates,
+                    evaluated_pmf=receipt["evaluated_pmf"],
+                    stock_control_measurement=(
+                        None if mode == "shipped" else
+                        control_measurement),
                     context={
                         "proxy_cost_model": PROXY_COST_MODEL,
                         "proxy_measure_regime": dict(PROXY_MEASURE_REGIME),
@@ -414,7 +411,7 @@ def run_one(
                 seconds=round(el, 1),
                 screen=s, screen_cells=sc, finals=f,
                 rejected=receipt["rejected"],
-                real_trials=rt)
+                paired_replicates=rt)
     return best, p.stdout, p.stderr
 
 
@@ -424,23 +421,43 @@ def main(argv=None):
     ap.add_argument("--out", default="tools/peel_table.json")
     ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
     ap.add_argument("--seed-policy", required=True, choices=["raw"])
-    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument(
+        "--schedule", required=True,
+        choices=[
+            "iid", "burst", "permutation", "systematic-first",
+            "repair-only", "adversarial",
+        ])
     ap.add_argument("--loss", type=float, required=True)
     ap.add_argument("--construction-seed", type=int, required=True)
     ap.add_argument("--loss-seed", type=int, required=True)
-    ap.add_argument("--real-trials", type=int, default=0,
-                    help="0 = scale with K via real_trials_for()")
+    ap.add_argument(
+        "--paired-replicates", type=int, default=16,
+        help="even measured replicate count for each final paired timing run")
+    ap.add_argument("--paired-context", required=True)
+    ap.add_argument("--paired-warmups", type=int, default=2)
+    ap.add_argument("--paired-inner-reps", type=int, default=1)
+    ap.add_argument("--max-overhead", type=int, default=512)
+    ap.add_argument("--cache-state", choices=["warm", "cold"], default="warm")
+    ap.add_argument("--evict-bytes", type=int, default=64 * 1024 * 1024)
+    ap.add_argument("--rank-margin", type=float, default=0.0)
     ap.add_argument("--kmax", type=int, default=64000)
     ap.add_argument("--log", default=None)
     ap.add_argument(
         "--allow-unverified-cost-model", action="store_true",
         help="explicitly opt in to the proxy whose raw calibration is missing")
     a = ap.parse_args(argv)
-    if (a.real_trials < 0 or not 2 <= a.kmax <= 64000 or
+    if (a.paired_replicates < 4 or a.paired_replicates % 2 != 0 or
+            a.paired_warmups < 0 or a.paired_warmups % 2 != 0 or
+            not 1 <= a.paired_inner_reps <= 1024 or
+            a.max_overhead < 0 or
+            not 4096 <= a.evict_bytes <= PEELTIMING_EVICT_BYTES_MAX or
+            (a.cache_state == "cold" and a.paired_inner_reps != 1) or
+            not 0.0 <= a.rank_margin <= 1.0 or
+            not 2 <= a.kmax <= 64000 or
             not valid_loss_rate(a.loss) or
             not 0 <= a.construction_seed <= 0xffffffffffffffff or
             not 0 <= a.loss_seed <= 0xffffffffffffffff):
-        ap.error("invalid trial count, K, loss, or uint64 seed")
+        ap.error("invalid paired settings, K, loss, or uint64 seed")
     if not a.allow_unverified_cost_model:
         print(
             f"REFUSED: proxy cost model {PROXY_COST_MODEL!r} is unverified; "
@@ -449,23 +466,71 @@ def main(argv=None):
             file=sys.stderr)
         return 2
 
+    ks = [k for k in k_list() if k <= a.kmax]
+    if not ks:
+        print("REFUSED: --kmax selects no proxy-table K values", file=sys.stderr)
+        return 2
+    try:
+        for k in ks:
+            validate_peeltiming_dimensions(
+                block_count=k,
+                block_bytes=4096,
+                target_profile=a.target_profile,
+                seed_policy=a.seed_policy,
+                construction_seed=a.construction_seed,
+                loss=a.loss,
+                loss_seed=a.loss_seed,
+                schedule=a.schedule,
+                warmup_replicates=a.paired_warmups,
+                replicates=a.paired_replicates,
+                inner_reps=a.paired_inner_reps,
+                max_overhead=a.max_overhead,
+                cache_state=a.cache_state,
+                evict_bytes=a.evict_bytes,
+                required_margin=a.rank_margin,
+            )
+    except ValueError as error:
+        ap.error(str(error))
+    try:
+        require_distinct_paths(
+            a.out, a.bench, "--out", "the benchmark executable")
+        require_distinct_paths(
+            a.out, a.paired_context, "--out", "--paired-context")
+        require_distinct_from_source_provenance(
+            a.out, "--out", "tools/peel_sweep.py")
+        if a.log is not None:
+            require_distinct_paths(
+                a.log, a.bench, "--log", "the benchmark executable")
+            require_distinct_paths(
+                a.log, a.paired_context, "--log", "--paired-context")
+            require_distinct_paths(a.log, a.out, "--log", "--out")
+            require_distinct_from_source_provenance(
+                a.log, "--log", "tools/peel_sweep.py")
+        thermal_source = paired_context_thermal_source(a.paired_context)
+        require_distinct_paths(
+            a.out, thermal_source, "--out", "the live thermal CSV")
+        if a.log is not None:
+            require_distinct_paths(
+                a.log, thermal_source, "--log", "the live thermal CSV")
+    except MeasurementError as error:
+        print(f"REFUSED output: {error}", file=sys.stderr)
+        return 2
     try:
         identity = capture_artifact_identity(
             a.bench, "tools/peel_sweep.py")
     except MeasurementError as error:
         print(f"REFUSED measurement: {error}", file=sys.stderr)
         return 2
-    ks = [k for k in k_list() if k <= a.kmax]
-    if not ks:
-        print("REFUSED: --kmax selects no proxy-table K values", file=sys.stderr)
-        return 2
     pivot = 128 if 128 in ks else ks[len(ks) // 2]
     up = [k for k in ks if k >= pivot]
     down = [k for k in ks if k < pivot][::-1]
 
     try:
+        if a.log is not None:
+            require_distinct_from_source_provenance(
+                a.log, "--log", "tools/peel_sweep.py")
         logf = open(a.log, "w") if a.log else None
-    except OSError as error:
+    except (MeasurementError, OSError) as error:
         print(f"REFUSED log output: {error}", file=sys.stderr)
         return 2
     table = {}
@@ -474,18 +539,25 @@ def main(argv=None):
         for k in seq:
             best, out, err = run_one(
                 a.bench, k, init, a.construction_seed, a.loss_seed,
-                a.real_trials, a.allow_unverified_cost_model,
+                a.paired_replicates, a.allow_unverified_cost_model,
                 target_profile=a.target_profile,
                 seed_policy=a.seed_policy,
                 loss=a.loss,
-                schedule=a.schedule)
+                schedule=a.schedule,
+                paired_context=a.paired_context,
+                paired_warmups=a.paired_warmups,
+                paired_inner_reps=a.paired_inner_reps,
+                max_overhead=a.max_overhead,
+                cache_state=a.cache_state,
+                evict_bytes=a.evict_bytes,
+                rank_margin=a.rank_margin)
             table[k] = best
             # warm start the NEXT K from this one, on the offset lattice
             init = warm_start(best)
             print(f"  K={k:<6} tilt={best['tilt']:>+5} p1={best['p1']:>3} "
                   f"dmax={best['dmax']:>2} absorb={best['absorb']:>3} "
                   f"scale={best['scale']:>7.2f} "
-                  f"{best['decode_mbps']:>7.1f}MB/s "
+                  f"{best['solve_mbps']:>7.1f}MB/s "
                   f"OH={best['oh_mean']:.4f} ({best['seconds']}s)", flush=True)
             if logf:
                 logf.write(f"=== K={k} ({label}) ===\n{out}\n{err}\n")
@@ -499,9 +571,7 @@ def main(argv=None):
         walk(down, "down", pivot_init)
     except (MeasurementError, OSError, ValueError) as error:
         print(f"  REFUSED publication: {error}", file=sys.stderr)
-        if logf:
-            logf.write(f"=== FAILED ===\n{error}\n")
-            logf.close()
+        _report_log_errors(_close_optional_log(logf, error))
         return 1
     try:
         document = make_table_document(
@@ -516,7 +586,14 @@ def main(argv=None):
             schedule=a.schedule,
             settings={
                 "proxy_k_ladder": ks,
-                "real_trials_override": a.real_trials,
+                "paired_replicates": a.paired_replicates,
+                "paired_context": os.path.realpath(a.paired_context),
+                "paired_warmups": a.paired_warmups,
+                "paired_inner_reps": a.paired_inner_reps,
+                "max_overhead": a.max_overhead,
+                "cache_state": a.cache_state,
+                "evict_bytes": a.evict_bytes,
+                "rank_margin": a.rank_margin,
                 "target_profile": a.target_profile,
                 "seed_policy": a.seed_policy,
                 "loss": a.loss,
@@ -529,14 +606,28 @@ def main(argv=None):
             },
             artifact_identity=identity,
         )
+        require_distinct_paths(
+            a.out, a.bench, "--out", "the benchmark executable")
+        require_distinct_paths(
+            a.out, a.paired_context, "--out", "--paired-context")
+        if paired_context_thermal_source(a.paired_context) != thermal_source:
+            raise MeasurementError(
+                "--paired-context changed its thermal source during sweep")
+        require_distinct_paths(
+            a.out, thermal_source, "--out", "the live thermal CSV")
+        if a.log is not None:
+            require_distinct_paths(
+                a.log, thermal_source, "--log", "the live thermal CSV")
+            require_distinct_paths(a.log, a.out, "--log", "--out")
+        require_distinct_from_source_provenance(
+            a.out, "--out", "tools/peel_sweep.py")
         write_json_atomic(a.out, document)
     except (MeasurementError, OSError, ValueError) as error:
         print(f"  REFUSED publication: {error}", file=sys.stderr)
-        if logf:
-            logf.close()
+        _report_log_errors(_close_optional_log(logf))
         return 1
     print(f"\n  {len(table)} K values written to {a.out}")
-    if logf: logf.close()
+    _report_log_errors(_close_optional_log(logf))
     return 0
 
 

@@ -1,6 +1,13 @@
 if(NOT DEFINED BENCH)
     message(FATAL_ERROR "BENCH is required")
 endif()
+if(NOT DEFINED PEELTIMING_SUPPORTED)
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        set(PEELTIMING_SUPPORTED 1)
+    else()
+        set(PEELTIMING_SUPPORTED 0)
+    endif()
+endif()
 
 # This script is also useful standalone, outside the CTest registration that
 # cleans its parent environment.  Every ordinary child therefore starts with
@@ -370,11 +377,23 @@ expect_failure("mixed precode profile requires even block bytes" compare
     --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
     --schedule iid --precode --target-profile dispatch-v1
     --seed-policy raw --construction-seed 0x1234)
-expect_failure("target currently supports only --schedule iid" compare
-    --nlo 64 --nhi 64 --trials 1 --bb-list 2
-    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
-    --schedule burst --precode --target-profile dispatch-v1
-    --seed-policy raw --construction-seed 0x1234)
+foreach(target_schedule IN ITEMS iid burst permutation systematic-first
+        repair-only adversarial)
+    expect_success(
+        "loss=packet-schedule-v1,loss_rate=0\\.10000000000000001,"
+        compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 0 --loss 0.1 --loss-seed 0x5678
+        --schedule ${target_schedule} --precode
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234)
+    expect_success(
+        "schedule=${target_schedule},loss_trace=common-id-v2"
+        compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 0 --loss 0.1 --loss-seed 0x5678
+        --schedule ${target_schedule} --precode
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234)
+endforeach()
 foreach(forbidden_target_hook IN ITEMS
         WIREHAIR_V2_STAIRCASE_DEGREES
         WIREHAIR_V2_STAIRCASE_ROW_DEGREES
@@ -948,11 +967,21 @@ expect_failure("even block bytes" precodefail
     --loss 0.1 --loss-seed 0x5678 --schedule iid
     --target-profile dispatch-v1 --seed-policy raw
     --construction-seed 0x1234)
-expect_failure("target currently supports only --schedule iid" precodefail
-    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
-    --loss 0.1 --loss-seed 0x5678 --schedule burst
-    --target-profile dispatch-v1 --seed-policy raw
-    --construction-seed 0x1234)
+foreach(target_schedule IN ITEMS iid burst permutation systematic-first
+        repair-only adversarial)
+    expect_success(
+        "loss=packet-schedule-v1,loss_rate=0\\.10000000000000001,"
+        precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+        --loss 0.1 --loss-seed 0x5678 --schedule ${target_schedule}
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234)
+    expect_success(
+        "schedule=${target_schedule},loss_trace=precodefail-cell-v1"
+        precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+        --loss 0.1 --loss-seed 0x5678 --schedule ${target_schedule}
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234)
+endforeach()
 foreach(forbidden_target_hook IN ITEMS
         WIREHAIR_V2_STAIRCASE_DEGREES
         WIREHAIR_V2_STAIRCASE_ROW_DEGREES
@@ -2200,6 +2229,483 @@ expect_failure("cache-state must be cold or warm" groupedtiming
     --candidate-period 48 --candidate-grouped-rows 3
     --candidate-buckets separate --evict-bytes 4096 --cache-state tepid
     --loss 0.5 --seed 4660 --schedule burst)
+
+# Peel timing is one native same-process receipt: candidate/control and the
+# identity/identity A/A floor share every replicate's independently derived
+# construction, loss trace and common timing prefix.  Its semantic arm must
+# prove explicit stock PMF+scale is byte-recovery-identical to no override,
+# while keeping that no-override arm untimed.
+if(PEELTIMING_SUPPORTED)
+set(peeltiming_base_args peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+run_bench(
+    peeltiming_result peeltiming_out peeltiming_err
+    ${peeltiming_base_args})
+string(REGEX MATCHALL
+    "\n[0-3],1,(candidate_control|identity_aa),[0-7],[0-3],[AB],"
+    peeltiming_rows "${peeltiming_out}")
+list(LENGTH peeltiming_rows peeltiming_row_count)
+string(REGEX MATCHALL
+    "\n[0-3],1,candidate_control," peeltiming_candidate_rows
+    "${peeltiming_out}")
+list(LENGTH peeltiming_candidate_rows peeltiming_candidate_row_count)
+string(REGEX MATCHALL
+    "\n[0-3],1,identity_aa," peeltiming_aa_rows
+    "${peeltiming_out}")
+list(LENGTH peeltiming_aa_rows peeltiming_aa_row_count)
+# K=16/bb=2 engages the tiny mixed path that previously skipped much of its
+# GF(2^16) RHS work for an all-zero payload.  Require every timed row to carry
+# the nonzero-path operation receipt, so the manifest string alone cannot
+# conceal a regression back to the biased zero RHS.
+set(peeltiming_nonzero_rhs_row_count 0)
+string(REPLACE "\n" ";" peeltiming_lines "${peeltiming_out}")
+foreach(peeltiming_line IN LISTS peeltiming_lines)
+    if(peeltiming_line MATCHES
+       "^[0-3],1,(candidate_control|identity_aa),")
+        string(REPLACE "," ";" peeltiming_fields "${peeltiming_line}")
+        list(LENGTH peeltiming_fields peeltiming_field_count)
+        if(NOT peeltiming_field_count EQUAL 41)
+            message(FATAL_ERROR
+                "peeltiming row has the wrong field count for its nonzero "
+                "RHS check\n${peeltiming_line}")
+        endif()
+        # Zero RHS rows in this exact fixture report only 141..144 block
+        # mul-adds; the deterministic nonzero RHS reports at least 360.
+        list(GET peeltiming_fields 32 peeltiming_block_muladds)
+        if(NOT peeltiming_block_muladds MATCHES "^[0-9]+$")
+            message(FATAL_ERROR
+                "peeltiming row has malformed block_muladds\n"
+                "${peeltiming_line}")
+        endif()
+        if(peeltiming_block_muladds LESS 300)
+            message(FATAL_ERROR
+                "peeltiming small-payload row took the biased zero-RHS "
+                "shortcut\n${peeltiming_line}")
+        endif()
+        math(EXPR peeltiming_nonzero_rhs_row_count
+            "${peeltiming_nonzero_rhs_row_count} + 1")
+    endif()
+endforeach()
+string(REGEX MATCH
+    "# peel_semantic[^\n]*" peeltiming_semantic "${peeltiming_out}")
+if(NOT peeltiming_result EQUAL 0 OR peeltiming_err OR
+   NOT peeltiming_semantic)
+    message(FATAL_ERROR
+        "native peel timing did not produce its semantic receipt\n"
+        "rc=${peeltiming_result}\nstdout=${peeltiming_out}\n"
+        "stderr=${peeltiming_err}")
+endif()
+extract_receipt_field(
+    "${peeltiming_semantic}" nohook_system_sha256
+    peeltiming_nohook_system_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" identity_system_sha256
+    peeltiming_identity_system_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" nohook_packet_rows_sha256
+    peeltiming_nohook_packet_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" identity_packet_rows_sha256
+    peeltiming_identity_packet_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" nohook_solve_sha256
+    peeltiming_nohook_solve_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" identity_solve_sha256
+    peeltiming_identity_solve_sha256)
+extract_receipt_field(
+    "${peeltiming_semantic}" trace_sha256 peeltiming_semantic_trace_sha256)
+string(REGEX MATCH
+    "\n0,1,candidate_control,0,0,A,identity,0,15111065706836454660,11400714819323198492,([0-9a-f]+),"
+    peeltiming_first_row "${peeltiming_out}")
+set(peeltiming_first_trace_sha256 "${CMAKE_MATCH_1}")
+if(NOT peeltiming_result EQUAL 0 OR peeltiming_err OR
+   NOT peeltiming_row_count EQUAL 64 OR
+   NOT peeltiming_candidate_row_count EQUAL 32 OR
+   NOT peeltiming_aa_row_count EQUAL 32 OR
+   NOT peeltiming_nonzero_rhs_row_count EQUAL 64 OR
+   NOT peeltiming_first_row OR
+   NOT peeltiming_out MATCHES
+       "payload_alignment=64,prefault=1,cpu_affinity_policy=first-allowed-affinity-v1,payload=" OR
+   NOT peeltiming_nohook_system_sha256 STREQUAL
+       peeltiming_identity_system_sha256 OR
+   NOT peeltiming_nohook_packet_sha256 STREQUAL
+       peeltiming_identity_packet_sha256 OR
+   NOT peeltiming_nohook_solve_sha256 STREQUAL
+       peeltiming_identity_solve_sha256 OR
+   peeltiming_semantic_trace_sha256 STREQUAL
+       peeltiming_first_trace_sha256 OR
+   peeltiming_semantic MATCHES "elapsed" OR
+   NOT peeltiming_out MATCHES
+       "^# peeltiming,schema=wirehair.wh2.peeltiming.v2,target_profile=dispatch-v1,seed_policy=raw,contract_id=[0-9a-f]+,K=16,bb=2,S=5,D2=4,H=12,construction_seed_base=7,construction_seed_derivation=base_xor_d1b54a32d192ed03_times_rep_plus_1_v1,semantic_seed_derivation=base-plus-attempt-mod2\\^64-skip-measured-alias-v1,loss=0\\.10000000000000001,loss_seed_base=9,loss_seed_derivation=base_xor_9e3779b97f4a7c15_times_rep_plus_1_v1,message_seed_policy=replicate-loss-seed-v1,schedule=iid,loss_model=packet-schedule-v1,trace_encoding=wirehair-wh2-peeltiming-loss-trace-v1,panels=candidate_control\\+identity_aa," OR
+   NOT peeltiming_out MATCHES
+       "payload=common-source-role-encoded-consistent-rhs-v1,timing_scope=decoder_solve_only,timing_prefix=common-max-recovery-overhead-v1,recovery_scope=full_encode_decode_recover_memcmp,weak_seed_policy=balanced-timing-ineligible-rows-v1,hook_path=explicit-tls-peel-pmf-and-scale-v1,no_override_scope=untimed-semantic-only,system_build=per_replicate_per_scale_outside_timer,startup_amortization=per-replicate-build-and-recovery-preflight-excluded-v1,slot_prewarm=validated-plus-conditioning-matching-role-solves-same-cpu-before-cache-v1,context_sha256=0000000000000000000000000000000000000000000000000000000000000000,uncertainty=paired-log-ratio-t95/v1,required_margin=0\\.050000000000000003,margin_rule=upper-log-cost-lt-negative-required-margin-and-aa-floor-v1,clock_domain=posix-clock-monotonic-ns-v1,stream_hash_scope=body-plus-done-prefix-v1,started_monotonic_ns=[0-9]+,expected_rows=64" OR
+   NOT peeltiming_out MATCHES
+       "\n# peel_semantic,timed=0,construction_seed=[0-9]+,seed_attempt=[0-9]+,seed_attempt_cap=256,loss_seed=9,trace_sha256=[0-9a-f]+,message_sha256=[0-9a-f]+,identity_pmf_sha256=[0-9a-f]+,identity_pmf_encoding=stock-recovered-explicit-17g-v1,identity_scale_effective=6\\.4000000000000004,nohook_result=0,nohook_recovery_ok=1,nohook_overhead=[0-9]+,identity_result=0,identity_recovery_ok=1,identity_overhead=[0-9]+,.*system_equal=1,.*packet_rows_equal=1,.*payload_equal=1,nohook_direct_result=0,identity_direct_result=0,.*solve_equal=1,full_recovery_equal=1,pass=1\n" OR
+   NOT peeltiming_out MATCHES
+       "replicate,measured,panel,slot,pair,label,role,label_swap,construction_seed,loss_seed,trace_sha256,common_overhead,arm_overhead,recovery_result,recovery_ok,timing_eligible,preflight_result,timing_result,outcome_stable,elapsed_ns,inner_reps,saturated,cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,fault_contaminated,inactivated,binary_def,heavy_gain,block_xors,block_muladds,build_ns_sum,peel_ns_sum,project_ns_sum,residual_ns_sum,backsub_ns_sum,source_bytes,packet_payload_bytes,intermediate_bytes\n" OR
+   NOT peeltiming_out MATCHES
+       "\n# peeltiming_done,complete=1,rows=64,finished_monotonic_ns=[0-9]+,stream_sha256=[0-9a-f]+\n$")
+    message(FATAL_ERROR
+        "native peel timing receipt failed\n"
+        "rc=${peeltiming_result}\nstdout=${peeltiming_out}\n"
+        "stderr=${peeltiming_err}")
+endif()
+
+# The trace is the common construction/loss population identity, not a digest
+# of candidate-specific codewords.  A later explicit stock control uses this
+# equality to prove that it replayed the selected trained arm's exact cells.
+run_bench(
+    peeltiming_alt_pmf_result
+    peeltiming_alt_pmf_out
+    peeltiming_alt_pmf_err
+    peeltiming --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 1,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+string(REGEX MATCH
+    "\n0,1,candidate_control,0,0,A,identity,0,15111065706836454660,11400714819323198492,([0-9a-f]+),"
+    peeltiming_alt_pmf_first_row "${peeltiming_alt_pmf_out}")
+set(peeltiming_alt_pmf_first_trace_sha256 "${CMAKE_MATCH_1}")
+if(NOT peeltiming_alt_pmf_result EQUAL 0 OR peeltiming_alt_pmf_err OR
+   NOT peeltiming_alt_pmf_first_row OR
+   NOT peeltiming_alt_pmf_first_trace_sha256 STREQUAL
+       peeltiming_first_trace_sha256)
+    message(FATAL_ERROR
+        "peeltiming loss trace changed with the candidate PMF\n"
+        "rc=${peeltiming_alt_pmf_result}\n"
+        "expected_trace=${peeltiming_first_trace_sha256}\n"
+        "actual_trace=${peeltiming_alt_pmf_first_trace_sha256}\n"
+        "stdout=${peeltiming_alt_pmf_out}\n"
+        "stderr=${peeltiming_alt_pmf_err}")
+endif()
+
+foreach(replicate RANGE 0 3)
+    math(EXPR swap "${replicate} % 2")
+    foreach(slot RANGE 0 7)
+        math(EXPR pair "${slot} / 2")
+        if(slot EQUAL 0 OR slot EQUAL 3 OR slot EQUAL 5 OR slot EQUAL 6)
+            set(label A)
+        else()
+            set(label B)
+        endif()
+        if((swap EQUAL 0 AND label STREQUAL "B") OR
+           (swap EQUAL 1 AND label STREQUAL "A"))
+            set(candidate_role candidate)
+            set(aa_role identity_b)
+        else()
+            set(candidate_role identity)
+            set(aa_role identity_a)
+        endif()
+        if(NOT peeltiming_out MATCHES
+           "\n${replicate},1,candidate_control,${slot},${pair},${label},${candidate_role},${swap}," OR
+           NOT peeltiming_out MATCHES
+           "\n${replicate},1,identity_aa,${slot},${pair},${label},${aa_role},${swap},")
+            message(FATAL_ERROR
+                "peeltiming order/swap mismatch replicate=${replicate} "
+                "slot=${slot}\n${peeltiming_out}")
+        endif()
+    endforeach()
+endforeach()
+
+string(REGEX MATCH
+    "# peeltiming_done,[^\n]*\n$" peeltiming_done "${peeltiming_out}")
+string(REGEX REPLACE
+    "# peeltiming_done,[^\n]*\n$" "" peeltiming_body "${peeltiming_out}")
+string(REGEX REPLACE
+    "stream_sha256=[0-9a-f]+\n$" "stream_sha256="
+    peeltiming_done_prefix "${peeltiming_done}")
+string(SHA256 peeltiming_bound_sha256
+    "${peeltiming_body}${peeltiming_done_prefix}")
+extract_receipt_field(
+    "${peeltiming_done}" stream_sha256 peeltiming_done_sha256)
+if(NOT peeltiming_bound_sha256 STREQUAL peeltiming_done_sha256)
+    message(FATAL_ERROR
+        "peeltiming terminal stream hash does not bind the body and "
+        "terminal prefix")
+endif()
+
+# Every advertised packet schedule traverses the same versioned paired
+# receipt/recovery protocol.  The cheap target compare gates are covered
+# independently above.
+foreach(peeltiming_schedule IN ITEMS iid burst permutation systematic-first
+        repair-only adversarial)
+    expect_success(
+        "schedule=${peeltiming_schedule},loss_model=packet-schedule-v1,trace_encoding=wirehair-wh2-peeltiming-loss-trace-v1.*recovery_scope=full_encode_decode_recover_memcmp"
+        peeltiming --N 16 --bb 2 --target-profile dispatch-v1
+        --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+        --schedule ${peeltiming_schedule} --candidate-pmf 0,1
+        --candidate-scale identity --warmup-replicates 0 --replicates 4
+        --inner-reps 1 --max-overhead 8 --cache-state warm
+        --evict-bytes 4096 --context-sha256
+        0000000000000000000000000000000000000000000000000000000000000000
+        --required-margin 0.05)
+endforeach()
+
+# Exercise a real overdetermined solve.  Independently random packet payloads
+# made this exact K=64/seed tuple fail once its common prefix reached OH=3;
+# role-valid codewords must instead keep all direct/full outcomes successful.
+run_bench(
+    peeltiming_positive_oh_result
+    peeltiming_positive_oh_out
+    peeltiming_positive_oh_err
+    peeltiming --N 64 --bb 2 --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 123 --loss 0.1 --loss-seed 456
+    --schedule iid --candidate-pmf 9,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 32 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+set(peeltiming_positive_oh_rows 0)
+set(peeltiming_positive_oh_nonzero_rows 0)
+string(REPLACE "\n" ";" peeltiming_positive_oh_lines
+    "${peeltiming_positive_oh_out}")
+foreach(peeltiming_line IN LISTS peeltiming_positive_oh_lines)
+    if(peeltiming_line MATCHES "^[0-3],1,(candidate_control|identity_aa),")
+        string(REPLACE "," ";" peeltiming_fields "${peeltiming_line}")
+        list(LENGTH peeltiming_fields peeltiming_field_count)
+        if(NOT peeltiming_field_count EQUAL 41)
+            message(FATAL_ERROR
+                "positive-OH peeltiming row has the wrong field count\n"
+                "${peeltiming_line}")
+        endif()
+        list(GET peeltiming_fields 11 peeltiming_common_overhead)
+        list(GET peeltiming_fields 13 peeltiming_recovery_result)
+        list(GET peeltiming_fields 15 peeltiming_timing_eligible)
+        list(GET peeltiming_fields 16 peeltiming_preflight_result)
+        list(GET peeltiming_fields 17 peeltiming_timing_result)
+        list(GET peeltiming_fields 38 peeltiming_source_bytes)
+        list(GET peeltiming_fields 39 peeltiming_packet_payload_bytes)
+        if(NOT "${peeltiming_recovery_result}" STREQUAL "0" OR
+           NOT "${peeltiming_timing_eligible}" STREQUAL "1" OR
+           NOT "${peeltiming_preflight_result}" STREQUAL "0" OR
+           NOT "${peeltiming_timing_result}" STREQUAL "0" OR
+           NOT "${peeltiming_source_bytes}" STREQUAL "128")
+            message(FATAL_ERROR
+                "positive-OH peeltiming row did not remain a successful "
+                "role-valid solve\n${peeltiming_line}")
+        endif()
+        math(EXPR peeltiming_expected_payload
+            "(64 + ${peeltiming_common_overhead}) * 2")
+        if(NOT peeltiming_packet_payload_bytes EQUAL
+           peeltiming_expected_payload)
+            message(FATAL_ERROR
+                "positive-OH peeltiming row has the wrong payload size\n"
+                "${peeltiming_line}")
+        endif()
+        if(peeltiming_common_overhead GREATER 0)
+            math(EXPR peeltiming_positive_oh_nonzero_rows
+                "${peeltiming_positive_oh_nonzero_rows} + 1")
+        endif()
+        math(EXPR peeltiming_positive_oh_rows
+            "${peeltiming_positive_oh_rows} + 1")
+    endif()
+endforeach()
+if(NOT peeltiming_positive_oh_result EQUAL 0 OR
+   peeltiming_positive_oh_err OR
+   NOT peeltiming_positive_oh_rows EQUAL 64 OR
+   peeltiming_positive_oh_nonzero_rows LESS 1)
+    message(FATAL_ERROR
+        "native positive-OH peeltiming regression failed\n"
+        "rc=${peeltiming_positive_oh_result}\n"
+        "stdout=${peeltiming_positive_oh_out}\n"
+        "stderr=${peeltiming_positive_oh_err}")
+endif()
+
+# A weak seed in the bounded, untimed semantic search is descriptive rather
+# than fatal.  This exact seed used to return Error only for the real nonzero
+# source message; require the witness search to skip it and bind attempt one.
+expect_success(
+    "# peel_semantic,timed=0,construction_seed=8709371131546466176,seed_attempt=1,"
+    peeltiming --N 10 --bb 2 --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 8709371131546466175
+    --loss 0.1 --loss-seed 9 --schedule iid --candidate-pmf 0,1
+    --candidate-scale identity --warmup-replicates 0 --replicates 4
+    --inner-reps 1 --max-overhead 8 --cache-state warm
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+
+# A measured raw construction seed is evidence, not a retry opportunity.
+# Replicate zero derives construction seed 0x78dde6e660de777f.  Its singular
+# coefficient matrix used to return NeedMore for a zero RHS but fatal Error for
+# the real nonzero source message.  Preserve all sixteen balanced weak rows
+# while making it impossible to mistake placeholders for throughput.
+run_bench(
+    peeltiming_weak_result peeltiming_weak_out peeltiming_weak_err
+    peeltiming --N 10 --bb 2 --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 12207196819495361148 --loss 0.1
+    --loss-seed 900105 --schedule repair-only --candidate-pmf 0,1
+    --candidate-scale identity --warmup-replicates 0 --replicates 4
+    --inner-reps 1 --max-overhead 32 --cache-state warm
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+set(peeltiming_weak_rows 0)
+string(REPLACE "\n" ";" peeltiming_weak_lines "${peeltiming_weak_out}")
+foreach(peeltiming_line IN LISTS peeltiming_weak_lines)
+    if(peeltiming_line MATCHES "^0,1,(candidate_control|identity_aa),")
+        string(REPLACE "," ";" peeltiming_fields "${peeltiming_line}")
+        list(LENGTH peeltiming_fields peeltiming_field_count)
+        if(NOT peeltiming_field_count EQUAL 41)
+            message(FATAL_ERROR
+                "weak-seed peeltiming row has the wrong field count\n"
+                "${peeltiming_line}")
+        endif()
+        list(GET peeltiming_fields 11 peeltiming_common_overhead)
+        list(GET peeltiming_fields 12 peeltiming_arm_overhead)
+        list(GET peeltiming_fields 13 peeltiming_recovery_result)
+        list(GET peeltiming_fields 14 peeltiming_recovery_ok)
+        list(GET peeltiming_fields 15 peeltiming_timing_eligible)
+        list(GET peeltiming_fields 16 peeltiming_preflight_result)
+        list(GET peeltiming_fields 17 peeltiming_timing_result)
+        list(GET peeltiming_fields 18 peeltiming_outcome_stable)
+        list(GET peeltiming_fields 19 peeltiming_elapsed_ns)
+        list(GET peeltiming_fields 20 peeltiming_inner_reps)
+        list(GET peeltiming_fields 22 peeltiming_cpu_before)
+        list(GET peeltiming_fields 23 peeltiming_cpu_after)
+        list(GET peeltiming_fields 24 peeltiming_cpu_migrated)
+        list(GET peeltiming_fields 39 peeltiming_packet_payload_bytes)
+        list(GET peeltiming_fields 40 peeltiming_intermediate_bytes)
+        if(NOT "${peeltiming_common_overhead}" STREQUAL "32" OR
+           NOT "${peeltiming_arm_overhead}" STREQUAL "-1" OR
+           NOT "${peeltiming_recovery_result}" STREQUAL "4" OR
+           NOT "${peeltiming_recovery_ok}" STREQUAL "0" OR
+           NOT "${peeltiming_timing_eligible}" STREQUAL "0" OR
+           NOT "${peeltiming_preflight_result}" STREQUAL "-1" OR
+           NOT "${peeltiming_timing_result}" STREQUAL "-1" OR
+           NOT "${peeltiming_outcome_stable}" STREQUAL "0" OR
+           NOT "${peeltiming_elapsed_ns}" STREQUAL "0" OR
+           NOT "${peeltiming_inner_reps}" STREQUAL "0" OR
+           NOT "${peeltiming_cpu_before}" STREQUAL "-1" OR
+           NOT "${peeltiming_cpu_after}" STREQUAL "-1" OR
+           NOT "${peeltiming_cpu_migrated}" STREQUAL "-1" OR
+           NOT "${peeltiming_packet_payload_bytes}" STREQUAL "0" OR
+           NOT "${peeltiming_intermediate_bytes}" STREQUAL "0")
+            message(FATAL_ERROR
+                "weak measured seed fabricated timing or lost its exact "
+                "recovery result\n${peeltiming_line}")
+        endif()
+        math(EXPR peeltiming_weak_rows "${peeltiming_weak_rows} + 1")
+    endif()
+endforeach()
+if(NOT peeltiming_weak_result EQUAL 0 OR peeltiming_weak_err OR
+   NOT peeltiming_weak_rows EQUAL 16 OR
+   NOT peeltiming_weak_out MATCHES
+       "\n# peeltiming_done,complete=1,rows=64,finished_monotonic_ns=[0-9]+,stream_sha256=[0-9a-f]+\n$")
+    message(FATAL_ERROR
+        "native weak-seed peeltiming regression failed\n"
+        "rc=${peeltiming_weak_result}\nstdout=${peeltiming_weak_out}\n"
+        "stderr=${peeltiming_weak_err}")
+endif()
+
+expect_failure("requires --N" peeltiming)
+expect_failure("duplicate --N" ${peeltiming_base_args} --N 17)
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 2 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("bad --loss value" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss -0 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("candidate-scale must be identity or" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale -0
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("bad --required-margin value" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin -0)
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 2
+    --max-overhead 8 --cache-state cold --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 1073741825
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("working set exceeds the 4 GiB protocol limit" peeltiming
+    --N 64000 --bb 16384 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 512 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("candidate-pmf must contain" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,-1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_env_failure(
+    "forbids ambient WIREHAIR_V2_PEEL_DEGREES"
+    "WIREHAIR_V2_PEEL_DEGREES=1,2"
+    ${peeltiming_base_args})
+expect_env_failure(
+    "forbids ambient WIREHAIR_V2_STAIRCASE_DEGREE_SCALE"
+    "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=1"
+    ${peeltiming_base_args})
+expect_env_failure(
+    "forbids ambient WIREHAIR_V2_STAIRCASE_DEGREES"
+    "WIREHAIR_V2_STAIRCASE_DEGREES=1,2"
+    ${peeltiming_base_args})
+expect_env_failure(
+    "forbids ambient WIREHAIR_V2_STAIRCASE_ROW_DEGREES"
+    "WIREHAIR_V2_STAIRCASE_ROW_DEGREES=1,2"
+    ${peeltiming_base_args})
+expect_env_failure(
+    "forbids ambient WIREHAIR_V2_BAND_TRACKING_X"
+    "WIREHAIR_V2_BAND_TRACKING_X=1"
+    ${peeltiming_base_args})
+endif()
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route
     --N 3,4096 --bb-list 64

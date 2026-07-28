@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Search individual small K values using measurements from the real codec.
 
-Every compare arm receives independently derived construction and loss seeds
-paired within its tier.  The stock target PMF is always included in the final
-ranking, and output is published
-atomically in a versioned table only after every requested K has a result.
+Every arm receives independently derived construction and loss seeds paired
+within its tier.  The stock target PMF is always included as the predeclared
+final fallback, and output is published atomically in a versioned table only
+after every requested K has a result.
 """
 import argparse
 import math
@@ -17,13 +17,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from peel_codec import (                                # noqa: E402
     MeasurementError,
+    PEELTIMING_EVICT_BYTES_MAX,
+    _COMPARE_BLOCK_BYTES_MAX,
+    _COMPARE_TRIALS_MAX,
+    _native_peel_cdf_signature,
     capture_artifact_identity,
     compare_probe,
     derive_seed,
     family,
+    make_paired_search_receipt,
     make_table_document,
-    make_search_receipt,
+    paired_probe,
+    paired_selected_metrics,
+    paired_context_thermal_source,
+    require_distinct_from_source_provenance,
+    require_distinct_paths,
+    require_paired_stock_control,
     stock_profile,
+    validate_peeltiming_dimensions,
     valid_loss_rate,
     write_json_atomic,
 )
@@ -53,19 +64,47 @@ class Direct:
             "loss_seed": loss_seed,
         }
         if v is None:
-            self.probes += 1
-            return compare_probe(
-                self.a.bench, k, trials, bb, **exact)
-        w = family(
-            self.profile.pmf, v[0], v[1], v[2], v[3])
+            w = list(self.profile.pmf)
+        else:
+            w = family(
+                self.profile.pmf, v[0], v[1], v[2], v[3])
         if w is None:
             return None
+        if tier == "gate":
+            self.probes += 1
+            return compare_probe(
+                self.a.bench, k, trials, bb,
+                peel_weights=None if v is None else w, **exact)
         self.probes += 1
-        # This search intentionally leaves the staircase scale unset.  Clearing
-        # every inherited WIREHAIR_V2_* hook in compare_probe makes that an
-        # exact arm rather than whatever the launching shell happened to carry.
-        return compare_probe(
-            self.a.bench, k, trials, bb, peel_weights=w, **exact)
+        return paired_probe(
+            self.a.bench, k, bb, w,
+            warmup_replicates=self.a.paired_warmups,
+            replicates=trials,
+            inner_reps=self.a.paired_inner_reps,
+            max_overhead=self.a.max_overhead,
+            cache_state=self.a.cache_state,
+            evict_bytes=self.a.evict_bytes,
+            context=self.a.paired_context,
+            required_margin=(
+                self.a.rank_margin if tier == "rank" else 0.0),
+            **exact)
+
+    @staticmethod
+    def candidate_arm(measurement):
+        return (
+            measurement.candidate
+            if hasattr(measurement, "candidate") else measurement)
+
+    @staticmethod
+    def rank_eligible(measurement):
+        """Return whether paired solve evidence is usable for ordering."""
+        return (
+            hasattr(measurement, "candidate") and
+            measurement.timing_ci_available and
+            measurement.recovery_regressions == 0 and
+            measurement.aa_log_cost_ci_low <= 0.0 <=
+                measurement.aa_log_cost_ci_high
+        )
 
     def candidate_pmf(self, vector):
         return family(
@@ -108,28 +147,53 @@ class Direct:
         rng = random.Random(sampling_seed)
         t0 = time.time()
         raw_pool = self.lhs(rng, self.a.screen, centre)
-        seen_pmfs = {tuple(self.profile.pmf)}
+        seen_pmfs = {
+            _native_peel_cdf_signature(self.profile.pmf, k)}
         pool = []
         for vector in raw_pool:
             candidate_pmf = self.candidate_pmf(vector)
             if candidate_pmf is None:
                 continue
-            key = tuple(candidate_pmf)
+            key = _native_peel_cdf_signature(candidate_pmf, k)
             if key in seen_pmfs:
                 continue
             seen_pmfs.add(key)
             pool.append(vector)
-        # gate everything cheaply, keep the decoders
+        # The cheap gate is recovery-only.  Its throughput and overhead are
+        # deliberately ignored: only paired decoder-solve evidence may order
+        # architectures.  Raw weak seeds are descriptive, so compare their
+        # count against the same-seed stock control instead of requiring an
+        # absolute zero.
         alive = []
-        for v in pool:
-            r = self.probe(
-                k, v, self.a.gate_trials, self.a.gate_bb, "gate")
-            if r and r.fail == 0:
-                alive.append((r.goodput(k), v))
-        alive.sort(key=lambda x: -x[0])
-        best_g, best_v = alive[0] if alive else (0.0, None)
+        gate_control_arm = None
+        if pool:
+            gate_control = self.probe(
+                k, None, self.a.gate_trials, self.a.gate_bb, "gate")
+            gate_control_arm = (
+                self.candidate_arm(gate_control) if gate_control else None)
+            if gate_control_arm is None:
+                raise MeasurementError(
+                    "recovery gate returned no stock control")
+            for v in pool:
+                r = self.probe(
+                    k, v, self.a.gate_trials, self.a.gate_bb, "gate")
+                arm = self.candidate_arm(r) if r else None
+                if arm and arm.fail <= gate_control_arm.fail:
+                    alive.append(v)
+        ranked_screen = []
+        for v in alive:
+            measurement = self.probe(
+                k, v, self.a.screen_paired_replicates,
+                self.a.rank_bb, "screen-rank")
+            if measurement is not None and self.rank_eligible(measurement):
+                ranked_screen.append(
+                    (measurement.candidate_log_cost_ci_high, v))
+        ranked_screen.sort(key=lambda item: item[0])
+        best_score, best_v = (
+            ranked_screen[0] if ranked_screen else (math.inf, None))
 
-        # local refine, still on the cheap tier
+        # Local moves are recovery-gated and then ordered by the same paired
+        # decoder-solve confidence bound as the initial screen.
         r_frac, used = 0.25, 0
         while best_v is not None and r_frac > 0.02 and used < self.a.refine:
             moved = False
@@ -145,54 +209,73 @@ class Direct:
                     candidate_pmf = self.candidate_pmf(w)
                     if candidate_pmf is None:
                         continue
-                    key = tuple(candidate_pmf)
+                    key = _native_peel_cdf_signature(candidate_pmf, k)
                     if key in seen_pmfs:
                         continue
                     seen_pmfs.add(key)
                     used += 1
                     rr = self.probe(
                         k, w, self.a.gate_trials, self.a.gate_bb, "gate")
-                    if rr and rr.fail == 0:
-                        g = rr.goodput(k)
-                        if g > best_g:
-                            best_g, best_v, moved = g, w, True
+                    arm = self.candidate_arm(rr) if rr else None
+                    if (arm and gate_control_arm is not None and
+                            arm.fail <= gate_control_arm.fail):
+                        ranked = self.probe(
+                            k, w, self.a.screen_paired_replicates,
+                            self.a.rank_bb, "screen-rank")
+                        if (ranked is not None and
+                                self.rank_eligible(ranked) and
+                                ranked.candidate_log_cost_ci_high <
+                                best_score):
+                            best_score = ranked.candidate_log_cost_ci_high
+                            best_v, moved = w, True
                 if used >= self.a.refine:
                     break
             if not moved:
                 r_frac *= 0.5
 
-        # rank tier: real payload, more trials, on the top few
-        # The shipped law is a mandatory control in the final ranking.
-        # None is the true shipped codec with no overrides.  Feeding the
-        # identity weights through the environment hook is equation-identical
-        # but measurably biased by the alternate code path.
-        incumbent = None
+        # The rank tier is one-process paired timing.  Every trained experiment
+        # contains its own explicit identity control and identity A/A panel.
         cands = (
             ([best_v] if best_v is not None else []) +
-            [v for _, v in alive[:self.a.rank_top] if v != best_v]
+            [v for _, v in ranked_screen if v != best_v]
         )
-        cands = cands[:self.a.rank_top] + [incumbent]
-        out, rank_measurements = [], []
+        cands = cands[:self.a.rank_top]
+        # The explicit stock-vs-stock arm is a fixed, predeclared control.
+        # Never choose a favorable identity arm from several noisy candidate
+        # runs.
+        cands.append(None)
+        rank_measurements = []
         for v in cands:
             r = self.probe(
-                k, v, self.a.rank_trials, self.a.rank_bb, "rank")
+                k, v, self.a.paired_replicates, self.a.rank_bb, "rank")
             if r is not None:
                 rank_measurements.append((r, v))
-            if r and r.fail == 0:
-                out.append((r.goodput(k), r, v))
-        if not out:
+        if not rank_measurements:
             return None
-        # The incumbent wins an exact tie; a trained arm must demonstrate a
-        # strict goodput improvement to become the recorded search winner.
-        out.sort(key=lambda x: (-x[0], x[2] is not None))
-        g, measurement, v = out[0]
-        shipped_control = next(
-            (rank_metrics for rank_metrics, vector in rank_measurements
-             if vector is None),
-            None)
-        if shipped_control is None:
-            raise MeasurementError("mandatory shipped rank control is missing")
-        if v is None:
+        try:
+            control_measurement, unused_control_vector = next(
+                item for item in rank_measurements if item[1] is None)
+        except StopIteration:
+            raise MeasurementError(
+                "paired rank did not return its stock control")
+        require_paired_stock_control(
+            control_measurement, "paired stock control")
+        trained = [
+            (measurement.candidate_log_cost_ci_high, measurement, vector)
+            for measurement, vector in rank_measurements
+            if vector is not None and measurement.valid_for_promotion
+        ]
+        if trained:
+            unused_score, measurement, v = min(
+                trained, key=lambda item: item[0])
+            mode = "trained"
+        else:
+            # Preserve the predeclared stock-vs-stock experiment as the
+            # fallback evidence.  Sampling several identity arms and retaining
+            # the fastest would cherry-pick measurement noise.
+            measurement, v = control_measurement, None
+            mode = "shipped"
+        if mode == "shipped":
             result = {
                 "K": k, "scale": -1.0, "p1": 100, "tilt": 0,
                 "dmax": 64, "absorb": 100, "reverted_to_shipped": True,
@@ -202,24 +285,40 @@ class Direct:
                 "K": k, "scale": -1.0, "p1": v[0], "tilt": v[1],
                 "dmax": v[2], "absorb": v[3],
             }
-        mode = "shipped" if v is None else "trained"
         profile = self.profile
         selected_pmf = (
-            list(profile.pmf) if v is None else
+            list(profile.pmf) if mode == "shipped" else
             family(profile.pmf, v[0], v[1], v[2], v[3])
         )
         if selected_pmf is None:
             return None
+        evaluated_coordinates = (
+            {"scale": -1.0, "p1": 100, "tilt": 0,
+             "dmax": 64, "absorb": 100}
+            if v is None else
+            {"scale": -1.0, "p1": v[0], "tilt": v[1],
+             "dmax": v[2], "absorb": v[3]}
+        )
+        evaluated_pmf = (
+            list(profile.pmf) if v is None else
+            family(profile.pmf, v[0], v[1], v[2], v[3])
+        )
+        if evaluated_pmf is None:
+            return None
+        selected_metrics = paired_selected_metrics(measurement, mode)
+        selected_arm = (
+            measurement.identity if mode == "shipped" else
+            measurement.candidate)
+        g = selected_arm.goodput(k)
         result.update(
             goodput=g,
-            **measurement.as_dict(),
+            **selected_metrics,
             native=profile.as_dict(),
             peel_pmf=selected_pmf,
-            search_receipt=make_search_receipt(
+            search_receipt=make_paired_search_receipt(
                 measurement,
                 mode=mode,
-                goodput=g,
-                trials=self.a.rank_trials,
+                block_count=k,
                 block_bytes=self.a.rank_bb,
                 search_kind="direct-real-codec",
                 construction_seed_base=self.a.construction_seed,
@@ -230,8 +329,10 @@ class Direct:
                     for name in ("scale", "p1", "tilt", "dmax", "absorb")
                 },
                 peel_pmf=selected_pmf,
-                shipped_control=shipped_control,
-                shipped_goodput=shipped_control.goodput(k),
+                evaluated_coordinates=evaluated_coordinates,
+                evaluated_pmf=evaluated_pmf,
+                stock_control_measurement=(
+                    None if mode == "shipped" else control_measurement),
                 context={
                     "warm_start": list(centre) if centre is not None else None,
                     "sampling_seed": sampling_seed,
@@ -239,6 +340,8 @@ class Direct:
                     "refine": self.a.refine,
                     "gate_trials": self.a.gate_trials,
                     "gate_block_bytes": self.a.gate_bb,
+                    "screen_paired_replicates":
+                        self.a.screen_paired_replicates,
                     "rank_top": self.a.rank_top,
                 },
             ),
@@ -256,25 +359,90 @@ def main(argv=None):
     ap.add_argument("--refine", type=int, default=48)
     ap.add_argument("--gate-trials", type=int, default=400)
     ap.add_argument("--gate-bb", type=int, required=True)
-    ap.add_argument("--rank-trials", type=int, default=2000)
+    ap.add_argument(
+        "--screen-paired-replicates", type=int, default=4,
+        help="even paired replicates used to order recovery-gate survivors")
+    ap.add_argument(
+        "--paired-replicates", type=int, default=16,
+        help="even measured replicate count for each final paired timing run")
     ap.add_argument("--rank-bb", type=int, required=True)
     ap.add_argument("--rank-top", type=int, default=3)
+    ap.add_argument("--paired-context", required=True)
+    ap.add_argument("--paired-warmups", type=int, default=2)
+    ap.add_argument("--paired-inner-reps", type=int, default=1)
+    ap.add_argument("--max-overhead", type=int, default=512)
+    ap.add_argument("--cache-state", choices=["warm", "cold"], default="warm")
+    ap.add_argument("--evict-bytes", type=int, default=64 * 1024 * 1024)
+    ap.add_argument("--rank-margin", type=float, default=0.0)
     ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
     ap.add_argument("--seed-policy", required=True, choices=["raw"])
-    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument(
+        "--schedule", required=True,
+        choices=[
+            "iid", "burst", "permutation", "systematic-first",
+            "repair-only", "adversarial",
+        ])
     ap.add_argument("--loss", type=float, required=True)
     ap.add_argument("--construction-seed", type=int, required=True)
     ap.add_argument("--loss-seed", type=int, required=True)
     a = ap.parse_args(argv)
     if (a.kmin < 2 or a.kmax > 64000 or a.kmax < a.kmin or
             a.screen < 1 or a.refine < 0 or
-            a.gate_trials < 1 or a.rank_trials < 1 or a.gate_bb < 1 or
-            a.rank_bb < 1 or a.rank_top < 1 or
+            not 1 <= a.gate_trials <= _COMPARE_TRIALS_MAX or
+            a.paired_replicates < 1 or
+            a.gate_bb < 2 or a.gate_bb % 2 != 0 or
+            a.gate_bb > _COMPARE_BLOCK_BYTES_MAX or
+            a.rank_bb < 2 or a.rank_bb % 2 != 0 or
+            a.rank_bb > _COMPARE_BLOCK_BYTES_MAX or a.rank_top < 1 or
+            a.screen_paired_replicates < 4 or
+            a.screen_paired_replicates % 2 != 0 or
+            a.paired_warmups < 0 or a.paired_warmups % 2 != 0 or
+            a.paired_inner_reps < 1 or
+            a.max_overhead < 0 or
+            not 4096 <= a.evict_bytes <= PEELTIMING_EVICT_BYTES_MAX or
+            not 0.0 <= a.rank_margin <= 1.0 or
+            a.paired_replicates < 4 or a.paired_replicates % 2 != 0 or
             not valid_loss_rate(a.loss) or
             not 0 <= a.construction_seed <= 0xffffffffffffffff or
             not 0 <= a.loss_seed <= 0xffffffffffffffff):
         ap.error(
             "invalid range, budget, payload, rank-top, loss, or uint64 seed")
+    try:
+        for k in range(a.kmin, a.kmax + 1):
+            for replicates in {
+                    a.screen_paired_replicates, a.paired_replicates}:
+                validate_peeltiming_dimensions(
+                    block_count=k,
+                    block_bytes=a.rank_bb,
+                    target_profile=a.target_profile,
+                    seed_policy=a.seed_policy,
+                    construction_seed=a.construction_seed,
+                    loss=a.loss,
+                    loss_seed=a.loss_seed,
+                    schedule=a.schedule,
+                    warmup_replicates=a.paired_warmups,
+                    replicates=replicates,
+                    inner_reps=a.paired_inner_reps,
+                    max_overhead=a.max_overhead,
+                    cache_state=a.cache_state,
+                    evict_bytes=a.evict_bytes,
+                    required_margin=a.rank_margin,
+                )
+    except ValueError as error:
+        ap.error(str(error))
+    try:
+        require_distinct_paths(
+            a.out, a.bench, "--out", "the benchmark executable")
+        require_distinct_paths(
+            a.out, a.paired_context, "--out", "--paired-context")
+        require_distinct_from_source_provenance(
+            a.out, "--out", "tools/peel_direct.py")
+        thermal_source = paired_context_thermal_source(a.paired_context)
+        require_distinct_paths(
+            a.out, thermal_source, "--out", "the live thermal CSV")
+    except MeasurementError as error:
+        print(f"  REFUSED output: {error}", file=sys.stderr)
+        return 2
 
     try:
         identity = capture_artifact_identity(
@@ -302,7 +470,7 @@ def main(argv=None):
         centre = None if r.get("reverted_to_shipped") else [
             r["p1"], r["tilt"], r["dmax"], r["absorb"]]
         print(f"  K={k:<5} p1={r['p1']:>3} tilt={r['tilt']:>+5} dmax={r['dmax']:>2} "
-              f"absorb={r['absorb']:>3}  {r['decode_mbps']:>7.1f}MB/s "
+              f"absorb={r['absorb']:>3}  {r['solve_mbps']:>7.1f}MB/s "
               f"OH={r['oh_mean']:.4f} "
               f"({r['seconds']}s, {r['probes']} probes)", flush=True)
     if failed:
@@ -328,9 +496,17 @@ def main(argv=None):
                 "refine": a.refine,
                 "gate_trials": a.gate_trials,
                 "gate_block_bytes": a.gate_bb,
-                "rank_trials": a.rank_trials,
+                "screen_paired_replicates": a.screen_paired_replicates,
+                "paired_replicates": a.paired_replicates,
                 "rank_block_bytes": a.rank_bb,
                 "rank_top": a.rank_top,
+                "paired_context": os.path.realpath(a.paired_context),
+                "paired_warmups": a.paired_warmups,
+                "paired_inner_reps": a.paired_inner_reps,
+                "max_overhead": a.max_overhead,
+                "cache_state": a.cache_state,
+                "evict_bytes": a.evict_bytes,
+                "rank_margin": a.rank_margin,
                 "target_profile": a.target_profile,
                 "seed_policy": a.seed_policy,
                 "loss": a.loss,
@@ -338,6 +514,17 @@ def main(argv=None):
             },
             artifact_identity=identity,
         )
+        require_distinct_paths(
+            a.out, a.bench, "--out", "the benchmark executable")
+        require_distinct_paths(
+            a.out, a.paired_context, "--out", "--paired-context")
+        if paired_context_thermal_source(a.paired_context) != thermal_source:
+            raise MeasurementError(
+                "--paired-context changed its thermal source during search")
+        require_distinct_paths(
+            a.out, thermal_source, "--out", "the live thermal CSV")
+        require_distinct_from_source_provenance(
+            a.out, "--out", "tools/peel_direct.py")
         write_json_atomic(a.out, document)
     except (MeasurementError, OSError, ValueError) as error:
         print(f"  REFUSED publication: {error}", file=sys.stderr)

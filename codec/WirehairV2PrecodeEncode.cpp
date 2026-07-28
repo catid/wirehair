@@ -2212,8 +2212,40 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         if (solve_result == Wirehair_NeedMore ||
             solve_result == Wirehair_Error)
         {
-            if (profile.V2SeedSelected) {
-                return solve_result == Wirehair_NeedMore ?
+            if (profile.V2SeedSelected)
+            {
+                if (solve_result == Wirehair_NeedMore) {
+                    return Wirehair_BadPeelSeed;
+                }
+
+                // A singular square systematic system has a payload-dependent
+                // solver result: an all-zero RHS is dependent (NeedMore), but
+                // a general source message is normally inconsistent (Error).
+                // Raw attempt-zero experiments must classify both cases as
+                // the same weak construction seed.  Re-run only this rare
+                // Error path with a zero RHS to distinguish structural rank
+                // loss from a genuine solver invariant error.  Healthy
+                // encoders pay no probe cost, and an Error that does not
+                // reproduce as rank deficiency remains fatal.
+                GuardedAllocation();
+                std::vector<uint8_t> zero_rhs(
+                    block_bytes, uint8_t{0});
+                for (SolvePacket& packet : packets) {
+                    packet.Data = zero_rhs.data();
+                }
+                intermediate_blocks.clear();
+                const WirehairResult structural_result =
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        system,
+                        packet_config,
+                        solve_runtime,
+                        packets,
+                        block_bytes,
+                        intermediate_blocks);
+                if (structural_result == Wirehair_OOM) {
+                    return structural_result;
+                }
+                return structural_result == Wirehair_NeedMore ?
                     Wirehair_BadPeelSeed : solve_result;
             }
             PrecodeSystem selected_system;

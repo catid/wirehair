@@ -1,5 +1,6 @@
 #include "WirehairV2PrecodeDecode.h"
 #include "WirehairV2PrecodeEncode.h"
+#include "WirehairV2Contract.h"
 
 #include <cstdio>
 #include <string>
@@ -126,6 +127,81 @@ bool CheckK(uint32_t K, uint32_t expected_attempt, uint32_t& attempt_out)
     return true;
 }
 
+bool CheckRawPinnedWeakClassification()
+{
+    static const uint32_t K = 10u;
+    static const uint64_t construction_seed =
+        UINT64_C(0x78dde6e660de777f);
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract("dispatch-v1");
+    if (!contract) {
+        std::fprintf(stderr,
+            "seed selection: could not find raw target contract\n");
+        return false;
+    }
+    const wirehair_v2::MessagePrecodeEncoderOptions options =
+        wirehair_v2::MessageOptionsForContract(*contract);
+    const uint32_t widths[] = {2u, 1280u, 4096u};
+    for (uint32_t block_bytes : widths)
+    {
+        wirehair_v2::SeedProfile profile;
+        if (!wirehair_v2::MakeRawContractProfile(
+                *contract, K, block_bytes, construction_seed, profile))
+        {
+            std::fprintf(stderr,
+                "seed selection: could not build raw weak-seed profile "
+                "bb=%u\n", block_bytes);
+            return false;
+        }
+        std::vector<uint8_t> zero_message(
+            (size_t)K * block_bytes, uint8_t{0});
+        std::vector<uint8_t> nonzero_message(zero_message.size());
+        for (size_t i = 0u; i < nonzero_message.size(); ++i) {
+            nonzero_message[i] = (uint8_t)(i * 29u + 7u);
+        }
+
+        wirehair_v2::MessagePrecodeEncoder zero_encoder;
+        wirehair_v2::MessagePrecodeEncoder nonzero_encoder;
+        const WirehairResult zero_result = zero_encoder.InitializeResult(
+            zero_message.data(), zero_message.size(), block_bytes,
+            &profile, &options);
+        const WirehairResult nonzero_result =
+            nonzero_encoder.InitializeResult(
+                nonzero_message.data(), nonzero_message.size(), block_bytes,
+                &profile, &options);
+        if (zero_result != Wirehair_BadPeelSeed ||
+            nonzero_result != Wirehair_BadPeelSeed)
+        {
+            std::fprintf(stderr,
+                "seed selection: raw singular construction changed class "
+                "with RHS bb=%u zero=%d nonzero=%d\n",
+                block_bytes, (int)zero_result, (int)nonzero_result);
+            return false;
+        }
+        if (block_bytes == 2u)
+        {
+            // The exact-width diagnostic zero block is the fourth guarded
+            // allocation on this complete, uncached input.  Classification
+            // must not turn failure of that diagnostic into BadPeelSeed.
+            wirehair_v2::MessagePrecodeEncoder oom_encoder;
+            wirehair_v2::SetAllocationFailureCountdownForTesting(3);
+            const WirehairResult oom_result = oom_encoder.InitializeResult(
+                nonzero_message.data(), nonzero_message.size(), block_bytes,
+                &profile, &options);
+            wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+            if (oom_result != Wirehair_OOM ||
+                oom_encoder.IsInitialized())
+            {
+                std::fprintf(stderr,
+                    "seed selection: weak-seed diagnostic OOM was not "
+                    "transactional result=%d\n", (int)oom_result);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -134,6 +210,9 @@ int main(int argc, char** argv)
         argc == 2 && std::string(argv[1]) == "--sanitizer";
     if (argc > 2 || (argc == 2 && !sanitizer_mode)) {
         return 2;
+    }
+    if (!CheckRawPinnedWeakClassification()) {
+        return 1;
     }
     uint32_t fixups = 0u;
     uint32_t max_attempt = 0u;

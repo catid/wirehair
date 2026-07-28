@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Screen peel candidates with native counters, then rank on the real codec.
 
-The counter stage is only a candidate ordering. Recovery and throughput come
-from explicit common-random-number ``compare`` pairs within each tier. The
+The counter stage is only a candidate ordering. Recovery and solve timing come
+from explicit common-random-number measurements within each tier. The
 native ``peelpmf``
 receipt supplies both the exact shipped distribution and the staircase size;
 this module deliberately does not duplicate either construction in Python.
@@ -18,20 +18,30 @@ import time
 
 from peel_codec import (
     MeasurementError,
+    PEELTIMING_EVICT_BYTES_MAX,
     PROXY_COST_MODEL,
     PROXY_MEASURE_REGIME,
     PROXY_ORDERING_PROTOCOL,
     SEARCH_BOX_PROTOCOL,
+    STOCK_CONTROL_EMBEDDED,
+    STOCK_CONTROL_SELECTED,
+    _COMPARE_BLOCK_BYTES_MAX,
+    _COMPARE_TRIALS_MAX,
+    _native_peel_cdf_signature,
     compare_probe,
     derive_seed,
     family as peel_family,
     isolated_codec_env,
+    paired_probe,
+    paired_selected_metrics,
+    require_paired_stock_control,
     stock_profile,
+    validate_peeltiming_dimensions,
     valid_loss_rate,
 )
 
 BENCH_DEFAULT = "build-fast/codec/wirehair_v2_bench"
-FUNNEL_RESULT_SCHEMA = "wirehair-v2-peel-funnel-result/v2"
+FUNNEL_RESULT_SCHEMA = "wirehair-v2-peel-funnel-result/v4"
 FUNNEL_RESULT_PREFIX = "# peel_funnel_result="
 MEASURE_COLUMNS = (
     "S", "H", "D2", "scale", "shape", "p1", "p2", "p3", "c1", "c2",
@@ -277,58 +287,59 @@ class Funnel:
         print(f"  screen  {self.a.screen} pts @{self.a.screen_cells} cells  "
               f"{time.time()-t0:5.1f}s  {len(alive)} measured")
         if not alive:
-            print("  counter stage returned no candidates")
-            return None
-        alive.sort(key=proxy_order)
-        best, best_fail, bestv = alive[0]
+            # Proxy output is advisory.  Its total failure cannot veto the
+            # authoritative native shipped control or make a sweep incomplete.
+            print(
+                "  counter stage returned no candidates; measuring shipped "
+                "control")
+            pool = [None]
+        else:
+            alive.sort(key=proxy_order)
+            best, best_fail, bestv = alive[0]
 
-        t1, r, used = time.time(), 0.25, 0
-        while r > 1e-3 and used < self.a.refine:
-            cand = []
-            for j, (_, lo, hi) in enumerate(self.box):
-                step = max(1, int(round(r * (hi - lo))))
-                for s in (-step, step):
-                    w = self.clamp([x + (s if kk == j else 0)
-                                    for kk, x in enumerate(bestv)])
-                    if w != bestv:
-                        cand.append(w)
-            cand = cand[:self.a.refine - used]
-            if not cand:
-                break
-            res = self.measure(cand, self.a.screen_cells)
-            used += len(cand)
-            moved = False
-            for p, (o, f) in zip(cand, res):
-                if (o is not None and f is not None and
-                        proxy_order((o, f, p)) <
-                        proxy_order((best, best_fail, bestv))):
-                    best, best_fail, bestv, moved = o, f, p, True
-            if not moved:
-                r *= 0.5
-        print(f"  refine  {used} pts @{self.a.screen_cells} cells  "
-              f"{time.time()-t1:5.1f}s  {alive[0][0]:,.0f} -> {best:,.0f}")
+            t1, r, used = time.time(), 0.25, 0
+            while r > 1e-3 and used < self.a.refine:
+                cand = []
+                for j, (_, lo, hi) in enumerate(self.box):
+                    step = max(1, int(round(r * (hi - lo))))
+                    for s in (-step, step):
+                        w = self.clamp([x + (s if kk == j else 0)
+                                        for kk, x in enumerate(bestv)])
+                        if w != bestv:
+                            cand.append(w)
+                cand = cand[:self.a.refine - used]
+                if not cand:
+                    break
+                res = self.measure(cand, self.a.screen_cells)
+                used += len(cand)
+                moved = False
+                for p, (o, f) in zip(cand, res):
+                    if (o is not None and f is not None and
+                            proxy_order((o, f, p)) <
+                            proxy_order((best, best_fail, bestv))):
+                        best, best_fail, bestv, moved = o, f, p, True
+                if not moved:
+                    r *= 0.5
+            print(f"  refine  {used} pts @{self.a.screen_cells} cells  "
+                  f"{time.time()-t1:5.1f}s  "
+                  f"{alive[0][0]:,.0f} -> {best:,.0f}")
 
-        # None means the true shipped arm: no peel override and no staircase
-        # scale override. It is a mandatory finalist and control.
-        incumbent = None
-        pool = [bestv] + [v for _, _, v in alive if v != bestv]
-        pool = pool[:self.a.finals - 1] + [incumbent]
+            # None means the true shipped arm: no peel override and no
+            # staircase scale override. It is a mandatory finalist/control.
+            pool = [bestv] + [v for _, _, v in alive if v != bestv]
+            pool = pool[:self.a.finals - 1] + [None]
         t2 = time.time()
         ok, dead = self.real_select(pool)
         print(f"  finals  {self.gate_arm_count} arms gated "
               f"({len(pool)} proxy/shipped) @bb{self.a.gate_bb}/"
               f"{self.a.gate_trials}tr, top {self.a.rank_top} timed @bb"
-              f"{self.a.rank_bb}/{self.a.real_trials}tr  {time.time()-t2:5.1f}s  "
+              f"{self.a.rank_bb}/{self.a.paired_replicates}rep  "
+              f"{time.time()-t2:5.1f}s  "
               f"{len(dead)} rejected as non-decoding")
         if not ok:
             print("  no candidate decoded -- the incumbent stands at this K")
             return None
         winner_goodput, winner_metrics, winner_vector = ok[0]
-        winner_key = (
-            None if winner_vector is None else tuple(winner_vector))
-        shipped_control = self.rank_controls.get(winner_key)
-        if shipped_control is None:
-            raise MeasurementError("mandatory shipped rank control is missing")
         if winner_vector is None:
             winner_coordinates = {
                 "scale": -1.0, "p1": 100, "tilt": 0,
@@ -355,6 +366,31 @@ class Funnel:
                 winner_mode = "trained"
         if winner_pmf is None:
             raise MeasurementError("winner has an invalid peel PMF")
+        evaluated_vector = (
+            winner_vector if winner_vector is not None else
+            self.control_evaluated_vector)
+        evaluated_coordinates = (
+            {"scale": -1.0, "p1": 100, "tilt": 0,
+             "dmax": 64, "absorb": 100}
+            if evaluated_vector is None else
+            {
+                "scale": evaluated_vector[0] / 100.0,
+                "p1": evaluated_vector[1],
+                "tilt": evaluated_vector[2] - 100,
+                "dmax": evaluated_vector[3],
+                "absorb": evaluated_vector[4],
+            }
+        )
+        evaluated_pmf = (
+            list(self.native_profile.pmf)
+            if evaluated_vector is None or is_scale_only(evaluated_vector)
+            else peel_family(
+                self.native_profile.pmf,
+                evaluated_coordinates["p1"], evaluated_coordinates["tilt"],
+                evaluated_coordinates["dmax"], evaluated_coordinates["absorb"])
+        )
+        if evaluated_pmf is None:
+            raise MeasurementError("evaluated finalist has an invalid PMF")
         winner_receipt = {
             "schema": FUNNEL_RESULT_SCHEMA,
             "K": self.k,
@@ -362,12 +398,21 @@ class Funnel:
             "coordinates": winner_coordinates,
             "peel_pmf": winner_pmf,
             "goodput": winner_goodput,
-            "trials": self.a.real_trials,
+            "trials": self.a.paired_replicates,
             "block_bytes": self.a.rank_bb,
             "rejected": len(dead),
-            "shipped_control": shipped_control.as_dict(),
-            "shipped_goodput": shipped_control.goodput(self.k),
-            **winner_metrics.as_dict(),
+            "evaluated_coordinates": evaluated_coordinates,
+            "evaluated_pmf": evaluated_pmf,
+            "paired_measurement": winner_metrics.as_dict(),
+            "stock_control_source": (
+                STOCK_CONTROL_SELECTED
+                if winner_mode == "shipped" else
+                STOCK_CONTROL_EMBEDDED),
+            "stock_control_measurement": (
+                None if winner_mode == "shipped" else
+                self.stock_control_measurement.as_dict()),
+            "shipped_goodput": winner_metrics.identity.goodput(self.k),
+            **paired_selected_metrics(winner_metrics, winner_mode),
         }
         print(
             FUNNEL_RESULT_PREFIX +
@@ -378,30 +423,33 @@ class Funnel:
               f"total {time.time()-t0:.1f}s, {self.calls} bench calls\n")
         print(f"  {'rank':>4} {'goodput':>10} {'MB/s':>9} {'OH_mean':>9}  parameters")
         for i, (g, measurement, v) in enumerate(ok[:self.a.show], 1):
+            arm = measurement.identity if v is None else measurement.candidate
             metrics = (
-                f"fail={measurement.fail} OH_sd={measurement.oh_sd:.17g} "
-                f"OH50={measurement.oh50:.17g} "
-                f"OH95={measurement.oh95:.17g} "
-                f"OH99={measurement.oh99:.17g} "
-                f"OH_max={measurement.oh_max:.17g} "
-                f"construction_seed={measurement.construction_seed} "
-                f"loss_seed={measurement.loss_seed}")
+                f"fail={arm.fail} OH_sd={arm.oh_sd:.17g} "
+                f"OH50={arm.oh50:.17g} "
+                f"OH95={arm.oh95:.17g} "
+                f"OH99={arm.oh99:.17g} "
+                f"OH_max={arm.oh_max:.17g} "
+                f"stream_sha256={measurement.stream_sha256}")
             if v is None:
                 print(f"  {i:>4} {g:>10.1f} "
-                      f"{measurement.decode_mbps:>9.1f} "
-                      f"{measurement.oh_mean:>9.4f}  "
+                      f"{arm.solve_mbps:>9.1f} "
+                      f"{arm.oh_mean:>9.4f}  "
                       "mode=shipped scale=-1.00 p1=100 tilt=0 "
                       f"dmax=64 absorb=100 {metrics}")
             else:
                 mode = "scale-only" if is_scale_only(v) else "trained"
                 print(f"  {i:>4} {g:>10.1f} "
-                      f"{measurement.decode_mbps:>9.1f} "
-                      f"{measurement.oh_mean:>9.4f}  "
+                      f"{arm.solve_mbps:>9.1f} "
+                      f"{arm.oh_mean:>9.4f}  "
                       f"mode={mode} scale={v[0]/100:.2f} "
                       f"p1={v[1]} tilt={v[2]-100} dmax={v[3]} "
                       f"absorb={v[4]} {metrics}")
-        print(f"\n  NOTE goodput = MB/s * K/(K+OH); failure is a hard gate, not a "
-              f"term.\n       Top finalists are typically within noise of each other.")
+        print(
+            "\n  NOTE goodput = MB/s * K/(K+OH) over common successful "
+            "replicates; candidate-only recovery regressions are a hard gate."
+            "\n       Shared raw-seed failures are reported separately; top "
+            "finalists are typically within noise of each other.")
         return ok
 
     def real_probe(self, v, trials, bb, tier):
@@ -423,22 +471,36 @@ class Funnel:
         }
         scale = None if v is None else v[0] / 100.0
         if v is None or is_scale_only(v):
-            return compare_probe(
-                self.a.bench, self.k, trials, bb,
-                degree_scale=scale, **exact)
-        w = peel_family(
-            self.native_profile.pmf,
-            v[1], v[2] - 100, v[3], v[4])
+            w = list(self.native_profile.pmf)
+        else:
+            w = peel_family(
+                self.native_profile.pmf,
+                v[1], v[2] - 100, v[3], v[4])
         if w is None:
             return None
-        return compare_probe(
-            self.a.bench, self.k, trials, bb,
-            peel_weights=w, degree_scale=scale, **exact)
+        if tier == "gate":
+            return compare_probe(
+                self.a.bench, self.k, trials, bb,
+                peel_weights=(
+                    None if v is None else
+                    (None if is_scale_only(v) else w)),
+                degree_scale=scale, **exact)
+        return paired_probe(
+            self.a.bench, self.k, bb, w, degree_scale=scale,
+            warmup_replicates=self.a.paired_warmups,
+            replicates=trials,
+            inner_reps=self.a.paired_inner_reps,
+            max_overhead=self.a.max_overhead,
+            cache_state=self.a.cache_state,
+            evict_bytes=self.a.evict_bytes,
+            context=self.a.paired_context,
+            required_margin=(
+                self.a.rank_margin if tier == "rank" else 0.0),
+            **exact)
 
     def real_select(self, pool):
         """Use a cheap recovery gate, then rank survivors at real payload."""
         self.rank_measurements = []
-        self.rank_controls = {}
         # Deduplicate by the complete active configuration. Scale is an
         # independent staircase override, so two equal PMFs at different
         # scales are distinct arms. The true shipped arm has no override at all
@@ -447,6 +509,8 @@ class Funnel:
         seen_configs = set()
         have_shipped = False
         native_pmf = list(self.native_profile.pmf)
+        native_signature = _native_peel_cdf_signature(
+            native_pmf, self.k)
         for vector in pool:
             if vector is None:
                 if not have_shipped:
@@ -460,14 +524,17 @@ class Funnel:
                 continue
             if is_scale_only(vector):
                 candidate_pmf = native_pmf
-            elif candidate_pmf == native_pmf:
+            elif (_native_peel_cdf_signature(candidate_pmf, self.k) ==
+                  native_signature):
                 # Canonicalize every PMF identity alias to the actual stock
                 # hook.  The active scale remains a distinct experiment.
                 canonical = [vector[0], *SCALE_ONLY_SHAPE]
                 if vector != canonical:
                     vector = canonical
                 candidate_pmf = native_pmf
-            key = (vector[0], tuple(candidate_pmf))
+            key = (
+                vector[0],
+                _native_peel_cdf_signature(candidate_pmf, self.k))
             if key in seen_configs:
                 continue
             seen_configs.add(key)
@@ -490,14 +557,27 @@ class Funnel:
                     seen_vectors.add(key)
         pool.append(None)
         self.gate_arm_count = len(pool)
-        passed, dead = [], []
+        gate_results = []
         for v in pool:
             r = self.real_probe(
                 v, self.a.gate_trials, self.a.gate_bb, "gate")
-            if r is None:
-                continue
-            (dead if r.fail > 0 else passed).append((r, v))
-        out = []
+            if r is not None:
+                gate_results.append((r, v))
+        try:
+            gate_control = next(
+                r for r, v in gate_results if v is None)
+        except StopIteration:
+            raise MeasurementError(
+                "recovery gate returned no stock control")
+        gate_control_arm = (
+            gate_control.candidate
+            if hasattr(gate_control, "candidate") else gate_control)
+        passed, dead = [], []
+        for r, v in gate_results:
+            arm = r.candidate if hasattr(r, "candidate") else r
+            (dead if arm.fail > gate_control_arm.fail else passed).append(
+                (r, v))
+        candidate_out = []
         # The shipped arm is a mandatory control, not merely the last member of
         # a cost-sorted candidate list.  The old slice silently omitted it
         # whenever at least rank_top trained candidates passed the cheap gate.
@@ -511,7 +591,8 @@ class Funnel:
         rank_vectors = []
         seen_rank_vectors = set()
         # Simpler scale-only candidates win exact candidate/candidate ties.
-        # The final sort still gives the no-hook shipped arm first priority.
+        # The final sort still gives the explicit stock-vs-stock arm first
+        # priority.
         for candidate in scale_only_finalists + proxy_finalists:
             key = tuple(candidate)
             if key not in seen_rank_vectors:
@@ -521,26 +602,35 @@ class Funnel:
             rank_vectors.append(None)
         for v in rank_vectors:
             r = self.real_probe(
-                v, self.a.real_trials, self.a.rank_bb, "rank")
+                v, self.a.paired_replicates, self.a.rank_bb, "rank")
             if r is None:
                 continue
             self.rank_measurements.append((r, v))
-            if r.fail > 0:                    # slipped through the cheap gate
-                if not any(dead_v is v for _, dead_v in dead):
-                    dead.append((r, v))
-                continue
-            out.append((r.goodput(self.k), r, v))
-        shipped_control = next(
-            (measurement for measurement, vector in self.rank_measurements
-             if vector is None),
-            None)
-        if shipped_control is None:
-            raise MeasurementError("mandatory shipped rank control is missing")
-        self.rank_controls[None] = shipped_control
-        for unused_measurement, vector in self.rank_measurements:
-            if vector is not None:
-                self.rank_controls[tuple(vector)] = shipped_control
-        return sorted(out, key=lambda x: (-x[0], x[2] is not None)), dead
+            if v is not None and r.valid_for_promotion:
+                candidate_out.append(
+                    (r.candidate.goodput(self.k), r, v))
+        if not self.rank_measurements:
+            raise MeasurementError("paired rank returned no measurements")
+        try:
+            control_measurement, self.control_evaluated_vector = next(
+                item for item in self.rank_measurements
+                if item[1] is None)
+        except StopIteration:
+            raise MeasurementError(
+                "paired rank did not return its stock control")
+        require_paired_stock_control(
+            control_measurement, "paired stock control")
+        self.stock_control_measurement = control_measurement
+        # Architecture choice is made solely by the paired solve-cost upper
+        # confidence bound among recovery-nonregressing promotable arms.
+        # Overhead remains receipt-only and must not become a hidden veto or
+        # sorting term.
+        candidate_out.sort(
+            key=lambda item: item[1].candidate_log_cost_ci_high)
+        candidate_out.append((
+            control_measurement.identity.goodput(self.k),
+            control_measurement, None))
+        return candidate_out, dead
 
     def stock_pmf(self):
         return list(self.native_profile.pmf)
@@ -564,7 +654,12 @@ def main(argv=None):
     ap.add_argument("--cell-base", type=int, default=900_000_000)
     ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
     ap.add_argument("--seed-policy", required=True, choices=["raw"])
-    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument(
+        "--schedule", required=True,
+        choices=[
+            "iid", "burst", "permutation", "systematic-first",
+            "repair-only", "adversarial",
+        ])
     ap.add_argument("--loss", type=float, required=True)
     ap.add_argument("--construction-seed", type=int, required=True)
     ap.add_argument("--loss-seed", type=int, required=True)
@@ -574,8 +669,9 @@ def main(argv=None):
                          "lattice (tilt = signed + 100), normally the answer "
                          "from a neighbouring K")
     ap.add_argument("--init-frac", type=float, default=0.20)
-    ap.add_argument("--real-trials", type=int, default=2000,
-                    help="trials for the RANK tier (real payload)")
+    ap.add_argument(
+        "--paired-replicates", type=int, default=16,
+        help="even measured replicate count for each final paired timing run")
     ap.add_argument("--gate-trials", type=int, default=25,
                     help="trials for the cheap solve-rate gate")
     ap.add_argument("--gate-bb", type=int, default=64,
@@ -584,6 +680,13 @@ def main(argv=None):
                     help="payload for throughput ranking; must be realistic")
     ap.add_argument("--rank-top", type=int, default=3,
                     help="how many gate survivors get a real timing measurement")
+    ap.add_argument("--paired-context", required=True)
+    ap.add_argument("--paired-warmups", type=int, default=2)
+    ap.add_argument("--paired-inner-reps", type=int, default=1)
+    ap.add_argument("--max-overhead", type=int, default=512)
+    ap.add_argument("--cache-state", choices=["warm", "cold"], default="warm")
+    ap.add_argument("--evict-bytes", type=int, default=64 * 1024 * 1024)
+    ap.add_argument("--rank-margin", type=float, default=0.0)
     ap.add_argument(
         "--allow-unverified-cost-model", action="store_true",
         help="opt in to the embedded ES cost model whose raw calibration "
@@ -591,14 +694,45 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if (not 2 <= a.K <= 64000 or a.screen < 1 or
             a.refine < 0 or a.finals < 2 or a.show < 1 or
-            a.screen_cells < 1 or a.threads < 1 or a.batch < 1 or
-            a.cell_base < 0 or a.gate_trials < 1 or a.gate_bb < 1 or
-            a.real_trials < 1 or a.rank_bb < 1 or a.rank_top < 1 or
+            a.screen_cells < 1 or not 1 <= a.threads <= 1024 or
+            a.batch < 1 or
+            a.cell_base < 0 or
+            not 1 <= a.gate_trials <= _COMPARE_TRIALS_MAX or
+            a.gate_bb < 2 or a.gate_bb % 2 != 0 or
+            a.gate_bb > _COMPARE_BLOCK_BYTES_MAX or
+            a.paired_replicates < 1 or
+            a.rank_bb < 2 or a.rank_bb % 2 != 0 or
+            a.rank_bb > _COMPARE_BLOCK_BYTES_MAX or a.rank_top < 1 or
+            a.paired_warmups < 0 or a.paired_warmups % 2 != 0 or
+            a.paired_inner_reps < 1 or a.max_overhead < 0 or
+            not 4096 <= a.evict_bytes <= PEELTIMING_EVICT_BYTES_MAX or
+            not 0.0 <= a.rank_margin <= 1.0 or
+            a.paired_replicates < 4 or a.paired_replicates % 2 != 0 or
             not 0.0 < a.init_frac <= 1.0 or
             not valid_loss_rate(a.loss) or
             not 0 <= a.construction_seed <= 0xffffffffffffffff or
             not 0 <= a.loss_seed <= 0xffffffffffffffff):
         ap.error("invalid K, budget, payload, fraction, loss, or uint64 seed")
+    try:
+        validate_peeltiming_dimensions(
+            block_count=a.K,
+            block_bytes=a.rank_bb,
+            target_profile=a.target_profile,
+            seed_policy=a.seed_policy,
+            construction_seed=a.construction_seed,
+            loss=a.loss,
+            loss_seed=a.loss_seed,
+            schedule=a.schedule,
+            warmup_replicates=a.paired_warmups,
+            replicates=a.paired_replicates,
+            inner_reps=a.paired_inner_reps,
+            max_overhead=a.max_overhead,
+            cache_state=a.cache_state,
+            evict_bytes=a.evict_bytes,
+            required_margin=a.rank_margin,
+        )
+    except ValueError as error:
+        ap.error(str(error))
     if not a.allow_unverified_cost_model:
         print(
             f"REFUSED: proxy cost model {PROXY_COST_MODEL!r} has no replayable "

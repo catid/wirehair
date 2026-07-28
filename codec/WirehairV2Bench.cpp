@@ -40,6 +40,7 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
+#include <time.h>
 #endif
 
 #if defined(__linux__)
@@ -2693,14 +2694,6 @@ int CmdCompare(int argc, char** argv)
             return 1;
         }
         precode_profile = PrecodeProfileMixed;
-        if (schedule_kind != PacketScheduleKind::Iid)
-        {
-            std::fprintf(stderr,
-                "compare dispatch-v1 target currently supports only "
-                "--schedule iid; other loss models need a versioned "
-                "receipt\n");
-            return 1;
-        }
         if (!ValidateTargetExperimentEnvironment("compare")) {
             return 1;
         }
@@ -3008,7 +3001,7 @@ int CmdCompare(int argc, char** argv)
             "dense_identity_corner=0,dense_two_anchor=0,mix_count=%u,"
             "packet_seed_multiplier=1,packet_seed_avalanche=0,"
             "packet_peel_seed=%u,construction_seed=0x%llx,"
-            "loss=iid-drop,loss_rate=%.17g,loss_seed=0x%llx,"
+            "loss=packet-schedule-v1,loss_rate=%.17g,loss_seed=0x%llx,"
             "schedule=%s,loss_trace=common-id-v2,pmf_sha256=%s,"
             "pmf_encoding=wirehair-v2-peel-spec-v1,staircase_scale=%s\n",
             target_contract->Name,
@@ -5550,7 +5543,7 @@ uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
 // manifest to the exact bytes produced by route mode.  Keeping verification in
 // the consumer prevents a stale or forged preferred map from being blessed by
 // an unrelated digest supplied on the command line.
-std::string Sha256Hex(const std::string& input)
+std::string Sha256HexBytes(const uint8_t* input, size_t input_size)
 {
     static const uint32_t kRound[64] = {
         0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
@@ -5574,7 +5567,10 @@ std::string Sha256Hex(const std::string& input)
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
     };
-    std::vector<uint8_t> bytes(input.begin(), input.end());
+    std::vector<uint8_t> bytes;
+    if (input_size > 0u) {
+        bytes.assign(input, input + input_size);
+    }
     const uint64_t bit_count = (uint64_t)bytes.size() * 8u;
     bytes.push_back(0x80u);
     while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
@@ -5621,6 +5617,12 @@ std::string Sha256Hex(const std::string& input)
     output << std::hex << std::setfill('0');
     for (uint32_t value : state) output << std::setw(8) << value;
     return output.str();
+}
+
+std::string Sha256Hex(const std::string& input)
+{
+    return Sha256HexBytes(
+        reinterpret_cast<const uint8_t*>(input.data()), input.size());
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
@@ -9083,14 +9085,6 @@ int CmdPrecodeFail(int argc, char** argv)
         if (!ValidateTargetExperimentEnvironment("precodefail")) {
             return 1;
         }
-        if (schedule_kind != PacketScheduleKind::Iid)
-        {
-            std::fprintf(stderr,
-                "precodefail dispatch-v1 target currently supports only "
-                "--schedule iid; other loss models need a versioned "
-                "receipt\n");
-            return 1;
-        }
     }
     if (dispatch_profile_v1)
     {
@@ -9929,7 +9923,7 @@ int CmdPrecodeFail(int argc, char** argv)
                     "dense_identity_corner=%u,dense_two_anchor=%u,"
                     "mix_count=%u,packet_seed_multiplier=%u,"
                     "packet_seed_avalanche=%u,packet_peel_seed=%u,"
-                    "construction_seed=0x%llx,loss=iid-drop,"
+                    "construction_seed=0x%llx,loss=packet-schedule-v1,"
                     "loss_rate=%.17g,loss_seed=0x%llx,schedule=%s,"
                     "loss_trace=precodefail-cell-v1,"
                     "overhead_stream=%s,pmf_sha256=%s,"
@@ -11663,6 +11657,2173 @@ std::vector<double> MakePeelDegreeWeights(
     // one, which is why the identity survives normalization.
     for (double& w : out) { w = (w > 0.0 ? w : 0.0) / total; }
     return out;
+}
+
+enum class PeelTimingCacheState
+{
+    Cold,
+    Warm
+};
+
+// Cache eviction is a measurement policy, not an unbounded allocation API.
+// One GiB is already well beyond the LLC capacity of supported test hosts and
+// prevents a syntactically valid receipt from committing SIZE_MAX pages under
+// Linux overcommit before std::bad_alloc can report the problem.
+static constexpr uint64_t kPeelTimingEvictBytesMax =
+    UINT64_C(1024) * 1024u * 1024u;
+static constexpr uint64_t kPeelTimingWorkingBytesMax =
+    UINT64_C(4) * 1024u * 1024u * 1024u;
+
+struct PeelTimingOptions
+{
+    uint32_t BlockCount = 0u;
+    uint32_t BlockBytes = 0u;
+    uint64_t ConstructionSeedBase = 0u;
+    double Loss = 0.0;
+    uint64_t LossSeedBase = 0u;
+    PacketScheduleKind Schedule = PacketScheduleKind::Iid;
+    std::string CandidatePmfSpec;
+    std::vector<double> CandidatePmf;
+    bool CandidateScaleIdentity = false;
+    double CandidateScale = 0.0;
+    uint32_t WarmupReplicates = 0u;
+    uint32_t Replicates = 0u;
+    uint32_t InnerReps = 0u;
+    uint32_t MaxOverhead = 0u;
+    PeelTimingCacheState CacheState = PeelTimingCacheState::Warm;
+    uint64_t EvictBytes = 0u;
+    std::string ContextSha256;
+    double RequiredMargin = 0.0;
+    const wirehair_v2::V2EquationContract* TargetContract = nullptr;
+};
+
+bool IsPeelTimingLowerHexSha256(const std::string& text)
+{
+    if (text.size() != 64u) return false;
+    for (char ch : text) {
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParsePeelTimingPmf(
+    const char* text,
+    std::string& exact_spec,
+    std::vector<double>& weights)
+{
+    exact_spec.clear();
+    weights.clear();
+    if (!text || !*text) return false;
+    const char* p = text;
+    for (;;)
+    {
+        if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
+            *p == '\f' || *p == '\v')
+        {
+            return false;
+        }
+        errno = 0;
+        char* end = nullptr;
+        const double weight = std::strtod(p, &end);
+        if (end == p || errno == ERANGE || !std::isfinite(weight) ||
+            weight < 0.0 || weights.size() >= 64u)
+        {
+            return false;
+        }
+        weights.push_back(weight);
+        p = end;
+        if (*p == '\0') break;
+        if (*p != ',') return false;
+        ++p;
+        if (*p == '\0') return false;
+    }
+    double sum = 0.0;
+    for (double weight : weights) {
+        sum += weight;
+        if (!std::isfinite(sum)) return false;
+    }
+    if (!(sum > 0.0)) return false;
+
+    std::ostringstream canonical;
+    canonical << std::setprecision(17);
+    for (size_t i = 0u; i < weights.size(); ++i) {
+        // Collapse both IEEE-754 signed-zero spellings before hashing the
+        // canonical PMF.  They drive the same sampler and therefore must not
+        // create two receipt identities.
+        if (weights[i] == 0.0) weights[i] = 0.0;
+        if (i != 0u) canonical << ',';
+        canonical << weights[i];
+    }
+    exact_spec = canonical.str();
+    return true;
+}
+
+bool ParsePeelTimingOptions(
+    int argc,
+    char** argv,
+    PeelTimingOptions& options)
+{
+    bool have_N = false;
+    bool have_bb = false;
+    bool have_target = false;
+    bool have_seed_policy = false;
+    bool have_construction_seed = false;
+    bool have_loss = false;
+    bool have_loss_seed = false;
+    bool have_schedule = false;
+    bool have_candidate_pmf = false;
+    bool have_candidate_scale = false;
+    bool have_warmups = false;
+    bool have_replicates = false;
+    bool have_inner_reps = false;
+    bool have_max_overhead = false;
+    bool have_cache_state = false;
+    bool have_evict_bytes = false;
+    bool have_context = false;
+    bool have_margin = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!AcceptOptionOnce("peeltiming", "--N", have_N) ||
+                !TakeArg("peeltiming", "--N", argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, options.BlockCount)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (!AcceptOptionOnce("peeltiming", "--bb", have_bb) ||
+                !TakeArg("peeltiming", "--bb", argc, argv, i, value) ||
+                !ParseU32Arg("--bb", value, options.BlockBytes)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--target-profile")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--target-profile", have_target) ||
+                !TakeArg(
+                    "peeltiming", "--target-profile", argc, argv, i, value))
+            {
+                return false;
+            }
+            options.TargetContract =
+                wirehair_v2::FindV2EquationContract(value);
+            if (!options.TargetContract ||
+                options.TargetContract->PublicProfile ||
+                options.TargetContract->ProfileId !=
+                    wirehair_v2::kWh2DispatchV1ContractId)
+            {
+                std::fprintf(stderr,
+                    "peeltiming --target-profile must be dispatch-v1\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed-policy")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--seed-policy", have_seed_policy) ||
+                !TakeArg(
+                    "peeltiming", "--seed-policy", argc, argv, i, value) ||
+                std::strcmp(value, "raw") != 0)
+            {
+                std::fprintf(stderr,
+                    "peeltiming --seed-policy must be raw\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--construction-seed",
+                    have_construction_seed) ||
+                !TakeArg(
+                    "peeltiming", "--construction-seed",
+                    argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--construction-seed", value,
+                    options.ConstructionSeedBase))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!AcceptOptionOnce("peeltiming", "--loss", have_loss) ||
+                !TakeArg(
+                    "peeltiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, options.Loss)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--loss-seed")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--loss-seed", have_loss_seed) ||
+                !TakeArg(
+                    "peeltiming", "--loss-seed", argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--loss-seed", value, options.LossSeedBase))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--schedule", have_schedule) ||
+                !TakeArg(
+                    "peeltiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, options.Schedule))
+            {
+                std::fprintf(stderr,
+                    "peeltiming --schedule must be iid, burst, permutation, "
+                    "systematic-first, repair-only, or adversarial\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-pmf")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--candidate-pmf", have_candidate_pmf) ||
+                !TakeArg(
+                    "peeltiming", "--candidate-pmf", argc, argv, i, value) ||
+                !ParsePeelTimingPmf(
+                    value, options.CandidatePmfSpec,
+                    options.CandidatePmf))
+            {
+                std::fprintf(stderr,
+                    "peeltiming --candidate-pmf must contain 1..64 finite "
+                    "non-negative comma-separated weights with positive sum\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-scale")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--candidate-scale",
+                    have_candidate_scale) ||
+                !TakeArg(
+                    "peeltiming", "--candidate-scale", argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "identity")) {
+                options.CandidateScaleIdentity = true;
+            }
+            else if (!ParseSignedDoubleScalar(
+                         value, options.CandidateScale) ||
+                     (options.CandidateScale == 0.0 &&
+                      std::signbit(options.CandidateScale)) ||
+                     options.CandidateScale <
+                         wirehair_v2::kStaircaseDegreeScaleMin ||
+                     options.CandidateScale >
+                         wirehair_v2::kStaircaseDegreeScaleMax)
+            {
+                std::fprintf(stderr,
+                    "peeltiming --candidate-scale must be identity or a "
+                    "finite value in [0,64000]\n");
+                return false;
+            }
+            if (!options.CandidateScaleIdentity &&
+                options.CandidateScale == 0.0)
+            {
+                options.CandidateScale = 0.0;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--warmup-replicates")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--warmup-replicates", have_warmups) ||
+                !TakeArg(
+                    "peeltiming", "--warmup-replicates",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--warmup-replicates", value,
+                    options.WarmupReplicates))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--replicates")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--replicates", have_replicates) ||
+                !TakeArg(
+                    "peeltiming", "--replicates", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--replicates", value, options.Replicates))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--inner-reps")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--inner-reps", have_inner_reps) ||
+                !TakeArg(
+                    "peeltiming", "--inner-reps", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--inner-reps", value, options.InnerReps))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--max-overhead")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--max-overhead", have_max_overhead) ||
+                !TakeArg(
+                    "peeltiming", "--max-overhead", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--max-overhead", value, options.MaxOverhead))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cache-state")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--cache-state", have_cache_state) ||
+                !TakeArg(
+                    "peeltiming", "--cache-state", argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "cold")) {
+                options.CacheState = PeelTimingCacheState::Cold;
+            }
+            else if (!std::strcmp(value, "warm")) {
+                options.CacheState = PeelTimingCacheState::Warm;
+            }
+            else {
+                std::fprintf(stderr,
+                    "peeltiming --cache-state must be cold or warm\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--evict-bytes", have_evict_bytes) ||
+                !TakeArg(
+                    "peeltiming", "--evict-bytes", argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--evict-bytes", value, options.EvictBytes))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--context-sha256")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--context-sha256", have_context) ||
+                !TakeArg(
+                    "peeltiming", "--context-sha256", argc, argv, i, value))
+            {
+                return false;
+            }
+            options.ContextSha256 = value;
+        }
+        else if (!std::strcmp(argv[i], "--required-margin")) {
+            if (!AcceptOptionOnce(
+                    "peeltiming", "--required-margin", have_margin) ||
+                !TakeArg(
+                    "peeltiming", "--required-margin", argc, argv, i, value) ||
+                !ParseDoubleArg(
+                    "--required-margin", value, options.RequiredMargin))
+            {
+                return false;
+            }
+        }
+        else {
+            return UnknownArg("peeltiming", argv[i]);
+        }
+    }
+
+    if (!have_N || !have_bb || !have_target || !have_seed_policy ||
+        !have_construction_seed || !have_loss || !have_loss_seed ||
+        !have_schedule || !have_candidate_pmf || !have_candidate_scale ||
+        !have_warmups || !have_replicates || !have_inner_reps ||
+        !have_max_overhead || !have_cache_state || !have_evict_bytes ||
+        !have_context || !have_margin)
+    {
+        std::fprintf(stderr,
+            "peeltiming requires --N, --bb, --target-profile, "
+            "--seed-policy, --construction-seed, --loss, --loss-seed, "
+            "--schedule, --candidate-pmf, --candidate-scale, "
+            "--warmup-replicates, --replicates, --inner-reps, "
+            "--max-overhead, --cache-state, --evict-bytes, "
+            "--context-sha256, and --required-margin\n");
+        return false;
+    }
+    const uint64_t total_replicates =
+        (uint64_t)options.WarmupReplicates + options.Replicates;
+    const uint64_t delivered =
+        (uint64_t)options.BlockCount + options.MaxOverhead;
+    const long double work_units =
+        (long double)total_replicates * 16.0L *
+        (long double)options.InnerReps * (long double)delivered;
+    if (options.BlockCount < 2u || options.BlockCount > 64000u ||
+        options.BlockBytes == 0u ||
+        options.BlockBytes > UINT32_C(0x7fffffff) ||
+        (options.BlockBytes & 1u) != 0u ||
+        !ValidateLoss(options.Loss, "peeltiming") ||
+        (options.Loss == 0.0 && std::signbit(options.Loss)) ||
+        options.Replicates < 4u || (options.Replicates & 1u) != 0u ||
+        (options.WarmupReplicates & 1u) != 0u ||
+        total_replicates > 10000u ||
+        options.InnerReps == 0u || options.InnerReps > 1024u ||
+        options.MaxOverhead > 4096u ||
+        options.MaxOverhead >
+            (uint64_t)options.BlockCount + 512u ||
+        (uint64_t)options.BlockCount + options.MaxOverhead > UINT32_MAX ||
+        options.EvictBytes < 4096u ||
+        options.EvictBytes > kPeelTimingEvictBytesMax ||
+        (options.CacheState == PeelTimingCacheState::Cold &&
+         options.InnerReps != 1u) ||
+        !IsPeelTimingLowerHexSha256(options.ContextSha256) ||
+        options.RequiredMargin < 0.0 ||
+        options.RequiredMargin > 1.0 ||
+        (options.RequiredMargin == 0.0 &&
+         std::signbit(options.RequiredMargin)) ||
+        work_units > 1000000000000.0L)
+    {
+        std::fprintf(stderr, "peeltiming argument domain mismatch\n");
+        return false;
+    }
+    return true;
+}
+
+const char* PeelTimingCacheStateName(PeelTimingCacheState state)
+{
+    return state == PeelTimingCacheState::Cold ? "cold" : "warm";
+}
+
+uint64_t PeelTimingDerivedConstructionSeed(
+    uint64_t base,
+    uint32_t replicate)
+{
+    return base ^ ((uint64_t)(replicate + 1u) *
+        UINT64_C(0xd1b54a32d192ed03));
+}
+
+uint64_t PeelTimingDerivedLossSeed(uint64_t base, uint32_t replicate)
+{
+    return base ^ ((uint64_t)(replicate + 1u) *
+        UINT64_C(0x9e3779b97f4a7c15));
+}
+
+bool ReadPeelTimingMonotonicNanoseconds(uint64_t& nanoseconds)
+{
+#if defined(__unix__) || defined(__APPLE__)
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
+        now.tv_sec >= 0 && now.tv_nsec >= 0)
+    {
+        nanoseconds = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+            (uint64_t)now.tv_nsec;
+        return true;
+    }
+    return false;
+#else
+    const std::chrono::nanoseconds elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now().time_since_epoch());
+    if (elapsed.count() < 0) return false;
+    nanoseconds = (uint64_t)elapsed.count();
+    return true;
+#endif
+}
+
+const char* PeelTimingClockDomain()
+{
+#if defined(__unix__) || defined(__APPLE__)
+    return "posix-clock-monotonic-ns-v1";
+#else
+    return "cpp-steady-clock-ns-v1";
+#endif
+}
+
+bool ValidatePeelTimingEnvironment()
+{
+    static const char* const kForbidden[] = {
+        "WIREHAIR_V2_PEEL_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_ROW_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE",
+        "WIREHAIR_V2_BAND_TRACKING_X"
+    };
+    for (const char* name : kForbidden)
+    {
+        const wirehair::EnvironmentValue value(name);
+        if (value.IsSet())
+        {
+            std::fprintf(stderr,
+                "peeltiming forbids ambient %s\n", name);
+            return false;
+        }
+    }
+    return ValidateTargetExperimentEnvironment("peeltiming");
+}
+
+bool PinPeelTimingToFirstAllowedCpu()
+{
+#if defined(__linux__)
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        return false;
+    }
+    int selected_cpu = -1;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &allowed)) {
+            selected_cpu = cpu;
+            break;
+        }
+    }
+    if (selected_cpu < 0) return false;
+    cpu_set_t selected;
+    CPU_ZERO(&selected);
+    CPU_SET(selected_cpu, &selected);
+    if (sched_setaffinity(0, sizeof(selected), &selected) != 0) {
+        return false;
+    }
+    cpu_set_t verified;
+    CPU_ZERO(&verified);
+    if (sched_getaffinity(0, sizeof(verified), &verified) != 0 ||
+        CPU_COUNT(&verified) != 1 ||
+        !CPU_ISSET(selected_cpu, &verified))
+    {
+        return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+struct PeelTimingUsage
+{
+    int64_t MinorFaults = -1;
+    int64_t MajorFaults = -1;
+};
+
+PeelTimingUsage ReadPeelTimingUsage()
+{
+    PeelTimingUsage result;
+#if defined(__unix__) || defined(__APPLE__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        result.MinorFaults = (int64_t)usage.ru_minflt;
+        result.MajorFaults = (int64_t)usage.ru_majflt;
+    }
+#endif
+    return result;
+}
+
+int PeelTimingCurrentCpu()
+{
+#if defined(__linux__)
+    return sched_getcpu();
+#else
+    return -1;
+#endif
+}
+
+int PeelTimingCpuMigrated(int before, int after)
+{
+    return before < 0 || after < 0 ? -1 : (before != after ? 1 : 0);
+}
+
+int PeelTimingFaultContaminated(int64_t minor, int64_t major)
+{
+    return minor < 0 || major < 0 ?
+        -1 : (minor != 0 || major != 0 ? 1 : 0);
+}
+
+static volatile uint8_t PeelTimingEvictionSink = 0u;
+
+void EvictPeelTimingCache(std::vector<uint8_t>& eviction)
+{
+    uint8_t accumulator = PeelTimingEvictionSink;
+    for (size_t offset = 0u; offset < eviction.size(); offset += 64u) {
+        eviction[offset] = (uint8_t)(eviction[offset] + 1u);
+        accumulator ^= eviction[offset];
+    }
+    if (!eviction.empty()) {
+        eviction.back() = (uint8_t)(eviction.back() + 1u);
+        accumulator ^= eviction.back();
+    }
+    PeelTimingEvictionSink = accumulator;
+}
+
+enum class PeelTimingRole
+{
+    Candidate,
+    IdentityA,
+    IdentityB,
+    NoOverride
+};
+
+const char* PeelTimingRoleName(PeelTimingRole role)
+{
+    switch (role)
+    {
+    case PeelTimingRole::Candidate:  return "candidate";
+    case PeelTimingRole::IdentityA:  return "identity_a";
+    case PeelTimingRole::IdentityB:  return "identity_b";
+    case PeelTimingRole::NoOverride: return "no_override";
+    }
+    return "unknown";
+}
+
+bool ConfigurePeelTimingRole(
+    PeelTimingRole role,
+    const PeelTimingOptions& options,
+    const std::vector<double>& identity_weights,
+    double identity_scale,
+    double candidate_scale)
+{
+    if (role == PeelTimingRole::NoOverride)
+    {
+        wirehair_v2::ClearPeelDegreesForTesting();
+        wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+        return wirehair_v2::PeelDegreeConfigurationValidForTesting();
+    }
+    const std::vector<double>& weights =
+        role == PeelTimingRole::Candidate ?
+        options.CandidatePmf : identity_weights;
+    const double scale = role == PeelTimingRole::Candidate ?
+        candidate_scale : identity_scale;
+    if (!wirehair_v2::SetPeelDegreesForTesting(weights)) return false;
+    wirehair_v2::SetStaircaseDegreeScaleForTesting(scale);
+    return wirehair_v2::PeelDegreeConfigurationValidForTesting();
+}
+
+std::string CanonicalPeelTimingPmf(
+    const std::vector<double>& weights)
+{
+    std::ostringstream text;
+    text << std::setprecision(17);
+    for (size_t i = 0u; i < weights.size(); ++i) {
+        if (i != 0u) text << ',';
+        text << (weights[i] == 0.0 ? 0.0 : weights[i]);
+    }
+    return text.str();
+}
+
+std::string PeelTimingSystemDigest(
+    const wirehair_v2::PrecodeSystem& system)
+{
+    const wirehair_v2::PrecodeParams& p = system.Params;
+    std::ostringstream text;
+    text << "wirehair-wh2-peeltiming-system-v1\n"
+         << p.BlockCount << ',' << p.Staircase << ',' << p.DenseRows << ','
+         << p.HeavyRows << ',' << p.SourceHits << ',' << (uint32_t)p.Field
+         << ',' << p.Seed << ',' << (p.DegreeBalancedStaircase ? 1 : 0)
+         << ',' << (p.DenseIdentityCorner ? 1 : 0) << ','
+         << (p.DenseTwoAnchor ? 1 : 0) << ',' << p.DenseTwoAnchorPhase
+         << ',' << (uint32_t)p.SegmentedDenseAnchors << ','
+         << (uint32_t)p.HeavyFamily << '\n';
+    const auto append_rows = [&text](
+        const char* tag,
+        const std::vector<std::vector<uint32_t>>& rows)
+    {
+        text << tag << '=' << rows.size() << '\n';
+        for (size_t r = 0u; r < rows.size(); ++r) {
+            text << r << ':';
+            for (uint32_t column : rows[r]) text << column << ',';
+            text << '\n';
+        }
+    };
+    append_rows("staircase", system.StaircaseRows);
+    append_rows("dense", system.DenseRowColumns);
+    return Sha256Hex(text.str());
+}
+
+std::string PeelTimingPacketRowsDigest(
+    uint32_t K,
+    uint32_t precode_count,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const std::vector<uint32_t>& ids,
+    bool& valid)
+{
+    valid = true;
+    std::ostringstream text;
+    text << "wirehair-wh2-peeltiming-packet-rows-v1\n";
+    for (uint32_t id : ids)
+    {
+        const std::vector<uint32_t> row =
+            wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                K, precode_count, id, config, runtime);
+        if (row.empty()) {
+            valid = false;
+            return std::string();
+        }
+        text << id << ':';
+        for (uint32_t column : row) text << column << ',';
+        text << '\n';
+    }
+    return Sha256Hex(text.str());
+}
+
+struct PeelTimingEncodedPayload
+{
+    PeelTimingRole Role = PeelTimingRole::NoOverride;
+    std::vector<uint8_t> Bytes;
+    std::string Sha256;
+    size_t IntermediateBytes = 0u;
+    std::string IntermediateSha256;
+};
+
+bool PeelTimingPayloadRoleMatches(
+    PeelTimingRole stored,
+    PeelTimingRole requested)
+{
+    if (stored == requested) return true;
+    return stored == PeelTimingRole::IdentityA &&
+        requested == PeelTimingRole::IdentityB;
+}
+
+struct PeelTimingCell
+{
+    wirehair_v2::PacketRowRuntime Runtime;
+    std::vector<wirehair_v2::SolvePacket> Packets;
+    std::vector<uint8_t> PayloadStorage;
+    uint8_t* Payload = nullptr;
+    size_t PayloadBytes = 0u;
+    PeelTimingEncodedPayload First;
+    PeelTimingEncodedPayload Second;
+    std::string MessageSha256;
+    std::string TraceSha256;
+
+    const PeelTimingEncodedPayload* FindPayload(
+        PeelTimingRole role) const
+    {
+        if (PeelTimingPayloadRoleMatches(First.Role, role)) return &First;
+        if (PeelTimingPayloadRoleMatches(Second.Role, role)) return &Second;
+        return nullptr;
+    }
+
+    bool LoadPayload(PeelTimingRole role)
+    {
+        const PeelTimingEncodedPayload* encoded = FindPayload(role);
+        if (!encoded || !Payload ||
+            encoded->Bytes.size() != PayloadBytes)
+        {
+            return false;
+        }
+        if (!encoded->Bytes.empty()) {
+            std::memcpy(Payload, encoded->Bytes.data(), encoded->Bytes.size());
+        }
+        return true;
+    }
+};
+
+WirehairResult BuildPeelTimingEncodedPayload(
+    PeelTimingRole role,
+    const PeelTimingOptions& options,
+    const std::vector<double>& identity_weights,
+    double identity_scale,
+    double candidate_scale,
+    uint64_t construction_seed,
+    const std::vector<uint8_t>& message,
+    const std::vector<uint32_t>& ids,
+    PeelTimingEncodedPayload& payload)
+{
+    payload = PeelTimingEncodedPayload();
+    payload.Role = role;
+    if (!ConfigurePeelTimingRole(
+            role, options, identity_weights,
+            identity_scale, candidate_scale))
+    {
+        return Wirehair_InvalidInput;
+    }
+    wirehair_v2::SeedProfile raw_profile;
+    if (!wirehair_v2::MakeRawContractProfile(
+            *options.TargetContract, options.BlockCount, options.BlockBytes,
+            construction_seed, raw_profile))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const wirehair_v2::MessagePrecodeEncoderOptions encoder_options =
+        wirehair_v2::MessageOptionsForContract(*options.TargetContract);
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    const WirehairResult initialize_result = encoder.InitializeResult(
+        message.data(), message.size(), options.BlockBytes, &raw_profile,
+        &encoder_options);
+    if (initialize_result != Wirehair_Success) {
+        return initialize_result;
+    }
+    const uint64_t intermediate_blocks =
+        (uint64_t)options.BlockCount + raw_profile.V2StaircaseCount +
+        raw_profile.V2DenseRowCount + raw_profile.V2HeavyRowCount;
+    const uint64_t intermediate_bytes =
+        intermediate_blocks * options.BlockBytes;
+    if (intermediate_blocks > UINT32_MAX ||
+        intermediate_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        !encoder.IntermediateBlocks())
+    {
+        return Wirehair_Error;
+    }
+    payload.IntermediateBytes = (size_t)intermediate_bytes;
+    payload.IntermediateSha256 = Sha256HexBytes(
+        encoder.IntermediateBlocks(), payload.IntermediateBytes);
+
+    const uint64_t payload_bytes =
+        (uint64_t)ids.size() * options.BlockBytes;
+    if (payload_bytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return Wirehair_OOM;
+    }
+    payload.Bytes.resize((size_t)payload_bytes);
+    for (size_t i = 0u; i < ids.size(); ++i)
+    {
+        uint32_t data_bytes = 0u;
+        const WirehairResult encode_result = encoder.EncodeResult(
+            ids[i],
+            payload.Bytes.data() + i * (size_t)options.BlockBytes,
+            options.BlockBytes, &data_bytes);
+        if (encode_result != Wirehair_Success ||
+            data_bytes != options.BlockBytes)
+        {
+            return encode_result == Wirehair_Success ?
+                Wirehair_Error : encode_result;
+        }
+    }
+    payload.Sha256 =
+        Sha256HexBytes(payload.Bytes.data(), payload.Bytes.size());
+    return Wirehair_Success;
+}
+
+std::string PeelTimingLossTraceDigest(
+    const PeelTimingOptions& options,
+    uint64_t construction_seed,
+    uint64_t loss_seed,
+    const std::vector<uint32_t>& ids)
+{
+    // This digest is the cross-arm common-random-number identity.  Keep it
+    // independent of candidate PMFs, role labels, encoded payloads, and
+    // recovery outcomes so a later explicit stock-vs-stock control can prove
+    // that it replayed the selected arm's exact construction/loss population.
+    std::ostringstream trace;
+    trace << "wirehair-wh2-peeltiming-loss-trace-v1\nK="
+          << options.BlockCount << "\nblock_bytes=" << options.BlockBytes
+          << "\nconstruction_seed=" << construction_seed
+          << "\nloss_seed=" << loss_seed << "\nloss="
+          << std::setprecision(17) << options.Loss << "\nschedule="
+          << PacketScheduleName(options.Schedule)
+          << "\nmessage_seed_policy=replicate-loss-seed-v1"
+          << "\nids=";
+    for (size_t i = 0u; i < ids.size(); ++i) {
+        if (i != 0u) trace << ',';
+        trace << ids[i];
+    }
+    trace << '\n';
+    return Sha256Hex(trace.str());
+}
+
+WirehairResult BuildPeelTimingCell(
+    PeelTimingRole first_role,
+    PeelTimingRole second_role,
+    const PeelTimingOptions& options,
+    const std::vector<double>& identity_weights,
+    double identity_scale,
+    double candidate_scale,
+    const wirehair_v2::PrecodeParams& params,
+    const wirehair_v2::PacketRowConfig& config,
+    uint64_t construction_seed,
+    uint64_t loss_seed,
+    const std::vector<uint32_t>& ids,
+    PeelTimingCell& cell)
+{
+    cell = PeelTimingCell();
+    const uint64_t precode_wide =
+        (uint64_t)params.Staircase + params.DenseRows + params.HeavyRows;
+    const uint64_t payload_wide =
+        (uint64_t)ids.size() * options.BlockBytes;
+    if (precode_wide > UINT32_MAX ||
+        payload_wide >
+            (uint64_t)std::numeric_limits<size_t>::max() - 63u ||
+        !cell.Runtime.Initialize(
+            params.BlockCount, (uint32_t)precode_wide, config.MixCount))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const uint64_t message_wide =
+        (uint64_t)params.BlockCount * options.BlockBytes;
+    if (message_wide >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return Wirehair_OOM;
+    }
+    std::vector<uint8_t> message((size_t)message_wide);
+    FillMessage(message, loss_seed);
+    if (std::find_if(
+            message.begin(), message.end(),
+            [](uint8_t value) { return value != 0u; }) == message.end())
+    {
+        return Wirehair_Error;
+    }
+    cell.MessageSha256 = Sha256HexBytes(message.data(), message.size());
+    WirehairResult result = BuildPeelTimingEncodedPayload(
+        first_role, options, identity_weights, identity_scale,
+        candidate_scale, construction_seed, message, ids, cell.First);
+    if (result != Wirehair_Success) return result;
+    result = BuildPeelTimingEncodedPayload(
+        second_role, options, identity_weights, identity_scale,
+        candidate_scale, construction_seed, message, ids, cell.Second);
+    if (result != Wirehair_Success) return result;
+
+    const size_t payload_bytes = (size_t)payload_wide;
+    if (cell.First.Bytes.size() != payload_bytes ||
+        cell.Second.Bytes.size() != payload_bytes)
+    {
+        return Wirehair_Error;
+    }
+    cell.PayloadBytes = payload_bytes;
+    cell.PayloadStorage.resize(payload_bytes + 63u);
+    const uintptr_t unaligned =
+        reinterpret_cast<uintptr_t>(cell.PayloadStorage.data());
+    if (unaligned > std::numeric_limits<uintptr_t>::max() - 63u) {
+        return Wirehair_Error;
+    }
+    const uintptr_t aligned = (unaligned + 63u) & ~(uintptr_t)63u;
+    cell.Payload = reinterpret_cast<uint8_t*>(aligned);
+    if ((aligned & 63u) != 0u || aligned < unaligned ||
+        aligned - unaligned > 63u)
+    {
+        return Wirehair_Error;
+    }
+    cell.Packets.resize(ids.size());
+
+    for (size_t i = 0u; i < ids.size(); ++i) {
+        cell.Packets[i].BlockId = ids[i];
+        cell.Packets[i].Data =
+            cell.Payload + i * (size_t)options.BlockBytes;
+    }
+    cell.TraceSha256 = PeelTimingLossTraceDigest(
+        options, construction_seed, loss_seed, ids);
+    return Wirehair_Success;
+}
+
+struct PeelTimingRecovery
+{
+    WirehairResult Result = Wirehair_Error;
+    bool Ok = false;
+    int32_t Overhead = -1;
+};
+
+PeelTimingRecovery RunPeelTimingRecovery(
+    PeelTimingRole role,
+    const PeelTimingOptions& options,
+    const std::vector<double>& identity_weights,
+    double identity_scale,
+    double candidate_scale,
+    uint64_t construction_seed,
+    uint64_t payload_seed,
+    const std::vector<uint32_t>& ids)
+{
+    PeelTimingRecovery recovery;
+    if (!ConfigurePeelTimingRole(
+            role, options, identity_weights,
+            identity_scale, candidate_scale))
+    {
+        return recovery;
+    }
+    const TrialResult trial = RunV2PrecodeTrial(
+        options.BlockCount, options.BlockBytes, options.Loss,
+        payload_seed, &ids, options.TargetContract->Completion,
+        false, false, options.TargetContract->RecoveryMixCount,
+        options.TargetContract, construction_seed);
+    recovery.Result = trial.TerminalResult;
+    recovery.Ok = trial.Ok;
+    if (trial.Ok) recovery.Overhead = (int32_t)trial.Extra;
+    return recovery;
+}
+
+struct PeelTimingDirectObservation
+{
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+    size_t IntermediateBytes = 0u;
+    std::string IntermediateSha256;
+};
+
+std::string PeelTimingBytesDigest(const std::vector<uint8_t>& bytes)
+{
+    return Sha256HexBytes(bytes.data(), bytes.size());
+}
+
+PeelTimingDirectObservation RunPeelTimingDirect(
+    PeelTimingRole role,
+    const PeelTimingOptions& options,
+    const std::vector<double>& identity_weights,
+    double identity_scale,
+    double candidate_scale,
+    const wirehair_v2::PrecodeSystem& system,
+    const wirehair_v2::PacketRowConfig& config,
+    const wirehair_v2::PacketRowRuntime& runtime,
+    const std::vector<wirehair_v2::SolvePacket>& packets,
+    bool bind_intermediate_bytes = false)
+{
+    PeelTimingDirectObservation observation;
+    if (!ConfigurePeelTimingRole(
+            role, options, identity_weights,
+            identity_scale, candidate_scale))
+    {
+        return observation;
+    }
+    std::vector<uint8_t> intermediate;
+    observation.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, config, runtime, packets, options.BlockBytes,
+            intermediate, &observation.Stats);
+    observation.IntermediateBytes = intermediate.size();
+    if (bind_intermediate_bytes) {
+        observation.IntermediateSha256 =
+            PeelTimingBytesDigest(intermediate);
+    }
+    return observation;
+}
+
+std::string PeelTimingSolveDigest(
+    const PeelTimingDirectObservation& observation)
+{
+    const wirehair_v2::PrecodeSolveStats& s = observation.Stats;
+    std::ostringstream text;
+    text << "wirehair-wh2-peeltiming-solve-v1\n"
+         << (int)observation.Result << ',' << observation.IntermediateBytes
+         << ',' << observation.IntermediateSha256
+         << ',' << s.PacketRows << ',' << s.PeeledColumns << ','
+         << s.InactivatedColumns << ',' << s.ResidualRows << ','
+         << s.ResidualRank << ',' << s.BinaryResidualRank << ','
+         << s.BinaryRowReferences << ',' << s.BinaryRowStorageBytes << ','
+         << s.BinaryAdjacencyStorageBytes << ','
+         << s.BinaryRowStorageAllocations << ','
+         << s.BinaryAdjacencyStorageAllocations << ',' << s.BlockXors << ','
+         << s.BlockMulAdds << ',' << s.BlockCopies << ','
+         << s.BlockZeroFills << ',' << s.BlockAddSets << ','
+         << s.BlockAddSetSources << ',' << s.PeelAdjacencyVisits << ','
+         << s.PeelRowScanSteps << ',' << s.PeelHeapOperations << ','
+         << s.ProjectionWordXors << ',' << s.ResidualCoeffWordXors << ','
+         << s.ResidualCoeffByteOps << ',' << s.PacketSeedAttempt << ','
+         << s.MixedJointSourceXors << ','
+         << s.MixedJointMarginalXors << ','
+         << s.MixedJointMarginalCopies << ','
+         << s.MixedJointScratchBytes << ','
+         << s.MixedJointActiveDeltas << ','
+         << s.MixedDualSourceColumns << '\n';
+    return Sha256Hex(text.str());
+}
+
+int CmdPeelTiming(int argc, char** argv)
+{
+    PeelTimingOptions options;
+    if (!ParsePeelTimingOptions(argc, argv, options)) return 1;
+    if (!ValidatePeelTimingEnvironment()) return 1;
+#if !defined(__linux__)
+    // A trustworthy receipt requires both a per-slot CPU identity and process
+    // fault counters.  Do not silently emit unknown (-1) telemetry on hosts
+    // where this protocol has no implemented CPU-migration oracle.
+    std::fprintf(stderr,
+        "peeltiming requires Linux CPU and resource-usage telemetry\n");
+    return 1;
+#endif
+    if (!PinPeelTimingToFirstAllowedCpu())
+    {
+        std::fprintf(stderr,
+            "peeltiming could not pin its first allowed CPU\n");
+        return 1;
+    }
+    const std::vector<int> one_K(1u, (int)options.BlockCount);
+    const std::vector<int> one_bb(1u, (int)options.BlockBytes);
+    if (!ValidatePayloadE2EInputs(one_K, one_bb, "peeltiming")) {
+        return 1;
+    }
+
+    uint64_t started_monotonic_ns = 0u;
+    if (!ReadPeelTimingMonotonicNanoseconds(started_monotonic_ns))
+    {
+        std::fprintf(stderr,
+            "peeltiming could not read the monotonic start clock\n");
+        return 2;
+    }
+    struct HookCleanup
+    {
+        ~HookCleanup()
+        {
+            wirehair_v2::ClearPeelDegreesForTesting();
+            wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+        }
+    } hook_cleanup;
+    const std::vector<double>& stock = StockPeelPmf(options.BlockCount);
+    if (stock.size() != 65u)
+    {
+        std::fprintf(stderr,
+            "peeltiming native identity PMF has the wrong size\n");
+        return 2;
+    }
+    const std::vector<double> identity_weights(
+        stock.begin() + 1, stock.end());
+    const std::string identity_pmf_spec =
+        CanonicalPeelTimingPmf(identity_weights);
+    const std::string identity_pmf_sha256 =
+        Sha256Hex(identity_pmf_spec);
+    const std::string candidate_pmf_sha256 =
+        Sha256Hex(options.CandidatePmfSpec);
+
+    const auto resolve_target = [&](
+        uint64_t construction_seed,
+        wirehair_v2::PrecodeParams& params,
+        wirehair_v2::PacketRowConfig& config) -> bool
+    {
+        wirehair_v2::SeedProfile profile;
+        if (!wirehair_v2::MakeRawContractProfile(
+                *options.TargetContract, options.BlockCount,
+                options.BlockBytes, construction_seed, profile))
+        {
+            return false;
+        }
+        const wirehair_v2::MessagePrecodeEncoderOptions target_options =
+            wirehair_v2::MessageOptionsForContract(
+                *options.TargetContract);
+        return wirehair_v2::ResolveMessagePrecodeConfiguration(
+                profile, target_options, params, config) &&
+            profile.V2SeedPolicy ==
+                wirehair_v2::V2SeedDerivation::RawUniform &&
+            profile.V2SeedAttempt == 0u &&
+            config.MixCount == options.TargetContract->RecoveryMixCount;
+    };
+    const auto identity_scale_for = [](
+        const wirehair_v2::PrecodeParams& params) -> double
+    {
+        const uint64_t hits =
+            std::min(params.SourceHits, params.Staircase);
+        return (double)((uint64_t)params.BlockCount * hits) /
+            (double)params.Staircase;
+    };
+    const auto recordable_recovery = [](const PeelTimingRecovery& recovery) {
+        return recovery.Result == Wirehair_Success ||
+            recovery.Result == Wirehair_NeedMore ||
+            recovery.Result == Wirehair_BadDenseSeed ||
+            recovery.Result == Wirehair_BadPeelSeed ||
+            recovery.Result == Wirehair_ExtraInsufficient;
+    };
+    const auto timing_eligible_recovery = [](
+        const PeelTimingRecovery& recovery)
+    {
+        return recovery.Result == Wirehair_Success && recovery.Ok;
+    };
+    const auto success_result = [](WirehairResult result) {
+        return result == Wirehair_Success;
+    };
+    const uint64_t total_replicates =
+        (uint64_t)options.WarmupReplicates + options.Replicates;
+
+    // The semantic identity proof is deliberately outside the measured raw
+    // seed population.  Attempt zero is the requested base for continuity;
+    // a common raw weak seed is recorded and skipped only for this untimed
+    // witness.  Measured replicate seeds below are never repaired.
+    static const uint32_t kSemanticSeedAttemptCap = 256u;
+    uint32_t semantic_seed_attempt = 0u;
+    uint64_t semantic_construction_seed = 0u;
+    const uint64_t semantic_loss_seed = options.LossSeedBase;
+    wirehair_v2::PrecodeParams semantic_params;
+    wirehair_v2::PacketRowConfig semantic_config;
+    double identity_scale = 0.0;
+    double candidate_scale = 0.0;
+    PeelTimingRecovery identity_semantic_recovery;
+    PeelTimingRecovery nohook_semantic_recovery;
+    // Reject oversized live workloads before the bounded semantic witness
+    // search can perform as many as 256 full encode/decode attempts.
+    wirehair_v2::PrecodeParams budget_params;
+    wirehair_v2::PacketRowConfig budget_config;
+    if (!resolve_target(
+            options.ConstructionSeedBase, budget_params, budget_config))
+    {
+        std::fprintf(stderr,
+            "peeltiming could not resolve dispatch-v1 budget target\n");
+        return 2;
+    }
+    const uint64_t system_width =
+        (uint64_t)options.BlockCount + budget_params.Staircase +
+        budget_params.DenseRows + budget_params.HeavyRows;
+    const uint64_t max_inactive = std::min<uint64_t>(
+        system_width, wirehair_v2::kMaxInactiveColumns);
+    const uint64_t working_blocks =
+        (uint64_t)options.BlockCount +
+        3u * ((uint64_t)options.BlockCount + options.MaxOverhead) +
+        2u * system_width + 2u * max_inactive + 96u;
+    const uint64_t metadata_bytes =
+        (uint64_t)options.BlockCount * 4096u;
+    if (working_blocks >
+            (UINT64_MAX - metadata_bytes - options.EvictBytes) /
+                options.BlockBytes ||
+        working_blocks * options.BlockBytes + metadata_bytes +
+            options.EvictBytes > kPeelTimingWorkingBytesMax)
+    {
+        std::fprintf(stderr,
+            "peeltiming working set exceeds the 4 GiB protocol limit\n");
+        return 1;
+    }
+    std::vector<uint32_t> semantic_ids = BuildPacketSchedule(
+        options.BlockCount,
+        options.BlockCount + options.MaxOverhead,
+        options.Loss, semantic_loss_seed, options.Schedule);
+    if (semantic_ids.size() !=
+            (size_t)options.BlockCount + options.MaxOverhead)
+    {
+        std::fprintf(stderr,
+            "peeltiming could not build the semantic packet schedule\n");
+        return 2;
+    }
+    bool semantic_witness_found = false;
+    for (uint32_t attempt = 0u;
+         attempt < kSemanticSeedAttemptCap; ++attempt)
+    {
+        const uint64_t witness_seed =
+            options.ConstructionSeedBase + (uint64_t)attempt;
+        bool aliases_measured = false;
+        for (uint64_t replicate = 0u;
+             replicate < total_replicates; ++replicate)
+        {
+            if (witness_seed == PeelTimingDerivedConstructionSeed(
+                    options.ConstructionSeedBase, (uint32_t)replicate))
+            {
+                aliases_measured = true;
+                break;
+            }
+        }
+        if (aliases_measured) continue;
+        wirehair_v2::PrecodeParams witness_params;
+        wirehair_v2::PacketRowConfig witness_config;
+        if (!resolve_target(
+                witness_seed, witness_params, witness_config))
+        {
+            std::fprintf(stderr,
+                "peeltiming could not resolve dispatch-v1 semantic "
+                "target attempt=%u\n", attempt);
+            return 2;
+        }
+        const double witness_identity_scale =
+            identity_scale_for(witness_params);
+        const double witness_candidate_scale =
+            options.CandidateScaleIdentity ?
+            witness_identity_scale : options.CandidateScale;
+        const PeelTimingRecovery identity_recovery =
+            RunPeelTimingRecovery(
+                PeelTimingRole::IdentityA, options, identity_weights,
+                witness_identity_scale, witness_candidate_scale,
+                witness_seed, semantic_loss_seed, semantic_ids);
+        const PeelTimingRecovery nohook_recovery =
+            RunPeelTimingRecovery(
+                PeelTimingRole::NoOverride, options, identity_weights,
+                witness_identity_scale, witness_candidate_scale,
+                witness_seed, semantic_loss_seed, semantic_ids);
+        if (identity_recovery.Result != nohook_recovery.Result ||
+            identity_recovery.Ok != nohook_recovery.Ok ||
+            identity_recovery.Overhead != nohook_recovery.Overhead)
+        {
+            std::fprintf(stderr,
+                "peeltiming genuine identity/no-override recovery "
+                "mismatch at semantic attempt=%u\n", attempt);
+            return 2;
+        }
+        if (identity_recovery.Result == Wirehair_Success &&
+            identity_recovery.Ok && identity_recovery.Overhead >= 0)
+        {
+            semantic_seed_attempt = attempt;
+            semantic_construction_seed = witness_seed;
+            semantic_params = witness_params;
+            semantic_config = witness_config;
+            identity_scale = witness_identity_scale;
+            candidate_scale = witness_candidate_scale;
+            identity_semantic_recovery = identity_recovery;
+            nohook_semantic_recovery = nohook_recovery;
+            semantic_witness_found = true;
+            break;
+        }
+        if (!recordable_recovery(identity_recovery))
+        {
+            std::fprintf(stderr,
+                "peeltiming semantic witness returned fatal result=%d "
+                "attempt=%u\n",
+                (int)identity_recovery.Result, attempt);
+            return 2;
+        }
+    }
+    if (!semantic_witness_found)
+    {
+        std::fprintf(stderr,
+            "peeltiming could not find a successful semantic witness "
+            "within %u raw attempts\n", kSemanticSeedAttemptCap);
+        return 2;
+    }
+    if ((uint64_t)options.BlockCount + semantic_params.Staircase +
+            semantic_params.DenseRows + semantic_params.HeavyRows !=
+        system_width)
+    {
+        std::fprintf(stderr,
+            "peeltiming semantic structure drifted from its budget target\n");
+        return 2;
+    }
+    const uint32_t semantic_precode_count =
+        semantic_params.Staircase + semantic_params.DenseRows +
+        semantic_params.HeavyRows;
+
+    wirehair_v2::PrecodeSystem identity_semantic_system;
+    wirehair_v2::PrecodeSystem nohook_semantic_system;
+    if (!ConfigurePeelTimingRole(
+            PeelTimingRole::IdentityA, options, identity_weights,
+            identity_scale, candidate_scale) ||
+        !wirehair_v2::BuildPrecodeSystem(
+            semantic_params, identity_semantic_system) ||
+        !ConfigurePeelTimingRole(
+            PeelTimingRole::NoOverride, options, identity_weights,
+            identity_scale, candidate_scale) ||
+        !wirehair_v2::BuildPrecodeSystem(
+            semantic_params, nohook_semantic_system))
+    {
+        std::fprintf(stderr,
+            "peeltiming semantic system construction failed\n");
+        return 2;
+    }
+
+    PeelTimingCell semantic_cell;
+    const WirehairResult semantic_cell_result = BuildPeelTimingCell(
+        PeelTimingRole::IdentityA, PeelTimingRole::NoOverride,
+        options, identity_weights, identity_scale, candidate_scale,
+        semantic_params, semantic_config, semantic_construction_seed,
+        semantic_loss_seed, semantic_ids, semantic_cell);
+    if (semantic_cell_result != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "peeltiming semantic encoded cell setup failed result=%d\n",
+            (int)semantic_cell_result);
+        return 2;
+    }
+    bool identity_packet_valid = false;
+    bool nohook_packet_valid = false;
+    if (!ConfigurePeelTimingRole(
+            PeelTimingRole::IdentityA, options, identity_weights,
+            identity_scale, candidate_scale))
+    {
+        std::fprintf(stderr,
+            "peeltiming explicit identity configuration failed\n");
+        return 2;
+    }
+    const std::string identity_packet_sha256 =
+        PeelTimingPacketRowsDigest(
+            options.BlockCount, semantic_precode_count, semantic_config,
+            semantic_cell.Runtime, semantic_ids, identity_packet_valid);
+    if (!ConfigurePeelTimingRole(
+            PeelTimingRole::NoOverride, options, identity_weights,
+            identity_scale, candidate_scale))
+    {
+        std::fprintf(stderr,
+            "peeltiming no-override configuration failed\n");
+        return 2;
+    }
+    const std::string nohook_packet_sha256 =
+        PeelTimingPacketRowsDigest(
+            options.BlockCount, semantic_precode_count, semantic_config,
+            semantic_cell.Runtime, semantic_ids, nohook_packet_valid);
+
+    std::vector<wirehair_v2::SolvePacket> semantic_packets(
+        semantic_cell.Packets.begin(), semantic_cell.Packets.end());
+    if (!semantic_cell.LoadPayload(PeelTimingRole::IdentityA))
+    {
+        std::fprintf(stderr,
+            "peeltiming could not load the identity semantic payload\n");
+        return 2;
+    }
+    const PeelTimingDirectObservation identity_semantic_solve =
+        RunPeelTimingDirect(
+            PeelTimingRole::IdentityA, options, identity_weights,
+            identity_scale, candidate_scale,
+            identity_semantic_system, semantic_config,
+            semantic_cell.Runtime, semantic_packets, true);
+    if (!semantic_cell.LoadPayload(PeelTimingRole::NoOverride))
+    {
+        std::fprintf(stderr,
+            "peeltiming could not load the no-override semantic payload\n");
+        return 2;
+    }
+    const PeelTimingDirectObservation nohook_semantic_solve =
+        RunPeelTimingDirect(
+            PeelTimingRole::NoOverride, options, identity_weights,
+            identity_scale, candidate_scale,
+            nohook_semantic_system, semantic_config,
+            semantic_cell.Runtime, semantic_packets, true);
+    const std::string identity_system_sha256 =
+        PeelTimingSystemDigest(identity_semantic_system);
+    const std::string nohook_system_sha256 =
+        PeelTimingSystemDigest(nohook_semantic_system);
+    const std::string identity_solve_sha256 =
+        PeelTimingSolveDigest(identity_semantic_solve);
+    const std::string nohook_solve_sha256 =
+        PeelTimingSolveDigest(nohook_semantic_solve);
+    const bool semantic_system_equal =
+        identity_system_sha256 == nohook_system_sha256;
+    const bool semantic_packet_equal =
+        identity_packet_valid && nohook_packet_valid &&
+        identity_packet_sha256 == nohook_packet_sha256;
+    const bool semantic_payload_equal =
+        semantic_cell.First.Bytes == semantic_cell.Second.Bytes &&
+        semantic_cell.First.Sha256 == semantic_cell.Second.Sha256;
+    const size_t semantic_intermediate_bytes =
+        (size_t)system_width * options.BlockBytes;
+    const bool semantic_solve_equal =
+        identity_semantic_solve.Result == Wirehair_Success &&
+        nohook_semantic_solve.Result == Wirehair_Success &&
+        identity_semantic_solve.IntermediateBytes ==
+            semantic_intermediate_bytes &&
+        nohook_semantic_solve.IntermediateBytes ==
+            semantic_intermediate_bytes &&
+        identity_semantic_solve.IntermediateSha256 ==
+            semantic_cell.First.IntermediateSha256 &&
+        nohook_semantic_solve.IntermediateSha256 ==
+            semantic_cell.Second.IntermediateSha256 &&
+        identity_solve_sha256 == nohook_solve_sha256;
+    const bool semantic_full_equal =
+        identity_semantic_recovery.Result == Wirehair_Success &&
+        nohook_semantic_recovery.Result == Wirehair_Success &&
+        identity_semantic_recovery.Ok &&
+        nohook_semantic_recovery.Ok &&
+        identity_semantic_recovery.Overhead >= 0 &&
+        nohook_semantic_recovery.Overhead >= 0 &&
+        identity_semantic_recovery.Result ==
+            nohook_semantic_recovery.Result &&
+        identity_semantic_recovery.Overhead ==
+            nohook_semantic_recovery.Overhead;
+    const bool semantic_pass = semantic_system_equal &&
+        semantic_packet_equal && semantic_payload_equal &&
+        semantic_solve_equal &&
+        semantic_full_equal;
+    if (!semantic_pass)
+    {
+        std::fprintf(stderr,
+            "peeltiming explicit identity/no-override proof failed "
+            "system=%d packet=%d payload=%d solve=%d full=%d "
+            "identity_direct=%d nohook_direct=%d\n",
+            semantic_system_equal ? 1 : 0,
+            semantic_packet_equal ? 1 : 0,
+            semantic_payload_equal ? 1 : 0,
+            semantic_solve_equal ? 1 : 0,
+            semantic_full_equal ? 1 : 0,
+            (int)identity_semantic_solve.Result,
+            (int)nohook_semantic_solve.Result);
+        return 2;
+    }
+
+    // Keep the semantic proof out of the measured working set.  At the
+    // largest supported payload this state is hundreds of MiB, and retaining
+    // it would change allocator and cache pressure throughout every timed
+    // replicate.
+    const std::string semantic_trace_sha256 = semantic_cell.TraceSha256;
+    const std::string semantic_message_sha256 =
+        semantic_cell.MessageSha256;
+    const std::string identity_semantic_payload_sha256 =
+        semantic_cell.First.Sha256;
+    const std::string nohook_semantic_payload_sha256 =
+        semantic_cell.Second.Sha256;
+    identity_semantic_system = wirehair_v2::PrecodeSystem();
+    nohook_semantic_system = wirehair_v2::PrecodeSystem();
+    semantic_cell = PeelTimingCell();
+    std::vector<uint32_t>().swap(semantic_ids);
+    std::vector<wirehair_v2::SolvePacket>().swap(semantic_packets);
+
+    std::vector<uint8_t> eviction((size_t)options.EvictBytes, 0u);
+    EvictPeelTimingCache(eviction);
+    const uint64_t expected_rows = total_replicates * 16u;
+    std::ostringstream scale_text;
+    scale_text << std::setprecision(17) << identity_scale;
+    const std::string identity_scale_text = scale_text.str();
+    scale_text.str(std::string());
+    scale_text.clear();
+    scale_text << std::setprecision(17) << candidate_scale;
+    const std::string candidate_scale_text = scale_text.str();
+    const std::string candidate_scale_requested =
+        options.CandidateScaleIdentity ?
+        "identity" : candidate_scale_text;
+    std::ostringstream contract_id;
+    contract_id << std::hex << std::setfill('0') << std::setw(16)
+        << options.TargetContract->ProfileId;
+
+    std::ostringstream receipt;
+    receipt << std::setprecision(17);
+    receipt
+        << "# peeltiming"
+        << ",schema=wirehair.wh2.peeltiming.v2"
+        << ",target_profile=dispatch-v1"
+        << ",seed_policy=raw"
+        << ",contract_id=" << contract_id.str()
+        << ",K=" << options.BlockCount
+        << ",bb=" << options.BlockBytes
+        << ",S=" << semantic_params.Staircase
+        << ",D2=" << semantic_params.DenseRows
+        << ",H=" << semantic_params.HeavyRows
+        << ",construction_seed_base=" << options.ConstructionSeedBase
+        << ",construction_seed_derivation="
+            "base_xor_d1b54a32d192ed03_times_rep_plus_1_v1"
+        << ",semantic_seed_derivation="
+            "base-plus-attempt-mod2^64-skip-measured-alias-v1"
+        << ",loss=" << options.Loss
+        << ",loss_seed_base=" << options.LossSeedBase
+        << ",loss_seed_derivation="
+            "base_xor_9e3779b97f4a7c15_times_rep_plus_1_v1"
+        << ",message_seed_policy=replicate-loss-seed-v1"
+        << ",schedule=" << PacketScheduleName(options.Schedule)
+        << ",loss_model=packet-schedule-v1"
+        << ",trace_encoding=wirehair-wh2-peeltiming-loss-trace-v1"
+        << ",panels=candidate_control+identity_aa"
+        << ",candidate_pmf_sha256=" << candidate_pmf_sha256
+        << ",candidate_pmf_encoding=binary64-17g-comma-v1"
+        << ",candidate_scale_requested=" << candidate_scale_requested
+        << ",candidate_scale_effective=" << candidate_scale_text
+        << ",identity_pmf_sha256=" << identity_pmf_sha256
+        << ",identity_pmf_encoding=stock-recovered-explicit-17g-v1"
+        << ",identity_scale_effective=" << identity_scale_text
+        << ",warmup_replicates=" << options.WarmupReplicates
+        << ",replicates=" << options.Replicates
+        << ",slots_per_panel=8"
+        << ",panels_per_replicate=2"
+        << ",order=ABBABAAB"
+        << ",label_swap=alternating"
+        << ",inner_reps=" << options.InnerReps
+        << ",max_overhead=" << options.MaxOverhead
+        << ",cache_state="
+        << PeelTimingCacheStateName(options.CacheState)
+        << ",evict_bytes=" << options.EvictBytes
+        << ",payload_alignment=64"
+        << ",prefault=1"
+        << ",cpu_affinity_policy=first-allowed-affinity-v1"
+        << ",payload=common-source-role-encoded-consistent-rhs-v1"
+        << ",timing_scope=decoder_solve_only"
+        << ",timing_prefix=common-max-recovery-overhead-v1"
+        << ",recovery_scope=full_encode_decode_recover_memcmp"
+        << ",weak_seed_policy=balanced-timing-ineligible-rows-v1"
+        << ",hook_path=explicit-tls-peel-pmf-and-scale-v1"
+        << ",no_override_scope=untimed-semantic-only"
+        << ",system_build=per_replicate_per_scale_outside_timer"
+        << ",startup_amortization="
+            "per-replicate-build-and-recovery-preflight-excluded-v1"
+        << ",slot_prewarm="
+            "validated-plus-conditioning-matching-role-solves-"
+            "same-cpu-before-cache-v1"
+        << ",context_sha256=" << options.ContextSha256
+        << ",uncertainty=paired-log-ratio-t95/v1"
+        << ",required_margin=" << options.RequiredMargin
+        << ",margin_rule="
+            "upper-log-cost-lt-negative-required-margin-and-aa-floor-v1"
+        << ",clock_domain=" << PeelTimingClockDomain()
+        << ",stream_hash_scope=body-plus-done-prefix-v1"
+        << ",started_monotonic_ns=" << started_monotonic_ns
+        << ",expected_rows=" << expected_rows << '\n';
+    receipt
+        << "# peel_semantic"
+        << ",timed=0"
+        << ",construction_seed=" << semantic_construction_seed
+        << ",seed_attempt=" << semantic_seed_attempt
+        << ",seed_attempt_cap=" << kSemanticSeedAttemptCap
+        << ",loss_seed=" << semantic_loss_seed
+        << ",trace_sha256=" << semantic_trace_sha256
+        << ",message_sha256=" << semantic_message_sha256
+        << ",identity_pmf_sha256=" << identity_pmf_sha256
+        << ",identity_pmf_encoding=stock-recovered-explicit-17g-v1"
+        << ",identity_scale_effective=" << identity_scale_text
+        << ",nohook_result=" << (int)nohook_semantic_recovery.Result
+        << ",nohook_recovery_ok="
+        << (nohook_semantic_recovery.Ok ? 1 : 0)
+        << ",nohook_overhead=" << nohook_semantic_recovery.Overhead
+        << ",identity_result=" << (int)identity_semantic_recovery.Result
+        << ",identity_recovery_ok="
+        << (identity_semantic_recovery.Ok ? 1 : 0)
+        << ",identity_overhead=" << identity_semantic_recovery.Overhead
+        << ",nohook_system_sha256=" << nohook_system_sha256
+        << ",identity_system_sha256=" << identity_system_sha256
+        << ",system_equal=" << (semantic_system_equal ? 1 : 0)
+        << ",nohook_packet_rows_sha256=" << nohook_packet_sha256
+        << ",identity_packet_rows_sha256=" << identity_packet_sha256
+        << ",packet_rows_equal=" << (semantic_packet_equal ? 1 : 0)
+        << ",nohook_payload_sha256="
+        << nohook_semantic_payload_sha256
+        << ",identity_payload_sha256="
+        << identity_semantic_payload_sha256
+        << ",payload_equal=" << (semantic_payload_equal ? 1 : 0)
+        << ",nohook_direct_result="
+        << (int)nohook_semantic_solve.Result
+        << ",identity_direct_result="
+        << (int)identity_semantic_solve.Result
+        << ",nohook_intermediate_bytes="
+        << nohook_semantic_solve.IntermediateBytes
+        << ",identity_intermediate_bytes="
+        << identity_semantic_solve.IntermediateBytes
+        << ",nohook_solve_sha256=" << nohook_solve_sha256
+        << ",identity_solve_sha256=" << identity_solve_sha256
+        << ",solve_equal=" << (semantic_solve_equal ? 1 : 0)
+        << ",full_recovery_equal=" << (semantic_full_equal ? 1 : 0)
+        << ",pass=" << (semantic_pass ? 1 : 0) << '\n';
+    receipt
+        << "replicate,measured,panel,slot,pair,label,role,label_swap,"
+        << "construction_seed,loss_seed,trace_sha256,common_overhead,"
+        << "arm_overhead,recovery_result,recovery_ok,timing_eligible,"
+        << "preflight_result,timing_result,outcome_stable,elapsed_ns,"
+        << "inner_reps,saturated,"
+        << "cpu_before,cpu_after,cpu_migrated,minflt_delta,majflt_delta,"
+        << "fault_contaminated,inactivated,binary_def,heavy_gain,"
+        << "block_xors,block_muladds,build_ns_sum,peel_ns_sum,"
+        << "project_ns_sum,residual_ns_sum,backsub_ns_sum,source_bytes,"
+        << "packet_payload_bytes,intermediate_bytes\n";
+
+    struct TimedObservation
+    {
+        WirehairResult Result = Wirehair_Error;
+        wirehair_v2::PrecodeSolveStats Stats;
+        size_t IntermediateBytes = 0u;
+        uint64_t ElapsedNanoseconds = 0u;
+        uint64_t BuildNanoseconds = 0u;
+        uint64_t PeelNanoseconds = 0u;
+        uint64_t ProjectNanoseconds = 0u;
+        uint64_t ResidualNanoseconds = 0u;
+        uint64_t BackSubNanoseconds = 0u;
+        bool Saturated = false;
+        bool Stable = true;
+        int CpuBefore = -1;
+        int CpuAfter = -1;
+        int CpuMigrated = 0;
+        int64_t MinorFaults = 0;
+        int64_t MajorFaults = 0;
+    };
+    const auto add_u64 = [](uint64_t& total, uint64_t value, bool& bad) {
+        if (value > UINT64_MAX - total) {
+            total = UINT64_MAX;
+            bad = true;
+        }
+        else {
+            total += value;
+        }
+    };
+
+    static const char kOrder[] =
+        {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
+    uint64_t emitted_rows = 0u;
+    for (uint32_t replicate = 0u;
+         replicate < total_replicates; ++replicate)
+    {
+        const uint64_t construction_seed =
+            PeelTimingDerivedConstructionSeed(
+                options.ConstructionSeedBase, replicate);
+        const uint64_t loss_seed =
+            PeelTimingDerivedLossSeed(options.LossSeedBase, replicate);
+        wirehair_v2::PrecodeParams params;
+        wirehair_v2::PacketRowConfig config;
+        if (!resolve_target(construction_seed, params, config))
+        {
+            std::fprintf(stderr,
+                "peeltiming target resolution failed replicate=%u\n",
+                replicate);
+            return 2;
+        }
+        const double replicate_identity_scale =
+            identity_scale_for(params);
+        const double replicate_candidate_scale =
+            options.CandidateScaleIdentity ?
+            replicate_identity_scale : options.CandidateScale;
+        if (replicate_identity_scale != identity_scale ||
+            replicate_candidate_scale != candidate_scale)
+        {
+            std::fprintf(stderr,
+                "peeltiming scale drifted across replicates\n");
+            return 2;
+        }
+        const std::vector<uint32_t> ids = BuildPacketSchedule(
+            options.BlockCount,
+            options.BlockCount + options.MaxOverhead,
+            options.Loss, loss_seed, options.Schedule);
+        if (ids.size() !=
+                (size_t)options.BlockCount + options.MaxOverhead)
+        {
+            std::fprintf(stderr,
+                "peeltiming packet schedule failed replicate=%u\n",
+                replicate);
+            return 2;
+        }
+
+        wirehair_v2::PrecodeSystem identity_system;
+        wirehair_v2::PrecodeSystem candidate_system_storage;
+        if (!ConfigurePeelTimingRole(
+                PeelTimingRole::IdentityA, options, identity_weights,
+                identity_scale, candidate_scale) ||
+            !wirehair_v2::BuildPrecodeSystem(params, identity_system))
+        {
+            std::fprintf(stderr,
+                "peeltiming identity system failed replicate=%u\n",
+                replicate);
+            return 2;
+        }
+        const wirehair_v2::PrecodeSystem* candidate_system =
+            &identity_system;
+        if (candidate_scale != identity_scale)
+        {
+            if (!ConfigurePeelTimingRole(
+                    PeelTimingRole::Candidate, options, identity_weights,
+                    identity_scale, candidate_scale) ||
+                !wirehair_v2::BuildPrecodeSystem(
+                    params, candidate_system_storage))
+            {
+                std::fprintf(stderr,
+                    "peeltiming candidate system failed replicate=%u\n",
+                    replicate);
+                return 2;
+            }
+            candidate_system = &candidate_system_storage;
+        }
+
+        const PeelTimingRecovery candidate_recovery =
+            RunPeelTimingRecovery(
+                PeelTimingRole::Candidate, options, identity_weights,
+                identity_scale, candidate_scale, construction_seed,
+                loss_seed, ids);
+        const PeelTimingRecovery identity_a_recovery =
+            RunPeelTimingRecovery(
+                PeelTimingRole::IdentityA, options, identity_weights,
+                identity_scale, candidate_scale, construction_seed,
+                loss_seed, ids);
+        const PeelTimingRecovery identity_b_recovery =
+            RunPeelTimingRecovery(
+                PeelTimingRole::IdentityB, options, identity_weights,
+                identity_scale, candidate_scale, construction_seed,
+                loss_seed, ids);
+        if (!recordable_recovery(candidate_recovery) ||
+            !recordable_recovery(identity_a_recovery) ||
+            !recordable_recovery(identity_b_recovery))
+        {
+            std::fprintf(stderr,
+                "peeltiming fatal recovery result replicate=%u "
+                "candidate=%d identity_a=%d identity_b=%d\n",
+                replicate, (int)candidate_recovery.Result,
+                (int)identity_a_recovery.Result,
+                (int)identity_b_recovery.Result);
+            return 2;
+        }
+        if (identity_a_recovery.Result != identity_b_recovery.Result ||
+            identity_a_recovery.Ok != identity_b_recovery.Ok ||
+            identity_a_recovery.Overhead != identity_b_recovery.Overhead)
+        {
+            std::fprintf(stderr,
+                "peeltiming identity recovery drift replicate=%u "
+                "identity_a=%d/%d/%d identity_b=%d/%d/%d\n",
+                replicate,
+                (int)identity_a_recovery.Result,
+                identity_a_recovery.Ok ? 1 : 0,
+                identity_a_recovery.Overhead,
+                (int)identity_b_recovery.Result,
+                identity_b_recovery.Ok ? 1 : 0,
+                identity_b_recovery.Overhead);
+            return 2;
+        }
+        const bool timing_eligible =
+            timing_eligible_recovery(candidate_recovery) &&
+            timing_eligible_recovery(identity_a_recovery) &&
+            timing_eligible_recovery(identity_b_recovery);
+        uint32_t common_overhead = options.MaxOverhead;
+        if (candidate_recovery.Ok && identity_a_recovery.Ok &&
+            identity_b_recovery.Ok)
+        {
+            common_overhead = (uint32_t)std::max(
+                candidate_recovery.Overhead,
+                std::max(
+                    identity_a_recovery.Overhead,
+                    identity_b_recovery.Overhead));
+        }
+        const size_t timing_packet_count = timing_eligible ?
+            (size_t)options.BlockCount + common_overhead : 0u;
+        PeelTimingCell cell;
+        std::vector<wirehair_v2::SolvePacket> timing_packets;
+        PeelTimingDirectObservation candidate_preflight;
+        PeelTimingDirectObservation identity_a_preflight;
+        PeelTimingDirectObservation identity_b_preflight;
+        std::string replicate_trace_sha256;
+        if (timing_eligible)
+        {
+            const WirehairResult cell_result = BuildPeelTimingCell(
+                PeelTimingRole::Candidate, PeelTimingRole::IdentityA,
+                options, identity_weights, identity_scale, candidate_scale,
+                params, config, construction_seed, loss_seed, ids, cell);
+            if (cell_result != Wirehair_Success)
+            {
+                std::fprintf(stderr,
+                    "peeltiming encoded cell setup failed replicate=%u "
+                    "result=%d\n", replicate, (int)cell_result);
+                return 2;
+            }
+            timing_packets.assign(
+                cell.Packets.begin(),
+                cell.Packets.begin() + timing_packet_count);
+            if (!cell.LoadPayload(PeelTimingRole::Candidate)) {
+                std::fprintf(stderr,
+                    "peeltiming candidate payload load failed "
+                    "replicate=%u\n", replicate);
+                return 2;
+            }
+            candidate_preflight = RunPeelTimingDirect(
+                PeelTimingRole::Candidate, options, identity_weights,
+                identity_scale, candidate_scale, *candidate_system, config,
+                cell.Runtime, timing_packets);
+            if (!cell.LoadPayload(PeelTimingRole::IdentityA)) {
+                std::fprintf(stderr,
+                    "peeltiming identity payload load failed "
+                    "replicate=%u\n", replicate);
+                return 2;
+            }
+            identity_a_preflight = RunPeelTimingDirect(
+                PeelTimingRole::IdentityA, options, identity_weights,
+                identity_scale, candidate_scale, identity_system, config,
+                cell.Runtime, timing_packets);
+            if (!cell.LoadPayload(PeelTimingRole::IdentityB)) {
+                std::fprintf(stderr,
+                    "peeltiming identity-B payload load failed "
+                    "replicate=%u\n", replicate);
+                return 2;
+            }
+            identity_b_preflight = RunPeelTimingDirect(
+                PeelTimingRole::IdentityB, options, identity_weights,
+                identity_scale, candidate_scale, identity_system, config,
+                cell.Runtime, timing_packets);
+            if ((candidate_preflight.Result != Wirehair_Success &&
+                 candidate_preflight.Result != Wirehair_NeedMore) ||
+                (identity_a_preflight.Result != Wirehair_Success &&
+                 identity_a_preflight.Result != Wirehair_NeedMore) ||
+                (identity_b_preflight.Result != Wirehair_Success &&
+                 identity_b_preflight.Result != Wirehair_NeedMore) ||
+                success_result(candidate_preflight.Result) !=
+                    candidate_recovery.Ok ||
+                success_result(identity_a_preflight.Result) !=
+                    identity_a_recovery.Ok ||
+                success_result(identity_b_preflight.Result) !=
+                    identity_b_recovery.Ok ||
+                PeelTimingSolveDigest(identity_a_preflight) !=
+                    PeelTimingSolveDigest(identity_b_preflight))
+            {
+                std::fprintf(stderr,
+                    "peeltiming encoded direct preflight disagrees with "
+                    "full recovery replicate=%u candidate=%d/%d "
+                    "identity_a=%d/%d identity_b=%d/%d\n",
+                    replicate,
+                    (int)candidate_preflight.Result,
+                    (int)candidate_recovery.Result,
+                    (int)identity_a_preflight.Result,
+                    (int)identity_a_recovery.Result,
+                    (int)identity_b_preflight.Result,
+                    (int)identity_b_recovery.Result);
+                return 2;
+            }
+            replicate_trace_sha256 = cell.TraceSha256;
+        }
+        else {
+            replicate_trace_sha256 = PeelTimingLossTraceDigest(
+                options, construction_seed, loss_seed, ids);
+        }
+
+        const auto timed_solve = [&](
+            PeelTimingRole role,
+            const wirehair_v2::PrecodeSystem& system,
+            const PeelTimingDirectObservation& preflight,
+            TimedObservation& timed) -> bool
+        {
+            // The earlier three-arm preflight order is validation only.  The
+            // first role-local solve verifies the expected result and stats.
+            // Its digest construction can perturb allocator free lists, so a
+            // second matching solve conditions the exact role immediately
+            // before timing.  Cold mode then evicts data symmetrically; warm
+            // mode measures directly from that conditioned state.
+            if (!cell.LoadPayload(role)) {
+                return false;
+            }
+            const int validation_cpu_before = PeelTimingCurrentCpu();
+            const PeelTimingDirectObservation slot_validation =
+                RunPeelTimingDirect(
+                    role, options, identity_weights,
+                    identity_scale, candidate_scale, system, config,
+                    cell.Runtime, timing_packets);
+            const int validation_cpu_after = PeelTimingCurrentCpu();
+            if (validation_cpu_before < 0 ||
+                validation_cpu_after != validation_cpu_before ||
+                PeelTimingSolveDigest(slot_validation) !=
+                    PeelTimingSolveDigest(preflight))
+            {
+                return false;
+            }
+            std::vector<PeelTimingDirectObservation> observations(
+                options.InnerReps);
+            const int conditioning_cpu_before = PeelTimingCurrentCpu();
+            const PeelTimingDirectObservation slot_conditioning =
+                RunPeelTimingDirect(
+                    role, options, identity_weights,
+                    identity_scale, candidate_scale, system, config,
+                    cell.Runtime, timing_packets);
+            const int conditioning_cpu_after = PeelTimingCurrentCpu();
+            if (conditioning_cpu_before < 0 ||
+                conditioning_cpu_after != conditioning_cpu_before)
+            {
+                return false;
+            }
+            for (uint32_t inner = 0u; inner < options.InnerReps; ++inner)
+            {
+                if (options.CacheState == PeelTimingCacheState::Cold) {
+                    EvictPeelTimingCache(eviction);
+                }
+                std::vector<uint8_t> intermediate;
+                wirehair_v2::PrecodeSolveStats stats;
+                const PeelTimingUsage usage_before =
+                    ReadPeelTimingUsage();
+                const int cpu_before = PeelTimingCurrentCpu();
+                if (cpu_before != conditioning_cpu_after) {
+                    return false;
+                }
+                uint64_t begin_ns = 0u;
+                if (!ReadPeelTimingMonotonicNanoseconds(begin_ns)) {
+                    return false;
+                }
+                const WirehairResult result =
+                    wirehair_v2::
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        system, config, cell.Runtime, timing_packets,
+                        options.BlockBytes, intermediate, &stats);
+                uint64_t end_ns = 0u;
+                if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+                    end_ns <= begin_ns)
+                {
+                    return false;
+                }
+                const int cpu_after = PeelTimingCurrentCpu();
+                if (cpu_after != conditioning_cpu_after) {
+                    return false;
+                }
+                const PeelTimingUsage usage_after =
+                    ReadPeelTimingUsage();
+                const uint64_t elapsed = end_ns - begin_ns;
+                add_u64(
+                    timed.ElapsedNanoseconds, elapsed,
+                    timed.Saturated);
+                add_u64(
+                    timed.BuildNanoseconds, stats.BuildNanoseconds,
+                    timed.Saturated);
+                add_u64(
+                    timed.PeelNanoseconds, stats.PeelNanoseconds,
+                    timed.Saturated);
+                add_u64(
+                    timed.ProjectNanoseconds, stats.ProjectNanoseconds,
+                    timed.Saturated);
+                add_u64(
+                    timed.ResidualNanoseconds, stats.ResidualNanoseconds,
+                    timed.Saturated);
+                add_u64(
+                    timed.BackSubNanoseconds, stats.BackSubNanoseconds,
+                    timed.Saturated);
+                PeelTimingDirectObservation& current =
+                    observations[inner];
+                current.Result = result;
+                current.Stats = stats;
+                current.IntermediateBytes = intermediate.size();
+                if (inner == 0u) {
+                    timed.Result = result;
+                    timed.Stats = stats;
+                    timed.IntermediateBytes = intermediate.size();
+                    timed.CpuBefore = cpu_before;
+                }
+                timed.CpuAfter = cpu_after;
+                const int migrated =
+                    PeelTimingCpuMigrated(cpu_before, cpu_after);
+                if (migrated < 0 || timed.CpuBefore < 0) {
+                    timed.CpuMigrated = -1;
+                }
+                else if (timed.CpuMigrated >= 0 &&
+                         (migrated != 0 ||
+                          cpu_before != timed.CpuBefore ||
+                          cpu_after != timed.CpuBefore))
+                {
+                    timed.CpuMigrated = 1;
+                }
+                if (usage_before.MinorFaults < 0 ||
+                    usage_after.MinorFaults < 0)
+                {
+                    timed.MinorFaults = -1;
+                }
+                else if (timed.MinorFaults >= 0) {
+                    timed.MinorFaults +=
+                        usage_after.MinorFaults -
+                        usage_before.MinorFaults;
+                }
+                if (usage_before.MajorFaults < 0 ||
+                    usage_after.MajorFaults < 0)
+                {
+                    timed.MajorFaults = -1;
+                }
+                else if (timed.MajorFaults >= 0) {
+                    timed.MajorFaults +=
+                        usage_after.MajorFaults -
+                        usage_before.MajorFaults;
+                }
+            }
+            const std::string expected_digest =
+                PeelTimingSolveDigest(preflight);
+            timed.Stable = timed.Stable &&
+                PeelTimingSolveDigest(slot_conditioning) == expected_digest;
+            for (const PeelTimingDirectObservation& observation :
+                 observations)
+            {
+                timed.Stable = timed.Stable &&
+                    PeelTimingSolveDigest(observation) == expected_digest;
+            }
+            return !timed.Saturated && timed.Stable;
+        };
+
+        for (uint32_t panel = 0u; panel < 2u; ++panel)
+        {
+            const bool aa_panel = panel == 1u;
+            for (uint32_t slot = 0u; slot < 8u; ++slot)
+            {
+                const char label = kOrder[slot];
+                PeelTimingRole role = PeelTimingRole::IdentityA;
+                if (!aa_panel)
+                {
+                    const bool label_is_candidate =
+                        ((replicate & 1u) == 0u) ?
+                        label == 'B' : label == 'A';
+                    role = label_is_candidate ?
+                        PeelTimingRole::Candidate :
+                        PeelTimingRole::IdentityA;
+                }
+                else
+                {
+                    const bool label_is_identity_b =
+                        ((replicate & 1u) == 0u) ?
+                        label == 'B' : label == 'A';
+                    role = label_is_identity_b ?
+                        PeelTimingRole::IdentityB :
+                        PeelTimingRole::IdentityA;
+                }
+                const wirehair_v2::PrecodeSystem& system =
+                    role == PeelTimingRole::Candidate ?
+                    *candidate_system : identity_system;
+                const PeelTimingRecovery& recovery =
+                    role == PeelTimingRole::Candidate ?
+                    candidate_recovery :
+                    (role == PeelTimingRole::IdentityB ?
+                        identity_b_recovery : identity_a_recovery);
+                const PeelTimingDirectObservation& preflight =
+                    role == PeelTimingRole::Candidate ?
+                    candidate_preflight :
+                    (role == PeelTimingRole::IdentityB ?
+                        identity_b_preflight : identity_a_preflight);
+                const char* role_name =
+                    !aa_panel && role == PeelTimingRole::IdentityA ?
+                    "identity" : PeelTimingRoleName(role);
+                TimedObservation timed;
+                if (timing_eligible &&
+                    !timed_solve(role, system, preflight, timed))
+                {
+                    std::fprintf(stderr,
+                        "peeltiming timed solve drifted replicate=%u "
+                        "panel=%u slot=%u\n",
+                        replicate, panel, slot);
+                    return 2;
+                }
+                if (!timing_eligible)
+                {
+                    timed.Stable = false;
+                    timed.CpuMigrated = -1;
+                }
+                const uint32_t binary_def =
+                    timed.Stats.InactivatedColumns >=
+                            timed.Stats.BinaryResidualRank ?
+                        timed.Stats.InactivatedColumns -
+                            timed.Stats.BinaryResidualRank :
+                        0u;
+                const uint32_t heavy_gain =
+                    timed.Stats.ResidualRank >=
+                            timed.Stats.BinaryResidualRank ?
+                        timed.Stats.ResidualRank -
+                            timed.Stats.BinaryResidualRank :
+                        0u;
+                receipt
+                    << replicate << ','
+                    << (replicate >= options.WarmupReplicates ? 1 : 0)
+                    << ','
+                    << (aa_panel ?
+                        "identity_aa" : "candidate_control")
+                    << ',' << slot
+                    << ',' << slot / 2u
+                    << ',' << label
+                    << ',' << role_name
+                    << ',' << (replicate & 1u)
+                    << ',' << construction_seed
+                    << ',' << loss_seed
+                    << ',' << replicate_trace_sha256
+                    << ',' << common_overhead
+                    << ',' << recovery.Overhead
+                    << ',' << (int)recovery.Result
+                    << ',' << (recovery.Ok ? 1 : 0)
+                    << ',' << (timing_eligible ? 1 : 0)
+                    << ',' << (timing_eligible ?
+                        (int)preflight.Result : -1)
+                    << ',' << (timing_eligible ?
+                        (int)timed.Result : -1)
+                    << ',' << (timed.Stable ? 1 : 0)
+                    << ',' << timed.ElapsedNanoseconds
+                    << ',' << (timing_eligible ? options.InnerReps : 0u)
+                    << ',' << (timed.Saturated ? 1 : 0)
+                    << ',' << timed.CpuBefore
+                    << ',' << timed.CpuAfter
+                    << ',' << timed.CpuMigrated
+                    << ',' << timed.MinorFaults
+                    << ',' << timed.MajorFaults
+                    << ',' << PeelTimingFaultContaminated(
+                        timed.MinorFaults, timed.MajorFaults)
+                    << ',' << timed.Stats.InactivatedColumns
+                    << ',' << binary_def
+                    << ',' << heavy_gain
+                    << ',' << timed.Stats.BlockXors
+                    << ',' << timed.Stats.BlockMulAdds
+                    << ',' << timed.BuildNanoseconds
+                    << ',' << timed.PeelNanoseconds
+                    << ',' << timed.ProjectNanoseconds
+                    << ',' << timed.ResidualNanoseconds
+                    << ',' << timed.BackSubNanoseconds
+                    << ',' << (uint64_t)options.BlockCount *
+                        options.BlockBytes
+                    << ',' << (timing_eligible ?
+                        (uint64_t)timing_packet_count *
+                            options.BlockBytes : 0u)
+                    << ',' << timed.IntermediateBytes << '\n';
+                ++emitted_rows;
+            }
+        }
+    }
+    if (emitted_rows != expected_rows)
+    {
+        std::fprintf(stderr,
+            "peeltiming internal row count mismatch\n");
+        return 2;
+    }
+    uint64_t finished_monotonic_ns = 0u;
+    if (!ReadPeelTimingMonotonicNanoseconds(finished_monotonic_ns) ||
+        finished_monotonic_ns <= started_monotonic_ns)
+    {
+        std::fprintf(stderr,
+            "peeltiming could not read the monotonic finish clock\n");
+        return 2;
+    }
+    const std::string body = receipt.str();
+    std::ostringstream done_prefix_stream;
+    done_prefix_stream << "# peeltiming_done"
+         << ",complete=1"
+         << ",rows=" << emitted_rows
+         << ",finished_monotonic_ns=" << finished_monotonic_ns
+         << ",stream_sha256=";
+    const std::string done_prefix = done_prefix_stream.str();
+    const std::string stream_sha256 = Sha256Hex(body + done_prefix);
+    const std::string done_text = done_prefix + stream_sha256 + '\n';
+    if (std::fwrite(body.data(), 1u, body.size(), stdout) != body.size() ||
+        std::fwrite(
+            done_text.data(), 1u, done_text.size(), stdout) !=
+            done_text.size() ||
+        std::fflush(stdout) != 0)
+    {
+        std::fprintf(stderr,
+            "peeltiming could not write the complete receipt\n");
+        return 2;
+    }
+    return 0;
 }
 
 struct PrecodeSweepRun
@@ -19308,7 +21469,7 @@ int main(int argc, char** argv)
         // configures do.
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE \
-    "peelpmf|precodesweep|precodecost|essearch|"
+    "peelpmf|peeltiming|precodesweep|precodecost|essearch|"
 #else
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE ""
 #endif
@@ -19362,6 +21523,9 @@ int main(int argc, char** argv)
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         if (!std::strcmp(argv[1], "peelpmf")) {
             return CmdPeelPmf(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "peeltiming")) {
+            return CmdPeelTiming(argc - 2, argv + 2);
         }
         if (!std::strcmp(argv[1], "precodesweep")) {
             return CmdPrecodeSweep(argc - 2, argv + 2);

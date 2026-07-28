@@ -217,9 +217,11 @@ def main(argv=None):
           f"{'absorb':>7} {'MB/s':>9} {'OH':>8}")
     for k in sorted(table):
         v = table[k]
+        solve_mbps = v.get(
+            "verified_solve_mbps", v.get("solve_mbps", 0.0))
         print(f"  {k:>7} {v['scale']:>8.2f} {v['p1']:>5} {v['tilt']:>+6} "
                   f"{v['dmax']:>5} {v['absorb']:>7} "
-                  f"{v.get('decode_mbps', v.get('verified_mbps', 0)):>9.1f} "
+                  f"{solve_mbps:>9.1f} "
                   f"{v.get('oh_mean', 0):>8.4f}")
     return 0
 
