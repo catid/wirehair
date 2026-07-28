@@ -4530,6 +4530,18 @@ bool SameNonTimingSolveStats(
             b.BinaryAdjacencyStorageAllocations &&
         a.BlockXors == b.BlockXors &&
         a.BlockMulAdds == b.BlockMulAdds &&
+        a.BlockCopies == b.BlockCopies &&
+        a.BlockZeroFills == b.BlockZeroFills &&
+        a.BlockAddSets == b.BlockAddSets &&
+        a.BlockAddSetSources == b.BlockAddSetSources &&
+        a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
+        a.PeelRowScanSteps == b.PeelRowScanSteps &&
+        a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.ProjectionWordXors == b.ProjectionWordXors &&
+        a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
+        a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
+        a.TinyMixedFastPathAcceptances ==
+            b.TinyMixedFastPathAcceptances &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&

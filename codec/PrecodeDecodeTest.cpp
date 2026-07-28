@@ -239,12 +239,30 @@ bool SameStats(
             b.BinaryAdjacencyStorageAllocations &&
         a.BlockXors == b.BlockXors &&
         a.BlockMulAdds == b.BlockMulAdds &&
+        a.BlockCopies == b.BlockCopies &&
+        a.BlockZeroFills == b.BlockZeroFills &&
+        a.BlockAddSets == b.BlockAddSets &&
+        a.BlockAddSetSources == b.BlockAddSetSources &&
+        a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
+        a.PeelRowScanSteps == b.PeelRowScanSteps &&
+        a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.ProjectionWordXors == b.ProjectionWordXors &&
+        a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
+        a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
         a.BuildNanoseconds == b.BuildNanoseconds &&
         a.PeelNanoseconds == b.PeelNanoseconds &&
         a.ProjectNanoseconds == b.ProjectNanoseconds &&
         a.ResidualNanoseconds == b.ResidualNanoseconds &&
         a.BackSubNanoseconds == b.BackSubNanoseconds &&
-        a.PacketSeedAttempt == b.PacketSeedAttempt;
+        a.PacketSeedAttempt == b.PacketSeedAttempt &&
+        a.TinyMixedFastPathAcceptances ==
+            b.TinyMixedFastPathAcceptances &&
+        a.MixedJointSourceXors == b.MixedJointSourceXors &&
+        a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
+        a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
+        a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
+        a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
+        a.MixedDualSourceColumns == b.MixedDualSourceColumns;
 }
 
 std::vector<uint8_t> MakeMessage(size_t bytes)

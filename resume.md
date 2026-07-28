@@ -4,6 +4,79 @@ Audit date: 2026-07-28
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
 
+## 2026-07-28 canonical tiny-completion checkpoint
+
+The first `wirehair-za5v` checkpoint is complete on the exact current source
+diff, SHA-256
+`54365c4f6c734b97786bce21b022c0d5c48abc4189928bd3248f98cee978e5b1`.
+The bead remains open: this checkpoint proves the existing canonical
+dispatch-v1 completion path before the separate native band-timing experiment;
+it does not select or promote a replacement band.
+
+`PrecodeSolveStats` now has a test-only
+`TinyMixedFastPathAcceptances` counter incremented only after
+`TrySolveMixedCompletionQuotientTiny` accepts.  The forced on/off/automatic
+test covers the exact canonical P244 frozen 10 GF(256) + 2 GF(2^16),
+SmallBandD4, raw mix3 descriptor at widths two and four for every K=2..100.
+It requires exactly one acceptance for every successful forced-on mixed solve
+and zero for forced-off, nonmixed, and ineligible solves.  Explicit bb=10,
+K=385, and separate-bucket seams prove the exclusion boundary.  A direct
+deficient-syndrome oracle compares forced general and tiny paths for Success,
+NeedMore, and Error under constant, independent, and grouped schedules,
+including nonzero successful writeback and immutable failure buffers.
+Deterministic solve-stat comparisons were expanded to cover every field in
+both the decoder and benchmark helpers.
+
+Exact final receipts were:
+
+- Release and strict Clang ASan+UBSan default grids: 2,998 encoder and 6,342
+  decoder cases; 3,970 tiny acceptances, all 3,970 successful forced-on mixed
+  solves accepted, and every forced-off/nonmixed/ineligible count was zero.
+- Release and two independent strict sanitizer `--full` runs: 47,139 encoder
+  and 138,927 decoder cases, including 73,706 tiny acceptances, all 73,706
+  successful forced-on mixed solves accepted, canonical cells=12,473, and
+  K coverage=99/99.  All 120 Release shards emitted the same exact receipt.
+- The direct solve oracle passed all mixed quotient factor/replay and
+  constant/independent/grouped deficient-syndrome cases in Release and strict
+  sanitizer builds.  Focused decode, full build, and production build-policy
+  gates also passed.
+- The final exact-tree Release CTest run passed 44/44, including the all-K
+  fingerprint in 2,525.73 seconds and `build_policy_e2e` in 107.75 seconds.
+  `LastTest.log` SHA-256 is
+  `5790015edeca8b5d8e9fa35c0a5d9ea158b96cc7172453f68b0864ea69dfe2ac`.
+- Three final full-core fuzz waves passed 125/125, 125/125, and 128/128
+  workers with 3,052,662,567, 1,540,135,489, and 943,646,060 mutations,
+  respectively, and zero artifacts.  Two dedicated replacement workers added
+  6,679,964 stateful and 49,600,647 profile mutations, also with zero
+  artifacts.  Together with the two earlier ten-minute waves, this checkpoint
+  accumulated more than 11.7 billion clean fuzz mutations.
+
+Three source-reading passes found and repaired proof gaps: three deterministic
+stats were initially omitted, automatic-mode Success did not prove engagement,
+and failure-buffer immutability was not checked.  A fresh adversarial pass on
+the frozen final diff found no further bug.
+
+The hardened thermal worker was stopped gracefully only after the complete
+CTest and fuzz interval.  It captured 6,559 valid one-second rows over
+6,558.000074 seconds with no gaps, invalid samples, read errors, or EDAC
+corrected/uncorrected errors.  Whole-session maxima were 95.25 C CPU and
+82.25 C DIMM.  Across 4,842 samples at or above 90 percent CPU busy, average
+busy was 99.435801 percent and CPU/DIMM maxima were 91.25/82.25 C.  The
+immutable CSV SHA-256 is
+`0ba1b4d80635c3683f336292a0ac77b03511b3cb42db6a841447fd8d2243b301`;
+the hardened sampler SHA-256 is
+`2b84efa91375a96a4a64e09ce5bfd7cba0b85b75028f5a93470cd4ae58aadb01`.
+
+Next: add a transactional, test-build-only explicit `PrecodeParams` plus
+`PacketRowConfig` encoder/decoder initialization seam, then build
+`wirehair.wh2.bandtiming.v1`.  Candidate and dispatch must use that same
+explicit path; an untimed semantic bridge must prove the canonical descriptor
+identical to real dispatch.  The native receipt must retain all raw weak seeds,
+use panel-local censoring, and measure encoder init plus first K symbols,
+decoder first feed through first success, and candidate-vs-dispatch direct
+solve as distinct estimands.  Do not close `wirehair-za5v` until the full
+all-K, six-schedule speed/recovery acceptance contract is verified.
+
 ## 2026-07-28 verified same-path timing closure
 
 `wirehair-lnfk` is closed after clause-by-clause acceptance verification on the

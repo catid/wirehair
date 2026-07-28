@@ -229,6 +229,11 @@ struct PrecodeSolveStats
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Per cold solve, incremented exactly once when the tiny mixed completion
+    // solver accepts the quotient shape and supplies the terminal result.
+    // Forced-path tests use this to distinguish real engagement from a
+    // byte-identical fallthrough to the general solver.
+    uint32_t TinyMixedFastPathAcceptances = 0;
     uint64_t MixedJointSourceXors = 0;
     uint64_t MixedJointMarginalXors = 0;
     uint64_t MixedJointMarginalCopies = 0;

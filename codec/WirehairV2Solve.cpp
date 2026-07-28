@@ -3617,6 +3617,9 @@ WirehairResult SolveMixedCompletionQuotient(
                 binary_pivot_coeff, binary_pivot_rhs, binary_have_pivot,
                 binary_rank, free_columns, values, stats, tiny_result))
         {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++stats.TinyMixedFastPathAcceptances;
+#endif
             return tiny_result;
         }
         // Structurally unsupported shapes fall through with no state built.
@@ -8639,9 +8642,97 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         PrecodeSystem system;
         system.Params = MakeMixedParams(
             column_count, UINT64_C(0x13198a2e03707344));
+        const uint32_t block_bytes = 2u;
+        const int previous_fast_path_mode =
+            TinyMixedFastPathTestModeValue;
+        struct RestoreTinyFastPathMode
+        {
+            int Previous;
+            ~RestoreTinyFastPathMode()
+            {
+                TinyMixedFastPathTestModeValue = Previous;
+            }
+        } restore_fast_path_mode = {previous_fast_path_mode};
+
+        // The duplicate coefficient pair also gives a one-variable,
+        // full-rank system with a nonzero solution.  Exercise it under every
+        // schedule used by this oracle so secondary-residue coefficient
+        // assembly and the tiny solver's successful writeback cannot escape
+        // the forced on/off comparison.
+        {
+            const uint32_t success_inactive_count = 1u;
+            const uint32_t success_projection_words =
+                PackedWordCount(success_inactive_count);
+            std::vector<uint32_t> success_inactive_index(
+                column_count, UINT32_MAX);
+            success_inactive_index[duplicate0] = 0u;
+            const std::vector<uint32_t> success_inactive_columns = {
+                duplicate0
+            };
+            const std::vector<uint64_t> success_projection(
+                (size_t)column_count * success_projection_words,
+                UINT64_C(0));
+            const std::vector<uint64_t> success_binary_coeff(
+                (size_t)success_inactive_count *
+                    success_projection_words,
+                UINT64_C(0));
+            const std::vector<uint8_t> success_binary_rhs(
+                (size_t)success_inactive_count * block_bytes, uint8_t{0});
+            const std::vector<uint8_t> success_have_pivot(
+                success_inactive_count, uint8_t{0});
+            std::vector<uint8_t> success_initial_values(
+                (size_t)column_count * block_bytes, uint8_t{0});
+            success_initial_values[
+                (size_t)duplicate1 * block_bytes] = 0x5au;
+            success_initial_values[
+                (size_t)duplicate1 * block_bytes + 1u] = 0xa5u;
+            const auto run_success = [&](
+                int mode,
+                PrecodeSolveStats& stats,
+                std::vector<uint8_t>& values) -> WirehairResult
+            {
+                TinyMixedFastPathTestModeValue = mode;
+                values = success_initial_values;
+                return SolveMixedCompletionQuotient(
+                    system, column_count, success_inactive_count,
+                    success_projection_words, block_bytes,
+                    success_inactive_index, success_inactive_columns,
+                    success_projection, success_binary_coeff,
+                    success_binary_rhs, success_have_pivot, 0u,
+                    values, stats);
+            };
+            PrecodeSolveStats success_general_stats;
+            PrecodeSolveStats success_tiny_stats;
+            std::vector<uint8_t> success_general_values;
+            std::vector<uint8_t> success_tiny_values;
+            if (run_success(
+                    -1, success_general_stats,
+                    success_general_values) != Wirehair_Success ||
+                run_success(
+                    1, success_tiny_stats,
+                    success_tiny_values) != Wirehair_Success ||
+                success_general_stats.TinyMixedFastPathAcceptances != 0u ||
+                success_tiny_stats.TinyMixedFastPathAcceptances != 1u ||
+                success_tiny_values != success_general_values ||
+                success_tiny_stats.ResidualRows !=
+                    success_general_stats.ResidualRows ||
+                success_tiny_stats.BinaryResidualRank !=
+                    success_general_stats.BinaryResidualRank ||
+                success_tiny_stats.ResidualRank !=
+                    success_general_stats.ResidualRank ||
+                std::memcmp(
+                    success_tiny_values.data() +
+                        (size_t)duplicate0 * block_bytes,
+                    success_initial_values.data() +
+                        (size_t)duplicate1 * block_bytes,
+                    block_bytes) != 0)
+            {
+                return false;
+            }
+        }
+
         const uint32_t inactive_count = 2u;
         const uint32_t projection_words = PackedWordCount(inactive_count);
-        const uint32_t block_bytes = 2u;
         std::vector<uint32_t> inactive_index(column_count, UINT32_MAX);
         inactive_index[duplicate0] = 0u;
         inactive_index[duplicate1] = 1u;
@@ -8655,26 +8746,72 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientDeficientSyndromeForTesting()
         const std::vector<uint8_t> binary_rhs(
             (size_t)inactive_count * block_bytes, uint8_t{0});
         const std::vector<uint8_t> have_pivot(inactive_count, uint8_t{0});
-        std::vector<uint8_t> values(
+        const std::vector<uint8_t> zero_values(
             (size_t)column_count * block_bytes, uint8_t{0});
-        PrecodeSolveStats stats;
-        if (SolveMixedCompletionQuotient(
+        const auto run_quotient = [&](
+            int mode,
+            const std::vector<uint8_t>& initial_values,
+            PrecodeSolveStats& stats,
+            std::vector<uint8_t>& values) -> WirehairResult
+        {
+            TinyMixedFastPathTestModeValue = mode;
+            values = initial_values;
+            return SolveMixedCompletionQuotient(
                 system, column_count, inactive_count, projection_words,
                 block_bytes, inactive_index, inactive_columns, projection,
-                binary_coeff, binary_rhs, have_pivot, 0u, values, stats) !=
-                Wirehair_NeedMore ||
-            stats.BinaryResidualRank != 0u ||
-            stats.ResidualRank != 1u)
+                binary_coeff, binary_rhs, have_pivot, 0u, values, stats);
+        };
+
+        PrecodeSolveStats deficient_general;
+        PrecodeSolveStats deficient_tiny;
+        std::vector<uint8_t> deficient_general_values;
+        std::vector<uint8_t> deficient_tiny_values;
+        if (run_quotient(
+                -1, zero_values, deficient_general,
+                deficient_general_values) != Wirehair_NeedMore ||
+            run_quotient(
+                1, zero_values, deficient_tiny,
+                deficient_tiny_values) != Wirehair_NeedMore ||
+            deficient_general.TinyMixedFastPathAcceptances != 0u ||
+            deficient_tiny.TinyMixedFastPathAcceptances != 1u ||
+            deficient_general_values != zero_values ||
+            deficient_tiny_values != zero_values ||
+            deficient_general.BinaryResidualRank != 0u ||
+            deficient_general.ResidualRank != 1u ||
+            deficient_tiny.ResidualRows !=
+                deficient_general.ResidualRows ||
+            deficient_tiny.BinaryResidualRank !=
+                deficient_general.BinaryResidualRank ||
+            deficient_tiny.ResidualRank != deficient_general.ResidualRank)
         {
             return false;
         }
-        values[(size_t)inconsistent_column * block_bytes] = 1u;
-        stats = PrecodeSolveStats{};
-        return SolveMixedCompletionQuotient(
-            system, column_count, inactive_count, projection_words,
-            block_bytes, inactive_index, inactive_columns, projection,
-            binary_coeff, binary_rhs, have_pivot, 0u, values, stats) ==
-            Wirehair_Error;
+        std::vector<uint8_t> inconsistent_values = zero_values;
+        inconsistent_values[
+            (size_t)inconsistent_column * block_bytes] = 1u;
+        PrecodeSolveStats inconsistent_general;
+        PrecodeSolveStats inconsistent_tiny;
+        std::vector<uint8_t> inconsistent_general_values;
+        std::vector<uint8_t> inconsistent_tiny_values;
+        return
+            run_quotient(
+                -1, inconsistent_values,
+                inconsistent_general,
+                inconsistent_general_values) == Wirehair_Error &&
+            run_quotient(
+                1, inconsistent_values,
+                inconsistent_tiny,
+                inconsistent_tiny_values) == Wirehair_Error &&
+            inconsistent_general.TinyMixedFastPathAcceptances == 0u &&
+            inconsistent_tiny.TinyMixedFastPathAcceptances == 1u &&
+            inconsistent_general_values == inconsistent_values &&
+            inconsistent_tiny_values == inconsistent_values &&
+            inconsistent_tiny.ResidualRows ==
+                inconsistent_general.ResidualRows &&
+            inconsistent_tiny.BinaryResidualRank ==
+                inconsistent_general.BinaryResidualRank &&
+            inconsistent_tiny.ResidualRank ==
+                inconsistent_general.ResidualRank;
     }
     catch (...) {
         return false;

@@ -44,6 +44,32 @@ uint64_t SplitMix64(uint64_t& state)
     return z ^ (z >> 31);
 }
 
+bool CheckTinyMixedFastPathModeControl()
+{
+    if (!SetTinyMixedFastPathModeForTesting(0) ||
+        TinyMixedFastPathModeForTesting() != 0)
+    {
+        return false;
+    }
+    static const int kModes[] = {-1, 1, 0};
+    for (int mode : kModes)
+    {
+        if (!SetTinyMixedFastPathModeForTesting(mode) ||
+            TinyMixedFastPathModeForTesting() != mode)
+        {
+            return false;
+        }
+    }
+    if (SetTinyMixedFastPathModeForTesting(-2) ||
+        TinyMixedFastPathModeForTesting() != 0 ||
+        SetTinyMixedFastPathModeForTesting(2) ||
+        TinyMixedFastPathModeForTesting() != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
 struct ProfileConfig
 {
     const char* Name;
@@ -55,6 +81,8 @@ struct ProfileConfig
     uint32_t DenseRows;
     bool IdentityCorner;
     uint32_t MinK;
+    bool CanonicalDispatch;
+    MixedResidueBucketMode BucketMode;
 };
 
 bool ApplyProfileHooks(const ProfileConfig& profile)
@@ -81,13 +109,14 @@ bool ApplyProfileHooks(const ProfileConfig& profile)
     {
         return false;
     }
-    return true;
+    return SetMixedResidueBucketModeForTesting(profile.BucketMode);
 }
 
 struct SolveOutcome
 {
     WirehairResult Result = Wirehair_Error;
     std::vector<uint8_t> Blocks;
+    PrecodeSolveStats Stats;
 };
 
 SolveOutcome RunSolve(
@@ -98,13 +127,22 @@ SolveOutcome RunSolve(
     uint32_t block_bytes)
 {
     SolveOutcome outcome;
-    if (!SetTinyMixedFastPathModeForTesting(fast_path_mode)) {
+    if (!SetTinyMixedFastPathModeForTesting(fast_path_mode) ||
+        TinyMixedFastPathModeForTesting() != fast_path_mode)
+    {
         outcome.Result = Wirehair_Error;
         return outcome;
     }
     outcome.Result = SolvePrecodeSystem(
-        system, config, packets, block_bytes, outcome.Blocks);
-    (void)SetTinyMixedFastPathModeForTesting(0);
+        system, config, packets, block_bytes, outcome.Blocks,
+        &outcome.Stats);
+    if (!SetTinyMixedFastPathModeForTesting(0) ||
+        TinyMixedFastPathModeForTesting() != 0)
+    {
+        outcome.Result = Wirehair_Error;
+        outcome.Blocks.clear();
+        outcome.Stats = PrecodeSolveStats();
+    }
     return outcome;
 }
 
@@ -115,8 +153,43 @@ struct Counters
     uint64_t SuccessCases = 0;
     uint64_t NeedMoreCases = 0;
     uint64_t ErrorCases = 0;
-    uint64_t FastPathEngaged = 0;
+    uint64_t SuccessfulForcedOnMixedSolves = 0;
+    uint64_t ForcedOnMixedAcceptances = 0;
+    uint64_t ForcedOffAcceptances = 0;
+    uint64_t ForcedOnNonMixedAcceptances = 0;
+    uint64_t SuccessfulAutomaticEligibleMixedSolves = 0;
+    uint64_t AutomaticMixedAcceptances = 0;
+    uint64_t AutomaticIneligibleAcceptances = 0;
+    uint64_t CanonicalDispatchEncodeCases = 0;
+    uint32_t AutomaticExclusionSeamCases = 0;
+    bool CanonicalDispatchWidth2Success[101] = {};
+    bool CanonicalDispatchWidth4Success[101] = {};
 };
+
+bool SamePathIndependentStats(
+    const PrecodeSolveStats& a,
+    const PrecodeSolveStats& b)
+{
+    return a.PacketRows == b.PacketRows &&
+        a.PeeledColumns == b.PeeledColumns &&
+        a.InactivatedColumns == b.InactivatedColumns &&
+        a.ResidualRows == b.ResidualRows &&
+        a.ResidualRank == b.ResidualRank &&
+        a.BinaryResidualRank == b.BinaryResidualRank &&
+        a.BinaryRowReferences == b.BinaryRowReferences &&
+        a.BinaryRowStorageBytes == b.BinaryRowStorageBytes &&
+        a.BinaryAdjacencyStorageBytes == b.BinaryAdjacencyStorageBytes &&
+        a.BinaryRowStorageAllocations == b.BinaryRowStorageAllocations &&
+        a.BinaryAdjacencyStorageAllocations ==
+            b.BinaryAdjacencyStorageAllocations &&
+        a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
+        a.PeelRowScanSteps == b.PeelRowScanSteps &&
+        a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.ProjectionWordXors == b.ProjectionWordXors &&
+        a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
+        a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
+        a.PacketSeedAttempt == b.PacketSeedAttempt;
+}
 
 bool CompareOutcomes(
     const char* what,
@@ -126,24 +199,151 @@ bool CompareOutcomes(
     uint32_t block_bytes,
     const SolveOutcome& off,
     const SolveOutcome& on,
+    const SolveOutcome& automatic,
     Counters& counters)
 {
-    if (off.Result != on.Result)
+    const uint32_t off_acceptances =
+        off.Stats.TinyMixedFastPathAcceptances;
+    const uint32_t on_acceptances =
+        on.Stats.TinyMixedFastPathAcceptances;
+    counters.ForcedOffAcceptances += off_acceptances;
+    if (off_acceptances != 0u)
     {
         std::fprintf(stderr,
-            "FAIL %s %s K=%u seed=0x%llx bb=%u result off=%d on=%d\n",
+            "FAIL %s %s K=%u seed=0x%llx bb=%u forced-off accepted "
+            "tiny path %u times\n",
             what, profile.Name, K, (unsigned long long)seed, block_bytes,
-            (int)off.Result, (int)on.Result);
+            off_acceptances);
+        return false;
+    }
+    if (!profile.Mixed)
+    {
+        counters.ForcedOnNonMixedAcceptances += on_acceptances;
+        if (on_acceptances != 0u)
+        {
+            std::fprintf(stderr,
+                "FAIL %s %s K=%u seed=0x%llx bb=%u nonmixed solve "
+                "accepted tiny path %u times\n",
+                what, profile.Name, K, (unsigned long long)seed, block_bytes,
+                on_acceptances);
+            return false;
+        }
+    }
+    else
+    {
+        counters.ForcedOnMixedAcceptances += on_acceptances;
+        if (on_acceptances > 1u)
+        {
+            std::fprintf(stderr,
+                "FAIL %s %s K=%u seed=0x%llx bb=%u forced-on mixed "
+                "solve accepted tiny path %u times\n",
+                what, profile.Name, K, (unsigned long long)seed, block_bytes,
+                on_acceptances);
+            return false;
+        }
+        if (on.Result == Wirehair_Success)
+        {
+            ++counters.SuccessfulForcedOnMixedSolves;
+            if (on_acceptances != 1u)
+            {
+                std::fprintf(stderr,
+                    "FAIL %s %s K=%u seed=0x%llx bb=%u successful "
+                    "forced-on mixed solve did not accept tiny path\n",
+                    what, profile.Name, K, (unsigned long long)seed,
+                    block_bytes);
+                return false;
+            }
+        }
+    }
+    const uint32_t automatic_acceptances =
+        automatic.Stats.TinyMixedFastPathAcceptances;
+    if (profile.Mixed) {
+        counters.AutomaticMixedAcceptances += automatic_acceptances;
+    }
+    if (automatic_acceptances > 1u)
+    {
+        std::fprintf(stderr,
+            "FAIL %s %s K=%u seed=0x%llx bb=%u automatic solve "
+            "accepted tiny path %u times\n",
+            what, profile.Name, K, (unsigned long long)seed, block_bytes,
+            automatic_acceptances);
+        return false;
+    }
+    const bool automatic_eligible =
+        profile.Mixed &&
+        K <= TinyMixedFastPathMaxSourceBlocks() &&
+        block_bytes <= TinyMixedFastPathMaxBlockBytes() &&
+        (uint64_t)K * block_bytes <=
+            TinyMixedFastPathMaxProductBytes() &&
+        profile.BucketMode == MixedResidueBucketMode::Automatic;
+    if (!automatic_eligible)
+    {
+        counters.AutomaticIneligibleAcceptances += automatic_acceptances;
+        if (automatic_acceptances != 0u)
+        {
+            std::fprintf(stderr,
+                "FAIL %s %s K=%u seed=0x%llx bb=%u ineligible "
+                "automatic solve accepted tiny path %u times\n",
+                what, profile.Name, K, (unsigned long long)seed, block_bytes,
+                automatic_acceptances);
+            return false;
+        }
+    }
+    else
+    {
+        if (automatic_acceptances != on_acceptances)
+        {
+            std::fprintf(stderr,
+                "FAIL %s %s K=%u seed=0x%llx bb=%u eligible automatic "
+                "acceptance %u differs from forced-on %u\n",
+                what, profile.Name, K, (unsigned long long)seed,
+                block_bytes, automatic_acceptances, on_acceptances);
+            return false;
+        }
+        if (automatic.Result == Wirehair_Success)
+        {
+            ++counters.SuccessfulAutomaticEligibleMixedSolves;
+            if (automatic_acceptances != 1u)
+            {
+                std::fprintf(stderr,
+                    "FAIL %s %s K=%u seed=0x%llx bb=%u eligible "
+                    "successful automatic solve did not accept tiny path\n",
+                    what, profile.Name, K, (unsigned long long)seed,
+                    block_bytes);
+                return false;
+            }
+        }
+    }
+    if (!SamePathIndependentStats(off.Stats, on.Stats) ||
+        !SamePathIndependentStats(off.Stats, automatic.Stats))
+    {
+        std::fprintf(stderr,
+            "FAIL %s %s K=%u seed=0x%llx bb=%u path-independent "
+            "stats differ: off rank=%u/%u on=%u/%u auto=%u/%u\n",
+            what, profile.Name, K, (unsigned long long)seed, block_bytes,
+            off.Stats.BinaryResidualRank, off.Stats.ResidualRank,
+            on.Stats.BinaryResidualRank, on.Stats.ResidualRank,
+            automatic.Stats.BinaryResidualRank,
+            automatic.Stats.ResidualRank);
+        return false;
+    }
+    if (off.Result != on.Result || off.Result != automatic.Result)
+    {
+        std::fprintf(stderr,
+            "FAIL %s %s K=%u seed=0x%llx bb=%u result "
+            "off=%d on=%d auto=%d\n",
+            what, profile.Name, K, (unsigned long long)seed, block_bytes,
+            (int)off.Result, (int)on.Result, (int)automatic.Result);
         return false;
     }
     if (off.Result == Wirehair_Success)
     {
         ++counters.SuccessCases;
-        if (off.Blocks != on.Blocks)
+        if (off.Blocks != on.Blocks || off.Blocks != automatic.Blocks)
         {
             std::fprintf(stderr,
                 "FAIL %s %s K=%u seed=0x%llx bb=%u intermediate "
-                "blocks differ\n",
+                "blocks differ across off/on/automatic\n",
                 what, profile.Name, K, (unsigned long long)seed,
                 block_bytes);
             return false;
@@ -177,6 +377,32 @@ bool RunCase(
         params.DenseRows = profile.DenseRows;
     }
     params.DenseIdentityCorner = profile.IdentityCorner;
+    if (profile.CanonicalDispatch &&
+        (!profile.Mixed || profile.SharedX ||
+         profile.Period != kMixedCoefficientPeriod ||
+         profile.GF256Rows != kMixedGF256Rows ||
+         profile.DenseRows != 4u || profile.IdentityCorner ||
+         profile.MinK != 2u ||
+         !IsCanonicalMixedCompletionState() ||
+         !IsCanonicalStableTargetPacketRowState() ||
+         ActiveMixedResidueBucketModeForTesting() !=
+            MixedResidueBucketMode::Automatic ||
+         params.BlockCount != K ||
+         params.Staircase != SmallBandStaircaseCount(K) ||
+         params.DenseRows != 4u ||
+         params.HeavyRows != kMixedGF256Rows + kMixedGF16Rows ||
+         params.Field != CompletionField::MixedGF256GF16 ||
+         params.DenseIdentityCorner || params.DenseTwoAnchor ||
+         params.DenseTwoAnchorPhase != 0u ||
+         params.DegreeBalancedStaircase ||
+         params.StaircaseDegreeScale != kStaircaseDegreeScaleUnset ||
+         params.Seed != construction_seed))
+    {
+        std::fprintf(stderr,
+            "FAIL %s K=%u seed=0x%llx canonical dispatch params drifted\n",
+            profile.Name, K, (unsigned long long)construction_seed);
+        return false;
+    }
     PrecodeSystem system;
     if (!BuildPrecodeSystem(params, system))
     {
@@ -189,6 +415,15 @@ bool RunCase(
     config.PeelSeed = (uint32_t)construction_seed ^
         (uint32_t)(construction_seed >> 32);
     config.MixCount = kCertifiedPacketMixCount;
+    if (profile.CanonicalDispatch &&
+        (config.PeelSeed != RawUniformPacketPeelSeed(construction_seed) ||
+         config.MixCount != kCertifiedPacketMixCount))
+    {
+        std::fprintf(stderr,
+            "FAIL %s K=%u seed=0x%llx canonical packet config drifted\n",
+            profile.Name, K, (unsigned long long)construction_seed);
+        return false;
+    }
 
     // Deterministic payload.
     uint64_t payload_state = construction_seed ^
@@ -205,15 +440,31 @@ bool RunCase(
     }
 
     ++counters.EncodeCases;
+    if (profile.CanonicalDispatch) {
+        ++counters.CanonicalDispatchEncodeCases;
+    }
     const SolveOutcome off =
         RunSolve(-1, system, config, packets, block_bytes);
     const SolveOutcome on =
         RunSolve(1, system, config, packets, block_bytes);
+    const SolveOutcome automatic =
+        RunSolve(0, system, config, packets, block_bytes);
     if (!CompareOutcomes(
             "encode", profile, K, construction_seed, block_bytes,
-            off, on, counters))
+            off, on, automatic, counters))
     {
         return false;
+    }
+    if (profile.CanonicalDispatch && K <= 100u &&
+        on.Result == Wirehair_Success &&
+        on.Stats.TinyMixedFastPathAcceptances == 1u)
+    {
+        if (block_bytes == 2u) {
+            counters.CanonicalDispatchWidth2Success[K] = true;
+        }
+        else if (block_bytes == 4u) {
+            counters.CanonicalDispatchWidth4Success[K] = true;
+        }
     }
 
     std::vector<uint8_t> repair_off;
@@ -297,9 +548,11 @@ bool RunCase(
         RunSolve(-1, system, config, received, block_bytes);
     const SolveOutcome decode_on =
         RunSolve(1, system, config, received, block_bytes);
+    const SolveOutcome decode_automatic =
+        RunSolve(0, system, config, received, block_bytes);
     if (!CompareOutcomes(
             "decode", profile, K, construction_seed, block_bytes,
-            decode_off, decode_on, counters))
+            decode_off, decode_on, decode_automatic, counters))
     {
         return false;
     }
@@ -325,9 +578,11 @@ bool RunCase(
             RunSolve(-1, system, config, deficient, block_bytes);
         const SolveOutcome deficient_on =
             RunSolve(1, system, config, deficient, block_bytes);
+        const SolveOutcome deficient_automatic =
+            RunSolve(0, system, config, deficient, block_bytes);
         if (!CompareOutcomes(
                 "deficient", profile, K, construction_seed, block_bytes,
-                deficient_off, deficient_on, counters))
+                deficient_off, deficient_on, deficient_automatic, counters))
         {
             return false;
         }
@@ -349,9 +604,11 @@ bool RunCase(
             RunSolve(-1, system, config, conflicted, block_bytes);
         const SolveOutcome conflict_on =
             RunSolve(1, system, config, conflicted, block_bytes);
+        const SolveOutcome conflict_automatic =
+            RunSolve(0, system, config, conflicted, block_bytes);
         if (!CompareOutcomes(
                 "conflict", profile, K, construction_seed, block_bytes,
-                conflict_off, conflict_on, counters))
+                conflict_off, conflict_on, conflict_automatic, counters))
         {
             return false;
         }
@@ -414,10 +671,14 @@ int RunTiming(
     const char* profile_name)
 {
     ProfileConfig profile =
-        {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u};
+        {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u,
+            false, MixedResidueBucketMode::Automatic};
     if (profile_name && !std::strcmp(profile_name, "d4")) {
         profile.Name = "mixed-p244-d4";
+        profile.Period = kMixedCoefficientPeriod;
+        profile.GF256Rows = kMixedGF256Rows;
         profile.DenseRows = 4u;
+        profile.CanonicalDispatch = true;
     }
     else if (profile_name && std::strcmp(profile_name, "baseline")) {
         std::fprintf(stderr,
@@ -513,19 +774,33 @@ int main(int argc, char** argv)
             "FAIL tiny scalar helper verification\n");
         return 1;
     }
+    if (!CheckTinyMixedFastPathModeControl())
+    {
+        std::fprintf(stderr,
+            "FAIL tiny fast-path mode control verification\n");
+        return 1;
+    }
     std::printf("tiny scalar helpers: exhaustive inverse and row kernels "
-                "verified\n");
+                "verified; mode control verified\n");
 
     static const ProfileConfig kProfiles[] = {
         // mixed-p244-baseline: frozen geometry defaults
-        {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u},
+        {"mixed-p244-baseline", true, false, 0u, 0u, 0u, false, 2u,
+            false, MixedResidueBucketMode::Automatic},
+        // Exact dispatch-v1 completion band: frozen P244, 10 GF(256) plus
+        // two GF(2^16) rows, and four binary dense rows.
+        {"mixed-p244-d4", true, false, kMixedCoefficientPeriod,
+            kMixedGF256Rows, 4u, false, 2u, true,
+            MixedResidueBucketMode::Automatic},
         // ic-d8-9x2-p48x: shared-x, period 48, 9 GF256 rows, D2=8,
         // identity corner.  The small-band staircase gives S=2 at K=5, so
         // K+S=7 cannot carry the eight distinct corner anchors; K=6 is the
         // first valid construction.
-        {"ic-d8-9x2-p48x", true, true, 48u, 9u, 8u, true, 6u},
+        {"ic-d8-9x2-p48x", true, true, 48u, 9u, 8u, true, 6u,
+            false, MixedResidueBucketMode::Automatic},
         // certified control: never touches the mixed fast path
-        {"cert-baseline", false, false, 0u, 0u, 0u, false, 2u},
+        {"cert-baseline", false, false, 0u, 0u, 0u, false, 2u,
+            false, MixedResidueBucketMode::Automatic},
     };
 
     const std::vector<uint32_t> k_values = BuildKList(full);
@@ -550,6 +825,9 @@ int main(int argc, char** argv)
                 // bounded K so the forced scalar path stays fast enough.
                 std::vector<uint32_t> widths;
                 widths.push_back(2u);
+                if (profile.Mixed) {
+                    widths.push_back(4u);
+                }
                 widths.push_back(6u);
                 // 8-byte blocks reach the widened product gate (K*bb <=
                 // 3072 engages bb=8 through K=384); cover the flat-K
@@ -581,13 +859,101 @@ int main(int argc, char** argv)
             }
         }
     }
+    // Directly straddle every automatic-dispatch exclusion that the regular
+    // width/K ladder could otherwise skip: the first valid even width above
+    // bb=8, the first K above K*bb=3072 at bb=8, and an explicitly requested
+    // residue-bucket implementation at an otherwise eligible small cell.
+    const uint64_t seam_seed = UINT64_C(0xC0FFEE);
+    if (!RunCase(
+            kProfiles[1], 2u, seam_seed,
+            TinyMixedFastPathMaxBlockBytes() + 2u, false, counters) ||
+        !RunCase(
+            kProfiles[1],
+            TinyMixedFastPathMaxProductBytes() /
+                TinyMixedFastPathMaxBlockBytes() + 1u,
+            seam_seed, TinyMixedFastPathMaxBlockBytes(), false, counters))
+    {
+        return 1;
+    }
+    counters.AutomaticExclusionSeamCases += 2u;
+    ProfileConfig explicit_buckets = kProfiles[1];
+    explicit_buckets.Name = "mixed-p244-d4-explicit-buckets";
+    explicit_buckets.CanonicalDispatch = false;
+    explicit_buckets.BucketMode = MixedResidueBucketMode::Separate;
+    if (!RunCase(
+            explicit_buckets, 16u, seam_seed, 2u, false, counters) ||
+        !SetMixedResidueBucketModeForTesting(
+            MixedResidueBucketMode::Automatic))
+    {
+        return 1;
+    }
+    ++counters.AutomaticExclusionSeamCases;
+    const uint64_t expected_encode_cases = full ? 47139u : 2998u;
+    const uint64_t expected_dispatch_cases = full ? 12473u : 805u;
+    if (counters.EncodeCases != expected_encode_cases ||
+        counters.CanonicalDispatchEncodeCases != expected_dispatch_cases)
+    {
+        std::fprintf(stderr,
+            "FAIL grid cardinality encode=%llu expected=%llu "
+            "dispatch=%llu expected_dispatch=%llu\n",
+            (unsigned long long)counters.EncodeCases,
+            (unsigned long long)expected_encode_cases,
+            (unsigned long long)counters.CanonicalDispatchEncodeCases,
+            (unsigned long long)expected_dispatch_cases);
+        return 1;
+    }
+    if (counters.AutomaticExclusionSeamCases != 3u)
+    {
+        std::fprintf(stderr,
+            "FAIL automatic exclusion seam count=%u expected=3\n",
+            counters.AutomaticExclusionSeamCases);
+        return 1;
+    }
+    uint32_t required_dispatch_k = 0u;
+    uint32_t covered_dispatch_k = 0u;
+    for (uint32_t K : k_values)
+    {
+        if (K > 100u) {
+            continue;
+        }
+        ++required_dispatch_k;
+        if (!counters.CanonicalDispatchWidth2Success[K] ||
+            !counters.CanonicalDispatchWidth4Success[K])
+        {
+            std::fprintf(stderr,
+                "FAIL canonical dispatch lacks accepted successful "
+                "bb=2/4 coverage at K=%u\n", K);
+            return 1;
+        }
+        ++covered_dispatch_k;
+    }
     std::printf(
         "tiny fast path A/B: %llu encode cases, %llu decode cases "
-        "(%llu success, %llu need-more, %llu error) byte-identical\n",
+        "(%llu success, %llu need-more, %llu error) byte-identical; "
+        "tiny_acceptances=%llu successful_forced_on_mixed=%llu "
+        "forced_off_acceptances=%llu "
+        "forced_on_nonmixed_acceptances=%llu "
+        "automatic_mixed_acceptances=%llu "
+        "successful_automatic_eligible_mixed=%llu "
+        "automatic_ineligible_acceptances=%llu "
+        "automatic_exclusion_seams=%u/3 "
+        "canonical_dispatch_encode=%llu "
+        "canonical_dispatch_k_covered=%u/%u\n",
         (unsigned long long)counters.EncodeCases,
         (unsigned long long)counters.DecodeCases,
         (unsigned long long)counters.SuccessCases,
         (unsigned long long)counters.NeedMoreCases,
-        (unsigned long long)counters.ErrorCases);
+        (unsigned long long)counters.ErrorCases,
+        (unsigned long long)counters.ForcedOnMixedAcceptances,
+        (unsigned long long)counters.SuccessfulForcedOnMixedSolves,
+        (unsigned long long)counters.ForcedOffAcceptances,
+        (unsigned long long)counters.ForcedOnNonMixedAcceptances,
+        (unsigned long long)counters.AutomaticMixedAcceptances,
+        (unsigned long long)
+            counters.SuccessfulAutomaticEligibleMixedSolves,
+        (unsigned long long)counters.AutomaticIneligibleAcceptances,
+        counters.AutomaticExclusionSeamCases,
+        (unsigned long long)counters.CanonicalDispatchEncodeCases,
+        covered_dispatch_k, required_dispatch_k);
     return 0;
 }
