@@ -5121,6 +5121,17 @@ uint32_t TinyMixedFastPathMaxProductBytes()
     return WIREHAIR_V2_TINY_MIXED_FASTPATH_MAX_PRODUCT_BYTES;
 }
 
+bool IsCanonicalStableTargetPacketRowState()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return PacketRowSeedMultiplier == 1u &&
+        !PacketRowSeedAvalanche &&
+        OddPacketPeelSeedXor == 0u;
+#else
+    return true;
+#endif
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool SetTinyMixedFastPathModeForTesting(int mode)
 {

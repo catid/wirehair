@@ -288,6 +288,11 @@ private:
 
 struct MessagePrecodeEncoderOptions
 {
+    // Equation geometry.  LegacyD12 preserves every existing public profile;
+    // SmallBandD4 is selected only by the separately named dispatch-v1
+    // profile and never inferred from completion field alone.
+    V2PrecodeArchitecture Architecture = V2PrecodeArchitecture::LegacyD12;
+
     // Named version-4 packet contracts bind this value together with the
     // completion field: three columns for the original profiles, or two for
     // the opt-in mixed/mix2 profile.  Keep it explicit so supplied options can
@@ -311,6 +316,17 @@ struct MessagePrecodeEncoderOptions
 
 /** True when any selected or mixed V2 precode contract state is present. */
 bool HasMessagePrecodeContractState(const SeedProfile& profile);
+
+/**
+    True when every equation-active, non-receipted test control matches the
+    frozen stable-target mapping.
+
+    The peel-PMF and staircase-scale overlays are intentionally absent because
+    target receipts bind them separately.  Raw target binding and replay both
+    call this gate so a stored profile cannot inherit a different equation
+    stream under the same stable identifier.
+*/
+bool IsCanonicalStableTargetEquationState();
 
 /**
     Resolve and validate the matrix options bound to a selected V2 profile.

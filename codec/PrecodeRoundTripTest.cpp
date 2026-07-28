@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -529,8 +530,29 @@ bool RunUnauthenticatedCorruptionBoundary()
     return true;
 }
 
-bool CompleteDirectRepairOnly(
+WirehairResult EncodeDirectPacket(
     wirehair_v2::Codec& encoder,
+    uint32_t id,
+    uint8_t* block,
+    uint32_t block_bytes,
+    uint32_t* bytes)
+{
+    return encoder.Encode(id, block, block_bytes, bytes);
+}
+
+WirehairResult EncodeDirectPacket(
+    wirehair_v2::MessagePrecodeEncoder& encoder,
+    uint32_t id,
+    uint8_t* block,
+    uint32_t block_bytes,
+    uint32_t* bytes)
+{
+    return encoder.EncodeResult(id, block, block_bytes, bytes);
+}
+
+template <typename Encoder>
+bool CompleteDirectRepairOnly(
+    Encoder& encoder,
     wirehair_v2::MessagePrecodeDecoder& decoder,
     const std::vector<uint8_t>& message,
     uint32_t K,
@@ -543,7 +565,8 @@ bool CompleteDirectRepairOnly(
     for (; result == Wirehair_NeedMore && id < 2u * K + 128u; ++id)
     {
         uint32_t bytes = 0u;
-        if (encoder.Encode(id, block.data(), block_bytes, &bytes) !=
+        if (EncodeDirectPacket(
+                encoder, id, block.data(), block_bytes, &bytes) !=
                 Wirehair_Success ||
             bytes != block_bytes)
         {
@@ -570,12 +593,342 @@ bool SameOptions(
     const wirehair_v2::MessagePrecodeEncoderOptions& a,
     const wirehair_v2::MessagePrecodeEncoderOptions& b)
 {
-    return a.RecoveryMixCount == b.RecoveryMixCount &&
+    return a.Architecture == b.Architecture &&
+        a.RecoveryMixCount == b.RecoveryMixCount &&
         a.DenseIdentityCorner == b.DenseIdentityCorner &&
         a.AdaptiveDenseTwoAnchor == b.AdaptiveDenseTwoAnchor &&
         a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
         a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt &&
         a.Completion == b.Completion;
+}
+
+bool SamePrecodeParams(
+    const wirehair_v2::PrecodeParams& a,
+    const wirehair_v2::PrecodeParams& b)
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.Field == b.Field &&
+        a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
+        a.StaircaseDegreeScale == b.StaircaseDegreeScale &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.Seed == b.Seed;
+}
+
+bool RunArchitectureBoundaryCases()
+{
+    const uint32_t block_bytes = 2u;
+    std::vector<uint32_t> block_counts;
+    for (uint32_t K = 2u; K <= 100u; ++K) {
+        block_counts.push_back(K);
+    }
+    const uint32_t boundary_counts[] = {
+        101u, 1024u, 4095u, 4096u, 9999u, 10000u, 64000u
+    };
+    block_counts.insert(
+        block_counts.end(),
+        boundary_counts,
+        boundary_counts +
+            sizeof(boundary_counts) / sizeof(boundary_counts[0]));
+
+    wirehair_v2::MessagePrecodeEncoderOptions legacy_options;
+    legacy_options.Completion =
+        wirehair_v2::CompletionField::MixedGF256GF16;
+    wirehair_v2::MessagePrecodeEncoderOptions small_band_options =
+        legacy_options;
+    small_band_options.Architecture =
+        wirehair_v2::V2PrecodeArchitecture::SmallBandD4;
+
+    for (uint32_t K : block_counts)
+    {
+        const uint64_t message_bytes = (uint64_t)K * block_bytes;
+        std::vector<uint8_t> message((size_t)message_bytes);
+        for (size_t i = 0; i < message.size(); ++i) {
+            message[i] = (uint8_t)(i * 53u + K * 11u + 7u);
+        }
+        const wirehair_v2::SeedProfile base =
+            wirehair_v2::SelectSeedProfile(K, block_bytes);
+        const uint32_t inherited_staircase = wirehair::GetDenseCount(K);
+        const uint32_t small_band_staircase =
+            wirehair_v2::SmallBandStaircaseCount(K);
+        if (base.DenseCount != inherited_staircase)
+        {
+            std::fprintf(stderr,
+                "architecture boundary K=%u: base DenseCount=%u expected=%u\n",
+                K, base.DenseCount, inherited_staircase);
+            return false;
+        }
+
+        wirehair_v2::MessagePrecodeEncoder legacy_encoder;
+        wirehair_v2::MessagePrecodeEncoder small_band_encoder;
+        if (legacy_encoder.InitializeResult(
+                message.data(), message_bytes, block_bytes,
+                &base, &legacy_options) != Wirehair_Success ||
+            small_band_encoder.InitializeResult(
+                message.data(), message_bytes, block_bytes,
+                &base, &small_band_options) != Wirehair_Success)
+        {
+            std::fprintf(stderr,
+                "architecture boundary K=%u: encoder init failed\n", K);
+            return false;
+        }
+
+        const wirehair_v2::SeedProfile& legacy =
+            legacy_encoder.Profile();
+        const wirehair_v2::SeedProfile& small_band =
+            small_band_encoder.Profile();
+        if (legacy.DenseCount != inherited_staircase ||
+            small_band.DenseCount != inherited_staircase ||
+            legacy.DenseCount != base.DenseCount ||
+            small_band.DenseCount != base.DenseCount ||
+            legacy.DenseSeed != base.DenseSeed ||
+            small_band.DenseSeed != base.DenseSeed ||
+            legacy.V2Architecture !=
+                wirehair_v2::V2PrecodeArchitecture::LegacyD12 ||
+            small_band.V2Architecture !=
+                wirehair_v2::V2PrecodeArchitecture::SmallBandD4 ||
+            legacy.V2SeedPolicy !=
+                wirehair_v2::V2SeedDerivation::ProfileDerived ||
+            small_band.V2SeedPolicy !=
+                wirehair_v2::V2SeedDerivation::ProfileDerived ||
+            legacy.V2StaircaseCount != inherited_staircase ||
+            small_band.V2StaircaseCount != small_band_staircase ||
+            legacy.V2DenseRowCount != 12u ||
+            small_band.V2DenseRowCount != 4u ||
+            legacy.V2PrecodeContractVersion !=
+                wirehair_v2::PrecodeContractVersion(
+                    wirehair_v2::CompletionField::MixedGF256GF16,
+                    false,
+                    wirehair_v2::V2PrecodeArchitecture::LegacyD12) ||
+            small_band.V2PrecodeContractVersion !=
+                wirehair_v2::PrecodeContractVersion(
+                    wirehair_v2::CompletionField::MixedGF256GF16,
+                    false,
+                    wirehair_v2::V2PrecodeArchitecture::SmallBandD4))
+        {
+            std::fprintf(stderr,
+                "architecture boundary K=%u: selected profile mismatch "
+                "legacy(S=%u,D2=%u) small-band(S=%u,D2=%u)\n",
+                K,
+                legacy.V2StaircaseCount,
+                legacy.V2DenseRowCount,
+                small_band.V2StaircaseCount,
+                small_band.V2DenseRowCount);
+            return false;
+        }
+
+        wirehair_v2::MessagePrecodeDecoder legacy_decoder;
+        wirehair_v2::MessagePrecodeDecoder small_band_decoder;
+        if (legacy_decoder.InitializeResult(
+                message_bytes, block_bytes, &legacy) != Wirehair_Success ||
+            small_band_decoder.InitializeResult(
+                message_bytes, block_bytes, &small_band) != Wirehair_Success ||
+            !SameOptions(legacy_decoder.Options(), legacy_options) ||
+            !SameOptions(small_band_decoder.Options(), small_band_options) ||
+            !SamePrecodeParams(
+                legacy_encoder.BlockEncoder().System().Params,
+                legacy_decoder.System().Params) ||
+            !SamePrecodeParams(
+                small_band_encoder.BlockEncoder().System().Params,
+                small_band_decoder.System().Params) ||
+            legacy_decoder.PacketSeedAttempt() != legacy.V2SeedAttempt ||
+            small_band_decoder.PacketSeedAttempt() !=
+                small_band.V2SeedAttempt ||
+            legacy_decoder.PacketPeelSeed() != legacy.V2PacketPeelSeed ||
+            small_band_decoder.PacketPeelSeed() !=
+                small_band.V2PacketPeelSeed)
+        {
+            std::fprintf(stderr,
+                "architecture boundary K=%u: decoder reconstruction "
+                "mismatch\n", K);
+            return false;
+        }
+
+        if (K == 64u)
+        {
+            const auto rejects = [&](wirehair_v2::SeedProfile malformed,
+                                     const char* field) {
+                wirehair_v2::MessagePrecodeDecoder decoder;
+                if (decoder.InitializeResult(
+                        message_bytes, block_bytes, &malformed) ==
+                    Wirehair_InvalidInput)
+                {
+                    return true;
+                }
+                std::fprintf(stderr,
+                    "architecture boundary: malformed %s was accepted\n",
+                    field);
+                return false;
+            };
+
+            wirehair_v2::SeedProfile malformed = small_band;
+            malformed.V2Architecture =
+                wirehair_v2::V2PrecodeArchitecture::LegacyD12;
+            if (!rejects(malformed, "architecture/version pair")) {
+                return false;
+            }
+            malformed = small_band;
+            malformed.V2PrecodeContractVersion =
+                wirehair_v2::kMixedPrecodeContractVersion;
+            if (!rejects(malformed, "small-band contract version")) {
+                return false;
+            }
+            malformed = small_band;
+            ++malformed.V2StaircaseCount;
+            if (!rejects(malformed, "small-band staircase count")) {
+                return false;
+            }
+            malformed = small_band;
+            malformed.V2DenseRowCount = 12u;
+            if (!rejects(malformed, "small-band dense-row count")) {
+                return false;
+            }
+            malformed = legacy;
+            malformed.V2SeedPolicy =
+                wirehair_v2::V2SeedDerivation::RawUniform;
+            if (!rejects(malformed, "legacy raw-seed policy")) {
+                return false;
+            }
+            malformed = small_band;
+            malformed.V2SeedPolicy =
+                wirehair_v2::V2SeedDerivation::RawUniform;
+            malformed.V2SeedAttempt = 1u;
+            if (!rejects(malformed, "raw-seed retry attempt")) {
+                return false;
+            }
+            malformed = small_band;
+            malformed.V2SeedPolicy =
+                static_cast<wirehair_v2::V2SeedDerivation>(UINT32_MAX);
+            if (!rejects(malformed, "unknown seed policy")) {
+                return false;
+            }
+
+            // RawUniform is a complete table-free overlay: its direct seeds,
+            // architecture, and attempt zero are sufficient even when every
+            // legacy per-K seed-table field is absent.
+            wirehair_v2::SeedProfile raw;
+            raw.BlockCount = K;
+            raw.BlockBytes = block_bytes;
+            raw.V2SeedPolicy =
+                wirehair_v2::V2SeedDerivation::RawUniform;
+            wirehair_v2::PrecodeSystem raw_system;
+            raw_system.Params =
+                wirehair_v2::MakeMixedParams(K, UINT64_C(0x1234));
+            raw_system.Params.Staircase =
+                wirehair_v2::SmallBandStaircaseCount(K);
+            raw_system.Params.DenseRows = 4u;
+            wirehair_v2::PacketRowConfig raw_packet;
+            raw_packet.PeelSeed = 0x1234u;
+            raw_packet.MixCount =
+                wirehair_v2::kCertifiedPacketMixCount;
+            wirehair_v2::MessagePrecodeEncoderOptions raw_options =
+                small_band_options;
+            raw_options.PrecodeSeedSalt = 0u;
+            raw_options.RecoveryRowSeedSalt = 0u;
+            wirehair_v2::BindMessagePrecodeProfile(
+                raw, raw_options, raw_system, raw_packet, 0u);
+            wirehair_v2::MessagePrecodeEncoder raw_encoder;
+            wirehair_v2::MessagePrecodeDecoder raw_decoder;
+            if (raw.DenseCount != 0u || raw.PeelSeed != 0u ||
+                raw.DenseSeed != 0u || raw.UsedPeelFixup ||
+                raw.UsedDenseFixup ||
+                raw_encoder.InitializeResult(
+                    message.data(), message_bytes, block_bytes,
+                    &raw, &raw_options) != Wirehair_Success ||
+                raw_decoder.InitializeResult(
+                    message_bytes, block_bytes, &raw_encoder.Profile(),
+                    &raw_options) != Wirehair_Success ||
+                !SamePrecodeParams(
+                    raw_encoder.BlockEncoder().System().Params,
+                    raw_decoder.System().Params) ||
+                raw_encoder.Profile().V2SeedAttempt != 0u ||
+                raw_decoder.PacketSeedAttempt() != 0u ||
+                !CompleteDirectRepairOnly(
+                    raw_encoder, raw_decoder, message, K, block_bytes,
+                    "raw dispatch-v1"))
+            {
+                std::fprintf(stderr,
+                    "architecture boundary: table-free raw profile "
+                    "did not replay and recover exactly\n");
+                return false;
+            }
+
+            malformed = raw;
+            malformed.V2PacketPeelSeed ^= 1u;
+            if (!rejects(malformed, "raw packet-seed fold")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.DenseCount = 1u;
+            if (!rejects(malformed, "raw dense-count table state")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.PeelSeed = 1u;
+            if (!rejects(malformed, "raw peel-seed table state")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.DenseSeed = 1u;
+            if (!rejects(malformed, "raw dense-seed table state")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.PeelSeedBucket = 1u;
+            if (!rejects(malformed, "raw peel-seed bucket state")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.UsedPeelFixup = true;
+            if (!rejects(malformed, "raw peel fixup")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.UsedDenseFixup = true;
+            if (!rejects(malformed, "raw dense fixup")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.Tuned = true;
+            if (!rejects(malformed, "raw tuned seed state")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.Policy.Codec.MinDegree = 37u;
+            if (!rejects(malformed, "raw legacy peel policy")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.TuningResidualMean =
+                std::numeric_limits<double>::quiet_NaN();
+            if (!rejects(malformed, "raw tuning residual")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.TuningCandidatesRequested = UINT16_MAX;
+            if (!rejects(malformed, "raw tuning candidate diagnostics")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.V2PrecodeSeedSalt = UINT64_C(1);
+            if (!rejects(malformed, "raw precode salt")) {
+                return false;
+            }
+            malformed = raw;
+            malformed.V2RecoveryRowSeedSalt = UINT64_C(1);
+            if (!rejects(malformed, "raw packet salt")) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool RunOptionContractCase(
@@ -606,10 +959,22 @@ bool RunOptionContractCase(
         !profile.V2SeedSelected ||
         profile.V2PrecodeContractVersion !=
             wirehair_v2::PrecodeContractVersion(
-                options.Completion, options.AdaptiveDenseTwoAnchor) ||
+                options.Completion, options.AdaptiveDenseTwoAnchor,
+                options.Architecture) ||
         profile.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion ||
-        profile.V2StaircaseCount != profile.DenseCount ||
+        profile.V2Architecture != options.Architecture ||
+        profile.V2SeedPolicy !=
+            wirehair_v2::V2SeedDerivation::ProfileDerived ||
+        profile.V2StaircaseCount !=
+            (options.Architecture ==
+                    wirehair_v2::V2PrecodeArchitecture::SmallBandD4 ?
+                wirehair_v2::SmallBandStaircaseCount(K) :
+                profile.DenseCount) ||
+        profile.V2DenseRowCount !=
+            (options.Architecture ==
+                    wirehair_v2::V2PrecodeArchitecture::SmallBandD4 ?
+                4u : 12u) ||
         profile.V2RecoveryMixCount != options.RecoveryMixCount ||
         profile.V2DenseIdentityCorner != options.DenseIdentityCorner ||
         profile.V2DenseTwoAnchor !=
@@ -703,7 +1068,7 @@ bool RunBoundContractCases()
         (uint64_t)invalid_K * mixed_invalid_block_bytes;
     std::vector<uint8_t> mixed_invalid_message(
         (size_t)mixed_invalid_message_bytes, 0x5du);
-    const auto reject_two_anchor_options = [&](const char* label,
+    const auto reject_options = [&](const char* label,
         const wirehair_v2::MessagePrecodeEncoderOptions& rejected_options)
     {
         wirehair_v2::Codec rejected_encoder;
@@ -717,7 +1082,7 @@ bool RunBoundContractCases()
                 nullptr, &rejected_options) != Wirehair_InvalidInput)
         {
             std::fprintf(stderr,
-                "contract: invalid two-anchor option pair %s was accepted\n",
+                "contract: invalid option pair %s was accepted\n",
                 label);
             return false;
         }
@@ -725,17 +1090,17 @@ bool RunBoundContractCases()
     };
     wirehair_v2::MessagePrecodeEncoderOptions invalid_two_anchor = defaults;
     invalid_two_anchor.AdaptiveDenseTwoAnchor = true;
-    if (!reject_two_anchor_options("GF256/mix3", invalid_two_anchor)) {
+    if (!reject_options("GF256/mix3/two-anchor", invalid_two_anchor)) {
         return false;
     }
     invalid_two_anchor.Completion =
         wirehair_v2::CompletionField::MixedGF256GF16;
-    if (!reject_two_anchor_options("mixed/mix3", invalid_two_anchor)) {
+    if (!reject_options("mixed/mix3/two-anchor", invalid_two_anchor)) {
         return false;
     }
     invalid_two_anchor.RecoveryMixCount = 2u;
     invalid_two_anchor.DenseIdentityCorner = true;
-    if (!reject_two_anchor_options(
+    if (!reject_options(
             "mixed/mix2/identity-corner", invalid_two_anchor))
     {
         return false;
@@ -777,6 +1142,46 @@ bool RunBoundContractCases()
             "mixed-mix2-two-anchor-active", variant, mixed_mix3,
             wirehair_v2::kDenseTwoAnchorMinBlockCount))
     {
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions legacy_mixed = defaults;
+    legacy_mixed.Completion =
+        wirehair_v2::CompletionField::MixedGF256GF16;
+    wirehair_v2::MessagePrecodeEncoderOptions small_band = legacy_mixed;
+    small_band.Architecture =
+        wirehair_v2::V2PrecodeArchitecture::SmallBandD4;
+    if (!RunOptionContractCase(
+            "small-band-d4", small_band, legacy_mixed, 64u) ||
+        !RunOptionContractCase(
+            "small-band-d4-above-band", small_band, legacy_mixed, 101u))
+    {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoderOptions invalid_architecture = defaults;
+    invalid_architecture.Architecture =
+        static_cast<wirehair_v2::V2PrecodeArchitecture>(UINT32_MAX);
+    if (!reject_options("unknown architecture", invalid_architecture)) {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoderOptions invalid_small_band = small_band;
+    invalid_small_band.Completion = wirehair_v2::CompletionField::GF256;
+    if (!reject_options("small-band/GF256", invalid_small_band)) {
+        return false;
+    }
+    invalid_small_band = small_band;
+    invalid_small_band.RecoveryMixCount = 2u;
+    if (!reject_options("small-band/mix2", invalid_small_band)) {
+        return false;
+    }
+    invalid_small_band = small_band;
+    invalid_small_band.AdaptiveDenseTwoAnchor = true;
+    if (!reject_options("small-band/two-anchor", invalid_small_band)) {
+        return false;
+    }
+    invalid_small_band = small_band;
+    invalid_small_band.DenseIdentityCorner = true;
+    if (!reject_options("small-band/identity-corner", invalid_small_band)) {
         return false;
     }
 
@@ -1129,6 +1534,7 @@ int main(int argc, char** argv)
     ok = RunForcedNeedMoreResumeCase() && ok;
     ok = RunMixedColdRetryCase() && ok;
     ok = RunUnauthenticatedCorruptionBoundary() && ok;
+    ok = RunArchitectureBoundaryCases() && ok;
     ok = RunBoundContractCases() && ok;
     return ok ? 0 : 1;
 }

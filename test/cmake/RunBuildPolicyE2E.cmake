@@ -287,6 +287,37 @@ run_checked(bench_output "v2 benchmark smoke"
     "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
     compare --nlo 2 --nhi 2 --trials 1 --bb-list 8
     --max-message-mib 1 --loss 0)
+
+# A production benchmark has no test-hook implementation.  It must reject
+# ambient target overrides instead of emitting a receipt for equations it did
+# not actually run.
+foreach(target_override IN ITEMS
+        "WIREHAIR_V2_PEEL_DEGREES=1,1"
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=12")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "${target_override}"
+            "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
+            compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+            --max-message-mib 0 --loss 0.1 --loss-seed 2 --schedule iid
+            --precode --target-profile dispatch-v1 --seed-policy raw
+            --construction-seed 1
+        RESULT_VARIABLE target_override_result
+        OUTPUT_VARIABLE target_override_out
+        ERROR_VARIABLE target_override_err
+        TIMEOUT 10)
+    if(NOT target_override_result EQUAL 1 OR
+       NOT target_override_out STREQUAL "" OR
+       NOT target_override_err STREQUAL
+           "compare target mode cannot apply peel PMF or staircase scale overrides because WIREHAIR_V2_ENABLE_TEST_HOOKS is disabled\n")
+        message(FATAL_ERROR
+            "BUILD_TESTS=OFF benchmark accepted or misreported "
+            "${target_override}\n"
+            "rc=${target_override_result}\n"
+            "stdout=${target_override_out}\n"
+            "stderr=${target_override_err}")
+    endif()
+endforeach()
+
 execute_process(
     COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
         preferredattempt

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Inspect a current, provenance-bearing peel table.
+"""Inspect an independently validated, provenance-bearing peel table.
 
-Legacy flat JSON tables are refused.  Exact measured anchors are replayable;
-every unmeasured K resolves to shipped by default. Interpolation and clamping
-of trained parameters require an explicit experimental opt-in because an arm
-measured at one K has no recovery guarantee at another.
+Legacy flat JSON and raw search tables are refused by default. Exact validated
+anchors are replayable; every unmeasured K resolves to shipped by default.
+Raw-search inspection, interpolation, and clamping each require an explicit
+experimental opt-in because search evidence is not independent validation and
+an arm measured at one K has no recovery guarantee at another.
 """
 import argparse
 import bisect
@@ -25,10 +26,19 @@ from peel_codec import (                                  # noqa: E402
 FIELDS = ("scale", "p1", "tilt", "dmax", "absorb")
 
 
-def load(path=DEFAULT_TABLE, allow_unverified_cost_model=False, bench=None):
+def load(
+        path=DEFAULT_TABLE, allow_unverified_cost_model=False, bench=None,
+        allow_unvalidated_search=False):
     document, entries = read_table_document(path)
     if bench is not None:
         verify_benchmark_identity(document, bench)
+    generator = document["provenance"]["generator"]
+    if (generator != "tools/peel_validate.py" and
+            not allow_unvalidated_search):
+        raise MeasurementError(
+            "peel table is an unvalidated search result; pass "
+            "--allow-unvalidated-search only for an explicit experiment, "
+            "or independently validate it into a new table first")
     settings = document["provenance"]["settings"]
     if (settings.get("allow_unverified_cost_model") and
             not allow_unverified_cost_model):
@@ -121,10 +131,11 @@ def uses_shipped_arm(k, table, allow_unverified_interpolation=False):
 
 
 def pmf_for_k(
-        k, table, bench, allow_unverified_interpolation=False):
+        k, table, bench, allow_unverified_interpolation=False, *,
+        target_profile):
     """The peel PMF this K should use, based on the exact native PMF."""
     p, _ = params_for_k(k, table, allow_unverified_interpolation)
-    stock = stock_pmf(bench, k)
+    stock = stock_pmf(bench, k, target_profile=target_profile)
     if uses_shipped_arm(k, table, allow_unverified_interpolation):
         return stock
     if k in table:
@@ -138,6 +149,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--table", default=DEFAULT_TABLE)
     ap.add_argument("--bench", default="build-fast/codec/wirehair_v2_bench")
+    ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
     ap.add_argument("--K", type=int, help="print parameters for one K")
     ap.add_argument("--pmf", action="store_true", help="also print the PMF")
     ap.add_argument("--check", action="store_true",
@@ -145,6 +157,10 @@ def main(argv=None):
     ap.add_argument(
         "--allow-unverified-cost-model", action="store_true",
         help="accept a sweep table that records the unverified proxy opt-in")
+    ap.add_argument(
+        "--allow-unvalidated-search", action="store_true",
+        help="EXPERIMENTAL: inspect a raw search result without independent "
+             "validation")
     ap.add_argument(
         "--allow-unverified-interpolation", action="store_true",
         help="EXPERIMENTAL: interpolate or clamp trained coordinates for an "
@@ -155,7 +171,9 @@ def main(argv=None):
     if a.pmf and a.K is None:
         ap.error("--pmf requires --K")
     try:
-        table = load(a.table, a.allow_unverified_cost_model, a.bench)
+        table = load(
+            a.table, a.allow_unverified_cost_model, a.bench,
+            a.allow_unvalidated_search)
     except (MeasurementError, OSError, ValueError) as error:
         print(f"REFUSED input table: {error}", file=sys.stderr)
         return 2
@@ -189,7 +207,8 @@ def main(argv=None):
               f"tilt={p['tilt']} dmax={p['dmax']} absorb={p['absorb']}")
         if a.pmf:
             w = pmf_for_k(
-                a.K, table, a.bench, a.allow_unverified_interpolation)
+                a.K, table, a.bench, a.allow_unverified_interpolation,
+                target_profile=a.target_profile)
             print("  " + ",".join(f"{x:.17g}" for x in w))
         return 0
 

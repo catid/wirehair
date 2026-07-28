@@ -17,11 +17,21 @@ static const uint32_t kPacketRowContractVersion = 4u;
 static const uint32_t kPrecodeContractVersion = 2u; // existing/default alias
 static const uint32_t kMixedPrecodeContractVersion = 3u;
 static const uint32_t kMixedTwoAnchorPrecodeContractVersion = 4u;
+static const uint32_t kMixedSmallBandD4PrecodeContractVersion = 5u;
 
 inline uint32_t PrecodeContractVersion(
     CompletionField field,
-    bool adaptive_dense_two_anchor = false)
+    bool adaptive_dense_two_anchor = false,
+    V2PrecodeArchitecture architecture =
+        V2PrecodeArchitecture::LegacyD12)
 {
+    if (architecture == V2PrecodeArchitecture::SmallBandD4)
+    {
+        return field == CompletionField::MixedGF256GF16 &&
+                !adaptive_dense_two_anchor ?
+            kMixedSmallBandD4PrecodeContractVersion : 0u;
+    }
+    if (architecture != V2PrecodeArchitecture::LegacyD12) return 0u;
     if (adaptive_dense_two_anchor)
     {
         return field == CompletionField::MixedGF256GF16 ?
@@ -110,6 +120,16 @@ struct PacketRowConfig
     uint32_t PeelSeed = 0;
     uint32_t MixCount = kCertifiedPacketMixCount;
 };
+
+/**
+    True when packet ids and packet peel seeds use the frozen production
+    mapping.
+
+    The receipted packet-degree PMF overlay is deliberately excluded.  Stable
+    target identities use this to reject the unreceipted id multiplier,
+    avalanche, and odd-id peel-seed experiments in test-hook builds.
+*/
+bool IsCanonicalStableTargetPacketRowState();
 
 /**
     Validated process-local invariants for one packet-row domain.

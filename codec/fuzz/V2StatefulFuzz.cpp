@@ -481,7 +481,7 @@ bool MalformedProfileRetry(
     wirehair_v2::MessagePrecodeDecoder decoder;
     if (!InitializeDecoder(fixture, encoder, decoder, failure)) return false;
     wirehair_v2::SeedProfile bad = encoder.Profile();
-    switch (input.U8() % 9u)
+    switch (input.U8() % 11u)
     {
     case 0: ++bad.V2PrecodeContractVersion; break;
     case 1: ++bad.V2PacketRowContractVersion; break;
@@ -496,7 +496,15 @@ bool MalformedProfileRetry(
     case 7:
         bad.V2AdaptiveDenseTwoAnchor = !bad.V2AdaptiveDenseTwoAnchor;
         break;
-    default: ++bad.V2StaircaseCount; break;
+    case 8: ++bad.V2StaircaseCount; break;
+    case 9:
+        bad.V2Architecture =
+            static_cast<wirehair_v2::V2PrecodeArchitecture>(UINT32_MAX);
+        break;
+    default:
+        bad.V2SeedPolicy =
+            static_cast<wirehair_v2::V2SeedDerivation>(UINT32_MAX);
+        break;
     }
     if (decoder.InitializeResult(
             fixture.MessageBytes, fixture.BlockBytes, &bad) !=

@@ -214,13 +214,18 @@ bool FuzzProfileContract(
     wirehair_v2::MessagePrecodeEncoderOptions options;
     options.PrecodeSeedSalt = input.U64();
     options.RecoveryRowSeedSalt = input.U64();
-    options.DenseIdentityCorner = input.Bool();
     options.Completion = mixed ?
         wirehair_v2::CompletionField::MixedGF256GF16 :
         wirehair_v2::CompletionField::GF256;
-    options.RecoveryMixCount = mixed && input.Bool() ? 2u :
-        wirehair_v2::kCertifiedPacketMixCount;
-    options.AdaptiveDenseTwoAnchor = mixed &&
+    const bool small_band_d4 = mixed && input.Bool();
+    options.Architecture = small_band_d4 ?
+        wirehair_v2::V2PrecodeArchitecture::SmallBandD4 :
+        wirehair_v2::V2PrecodeArchitecture::LegacyD12;
+    options.DenseIdentityCorner = !small_band_d4 && input.Bool();
+    options.RecoveryMixCount =
+        !small_band_d4 && mixed && input.Bool() ? 2u :
+            wirehair_v2::kCertifiedPacketMixCount;
+    options.AdaptiveDenseTwoAnchor = !small_band_d4 && mixed &&
         options.RecoveryMixCount == 2u &&
         !options.DenseIdentityCorner && input.Bool();
 
@@ -256,7 +261,7 @@ bool FuzzProfileContract(
 
     wirehair_v2::SeedProfile bad = profile;
     wirehair_v2::MessagePrecodeEncoderOptions requested = bound_options;
-    const unsigned mutation = input.U8() % 21u;
+    const unsigned mutation = input.U8() % 24u;
     switch (mutation)
     {
     case 0: ++bad.V2PrecodeContractVersion; break;
@@ -285,13 +290,28 @@ bool FuzzProfileContract(
         bad.V2SeedSelected = false;
         break;
     case 18:
-        requested.PrecodeSeedSalt ^= 1u;
+        bad.V2Architecture =
+            static_cast<wirehair_v2::V2PrecodeArchitecture>(UINT32_MAX);
         break;
     case 19:
+        bad.V2SeedPolicy =
+            static_cast<wirehair_v2::V2SeedDerivation>(UINT32_MAX);
+        break;
+    case 20:
+        requested.PrecodeSeedSalt ^= 1u;
+        break;
+    case 21:
         requested.Completion = requested.Completion ==
                 wirehair_v2::CompletionField::MixedGF256GF16 ?
             wirehair_v2::CompletionField::GF256 :
             wirehair_v2::CompletionField::MixedGF256GF16;
+        break;
+    case 22:
+        requested.Architecture =
+            requested.Architecture ==
+                    wirehair_v2::V2PrecodeArchitecture::LegacyD12 ?
+                wirehair_v2::V2PrecodeArchitecture::SmallBandD4 :
+                wirehair_v2::V2PrecodeArchitecture::LegacyD12;
         break;
     default:
         requested.AdaptiveDenseTwoAnchor =
@@ -300,7 +320,7 @@ bool FuzzProfileContract(
     }
     wirehair_v2::MessagePrecodeEncoderOptions ignored_options;
     const wirehair_v2::MessagePrecodeEncoderOptions* requested_pointer =
-        mutation >= 18u ? &requested : nullptr;
+        mutation >= 20u ? &requested : nullptr;
     if (wirehair_v2::ResolveMessagePrecodeOptions(
             bad, requested_pointer, ignored_options))
     {

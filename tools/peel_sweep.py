@@ -15,6 +15,7 @@ HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
 sys.path.insert(0, HERE)
 from peel_codec import (                                  # noqa: E402
     MeasurementError,
+    PROXY_K_LADDER,
     RecoveryMetrics,
     capture_artifact_identity,
     derive_seed,
@@ -23,6 +24,7 @@ from peel_codec import (                                  # noqa: E402
     make_search_receipt,
     stock_profile,
     strict_json_loads,
+    valid_loss_rate,
     write_json_atomic,
 )
 from peel_funnel import (                                 # noqa: E402
@@ -39,8 +41,7 @@ from peel_funnel import (                                 # noqa: E402
 # The block counts represented by the embedded proxy table.  Its raw
 # calibration provenance is unavailable, so use still requires an explicit
 # opt-in and every finalist is measured on the real codec.
-PROXY_K = [2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384,
-           512, 768, 1024, 1536, 2048, 4096, 8192, 16384, 32768, 64000]
+PROXY_K = list(PROXY_K_LADDER)
 
 
 def k_list():
@@ -81,14 +82,17 @@ def warm_start(best):
     ]
 
 
-def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
+def run_one(
+        bench, k, init, construction_seed_base, loss_seed_base, real_trials,
+        allow_unverified_cost_model, *, target_profile, seed_policy, loss,
+        schedule):
     s, r, f, sc = budget(k)
     rt = real_trials or real_trials_for(k)
     rank_bb = 4096
     threads = 64
     batch = 60
     cell_base = 900_000_000
-    profile = stock_profile(bench, k)
+    profile = stock_profile(bench, k, target_profile=target_profile)
     box = search_box(profile)
     if init is not None:
         if (not isinstance(init, list) or len(init) != len(box) or
@@ -107,7 +111,11 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
            "--screen-cells", str(sc),
            "--threads", str(threads), "--batch", str(batch),
            "--cell-base", str(cell_base),
-           "--seed", str(seed), "--show", "1"]
+           "--target-profile", target_profile,
+           "--seed-policy", seed_policy,
+           "--loss", f"{loss:.17g}", "--schedule", schedule,
+           "--construction-seed", str(construction_seed_base),
+           "--loss-seed", str(loss_seed_base), "--show", "1"]
     if allow_unverified_cost_model:
         cmd.append("--allow-unverified-cost-model")
     if init is not None:
@@ -145,24 +153,23 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
     expected_receipt_fields = {
         "schema", "K", "mode", "coordinates", "peel_pmf", "goodput",
         "trials", "block_bytes", "rejected", "shipped_control",
-        "shipped_goodput", "seed", "fail", "oh_mean", "OH_sd", "OH50",
-        "OH95", "OH99", "OH_max", "decode_mbps",
+        "shipped_goodput", "construction_seed", "loss_seed",
+        "target_receipt", "fail", "oh_mean", "OH_sd", "OH50", "OH95",
+        "OH99", "OH_max", "decode_mbps",
     }
     if (set(receipt) != expected_receipt_fields or
             receipt.get("schema") != FUNNEL_RESULT_SCHEMA or
             receipt.get("K") != k or
-            isinstance(receipt.get("K"), bool) or
-            not isinstance(receipt.get("K"), int) or
-            receipt.get("mode") not in ("trained", "shipped") or
+            type(receipt.get("K")) is not int or
+            receipt.get("mode") not in
+            ("trained", "scale-only", "shipped") or
             receipt.get("trials") != rt or
-            isinstance(receipt.get("trials"), bool) or
-            not isinstance(receipt.get("trials"), int) or
+            type(receipt.get("trials")) is not int or
             receipt.get("block_bytes") != rank_bb or
-            isinstance(receipt.get("block_bytes"), bool) or
-            not isinstance(receipt.get("block_bytes"), int) or
-            isinstance(receipt.get("rejected"), bool) or
-            not isinstance(receipt.get("rejected"), int) or
-            not 0 <= receipt["rejected"] <= f or
+            type(receipt.get("block_bytes")) is not int or
+            type(receipt.get("rejected")) is not int or
+            # Each proxy finalist can add one canonical scale-only gate arm.
+            not 0 <= receipt["rejected"] <= 2 * f or
             not isinstance(receipt.get("coordinates"), dict) or
             not isinstance(receipt.get("peel_pmf"), list) or
             not isinstance(receipt.get("shipped_control"), dict)):
@@ -171,17 +178,15 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
     coordinates = receipt["coordinates"]
     coordinate_names = ("scale", "p1", "tilt", "dmax", "absorb")
     if (set(coordinates) != set(coordinate_names) or
-            isinstance(coordinates["scale"], bool) or
-            not isinstance(coordinates["scale"], (int, float)) or
-            any(isinstance(coordinates[name], bool) or
-                not isinstance(coordinates[name], int)
+            type(coordinates["scale"]) is not float or
+            any(type(coordinates[name]) is not int
                 for name in ("p1", "tilt", "dmax", "absorb")) or
-            isinstance(receipt.get("seed"), bool) or
-            not isinstance(receipt.get("seed"), int) or
-            isinstance(receipt.get("fail"), bool) or
-            not isinstance(receipt.get("fail"), int) or
-            any(isinstance(receipt.get(name), bool) or
-                not isinstance(receipt.get(name), (int, float))
+            any(
+                type(receipt.get(name)) is not int
+                for name in ("construction_seed", "loss_seed")) or
+            not isinstance(receipt.get("target_receipt"), dict) or
+            type(receipt.get("fail")) is not int or
+            any(type(receipt.get(name)) is not float
                 for name in (
                     "goodput", "decode_mbps", "oh_mean", "OH_sd", "OH50",
                     "OH95", "OH99", "OH_max", "shipped_goodput"))):
@@ -203,8 +208,11 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             "OH95": float(receipt["OH95"]),
             "OH99": float(receipt["OH99"]),
             "OH_max": float(receipt["OH_max"]),
-            "seed": int(receipt["seed"]),
-            "reverted_to_shipped": receipt["mode"] == "shipped",
+            "construction_seed": int(receipt["construction_seed"]),
+            "loss_seed": int(receipt["loss_seed"]),
+            "target_receipt": dict(receipt["target_receipt"]),
+            **({"reverted_to_shipped": True}
+               if receipt["mode"] == "shipped" else {}),
             "peel_pmf": receipt["peel_pmf"],
         }
     except (KeyError, TypeError, ValueError, OverflowError) as error:
@@ -222,7 +230,7 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             }):
         raise MeasurementError(
             f"peel_funnel emitted non-production shipped coordinates for K={k}")
-    if receipt["mode"] == "trained" and best["scale"] < 0.0:
+    if receipt["mode"] in ("trained", "scale-only") and best["scale"] < 0.0:
         raise MeasurementError(
             f"peel_funnel emitted an unset scale for a trained arm at K={k}")
     finite_fields = (
@@ -238,36 +246,45 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             not 2 <= best["dmax"] <= 64 or
             not 0 <= best["absorb"] <= 100 or
             best["fail"] != 0 or
-            not 0 <= best["seed"] <= 0xffffffffffffffff or
+            not 0 <= best["construction_seed"] <= 0xffffffffffffffff or
+            not 0 <= best["loss_seed"] <= 0xffffffffffffffff or
             best["oh_mean"] > best["OH_max"] or
             not (best["OH50"] <= best["OH95"] <= best["OH99"] <=
                  best["OH_max"])):
         raise MeasurementError(
             f"peel_funnel emitted invalid recovery metrics for K={k}")
-    if receipt["mode"] == "trained":
+    if receipt["mode"] in ("trained", "scale-only"):
         scale_centi = int(round(best["scale"] * 100.0))
         if (not box[0][1] <= scale_centi <= box[0][2] or
-                not math.isclose(
-                    best["scale"], scale_centi / 100.0,
-                    rel_tol=0.0, abs_tol=1e-12)):
+                best["scale"] != scale_centi / 100.0):
             raise MeasurementError(
                 f"peel_funnel emitted an off-lattice scale for K={k}")
-    expected_seed = derive_seed(
-        seed, "funnel-search", k, "rank", rt, rank_bb)
-    if best["seed"] != expected_seed:
+    expected_construction_seed = derive_seed(
+        construction_seed_base, "funnel-search", k, "rank", rt, rank_bb,
+        "construction")
+    expected_loss_seed = derive_seed(
+        loss_seed_base, "funnel-search", k, "rank", rt, rank_bb, "loss")
+    if (best["construction_seed"] != expected_construction_seed or
+            best["loss_seed"] != expected_loss_seed):
         raise MeasurementError(
-            f"peel_funnel emitted an invalid rank seed for K={k}")
+            f"peel_funnel emitted invalid rank construction/loss seeds "
+            f"for K={k}")
     expected_pmf = (
-        list(profile.pmf) if receipt["mode"] == "shipped" else
+        list(profile.pmf)
+        if receipt["mode"] in ("shipped", "scale-only") else
         family(
             profile.pmf, best["p1"], best["tilt"],
             best["dmax"], best["absorb"])
     )
-    if expected_pmf is None or best["peel_pmf"] != expected_pmf:
+    if (any(type(probability) is not float
+            for probability in best["peel_pmf"]) or
+            expected_pmf is None or best["peel_pmf"] != expected_pmf):
         raise MeasurementError(
             f"peel_funnel emitted a PMF/coordinate mismatch for K={k}")
     measurement = RecoveryMetrics(
-        seed=best["seed"],
+        construction_seed=best["construction_seed"],
+        loss_seed=best["loss_seed"],
+        target_receipt=best["target_receipt"],
         fail=best["fail"],
         oh_mean=best["oh_mean"],
         oh_sd=best["OH_sd"],
@@ -277,23 +294,23 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
         oh_max=best["OH_max"],
         decode_mbps=best["decode_mbps"],
     )
-    if not math.isclose(
-            best["goodput"], measurement.goodput(k),
-            rel_tol=1e-12, abs_tol=1e-12):
+    candidate_goodput = measurement.goodput(k)
+    if best["goodput"] != candidate_goodput:
         raise MeasurementError(
             f"peel_funnel emitted inconsistent goodput for K={k}")
     shipped_raw = receipt["shipped_control"]
     expected_metric_fields = {
-        "seed", "fail", "oh_mean", "OH_sd", "OH50", "OH95", "OH99",
-        "OH_max", "decode_mbps",
+        "construction_seed", "loss_seed", "target_receipt", "fail",
+        "oh_mean", "OH_sd", "OH50", "OH95", "OH99", "OH_max",
+        "decode_mbps",
     }
     if (set(shipped_raw) != expected_metric_fields or
-            isinstance(shipped_raw.get("seed"), bool) or
-            not isinstance(shipped_raw.get("seed"), int) or
-            isinstance(shipped_raw.get("fail"), bool) or
-            not isinstance(shipped_raw.get("fail"), int) or
-            any(isinstance(shipped_raw.get(name), bool) or
-                not isinstance(shipped_raw.get(name), (int, float))
+            any(
+                type(shipped_raw.get(name)) is not int
+                for name in ("construction_seed", "loss_seed")) or
+            not isinstance(shipped_raw.get("target_receipt"), dict) or
+            type(shipped_raw.get("fail")) is not int or
+            any(type(shipped_raw.get(name)) is not float
                 for name in (
                     "oh_mean", "OH_sd", "OH50", "OH95", "OH99",
                     "OH_max", "decode_mbps"))):
@@ -301,7 +318,9 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             f"peel_funnel emitted invalid shipped-control types for K={k}")
     try:
         shipped_control = RecoveryMetrics(
-            seed=int(shipped_raw["seed"]),
+            construction_seed=int(shipped_raw["construction_seed"]),
+            loss_seed=int(shipped_raw["loss_seed"]),
+            target_receipt=dict(shipped_raw["target_receipt"]),
             fail=int(shipped_raw["fail"]),
             oh_mean=float(shipped_raw["oh_mean"]),
             oh_sd=float(shipped_raw["OH_sd"]),
@@ -311,7 +330,7 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             oh_max=float(shipped_raw["OH_max"]),
             decode_mbps=float(shipped_raw["decode_mbps"]),
         )
-        shipped_goodput = float(receipt["shipped_goodput"])
+        shipped_goodput = receipt["shipped_goodput"]
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise MeasurementError(
             f"peel_funnel emitted incomplete shipped-control metrics "
@@ -322,7 +341,9 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
         shipped_control.oh99, shipped_control.oh_max,
         shipped_control.decode_mbps,
     )
-    if (shipped_control.seed != expected_seed or
+    canonical_shipped_goodput = shipped_control.goodput(k)
+    if (shipped_control.construction_seed != expected_construction_seed or
+            shipped_control.loss_seed != expected_loss_seed or
             not 0 <= shipped_control.fail <= rt or
             any(not math.isfinite(value) or value < 0.0
                 for value in shipped_values) or
@@ -330,25 +351,25 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
             not (shipped_control.oh50 <= shipped_control.oh95 <=
                  shipped_control.oh99 <= shipped_control.oh_max) or
             not math.isfinite(shipped_goodput) or
-            not math.isclose(
-                shipped_goodput, shipped_control.goodput(k),
-                rel_tol=1e-12, abs_tol=1e-12)):
+            shipped_goodput != canonical_shipped_goodput):
         raise MeasurementError(
             f"peel_funnel emitted invalid shipped-control metrics for K={k}")
-    if (receipt["mode"] == "trained" and
-            not best["goodput"] > shipped_goodput):
+    if (receipt["mode"] in ("trained", "scale-only") and
+            not candidate_goodput > canonical_shipped_goodput):
         raise MeasurementError(
-            f"peel_funnel selected a trained arm that did not beat shipped "
+            f"peel_funnel selected a candidate that did not beat shipped "
             f"for K={k}")
     if (receipt["mode"] == "shipped" and
             (measurement.as_dict() != shipped_control.as_dict() or
-             best["goodput"] != shipped_goodput)):
+             candidate_goodput != canonical_shipped_goodput)):
         raise MeasurementError(
             f"peel_funnel shipped winner contradicts its control for K={k}")
-    mode = "shipped" if best["reverted_to_shipped"] else "trained"
+    best["goodput"] = candidate_goodput
+    shipped_goodput = canonical_shipped_goodput
+    mode = receipt["mode"]
     best.update(K=k, S=profile.staircase,
                 source_hits=profile.source_hits,
-                shipped_mean=profile.shipped_mean,
+                target_mean=profile.target_mean,
                 native=profile.as_dict(),
                 search_receipt=make_search_receipt(
                     measurement,
@@ -357,7 +378,8 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
                     trials=rt,
                     block_bytes=rank_bb,
                     search_kind="unverified-proxy-funnel",
-                    base_seed=seed,
+                    construction_seed_base=construction_seed_base,
+                    loss_seed_base=loss_seed_base,
                     seed_domain="funnel-search",
                     coordinates={
                         name: best[name]
@@ -375,7 +397,8 @@ def run_one(bench, k, init, seed, real_trials, allow_unverified_cost_model):
                         "scale_centi": [box[0][1], box[0][2]],
                         "warm_start": list(init) if init is not None else None,
                         "sampling_seed": derive_seed(
-                            seed, "funnel-search", k, "sampling"),
+                            construction_seed_base,
+                            "funnel-search", k, "sampling"),
                         "screen": s,
                         "refine": r,
                         "finals": f,
@@ -399,7 +422,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench", default="build-fast/codec/wirehair_v2_bench")
     ap.add_argument("--out", default="tools/peel_table.json")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
+    ap.add_argument("--seed-policy", required=True, choices=["raw"])
+    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument("--loss", type=float, required=True)
+    ap.add_argument("--construction-seed", type=int, required=True)
+    ap.add_argument("--loss-seed", type=int, required=True)
     ap.add_argument("--real-trials", type=int, default=0,
                     help="0 = scale with K via real_trials_for()")
     ap.add_argument("--kmax", type=int, default=64000)
@@ -409,8 +437,10 @@ def main(argv=None):
         help="explicitly opt in to the proxy whose raw calibration is missing")
     a = ap.parse_args(argv)
     if (a.real_trials < 0 or not 2 <= a.kmax <= 64000 or
-            not 0 <= a.seed <= 0xffffffffffffffff):
-        ap.error("invalid trial count, K, or uint64 seed")
+            not valid_loss_rate(a.loss) or
+            not 0 <= a.construction_seed <= 0xffffffffffffffff or
+            not 0 <= a.loss_seed <= 0xffffffffffffffff):
+        ap.error("invalid trial count, K, loss, or uint64 seed")
     if not a.allow_unverified_cost_model:
         print(
             f"REFUSED: proxy cost model {PROXY_COST_MODEL!r} is unverified; "
@@ -443,8 +473,12 @@ def main(argv=None):
     def walk(seq, label, init=None):
         for k in seq:
             best, out, err = run_one(
-                a.bench, k, init, a.seed, a.real_trials,
-                a.allow_unverified_cost_model)
+                a.bench, k, init, a.construction_seed, a.loss_seed,
+                a.real_trials, a.allow_unverified_cost_model,
+                target_profile=a.target_profile,
+                seed_policy=a.seed_policy,
+                loss=a.loss,
+                schedule=a.schedule)
             table[k] = best
             # warm start the NEXT K from this one, on the offset lattice
             init = warm_start(best)
@@ -474,11 +508,19 @@ def main(argv=None):
             table,
             generator="tools/peel_sweep.py",
             bench=a.bench,
-            base_seed=a.seed,
+            construction_seed_base=a.construction_seed,
+            loss_seed_base=a.loss_seed,
+            target_profile=a.target_profile,
+            seed_policy=a.seed_policy,
+            loss=a.loss,
+            schedule=a.schedule,
             settings={
                 "proxy_k_ladder": ks,
                 "real_trials_override": a.real_trials,
-                "loss": 0.10,
+                "target_profile": a.target_profile,
+                "seed_policy": a.seed_policy,
+                "loss": a.loss,
+                "schedule": a.schedule,
                 "proxy_cost_model": PROXY_COST_MODEL,
                 "proxy_measure_regime": dict(PROXY_MEASURE_REGIME),
                 "proxy_ordering": PROXY_ORDERING_PROTOCOL,

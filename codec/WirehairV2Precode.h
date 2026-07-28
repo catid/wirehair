@@ -9,15 +9,17 @@
 /*
     Certified precode construction for the V2 codec (wirehair-axd).
 
-    Implements the Phase-B-certified `ldpcdense_s<S>_d12_s2_h12` structure
-    from experiments/precode (see experiments/precode/README.md and
-    results/SUMMARY.md "Ship Gate Decision"):
+    Implements the Phase-B-certified `ldpcdense_s<S>_d12_s2_h12` legacy
+    structure and the versioned SmallBandD4 architecture used by the stable
+    dispatch-v1 benchmark target:
 
-    - S = GetDenseCount(K) LDPC-staircase parity columns.  Each SOURCE column
-      connects to N1 distinct staircase parities (N1 = 2 below K=10000,
-      N1 = 3 from K=10000 upward); parity row j additionally references its
-      own parity column K+j and the staircase link K+j-1.
-    - D2 = 12 dense binary rows over all span = K + S + D2 binary columns,
+    - LegacyD12 uses S = GetDenseCount(K).  SmallBandD4 instead uses
+      SmallBandStaircaseCount(K), which differs only at K <= 100.  Each
+      SOURCE column connects to N1 distinct staircase parities (N1 = 2 below
+      K=10000, N1 = 3 from K=10000 upward); parity row j additionally
+      references its own parity column K+j and the staircase link K+j-1.
+    - LegacyD12 uses D2 = 12 dense binary rows; SmallBandD4 uses D2 = 4.
+      The rows span all K + S + D2 binary columns,
       generated Shuffle-2 style: first row = the ceil(span/2) set-half of a
       shuffled deck, every subsequent row = previous row XOR two deck-driven
       flips (one set-half entry, one clear-half entry), with a reshuffle at
@@ -241,29 +243,23 @@ static const uint32_t kSmallBandStaircaseMaxBlockCount = 100u;
 
     Equals wirehair::GetDenseCount(block_count) above
     kSmallBandStaircaseMaxBlockCount.  At or below it, S is the smaller of the
-    inherited value and floor(1.25 * sqrt(K)), never below 2.  See the
-    definition for the reliability sweep behind the coefficient.  Returns 0
-    for block counts outside [2, 64000].
+    inherited value and the exact integer value floor(5 * sqrt(K) / 4), never
+    below 2.  See the definition for the reliability sweep behind the
+    coefficient.  Returns 0 for block counts outside [2, 64000].
 
-    NOT YET REACHED BY THE SHIPPED MESSAGE CODEC.  MessagePrecodeEncoder and
-    MessagePrecodeDecoder both overwrite Staircase with SeedProfile::DenseCount
-    after calling MakeCertifiedParams (WirehairV2PrecodeEncode.cpp, in
-    ValidateMessagePrecodeContract), as does the equation fingerprint
-    (WirehairV2Fingerprint.cpp).  Encoder and decoder therefore still agree
-    with each other and the public profile fingerprints are unchanged, but they
-    keep the inherited S.  Routing this rule into the shipped codec means
-    (1) sourcing SeedProfile::DenseCount from here in WirehairV2Seeds.cpp,
-    (2) relaxing the DenseCount % 4 == 2 profile invariant, which is another
-    Wirehair-1 dense-count artifact this band violates (S = 12 at K = 100),
-    (3) rechecking GetDenseSeed()/HasDenseFixup(), which are indexed by the
-    dense count, and (4) minting a new profile ID, since changing the
-    equations under an existing one is exactly what the fingerprint freeze
-    exists to prevent.
+    The frozen public profiles continue to select LegacyD12.  The stable
+    benchmark-only dispatch-v1 contract selects SmallBandD4 explicitly, and
+    its all-K fingerprint pins that equation system.  SeedProfile::DenseCount
+    intentionally remains the legacy table output: MatrixSeedFromProfile(),
+    packet seed derivation, and legacy seed/fixup tables consume it as a seed
+    input.  The selected staircase count and dense-row count are separate
+    versioned architecture fields and must not be inferred from DenseCount.
 */
 uint32_t SmallBandStaircaseCount(uint32_t block_count);
 
-/// Certified rule: S = SmallBandStaircaseCount(K), D2 = 12, H = 12,
-/// N1 = 2 below K=10000 and N1 = 3 from K=10000 upward
+/// Construction helper used by experiments: S = SmallBandStaircaseCount(K),
+/// D2 = 12, H = 12, N1 = 2 below K=10000 and N1 = 3 from K=10000 upward.
+/// Message-codec contracts resolve their architecture after this helper.
 PrecodeParams MakeCertifiedParams(uint32_t block_count, uint64_t seed);
 
 /// Versioned mixed 10-row GF(256) + 2-row GF(2^16) completion rule.
@@ -309,6 +305,18 @@ struct StaircaseDegreeMixture
 bool MakeStaircaseDegreeMixture(
     const PrecodeParams& params,
     StaircaseDegreeMixture& out);
+
+/**
+    True when no non-receipted staircase shape or realized-row override is
+    active.
+
+    The target-mean StaircaseDegreeScale override is deliberately excluded:
+    stable benchmark targets receipt that overlay explicitly.  Both the
+    thread-local and environment-backed shape/row-sequence controls are
+    equation-active but are not part of that receipt, so stable target
+    identities must reject them.
+*/
+bool IsCanonicalStableTargetStaircaseState();
 
 struct PrecodeSystem
 {
@@ -467,6 +475,16 @@ MixedCoefficientGeometry ActiveMixedCoefficientGeometry();
 uint32_t ActiveMixedGF256Rows();
 uint32_t ActiveMixedGF16Rows();
 uint32_t ActiveMixedPackedCoefficientWords();
+
+/**
+    True when every equation-active mixed-completion control matches the
+    frozen production 10+2/P244 geometry.
+
+    Inactive keyed seeds and execution-only bucket policy are intentionally
+    excluded.  Stable raw contracts call this both when binding and replaying
+    a profile so thread-local test-hook changes cannot inherit their identity.
+*/
+bool IsCanonicalMixedCompletionState();
 
 // Production data-plane cap for joint A/B residue accumulation.  The small
 // scheduling vectors are bounded by K and P separately; this limit covers the

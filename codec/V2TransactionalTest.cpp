@@ -120,6 +120,8 @@ bool SameProfile(
         a.V2SeedAttempt == b.V2SeedAttempt &&
         a.V2PrecodeContractVersion == b.V2PrecodeContractVersion &&
         a.V2PacketRowContractVersion == b.V2PacketRowContractVersion &&
+        a.V2Architecture == b.V2Architecture &&
+        a.V2SeedPolicy == b.V2SeedPolicy &&
         a.V2StaircaseCount == b.V2StaircaseCount &&
         a.V2DenseRowCount == b.V2DenseRowCount &&
         a.V2HeavyRowCount == b.V2HeavyRowCount &&

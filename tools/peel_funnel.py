@@ -18,30 +18,20 @@ import time
 
 from peel_codec import (
     MeasurementError,
+    PROXY_COST_MODEL,
+    PROXY_MEASURE_REGIME,
+    PROXY_ORDERING_PROTOCOL,
+    SEARCH_BOX_PROTOCOL,
     compare_probe,
     derive_seed,
     family as peel_family,
     isolated_codec_env,
     stock_profile,
+    valid_loss_rate,
 )
 
 BENCH_DEFAULT = "build-fast/codec/wirehair_v2_bench"
-PROXY_COST_MODEL = "embedded-es-cost-model/raw-calibration-unavailable"
-SEARCH_BOX_PROTOCOL = "native-mean:[0,min(K,max(40,4*mean))]/v1"
-PROXY_MEASURE_REGIME = {
-    "solve_block_bytes": 0,
-    "cost_model_block_bytes": 1280,
-    "cost_model_verified": 0,
-    "band_tracking_x": 1,
-    "loss": "0.100000",
-    "seed_base": 55,
-    "completion": "mixed",
-    "geometry": "frozen",
-    "period": 244,
-    "gf16_rows": 0,
-}
-PROXY_ORDERING_PROTOCOL = "fail-rate-then-pred-ns/v1"
-FUNNEL_RESULT_SCHEMA = "wirehair-v2-peel-funnel-result/v1"
+FUNNEL_RESULT_SCHEMA = "wirehair-v2-peel-funnel-result/v2"
 FUNNEL_RESULT_PREFIX = "# peel_funnel_result="
 MEASURE_COLUMNS = (
     "S", "H", "D2", "scale", "shape", "p1", "p2", "p3", "c1", "c2",
@@ -49,6 +39,7 @@ MEASURE_COLUMNS = (
     "peel_dmax", "peel_absorb", "cells", "failures", "fail_rate",
     "solved", "pred_ns", "xors", "muladds", "copies", "zerofills", "status",
 )
+SCALE_ONLY_SHAPE = (100, 100, 64, 100)
 
 NON_SCALE_BOX = [
     ("p1", 0, 400),         # hundredths of the incumbent's degree-1 mass
@@ -62,13 +53,21 @@ def search_box(profile):
     """Build a broad scale range that contains the native-density region."""
     scale_max = min(
         float(profile.block_count),
-        max(40.0, 4.0 * profile.shipped_mean))
+        max(40.0, 4.0 * profile.target_mean))
     return [("scale", 0, int(math.ceil(100.0 * scale_max)))] + NON_SCALE_BOX
 
 
 def proxy_order(result):
     """Order proxy rows by recovery surrogate first, predicted work second."""
     return result[1], result[0]
+
+
+def is_scale_only(vector):
+    """Return whether vector selects stock PMF with only a scale override."""
+    return (
+        vector is not None and
+        tuple(vector[1:]) == SCALE_ONLY_SHAPE
+    )
 
 
 class Funnel:
@@ -79,9 +78,17 @@ class Funnel:
                 "allow_unverified_cost_model opt-in")
         self.a = args
         self.k = args.K
-        self.native_profile = stock_profile(args.bench, args.K)
+        self.native_profile = stock_profile(
+            args.bench, args.K, target_profile=args.target_profile)
         self.box = search_box(self.native_profile)
-        self.struct = f"{self.native_profile.staircase}:10:12"
+        # The explicitly unverified proxy has no GF(2^16) lanes. Its H
+        # coordinate therefore names only the GF(256) prefix, not the target's
+        # total heavy-row count. Every finalist is still ranked on the exact
+        # 10+2 target through compare_probe.
+        self.struct = (
+            f"{self.native_profile.staircase}:"
+            f"{self.native_profile.gf256_rows}:"
+            f"{self.native_profile.dense_rows}")
         self.calls = 0
 
     def token(self, v):
@@ -107,8 +114,11 @@ class Funnel:
             command = [
                 self.a.bench, "essearch", "--N", str(self.k),
                  # The native receipt pins the actual structure. Keep the broad
-                 # parser domain so essearch accepts every production S.
+                 # parser domain so essearch accepts every target dimension.
                  "--fix-structure", self.struct, "--s-lo", "1", "--s-hi", "400",
+                 "--h-lo", "1", "--h-hi",
+                 str(self.native_profile.gf256_rows),
+                 "--d2-hi", str(self.native_profile.dense_rows),
                  # CmdEsSearch requires these fields even in --measure mode.
                  # They do not enter the rows, and this caller ranks pred_ns
                  # alone, so spell an explicitly inert objective.
@@ -245,11 +255,9 @@ class Funnel:
             for x, (_, lo, hi) in zip(v, self.box)
         ]
 
-    def run(self, seed):
-        if seed != self.a.seed:
-            raise ValueError("sampling seed must match the recorded base seed")
+    def run(self):
         sampling_seed = derive_seed(
-            seed, "funnel-search", self.k, "sampling")
+            self.a.construction_seed, "funnel-search", self.k, "sampling")
         rng = random.Random(sampling_seed)
         t0 = time.time()
         print(
@@ -307,7 +315,8 @@ class Funnel:
         pool = pool[:self.a.finals - 1] + [incumbent]
         t2 = time.time()
         ok, dead = self.real_select(pool)
-        print(f"  finals  {len(pool)} gated @bb{self.a.gate_bb}/"
+        print(f"  finals  {self.gate_arm_count} arms gated "
+              f"({len(pool)} proxy/shipped) @bb{self.a.gate_bb}/"
               f"{self.a.gate_trials}tr, top {self.a.rank_top} timed @bb"
               f"{self.a.rank_bb}/{self.a.real_trials}tr  {time.time()-t2:5.1f}s  "
               f"{len(dead)} rejected as non-decoding")
@@ -315,10 +324,9 @@ class Funnel:
             print("  no candidate decoded -- the incumbent stands at this K")
             return None
         winner_goodput, winner_metrics, winner_vector = ok[0]
-        shipped_control = next(
-            (metrics for metrics, vector in self.rank_measurements
-             if vector is None),
-            None)
+        winner_key = (
+            None if winner_vector is None else tuple(winner_vector))
+        shipped_control = self.rank_controls.get(winner_key)
         if shipped_control is None:
             raise MeasurementError("mandatory shipped rank control is missing")
         if winner_vector is None:
@@ -336,11 +344,15 @@ class Funnel:
                 "dmax": winner_vector[3],
                 "absorb": winner_vector[4],
             }
-            winner_pmf = peel_family(
-                self.native_profile.pmf,
-                winner_coordinates["p1"], winner_coordinates["tilt"],
-                winner_coordinates["dmax"], winner_coordinates["absorb"])
-            winner_mode = "trained"
+            if is_scale_only(winner_vector):
+                winner_pmf = list(self.native_profile.pmf)
+                winner_mode = "scale-only"
+            else:
+                winner_pmf = peel_family(
+                    self.native_profile.pmf,
+                    winner_coordinates["p1"], winner_coordinates["tilt"],
+                    winner_coordinates["dmax"], winner_coordinates["absorb"])
+                winner_mode = "trained"
         if winner_pmf is None:
             raise MeasurementError("winner has an invalid peel PMF")
         winner_receipt = {
@@ -372,7 +384,8 @@ class Funnel:
                 f"OH95={measurement.oh95:.17g} "
                 f"OH99={measurement.oh99:.17g} "
                 f"OH_max={measurement.oh_max:.17g} "
-                f"seed={measurement.seed}")
+                f"construction_seed={measurement.construction_seed} "
+                f"loss_seed={measurement.loss_seed}")
             if v is None:
                 print(f"  {i:>4} {g:>10.1f} "
                       f"{measurement.decode_mbps:>9.1f} "
@@ -380,10 +393,11 @@ class Funnel:
                       "mode=shipped scale=-1.00 p1=100 tilt=0 "
                       f"dmax=64 absorb=100 {metrics}")
             else:
+                mode = "scale-only" if is_scale_only(v) else "trained"
                 print(f"  {i:>4} {g:>10.1f} "
                       f"{measurement.decode_mbps:>9.1f} "
                       f"{measurement.oh_mean:>9.4f}  "
-                      f"mode=trained scale={v[0]/100:.2f} "
+                      f"mode={mode} scale={v[0]/100:.2f} "
                       f"p1={v[1]} tilt={v[2]-100} dmax={v[3]} "
                       f"absorb={v[4]} {metrics}")
         print(f"\n  NOTE goodput = MB/s * K/(K+OH); failure is a hard gate, not a "
@@ -391,12 +405,27 @@ class Funnel:
         return ok
 
     def real_probe(self, v, trials, bb, tier):
-        """Return full real-codec metrics under the tier's paired seed."""
-        seed = derive_seed(
-            self.a.seed, "funnel-search", self.k, tier, trials, bb)
-        if v is None:
+        """Return metrics under paired seeds for one exact target/scale."""
+        construction_seed = derive_seed(
+            self.a.construction_seed, "funnel-search", self.k, tier, trials,
+            bb, "construction")
+        loss_seed = derive_seed(
+            self.a.loss_seed, "funnel-search", self.k, tier, trials, bb,
+            "loss")
+        exact = {
+            "native_profile": self.native_profile,
+            "target_profile": self.a.target_profile,
+            "seed_policy": self.a.seed_policy,
+            "loss": self.a.loss,
+            "schedule": self.a.schedule,
+            "construction_seed": construction_seed,
+            "loss_seed": loss_seed,
+        }
+        scale = None if v is None else v[0] / 100.0
+        if v is None or is_scale_only(v):
             return compare_probe(
-                self.a.bench, self.k, trials, bb, seed=seed)
+                self.a.bench, self.k, trials, bb,
+                degree_scale=scale, **exact)
         w = peel_family(
             self.native_profile.pmf,
             v[1], v[2] - 100, v[3], v[4])
@@ -404,11 +433,12 @@ class Funnel:
             return None
         return compare_probe(
             self.a.bench, self.k, trials, bb,
-            peel_weights=w, degree_scale=v[0] / 100.0, seed=seed)
+            peel_weights=w, degree_scale=scale, **exact)
 
     def real_select(self, pool):
         """Use a cheap recovery gate, then rank survivors at real payload."""
         self.rank_measurements = []
+        self.rank_controls = {}
         # Deduplicate by the complete active configuration. Scale is an
         # independent staircase override, so two equal PMFs at different
         # scales are distinct arms. The true shipped arm has no override at all
@@ -416,6 +446,7 @@ class Funnel:
         unique_pool = []
         seen_configs = set()
         have_shipped = False
+        native_pmf = list(self.native_profile.pmf)
         for vector in pool:
             if vector is None:
                 if not have_shipped:
@@ -427,6 +458,15 @@ class Funnel:
                 vector[1], vector[2] - 100, vector[3], vector[4])
             if candidate_pmf is None:
                 continue
+            if is_scale_only(vector):
+                candidate_pmf = native_pmf
+            elif candidate_pmf == native_pmf:
+                # Canonicalize every PMF identity alias to the actual stock
+                # hook.  The active scale remains a distinct experiment.
+                canonical = [vector[0], *SCALE_ONLY_SHAPE]
+                if vector != canonical:
+                    vector = canonical
+                candidate_pmf = native_pmf
             key = (vector[0], tuple(candidate_pmf))
             if key in seen_configs:
                 continue
@@ -434,7 +474,22 @@ class Funnel:
             unique_pool.append(vector)
         if not have_shipped:
             unique_pool.append(None)
-        pool = unique_pool
+        # Gate a canonical scale-only arm for each surviving proxy scale. A
+        # trained PMF can fail while the same staircase scale with stock PMF
+        # remains viable, so injecting only after the gate would miss a real
+        # candidate and make rejection accounting inconsistent.
+        pool = []
+        seen_vectors = set()
+        for vector in unique_pool:
+            if vector is None:
+                continue
+            for candidate in ([vector[0], *SCALE_ONLY_SHAPE], vector):
+                key = tuple(candidate)
+                if key not in seen_vectors:
+                    pool.append(candidate)
+                    seen_vectors.add(key)
+        pool.append(None)
+        self.gate_arm_count = len(pool)
         passed, dead = [], []
         for v in pool:
             r = self.real_probe(
@@ -446,9 +501,22 @@ class Funnel:
         # The shipped arm is a mandatory control, not merely the last member of
         # a cost-sorted candidate list.  The old slice silently omitted it
         # whenever at least rank_top trained candidates passed the cheap gate.
-        rank_vectors = [
-            v for _, v in passed if v is not None
+        scale_only_finalists = [
+            v for _, v in passed if is_scale_only(v)
         ][:self.a.rank_top]
+        proxy_finalists = [
+            v for _, v in passed
+            if v is not None and not is_scale_only(v)
+        ][:self.a.rank_top]
+        rank_vectors = []
+        seen_rank_vectors = set()
+        # Simpler scale-only candidates win exact candidate/candidate ties.
+        # The final sort still gives the no-hook shipped arm first priority.
+        for candidate in scale_only_finalists + proxy_finalists:
+            key = tuple(candidate)
+            if key not in seen_rank_vectors:
+                rank_vectors.append(candidate)
+                seen_rank_vectors.add(key)
         if any(v is None for v in pool):
             rank_vectors.append(None)
         for v in rank_vectors:
@@ -462,6 +530,16 @@ class Funnel:
                     dead.append((r, v))
                 continue
             out.append((r.goodput(self.k), r, v))
+        shipped_control = next(
+            (measurement for measurement, vector in self.rank_measurements
+             if vector is None),
+            None)
+        if shipped_control is None:
+            raise MeasurementError("mandatory shipped rank control is missing")
+        self.rank_controls[None] = shipped_control
+        for unused_measurement, vector in self.rank_measurements:
+            if vector is not None:
+                self.rank_controls[tuple(vector)] = shipped_control
         return sorted(out, key=lambda x: (-x[0], x[2] is not None)), dead
 
     def stock_pmf(self):
@@ -484,7 +562,12 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=64)
     ap.add_argument("--batch", type=int, default=60)
     ap.add_argument("--cell-base", type=int, default=900_000_000)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
+    ap.add_argument("--seed-policy", required=True, choices=["raw"])
+    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument("--loss", type=float, required=True)
+    ap.add_argument("--construction-seed", type=int, required=True)
+    ap.add_argument("--loss-seed", type=int, required=True)
     ap.add_argument("--show", type=int, default=10)
     ap.add_argument("--init", type=str, default=None,
                     help="warm start 'scale,p1,tilt,dmax,absorb' on the OFFSET "
@@ -512,8 +595,10 @@ def main(argv=None):
             a.cell_base < 0 or a.gate_trials < 1 or a.gate_bb < 1 or
             a.real_trials < 1 or a.rank_bb < 1 or a.rank_top < 1 or
             not 0.0 < a.init_frac <= 1.0 or
-            not 0 <= a.seed <= 0xffffffffffffffff):
-        ap.error("invalid K, budget, payload, fraction, or uint64 seed")
+            not valid_loss_rate(a.loss) or
+            not 0 <= a.construction_seed <= 0xffffffffffffffff or
+            not 0 <= a.loss_seed <= 0xffffffffffffffff):
+        ap.error("invalid K, budget, payload, fraction, loss, or uint64 seed")
     if not a.allow_unverified_cost_model:
         print(
             f"REFUSED: proxy cost model {PROXY_COST_MODEL!r} has no replayable "
@@ -532,7 +617,7 @@ def main(argv=None):
         f = Funnel(a)
         if a.init:
             a.init = f.clamp(a.init)
-        ranked = f.run(a.seed)
+        ranked = f.run()
     except (MeasurementError, OSError, ValueError) as error:
         print(f"REFUSED funnel measurement: {error}", file=sys.stderr)
         return 1

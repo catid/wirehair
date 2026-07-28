@@ -4,6 +4,71 @@ Audit date: 2026-07-27
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-d45d`, `wirehair-68o1`, `wirehair-tz5b`
 
+## 2026-07-28 architecture reconciliation
+
+The four published V2 profiles remain byte-frozen on the
+`LegacyD12/ProfileDerived` equation system.  They still use the legacy
+`GetDenseCount(K)` staircase rule and up to 256 profile-derived seed attempts.
+They were not rewritten to match an experiment.
+
+Fresh peel work instead names the nonpublic `dispatch-v1` target explicitly:
+contract ID `a98c37c23ee7feae`, `SmallBandD4`, mixed 10 GF(256) + 2 GF(2^16)
+completion rows, P244 frozen geometry, mix3, and one table-free raw construction
+seed.  `compare`, `precodefail`, `peelpmf`, and every Python training/validation
+receipt must agree on that complete identity.  The target is not a public
+serialized profile; production promotion remains `wirehair-2qlw`.
+
+All earlier small-K/proxy evidence that did not bind this exact target is
+invalid for architecture or parameter selection, independently of its reported
+gain.  After the target/profile plumbing is closed (`wirehair-umrh`,
+`wirehair-uvkr`), the next correctness gate is the same-process, same-hook-path
+paired timing protocol in `wirehair-lnfk`; only then should a fresh table be
+trained and independently validated.
+
+## 2026-07-28 verified target-plumbing closure
+
+`wirehair-umrh` and `wirehair-uvkr` are closed. Their acceptance clauses were
+mapped independently and replayed against the final tree before either Bead
+was closed. Two final source-reading passes were clean.
+
+The five equation contracts produced their exact frozen SHA-256 over every
+K=2..64000:
+
+- certified: `e6146e7fea89089689a819c72e7e82f799344b451f5e4653b125f622dee3de0b`
+- mixed: `47bca161ff7b51684f39d19db3b5b0d11137f21335ec5c74d818d06756d93627`
+- mixed mix2: `858321c2c0a07103b2615bb6586ce310105d37dd9b2120eb5b63527a6fcb5404`
+- mixed mix2 two-anchor:
+  `272b24d707befdeb08afdba83472ccdaeed9ebfac17b05bc6c251793b6b17a7b`
+- dispatch-v1:
+  `66902904804e0efb31971855da6d36dc74e06ed1653b28d6d993d271817a69b1`
+
+Every all-K process also checked the grouped-GF(256) K=4096 seam against
+`4c2af25b58d403d6df117a1bb872d25a27b4225ba2c927a57821511b8c42c7be`.
+The remaining final gates passed: 43/43 audit CTests and 42/42 ASan+UBSan
+CTests (the separately executed full all-K test excluded from those counts),
+5/5 focused architecture/lifecycle seams, 71/71 warning-strict Python tests,
+Python bytecode compilation, and `git diff --check`.
+
+The raw target CLI is now singleton and fail-closed. An independent matrix
+rejected all 30 duplicate/cross-alias cases and all 26 partial, omitted, or
+multi-selector cases. Candidate/control gates require an actual successful
+decode/solve, not merely exit zero and a receipt. Receipts serialize parsed
+staircase scales canonically, so raw whitespace cannot split a line and
+negative zero is exactly `0` in both native and Python paths.
+
+During the final all-K run, 1,200 profile and 1,200 stateful fuzz workers all
+passed, covering 2,980,603,266 mutations. Two additional captured load batches
+brought the final-session total to 2,656/2,656 passing workers and
+3,449,849,883 mutations. The hardened thermal sampler recorded 4,953
+one-second samples over 4,952 seconds with a monotonic, complete 19-column
+stream. Across the 602-sample all-K/load window CPU busy averaged 96.697%, CPU
+peaked at 63.125 C, and the hottest DIMM peaked at 50.500 C; the complete
+session CPU peak was 80.250 C. Sensor read errors and EDAC corrected and
+uncorrected counts remained zero.
+
+The next ready correctness gate is `wirehair-lnfk`: implement same-process,
+same-hook-path paired peel timing before training any replacement table.
+
 ## Stop: the inherited peel tables are not production evidence
 
 Do not deploy, interpolate, benchmark as “trained,” or seed-tune from any of
@@ -46,7 +111,8 @@ WH2 result. There is presently no production peel-parameter table.
 The training pipeline now uses one versioned, fail-closed schema and a shared
 codec helper:
 
-- `wirehair_v2_bench peelpmf --N K` exports the native PMF and structural
+- `wirehair_v2_bench peelpmf --N K --target-profile dispatch-v1` exports the
+  native PMF and structural
   metadata instead of asking Python to transcribe the codec.
 - Native metadata, exact PMF identity, parameter semantics, executable
   identity, independent search/validation seeds, and complete metrics are
@@ -148,7 +214,8 @@ cmake -E env \
   --unset=WIREHAIR_V2_STAIRCASE_ROW_DEGREES \
   --unset=WIREHAIR_V2_STAIRCASE_DEGREE_SCALE \
   --unset=WIREHAIR_V2_BAND_TRACKING_X \
-  build-audit/codec/wirehair_v2_bench peelpmf --N 128
+  build-audit/codec/wirehair_v2_bench peelpmf --N 128 \
+    --target-profile dispatch-v1
 ```
 
 The 2026-07-27 audit receipt is:

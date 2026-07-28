@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Search individual small K values using measurements from the real codec.
 
-Every compare arm receives a deterministic seed paired within its tier.  The
-shipped codec is always included in the final ranking, and output is published
+Every compare arm receives independently derived construction and loss seeds
+paired within its tier.  The stock target PMF is always included in the final
+ranking, and output is published
 atomically in a versioned table only after every requested K has a result.
 """
 import argparse
+import math
 import os
 import random
 import sys
@@ -22,6 +24,7 @@ from peel_codec import (                                # noqa: E402
     make_table_document,
     make_search_receipt,
     stock_profile,
+    valid_loss_rate,
     write_json_atomic,
 )
 
@@ -34,13 +37,25 @@ class Direct:
         self.profile = None
 
     def probe(self, k, v, trials, bb, tier):
-        """Return full metrics under the tier's explicit paired seed."""
-        seed = derive_seed(
-            self.a.seed, "direct-search", k, tier, trials, bb)
+        """Return full metrics under the tier's explicit paired seeds."""
+        construction_seed = derive_seed(
+            self.a.construction_seed, "direct-search", k, tier, trials, bb,
+            "construction")
+        loss_seed = derive_seed(
+            self.a.loss_seed, "direct-search", k, tier, trials, bb, "loss")
+        exact = {
+            "native_profile": self.profile,
+            "target_profile": self.a.target_profile,
+            "seed_policy": self.a.seed_policy,
+            "loss": self.a.loss,
+            "schedule": self.a.schedule,
+            "construction_seed": construction_seed,
+            "loss_seed": loss_seed,
+        }
         if v is None:
             self.probes += 1
             return compare_probe(
-                self.a.bench, k, trials, bb, seed=seed)
+                self.a.bench, k, trials, bb, **exact)
         w = family(
             self.profile.pmf, v[0], v[1], v[2], v[3])
         if w is None:
@@ -50,7 +65,7 @@ class Direct:
         # every inherited WIREHAIR_V2_* hook in compare_probe makes that an
         # exact arm rather than whatever the launching shell happened to carry.
         return compare_probe(
-            self.a.bench, k, trials, bb, peel_weights=w, seed=seed)
+            self.a.bench, k, trials, bb, peel_weights=w, **exact)
 
     def candidate_pmf(self, vector):
         return family(
@@ -80,17 +95,16 @@ class Direct:
     def clamp(v):
         return [max(lo, min(hi, int(round(x)))) for x, (_, lo, hi) in zip(v, BOX)]
 
-    def solve(self, k, seed, centre):
-        if seed != self.a.seed:
-            raise ValueError("sampling seed must match the recorded base seed")
+    def solve(self, k, centre):
         if centre is not None and (
                 not isinstance(centre, list) or len(centre) != len(BOX) or
                 any(isinstance(value, bool) or not isinstance(value, int)
                     for value in centre)):
             raise ValueError("warm start must contain four integers")
-        self.profile = stock_profile(self.a.bench, k)
+        self.profile = stock_profile(
+            self.a.bench, k, target_profile=self.a.target_profile)
         sampling_seed = derive_seed(
-            seed, "direct-search", k, "sampling")
+            self.a.construction_seed, "direct-search", k, "sampling")
         rng = random.Random(sampling_seed)
         t0 = time.time()
         raw_pool = self.lhs(rng, self.a.screen, centre)
@@ -208,7 +222,8 @@ class Direct:
                 trials=self.a.rank_trials,
                 block_bytes=self.a.rank_bb,
                 search_kind="direct-real-codec",
-                base_seed=self.a.seed,
+                construction_seed_base=self.a.construction_seed,
+                loss_seed_base=self.a.loss_seed,
                 seed_domain="direct-search",
                 coordinates={
                     name: result[name]
@@ -240,18 +255,26 @@ def main(argv=None):
     ap.add_argument("--screen", type=int, default=40)
     ap.add_argument("--refine", type=int, default=48)
     ap.add_argument("--gate-trials", type=int, default=400)
-    ap.add_argument("--gate-bb", type=int, default=64)
+    ap.add_argument("--gate-bb", type=int, required=True)
     ap.add_argument("--rank-trials", type=int, default=2000)
-    ap.add_argument("--rank-bb", type=int, default=4096)
+    ap.add_argument("--rank-bb", type=int, required=True)
     ap.add_argument("--rank-top", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
+    ap.add_argument("--seed-policy", required=True, choices=["raw"])
+    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument("--loss", type=float, required=True)
+    ap.add_argument("--construction-seed", type=int, required=True)
+    ap.add_argument("--loss-seed", type=int, required=True)
     a = ap.parse_args(argv)
     if (a.kmin < 2 or a.kmax > 64000 or a.kmax < a.kmin or
             a.screen < 1 or a.refine < 0 or
             a.gate_trials < 1 or a.rank_trials < 1 or a.gate_bb < 1 or
             a.rank_bb < 1 or a.rank_top < 1 or
-            not 0 <= a.seed <= 0xffffffffffffffff):
-        ap.error("invalid range, budget, payload, rank-top, or uint64 seed")
+            not valid_loss_rate(a.loss) or
+            not 0 <= a.construction_seed <= 0xffffffffffffffff or
+            not 0 <= a.loss_seed <= 0xffffffffffffffff):
+        ap.error(
+            "invalid range, budget, payload, rank-top, loss, or uint64 seed")
 
     try:
         identity = capture_artifact_identity(
@@ -265,7 +288,7 @@ def main(argv=None):
     for k in range(a.kmin, a.kmax + 1):
         d = Direct(a)
         try:
-            r = d.solve(k, a.seed, centre)
+            r = d.solve(k, centre)
         except (MeasurementError, OSError, ValueError) as error:
             print(
                 f"  REFUSED publication: measurement failed for K={k}: "
@@ -292,7 +315,12 @@ def main(argv=None):
             table,
             generator="tools/peel_direct.py",
             bench=a.bench,
-            base_seed=a.seed,
+            construction_seed_base=a.construction_seed,
+            loss_seed_base=a.loss_seed,
+            target_profile=a.target_profile,
+            seed_policy=a.seed_policy,
+            loss=a.loss,
+            schedule=a.schedule,
             settings={
                 "kmin": a.kmin,
                 "kmax": a.kmax,
@@ -303,7 +331,10 @@ def main(argv=None):
                 "rank_trials": a.rank_trials,
                 "rank_block_bytes": a.rank_bb,
                 "rank_top": a.rank_top,
-                "loss": 0.10,
+                "target_profile": a.target_profile,
+                "seed_policy": a.seed_policy,
+                "loss": a.loss,
+                "schedule": a.schedule,
             },
             artifact_identity=identity,
         )

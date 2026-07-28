@@ -16,6 +16,10 @@ bool IsDefaultProfile(const wirehair_v2::SeedProfile& profile)
         !profile.V2SeedSelected && profile.V2SeedAttempt == 0u &&
         profile.V2PrecodeContractVersion == 0u &&
         profile.V2PacketRowContractVersion == 0u &&
+        profile.V2Architecture ==
+            wirehair_v2::V2PrecodeArchitecture::LegacyD12 &&
+        profile.V2SeedPolicy ==
+            wirehair_v2::V2SeedDerivation::ProfileDerived &&
         profile.V2StaircaseCount == 0u &&
         profile.V2DenseRowCount == 0u &&
         profile.V2HeavyRowCount == 0u &&
@@ -112,6 +116,8 @@ bool CheckPatternInitializedAccessors()
         message_encoder->BlockBytes() != 0u ||
         message_encoder->IntermediateBlocks() != nullptr ||
         !IsDefaultProfile(message_encoder->Profile()) ||
+        options.Architecture !=
+            wirehair_v2::V2PrecodeArchitecture::LegacyD12 ||
         options.RecoveryMixCount != wirehair_v2::kDefaultRecoveryMixCount ||
         options.DenseIdentityCorner ||
         options.AdaptiveDenseTwoAnchor ||
@@ -145,6 +151,8 @@ bool CheckPatternInitializedAccessors()
         message_decoder->BlockBytes() != 0u ||
         message_decoder->IntermediateBlocks() != nullptr ||
         !IsDefaultProfile(message_decoder->Profile()) ||
+        decoder_options.Architecture !=
+            wirehair_v2::V2PrecodeArchitecture::LegacyD12 ||
         decoder_options.RecoveryMixCount !=
             wirehair_v2::kDefaultRecoveryMixCount ||
         decoder_options.DenseIdentityCorner ||

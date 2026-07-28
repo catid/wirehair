@@ -1738,6 +1738,39 @@ bool IsSupportedMessagePrecodeContract(
          recovery_mix_count == 2u);
 }
 
+bool HasCanonicalRawProfileDiagnostics(const SeedProfile& profile)
+{
+    const PeelPolicy& policy = profile.Policy;
+    const PeelingCodec& codec = policy.Codec;
+    return
+        policy.Solver == PeelSolver::RqccLowref &&
+        policy.Structure == PeelStructure::LtM1C16 &&
+        policy.ByteClass == BlockByteClass::Small &&
+        policy.CountBand == BlockCountBand::UpTo1000 &&
+        codec.Solver == PeelSolver::RqccLowref &&
+        codec.Structure == PeelStructure::LtM1C16 &&
+        codec.Family == DegreeFamily::Lt &&
+        codec.MinDegree == 0u &&
+        codec.MaxDegree == 0u &&
+        codec.SolverCandidateLimit == 0u &&
+        codec.Degree1Mass == 0.0 &&
+        codec.Degree2Mass == 0.0 &&
+        codec.RobustC == 0.0 &&
+        codec.RobustDelta == 0.0 &&
+        !codec.FullyRandomRows &&
+        !codec.UseWirehairRowDistribution &&
+        profile.V2PrecodeSeedSalt == 0u &&
+        profile.V2RecoveryRowSeedSalt == 0u &&
+        !profile.Tuned &&
+        profile.TuningResidualMean == 0.0 &&
+        profile.TuningResidualColumns == 0u &&
+        profile.TuningXorCost == 0u &&
+        profile.TuningCandidatesRequested == 0u &&
+        profile.TuningCandidatesUnique == 0u &&
+        profile.TuningCandidatesCompleted == 0u &&
+        profile.TuningTrials == 0u;
+}
+
 uint64_t MessagePrecodeMatrixSeed(
     const SeedProfile& profile,
     const MessagePrecodeEncoderOptions& options)
@@ -1760,11 +1793,28 @@ PrecodeParams MakeMessagePrecodeParams(
     const SeedProfile& profile,
     const MessagePrecodeEncoderOptions& options)
 {
-    const uint64_t seed = MessagePrecodeMatrixSeed(profile, options);
+    const uint64_t seed =
+        profile.V2SeedSelected &&
+            profile.V2SeedPolicy == V2SeedDerivation::RawUniform ?
+        profile.V2PrecodeSeed :
+        MessagePrecodeMatrixSeed(profile, options);
     PrecodeParams params =
         options.Completion == CompletionField::MixedGF256GF16 ?
         MakeMixedParams(profile.BlockCount, seed) :
         MakeCertifiedParams(profile.BlockCount, seed);
+    if (options.Architecture == V2PrecodeArchitecture::LegacyD12)
+    {
+        // Existing profiles deliberately inherit the Wirehair-1 dense count
+        // as their V2 staircase count.  DenseCount also feeds the base matrix
+        // seed and must remain unchanged.
+        params.Staircase = profile.DenseCount;
+        params.DenseRows = 12u;
+    }
+    else if (options.Architecture == V2PrecodeArchitecture::SmallBandD4)
+    {
+        params.Staircase = SmallBandStaircaseCount(profile.BlockCount);
+        params.DenseRows = 4u;
+    }
     params.DenseTwoAnchor = options.AdaptiveDenseTwoAnchor &&
         profile.BlockCount >= kDenseTwoAnchorMinBlockCount;
     return params;
@@ -1772,11 +1822,20 @@ PrecodeParams MakeMessagePrecodeParams(
 
 } // namespace
 
+bool IsCanonicalStableTargetEquationState()
+{
+    return IsCanonicalMixedCompletionState() &&
+        IsCanonicalStableTargetStaircaseState() &&
+        IsCanonicalStableTargetPacketRowState();
+}
+
 bool HasMessagePrecodeContractState(const SeedProfile& profile)
 {
     return profile.V2SeedSelected || profile.V2SeedAttempt != 0u ||
         profile.V2PrecodeContractVersion != 0u ||
         profile.V2PacketRowContractVersion != 0u ||
+        profile.V2Architecture != V2PrecodeArchitecture::LegacyD12 ||
+        profile.V2SeedPolicy != V2SeedDerivation::ProfileDerived ||
         profile.V2StaircaseCount != 0u ||
         profile.V2DenseRowCount != 0u ||
         profile.V2HeavyRowCount != 0u ||
@@ -1804,7 +1863,19 @@ bool ResolveMessagePrecodeOptions(
         }
         resolved_options = requested_options ? *requested_options :
             MessagePrecodeEncoderOptions();
-        return (resolved_options.Completion == CompletionField::GF256 ||
+        const bool supported_architecture =
+            resolved_options.Architecture ==
+                V2PrecodeArchitecture::LegacyD12 ||
+            (resolved_options.Architecture ==
+                    V2PrecodeArchitecture::SmallBandD4 &&
+             resolved_options.Completion ==
+                    CompletionField::MixedGF256GF16 &&
+             resolved_options.RecoveryMixCount ==
+                    kCertifiedPacketMixCount &&
+             !resolved_options.AdaptiveDenseTwoAnchor &&
+             !resolved_options.DenseIdentityCorner);
+        return supported_architecture &&
+            (resolved_options.Completion == CompletionField::GF256 ||
                 resolved_options.Completion ==
                     CompletionField::MixedGF256GF16) &&
             (!resolved_options.AdaptiveDenseTwoAnchor ||
@@ -1823,10 +1894,27 @@ bool ResolveMessagePrecodeOptions(
         profile.V2PrecodeContractVersion !=
             PrecodeContractVersion(
                 profile.V2CompletionField,
-                profile.V2AdaptiveDenseTwoAnchor) ||
+                profile.V2AdaptiveDenseTwoAnchor,
+                profile.V2Architecture) ||
         profile.V2PacketRowContractVersion != kPacketRowContractVersion ||
+        (profile.V2Architecture != V2PrecodeArchitecture::LegacyD12 &&
+         profile.V2Architecture != V2PrecodeArchitecture::SmallBandD4) ||
+        (profile.V2SeedPolicy != V2SeedDerivation::ProfileDerived &&
+         profile.V2SeedPolicy != V2SeedDerivation::RawUniform) ||
+        (profile.V2SeedPolicy == V2SeedDerivation::RawUniform &&
+         (profile.V2Architecture != V2PrecodeArchitecture::SmallBandD4 ||
+          profile.V2SeedAttempt != 0u ||
+          !IsCanonicalStableTargetEquationState() ||
+          profile.V2PacketPeelSeed !=
+            RawUniformPacketPeelSeed(profile.V2PrecodeSeed) ||
+          profile.DenseCount != 0u ||
+          profile.PeelSeed != 0u ||
+          profile.DenseSeed != 0u ||
+          profile.PeelSeedBucket != 0u ||
+          profile.UsedPeelFixup ||
+          profile.UsedDenseFixup ||
+          !HasCanonicalRawProfileDiagnostics(profile))) ||
         profile.V2StaircaseCount == 0u ||
-        profile.V2StaircaseCount != profile.DenseCount ||
         profile.V2DenseRowCount == 0u ||
         profile.V2HeavyRowCount == 0u ||
         profile.V2SourceHits == 0u ||
@@ -1837,6 +1925,11 @@ bool ResolveMessagePrecodeOptions(
          (profile.V2CompletionField != CompletionField::MixedGF256GF16 ||
           profile.V2RecoveryMixCount != 2u ||
           profile.V2DenseIdentityCorner)) ||
+        (profile.V2Architecture == V2PrecodeArchitecture::SmallBandD4 &&
+         (profile.V2CompletionField != CompletionField::MixedGF256GF16 ||
+          profile.V2RecoveryMixCount != kCertifiedPacketMixCount ||
+          profile.V2AdaptiveDenseTwoAnchor ||
+          profile.V2DenseIdentityCorner)) ||
         !IsSupportedMessagePrecodeContract(
             profile.V2CompletionField, profile.V2RecoveryMixCount))
     {
@@ -1844,6 +1937,7 @@ bool ResolveMessagePrecodeOptions(
     }
 
     MessagePrecodeEncoderOptions bound;
+    bound.Architecture = profile.V2Architecture;
     bound.RecoveryMixCount = profile.V2RecoveryMixCount;
     bound.DenseIdentityCorner = profile.V2DenseIdentityCorner;
     bound.AdaptiveDenseTwoAnchor = profile.V2AdaptiveDenseTwoAnchor;
@@ -1851,7 +1945,8 @@ bool ResolveMessagePrecodeOptions(
     bound.RecoveryRowSeedSalt = profile.V2RecoveryRowSeedSalt;
     bound.Completion = profile.V2CompletionField;
     if (requested_options &&
-        (requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
+        (requested_options->Architecture != bound.Architecture ||
+         requested_options->RecoveryMixCount != bound.RecoveryMixCount ||
          requested_options->DenseIdentityCorner != bound.DenseIdentityCorner ||
          requested_options->AdaptiveDenseTwoAnchor !=
             bound.AdaptiveDenseTwoAnchor ||
@@ -1894,10 +1989,14 @@ bool ResolveMessagePrecodeConfiguration(
     {
         return false;
     }
-    if (profile.DenseCount == 0u ||
-        profile.DenseCount > wirehair::kMaxDenseCount ||
-        (profile.BlockCount >= wirehair::kTinyTableCount &&
-         profile.DenseCount % 4u != 2u))
+    // DenseCount is a legacy profile-derived seed input.  RawUniform binds
+    // both equation seeds directly and must not need to read or carry any
+    // per-K seed-table state merely to pass validation.
+    if (profile.V2SeedPolicy == V2SeedDerivation::ProfileDerived &&
+        (profile.DenseCount == 0u ||
+         profile.DenseCount > wirehair::kMaxDenseCount ||
+         (profile.BlockCount >= wirehair::kTinyTableCount &&
+          profile.DenseCount % 4u != 2u)))
     {
         return false;
     }
@@ -1905,14 +2004,15 @@ bool ResolveMessagePrecodeConfiguration(
     {
         PrecodeParams expected = MakeMessagePrecodeParams(
             profile, validated_options);
-        expected.Staircase = profile.DenseCount;
         expected.DenseIdentityCorner = validated_options.DenseIdentityCorner;
         expected = PrecodeParamsForAttempt(
             expected, profile.V2SeedAttempt);
 
         PacketRowConfig expected_packet;
-        expected_packet.PeelSeed = MessagePacketPeelSeed(
-            profile, validated_options);
+        expected_packet.PeelSeed =
+            profile.V2SeedPolicy == V2SeedDerivation::RawUniform ?
+            RawUniformPacketPeelSeed(profile.V2PrecodeSeed) :
+            MessagePacketPeelSeed(profile, validated_options);
         expected_packet.MixCount = validated_options.RecoveryMixCount;
         expected_packet = PacketConfigForAttempt(
             expected_packet, profile.V2SeedAttempt);
@@ -1937,7 +2037,6 @@ bool ResolveMessagePrecodeConfiguration(
     else
     {
         params = MakeMessagePrecodeParams(profile, validated_options);
-        params.Staircase = profile.DenseCount;
         params.DenseIdentityCorner = validated_options.DenseIdentityCorner;
         packet_config.PeelSeed = MessagePacketPeelSeed(
             profile, validated_options);
@@ -1960,13 +2059,15 @@ void BindMessagePrecodeProfile(
     const PacketRowConfig& packet_config,
     uint32_t packet_seed_attempt)
 {
-    profile.DenseCount = (uint16_t)system.Params.Staircase;
     profile.V2SeedSelected = true;
     profile.V2SeedAttempt = packet_seed_attempt;
     profile.V2PrecodeContractVersion =
         PrecodeContractVersion(
-            system.Params.Field, options.AdaptiveDenseTwoAnchor);
+            system.Params.Field,
+            options.AdaptiveDenseTwoAnchor,
+            options.Architecture);
     profile.V2PacketRowContractVersion = kPacketRowContractVersion;
+    profile.V2Architecture = options.Architecture;
     profile.V2StaircaseCount = system.Params.Staircase;
     profile.V2DenseRowCount = system.Params.DenseRows;
     profile.V2HeavyRowCount = system.Params.HeavyRows;

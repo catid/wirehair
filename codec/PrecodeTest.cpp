@@ -18,6 +18,96 @@
 
 namespace {
 
+bool TestSmallBandStaircaseCount()
+{
+    struct Band
+    {
+        uint32_t First;
+        uint32_t Last;
+        uint32_t Staircase;
+    };
+    // Exact floor(5*sqrt(K)/4), with the documented minimum of two.
+    // Iterating these disjoint bands exercises every K in [2, 100].
+    const Band bands[] = {
+        { 2u, 5u, 2u },
+        { 6u, 10u, 3u },
+        { 11u, 15u, 4u },
+        { 16u, 23u, 5u },
+        { 24u, 31u, 6u },
+        { 32u, 40u, 7u },
+        { 41u, 51u, 8u },
+        { 52u, 63u, 9u },
+        { 64u, 77u, 10u },
+        { 78u, 92u, 11u },
+        { 93u, 100u, 12u },
+    };
+    uint32_t tested = 0u;
+    for (const Band& band : bands)
+    {
+        for (uint32_t K = band.First; K <= band.Last; ++K)
+        {
+            const uint32_t actual =
+                wirehair_v2::SmallBandStaircaseCount(K);
+            if (actual != band.Staircase)
+            {
+                std::fprintf(stderr,
+                    "small-band staircase wrong at K=%u: got %u, want %u\n",
+                    K, actual, band.Staircase);
+                return false;
+            }
+            ++tested;
+        }
+    }
+    if (tested != 99u)
+    {
+        std::fprintf(stderr,
+            "small-band staircase coverage wrong: tested %u K values\n",
+            tested);
+        return false;
+    }
+
+    // The old one-step Newton approximation rounded these exact boundary
+    // cases up by one.  Keep them explicit so that approximation cannot
+    // silently return.
+    struct Seam
+    {
+        uint32_t K;
+        uint32_t Staircase;
+    };
+    const Seam discrepancy_seams[] = {
+        { 15u, 4u },
+        { 23u, 5u },
+        { 31u, 6u },
+        { 63u, 9u },
+        { 77u, 10u },
+        { 92u, 11u },
+    };
+    for (const Seam& seam : discrepancy_seams)
+    {
+        const uint32_t actual =
+            wirehair_v2::SmallBandStaircaseCount(seam.K);
+        if (actual != seam.Staircase)
+        {
+            std::fprintf(stderr,
+                "small-band exact seam wrong at K=%u: got %u, want %u\n",
+                seam.K, actual, seam.Staircase);
+            return false;
+        }
+    }
+
+    const uint32_t handoff = wirehair_v2::SmallBandStaircaseCount(101u);
+    const uint32_t inherited = wirehair::GetDenseCount(101u);
+    if (handoff != inherited || handoff != 26u)
+    {
+        std::fprintf(stderr,
+            "small-band legacy handoff wrong at K=101: got %u, "
+            "inherited %u, want 26\n",
+            handoff, inherited);
+        return false;
+    }
+    return true;
+}
+
 bool IsSegmentedAnchor(
     wirehair_v2::DenseAnchorLayout layout,
     uint32_t row)
@@ -1343,7 +1433,7 @@ int main()
 {
     gf256_init();
 
-    if (!TestParams()) {
+    if (!TestSmallBandStaircaseCount() || !TestParams()) {
         return 1;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)

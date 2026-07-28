@@ -62,6 +62,56 @@ function(expect_success pattern)
     reject_sanitizer("${out}${err}" "expected success: ${ARGN}")
 endfunction()
 
+function(expect_env_failure pattern assignment)
+    execute_process(
+        COMMAND ${clean_hook_env_command}
+            "${assignment}" "${BENCH}" ${ARGN}
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE out
+        ERROR_VARIABLE err
+        TIMEOUT 90)
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 1)
+        message(FATAL_ERROR
+            "expected exit 1 with ${assignment}, got '${result}': "
+            "${ARGN}\nstdout=${out}\nstderr=${err}")
+    endif()
+    if(NOT err MATCHES "${pattern}")
+        message(FATAL_ERROR
+            "missing diagnostic '${pattern}' with ${assignment}: "
+            "${ARGN}\nstderr=${err}")
+    endif()
+    reject_sanitizer(
+        "${out}${err}" "expected environment failure: ${assignment}")
+endfunction()
+
+function(extract_receipt_field receipt field out_var)
+    string(REGEX MATCH "(^|,)${field}=([^,\r\n]*)"
+        field_match "${receipt}")
+    if(NOT field_match)
+        message(FATAL_ERROR
+            "receipt is missing exact field '${field}'\n${receipt}")
+    endif()
+    set(${out_var} "${CMAKE_MATCH_2}" PARENT_SCOPE)
+endfunction()
+
+function(require_compare_target_success output context)
+    if(NOT "${output}" MATCHES
+       "(^|\n)v2_target[ ]+2[ ]+1[ ]+0[ ]")
+        message(FATAL_ERROR
+            "${context} did not report one successful zero-failure "
+            "v2_target decode\n${output}")
+    endif()
+endfunction()
+
+function(require_precodefail_target_success output context)
+    if(NOT "${output}" MATCHES
+       "(^|\n)[0-9]+,2,periodic,3,0,1,1,0,0,0\\.00000000,")
+        message(FATAL_ERROR
+            "${context} did not report one successful zero-failure "
+            "dispatch-v1 structure solve\n${output}")
+    endif()
+endfunction()
+
 function(expect_selftest)
     run_bench(result out err selftest)
     if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
@@ -94,18 +144,23 @@ function(expect_peel_env result_expected value)
     execute_process(
         COMMAND ${clean_hook_env_command}
             "WIREHAIR_V2_PEEL_DEGREES=${value}"
-            "${BENCH}" peelpmf --N 2
+            "${BENCH}" compare --nlo 2 --nhi 2 --trials 1 --bb-list 2
+            --max-message-mib 0 --loss 0.1 --loss-seed 2 --schedule iid
+            --precode --target-profile dispatch-v1 --seed-policy raw
+            --construction-seed 1
         RESULT_VARIABLE result
         OUTPUT_VARIABLE out
         ERROR_VARIABLE err
         TIMEOUT 30)
     if(result_expected STREQUAL "success")
         if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0 OR
-            NOT out MATCHES "# peelpmf,N=2,")
+            NOT out MATCHES "# wh2_target,")
             message(FATAL_ERROR
                 "valid peel-degree environment was rejected: '${value}'\n"
                 "result=${result}\nstdout=${out}\nstderr=${err}")
         endif()
+        require_compare_target_success(
+            "${out}" "valid peel-degree environment '${value}'")
     else()
         if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 1 OR
             NOT err MATCHES "invalid WIREHAIR_V2_PEEL_DEGREES")
@@ -237,6 +292,108 @@ expect_success("precode_profile=certified" compare --nlo 64 --nhi 64
 expect_success("precode_profile_handoff=encoder-selected-v1" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0 --precode)
+expect_success(
+    "# wh2_target,profile=dispatch-v1,contract_id=a98c37c23ee7feae,contract_sha256=a98c37c23ee7feae4171ff10627f660f705db6b7aae9268f85617ce86396583c,.*seed_attempt=0,.*N=64,bb=2,staircase=10,dense_rows=4,heavy_rows=12,completion=mixed,gf256_rows=10,gf16_rows=2,period=244,geometry=frozen"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
+expect_success("v2_target[ ]+2[ ]+1[ ]+0[ ]" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
+
+function(expect_compare_target_duplicate option value)
+    expect_failure("duplicate --${option}" compare
+        --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --precode --target-profile dispatch-v1
+        --seed-policy raw --construction-seed 0x1234
+        "--${option}" "${value}")
+endfunction()
+expect_compare_target_duplicate(loss 0.1)
+expect_compare_target_duplicate(loss-seed 0x5678)
+expect_compare_target_duplicate(schedule iid)
+expect_compare_target_duplicate(target-profile dispatch-v1)
+expect_compare_target_duplicate(seed-policy raw)
+expect_compare_target_duplicate(construction-seed 0x1234)
+expect_compare_target_duplicate(nlo 64)
+expect_compare_target_duplicate(nhi 64)
+expect_compare_target_duplicate(trials 1)
+expect_compare_target_duplicate(bb-list 2)
+expect_compare_target_duplicate(max-message-mib 1)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nhi 64 --trials 1 --bb-list 2 --max-message-mib 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid --precode
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nlo 2048 --trials 1 --bb-list 2 --max-message-mib 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid --precode
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nlo 64 --nhi 64 --trials 1 --max-message-mib 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid --precode
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("mutually exclusive" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2 --max-message-mib 1
+    --loss 0.1 --seed 7 --loss-seed 0x5678 --schedule iid --precode
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+
+expect_failure("unknown benchmark --target-profile" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile mixed_2026_07
+    --seed-policy raw --construction-seed 0x1234)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234
+    --precode-profile mixed)
+expect_failure("target mode requires exactly one N and bb" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234 --seed 7)
+expect_failure("mixed precode profile requires even block bytes" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 1
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
+expect_failure("target currently supports only --schedule iid" compare
+    --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule burst --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
+foreach(forbidden_target_hook IN ITEMS
+        WIREHAIR_V2_STAIRCASE_DEGREES
+        WIREHAIR_V2_STAIRCASE_ROW_DEGREES
+        WIREHAIR_V2_BAND_TRACKING_X)
+    expect_env_failure(
+        "target mode forbids ambient ${forbidden_target_hook}"
+        "${forbidden_target_hook}=1"
+        compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --precode --target-profile dispatch-v1
+        --seed-policy raw --construction-seed 0x1234)
+endforeach()
+expect_env_failure(
+    "target mode has invalid WIREHAIR_V2_STAIRCASE_DEGREE_SCALE"
+    "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=not-a-number"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
 expect_success("v2_mixed[ ]+8[ ]+1[ ]+0" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0 --precode
     --precode-profile mixed)
@@ -672,18 +829,423 @@ expect_success("solve_block_bytes=2" precodefail
 expect_failure("--encode-timing-bytes must be in" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --completion mixed --encode-timing 3 --encode-timing-bytes 3)
-expect_success("# dispatch_profile: name=v1 bands=1 band0=k.2,64000.:mixed-p244-frozen-10x2-d4"
+expect_success("# dispatch_profile: name=legacy-layout-v1 contract_id=none identity=layout-only-unversioned bands=1 band0=k.2,64000.:mixed-p244-frozen-10x2-d4"
     precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --loss 0.1 --dispatch-profile v1)
+run_bench(legacy_dispatch_result legacy_dispatch_out legacy_dispatch_err
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --dispatch-profile v1)
+if(NOT legacy_dispatch_result EQUAL 0 OR
+   legacy_dispatch_out MATCHES
+       "name=dispatch-v1|contract_id=a98c37c23ee7feae")
+    message(FATAL_ERROR
+        "legacy layout selector reused the raw target identity\n"
+        "stdout=${legacy_dispatch_out}\nstderr=${legacy_dispatch_err}")
+endif()
 expect_failure("unknown --dispatch-profile" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --dispatch-profile v2)
-expect_failure("--dispatch-profile supplies the complete" precodefail
+expect_failure("legacy dispatch layout v1 supplies the complete" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --dispatch-profile v1 --binary-dense-rows 8)
-expect_failure("--dispatch-profile supplies the complete" precodefail
+expect_failure("legacy dispatch layout v1 supplies the complete" precodefail
     --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
     --dispatch-profile v1 --completion mixed)
+expect_success(
+    "# wh2_target,profile=dispatch-v1,contract_id=a98c37c23ee7feae,contract_sha256=a98c37c23ee7feae4171ff10627f660f705db6b7aae9268f85617ce86396583c,.*seed_attempt=0,.*N=64,bb=2,staircase=10,dense_rows=4,heavy_rows=12,completion=mixed,gf256_rows=10,gf16_rows=2,period=244,geometry=frozen"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+
+function(expect_precodefail_target_duplicate option value)
+    expect_failure("duplicate --${option}" precodefail
+        --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+        --loss 0.1 --loss-seed 0x5678 --schedule iid
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234
+        "--${option}" "${value}")
+endfunction()
+expect_precodefail_target_duplicate(loss 0.1)
+expect_precodefail_target_duplicate(loss-seed 0x5678)
+expect_precodefail_target_duplicate(schedule iid)
+expect_precodefail_target_duplicate(target-profile dispatch-v1)
+expect_precodefail_target_duplicate(seed-policy raw)
+expect_precodefail_target_duplicate(construction-seed 0x1234)
+expect_precodefail_target_duplicate(N 64)
+expect_precodefail_target_duplicate(bb-list 2)
+expect_precodefail_target_duplicate(overhead 0)
+expect_precodefail_target_duplicate(trials 1)
+expect_precodefail_target_duplicate(threads 1)
+function(expect_precodefail_target_measurement_duplicate option first second)
+    expect_failure("duplicate --${option}" precodefail
+        --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+        --loss 0.1 --loss-seed 0x5678 --schedule iid
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234
+        "--${option}" "${first}" "--${option}" "${second}")
+endfunction()
+expect_precodefail_target_measurement_duplicate(solve-block-bytes 0 2)
+expect_precodefail_target_measurement_duplicate(encode-timing 0 1)
+expect_precodefail_target_measurement_duplicate(encode-timing-bytes 2 4)
+expect_precodefail_target_measurement_duplicate(overhead-ladder-pct 1 2)
+expect_precodefail_target_measurement_duplicate(overhead-ladder-min 8 9)
+expect_failure("exactly one explicit --N and --bb-list" precodefail
+    --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("exactly one explicit --N and --bb-list" precodefail
+    --N 64 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("exactly one explicit --N and --bb-list" precodefail
+    --N 64,65 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("exactly one explicit --N and --bb-list" precodefail
+    --N 64 --bb-list 2,4 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("mutually exclusive" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --seed 7 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+
+expect_failure("unknown benchmark --target-profile" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile mixed_2026_07 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("target mode requires --target-profile" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw)
+expect_failure(
+    "every individual equation/seed-table/implementation override is forbidden"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234 --source-hits 2)
+expect_failure(
+    "every individual equation/seed-table/implementation override is forbidden"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234 --tiny-fastpath off)
+expect_failure(
+    "every individual equation/seed-table/implementation override is forbidden"
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234 --fail-thread-launch-after 1)
+expect_failure("even block bytes" precodefail
+    --N 64 --bb-list 1 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+expect_failure("target currently supports only --schedule iid" precodefail
+    --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule burst
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+foreach(forbidden_target_hook IN ITEMS
+        WIREHAIR_V2_STAIRCASE_DEGREES
+        WIREHAIR_V2_STAIRCASE_ROW_DEGREES
+        WIREHAIR_V2_BAND_TRACKING_X)
+    expect_env_failure(
+        "target mode forbids ambient ${forbidden_target_hook}"
+        "${forbidden_target_hook}=1"
+        precodefail --N 64 --bb-list 2 --overhead 0
+        --trials 1 --threads 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234)
+endforeach()
+
+# The same raw target cell must bind the same equation/seed receipt in the
+# full codec and structure-only paths.  Mode-specific accounting fields
+# (loss_trace versus overhead_stream) are deliberately outside this set.
+run_bench(compare_target_result compare_target_out compare_target_err
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234)
+run_bench(precodefail_target_result precodefail_target_out
+    precodefail_target_err
+    precodefail --N 64 --bb-list 2 --overhead 0 --trials 1 --threads 1
+    --loss 0.1 --loss-seed 0x5678 --schedule iid
+    --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 0x1234)
+if(NOT compare_target_result EQUAL 0 OR
+   NOT precodefail_target_result EQUAL 0)
+    message(FATAL_ERROR
+        "target receipt parity commands failed\n"
+        "compare stderr=${compare_target_err}\n"
+        "precodefail stderr=${precodefail_target_err}")
+endif()
+require_compare_target_success(
+    "${compare_target_out}" "target receipt parity compare")
+require_precodefail_target_success(
+    "${precodefail_target_out}" "target receipt parity precodefail")
+string(REGEX MATCH "# wh2_target,[^\r\n]*"
+    compare_target_receipt "${compare_target_out}")
+string(REGEX MATCH "# wh2_target,[^\r\n]*"
+    precodefail_target_receipt "${precodefail_target_out}")
+foreach(target_field IN ITEMS
+        profile contract_id contract_sha256 precode_contract packet_contract
+        architecture seed_policy attempt_policy seed_attempt seed_tables
+        fixups N bb staircase dense_rows heavy_rows completion gf256_rows
+        gf16_rows period geometry residue_schedule residue_skew
+        grouped_gf256_rows independent_extension source_hits target_mean
+        heavy_family
+        dense_identity_corner dense_two_anchor mix_count
+        packet_seed_multiplier packet_seed_avalanche packet_peel_seed
+        construction_seed loss loss_rate loss_seed schedule pmf_sha256
+        pmf_encoding staircase_scale)
+    extract_receipt_field(
+        "${compare_target_receipt}" "${target_field}" compare_target_value)
+    extract_receipt_field(
+        "${precodefail_target_receipt}" "${target_field}"
+        precodefail_target_value)
+    if(NOT compare_target_value STREQUAL precodefail_target_value)
+        message(FATAL_ERROR
+            "target receipt field '${target_field}' differs: "
+            "compare='${compare_target_value}', "
+            "precodefail='${precodefail_target_value}'")
+    endif()
+endforeach()
+extract_receipt_field(
+    "${precodefail_target_receipt}" "loss_trace"
+    precodefail_target_loss_trace)
+if(NOT precodefail_target_loss_trace STREQUAL "precodefail-cell-v1")
+    message(FATAL_ERROR
+        "precodefail target receipt has wrong loss_trace: "
+        "'${precodefail_target_loss_trace}'")
+endif()
+
+# Real-binary candidate/control proof.  The strict target parser strips every
+# ambient hook, then these two children add exactly one receipted experiment.
+# A PMF candidate may change only its digest; a scale candidate may additionally
+# change the derived target mean.
+execute_process(
+    COMMAND ${clean_hook_env_command}
+        "WIREHAIR_V2_PEEL_DEGREES=1,1"
+        "${BENCH}" compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --precode --target-profile dispatch-v1
+        --seed-policy raw --construction-seed 0x1234
+    RESULT_VARIABLE pmf_candidate_result
+    OUTPUT_VARIABLE pmf_candidate_out
+    ERROR_VARIABLE pmf_candidate_err
+    TIMEOUT 30)
+set(scale_with_raw_whitespace "\n 12\t")
+execute_process(
+    COMMAND ${clean_hook_env_command}
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=${scale_with_raw_whitespace}"
+        "${BENCH}" compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+        --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --precode --target-profile dispatch-v1
+        --seed-policy raw --construction-seed 0x1234
+    RESULT_VARIABLE scale_candidate_result
+    OUTPUT_VARIABLE scale_candidate_out
+    ERROR_VARIABLE scale_candidate_err
+    TIMEOUT 30)
+execute_process(
+    COMMAND ${clean_hook_env_command}
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=${scale_with_raw_whitespace}"
+        "${BENCH}" precodefail --N 64 --bb-list 2 --overhead 0
+        --trials 1 --threads 1 --loss 0.1 --loss-seed 0x5678
+        --schedule iid --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 0x1234
+    RESULT_VARIABLE precodefail_scale_candidate_result
+    OUTPUT_VARIABLE precodefail_scale_candidate_out
+    ERROR_VARIABLE precodefail_scale_candidate_err
+    TIMEOUT 30)
+if(NOT pmf_candidate_result EQUAL 0 OR
+   NOT scale_candidate_result EQUAL 0 OR
+   NOT precodefail_scale_candidate_result EQUAL 0)
+    message(FATAL_ERROR
+        "real target candidate/control commands failed\n"
+        "pmf stderr=${pmf_candidate_err}\n"
+        "scale stderr=${scale_candidate_err}\n"
+        "precodefail scale stderr=${precodefail_scale_candidate_err}")
+endif()
+require_compare_target_success(
+    "${pmf_candidate_out}" "PMF candidate")
+require_compare_target_success(
+    "${scale_candidate_out}" "staircase-scale candidate")
+require_precodefail_target_success(
+    "${precodefail_scale_candidate_out}"
+    "precodefail staircase-scale candidate")
+string(REGEX MATCH "# wh2_target,[^\r\n]*"
+    pmf_candidate_receipt "${pmf_candidate_out}")
+string(REGEX MATCH "# wh2_target,[^\r\n]*"
+    scale_candidate_receipt "${scale_candidate_out}")
+string(REGEX MATCH "# wh2_target,[^\r\n]*"
+    precodefail_scale_candidate_receipt
+    "${precodefail_scale_candidate_out}")
+if(pmf_candidate_receipt STREQUAL "" OR
+   scale_candidate_receipt STREQUAL "" OR
+   precodefail_scale_candidate_receipt STREQUAL "")
+    message(FATAL_ERROR
+        "real target candidate run omitted its receipt\n"
+        "pmf=${pmf_candidate_out}\nscale=${scale_candidate_out}\n"
+        "precodefail scale=${precodefail_scale_candidate_out}")
+endif()
+foreach(target_field IN ITEMS
+        profile contract_id contract_sha256 precode_contract packet_contract
+        architecture seed_policy attempt_policy seed_attempt seed_tables
+        fixups N bb staircase dense_rows heavy_rows completion gf256_rows
+        gf16_rows period geometry residue_schedule residue_skew
+        grouped_gf256_rows independent_extension source_hits target_mean
+        heavy_family dense_identity_corner dense_two_anchor mix_count
+        packet_seed_multiplier packet_seed_avalanche packet_peel_seed
+        construction_seed loss loss_rate loss_seed schedule loss_trace
+        pmf_encoding)
+    extract_receipt_field(
+        "${compare_target_receipt}" "${target_field}" control_value)
+    extract_receipt_field(
+        "${pmf_candidate_receipt}" "${target_field}" pmf_value)
+    if(NOT control_value STREQUAL pmf_value)
+        message(FATAL_ERROR
+            "PMF candidate changed target field '${target_field}': "
+            "control='${control_value}', candidate='${pmf_value}'")
+    endif()
+    if(NOT target_field STREQUAL "target_mean")
+        extract_receipt_field(
+            "${scale_candidate_receipt}" "${target_field}" scale_value)
+        if(NOT control_value STREQUAL scale_value)
+            message(FATAL_ERROR
+                "scale candidate changed target field '${target_field}': "
+                "control='${control_value}', candidate='${scale_value}'")
+        endif()
+    endif()
+endforeach()
+extract_receipt_field(
+    "${compare_target_receipt}" "pmf_sha256" control_pmf_digest)
+extract_receipt_field(
+    "${pmf_candidate_receipt}" "pmf_sha256" candidate_pmf_digest)
+extract_receipt_field(
+    "${scale_candidate_receipt}" "pmf_sha256" scale_pmf_digest)
+extract_receipt_field(
+    "${compare_target_receipt}" "staircase_scale" control_scale)
+extract_receipt_field(
+    "${pmf_candidate_receipt}" "staircase_scale" candidate_scale)
+extract_receipt_field(
+    "${scale_candidate_receipt}" "staircase_scale" scale_scale)
+extract_receipt_field(
+    "${scale_candidate_receipt}" "target_mean" scale_target_mean)
+extract_receipt_field(
+    "${precodefail_scale_candidate_receipt}" "staircase_scale"
+    precodefail_scale_scale)
+extract_receipt_field(
+    "${precodefail_scale_candidate_receipt}" "target_mean"
+    precodefail_scale_target_mean)
+if(control_pmf_digest STREQUAL candidate_pmf_digest OR
+   NOT control_pmf_digest STREQUAL scale_pmf_digest OR
+   NOT control_scale STREQUAL "unset" OR
+   NOT candidate_scale STREQUAL "unset" OR
+   NOT scale_scale STREQUAL "12" OR
+   NOT scale_target_mean STREQUAL "12" OR
+   NOT precodefail_scale_scale STREQUAL "12" OR
+   NOT precodefail_scale_target_mean STREQUAL "12")
+    message(FATAL_ERROR
+        "real target candidate deltas were not exactly PMF/scale\n"
+        "control=${compare_target_receipt}\n"
+        "pmf=${pmf_candidate_receipt}\n"
+        "scale=${scale_candidate_receipt}")
+endif()
+
+expect_failure("requires --target-profile dispatch-v1" peelpmf --N 64)
+expect_failure("unknown benchmark --target-profile" peelpmf
+    --N 64 --target-profile mixed_2026_07)
+expect_failure("--N may appear only once" peelpmf
+    --N 64 --N 64 --target-profile dispatch-v1)
+expect_failure("--N may appear only once" peelpmf
+    --N 64 --K 64 --target-profile dispatch-v1)
+expect_failure("--target-profile may appear only once" peelpmf
+    --N 64 --target-profile dispatch-v1
+    --target-profile dispatch-v1)
+expect_env_failure("peelpmf stock metadata forbids ambient"
+    "WIREHAIR_V2_PEEL_DEGREES=1,1"
+    peelpmf --N 64 --target-profile dispatch-v1)
+expect_env_failure("peelpmf stock metadata forbids ambient"
+    "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=12"
+    peelpmf --N 64 --target-profile dispatch-v1)
+expect_success(
+    "# peelpmf,N=64,target_profile=dispatch-v1,contract_id=a98c37c23ee7feae,contract_sha256=a98c37c23ee7feae4171ff10627f660f705db6b7aae9268f85617ce86396583c,.*staircase=10,dense_rows=4,heavy_rows=12,source_hits=2,completion=mixed,gf256_rows=10,gf16_rows=2,period=244,geometry=frozen"
+    peelpmf --N 64 --target-profile dispatch-v1)
+expect_success("# peelpmf,N=100,.*staircase=12,dense_rows=4"
+    peelpmf --N 100 --target-profile dispatch-v1)
+expect_success("# peelpmf,N=101,.*staircase=26,dense_rows=4"
+    peelpmf --N 101 --target-profile dispatch-v1)
+
+# Cross the complete reduced-S band boundary and representative large K with
+# the actual full-codec target command.  Every structural field, including the
+# exact staircase mean, must match peelpmf's native metadata.  Construction
+# seed one is a fixed functional test fixture across this domain; unlike the
+# architecture receipt, it is not a promoted per-K seed table or fixup.
+set(target_crosspath_Ks "")
+foreach(target_K RANGE 2 100)
+    list(APPEND target_crosspath_Ks "${target_K}")
+endforeach()
+list(APPEND target_crosspath_Ks 101 128 4096 64000)
+foreach(target_K IN LISTS target_crosspath_Ks)
+    run_bench(cross_compare_result cross_compare_out cross_compare_err
+        compare --nlo "${target_K}" --nhi "${target_K}" --trials 1
+        --bb-list 2 --max-message-mib 0 --loss 0.1
+        --loss-seed 0x5678 --schedule iid --precode
+        --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 1)
+    run_bench(cross_pmf_result cross_pmf_out cross_pmf_err
+        peelpmf --N "${target_K}" --target-profile dispatch-v1)
+    if(NOT cross_compare_result EQUAL 0 OR
+       NOT cross_pmf_result EQUAL 0 OR
+       NOT cross_compare_out MATCHES "(^|\n)v2_target[ ]")
+        message(FATAL_ERROR
+            "target cross-path command failed at K=${target_K}\n"
+            "compare stdout=${cross_compare_out}\n"
+            "compare stderr=${cross_compare_err}\n"
+            "peelpmf stdout=${cross_pmf_out}\n"
+            "peelpmf stderr=${cross_pmf_err}")
+    endif()
+    require_compare_target_success(
+        "${cross_compare_out}" "target cross-path K=${target_K}")
+    string(REGEX MATCH "# wh2_target,[^\r\n]*"
+        cross_compare_receipt "${cross_compare_out}")
+    string(REGEX MATCH "# peelpmf,[^\r\n]*"
+        cross_pmf_receipt "${cross_pmf_out}")
+    extract_receipt_field(
+        "${cross_compare_receipt}" "profile" cross_compare_profile)
+    extract_receipt_field(
+        "${cross_pmf_receipt}" "target_profile" cross_pmf_profile)
+    if(NOT cross_compare_profile STREQUAL cross_pmf_profile)
+        message(FATAL_ERROR
+            "target profile differs across paths at K=${target_K}")
+    endif()
+    foreach(shared_field IN ITEMS
+            contract_id contract_sha256 precode_contract packet_contract
+            architecture N staircase dense_rows heavy_rows source_hits
+            target_mean completion gf256_rows gf16_rows period geometry
+            residue_schedule residue_skew mix_count pmf_sha256 pmf_encoding)
+        extract_receipt_field(
+            "${cross_compare_receipt}" "${shared_field}"
+            cross_compare_value)
+        extract_receipt_field(
+            "${cross_pmf_receipt}" "${shared_field}" cross_pmf_value)
+        if(NOT cross_compare_value STREQUAL cross_pmf_value)
+            message(FATAL_ERROR
+                "target field '${shared_field}' differs across paths at "
+                "K=${target_K}: compare='${cross_compare_value}', "
+                "peelpmf='${cross_pmf_value}'")
+        endif()
+    endforeach()
+endforeach()
+
 # Exact-overhead ladder: dense 0..min, then v += ceil(v/2) to the cap
 # max(min, ceil(pct% * K)).  K=64 at 50%/8 walks 0..8,12,18,27,32.
 expect_success("overhead_ladder_pct=50 overhead_ladder_min=8" precodefail
@@ -2203,6 +2765,11 @@ endforeach()
 expect_success("paired_trial: schedule=burst" compare --nlo 64 --nhi 64
     --trials 1 --bb-list 8 --max-message-mib 1 --loss 0.1
     --schedule burst --precode --trial-details)
+expect_failure("legacy/profile/equation/cache overrides are forbidden"
+    compare --nlo 64 --nhi 64 --trials 1 --bb-list 2
+    --max-message-mib 1 --loss 0.1 --loss-seed 0x5678
+    --schedule iid --precode --target-profile dispatch-v1
+    --seed-policy raw --construction-seed 0x1234 --trial-details)
 expect_success("cached_ok=1.*cached_oh=[0-9]+.*cached_delta=" compare
     --nlo 64 --nhi 64 --trials 1 --bb-list 8 --max-message-mib 1
     --loss 0.1 --schedule iid --precode-cache --trial-details)
@@ -2479,8 +3046,10 @@ expect_failure("even for mixed completion" precodecost --N 200 --bb 3
 
 # Training tools obtain the native degree law and structural metadata from the
 # codec instead of maintaining a second transcription.
-expect_success("# peelpmf,N=128,degrees=64,staircase=" peelpmf --N 128)
-expect_success("degree,probability" peelpmf --N 4096)
+expect_success("# peelpmf,N=128,.*degrees=64,staircase=" peelpmf --N 128
+    --target-profile dispatch-v1)
+expect_success("degree,probability" peelpmf --N 4096
+    --target-profile dispatch-v1)
 expect_failure("peelpmf --N must be in" peelpmf --N 1)
 
 # EsEvaluator ultimately keys RunCell with a uint32 cell id.  Search/holdout
@@ -2717,13 +3286,17 @@ endif()
 execute_process(
     COMMAND ${clean_hook_env_command}
         "WIREHAIR_V2_PEEL_DEGREES=${es_peel_weights}"
-        "${BENCH}" peelpmf --N 128
+        "${BENCH}" compare --nlo 128 --nhi 128 --trials 1 --bb-list 2
+        --max-message-mib 0 --loss 0.1 --loss-seed 2 --schedule iid
+        --precode --target-profile dispatch-v1 --seed-policy raw
+        --construction-seed 1
     RESULT_VARIABLE es_peel_replay_result
     OUTPUT_VARIABLE es_peel_replay_out
     ERROR_VARIABLE es_peel_replay_err
     TIMEOUT 30)
 if(NOT es_peel_replay_result MATCHES "^-?[0-9]+$" OR
-    NOT es_peel_replay_result EQUAL 0)
+   NOT es_peel_replay_result EQUAL 0 OR
+   NOT es_peel_replay_out MATCHES "# wh2_target,")
     message(FATAL_ERROR
         "printed best peel PMF does not replay through its environment\n"
         "weights=${es_peel_weights}\n"

@@ -1,4 +1,5 @@
 add_library(wirehair_v2_policy STATIC
+    WirehairV2Contract.h
     WirehairV2GF16.cpp
     WirehairV2GF16.h
     WirehairV2Codec.cpp
@@ -193,6 +194,13 @@ if (BUILD_TESTS)
         LABELS "v2;golden;fingerprint;freeze"
         TIMEOUT 3600
         RUN_SERIAL TRUE)
+    add_test(NAME wirehair_v2_fingerprint_cli_test
+        COMMAND ${CMAKE_COMMAND}
+            -DFINGERPRINT=$<TARGET_FILE:wirehair_v2_fingerprint_test>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/V2FingerprintCliTest.cmake)
+    set_tests_properties(wirehair_v2_fingerprint_cli_test PROPERTIES
+        LABELS "v2;cli;fingerprint"
+        TIMEOUT 60)
 
     # Representative frozen packet bytes through the public V2 API.
     add_executable(wirehair_v2_packet_golden_test V2PacketGoldenTest.cpp)

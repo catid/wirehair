@@ -1,9 +1,11 @@
 #include "WirehairV2Codec.h"
+#include "WirehairV2Contract.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2Precode.h"
 #include "WirehairV2Seeds.h"
 #include "WirehairV2Solve.h"
 
+#include "../WirehairEnvironment.h"
 #include "../WirehairTools.h"
 
 #include <wirehair/wirehair.h>
@@ -48,6 +50,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 static const uint32_t kMaxSeedTableTrials = 1000000u;
+
+std::string Sha256Hex(const std::string& input);
 
 double NowSeconds()
 {
@@ -95,6 +99,7 @@ bool ParseU64Scalar(const char* text, uint64_t& out)
     return true;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 bool ParseDecimalU64Scalar(const char* text, uint64_t& out)
 {
     if (!text || !*text || *text < '0' || *text > '9') {
@@ -109,6 +114,7 @@ bool ParseDecimalU64Scalar(const char* text, uint64_t& out)
     out = (uint64_t)value;
     return true;
 }
+#endif
 
 bool ParseDoubleScalar(const char* text, double& out)
 {
@@ -207,6 +213,20 @@ bool UnknownArg(const char* command, const char* option)
 {
     std::fprintf(stderr, "%s: unknown option %s\n", command, option);
     return false;
+}
+
+bool AcceptOptionOnce(
+    const char* command,
+    const char* option,
+    bool& explicit_option)
+{
+    if (explicit_option)
+    {
+        std::fprintf(stderr, "%s duplicate %s\n", command, option);
+        return false;
+    }
+    explicit_option = true;
+    return true;
 }
 
 struct Rng
@@ -1226,6 +1246,110 @@ TrialResult RunV2Trial(
     return tr;
 }
 
+bool ResolveTargetStaircaseScaleReceipt(std::string& receipt)
+{
+    receipt = "unset";
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const wirehair::EnvironmentValue scale_value(
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
+    if (!scale_value.IsSet()) {
+        return true;
+    }
+    double parsed = wirehair_v2::kStaircaseDegreeScaleUnset;
+    if (!wirehair_v2::ParseStaircaseDegreeScaleForTesting(
+            scale_value.Get(), parsed))
+    {
+        return false;
+    }
+    // Collapse both signed-zero spellings and serialize the parsed number,
+    // never the raw environment bytes, so the receipt stays one line and has
+    // one canonical binary64 spelling.
+    if (parsed == 0.0) {
+        parsed = 0.0;
+    }
+    char text[64];
+    const int written = std::snprintf(text, sizeof(text), "%.17g", parsed);
+    if (written < 0 || (size_t)written >= sizeof(text)) {
+        return false;
+    }
+    receipt.assign(text, (size_t)written);
+#endif
+    return true;
+}
+
+bool ValidateTargetExperimentEnvironment(const char* command)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    static const char* const kForbidden[] = {
+        "WIREHAIR_V2_STAIRCASE_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_ROW_DEGREES",
+        "WIREHAIR_V2_BAND_TRACKING_X"
+    };
+    for (const char* name : kForbidden)
+    {
+        const wirehair::EnvironmentValue value(name);
+        if (value.IsSet())
+        {
+            std::fprintf(stderr,
+                "%s target mode forbids ambient %s; only the receipted "
+                "peel PMF and staircase scale hooks are allowed\n",
+                command, name);
+            return false;
+        }
+    }
+    std::string scale_receipt;
+    if (!ResolveTargetStaircaseScaleReceipt(scale_receipt))
+    {
+        std::fprintf(stderr,
+            "%s target mode has invalid "
+            "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE\n",
+            command);
+        return false;
+    }
+#else
+    const wirehair::EnvironmentValue peel_value(
+        "WIREHAIR_V2_PEEL_DEGREES");
+    const wirehair::EnvironmentValue scale_value(
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
+    if (peel_value.IsSet() || scale_value.IsSet())
+    {
+        std::fprintf(stderr,
+            "%s target mode cannot apply peel PMF or staircase scale "
+            "overrides because WIREHAIR_V2_ENABLE_TEST_HOOKS is disabled\n",
+            command);
+        return false;
+    }
+#endif
+    return true;
+}
+
+bool ResolveTargetStaircaseMean(
+    const wirehair_v2::PrecodeParams& params,
+    double& mean_out)
+{
+    wirehair_v2::PrecodeParams effective = params;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const wirehair::EnvironmentValue scale_value(
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
+    const char* scale = scale_value.Get();
+    if (scale != nullptr &&
+        !wirehair_v2::ParseStaircaseDegreeScaleForTesting(
+            scale, effective.StaircaseDegreeScale))
+    {
+        return false;
+    }
+#endif
+    wirehair_v2::StaircaseDegreeMixture mixture;
+    if (!wirehair_v2::MakeStaircaseDegreeMixture(effective, mixture) ||
+        effective.Staircase == 0u)
+    {
+        return false;
+    }
+    mean_out =
+        (double)mixture.EdgeCount / (double)effective.Staircase;
+    return true;
+}
+
 TrialResult RunV2PrecodeTrial(
     uint32_t N,
     uint32_t block_bytes,
@@ -1237,7 +1361,9 @@ TrialResult RunV2PrecodeTrial(
     bool cache_encoder_source = false,
     bool cache_decoder_systematic = false,
     uint32_t recovery_mix_count =
-        wirehair_v2::kCertifiedPacketMixCount)
+        wirehair_v2::kCertifiedPacketMixCount,
+    const wirehair_v2::V2EquationContract* target_contract = nullptr,
+    uint64_t construction_seed = 0u)
 {
     TrialResult tr = {};
     tr.TerminalResult = Wirehair_Error;
@@ -1251,16 +1377,37 @@ TrialResult RunV2PrecodeTrial(
     wirehair_v2::Codec enc;
     wirehair_v2::Codec dec;
     wirehair_v2::MessagePrecodeEncoderOptions encoder_options;
-    encoder_options.Completion = completion;
-    encoder_options.RecoveryMixCount = recovery_mix_count;
+    if (target_contract) {
+        encoder_options =
+            wirehair_v2::MessageOptionsForContract(*target_contract);
+        completion = target_contract->Completion;
+        recovery_mix_count = target_contract->RecoveryMixCount;
+    }
+    else {
+        encoder_options.Completion = completion;
+        encoder_options.RecoveryMixCount = recovery_mix_count;
+    }
     encoder_options.CacheSystematicSource = cache_encoder_source;
     encoder_options.CacheReceivedSystematicPackets = cache_decoder_systematic;
-    const bool use_encoder_options =
+    const bool use_encoder_options = target_contract ||
         completion != wirehair_v2::CompletionField::GF256 ||
         cache_encoder_source;
+    wirehair_v2::SeedProfile raw_profile;
+    const wirehair_v2::SeedProfile* seed_override = nullptr;
+    if (target_contract)
+    {
+        if (!wirehair_v2::MakeRawContractProfile(
+                *target_contract, N, block_bytes, construction_seed,
+                raw_profile))
+        {
+            tr.TerminalResult = Wirehair_InvalidInput;
+            return tr;
+        }
+        seed_override = &raw_profile;
+    }
     const double c0 = NowSeconds();
     WirehairResult result = enc.InitializePrecodeEncoder(
-        message.data(), message_bytes, block_bytes, nullptr,
+        message.data(), message_bytes, block_bytes, seed_override,
         use_encoder_options ? &encoder_options : nullptr);
     if (result == Wirehair_Success)
     {
@@ -1270,12 +1417,26 @@ TrialResult RunV2PrecodeTrial(
         // search in the decoder.
         result = dec.InitializePrecodeDecoder(
             message_bytes, block_bytes, &enc.Profile(),
-            cache_decoder_systematic ? &encoder_options : nullptr);
+            target_contract || cache_decoder_systematic ?
+                &encoder_options : nullptr);
         if (result == Wirehair_Success &&
             (enc.Profile().V2CompletionField != completion ||
              dec.Profile().V2CompletionField != completion ||
              enc.Profile().V2RecoveryMixCount != recovery_mix_count ||
              dec.Profile().V2RecoveryMixCount != recovery_mix_count ||
+             enc.Profile().V2Architecture !=
+                encoder_options.Architecture ||
+             dec.Profile().V2Architecture !=
+                encoder_options.Architecture ||
+             (target_contract &&
+              (enc.Profile().V2SeedPolicy !=
+                    wirehair_v2::V2SeedDerivation::RawUniform ||
+               dec.Profile().V2SeedPolicy !=
+                    wirehair_v2::V2SeedDerivation::RawUniform ||
+               enc.Profile().V2SeedAttempt != 0u ||
+               enc.Profile().V2DenseRowCount != 4u ||
+               enc.Profile().V2StaircaseCount !=
+                    wirehair_v2::SmallBandStaircaseCount(N))) ||
              dec.Profile().V2SeedAttempt != enc.Profile().V2SeedAttempt ||
              dec.Profile().V2PacketPeelSeed !=
                 enc.Profile().V2PacketPeelSeed ||
@@ -1984,7 +2145,24 @@ int CmdCompare(int argc, char** argv)
     uint32_t max_message_mib = 128u;
     double loss = 0.10;
     uint64_t seed = UINT64_C(0xc0decafe);
+    uint64_t construction_seed = 0u;
     std::string bb_list = "1280,102400";
+    bool nlo_explicit = false;
+    bool nhi_explicit = false;
+    bool trials_explicit = false;
+    bool bb_list_explicit = false;
+    bool max_message_mib_explicit = false;
+    const wirehair_v2::V2EquationContract* target_contract = nullptr;
+    bool target_profile_explicit = false;
+    bool raw_seed_policy = false;
+    bool seed_policy_explicit = false;
+    bool construction_seed_explicit = false;
+    bool loss_seed_explicit = false;
+    bool legacy_seed_explicit = false;
+    bool loss_explicit = false;
+    bool schedule_explicit = false;
+    bool v2_profile_explicit = false;
+    bool tuning_option_explicit = false;
     bool include_precode = false;
     bool include_precode_cache = false;
     bool cache_encoder_source = false;
@@ -1999,6 +2177,7 @@ int CmdCompare(int argc, char** argv)
     uint32_t mixed_mix_count = wirehair_v2::kCertifiedPacketMixCount;
     uint32_t packet_row_seed_multiplier = 1u;
     bool packet_row_seed_avalanche = false;
+    bool packet_row_seed_multiplier_explicit = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     bool mixed_mix_count_explicit = false;
     uint32_t mixed_period = wirehair_v2::kMixedCoefficientPeriod;
@@ -2030,31 +2209,125 @@ int CmdCompare(int argc, char** argv)
     {
         const char* value = nullptr;
         if (!std::strcmp(argv[i], "--nlo")) {
-            if (!TakeArg("compare", "--nlo", argc, argv, i, value) ||
+            if (!AcceptOptionOnce(
+                    "compare", "--nlo", nlo_explicit) ||
+                !TakeArg("compare", "--nlo", argc, argv, i, value) ||
                 !ParseU32Arg("--nlo", value, nlo)) return 1;
         }
         else if (!std::strcmp(argv[i], "--nhi")) {
-            if (!TakeArg("compare", "--nhi", argc, argv, i, value) ||
+            if (!AcceptOptionOnce(
+                    "compare", "--nhi", nhi_explicit) ||
+                !TakeArg("compare", "--nhi", argc, argv, i, value) ||
                 !ParseU32Arg("--nhi", value, nhi)) return 1;
         }
         else if (!std::strcmp(argv[i], "--trials")) {
-            if (!TakeArg("compare", "--trials", argc, argv, i, value) ||
+            if (!AcceptOptionOnce(
+                    "compare", "--trials", trials_explicit) ||
+                !TakeArg("compare", "--trials", argc, argv, i, value) ||
                 !ParseU32Arg("--trials", value, trials)) return 1;
         }
         else if (!std::strcmp(argv[i], "--bb-list")) {
-            if (!TakeArg("compare", "--bb-list", argc, argv, i, value)) return 1;
+            if (!AcceptOptionOnce(
+                    "compare", "--bb-list", bb_list_explicit) ||
+                !TakeArg("compare", "--bb-list", argc, argv, i, value))
+            {
+                return 1;
+            }
             bb_list = value;
         }
         else if (!std::strcmp(argv[i], "--loss")) {
+            if (loss_explicit)
+            {
+                std::fprintf(stderr, "compare duplicate --loss\n");
+                return 1;
+            }
             if (!TakeArg("compare", "--loss", argc, argv, i, value) ||
                 !ParseDoubleArg("--loss", value, loss)) return 1;
+            loss_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--seed")) {
             if (!TakeArg("compare", "--seed", argc, argv, i, value) ||
                 !ParseU64Arg("--seed", value, seed)) return 1;
+            legacy_seed_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--loss-seed")) {
+            if (loss_seed_explicit)
+            {
+                std::fprintf(stderr, "compare duplicate --loss-seed\n");
+                return 1;
+            }
+            if (!TakeArg("compare", "--loss-seed", argc, argv, i, value) ||
+                !ParseU64Arg("--loss-seed", value, seed)) return 1;
+            loss_seed_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (construction_seed_explicit)
+            {
+                std::fprintf(stderr,
+                    "compare duplicate --construction-seed\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "compare", "--construction-seed", argc, argv, i, value) ||
+                !ParseU64Arg("--construction-seed", value, construction_seed))
+            {
+                return 1;
+            }
+            construction_seed_explicit = true;
+        }
+        else if (!std::strcmp(argv[i], "--target-profile")) {
+            if (target_profile_explicit)
+            {
+                std::fprintf(stderr,
+                    "compare duplicate --target-profile\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "compare", "--target-profile", argc, argv, i, value))
+            {
+                return 1;
+            }
+            target_profile_explicit = true;
+            target_contract = wirehair_v2::FindV2EquationContract(value);
+            if (!target_contract ||
+                target_contract->PublicProfile ||
+                target_contract->ProfileId !=
+                    wirehair_v2::kWh2DispatchV1ContractId)
+            {
+                std::fprintf(stderr,
+                    "compare unknown benchmark --target-profile '%s' "
+                    "(expected dispatch-v1)\n",
+                    value);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed-policy")) {
+            if (seed_policy_explicit)
+            {
+                std::fprintf(stderr, "compare duplicate --seed-policy\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "compare", "--seed-policy", argc, argv, i, value))
+            {
+                return 1;
+            }
+            seed_policy_explicit = true;
+            raw_seed_policy = std::strcmp(value, "raw") == 0;
+            if (!raw_seed_policy)
+            {
+                std::fprintf(stderr,
+                    "compare unknown --seed-policy '%s' (expected raw)\n",
+                    value);
+                return 1;
+            }
         }
         else if (!std::strcmp(argv[i], "--max-message-mib")) {
-            if (!TakeArg("compare", "--max-message-mib", argc, argv, i, value) ||
+            if (!AcceptOptionOnce(
+                    "compare", "--max-message-mib",
+                    max_message_mib_explicit) ||
+                !TakeArg(
+                    "compare", "--max-message-mib", argc, argv, i, value) ||
                 !ParseU32Arg("--max-message-mib", value, max_message_mib)) return 1;
         }
         else if (!std::strcmp(argv[i], "--precode")) {
@@ -2255,6 +2528,7 @@ int CmdCompare(int argc, char** argv)
             {
                 return 1;
             }
+            packet_row_seed_multiplier_explicit = true;
         }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-avalanche"))
@@ -2263,6 +2537,11 @@ int CmdCompare(int argc, char** argv)
         }
 #endif
         else if (!std::strcmp(argv[i], "--schedule")) {
+            if (schedule_explicit)
+            {
+                std::fprintf(stderr, "compare duplicate --schedule\n");
+                return 1;
+            }
             if (!TakeArg("compare", "--schedule", argc, argv, i, value) ||
                 !ParsePacketSchedule(value, schedule_kind))
             {
@@ -2272,10 +2551,12 @@ int CmdCompare(int argc, char** argv)
                     "adversarial)\n");
                 return 1;
             }
+            schedule_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--v2-profile")) {
             if (!TakeArg("compare", "--v2-profile", argc, argv, i, value)) return 1;
             const char* profile = value;
+            v2_profile_explicit = true;
             if (!std::strcmp(profile, "tuned")) {
                 std::fprintf(stderr,
                     "--v2-profile tuned is retired: the synthetic peel "
@@ -2301,31 +2582,37 @@ int CmdCompare(int argc, char** argv)
             if (!TakeArg("compare", "--peel-candidates", argc, argv, i, value) ||
                 !ParseU16Arg("--peel-candidates", value,
                     compare_options.PeelCandidates)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--peel-trials")) {
             if (!TakeArg("compare", "--peel-trials", argc, argv, i, value) ||
                 !ParseU16Arg("--peel-trials", value,
                     compare_options.PeelTrials)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--auto-trials")) {
             if (!TakeArg("compare", "--auto-trials", argc, argv, i, value) ||
                 !ParseU16Arg("--auto-trials", value,
                     compare_options.AutoTrials)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--tune-seed")) {
             if (!TakeArg("compare", "--tune-seed", argc, argv, i, value) ||
                 !ParseU64Arg("--tune-seed", value,
                     compare_options.TuneSeed)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--auto-seed")) {
             if (!TakeArg("compare", "--auto-seed", argc, argv, i, value) ||
                 !ParseU64Arg("--auto-seed", value,
                     compare_options.AutoSeed)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--auto-min-delta")) {
             if (!TakeArg("compare", "--auto-min-delta", argc, argv, i, value) ||
                 !ParseDoubleArg("--auto-min-delta", value,
                     compare_options.AutoMinDelta)) return 1;
+            tuning_option_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--dense-delta")) {
             if (!TakeArg("compare", "--dense-delta", argc, argv, i, value)) return 1;
@@ -2357,6 +2644,66 @@ int CmdCompare(int argc, char** argv)
     }
     if (!ValidateLoss(loss, "compare")) {
         return 1;
+    }
+    if (legacy_seed_explicit && loss_seed_explicit)
+    {
+        std::fprintf(stderr,
+            "compare --seed and --loss-seed are mutually exclusive\n");
+        return 1;
+    }
+    const bool target_protocol_requested =
+        target_profile_explicit || seed_policy_explicit ||
+        construction_seed_explicit || loss_seed_explicit;
+    if (target_protocol_requested)
+    {
+        bool equation_override = precode_profile_explicit ||
+            v2_profile_explicit || tuning_option_explicit ||
+            compare_options.DenseOverride ||
+            packet_row_seed_multiplier_explicit ||
+            packet_row_seed_avalanche;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        equation_override = equation_override ||
+            mixed_mix_count_explicit || mixed_period_explicit ||
+            mixed_geometry_explicit || mixed_gf256_rows_explicit ||
+            mixed_grouped_gf256_rows_explicit ||
+            mixed_grouped_gf256_row_mask_explicit ||
+            mixed_gf16_rows_explicit ||
+            mixed_residue_skew_explicit ||
+            mixed_residue_schedule_explicit ||
+            mixed_residue_hash_seed_explicit ||
+            mixed_residue_hash_keyed ||
+            mixed_independent_extension_residues ||
+            mixed_residue_bucket_mode_explicit;
+#endif
+        if (!target_contract || !target_profile_explicit ||
+            !seed_policy_explicit || !raw_seed_policy ||
+            !construction_seed_explicit || !loss_seed_explicit ||
+            !loss_explicit || !schedule_explicit || legacy_seed_explicit ||
+            !include_precode || include_precode_cache ||
+            !nlo_explicit || !nhi_explicit || !bb_list_explicit ||
+            block_bytes_list.size() != 1u || nlo != nhi ||
+            trial_details ||
+            equation_override)
+        {
+            std::fprintf(stderr,
+                "compare target mode requires exactly one N and bb plus "
+                "--precode --target-profile dispatch-v1 --seed-policy raw "
+                "--construction-seed, --loss, --loss-seed, and --schedule; "
+                "legacy/profile/equation/cache overrides are forbidden\n");
+            return 1;
+        }
+        precode_profile = PrecodeProfileMixed;
+        if (schedule_kind != PacketScheduleKind::Iid)
+        {
+            std::fprintf(stderr,
+                "compare dispatch-v1 target currently supports only "
+                "--schedule iid; other loss models need a versioned "
+                "receipt\n");
+            return 1;
+        }
+        if (!ValidateTargetExperimentEnvironment("compare")) {
+            return 1;
+        }
     }
     if (precode_profile_explicit &&
         !include_precode && !include_precode_cache)
@@ -2585,6 +2932,117 @@ int CmdCompare(int argc, char** argv)
     compare_options.LogAutoChoices =
         compare_options.ProfileMode == CompareProfileAuto && nlo == nhi;
 
+    if (target_contract)
+    {
+        if (wirehair_v2::ActiveMixedCoefficientPeriod() !=
+                wirehair_v2::kMixedCoefficientPeriod ||
+            wirehair_v2::ActiveMixedGF256Rows() !=
+                wirehair_v2::kMixedGF256Rows ||
+            wirehair_v2::ActiveMixedGF16Rows() !=
+                wirehair_v2::kMixedGF16Rows ||
+            wirehair_v2::ActiveMixedCoefficientGeometry() !=
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX ||
+            wirehair_v2::ActiveMixedResidueSchedule() !=
+                wirehair_v2::MixedResidueSchedule::Constant ||
+            wirehair_v2::ActiveMixedResidueSkew() != 0u ||
+            wirehair_v2::ActiveMixedGroupedGF256Rows() != 0u ||
+            mixed_independent_extension_residues ||
+            mixed_mix_count != wirehair_v2::kCertifiedPacketMixCount ||
+            packet_row_seed_multiplier != 1u ||
+            packet_row_seed_avalanche)
+        {
+            std::fprintf(stderr,
+                "compare dispatch-v1 target did not resolve to canonical "
+                "P244 frozen 10+2/mix3 packet equations\n");
+            return 1;
+        }
+        wirehair_v2::SeedProfile raw_profile;
+        if (!wirehair_v2::MakeRawContractProfile(
+                *target_contract, nlo, (uint32_t)block_bytes_list[0],
+                construction_seed, raw_profile))
+        {
+            std::fprintf(stderr,
+                "compare could not expand dispatch-v1 target profile\n");
+            return 1;
+        }
+        const wirehair_v2::MessagePrecodeEncoderOptions target_options =
+            wirehair_v2::MessageOptionsForContract(*target_contract);
+        wirehair_v2::PrecodeParams target_params;
+        wirehair_v2::PacketRowConfig target_packet;
+        double target_mean = 0.0;
+        if (!wirehair_v2::ResolveMessagePrecodeConfiguration(
+                raw_profile, target_options, target_params, target_packet) ||
+            !ResolveTargetStaircaseMean(target_params, target_mean) ||
+            target_packet.PeelSeed != raw_profile.V2PacketPeelSeed ||
+            target_packet.MixCount != raw_profile.V2RecoveryMixCount)
+        {
+            std::fprintf(stderr,
+                "compare could not resolve dispatch-v1 target metadata\n");
+            return 1;
+        }
+        const wirehair::EnvironmentValue peel_value(
+            "WIREHAIR_V2_PEEL_DEGREES");
+        const char* peel_spec = peel_value.Get();
+        std::string staircase_scale;
+        if (!ResolveTargetStaircaseScaleReceipt(staircase_scale))
+        {
+            std::fprintf(stderr,
+                "compare could not canonicalize dispatch-v1 target "
+                "staircase scale\n");
+            return 1;
+        }
+        const std::string pmf_digest = Sha256Hex(
+            peel_spec && *peel_spec ? peel_spec : "stock");
+        const std::string contract_digest =
+            Sha256Hex(target_contract->CanonicalName);
+        std::printf(
+            "# wh2_target,profile=%s,contract_id=%016llx,"
+            "contract_sha256=%s,precode_contract=%u,packet_contract=%u,"
+            "architecture=smallband100-d4,seed_policy=raw-uniform-v1,"
+            "attempt_policy=single,seed_attempt=0,seed_tables=none,"
+            "fixups=none,N=%u,bb=%u,staircase=%u,dense_rows=%u,"
+            "heavy_rows=%u,completion=mixed,gf256_rows=%u,gf16_rows=%u,"
+            "period=%u,geometry=%s,residue_schedule=%s,residue_skew=%u,"
+            "grouped_gf256_rows=%u,independent_extension=%u,"
+            "source_hits=%u,target_mean=%.17g,heavy_family=periodic,"
+            "dense_identity_corner=0,dense_two_anchor=0,mix_count=%u,"
+            "packet_seed_multiplier=1,packet_seed_avalanche=0,"
+            "packet_peel_seed=%u,construction_seed=0x%llx,"
+            "loss=iid-drop,loss_rate=%.17g,loss_seed=0x%llx,"
+            "schedule=%s,loss_trace=common-id-v2,pmf_sha256=%s,"
+            "pmf_encoding=wirehair-v2-peel-spec-v1,staircase_scale=%s\n",
+            target_contract->Name,
+            (unsigned long long)target_contract->ProfileId,
+            contract_digest.c_str(),
+            raw_profile.V2PrecodeContractVersion,
+            raw_profile.V2PacketRowContractVersion,
+            nlo,
+            (uint32_t)block_bytes_list[0],
+            raw_profile.V2StaircaseCount,
+            raw_profile.V2DenseRowCount,
+            raw_profile.V2HeavyRowCount,
+            wirehair_v2::ActiveMixedGF256Rows(),
+            wirehair_v2::ActiveMixedGF16Rows(),
+            wirehair_v2::ActiveMixedCoefficientPeriod(),
+            MixedCoefficientGeometryName(
+                wirehair_v2::ActiveMixedCoefficientGeometry()),
+            MixedResidueScheduleName(
+                wirehair_v2::ActiveMixedResidueSchedule()),
+            wirehair_v2::ActiveMixedResidueSkew(),
+            wirehair_v2::ActiveMixedGroupedGF256Rows(),
+            mixed_independent_extension_residues ? 1u : 0u,
+            raw_profile.V2SourceHits,
+            target_mean,
+            raw_profile.V2RecoveryMixCount,
+            raw_profile.V2PacketPeelSeed,
+            (unsigned long long)construction_seed,
+            loss,
+            (unsigned long long)seed,
+            PacketScheduleName(schedule_kind),
+            pmf_digest.c_str(),
+            staircase_scale.c_str());
+    }
+
     std::printf(
         "# compare: N=[%u,%u] trials/bb=%u loss=%.17g seed=0x%llx "
         "max_message_mib=%u v2_profile=%s peel_candidates=%u peel_trials=%u "
@@ -2770,7 +3228,9 @@ int CmdCompare(int argc, char** argv)
                         completion ==
                                 wirehair_v2::CompletionField::MixedGF256GF16 ?
                             mixed_mix_count :
-                            wirehair_v2::kCertifiedPacketMixCount);
+                            wirehair_v2::kCertifiedPacketMixCount,
+                        target_contract,
+                        construction_seed);
                 }
                 if (include_precode_cache) {
                     cache_result = RunV2PrecodeTrial(
@@ -2780,7 +3240,9 @@ int CmdCompare(int argc, char** argv)
                         completion ==
                                 wirehair_v2::CompletionField::MixedGF256GF16 ?
                             mixed_mix_count :
-                            wirehair_v2::kCertifiedPacketMixCount);
+                            wirehair_v2::kCertifiedPacketMixCount,
+                        nullptr,
+                        0u);
                 }
             };
             const bool mixed_first =
@@ -2921,7 +3383,9 @@ int CmdCompare(int argc, char** argv)
             PrintAccum("v2_precode", block_bytes, certified_precode);
         }
         if (include_precode && include_mixed) {
-            PrintAccum("v2_mixed", block_bytes, mixed_precode);
+            PrintAccum(
+                target_contract ? "v2_target" : "v2_mixed",
+                block_bytes, mixed_precode);
         }
         if (include_precode_cache && include_certified) {
             PrintAccum(
@@ -5075,6 +5539,8 @@ bool IsLowerHexSha256(const std::string& text)
     return true;
 }
 
+#endif // test hooks && !WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT
+
 uint32_t Sha256RotateRight(uint32_t value, uint32_t shift)
 {
     return (value >> shift) | (value << (32u - shift));
@@ -5156,6 +5622,9 @@ std::string Sha256Hex(const std::string& input)
     for (uint32_t value : state) output << std::setw(8) << value;
     return output.str();
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    !defined(WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT)
 
 bool ReadBoundedFile(
     const std::string& path,
@@ -7720,6 +8189,7 @@ int CmdPrecodeFail(int argc, char** argv)
     // width that selects the seed profile and the loss stream.  Unset keeps
     // the completion field's own default; see solve_block_bytes below.
     uint32_t solve_block_bytes_option = kSolveBlockBytesUnset;
+    bool solve_block_bytes_explicit = false;
     bool payload_e2e = false;
     bool full_payload_solve = false;
     uint32_t trials = 100u;
@@ -7727,6 +8197,11 @@ int CmdPrecodeFail(int argc, char** argv)
     double loss = 0.10;
     uint64_t seed = UINT64_C(0x5eedf411);
     PacketScheduleKind schedule_kind = PacketScheduleKind::Iid;
+    bool nlist_explicit = false;
+    bool bb_list_explicit = false;
+    bool overhead_list_explicit = false;
+    bool trials_explicit = false;
+    bool threads_explicit = false;
     bool mixed_residue_hash_keyed = false;
     bool mixed_independent_extension_residues = false;
     uint32_t mixed_extension_residue_seed_xor = 78u;
@@ -7750,8 +8225,23 @@ int CmdPrecodeFail(int argc, char** argv)
         wirehair_v2::DenseAnchorLayout::Disabled;
     bool dense_identity_corner = false;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const wirehair_v2::V2EquationContract* target_contract = nullptr;
+    bool target_profile_explicit = false;
+    bool raw_seed_policy = false;
+    bool seed_policy_explicit = false;
+    bool loss_seed_explicit = false;
+    bool legacy_seed_explicit = false;
+    bool loss_explicit = false;
+    bool schedule_explicit = false;
+    bool completion_explicit = false;
+    bool heavy_family_explicit = false;
+    bool mix_count_explicit = false;
+    bool legacy_dispatch_profile_explicit = false;
+    bool odd_packet_peel_seed_xor_explicit = false;
+    bool packet_row_seed_multiplier_explicit = false;
     bool mixed_null_witness_internal_error = false;
     uint32_t fail_thread_launch_after = UINT32_MAX;
+    bool fail_thread_launch_after_explicit = false;
     bool source_hits_explicit = false;
     bool staircase_rows_explicit = false;
     bool binary_dense_rows_explicit = false;
@@ -7792,24 +8282,30 @@ int CmdPrecodeFail(int argc, char** argv)
     bool construction_seed_explicit = false;
     bool overhead_early_stop = false;
     uint32_t encode_timing_reps = 0u;
+    bool encode_timing_explicit = false;
     // Tiny mixed fast-path override: 0 automatic gate, -1 force the general
     // machinery, +1 force the dense scalar path.  Equation-preserving, so
     // this is a timing/A-B control only.
     int tiny_fastpath_mode = 0;
+    bool tiny_fastpath_explicit = false;
     // Exact-overhead ladder: per-K overhead levels 0..min(cap, ladder_min)
     // densely, then v += ceil(v/2) geometric steps to the cap
     // max(ladder_min, ceil(ladder_pct% * K)).  With ascending early stop the
     // first-success level is an exact extra count in the dense range and a
     // bracketing upper bound in the geometric range.
     uint32_t overhead_ladder_pct = 0u;
+    bool overhead_ladder_pct_explicit = false;
     uint32_t overhead_ladder_min = 8u;
     bool overhead_ladder_min_explicit = false;
     bool overhead_explicit = false;
     // Equal-block-bytes timing override so cross-completion envelopes are
     // measured at one payload width (e.g. certified at two bytes).
     uint32_t encode_timing_bytes = 0u;
-    // K-dispatched composite profile (versioned constant band map; never
-    // per-K tuning).  v1, from the 2026-07-23 fast-path envelope
+    bool encode_timing_bytes_explicit = false;
+    // Legacy K-dispatched layout selector (constant band map; never per-K
+    // tuning).  This is NOT an equation contract: unlike --target-profile,
+    // it may still use profile-derived seeds/retries or an explicitly supplied
+    // raw construction seed.  v1, from the 2026-07-23 fast-path envelope
     // re-measure at equal two-byte blocks over K=2..4096 plus the quiet
     // regional screen above: the former three regimes collapse to ONE
     // band, [2,64000] -> mixed frozen P244 10+2 with four binary dense
@@ -7824,13 +8320,18 @@ int CmdPrecodeFail(int argc, char** argv)
     {
         const char* value = nullptr;
         if (!std::strcmp(argv[i], "--N")) {
-            if (!TakeArg("precodefail", "--N", argc, argv, i, value)) {
+            if (!AcceptOptionOnce(
+                    "precodefail", "--N", nlist_explicit) ||
+                !TakeArg("precodefail", "--N", argc, argv, i, value))
+            {
                 return 1;
             }
             nlist = value;
         }
         else if (!std::strcmp(argv[i], "--bb-list")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--bb-list", bb_list_explicit) ||
+                !TakeArg(
                     "precodefail", "--bb-list", argc, argv, i, value))
             {
                 return 1;
@@ -7838,7 +8339,9 @@ int CmdPrecodeFail(int argc, char** argv)
             bb_list = value;
         }
         else if (!std::strcmp(argv[i], "--overhead")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--overhead", overhead_list_explicit) ||
+                !TakeArg(
                     "precodefail", "--overhead", argc, argv, i, value))
             {
                 return 1;
@@ -7855,6 +8358,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             heavy_family_list = value;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            heavy_family_explicit = true;
+#endif
         }
         else if (!std::strcmp(argv[i], "--mix-count")) {
             if (!TakeArg(
@@ -7863,6 +8369,9 @@ int CmdPrecodeFail(int argc, char** argv)
                 return 1;
             }
             mix_count_list = value;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            mix_count_explicit = true;
+#endif
         }
         else if (!std::strcmp(argv[i], "--completion")) {
             if (!TakeArg(
@@ -7878,9 +8387,15 @@ int CmdPrecodeFail(int argc, char** argv)
                     value);
                 return 1;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            completion_explicit = true;
+#endif
         }
         else if (!std::strcmp(argv[i], "--solve-block-bytes")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--solve-block-bytes",
+                    solve_block_bytes_explicit) ||
+                !TakeArg(
                     "precodefail", "--solve-block-bytes", argc, argv, i,
                     value) ||
                 !ParseSolveBlockBytesArg(
@@ -7893,7 +8408,9 @@ int CmdPrecodeFail(int argc, char** argv)
             payload_e2e = true;
         }
         else if (!std::strcmp(argv[i], "--trials")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--trials", trials_explicit) ||
+                !TakeArg(
                     "precodefail", "--trials", argc, argv, i, value) ||
                 !ParseU32Arg("--trials", value, trials))
             {
@@ -7901,7 +8418,9 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--threads")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--threads", threads_explicit) ||
+                !TakeArg(
                     "precodefail", "--threads", argc, argv, i, value) ||
                 !ParseU32Arg("--threads", value, threads))
             {
@@ -7909,12 +8428,22 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--loss")) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (loss_explicit)
+            {
+                std::fprintf(stderr, "precodefail duplicate --loss\n");
+                return 1;
+            }
+#endif
             if (!TakeArg(
                     "precodefail", "--loss", argc, argv, i, value) ||
                 !ParseDoubleArg("--loss", value, loss))
             {
                 return 1;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            loss_explicit = true;
+#endif
         }
         else if (!std::strcmp(argv[i], "--seed")) {
             if (!TakeArg(
@@ -7923,8 +8452,36 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            legacy_seed_explicit = true;
+#endif
         }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        else if (!std::strcmp(argv[i], "--loss-seed")) {
+            if (loss_seed_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail duplicate --loss-seed\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--loss-seed", argc, argv, i, value) ||
+                !ParseU64Arg("--loss-seed", value, seed))
+            {
+                return 1;
+            }
+            loss_seed_explicit = true;
+        }
+#endif
         else if (!std::strcmp(argv[i], "--schedule")) {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (schedule_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail duplicate --schedule\n");
+                return 1;
+            }
+#endif
             if (!TakeArg(
                     "precodefail", "--schedule", argc, argv, i, value) ||
                 !ParsePacketSchedule(value, schedule_kind))
@@ -7936,6 +8493,9 @@ int CmdPrecodeFail(int argc, char** argv)
                     value ? value : "");
                 return 1;
             }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            schedule_explicit = true;
+#endif
         }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         else if (!std::strcmp(argv[i], "--full-payload-solve")) {
@@ -8088,6 +8648,7 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+            odd_packet_peel_seed_xor_explicit = true;
         }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-multiplier"))
@@ -8101,6 +8662,7 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+            packet_row_seed_multiplier_explicit = true;
         }
         else if (!std::strcmp(
                      argv[i], "--packet-row-seed-avalanche"))
@@ -8281,8 +8843,15 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
+            fail_thread_launch_after_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (construction_seed_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail duplicate --construction-seed\n");
+                return 1;
+            }
             if (!TakeArg(
                     "precodefail", "--construction-seed",
                     argc, argv, i, value) ||
@@ -8297,7 +8866,10 @@ int CmdPrecodeFail(int argc, char** argv)
             overhead_early_stop = true;
         }
         else if (!std::strcmp(argv[i], "--encode-timing")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--encode-timing",
+                    encode_timing_explicit) ||
+                !TakeArg(
                     "precodefail", "--encode-timing",
                     argc, argv, i, value) ||
                 !ParseU32Arg(
@@ -8328,6 +8900,7 @@ int CmdPrecodeFail(int argc, char** argv)
                     "off\n");
                 return 1;
             }
+            tiny_fastpath_explicit = true;
         }
         else if (!std::strcmp(argv[i], "--dispatch-profile")) {
             if (!TakeArg(
@@ -8343,10 +8916,64 @@ int CmdPrecodeFail(int argc, char** argv)
                     "(expected v1)\n", value);
                 return 1;
             }
+            legacy_dispatch_profile_explicit = true;
             dispatch_profile_v1 = true;
         }
-        else if (!std::strcmp(argv[i], "--encode-timing-bytes")) {
+        else if (!std::strcmp(argv[i], "--target-profile")) {
+            if (target_profile_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail duplicate --target-profile\n");
+                return 1;
+            }
             if (!TakeArg(
+                    "precodefail", "--target-profile",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            target_profile_explicit = true;
+            target_contract = wirehair_v2::FindV2EquationContract(value);
+            if (!target_contract || target_contract->PublicProfile ||
+                target_contract->ProfileId !=
+                    wirehair_v2::kWh2DispatchV1ContractId)
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown benchmark --target-profile %s "
+                    "(expected dispatch-v1)\n",
+                    value);
+                return 1;
+            }
+            dispatch_profile_v1 = true;
+        }
+        else if (!std::strcmp(argv[i], "--seed-policy")) {
+            if (seed_policy_explicit)
+            {
+                std::fprintf(stderr,
+                    "precodefail duplicate --seed-policy\n");
+                return 1;
+            }
+            if (!TakeArg(
+                    "precodefail", "--seed-policy",
+                    argc, argv, i, value))
+            {
+                return 1;
+            }
+            seed_policy_explicit = true;
+            raw_seed_policy = std::strcmp(value, "raw") == 0;
+            if (!raw_seed_policy)
+            {
+                std::fprintf(stderr,
+                    "precodefail unknown --seed-policy %s (expected raw)\n",
+                    value);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--encode-timing-bytes")) {
+            if (!AcceptOptionOnce(
+                    "precodefail", "--encode-timing-bytes",
+                    encode_timing_bytes_explicit) ||
+                !TakeArg(
                     "precodefail", "--encode-timing-bytes",
                     argc, argv, i, value) ||
                 !ParseU32Arg(
@@ -8356,7 +8983,10 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--overhead-ladder-pct")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--overhead-ladder-pct",
+                    overhead_ladder_pct_explicit) ||
+                !TakeArg(
                     "precodefail", "--overhead-ladder-pct",
                     argc, argv, i, value) ||
                 !ParseU32Arg(
@@ -8366,7 +8996,10 @@ int CmdPrecodeFail(int argc, char** argv)
             }
         }
         else if (!std::strcmp(argv[i], "--overhead-ladder-min")) {
-            if (!TakeArg(
+            if (!AcceptOptionOnce(
+                    "precodefail", "--overhead-ladder-min",
+                    overhead_ladder_min_explicit) ||
+                !TakeArg(
                     "precodefail", "--overhead-ladder-min",
                     argc, argv, i, value) ||
                 !ParseU32Arg(
@@ -8374,7 +9007,6 @@ int CmdPrecodeFail(int argc, char** argv)
             {
                 return 1;
             }
-            overhead_ladder_min_explicit = true;
         }
 #endif
         else if (!UnknownArg("precodefail", argv[i])) {
@@ -8393,6 +9025,111 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail requires non-empty integer lists\n");
         return 1;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (legacy_seed_explicit && loss_seed_explicit)
+    {
+        std::fprintf(stderr,
+            "precodefail --seed and --loss-seed are mutually exclusive\n");
+        return 1;
+    }
+    const bool target_protocol_requested =
+        target_profile_explicit || seed_policy_explicit ||
+        loss_seed_explicit;
+    if (target_protocol_requested)
+    {
+        const bool equation_override =
+            legacy_dispatch_profile_explicit ||
+            completion_explicit || heavy_family_explicit ||
+            mix_count_explicit || source_hits_explicit ||
+            staircase_rows_explicit || binary_dense_rows_explicit ||
+            binary_dense_two_anchor || binary_dense_two_anchor_phase_explicit ||
+            binary_dense_segmented_anchors_explicit ||
+            degree_balanced_staircase || dense_identity_corner ||
+            gf256_heavy_rows_explicit || packet_peel_seed_xor_explicit ||
+            packet_peel_seed_table != PacketPeelSeedTable::None ||
+            odd_packet_peel_seed_xor_explicit ||
+            packet_row_seed_multiplier_explicit ||
+            packet_row_seed_avalanche || seed_block_bytes_explicit ||
+            mixed_period_explicit || mixed_geometry_explicit ||
+            mixed_gf256_rows_explicit ||
+            mixed_grouped_gf256_rows_explicit ||
+            mixed_grouped_gf256_row_mask_explicit ||
+            mixed_gf16_rows_explicit ||
+            mixed_residue_skew_explicit ||
+            mixed_residue_schedule_explicit ||
+            mixed_residue_hash_seed_explicit ||
+            mixed_residue_hash_keyed ||
+            mixed_independent_extension_residues ||
+            mixed_extension_residue_seed_xor_explicit ||
+            mixed_residue_bucket_mode_explicit;
+        const bool implementation_override =
+            tiny_fastpath_explicit || fail_thread_launch_after_explicit;
+        if (!target_contract || !target_profile_explicit ||
+            !seed_policy_explicit || !raw_seed_policy ||
+            !construction_seed_explicit || !loss_seed_explicit ||
+            !loss_explicit || !schedule_explicit || legacy_seed_explicit ||
+            !nlist_explicit || !bb_list_explicit ||
+            Ns.size() != 1u || BBs.size() != 1u ||
+            equation_override || implementation_override)
+        {
+            std::fprintf(stderr,
+                "precodefail target mode requires --target-profile "
+                "dispatch-v1 --seed-policy raw --construction-seed, "
+                "exactly one explicit --N and --bb-list, --loss, "
+                "--loss-seed, and --schedule; every individual equation/"
+                "seed-table/implementation override is forbidden\n");
+            return 1;
+        }
+        if (!ValidateTargetExperimentEnvironment("precodefail")) {
+            return 1;
+        }
+        if (schedule_kind != PacketScheduleKind::Iid)
+        {
+            std::fprintf(stderr,
+                "precodefail dispatch-v1 target currently supports only "
+                "--schedule iid; other loss models need a versioned "
+                "receipt\n");
+            return 1;
+        }
+    }
+    if (dispatch_profile_v1)
+    {
+        const bool dispatch_override =
+            completion_explicit || binary_dense_rows_explicit ||
+            dense_identity_corner || binary_dense_two_anchor ||
+            binary_dense_two_anchor_phase_explicit ||
+            binary_dense_segmented_anchors_explicit ||
+            degree_balanced_staircase || gf256_heavy_rows_explicit ||
+            mixed_period_explicit || mixed_geometry_explicit ||
+            mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
+            source_hits_explicit || staircase_rows_explicit ||
+            packet_peel_seed_xor_explicit ||
+            packet_peel_seed_table != PacketPeelSeedTable::None ||
+            odd_packet_peel_seed_xor_explicit ||
+            packet_row_seed_multiplier_explicit ||
+            packet_row_seed_avalanche || seed_block_bytes_explicit ||
+            mixed_grouped_gf256_rows_explicit ||
+            mixed_grouped_gf256_row_mask_explicit ||
+            mixed_residue_skew_explicit ||
+            mixed_residue_schedule_explicit ||
+            mixed_residue_hash_seed_explicit ||
+            mixed_residue_hash_keyed ||
+            mixed_independent_extension_residues ||
+            mixed_extension_residue_seed_xor_explicit ||
+            mixed_residue_bucket_mode_explicit ||
+            heavy_family_explicit || mix_count_explicit;
+        if (dispatch_override)
+        {
+            std::fprintf(stderr,
+                "precodefail legacy dispatch layout v1 supplies the complete "
+                "band and "
+                "packet configuration; explicit equation knobs conflict\n");
+            return 1;
+        }
+        completion = PrecodeFailCompletion::Mixed;
+        binary_dense_rows_override = 4u;
+    }
+#endif
     // --full-payload-solve is the option whose entire job is to set the solve
     // width, to the payload width bb.  Naming a solve width as well asks for
     // two different widths at once, so it is a hard error rather than a
@@ -8794,28 +9531,11 @@ int CmdPrecodeFail(int argc, char** argv)
             "precodefail --encode-timing must be in [0,99]\n");
         return 1;
     }
-    if (dispatch_profile_v1)
+    if (legacy_dispatch_profile_explicit)
     {
-        if (binary_dense_rows_explicit || dense_identity_corner ||
-            binary_dense_two_anchor ||
-            binary_dense_segmented_anchors_explicit ||
-            degree_balanced_staircase || gf256_heavy_rows_explicit ||
-            mixed_period_explicit || mixed_geometry_explicit ||
-            mixed_gf256_rows_explicit || mixed_gf16_rows_explicit ||
-            completion == PrecodeFailCompletion::Mixed)
-        {
-            std::fprintf(stderr,
-                "precodefail --dispatch-profile supplies the complete "
-                "band configuration; it conflicts with explicit "
-                "completion/dense/heavy/mixed knobs\n");
-            return 1;
-        }
-        // v1 single band: [2,64000] -> mixed frozen P244 10+2, four
-        // binary dense rows, mix count from the CLI default.
-        completion = PrecodeFailCompletion::Mixed;
-        binary_dense_rows_override = 4u;
         std::printf(
-            "# dispatch_profile: name=v1 bands=1 "
+            "# dispatch_profile: name=legacy-layout-v1 "
+            "contract_id=none identity=layout-only-unversioned bands=1 "
             "band0=k[2,64000]:mixed-p244-frozen-10x2-d4\n");
     }
     if (encode_timing_bytes != 0u &&
@@ -8872,7 +9592,8 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s%s\n",
+            "overhead_stream=%s loss_trace=precodefail-cell-v1 "
+            "full_payload_solve=%u schedule=%s%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             source_hits_override,
             packet_peel_seed_xor,
@@ -8919,7 +9640,8 @@ int CmdPrecodeFail(int argc, char** argv)
             "odd_packet_peel_seed_xor=0x%x "
             "packet_row_seed_multiplier=0x%x "
             "packet_row_seed_avalanche=%u seed_block_bytes_override=%u "
-            "overhead_stream=%s full_payload_solve=%u schedule=%s%s%s%s\n",
+            "overhead_stream=%s loss_trace=precodefail-cell-v1 "
+            "full_payload_solve=%u schedule=%s%s%s%s\n",
             trials, threads, loss, (unsigned long long)seed,
             PrecodeFailCompletionName(completion),
             wirehair_v2::ActiveMixedCoefficientPeriod(),
@@ -9093,8 +9815,21 @@ int CmdPrecodeFail(int argc, char** argv)
             return 1;
         }
 #endif
-        const wirehair_v2::SeedProfile profile =
-            wirehair_v2::SelectSeedProfile(K, bb);
+        wirehair_v2::SeedProfile profile;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        if (target_contract)
+        {
+            // Raw target cells bind both construction seeds directly.  Do
+            // not even consult the legacy per-K seed/fixup tables while
+            // constructing their otherwise dimension-only profile.
+            profile.BlockCount = K;
+            profile.BlockBytes = bb;
+        }
+        else
+#endif
+        {
+            profile = wirehair_v2::SelectSeedProfile(K, bb);
+        }
         // Research graph portability without changing the payload width used
         // by E2E validation, loss-stream pairing, or full-payload solving.
         const wirehair_v2::SeedProfile seed_profile =
@@ -9113,8 +9848,8 @@ int CmdPrecodeFail(int argc, char** argv)
             // with no per-K profile-derived component in either the matrix
             // seed or the packet peel seed.
             matrix_seed = construction_seed;
-            packet_peel_seed = (uint32_t)construction_seed ^
-                (uint32_t)(construction_seed >> 32);
+            packet_peel_seed =
+                wirehair_v2::RawUniformPacketPeelSeed(construction_seed);
         }
 #endif
         const wirehair_v2::PrecodeParams canonical_params =
@@ -9152,6 +9887,94 @@ int CmdPrecodeFail(int argc, char** argv)
                 base_params.HeavyRows = gf256_heavy_rows_override;
             }
             base_params.HeavyFamily = heavy_family;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (target_contract)
+            {
+                const wirehair::EnvironmentValue peel_value(
+                    "WIREHAIR_V2_PEEL_DEGREES");
+                const char* peel_spec = peel_value.Get();
+                std::string staircase_scale;
+                if (!ResolveTargetStaircaseScaleReceipt(staircase_scale))
+                {
+                    std::fprintf(stderr,
+                        "precodefail could not canonicalize dispatch-v1 "
+                        "target staircase scale\n");
+                    return 1;
+                }
+                const std::string pmf_digest = Sha256Hex(
+                    peel_spec && *peel_spec ? peel_spec : "stock");
+                const std::string contract_digest =
+                    Sha256Hex(target_contract->CanonicalName);
+                double target_mean = 0.0;
+                if (!ResolveTargetStaircaseMean(
+                        base_params, target_mean))
+                {
+                    std::fprintf(stderr,
+                        "precodefail could not resolve dispatch-v1 target "
+                        "metadata\n");
+                    return 1;
+                }
+                std::printf(
+                    "# wh2_target,profile=%s,contract_id=%016llx,"
+                    "contract_sha256=%s,precode_contract=%u,"
+                    "packet_contract=%u,architecture=smallband100-d4,"
+                    "seed_policy=raw-uniform-v1,attempt_policy=single,"
+                    "seed_attempt=0,seed_tables=none,fixups=none,"
+                    "N=%u,bb=%u,staircase=%u,dense_rows=%u,"
+                    "heavy_rows=%u,completion=mixed,gf256_rows=%u,"
+                    "gf16_rows=%u,period=%u,geometry=%s,"
+                    "residue_schedule=%s,residue_skew=%u,"
+                    "grouped_gf256_rows=%u,independent_extension=%u,"
+                    "source_hits=%u,target_mean=%.17g,heavy_family=%s,"
+                    "dense_identity_corner=%u,dense_two_anchor=%u,"
+                    "mix_count=%u,packet_seed_multiplier=%u,"
+                    "packet_seed_avalanche=%u,packet_peel_seed=%u,"
+                    "construction_seed=0x%llx,loss=iid-drop,"
+                    "loss_rate=%.17g,loss_seed=0x%llx,schedule=%s,"
+                    "loss_trace=precodefail-cell-v1,"
+                    "overhead_stream=%s,pmf_sha256=%s,"
+                    "pmf_encoding=wirehair-v2-peel-spec-v1,"
+                    "staircase_scale=%s\n",
+                    target_contract->Name,
+                    (unsigned long long)target_contract->ProfileId,
+                    contract_digest.c_str(),
+                    wirehair_v2::PrecodeContractVersion(
+                        target_contract->Completion,
+                        target_contract->AdaptiveDenseTwoAnchor,
+                        target_contract->Architecture),
+                    wirehair_v2::kPacketRowContractVersion,
+                    K, bb,
+                    base_params.Staircase,
+                    base_params.DenseRows,
+                    base_params.HeavyRows,
+                    wirehair_v2::ActiveMixedGF256Rows(),
+                    wirehair_v2::ActiveMixedGF16Rows(),
+                    wirehair_v2::ActiveMixedCoefficientPeriod(),
+                    MixedCoefficientGeometryName(
+                        wirehair_v2::ActiveMixedCoefficientGeometry()),
+                    MixedResidueScheduleName(
+                        wirehair_v2::ActiveMixedResidueSchedule()),
+                    wirehair_v2::ActiveMixedResidueSkew(),
+                    wirehair_v2::ActiveMixedGroupedGF256Rows(),
+                    mixed_independent_extension_residues ? 1u : 0u,
+                    base_params.SourceHits,
+                    target_mean,
+                    HeavyFamilyName(base_params.HeavyFamily),
+                    base_params.DenseIdentityCorner ? 1u : 0u,
+                    base_params.DenseTwoAnchor ? 1u : 0u,
+                    base_config.MixCount,
+                    packet_row_seed_multiplier,
+                    packet_row_seed_avalanche ? 1u : 0u,
+                    base_config.PeelSeed,
+                    (unsigned long long)construction_seed,
+                    loss,
+                    (unsigned long long)seed,
+                    PacketScheduleName(schedule_kind),
+                    paired_overhead_stream ? "paired" : "salted",
+                    pmf_digest.c_str(),
+                    staircase_scale.c_str());
+            }
+#endif
             wirehair_v2::PrecodeSystem system;
             wirehair_v2::PacketRowConfig config;
             uint32_t seed_attempt = 0u;
@@ -10576,6 +11399,8 @@ int CmdPeelPmf(int argc, char** argv)
 {
     uint32_t block_count = 0u;
     bool have_block_count = false;
+    const wirehair_v2::V2EquationContract* target_contract = nullptr;
+    bool have_target_profile = false;
     for (int i = 0; i < argc; ++i)
     {
         const char* value = nullptr;
@@ -10592,6 +11417,29 @@ int CmdPeelPmf(int argc, char** argv)
             }
             have_block_count = true;
         }
+        else if (!std::strcmp(argv[i], "--target-profile"))
+        {
+            if (have_target_profile ||
+                !TakeArg(
+                    "peelpmf", "--target-profile", argc, argv, i, value))
+            {
+                std::fprintf(stderr,
+                    "peelpmf: --target-profile may appear only once\n");
+                return 1;
+            }
+            have_target_profile = true;
+            target_contract = wirehair_v2::FindV2EquationContract(value);
+            if (!target_contract || target_contract->PublicProfile ||
+                target_contract->ProfileId !=
+                    wirehair_v2::kWh2DispatchV1ContractId)
+            {
+                std::fprintf(stderr,
+                    "peelpmf unknown benchmark --target-profile '%s' "
+                    "(expected dispatch-v1)\n",
+                    value);
+                return 1;
+            }
+        }
         else {
             UnknownArg("peelpmf", argv[i]);
             return 1;
@@ -10602,30 +11450,97 @@ int CmdPeelPmf(int argc, char** argv)
         std::fprintf(stderr, "peelpmf --N must be in [2,64000]\n");
         return 1;
     }
+    if (!have_target_profile || !target_contract)
+    {
+        std::fprintf(stderr,
+            "peelpmf requires --target-profile dispatch-v1\n");
+        return 1;
+    }
+    const wirehair::EnvironmentValue peel_value(
+        "WIREHAIR_V2_PEEL_DEGREES");
+    const wirehair::EnvironmentValue scale_value(
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE");
+    if (peel_value.IsSet() || scale_value.IsSet())
+    {
+        std::fprintf(stderr,
+            "peelpmf stock metadata forbids ambient peel PMF or staircase "
+            "scale overrides\n");
+        return 1;
+    }
+    if (!ValidateTargetExperimentEnvironment("peelpmf")) {
+        return 1;
+    }
 
     const std::vector<double>& pmf = StockPeelPmf(block_count);
     if (pmf.size() != kPeelMaxDegree + 1u) {
         std::fprintf(stderr, "peelpmf: native PMF has the wrong size\n");
         return 2;
     }
-    const wirehair_v2::PrecodeParams params =
-        wirehair_v2::MakeMixedParams(block_count, 0u);
-    wirehair_v2::StaircaseDegreeMixture mixture;
-    if (!wirehair_v2::MakeStaircaseDegreeMixture(params, mixture) ||
-        params.Staircase == 0u)
+    wirehair_v2::SeedProfile raw_profile;
+    const uint32_t metadata_block_bytes = 2u;
+    if (!wirehair_v2::MakeRawContractProfile(
+            *target_contract, block_count, metadata_block_bytes, 0u,
+            raw_profile))
     {
         std::fprintf(stderr,
-            "peelpmf: native mixed profile is invalid for N=%u\n",
+            "peelpmf: dispatch-v1 profile expansion failed for N=%u\n",
             block_count);
         return 2;
     }
-    const double shipped_mean =
-        (double)mixture.EdgeCount / (double)params.Staircase;
+    const wirehair_v2::MessagePrecodeEncoderOptions target_options =
+        wirehair_v2::MessageOptionsForContract(*target_contract);
+    wirehair_v2::PrecodeParams params;
+    wirehair_v2::PacketRowConfig packet;
+    double target_mean = 0.0;
+    if (!wirehair_v2::ResolveMessagePrecodeConfiguration(
+            raw_profile, target_options, params, packet) ||
+        !ResolveTargetStaircaseMean(params, target_mean) ||
+        packet.MixCount != target_contract->RecoveryMixCount)
+    {
+        std::fprintf(stderr,
+            "peelpmf: dispatch-v1 target is invalid for N=%u\n",
+            block_count);
+        return 2;
+    }
+    // The canonical stock token is also what target compare receipts hash.
+    // Candidate runs hash their exact comma-separated override specification.
+    const std::string pmf_digest = Sha256Hex("stock");
+    const std::string contract_digest =
+        Sha256Hex(target_contract->CanonicalName);
     std::printf(
-        "# peelpmf,N=%u,degrees=%u,staircase=%u,source_hits=%u,"
-        "shipped_mean=%.17g\n",
-        block_count, kPeelMaxDegree, params.Staircase, params.SourceHits,
-        shipped_mean);
+        "# peelpmf,N=%u,target_profile=%s,contract_id=%016llx,"
+        "contract_sha256=%s,precode_contract=%u,packet_contract=%u,"
+        "architecture=smallband100-d4,degrees=%u,staircase=%u,"
+        "dense_rows=%u,heavy_rows=%u,source_hits=%u,completion=mixed,"
+        "gf256_rows=%u,gf16_rows=%u,period=%u,geometry=%s,"
+        "residue_schedule=%s,residue_skew=%u,mix_count=%u,"
+        "target_mean=%.17g,pmf_sha256=%s,"
+        "pmf_encoding=wirehair-v2-peel-spec-v1\n",
+        block_count,
+        target_contract->Name,
+        (unsigned long long)target_contract->ProfileId,
+        contract_digest.c_str(),
+        wirehair_v2::PrecodeContractVersion(
+            target_contract->Completion,
+            target_contract->AdaptiveDenseTwoAnchor,
+            target_contract->Architecture),
+        wirehair_v2::kPacketRowContractVersion,
+        kPeelMaxDegree,
+        params.Staircase,
+        params.DenseRows,
+        params.HeavyRows,
+        params.SourceHits,
+        wirehair_v2::ActiveMixedGF256Rows(),
+        wirehair_v2::ActiveMixedGF16Rows(),
+        wirehair_v2::ActiveMixedCoefficientPeriod(),
+        MixedCoefficientGeometryName(
+            wirehair_v2::ActiveMixedCoefficientGeometry()),
+        MixedResidueScheduleName(
+            wirehair_v2::ActiveMixedResidueSchedule()),
+        wirehair_v2::ActiveMixedResidueSkew(),
+        target_contract->RecoveryMixCount,
+        target_mean,
+        pmf_digest.c_str());
     std::printf("degree,probability\n");
     for (uint32_t degree = 1u; degree <= kPeelMaxDegree; ++degree) {
         std::printf("%u,%.17g\n", degree, pmf[degree]);
@@ -11004,8 +11919,8 @@ struct PrecodeSweepRun
         // Untuned protocol: the construction seed is the matrix seed and the
         // packet peel seed folds its halves, with no per-K profile component.
         const uint64_t construction_seed = ConstructionSeed(cell);
-        const uint32_t packet_peel_seed = (uint32_t)construction_seed ^
-            (uint32_t)(construction_seed >> 32);
+        const uint32_t packet_peel_seed =
+            wirehair_v2::RawUniformPacketPeelSeed(construction_seed);
         wirehair_v2::PrecodeParams params =
             Completion == PrecodeFailCompletion::Mixed ?
                 wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :
@@ -12290,8 +13205,8 @@ struct PrecodeCostRun : PrecodeSweepRun
         PrecodeCostSample& out) const
     {
         const uint64_t construction_seed = ConstructionSeed(cell);
-        const uint32_t packet_peel_seed = (uint32_t)construction_seed ^
-            (uint32_t)(construction_seed >> 32);
+        const uint32_t packet_peel_seed =
+            wirehair_v2::RawUniformPacketPeelSeed(construction_seed);
         wirehair_v2::PrecodeParams params =
             Completion == PrecodeFailCompletion::Mixed ?
                 wirehair_v2::MakeMixedParams(BlockCount, construction_seed) :

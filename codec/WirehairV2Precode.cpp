@@ -933,6 +933,18 @@ bool ValidatePrecodeParams(const PrecodeParams& params)
 
 } // namespace
 
+bool IsCanonicalStableTargetStaircaseState()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return g_staircase_degrees_override.empty() &&
+        g_staircase_row_degrees_override.empty() &&
+        !StaircaseDegreesEnvironment().IsSet &&
+        !StaircaseRowDegreesEnvironment().IsSet;
+#else
+    return true;
+#endif
+}
+
 bool MakeStaircaseDegreeMixture(
     const PrecodeParams& params,
     StaircaseDegreeMixture& out)
@@ -1039,18 +1051,23 @@ uint32_t SmallBandStaircaseCount(uint32_t block_count)
     // degrade below it -- at K=100, S=26 fails 0.93% and S=12 fails 0.87%,
     // while S=8 fails 1.13% and S=4 fails 1.77%.  Sizing S at the knee keeps
     // reliability and drops ~11% of encode time.
-    uint32_t root = 1u;
-    while ((root + 1u) * (root + 1u) <= block_count) {
-        ++root;
+    // Compute floor(5*sqrt(K)/4) exactly without floating point.  For
+    // non-negative integers s,
+    //
+    //     s <= 5*sqrt(K)/4  iff  16*s*s <= 25*K.
+    //
+    // Start at the rule's minimum and advance to the largest satisfying s.
+    // This branch is limited to K <= 100, but use 64-bit products anyway so
+    // the arithmetic and its overflow safety are explicit and portable.
+    uint32_t staircase = 2u;
+    for (;;)
+    {
+        const uint64_t next = (uint64_t)staircase + 1u;
+        if (16u * next * next > 25u * (uint64_t)block_count) {
+            break;
+        }
+        ++staircase;
     }
-    // floor(1.25 * (root + K/root) / 2): one Newton refinement of the integer
-    // square root, scaled by 5/4, all in exact integer arithmetic so the rule
-    // is reproducible on every platform.  Only reached for K <= 100, so the
-    // 5*(K + root^2) product cannot overflow.  Gives S = 3 at K=8, 5 at
-    // K=16, 7 at K=32, 10 at K=64 and 12 at K=100.
-    const uint32_t scaled = (5u * (block_count + root * root)) /
-        (8u * root);
-    uint32_t staircase = scaled < 2u ? 2u : scaled;
     if (staircase > inherited) {
         staircase = inherited;
     }
@@ -2571,6 +2588,21 @@ uint32_t ActiveMixedGF256Rows()
 uint32_t ActiveMixedPackedCoefficientWords()
 {
     return (ActiveMixedGF256Rows() + ActiveMixedGF16Rows() + 3u) / 4u;
+}
+
+bool IsCanonicalMixedCompletionState()
+{
+    return
+        ActiveMixedCoefficientPeriod() == kMixedCoefficientPeriod &&
+        ActiveMixedGF256Rows() == kMixedGF256Rows &&
+        ActiveMixedGF16Rows() == kMixedGF16Rows &&
+        ActiveMixedCoefficientGeometry() ==
+            MixedCoefficientGeometry::FrozenPowerX &&
+        ActiveMixedResidueSchedule() == MixedResidueSchedule::Constant &&
+        ActiveMixedResidueSkew() == 0u &&
+        !ActiveMixedResiduesRotated() &&
+        !ActiveMixedIndependentExtensionResidues() &&
+        ActiveMixedGroupedGF256Rows() == 0u;
 }
 
 uint8_t HeavyCoefficientForParams(

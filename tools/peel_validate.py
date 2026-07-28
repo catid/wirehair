@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Validate a versioned peel table against the true shipped codec.
 
-Trained and shipped arms use one explicit paired seed per K, and every recovery
-metric emitted by the native benchmark is retained. Legacy unversioned tables
-are refused: their PMF source and measurement conditions cannot be replayed.
-The output is replaced atomically only after all requested K values succeed.
+Candidate and true shipped arms use explicit paired construction/loss seeds.
+The candidate replays its measured PMF and scale, while the shipped arm uses
+neither hook. Every recovery metric emitted by the native benchmark is
+retained. Legacy unversioned tables are refused: their PMF source and
+measurement conditions cannot be replayed. The output is replaced atomically
+only after all requested K values succeed.
 """
 import argparse
 import math
@@ -21,6 +23,7 @@ from peel_codec import (                                 # noqa: E402
     make_table_document,
     read_table_document_snapshot,
     stock_profile,
+    valid_loss_rate,
     verify_benchmark_identity,
     write_json_atomic,
 )
@@ -48,17 +51,24 @@ def main(argv=None):
     ap.add_argument("--table", required=True)
     ap.add_argument("--out", default=None, help="write the corrected table here")
     ap.add_argument("--trials", type=int, default=3000)
-    ap.add_argument("--bb", type=int, default=4096)
+    ap.add_argument("--bb", type=int, required=True)
     ap.add_argument("--kmax", type=int, default=10 ** 9)
     ap.add_argument("--margin", type=float, default=2.0,
                     help="percent goodput a trained point must beat shipped by")
-    ap.add_argument("--seed", type=int, default=1,
-                    help="base uint64 for domain-separated paired seeds")
+    ap.add_argument("--target-profile", required=True, choices=["dispatch-v1"])
+    ap.add_argument("--seed-policy", required=True, choices=["raw"])
+    ap.add_argument("--schedule", required=True, choices=["iid"])
+    ap.add_argument("--loss", type=float, required=True)
+    ap.add_argument("--construction-seed", type=int, required=True)
+    ap.add_argument("--loss-seed", type=int, required=True)
     a = ap.parse_args(argv)
     if (a.trials < 1 or a.bb < 1 or a.kmax < 2 or
             not math.isfinite(a.margin) or a.margin < 0.0 or
-            not 0 <= a.seed <= 0xffffffffffffffff):
-        ap.error("invalid trials, payload, K, margin, or uint64 seed")
+            not valid_loss_rate(a.loss) or
+            not 0 <= a.construction_seed <= 0xffffffffffffffff or
+            not 0 <= a.loss_seed <= 0xffffffffffffffff):
+        ap.error(
+            "invalid trials, payload, K, margin, loss, or uint64 seed")
     if a.out is not None:
         try:
             require_distinct_output(a.table, a.out)
@@ -92,26 +102,46 @@ def main(argv=None):
         v = table[k]
         try:
             scale = float(v["scale"])
-            native = stock_profile(a.bench, k)
+            native = stock_profile(
+                a.bench, k, target_profile=a.target_profile)
             if native.as_dict() != v["native"]:
                 raise MeasurementError(
                     "native peel profile does not match the search receipt")
-            paired_seed = derive_seed(
-                a.seed, "validation", k, a.trials, a.bb)
-            if v.get("reverted_to_shipped"):
-                # Preserve the semantic arm, not an identity vector routed
-                # through the test hook.
+            construction_seed = derive_seed(
+                a.construction_seed, "validation", k, a.trials, a.bb,
+                "construction")
+            loss_seed = derive_seed(
+                a.loss_seed, "validation", k, a.trials, a.bb, "loss")
+            exact = {
+                "native_profile": native,
+                "target_profile": a.target_profile,
+                "seed_policy": a.seed_policy,
+                "loss": a.loss,
+                "schedule": a.schedule,
+                "construction_seed": construction_seed,
+                "loss_seed": loss_seed,
+            }
+            source_mode = v["search_receipt"]["mode"]
+            source_is_shipped = source_mode == "shipped"
+            source_is_scale_only = source_mode == "scale-only"
+            if source_is_shipped:
                 tr = compare_probe(
-                    a.bench, k, a.trials, a.bb, seed=paired_seed)
+                    a.bench, k, a.trials, a.bb, **exact)
+            elif source_is_scale_only:
+                # A stock PMF with an active scale is a real candidate, not
+                # the shipped codec. Leave the peel hook unset and replay only
+                # its staircase scale.
+                tr = compare_probe(
+                    a.bench, k, a.trials, a.bb,
+                    degree_scale=scale, **exact)
             else:
                 tr = compare_probe(
                     a.bench, k, a.trials, a.bb,
                     peel_weights=v["peel_pmf"],
                     degree_scale=scale if scale >= 0.0 else None,
-                    seed=paired_seed)
+                    **exact)
             sh = compare_probe(
-                a.bench, k, a.trials, a.bb,
-                seed=paired_seed)  # no overrides: true shipped
+                a.bench, k, a.trials, a.bb, **exact)
             if tr.fail > 0 and sh.fail > 0:
                 raise MeasurementError(
                     "both trained and shipped validation arms failed recovery")
@@ -124,7 +154,7 @@ def main(argv=None):
         # Shipped is the safer default, so training must clear an explicit
         # margin rather than win a single noisy timing comparison.
         keep = (
-            not v.get("reverted_to_shipped") and
+            not source_is_shipped and
             tg > sg * (1.0 + a.margin / 100.0)
         )
         selected = tr if keep else sh
@@ -137,10 +167,12 @@ def main(argv=None):
             continue
         d = 100.0 * (tg - sg) / sg if sg > 0.0 else None
         validation_receipt = {
-            "verdict": "keep" if keep else "revert",
+            "verdict": "keep" if keep else "control",
             "margin_percent": a.margin,
             "trials": a.trials,
             "block_bytes": a.bb,
+            "scale": scale,
+            "trained_pmf_sha256": tr.target_receipt["pmf_sha256"],
             "trained_goodput": tg,
             "shipped_goodput": sg,
             "trained": tr.as_dict(),
@@ -191,7 +223,7 @@ def main(argv=None):
         v["gain_pct"] for v in fixed.values()
         if not v.get("reverted_to_shipped") and v["gain_pct"] is not None
     ]
-    print(f"\n  {wins} kept, {losses} reverted to shipped")
+    print(f"\n  {wins} kept, {losses} selected true shipped")
     if g:
         g.sort()
         print(f"  gains where kept: median {g[len(g)//2]:+.1f}%  "
@@ -211,7 +243,12 @@ def main(argv=None):
                 fixed,
                 generator="tools/peel_validate.py",
                 bench=a.bench,
-                base_seed=a.seed,
+                construction_seed_base=a.construction_seed,
+                loss_seed_base=a.loss_seed,
+                target_profile=a.target_profile,
+                seed_policy=a.seed_policy,
+                loss=a.loss,
+                schedule=a.schedule,
                 settings={
                     "source_table": os.path.realpath(a.table),
                     "source_table_sha256": source_table_sha256,
@@ -222,7 +259,10 @@ def main(argv=None):
                     "block_bytes": a.bb,
                     "kmax": a.kmax,
                     "margin_percent": a.margin,
-                    "loss": 0.10,
+                    "target_profile": a.target_profile,
+                    "seed_policy": a.seed_policy,
+                    "loss": a.loss,
+                    "schedule": a.schedule,
                 },
                 source_provenance={
                     "schema": source_document["schema"],

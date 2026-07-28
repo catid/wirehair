@@ -9,6 +9,33 @@ namespace wirehair_v2 {
 
 static const uint16_t kSeedTreeSubdivisions = 2048;
 
+/**
+    Versioned message-precode geometry selected by a named V2 profile.
+
+    DenseCount remains the legacy Wirehair-1 dense-row seed input.  It must
+    not be repurposed as the V2 staircase count: doing so would also change
+    MatrixSeedFromProfile() and the legacy facade's OverrideSeeds() inputs.
+*/
+enum class V2PrecodeArchitecture : uint32_t
+{
+    LegacyD12 = 0,
+    SmallBandD4 = 1
+};
+
+/// Construction-seed policy bound into an internal selected profile.
+enum class V2SeedDerivation : uint32_t
+{
+    ProfileDerived = 0,
+    RawUniform = 1
+};
+
+/// Raw-uniform-v1 packet-seed mapping frozen by dispatch-v1.
+inline uint32_t RawUniformPacketPeelSeed(uint64_t construction_seed)
+{
+    return (uint32_t)construction_seed ^
+        (uint32_t)(construction_seed >> 32);
+}
+
 struct SeedProfile
 {
     uint32_t BlockCount = 0;
@@ -24,6 +51,9 @@ struct SeedProfile
     uint32_t V2SeedAttempt = 0;
     uint32_t V2PrecodeContractVersion = 0;
     uint32_t V2PacketRowContractVersion = 0;
+    V2PrecodeArchitecture V2Architecture =
+        V2PrecodeArchitecture::LegacyD12;
+    V2SeedDerivation V2SeedPolicy = V2SeedDerivation::ProfileDerived;
     uint32_t V2StaircaseCount = 0;
     uint32_t V2DenseRowCount = 0;
     uint32_t V2HeavyRowCount = 0;

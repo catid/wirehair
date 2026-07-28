@@ -1,6 +1,7 @@
 #include <wirehair/wirehair.h>
 
 #include "WirehairV2Codec.h"
+#include "WirehairV2Contract.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Solve.h"
@@ -51,73 +52,17 @@ bool NamedV2ProfileAvailable()
 #endif
 }
 
-struct V2ProfileContract
-{
-    uint64_t Id;
-    wirehair_v2::CompletionField Completion;
-    uint32_t RecoveryMixCount;
-    bool AdaptiveDenseTwoAnchor;
-};
-
-const V2ProfileContract kV2ProfileContracts[] = {
-    {
-        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
-        wirehair_v2::CompletionField::GF256,
-        wirehair_v2::kCertifiedPacketMixCount,
-        false
-    },
-    {
-        WIREHAIR_V2_PROFILE_MIXED_2026_07,
-        wirehair_v2::CompletionField::MixedGF256GF16,
-        wirehair_v2::kCertifiedPacketMixCount,
-        false
-    },
-    {
-        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
-        wirehair_v2::CompletionField::MixedGF256GF16,
-        2u,
-        false
-    },
-    {
-        WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07,
-        wirehair_v2::CompletionField::MixedGF256GF16,
-        2u,
-        true
-    }
-};
-
-const V2ProfileContract* ProfileContractForId(uint64_t profile_id)
-{
-    for (const V2ProfileContract& contract : kV2ProfileContracts) {
-        if (contract.Id == profile_id) return &contract;
-    }
-    return nullptr;
-}
-
-const V2ProfileContract* ProfileContractForConfiguration(
-    wirehair_v2::CompletionField completion,
-    uint32_t recovery_mix_count,
-    bool adaptive_dense_two_anchor)
-{
-    for (const V2ProfileContract& contract : kV2ProfileContracts) {
-        if (contract.Completion == completion &&
-            contract.RecoveryMixCount == recovery_mix_count &&
-            contract.AdaptiveDenseTwoAnchor == adaptive_dense_two_anchor)
-        {
-            return &contract;
-        }
-    }
-    return nullptr;
-}
-
 uint64_t ProfileIdForConfiguration(
     wirehair_v2::CompletionField completion,
     uint32_t recovery_mix_count,
-    bool adaptive_dense_two_anchor)
+    bool adaptive_dense_two_anchor,
+    wirehair_v2::V2PrecodeArchitecture architecture)
 {
-    const V2ProfileContract* contract = ProfileContractForConfiguration(
-        completion, recovery_mix_count, adaptive_dense_two_anchor);
-    return contract ? contract->Id : 0u;
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindPublicV2EquationContract(
+            completion, recovery_mix_count, adaptive_dense_two_anchor,
+            architecture);
+    return contract ? contract->ProfileId : 0u;
 }
 
 uint16_t Load16LE(const uint8_t* data)
@@ -208,8 +153,8 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     {
         return WirehairV2_ReservedNonzero;
     }
-    const V2ProfileContract* contract =
-        ProfileContractForId(profile.profile_id);
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract(profile.profile_id, true);
     if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
@@ -358,41 +303,25 @@ bool ProfileCreationArgumentsOverlap(
 
 wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 {
-    const V2ProfileContract* contract =
-        ProfileContractForId(profile.profile_id);
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract(profile.profile_id, true);
     if (!contract) return wirehair_v2::SeedProfile{};
 
     const uint32_t block_count =
         (uint32_t)BlockCountWide(profile.message_bytes, profile.block_bytes);
     wirehair_v2::SeedProfile expanded =
         wirehair_v2::SelectSeedProfile(block_count, profile.block_bytes);
-    wirehair_v2::MessagePrecodeEncoderOptions options;
-    options.Completion = contract->Completion;
-    options.RecoveryMixCount = contract->RecoveryMixCount;
-    options.AdaptiveDenseTwoAnchor = contract->AdaptiveDenseTwoAnchor;
-
-    wirehair_v2::PrecodeParams params =
-        options.Completion ==
-                wirehair_v2::CompletionField::MixedGF256GF16 ?
-            wirehair_v2::MakeMixedParams(
-                block_count,
-                wirehair_v2::MatrixSeedFromProfile(
-                    expanded, 0u, options.PrecodeSeedSalt)) :
-            wirehair_v2::MakeCertifiedParams(
-                block_count,
-                wirehair_v2::MatrixSeedFromProfile(
-                    expanded, 0u, options.PrecodeSeedSalt));
-    params.Staircase = expanded.DenseCount;
-    params.DenseIdentityCorner = options.DenseIdentityCorner;
-    params.DenseTwoAnchor = options.AdaptiveDenseTwoAnchor &&
-        block_count >= wirehair_v2::kDenseTwoAnchorMinBlockCount;
+    const wirehair_v2::MessagePrecodeEncoderOptions options =
+        wirehair_v2::MessageOptionsForContract(*contract);
+    wirehair_v2::PrecodeParams params;
+    wirehair_v2::PacketRowConfig packet_config;
+    if (!wirehair_v2::ResolveMessagePrecodeConfiguration(
+            expanded, options, params, packet_config))
+    {
+        return wirehair_v2::SeedProfile{};
+    }
     params = wirehair_v2::PrecodeParamsForAttempt(
         params, profile.seed_attempt);
-
-    wirehair_v2::PacketRowConfig packet_config;
-    packet_config.PeelSeed = wirehair_v2::PacketPeelSeedFromProfile(
-        expanded, options.RecoveryRowSeedSalt);
-    packet_config.MixCount = options.RecoveryMixCount;
     packet_config = wirehair_v2::PacketConfigForAttempt(
         packet_config, profile.seed_attempt);
 
@@ -409,11 +338,14 @@ WirehairV2Result MakePublicProfile(
     WirehairV2Profile& profile)
 {
     if (!expanded.V2SeedSelected ||
+        expanded.V2SeedPolicy !=
+            wirehair_v2::V2SeedDerivation::ProfileDerived ||
         expanded.V2SeedAttempt >= wirehair_v2::kMaxPacketSeedAttempts ||
         expanded.V2PrecodeContractVersion !=
             wirehair_v2::PrecodeContractVersion(
                 expanded.V2CompletionField,
-                expanded.V2AdaptiveDenseTwoAnchor) ||
+                expanded.V2AdaptiveDenseTwoAnchor,
+                expanded.V2Architecture) ||
         expanded.V2PacketRowContractVersion !=
             wirehair_v2::kPacketRowContractVersion)
     {
@@ -424,7 +356,7 @@ WirehairV2Result MakePublicProfile(
     profile.profile_version = WIREHAIR_V2_PROFILE_VERSION;
     profile.profile_id = ProfileIdForConfiguration(
         expanded.V2CompletionField, expanded.V2RecoveryMixCount,
-        expanded.V2AdaptiveDenseTwoAnchor);
+        expanded.V2AdaptiveDenseTwoAnchor, expanded.V2Architecture);
     profile.message_bytes = message_bytes;
     profile.block_bytes = expanded.BlockBytes;
     profile.seed_attempt = (uint8_t)expanded.V2SeedAttempt;
@@ -448,6 +380,8 @@ WirehairV2Result MakePublicProfile(
             expanded.V2PrecodeContractVersion ||
         canonical.V2PacketRowContractVersion !=
             expanded.V2PacketRowContractVersion ||
+        canonical.V2Architecture != expanded.V2Architecture ||
+        canonical.V2SeedPolicy != expanded.V2SeedPolicy ||
         canonical.V2StaircaseCount != expanded.V2StaircaseCount ||
         canonical.V2DenseRowCount != expanded.V2DenseRowCount ||
         canonical.V2HeavyRowCount != expanded.V2HeavyRowCount ||
@@ -772,7 +706,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     {
         return WirehairV2_BufferTooSmall;
     }
-    const V2ProfileContract* contract = ProfileContractForId(profileId);
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract(profileId, true);
     if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
@@ -796,10 +731,8 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
         return WirehairV2_UnsupportedPlatform;
     }
 
-    wirehair_v2::MessagePrecodeEncoderOptions options;
-    options.Completion = contract->Completion;
-    options.RecoveryMixCount = contract->RecoveryMixCount;
-    options.AdaptiveDenseTwoAnchor = contract->AdaptiveDenseTwoAnchor;
+    const wirehair_v2::MessagePrecodeEncoderOptions options =
+        wirehair_v2::MessageOptionsForContract(*contract);
     PublicCodec* codec = new (std::nothrow) PublicCodec;
     if (!codec) {
         return WirehairV2_OOM;

@@ -252,27 +252,6 @@ const uint32_t kSteppedAttempts[] = { 1u, 255u };
 /// part of the digest rather than an assumption.
 const uint32_t kCoefficientWindowPeriods = 2u;
 
-const EquationFingerprintContract kContracts[] = {
-    {
-        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
-        "certified_2026_07",
-        CompletionField::GF256,
-        kCertifiedPacketMixCount
-    },
-    {
-        WIREHAIR_V2_PROFILE_MIXED_2026_07,
-        "mixed_2026_07",
-        CompletionField::MixedGF256GF16,
-        kCertifiedPacketMixCount
-    },
-    {
-        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07,
-        "mixed_mix2_2026_07",
-        CompletionField::MixedGF256GF16,
-        2u
-    }
-};
-
 bool HashCompletionCoefficients(
     StreamHasher& hasher,
     const EquationFingerprintContract& contract)
@@ -308,9 +287,16 @@ bool HashCompletionCoefficients(
     hasher.U32(gf16_rows);
     hasher.U32(period);
     hasher.U32((uint32_t)ActiveMixedCoefficientGeometry());
-    hasher.U32((uint32_t)ActiveMixedResidueSchedule());
+    const MixedResidueSchedule residue_schedule =
+        ActiveMixedResidueSchedule();
+    hasher.U32((uint32_t)residue_schedule);
     hasher.U32(ActiveMixedResidueSkew());
-    hasher.U32(ActiveMixedResidueHashSeed());
+    // The keyed seed is equation-active only for the hashed schedule.
+    // Canonicalize it away for Constant/Ramp so thread-local experiment
+    // history cannot create false fingerprint drift.
+    hasher.U32(
+        residue_schedule == MixedResidueSchedule::Hashed ?
+            ActiveMixedResidueHashSeed() : 0u);
     hasher.U8(ActiveMixedResiduesRotated() ? 1u : 0u);
     hasher.U8(ActiveMixedIndependentExtensionResidues() ? 1u : 0u);
     for (uint32_t row = 0; row < gf256_rows; ++row) {
@@ -334,6 +320,27 @@ bool HashCompletionCoefficients(
         hasher.U32(ActiveMixedResidueBlockShift(block));
         hasher.U32(ActiveMixedExtensionResidueBlockShift(block));
     }
+    const uint32_t grouped_rows = ActiveMixedGroupedGF256Rows();
+    if (grouped_rows != 0u)
+    {
+        // Conditional experiment extension.  Keeping it absent for the
+        // production grouped_rows == 0 geometry preserves every frozen
+        // version-1 profile digest while ensuring grouped schedule C cannot
+        // alias the ungrouped experimental equation stream.
+        hasher.U32(UINT32_C(0x31465247)); // "GRF1" in little-endian bytes
+        hasher.U32(grouped_rows);
+        hasher.U32(ActiveMixedGroupedGF256RowMask());
+        hasher.U32(ActiveMixedGroupedGF256HashSeed());
+        for (uint32_t column = 0; column < residue_window; ++column)
+        {
+            hasher.U32(ActiveMixedGroupedGF256CoefficientResidue(
+                column, UINT32_MAX));
+        }
+        for (uint32_t block = 0; block < 4u; ++block) {
+            hasher.U32(
+                ActiveMixedGroupedGF256ResidueBlockShift(block));
+        }
+    }
     return true;
 }
 
@@ -346,30 +353,66 @@ bool HashBlockCount(
 {
     const bool mixed =
         contract.Completion == CompletionField::MixedGF256GF16;
-
-    // Mirror ExpandProfile() in WirehairV2Profile.cpp statement for
-    // statement: legacy table selection, seed derivation, contract binding,
-    // and attempt stepping must digest exactly what the public path derives.
-    const SeedProfile base = SelectSeedProfile(
-        block_count, kEquationFingerprintCanonicalBlockBytes);
     hasher.U32(block_count);
-    hasher.U32(base.DenseCount);
-    hasher.U32(base.PeelSeed);
-    hasher.U32(base.DenseSeed);
-    HashSeedFoldedPolicy(hasher, base.Policy);
 
-    const uint64_t matrix_seed = MatrixSeedFromProfile(
-        base, 0u, kMessagePrecodeSeedSalt);
-    PrecodeParams params = mixed ?
-        MakeMixedParams(block_count, matrix_seed) :
-        MakeCertifiedParams(block_count, matrix_seed);
-    params.Staircase = base.DenseCount;
-    params.DenseIdentityCorner = false;
-
+    PrecodeParams params;
     PacketRowConfig packet;
-    packet.PeelSeed = PacketPeelSeedFromProfile(
-        base, kMessageRecoveryRowSeedSalt);
-    packet.MixCount = contract.RecoveryMixCount;
+    if (contract.SeedPolicy == V2SeedDerivation::ProfileDerived)
+    {
+        // Mirror ExpandProfile() in WirehairV2Profile.cpp statement for
+        // statement: legacy table selection, seed derivation, contract binding,
+        // and attempt stepping must digest exactly what the public path derives.
+        const SeedProfile base = SelectSeedProfile(
+            block_count, kEquationFingerprintCanonicalBlockBytes);
+        hasher.U32(base.DenseCount);
+        hasher.U32(base.PeelSeed);
+        hasher.U32(base.DenseSeed);
+        HashSeedFoldedPolicy(hasher, base.Policy);
+
+        const uint64_t matrix_seed = MatrixSeedFromProfile(
+            base, 0u, kMessagePrecodeSeedSalt);
+        params = mixed ?
+            MakeMixedParams(block_count, matrix_seed) :
+            MakeCertifiedParams(block_count, matrix_seed);
+        if (contract.Architecture == V2PrecodeArchitecture::LegacyD12)
+        {
+            params.Staircase = base.DenseCount;
+            params.DenseRows = 12u;
+        }
+        else {
+            return false;
+        }
+        params.DenseIdentityCorner = false;
+        params.DenseTwoAnchor = contract.AdaptiveDenseTwoAnchor &&
+            block_count >= kDenseTwoAnchorMinBlockCount;
+
+        packet.PeelSeed = PacketPeelSeedFromProfile(
+            base, kMessageRecoveryRowSeedSalt);
+        packet.MixCount = contract.RecoveryMixCount;
+    }
+    else if (contract.SeedPolicy == V2SeedDerivation::RawUniform)
+    {
+        SeedProfile raw;
+        if (!MakeRawContractProfile(
+                contract,
+                block_count,
+                kEquationFingerprintCanonicalBlockBytes,
+                kEquationFingerprintRawConstructionSeed,
+                raw))
+        {
+            return false;
+        }
+        const MessagePrecodeEncoderOptions options =
+            MessageOptionsForContract(contract);
+        if (!ResolveMessagePrecodeConfiguration(
+                raw, options, params, packet))
+        {
+            return false;
+        }
+    }
+    else {
+        return false;
+    }
 
     const PrecodeParams params0 = PrecodeParamsForAttempt(params, 0u);
     const PacketRowConfig packet0 = PacketConfigForAttempt(packet, 0u);
@@ -383,12 +426,37 @@ bool HashBlockCount(
     hasher.U64(params0.Seed);
     hasher.U32(packet0.PeelSeed);
     hasher.U32(packet0.MixCount);
-
-    for (uint32_t attempt : kSteppedAttempts)
+    if (mixed && ActiveMixedGroupedGF256Rows() != 0u)
     {
-        hasher.U32(attempt);
-        hasher.U64(PrecodeParamsForAttempt(params, attempt).Seed);
-        hasher.U32(PacketConfigForAttempt(packet, attempt).PeelSeed);
+        // The secondary schedule applies only before the final H completion
+        // columns.  Freeze both sides of that real per-K transition so a
+        // comparator or corner-boundary regression cannot hide behind the
+        // K-independent schedule-C window above.
+        const uint32_t first_heavy_column =
+            params0.BlockCount + params0.Staircase + params0.DenseRows;
+        hasher.U32(first_heavy_column);
+        hasher.U32(ActiveMixedGroupedGF256CoefficientResidue(
+            first_heavy_column - 1u, first_heavy_column));
+        hasher.U32(ActiveMixedGroupedGF256CoefficientResidue(
+            first_heavy_column, first_heavy_column));
+        hasher.U32(ActiveMixedGroupedGF256CoefficientResidue(
+            first_heavy_column + 1u, first_heavy_column));
+        hasher.U32(ActiveMixedGroupedGF256CoefficientResidue(
+            first_heavy_column + params0.HeavyRows - 1u,
+            first_heavy_column));
+    }
+
+    if (contract.SeedAttemptCount > 1u)
+    {
+        for (uint32_t attempt : kSteppedAttempts)
+        {
+            if (attempt >= contract.SeedAttemptCount) {
+                return false;
+            }
+            hasher.U32(attempt);
+            hasher.U64(PrecodeParamsForAttempt(params, attempt).Seed);
+            hasher.U32(PacketConfigForAttempt(packet, attempt).PeelSeed);
+        }
     }
 
     PrecodeSystem system;
@@ -431,17 +499,20 @@ bool HashBlockCount(
         hasher.Row(row);
     }
 
-    for (uint32_t probe_index = 0; probe_index < probe_count; ++probe_index)
+    if (contract.SeedPolicy == V2SeedDerivation::ProfileDerived)
     {
-        const uint32_t probe_bytes = probes[probe_index];
-        const SeedProfile probe_profile =
-            SelectSeedProfile(block_count, probe_bytes);
-        hasher.U32(probe_bytes);
-        HashSeedFoldedPolicy(hasher, probe_profile.Policy);
-        hasher.U64(MatrixSeedFromProfile(
-            probe_profile, 0u, kMessagePrecodeSeedSalt));
-        hasher.U32(PacketPeelSeedFromProfile(
-            probe_profile, kMessageRecoveryRowSeedSalt));
+        for (uint32_t probe_index = 0; probe_index < probe_count; ++probe_index)
+        {
+            const uint32_t probe_bytes = probes[probe_index];
+            const SeedProfile probe_profile =
+                SelectSeedProfile(block_count, probe_bytes);
+            hasher.U32(probe_bytes);
+            HashSeedFoldedPolicy(hasher, probe_profile.Policy);
+            hasher.U64(MatrixSeedFromProfile(
+                probe_profile, 0u, kMessagePrecodeSeedSalt));
+            hasher.U32(PacketPeelSeedFromProfile(
+                probe_profile, kMessageRecoveryRowSeedSalt));
+        }
     }
     return true;
 }
@@ -451,8 +522,7 @@ bool HashBlockCount(
 const EquationFingerprintContract* EquationFingerprintContracts(
     uint32_t& count_out)
 {
-    count_out = (uint32_t)(sizeof(kContracts) / sizeof(kContracts[0]));
-    return kContracts;
+    return V2EquationContracts(count_out);
 }
 
 bool ComputeEquationFingerprint(
@@ -463,12 +533,23 @@ bool ComputeEquationFingerprint(
     EquationFingerprintProgress progress,
     void* progress_context)
 {
+    const bool profile_derived =
+        contract.SeedPolicy == V2SeedDerivation::ProfileDerived &&
+        contract.SeedAttemptCount == kMaxPacketSeedAttempts;
+    const bool raw_uniform =
+        contract.SeedPolicy == V2SeedDerivation::RawUniform &&
+        contract.SeedAttemptCount == 1u;
     if (!digest_out ||
         min_block_count < kEquationFingerprintMinBlockCount ||
         max_block_count > kEquationFingerprintMaxBlockCount ||
         min_block_count > max_block_count ||
         (contract.Completion != CompletionField::GF256 &&
-         contract.Completion != CompletionField::MixedGF256GF16))
+         contract.Completion != CompletionField::MixedGF256GF16) ||
+        PrecodeContractVersion(
+            contract.Completion,
+            contract.AdaptiveDenseTwoAnchor,
+            contract.Architecture) == 0u ||
+        (!profile_derived && !raw_uniform))
     {
         return false;
     }
@@ -480,11 +561,12 @@ bool ComputeEquationFingerprint(
         contract.Completion == CompletionField::MixedGF256GF16;
     const uint32_t* probes =
         mixed ? kProbeBlockBytesMixed : kProbeBlockBytesGF256;
-    const uint32_t probe_count = mixed ?
-        (uint32_t)(sizeof(kProbeBlockBytesMixed) /
-            sizeof(kProbeBlockBytesMixed[0])) :
-        (uint32_t)(sizeof(kProbeBlockBytesGF256) /
-            sizeof(kProbeBlockBytesGF256[0]));
+    const uint32_t probe_count = raw_uniform ? 0u :
+        (mixed ?
+            (uint32_t)(sizeof(kProbeBlockBytesMixed) /
+                sizeof(kProbeBlockBytesMixed[0])) :
+            (uint32_t)(sizeof(kProbeBlockBytesGF256) /
+                sizeof(kProbeBlockBytesGF256[0])));
 
     StreamHasher hasher;
     static const char kStreamTag[8] = {
@@ -494,11 +576,23 @@ bool ComputeEquationFingerprint(
     hasher.U64(contract.ProfileId);
     hasher.U32((uint32_t)contract.Completion);
     hasher.U32(contract.RecoveryMixCount);
-    hasher.U32(PrecodeContractVersion(contract.Completion));
+    hasher.U32(PrecodeContractVersion(
+        contract.Completion,
+        contract.AdaptiveDenseTwoAnchor,
+        contract.Architecture));
     hasher.U32(kPacketRowContractVersion);
-    hasher.U64(kMessagePrecodeSeedSalt);
-    hasher.U64(kMessageRecoveryRowSeedSalt);
-    hasher.U32(kMaxPacketSeedAttempts);
+    if (profile_derived)
+    {
+        // Preserve the public fingerprint-v1 stream byte-for-byte.
+        hasher.U64(kMessagePrecodeSeedSalt);
+        hasher.U64(kMessageRecoveryRowSeedSalt);
+    }
+    else {
+        // Raw-uniform has no profile salts or legacy block-byte derivation.
+        hasher.U32((uint32_t)contract.SeedPolicy);
+        hasher.U64(kEquationFingerprintRawConstructionSeed);
+    }
+    hasher.U32(contract.SeedAttemptCount);
     hasher.U32(min_block_count);
     hasher.U32(max_block_count);
     hasher.U32(kEquationFingerprintCanonicalBlockBytes);
@@ -526,6 +620,25 @@ bool ComputeEquationFingerprint(
     }
 
     hasher.Digest.Finalize(digest_out);
+    return true;
+}
+
+bool ComputeEquationContractNameDigest(
+    const EquationFingerprintContract& contract,
+    uint8_t* digest_out)
+{
+    if (!contract.CanonicalName || !contract.CanonicalName[0] ||
+        !digest_out)
+    {
+        return false;
+    }
+    size_t bytes = 0u;
+    while (contract.CanonicalName[bytes] != '\0') {
+        ++bytes;
+    }
+    Sha256 digest;
+    digest.Update(contract.CanonicalName, bytes);
+    digest.Finalize(digest_out);
     return true;
 }
 
