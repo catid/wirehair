@@ -171,8 +171,9 @@ def classification_policy():
                 "outcomes",
         },
         "outcome_use":
-            "reporting-erratum-only-neither-v1-training-decisions-nor-"
-            "this-erratum-can-authorize-sealed-or-public-promotion",
+            "reporting-erratum-only-this-historical-v1-no-survivor-"
+            "decision-and-this-erratum-grant-no-sealed-or-public-"
+            "promotion-authorization",
     }
 
 

@@ -591,6 +591,14 @@ class SelectorScheduleAggregationTests(unittest.TestCase):
 
 
 class SourceAndArtifactBindingTests(unittest.TestCase):
+    def test_policy_scopes_authorization_to_this_no_survivor_artifact(self):
+        self.assertEqual(
+            erratum.classification_policy()["outcome_use"],
+            "reporting-erratum-only-this-historical-v1-no-survivor-"
+            "decision-and-this-erratum-grant-no-sealed-or-public-"
+            "promotion-authorization",
+        )
+
     def test_classifier_is_the_auditor_source_loaded_module(self):
         self.assertIs(classification, erratum.classification)
         source = erratum._source_bytes(
