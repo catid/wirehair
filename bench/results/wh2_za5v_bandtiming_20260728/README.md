@@ -5,6 +5,15 @@ These are the immutable raw receipts and exact runners for the initial
 screening evidence only: neither archive is the all-K, six-schedule selection
 or the independent holdout required for promotion.
 
+These archives use historical receipt protocol
+`wirehair-v2-bench:bandtiming:dispatch-v1:v1` and native row schema
+`wirehair.wh2.bandtiming.v1`.  Later source review found that v1 direct-solve
+timing was repeatable but did not independently commit the direct intermediate
+to the encoder intermediate.  The 600 receipts remain exactly replayable for
+historical screening, but are explicitly non-promotable.  Promotion-grade
+reruns use the witnessed v2 protocol and must repeat the complete protected
+selection before any holdout.
+
 ## Frozen completion screen
 
 - Raw archive: `frozen_screen_raw.tar.gz`
@@ -60,7 +69,7 @@ No per-K or per-seed repair was applied.  Architectures are compared on their
 raw weak-seed populations; any seed repair remains deliberately deferred until
 after the architecture is selected.
 
-## Frozen all-K selection protocol
+## Historical superseded v1 all-K checkpoint
 
 A first protected execution completed its 2,376 native jobs but was rejected
 by the final authenticated replay before any summary, completion record, or
@@ -71,7 +80,9 @@ pair-local maximum candidate/dispatch recovery prefix.  The corrected runner
 excludes only that overhead, retains the invariant direct result class, and
 requires a completely fresh promotion-grade execution.
 
-The corrected tracked runner and unchanged parser are:
+The following hashes identify only the final historical v1 runner checkpoint.
+They are retained for archive provenance and are not the current
+promotion-grade runner:
 
 - campaign runner SHA-256:
   `72ee3a1f1576304fa66ebcd084045f54cff45f0ca32dd9f88e27144772739871`;
@@ -81,6 +92,36 @@ The corrected tracked runner and unchanged parser are:
   `66a1c7e83149914b8063d03eafac771d9ff9edbaf3be084f30557d1938fd92c2`;
 - strict parser tests SHA-256:
   `27f3ca2761126630b985846948fefd1a7740417a6fc298ab8f1ca61ab92002ae`;
+
+## Current witnessed v2 prelaunch checkpoint
+
+The promotion receipt protocol is
+`wirehair-v2-bench:bandtiming:dispatch-v1:v2`, the native row schema is
+`wirehair.wh2.bandtiming.v2`, and the campaign schema is
+`wirehair.wh2.za5v.all-k-campaign.v2`.  Successful WH2 encoder, decoder, and
+direct rows bind the same solved-intermediate byte count and SHA-256 witness;
+historical v1 receipts are replay-only and cannot satisfy this contract.
+
+The current promotion artifacts are:
+
+- benchmark binary SHA-256:
+  `84c6d4fd1ab410ffee55db68ab4decd65fd498ee37e8d1de3d1d0362697e5c4d`;
+- native benchmark source SHA-256:
+  `db9e1b11bf809b958a9b9869fc55d6a62addb067df0779c5401eac5fd36138b0`;
+- native CLI test SHA-256:
+  `e41501899e6b82c2b9d45262ce439f77e72401f4dda6e05e361e18303e799775`;
+- strict band-timing parser SHA-256:
+  `ceeebe3cab0507fdfe86db9067d2e1aea1741aaeb1629cdcaafb589bb568e519`;
+- strict parser tests SHA-256:
+  `c9921d227d4ce535ae27cbcd696ca8d80fe35590c05a03e5f31e7d0318f7f02b`;
+- paired-context tool SHA-256:
+  `07cd2dd509e0847caaaab813ba2d7fe6f4cf57a4fe2d78e2c9400c2545f87c82`;
+- campaign runner SHA-256:
+  `bae4336508d9d5fd9dd514950da709cb01cc129dcf9e0b36f3e8fe96e17346ef`;
+- campaign runner tests SHA-256:
+  `1a5d2378c11bf2f69998dedf43204f0493fdf47f8082c61feae9d266ec25ec95`;
+- exact result-free selection plan SHA-256:
+  `3a0413150506aa777c995774e80e7ca89e2dc34f97801d8089c8e085697807c0`;
 - frozen-roster SHA-256:
   `d7f032731d3f5b1a52d37cb27cc4236e92ef8be46efa5445934c8356288421fc`;
 - selection job-list SHA-256:

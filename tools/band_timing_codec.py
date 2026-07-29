@@ -20,8 +20,27 @@ import peel_codec
 
 MeasurementError = peel_codec.MeasurementError
 
-BANDTIMING_PROTOCOL = "wirehair-v2-bench:bandtiming:dispatch-v1:v1"
-BANDTIMING_SCHEMA = "wirehair.wh2.bandtiming.v1"
+BANDTIMING_PROTOCOL_V1 = "wirehair-v2-bench:bandtiming:dispatch-v1:v1"
+BANDTIMING_SCHEMA_V1 = "wirehair.wh2.bandtiming.v1"
+BANDTIMING_PROTOCOL_V2 = "wirehair-v2-bench:bandtiming:dispatch-v1:v2"
+BANDTIMING_SCHEMA_V2 = "wirehair.wh2.bandtiming.v2"
+BANDTIMING_PROTOCOL = BANDTIMING_PROTOCOL_V2
+BANDTIMING_SCHEMA = BANDTIMING_SCHEMA_V2
+BANDTIMING_DIRECT_SCOPE_V1 = (
+    "candidate-dispatch-pair-local-fixed-prefix-solve-v1"
+)
+BANDTIMING_DIRECT_SCOPE_V2 = (
+    "candidate-dispatch-pair-local-fixed-prefix-encoder-"
+    "intermediate-witnessed-solve-v2"
+)
+_BANDTIMING_SCHEMA_BY_PROTOCOL = {
+    BANDTIMING_PROTOCOL_V1: BANDTIMING_SCHEMA_V1,
+    BANDTIMING_PROTOCOL_V2: BANDTIMING_SCHEMA_V2,
+}
+_BANDTIMING_DIRECT_SCOPE_BY_SCHEMA = {
+    BANDTIMING_SCHEMA_V1: BANDTIMING_DIRECT_SCOPE_V1,
+    BANDTIMING_SCHEMA_V2: BANDTIMING_DIRECT_SCOPE_V2,
+}
 BANDTIMING_ORDER = "ABBABAAB"
 BANDTIMING_LABEL_SWAP = "alternating"
 BANDTIMING_SCOPE_ORDER = ("encoder", "decoder", "direct")
@@ -165,7 +184,7 @@ BANDTIMING_MANIFEST_FIELDS = (
     "stream_hash_scope", "started_monotonic_ns", "expected_rows",
 )
 
-BANDTIMING_SEMANTIC_FIELDS = (
+BANDTIMING_SEMANTIC_FIELDS_V1 = (
     "timed", "construction_seed", "seed_attempt", "seed_attempt_cap",
     "canonical_S", "canonical_D2", "canonical_gf256", "canonical_gf16",
     "canonical_P", "canonical_x", "trace_sha256", "message_sha256",
@@ -186,8 +205,13 @@ BANDTIMING_SEMANTIC_FIELDS = (
     "explicit_recovered_sha256", "dispatch_recovered_sha256",
     "recovery_equal", "message_equal", "pass",
 )
+BANDTIMING_SEMANTIC_FIELDS_V2 = BANDTIMING_SEMANTIC_FIELDS_V1 + (
+    "explicit_direct_intermediate_sha256",
+    "dispatch_direct_intermediate_sha256",
+)
+BANDTIMING_SEMANTIC_FIELDS = BANDTIMING_SEMANTIC_FIELDS_V2
 
-BANDTIMING_COLUMNS = (
+BANDTIMING_COLUMNS_V1 = (
     "replicate", "measured", "scope", "panel", "panel_index", "slot",
     "pair", "label", "role", "label_swap", "construction_seed",
     "loss_seed", "trace_sha256", "construct_result", "result",
@@ -200,6 +224,28 @@ BANDTIMING_COLUMNS = (
     "cpu_migrated", "minflt_delta", "majflt_delta", "fault_contaminated",
     "stats_available", *_SOLVE_STATS_FIELDS, *_BYTE_FIELDS,
 )
+BANDTIMING_COLUMNS_V2 = BANDTIMING_COLUMNS_V1 + (
+    "intermediate_sha256",
+)
+BANDTIMING_COLUMNS = BANDTIMING_COLUMNS_V2
+
+
+def _bandtiming_format(protocol):
+    if protocol == BANDTIMING_PROTOCOL_V1:
+        return (
+            BANDTIMING_SCHEMA_V1,
+            BANDTIMING_SEMANTIC_FIELDS_V1,
+            BANDTIMING_COLUMNS_V1,
+            False,
+        )
+    if protocol == BANDTIMING_PROTOCOL_V2:
+        return (
+            BANDTIMING_SCHEMA_V2,
+            BANDTIMING_SEMANTIC_FIELDS_V2,
+            BANDTIMING_COLUMNS_V2,
+            True,
+        )
+    raise MeasurementError("bandtiming expected protocol is unsupported")
 
 
 @dataclass(frozen=True)
@@ -328,6 +374,7 @@ class BandTimingContrast:
 class BandTimingMeasurement:
     """Complete independently checked bandtiming experiment."""
 
+    protocol: str
     manifest: dict
     semantic: dict
     context: dict
@@ -342,9 +389,13 @@ class BandTimingMeasurement:
     final_context_sha256: str
     native_stdout: str
 
+    @property
+    def valid_for_promotion(self):
+        return self.protocol == BANDTIMING_PROTOCOL_V2
+
     def as_dict(self):
         return {
-            "protocol": BANDTIMING_PROTOCOL,
+            "protocol": self.protocol,
             "manifest": dict(self.manifest),
             "semantic": dict(self.semantic),
             "context": copy.deepcopy(self.context),
@@ -590,10 +641,10 @@ def _percentile_integer(values, probability):
     return float(ordered[index])
 
 
-def _parse_row(fields, label):
-    if len(fields) != len(BANDTIMING_COLUMNS):
+def _parse_row(fields, label, columns):
+    if len(fields) != len(columns):
         raise MeasurementError(f"{label} has the wrong column count")
-    raw = dict(zip(BANDTIMING_COLUMNS, fields))
+    raw = dict(zip(columns, fields))
     uint32_names = {
         "replicate", "measured", "panel_index", "slot", "pair",
         "label_swap", "construction_seed", "recovery_ok",
@@ -634,6 +685,8 @@ def _parse_row(fields, label):
     if not peel_codec._is_sha256(raw["trace_sha256"]):
         raise MeasurementError(f"{label}.trace_sha256 is invalid")
     row["trace_sha256"] = raw["trace_sha256"]
+    row["intermediate_sha256"] = raw.get(
+        "intermediate_sha256", "not_applicable")
     if row["result_class"] not in _RESULT_CLASSES:
         raise MeasurementError(f"{label}.result_class is invalid")
     if row["recovery_class"] not in _RECOVERY_CLASSES:
@@ -646,7 +699,7 @@ def _parse_manifest(
         seed_policy, construction_seed, loss, loss_seed, schedule,
         warmup_replicates, replicates, inner_reps, max_overhead,
         cache_state, systematic_cache, evict_bytes, context_sha256,
-        required_margin, expected_rows):
+        required_margin, expected_rows, expected_schema):
     integer_names = {
         "K", "bb", "message_bytes", "candidate_S", "candidate_D2",
         "candidate_gf256",
@@ -685,8 +738,10 @@ def _parse_manifest(
 
     dispatch = dispatch_band_descriptor(block_count)
     cache_enabled = int(systematic_cache == "on")
+    if expected_schema not in _BANDTIMING_DIRECT_SCOPE_BY_SCHEMA:
+        raise MeasurementError("bandtiming expected schema is unsupported")
     expected = {
-        "schema": BANDTIMING_SCHEMA,
+        "schema": expected_schema,
         "dispatch_profile": dispatch_profile,
         "seed_policy": seed_policy,
         "contract_id": peel_codec.TARGET_CONTRACT["contract_id"],
@@ -754,7 +809,7 @@ def _parse_manifest(
         "decoder_scope":
             "fresh-init-outside-timer-first-feed-through-own-success-v1",
         "direct_scope":
-            "candidate-dispatch-pair-local-fixed-prefix-solve-v1",
+            _BANDTIMING_DIRECT_SCOPE_BY_SCHEMA[expected_schema],
         "weak_seed_policy": "panel-local-balanced-censor-v1",
         "hook_path":
             "caller-pinned-explicit-transaction-attempt-zero-v2",
@@ -782,7 +837,7 @@ def _parse_manifest(
 
 def _parse_semantic(
         raw, dispatch, block_count, block_bytes, construction_seed_base,
-        measured_seeds, measured_traces, max_overhead):
+        measured_seeds, measured_traces, max_overhead, witnessed):
     integer_names = {
         "timed", "construction_seed", "seed_attempt", "seed_attempt_cap",
         "canonical_S", "canonical_D2", "canonical_gf256", "canonical_gf16",
@@ -817,10 +872,24 @@ def _parse_semantic(
         "dispatch_solve_sha256", "explicit_recovered_sha256",
         "dispatch_recovered_sha256",
     }
+    if witnessed:
+        digest_names.update({
+            "explicit_direct_intermediate_sha256",
+            "dispatch_direct_intermediate_sha256",
+        })
     if any(not peel_codec._is_sha256(raw[name]) for name in digest_names):
         raise MeasurementError("bandtiming semantic digest is invalid")
     expected_semantic_seed = (
         construction_seed_base + semantic["seed_attempt"]) & 0xffffffff
+    direct_intermediates_match = (
+        not witnessed or
+        (
+            semantic["explicit_direct_intermediate_sha256"] ==
+                semantic["explicit_intermediate_sha256"] and
+            semantic["dispatch_direct_intermediate_sha256"] ==
+                semantic["dispatch_intermediate_sha256"]
+        )
+    )
     if (semantic["timed"] != 0 or
             semantic["construction_seed"] > 0xffffffff or
             semantic["construction_seed"] != expected_semantic_seed or
@@ -859,6 +928,7 @@ def _parse_semantic(
                 semantic["dispatch_payload_sha256"] or
             semantic["explicit_solve_sha256"] !=
                 semantic["dispatch_solve_sha256"] or
+            not direct_intermediates_match or
             semantic["explicit_overhead"] != semantic["dispatch_overhead"] or
             semantic["explicit_overhead"] > max_overhead or
             semantic["explicit_recovered_sha256"] !=
@@ -931,6 +1001,7 @@ def _outcome_signature(row):
         row["arm_overhead"], row["fixed_prefix_symbols"],
         tuple(row[name] for name in _SOLVE_COUNT_FIELDS),
         tuple(row[name] for name in _BYTE_FIELDS),
+        row["intermediate_sha256"],
     )
 
 
@@ -945,13 +1016,17 @@ def _cross_panel_signature(row):
             row["encoded_symbols"], row["received_symbols"],
             row["arm_overhead"], row["fixed_prefix_symbols"],
             tuple(row[name] for name in _BYTE_FIELDS),
+            row["intermediate_sha256"],
         )
+    elif row["scope"] == "direct":
+        signature += (row["intermediate_sha256"],)
     return signature
 
 
 def _validate_row_scope(
         row, *, block_count, block_bytes, candidate, dispatch,
-        inner_reps, max_overhead, expected_cpu, schedule, loss):
+        inner_reps, max_overhead, expected_cpu, schedule, loss,
+        witnessed):
     label = (
         f"bandtiming replicate {row['replicate']} "
         f"{row['panel']} slot {row['slot']}"
@@ -1101,6 +1176,17 @@ def _validate_row_scope(
             row["intermediate_bytes"] != expected_intermediate):
         raise MeasurementError(
             f"{label} byte provenance contradicts its architecture")
+    if witnessed:
+        witness_expected = (
+            base != "wh1" and _row_succeeded(row)
+        )
+        witness_valid = peel_codec._is_sha256(
+            row["intermediate_sha256"])
+        if witness_valid != witness_expected or (
+                not witness_expected and
+                row["intermediate_sha256"] != "not_applicable"):
+            raise MeasurementError(
+                f"{label} has an invalid intermediate witness")
     if zero_prefix:
         payload_ok = row["packet_payload_bytes"] == 0
     elif row["scope"] == "encoder":
@@ -1395,7 +1481,8 @@ def _contrast(
     )
 
 
-def _parse_stream_envelope(stdout, expected_rows):
+def _parse_stream_envelope(
+        stdout, expected_rows, semantic_fields, columns):
     if not isinstance(stdout, str) or not stdout:
         raise MeasurementError("bandtiming returned no output")
     try:
@@ -1417,14 +1504,14 @@ def _parse_stream_envelope(stdout, expected_rows):
         lines[0][:-1], "# bandtiming,", BANDTIMING_MANIFEST_FIELDS,
         "bandtiming manifest")
     semantic_raw = peel_codec._parse_ordered_kv_line(
-        lines[1][:-1], "# band_semantic,", BANDTIMING_SEMANTIC_FIELDS,
+        lines[1][:-1], "# band_semantic,", semantic_fields,
         "bandtiming semantic")
     try:
         header = next(csv.reader([lines[2][:-1]], strict=True))
     except (csv.Error, StopIteration) as error:
         raise MeasurementError(f"malformed bandtiming header: {error}")
     if (lines[2][:-1] != ",".join(header) or
-            tuple(header) != BANDTIMING_COLUMNS):
+            tuple(header) != columns):
         raise MeasurementError("bandtiming header is missing or reordered")
     done = peel_codec._parse_ordered_kv_line(
         lines[-1][:-1], "# bandtiming_done,",
@@ -1458,8 +1545,10 @@ def parse_bandtiming_output(
         construction_seed, loss, loss_seed, schedule,
         warmup_replicates, replicates, inner_reps, max_overhead,
         cache_state, systematic_cache, evict_bytes, context,
-        required_margin):
+        required_margin, _protocol=BANDTIMING_PROTOCOL_V2):
     """Validate and independently aggregate one native 15-panel stream."""
+    expected_schema, semantic_fields, columns, witnessed = \
+        _bandtiming_format(_protocol)
     validate_bandtiming_dimensions(
         block_count=block_count,
         block_bytes=block_bytes,
@@ -1483,7 +1572,8 @@ def parse_bandtiming_output(
     expected_rows = total_replicates * 120
     (
         lines, manifest_raw, semantic_raw, finished_ns, stream_sha256,
-    ) = _parse_stream_envelope(stdout, expected_rows)
+    ) = _parse_stream_envelope(
+        stdout, expected_rows, semantic_fields, columns)
     started_ns = peel_codec._parse_decimal_integer(
         manifest_raw["started_monotonic_ns"],
         "bandtiming manifest.started_monotonic_ns",
@@ -1514,6 +1604,7 @@ def parse_bandtiming_output(
         context_sha256=context_sha256,
         required_margin=float(required_margin),
         expected_rows=expected_rows,
+        expected_schema=expected_schema,
     )
     if manifest["started_monotonic_ns"] != started_ns:
         raise MeasurementError("bandtiming start clock changed while parsing")
@@ -1537,7 +1628,8 @@ def parse_bandtiming_output(
         if line[:-1] != ",".join(fields):
             raise MeasurementError(
                 f"bandtiming row {row_index} uses noncanonical CSV")
-        row = _parse_row(fields, f"bandtiming row {row_index}")
+        row = _parse_row(
+            fields, f"bandtiming row {row_index}", columns)
         expected_replicate = row_index // 120
         within_replicate = row_index % 120
         expected_panel_index = within_replicate // 8
@@ -1590,6 +1682,7 @@ def parse_bandtiming_output(
             expected_cpu=context["bound"]["cpu_affinity"][0],
             schedule=schedule,
             loss=float(loss),
+            witnessed=witnessed,
         )
         replicate_index = indexed_rows[expected_replicate]
         replicate_index.panel_rows[expected_panel_index].append(row)
@@ -1753,6 +1846,26 @@ def parse_bandtiming_output(
                 raise MeasurementError(
                     f"bandtiming {arm} constructor code changed across "
                     f"shared payload scopes in replicate {replicate}")
+        if witnessed:
+            for arm in ("candidate", "dispatch"):
+                witnesses_by_scope = {
+                    scope: {
+                        row["intermediate_sha256"]
+                        for row in replicate_index.scope_arm_rows[
+                            _ARM_SCOPE_INDEX[(scope, arm)]
+                        ]
+                        if row["intermediate_sha256"] != "not_applicable"
+                    }
+                    for scope in BANDTIMING_SCOPE_ORDER
+                }
+                witnesses = set().union(*witnesses_by_scope.values())
+                if len(witnesses) > 1 or (
+                        any(witnesses_by_scope[scope]
+                            for scope in ("decoder", "direct")) and
+                        not witnesses_by_scope["encoder"]):
+                    raise MeasurementError(
+                        f"bandtiming {arm} intermediate witness changed "
+                        f"across scopes in replicate {replicate}")
         complete_prefix_rows = [
             row for row in decoder_by_arm.values()
             if row["construct_result"] == 0 and
@@ -1924,6 +2037,7 @@ def parse_bandtiming_output(
         {item[0] for item in seen_trace.values()},
         {item[2] for item in seen_trace.values()},
         max_overhead,
+        witnessed,
     )
     message_bytes = (block_count - 1) * block_bytes + 1
     summaries = {
@@ -2005,6 +2119,7 @@ def parse_bandtiming_output(
             "fault_contaminated_panels": list(contaminated_panels),
         })
     return BandTimingMeasurement(
+        protocol=_protocol,
         manifest=manifest,
         semantic=semantic,
         context=copy.deepcopy(context),
@@ -2051,7 +2166,7 @@ def _bandtiming_run_bounds(stdout):
     done_prefix += "stream_sha256="
     stream_sha256 = hashlib.sha256(
         ("".join(lines[:-1]) + done_prefix).encode("ascii")).hexdigest()
-    if (manifest["schema"] != BANDTIMING_SCHEMA or
+    if (manifest["schema"] != BANDTIMING_SCHEMA_V2 or
             done["complete"] != "1" or rows != expected_rows or
             len(lines) != rows + 4 or
             done["stream_sha256"] != stream_sha256):
@@ -2191,11 +2306,16 @@ def replay_bandtiming_receipt(receipt, *, expected_request=None):
     }
     if not isinstance(receipt, dict) or set(receipt) != fields:
         raise MeasurementError("bandtiming receipt schema is incomplete")
-    if receipt.get("protocol") != BANDTIMING_PROTOCOL:
+    protocol = receipt.get("protocol")
+    if (not isinstance(protocol, str) or
+            protocol not in _BANDTIMING_SCHEMA_BY_PROTOCOL):
         raise MeasurementError("bandtiming receipt protocol is invalid")
     manifest = receipt.get("manifest")
     if not isinstance(manifest, dict):
         raise MeasurementError("bandtiming receipt manifest is invalid")
+    if manifest.get("schema") != _BANDTIMING_SCHEMA_BY_PROTOCOL[protocol]:
+        raise MeasurementError(
+            "bandtiming receipt protocol and native schema disagree")
     candidate = _descriptor_from_receipt(
         receipt.get("candidate_descriptor"),
         "bandtiming candidate descriptor")
@@ -2232,13 +2352,24 @@ def replay_bandtiming_receipt(receipt, *, expected_request=None):
         if not isinstance(expected_request, dict):
             raise MeasurementError("expected bandtiming request is not a dict")
         for name, expected in expected_request.items():
-            if name not in request or not peel_codec._same_typed_json(
-                    request[name], expected):
+            if name == "candidate":
+                same = (
+                    type(expected) is BandDescriptor
+                    and peel_codec._same_typed_json(
+                        request[name].as_dict(), expected.as_dict())
+                )
+            else:
+                same = (
+                    name in request
+                    and peel_codec._same_typed_json(
+                        request[name], expected)
+                )
+            if name not in request or not same:
                 raise MeasurementError(
                     f"bandtiming replay request changed {name}")
     try:
         parsed = parse_bandtiming_output(
-            receipt.get("native_stdout"), **request)
+            receipt.get("native_stdout"), _protocol=protocol, **request)
     except ValueError as error:
         raise MeasurementError(
             f"bandtiming receipt request is invalid: {error}")
@@ -2253,7 +2384,8 @@ def replay_bandtiming_receipt(receipt, *, expected_request=None):
     # enriched or otherwise incomplete receipts remain invalid.
     legacy_replicates = receipt.get("replicates")
     if (
-        isinstance(legacy_replicates, list)
+        protocol == BANDTIMING_PROTOCOL_V1
+        and isinstance(legacy_replicates, list)
         and legacy_replicates
         and all(
             isinstance(replicate, dict)

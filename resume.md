@@ -4,6 +4,70 @@ Audit date: 2026-07-28
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
 
+## 2026-07-29 direct-solve evidence witness repair
+
+The second protected `wirehair-za5v` selection attempt was stopped after
+1,472/2,376 result files, before any summary, completion marker, decision, or
+candidate outcome was read.  Source review found that direct timing proved
+repeatability only against its own preflight solve; it did not independently
+bind the solved intermediate to the encoder intermediate.  Decoder byte
+recovery does not close that gap for every pair-local direct prefix.  Because
+direct cost participates in architecture ranking, neither protected attempt
+nor the earlier v1 screens can certify promotion.
+
+The replacement receipt protocol is
+`wirehair-v2-bench:bandtiming:dispatch-v1:v2`; its native row schema is
+`wirehair.wh2.bandtiming.v2`.  Successful WH2 encoder, decoder, and direct
+rows carry an `intermediate_sha256` witness; WH1 and unsuccessful rows carry
+the exact `not_applicable` sentinel.  The semantic bridge separately carries
+both direct intermediate hashes.  Native code fails closed when encoder and
+scheduled payload intermediates differ, when direct preflight differs from
+its encoder payload, or when any timed direct solve differs from both.  The
+independent Python consumer selects that exact
+protocol/schema/semantic/header format and requires one common witness per
+WH2 arm and replicate across panels and scopes.
+
+Historical v1 receipts retain their exact 52-column and semantic layouts and
+remain replayable, but `valid_for_promotion` is false.  The all-K campaign is
+now schema v2, binds the v2 bandtiming protocol in its result-free plan, and
+rejects a legacy receipt both immediately after a worker and during final
+result replay.  All 600 archived v1 screen receipts replay exactly as
+non-promotable, while a live 360-row native v2 probe and replay pass with
+authenticated thermal context.
+
+Current prelaunch gates pass: 73/73 warning-strict parser/campaign tests,
+39/39 broad Release CTests excluding the separately frozen long fingerprint
+and `ci-once` tests, the focused Release and Clang ASan+UBSan native CLI
+gates, and production `build_policy_e2e` in 132.38 seconds.  Independent
+current-diff native and integrated Python source reviews are clean.  The
+result-free selection plan SHA-256 is
+`3a0413150506aa777c995774e80e7ca89e2dc34f97801d8089c8e085697807c0`.
+Its logical roster, job-list, cell-set, policy, and holdout hashes remain
+unchanged.
+
+Current promotion artifacts are:
+
+- benchmark binary:
+  `84c6d4fd1ab410ffee55db68ab4decd65fd498ee37e8d1de3d1d0362697e5c4d`;
+- native benchmark source:
+  `db9e1b11bf809b958a9b9869fc55d6a62addb067df0779c5401eac5fd36138b0`;
+- native CLI test:
+  `e41501899e6b82c2b9d45262ce439f77e72401f4dda6e05e361e18303e799775`;
+- strict parser:
+  `ceeebe3cab0507fdfe86db9067d2e1aea1741aaeb1629cdcaafb589bb568e519`;
+- parser tests:
+  `c9921d227d4ce535ae27cbcd696ca8d80fe35590c05a03e5f31e7d0318f7f02b`;
+- paired-context tool:
+  `07cd2dd509e0847caaaab813ba2d7fe6f4cf57a4fe2d78e2c9400c2545f87c82`;
+- campaign runner:
+  `bae4336508d9d5fd9dd514950da709cb01cc129dcf9e0b36f3e8fe96e17346ef`;
+- campaign tests:
+  `1a5d2378c11bf2f69998dedf43204f0493fdf47f8082c61feae9d266ec25ec95`.
+
+Next: push this witnessed-v2 checkpoint, then start a completely fresh
+2,376-job selection directory.  Do not inspect candidate outcomes before its
+authenticated completion.
+
 ## 2026-07-29 protected selection replay fix
 
 The first protected `wirehair-za5v` selection attempt is invalid and produced
@@ -48,10 +112,9 @@ logical experiment remains frozen: roster, selection job list, matched cell
 set, policy, and all four disjoint holdout hashes are byte-for-byte unchanged
 from the prelaunch checkpoint.
 
-Next: commit and push the corrected runner and documentation, then launch a
-fresh selection directory so every native result, runtime-monitor record,
-summary, and completion marker binds the corrected runner from the outset.
-Only a strictly replayed fresh completion may reveal a survivor.
+Historical next step (superseded by the witnessed-v2 repair above): commit and
+push the corrected v1 runner, then launch a fresh selection directory.  No v1
+execution is promotion evidence.
 
 ## 2026-07-28 protected all-K campaign prelaunch checkpoint
 
@@ -136,11 +199,11 @@ remains live; under 100 percent CPU load the post-EXPO system is typically
 about 62-64 C CPU and 50-52.25 C hottest DIMM, with zero sensor or EDAC
 errors.
 
-Next: commit and push this prelaunch checkpoint to GitHub plus Dolt, then run
-the protected selection on exclusive CPUs 0-31 while low-priority fuzzing
-keeps CPUs 32-127 occupied.
-Only the runner-derived sole survivor may enter its predeclared disjoint
-holdout.  Promote a new per-instance contract/profile and fingerprint only if
+Historical next step (superseded by the witnessed-v2 repair above): this was
+the prelaunch instruction for the v1 campaign.  Only the runner-derived sole
+survivor from a fresh authenticated v2 selection may enter its predeclared
+disjoint holdout.  Promote a new per-instance contract/profile and fingerprint
+only if
 the cumulative recovery, direct-solve, WH1 encoder/decoder throughput, and
 reliability gates all pass; otherwise retain dispatch-v1 and record the exact
 remaining gap.
@@ -208,7 +271,8 @@ immutable CSV SHA-256 is
 the hardened sampler SHA-256 is
 `2b84efa91375a96a4a64e09ce5bfd7cba0b85b75028f5a93470cd4ae58aadb01`.
 
-Next: add a transactional, test-build-only explicit `PrecodeParams` plus
+Historical next step (completed and superseded): add a transactional,
+test-build-only explicit `PrecodeParams` plus
 `PacketRowConfig` encoder/decoder initialization seam, then build
 `wirehair.wh2.bandtiming.v1`.  Candidate and dispatch must use that same
 explicit path; an untimed semantic bridge must prove the canonical descriptor
@@ -281,16 +345,10 @@ average busy was 99.019950 percent, CPU peaked at 75.625 C, and DIMM peaked at
 zero.  The retained CSV SHA-256 is
 `3b602510fc7b52d5b72360e4e64b8db6b4287704d48909cc2513401a2ece639a`.
 
-The next P0 is `wirehair-za5v`.  Its first implementation step is deliberately
-small: add the canonical mixed P244/D4 10+2 profile to the forced tiny-path
-grid, add a per-call test-only `TinyMixedFastPathAcceptances` counter, require
-one acceptance for every successful forced-on mixed solve and zero for
-forced-off/nonmixed solves, and use width four for mixed profiles.  Only after
-the complete audit/sanitizer/build-policy grid passes should the separate
-`wirehair.wh2.bandtiming.v1` experiment begin.  Cross-codec timing must measure
-decoder receive from first feed through first success because WH1 peels during
-feed; fixed-prefix direct-solve timing is valid only for candidate versus
-dispatch.
+Historical next step (completed and superseded): `wirehair-za5v` first added
+the canonical mixed P244/D4 10+2 profile to the forced tiny-path grid and then
+the separate v1 timing experiment.  The current promotion path is the
+witnessed-v2 campaign described at the top of this file.
 
 ## 2026-07-28 architecture reconciliation
 
@@ -533,8 +591,9 @@ The 2026-07-27 audit receipt is:
    intended payload widths, and all relevant K. Record raw weak-seed counts and
    overhead distributions for architecture comparisons before seed fixups.
    Use the closed `wirehair-lnfk` same-process paired protocol for peel
-   rankings; use the separate `wirehair.wh2.bandtiming.v1` scope specified by
-   `wirehair-za5v` for small-K completion-band work.
+   rankings; use the separately versioned `wirehair.wh2.bandtiming.v2` scope
+   specified by `wirehair-za5v` for small-K completion-band work.  Archived
+   v1 receipts are replay-only and cannot support promotion.
 4. Only after the architecture and parameter table are frozen, search targeted
    seed fixups and compare WH2 against mainline for solve speed and recovery.
 5. Define either a versioned native coordinate-to-PMF reconstruction or consume

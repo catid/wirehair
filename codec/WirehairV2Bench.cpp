@@ -13848,6 +13848,47 @@ enum class BandTimingX
     Tracking
 };
 
+enum class BandTimingDirectWitnessFault
+{
+    None,
+    Candidate,
+    Dispatch,
+    CandidateBytes,
+    DispatchBytes,
+    Semantic,
+    SemanticBytes
+};
+
+enum class BandTimingTimedEncoderWitnessFault
+{
+    None,
+    Candidate,
+    Dispatch
+};
+
+enum class BandTimingTimedDirectWitnessFault
+{
+    None,
+    Candidate,
+    Dispatch
+};
+
+bool BandTimingMeasuredDirectWitnessFaultRequested(
+    BandTimingDirectWitnessFault fault)
+{
+    return fault == BandTimingDirectWitnessFault::Candidate ||
+        fault == BandTimingDirectWitnessFault::Dispatch ||
+        fault == BandTimingDirectWitnessFault::CandidateBytes ||
+        fault == BandTimingDirectWitnessFault::DispatchBytes;
+}
+
+bool BandTimingSemanticDirectWitnessFaultRequested(
+    BandTimingDirectWitnessFault fault)
+{
+    return fault == BandTimingDirectWitnessFault::Semantic ||
+        fault == BandTimingDirectWitnessFault::SemanticBytes;
+}
+
 struct BandTimingOptions
 {
     uint32_t BlockCount = 0u;
@@ -13872,6 +13913,12 @@ struct BandTimingOptions
     std::string ContextSha256;
     double RequiredMargin = 0.0;
     const wirehair_v2::V2EquationContract* DispatchContract = nullptr;
+    BandTimingDirectWitnessFault DirectWitnessFault =
+        BandTimingDirectWitnessFault::None;
+    BandTimingTimedEncoderWitnessFault TimedEncoderWitnessFault =
+        BandTimingTimedEncoderWitnessFault::None;
+    BandTimingTimedDirectWitnessFault TimedDirectWitnessFault =
+        BandTimingTimedDirectWitnessFault::None;
 };
 
 const char* BandTimingXName(BandTimingX x)
@@ -13907,6 +13954,9 @@ bool ParseBandTimingOptions(
     bool have_evict_bytes = false;
     bool have_context = false;
     bool have_margin = false;
+    bool have_direct_witness_fault = false;
+    bool have_timed_encoder_witness_fault = false;
+    bool have_timed_direct_witness_fault = false;
 
     for (int i = 0; i < argc; ++i)
     {
@@ -14208,6 +14258,112 @@ bool ParseBandTimingOptions(
                 return false;
             }
         }
+        else if (!std::strcmp(
+                    argv[i], "--test-direct-witness-mismatch"))
+        {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--test-direct-witness-mismatch",
+                    have_direct_witness_fault) ||
+                !TakeArg(
+                    "bandtiming", "--test-direct-witness-mismatch",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "candidate")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::Candidate;
+            }
+            else if (!std::strcmp(value, "dispatch")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::Dispatch;
+            }
+            else if (!std::strcmp(value, "candidate-bytes")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::CandidateBytes;
+            }
+            else if (!std::strcmp(value, "dispatch-bytes")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::DispatchBytes;
+            }
+            else if (!std::strcmp(value, "semantic")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::Semantic;
+            }
+            else if (!std::strcmp(value, "semantic-bytes")) {
+                options.DirectWitnessFault =
+                    BandTimingDirectWitnessFault::SemanticBytes;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming --test-direct-witness-mismatch must be "
+                    "candidate, dispatch, candidate-bytes, "
+                    "dispatch-bytes, semantic, or semantic-bytes\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(
+                    argv[i],
+                    "--test-timed-encoder-witness-mismatch"))
+        {
+            if (!AcceptOptionOnce(
+                    "bandtiming",
+                    "--test-timed-encoder-witness-mismatch",
+                    have_timed_encoder_witness_fault) ||
+                !TakeArg(
+                    "bandtiming",
+                    "--test-timed-encoder-witness-mismatch",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "candidate")) {
+                options.TimedEncoderWitnessFault =
+                    BandTimingTimedEncoderWitnessFault::Candidate;
+            }
+            else if (!std::strcmp(value, "dispatch")) {
+                options.TimedEncoderWitnessFault =
+                    BandTimingTimedEncoderWitnessFault::Dispatch;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming "
+                    "--test-timed-encoder-witness-mismatch must be "
+                    "candidate or dispatch\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(
+                    argv[i],
+                    "--test-timed-direct-witness-mismatch"))
+        {
+            if (!AcceptOptionOnce(
+                    "bandtiming",
+                    "--test-timed-direct-witness-mismatch",
+                    have_timed_direct_witness_fault) ||
+                !TakeArg(
+                    "bandtiming",
+                    "--test-timed-direct-witness-mismatch",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "candidate")) {
+                options.TimedDirectWitnessFault =
+                    BandTimingTimedDirectWitnessFault::Candidate;
+            }
+            else if (!std::strcmp(value, "dispatch")) {
+                options.TimedDirectWitnessFault =
+                    BandTimingTimedDirectWitnessFault::Dispatch;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming "
+                    "--test-timed-direct-witness-mismatch must be "
+                    "candidate or dispatch\n");
+                return false;
+            }
+        }
         else {
             return UnknownArg("bandtiming", argv[i]);
         }
@@ -14231,6 +14387,20 @@ bool ParseBandTimingOptions(
             "--inner-reps, --max-overhead, --cache-state, "
             "--systematic-cache, --evict-bytes, --context-sha256, "
             "and --required-margin\n");
+        return false;
+    }
+    const unsigned witness_fault_count =
+        (options.DirectWitnessFault !=
+            BandTimingDirectWitnessFault::None ? 1u : 0u) +
+        (options.TimedEncoderWitnessFault !=
+            BandTimingTimedEncoderWitnessFault::None ? 1u : 0u) +
+        (options.TimedDirectWitnessFault !=
+            BandTimingTimedDirectWitnessFault::None ? 1u : 0u);
+    if (witness_fault_count > 1u)
+    {
+        std::fprintf(stderr,
+            "bandtiming test witness fault options are mutually "
+            "exclusive\n");
         return false;
     }
 
@@ -15111,6 +15281,116 @@ BandTimingDirect RunBandTimingDirect(
     return direct;
 }
 
+bool BandTimingExpectedIntermediateBytes(
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    size_t& expected_bytes)
+{
+    expected_bytes = 0u;
+    const wirehair_v2::PrecodeParams& params =
+        descriptor.Explicit.Params;
+    const uint64_t blocks =
+        (uint64_t)params.BlockCount + params.Staircase +
+        params.DenseRows + params.HeavyRows;
+    if (params.BlockCount != options.BlockCount ||
+        options.BlockBytes == 0u ||
+        blocks == 0u ||
+        blocks >
+            (uint64_t)std::numeric_limits<size_t>::max() /
+                options.BlockBytes)
+    {
+        return false;
+    }
+    expected_bytes =
+        (size_t)blocks * (size_t)options.BlockBytes;
+    return expected_bytes != 0u;
+}
+
+bool BandTimingDirectWitnessValid(
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    const BandTimingDirect& direct,
+    const BandTimingPayload& payload)
+{
+    if (direct.Result != Wirehair_Success) return true;
+    size_t expected_bytes = 0u;
+    if (!BandTimingExpectedIntermediateBytes(
+            options, descriptor, expected_bytes))
+    {
+        return false;
+    }
+    return direct.ConstructResult == Wirehair_Success &&
+        payload.ConstructResult == Wirehair_Success &&
+        payload.Result == Wirehair_Success &&
+        direct.IntermediateBytes == expected_bytes &&
+        payload.IntermediateBytes == expected_bytes &&
+        IsPeelTimingLowerHexSha256(direct.IntermediateSha256) &&
+        IsPeelTimingLowerHexSha256(payload.IntermediateSha256) &&
+        direct.IntermediateSha256 == payload.IntermediateSha256;
+}
+
+bool BandTimingPayloadIntermediateWitnessesAgree(
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    const BandTimingPayload& first,
+    const BandTimingPayload& second)
+{
+    if (first.ConstructResult != second.ConstructResult ||
+        first.Result != second.Result)
+    {
+        return false;
+    }
+    if (first.Result != Wirehair_Success) return true;
+    size_t expected_bytes = 0u;
+    if (!BandTimingExpectedIntermediateBytes(
+            options, descriptor, expected_bytes))
+    {
+        return false;
+    }
+    return first.ConstructResult == Wirehair_Success &&
+        first.IntermediateBytes == expected_bytes &&
+        second.IntermediateBytes == expected_bytes &&
+        IsPeelTimingLowerHexSha256(first.IntermediateSha256) &&
+        IsPeelTimingLowerHexSha256(second.IntermediateSha256) &&
+        first.IntermediateSha256 == second.IntermediateSha256;
+}
+
+bool CorruptBandTimingDirectWitnessForTesting(
+    BandTimingDirect& direct,
+    bool corrupt_bytes)
+{
+    if (direct.Result != Wirehair_Success) return false;
+    if (corrupt_bytes)
+    {
+        direct.IntermediateBytes =
+            direct.IntermediateBytes == 0u ?
+                1u : direct.IntermediateBytes - 1u;
+        return true;
+    }
+    if (direct.IntermediateSha256.empty()) {
+        direct.IntermediateSha256 = "invalid";
+    }
+    else {
+        direct.IntermediateSha256[0] =
+            direct.IntermediateSha256[0] == '0' ? '1' : '0';
+    }
+    return true;
+}
+
+bool CorruptBandTimingPayloadWitnessForTesting(
+    BandTimingPayload& payload)
+{
+    if (payload.Result != Wirehair_Success) return false;
+    if (payload.IntermediateSha256.empty()) {
+        payload.IntermediateSha256 = "invalid";
+    }
+    else {
+        payload.IntermediateSha256[0] =
+            payload.IntermediateSha256[0] == '0' ? '1' : '0';
+    }
+    return true;
+}
+
 const char* BandTimingResultClass(WirehairResult result)
 {
     if (result == Wirehair_Success) return "success";
@@ -15455,6 +15735,7 @@ bool TimeBandTimingEncoder(
     BandTimingTimed& timed)
 {
     const std::string expected_sha256 = preflight.Sha256;
+    size_t expected_intermediate_bytes = 0u;
     std::unique_ptr<
         wirehair_v2::ScopedExplicitEquationStateTransactionForTesting>
         explicit_transaction;
@@ -15477,6 +15758,14 @@ bool TimeBandTimingEncoder(
             return false;
         }
         if (!explicit_transaction->IsValid()) {
+            return false;
+        }
+        if (!BandTimingExpectedIntermediateBytes(
+                options, *descriptor, expected_intermediate_bytes) ||
+            preflight.IntermediateBytes != expected_intermediate_bytes ||
+            !IsPeelTimingLowerHexSha256(
+                preflight.IntermediateSha256))
+        {
             return false;
         }
     }
@@ -15514,6 +15803,9 @@ bool TimeBandTimingEncoder(
         WirehairResult construct_result = Wirehair_Error;
         WirehairResult result = Wirehair_Error;
         uint64_t end_ns = 0u;
+        bool intermediate_stable = role == BandTimingRole::Wh1;
+        int cpu_after = -1;
+        PeelTimingUsage usage_after;
         if (role == BandTimingRole::Wh1)
         {
             wirehair::Codec encoder;
@@ -15552,6 +15844,8 @@ bool TimeBandTimingEncoder(
             {
                 return false;
             }
+            cpu_after = PeelTimingCurrentCpu();
+            usage_after = ReadPeelTimingUsage();
         }
         else
         {
@@ -15582,9 +15876,17 @@ bool TimeBandTimingEncoder(
             {
                 return false;
             }
+            cpu_after = PeelTimingCurrentCpu();
+            usage_after = ReadPeelTimingUsage();
+            const uint8_t* const intermediate =
+                encoder.IntermediateBlocks();
+            intermediate_stable =
+                result == Wirehair_Success &&
+                intermediate != nullptr &&
+                Sha256HexBytes(
+                    intermediate, expected_intermediate_bytes) ==
+                    preflight.IntermediateSha256;
         }
-        const int cpu_after = PeelTimingCurrentCpu();
-        const PeelTimingUsage usage_after = ReadPeelTimingUsage();
         int64_t minor = 0;
         int64_t major = 0;
         if (!BandTimingUsageDeltas(
@@ -15600,6 +15902,7 @@ bool TimeBandTimingEncoder(
             construct_result == preflight.ConstructResult &&
             result == preflight.Result &&
             result == Wirehair_Success &&
+            intermediate_stable &&
             Sha256HexBytes(output.Data(), output.Size()) ==
                 expected_sha256;
         if (!BandTimingAccumulateTelemetry(
@@ -15952,6 +16255,8 @@ bool TimeBandTimingDirect(
         timed.Stable = timed.Stable &&
             current.ConstructResult == preflight.ConstructResult &&
             current.Result == preflight.Result &&
+            BandTimingDirectWitnessValid(
+                options, descriptor, current, payload) &&
             current.IntermediateBytes == preflight.IntermediateBytes &&
             current.IntermediateSha256 ==
                 preflight.IntermediateSha256 &&
@@ -16024,7 +16329,10 @@ struct BandTimingSemantic
     WirehairResult DispatchDirectResult = Wirehair_Error;
     std::string ExplicitSolveSha256;
     std::string DispatchSolveSha256;
+    std::string ExplicitDirectIntermediateSha256;
+    std::string DispatchDirectIntermediateSha256;
     bool DirectEqual = false;
+    bool TestFaultInjected = false;
     WirehairResult ExplicitDecodeResult = Wirehair_Error;
     WirehairResult DispatchDecodeResult = Wirehair_Error;
     int32_t ExplicitOverhead = -1;
@@ -16263,7 +16571,7 @@ bool BuildBandTimingSemanticWitness(
         const uint32_t prefix = std::max(
             explicit_recovery.ReceivedSymbols,
             dispatch_recovery.ReceivedSymbols);
-        const BandTimingDirect explicit_direct =
+        BandTimingDirect explicit_direct =
             RunBandTimingDirect(
                 options, descriptor, ids, explicit_payload,
                 prefix, true);
@@ -16273,6 +16581,15 @@ bool BuildBandTimingSemanticWitness(
                 prefix, true);
 
         semantic = BandTimingSemantic();
+        if (BandTimingSemanticDirectWitnessFaultRequested(
+                options.DirectWitnessFault))
+        {
+            semantic.TestFaultInjected =
+                CorruptBandTimingDirectWitnessForTesting(
+                    explicit_direct,
+                    options.DirectWitnessFault ==
+                        BandTimingDirectWitnessFault::SemanticBytes);
+        }
         semantic.ConstructionSeed = construction_seed;
         semantic.SeedAttempt = attempt;
         semantic.TraceSha256 = BandTimingTraceDigest(
@@ -16357,11 +16674,21 @@ bool BuildBandTimingSemanticWitness(
             dispatch_direct.Result, dispatch_direct.Stats,
             dispatch_direct.IntermediateBytes,
             dispatch_direct.IntermediateSha256);
+        semantic.ExplicitDirectIntermediateSha256 =
+            explicit_direct.IntermediateSha256;
+        semantic.DispatchDirectIntermediateSha256 =
+            dispatch_direct.IntermediateSha256;
         semantic.DirectEqual =
             explicit_direct.ConstructResult == Wirehair_Success &&
             dispatch_direct.ConstructResult == Wirehair_Success &&
             explicit_direct.Result == Wirehair_Success &&
             dispatch_direct.Result == Wirehair_Success &&
+            BandTimingDirectWitnessValid(
+                options, descriptor,
+                explicit_direct, explicit_payload) &&
+            BandTimingDirectWitnessValid(
+                options, descriptor,
+                dispatch_direct, dispatch_payload) &&
             semantic.ExplicitSolveSha256 ==
                 semantic.DispatchSolveSha256;
         semantic.ExplicitDecodeResult = explicit_recovery.Result;
@@ -16610,12 +16937,35 @@ int CmdBandTiming(int argc, char** argv)
     }
 
     BandTimingSemantic semantic;
-    if (!BuildBandTimingSemanticWitness(
-            options, total_replicates, semantic))
+    const bool semantic_ok = BuildBandTimingSemanticWitness(
+        options, total_replicates, semantic);
+    if (!semantic_ok)
     {
-        std::fprintf(stderr,
-            "bandtiming explicit canonical/real dispatch semantic "
-            "witness failed\n");
+        if (BandTimingSemanticDirectWitnessFaultRequested(
+                options.DirectWitnessFault) &&
+            !semantic.TestFaultInjected)
+        {
+            std::fprintf(stderr,
+                "bandtiming requested semantic direct witness fault "
+                "was not injectable\n");
+        }
+        else {
+            std::fprintf(stderr,
+                "bandtiming explicit canonical/real dispatch semantic "
+                "witness failed\n");
+        }
+        return 2;
+    }
+    if (BandTimingSemanticDirectWitnessFaultRequested(
+            options.DirectWitnessFault))
+    {
+        std::fputs(
+            semantic.TestFaultInjected ?
+                "bandtiming injected semantic direct witness fault "
+                "was not detected\n" :
+                "bandtiming requested semantic direct witness fault "
+                "was not injectable\n",
+            stderr);
         return 2;
     }
 
@@ -16657,7 +17007,7 @@ int CmdBandTiming(int argc, char** argv)
     receipt << std::setprecision(17);
     receipt
         << "# bandtiming"
-        << ",schema=wirehair.wh2.bandtiming.v1"
+        << ",schema=wirehair.wh2.bandtiming.v2"
         << ",dispatch_profile=dispatch-v1"
         << ",seed_policy=raw"
         << ",contract_id=" << contract_id.str()
@@ -16738,7 +17088,8 @@ int CmdBandTiming(int argc, char** argv)
         << ",decoder_scope="
             "fresh-init-outside-timer-first-feed-through-own-success-v1"
         << ",direct_scope="
-            "candidate-dispatch-pair-local-fixed-prefix-solve-v1"
+            "candidate-dispatch-pair-local-fixed-prefix-encoder-"
+            "intermediate-witnessed-solve-v2"
         << ",weak_seed_policy=panel-local-balanced-censor-v1"
         << ",hook_path=caller-pinned-explicit-transaction-attempt-zero-v2"
         << ",codec_reuse=none-fresh-object-every-inner-v1"
@@ -16822,7 +17173,12 @@ int CmdBandTiming(int argc, char** argv)
             << semantic.DispatchRecoveredSha256
         << ",recovery_equal=" << (semantic.RecoveryEqual ? 1 : 0)
         << ",message_equal=" << (semantic.MessageEqual ? 1 : 0)
-        << ",pass=" << (semantic.Pass ? 1 : 0) << '\n';
+        << ",pass=" << (semantic.Pass ? 1 : 0)
+        << ",explicit_direct_intermediate_sha256="
+            << semantic.ExplicitDirectIntermediateSha256
+        << ",dispatch_direct_intermediate_sha256="
+            << semantic.DispatchDirectIntermediateSha256
+        << '\n';
     receipt
         << "replicate,measured,scope,panel,panel_index,slot,pair,label,"
         << "role,label_swap,construction_seed,loss_seed,trace_sha256,"
@@ -16836,13 +17192,16 @@ int CmdBandTiming(int argc, char** argv)
         << "inactivated,binary_def,heavy_gain,block_xors,block_muladds,"
         << "build_ns_sum,peel_ns_sum,project_ns_sum,residual_ns_sum,"
         << "backsub_ns_sum,source_bytes,packet_payload_bytes,"
-        << "intermediate_bytes\n";
+        << "intermediate_bytes,intermediate_sha256\n";
 
     std::vector<uint8_t> eviction((size_t)options.EvictBytes, 0u);
     EvictPeelTimingCache(eviction);
     static const char kOrder[] =
         {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
     uint64_t emitted_rows = 0u;
+    bool direct_witness_fault_injected = false;
+    bool timed_encoder_witness_fault_injected = false;
+    bool timed_direct_witness_fault_injected = false;
     for (uint32_t replicate = 0u;
          replicate < total_replicates; ++replicate)
     {
@@ -16938,6 +17297,34 @@ int CmdBandTiming(int argc, char** argv)
                 "replicate=%u\n", replicate);
             return 2;
         }
+        if (!BandTimingPayloadIntermediateWitnessesAgree(
+                options, candidate_descriptor,
+                candidate_payload, candidate_encoder) ||
+            !BandTimingPayloadIntermediateWitnessesAgree(
+                options, dispatch_descriptor,
+                dispatch_payload, dispatch_encoder))
+        {
+            std::fprintf(stderr,
+                "bandtiming encoder/scheduled intermediate witness "
+                "mismatch replicate=%u\n", replicate);
+            return 2;
+        }
+        if (options.TimedEncoderWitnessFault ==
+                BandTimingTimedEncoderWitnessFault::Candidate)
+        {
+            timed_encoder_witness_fault_injected =
+                CorruptBandTimingPayloadWitnessForTesting(
+                    candidate_encoder) ||
+                timed_encoder_witness_fault_injected;
+        }
+        else if (options.TimedEncoderWitnessFault ==
+                    BandTimingTimedEncoderWitnessFault::Dispatch)
+        {
+            timed_encoder_witness_fault_injected =
+                CorruptBandTimingPayloadWitnessForTesting(
+                    dispatch_encoder) ||
+                timed_encoder_witness_fault_injected;
+        }
         const BandTimingRecovery candidate_recovery =
             RunBandTimingRecovery(
                 BandTimingRole::Candidate, options,
@@ -17017,6 +17404,42 @@ int CmdBandTiming(int argc, char** argv)
                             dispatch_payload, wh1_payload),
                         direct_prefix, true);
                 }
+                const auto inject_direct_witness_fault = [&](
+                    BandTimingRole role,
+                    BandTimingDirect& direct)
+                {
+                    const bool candidate_fault =
+                        options.DirectWitnessFault ==
+                            BandTimingDirectWitnessFault::Candidate ||
+                        options.DirectWitnessFault ==
+                            BandTimingDirectWitnessFault::CandidateBytes;
+                    const bool dispatch_fault =
+                        options.DirectWitnessFault ==
+                            BandTimingDirectWitnessFault::Dispatch ||
+                        options.DirectWitnessFault ==
+                            BandTimingDirectWitnessFault::DispatchBytes;
+                    if ((role == BandTimingRole::Candidate &&
+                         candidate_fault) ||
+                        (role == BandTimingRole::Dispatch &&
+                         dispatch_fault))
+                    {
+                        const bool corrupt_bytes =
+                            options.DirectWitnessFault ==
+                                BandTimingDirectWitnessFault::
+                                    CandidateBytes ||
+                            options.DirectWitnessFault ==
+                                BandTimingDirectWitnessFault::
+                                    DispatchBytes;
+                        direct_witness_fault_injected =
+                            CorruptBandTimingDirectWitnessForTesting(
+                                direct, corrupt_bytes) ||
+                            direct_witness_fault_injected;
+                    }
+                };
+                inject_direct_witness_fault(
+                    panel.First, first_direct);
+                inject_direct_witness_fault(
+                    panel.Second, second_direct);
                 if (BandTimingDirectOutOfMemory(first_direct) ||
                     BandTimingDirectOutOfMemory(second_direct))
                 {
@@ -17026,6 +17449,63 @@ int CmdBandTiming(int argc, char** argv)
                         replicate, panel_index);
                     return 2;
                 }
+                const BandTimingPayload& first_payload =
+                    BandTimingPayloadForRole(
+                        panel.First, candidate_payload,
+                        dispatch_payload, wh1_payload);
+                const BandTimingPayload& second_payload =
+                    BandTimingPayloadForRole(
+                        panel.Second, candidate_payload,
+                        dispatch_payload, wh1_payload);
+                if (!BandTimingDirectWitnessValid(
+                        options,
+                        *BandTimingDescriptorForRole(
+                            panel.First, candidate_descriptor,
+                            dispatch_descriptor),
+                        first_direct, first_payload))
+                {
+                    std::fprintf(stderr,
+                        "bandtiming direct intermediate witness mismatch "
+                        "role=%s replicate=%u panel=%u\n",
+                        BandTimingBaseRoleName(panel.First),
+                        replicate, panel_index);
+                    return 2;
+                }
+                if (!BandTimingDirectWitnessValid(
+                        options,
+                        *BandTimingDescriptorForRole(
+                            panel.Second, candidate_descriptor,
+                            dispatch_descriptor),
+                        second_direct, second_payload))
+                {
+                    std::fprintf(stderr,
+                        "bandtiming direct intermediate witness mismatch "
+                        "role=%s replicate=%u panel=%u\n",
+                        BandTimingBaseRoleName(panel.Second),
+                        replicate, panel_index);
+                    return 2;
+                }
+                const auto inject_timed_direct_witness_fault = [&](
+                    BandTimingRole role,
+                    BandTimingDirect& direct)
+                {
+                    if ((role == BandTimingRole::Candidate &&
+                         options.TimedDirectWitnessFault ==
+                            BandTimingTimedDirectWitnessFault::Candidate) ||
+                        (role == BandTimingRole::Dispatch &&
+                         options.TimedDirectWitnessFault ==
+                            BandTimingTimedDirectWitnessFault::Dispatch))
+                    {
+                        timed_direct_witness_fault_injected =
+                            CorruptBandTimingDirectWitnessForTesting(
+                                direct, false) ||
+                            timed_direct_witness_fault_injected;
+                    }
+                };
+                inject_timed_direct_witness_fault(
+                    panel.First, first_direct);
+                inject_timed_direct_witness_fault(
+                    panel.Second, second_direct);
             }
             const auto make_observation = [&](
                 BandTimingRole role,
@@ -17260,6 +17740,43 @@ int CmdBandTiming(int argc, char** argv)
                     observation.RecoveryApplicable ?
                     BandTimingResultClass(observation.RecoveryResult) :
                     "not_applicable";
+                const bool row_succeeded =
+                    observation.ConstructResult == Wirehair_Success &&
+                    observation.Result == Wirehair_Success &&
+                    (
+                        panel.Scope != BandTimingScope::Decoder ||
+                        (
+                            observation.RecoveryApplicable &&
+                            observation.RecoveryResult ==
+                                Wirehair_Success &&
+                            observation.RecoveryOk
+                        )
+                    );
+                const std::string* intermediate_sha256 = nullptr;
+                if (role != BandTimingRole::Wh1 && row_succeeded)
+                {
+                    if (panel.Scope == BandTimingScope::Encoder) {
+                        intermediate_sha256 =
+                            &encoder_preflight.IntermediateSha256;
+                    }
+                    else if (panel.Scope == BandTimingScope::Decoder) {
+                        intermediate_sha256 =
+                            &payload.IntermediateSha256;
+                    }
+                    else {
+                        intermediate_sha256 =
+                            &direct_preflight.IntermediateSha256;
+                    }
+                    if (intermediate_sha256->empty())
+                    {
+                        std::fprintf(stderr,
+                            "bandtiming successful WH2 row omitted its "
+                            "intermediate witness replicate=%u panel=%u "
+                            "slot=%u\n",
+                            replicate, panel_index, slot);
+                        return 2;
+                    }
+                }
                 receipt
                     << replicate << ','
                     << (replicate >=
@@ -17321,12 +17838,50 @@ int CmdBandTiming(int argc, char** argv)
                     << ',' << message_bytes
                     << ',' << observation.PacketPayloadBytes
                     << ',' << observation.IntermediateBytes
+                    << ',' << (intermediate_sha256 ?
+                        *intermediate_sha256 : "not_applicable")
                     << '\n';
                 ++emitted_rows;
             }
         }
     }
 
+    if (BandTimingMeasuredDirectWitnessFaultRequested(
+            options.DirectWitnessFault))
+    {
+        std::fputs(
+            direct_witness_fault_injected ?
+                "bandtiming injected direct witness fault was not "
+                "detected\n" :
+                "bandtiming requested direct witness fault was not "
+                "injectable\n",
+            stderr);
+        return 2;
+    }
+    if (options.TimedDirectWitnessFault !=
+            BandTimingTimedDirectWitnessFault::None)
+    {
+        std::fputs(
+            timed_direct_witness_fault_injected ?
+                "bandtiming injected timed direct witness fault was not "
+                "detected\n" :
+                "bandtiming requested timed direct witness fault was not "
+                "injectable\n",
+            stderr);
+        return 2;
+    }
+    if (options.TimedEncoderWitnessFault !=
+            BandTimingTimedEncoderWitnessFault::None)
+    {
+        std::fputs(
+            timed_encoder_witness_fault_injected ?
+                "bandtiming injected timed encoder witness fault was not "
+                "detected\n" :
+                "bandtiming requested timed encoder witness fault was not "
+                "injectable\n",
+            stderr);
+        return 2;
+    }
     if (emitted_rows != expected_rows)
     {
         std::fprintf(stderr,

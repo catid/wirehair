@@ -55,6 +55,25 @@ function(expect_failure pattern)
     reject_sanitizer("${out}${err}" "expected failure: ${ARGN}")
 endfunction()
 
+function(expect_runtime_failure pattern)
+    run_bench(result out err ${ARGN})
+    if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 2)
+        message(FATAL_ERROR
+            "expected exit 2, got '${result}': ${ARGN}\n"
+            "stdout=${out}\nstderr=${err}")
+    endif()
+    if(NOT err MATCHES "${pattern}")
+        message(FATAL_ERROR
+            "missing diagnostic '${pattern}': ${ARGN}\nstderr=${err}")
+    endif()
+    if(NOT "${out}" STREQUAL "")
+        message(FATAL_ERROR
+            "runtime failure leaked a partial receipt: ${ARGN}\n"
+            "stdout=${out}\nstderr=${err}")
+    endif()
+    reject_sanitizer("${out}${err}" "expected runtime failure: ${ARGN}")
+endfunction()
+
 function(expect_success pattern)
     run_bench(result out err ${ARGN})
     if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
@@ -2758,7 +2777,7 @@ string(REGEX MATCH
 if(NOT bandtiming_result EQUAL 0 OR bandtiming_err OR
    NOT bandtiming_manifest OR NOT bandtiming_semantic OR
    NOT bandtiming_manifest MATCHES
-       "schema=wirehair.wh2.bandtiming.v1,dispatch_profile=dispatch-v1,seed_policy=raw," OR
+       "schema=wirehair.wh2.bandtiming.v2,dispatch_profile=dispatch-v1,seed_policy=raw," OR
    NOT bandtiming_manifest MATCHES
        "completion=mixed,candidate_S=5,candidate_D2=4,candidate_gf256=10,candidate_gf16=2,candidate_P=244,candidate_x_geometry=frozen," OR
    NOT bandtiming_manifest MATCHES
@@ -2766,19 +2785,88 @@ if(NOT bandtiming_result EQUAL 0 OR bandtiming_err OR
    NOT bandtiming_manifest MATCHES
        "panels_per_replicate=15,order=ABBABAAB,label_swap=alternating,inner_reps=1,max_overhead=16,cache_state=warm,systematic_cache=off,wh2_source_cache=0,wh2_received_systematic_cache=0," OR
    NOT bandtiming_manifest MATCHES
-       "payload_alignment=64,prefault=1,cpu_affinity_policy=first-allowed-affinity-v1,encoder_scope=fresh-object-init-through-first-K-symbols-v1,decoder_scope=fresh-init-outside-timer-first-feed-through-own-success-v1,direct_scope=candidate-dispatch-pair-local-fixed-prefix-solve-v1," OR
+       "payload_alignment=64,prefault=1,cpu_affinity_policy=first-allowed-affinity-v1,encoder_scope=fresh-object-init-through-first-K-symbols-v1,decoder_scope=fresh-init-outside-timer-first-feed-through-own-success-v1,direct_scope=candidate-dispatch-pair-local-fixed-prefix-encoder-intermediate-witnessed-solve-v2," OR
    NOT bandtiming_manifest MATCHES
        "weak_seed_policy=panel-local-balanced-censor-v1,hook_path=caller-pinned-explicit-transaction-attempt-zero-v2,codec_reuse=none-fresh-object-every-inner-v1," OR
    NOT bandtiming_manifest MATCHES "expected_rows=360$" OR
    NOT bandtiming_semantic MATCHES
        "seed_attempt_cap=256,canonical_S=5,canonical_D2=4,canonical_gf256=10,canonical_gf16=2,canonical_P=244,canonical_x=frozen," OR
    NOT bandtiming_semantic MATCHES
-       "params_equal=1,.*coefficients_equal=1,.*packet_rows_equal=1,.*intermediate_equal=1,.*payload_equal=1,.*direct_equal=1,.*recovery_equal=1,message_equal=1,pass=1$")
+       "params_equal=1,.*coefficients_equal=1,.*packet_rows_equal=1,.*intermediate_equal=1,.*payload_equal=1,.*direct_equal=1,.*recovery_equal=1,message_equal=1,pass=1,explicit_direct_intermediate_sha256=[0-9a-f]+,dispatch_direct_intermediate_sha256=[0-9a-f]+$")
     message(FATAL_ERROR
         "native band timing did not produce its canonical semantic receipt\n"
         "rc=${bandtiming_result}\nstdout=${bandtiming_out}\n"
         "stderr=${bandtiming_err}")
 endif()
+
+expect_runtime_failure(
+    "direct intermediate witness mismatch role=candidate"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch candidate)
+expect_runtime_failure(
+    "direct intermediate witness mismatch role=dispatch"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch dispatch)
+expect_runtime_failure(
+    "direct intermediate witness mismatch role=candidate"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch candidate-bytes)
+expect_runtime_failure(
+    "direct intermediate witness mismatch role=dispatch"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch dispatch-bytes)
+expect_runtime_failure(
+    "explicit canonical/real dispatch semantic witness failed"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch semantic)
+expect_runtime_failure(
+    "explicit canonical/real dispatch semantic witness failed"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch semantic-bytes)
+expect_runtime_failure(
+    "bandtiming timed operation drifted"
+    ${bandtiming_base_args}
+    --test-timed-encoder-witness-mismatch candidate)
+expect_runtime_failure(
+    "bandtiming timed operation drifted"
+    ${bandtiming_base_args}
+    --test-timed-direct-witness-mismatch candidate)
+expect_runtime_failure(
+    "bandtiming timed operation drifted"
+    ${bandtiming_base_args}
+    --test-timed-direct-witness-mismatch dispatch)
+expect_failure(
+    "test-direct-witness-mismatch must be candidate, dispatch,"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch neither)
+expect_failure(
+    "duplicate --test-direct-witness-mismatch"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch candidate
+    --test-direct-witness-mismatch dispatch)
+expect_failure(
+    "test-timed-encoder-witness-mismatch must be candidate or dispatch"
+    ${bandtiming_base_args}
+    --test-timed-encoder-witness-mismatch neither)
+expect_failure(
+    "duplicate --test-timed-encoder-witness-mismatch"
+    ${bandtiming_base_args}
+    --test-timed-encoder-witness-mismatch candidate
+    --test-timed-encoder-witness-mismatch dispatch)
+expect_failure(
+    "test-timed-direct-witness-mismatch must be candidate or dispatch"
+    ${bandtiming_base_args}
+    --test-timed-direct-witness-mismatch neither)
+expect_failure(
+    "duplicate --test-timed-direct-witness-mismatch"
+    ${bandtiming_base_args}
+    --test-timed-direct-witness-mismatch candidate
+    --test-timed-direct-witness-mismatch dispatch)
+expect_failure(
+    "test witness fault options are mutually exclusive"
+    ${bandtiming_base_args}
+    --test-direct-witness-mismatch candidate
+    --test-timed-direct-witness-mismatch candidate)
 
 set(bandtiming_panel_names
     encoder_candidate_dispatch
@@ -2819,7 +2907,7 @@ foreach(bandtiming_line IN LISTS bandtiming_lines)
     endif()
     string(REPLACE "," ";" bandtiming_fields "${bandtiming_line}")
     list(LENGTH bandtiming_fields bandtiming_field_count)
-    if(NOT bandtiming_field_count EQUAL 52)
+    if(NOT bandtiming_field_count EQUAL 53)
         message(FATAL_ERROR
             "bandtiming row has the wrong field count\n${bandtiming_line}")
     endif()
@@ -2866,10 +2954,11 @@ foreach(bandtiming_line IN LISTS bandtiming_lines)
     endif()
     foreach(bandtiming_field_index IN ITEMS
             0 1 2 3 4 5 6 7 8 9 13 14 15 16 17 18 23 24 25 26 27
-            28 29 30 31 32 33 34 35 36 37 38 49 50 51)
+            28 29 30 31 32 33 34 35 36 37 38 49 50 51 52)
         list(GET bandtiming_fields ${bandtiming_field_index}
             "bandtiming_f${bandtiming_field_index}")
     endforeach()
+    string(LENGTH "${bandtiming_f52}" bandtiming_f52_length)
     if(NOT bandtiming_f0 EQUAL bandtiming_expected_replicate OR
        NOT "${bandtiming_f1}" STREQUAL "1" OR
        NOT "${bandtiming_f2}" STREQUAL "${bandtiming_expected_scope}" OR
@@ -2934,20 +3023,25 @@ foreach(bandtiming_line IN LISTS bandtiming_lines)
     endif()
     if(bandtiming_expected_role MATCHES "^wh1")
         if(NOT "${bandtiming_f38}" STREQUAL "0" OR
-           NOT "${bandtiming_f51}" STREQUAL "0")
+           NOT "${bandtiming_f51}" STREQUAL "0" OR
+           NOT "${bandtiming_f52}" STREQUAL "not_applicable")
             message(FATAL_ERROR
                 "bandtiming WH1 row fabricated solver/intermediate data\n"
                 "${bandtiming_line}")
         endif()
     elseif(bandtiming_expected_scope STREQUAL "encoder")
         if(NOT "${bandtiming_f38}" STREQUAL "0" OR
-           NOT "${bandtiming_f51}" STREQUAL "74")
+           NOT "${bandtiming_f51}" STREQUAL "74" OR
+           NOT bandtiming_f52_length EQUAL 64 OR
+           NOT bandtiming_f52 MATCHES "^[0-9a-f]+$")
             message(FATAL_ERROR
                 "bandtiming WH2 encoder byte/stat provenance is wrong\n"
                 "${bandtiming_line}")
         endif()
     elseif(NOT "${bandtiming_f38}" STREQUAL "1" OR
-           NOT "${bandtiming_f51}" STREQUAL "74")
+           NOT "${bandtiming_f51}" STREQUAL "74" OR
+           NOT bandtiming_f52_length EQUAL 64 OR
+           NOT bandtiming_f52 MATCHES "^[0-9a-f]+$")
         message(FATAL_ERROR
             "bandtiming WH2 solve row lacks stats/intermediate provenance\n"
             "${bandtiming_line}")
@@ -3026,8 +3120,7 @@ endif()
 
 # Exercise both source-cache receipts and every loss schedule accepted by the
 # all-K reliability protocol.
-expect_success(
-    "warmup_replicates=1,replicates=3,slots_per_panel=8,panels_per_replicate=15,order=ABBABAAB,label_swap=alternating,inner_reps=1,max_overhead=16,cache_state=cold,systematic_cache=on,wh2_source_cache=1,wh2_received_systematic_cache=1,"
+set(bandtiming_cache_on_args
     bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
     --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
     --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
@@ -3038,6 +3131,13 @@ expect_success(
     --evict-bytes 4096 --context-sha256
     0000000000000000000000000000000000000000000000000000000000000000
     --required-margin 0)
+expect_success(
+    "warmup_replicates=1,replicates=3,slots_per_panel=8,panels_per_replicate=15,order=ABBABAAB,label_swap=alternating,inner_reps=1,max_overhead=16,cache_state=cold,systematic_cache=on,wh2_source_cache=1,wh2_received_systematic_cache=1,"
+    ${bandtiming_cache_on_args})
+expect_runtime_failure(
+    "bandtiming timed operation drifted"
+    ${bandtiming_cache_on_args}
+    --test-timed-encoder-witness-mismatch candidate)
 foreach(bandtiming_schedule IN ITEMS burst permutation systematic-first
         repair-only adversarial)
     expect_success(
@@ -3061,8 +3161,7 @@ endforeach()
 # the constructor.  Candidate-containing panels are censored without
 # contaminating independent dispatch A/A panels; no failed row may fabricate
 # recovery or timing telemetry.
-run_bench(
-    bandtiming_weak_result bandtiming_weak_out bandtiming_weak_err
+set(bandtiming_weak_args
     bandtiming --N 10 --bb 2 --dispatch-profile dispatch-v1
     --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
     --schedule repair-only --candidate-staircase 1
@@ -3074,6 +3173,9 @@ run_bench(
     --context-sha256
     0000000000000000000000000000000000000000000000000000000000000000
     --required-margin 0)
+run_bench(
+    bandtiming_weak_result bandtiming_weak_out bandtiming_weak_err
+    ${bandtiming_weak_args})
 set(bandtiming_weak_encoder_rows 0)
 set(bandtiming_weak_decoder_rows 0)
 set(bandtiming_weak_direct_rows 0)
@@ -3115,6 +3217,7 @@ foreach(bandtiming_line IN LISTS bandtiming_weak_lines)
     list(GET bandtiming_fields 38 bandtiming_stats_available)
     list(GET bandtiming_fields 50 bandtiming_packet_bytes)
     list(GET bandtiming_fields 51 bandtiming_intermediate_bytes)
+    list(GET bandtiming_fields 52 bandtiming_intermediate_sha256)
     if(bandtiming_role MATCHES "^candidate")
         if(bandtiming_scope STREQUAL "encoder")
             math(EXPR bandtiming_weak_encoder_rows
@@ -3153,7 +3256,9 @@ foreach(bandtiming_line IN LISTS bandtiming_weak_lines)
            NOT "${bandtiming_fault_contaminated}" STREQUAL "0" OR
            NOT "${bandtiming_stats_available}" STREQUAL "0" OR
            NOT "${bandtiming_packet_bytes}" STREQUAL "0" OR
-           NOT "${bandtiming_intermediate_bytes}" STREQUAL "26")
+           NOT "${bandtiming_intermediate_bytes}" STREQUAL "26" OR
+           NOT "${bandtiming_intermediate_sha256}" STREQUAL
+               "not_applicable")
             message(FATAL_ERROR
                 "bandtiming probe-certified candidate weak row fabricated "
                 "timing or lost its normalized class\n${bandtiming_line}")
@@ -3174,7 +3279,9 @@ foreach(bandtiming_line IN LISTS bandtiming_weak_lines)
             "${bandtiming_independent_dispatch_rows} + 1")
         if(NOT "${bandtiming_eligible}" STREQUAL "1" OR
            NOT "${bandtiming_censored}" STREQUAL "0" OR
-           NOT "${bandtiming_reason}" STREQUAL "none")
+           NOT "${bandtiming_reason}" STREQUAL "none" OR
+           NOT bandtiming_intermediate_sha256 MATCHES
+               "^[0-9a-f]+$")
             message(FATAL_ERROR
                 "candidate weak seed contaminated an independent dispatch "
                 "panel\n${bandtiming_line}")
@@ -3193,6 +3300,18 @@ if(NOT bandtiming_weak_result EQUAL 0 OR bandtiming_weak_err OR
         "rc=${bandtiming_weak_result}\nstdout=${bandtiming_weak_out}\n"
         "stderr=${bandtiming_weak_err}")
 endif()
+expect_runtime_failure(
+    "requested direct witness fault was not injectable"
+    ${bandtiming_weak_args}
+    --test-direct-witness-mismatch candidate)
+expect_runtime_failure(
+    "requested timed encoder witness fault was not injectable"
+    ${bandtiming_weak_args}
+    --test-timed-encoder-witness-mismatch candidate)
+expect_runtime_failure(
+    "requested timed direct witness fault was not injectable"
+    ${bandtiming_weak_args}
+    --test-timed-direct-witness-mismatch candidate)
 
 # The bounded semantic witness may skip only a weakness reproduced by both
 # the explicit canonical path and the real dispatch path.  This K=5 seed is a
@@ -3217,7 +3336,7 @@ run_bench(
 if(NOT bandtiming_shared_weak_result EQUAL 0 OR
    bandtiming_shared_weak_err OR
    NOT bandtiming_shared_weak_out MATCHES
-       "\n# band_semantic,timed=0,construction_seed=321981944,seed_attempt=1,seed_attempt_cap=256,.*pass=1\n")
+       "\n# band_semantic,timed=0,construction_seed=321981944,seed_attempt=1,seed_attempt_cap=256,.*pass=1,explicit_direct_intermediate_sha256=[0-9a-f]+,dispatch_direct_intermediate_sha256=[0-9a-f]+\n")
     message(FATAL_ERROR
         "bandtiming semantic witness did not skip exactly the shared weak "
         "construction\nrc=${bandtiming_shared_weak_result}\n"

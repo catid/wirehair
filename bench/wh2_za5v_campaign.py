@@ -38,7 +38,8 @@ import band_timing_codec as band
 import peel_codec
 
 
-CAMPAIGN_SCHEMA = "wirehair.wh2.za5v.all-k-campaign.v1"
+CAMPAIGN_SCHEMA = "wirehair.wh2.za5v.all-k-campaign.v2"
+REQUIRED_BANDTIMING_PROTOCOL = band.BANDTIMING_PROTOCOL_V2
 JOB_SCHEMA = "wirehair.wh2.za5v.all-k-job.v1"
 RESULT_SCHEMA = "wirehair.wh2.za5v.all-k-result.v1"
 SUMMARY_SCHEMA = "wirehair.wh2.za5v.all-k-summary.v1"
@@ -824,11 +825,11 @@ def validate_job(job):
     expected = _job_without_identity(
         phase, candidate_name, block_count, schedule)
     identity = canonical_sha256(expected)
-    if job != {
-        **expected,
-        "job_id": identity,
-        "order": job.get("order"),
-    }:
+    if not peel_codec._same_typed_json(job, {
+            **expected,
+            "job_id": identity,
+            "order": job.get("order"),
+    }):
         raise CampaignError("job differs from its frozen request")
     if type(job["order"]) is not int or job["order"] < 0:
         raise CampaignError("job order is invalid")
@@ -1051,10 +1052,11 @@ def _load_selection_contract(path, requested_survivor):
         path.parent / "summary.json.gz")
     if not isinstance(summary, dict):
         raise CampaignError("selection summary is not an object")
-    if completion.get("summary") != {
-        "path": "summary.json.gz",
-        **summary_evidence,
-    }:
+    if not peel_codec._same_typed_json(
+            completion.get("summary"), {
+                "path": "summary.json.gz",
+                **summary_evidence,
+            }):
         raise CampaignError(
             "selection decision is not bound by completion summary hash")
     decision = summary.get("decision")
@@ -1078,6 +1080,7 @@ def make_plan(phase, survivor=None):
     validation = validate_frozen_contract()
     return {
         "schema": CAMPAIGN_SCHEMA,
+        "bandtiming_protocol": REQUIRED_BANDTIMING_PROTOCOL,
         "phase": phase,
         "survivor": survivor,
         "frozen_roster": frozen_roster(),
@@ -1154,8 +1157,11 @@ def _verify_job_files(directory, manifest, manifest_sha256):
         _parent_signal_safe_point()
         path = directory / assignment["job_file"]
         record, digest = read_canonical_json(path)
-        if record != _expected_job_record(
-                manifest, manifest_sha256, assignment, job):
+        if not peel_codec._same_typed_json(
+                record,
+                _expected_job_record(
+                    manifest, manifest_sha256, assignment, job),
+        ):
             raise CampaignError(f"job file changed: {path}")
         evidence.append({
             "path": assignment["job_file"],
@@ -1203,6 +1209,7 @@ def _validate_worker_record(record):
         or set(assignment) != {
             "order", "job_id", "cpu", "job_file", "output", "log"
         }
+        or type(assignment["order"]) is not int
         or assignment["order"] != job["order"]
         or assignment["job_id"] != job["job_id"]
         or type(assignment["cpu"]) is not int
@@ -1241,7 +1248,7 @@ def run_worker(job_file, output_path):
     bindings = record["runtime_bindings"]
     before_bindings = runtime_bindings(
         bindings["benchmark"]["path"], bindings["thermal"]["path"])
-    if before_bindings != bindings:
+    if not peel_codec._same_typed_json(before_bindings, bindings):
         raise CampaignError("worker runtime binding changed before launch")
     request = expected_request(job)
     context = peel_codec.make_paired_context_config(
@@ -1273,9 +1280,19 @@ def run_worker(job_file, output_path):
         required_margin=request["required_margin"],
     )
     wall_finished_ns = time.time_ns()
+    if (
+        measurement.protocol != REQUIRED_BANDTIMING_PROTOCOL
+        or not measurement.valid_for_promotion
+    ):
+        raise CampaignError("worker produced a non-promotable receipt")
     receipt = measurement.as_dict()
-    band.replay_bandtiming_receipt(
+    replayed = band.replay_bandtiming_receipt(
         receipt, expected_request=request)
+    if (
+        replayed.protocol != REQUIRED_BANDTIMING_PROTOCOL
+        or not replayed.valid_for_promotion
+    ):
+        raise CampaignError("worker replay downgraded the receipt protocol")
     bound = receipt["context"]["bound"]
     if (
         bound["cpu_affinity"] != [assignment["cpu"]]
@@ -1286,7 +1303,7 @@ def run_worker(job_file, output_path):
             "native receipt does not bind the assigned CPU and thermal source")
     after_bindings = runtime_bindings(
         bindings["benchmark"]["path"], bindings["thermal"]["path"])
-    if after_bindings != before_bindings:
+    if not peel_codec._same_typed_json(after_bindings, before_bindings):
         raise CampaignError("worker runtime binding changed during probe")
     envelope = {
         "schema": RESULT_SCHEMA,
@@ -3517,12 +3534,15 @@ def _replay_result(
         or set(envelope) != required
         or envelope["schema"] != RESULT_SCHEMA
         or envelope["manifest_sha256"] != manifest_sha256
-        or envelope["job"] != job
-        or envelope["assignment"] != assignment
-        or envelope["runtime_bindings_before"]
-            != manifest["runtime_bindings"]
-        or envelope["runtime_bindings_after"]
-            != manifest["runtime_bindings"]
+        or not peel_codec._same_typed_json(envelope["job"], job)
+        or not peel_codec._same_typed_json(
+            envelope["assignment"], assignment)
+        or not peel_codec._same_typed_json(
+            envelope["runtime_bindings_before"],
+            manifest["runtime_bindings"])
+        or not peel_codec._same_typed_json(
+            envelope["runtime_bindings_after"],
+            manifest["runtime_bindings"])
         or type(envelope["wall_started_unix_ns"]) is not int
         or type(envelope["wall_finished_unix_ns"]) is not int
         or envelope["wall_finished_unix_ns"]
@@ -3531,7 +3551,14 @@ def _replay_result(
         raise CampaignError(f"result envelope is inconsistent: {path}")
     receipt = envelope["receipt"]
     request = expected_request(job)
-    band.replay_bandtiming_receipt(receipt, expected_request=request)
+    replayed = band.replay_bandtiming_receipt(
+        receipt, expected_request=request)
+    if (
+        replayed.protocol != manifest["bandtiming_protocol"]
+        or replayed.protocol != REQUIRED_BANDTIMING_PROTOCOL
+        or not replayed.valid_for_promotion
+    ):
+        raise CampaignError(f"result receipt is non-promotable: {path}")
     if (
         receipt["candidate_descriptor"] != job["candidate_descriptor"]
         or receipt["dispatch_descriptor"] != job["dispatch_descriptor"]
@@ -3752,11 +3779,12 @@ def _run_campaign_impl(
     log_files = _verify_empty_logs(directory, manifest)
     summary_evidence = build_summaries(directory, manifest, directory)
     _parent_signal_safe_point()
-    if summary_evidence["job_files"] != job_files:
+    if not peel_codec._same_typed_json(
+            summary_evidence["job_files"], job_files):
         raise CampaignError("job file hashes changed during campaign")
     final_bindings = runtime_bindings(
         bindings["benchmark"]["path"], bindings["thermal"]["path"])
-    if final_bindings != bindings:
+    if not peel_codec._same_typed_json(final_bindings, bindings):
         raise CampaignError("campaign runtime binding changed before completion")
     completion = {
         "schema": COMPLETION_SCHEMA,
@@ -3827,7 +3855,8 @@ def _validate_manifest(manifest):
     worker_cpus = manifest.get("worker_cpus")
     if (
         set(manifest) != set(expected_plan) | common_runtime_fields
-        or any(manifest.get(name) != value
+        or any(not peel_codec._same_typed_json(
+                   manifest.get(name), value)
                for name, value in expected_plan.items())
         or type(manifest.get("created_unix_ns")) is not int
         or manifest["created_unix_ns"] <= 0
@@ -3875,7 +3904,8 @@ def _validate_manifest(manifest):
         raise CampaignError("holdout selection contract is invalid")
 
     jobs = build_pre_cpu_jobs(phase, survivor)
-    if manifest.get("pre_cpu_jobs") != list(jobs):
+    if not peel_codec._same_typed_json(
+            manifest.get("pre_cpu_jobs"), list(jobs)):
         raise CampaignError("campaign manifest population changed")
     assignments = manifest.get("assignments")
     if (
@@ -3888,19 +3918,16 @@ def _validate_manifest(manifest):
         raise CampaignError("campaign assignments are incomplete")
     for index, (assignment, job) in enumerate(zip(assignments, jobs)):
         _parent_signal_safe_point()
-        if (
-            not isinstance(assignment, dict)
-            or set(assignment) != {
-                "order", "job_id", "cpu", "job_file", "output", "log"
-            }
-            or assignment.get("order") != index
-            or assignment.get("job_id") != job["job_id"]
-            or assignment.get("cpu")
-                != manifest["worker_cpus"][index % manifest["workers"]]
-            or assignment.get("job_file") != f"jobs/{index:04d}.json"
-            or assignment.get("output") != f"results/{index:04d}.json.gz"
-            or assignment.get("log") != f"logs/{index:04d}.log"
-        ):
+        expected_assignment = {
+            "order": index,
+            "job_id": job["job_id"],
+            "cpu": manifest["worker_cpus"][index % manifest["workers"]],
+            "job_file": f"jobs/{index:04d}.json",
+            "output": f"results/{index:04d}.json.gz",
+            "log": f"logs/{index:04d}.log",
+        }
+        if not peel_codec._same_typed_json(
+                assignment, expected_assignment):
             raise CampaignError("campaign CPU assignment changed")
     return jobs
 
@@ -3929,10 +3956,11 @@ def _verify_stored_summary_artifacts(directory, completion):
     if (
         not isinstance(expected_summary, dict)
         or not isinstance(summary_value, dict)
-        or expected_summary != {
-            "path": "summary.json.gz",
-            **summary_evidence,
-        }
+        or not peel_codec._same_typed_json(
+            expected_summary, {
+                "path": "summary.json.gz",
+                **summary_evidence,
+            })
         or summary_value.get("schema") != SUMMARY_SCHEMA
         or summary_value.get("phase") != completion["phase"]
         or summary_value.get("pre_cpu_job_list_sha256")
@@ -3953,7 +3981,8 @@ def _verify_stored_summary_artifacts(directory, completion):
         directory / "cell-ledger.jsonl.gz")
     if (
         digest != ledger["compressed_sha256"]
-        or size != ledger["compressed_bytes"]
+        or not peel_codec._same_typed_json(
+            size, ledger["compressed_bytes"])
     ):
         raise CampaignError("stored cell ledger does not match completion")
 
@@ -4026,7 +4055,8 @@ def verify_campaign(directory):
             manifest["selection_contract"]["path"],
             manifest["survivor"],
         )
-        if reopened != manifest["selection_contract"]:
+        if not peel_codec._same_typed_json(
+                reopened, manifest["selection_contract"]):
             raise CampaignError(
                 "holdout parent selection evidence changed")
     completion, completion_sha256 = read_canonical_json(
@@ -4056,9 +4086,11 @@ def verify_campaign(directory):
             != manifest["frozen_roster_sha256"]
         or completion.get("pre_cpu_job_list_sha256")
             != manifest["pre_cpu_job_list_sha256"]
-        or completion.get("jobs") != len(manifest["pre_cpu_jobs"])
-        or completion.get("runtime_bindings_final")
-            != manifest["runtime_bindings"]
+        or type(completion.get("jobs")) is not int
+        or completion["jobs"] != len(manifest["pre_cpu_jobs"])
+        or not peel_codec._same_typed_json(
+            completion.get("runtime_bindings_final"),
+            manifest["runtime_bindings"])
         or type(completion.get("completed_unix_ns")) is not int
         or completion["completed_unix_ns"] < manifest["created_unix_ns"]
     ):
@@ -4072,11 +4104,17 @@ def verify_campaign(directory):
         reproduced = build_summaries(
             directory, manifest, Path(temporary))
     if (
-        reproduced["job_files"] != completion["job_files"]
-        or reproduced["result_files"] != completion["result_files"]
-        or reproduced["cell_ledger"] != completion["cell_ledger"]
-        or reproduced["summary"] != completion["summary"]
-        or _verify_empty_logs(directory, manifest) != completion["log_files"]
+        not peel_codec._same_typed_json(
+            reproduced["job_files"], completion["job_files"])
+        or not peel_codec._same_typed_json(
+            reproduced["result_files"], completion["result_files"])
+        or not peel_codec._same_typed_json(
+            reproduced["cell_ledger"], completion["cell_ledger"])
+        or not peel_codec._same_typed_json(
+            reproduced["summary"], completion["summary"])
+        or not peel_codec._same_typed_json(
+            _verify_empty_logs(directory, manifest),
+            completion["log_files"])
     ):
         raise CampaignError("strict replay did not reproduce summary hashes")
     return {

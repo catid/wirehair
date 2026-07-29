@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -168,6 +169,10 @@ class FrozenPopulationTests(unittest.TestCase):
     def test_dry_plans_are_result_free_and_holdout_is_explicit(self):
         selection = campaign.make_plan("selection")
         self.assertEqual(selection["pre_cpu_job_count"], 2376)
+        self.assertEqual(
+            selection["bandtiming_protocol"],
+            campaign.band.BANDTIMING_PROTOCOL_V2,
+        )
         forbidden = (
             "created_unix_ns", "runtime_bindings", "worker_cpus",
             "assignments", "results", "summary", "completion",
@@ -180,6 +185,27 @@ class FrozenPopulationTests(unittest.TestCase):
         holdout = campaign.make_plan("holdout", "pure8_s0m1_d3")
         self.assertEqual(holdout["pre_cpu_job_count"], 594)
         self.assertEqual(holdout["survivor"], "pure8_s0m1_d3")
+
+    def test_campaign_v2_protocol_pin_ignores_mutable_current_alias(self):
+        with mock.patch.object(
+                campaign.band,
+                "BANDTIMING_PROTOCOL",
+                campaign.band.BANDTIMING_PROTOCOL_V1):
+            selection = campaign.make_plan("selection")
+            holdout = campaign.make_plan(
+                "holdout", "pure8_s0m1_d3")
+        self.assertEqual(
+            campaign.REQUIRED_BANDTIMING_PROTOCOL,
+            campaign.band.BANDTIMING_PROTOCOL_V2,
+        )
+        self.assertEqual(
+            selection["bandtiming_protocol"],
+            campaign.band.BANDTIMING_PROTOCOL_V2,
+        )
+        self.assertEqual(
+            holdout["bandtiming_protocol"],
+            campaign.band.BANDTIMING_PROTOCOL_V2,
+        )
 
     def test_result_free_selection_policy_is_bound_into_plan(self):
         policy = campaign.selection_policy()
@@ -281,12 +307,286 @@ class FrozenPopulationTests(unittest.TestCase):
                 campaign._replay_result(
                     directory, manifest, "0" * 64, assignment, job)
 
+    def test_artifact_replay_rejects_bool_int_aliases(self):
+        job = campaign.build_pre_cpu_jobs("selection")[0]
+        assignment = {
+            "order": job["order"],
+            "job_id": job["job_id"],
+            "cpu": 0,
+            "job_file": "jobs/0000.json",
+            "output": "results/0000.json.gz",
+            "log": "logs/0000.log",
+        }
+        bindings = synthetic_runtime_bindings()
+        manifest_sha256 = "0" * 64
+        manifest = {
+            "bandtiming_protocol": campaign.REQUIRED_BANDTIMING_PROTOCOL,
+            "runtime_bindings": bindings,
+            "pre_cpu_jobs": [job],
+            "assignments": [assignment],
+        }
+        record = campaign._expected_job_record(
+            manifest, manifest_sha256, assignment, job)
+        envelope = {
+            "schema": campaign.RESULT_SCHEMA,
+            "manifest_sha256": manifest_sha256,
+            "job": job,
+            "assignment": assignment,
+            "wall_started_unix_ns": 1,
+            "wall_finished_unix_ns": 2,
+            "runtime_bindings_before": bindings,
+            "runtime_bindings_after": bindings,
+            "receipt": {},
+        }
+        mutations = (
+            lambda value: value["job"].__setitem__("order", False),
+            lambda value: value["assignment"].__setitem__("order", False),
+            lambda value: value["runtime_bindings"].get(
+                "benchmark").__setitem__("device", True),
+        )
+        for mutate in mutations:
+            with self.subTest(artifact="job", mutation=mutate):
+                forged = json.loads(json.dumps(record))
+                mutate(forged)
+                with mock.patch.object(
+                        campaign, "read_canonical_json",
+                        return_value=(forged, "1" * 64)):
+                    with self.assertRaisesRegex(
+                            campaign.CampaignError, "job file changed"):
+                        campaign._verify_job_files(
+                            Path("/unused"), manifest, manifest_sha256)
+
+        envelope_mutations = (
+            lambda value: value["job"].__setitem__("order", False),
+            lambda value: value["assignment"].__setitem__("order", False),
+            lambda value: value["runtime_bindings_before"][
+                "benchmark"].__setitem__("device", True),
+            lambda value: value["runtime_bindings_after"][
+                "benchmark"].__setitem__("device", True),
+        )
+        for mutate in envelope_mutations:
+            with self.subTest(artifact="result", mutation=mutate):
+                forged = json.loads(json.dumps(envelope))
+                mutate(forged)
+                with (
+                        mock.patch.object(
+                            campaign, "read_canonical_gzip_json",
+                            return_value=(forged, {})),
+                        mock.patch.object(
+                            campaign.band,
+                            "replay_bandtiming_receipt") as replay,
+                ):
+                    with self.assertRaisesRegex(
+                            campaign.CampaignError,
+                            "result envelope is inconsistent"):
+                        campaign._replay_result(
+                            Path("/unused"), manifest, manifest_sha256,
+                            assignment, job)
+                    replay.assert_not_called()
+
+    def test_result_replay_rejects_legacy_nonpromotable_protocol(self):
+        from test_band_timing_tools import (
+            band_context,
+            bandtiming_stdout,
+            parse_kwargs,
+        )
+
+        with (
+                mock.patch.object(
+                    campaign, "SELECTION_REPLICATES", 4),
+                tempfile.TemporaryDirectory() as temporary,
+        ):
+            directory = Path(temporary)
+            job = campaign.build_pre_cpu_jobs("selection")[0]
+            campaign.validate_job(job)
+            candidate = campaign.descriptor_from_job(job)
+            context = band_context(cache_state=job["cache_state"])
+            fixture = {
+                "candidate": candidate,
+                "schedule": job["schedule"],
+                "systematic_cache": job["systematic_cache"],
+                "cache_state": job["cache_state"],
+                "block_count": job["K"],
+                "block_bytes": job["block_bytes"],
+                "replicates": job["replicates"],
+                "warmups": job["warmup_replicates"],
+                "construction_seed": job["construction_seed_base"],
+                "loss_seed": job["loss_seed_base"],
+                "inner_reps": job["inner_reps"],
+                "max_overhead": job["max_overhead"],
+                "required_margin": job["required_margin"],
+                "loss": job["loss"],
+            }
+            legacy_measurement = campaign.band.parse_bandtiming_output(
+                bandtiming_stdout(
+                    context=context,
+                    schema=campaign.band.BANDTIMING_SCHEMA_V1,
+                    **fixture,
+                ),
+                _protocol=campaign.band.BANDTIMING_PROTOCOL_V1,
+                **parse_kwargs(context=context, **fixture),
+            )
+            self.assertFalse(legacy_measurement.valid_for_promotion)
+            self.assertEqual(
+                campaign.band.replay_bandtiming_receipt(
+                    legacy_measurement.as_dict()).protocol,
+                campaign.band.BANDTIMING_PROTOCOL_V1,
+            )
+            assignment = {
+                "order": job["order"],
+                "job_id": job["job_id"],
+                "cpu": 2,
+                "job_file": "jobs/0000.json",
+                "output": "results/0000.json.gz",
+                "log": "logs/0000.log",
+            }
+            bindings = synthetic_runtime_bindings()
+            bindings["thermal"]["device"] = 1
+            bindings["thermal"]["inode"] = 2
+            manifest_sha256 = "0" * 64
+            manifest = {
+                "bandtiming_protocol":
+                    campaign.REQUIRED_BANDTIMING_PROTOCOL,
+                "runtime_bindings": bindings,
+                "pre_cpu_jobs": [job],
+            }
+            envelope = {
+                "schema": campaign.RESULT_SCHEMA,
+                "manifest_sha256": manifest_sha256,
+                "job": job,
+                "assignment": assignment,
+                "wall_started_unix_ns": 1,
+                "wall_finished_unix_ns": 2,
+                "runtime_bindings_before": bindings,
+                "runtime_bindings_after": bindings,
+                "receipt": legacy_measurement.as_dict(),
+            }
+            with (
+                    mock.patch.object(
+                        campaign, "read_canonical_gzip_json",
+                        return_value=(envelope, {})),
+                    mock.patch.object(
+                        campaign.band,
+                        "BANDTIMING_PROTOCOL",
+                        campaign.band.BANDTIMING_PROTOCOL_V1),
+            ):
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "non-promotable"):
+                    campaign._replay_result(
+                        directory, manifest, manifest_sha256,
+                        assignment, job)
+
+    def test_worker_rejects_probe_and_replay_protocol_downgrades(self):
+        bindings = synthetic_runtime_bindings()
+        job = campaign.build_pre_cpu_jobs("selection")[0]
+        assignment = {
+            "order": job["order"],
+            "job_id": job["job_id"],
+            "cpu": 2,
+            "job_file": "jobs/0000.json",
+            "output": "results/0000.json.gz",
+            "log": "logs/0000.log",
+        }
+        record = {
+            "schema": campaign.JOB_SCHEMA,
+            "manifest_sha256": "0" * 64,
+            "runtime_bindings": bindings,
+            "job": job,
+            "assignment": assignment,
+        }
+        cases = (
+            (
+                SimpleNamespace(
+                    protocol=campaign.band.BANDTIMING_PROTOCOL_V1,
+                    valid_for_promotion=False,
+                    as_dict=lambda: {}),
+                SimpleNamespace(
+                    protocol=campaign.band.BANDTIMING_PROTOCOL_V2,
+                    valid_for_promotion=True),
+                "worker produced a non-promotable receipt",
+                False,
+            ),
+            (
+                SimpleNamespace(
+                    protocol=campaign.band.BANDTIMING_PROTOCOL_V2,
+                    valid_for_promotion=True,
+                    as_dict=lambda: {}),
+                SimpleNamespace(
+                    protocol=campaign.band.BANDTIMING_PROTOCOL_V1,
+                    valid_for_promotion=False),
+                "worker replay downgraded the receipt protocol",
+                True,
+            ),
+        )
+        for probe, replay, diagnostic, replay_called in cases:
+            with (
+                    self.subTest(diagnostic=diagnostic),
+                    tempfile.TemporaryDirectory() as temporary,
+            ):
+                directory = Path(temporary)
+                job_path = directory / assignment["job_file"]
+                output_path = directory / assignment["output"]
+                with (
+                        mock.patch.object(
+                            campaign, "_require_normal_priority"),
+                        mock.patch.object(
+                            campaign, "read_canonical_json",
+                            return_value=(record, "unused")),
+                        mock.patch.object(
+                            campaign.os, "sched_setaffinity"),
+                        mock.patch.object(
+                            campaign.os, "sched_getaffinity",
+                            return_value={assignment["cpu"]}),
+                        mock.patch.object(
+                            campaign, "runtime_bindings",
+                            return_value=bindings),
+                        mock.patch.object(
+                            campaign.peel_codec,
+                            "make_paired_context_config",
+                            return_value={}),
+                        mock.patch.object(
+                            campaign.band, "bandtiming_probe",
+                            return_value=probe),
+                        mock.patch.object(
+                            campaign.band, "replay_bandtiming_receipt",
+                            return_value=replay) as replay_mock,
+                ):
+                    with self.assertRaisesRegex(
+                            campaign.CampaignError, diagnostic):
+                        campaign.run_worker(job_path, output_path)
+                self.assertEqual(replay_mock.called, replay_called)
+
     def test_malformed_manifest_and_process_group_cleanup(self):
         jobs = campaign.build_pre_cpu_jobs("selection")
         bindings = synthetic_runtime_bindings()
         manifest = campaign._build_manifest(
             "selection", None, jobs, [0], 1, bindings, None)
         campaign._validate_manifest(manifest)
+        legacy_protocol = json.loads(json.dumps(manifest))
+        legacy_protocol["bandtiming_protocol"] = (
+            campaign.band.BANDTIMING_PROTOCOL_V1
+        )
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "runtime contract"):
+            campaign._validate_manifest(legacy_protocol)
+        aliased_roster_flag = json.loads(json.dumps(manifest))
+        aliased_roster_flag["frozen_roster"]["selection_policy"][
+            "production_contract_promotion"
+        ]["requires_holdout_confirmation"] = 1
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "runtime contract"):
+            campaign._validate_manifest(aliased_roster_flag)
+        aliased_population_order = json.loads(json.dumps(manifest))
+        aliased_population_order["pre_cpu_jobs"][0]["order"] = False
+        aliased_population_order["assignments"][0]["order"] = False
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "population changed"):
+            campaign._validate_manifest(aliased_population_order)
+        aliased_assignment_order = json.loads(json.dumps(manifest))
+        aliased_assignment_order["assignments"][0]["order"] = False
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "assignment changed"):
+            campaign._validate_manifest(aliased_assignment_order)
         forged = json.loads(json.dumps(manifest))
         forged["assignments"][0]["cpu"] = 1
         with self.assertRaisesRegex(
@@ -307,6 +607,11 @@ class FrozenPopulationTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 campaign.CampaignError, "outside the frozen roster"):
             campaign.validate_job(malformed_job)
+        aliased_job_descriptor = json.loads(json.dumps(jobs[0]))
+        aliased_job_descriptor["candidate_descriptor"]["gf16"] = False
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "differs from its frozen request"):
+            campaign.validate_job(aliased_job_descriptor)
         with self.assertRaisesRegex(
                 campaign.CampaignError, "explicit survivor"):
             campaign.build_pre_cpu_jobs("holdout", [])
@@ -328,6 +633,11 @@ class FrozenPopulationTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 campaign.CampaignError, "CPU assignment is malformed"):
             campaign._validate_worker_record(malformed_worker_path)
+        aliased_worker_order = json.loads(json.dumps(worker_record))
+        aliased_worker_order["assignment"]["order"] = False
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "CPU assignment is malformed"):
+            campaign._validate_worker_record(aliased_worker_order)
 
         survivor = "pure8_s0_d3"
         holdout_jobs = campaign.build_pre_cpu_jobs("holdout", survivor)
@@ -499,6 +809,59 @@ class FrozenPopulationTests(unittest.TestCase):
                         "stored summary does not match completion"):
                     campaign._verify_stored_summary_artifacts(
                         directory, completion)
+
+    def test_stored_evidence_rejects_numeric_type_aliases(self):
+        summary_value = {
+            "schema": campaign.SUMMARY_SCHEMA,
+            "phase": "selection",
+            "pre_cpu_job_list_sha256": "0" * 64,
+        }
+        summary_evidence = {
+            "compressed_sha256": "1" * 64,
+            "uncompressed_sha256": "2" * 64,
+            "compressed_bytes": 10,
+            "uncompressed_bytes": 20,
+        }
+        ledger = {
+            "path": "cell-ledger.jsonl.gz",
+            "rows": 1,
+            "compressed_sha256": "3" * 64,
+            "uncompressed_sha256": "4" * 64,
+            "compressed_bytes": 30,
+            "uncompressed_bytes": 40,
+        }
+        completion = {
+            "phase": "selection",
+            "pre_cpu_job_list_sha256": "0" * 64,
+            "summary": {
+                "path": "summary.json.gz",
+                **summary_evidence,
+            },
+            "cell_ledger": ledger,
+        }
+        with (
+                mock.patch.object(
+                    campaign, "read_canonical_gzip_json",
+                    return_value=(summary_value, summary_evidence)),
+                mock.patch.object(
+                    campaign, "_stream_file_sha256",
+                    return_value=("3" * 64, 30)),
+        ):
+            forged_summary = json.loads(json.dumps(completion))
+            forged_summary["summary"]["compressed_bytes"] = 10.0
+            with self.assertRaisesRegex(
+                    campaign.CampaignError,
+                    "stored summary does not match completion"):
+                campaign._verify_stored_summary_artifacts(
+                    Path("/unused"), forged_summary)
+
+            forged_ledger = json.loads(json.dumps(completion))
+            forged_ledger["cell_ledger"]["compressed_bytes"] = 30.0
+            with self.assertRaisesRegex(
+                    campaign.CampaignError,
+                    "stored cell ledger does not match completion"):
+                campaign._verify_stored_summary_artifacts(
+                    Path("/unused"), forged_ledger)
 
     def test_runtime_binding_nested_schema_fails_closed(self):
         jobs = campaign.build_pre_cpu_jobs("selection")

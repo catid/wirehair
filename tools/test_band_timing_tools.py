@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the independent bandtiming v1 consumer."""
+"""Adversarial tests for the independent bandtiming consumer."""
 
 import copy
 import gc
@@ -130,7 +130,11 @@ def bandtiming_stdout(
         warmups=0, replicates=4, construction_seed=7, loss_seed=9,
         inner_reps=1, max_overhead=16, required_margin=0.0,
         weak=None, mutate_row=None, started_ns=1_000_000_000,
-        finished_ns=2_000_000_000, loss=0.1):
+        finished_ns=2_000_000_000, loss=0.1, schema=None):
+    schema = schema or band.BANDTIMING_SCHEMA
+    if schema not in (
+            band.BANDTIMING_SCHEMA_V1, band.BANDTIMING_SCHEMA):
+        raise ValueError("unsupported fixture schema")
     candidate = candidate or default_candidate(block_count)
     dispatch = band.dispatch_band_descriptor(block_count)
     context = context or band_context(cache_state=cache_state)
@@ -138,7 +142,7 @@ def bandtiming_stdout(
     expected_rows = total * 120
     message_bytes = (block_count - 1) * block_bytes + 1
     manifest = {
-        "schema": band.BANDTIMING_SCHEMA,
+        "schema": schema,
         "dispatch_profile": peel_codec.TARGET_PROFILE,
         "seed_policy": peel_codec.TARGET_SEED_POLICY,
         "contract_id": peel_codec.TARGET_CONTRACT["contract_id"],
@@ -206,8 +210,11 @@ def bandtiming_stdout(
             "fresh-object-init-through-first-K-symbols-v1",
         "decoder_scope":
             "fresh-init-outside-timer-first-feed-through-own-success-v1",
-        "direct_scope":
-            "candidate-dispatch-pair-local-fixed-prefix-solve-v1",
+        "direct_scope": (
+            band.BANDTIMING_DIRECT_SCOPE_V1
+            if schema == band.BANDTIMING_SCHEMA_V1
+            else band.BANDTIMING_DIRECT_SCOPE_V2
+        ),
         "weak_seed_policy": "panel-local-balanced-censor-v1",
         "hook_path":
             "caller-pinned-explicit-transaction-attempt-zero-v2",
@@ -284,14 +291,22 @@ def bandtiming_stdout(
         "message_equal": 1,
         "pass": 1,
     }
+    if schema == band.BANDTIMING_SCHEMA_V1:
+        semantic_fields = band.BANDTIMING_SEMANTIC_FIELDS_V1
+        columns = band.BANDTIMING_COLUMNS_V1
+    else:
+        semantic["explicit_direct_intermediate_sha256"] = digest
+        semantic["dispatch_direct_intermediate_sha256"] = digest
+        semantic_fields = band.BANDTIMING_SEMANTIC_FIELDS_V2
+        columns = band.BANDTIMING_COLUMNS_V2
     lines = [
         "# bandtiming," + ",".join(
             f"{name}={manifest[name]}"
             for name in band.BANDTIMING_MANIFEST_FIELDS),
         "# band_semantic," + ",".join(
             f"{name}={semantic[name]}"
-            for name in band.BANDTIMING_SEMANTIC_FIELDS),
-        ",".join(band.BANDTIMING_COLUMNS),
+            for name in semantic_fields),
+        ",".join(columns),
     ]
     base_overhead = {"candidate": 2, "dispatch": 3, "wh1": 4}
     base_elapsed = {"candidate": 80, "dispatch": 100, "wh1": 120}
@@ -472,6 +487,24 @@ def bandtiming_stdout(
                     ) * block_bytes
                 )
                 elapsed = base_elapsed[base] if eligible else 0
+                row_succeeded = (
+                    construct_result == 0 and result_class == "success" and
+                    (
+                        scope != "decoder" or
+                        (
+                            recovery_result == 0 and
+                            recovery_class == "success" and
+                            recovery_ok == 1
+                        )
+                    )
+                )
+                intermediate_sha256 = (
+                    hashlib.sha256(
+                        f"intermediate-{replicate}-{base}".encode("ascii")
+                    ).hexdigest()
+                    if base != "wh1" and row_succeeded
+                    else "not_applicable"
+                )
                 row = {
                     "replicate": replicate,
                     "measured": int(replicate >= warmups),
@@ -516,11 +549,12 @@ def bandtiming_stdout(
                     "source_bytes": message_bytes,
                     "packet_payload_bytes": packet_bytes,
                     "intermediate_bytes": intermediate,
+                    "intermediate_sha256": intermediate_sha256,
                 }
                 if mutate_row is not None:
                     mutate_row(row_index, row)
                 lines.append(",".join(
-                    str(row[name]) for name in band.BANDTIMING_COLUMNS))
+                    str(row[name]) for name in columns))
                 row_index += 1
     prefix = "\n".join(lines) + "\n"
     done_prefix = (
@@ -615,6 +649,130 @@ class BandTimingParserTests(unittest.TestCase):
         context["bound"]["cpu_affinity"].append(99)
         self.assertEqual(
             result.context["bound"]["cpu_affinity"], [2])
+
+    def test_v2_intermediate_witness_is_independently_bound(self):
+        kwargs = parse_kwargs()
+        stdout = bandtiming_stdout()
+        forged = hashlib.sha256(b"forged-intermediate").hexdigest()
+
+        def replace_matching_rows(source, predicate, value):
+            def edit(lines):
+                for index in range(3, len(lines) - 1):
+                    row = dict(zip(
+                        band.BANDTIMING_COLUMNS,
+                        lines[index].split(",")))
+                    if predicate(row):
+                        row["intermediate_sha256"] = value
+                        lines[index] = ",".join(
+                            row[name]
+                            for name in band.BANDTIMING_COLUMNS)
+            return authenticated_edit(source, edit)
+
+        forged_direct = replace_matching_rows(
+            stdout,
+            lambda row: (
+                row["scope"] == "direct" and
+                band._base_arm(row["role"]) == "candidate"
+            ),
+            forged,
+        )
+        with self.assertRaisesRegex(
+                band.MeasurementError, "witness changed across scopes"):
+            band.parse_bandtiming_output(forged_direct, **kwargs)
+
+        successful_sentinel = edit_row(
+            stdout, 0, intermediate_sha256="not_applicable")
+        with self.assertRaisesRegex(
+                band.MeasurementError, "invalid intermediate witness"):
+            band.parse_bandtiming_output(successful_sentinel, **kwargs)
+
+        wh1_hash = replace_matching_rows(
+            stdout,
+            lambda row: band._base_arm(row["role"]) == "wh1",
+            forged,
+        )
+        with self.assertRaisesRegex(
+                band.MeasurementError, "invalid intermediate witness"):
+            band.parse_bandtiming_output(wh1_hash, **kwargs)
+
+        malformed = edit_row(
+            stdout, 12 * 8, intermediate_sha256="A" * 64)
+        with self.assertRaisesRegex(
+                band.MeasurementError, "invalid intermediate witness"):
+            band.parse_bandtiming_output(malformed, **kwargs)
+
+        failed = bandtiming_stdout(weak={
+            (0, "encoder", "candidate"): {
+                "construct_result": 4, "class": "weak",
+            },
+            (0, "decoder", "candidate"): {
+                "construct_result": 4, "class": "weak",
+            },
+            (0, "direct", "candidate"): {
+                "construct_result": 4, "class": "weak",
+            },
+        })
+        failed_hash = edit_row(
+            failed, 0, intermediate_sha256=forged)
+        with self.assertRaisesRegex(
+                band.MeasurementError, "invalid intermediate witness"):
+            band.parse_bandtiming_output(failed_hash, **kwargs)
+
+        def forge_semantic(lines):
+            fields = lines[1].split(",")
+            name = "explicit_direct_intermediate_sha256="
+            fields = [
+                name + forged if field.startswith(name) else field
+                for field in fields
+            ]
+            lines[1] = ",".join(fields)
+
+        with self.assertRaisesRegex(
+                band.MeasurementError, "semantic bridge failed"):
+            band.parse_bandtiming_output(
+                authenticated_edit(stdout, forge_semantic), **kwargs)
+
+        censored = bandtiming_stdout(weak={
+            (0, "direct", "dispatch"): {
+                "construct_result": 0,
+                "result": 8,
+                "class": "error",
+            },
+        })
+        parsed = band.parse_bandtiming_output(censored, **kwargs)
+        self.assertIn(
+            "direct_candidate_dispatch",
+            parsed.replicate_receipts[0]["censored_panels"])
+
+    def test_protocol_schema_binds_exact_direct_scope(self):
+        def replace_direct_scope(stdout, scope):
+            def edit(lines):
+                fields = lines[0].split(",")
+                replacements = 0
+                for index, field in enumerate(fields):
+                    if field.startswith("direct_scope="):
+                        fields[index] = f"direct_scope={scope}"
+                        replacements += 1
+                self.assertEqual(replacements, 1)
+                lines[0] = ",".join(fields)
+            return authenticated_edit(stdout, edit)
+
+        v2_with_v1_scope = replace_direct_scope(
+            bandtiming_stdout(), band.BANDTIMING_DIRECT_SCOPE_V1)
+        with self.assertRaisesRegex(
+                band.MeasurementError, "manifest.direct_scope"):
+            band.parse_bandtiming_output(
+                v2_with_v1_scope, **parse_kwargs())
+
+        v1_with_v2_scope = replace_direct_scope(
+            bandtiming_stdout(schema=band.BANDTIMING_SCHEMA_V1),
+            band.BANDTIMING_DIRECT_SCOPE_V2)
+        with self.assertRaisesRegex(
+                band.MeasurementError, "manifest.direct_scope"):
+            band.parse_bandtiming_output(
+                v1_with_v2_scope,
+                _protocol=band.BANDTIMING_PROTOCOL_V1,
+                **parse_kwargs())
 
     def test_parser_scaling_is_linear_through_512_replicates(self):
         # Generate outside the timed region, use process CPU time to exclude
@@ -723,6 +881,7 @@ class BandTimingParserTests(unittest.TestCase):
                         "result": "8",
                         "result_class": "error",
                         "preflight_result": "8",
+                        "intermediate_sha256": "not_applicable",
                     })
                 row.update({
                     "timing_eligible": "0",
@@ -1176,6 +1335,7 @@ class BandTimingParserTests(unittest.TestCase):
                 edit_row(
                     bb64_stdout, 12 * 8,
                     result=8, result_class="error", preflight_result=8,
+                    intermediate_sha256="not_applicable",
                     packet_payload_bytes=2),
                 **parse_kwargs(block_bytes=64))
 
@@ -1618,6 +1778,7 @@ class BandTimingParserTests(unittest.TestCase):
     def test_replay_recomputes_every_derived_summary(self):
         measurement = band.parse_bandtiming_output(
             bandtiming_stdout(), **parse_kwargs())
+        self.assertTrue(measurement.valid_for_promotion)
         receipt = measurement.as_dict()
         receipt["context"]["bound"]["cpu_affinity"].append(99)
         receipt["replicates"][0]["censored_panels"].append("forged")
@@ -1627,7 +1788,74 @@ class BandTimingParserTests(unittest.TestCase):
         receipt = fresh
         replayed = band.replay_bandtiming_receipt(receipt)
         self.assertEqual(replayed.stream_sha256, measurement.stream_sha256)
-        legacy = copy.deepcopy(receipt)
+
+        pre_enrichment_v2 = copy.deepcopy(receipt)
+        for replicate in pre_enrichment_v2["replicates"]:
+            for field in band._REPLICATE_CONSTRUCTION_FIELDS:
+                del replicate[field]
+        with self.assertRaisesRegex(
+                band.MeasurementError, "stale or forged"):
+            band.replay_bandtiming_receipt(pre_enrichment_v2)
+
+        v1_stdout = bandtiming_stdout(schema=band.BANDTIMING_SCHEMA_V1)
+        with self.assertRaisesRegex(
+                band.MeasurementError, "semantic receipt"):
+            band.parse_bandtiming_output(v1_stdout, **parse_kwargs())
+        legacy_measurement = band.parse_bandtiming_output(
+            v1_stdout, _protocol=band.BANDTIMING_PROTOCOL_V1,
+            **parse_kwargs())
+        self.assertFalse(legacy_measurement.valid_for_promotion)
+        legacy_receipt = legacy_measurement.as_dict()
+        replayed_legacy_enriched = band.replay_bandtiming_receipt(
+            legacy_receipt)
+        self.assertFalse(replayed_legacy_enriched.valid_for_promotion)
+        with mock.patch.object(
+                band, "BANDTIMING_PROTOCOL",
+                band.BANDTIMING_PROTOCOL_V1):
+            self.assertTrue(measurement.valid_for_promotion)
+            self.assertFalse(legacy_measurement.valid_for_promotion)
+            self.assertEqual(
+                band.replay_bandtiming_receipt(receipt).protocol,
+                band.BANDTIMING_PROTOCOL_V2)
+
+        mismatched_protocol = copy.deepcopy(receipt)
+        mismatched_protocol["protocol"] = band.BANDTIMING_PROTOCOL_V1
+        with self.assertRaisesRegex(
+                band.MeasurementError, "protocol and native schema"):
+            band.replay_bandtiming_receipt(mismatched_protocol)
+        mismatched_schema = copy.deepcopy(legacy_receipt)
+        mismatched_schema["protocol"] = band.BANDTIMING_PROTOCOL
+        with self.assertRaisesRegex(
+                band.MeasurementError, "protocol and native schema"):
+            band.replay_bandtiming_receipt(mismatched_schema)
+
+        relabeled_v2 = copy.deepcopy(receipt)
+        relabeled_v2["protocol"] = band.BANDTIMING_PROTOCOL_V1
+        relabeled_v2["manifest"]["schema"] = band.BANDTIMING_SCHEMA_V1
+        with self.assertRaisesRegex(
+                band.MeasurementError, "semantic receipt"):
+            band.replay_bandtiming_receipt(relabeled_v2)
+        relabeled_v1 = copy.deepcopy(legacy_receipt)
+        relabeled_v1["protocol"] = band.BANDTIMING_PROTOCOL
+        relabeled_v1["manifest"]["schema"] = band.BANDTIMING_SCHEMA
+        with self.assertRaisesRegex(
+                band.MeasurementError, "semantic receipt"):
+            band.replay_bandtiming_receipt(relabeled_v1)
+        unknown = copy.deepcopy(receipt)
+        unknown["protocol"] = "wirehair-v2-bench:bandtiming:unknown"
+        with self.assertRaisesRegex(
+                band.MeasurementError, "protocol is invalid"):
+            band.replay_bandtiming_receipt(unknown)
+        for malformed_protocol in ([], {}, 1, None):
+            malformed_protocol_receipt = copy.deepcopy(receipt)
+            malformed_protocol_receipt["protocol"] = malformed_protocol
+            with self.subTest(protocol=malformed_protocol):
+                with self.assertRaisesRegex(
+                        band.MeasurementError, "protocol is invalid"):
+                    band.replay_bandtiming_receipt(
+                        malformed_protocol_receipt)
+
+        legacy = copy.deepcopy(legacy_receipt)
         for replicate in legacy["replicates"]:
             for field in band._REPLICATE_CONSTRUCTION_FIELDS:
                 del replicate[field]
@@ -1635,7 +1863,8 @@ class BandTimingParserTests(unittest.TestCase):
                 set(replicate), band._LEGACY_REPLICATE_FIELDS)
         replayed_legacy = band.replay_bandtiming_receipt(legacy)
         self.assertEqual(
-            replayed_legacy.stream_sha256, measurement.stream_sha256)
+            replayed_legacy.stream_sha256,
+            legacy_measurement.stream_sha256)
 
         partially_enriched = copy.deepcopy(legacy)
         partially_enriched["replicates"][0][
@@ -1678,6 +1907,21 @@ class BandTimingParserTests(unittest.TestCase):
                 band.MeasurementError, "request changed block_count"):
             band.replay_bandtiming_receipt(
                 receipt, expected_request={"block_count": 17})
+        candidate = parse_kwargs()["candidate"]
+        aliased_candidate = band.BandDescriptor(
+            staircase=float(candidate.staircase),
+            dense_rows=candidate.dense_rows,
+            gf256_rows=candidate.gf256_rows,
+            gf16_rows=candidate.gf16_rows,
+            period=candidate.period,
+            x_mode=candidate.x_mode,
+        )
+        with self.assertRaisesRegex(
+                band.MeasurementError, "request changed candidate"):
+            band.replay_bandtiming_receipt(
+                receipt,
+                expected_request={"candidate": aliased_candidate},
+            )
         malformed = copy.deepcopy(receipt)
         malformed["manifest"]["K"] = "16"
         with self.assertRaisesRegex(
@@ -1764,6 +2008,15 @@ class BandTimingProbeTests(unittest.TestCase):
         stdout = bandtiming_stdout()
         with self.assertRaisesRegex(band.MeasurementError, "not ASCII"):
             band._bandtiming_run_bounds(stdout.replace("mixed", "mixéd", 1))
+
+    def test_run_bounds_pins_v2_despite_mutable_latest_alias(self):
+        stdout = bandtiming_stdout()
+        with mock.patch.object(
+                band, "BANDTIMING_SCHEMA",
+                band.BANDTIMING_SCHEMA_V1):
+            self.assertEqual(
+                band._bandtiming_run_bounds(stdout),
+                (1_000_000_000, 2_000_000_000))
 
 
 if __name__ == "__main__":
