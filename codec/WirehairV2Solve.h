@@ -552,6 +552,28 @@ std::vector<uint32_t> GeneratePacketMatrixRowWithRuntime(
     const PacketRowConfig& config,
     const PacketRowRuntime& runtime);
 
+/**
+    Generate a packet row without allocating output storage.
+
+    The function fails closed when the runtime is invalid, `columns_out` is
+    null, or `capacity` is smaller than the complete row.  In every failure
+    case it leaves both caller storage and `count_out` untouched.
+    `count_out` must not overlap the output row; overlap is rejected before
+    writing.  On success it writes exactly the same ordered columns as
+    GeneratePacketMatrixRowWithRuntime() and stores their count in
+    `count_out`.  The caller must initialize any enabled test-hook state
+    outside an allocation-sensitive interval; production has no such state.
+*/
+bool GeneratePacketMatrixRowIntoWithRuntime(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    uint32_t* columns_out,
+    size_t capacity,
+    size_t& count_out);
+
 uint32_t PacketPeelSeedFromProfile(
     const SeedProfile& profile,
     uint64_t salt);

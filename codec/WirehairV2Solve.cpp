@@ -599,7 +599,9 @@ bool ForEachPacketMatrixColumn(
     {
         return false;
     }
-    prepare((size_t)params.PeelCount + config.MixCount);
+    if (!prepare((size_t)params.PeelCount + config.MixCount)) {
+        return false;
+    }
     wirehair::PeelRowIterator source(
         params, (uint16_t)source_count, runtime.SourcePrime());
     do {
@@ -5568,13 +5570,60 @@ std::vector<uint32_t> GeneratePacketMatrixRowWithRuntime(
         block_id,
         config,
         runtime,
-        [&row](size_t count) { row.reserve(count); },
+        [&row](size_t count) {
+            row.reserve(count);
+            return true;
+        },
         [&row](uint32_t column) { row.push_back(column); });
     if (!generated) {
         row.clear();
         return row;
     }
     return row;
+}
+
+bool GeneratePacketMatrixRowIntoWithRuntime(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    uint32_t* columns_out,
+    size_t capacity,
+    size_t& count_out)
+{
+    size_t produced_count = 0u;
+    const bool generated = ForEachPacketMatrixColumn(
+        source_count,
+        precode_count,
+        block_id,
+        config,
+        runtime,
+        [&](size_t count) {
+            if (columns_out == nullptr || capacity < count) {
+                return false;
+            }
+            const uintptr_t output_begin =
+                reinterpret_cast<uintptr_t>(columns_out);
+            if (count > (UINTPTR_MAX - output_begin) / sizeof(uint32_t)) {
+                return false;
+            }
+            const uintptr_t output_end =
+                output_begin + count * sizeof(uint32_t);
+            const uintptr_t count_begin =
+                reinterpret_cast<uintptr_t>(&count_out);
+            if (count_begin > UINTPTR_MAX - sizeof(count_out)) {
+                return false;
+            }
+            const uintptr_t count_end = count_begin + sizeof(count_out);
+            return output_begin >= count_end || count_begin >= output_end;
+        },
+        [&](uint32_t column) {
+            columns_out[produced_count++] = column;
+        });
+    if (!generated) return false;
+    count_out = produced_count;
+    return true;
 }
 
 std::vector<uint32_t> GeneratePacketMatrixRow(
@@ -6274,6 +6323,7 @@ static WirehairResult SolvePrecodeSystemImpl(
                 runtime,
                 [&packet_references](size_t count) {
                     packet_references = count;
+                    return true;
                 },
                 [&rows](uint32_t column) { rows.AppendColumn(column); });
             if (!generated || packet_references == 0u) {

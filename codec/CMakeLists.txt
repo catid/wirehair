@@ -403,6 +403,11 @@ add_executable(wirehair_v2_resume_bench ${WIREHAIR_BENCH_EXCLUDE}
 target_link_libraries(wirehair_v2_resume_bench wirehair_v2_policy)
 wirehair_apply_project_options(wirehair_v2_resume_bench)
 
+add_executable(wirehair_v2_hook_timing ${WIREHAIR_BENCH_EXCLUDE}
+    V2HookTiming.cpp)
+target_link_libraries(wirehair_v2_hook_timing wirehair_v2_policy)
+wirehair_apply_project_options(wirehair_v2_hook_timing)
+
 if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set(_wirehair_v2_peeltiming_supported 1)

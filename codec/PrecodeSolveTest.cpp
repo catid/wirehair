@@ -833,6 +833,237 @@ bool CheckPacketEvaluationFusion()
     return true;
 }
 
+bool CheckPacketRowInto()
+{
+    static const uint32_t kCanary = UINT32_C(0xdecafbad);
+    static const size_t kCapacity =
+        64u + wirehair_v2::kCertifiedPacketMixCount;
+    struct DomainCase
+    {
+        uint32_t K;
+        uint32_t P;
+        uint32_t Mix;
+    };
+    static const DomainCase cases[] = {
+        { 2u, 2u, 1u },
+        { 2u, 2u, 2u },
+        { 2u, 3u, 3u },
+        { 64000u, 1535u, 1u },
+        { 64000u, 1535u, 2u },
+        { 64000u, 1535u, 3u },
+        { 14u, 65521u, 1u },
+        { 14u, 65521u, 2u },
+        { 14u, 65521u, 3u }
+    };
+    for (const DomainCase& domain : cases)
+    {
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = UINT32_C(0x12345678);
+        config.MixCount = domain.Mix;
+        wirehair_v2::PacketRowRuntime runtime;
+        if (!runtime.Initialize(domain.K, domain.P, domain.Mix)) {
+            std::fprintf(stderr, "solve: row-into runtime domain failed\n");
+            return false;
+        }
+        const uint32_t ids[] = {
+            0u, domain.K - 1u, domain.K, UINT32_MAX
+        };
+        for (uint32_t id : ids)
+        {
+            const std::vector<uint32_t> expected =
+                wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                    domain.K, domain.P, id, config, runtime);
+            uint32_t storage[kCapacity + 2u];
+            std::fill(
+                storage, storage + kCapacity + 2u, kCanary);
+            size_t count = SIZE_MAX;
+            if (expected.empty() || expected.size() > kCapacity ||
+                !wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                    domain.K, domain.P, id, config, runtime,
+                    storage + 1u, kCapacity, count) ||
+                count != expected.size() ||
+                !std::equal(
+                    expected.begin(), expected.end(), storage + 1u) ||
+                storage[0] != kCanary ||
+                !std::all_of(
+                    storage + 1u + count,
+                    storage + kCapacity + 2u,
+                    [](uint32_t value) { return value == kCanary; }))
+            {
+                std::fprintf(stderr,
+                    "solve: row-into exact/canary mismatch "
+                    "K=%u P=%u mix=%u id=%u\n",
+                    domain.K, domain.P, domain.Mix, id);
+                return false;
+            }
+
+            const size_t count_canary = SIZE_MAX;
+            std::fill(
+                storage, storage + kCapacity + 2u, kCanary);
+            count = count_canary;
+            if (wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                    domain.K, domain.P, id, config, runtime,
+                    storage + 1u, expected.size() - 1u, count) ||
+                count != count_canary ||
+                !std::all_of(
+                    storage, storage + kCapacity + 2u,
+                    [](uint32_t value) { return value == kCanary; }))
+            {
+                std::fprintf(stderr,
+                    "solve: row-into short capacity wrote output\n");
+                return false;
+            }
+            count = count_canary;
+            if (wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                    domain.K, domain.P, id, config, runtime,
+                    nullptr, expected.size(), count) ||
+                count != count_canary)
+            {
+                std::fprintf(stderr,
+                    "solve: row-into null output was accepted\n");
+                return false;
+            }
+            std::fill(
+                storage, storage + kCapacity + 2u, kCanary);
+            count = count_canary;
+            if (wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                    domain.K, domain.P, id, config, runtime,
+                    storage + 1u, 0u, count) ||
+                count != count_canary ||
+                !std::all_of(
+                    storage, storage + kCapacity + 2u,
+                    [](uint32_t value) { return value == kCanary; }))
+            {
+                std::fprintf(stderr,
+                    "solve: row-into zero capacity wrote output\n");
+                return false;
+            }
+            count = count_canary;
+            if (wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                    domain.K, domain.P, id, config, runtime,
+                    reinterpret_cast<uint32_t*>(&count),
+                    kCapacity, count) ||
+                count != count_canary)
+            {
+                std::fprintf(stderr,
+                    "solve: row-into count alias was accepted\n");
+                return false;
+            }
+        }
+    }
+
+    {
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = 9u;
+        config.MixCount = 3u;
+        wirehair_v2::PacketRowRuntime runtime;
+        wirehair_v2::PacketRowRuntime invalid;
+        uint32_t storage[kCapacity + 2u];
+        std::fill(storage, storage + kCapacity + 2u, kCanary);
+        size_t count = SIZE_MAX;
+        if (!runtime.Initialize(128u, 3u, config.MixCount) ||
+            wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                128u, 3u, 0u, config, invalid,
+                storage + 1u, kCapacity, count) ||
+            count != SIZE_MAX ||
+            !std::all_of(
+                storage, storage + kCapacity + 2u,
+                [](uint32_t value) { return value == kCanary; }))
+        {
+            std::fprintf(stderr,
+                "solve: row-into invalid runtime was not atomic\n");
+            return false;
+        }
+        config.MixCount = 4u;
+        if (wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                128u, 3u, 0u, config, runtime,
+                storage + 1u, kCapacity, count) ||
+            count != SIZE_MAX ||
+            !std::all_of(
+                storage, storage + kCapacity + 2u,
+                [](uint32_t value) { return value == kCanary; }))
+        {
+            std::fprintf(stderr,
+                "solve: row-into invalid config was not atomic\n");
+            return false;
+        }
+    }
+
+    {
+        std::vector<double> forced(64u, 0.0);
+        forced[63u] = 1.0;
+        const bool installed =
+            wirehair_v2::SetPeelDegreesForTesting(forced);
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = 9u;
+        config.MixCount = 3u;
+        wirehair_v2::PacketRowRuntime runtime;
+        uint32_t storage[kCapacity + 2u];
+        std::fill(storage, storage + kCapacity + 2u, kCanary);
+        size_t count = SIZE_MAX;
+        const bool runtime_ready =
+            runtime.Initialize(128u, 3u, config.MixCount);
+        const std::vector<uint32_t> expected =
+            wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                128u, 3u, 0u, config, runtime);
+        const bool exact =
+            installed &&
+            runtime_ready &&
+            wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                128u, 3u, 0u, config, runtime,
+                storage + 1u, kCapacity, count) &&
+            count == kCapacity &&
+            expected.size() == kCapacity &&
+            std::equal(
+                expected.begin(), expected.end(), storage + 1u) &&
+            storage[0] == kCanary &&
+            storage[kCapacity + 1u] == kCanary;
+        wirehair_v2::ClearPeelDegreesForTesting();
+        if (!exact)
+        {
+            std::fprintf(stderr,
+                "solve: row-into forced degree-64/max-67 failed\n");
+            return false;
+        }
+    }
+
+    {
+        const std::vector<double> invalid(1u, -1.0);
+        const bool rejected =
+            !wirehair_v2::SetPeelDegreesForTesting(invalid);
+        const bool active_invalid =
+            rejected &&
+            !wirehair_v2::PeelDegreeConfigurationValidForTesting();
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = 9u;
+        config.MixCount = 3u;
+        wirehair_v2::PacketRowRuntime runtime;
+        uint32_t storage[kCapacity + 2u];
+        std::fill(storage, storage + kCapacity + 2u, kCanary);
+        size_t count = SIZE_MAX;
+        const bool atomic =
+            active_invalid &&
+            runtime.Initialize(128u, 3u, config.MixCount) &&
+            !wirehair_v2::GeneratePacketMatrixRowIntoWithRuntime(
+                128u, 3u, 0u, config, runtime,
+                storage + 1u, kCapacity, count) &&
+            count == SIZE_MAX &&
+            std::all_of(
+                storage, storage + kCapacity + 2u,
+                [](uint32_t value) { return value == kCanary; });
+        wirehair_v2::ClearPeelDegreesForTesting();
+        if (!atomic)
+        {
+            std::fprintf(stderr,
+                "solve: row-into invalid hook was not atomic\n");
+            return false;
+        }
+    }
+
+    std::printf("packet row-into domains/capacity/hooks: PASS\n");
+    return true;
+}
+
 bool CheckOddPacketPeelSeedInterleave()
 {
     static const uint32_t K = 251u;
@@ -4007,6 +4238,7 @@ int main(int argc, char** argv)
     bool ok = true;
     ok = CheckLowestBitIndex() && ok;
     ok = CheckPacketEvaluationFusion() && ok;
+    ok = CheckPacketRowInto() && ok;
     ok = CheckOddPacketPeelSeedInterleave() && ok;
     ok = CheckPacketRowSeedPermutation() && ok;
     ok = CheckPacketRuntimeBoundaries() && ok;
