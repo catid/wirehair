@@ -960,6 +960,136 @@ class FrozenPopulationTests(unittest.TestCase):
                     campaign._verify_stored_summary_artifacts(
                         directory, completion)
 
+    def test_capped_gzip_json_preserves_exact_boundary_semantics_and_hashes(
+            self):
+        value = {
+            "schema": campaign.SUMMARY_SCHEMA,
+            "phase": "selection",
+            "historical_fixture": [None, False, 7, "ascii"],
+        }
+        payload = campaign.canonical_json_bytes(value)
+        compressed = gzip.compress(
+            payload, compresslevel=6, mtime=0)
+        expected_evidence = {
+            "compressed_sha256":
+                hashlib.sha256(compressed).hexdigest(),
+            "uncompressed_sha256":
+                hashlib.sha256(payload).hexdigest(),
+            "compressed_bytes": len(compressed),
+            "uncompressed_bytes": len(payload),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "summary.json.gz"
+            path.write_bytes(compressed)
+            observed, evidence = campaign.read_canonical_gzip_json(
+                path,
+                compressed_limit=len(compressed),
+                uncompressed_limit=len(payload),
+            )
+            self.assertTrue(
+                campaign.peel_codec._same_typed_json(observed, value))
+            self.assertEqual(evidence, expected_evidence)
+
+            for dimension, limits, expected in (
+                    (
+                        "compressed",
+                        (len(compressed) - 1, len(payload)),
+                        "exceeds compressed byte limit",
+                    ),
+                    (
+                        "uncompressed",
+                        (len(compressed), len(payload) - 1),
+                        "exceeds uncompressed byte limit",
+                    ),
+            ):
+                with (
+                        self.subTest(dimension=dimension),
+                        mock.patch.object(
+                            campaign, "_strict_json_payload") as parse,
+                        self.assertRaisesRegex(
+                            campaign.CampaignError, expected),
+                ):
+                    campaign.read_canonical_gzip_json(
+                        path,
+                        compressed_limit=limits[0],
+                        uncompressed_limit=limits[1],
+                    )
+                parse.assert_not_called()
+
+    def test_capped_gzip_json_rejects_truncation_and_trailing_data(
+            self):
+        payload = campaign.canonical_json_bytes({"valid": True})
+        compressed = gzip.compress(
+            payload, compresslevel=6, mtime=0)
+        cases = (
+            ("truncated", compressed[:-1], "is truncated"),
+            ("zero_padding", compressed + b"\0", "has trailing data"),
+            (
+                "concatenated_member",
+                compressed + gzip.compress(b"", mtime=0),
+                "has trailing data",
+            ),
+        )
+        for name, malformed, expected in cases:
+            with (
+                    self.subTest(name=name),
+                    tempfile.TemporaryDirectory() as temporary,
+            ):
+                path = Path(temporary) / "summary.json.gz"
+                path.write_bytes(malformed)
+                with (
+                        mock.patch.object(
+                            campaign, "_strict_json_payload") as parse,
+                        self.assertRaisesRegex(
+                            campaign.CampaignError, expected),
+                ):
+                    campaign.read_canonical_gzip_json(
+                        path,
+                        compressed_limit=len(malformed),
+                        uncompressed_limit=len(payload),
+                    )
+                parse.assert_not_called()
+
+    def test_capped_gzip_json_rejects_compressed_and_inflated_bombs(
+            self):
+        uncompressed_limit = 1024
+        cases = (
+            (
+                "compressed",
+                b"x" * 1025,
+                1024,
+                uncompressed_limit,
+                "exceeds compressed byte limit",
+            ),
+            (
+                "inflated",
+                gzip.compress(
+                    b"x" * (uncompressed_limit + 1), mtime=0),
+                1024,
+                uncompressed_limit,
+                "exceeds uncompressed byte limit",
+            ),
+        )
+        for name, malformed, compressed_limit, raw_limit, expected in cases:
+            with (
+                    self.subTest(name=name),
+                    tempfile.TemporaryDirectory() as temporary,
+            ):
+                path = Path(temporary) / "summary.json.gz"
+                path.write_bytes(malformed)
+                with (
+                        mock.patch.object(
+                            campaign, "_strict_json_payload") as parse,
+                        self.assertRaisesRegex(
+                            campaign.CampaignError, expected),
+                ):
+                    campaign.read_canonical_gzip_json(
+                        path,
+                        compressed_limit=compressed_limit,
+                        uncompressed_limit=raw_limit,
+                    )
+                parse.assert_not_called()
+
     def test_stored_evidence_rejects_numeric_type_aliases(self):
         summary_value = {
             "schema": campaign.SUMMARY_SCHEMA,

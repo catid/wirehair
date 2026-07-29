@@ -78,6 +78,15 @@ RESULT_COMPRESSED_FIXED_BYTES = 64 * 1024
 RESULT_COMPRESSED_BYTES_PER_REPLICATE = 8 * 1024
 RESULT_UNCOMPRESSED_FIXED_BYTES = 512 * 1024
 RESULT_UNCOMPRESSED_BYTES_PER_REPLICATE = 64 * 1024
+# A stored summary contains bounded aggregates for the frozen 2,376-job
+# selection roster (the holdout roster is smaller), never native replicate
+# rows.  The authenticated historical selection summary is 6,841,835 bytes
+# compressed and 106,901,502 bytes uncompressed.  These power-of-two ceilings
+# leave substantial schema headroom without allowing a changed or malformed
+# artifact to select its own allocation bound.  A future summary schema that
+# legitimately exceeds them must raise the limits explicitly.
+SUMMARY_COMPRESSED_BYTE_LIMIT = 32 * 1024 * 1024
+SUMMARY_UNCOMPRESSED_BYTE_LIMIT = 256 * 1024 * 1024
 REPLAY_QUEUE_POLL_SECONDS = 0.05
 REPLAY_TERMINATE_GRACE_SECONDS = 0.5
 REPLAY_KILL_GRACE_SECONDS = 1.0
@@ -339,17 +348,6 @@ class _CappedHashReader:
         self.digest.update(data)
         return data
 
-    def seek(self, offset, whence=os.SEEK_SET):
-        # gzip.GzipFile only rewinds a reader when its caller seeks.  This
-        # verifier is strictly forward-only, so a rewind would make the
-        # compressed evidence hash ambiguous and is rejected.
-        if offset != self.count or whence != os.SEEK_SET:
-            raise OSError("capped gzip evidence reader is forward-only")
-        return self.count
-
-    def tell(self):
-        return self.count
-
 
 def _result_evidence_byte_limits(job):
     if not isinstance(job, dict):
@@ -375,33 +373,16 @@ def _result_evidence_byte_limits(job):
 
 
 def read_canonical_gzip_json(
-        path, *, compressed_limit=None, uncompressed_limit=None):
+        path, *, compressed_limit, uncompressed_limit):
+    """Read exactly one canonical-JSON gzip member under hard byte caps."""
     path = Path(path)
-    if (compressed_limit is None) != (uncompressed_limit is None):
-        raise CampaignError("gzip evidence byte limits are incomplete")
-    if compressed_limit is not None and (
+    if (
         type(compressed_limit) is not int
         or compressed_limit < 1
         or type(uncompressed_limit) is not int
         or uncompressed_limit < 1
     ):
         raise CampaignError("gzip evidence byte limits are invalid")
-    if compressed_limit is None:
-        try:
-            compressed = path.read_bytes()
-            payload = gzip.decompress(compressed)
-        except (OSError, EOFError, gzip.BadGzipFile, zlib.error) as error:
-            raise CampaignError(
-                f"could not read gzip evidence {path}: {error}")
-        return (
-            _strict_json_payload(payload, str(path)),
-            {
-                "compressed_sha256": sha256_bytes(compressed),
-                "uncompressed_sha256": sha256_bytes(payload),
-                "compressed_bytes": len(compressed),
-                "uncompressed_bytes": len(payload),
-            },
-        )
 
     stable = (
         "st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns",
@@ -419,22 +400,33 @@ def read_canonical_gzip_json(
             reader = _CappedHashReader(source, compressed_limit)
             chunks = []
             uncompressed_bytes = 0
-            with gzip.GzipFile(fileobj=reader, mode="rb") as archive:
-                while True:
+            archive = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            while not archive.eof:
+                compressed_chunk = reader.read(64 * 1024)
+                if not compressed_chunk:
+                    raise CampaignError(
+                        f"gzip evidence is truncated: {path}")
+                pending = compressed_chunk
+                while pending and not archive.eof:
                     remaining_with_probe = (
                         uncompressed_limit - uncompressed_bytes + 1)
-                    chunk = archive.read(
-                        min(64 * 1024, remaining_with_probe))
-                    if not chunk:
-                        break
+                    chunk = archive.decompress(
+                        pending,
+                        min(64 * 1024, remaining_with_probe),
+                    )
+                    pending = archive.unconsumed_tail
                     uncompressed_bytes += len(chunk)
                     if uncompressed_bytes > uncompressed_limit:
                         raise CampaignError(
                             "gzip evidence exceeds uncompressed byte "
                             f"limit: {path}")
                     chunks.append(chunk)
-            while reader.read(64 * 1024):
-                pass
+                if archive.unused_data:
+                    raise CampaignError(
+                        f"gzip evidence has trailing data: {path}")
+            if reader.read(1):
+                raise CampaignError(
+                    f"gzip evidence has trailing data: {path}")
             after = os.fstat(source.fileno())
         current = os.stat(path, follow_symlinks=False)
         if (
@@ -454,7 +446,7 @@ def read_canonical_gzip_json(
     except _EvidenceByteLimitExceeded:
         raise CampaignError(
             f"gzip evidence exceeds compressed byte limit: {path}")
-    except (OSError, EOFError, gzip.BadGzipFile, zlib.error) as error:
+    except (OSError, zlib.error) as error:
         raise CampaignError(f"could not read gzip evidence {path}: {error}")
     return (
         _strict_json_payload(payload, str(path)),
@@ -1196,7 +1188,10 @@ def _load_selection_contract(path, requested_survivor):
         raise CampaignError(
             "selection campaign failed strict parent verification")
     summary, summary_evidence = read_canonical_gzip_json(
-        path.parent / "summary.json.gz")
+        path.parent / "summary.json.gz",
+        compressed_limit=SUMMARY_COMPRESSED_BYTE_LIMIT,
+        uncompressed_limit=SUMMARY_UNCOMPRESSED_BYTE_LIMIT,
+    )
     if not isinstance(summary, dict):
         raise CampaignError("selection summary is not an object")
     if not peel_codec._same_typed_json(
@@ -4514,7 +4509,10 @@ def _stream_file_sha256(path):
 
 def _verify_stored_summary_artifacts(directory, completion):
     summary_value, summary_evidence = read_canonical_gzip_json(
-        directory / "summary.json.gz")
+        directory / "summary.json.gz",
+        compressed_limit=SUMMARY_COMPRESSED_BYTE_LIMIT,
+        uncompressed_limit=SUMMARY_UNCOMPRESSED_BYTE_LIMIT,
+    )
     expected_summary = completion.get("summary")
     if (
         not isinstance(expected_summary, dict)
