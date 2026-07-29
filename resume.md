@@ -147,20 +147,51 @@ Thermal evidence covers all 1,188 native job intervals with 7,906 valid rows:
 maximum CPU Tctl 62.5 C, maximum DIMM temperature 53.0 C, and EDAC CE/UE 0/0.
 The runtime monitor saw mean occupancy 30.434/32 and all groups exited.
 
-The frozen v3 summary has one reporting erratum, tracked by
-`wirehair-rv4a.4`.  It blanket-counts the expected repair-triggering
-attempt-zero real-payload `Wirehair_Error` as a fatal runtime error and omits
-it from raw structural weakness.  The six schedules repeat each selector, so
-the 5,412 pure8 and 4,422 pure9 physical Error rows correspond to 902 and 737
-unique selectors; adding the 384 and 390 unique NeedMore selectors gives the
-correct deduplicated retry-needed counts of 1,286 and 1,127.  Every one is
-corroborated by the attempt-zero zero-RHS structural probe and later successful
-repair, so genuine runtime errors are zero.  This additive erratum does not
-change no-survivor: the three independent timing failures remain decisive.
-The immutable v3 summary, completion, decision, and verification bytes must
-not be rewritten.  Before any future outcome, fix the classifier, version the
-post-v3 schema/policy, rerun mutation/replay tests, and establish a new
-source/plan/pin freeze.
+The frozen v3 summary has one reporting defect: it blanket-counts the expected
+repair-triggering attempt-zero real-payload `Wirehair_Error` as a fatal runtime
+error and omits it from raw structural weakness.  `wirehair-rv4a.4` now records
+the correction in a separately versioned, additive erratum without changing a
+byte of the v3 summary, completion, decision, ledger, or verification receipt.
+The final source commit is
+`f5b68fe873758accec964a67d59890ae145b4774`; the classification-policy SHA-256
+is `179d88ec3266d5aea2459ba253c97b54cd7cf28c7bea71d97ed9d89f6cf7ed5b`.
+The authenticated receipt is
+`/home/catid/wh2-rv4a3-classification-erratum-f5b68fe8.json`, 6,365 bytes,
+with independently captured SHA-256
+`767d178976bc1fa16c94ef8b4bc5132cec90562d94b1b6762d86b7e61520cf23`.
+
+The source-pinned replay completed in 524.03 seconds, re-read all 1,188 jobs
+and 912,384 recovery cells, then independently rehashed all 1,188 compressed
+result files (2,892,638,210 bytes) with zero mismatches.  Across the six
+repeated schedules, pure8 has 902 corroborated Error plus 384 NeedMore
+selectors, or 1,286 unique retry-needed constructions; pure9 has 737 plus 390,
+or 1,127.  The overall corrected count is 2,413 unique selectors.  Repaired
+final weakness is zero by both unique-selector and physical-cell weighting,
+and genuine runtime errors and observations are zero.  The legacy v1 values
+of 9,834 physical runtime errors and zero raw weakness remain explicitly
+receipted as historical misclassification.  During the exact replay window,
+CPU occupancy stayed at 100%, CPU Tctl stayed within 61.75–63.125 C, the
+hottest DIMM reached 53.25 C, and DIMM-read/EDAC CE/UE errors were all zero.
+
+Two final adversarial audits caught and fixed an over-broad authorization
+sentence and a receipt-test authentication gap before this final artifact was
+published.  The test now requires an independently supplied receipt digest,
+the exact classifier commit, the exact embedded policy and policy hash, and
+matching committed/on-disk hashes for all three runtime sources; it
+demonstrably rejects the superseded `49cfe61` receipt.  The final anchored
+suite passes 19/19 on Python 3.12 and Python 3.8.  Broader current-Python
+parser/campaign/verifier/erratum coverage passes 142/142, Release passes
+45/45, strict Clang ASan+UBSan passes 43/43, all three package modes pass,
+and the production build-policy gate passes when rerun with enough wall time
+under the fully saturated host.
+
+The erratum is reporting-only.  Its authorization language is scoped exactly
+to this authenticated historical v1 no-survivor decision; it neither rewrites
+nor technically revokes hypothetical legacy winner handling.  Both outcome
+and promotion authorization remain forbidden, the three independent timing
+failures remain decisive, no sealed job was launched, and dispatch-v1 stays
+production.  Any future outcome requires a newly versioned source, plan, pin,
+schema, and policy.
 
 ## 2026-07-29 authenticated all-K za5v result
 
