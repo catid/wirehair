@@ -1280,6 +1280,14 @@ bool CheckTransactionsAndAmbientIsolation()
 
 bool CheckConcurrentIsolation()
 {
+    struct DispatchObservation
+    {
+        WirehairResult Result = Wirehair_InvalidInput;
+        uint32_t HeavyRows = 0u;
+        uint32_t DataBytes = 0u;
+        uint8_t Block[6] = {};
+    };
+
     const wirehair_v2::RepairV1Contract* pure8 =
         wirehair_v2::FindRepairV1Contract(
             wirehair_v2::RepairV1Arm::Pure8S0M1D3);
@@ -1289,6 +1297,48 @@ bool CheckConcurrentIsolation()
     const wirehair_v2::V2EquationContract* dispatch =
         wirehair_v2::FindV2EquationContract("dispatch-v1");
     if (!pure8 || !pure9 || !dispatch) return false;
+    const wirehair_v2::MessagePrecodeEncoderOptions dispatch_options =
+        wirehair_v2::MessageOptionsForContract(*dispatch);
+    std::vector<DispatchObservation> dispatch_baselines(101u);
+    uint32_t dispatch_successes = 0u;
+    for (uint32_t K = 2u; K <= 100u; ++K)
+    {
+        wirehair_v2::SeedProfile profile;
+        std::vector<uint8_t> message;
+        FillMessage(message, K, 6u, 31u);
+        if (!wirehair_v2::MakeRawContractProfile(
+                *dispatch, K, 6u,
+                UINT32_C(0x510e527f) ^ K, profile))
+        {
+            return false;
+        }
+        wirehair_v2::MessagePrecodeEncoder encoder;
+        DispatchObservation& observation = dispatch_baselines[K];
+        observation.Result = encoder.InitializeResult(
+            message.data(), message.size(), 6u,
+            &profile, &dispatch_options);
+        if (observation.Result == Wirehair_BadPeelSeed) {
+            continue;
+        }
+        if (observation.Result != Wirehair_Success ||
+            encoder.BlockEncoder().System().Params.HeavyRows !=
+                wirehair_v2::kMixedGF256Rows +
+                    wirehair_v2::kMixedGF16Rows ||
+            encoder.EncodeResult(
+                K + 1u, observation.Block, sizeof(observation.Block),
+                &observation.DataBytes) != Wirehair_Success ||
+            observation.DataBytes != sizeof(observation.Block))
+        {
+            return false;
+        }
+        observation.HeavyRows =
+            encoder.BlockEncoder().System().Params.HeavyRows;
+        ++dispatch_successes;
+    }
+    if (dispatch_successes == 0u) {
+        return false;
+    }
+
     std::atomic<bool> ok(true);
     const auto arm_worker = [&ok](
         const wirehair_v2::RepairV1Contract* contract)
@@ -1320,11 +1370,14 @@ bool CheckConcurrentIsolation()
             }
         }
     };
-    const auto dispatch_worker = [&ok, dispatch]()
+    const auto dispatch_worker = [
+        &ok, dispatch, &dispatch_options, &dispatch_baselines]()
     {
         for (uint32_t K = 2u; K <= 100u && ok.load(); ++K)
         {
             wirehair_v2::SeedProfile profile;
+            std::vector<uint8_t> message;
+            FillMessage(message, K, 6u, 31u);
             if (!wirehair_v2::MakeRawContractProfile(
                     *dispatch, K, 6u,
                     UINT32_C(0x510e527f) ^ K, profile) ||
@@ -1332,6 +1385,37 @@ bool CheckConcurrentIsolation()
                     wirehair_v2::kMixedGF256Rows +
                         wirehair_v2::kMixedGF16Rows ||
                 profile.V2SeedAttempt != 0u)
+            {
+                ok.store(false);
+                return;
+            }
+            wirehair_v2::MessagePrecodeEncoder encoder;
+            const WirehairResult result = encoder.InitializeResult(
+                message.data(), message.size(), 6u,
+                &profile, &dispatch_options);
+            const DispatchObservation& expected = dispatch_baselines[K];
+            if (result != expected.Result)
+            {
+                ok.store(false);
+                return;
+            }
+            if (result == Wirehair_BadPeelSeed) {
+                continue;
+            }
+            if (result != Wirehair_Success ||
+                encoder.BlockEncoder().System().Params.HeavyRows !=
+                    expected.HeavyRows)
+            {
+                ok.store(false);
+                return;
+            }
+            uint8_t block[6] = {};
+            uint32_t bytes = 0u;
+            if (encoder.EncodeResult(
+                    K + 1u, block, sizeof(block), &bytes) !=
+                    Wirehair_Success ||
+                bytes != expected.DataBytes ||
+                std::memcmp(block, expected.Block, bytes) != 0)
             {
                 ok.store(false);
                 return;
