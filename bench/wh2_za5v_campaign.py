@@ -1767,7 +1767,6 @@ class RecoveryAggregator:
             replicate["decoder_dispatch_result_class"],
             replicate["decoder_dispatch_overhead"],
             replicate["direct_dispatch_result_class"],
-            replicate["direct_dispatch_overhead"],
             wh1_construct_result,
             wh1_constructor,
             replicate["encoder_wh1_result_class"],
@@ -1775,6 +1774,14 @@ class RecoveryAggregator:
             replicate["decoder_wh1_result_class"],
             replicate["decoder_wh1_overhead"],
         )
+        # Direct candidate/dispatch observations intentionally share a
+        # pair-local fixed prefix: max(candidate recovery, dispatch recovery).
+        # Its recorded overhead therefore belongs to the candidate comparison,
+        # not to the candidate-independent control signature.  The result
+        # class remains invariant: a recovered dispatch must also solve at any
+        # larger pair prefix, while an unrecovered dispatch always uses K+64.
+        # The native receipt parser authenticates that pair-local relationship
+        # before this aggregator consumes the replicate.
         prior = self.control_signatures.setdefault(
             control_key, control_signature)
         if prior != control_signature:
@@ -2108,7 +2115,8 @@ class RecoveryAggregator:
                     "K-schedule-construction-seed-loss-seed",
                 "signature":
                     "trace-dispatch-construct-result-class-encoder-decoder-"
-                    "direct-result-class-overhead-wh1-construct-result-class-"
+                    "result-class-overhead-direct-result-class-"
+                    "wh1-construct-result-class-"
                     "encoder-decoder-result-class-overhead",
             },
             "groups": groups,

@@ -1501,10 +1501,16 @@ class RecoveryAggregationTests(unittest.TestCase):
             job for job in self.jobs
             if job["schedule"] == "iid")[:2]
         mutations = (
+            ("trace_sha256", "0" * 64),
             ("encoder_dispatch_result_class", "error"),
-            ("direct_dispatch_overhead", 1),
+            ("encoder_dispatch_overhead", 1),
+            ("decoder_dispatch_result_class", "error"),
+            ("decoder_dispatch_overhead", 1),
+            ("direct_dispatch_result_class", "error"),
             ("encoder_wh1_result_class", "error"),
             ("encoder_wh1_overhead", 1),
+            ("decoder_wh1_result_class", "error"),
+            ("decoder_wh1_overhead", 2),
         )
         for field, value in mutations:
             with self.subTest(field=field):
@@ -1517,6 +1523,36 @@ class RecoveryAggregationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                         campaign.CampaignError, "control changed"):
                     aggregator.add_replicate(same_cell_jobs[1], second)
+
+    def test_candidate_coupled_direct_overhead_is_not_shared_control(self):
+        same_cell_jobs = tuple(
+            job for job in self.jobs
+            if job["schedule"] == "iid")[:2]
+        self.assertNotEqual(
+            same_cell_jobs[0]["candidate"], same_cell_jobs[1]["candidate"])
+        aggregator = campaign.RecoveryAggregator(
+            "selection", self.jobs)
+        first = synthetic_replicate(same_cell_jobs[0], 11)
+        second = synthetic_replicate(same_cell_jobs[1], 11)
+        first_prefix = max(
+            first["decoder_candidate_overhead"],
+            first["decoder_dispatch_overhead"],
+        )
+        first["direct_candidate_overhead"] = first_prefix
+        first["direct_dispatch_overhead"] = first_prefix
+        aggregator.add_replicate(same_cell_jobs[0], first)
+
+        # The direct candidate/dispatch panel solves both arms at the
+        # max first-success prefix when both recover (otherwise K+64).  A
+        # different candidate can therefore move both recorded direct
+        # overheads without changing the invariant dispatch result class or
+        # shared dispatch/WH1 recovery controls.
+        second["decoder_candidate_overhead"] = first_prefix + 1
+        second["direct_candidate_overhead"] = first_prefix + 1
+        second["direct_dispatch_overhead"] = first_prefix + 1
+        cell = aggregator.add_replicate(same_cell_jobs[1], second)
+        self.assertEqual(cell["dispatch_overhead"],
+                         second["decoder_dispatch_overhead"])
 
     def test_timing_and_thermal_summary_cardinality(self):
         evidence = campaign.JobEvidenceAggregator(

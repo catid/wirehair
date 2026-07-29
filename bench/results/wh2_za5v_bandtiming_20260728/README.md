@@ -62,13 +62,21 @@ after the architecture is selected.
 
 ## Frozen all-K selection protocol
 
-The protected selection population has not been run yet.  Its tracked runner
-and parser were frozen and reviewed before any result was generated:
+A first protected execution completed its 2,376 native jobs but was rejected
+by the final authenticated replay before any summary, completion record, or
+decision was published.  It is not selection evidence.  Result-blind
+forensics found that the runner had incorrectly treated the direct dispatch
+overhead as candidate-independent even though the native direct panel uses the
+pair-local maximum candidate/dispatch recovery prefix.  The corrected runner
+excludes only that overhead, retains the invariant direct result class, and
+requires a completely fresh promotion-grade execution.
+
+The corrected tracked runner and unchanged parser are:
 
 - campaign runner SHA-256:
-  `daa12df8587b0072d97c68aa86902fcc843fc05497887b9b56a0deb0fbe04899`;
+  `6f27877fa223ef202cf30801769b341aa2eadcdfec9e932a22e5e374607397c1`;
 - campaign runner tests SHA-256:
-  `92a24becb41918e20d2faf2d8bf754a3a2d133d49fb1626e624a8995a691c568`;
+  `af096019e98d13fca634dcf5f887e9b2e36024376517dec8c4f8a221bc813d6a`;
 - strict band-timing parser SHA-256:
   `66a1c7e83149914b8063d03eafac771d9ff9edbaf3be084f30557d1938fd92c2`;
 - strict parser tests SHA-256:

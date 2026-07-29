@@ -4,6 +4,54 @@ Audit date: 2026-07-28
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
 
+## 2026-07-29 protected selection replay fix
+
+The first protected `wirehair-za5v` selection attempt is invalid and produced
+no selection decision.  All 2,376 native jobs finished, but the final
+authenticated replay failed closed before publishing the summary, completion
+record, or completion checksum.  The failed directory must not be used for
+promotion.
+
+The failure exposed a campaign-runner bug rather than a native-codec result.
+The direct candidate/dispatch panel intentionally solves both arms at the
+pair-local maximum recovery prefix.  Its recorded dispatch overhead can
+therefore differ when the candidate changes, but the recovery aggregator
+incorrectly included that overhead in the candidate-independent duplicate
+signature.  Result-blind forensics across all 594 K/schedule groups found this
+expected direct-overhead drift in every group and zero drift in the other
+shared controls.  No ranking, survivor, or recovery result was read.
+
+The corrected runner excludes only the pair-local direct overhead.  It retains
+the direct dispatch result class as an invariant, because a dispatch that
+already recovered must remain solvable at a larger consistent prefix, while an
+unrecovered dispatch uses the same K+64 prefix in every copy.  The native
+parser independently enforces the same distinction.  Regression coverage now
+accepts a realistic candidate-dependent prefix change and rejects drift in
+every retained signature field.
+
+Corrected protected artifacts:
+
+- campaign runner:
+  `6f27877fa223ef202cf30801769b341aa2eadcdfec9e932a22e5e374607397c1`;
+- campaign tests:
+  `af096019e98d13fca634dcf5f887e9b2e36024376517dec8c4f8a221bc813d6a`;
+- strict parser:
+  `66a1c7e83149914b8063d03eafac771d9ff9edbaf3be084f30557d1938fd92c2`;
+- parser tests:
+  `27f3ca2761126630b985846948fefd1a7740417a6fc298ab8f1ca61ab92002ae`.
+
+Warning-strict parser plus campaign tests pass 65/65; campaign-only tests pass
+44/44.  Two independent source reviews and an exhaustive result-blind
+2,376-job control audit found no analogous candidate-coupled field.  The
+logical experiment remains frozen: roster, selection job list, matched cell
+set, policy, and all four disjoint holdout hashes are byte-for-byte unchanged
+from the prelaunch checkpoint.
+
+Next: commit and push the corrected runner and documentation, then launch a
+fresh selection directory so every native result, runtime-monitor record,
+summary, and completion marker binds the corrected runner from the outset.
+Only a strictly replayed fresh completion may reveal a survivor.
+
 ## 2026-07-28 protected all-K campaign prelaunch checkpoint
 
 `wirehair-za5v` remains open.  No protected all-K selection or holdout outcome
