@@ -3,7 +3,7 @@
 Audit date: 2026-07-29
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-rv4a`, `wirehair-rv4a.1`,
-`wirehair-rv4a.2`, `wirehair-rv4a.3`
+`wirehair-rv4a.2`, `wirehair-rv4a.3`, `wirehair-rv4a.4`
 
 ## 2026-07-29 current state and next work
 
@@ -25,10 +25,11 @@ GF(256)/0x14d arithmetic witness is 72,094 bytes with SHA-256
 Release, strict ASan+UBSan, package, exhaustive ordered-pair/tail, OOM/fault,
 and all-K fingerprint gates pass; the final all-K run took 2,673.07 seconds.
 
-The active P0 is the new, non-retroactive `wirehair-rv4a` seed-repair
-experiment.  Its selector/contracts child `wirehair-rv4a.1` is verified and
-closed by commits `7b43515` and `c120c92`.  The frozen repair-v1 policy SHA-256
-is `5e67a150d1f909d6ed80468185fa2dd0e82eb2fc3486c0fa662e213cf3100b42`.
+The non-retroactive `wirehair-rv4a` seed-repair experiment has completed with
+the authenticated no-survivor result below.  Its selector/contracts child
+`wirehair-rv4a.1` is verified and closed by commits `7b43515` and `c120c92`.
+The frozen repair-v1 policy SHA-256 is
+`5e67a150d1f909d6ed80468185fa2dd0e82eb2fc3486c0fa662e213cf3100b42`.
 The provisional pure8 ID/SHA is `19cccf775ce0bf09` /
 `19cccf775ce0bf098c9a425cb349714c4c4a880e7cf136c3bc365e13c05089a5`;
 pure9 is `a530f9105beaa450` /
@@ -94,11 +95,72 @@ broad Release 43/43, packages 3/3, build-policy 1/1, TSan selector 3/3 plus
 repairtiming CLI, and an exact 3/3 live receipt replay.  Primary and three
 independent code-reading audits ended with a full clean pass.
 
-`wirehair-rv4a.3` is now unblocked.  Its training run must consume the exact
-frozen source, binary, plan, pin path, and trusted pin SHA above; do not rebuild
-or touch any pinned input.  Only an eligible training winner may launch the one
-joint sealed boundary.  No repair-v1 training or sealed outcome has yet been
-launched or read.
+`wirehair-rv4a.3` consumed those exact frozen inputs and completed all 1,188
+training jobs.  The independently authenticated manifest, completion,
+decision, and verification-receipt SHA-256 values are, respectively,
+`c11d15c1c0c17e226ea45930cf11fb9d8cd9b43c05a4a3ff8d95c7b9f23a534a`,
+`ab2a269488e64a5fba03716df9c284084cc3a71f6cdf69cb07b61d969456059c`,
+`ee676d07ce82f71e9252fa2a26b031630470cebc650d9910b098fe83655a7e52`,
+and
+`32ff54529883e5c10d53cdd1340c22ff61dbc01e7fa366ba673595b7d16bffcd`.
+The compressed summary and ledger SHA-256 values are
+`21a23a5d940350dfd60e72276c82b929ce3738ce878d8adcd4fa510c3ed3b816`
+and
+`df659fbde0965ea38f03bc44f20ccebd32368240da456df4184d0943b56adae1`.
+Independent hashing found zero mismatches across all 3,564 manifest-listed
+job/result/log files, all worker logs are empty, and all 912,384 recovery
+cells, 152,064 unique selectors, 7,299,072 attempt rows, 102,187,008 timing
+rows, and 110,398,464 total native rows match the result-free freeze.
+
+Repair was completely effective on the authenticated training population:
+
+| Arm | Raw unrecovered @ +64 | Raw tail AUC | Repaired unrecovered @ +64 | Repaired tail AUC | Selected attempt > 0 |
+|---|---:|---:|---:|---:|---:|
+| `pure8_s0m1_d3` | 7,716 | 505,762 | 0 | 4,326 | 1,286 / 76,032 |
+| `pure9_s0m1_d3` | 6,762 | 442,667 | 0 | 3,212 | 1,127 / 76,032 |
+| dispatch-v1 control | 4,302 | 280,333 | — | — | — |
+| WH1 control | 11,607 | 765,140 | — | — | — |
+
+Pure8's selected-attempt histogram is `{0:74746, 1:1223, 2:58, 3:5}`;
+pure9's is `{0:74905, 1:1066, 2:51, 3:9, 4:1}`.  Mean selector calls are
+1.05164 and 1.04542; overall p99/max attempts are 2/5 and p99/max calls are
+4/7.  Repaired recovery succeeds in all 456,192 cells per arm, with zero cap
+exhaustion, final weakness, mismatch, uncommitted result, nonrepairable
+regression, or OOM.
+
+Neither arm passes the frozen WH1 throughput gates:
+
+| Arm | Decoder feed / WH1 | Full decoder / WH1 | Full encoder / WH1 | Selected direct / dispatch |
+|---|---:|---:|---:|---:|
+| `pure8_s0m1_d3` | 2.13635 | 2.31527 | 1.78164 | 0.63822 |
+| `pure9_s0m1_d3` | 2.22392 | 2.40291 | 1.84330 | 0.68231 |
+
+All 594 jobs per arm have complete cross-arm and A/A timing panels.  Direct
+solve passes decisively, but both arms independently fail decoder feed, full
+decoder, and full encoder.  The authenticated decision is therefore
+`status=no-survivor`, `candidate_order=[]`, `selected_survivor=null`, and
+`sealed_authorization=forbidden`.  No sealed job was launched and dispatch-v1
+remains the production profile.  The non-gating full-selector/forced-selected
+encoder ratios are 1.04615 for pure8 and 1.04252 for pure9.
+
+Thermal evidence covers all 1,188 native job intervals with 7,906 valid rows:
+maximum CPU Tctl 62.5 C, maximum DIMM temperature 53.0 C, and EDAC CE/UE 0/0.
+The runtime monitor saw mean occupancy 30.434/32 and all groups exited.
+
+The frozen v3 summary has one reporting erratum, tracked by
+`wirehair-rv4a.4`.  It blanket-counts the expected repair-triggering
+attempt-zero real-payload `Wirehair_Error` as a fatal runtime error and omits
+it from raw structural weakness.  The six schedules repeat each selector, so
+the 5,412 pure8 and 4,422 pure9 physical Error rows correspond to 902 and 737
+unique selectors; adding the 384 and 390 unique NeedMore selectors gives the
+correct deduplicated retry-needed counts of 1,286 and 1,127.  Every one is
+corroborated by the attempt-zero zero-RHS structural probe and later successful
+repair, so genuine runtime errors are zero.  This additive erratum does not
+change no-survivor: the three independent timing failures remain decisive.
+The immutable v3 summary, completion, decision, and verification bytes must
+not be rewritten.  Before any future outcome, fix the classifier, version the
+post-v3 schema/policy, rerun mutation/replay tests, and establish a new
+source/plan/pin freeze.
 
 ## 2026-07-29 authenticated all-K za5v result
 
