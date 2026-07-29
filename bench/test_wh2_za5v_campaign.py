@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Fast contract and aggregation tests for wh2_za5v_campaign.py."""
 
+import gzip
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import signal
 import subprocess
@@ -21,6 +23,53 @@ if str(BENCH) not in sys.path:
 
 import wh2_za5v_campaign as campaign
 import wh2_za5v_parallel_verify as parallel_verify
+
+
+def adversarial_replay_failure(
+        directory, unused_manifest, unused_manifest_sha256,
+        assignment, job):
+    marker = Path(job["_test_marker"])
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    (marker.parent / f"worker-{os.getpid()}").touch()
+    if assignment["order"] == 0:
+        marker.touch()
+        time.sleep(30)
+        raise AssertionError("sleeping replay unexpectedly completed")
+    deadline = time.monotonic() + 5.0
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError("slow replay did not start")
+        time.sleep(0.005)
+    raise campaign.CampaignError("adversarial fast failure")
+
+
+def adversarial_wrapper_task(task):
+    assignment, job = task
+    marker = Path(job["_test_marker"])
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    (marker.parent / f"worker-{os.getpid()}").touch()
+    if assignment["order"] == 0:
+        marker.touch()
+        time.sleep(30)
+        raise AssertionError("sleeping replay unexpectedly completed")
+    deadline = time.monotonic() + 5.0
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError("slow replay did not start")
+        time.sleep(0.005)
+    return {
+        "status": "error",
+        "order": assignment["order"],
+        "job_id": job["job_id"],
+        "exception_kind": "campaign",
+        "message": "adversarial fast failure",
+    }
+
+
+def adversarial_wrapper_initializer(*unused_arguments):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
 
 def synthetic_runtime_bindings():
@@ -1717,7 +1766,14 @@ class ParallelReplayTests(unittest.TestCase):
                     "SUPPORTED_RUNNER_SHA256",
                     frozenset({
                         manifest["runtime_bindings"]["runner"]["sha256"],
-                    })):
+                    })), mock.patch.object(
+                        parallel_verify,
+                        "_load_frozen_campaign",
+                        return_value=campaign,
+                    ), mock.patch.object(
+                        parallel_verify,
+                        "_assert_source_attestation",
+                    ):
                 wrapped = parallel_verify.parallel_build_summaries(
                     campaign,
                     Path(campaign.__file__),
@@ -1771,6 +1827,15 @@ class ParallelReplayTests(unittest.TestCase):
                                 manifest["runtime_bindings"][
                                     "runner"]["sha256"],
                             })),
+                        mock.patch.object(
+                            parallel_verify,
+                            "_load_frozen_campaign",
+                            return_value=campaign,
+                        ),
+                        mock.patch.object(
+                            parallel_verify,
+                            "_assert_source_attestation",
+                        ),
                         self.assertRaises(Exception) as wrapper_error,
                 ):
                     parallel_verify.parallel_build_summaries(
@@ -1832,6 +1897,9 @@ class ParallelReplayTests(unittest.TestCase):
                         parallel_verify,
                         "_load_frozen_campaign",
                         return_value=campaign),
+                    mock.patch.object(
+                        parallel_verify,
+                        "_assert_source_attestation"),
                     mock.patch.object(
                         parallel_verify,
                         "SUPPORTED_RUNNER_SHA256",
@@ -1909,6 +1977,587 @@ class ParallelReplayTests(unittest.TestCase):
                         campaign.CampaignError, "worker count"):
                     parallel_verify._worker_count(
                         campaign, manifest, value, 10)
+
+    @staticmethod
+    def _adversarial_pool_manifest(marker):
+        assignments = [
+            {"order": index, "job_id": str(index), "output": "unused"}
+            for index in range(2)
+        ]
+        jobs = [
+            {
+                "job_id": str(index),
+                "_test_marker": str(marker),
+            }
+            for index in range(2)
+        ]
+        return {
+            "workers": 2,
+            "bandtiming_protocol": "test",
+            "runtime_bindings": {},
+            "assignments": assignments,
+            "pre_cpu_jobs": jobs,
+        }
+
+    def _assert_worker_markers_reaped(self, root):
+        markers = tuple(root.glob("worker-*"))
+        self.assertTrue(markers)
+        for marker in markers:
+            pid = int(marker.name.removeprefix("worker-"))
+            self.assertFalse(
+                Path("/proc", str(pid)).exists(),
+                f"replay child {pid} survived cleanup",
+            )
+
+    def test_parallel_error_is_fail_fast_and_reaps_campaign_workers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self._adversarial_pool_manifest(
+                root / "slow-started")
+            ledger_path = root / "ledger.jsonl.gz"
+            started = time.monotonic()
+            with (
+                    mock.patch.object(
+                        campaign,
+                        "_replay_result",
+                        adversarial_replay_failure,
+                    ),
+                    self.assertRaisesRegex(
+                        campaign.CampaignError,
+                        "adversarial fast failure",
+                    ),
+            ):
+                with campaign._ordered_replayed_results(
+                        root,
+                        manifest,
+                        "manifest",
+                        replay_workers=2,
+                ) as replayed:
+                    with campaign.AtomicGzipJsonLines(
+                            ledger_path) as ledger:
+                        ledger.write({"prefix": True})
+                        next(replayed)
+            self.assertLess(time.monotonic() - started, 1.0)
+            self._assert_worker_markers_reaped(root)
+            self.assertFalse(ledger_path.exists())
+            self.assertFalse(
+                ledger_path.with_name(
+                    ledger_path.name + ".tmp").exists())
+
+    def test_parallel_error_is_fail_fast_and_reaps_wrapper_workers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self._adversarial_pool_manifest(
+                root / "slow-started")
+            ledger_path = root / "ledger.jsonl.gz"
+            started = time.monotonic()
+            with (
+                    mock.patch.object(
+                        parallel_verify,
+                        "_initialize_worker",
+                        adversarial_wrapper_initializer,
+                    ),
+                    mock.patch.object(
+                        parallel_verify,
+                        "_replay_task",
+                        adversarial_wrapper_task,
+                    ),
+                    self.assertRaisesRegex(
+                        campaign.CampaignError,
+                        "adversarial fast failure",
+                    ),
+            ):
+                with parallel_verify._ordered_results(
+                        campaign,
+                        Path(campaign.__file__),
+                        root,
+                        manifest,
+                        "manifest",
+                        replay_workers=2,
+                ) as replayed:
+                    with campaign.AtomicGzipJsonLines(
+                            ledger_path) as ledger:
+                        ledger.write({"prefix": True})
+                        next(replayed)
+            self.assertLess(time.monotonic() - started, 1.0)
+            self._assert_worker_markers_reaped(root)
+            self.assertFalse(ledger_path.exists())
+            self.assertFalse(
+                ledger_path.with_name(
+                    ledger_path.name + ".tmp").exists())
+
+    def test_result_evidence_caps_reject_compressed_and_inflated_bombs(self):
+        for bomb in ("compressed", "uncompressed"):
+            with (
+                    self.subTest(bomb=bomb),
+                    mock.patch.object(campaign, "K_VALUES", (2,)),
+                    mock.patch.object(
+                        campaign, "SELECTION_REPLICATES", 3),
+                    tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                evidence = root / "evidence"
+                manifest = parallel_replay_fixture(evidence)
+                assignment = manifest["assignments"][0]
+                job = manifest["pre_cpu_jobs"][0]
+                limits = campaign._result_evidence_byte_limits(job)
+                result_path = evidence / assignment["output"]
+                if bomb == "compressed":
+                    result_path.write_bytes(
+                        b"x" * (limits["compressed"] + 1))
+                    expected = "exceeds compressed byte limit"
+                else:
+                    payload = b"x" * (limits["uncompressed"] + 1)
+                    compressed = gzip.compress(payload, mtime=0)
+                    self.assertLess(
+                        len(compressed), limits["compressed"])
+                    result_path.write_bytes(compressed)
+                    expected = "exceeds uncompressed byte limit"
+
+                invocations = (
+                    (
+                        "serial",
+                        lambda output: campaign.build_summaries(
+                            evidence,
+                            manifest,
+                            output,
+                            replay_workers=1,
+                        ),
+                    ),
+                    (
+                        "parallel",
+                        lambda output: campaign.build_summaries(
+                            evidence,
+                            manifest,
+                            output,
+                            replay_workers=2,
+                        ),
+                    ),
+                    (
+                        "wrapper",
+                        lambda output:
+                            parallel_verify.parallel_build_summaries(
+                                campaign,
+                                Path(campaign.__file__),
+                                evidence,
+                                manifest,
+                                output,
+                                replay_workers=2,
+                            ),
+                    ),
+                )
+                for name, invoke in invocations:
+                    output = root / name
+                    patches = (
+                        mock.patch.object(
+                            parallel_verify,
+                            "_load_frozen_campaign",
+                            return_value=campaign,
+                        ),
+                        mock.patch.object(
+                            parallel_verify,
+                            "_assert_source_attestation",
+                        ),
+                        mock.patch.object(
+                            parallel_verify,
+                            "SUPPORTED_RUNNER_SHA256",
+                            frozenset({
+                                manifest["runtime_bindings"][
+                                    "runner"]["sha256"],
+                            }),
+                        ),
+                    ) if name == "wrapper" else (
+                        nullcontext(),
+                        nullcontext(),
+                        nullcontext(),
+                    )
+                    with (
+                            self.subTest(path=name),
+                            patches[0],
+                            patches[1],
+                            patches[2],
+                            self.assertRaisesRegex(
+                                campaign.CampaignError, expected),
+                    ):
+                        invoke(output)
+                    self.assertFalse(
+                        (output / "cell-ledger.jsonl.gz").exists())
+                    self.assertFalse(
+                        (output / "cell-ledger.jsonl.gz.tmp").exists())
+                    self.assertFalse(
+                        (output / "summary.json.gz").exists())
+
+    def test_replay_parent_signals_reap_children_and_atomic_temps(self):
+        campaign_source = r"""
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_campaign as campaign
+root = Path(sys.argv[2])
+def slow(directory, manifest, manifest_sha256, assignment, job):
+    (root / ("worker-" + str(os.getpid()))).touch()
+    time.sleep(30)
+    raise AssertionError("sleep completed")
+campaign._replay_result = slow
+manifest = {
+    "workers": 2,
+    "bandtiming_protocol": "test",
+    "runtime_bindings": {},
+    "assignments": [
+        {"order": i, "job_id": str(i), "output": "unused"}
+        for i in range(2)
+    ],
+    "pre_cpu_jobs": [{"job_id": str(i)} for i in range(2)],
+}
+try:
+    with campaign._ordered_replayed_results(
+            root, manifest, "manifest", replay_workers=2) as replayed:
+        with campaign.AtomicGzipJsonLines(
+                root / "ledger.jsonl.gz") as ledger:
+            ledger.write({"prefix": True})
+            next(replayed)
+except campaign.CampaignError:
+    raise SystemExit(42)
+raise SystemExit(99)
+"""
+        wrapper_source = r"""
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_campaign as campaign
+import wh2_za5v_parallel_verify as wrapper
+root = Path(sys.argv[2])
+def initialize(*unused):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+def slow(task):
+    (root / ("worker-" + str(os.getpid()))).touch()
+    time.sleep(30)
+    raise AssertionError("sleep completed")
+wrapper._initialize_worker = initialize
+wrapper._replay_task = slow
+manifest = {
+    "workers": 2,
+    "bandtiming_protocol": "test",
+    "runtime_bindings": {},
+    "assignments": [
+        {"order": i, "job_id": str(i), "output": "unused"}
+        for i in range(2)
+    ],
+    "pre_cpu_jobs": [{"job_id": str(i)} for i in range(2)],
+}
+try:
+    with wrapper._ordered_results(
+            campaign, Path(campaign.__file__), root, manifest,
+            "manifest", replay_workers=2) as replayed:
+        with campaign.AtomicGzipJsonLines(
+                root / "ledger.jsonl.gz") as ledger:
+            ledger.write({"prefix": True})
+            next(replayed)
+except campaign.CampaignError:
+    raise SystemExit(42)
+raise SystemExit(99)
+"""
+        for kind, source in (
+                ("campaign", campaign_source),
+                ("wrapper", wrapper_source),
+        ):
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                with (
+                        self.subTest(kind=kind, signal=signum),
+                        tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary)
+                    process = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-W",
+                            "error",
+                            "-c",
+                            source,
+                            str(BENCH),
+                            str(root),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    try:
+                        deadline = time.monotonic() + 10.0
+                        while len(tuple(root.glob("worker-*"))) < 2:
+                            if process.poll() is not None:
+                                stdout, stderr = process.communicate()
+                                self.fail(
+                                    "signal harness exited before worker "
+                                    f"start: {stdout!r} {stderr!r}")
+                            if time.monotonic() >= deadline:
+                                self.fail(
+                                    "signal harness worker did not start")
+                            time.sleep(0.01)
+                        os.kill(process.pid, signum)
+                        stdout, stderr = process.communicate(timeout=5)
+                        self.assertEqual(
+                            process.returncode,
+                            42,
+                            (stdout, stderr),
+                        )
+                        self._assert_worker_markers_reaped(root)
+                        self.assertFalse(
+                            (root / "ledger.jsonl.gz").exists())
+                        self.assertFalse(
+                            (root / "ledger.jsonl.gz.tmp").exists())
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+
+    def test_source_loader_ignores_stale_timestamp_pyc(self):
+        source = r"""
+import os
+from pathlib import Path
+import py_compile
+import sys
+import tempfile
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_parallel_verify as wrapper
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    bench = root / "bench"
+    tools = root / "tools"
+    bench.mkdir()
+    tools.mkdir()
+    (tools / "peel_codec.py").write_text(
+        "class MeasurementError(Exception):\n    pass\n",
+        encoding="ascii")
+    (tools / "band_timing_codec.py").write_text(
+        "import peel_codec\n", encoding="ascii")
+    runner = bench / "frozen_runner.py"
+    old = (
+        "import band_timing_codec as band\n"
+        "import peel_codec\n"
+        "MARKER = 'loaded_A'\n"
+    )
+    new = old.replace("loaded_A", "source_B")
+    assert len(old) == len(new)
+    runner.write_text(old, encoding="ascii")
+    saved = runner.stat().st_mtime_ns
+    py_compile.compile(str(runner), doraise=True)
+    runner.write_text(new, encoding="ascii")
+    os.utime(runner, ns=(saved, saved))
+    wrapper.SUPPORTED_RUNNER_SHA256 = frozenset({
+        wrapper.hashlib.sha256(runner.read_bytes()).hexdigest()})
+    wrapper.SUPPORTED_PARSER_SHA256 = frozenset({
+        wrapper.hashlib.sha256(
+            (tools / "band_timing_codec.py").read_bytes()).hexdigest()})
+    wrapper.SUPPORTED_CONTEXT_TOOL_SHA256 = frozenset({
+        wrapper.hashlib.sha256(
+            (tools / "peel_codec.py").read_bytes()).hexdigest()})
+    loaded = wrapper._load_frozen_campaign(runner)
+    assert loaded.MARKER == "source_B", loaded.MARKER
+"""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-W",
+                "error",
+                "-c",
+                source,
+                str(BENCH),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            (completed.stdout, completed.stderr),
+        )
+
+    def test_source_snapshot_rejects_oversized_runner_and_dependencies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for kind, limit in parallel_verify.SOURCE_BYTE_LIMITS.items():
+                with self.subTest(kind=kind):
+                    path = root / f"{kind}.py"
+                    with open(path, "wb") as source:
+                        source.truncate(limit + 1)
+                    with self.assertRaisesRegex(
+                            RuntimeError, "exceeds source byte limit"):
+                        parallel_verify._source_snapshot(path, kind)
+        source = r"""
+from pathlib import Path
+import resource
+import sys
+import tempfile
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_parallel_verify as wrapper
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    bench = root / "bench"
+    bench.mkdir()
+    runner = bench / "oversized.py"
+    with open(runner, "wb") as output:
+        output.truncate(128 * 1024 * 1024)
+    resource.setrlimit(
+        resource.RLIMIT_AS,
+        (96 * 1024 * 1024, 96 * 1024 * 1024))
+    try:
+        wrapper._load_frozen_campaign(runner)
+    except RuntimeError as error:
+        assert "exceeds source byte limit" in str(error), error
+    except MemoryError:
+        raise AssertionError("oversized source was read before rejection")
+    else:
+        raise AssertionError("oversized source was accepted")
+"""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-W",
+                "error",
+                "-c",
+                source,
+                str(BENCH),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            (completed.stdout, completed.stderr),
+        )
+
+    def test_source_loader_rejects_preloaded_and_substituted_modules(self):
+        preloaded = r"""
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_parallel_verify as wrapper
+runner = Path(sys.argv[1]) / "wh2_za5v_campaign.py"
+wrapper.SUPPORTED_RUNNER_SHA256 = frozenset({
+    wrapper.hashlib.sha256(runner.read_bytes()).hexdigest()})
+sys.path.insert(0, str(runner.parents[1] / "tools"))
+import peel_codec
+peel_codec.strict_json_loads = lambda unused: {"substituted": True}
+try:
+    wrapper._load_frozen_campaign(runner)
+except RuntimeError as error:
+    assert "refusing preloaded" in str(error), error
+else:
+    raise AssertionError("preloaded same-path module was accepted")
+"""
+        substituted = r"""
+from pathlib import Path
+import sys
+import types
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_parallel_verify as wrapper
+runner = Path(sys.argv[1]) / "wh2_za5v_campaign.py"
+wrapper.SUPPORTED_RUNNER_SHA256 = frozenset({
+    wrapper.hashlib.sha256(runner.read_bytes()).hexdigest()})
+campaign = wrapper._load_frozen_campaign(runner)
+fake = types.ModuleType("peel_codec")
+fake.__file__ = campaign.peel_codec.__file__
+sys.modules["peel_codec"] = fake
+try:
+    wrapper._load_frozen_campaign(runner)
+except RuntimeError as error:
+    assert "substituted" in str(error), error
+else:
+    raise AssertionError("same-path cached module substitution was accepted")
+"""
+        for source in (preloaded, substituted):
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-W",
+                    "error",
+                    "-c",
+                    source,
+                    str(BENCH),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                (completed.stdout, completed.stderr),
+            )
+
+    def test_source_loader_cleans_partial_modules_after_compile_failure(self):
+        source = r"""
+from pathlib import Path
+import sys
+import tempfile
+sys.path.insert(0, sys.argv[1])
+import wh2_za5v_parallel_verify as wrapper
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    bench = root / "bench"
+    tools = root / "tools"
+    bench.mkdir()
+    tools.mkdir()
+    context = tools / "peel_codec.py"
+    parser = tools / "band_timing_codec.py"
+    runner = bench / "frozen_runner.py"
+    context.write_text(
+        "class MeasurementError(Exception):\n    pass\n",
+        encoding="ascii")
+    parser.write_text("import peel_codec\n", encoding="ascii")
+    runner.write_text(
+        "import band_timing_codec as band\n"
+        "import peel_codec\n"
+        "this is not valid python !!!\n",
+        encoding="ascii")
+    digest = wrapper.hashlib.sha256
+    wrapper.SUPPORTED_RUNNER_SHA256 = frozenset({
+        digest(runner.read_bytes()).hexdigest()})
+    wrapper.SUPPORTED_PARSER_SHA256 = frozenset({
+        digest(parser.read_bytes()).hexdigest()})
+    wrapper.SUPPORTED_CONTEXT_TOOL_SHA256 = frozenset({
+        digest(context.read_bytes()).hexdigest()})
+    try:
+        wrapper._load_frozen_campaign(runner)
+    except SyntaxError:
+        pass
+    else:
+        raise AssertionError("invalid frozen runner compiled")
+    assert "peel_codec" not in sys.modules
+    assert "band_timing_codec" not in sys.modules
+    assert not any(
+        name.startswith("_wirehair_frozen_wh2_za5v_")
+        for name in sys.modules)
+"""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-W",
+                "error",
+                "-c",
+                source,
+                str(BENCH),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            (completed.stdout, completed.stderr),
+        )
 
 
 class RecoveryAggregationTests(unittest.TestCase):

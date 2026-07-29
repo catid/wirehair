@@ -13,9 +13,7 @@ one phase into a directory that must not already exist.
 """
 
 import argparse
-from collections import deque
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import gzip
 import hashlib
 import json
@@ -23,6 +21,7 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
+import queue
 import signal
 import stat
 import subprocess
@@ -71,6 +70,17 @@ EVICT_BYTES = 4096
 REQUIRED_MARGIN = 0.02
 THERMAL_INTERVAL_MS = 1000
 MAX_WORKERS = 32
+# Result receipts contain a fixed envelope plus one bounded native record per
+# measured/warmup replicate.  Keep these limits tied to that frozen schema so
+# malformed evidence cannot turn parallel verification into an unbounded
+# decompression multiplier.
+RESULT_COMPRESSED_FIXED_BYTES = 64 * 1024
+RESULT_COMPRESSED_BYTES_PER_REPLICATE = 8 * 1024
+RESULT_UNCOMPRESSED_FIXED_BYTES = 512 * 1024
+RESULT_UNCOMPRESSED_BYTES_PER_REPLICATE = 64 * 1024
+REPLAY_QUEUE_POLL_SECONDS = 0.05
+REPLAY_TERMINATE_GRACE_SECONDS = 0.5
+REPLAY_KILL_GRACE_SECONDS = 1.0
 RECOVERY_PAIRS = (
     ("candidate", "dispatch"),
     ("candidate", "wh1"),
@@ -87,13 +97,13 @@ def _parent_signal_error(signum):
 
 
 def _raise_pending_parent_signal(state):
-    for item in (signal.SIGTERM, signal.SIGHUP):
+    for item in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(item, signal.SIG_IGN)
     raise _parent_signal_error(state["pending"])
 
 
 def _parent_signal_safe_point():
-    """Raise a recorded TERM/HUP only where cleanup is guaranteed."""
+    """Raise a recorded INT/TERM/HUP only where cleanup is guaranteed."""
     state = _PARENT_SIGNAL_STATE
     if state is not None and state["pending"] is not None:
         _raise_pending_parent_signal(state)
@@ -305,20 +315,154 @@ def read_canonical_json(path):
     return _strict_json_payload(payload, str(path)), sha256_bytes(payload)
 
 
-def read_canonical_gzip_json(path):
+class _EvidenceByteLimitExceeded(Exception):
+    pass
+
+
+class _CappedHashReader:
+    """Hash a sequential byte stream while refusing the first byte over cap."""
+
+    def __init__(self, source, limit):
+        self.source = source
+        self.limit = limit
+        self.count = 0
+        self.digest = hashlib.sha256()
+
+    def read(self, size=-1):
+        remaining_with_probe = self.limit - self.count + 1
+        if size is None or size < 0 or size > remaining_with_probe:
+            size = remaining_with_probe
+        data = self.source.read(size)
+        if self.count + len(data) > self.limit:
+            raise _EvidenceByteLimitExceeded
+        self.count += len(data)
+        self.digest.update(data)
+        return data
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        # gzip.GzipFile only rewinds a reader when its caller seeks.  This
+        # verifier is strictly forward-only, so a rewind would make the
+        # compressed evidence hash ambiguous and is rejected.
+        if offset != self.count or whence != os.SEEK_SET:
+            raise OSError("capped gzip evidence reader is forward-only")
+        return self.count
+
+    def tell(self):
+        return self.count
+
+
+def _result_evidence_byte_limits(job):
+    if not isinstance(job, dict):
+        raise CampaignError("result evidence job is malformed")
+    replicates = job.get("replicates")
+    warmups = job.get("warmup_replicates")
+    if (
+        type(replicates) is not int
+        or replicates < 1
+        or type(warmups) is not int
+        or warmups < 0
+    ):
+        raise CampaignError("result evidence replicate count is invalid")
+    records = replicates + warmups
+    return {
+        "compressed":
+            RESULT_COMPRESSED_FIXED_BYTES
+            + records * RESULT_COMPRESSED_BYTES_PER_REPLICATE,
+        "uncompressed":
+            RESULT_UNCOMPRESSED_FIXED_BYTES
+            + records * RESULT_UNCOMPRESSED_BYTES_PER_REPLICATE,
+    }
+
+
+def read_canonical_gzip_json(
+        path, *, compressed_limit=None, uncompressed_limit=None):
     path = Path(path)
+    if (compressed_limit is None) != (uncompressed_limit is None):
+        raise CampaignError("gzip evidence byte limits are incomplete")
+    if compressed_limit is not None and (
+        type(compressed_limit) is not int
+        or compressed_limit < 1
+        or type(uncompressed_limit) is not int
+        or uncompressed_limit < 1
+    ):
+        raise CampaignError("gzip evidence byte limits are invalid")
+    if compressed_limit is None:
+        try:
+            compressed = path.read_bytes()
+            payload = gzip.decompress(compressed)
+        except (OSError, EOFError, gzip.BadGzipFile, zlib.error) as error:
+            raise CampaignError(
+                f"could not read gzip evidence {path}: {error}")
+        return (
+            _strict_json_payload(payload, str(path)),
+            {
+                "compressed_sha256": sha256_bytes(compressed),
+                "uncompressed_sha256": sha256_bytes(payload),
+                "compressed_bytes": len(compressed),
+                "uncompressed_bytes": len(payload),
+            },
+        )
+
+    stable = (
+        "st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns",
+        "st_ctime_ns",
+    )
     try:
-        compressed = path.read_bytes()
-        payload = gzip.decompress(compressed)
+        with open(path, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise CampaignError(
+                    f"gzip evidence is not a regular file: {path}")
+            if before.st_size > compressed_limit:
+                raise CampaignError(
+                    f"gzip evidence exceeds compressed byte limit: {path}")
+            reader = _CappedHashReader(source, compressed_limit)
+            chunks = []
+            uncompressed_bytes = 0
+            with gzip.GzipFile(fileobj=reader, mode="rb") as archive:
+                while True:
+                    remaining_with_probe = (
+                        uncompressed_limit - uncompressed_bytes + 1)
+                    chunk = archive.read(
+                        min(64 * 1024, remaining_with_probe))
+                    if not chunk:
+                        break
+                    uncompressed_bytes += len(chunk)
+                    if uncompressed_bytes > uncompressed_limit:
+                        raise CampaignError(
+                            "gzip evidence exceeds uncompressed byte "
+                            f"limit: {path}")
+                    chunks.append(chunk)
+            while reader.read(64 * 1024):
+                pass
+            after = os.fstat(source.fileno())
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            any(
+                getattr(before, name) != getattr(after, name)
+                for name in stable
+            )
+            or any(
+                getattr(after, name) != getattr(current, name)
+                for name in stable
+            )
+            or reader.count != after.st_size
+        ):
+            raise CampaignError(
+                f"gzip evidence changed while being read: {path}")
+        payload = b"".join(chunks)
+    except _EvidenceByteLimitExceeded:
+        raise CampaignError(
+            f"gzip evidence exceeds compressed byte limit: {path}")
     except (OSError, EOFError, gzip.BadGzipFile, zlib.error) as error:
         raise CampaignError(f"could not read gzip evidence {path}: {error}")
     return (
         _strict_json_payload(payload, str(path)),
         {
-            "compressed_sha256": sha256_bytes(compressed),
+            "compressed_sha256": reader.digest.hexdigest(),
             "uncompressed_sha256": sha256_bytes(payload),
-            "compressed_bytes": len(compressed),
-            "uncompressed_bytes": len(payload),
+            "compressed_bytes": reader.count,
+            "uncompressed_bytes": uncompressed_bytes,
         },
     )
 
@@ -1411,9 +1555,9 @@ def _run_wave(directory, manifest, assignments):
     script = Path(__file__).resolve()
     try:
         for assignment in assignments:
-            # TERM/HUP handlers only record intent.  Check immediately before
-            # launch and after the returned process group is registered, so
-            # there is no asynchronous exception window that can orphan it.
+            # INT/TERM/HUP handlers only record intent. Check immediately
+            # before launch and after the returned process group is registered,
+            # so there is no asynchronous exception window that can orphan it.
             _parent_signal_safe_point()
             log = None
             process = None
@@ -3526,7 +3670,12 @@ class AtomicGzipJsonLines:
 def _replay_result(
         directory, manifest, manifest_sha256, assignment, job):
     path = directory / assignment["output"]
-    envelope, evidence = read_canonical_gzip_json(path)
+    limits = _result_evidence_byte_limits(job)
+    envelope, evidence = read_canonical_gzip_json(
+        path,
+        compressed_limit=limits["compressed"],
+        uncompressed_limit=limits["uncompressed"],
+    )
     required = {
         "schema", "manifest_sha256", "job", "assignment",
         "wall_started_unix_ns", "wall_finished_unix_ns",
@@ -3610,9 +3759,17 @@ def _authenticated_receipt_projection(receipt):
 
 def _initialize_replay_process(directory, replay_manifest, manifest_sha256):
     """Install immutable replay state once in each bounded pool process."""
-    global _REPLAY_PROCESS_CONTEXT
+    global _PARENT_SIGNAL_STATE, _REPLAY_PROCESS_CONTEXT
     if _REPLAY_PROCESS_CONTEXT is not None:
         raise CampaignError("replay process context was initialized twice")
+    # The forked verifier workers are owned by the parent.  They ignore a
+    # terminal's SIGINT so the parent can perform ordered cleanup, but retain
+    # default TERM/HUP dispositions so terminate() cannot be defeated by the
+    # parent's inherited record-only handlers.
+    _PARENT_SIGNAL_STATE = None
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
     _REPLAY_PROCESS_CONTEXT = (
         Path(directory),
         replay_manifest,
@@ -3658,6 +3815,23 @@ def _replay_process_task(task):
         }
     _parent_signal_safe_point()
     return result
+
+
+def _replay_process_main(
+        task_queue, result_queue, directory, replay_manifest,
+        manifest_sha256):
+    """Own one replay loop; an unexpected exception makes the child nonzero."""
+    _initialize_replay_process(
+        directory, replay_manifest, manifest_sha256)
+    while True:
+        task = task_queue.get()
+        if task is None:
+            return
+        index, assignment, job = task
+        result_queue.put((
+            index,
+            _replay_process_task((assignment, job)),
+        ))
 
 
 def _validate_replay_process_result(result, assignment, job):
@@ -3717,6 +3891,105 @@ def _replay_worker_count(manifest, replay_workers, job_count):
     return min(value, job_count)
 
 
+def _replay_processes_alive(processes):
+    return tuple(process for process in processes if process.is_alive())
+
+
+def _join_replay_processes_until(processes, deadline):
+    for process in processes:
+        if process.pid is None:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        process.join(min(REPLAY_QUEUE_POLL_SECONDS, remaining))
+
+
+def _terminate_replay_processes(processes):
+    """Bounded TERM/KILL teardown that always reaps every replay child."""
+    for process in _replay_processes_alive(processes):
+        process.terminate()
+    _join_replay_processes_until(
+        processes, time.monotonic() + REPLAY_TERMINATE_GRACE_SECONDS)
+    for process in _replay_processes_alive(processes):
+        process.kill()
+    _join_replay_processes_until(
+        processes, time.monotonic() + REPLAY_KILL_GRACE_SECONDS)
+    survivors = _replay_processes_alive(processes)
+    if survivors:
+        raise CampaignError(
+            "parallel replay workers survived SIGKILL: "
+            + ",".join(str(process.pid) for process in survivors))
+
+
+def _close_replay_queues(*queues):
+    for work_queue in queues:
+        try:
+            work_queue.cancel_join_thread()
+        except (AttributeError, ValueError):
+            pass
+        try:
+            work_queue.close()
+        except (AttributeError, ValueError):
+            pass
+
+
+def _replay_worker_failure(processes, *, allow_clean_exit=False):
+    failures = [
+        (process.pid, process.exitcode)
+        for process in processes
+        if (
+            process.exitcode is not None
+            and (process.exitcode != 0 or not allow_clean_exit)
+        )
+    ]
+    if failures:
+        raise CampaignError(
+            f"parallel replay worker failed: {failures}")
+
+
+def _put_replay_task(
+        task_queue, task, processes, *, allow_clean_exit=False):
+    while True:
+        _parent_signal_safe_point()
+        _replay_worker_failure(
+            processes, allow_clean_exit=allow_clean_exit)
+        try:
+            task_queue.put(
+                task, timeout=REPLAY_QUEUE_POLL_SECONDS)
+            return
+        except queue.Full:
+            continue
+
+
+def _finish_replay_processes(task_queue, processes):
+    """Ask idle workers to exit, then use bounded teardown as a backstop."""
+    try:
+        for unused in processes:
+            _put_replay_task(
+                task_queue,
+                None,
+                processes,
+                allow_clean_exit=True,
+            )
+        deadline = time.monotonic() + REPLAY_TERMINATE_GRACE_SECONDS
+        while _replay_processes_alive(processes):
+            _parent_signal_safe_point()
+            _replay_worker_failure(
+                processes, allow_clean_exit=True)
+            if time.monotonic() >= deadline:
+                break
+            _join_replay_processes_until(
+                processes,
+                min(
+                    deadline,
+                    time.monotonic() + REPLAY_QUEUE_POLL_SECONDS,
+                ),
+            )
+    finally:
+        _terminate_replay_processes(processes)
+
+
 @contextmanager
 def _ordered_replayed_results(
         directory, manifest, manifest_sha256, *, replay_workers=None):
@@ -3750,52 +4023,104 @@ def _ordered_replayed_results(
         "bandtiming_protocol": manifest["bandtiming_protocol"],
         "runtime_bindings": manifest["runtime_bindings"],
     }
-    executor = ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=multiprocessing.get_context("fork"),
-        initializer=_initialize_replay_process,
-        initargs=(
-            str(Path(directory).resolve()),
-            replay_manifest,
-            manifest_sha256,
-        ),
+    context = multiprocessing.get_context("fork")
+    capacity = min(len(jobs), workers * 2)
+    task_queue = context.Queue(maxsize=capacity)
+    result_queue = context.Queue(maxsize=capacity)
+    processes = []
+    completed = [False]
+    handler = (
+        _parent_termination_handlers()
+        if _PARENT_SIGNAL_STATE is None
+        else nullcontext()
     )
-    pending = deque()
-    population = iter(zip(assignments, jobs))
-
-    def submit_one():
-        try:
-            assignment, job = next(population)
-        except StopIteration:
-            return False
-        pending.append((
-            assignment,
-            job,
-            executor.submit(
-                _replay_process_task, (assignment, job)),
-        ))
-        return True
-
     try:
-        for unused in range(min(len(jobs), workers * 2)):
-            if not submit_one():
-                break
+        with handler:
+            try:
+                for index in range(workers):
+                    _parent_signal_safe_point()
+                    process = context.Process(
+                        target=_replay_process_main,
+                        args=(
+                            task_queue,
+                            result_queue,
+                            str(Path(directory).resolve()),
+                            replay_manifest,
+                            manifest_sha256,
+                        ),
+                        name=f"za5v-replay-{index:02d}",
+                    )
+                    processes.append(process)
+                    process.start()
+                    _parent_signal_safe_point()
 
-        def parallel_results():
-            while pending:
-                _parent_signal_safe_point()
-                assignment, job, future = pending.popleft()
-                result = future.result()
-                _parent_signal_safe_point()
-                yield _validate_replay_process_result(
-                    result, assignment, job)
-                submit_one()
+                next_submit = 0
+                for unused in range(capacity):
+                    assignment = assignments[next_submit]
+                    job = jobs[next_submit]
+                    _put_replay_task(
+                        task_queue,
+                        (next_submit, assignment, job),
+                        processes,
+                    )
+                    next_submit += 1
 
-        yield parallel_results()
+                def parallel_results():
+                    nonlocal next_submit
+                    buffered = {}
+                    next_expected = 0
+                    while next_expected < len(jobs):
+                        while next_expected not in buffered:
+                            _parent_signal_safe_point()
+                            _replay_worker_failure(processes)
+                            try:
+                                index, result = result_queue.get(
+                                    timeout=REPLAY_QUEUE_POLL_SECONDS)
+                            except queue.Empty:
+                                continue
+                            if (
+                                type(index) is not int
+                                or not 0 <= index < next_submit
+                                or index in buffered
+                                or index < next_expected
+                            ):
+                                raise CampaignError(
+                                    "parallel replay result order is "
+                                    "inconsistent")
+                            # Validate every completion immediately.  A later
+                            # manifest job that fails must not wait behind an
+                            # unrelated slow earlier job.
+                            buffered[index] = \
+                                _validate_replay_process_result(
+                                    result,
+                                    assignments[index],
+                                    jobs[index],
+                                )
+                        value = buffered.pop(next_expected)
+                        next_expected += 1
+                        yield value
+                        if next_submit < len(jobs):
+                            _put_replay_task(
+                                task_queue,
+                                (
+                                    next_submit,
+                                    assignments[next_submit],
+                                    jobs[next_submit],
+                                ),
+                                processes,
+                            )
+                            next_submit += 1
+                    completed[0] = True
+
+                yield parallel_results()
+                _parent_signal_safe_point()
+            finally:
+                if completed[0]:
+                    _finish_replay_processes(task_queue, processes)
+                else:
+                    _terminate_replay_processes(processes)
     finally:
-        for unused_assignment, unused_job, future in pending:
-            future.cancel()
-        executor.shutdown(wait=True, cancel_futures=True)
+        _close_replay_queues(task_queue, result_queue)
 
 
 def build_summaries(
@@ -3915,9 +4240,9 @@ def _write_completion_checksum(directory, completion_sha256):
 
 @contextmanager
 def _parent_termination_handlers():
-    """Record TERM/HUP and raise only at explicit cleanup-safe points."""
+    """Record INT/TERM/HUP and raise only at explicit cleanup-safe points."""
     global _PARENT_SIGNAL_STATE
-    handled = (signal.SIGTERM, signal.SIGHUP)
+    handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous = {
         item: signal.getsignal(item)
         for item in handled
@@ -4055,7 +4380,7 @@ def _run_campaign_impl(
 def run_campaign(
         phase, directory, bench_path, thermal_source, *,
         survivor=None, selection_manifest=None, workers=MAX_WORKERS):
-    """Run a phase while TERM/HUP deterministically reap worker groups."""
+    """Run a phase while INT/TERM/HUP deterministically reap worker groups."""
     # Only the campaign parent enters this wrapper.  ``_worker`` dispatches
     # directly to ``run_worker`` and retains default signal dispositions, so
     # the parent's process-group TERM/KILL cleanup remains effective.
@@ -4282,7 +4607,7 @@ def _validate_runtime_monitor(monitor, manifest):
         raise CampaignError("runtime binding monitor totals are invalid")
 
 
-def verify_campaign(directory):
+def _verify_campaign_impl(directory):
     """Replay a completed campaign and reproduce both summary hashes."""
     directory = Path(directory).resolve()
     manifest, manifest_sha256 = read_canonical_json(
@@ -4363,6 +4688,16 @@ def verify_campaign(directory):
             len(manifest["pre_cpu_jobs"])
             * _phase_parameters(manifest["phase"])["replicates"],
     }
+
+
+def verify_campaign(directory):
+    """Strictly verify with signal-safe ownership of replay descendants."""
+    if _PARENT_SIGNAL_STATE is not None:
+        return _verify_campaign_impl(directory)
+    with _parent_termination_handlers():
+        verified = _verify_campaign_impl(directory)
+        _parent_signal_safe_point()
+        return verified
 
 
 def _parser():
