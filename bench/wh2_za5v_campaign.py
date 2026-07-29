@@ -1774,8 +1774,8 @@ class RecoveryAggregator:
             replicate["decoder_wh1_result_class"],
             replicate["decoder_wh1_overhead"],
         )
-        # Direct candidate/dispatch observations intentionally share a
-        # pair-local fixed prefix: max(candidate recovery, dispatch recovery).
+        # Direct candidate/dispatch observations intentionally share the
+        # maximum first-success prefix when both recover, otherwise K+64.
         # Its recorded overhead therefore belongs to the candidate comparison,
         # not to the candidate-independent control signature.  The result
         # class remains invariant: a recovered dispatch must also solve at any

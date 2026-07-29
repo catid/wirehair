@@ -14,12 +14,13 @@ promotion.
 
 The failure exposed a campaign-runner bug rather than a native-codec result.
 The direct candidate/dispatch panel intentionally solves both arms at the
-pair-local maximum recovery prefix.  Its recorded dispatch overhead can
-therefore differ when the candidate changes, but the recovery aggregator
-incorrectly included that overhead in the candidate-independent duplicate
-signature.  Result-blind forensics across all 594 K/schedule groups found this
-expected direct-overhead drift in every group and zero drift in the other
-shared controls.  No ranking, survivor, or recovery result was read.
+pair-local maximum first-success prefix when both recover, otherwise K+64.
+Its recorded dispatch overhead can therefore differ when the candidate
+changes, but the recovery aggregator incorrectly included that overhead in
+the candidate-independent duplicate signature.  Result-blind forensics across
+all 594 K/schedule groups found this expected direct-overhead drift in every
+group and zero drift in the other shared controls.  No ranking, survivor, or
+aggregate candidate performance or recovery result was derived or inspected.
 
 The corrected runner excludes only the pair-local direct overhead.  It retains
 the direct dispatch result class as an invariant, because a dispatch that
@@ -32,7 +33,7 @@ every retained signature field.
 Corrected protected artifacts:
 
 - campaign runner:
-  `6f27877fa223ef202cf30801769b341aa2eadcdfec9e932a22e5e374607397c1`;
+  `72ee3a1f1576304fa66ebcd084045f54cff45f0ca32dd9f88e27144772739871`;
 - campaign tests:
   `af096019e98d13fca634dcf5f887e9b2e36024376517dec8c4f8a221bc813d6a`;
 - strict parser:

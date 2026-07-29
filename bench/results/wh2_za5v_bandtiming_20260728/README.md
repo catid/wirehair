@@ -74,7 +74,7 @@ requires a completely fresh promotion-grade execution.
 The corrected tracked runner and unchanged parser are:
 
 - campaign runner SHA-256:
-  `6f27877fa223ef202cf30801769b341aa2eadcdfec9e932a22e5e374607397c1`;
+  `72ee3a1f1576304fa66ebcd084045f54cff45f0ca32dd9f88e27144772739871`;
 - campaign runner tests SHA-256:
   `af096019e98d13fca634dcf5f887e9b2e36024376517dec8c4f8a221bc813d6a`;
 - strict band-timing parser SHA-256:
