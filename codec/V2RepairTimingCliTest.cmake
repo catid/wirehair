@@ -80,15 +80,14 @@ if(NOT bound_sha STREQUAL done_sha)
         "repairtiming stream SHA-256 mismatch")
 endif()
 
-# The v3 domain is the full finite half-open interval [0, 1), rather than
-# bandtiming's older [0, 0.99] convenience cap.
+# The v3 domain uses the shared packet-schedule interval [0, 0.99].
 set(high_loss_args ${base_args})
 list(FIND high_loss_args "0.1" high_loss_index)
 if(high_loss_index LESS 0)
     message(FATAL_ERROR "repairtiming test lost its --loss value")
 endif()
 list(REMOVE_AT high_loss_args ${high_loss_index})
-list(INSERT high_loss_args ${high_loss_index} "0.995")
+list(INSERT high_loss_args ${high_loss_index} "0.99")
 execute_process(
     COMMAND ${clean_env} "${BENCH}" ${high_loss_args}
     RESULT_VARIABLE high_loss_result
@@ -98,9 +97,9 @@ execute_process(
 if(NOT high_loss_result EQUAL 0 OR
    NOT high_loss_err STREQUAL "" OR
    NOT high_loss_out MATCHES
-       "^# repairtiming,[^\n]*,loss=0.995[0-9]*,")
+       "^# repairtiming,[^\n]*,loss=0.98999999999999999,")
     message(FATAL_ERROR
-        "repairtiming half-open loss domain failed\n"
+        "repairtiming upper loss boundary failed\n"
         "rc=${high_loss_result}\nstdout=${high_loss_out}\n"
         "stderr=${high_loss_err}")
 endif()
@@ -380,6 +379,17 @@ function(expect_no_output_failure label)
             "stderr=${failure_err}")
     endif()
 endfunction()
+
+set(over_loss_args ${base_args})
+list(FIND over_loss_args "0.1" over_loss_index)
+if(over_loss_index LESS 0)
+    message(FATAL_ERROR "repairtiming test lost its --loss value")
+endif()
+list(REMOVE_AT over_loss_args ${over_loss_index})
+list(INSERT over_loss_args ${over_loss_index} "0.991")
+expect_no_output_failure(
+    "loss above shared packet-schedule domain"
+    ${over_loss_args})
 
 foreach(fault IN ITEMS bad-magic bad-id bad-attempt trailing)
     expect_no_output_failure(

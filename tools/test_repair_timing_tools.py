@@ -1183,12 +1183,17 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
                 self.fail(f"timed out waiting for {path}")
             time.sleep(0.01)
 
-    def test_success_has_devnull_stdin_isolated_env_and_private_session(self):
+    def test_success_has_devnull_stdin_isolated_env_and_private_group(self):
         source = "\n".join((
             "import os",
             "import sys",
             "assert sys.stdin.buffer.read() == b''",
             "assert 'WIREHAIR_V2_CAPTURE_SENTINEL' not in os.environ",
+            "assert not [",
+            "    name for name in os.listdir('/proc/self/fd')",
+            "    if name.isdecimal() and int(name) > 2 and",
+            "    os.path.exists('/proc/self/fd/' + name)",
+            "]",
             "sys.stdout.write(",
             "    f'{os.getpid()} {os.getpgrp()} {os.getsid(0)}')",
         ))
@@ -1197,9 +1202,10 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
                 {"WIREHAIR_V2_CAPTURE_SENTINEL": "must-not-leak"}):
             stdout = self.run_script(source)
         process_id, process_group, session_id = map(int, stdout.split())
-        self.assertEqual(process_id, process_group)
-        self.assertEqual(process_id, session_id)
+        self.assertNotEqual(process_id, process_group)
+        self.assertEqual(session_id, os.getsid(0))
         self.assertNotEqual(process_group, os.getpgrp())
+        self.assert_process_absent(process_group, process_group=True)
 
     def test_exact_stdout_cap_and_success_stderr_rejection(self):
         self.assertEqual(
@@ -1217,6 +1223,53 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
                 repair.MeasurementError, "unexpected stderr"):
             self.run_script(
                 "import os; os.write(2, b'unexpected warning')")
+
+    def test_exec_failure_releases_and_reaps_ready_watchdog(self):
+        watchdogs = []
+        original = repair._start_repairtiming_watchdog
+
+        def traced_start(env):
+            watchdog = original(env)
+            watchdogs.append(watchdog)
+            return watchdog
+
+        with mock.patch.object(
+                repair, "_start_repairtiming_watchdog",
+                side_effect=traced_start):
+            with self.assertRaisesRegex(
+                    repair.MeasurementError, "could not execute"):
+                repair._run_repairtiming_checked(
+                    ["/definitely/missing/repairtiming-benchmark"],
+                    peel_codec.isolated_codec_env(),
+                    stdout_limit=4096,
+                    stderr_limit=4096,
+                )
+        self.assertEqual(len(watchdogs), 1)
+        watchdog = watchdogs[0]
+        self.assertEqual(watchdog.liveness_fd, -1)
+        self.assertIsNotNone(watchdog.process.returncode)
+        self.assert_process_absent(
+            watchdog.process_group, process_group=True)
+
+    def test_launch_interrupt_still_reaps_ready_watchdog(self):
+        watchdog_processes = []
+        original = subprocess.Popen
+
+        def interrupted_launch(*args, **kwargs):
+            if kwargs.get("process_group") == 0:
+                process = original(*args, **kwargs)
+                watchdog_processes.append(process)
+                return process
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+                repair.subprocess, "Popen", side_effect=interrupted_launch):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_script("raise AssertionError('not launched')")
+        self.assertEqual(len(watchdog_processes), 1)
+        watchdog = watchdog_processes[0]
+        self.assertIsNotNone(watchdog.returncode)
+        self.assert_process_absent(watchdog.pid, process_group=True)
 
     def test_stdout_flood_is_killed_reaped_and_bounded_during_run(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1238,6 +1291,40 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
             self.assertLess(elapsed, 5.0)
             child_pid = int(pid_path.read_text())
             self.assert_process_absent(child_pid, process_group=True)
+
+    def test_post_kill_group_survivor_fails_closed_after_bounded_confirmation(
+            self):
+        with tempfile.TemporaryDirectory() as temporary:
+            identity_path = Path(temporary) / "survivor-target.identity"
+            source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                f"Path({str(identity_path)!r}).write_text(",
+                "    f'{os.getpid()} {os.getpgrp()}')",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "while True:",
+                "    os.write(1, b'x' * 4096)",
+            ))
+            original = repair._repairtiming_process_group_members
+
+            def injected_survivor(process_group):
+                members = original(process_group)
+                members[999999999] = "D"
+                return members
+
+            with mock.patch.object(
+                    repair, "_repairtiming_process_group_members",
+                    side_effect=injected_survivor), mock.patch.object(
+                        repair, "REPAIRTIMING_GROUP_CONFIRM_SECONDS", 0.05):
+                with self.assertRaisesRegex(
+                        repair.MeasurementError,
+                        "process group survived SIGKILL"):
+                    self.run_script(source, stdout_limit=31)
+            process_id, process_group = map(
+                int, identity_path.read_text().split())
+            self.assert_process_absent(process_id)
+            self.assert_process_absent(process_group, process_group=True)
 
     def test_stderr_flood_is_killed_promptly(self):
         source = "\n".join((
@@ -1307,16 +1394,89 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
             child_pid = int(child_pid_path.read_text())
             self.assert_process_absent(child_pid)
 
-    def test_parent_sigkill_triggers_native_parent_death_kill(self):
+    def test_exited_leader_with_detached_pipes_reports_and_kills_descendant(self):
         with tempfile.TemporaryDirectory() as temporary:
-            target_pid_path = Path(temporary) / "target.pid"
-            target_source = "\n".join((
+            child_pid_path = Path(temporary) / "detached-holder.pid"
+            child_source = "\n".join((
                 "import os",
                 "from pathlib import Path",
                 "import signal",
                 "import time",
-                f"Path({str(target_pid_path)!r}).write_text(str(os.getpid()))",
+                f"Path({str(child_pid_path)!r}).write_text(str(os.getpid()))",
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "time.sleep(60)",
+            ))
+            leader_source = "\n".join((
+                "from pathlib import Path",
+                "import subprocess",
+                "import sys",
+                "import time",
+                f"path = Path({str(child_pid_path)!r})",
+                "with open('/dev/null', 'wb') as sink:",
+                "    subprocess.Popen(",
+                f"        [sys.executable, '-c', {child_source!r}],",
+                "        stdin=subprocess.DEVNULL, stdout=sink, stderr=sink)",
+                "while not path.exists():",
+                "    time.sleep(0.001)",
+            ))
+            with self.assertRaisesRegex(
+                    repair.MeasurementError, "unexpected descendant"):
+                self.run_script(leader_source)
+            child_pid = int(child_pid_path.read_text())
+            self.assert_process_absent(child_pid)
+
+    def test_closed_pipes_before_exit_times_out_and_reaps_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            identity_path = Path(temporary) / "identity"
+            source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import time",
+                f"Path({str(identity_path)!r}).write_text(",
+                "    f'{os.getpid()} {os.getpgrp()}')",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "os.close(1)",
+                "os.close(2)",
+                "time.sleep(60)",
+            ))
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                    repair.MeasurementError,
+                    "closed its output pipes before exit"):
+                self.run_script(source)
+            self.assertLess(time.monotonic() - started, 5.0)
+            process_id, process_group = map(
+                int, identity_path.read_text().split())
+            self.assert_process_absent(process_id)
+            self.assert_process_absent(process_group, process_group=True)
+
+    def test_parent_sigkill_kills_leader_and_descendant_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target_identity_path = Path(temporary) / "target.identity"
+            descendant_pid_path = Path(temporary) / "descendant.pid"
+            descendant_source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import time",
+                f"Path({str(descendant_pid_path)!r}).write_text(",
+                "    str(os.getpid()))",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "time.sleep(60)",
+            ))
+            target_source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import subprocess",
+                "import sys",
+                "import time",
+                f"Path({str(target_identity_path)!r}).write_text(",
+                "    f'{os.getpid()} {os.getpgrp()}')",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                f"subprocess.Popen([sys.executable, '-c', "
+                f"{descendant_source!r}])",
                 "time.sleep(60)",
             ))
             helper_source = "\n".join((
@@ -1337,21 +1497,29 @@ class RepairTimingProcessCaptureTests(unittest.TestCase):
                 start_new_session=True,
             )
             target_pid = None
+            target_group = None
+            descendant_pid = None
             try:
-                self.wait_for_path(target_pid_path, helper)
-                target_pid = int(target_pid_path.read_text())
+                self.wait_for_path(target_identity_path, helper)
+                self.wait_for_path(descendant_pid_path, helper)
+                target_pid, target_group = map(
+                    int, target_identity_path.read_text().split())
+                descendant_pid = int(descendant_pid_path.read_text())
+                self.assertNotEqual(target_pid, target_group)
                 helper.kill()
                 helper.wait(timeout=5.0)
-                self.assert_process_absent(target_pid, process_group=True)
+                self.assert_process_absent(target_pid)
+                self.assert_process_absent(descendant_pid)
+                self.assert_process_absent(target_group, process_group=True)
             finally:
                 if helper.poll() is None:
                     os.killpg(helper.pid, signal.SIGKILL)
                     helper.wait(timeout=5.0)
                 if (
-                    target_pid is not None and
-                    repair._repairtiming_process_group_exists(target_pid)
+                    target_group is not None and
+                    repair._repairtiming_process_group_exists(target_group)
                 ):
-                    os.killpg(target_pid, signal.SIGKILL)
+                    os.killpg(target_group, signal.SIGKILL)
 
     def test_nonzero_diagnostic_is_stderr_first_and_bounded(self):
         source = "\n".join((

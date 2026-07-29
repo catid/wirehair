@@ -13,6 +13,7 @@ training campaign and executes both prebound sealed lanes into one completion.
 
 import argparse
 from contextlib import contextmanager
+import functools
 import gzip
 import hashlib
 import json
@@ -176,6 +177,18 @@ REQUIRED_MARGIN = 0.02
 THERMAL_INTERVAL_MS = 1000
 MAX_WORKERS = 32
 REPAIR_ATTEMPTS = 8
+SELECTOR_COUNT_FIELDS = (
+    "attempts_executed",
+    "calls_executed",
+    "real_configuration_calls",
+    "structural_probe_calls",
+)
+SELECTOR_COUNT_LIMITS = {
+    "attempts_executed": (1, REPAIR_ATTEMPTS),
+    "calls_executed": (1, REPAIR_ATTEMPTS + 2),
+    "real_configuration_calls": (1, 2),
+    "structural_probe_calls": (0, REPAIR_ATTEMPTS),
+}
 TRAINING_REPLICATES = 768
 SEALED_REPLICATES = 256
 
@@ -280,6 +293,7 @@ REPLAY_KILL_GRACE_SECONDS = 1.0
 REPLAY_SHUTDOWN_GRACE_SECONDS = 5.0
 WORKER_POLL_SECONDS = 0.05
 WORKER_TERMINATE_GRACE_SECONDS = 5.0
+WORKER_KILL_GRACE_SECONDS = 1.0
 
 _PARENT_SIGNAL_STATE = None
 
@@ -749,7 +763,8 @@ def selection_policy():
         "raw_evidence": {
             "attempt_zero":
                 "fresh-attempt0-result-and-recovery-metrics-reported-"
-                "separately-with-no-seed-fixes",
+                "separately-with-no-seed-fixes-including-deduplicated-"
+                "raw-and-repaired-weak-construction-counts",
             "historical_references": {
                 arm["name"]:
                     arm["historical_za5v_raw_weak_constructions"]
@@ -775,6 +790,13 @@ def selection_policy():
             "real_work_witness":
                 "lowest-replicate-carrying-the-key-in-the-first-frozen-"
                 "schedule",
+            "execution_counts":
+                "attempts-calls-real-configurations-and-structural-probes-"
+                "each-reported-as-histogram-mean-p50-p95-p99-max-over-"
+                "deduplicated-selectors",
+            "weak_constructions":
+                "fresh-raw-attempt0-and-repaired-final-weak-counts-once-per-"
+                "deduplication-key",
             "work": work_statistics,
             "selected_attempt_histogram":
                 "counts-attempt0-through7-plus-no-attempt-with-mean-p50-"
@@ -822,9 +844,10 @@ def selection_policy():
         "ranking": {
             "among": "eligible-training-arms-only",
             "lexicographic": [
-                "full_encoder_candidate_wh1_log_cost",
+                "decoder_feed_candidate_wh1_log_cost",
                 "full_decoder_candidate_wh1_log_cost",
                 "selected_direct_candidate_dispatch_log_cost",
+                "full_encoder_candidate_wh1_log_cost",
                 "candidate_name",
             ],
             "metric":
@@ -840,7 +863,8 @@ def selection_policy():
             ],
             "confirmation":
                 "repeat-all-training-eligibility-and-throughput-gates-on-"
-                "the-union-of-both-lanes-with-lane-breakdowns",
+                "the-union-and-independently-on-each-prebound-lane-in-one-"
+                "joint-completion-with-no-adaptive-lane-choice",
             "failure": "retain-dispatch-no-fallback-arm-or-lane-inspection",
             "promotion":
                 "rv4a2-records-evidence-only-public-contract-promotion-is-"
@@ -1775,11 +1799,20 @@ def _validate_loaded_source_hashes(bindings, parser_module):
     return bindings
 
 
-def _require_source_forced_outcome_runner():
+def _require_source_forced_outcome_runner(expected_sha256=None):
     """Fail closed unless outcome execution came through the exact-source CLI."""
     if not _is_sha256(_BOOTSTRAP_RUNNER_SOURCE_SHA256):
         raise CampaignError(
             "outcome execution requires the source-forced campaign runner")
+    if (
+        expected_sha256 is not None and
+        (
+            not _is_sha256(expected_sha256) or
+            _BOOTSTRAP_RUNNER_SOURCE_SHA256 != expected_sha256
+        )
+    ):
+        raise CampaignError(
+            "executing campaign runner does not match outcome manifest")
 
 
 def _validate_runtime_bindings_schema(bindings):
@@ -2347,31 +2380,97 @@ def _process_group_exists(group):
         return True
 
 
+def _pin_worker_before_exec(cpu):
+    """Restrict a rolling worker before Python imports execute after exec()."""
+    if type(cpu) is not int or cpu < 0:
+        raise OSError("rolling worker CPU is invalid")
+    os.sched_setaffinity(0, {cpu})
+    if sorted(os.sched_getaffinity(0)) != [cpu]:
+        raise OSError("rolling worker pre-exec affinity did not take effect")
+
+
 def _kill_process_groups_with_grace(processes, grace_seconds):
+    """Terminate owned worker groups, reap leaders, and prove no survivor."""
+    if (
+        type(grace_seconds) not in (int, float) or
+        isinstance(grace_seconds, bool) or
+        not math.isfinite(float(grace_seconds)) or grace_seconds < 0
+    ):
+        raise CampaignError("worker termination grace is invalid")
+    unique = {}
+    for process in processes:
+        pid = getattr(process, "pid", None)
+        if type(pid) is not int or pid <= 0:
+            continue
+        prior = unique.get(pid)
+        if prior is not None and prior is not process:
+            raise CampaignError("worker cleanup PID ownership is ambiguous")
+        unique[pid] = process
     groups = {
-        process.pid for process in processes
-        if process.pid is not None and _process_group_exists(process.pid)
+        pid for pid in unique if _process_group_exists(pid)
     }
-    for group in groups:
+    for group in sorted(groups):
         try:
             os.killpg(group, signal.SIGTERM)
         except ProcessLookupError:
             pass
+    for pid, process in unique.items():
+        if pid not in groups and process.poll() is None:
+            process.terminate()
+
+    def pending(tracked_groups):
+        returncodes = {
+            pid: process.poll()
+            for pid, process in unique.items()
+        }
+        live_groups = {
+            group for group in tracked_groups
+            if _process_group_exists(group)
+        }
+        live_leaders = {
+            pid for pid, returncode in returncodes.items()
+            if returncode is None
+        }
+        return live_groups, live_leaders
+
     deadline = time.monotonic() + grace_seconds
-    while groups and time.monotonic() < deadline:
-        groups = {group for group in groups if _process_group_exists(group)}
-        if groups:
+    live_groups, live_leaders = pending(groups)
+    while (
+        (live_groups or live_leaders) and
+        time.monotonic() < deadline
+    ):
+        if live_groups or live_leaders:
             time.sleep(0.02)
-    for group in groups:
+        live_groups, live_leaders = pending(live_groups)
+    for group in sorted(live_groups):
         try:
             os.killpg(group, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    for process in processes:
+    for pid in sorted(live_leaders):
+        process = unique[pid]
+        if pid not in live_groups:
+            process.kill()
+
+    deadline = time.monotonic() + WORKER_KILL_GRACE_SECONDS
+    live_groups, live_leaders = pending(live_groups)
+    while (
+        (live_groups or live_leaders) and
+        time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+        live_groups, live_leaders = pending(live_groups)
+    for process in unique.values():
         try:
-            process.wait(timeout=1.0)
+            process.wait(timeout=0)
         except subprocess.TimeoutExpired:
             pass
+    live_groups, live_leaders = pending(live_groups)
+    if live_groups or live_leaders:
+        raise CampaignError(
+            "rolling worker cleanup left surviving process groups/leaders: "
+            f"groups={sorted(live_groups)!r} "
+            f"leaders={sorted(live_leaders)!r}")
 
 
 def _run_rolling_workers(directory, manifest):
@@ -2386,7 +2485,7 @@ def _run_rolling_workers(directory, manifest):
     }
     cursors = {cpu: 0 for cpu in cpus}
     active = {}
-    all_processes = []
+    owned_processes = {}
     queue_receipts = {
         cpu: {
             "cpu": cpu,
@@ -2402,6 +2501,7 @@ def _run_rolling_workers(directory, manifest):
     pending_idle_checks = 0
     occupancy_histogram = {}
     drained_with_global_unstarted_checks = 0
+    completed_groups_confirmed_gone = 0
     first_check = last_check = 0
 
     def launch(cpu):
@@ -2428,6 +2528,8 @@ def _run_rolling_workers(directory, manifest):
                 stderr=subprocess.STDOUT,
                 env=environment,
                 start_new_session=True,
+                preexec_fn=functools.partial(
+                    _pin_worker_before_exec, cpu),
             )
         except BaseException:
             log.close()
@@ -2446,7 +2548,13 @@ def _run_rolling_workers(directory, manifest):
             "log": log,
             "receipt": receipt,
         }
-        all_processes.append(process)
+        if process.pid is None or process.pid in owned_processes:
+            try:
+                process.kill()
+            finally:
+                raise CampaignError(
+                    "rolling worker returned an invalid or reused PID")
+        owned_processes[process.pid] = process
 
     def sample():
         nonlocal check_count, checks_running, pending_idle_checks
@@ -2493,6 +2601,7 @@ def _run_rolling_workers(directory, manifest):
                 "rolling scheduler did not fill every startup slot")
         sample()
         while active:
+            descendant_groups = []
             finished = []
             for cpu in sorted(active):
                 state = active[cpu]
@@ -2503,6 +2612,14 @@ def _run_rolling_workers(directory, manifest):
                     time.monotonic_ns()
                 state["receipt"]["returncode"] = returncode
                 state["log"].close()
+                process = state["process"]
+                group_exists = _process_group_exists(process.pid)
+                if group_exists:
+                    descendant_groups.append((
+                        state["assignment"]["order"], process.pid))
+                else:
+                    owned_processes.pop(process.pid, None)
+                    completed_groups_confirmed_gone += 1
                 finished.append((cpu, returncode))
             for cpu, unused_returncode in finished:
                 del active[cpu]
@@ -2514,6 +2631,10 @@ def _run_rolling_workers(directory, manifest):
             if failures:
                 raise CampaignError(
                     f"rolling campaign worker failed: {failures!r}")
+            if descendant_groups:
+                raise CampaignError(
+                    "rolling campaign worker left descendants: "
+                    f"{descendant_groups!r}")
             for cpu, unused_returncode in finished:
                 if cursors[cpu] < len(queues[cpu]):
                     launch(cpu)
@@ -2522,11 +2643,15 @@ def _run_rolling_workers(directory, manifest):
                 time.sleep(WORKER_POLL_SECONDS)
     except BaseException:
         _kill_process_groups_with_grace(
-            all_processes, WORKER_TERMINATE_GRACE_SECONDS)
+            list(owned_processes.values()),
+            WORKER_TERMINATE_GRACE_SECONDS,
+        )
         raise
     finally:
         for state in active.values():
             state["log"].close()
+    if owned_processes:
+        raise CampaignError("rolling scheduler lost owned worker groups")
     return {
         "scheduler": "per-cpu-rolling-v1",
         "checks": check_count,
@@ -2541,6 +2666,8 @@ def _run_rolling_workers(directory, manifest):
             "idle-only-after-that-cpu-fixed-queue-exhausted-v1",
         "drained_slots_while_global_unstarted_checks":
             drained_with_global_unstarted_checks,
+        "completed_groups_confirmed_gone":
+            completed_groups_confirmed_gone,
         "occupancy_histogram": occupancy_histogram,
         "cpu_queues": [
             queue_receipts[cpu] for cpu in cpus
@@ -2638,6 +2765,14 @@ def _new_compact_job_aggregate(job):
             "fatal_attempt_zero_mismatch": 0,
             "oom": 0,
             "uncommitted": 0,
+            "execution_counts": {
+                field: _empty_histogram()
+                for field in SELECTOR_COUNT_FIELDS
+            },
+            "weak_constructions": {
+                "raw_attempt0": 0,
+                "repaired_final": 0,
+            },
             "work": {
                 field: {
                     "available": 0,
@@ -2813,6 +2948,21 @@ def _accumulate_cell(
         raise CampaignError("selector committed flag is invalid")
     if accumulate_selector:
         compact["selector"]["uncommitted"] += 1 - committed
+    for field in SELECTOR_COUNT_FIELDS:
+        value = selector[field]
+        lower, upper = SELECTOR_COUNT_LIMITS[field]
+        if type(value) is not int or not lower <= value <= upper:
+            raise CampaignError(
+                f"selector {field} accounting is invalid")
+        if accumulate_selector:
+            _histogram_add(
+                compact["selector"]["execution_counts"][field], value)
+    if (
+        selector["calls_executed"] !=
+            selector["real_configuration_calls"] +
+            selector["structural_probe_calls"]
+    ):
+        raise CampaignError("selector call accounting is contradictory")
 
     attempts = _decode_compact_rows(
         real["attempt_columns"],
@@ -2858,6 +3008,11 @@ def _accumulate_cell(
     dispatch = roles["dispatch"]
     wh1 = roles["wh1"]
     repaired_outcome = repaired["outcome_class"]
+    if accumulate_selector:
+        compact["selector"]["weak_constructions"]["raw_attempt0"] += int(
+            roles["raw"]["outcome_class"] == "weak")
+        compact["selector"]["weak_constructions"]["repaired_final"] += int(
+            repaired_outcome == "weak")
     if repaired_outcome == "weak":
         compact["candidate_final_weak"] += 1
     candidate_codes = (
@@ -3539,6 +3694,14 @@ def _new_phase_bucket(name):
             "fatal_attempt_zero_mismatch": 0,
             "oom": 0,
             "uncommitted": 0,
+            "execution_counts": {
+                field: {}
+                for field in SELECTOR_COUNT_FIELDS
+            },
+            "weak_constructions": {
+                "raw_attempt0": 0,
+                "repaired_final": 0,
+            },
             "work": {
                 field: {
                     "available": 0,
@@ -3625,6 +3788,25 @@ def _merge_compact_into_bucket(
                 "cap_exhausted", "fatal_attempt_zero_mismatch", "oom",
                 "uncommitted"):
             selector_target[field] += selector_source[field]
+        if (
+            set(selector_source.get("execution_counts", {})) !=
+                set(SELECTOR_COUNT_FIELDS) or
+            set(selector_source.get("weak_constructions", {})) !=
+                {"raw_attempt0", "repaired_final"}
+        ):
+            raise CampaignError(
+                "selector count or weak-construction evidence is malformed")
+        for field in SELECTOR_COUNT_FIELDS:
+            _merge_histogram(
+                selector_target["execution_counts"][field],
+                selector_source["execution_counts"][field],
+            )
+        for field in ("raw_attempt0", "repaired_final"):
+            value = selector_source["weak_constructions"][field]
+            if type(value) is not int or not 0 <= value <= observations:
+                raise CampaignError(
+                    "weak-construction evidence is malformed")
+            selector_target["weak_constructions"][field] += value
         for field, source in selector_source["work"].items():
             target = selector_target["work"][field]
             target["available"] += source["available"]
@@ -3707,7 +3889,8 @@ def _histogram_statistics(histogram, available, unavailable):
         "p50": nearest_rank(0.50),
         "p95": nearest_rank(0.95),
         "p99": nearest_rank(0.99),
-        "max": ordered[-1][0],
+        "max": next(
+            value for value, count in reversed(ordered) if count > 0),
     }
 
 
@@ -3743,6 +3926,27 @@ def _validate_selector_aggregate(selector):
         any(
             receipt["available"] + receipt["unavailable"] != observations
             for receipt in selector["work"].values()
+        ) or
+        set(selector.get("execution_counts", {})) !=
+            set(SELECTOR_COUNT_FIELDS) or
+        any(
+            not isinstance(histogram, dict) or
+            any(
+                type(key) is not str or not key.isdecimal() or
+                len(key) > 2 or str(int(key)) != key or
+                not lower <= int(key) <= upper or
+                type(count) is not int or count < 0
+                for key, count in histogram.items()
+            ) or
+            sum(histogram.values()) != observations
+            for field, histogram in selector["execution_counts"].items()
+            for lower, upper in (SELECTOR_COUNT_LIMITS[field],)
+        ) or
+        set(selector.get("weak_constructions", {})) !=
+            {"raw_attempt0", "repaired_final"} or
+        any(
+            type(value) is not int or not 0 <= value <= observations
+            for value in selector["weak_constructions"].values()
         )
     ):
         raise CampaignError(
@@ -3919,7 +4123,7 @@ def _finalize_phase_bucket(bucket):
     }
     selector = {
         key: value for key, value in bucket["selector"].items()
-        if key != "work"
+        if key not in ("work", "execution_counts")
     }
     selector["selected_attempt"] = _selected_attempt_statistics(
         bucket["selector"]["selected_attempt"])
@@ -3930,6 +4134,18 @@ def _finalize_phase_bucket(bucket):
             receipt["unavailable"],
         )
         for field, receipt in bucket["selector"]["work"].items()
+    }
+    selector["execution_counts"] = {
+        field: {
+            "histogram": dict(histogram),
+            "statistics": _histogram_statistics(
+                histogram,
+                selector["observations"],
+                0,
+            ),
+        }
+        for field, histogram in
+        bucket["selector"]["execution_counts"].items()
     }
     timing = {
         metric: _timing_confirmation(bucket["timing_jobs"], metric)
@@ -3996,6 +4212,34 @@ def _arm_eligibility(summary):
     }
 
 
+def _derive_sealed_confirmation(survivor, overall, lane_summaries):
+    """Apply frozen gates to the union and both lanes without adaptation."""
+    if survivor not in ARM_BY_NAME or (
+        not isinstance(lane_summaries, dict) or
+        set(lane_summaries) != {"random", "production"}
+    ):
+        raise CampaignError("sealed confirmation inputs are malformed")
+    eligibility = _arm_eligibility(overall)
+    lane_eligibility = {
+        lane: _arm_eligibility(lane_summaries[lane])
+        for lane in ("random", "production")
+    }
+    confirmed = (
+        eligibility["eligible"] and
+        all(item["eligible"] for item in lane_eligibility.values())
+    )
+    return {
+        "schema": "wirehair.wh2.rv4a.sealed-confirmation.v1",
+        "survivor": survivor,
+        "eligibility": eligibility,
+        "lane_eligibility": lane_eligibility,
+        "status": "confirmed" if confirmed else "failed",
+        "lane_breakdowns": lane_summaries,
+        "public_promotion": "not-evaluated-by-rv4a2",
+        "fallback": "forbidden",
+    }
+
+
 def _derive_training_decision(arm_summaries):
     candidates = {}
     eligible = []
@@ -4004,6 +4248,8 @@ def _derive_training_decision(arm_summaries):
         candidates[arm_name] = {
             "eligibility": eligibility,
             "fresh_attempt0_raw": summary["recovery"]["raw"],
+            "fresh_weak_constructions":
+                dict(summary["selector"]["weak_constructions"]),
             "historical_za5v_raw_weak_constructions":
                 ARM_BY_NAME[arm_name][
                     "historical_za5v_raw_weak_constructions"],
@@ -4016,11 +4262,13 @@ def _derive_training_decision(arm_summaries):
             eligible.append(arm_name)
     eligible.sort(key=lambda arm_name: (
         arm_summaries[arm_name]["timing"][
-            "full_encoder_candidate_wh1"]["mean"],
+            "decoder_feed_candidate_wh1"]["mean"],
         arm_summaries[arm_name]["timing"][
             "full_decoder_candidate_wh1"]["mean"],
         arm_summaries[arm_name]["timing"][
             "selected_direct_candidate_dispatch"]["mean"],
+        arm_summaries[arm_name]["timing"][
+            "full_encoder_candidate_wh1"]["mean"],
         arm_name,
     ))
     selected = eligible[0] if eligible else None
@@ -4086,10 +4334,13 @@ def _validate_selector_groups(selector_groups, phase):
 def build_summaries(
         directory, manifest, output_directory, *, replay_workers=MAX_WORKERS):
     """Replay every result and atomically build compact authenticated evidence."""
+    _require_source_forced_outcome_runner()
     directory = Path(directory).resolve()
     output_directory = Path(output_directory).resolve()
     manifest_sha256 = canonical_sha256(manifest)
     jobs = _validate_manifest(manifest)
+    _require_source_forced_outcome_runner(
+        manifest["runtime_bindings"]["sources"]["runner"]["sha256"])
     job_files = _verify_job_files(
         directory, manifest, manifest_sha256)
     result_files = []
@@ -4189,16 +4440,11 @@ def build_summaries(
         sealed_confirmation = None
     else:
         decision = None
-        eligibility = _arm_eligibility(finalized_overall)
-        sealed_confirmation = {
-            "schema": "wirehair.wh2.rv4a.sealed-confirmation.v1",
-            "survivor": manifest["survivor"],
-            "eligibility": eligibility,
-            "status": "confirmed" if eligibility["eligible"] else "failed",
-            "lane_breakdowns": finalized_lanes,
-            "public_promotion": "not-evaluated-by-rv4a2",
-            "fallback": "forbidden",
-        }
+        sealed_confirmation = _derive_sealed_confirmation(
+            manifest["survivor"],
+            finalized_overall,
+            finalized_lanes,
+        )
     summary = {
         "schema": SUMMARY_SCHEMA,
         "phase": manifest["phase"],
@@ -4367,6 +4613,7 @@ def _validate_runtime_monitor(monitor, manifest):
         "runtime_bindings_sha256", "startup_slots",
         "pending_idle_checks", "drain_policy",
         "drained_slots_while_global_unstarted_checks",
+        "completed_groups_confirmed_gone",
         "occupancy_histogram", "cpu_queues",
     }
     if (
@@ -4392,6 +4639,8 @@ def _validate_runtime_monitor(monitor, manifest):
         monitor["drained_slots_while_global_unstarted_checks"] < 0 or
         monitor["drained_slots_while_global_unstarted_checks"] >
             monitor["checks_while_running"] or
+        monitor.get("completed_groups_confirmed_gone") !=
+            len(manifest["assignments"]) or
         not isinstance(monitor.get("occupancy_histogram"), dict) or
         not isinstance(monitor.get("cpu_queues"), list) or
         len(monitor["cpu_queues"]) != manifest["workers"]
@@ -4651,10 +4900,13 @@ def _verify_stored_artifacts(directory, completion):
 
 
 def _verify_campaign_impl(directory, *, replay_workers):
+    _require_source_forced_outcome_runner()
     directory = Path(directory).resolve()
     manifest, manifest_sha256 = read_canonical_json(
         directory / "manifest.json")
     _validate_manifest(manifest)
+    _require_source_forced_outcome_runner(
+        manifest["runtime_bindings"]["sources"]["runner"]["sha256"])
     if manifest["phase"] == "sealed":
         reopened = _load_training_contract(
             manifest["training_contract"]["path"])
@@ -4753,6 +5005,7 @@ def _verify_campaign_impl(directory, *, replay_workers):
 
 
 def verify_campaign(directory, *, replay_workers=MAX_WORKERS):
+    _require_source_forced_outcome_runner()
     if _PARENT_SIGNAL_STATE is not None:
         return _verify_campaign_impl(
             directory, replay_workers=replay_workers)

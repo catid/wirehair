@@ -3,6 +3,7 @@
 
 import copy
 import gzip
+import hashlib
 import importlib
 import importlib.util
 import io
@@ -217,16 +218,17 @@ class FrozenPlanTests(unittest.TestCase):
         with self.assertRaises(campaign.CampaignError):
             campaign.build_pre_cpu_jobs("other")
 
-    def test_policy_is_repair_specific_and_not_za5v_direct_first(self):
+    def test_policy_is_repair_specific_and_decoder_solve_first(self):
         policy = campaign.selection_policy()
         self.assertEqual(
             policy["selector"]["policy_sha256"],
             campaign.REPAIR_POLICY_SHA256,
         )
         self.assertEqual(policy["ranking"]["lexicographic"], [
-            "full_encoder_candidate_wh1_log_cost",
+            "decoder_feed_candidate_wh1_log_cost",
             "full_decoder_candidate_wh1_log_cost",
             "selected_direct_candidate_dispatch_log_cost",
+            "full_encoder_candidate_wh1_log_cost",
             "candidate_name",
         ])
         self.assertIn(
@@ -265,6 +267,57 @@ class FrozenPlanTests(unittest.TestCase):
 
     def test_plan_hashes_cover_jobs_cells_policy_and_seeds(self):
         validation = campaign.validate_frozen_contract()
+        self.assertEqual(
+            {
+                key: validation[key]
+                for key in (
+                    "frozen_roster_sha256",
+                    "policy_sha256",
+                    "seed_disjointness_sha256",
+                    "training_job_list_sha256",
+                    "training_cell_set_sha256",
+                    "sealed_job_list_sha256",
+                    "sealed_cell_set_sha256",
+                    "result_free_plan_sha256",
+                )
+            },
+            {
+                "frozen_roster_sha256":
+                    "c4d29e2cacfe8fdf762dc449e803a8d5bfcdd7817b948c59"
+                    "da61580f219d0d7a",
+                "policy_sha256":
+                    "81d04c117d8fa414971057f8bd69a39d320139a872eac9c78"
+                    "5f5ff8c73c02b20",
+                "seed_disjointness_sha256":
+                    "ca29960e58a231f2d0bb7212843ccdee84e7ff6e6c122e18f"
+                    "d29873e2bd8e7f2",
+                "training_job_list_sha256":
+                    "70e0e4cc184fe478e53d8b877b35b434134d1d38a10b7d24"
+                    "c8eb52ecde259c0e",
+                "training_cell_set_sha256":
+                    "9dc8406a564df1f1d2bf5572e0580688a0dc0032453d60ecc"
+                    "31715e576e7d3cb",
+                "sealed_job_list_sha256": {
+                    "pure8_s0m1_d3":
+                        "dc7713a1ad4a4dcd4866c1617fc5b80b7e9b8011fc2e817b"
+                        "86f09f919ed31199",
+                    "pure9_s0m1_d3":
+                        "4a9b72575f7a005cd839ab0c705c56a40b445e11e0122e46d"
+                        "bdfebb7f65ce2e9",
+                },
+                "sealed_cell_set_sha256": {
+                    "pure8_s0m1_d3":
+                        "b54169a3a539087b96f58934d6ea5009e6d7a6d382bb8bb3"
+                        "c0677492d43f9d46",
+                    "pure9_s0m1_d3":
+                        "c163f8f37a89dc9437304be3e4ea3ff757077049e8c55d45d"
+                        "04fe80e901e76b2",
+                },
+                "result_free_plan_sha256":
+                    "568a967393ab1b5a23f9cc518b2e87f91752972c0f5c94d4c"
+                    "00099f4d9087291",
+            },
+        )
         for key in (
             "frozen_roster_sha256",
             "policy_sha256",
@@ -318,6 +371,11 @@ class FrozenPlanTests(unittest.TestCase):
         self.assertEqual(
             plan["cardinalities"]["training"]["unique_selectors"],
             152064,
+        )
+        self.assertEqual(
+            hashlib.sha256(completed.stdout).hexdigest(),
+            "762a3c01984cb57b42f8fb771ba13a14e81f9fedb17e5451c"
+            "16d93743a094283",
         )
         self.assertEqual(completed.stderr, b"")
 
@@ -914,6 +972,44 @@ class AtomicEvidenceTests(unittest.TestCase):
             popen.assert_not_called()
             self.assertFalse(output.exists())
 
+    def test_plain_import_cannot_replay_or_verify_outcomes(self):
+        with (
+            mock.patch.object(
+                campaign, "_BOOTSTRAP_RUNNER_SOURCE_SHA256", None
+            ),
+            mock.patch.object(
+                campaign, "_verify_campaign_impl"
+            ) as verify_impl,
+            self.assertRaises(campaign.CampaignError),
+        ):
+            campaign.verify_campaign("/unused", replay_workers=1)
+        verify_impl.assert_not_called()
+
+        with (
+            mock.patch.object(
+                campaign, "_BOOTSTRAP_RUNNER_SOURCE_SHA256", None
+            ),
+            mock.patch.object(campaign, "_validate_manifest") as validate,
+            self.assertRaises(campaign.CampaignError),
+        ):
+            campaign.build_summaries(
+                "/unused",
+                {},
+                "/unused-output",
+                replay_workers=1,
+            )
+        validate.assert_not_called()
+
+    def test_outcome_gate_requires_manifest_runner_hash(self):
+        with mock.patch.object(
+            campaign,
+            "_BOOTSTRAP_RUNNER_SOURCE_SHA256",
+            "a" * 64,
+        ):
+            campaign._require_source_forced_outcome_runner("a" * 64)
+            with self.assertRaises(campaign.CampaignError):
+                campaign._require_source_forced_outcome_runner("b" * 64)
+
     def test_loaded_source_stamp_detects_prebinding_mutation(self):
         bindings = _synthetic_runtime_bindings()
         parser = SimpleNamespace(
@@ -1349,7 +1445,99 @@ class CompactAggregationTests(unittest.TestCase):
         self.assertEqual(
             compact["selector"]["work"]["block_xors"]["available"], 1)
         self.assertEqual(
+            compact["selector"]["execution_counts"]["attempts_executed"],
+            {"1": 1},
+        )
+        self.assertEqual(compact["selector"]["weak_constructions"], {
+            "raw_attempt0": 0,
+            "repaired_final": 0,
+        })
+        self.assertEqual(
             compact["recovery"]["repaired"]["success_overhead"][0], 5)
+
+    def test_weak_constructions_are_deduplicated_from_physical_cells(self):
+        compact = campaign._new_compact_job_aggregate(self.job)
+        selector = _synthetic_selector(7)
+        real = _synthetic_real()
+        for role_name in ("raw", "repaired"):
+            role = real["roles"][role_name]
+            role.update({
+                "encode_result": 3,
+                "decode_construct_result": -1,
+                "feed_result": -1,
+                "recover_result": -1,
+                "recovery_ok": 0,
+                "encoded_symbols": 0,
+                "received_symbols": 0,
+                "overhead": -1,
+                "payload_sha256": "not_applicable",
+                "recovered_sha256": "not_applicable",
+                "encode_class": "weak",
+                "feed_class": "not_applicable",
+                "recover_class": "not_applicable",
+                "outcome_class": "weak",
+            })
+        for index in range(5):
+            campaign._accumulate_cell(
+                compact,
+                selector,
+                copy.deepcopy(real),
+                accumulate_selector=(index == 0),
+            )
+        self.assertEqual(compact["selector"]["observations"], 1)
+        self.assertEqual(compact["selector"]["weak_constructions"], {
+            "raw_attempt0": 1,
+            "repaired_final": 1,
+        })
+        self.assertEqual(
+            compact["recovery"]["raw"]["outcome_classes"]["weak"], 5)
+        self.assertEqual(compact["candidate_final_weak"], 5)
+
+    def test_selected_attempt_max_ignores_zero_count_bins(self):
+        histogram = {
+            **{
+                str(attempt): 0
+                for attempt in range(campaign.REPAIR_ATTEMPTS)
+            },
+            "none": 0,
+        }
+        histogram["0"] = 10
+        selected = campaign._selected_attempt_statistics(histogram)
+        self.assertEqual(selected["selected_statistics"]["mean"], 0.0)
+        self.assertEqual(selected["selected_statistics"]["p99"], 0)
+        self.assertEqual(selected["selected_statistics"]["max"], 0)
+        histogram["3"] = 1
+        selected = campaign._selected_attempt_statistics(histogram)
+        self.assertEqual(selected["selected_statistics"]["max"], 3)
+
+    def test_selector_execution_count_accounting_is_enforced(self):
+        compact = campaign._new_compact_job_aggregate(self.job)
+        selector = _synthetic_selector()
+        selector["calls_executed"] = 2
+        with self.assertRaisesRegex(
+                campaign.CampaignError, "accounting is contradictory"):
+            campaign._accumulate_cell(
+                compact, selector, _synthetic_real())
+
+        compact = self.compact()
+        bucket = campaign._new_phase_bucket("invalid-count")
+        campaign._merge_compact_into_bucket(
+            bucket,
+            compact,
+            {
+                "valid_rows": 2,
+                "cpu_tctl_max_c": 65.0,
+                "dimm_max_c": 52.0,
+                "edac_ce_max": 0,
+                "edac_ue_max": 0,
+            },
+        )
+        observations = bucket["selector"]["observations"]
+        bucket["selector"]["execution_counts"]["attempts_executed"] = {
+            str(campaign.REPAIR_ATTEMPTS + 1): observations,
+        }
+        with self.assertRaises(campaign.CampaignError):
+            campaign._finalize_phase_bucket(bucket)
 
     def test_cell_aggregate_deduplicates_fixed_production_root(self):
         job = next(
@@ -1570,7 +1758,21 @@ class CompactAggregationTests(unittest.TestCase):
             "full_encoder_selector_forced",
             eligibility["timing_pass"],
         )
-        pure8["timing"]["full_encoder_candidate_wh1"]["mean"] = -0.2
+        execution = pure8["selector"]["execution_counts"]
+        self.assertEqual(
+            execution["attempts_executed"]["histogram"], {"1": 16})
+        self.assertEqual(
+            execution["attempts_executed"]["statistics"]["mean"], 1.0)
+        self.assertEqual(
+            execution["attempts_executed"]["statistics"]["max"], 1)
+        self.assertEqual(
+            execution["structural_probe_calls"]["histogram"], {"0": 16})
+        # Decoder solve is the user's primary optimization target.  A faster
+        # encoder must not outrank a lower decoder-feed cost once both arms
+        # pass every recovery and timing gate.
+        pure8["timing"]["decoder_feed_candidate_wh1"]["mean"] = -0.1
+        pure9["timing"]["decoder_feed_candidate_wh1"]["mean"] = -0.2
+        pure8["timing"]["full_encoder_candidate_wh1"]["mean"] = -0.3
         pure9["timing"]["full_encoder_candidate_wh1"]["mean"] = -0.1
         decision = campaign._derive_training_decision({
             "pure8_s0m1_d3": pure8,
@@ -1578,7 +1780,13 @@ class CompactAggregationTests(unittest.TestCase):
         })
         self.assertEqual(decision["status"], "winner")
         self.assertEqual(
-            decision["selected_survivor"], "pure8_s0m1_d3")
+            decision["selected_survivor"], "pure9_s0m1_d3")
+        self.assertEqual(
+            decision["candidates"]["pure8_s0m1_d3"][
+                "fresh_weak_constructions"
+            ],
+            {"raw_attempt0": 0, "repaired_final": 0},
+        )
         pure8["selector"]["cap_exhausted"] = 1
         pure9["selector"]["cap_exhausted"] = 1
         decision = campaign._derive_training_decision({
@@ -1587,6 +1795,42 @@ class CompactAggregationTests(unittest.TestCase):
         })
         self.assertEqual(decision["status"], "no-survivor")
         self.assertIsNone(decision["selected_survivor"])
+
+    def test_sealed_confirmation_requires_each_prebound_lane(self):
+        bucket = campaign._new_phase_bucket("sealed")
+        compact = self.compact()
+        thermal = {
+            "valid_rows": 2,
+            "cpu_tctl_max_c": 65.0,
+            "dimm_max_c": 52.0,
+            "edac_ce_max": 0,
+            "edac_ue_max": 0,
+        }
+        for index in range(4):
+            item = copy.deepcopy(compact)
+            item["job_id"] = f"{index:064x}"
+            campaign._merge_compact_into_bucket(bucket, item, thermal)
+        eligible = campaign._finalize_phase_bucket(bucket)
+        random_lane = copy.deepcopy(eligible)
+        production_lane = copy.deepcopy(eligible)
+        production_lane["timing"][
+            "decoder_feed_candidate_wh1"
+        ]["pass"] = False
+        confirmation = campaign._derive_sealed_confirmation(
+            "pure8_s0m1_d3",
+            eligible,
+            {
+                "random": random_lane,
+                "production": production_lane,
+            },
+        )
+        self.assertTrue(confirmation["eligibility"]["eligible"])
+        self.assertTrue(
+            confirmation["lane_eligibility"]["random"]["eligible"])
+        self.assertFalse(
+            confirmation["lane_eligibility"]["production"]["eligible"])
+        self.assertEqual(confirmation["status"], "failed")
+        self.assertEqual(confirmation["fallback"], "forbidden")
 
     def test_selector_dedup_rejects_schedule_drift(self):
         compact = self.compact()
@@ -1637,7 +1881,9 @@ class RollingSchedulerTests(unittest.TestCase):
         }
 
     @staticmethod
-    def fake_popen_factory(durations, returncodes, launched, handles):
+    def fake_popen_factory(
+            durations, returncodes, launched, handles,
+            affinity_pins=None):
         next_pid = [1000]
 
         class FakeProcess:
@@ -1664,6 +1910,17 @@ class RollingSchedulerTests(unittest.TestCase):
             order = int(Path(
                 command[command.index("--job-file") + 1]
             ).stem)
+            preexec = kwargs.get("preexec_fn")
+            if (
+                getattr(preexec, "func", None) is not
+                    campaign._pin_worker_before_exec or
+                getattr(preexec, "args", None) != (order % 2,) or
+                kwargs.get("start_new_session") is not True
+            ):
+                raise AssertionError(
+                    "worker was not pinned before source import")
+            if affinity_pins is not None:
+                affinity_pins.append((order, preexec.args[0]))
             launched.append(order)
             handles.append(kwargs["stdout"])
             if sum(not handle.closed for handle in handles) > 2:
@@ -1676,11 +1933,13 @@ class RollingSchedulerTests(unittest.TestCase):
         manifest = self.manifest()
         launched = []
         handles = []
+        affinity_pins = []
         popen = self.fake_popen_factory(
             {0: 6, 1: 1, 2: 1, 3: 1},
             {},
             launched,
             handles,
+            affinity_pins,
         )
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -1692,11 +1951,17 @@ class RollingSchedulerTests(unittest.TestCase):
                 mock.patch.object(
                     campaign, "check_runtime_bindings"
                 ),
+                mock.patch.object(
+                    campaign, "_process_group_exists", return_value=False
+                ),
                 mock.patch.object(campaign.time, "sleep"),
             ):
                 monitor = campaign._run_rolling_workers(
                     directory, manifest)
         self.assertEqual(sorted(launched), [0, 1, 2, 3])
+        self.assertEqual(sorted(affinity_pins), [
+            (0, 0), (1, 1), (2, 0), (3, 1),
+        ])
         by_cpu = {
             receipt["cpu"]: receipt
             for receipt in monitor["cpu_queues"]
@@ -1722,7 +1987,7 @@ class RollingSchedulerTests(unittest.TestCase):
         handles = []
         cleaned = []
         popen = self.fake_popen_factory(
-            {0: 1, 1: 1, 2: 1, 3: 1},
+            {0: 10, 1: 1, 2: 1, 3: 1},
             {1: 17},
             launched,
             handles,
@@ -1738,6 +2003,9 @@ class RollingSchedulerTests(unittest.TestCase):
                     campaign, "check_runtime_bindings"
                 ),
                 mock.patch.object(
+                    campaign, "_process_group_exists", return_value=False
+                ),
+                mock.patch.object(
                     campaign,
                     "_kill_process_groups_with_grace",
                     side_effect=lambda processes, unused_grace:
@@ -1747,7 +2015,48 @@ class RollingSchedulerTests(unittest.TestCase):
             ):
                 campaign._run_rolling_workers(directory, manifest)
         self.assertEqual(launched, [0, 1])
-        self.assertEqual(len(cleaned), 2)
+        self.assertEqual([process.order for process in cleaned], [0])
+        self.assertTrue(all(handle.closed for handle in handles))
+
+    def test_successful_leader_with_descendants_fails_closed(self):
+        manifest = self.manifest()
+        launched = []
+        handles = []
+        cleaned = []
+        popen = self.fake_popen_factory(
+            {0: 1, 1: 1, 2: 1, 3: 1},
+            {},
+            launched,
+            handles,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "logs").mkdir()
+            with (
+                mock.patch.object(
+                    campaign.subprocess, "Popen", side_effect=popen
+                ),
+                mock.patch.object(
+                    campaign, "check_runtime_bindings"
+                ),
+                mock.patch.object(
+                    campaign,
+                    "_process_group_exists",
+                    side_effect=lambda pid: pid == 1000,
+                ),
+                mock.patch.object(
+                    campaign,
+                    "_kill_process_groups_with_grace",
+                    side_effect=lambda processes, unused_grace:
+                        cleaned.extend(processes),
+                ),
+                self.assertRaisesRegex(
+                    campaign.CampaignError, "left descendants"
+                ),
+            ):
+                campaign._run_rolling_workers(directory, manifest)
+        self.assertEqual(launched, [0, 1])
+        self.assertEqual([process.order for process in cleaned], [0])
         self.assertTrue(all(handle.closed for handle in handles))
 
     def test_parent_abort_cleans_every_active_group(self):
@@ -1795,6 +2104,100 @@ class RollingSchedulerTests(unittest.TestCase):
         self.assertEqual(launched, [0, 1])
         self.assertEqual(len(cleaned), 2)
         self.assertTrue(all(handle.closed for handle in handles))
+
+    def test_preexec_affinity_helper_pins_exact_cpu(self):
+        with (
+            mock.patch.object(campaign.os, "sched_setaffinity") as setaffinity,
+            mock.patch.object(
+                campaign.os, "sched_getaffinity", return_value={3}
+            ),
+        ):
+            campaign._pin_worker_before_exec(3)
+        setaffinity.assert_called_once_with(0, {3})
+
+    def test_group_cleanup_returns_promptly_after_sigterm(self):
+        process = subprocess.Popen(
+            ["/bin/sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        try:
+            campaign._kill_process_groups_with_grace([process], 2.0)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(process.returncode, -signal.SIGTERM)
+        self.assertFalse(campaign._process_group_exists(process.pid))
+
+    def test_group_cleanup_rejects_survivors_after_sigkill(self):
+        class StubbornProcess:
+            pid = 123456789
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def wait(timeout=None):
+                raise subprocess.TimeoutExpired("stubborn", timeout)
+
+            @staticmethod
+            def terminate():
+                pass
+
+            @staticmethod
+            def kill():
+                pass
+
+        with (
+            mock.patch.object(
+                campaign, "_process_group_exists", return_value=True
+            ),
+            mock.patch.object(campaign.os, "killpg"),
+            mock.patch.object(
+                campaign, "WORKER_KILL_GRACE_SECONDS", 0.01
+            ),
+            self.assertRaisesRegex(
+                campaign.CampaignError, "left surviving"
+            ),
+        ):
+            campaign._kill_process_groups_with_grace(
+                [StubbornProcess()], 0.01)
+
+    def test_group_cleanup_never_reacquires_a_gone_pgid(self):
+        class FinishedProcess:
+            pid = 123456788
+            returncode = 0
+
+            @staticmethod
+            def poll():
+                return 0
+
+            @staticmethod
+            def wait(timeout=None):
+                del timeout
+                return 0
+
+        existence = mock.Mock(side_effect=(True, False, True))
+        with (
+            mock.patch.object(
+                campaign, "_process_group_exists", existence
+            ),
+            mock.patch.object(campaign.os, "killpg") as killpg,
+        ):
+            campaign._kill_process_groups_with_grace(
+                [FinishedProcess()], 0)
+        self.assertEqual(existence.call_count, 2)
+        killpg.assert_called_once_with(
+            FinishedProcess.pid, signal.SIGTERM)
 
 
 class ParallelReplayTests(unittest.TestCase):

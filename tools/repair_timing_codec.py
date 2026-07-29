@@ -9,8 +9,6 @@ aggregation and does not alter the durable bandtiming v1/v2 consumers.
 
 import copy
 import csv
-import ctypes
-import functools
 import hashlib
 import io
 import json
@@ -569,22 +567,47 @@ REPAIRTIMING_TERMINATE_GRACE_SECONDS = 0.1
 REPAIRTIMING_GROUP_CONFIRM_SECONDS = 2.0
 REPAIRTIMING_SELECT_POLL_SECONDS = 0.05
 REPAIRTIMING_POST_EXIT_DRAIN_SECONDS = 0.5
-_REPAIRTIMING_PR_SET_PDEATHSIG = 1
+REPAIRTIMING_WATCHDOG_READY_SECONDS = 2.0
+_REPAIRTIMING_WATCHDOG_SOURCE = "\n".join((
+    "import os",
+    "import signal",
+    "import sys",
+    "read_fd = int(sys.argv[1])",
+    "ready_fd = int(sys.argv[2])",
+    "expected_parent = int(sys.argv[3])",
+    "def kill_group():",
+    "    try:",
+    "        os.killpg(os.getpgrp(), signal.SIGKILL)",
+    "    except BaseException:",
+    "        os._exit(127)",
+    "    os._exit(127)",
+    "if os.getppid() != expected_parent or os.getpgrp() != os.getpid():",
+    "    kill_group()",
+    "for ignored in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, "
+    "signal.SIGTERM):",
+    "    signal.signal(ignored, signal.SIG_IGN)",
+    "try:",
+    "    if os.write(ready_fd, b'R') != 1:",
+    "        kill_group()",
+    "finally:",
+    "    os.close(ready_fd)",
+    "while True:",
+    "    try:",
+    "        token = os.read(read_fd, 1)",
+    "    except InterruptedError:",
+    "        continue",
+    "    if token == b'N':",
+    "        os.close(read_fd)",
+    "        os._exit(0)",
+    "    kill_group()",
+))
 
-if sys.platform.startswith("linux"):
-    _REPAIRTIMING_LIBC = ctypes.CDLL(None, use_errno=True)
-    _REPAIRTIMING_PRCTL = getattr(_REPAIRTIMING_LIBC, "prctl", None)
-    if _REPAIRTIMING_PRCTL is not None:
-        _REPAIRTIMING_PRCTL.argtypes = (
-            ctypes.c_int,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-        )
-        _REPAIRTIMING_PRCTL.restype = ctypes.c_int
-else:
-    _REPAIRTIMING_PRCTL = None
+
+@dataclass
+class _RepairTimingWatchdog:
+    process: object
+    process_group: int
+    liveness_fd: int
 
 
 def repair_arm(value):
@@ -2496,24 +2519,141 @@ def _repairtiming_run_bounds(stdout):
     return started_ns, finished_ns
 
 
-def _arm_repairtiming_parent_death(expected_parent_pid):
-    """Arm Linux parent-death SIGKILL, closing the fork-to-prctl race."""
+def _close_repairtiming_fd(fd):
+    if fd is None or fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _repairtiming_child_exited_without_reaping(process):
+    """Query a direct child while reserving its PID until explicit wait()."""
+    try:
+        status = os.waitid(
+            os.P_PID,
+            process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except ChildProcessError:
+        return True
+    return status is not None
+
+
+def _await_repairtiming_watchdog_ready(process, ready_fd):
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(ready_fd, False)
+        selector.register(ready_fd, selectors.EVENT_READ)
+        deadline = time.monotonic() + REPAIRTIMING_WATCHDOG_READY_SECONDS
+        while True:
+            if _repairtiming_child_exited_without_reaping(process):
+                raise MeasurementError(
+                    "repairtiming process-group watchdog exited before ready")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise MeasurementError(
+                    "repairtiming process-group watchdog did not become ready")
+            try:
+                events = selector.select(timeout=remaining)
+            except InterruptedError:
+                continue
+            if not events:
+                continue
+            try:
+                ready = os.read(ready_fd, 2)
+            except BlockingIOError:
+                continue
+            if ready != b"R":
+                raise MeasurementError(
+                    "repairtiming process-group watchdog readiness failed")
+            break
+    finally:
+        selector.close()
+    try:
+        process_group = os.getpgid(process.pid)
+    except ProcessLookupError as error:
+        raise MeasurementError(
+            "repairtiming process-group watchdog disappeared") from error
     if (
-        _REPAIRTIMING_PRCTL is None or
-        _REPAIRTIMING_PRCTL(
-            _REPAIRTIMING_PR_SET_PDEATHSIG,
-            signal.SIGKILL,
-            0,
-            0,
-            0,
-        ) != 0
+        process_group != process.pid or
+        _repairtiming_child_exited_without_reaping(process)
     ):
-        os._exit(127)
-    # PR_SET_PDEATHSIG is not retroactive.  If the campaign worker died
-    # between fork() and prctl(), terminate before exec rather than orphaning.
-    if os.getppid() != expected_parent_pid:
-        os.kill(os.getpid(), signal.SIGKILL)
-        os._exit(127)
+        raise MeasurementError(
+            "repairtiming process-group watchdog is not a live group leader")
+
+
+def _start_repairtiming_watchdog(env):
+    """Establish and prove a parent-liveness group anchor before benchmark exec."""
+    if (
+        not sys.platform.startswith("linux") or
+        not hasattr(os, "pipe2") or
+        not hasattr(os, "WNOWAIT")
+    ):
+        raise MeasurementError(
+            "repairtiming subprocess isolation requires Linux waitid/pipe2")
+    liveness_read = liveness_write = None
+    ready_read = ready_write = None
+    process = None
+    try:
+        liveness_read, liveness_write = os.pipe2(os.O_CLOEXEC)
+        ready_read, ready_write = os.pipe2(os.O_CLOEXEC)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                _REPAIRTIMING_WATCHDOG_SOURCE,
+                str(liveness_read),
+                str(ready_write),
+                str(os.getpid()),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            close_fds=True,
+            pass_fds=(liveness_read, ready_write),
+            process_group=0,
+        )
+        _close_repairtiming_fd(liveness_read)
+        liveness_read = None
+        _close_repairtiming_fd(ready_write)
+        ready_write = None
+        _await_repairtiming_watchdog_ready(process, ready_read)
+        _close_repairtiming_fd(ready_read)
+        ready_read = None
+        return _RepairTimingWatchdog(
+            process=process,
+            process_group=process.pid,
+            liveness_fd=liveness_write,
+        )
+    except BaseException as error:
+        _close_repairtiming_fd(liveness_read)
+        _close_repairtiming_fd(liveness_write)
+        _close_repairtiming_fd(ready_read)
+        _close_repairtiming_fd(ready_write)
+        if process is not None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as reap_error:
+                raise MeasurementError(
+                    "could not reap failed repairtiming process-group watchdog"
+                ) from reap_error
+        if isinstance(error, MeasurementError):
+            raise
+        if isinstance(
+                error, (OSError, subprocess.SubprocessError, ValueError)):
+            raise MeasurementError(
+                "could not start repairtiming process-group watchdog: "
+                f"{error}") from error
+        raise
 
 
 def _repairtiming_process_group_exists(process_group):
@@ -2534,50 +2674,191 @@ def _signal_repairtiming_process_group(process_group, signal_number):
     return True
 
 
-def _terminate_repairtiming_process_group(process):
-    """TERM, KILL, reap the leader, and confirm its private group is gone."""
-    process_group = process.pid
-    if _repairtiming_process_group_exists(process_group):
-        _signal_repairtiming_process_group(
-            process_group, signal.SIGTERM)
-        deadline = time.monotonic() + REPAIRTIMING_TERMINATE_GRACE_SECONDS
-        while (
-            _repairtiming_process_group_exists(process_group) and
-            time.monotonic() < deadline
-        ):
-            process.poll()
-            time.sleep(0.005)
-        if _repairtiming_process_group_exists(process_group):
-            _signal_repairtiming_process_group(
-                process_group, signal.SIGKILL)
-    elif process.poll() is None:
-        # This is only reachable if child setup failed before setsid().
-        process.kill()
-
+def _repairtiming_process_group_members(process_group):
+    """Return Linux process-group membership while its anchor PID is reserved."""
+    members = {}
     try:
-        process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
+        entries = os.scandir("/proc")
+    except OSError as error:
+        raise MeasurementError(
+            f"could not inspect repairtiming process group: {error}") from error
+    with entries:
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                with open(
+                        os.path.join("/proc", entry.name, "stat"),
+                        "rb", buffering=0) as source:
+                    payload = source.read(4097)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError as error:
+                raise MeasurementError(
+                    "could not inspect repairtiming process-group member "
+                    f"{entry.name}: {error}") from error
+            if len(payload) > 4096:
+                raise MeasurementError(
+                    "repairtiming process stat exceeds its byte limit")
+            closing = payload.rfind(b") ")
+            if closing < 0:
+                raise MeasurementError(
+                    "repairtiming process stat is malformed")
+            fields = payload[closing + 2:].split()
+            if len(fields) < 3:
+                raise MeasurementError(
+                    "repairtiming process stat is incomplete")
+            try:
+                member_group = int(fields[2], 10)
+            except ValueError as error:
+                raise MeasurementError(
+                    "repairtiming process stat has an invalid group") from error
+            if member_group == process_group:
+                members[int(entry.name, 10)] = fields[0].decode(
+                    "ascii", "strict")
+    return members
+
+
+def _reap_repairtiming_child(process, label):
+    try:
+        return process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise MeasurementError(
+            f"could not promptly reap repairtiming {label}") from error
+
+
+def _confirm_repairtiming_group_killed(process, watchdog):
+    """Wait for only unreaped direct-child zombies under the reserved PGID."""
+    direct_children = {watchdog.process.pid}
+    if process is not None:
+        direct_children.add(process.pid)
+    deadline = time.monotonic() + REPAIRTIMING_GROUP_CONFIRM_SECONDS
+    survivors = {}
+    while True:
+        members = _repairtiming_process_group_members(
+            watchdog.process_group)
+        watchdog_state = members.get(watchdog.process.pid)
+        if watchdog_state is None:
+            # Never inspect or signal this numeric group again: without the
+            # unreaped anchor its PGID could already have been reused.
+            raise MeasurementError(
+                "repairtiming process-group anchor disappeared before reap")
+        survivors = {
+            process_id: state
+            for process_id, state in members.items()
+            if process_id not in direct_children or state != "Z"
+        }
+        if not survivors:
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.005)
+    sample = ",".join(
+        f"{process_id}:{state}"
+        for process_id, state in sorted(survivors.items())[:8])
+    if len(survivors) > 8:
+        sample += ",..."
+    raise MeasurementError(
+        "repairtiming benchmark process group survived SIGKILL"
+        f" ({sample})")
+
+
+def _terminate_repairtiming_process_group(process, watchdog):
+    """TERM/KILL one anchored group, then reap both direct children boundedly."""
+    process_group = watchdog.process_group
+    action_error = None
+    try:
         if _repairtiming_process_group_exists(process_group):
             _signal_repairtiming_process_group(
-                process_group, signal.SIGKILL)
-        else:
+                process_group, signal.SIGTERM)
+            deadline = time.monotonic() + REPAIRTIMING_TERMINATE_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                if process is not None:
+                    process.poll()
+                time.sleep(0.005)
+        elif process is not None and process.poll() is None:
             process.kill()
+    except BaseException as error:
+        action_error = error
+    finally:
         try:
-            process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as error:
-            raise MeasurementError(
-                "could not promptly reap repairtiming benchmark leader"
-            ) from error
+            # The watchdog is still an unreaped group leader here, so this
+            # numeric PGID cannot refer to an unrelated, PID-reused group.
+            if _repairtiming_process_group_exists(process_group):
+                _signal_repairtiming_process_group(
+                    process_group, signal.SIGKILL)
+        finally:
+            _close_repairtiming_fd(watchdog.liveness_fd)
+            watchdog.liveness_fd = -1
 
-    deadline = time.monotonic() + REPAIRTIMING_GROUP_CONFIRM_SECONDS
-    while (
-        _repairtiming_process_group_exists(process_group) and
-        time.monotonic() < deadline
-    ):
-        time.sleep(0.005)
-    if _repairtiming_process_group_exists(process_group):
+    confirmation_error = None
+    try:
+        _confirm_repairtiming_group_killed(process, watchdog)
+    except BaseException as error:
+        confirmation_error = error
+    leader_error = None
+    try:
+        if process is not None:
+            _reap_repairtiming_child(process, "benchmark leader")
+    except MeasurementError as error:
+        leader_error = error
+    watchdog_error = None
+    try:
+        _reap_repairtiming_child(
+            watchdog.process, "process-group watchdog")
+    except MeasurementError as error:
+        watchdog_error = error
+    if action_error is not None:
+        raise action_error
+    if confirmation_error is not None:
+        raise confirmation_error
+    if leader_error is not None:
+        raise leader_error
+    if watchdog_error is not None:
+        raise watchdog_error
+
+
+def _release_repairtiming_watchdog(watchdog):
+    """Release and reap an otherwise-empty anchor without a reusable-PGID race."""
+    try:
+        written = os.write(watchdog.liveness_fd, b"N")
+    except OSError as error:
+        written = 0
+        release_error = error
+    else:
+        release_error = None
+    finally:
+        _close_repairtiming_fd(watchdog.liveness_fd)
+        watchdog.liveness_fd = -1
+    if written != 1:
+        if _repairtiming_process_group_exists(watchdog.process_group):
+            _signal_repairtiming_process_group(
+                watchdog.process_group, signal.SIGKILL)
+        try:
+            _reap_repairtiming_child(
+                watchdog.process, "process-group watchdog")
+        finally:
+            if release_error is not None:
+                raise MeasurementError(
+                    "repairtiming process-group watchdog release failed"
+                ) from release_error
         raise MeasurementError(
-            "repairtiming benchmark process group survived SIGKILL")
+            "repairtiming process-group watchdog release was incomplete")
+    try:
+        returncode = _reap_repairtiming_child(
+            watchdog.process, "process-group watchdog")
+    except MeasurementError:
+        # The anchor PID is still reserved here, so this group signal cannot
+        # target a PID-reused group.
+        if _repairtiming_process_group_exists(watchdog.process_group):
+            _signal_repairtiming_process_group(
+                watchdog.process_group, signal.SIGKILL)
+        _reap_repairtiming_child(
+            watchdog.process, "process-group watchdog after SIGKILL")
+        raise
+    if returncode != 0:
+        raise MeasurementError(
+            "repairtiming process-group watchdog exited abnormally")
 
 
 def _repairtiming_diagnostic(stdout, stderr, limit):
@@ -2631,16 +2912,12 @@ def _run_repairtiming_checked(
         if type(value) is not int or value < 1:
             raise MeasurementError(
                 f"repairtiming {label} byte limit must be a positive integer")
-    if _REPAIRTIMING_PRCTL is None:
-        raise MeasurementError(
-            "repairtiming subprocess isolation requires Linux prctl")
-
     command_label = _repairtiming_command_label(command)
-    expected_parent_pid = os.getpid()
+    watchdog = _start_repairtiming_watchdog(env)
     try:
-        # A private session lets this runner clean up every benchmark
-        # descendant.  PDEATHSIG covers abrupt campaign-worker death despite
-        # that isolation; the child-side PPID check closes the preexec race.
+        # The ready watchdog is a live, unreaped group anchor.  `process_group`
+        # uses CPython's async-signal-safe child setup rather than Python code
+        # between fork and exec.  No liveness descriptor reaches the benchmark.
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -2648,11 +2925,35 @@ def _run_repairtiming_checked(
             stderr=subprocess.PIPE,
             env=env,
             bufsize=0,
-            start_new_session=True,
-            preexec_fn=functools.partial(
-                _arm_repairtiming_parent_death, expected_parent_pid),
+            close_fds=True,
+            process_group=watchdog.process_group,
         )
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
+    except BaseException as error:
+        try:
+            members = _repairtiming_process_group_members(
+                watchdog.process_group)
+            if (
+                set(members) != {watchdog.process.pid} or
+                members[watchdog.process.pid] == "Z"
+            ):
+                _terminate_repairtiming_process_group(None, watchdog)
+            else:
+                _release_repairtiming_watchdog(watchdog)
+        except MeasurementError as cleanup_error:
+            if watchdog.liveness_fd >= 0:
+                try:
+                    _terminate_repairtiming_process_group(None, watchdog)
+                except MeasurementError as termination_error:
+                    cleanup_error = MeasurementError(
+                        f"{cleanup_error}; termination also failed: "
+                        f"{termination_error}")
+            raise MeasurementError(
+                "could not execute repairtiming benchmark and could not "
+                f"clean its process-group watchdog: {cleanup_error}"
+            ) from error
+        if not isinstance(
+                error, (OSError, subprocess.SubprocessError, ValueError)):
+            raise
         raw_detail = str(error)
         sample = raw_detail[:diagnostic_limit]
         rendered = repr(sample)
@@ -2675,6 +2976,7 @@ def _run_repairtiming_checked(
     pipe_holder = False
     unexpected_descendants = False
     post_exit_deadline = None
+    clean_completion = False
     try:
         selector = selectors.DefaultSelector()
         streams = {
@@ -2697,6 +2999,11 @@ def _run_repairtiming_checked(
             selector.register(stream, selectors.EVENT_READ, name)
 
         while selector.get_map():
+            if _repairtiming_child_exited_without_reaping(
+                    watchdog.process):
+                raise MeasurementError(
+                    "repairtiming process-group watchdog exited during "
+                    "benchmark")
             try:
                 events = selector.select(
                     timeout=REPAIRTIMING_SELECT_POLL_SECONDS)
@@ -2759,11 +3066,26 @@ def _run_repairtiming_checked(
             raise MeasurementError(
                 "repairtiming benchmark closed its output pipes before exit"
             ) from error
-        unexpected_descendants = _repairtiming_process_group_exists(
-            process.pid)
+        members = _repairtiming_process_group_members(
+            watchdog.process_group)
+        if (
+            watchdog.process.pid not in members or
+            members[watchdog.process.pid] == "Z"
+        ):
+            raise MeasurementError(
+                "repairtiming process-group watchdog died during benchmark")
+        unexpected_descendants = (
+            set(members) != {watchdog.process.pid})
+        if unexpected_descendants:
+            raise MeasurementError(
+                "repairtiming benchmark left an unexpected descendant")
+        clean_completion = True
     finally:
         try:
-            _terminate_repairtiming_process_group(process)
+            if clean_completion:
+                _release_repairtiming_watchdog(watchdog)
+            else:
+                _terminate_repairtiming_process_group(process, watchdog)
         finally:
             try:
                 if selector is not None:
@@ -2773,9 +3095,6 @@ def _run_repairtiming_checked(
                     if stream is not None:
                         stream.close()
 
-    if unexpected_descendants:
-        raise MeasurementError(
-            "repairtiming benchmark left an unexpected descendant")
     decoded = {}
     for name, payload in buffers.items():
         try:

@@ -479,7 +479,7 @@ bool ParseRepairTimingOptions(
         (options.BlockBytes & 1u) != 0u ||
         !std::isfinite(options.Loss) ||
         options.Loss < 0.0 ||
-        options.Loss >= 1.0 ||
+        options.Loss > 0.99 ||
         (options.Loss == 0.0 && std::signbit(options.Loss)) ||
         options.Replicates < 3u ||
         cells == 0u || cells > 768u ||
