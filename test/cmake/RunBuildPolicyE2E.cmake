@@ -335,7 +335,8 @@ if(NOT production_usage_result EQUAL 1 OR
         "stderr=${production_usage_err}")
 endif()
 
-foreach(test_only_mode IN ITEMS preferredattempt peeltiming bandtiming)
+foreach(test_only_mode IN ITEMS
+        preferredattempt peeltiming bandtiming repairtiming)
     execute_process(
         COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
             "${test_only_mode}"
@@ -351,6 +352,16 @@ foreach(test_only_mode IN ITEMS preferredattempt peeltiming bandtiming)
             "stderr=${test_only_err}")
     endif()
 endforeach()
+
+file(STRINGS
+    "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
+    production_repairtiming_strings
+    REGEX "repairtiming|W2R3")
+if(production_repairtiming_strings)
+    message(FATAL_ERROR
+        "BUILD_TESTS=OFF benchmark retained repairtiming/W2R3 strings:\n"
+        "${production_repairtiming_strings}")
+endif()
 
 file(READ "${PROJECT_SOURCE_DIR}/CMakeLists.txt" root_cmake)
 if(root_cmake MATCHES "add_compile_options[ \t\r\n]*\\([ \t\r\n]*-w" OR

@@ -2,6 +2,10 @@
 #include "WirehairV2Contract.h"
 #include "WirehairV2Plan.h"
 #include "WirehairV2Precode.h"
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#include "WirehairV2PrecodeDecode.h"
+#include "WirehairV2Repair.h"
+#endif
 #include "WirehairV2Seeds.h"
 #include "WirehairV2Solve.h"
 
@@ -17922,6 +17926,10 @@ int CmdBandTiming(int argc, char** argv)
     return 0;
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#include "WirehairV2RepairTiming.inc"
+#endif
+
 struct PrecodeSweepRun
 {
     // Cell inputs shared by every config.
@@ -25565,7 +25573,8 @@ int main(int argc, char** argv)
         // configures do.
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE \
-    "peelpmf|peeltiming|bandtiming|precodesweep|precodecost|essearch|"
+    "peelpmf|peeltiming|bandtiming|repairtiming|precodesweep|precodecost|" \
+    "essearch|"
 #else
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE ""
 #endif
@@ -25625,6 +25634,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "bandtiming")) {
             return CmdBandTiming(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "repairtiming")) {
+            return CmdRepairTiming(argc - 2, argv + 2);
         }
         if (!std::strcmp(argv[1], "precodesweep")) {
             return CmdPrecodeSweep(argc - 2, argv + 2);

@@ -388,7 +388,8 @@ else()
     set(WIREHAIR_BENCH_EXCLUDE EXCLUDE_FROM_ALL)
 endif()
 add_executable(wirehair_v2_bench ${WIREHAIR_BENCH_EXCLUDE}
-    WirehairV2Bench.cpp)
+    WirehairV2Bench.cpp
+    WirehairV2RepairTiming.inc)
 target_link_libraries(wirehair_v2_bench wirehair_v2_policy Threads::Threads)
 wirehair_apply_project_options(wirehair_v2_bench)
 
@@ -420,11 +421,26 @@ if(BUILD_TESTS AND WIREHAIR_BUILD_BENCHMARKS)
         TIMEOUT 120
         PROCESSOR_AFFINITY TRUE)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(
+            NAME wirehair_v2_repairtiming_cli_test
+            COMMAND ${_wirehair_v2_clean_test_command} ${CMAKE_COMMAND}
+                -DBENCH=$<TARGET_FILE:wirehair_v2_bench>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/V2RepairTimingCliTest.cmake)
+        set_tests_properties(
+            wirehair_v2_repairtiming_cli_test PROPERTIES
+            LABELS "v2;repair;benchmark;protocol;transactional"
+            TIMEOUT 180
+            PROCESSOR_AFFINITY TRUE)
+    endif()
+
     # Compile the test-hook CLI with only the preferred-attempt experiment
     # suppressed.  This isolates the command-gating macro; build_policy_e2e is
     # the separate strict BUILD_TESTS=OFF compile/run gate for the real
     # production preprocessor surface.
-    add_executable(wirehair_v2_bench_no_preferred_test WirehairV2Bench.cpp)
+    add_executable(wirehair_v2_bench_no_preferred_test
+        WirehairV2Bench.cpp
+        WirehairV2RepairTiming.inc)
     target_compile_definitions(wirehair_v2_bench_no_preferred_test PRIVATE
         WIREHAIR_V2_BENCH_DISABLE_PREFERRED_ATTEMPT=1)
     target_link_libraries(wirehair_v2_bench_no_preferred_test
