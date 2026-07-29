@@ -1,4 +1,5 @@
 #include "WirehairV2PrecodeEncode.h"
+#include "WirehairV2Repair.h"
 
 #include "../WirehairTools.h"
 #include "../gf256.h"
@@ -1850,6 +1851,8 @@ void MessagePrecodeEncoder::Swap(MessagePrecodeEncoder& other) noexcept
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     swap(ExplicitEquationStateValue, other.ExplicitEquationStateValue);
     swap(ExplicitConfigurationValue, other.ExplicitConfigurationValue);
+    swap(ProvisionalRepairContractIdValue,
+        other.ProvisionalRepairContractIdValue);
 #endif
     swap(Initialized, other.Initialized);
 }
@@ -2363,8 +2366,22 @@ WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
     uint32_t packet_seed_attempt,
     bool require_exact_params,
     bool bind_profile,
-    ConfigurationFailurePolicy failure_policy)
+    ConfigurationFailurePolicy failure_policy
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ,
+    PrecodeSolveStats* attempted_stats_out,
+    bool* attempted_stats_available_out
+#endif
+    )
 {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (attempted_stats_out) {
+        *attempted_stats_out = PrecodeSolveStats();
+    }
+    if (attempted_stats_available_out) {
+        *attempted_stats_available_out = false;
+    }
+#endif
     if (gf256_init() != 0) {
         return Wirehair_UnsupportedPlatform;
     }
@@ -2459,6 +2476,9 @@ WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
         GuardedAllocation();
         std::vector<uint8_t> intermediate_blocks;
         PrecodeSolveStats solve_stats;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        solve_stats.PacketSeedAttempt = UINT32_MAX;
+#endif
         PacketRowConfig selected_packet_config = packet_config;
         WirehairResult solve_result =
             SolvePrecodeSystemForValidatedSystemWithRuntime(
@@ -2469,6 +2489,20 @@ WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
             block_bytes,
             intermediate_blocks,
             &solve_stats);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        bool solve_stats_available =
+            solve_stats.PacketSeedAttempt != UINT32_MAX;
+        if (solve_stats_available)
+        {
+            solve_stats.PacketSeedAttempt = packet_seed_attempt;
+            if (attempted_stats_out) {
+                *attempted_stats_out = solve_stats;
+            }
+            if (attempted_stats_available_out) {
+                *attempted_stats_available_out = true;
+            }
+        }
+#endif
         if (solve_result == Wirehair_NeedMore ||
             solve_result == Wirehair_Error)
         {
@@ -2529,6 +2563,10 @@ WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
                 intermediate_blocks.clear();
                 system = std::move(selected_system);
                 selected_packet_config = retry_config;
+                solve_stats = PrecodeSolveStats();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                solve_stats.PacketSeedAttempt = UINT32_MAX;
+#endif
                 solve_result =
                     SolvePrecodeSystemForValidatedSystemWithRuntime(
                         system,
@@ -2538,6 +2576,20 @@ WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
                         block_bytes,
                         intermediate_blocks,
                         &solve_stats);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                solve_stats_available =
+                    solve_stats.PacketSeedAttempt != UINT32_MAX;
+                if (solve_stats_available)
+                {
+                    solve_stats.PacketSeedAttempt = packet_seed_attempt;
+                    if (attempted_stats_out) {
+                        *attempted_stats_out = solve_stats;
+                    }
+                    if (attempted_stats_available_out) {
+                        *attempted_stats_available_out = true;
+                    }
+                }
+#endif
             }
             else {
                 return solve_result;
@@ -2663,14 +2715,24 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
         return Wirehair_InvalidInput;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (ExplicitConfigurationValue &&
+    const ScopedRepairV1ContractStateForTesting repair_scope(
+        ProvisionalRepairContractIdValue);
+    if (ProvisionalRepairContractIdValue != 0u &&
+        !repair_scope.IsValid())
+    {
+        return Wirehair_Error;
+    }
+    const bool pinned_equation_state =
+        ExplicitConfigurationValue ||
+        ProvisionalRepairContractIdValue != 0u;
+    if (pinned_equation_state &&
         !ExplicitEquationStateAuthorizedForTesting(
             ExplicitEquationStateValue, EncoderValue.System().Params))
     {
         return Wirehair_Error;
     }
     const ScopedMixedBandTrackingXForTesting tracking_x_snapshot(
-        ExplicitConfigurationValue &&
+        pinned_equation_state &&
             EncoderValue.System().Params.Field ==
                 CompletionField::MixedGF256GF16,
         ExplicitEquationStateValue.MixedBandTrackingX);
@@ -2818,13 +2880,22 @@ MessagePrecodeEncoder::DiagnosticIdentityForTesting() const
     return ExplicitConfigurationValue ?
         MessagePrecodeDiagnosticIdentityForTesting::
             ExplicitUnknownArchitecture :
-        MessagePrecodeDiagnosticIdentityForTesting::NamedContract;
+        (ProvisionalRepairContractIdValue != 0u ?
+            MessagePrecodeDiagnosticIdentityForTesting::
+                ProvisionalRepairContract :
+            MessagePrecodeDiagnosticIdentityForTesting::NamedContract);
 }
 
 const ExplicitEquationStateIdentityForTesting&
 MessagePrecodeEncoder::PinnedEquationStateForTesting() const
 {
     return ExplicitEquationStateValue;
+}
+
+uint64_t
+MessagePrecodeEncoder::ProvisionalRepairContractIdForTesting() const
+{
+    return Initialized ? ProvisionalRepairContractIdValue : 0u;
 }
 #endif
 

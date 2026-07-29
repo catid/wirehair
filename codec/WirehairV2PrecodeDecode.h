@@ -12,6 +12,10 @@
 
 namespace wirehair_v2 {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+struct RepairV1Contract;
+#endif
+
 /**
     Bounded flat hash table used by the decoder's accepted-packet set.
 
@@ -92,6 +96,18 @@ public:
         uint64_t message_bytes,
         uint32_t block_bytes,
         const ExplicitMessagePrecodeConfigForTesting& config);
+
+    /**
+        Initialize exactly one serialized repair-v1 attempt.  The decoder
+        validates seed_attempt < 8 and never searches another attempt.
+    */
+    WirehairResult InitializeRepairV1ResultForTesting(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const RepairV1Contract& contract,
+        uint32_t construction_root,
+        uint32_t seed_attempt,
+        bool cache_received_systematic = false);
 #endif
 
     /** Identical duplicate ids are ignored; conflicting duplicates fail. */
@@ -135,6 +151,7 @@ public:
         DiagnosticIdentityForTesting() const;
     const ExplicitEquationStateIdentityForTesting&
         PinnedEquationStateForTesting() const;
+    uint64_t ProvisionalRepairContractIdForTesting() const;
     bool HasIncrementalResumeStateForTesting() const;
     size_t IncrementalResumeBytesForTesting() const;
     size_t ColdReceiveCapacityBytesForTesting() const;
@@ -184,6 +201,7 @@ private:
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ExplicitEquationStateIdentityForTesting ExplicitEquationStateValue = {};
     bool ExplicitConfigurationValue = false;
+    uint64_t ProvisionalRepairContractIdValue = 0u;
 #endif
     bool Initialized = false;
     bool Decoded = false;

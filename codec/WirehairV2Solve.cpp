@@ -5196,6 +5196,16 @@ bool IsCanonicalStableTargetPacketRowState()
 #endif
 }
 
+bool IsCanonicalPacketDegreeState()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    const std::vector<double>* cdf = nullptr;
+    return ActivePeelDegreeCdf(cdf) && cdf == nullptr;
+#else
+    return true;
+#endif
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 uint64_t ActivePacketRowEquationStateFingerprintForTesting()
 {

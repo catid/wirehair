@@ -1035,6 +1035,18 @@ bool IsCanonicalStableTargetStaircaseState()
 #endif
 }
 
+bool IsCanonicalStaircaseDegreeScaleState()
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    return
+        g_staircase_degree_scale_override ==
+            kStaircaseDegreeScaleUnset &&
+        !StaircaseDegreeScaleEnvironment().IsSet;
+#else
+    return true;
+#endif
+}
+
 bool MakeStaircaseDegreeMixture(
     const PrecodeParams& params,
     StaircaseDegreeMixture& out)

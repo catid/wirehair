@@ -49,6 +49,11 @@
 
 namespace wirehair_v2 {
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+struct RepairV1Contract;
+struct RepairV1SelectorTelemetry;
+#endif
+
 static const uint32_t kDefaultRecoveryMixCount = kCertifiedPacketMixCount;
 static const uint64_t kMessagePrecodeSeedSalt =
     UINT64_C(0x763263707265636f);
@@ -338,7 +343,8 @@ enum class MessagePrecodeDiagnosticIdentityForTesting : uint8_t
 {
     Uninitialized = 0,
     NamedContract = 1,
-    ExplicitUnknownArchitecture = 2
+    ExplicitUnknownArchitecture = 2,
+    ProvisionalRepairContract = 3
 };
 
 /**
@@ -518,6 +524,36 @@ public:
         uint64_t message_bytes,
         uint32_t block_bytes,
         const ExplicitMessagePrecodeConfigForTesting& config);
+
+    /**
+        Run the frozen cap-8 repair-v1 lazy selector for one provisional arm.
+
+        This is test-build-only experiment infrastructure, not a public wire
+        profile.  On every failure the prior encoder remains unchanged.
+    */
+    WirehairResult InitializeRepairV1ResultForTesting(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const RepairV1Contract& contract,
+        uint32_t construction_root,
+        RepairV1SelectorTelemetry* telemetry = nullptr,
+        bool cache_systematic_source = false);
+
+    /**
+        Initialize exactly one repair-v1 attempt without selection.
+
+        This is the forced-selected control for semantic and timing bridges.
+        Attempts outside [0, 8) fail transactionally.
+    */
+    WirehairResult InitializeRepairV1SelectedResultForTesting(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const RepairV1Contract& contract,
+        uint32_t construction_root,
+        uint32_t seed_attempt,
+        bool cache_systematic_source = false);
 #endif
 
     bool Encode(
@@ -548,9 +584,10 @@ public:
     /**
         Diagnostic access to the solved block encoder.
 
-        For an explicit test configuration, output must still go through this
-        endpoint's EncodeResult(): direct calls on the returned low-level
-        object bypass the caller-pinned ambient-state contract.
+        For an explicit test configuration or provisional repair contract,
+        output must still go through this endpoint's EncodeResult(): direct
+        calls on the returned low-level object bypass the pinned equation-state
+        and candidate-geometry contract.
     */
     const PrecodeEncoder& BlockEncoder() const;
 
@@ -564,6 +601,7 @@ public:
         DiagnosticIdentityForTesting() const;
     const ExplicitEquationStateIdentityForTesting&
         PinnedEquationStateForTesting() const;
+    uint64_t ProvisionalRepairContractIdForTesting() const;
 #endif
 
 private:
@@ -587,7 +625,13 @@ private:
         uint32_t packet_seed_attempt,
         bool require_exact_params,
         bool bind_profile,
-        ConfigurationFailurePolicy failure_policy);
+        ConfigurationFailurePolicy failure_policy
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        ,
+        PrecodeSolveStats* attempted_stats_out = nullptr,
+        bool* attempted_stats_available_out = nullptr
+#endif
+        );
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     static bool SameExplicitParams(
@@ -611,6 +655,7 @@ private:
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     ExplicitEquationStateIdentityForTesting ExplicitEquationStateValue = {};
     bool ExplicitConfigurationValue = false;
+    uint64_t ProvisionalRepairContractIdValue = 0u;
 #endif
     bool Initialized = false;
 };

@@ -1,4 +1,5 @@
 #include "WirehairV2PrecodeDecode.h"
+#include "WirehairV2Repair.h"
 
 #include "../WirehairTools.h"
 #include "../gf256.h"
@@ -397,6 +398,8 @@ void MessagePrecodeDecoder::Swap(MessagePrecodeDecoder& other) noexcept
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     swap(ExplicitEquationStateValue, other.ExplicitEquationStateValue);
     swap(ExplicitConfigurationValue, other.ExplicitConfigurationValue);
+    swap(ProvisionalRepairContractIdValue,
+        other.ProvisionalRepairContractIdValue);
 #endif
     swap(Initialized, other.Initialized);
     swap(Decoded, other.Decoded);
@@ -789,14 +792,24 @@ WirehairResult MessagePrecodeDecoder::DecodeResult(
         return Wirehair_InvalidInput;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (ExplicitConfigurationValue &&
+    const ScopedRepairV1ContractStateForTesting repair_scope(
+        ProvisionalRepairContractIdValue);
+    if (ProvisionalRepairContractIdValue != 0u &&
+        !repair_scope.IsValid())
+    {
+        return Wirehair_Error;
+    }
+    const bool pinned_equation_state =
+        ExplicitConfigurationValue ||
+        ProvisionalRepairContractIdValue != 0u;
+    if (pinned_equation_state &&
         !ExplicitEquationStateAuthorizedForTesting(
             ExplicitEquationStateValue, SystemValue.Params))
     {
         return Wirehair_Error;
     }
     const ScopedMixedBandTrackingXForTesting tracking_x_snapshot(
-        ExplicitConfigurationValue &&
+        pinned_equation_state &&
             SystemValue.Params.Field == CompletionField::MixedGF256GF16,
         ExplicitEquationStateValue.MixedBandTrackingX);
 #endif
@@ -1064,14 +1077,24 @@ WirehairResult MessagePrecodeDecoder::RecoverResult(
         return Wirehair_InvalidInput;
     }
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    if (ExplicitConfigurationValue &&
+    const ScopedRepairV1ContractStateForTesting repair_scope(
+        ProvisionalRepairContractIdValue);
+    if (ProvisionalRepairContractIdValue != 0u &&
+        !repair_scope.IsValid())
+    {
+        return Wirehair_Error;
+    }
+    const bool pinned_equation_state =
+        ExplicitConfigurationValue ||
+        ProvisionalRepairContractIdValue != 0u;
+    if (pinned_equation_state &&
         !ExplicitEquationStateAuthorizedForTesting(
             ExplicitEquationStateValue, SystemValue.Params))
     {
         return Wirehair_Error;
     }
     const ScopedMixedBandTrackingXForTesting tracking_x_snapshot(
-        ExplicitConfigurationValue &&
+        pinned_equation_state &&
             SystemValue.Params.Field == CompletionField::MixedGF256GF16,
         ExplicitEquationStateValue.MixedBandTrackingX);
 #endif
@@ -1276,13 +1299,22 @@ MessagePrecodeDecoder::DiagnosticIdentityForTesting() const
     return ExplicitConfigurationValue ?
         MessagePrecodeDiagnosticIdentityForTesting::
             ExplicitUnknownArchitecture :
-        MessagePrecodeDiagnosticIdentityForTesting::NamedContract;
+        (ProvisionalRepairContractIdValue != 0u ?
+            MessagePrecodeDiagnosticIdentityForTesting::
+                ProvisionalRepairContract :
+            MessagePrecodeDiagnosticIdentityForTesting::NamedContract);
 }
 
 const ExplicitEquationStateIdentityForTesting&
 MessagePrecodeDecoder::PinnedEquationStateForTesting() const
 {
     return ExplicitEquationStateValue;
+}
+
+uint64_t
+MessagePrecodeDecoder::ProvisionalRepairContractIdForTesting() const
+{
+    return Initialized ? ProvisionalRepairContractIdValue : 0u;
 }
 
 bool MessagePrecodeDecoder::HasIncrementalResumeStateForTesting() const

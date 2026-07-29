@@ -18,6 +18,8 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2PrecodeDecode.h
     WirehairV2PrecodeEncode.cpp
     WirehairV2PrecodeEncode.h
+    WirehairV2Repair.cpp
+    WirehairV2Repair.h
     WirehairV2MixedBuckets.h
     WirehairV2Seeds.cpp
     WirehairV2Seeds.h
@@ -182,6 +184,35 @@ if (BUILD_TESTS)
             ${_wirehair_v2_seed_selection_args})
     set_tests_properties(wirehair_v2_precode_seed_selection_test
         PROPERTIES TIMEOUT 180)
+
+    add_executable(wirehair_v2_repair_selector_test
+        V2RepairSelectorTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_repair_selector_test)
+    target_link_libraries(wirehair_v2_repair_selector_test
+        wirehair_v2_policy Threads::Threads)
+    add_test(NAME wirehair_v2_repair_selector_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_repair_selector_test>)
+    set_tests_properties(wirehair_v2_repair_selector_test
+        PROPERTIES
+            LABELS "v2;repair;seed-selection;transactional;isolation"
+            TIMEOUT 600)
+    add_test(NAME wirehair_v2_repair_selector_pmf_env_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            WIREHAIR_V2_PEEL_DEGREES=1,1
+            $<TARGET_FILE:wirehair_v2_repair_selector_test>
+            --reject-environment)
+    add_test(NAME wirehair_v2_repair_selector_scale_env_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            WIREHAIR_V2_STAIRCASE_DEGREE_SCALE=0
+            $<TARGET_FILE:wirehair_v2_repair_selector_test>
+            --reject-environment)
+    set_tests_properties(
+        wirehair_v2_repair_selector_pmf_env_test
+        wirehair_v2_repair_selector_scale_env_test
+        PROPERTIES
+            LABELS "v2;repair;isolation;environment"
+            TIMEOUT 60)
 
     add_executable(wirehair_v2_profile_test V2ProfileTest.cpp)
     wirehair_apply_project_options(wirehair_v2_profile_test)

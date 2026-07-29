@@ -318,6 +318,16 @@ bool MakeStaircaseDegreeMixture(
 */
 bool IsCanonicalStableTargetStaircaseState();
 
+/**
+    True only when no target-mean staircase scale overlay is active.
+
+    Stable benchmark targets may receipt that overlay separately, which is why
+    IsCanonicalStableTargetStaircaseState() deliberately permits it.  Frozen
+    equation contracts that do not name such an overlay use this stricter
+    predicate as well.
+*/
+bool IsCanonicalStaircaseDegreeScaleState();
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /**
     Compact semantic fingerprint of every ambient precode hook that can alter

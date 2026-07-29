@@ -131,6 +131,15 @@ struct PacketRowConfig
 */
 bool IsCanonicalStableTargetPacketRowState();
 
+/**
+    True only when no packet-degree PMF overlay (valid or malformed) is active.
+
+    Stable benchmark targets may receipt a PMF separately.  Frozen equation
+    contracts that do not name such an overlay combine this with
+    IsCanonicalStableTargetPacketRowState().
+*/
+bool IsCanonicalPacketDegreeState();
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 /**
     Compact semantic fingerprint of every ambient packet-row hook.
