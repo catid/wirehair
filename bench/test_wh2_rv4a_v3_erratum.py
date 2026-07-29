@@ -703,13 +703,50 @@ class SourceAndArtifactBindingTests(unittest.TestCase):
     )
     def test_authenticated_erratum_has_exact_corrected_counts(self):
         path = Path(os.environ["WH2_RV4A3_ERRATUM_RECEIPT"])
-        receipt, unused_digest = \
+        expected_receipt_sha256 = os.environ.get(
+            "WH2_RV4A3_ERRATUM_RECEIPT_SHA256")
+        expected_classifier_commit = os.environ.get(
+            "WH2_RV4A3_ERRATUM_CLASSIFIER_COMMIT")
+        self.assertRegex(
+            expected_receipt_sha256 or "", r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            expected_classifier_commit or "", r"^[0-9a-f]{40}$")
+        receipt, receipt_sha256 = \
             erratum.campaign.read_canonical_json(path)
         self.assertEqual(
-            unused_digest,
-            erratum.campaign.canonical_sha256(receipt),
+            receipt_sha256, expected_receipt_sha256,
         )
         self.assertEqual(receipt["schema"], erratum.ERRATUM_SCHEMA)
+        expected_policy = erratum.classification_policy()
+        self.assertEqual(receipt["policy"], expected_policy)
+        self.assertEqual(
+            receipt["policy_sha256"],
+            erratum.campaign.canonical_sha256(expected_policy),
+        )
+        classifier_paths = [
+            "bench/wh2_rv4a_campaign.py",
+            "bench/wh2_rv4a_v3_erratum.py",
+            "tools/repair_v1_classification.py",
+        ]
+        self.assertEqual(
+            receipt["source_evidence"]["classification_source"],
+            erratum._git_source_receipt(
+                expected_classifier_commit, classifier_paths),
+        )
+        for relative in classifier_paths:
+            with self.subTest(classifier_source=relative):
+                binding = erratum.campaign._stable_file_binding(
+                    REPOSITORY / relative,
+                    byte_limit=erratum.SOURCE_BYTE_LIMIT,
+                )
+                self.assertEqual(
+                    receipt["source_evidence"]["classification_source"]
+                    ["files"][relative],
+                    {
+                        "bytes": binding["size"],
+                        "sha256": binding["sha256"],
+                    },
+                )
         self.assertEqual(
             receipt["source_evidence"]["manifest_sha256"],
             "c11d15c1c0c17e226ea45930cf11fb9d8cd9b43c05a4a3ff8d95c7b9f23a534a",
