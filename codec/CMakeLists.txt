@@ -202,7 +202,8 @@ if (BUILD_TESTS)
         LABELS "v2;profile;serialization;golden;e2e;abi"
         TIMEOUT 120)
 
-    # All-K equation-freeze fingerprints for every public V2 profile ID.
+    # All-K equation-freeze fingerprints for every public V2 precode profile
+    # ID.  Tiny MDS has its fixed-domain wire/arithmetic digest above.
     # This sweeps the complete K=2..64000 expansion, so it runs serially.
     # Instrumented sanitizer builds can take more than one hour under the
     # deliberately saturated validation load used by the WH2 campaign.

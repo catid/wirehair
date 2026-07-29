@@ -203,17 +203,41 @@ enumerate all 257 points of the projective line over GF(256):
 - ID 1 has coefficients `[0:1]`; and
 - ID `i` in `2..256` has coefficients `[1:i-1]`.
 
-The arithmetic is the library's frozen GF(256) representation. Any two
-distinct supported K=2 IDs have a nonzero 2-by-2 determinant, so they recover
-both source blocks without a construction seed or weak-seed table. K=2 encode
-or decode calls with an ID above 256 return `WirehairV2_InvalidInput`; they do
-not alias a supported direction. The serialized `seed_attempt` is therefore
+The arithmetic uses bytewise XOR and multiplication in the byte polynomial
+basis modulo `0x14d` (`x^8 + x^6 + x^3 + x^2 + 1`). Any two distinct
+supported K=2 IDs have a nonzero 2-by-2 determinant, so they recover both
+source blocks without a construction seed or weak-seed table. K=2 encode or
+decode calls with an ID above 256 return `WirehairV2_InvalidInput`; they do not
+alias a supported direction. The serialized `seed_attempt` is therefore
 always zero, and a nonzero value is rejected as `WirehairV2_BadSeed`.
 
 This finite ID domain is part of the profile identity rather than an
 implementation limit: a two-dimensional linear code over GF(256) has only 257
 projective directions. Applications needing more K=2 repair IDs must select a
 different versioned profile rather than wrapping IDs under this one.
+
+The complete K=2 packet-ID mapping and field arithmetic are frozen by a
+version-2 compatibility stream in `codec/V2TinyMDSTest.cpp`, generated through
+the public profile API and checked against an independent reference mapping
+and `0x14d` multiplier. Its first fixture uses the two-byte basis vectors
+`[1,0]` and `[0,1]`, so every encoded packet is exactly its `[alpha,beta]`
+row. Its second fixture uses a zero first source and the bytes `0..255` as the
+second source; IDs `0..256` therefore cover the complete 256-by-256
+multiplication table. The stream records the profile ID, exact serialized
+descriptor and source bytes, dimensions, and every ID, expected coefficient
+pair, encoded length, and encoded packet. The resulting stream is 72,094 bytes
+and its independently reproduced SHA-256 digest is
+`03bced599bfe6bb916cc26d15987ee86ed680e129fed45c3b9b897f767eb67ca`.
+This exhaustive wire golden is distinct from the all-pairs round-trip test:
+the latter proves the MDS property, while the digest prevents a coordinated
+encoder/decoder permutation or field-arithmetic change from silently changing
+the published wire equations. Digest drift requires a new profile ID; this
+golden must not be refreshed under the existing ID.
+
+The digest fixtures use full K=2 source blocks. K=1 repetition packet bytes
+and K=2 partial-systematic lengths/zero-padding remain separately pinned by
+`codec/V2PacketGoldenTest.cpp`, `codec/V2ProfileTest.cpp`, and the K1 and
+every-tail-length checks in `codec/V2TinyMDSTest.cpp`.
 
 ### Non-normative July 2026 mixed/mix3 certification snapshot
 
@@ -293,11 +317,12 @@ precode profile ID, computed over every supported block count `K = 2..64000`
 as a single streaming digest of the complete equation-affecting expansion.
 The exact digest stream is documented in `codec/WirehairV2Fingerprint.h`; the
 frozen constants live in `codec/V2FingerprintTest.cpp`. The fixed-domain
-tiny-MDS profile instead pins its canonical-name digest, exhaustively decodes
-every ordered pair of its 257 K=2 packet directions at full and partial source
-tails, and freezes representative descriptor/packet bytes. Representative
-goldens for every family live in `codec/V2PacketGoldenTest.cpp` (with
-additional small-K cases in `codec/V2ProfileTest.cpp`). After building,
+tiny-MDS profile instead pins its canonical-name digest and complete 257-ID
+coefficient/packet stream, exhaustively decodes every ordered pair of its 257
+K=2 packet directions at full and partial source tails, and freezes
+representative descriptor/packet bytes. Representative goldens for every
+family live in `codec/V2PacketGoldenTest.cpp` (with additional small-K cases
+in `codec/V2ProfileTest.cpp`). After building,
 `wirehair_v2_fingerprint_test --print-goldens` and
 `wirehair_v2_packet_golden_test --print-goldens` print the paste-ready
 precode/packet constant blocks; unset constants fail the tests rather than

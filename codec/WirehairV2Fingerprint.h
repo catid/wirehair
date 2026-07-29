@@ -21,11 +21,12 @@
     This module folds the complete precode equation-affecting expansion for
     EVERY supported block count K into one SHA-256 per versioned contract ID.
     The fixed-domain tiny-MDS profile is frozen separately by its canonical
-    name digest, exhaustive projective-line tests, and packet goldens.  The
-    all-K precode digests are compared against checked-in golden constants by
-    V2FingerprintTest.cpp.  Drift under a public profile ID is a compatibility
-    bug; drift under a stable benchmark target invalidates cross-run
-    experiment identity.  Neither is a golden to update silently.
+    name digest, a complete 257-ID coefficient/packet-stream and GF(256)
+    arithmetic digest, exhaustive projective-line tests, and representative
+    packet goldens.  The all-K precode digests are compared against checked-in
+    golden constants by V2FingerprintTest.cpp.  Drift under a public profile ID
+    is a compatibility bug; drift under a stable benchmark target invalidates
+    cross-run experiment identity.  Neither is a golden to update silently.
 
     Stream layout (fingerprint version 1).  Every integer is unsigned
     little-endian; SHA-256 output bytes follow the FIPS 180-4 big-endian word

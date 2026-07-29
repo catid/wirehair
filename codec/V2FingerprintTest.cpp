@@ -10,8 +10,8 @@
 #include <vector>
 
 /*
-    All-K equation-freeze test for public serialized V2 profiles and stable
-    benchmark-only architecture targets.
+    All-K equation-freeze test for public serialized V2 precode profiles and
+    stable precode benchmark-only architecture targets.
 
     For every supported K this digests the complete equation-affecting
     expansion of each versioned contract (see WirehairV2Fingerprint.h for the
