@@ -13,11 +13,14 @@ one phase into a directory that must not already exist.
 """
 
 import argparse
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 import gzip
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import signal
@@ -3577,7 +3580,226 @@ def _replay_result(
     return receipt, evidence
 
 
-def build_summaries(directory, manifest, output_directory):
+_AUTHENTICATED_RECEIPT_PROJECTION_FIELDS = (
+    "arms",
+    "contrasts",
+    "replicates",
+    "stream_sha256",
+    "context",
+    "evidence",
+)
+
+_REPLAY_PROCESS_CONTEXT = None
+
+
+def _authenticated_receipt_projection(receipt):
+    """Return only reducer inputs after the complete native replay succeeds."""
+    if (
+        not isinstance(receipt, dict)
+        or any(
+            name not in receipt
+            for name in _AUTHENTICATED_RECEIPT_PROJECTION_FIELDS
+        )
+    ):
+        raise CampaignError("authenticated receipt projection is incomplete")
+    return {
+        name: receipt[name]
+        for name in _AUTHENTICATED_RECEIPT_PROJECTION_FIELDS
+    }
+
+
+def _initialize_replay_process(directory, replay_manifest, manifest_sha256):
+    """Install immutable replay state once in each bounded pool process."""
+    global _REPLAY_PROCESS_CONTEXT
+    if _REPLAY_PROCESS_CONTEXT is not None:
+        raise CampaignError("replay process context was initialized twice")
+    _REPLAY_PROCESS_CONTEXT = (
+        Path(directory),
+        replay_manifest,
+        manifest_sha256,
+    )
+
+
+def _replay_process_task(task):
+    """Fully authenticate one result and return a compact ordered projection."""
+    _parent_signal_safe_point()
+    if _REPLAY_PROCESS_CONTEXT is None:
+        raise CampaignError("replay process context is not initialized")
+    assignment, job = task
+    directory, replay_manifest, manifest_sha256 = _REPLAY_PROCESS_CONTEXT
+    try:
+        receipt, evidence = _replay_result(
+            directory,
+            replay_manifest,
+            manifest_sha256,
+            assignment,
+            job,
+        )
+        result = {
+            "status": "ok",
+            "order": assignment["order"],
+            "job_id": job["job_id"],
+            "receipt": _authenticated_receipt_projection(receipt),
+            "evidence": evidence,
+        }
+    except (CampaignError, peel_codec.MeasurementError, ValueError) as error:
+        if isinstance(error, CampaignError):
+            kind = "campaign"
+        elif isinstance(error, peel_codec.MeasurementError):
+            kind = "measurement"
+        else:
+            kind = "value"
+        result = {
+            "status": "error",
+            "order": assignment["order"],
+            "job_id": job["job_id"],
+            "exception_kind": kind,
+            "message": str(error),
+        }
+    _parent_signal_safe_point()
+    return result
+
+
+def _validate_replay_process_result(result, assignment, job):
+    if (
+        not isinstance(result, dict)
+        or type(result.get("status")) is not str
+        or result["status"] not in ("ok", "error")
+        or type(result.get("order")) is not int
+        or result.get("order") != assignment["order"]
+        or type(result.get("job_id")) is not str
+        or result.get("job_id") != job["job_id"]
+    ):
+        raise CampaignError("parallel replay result is inconsistent")
+    if result["status"] == "error":
+        if (
+            set(result) != {
+                "status", "order", "job_id", "exception_kind", "message",
+            }
+            or result["exception_kind"]
+                not in ("campaign", "measurement", "value")
+            or type(result["message"]) is not str
+        ):
+            raise CampaignError("parallel replay result is inconsistent")
+        exception_type = {
+            "campaign": CampaignError,
+            "measurement": peel_codec.MeasurementError,
+            "value": ValueError,
+        }[result["exception_kind"]]
+        raise exception_type(result["message"])
+    if (
+        set(result) != {
+            "status", "order", "job_id", "receipt", "evidence",
+        }
+        or not isinstance(result["receipt"], dict)
+        or set(result["receipt"])
+            != set(_AUTHENTICATED_RECEIPT_PROJECTION_FIELDS)
+        or not isinstance(result["evidence"], dict)
+        or set(result["evidence"]) != {
+            "compressed_sha256", "uncompressed_sha256",
+            "compressed_bytes", "uncompressed_bytes",
+        }
+    ):
+        raise CampaignError("parallel replay result is inconsistent")
+    return result["receipt"], result["evidence"]
+
+
+def _replay_worker_count(manifest, replay_workers, job_count):
+    value = manifest.get("workers") if replay_workers is None \
+        else replay_workers
+    if (
+        type(value) is not int
+        or not 1 <= value <= MAX_WORKERS
+        or type(job_count) is not int
+        or job_count < 1
+    ):
+        raise CampaignError("replay worker count is invalid")
+    return min(value, job_count)
+
+
+@contextmanager
+def _ordered_replayed_results(
+        directory, manifest, manifest_sha256, *, replay_workers=None):
+    """Yield fully replayed receipts in manifest order with bounded storage."""
+    assignments = tuple(manifest["assignments"])
+    jobs = tuple(manifest["pre_cpu_jobs"])
+    if len(assignments) != len(jobs) or not jobs:
+        raise CampaignError("campaign replay population is incomplete")
+    workers = _replay_worker_count(
+        manifest, replay_workers, len(jobs))
+    if workers == 1:
+        def serial_results():
+            for assignment, job in zip(assignments, jobs):
+                _parent_signal_safe_point()
+                receipt, evidence = _replay_result(
+                    directory,
+                    manifest,
+                    manifest_sha256,
+                    assignment,
+                    job,
+                )
+                yield (
+                    _authenticated_receipt_projection(receipt),
+                    evidence,
+                )
+
+        yield serial_results()
+        return
+
+    replay_manifest = {
+        "bandtiming_protocol": manifest["bandtiming_protocol"],
+        "runtime_bindings": manifest["runtime_bindings"],
+    }
+    executor = ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=_initialize_replay_process,
+        initargs=(
+            str(Path(directory).resolve()),
+            replay_manifest,
+            manifest_sha256,
+        ),
+    )
+    pending = deque()
+    population = iter(zip(assignments, jobs))
+
+    def submit_one():
+        try:
+            assignment, job = next(population)
+        except StopIteration:
+            return False
+        pending.append((
+            assignment,
+            job,
+            executor.submit(
+                _replay_process_task, (assignment, job)),
+        ))
+        return True
+
+    try:
+        for unused in range(min(len(jobs), workers * 2)):
+            if not submit_one():
+                break
+
+        def parallel_results():
+            while pending:
+                _parent_signal_safe_point()
+                assignment, job, future = pending.popleft()
+                result = future.result()
+                _parent_signal_safe_point()
+                yield _validate_replay_process_result(
+                    result, assignment, job)
+                submit_one()
+
+        yield parallel_results()
+    finally:
+        for unused_assignment, unused_job, future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def build_summaries(
+        directory, manifest, output_directory, *, replay_workers=None):
     """Strictly replay all results and build deterministic compact summaries."""
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -3591,23 +3813,39 @@ def build_summaries(directory, manifest, output_directory):
     job_evidence = JobEvidenceAggregator(manifest["phase"], jobs)
     result_files = []
     stream_hashes = set()
-    with AtomicGzipJsonLines(ledger_path) as ledger:
-        for assignment, job in zip(manifest["assignments"], jobs):
-            _parent_signal_safe_point()
-            receipt, evidence = _replay_result(
-                directory, manifest, manifest_sha256, assignment, job)
-            stream = receipt["stream_sha256"]
-            if stream in stream_hashes:
-                raise CampaignError("duplicate native stream hash")
-            stream_hashes.add(stream)
-            job_evidence.add(job, receipt)
-            result_files.append({
-                "path": assignment["output"],
-                **evidence,
-                "stream_sha256": stream,
-            })
-            for replicate in receipt["replicates"]:
-                ledger.write(aggregator.add_replicate(job, replicate))
+    with _ordered_replayed_results(
+            directory,
+            manifest,
+            manifest_sha256,
+            replay_workers=replay_workers,
+    ) as replayed:
+        with AtomicGzipJsonLines(ledger_path) as ledger:
+            for assignment, job in zip(manifest["assignments"], jobs):
+                _parent_signal_safe_point()
+                try:
+                    receipt, evidence = next(replayed)
+                except StopIteration:
+                    raise CampaignError(
+                        "parallel replay omitted a result")
+                stream = receipt["stream_sha256"]
+                if stream in stream_hashes:
+                    raise CampaignError("duplicate native stream hash")
+                stream_hashes.add(stream)
+                job_evidence.add(job, receipt)
+                result_files.append({
+                    "path": assignment["output"],
+                    **evidence,
+                    "stream_sha256": stream,
+                })
+                for replicate in receipt["replicates"]:
+                    ledger.write(aggregator.add_replicate(job, replicate))
+            try:
+                next(replayed)
+            except StopIteration:
+                pass
+            else:
+                raise CampaignError(
+                    "parallel replay produced extra results")
     ledger_evidence = ledger.evidence()
     aggregates = aggregator.finish()
     timing_and_thermal = job_evidence.finish()

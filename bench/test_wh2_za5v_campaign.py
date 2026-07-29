@@ -20,6 +20,7 @@ if str(BENCH) not in sys.path:
     sys.path.insert(0, str(BENCH))
 
 import wh2_za5v_campaign as campaign
+import wh2_za5v_parallel_verify as parallel_verify
 
 
 def synthetic_runtime_bindings():
@@ -44,6 +45,106 @@ def synthetic_runtime_bindings():
             "mode": 0o100644,
         },
     }
+
+
+def parallel_replay_fixture(directory, *, fault=None):
+    """Write a small, fully replayable four-candidate selection population."""
+    from test_band_timing_tools import (
+        band_context,
+        bandtiming_stdout,
+        parse_kwargs,
+    )
+
+    directory = Path(directory)
+    for name in ("jobs", "results", "logs"):
+        (directory / name).mkdir(parents=True)
+    thermal = directory / "thermal.csv"
+    thermal.write_text("fixture\n", encoding="ascii")
+    bindings = campaign.runtime_bindings(sys.executable, thermal)
+    jobs = campaign.build_pre_cpu_jobs("selection")
+    assignments = [
+        {
+            "order": index,
+            "job_id": job["job_id"],
+            "cpu": 2,
+            "job_file": f"jobs/{index:04d}.json",
+            "output": f"results/{index:04d}.json.gz",
+            "log": f"logs/{index:04d}.log",
+        }
+        for index, job in enumerate(jobs)
+    ]
+    manifest = {
+        "bandtiming_protocol": campaign.REQUIRED_BANDTIMING_PROTOCOL,
+        "phase": "selection",
+        "survivor": None,
+        "workers": 2,
+        "worker_cpus": [2],
+        "runtime_bindings": bindings,
+        "selection_contract": None,
+        "pre_cpu_jobs": list(jobs),
+        "assignments": assignments,
+        "frozen_roster_sha256": "a" * 64,
+        "pre_cpu_job_list_sha256":
+            campaign.canonical_sha256(list(jobs)),
+    }
+    manifest_sha256 = campaign.canonical_sha256(manifest)
+    campaign._write_job_files(
+        directory, manifest, manifest_sha256)
+
+    for index, (assignment, job) in enumerate(zip(assignments, jobs)):
+        context = band_context(cache_state=job["cache_state"])
+        context["bound"]["thermal_device"] = \
+            bindings["thermal"]["device"]
+        context["bound"]["thermal_inode"] = \
+            bindings["thermal"]["inode"]
+        fixture = {
+            "candidate": campaign.descriptor_from_job(job),
+            "schedule": job["schedule"],
+            "systematic_cache": job["systematic_cache"],
+            "cache_state": job["cache_state"],
+            "context": context,
+            "block_count": job["K"],
+            "block_bytes": job["block_bytes"],
+            "replicates": job["replicates"],
+            "warmups": job["warmup_replicates"],
+            "construction_seed": job["construction_seed_base"],
+            "loss_seed": job["loss_seed_base"],
+            "inner_reps": job["inner_reps"],
+            "max_overhead": job["max_overhead"],
+            "required_margin": job["required_margin"],
+            "loss": job["loss"],
+        }
+        measurement = campaign.band.parse_bandtiming_output(
+            bandtiming_stdout(
+                schema=campaign.band.BANDTIMING_SCHEMA_V2,
+                **fixture,
+            ),
+            _protocol=campaign.band.BANDTIMING_PROTOCOL_V2,
+            **parse_kwargs(**fixture),
+        )
+        receipt = measurement.as_dict()
+        if fault == "derived" and index == 3:
+            receipt["replicates"][0]["loss_seed"] ^= 1
+        wall_started = 100 + index * 2
+        wall_finished = wall_started + 1
+        if fault == "envelope" and index == 3:
+            wall_finished = wall_started
+        campaign.atomic_gzip_json(
+            directory / assignment["output"],
+            {
+                "schema": campaign.RESULT_SCHEMA,
+                "manifest_sha256": manifest_sha256,
+                "job": job,
+                "assignment": assignment,
+                "wall_started_unix_ns": wall_started,
+                "wall_finished_unix_ns": wall_finished,
+                "runtime_bindings_before": bindings,
+                "runtime_bindings_after": bindings,
+                "receipt": receipt,
+            },
+        )
+        (directory / assignment["log"]).touch()
+    return manifest
 
 
 def synthetic_clean_selection_blockers(candidate):
@@ -1585,6 +1686,229 @@ def synthetic_arm(job, scope, arm):
     return next(
         item for item in job["arms"]
         if item["scope"] == scope and item["arm"] == arm)
+
+
+class ParallelReplayTests(unittest.TestCase):
+    def test_serial_parallel_and_import_only_wrapper_are_byte_identical(self):
+        with (
+                mock.patch.object(campaign, "K_VALUES", (2,)),
+                mock.patch.object(campaign, "SELECTION_REPLICATES", 3),
+                tempfile.TemporaryDirectory() as temporary,
+        ):
+            root = Path(temporary)
+            evidence = root / "evidence"
+            manifest = parallel_replay_fixture(evidence)
+            serial_directory = root / "serial"
+            parallel_directory = root / "parallel"
+            wrapper_directory = root / "wrapper"
+            serial = campaign.build_summaries(
+                evidence,
+                manifest,
+                serial_directory,
+                replay_workers=1,
+            )
+            parallel = campaign.build_summaries(
+                evidence,
+                manifest,
+                parallel_directory,
+            )
+            with mock.patch.object(
+                    parallel_verify,
+                    "SUPPORTED_RUNNER_SHA256",
+                    frozenset({
+                        manifest["runtime_bindings"]["runner"]["sha256"],
+                    })):
+                wrapped = parallel_verify.parallel_build_summaries(
+                    campaign,
+                    Path(campaign.__file__),
+                    evidence,
+                    manifest,
+                    wrapper_directory,
+                )
+            self.assertTrue(
+                campaign.peel_codec._same_typed_json(serial, parallel))
+            self.assertTrue(
+                campaign.peel_codec._same_typed_json(serial, wrapped))
+            for name in ("cell-ledger.jsonl.gz", "summary.json.gz"):
+                reference = (serial_directory / name).read_bytes()
+                self.assertEqual(
+                    (parallel_directory / name).read_bytes(), reference)
+                self.assertEqual(
+                    (wrapper_directory / name).read_bytes(), reference)
+
+    def test_parallel_replay_preserves_serial_fault_rejection(self):
+        for fault in ("envelope", "derived"):
+            with (
+                    self.subTest(fault=fault),
+                    mock.patch.object(campaign, "K_VALUES", (2,)),
+                    mock.patch.object(
+                        campaign, "SELECTION_REPLICATES", 3),
+                    tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                evidence = root / "evidence"
+                manifest = parallel_replay_fixture(
+                    evidence, fault=fault)
+                with self.assertRaises(Exception) as serial_error:
+                    campaign.build_summaries(
+                        evidence,
+                        manifest,
+                        root / "serial",
+                        replay_workers=1,
+                    )
+                with self.assertRaises(Exception) as parallel_error:
+                    campaign.build_summaries(
+                        evidence,
+                        manifest,
+                        root / "parallel",
+                        replay_workers=2,
+                    )
+                with (
+                        mock.patch.object(
+                            parallel_verify,
+                            "SUPPORTED_RUNNER_SHA256",
+                            frozenset({
+                                manifest["runtime_bindings"][
+                                    "runner"]["sha256"],
+                            })),
+                        self.assertRaises(Exception) as wrapper_error,
+                ):
+                    parallel_verify.parallel_build_summaries(
+                        campaign,
+                        Path(campaign.__file__),
+                        evidence,
+                        manifest,
+                        root / "wrapper",
+                        replay_workers=2,
+                    )
+                for observed in (
+                        parallel_error.exception,
+                        wrapper_error.exception):
+                    self.assertIs(
+                        type(observed), type(serial_error.exception))
+                    self.assertEqual(
+                        str(observed), str(serial_error.exception))
+                for output in (
+                        root / "serial",
+                        root / "parallel",
+                        root / "wrapper"):
+                    self.assertFalse(
+                        (output / "cell-ledger.jsonl.gz").exists())
+                    self.assertFalse(
+                        (output / "summary.json.gz").exists())
+
+    def test_import_only_verifier_patches_and_restores_only_builder(self):
+        with (
+                mock.patch.object(campaign, "K_VALUES", (2,)),
+                mock.patch.object(campaign, "SELECTION_REPLICATES", 3),
+                tempfile.TemporaryDirectory() as temporary,
+        ):
+            root = Path(temporary)
+            evidence = root / "evidence"
+            manifest = parallel_replay_fixture(evidence)
+            serial = campaign.build_summaries(
+                evidence,
+                manifest,
+                root / "serial",
+                replay_workers=1,
+            )
+            manifest_path = evidence / "manifest.json"
+            original_read = campaign.read_canonical_json
+            original_build = campaign.build_summaries
+
+            def read_fixture(path):
+                if Path(path) == manifest_path:
+                    return manifest, campaign.canonical_sha256(manifest)
+                return original_read(path)
+
+            def invoke_patched_builder(unused_directory):
+                self.assertIsNot(
+                    campaign.build_summaries, original_build)
+                return campaign.build_summaries(
+                    evidence, manifest, root / "wrapped")
+
+            with (
+                    mock.patch.object(
+                        parallel_verify,
+                        "_load_frozen_campaign",
+                        return_value=campaign),
+                    mock.patch.object(
+                        parallel_verify,
+                        "SUPPORTED_RUNNER_SHA256",
+                        frozenset({
+                            manifest["runtime_bindings"][
+                                "runner"]["sha256"],
+                        })),
+                    mock.patch.object(
+                        campaign,
+                        "read_canonical_json",
+                        side_effect=read_fixture),
+                    mock.patch.object(campaign, "_validate_manifest"),
+                    mock.patch.object(
+                        campaign,
+                        "verify_campaign",
+                        side_effect=invoke_patched_builder),
+            ):
+                imported, wrapped = \
+                    parallel_verify.verify_with_parallel_replay(
+                        Path(campaign.__file__),
+                        evidence,
+                        replay_workers=1,
+                    )
+            self.assertIs(imported, campaign)
+            self.assertIs(campaign.build_summaries, original_build)
+            self.assertTrue(
+                campaign.peel_codec._same_typed_json(serial, wrapped))
+            for name in ("cell-ledger.jsonl.gz", "summary.json.gz"):
+                self.assertEqual(
+                    (root / "wrapped" / name).read_bytes(),
+                    (root / "serial" / name).read_bytes(),
+                )
+
+    def test_import_only_verifier_rejects_unbound_runner(self):
+        bindings = synthetic_runtime_bindings()
+        bindings["runner"]["path"] = "/tmp/not-the-imported-runner.py"
+        with self.assertRaisesRegex(
+                campaign.CampaignError,
+                "not manifest-bound"):
+            parallel_verify._assert_imported_runner_binding(
+                campaign, bindings)
+
+    def test_import_only_verifier_rejects_unsupported_runner_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            thermal = Path(temporary) / "thermal.csv"
+            thermal.write_text("fixture\n", encoding="ascii")
+            bindings = campaign.runtime_bindings(
+                sys.executable, thermal)
+            bindings["runner"]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(
+                    campaign.CampaignError,
+                    "does not support"):
+                parallel_verify._assert_imported_runner_binding(
+                    campaign, bindings)
+
+    def test_replay_worker_counts_are_typed_and_bounded(self):
+        manifest = {"workers": 4}
+        self.assertEqual(
+            campaign._replay_worker_count(manifest, None, 10), 4)
+        self.assertEqual(
+            parallel_verify._worker_count(
+                campaign, manifest, None, 10), 4)
+        self.assertEqual(
+            campaign._replay_worker_count(manifest, 8, 3), 3)
+        self.assertEqual(
+            parallel_verify._worker_count(
+                campaign, manifest, 8, 3), 3)
+        for value in (False, 0, 33, 1.0, "2"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "worker count"):
+                    campaign._replay_worker_count(
+                        manifest, value, 10)
+                with self.assertRaisesRegex(
+                        campaign.CampaignError, "worker count"):
+                    parallel_verify._worker_count(
+                        campaign, manifest, value, 10)
 
 
 class RecoveryAggregationTests(unittest.TestCase):
