@@ -7,12 +7,12 @@ Primary Beads: `wirehair-rv4a`, `wirehair-rv4a.1`,
 
 ## 2026-07-29 current state and next work
 
-The branch is pushed through `64d884e`.  The authenticated `wirehair-za5v`
-architecture campaign is closed with the policy-required `no-survivor`
-decision recorded below; dispatch-v1 remains unchanged.  Its source-pinned
-parallel verifier reproduces the complete 2,376-job result in 6 minutes
-44 seconds rather than roughly 3 hours 21 minutes.  Stored-summary replay is
-now bounded to 32 MiB compressed and 256 MiB decompressed by `c2d18fa`.
+The authenticated `wirehair-za5v` architecture campaign is closed with the
+policy-required `no-survivor` decision recorded below; dispatch-v1 remains
+unchanged.  Its source-pinned parallel verifier reproduces the complete
+2,376-job result in 6 minutes 44 seconds rather than roughly 3 hours
+21 minutes.  Stored-summary replay is bounded to 32 MiB compressed and
+256 MiB decompressed by `c2d18fa`.
 
 `wirehair-4azp` is also closed.  Commits `d029397` and `64d884e` add and fully
 freeze the explicit `WIREHAIR_V2_PROFILE_TINY_MDS_2026_07` profile without
@@ -26,20 +26,35 @@ Release, strict ASan+UBSan, package, exhaustive ordered-pair/tail, OOM/fault,
 and all-K fingerprint gates pass; the final all-K run took 2,673.07 seconds.
 
 The active P0 is the new, non-retroactive `wirehair-rv4a` seed-repair
-experiment.  Its pre-outcome repair-v1 design is frozen in Beads.  It retests
-the raw speed leader `pure8_s0m1_d3` and raw reliability leader
-`pure9_s0m1_d3` with the same paired roots, eight total attempts, the existing
-golden-ratio precode/packet attempt stepping, and a lazy structural selector:
-healthy attempt-zero roots pay no probe, while weak roots are selected by a
-payload-independent zero-RHS rank check and the chosen attempt is serialized
-for the decoder.  No per-K tables or seed hand fixes are allowed.  Campaign
-v3 uses block_bytes=2, every K=2..100, all six hard schedules, 768 training
-roots, and prebound joint sealed random-root plus production-root lanes.
-Representative wider even block sizes are prelaunch correctness gates rather
-than roster axes.  Work is split into selector/contracts (`rv4a.1`),
-authenticated v3 tooling (`rv4a.2`), and the monitored campaign
-(`rv4a.3`).  No repair-v1 training or sealed outcome has been launched or
-read.
+experiment.  Its selector/contracts child `wirehair-rv4a.1` is verified and
+closed by commits `7b43515` and `c120c92`.  The frozen repair-v1 policy SHA-256
+is `5e67a150d1f909d6ed80468185fa2dd0e82eb2fc3486c0fa662e213cf3100b42`.
+The provisional pure8 ID/SHA is `19cccf775ce0bf09` /
+`19cccf775ce0bf098c9a425cb349714c4c4a880e7cf136c3bc365e13c05089a5`;
+pure9 is `a530f9105beaa450` /
+`a530f9105beaa450dee70ad9b2a5cc54c944d3cd47f0aa6534630b8971608541`.
+Healthy attempt-zero roots pay no probe; weak roots use the frozen
+payload-independent zero-RHS first-full-rank selector over attempts 0..7, and
+the decoder consumes exactly the serialized selected attempt without search.
+No per-K tables or seed hand fixes are allowed.
+
+Selector verification covers every K=2..100, all eight attempts, seven even
+widths with full/partial tails and distinct payloads, exact semantic bridges,
+OOM/error transactions and telemetry, endpoint state restoration, and
+concurrent pure8/pure9/real dispatch solves.  Release, strict ASan+UBSan,
+Clang ThreadSanitizer, production-symbol isolation, and the 575,991-cell
+public fingerprint gate pass.  Repeated primary and independent source audits
+ended clean.
+
+`wirehair-rv4a.2` is now claimed and is the active implementation task:
+build the additive, authenticated v3 native/parser/campaign protocol without
+changing bandtiming v2 or public dispatch.  Campaign v3 uses block_bytes=2,
+every K=2..100, all six hard schedules, 768 training roots, and prebound joint
+sealed random-root plus production-root lanes.  Representative wider even
+block sizes are prelaunch correctness gates rather than roster axes.
+`wirehair-rv4a.3` remains blocked until the v3 tooling, immutable manifests,
+and all pre-outcome hashes are verified.  No repair-v1 training or sealed
+outcome has been launched or read.
 
 ## 2026-07-29 authenticated all-K za5v result
 
