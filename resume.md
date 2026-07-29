@@ -1,8 +1,45 @@
-# Resume notes — WH2 peel-training audit
+# Resume notes — WH2 codec performance and reliability
 
 Audit date: 2026-07-29
 Branch: `feat/wh2-opcount-cost-model`
-Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
+Primary Beads: `wirehair-rv4a`, `wirehair-rv4a.1`,
+`wirehair-rv4a.2`, `wirehair-rv4a.3`
+
+## 2026-07-29 current state and next work
+
+The branch is pushed through `64d884e`.  The authenticated `wirehair-za5v`
+architecture campaign is closed with the policy-required `no-survivor`
+decision recorded below; dispatch-v1 remains unchanged.  Its source-pinned
+parallel verifier reproduces the complete 2,376-job result in 6 minutes
+44 seconds rather than roughly 3 hours 21 minutes.  Stored-summary replay is
+now bounded to 32 MiB compressed and 256 MiB decompressed by `c2d18fa`.
+
+`wirehair-4azp` is also closed.  Commits `d029397` and `64d884e` add and fully
+freeze the explicit `WIREHAIR_V2_PROFILE_TINY_MDS_2026_07` profile without
+changing `WIREHAIR_V2_PROFILE_CURRENT`.  K=1 is exact repetition for every
+uint32 packet ID.  K=2 maps IDs 0..256 to all points of
+`P^1(GF(256))`, rejects larger IDs, and recovers from every two distinct
+supported IDs with no weak seeds.  The complete public-API mapping and
+GF(256)/0x14d arithmetic witness is 72,094 bytes with SHA-256
+`03bced599bfe6bb916cc26d15987ee86ed680e129fed45c3b9b897f767eb67ca`.
+Release, strict ASan+UBSan, package, exhaustive ordered-pair/tail, OOM/fault,
+and all-K fingerprint gates pass; the final all-K run took 2,673.07 seconds.
+
+The active P0 is the new, non-retroactive `wirehair-rv4a` seed-repair
+experiment.  Its pre-outcome repair-v1 design is frozen in Beads.  It retests
+the raw speed leader `pure8_s0m1_d3` and raw reliability leader
+`pure9_s0m1_d3` with the same paired roots, eight total attempts, the existing
+golden-ratio precode/packet attempt stepping, and a lazy structural selector:
+healthy attempt-zero roots pay no probe, while weak roots are selected by a
+payload-independent zero-RHS rank check and the chosen attempt is serialized
+for the decoder.  No per-K tables or seed hand fixes are allowed.  Campaign
+v3 uses block_bytes=2, every K=2..100, all six hard schedules, 768 training
+roots, and prebound joint sealed random-root plus production-root lanes.
+Representative wider even block sizes are prelaunch correctness gates rather
+than roster axes.  Work is split into selector/contracts (`rv4a.1`),
+authenticated v3 tooling (`rv4a.2`), and the monitored campaign
+(`rv4a.3`).  No repair-v1 training or sealed outcome has been launched or
+read.
 
 ## 2026-07-29 authenticated all-K za5v result
 
