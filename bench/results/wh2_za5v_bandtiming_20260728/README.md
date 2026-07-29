@@ -14,6 +14,53 @@ historical screening, but are explicitly non-promotable.  Promotion-grade
 reruns use the witnessed v2 protocol and must repeat the complete protected
 selection before any holdout.
 
+## Authenticated all-K witnessed-v2 selection
+
+The promotion-grade rerun completed on 2026-07-29 in
+`/home/catid/wh2-za5v-selection-51fd529-v2`.  It contains four candidates,
+every K=2..100, all six schedules, 768 matched raw replicates per
+candidate/K/schedule, 2,376 jobs, and 1,824,768 raw recovery cells.  The
+serial finalizer fully replayed every native stream before publishing any
+decision; a separately hardened 32-process verifier then independently
+replayed and reproduced the artifacts.
+
+- Manifest SHA-256:
+  `aa962f62b50b310987b62c4fc70abc7314f82ee9027ea1d6f180bbf38d918786`
+- Completion SHA-256:
+  `692a0f58fc3e717b9fe6d25dd78ec9eb77c3fb29308612b9005b81fdd18fe704`
+- Cell-ledger SHA-256:
+  `fa63a95b233cbae26c30648f2f6554e173be622f31f55e4b547874ad7a79e8b1`
+- Summary SHA-256:
+  `250b6cfa3195637079a96f89a6fd4497eab9deaa4bd4f8280306ee0034f0c280`
+- Empty worker logs: all 2,376
+- Independent replay receipt: exact manifest/completion hashes, 2,376 jobs,
+  and 1,824,768 raw cells; wall time 6 minutes 44 seconds.
+
+The frozen decision is `no-survivor`, so the frozen policy forbids a holdout
+and retains dispatch-v1.  Raw architecture metrics, before any seed repair,
+are:
+
+| Candidate | Raw Pareto | Unique weak seeds | Unrecovered @ +64 | Tail AUC | Direct / dispatch | Decoder / WH1 | Encoder / WH1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `pure8_s0_d3` | yes | 1,166 | 6,996 | 458,921 | 0.8161 | 1.4521 | 1.6314 |
+| `pure8_s0m1_d3` | yes | 1,208 | 7,248 | 475,309 | 0.8024 | 1.4294 | 1.6081 |
+| `pure8_s0m1_d5` | no | 1,786 | 10,716 | 700,757 | 0.8526 | 1.5097 | 1.7277 |
+| `pure9_s0m1_d3` | yes | 1,034 | 6,204 | 406,561 | 0.8549 | 1.5116 | 1.6825 |
+| dispatch-v1 | control | — | 4,404 | 286,958 | 1.0000 | — | — |
+| WH1 | control | — | 12,491 | 822,794 | — | 1.0000 | 1.0000 |
+
+`pure8_s0m1_d3` leads direct solve speed at about 19.8% faster than
+dispatch.  `pure9_s0m1_d3` leads candidate recovery, roughly halving WH1's
+unrecovered count and tail AUC, but remains about 41% worse than dispatch on
+both measures and about 51% slower than WH1 end-to-end decode.  Every
+candidate-only regression is classified as constructor-weak and therefore
+potentially seed-repairable; nonrepairable regressions and runtime errors are
+both zero.  These descriptive facts justify later seed-repair experiments,
+not promotion from this evidence.
+
+Campaign thermal evidence has 13,102/13,102 valid rows, CPU Tctl maximum
+66.875 C, DIMM maximum 57.0 C, and zero corrected or uncorrected EDAC errors.
+
 ## Frozen completion screen
 
 - Raw archive: `frozen_screen_raw.tar.gz`

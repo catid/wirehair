@@ -1,8 +1,54 @@
 # Resume notes — WH2 peel-training audit
 
-Audit date: 2026-07-28
+Audit date: 2026-07-29
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
+
+## 2026-07-29 authenticated all-K za5v result
+
+The fresh witnessed-v2 `wirehair-za5v` selection completed and independently
+replayed all 2,376 jobs and 1,824,768 matched raw cells.  The immutable
+selection directory is
+`/home/catid/wh2-za5v-selection-51fd529-v2`.  Its manifest SHA-256 is
+`aa962f62b50b310987b62c4fc70abc7314f82ee9027ea1d6f180bbf38d918786`;
+completion SHA-256 is
+`692a0f58fc3e717b9fe6d25dd78ec9eb77c3fb29308612b9005b81fdd18fe704`;
+ledger SHA-256 is
+`fa63a95b233cbae26c30648f2f6554e173be622f31f55e4b547874ad7a79e8b1`;
+and summary SHA-256 is
+`250b6cfa3195637079a96f89a6fd4497eab9deaa4bd4f8280306ee0034f0c280`.
+Every worker log is empty.  A source-pinned 32-process independent verifier
+reproduced the exact completion hash, job count, and raw-cell count in
+6 minutes 44 seconds after its serial authenticated finalizer completed.
+
+The frozen decision is `no-survivor`; no holdout is permitted.  Dispatch-v1
+remains the production profile.  Three candidates are on the descriptive raw
+Pareto surface, but every candidate misses the recovery and cross-codec
+throughput gates:
+
+| Candidate | Weak constructions | Unrecovered @ +64 | Tail AUC | Direct / dispatch | Decoder / WH1 | Encoder / WH1 |
+|---|---:|---:|---:|---:|---:|---:|
+| `pure8_s0_d3` | 1,166 | 6,996 | 458,921 | 0.8161 | 1.4521 | 1.6314 |
+| `pure8_s0m1_d3` | 1,208 | 7,248 | 475,309 | 0.8024 | 1.4294 | 1.6081 |
+| `pure8_s0m1_d5` | 1,786 | 10,716 | 700,757 | 0.8526 | 1.5097 | 1.7277 |
+| `pure9_s0m1_d3` | 1,034 | 6,204 | 406,561 | 0.8549 | 1.5116 | 1.6825 |
+| dispatch-v1 control | — | 4,404 | 286,958 | 1.0000 | — | — |
+| WH1 control | — | 12,491 | 822,794 | — | 1.0000 | 1.0000 |
+
+Thus the best direct-solve arm is `pure8_s0m1_d3` at about 19.8% faster than
+dispatch, while the most reliable arm is `pure9_s0m1_d3`: it halves the WH1
+unrecovered count and tail area, but is still about 41% worse than dispatch on
+both recovery measures and about 51% slower than WH1 end-to-end decode.  All
+candidate-only recovery regressions are constructor-weak/seed-repairable:
+there are zero nonrepairable regressions and zero constructor, encoder,
+decoder, or direct runtime errors.  Preserve these raw counts.  A later
+seed-repair experiment may retest the reliability-leading and speed-leading
+architectures, but it is a new experiment and cannot retroactively promote
+this selection.
+
+Authenticated campaign thermal evidence covers 13,102/13,102 valid rows on
+CPUs 0-31, with maximum CPU Tctl 66.875 C, maximum DIMM temperature 57.0 C,
+and zero corrected or uncorrected EDAC errors.
 
 ## 2026-07-29 direct-solve evidence witness repair
 
@@ -64,9 +110,9 @@ Current promotion artifacts are:
 - campaign tests:
   `1a5d2378c11bf2f69998dedf43204f0493fdf47f8082c61feae9d266ec25ec95`.
 
-Next: push this witnessed-v2 checkpoint, then start a completely fresh
-2,376-job selection directory.  Do not inspect candidate outcomes before its
-authenticated completion.
+Historical next step (completed): push this witnessed-v2 checkpoint and run a
+fresh 2,376-job selection without inspecting outcomes before authenticated
+completion.  The completed result is recorded above.
 
 ## 2026-07-29 protected selection replay fix
 
