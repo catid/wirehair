@@ -46,15 +46,59 @@ Clang ThreadSanitizer, production-symbol isolation, and the 575,991-cell
 public fingerprint gate pass.  Repeated primary and independent source audits
 ended clean.
 
-`wirehair-rv4a.2` is now claimed and is the active implementation task:
-build the additive, authenticated v3 native/parser/campaign protocol without
-changing bandtiming v2 or public dispatch.  Campaign v3 uses block_bytes=2,
-every K=2..100, all six hard schedules, 768 training roots, and prebound joint
-sealed random-root plus production-root lanes.  Representative wider even
-block sizes are prelaunch correctness gates rather than roster axes.
-`wirehair-rv4a.3` remains blocked until the v3 tooling, immutable manifests,
-and all pre-outcome hashes are verified.  No repair-v1 training or sealed
-outcome has been launched or read.
+`wirehair-rv4a.2` is verified and closed at pushed commit `7383e6b`.  The
+additive v3 native/parser/campaign protocol leaves bandtiming v2 and public
+dispatch unchanged.  Campaign v3 uses block_bytes=2, every K=2..100, all six
+hard schedules, 768 training roots, and prebound joint sealed random-root plus
+production-root lanes.  Representative wider even block sizes remain
+prelaunch correctness gates rather than roster axes.
+
+The retained canonical result-free plan is
+`/home/catid/wh2-rv4a2-result-free-plan-568a9673.json`, with exact file
+SHA-256
+`762a3c01984cb57b42f8fb771ba13a14e81f9fedb17e5451c16d93743a094283`.
+Its semantic plan, roster, policy, and seed-disjointness SHA-256 values are,
+respectively,
+`568a967393ab1b5a23f9cc518b2e87f91752972c0f5c94d4c00099f4d9087291`,
+`c4d29e2cacfe8fdf762dc449e803a8d5bfcdd7817b948c59da61580f219d0d7a`,
+`81d04c117d8fa414971057f8bd69a39d320139a872eac9c785f5ff8c73c02b20`,
+and
+`ca29960e58a231f2d0bb7212843ccdee84e7ff6e6c122e18fd29873e2bd8e7f2`.
+Training contains exactly 1,188 jobs, 912,384 recovery cells, 152,064 unique
+selectors, 7,299,072 attempt rows, and 110,398,464 native rows.  Its job/cell
+hashes are
+`70e0e4cc184fe478e53d8b877b35b434134d1d38a10b7d24c8eb52ecde259c0e`
+and
+`9dc8406a564df1f1d2bf5572e0580688a0dc0032453d60ecc31715e576e7d3cb`.
+Each possible winner has one prebound sealed template of 1,188 jobs, 304,128
+recovery cells, 25,443 unique selectors, 2,433,024 attempt rows, and
+36,799,488 native rows.  Pure8's sealed job/cell hashes are
+`dc7713a1ad4a4dcd4866c1617fc5b80b7e9b8011fc2e817b86f09f919ed31199`
+and
+`b54169a3a539087b96f58934d6ea5009e6d7a6d382bb8bb3c0677492d43f9d46`;
+pure9's are
+`4a9b72575f7a005cd839ab0c705c56a40b445e11e0122e46dbdfebb7f65ce2e9`
+and
+`c163f8f37a89dc9437304be3e4ea3ff757077049e8c55d45d04fe80e901e76b2`.
+
+The external runtime receipt is
+`/home/catid/wh2-rv4a2-preflight-pin-568a9673.json`, exact SHA-256
+`22ec26d578fcba5bf71547ff5fe626cca8bc151561292426070e7310c00d7132`.
+The source-forced campaign and independent source-forced verifier generated
+byte-identical canonical receipts.  It binds benchmark SHA-256
+`7b767372ba090e42e8120d58dc5fabad5f42e55811802a78edeae1deb5b9022`,
+all 17 native/parser/runner/test/build inputs, and the live thermal source
+identity.  Final frozen-source gates pass: 123/123 warning-strict v3 tests,
+181/181 complete tool tests, focused Release and strict ASan+UBSan 5/5 each,
+broad Release 43/43, packages 3/3, build-policy 1/1, TSan selector 3/3 plus
+repairtiming CLI, and an exact 3/3 live receipt replay.  Primary and three
+independent code-reading audits ended with a full clean pass.
+
+`wirehair-rv4a.3` is now unblocked.  Its training run must consume the exact
+frozen source, binary, plan, pin path, and trusted pin SHA above; do not rebuild
+or touch any pinned input.  Only an eligible training winner may launch the one
+joint sealed boundary.  No repair-v1 training or sealed outcome has yet been
+launched or read.
 
 ## 2026-07-29 authenticated all-K za5v result
 
