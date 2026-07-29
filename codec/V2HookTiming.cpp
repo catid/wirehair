@@ -449,10 +449,7 @@ bool ParseOptions(int argc, char** argv, Options& options)
     uint32_t seen = 0u;
     for (int i = 1; i < argc; ++i)
     {
-        if (!std::strcmp(argv[i], "--help")) {
-            Usage(argv[0]);
-            return false;
-        }
+        if (!std::strcmp(argv[i], "--help")) return false;
         if (i + 1 >= argc) return false;
         const char* option = argv[i];
         const char* value = argv[++i];
@@ -2176,6 +2173,10 @@ bool EmitReceipt(
 
 int Main(int argc, char** argv)
 {
+    if (argc == 2 && !std::strcmp(argv[1], "--help")) {
+        Usage(argv[0]);
+        return 0;
+    }
     Options options;
     if (!ParseOptions(argc, argv, options)) {
         Usage(argv[0]);
