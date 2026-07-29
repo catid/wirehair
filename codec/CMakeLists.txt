@@ -23,6 +23,8 @@ add_library(wirehair_v2_policy STATIC
     WirehairV2Seeds.h
     WirehairV2Solve.cpp
     WirehairV2Solve.h
+    WirehairV2TinyMDS.cpp
+    WirehairV2TinyMDS.h
 )
 
 target_include_directories(wirehair_v2_policy PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -137,6 +139,25 @@ if (BUILD_TESTS)
             $<TARGET_FILE:wirehair_v2_tiny_fastpath_ab_test>)
     set_tests_properties(wirehair_v2_tiny_fastpath_ab_test
         PROPERTIES LABELS "v2" TIMEOUT 600)
+
+    add_executable(wirehair_v2_tiny_mds_test V2TinyMDSTest.cpp)
+    wirehair_apply_project_options(wirehair_v2_tiny_mds_test)
+    target_link_libraries(wirehair_v2_tiny_mds_test wirehair_v2_policy)
+    add_test(NAME wirehair_v2_tiny_mds_test
+        COMMAND ${_wirehair_v2_clean_test_command}
+            $<TARGET_FILE:wirehair_v2_tiny_mds_test>)
+    set_tests_properties(wirehair_v2_tiny_mds_test PROPERTIES
+        LABELS "v2;mds;gf256;exhaustive;oom"
+        TIMEOUT 300)
+    if(NOT _wirehair_v2_sanitized)
+        add_test(NAME wirehair_v2_tiny_mds_speed_gate
+            COMMAND ${_wirehair_v2_clean_test_command}
+                $<TARGET_FILE:wirehair_v2_tiny_mds_test> --benchmark)
+        set_tests_properties(wirehair_v2_tiny_mds_speed_gate PROPERTIES
+            LABELS "v2;mds;gf256;performance;paired"
+            TIMEOUT 120
+            RUN_SERIAL TRUE)
+    endif()
 
     add_executable(wirehair_v2_precode_roundtrip_test PrecodeRoundTripTest.cpp)
     wirehair_apply_project_options(wirehair_v2_precode_roundtrip_test)

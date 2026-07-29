@@ -264,10 +264,16 @@ int wirehair_package_round_trip(void)
     {
         return 10;
     }
+    if (wirehair_package_v2_round_trip(
+            message, 31u, 16u, 2u,
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07) != 0)
+    {
+        return 11;
+    }
     if (wirehair_package_v2_selector_failures(
             message, MessageBytes) != 0)
     {
-        return 11;
+        return 12;
     }
     return 0;
 }

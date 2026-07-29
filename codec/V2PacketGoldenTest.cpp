@@ -9,12 +9,13 @@
 /*
     Representative packet goldens for the public serialized V2 profiles.
 
-    For each public profile ID at representative K/BlockBytes this pins the
-    exact serialized descriptor and exact encoded repair packets emitted by
-    the public API.  Together with the all-K fingerprints in
-    V2FingerprintTest.cpp this freezes the July 2026 equation contract: a
-    changed descriptor or packet byte under an existing profile ID is a
-    compatibility bug and must ship under a new profile ID.
+    For representative public profile IDs and K/BlockBytes values this pins
+    exact serialized descriptors and encoded packets emitted by the public
+    API.  Precode profiles are additionally protected by the all-K
+    fingerprints in V2FingerprintTest.cpp; tiny MDS is protected by its
+    exhaustive fixed-domain test.  A changed descriptor or packet byte under
+    an existing profile ID is a compatibility bug and must ship under a new
+    profile ID.
 
     The constants are filled from a build of the frozen implementation:
 
@@ -32,6 +33,7 @@ struct PacketGoldenCase
     uint64_t ProfileId;
     uint64_t MessageBytes;
     uint32_t BlockBytes;
+    uint32_t PacketIds[3];
 };
 
 // Small-K cases at 16-byte blocks are already frozen in V2ProfileTest.cpp.
@@ -39,26 +41,35 @@ struct PacketGoldenCase
 // boundary) with a partial final block in every message.
 const PacketGoldenCase kPacketCases[] = {
     {"certified_k1000_b32",
-        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, 31985u, 32u},
+        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, 31985u, 32u,
+        {1000u, 1001u, 54321u}},
     {"mixed_k1000_b32",
-        WIREHAIR_V2_PROFILE_MIXED_2026_07, 31985u, 32u},
+        WIREHAIR_V2_PROFILE_MIXED_2026_07, 31985u, 32u,
+        {1000u, 1001u, 54321u}},
     {"mixed_mix2_k1000_b32",
-        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07, 31985u, 32u},
+        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07, 31985u, 32u,
+        {1000u, 1001u, 54321u}},
     {"certified_k10000_b2",
-        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, 19999u, 2u},
+        WIREHAIR_V2_PROFILE_CERTIFIED_2026_07, 19999u, 2u,
+        {10000u, 10001u, 54321u}},
     {"mixed_k10000_b2",
-        WIREHAIR_V2_PROFILE_MIXED_2026_07, 19999u, 2u},
+        WIREHAIR_V2_PROFILE_MIXED_2026_07, 19999u, 2u,
+        {10000u, 10001u, 54321u}},
     {"mixed_mix2_k10000_b2",
-        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07, 19999u, 2u}
+        WIREHAIR_V2_PROFILE_MIXED_MIX2_2026_07, 19999u, 2u,
+        {10000u, 10001u, 54321u}},
+    {"tiny_mds_k1_b16",
+        WIREHAIR_V2_PROFILE_TINY_MDS_2026_07, 7u, 16u,
+        {1u, 256u, UINT32_MAX}},
+    {"tiny_mds_k2_b16",
+        WIREHAIR_V2_PROFILE_TINY_MDS_2026_07, 31u, 16u,
+        {2u, 3u, 256u}}
 };
 const uint32_t kPacketCaseCount =
     (uint32_t)(sizeof(kPacketCases) / sizeof(kPacketCases[0]));
 
-/// Deep repair id shared by every case.
-const uint32_t kDeepRepairId = 54321u;
-
-// Per case: serialized descriptor hex, then repair packets K, K+1, and
-// kDeepRepairId as lowercase hex.
+// Per case: serialized descriptor hex, then the three declared packet IDs as
+// lowercase hex.
 // --- BEGIN FROZEN V2 PACKET GOLDENS ---
 // Fill by building, then running:
 //   wirehair_v2_packet_golden_test --print-goldens
@@ -99,12 +110,24 @@ static const char* const kPacketGoldens[kPacketCaseCount][4] = {
         "c23c",
         "2f5f",
         "fb58"
+    },
+    { // tiny_mds_k1_b16
+        "574856320100200028d175ef3f4b01bf07000000000000001000000000000000",
+        "135ca5ee3780c9000000000000000000",
+        "135ca5ee3780c9000000000000000000",
+        "135ca5ee3780c9000000000000000000"
+    },
+    { // tiny_mds_k2_b16
+        "574856320100200028d175ef3f4b01bf1f000000000000001000000000000000",
+        "b0b09090f09090b0b09090f07090b05a",
+        "18c9cf12f4a07b1bc0cc17f761781e5a",
+        "1e4ac8b32e2ce6e02a36fcd04e18af5a"
     }
 };
 // --- END FROZEN V2 PACKET GOLDENS ---
 
 const char* const kGoldenSlotNames[4] = {
-    "descriptor", "repair K", "repair K+1", "deep repair"
+    "descriptor", "packet 0", "packet 1", "packet 2"
 };
 
 void FillMessage(std::vector<uint8_t>& message)
@@ -136,10 +159,6 @@ bool ComputeCase(
 {
     std::vector<uint8_t> message((size_t)golden_case.MessageBytes);
     FillMessage(message);
-    const uint32_t block_count = (uint32_t)(
-        (golden_case.MessageBytes + golden_case.BlockBytes - 1u) /
-        golden_case.BlockBytes);
-
     uint8_t descriptor[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
     uint32_t descriptor_bytes = 0u;
     WirehairV2Codec encoder = nullptr;
@@ -170,9 +189,6 @@ bool ComputeCase(
         return false;
     }
 
-    const uint32_t packet_ids[3] = {
-        block_count, block_count + 1u, kDeepRepairId
-    };
     bool ok = true;
     for (uint32_t i = 0; ok && i < 3u; ++i)
     {
@@ -181,11 +197,11 @@ bool ComputeCase(
         uint32_t bytes = 0u;
         uint32_t recreated_bytes = 0u;
         if (wirehair_v2_encode(
-                encoder, packet_ids[i], block.data(),
+                encoder, golden_case.PacketIds[i], block.data(),
                 (uint32_t)block.size(), &bytes) != WirehairV2_Success ||
             bytes != golden_case.BlockBytes ||
             wirehair_v2_encode(
-                recreated, packet_ids[i], recreated_block.data(),
+                recreated, golden_case.PacketIds[i], recreated_block.data(),
                 (uint32_t)recreated_block.size(), &recreated_bytes) !=
                     WirehairV2_Success ||
             recreated_bytes != bytes ||
@@ -193,7 +209,7 @@ bool ComputeCase(
         {
             std::fprintf(stderr,
                 "packet golden: %s id=%u encode/reproduction failed\n",
-                golden_case.Name, packet_ids[i]);
+                golden_case.Name, golden_case.PacketIds[i]);
             ok = false;
             break;
         }

@@ -260,6 +260,7 @@ cmake --build build --target wirehair_v2_precode_decode_test
 ./build/codec/wirehair_v2_precode_decode_test --large
 ./build/codec/wirehair_v2_precode_decode_test --large-recovery
 ./build/codec/wirehair_v2_precode_solve_test
+./build/codec/wirehair_v2_tiny_mds_test
 ./build/codec/wirehair_v2_precode_roundtrip_test
 ./build/codec/wirehair_v2_precode_seed_selection_test
 ./build/codec/wirehair_v2_profile_test
@@ -321,6 +322,15 @@ remove only that overhead salt: trial `t` then receives the same delivered-ID
 prefix at every requested overhead, with each larger arm appending packets to
 the smaller one.  This makes `failure_trials` sets directly comparable and
 should produce a monotone failure curve for rank-only solves.
+
+`WIREHAIR_V2_PROFILE_TINY_MDS_2026_07` is a separate explicit profile for
+K=1 and K=2, not a precode benchmark arm.  It uses the exact GF(256)
+projective-line code documented in `V2_WIRE_PROFILE.md`: K=1 is repetition,
+and any two distinct supported K=2 packet IDs in `0..256` recover with no weak
+seed or probabilistic overhead.  The default and `dispatch-v1` paths remain
+unchanged.  `wirehair_v2_tiny_mds_test --benchmark` runs the counterbalanced
+fresh-decoder speed gate against both the current WH2 precode and legacy
+Wirehair.
 
 Test builds also expose `--source-hits N` and
 `--packet-peel-seed-xor U32` on `precodefail`.  The latter perturbs the

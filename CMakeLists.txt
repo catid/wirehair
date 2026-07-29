@@ -91,7 +91,9 @@ set(WIREHAIR_V2_PUBLIC_SOURCE_FILES
         codec/WirehairV2Seeds.cpp
         codec/WirehairV2Seeds.h
         codec/WirehairV2Solve.cpp
-        codec/WirehairV2Solve.h)
+        codec/WirehairV2Solve.h
+        codec/WirehairV2TinyMDS.cpp
+        codec/WirehairV2TinyMDS.h)
 
 set(LIB_SOURCE_FILES
         wirehair.cpp

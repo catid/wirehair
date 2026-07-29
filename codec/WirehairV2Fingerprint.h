@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 /*
-    All-K equation fingerprints for public serialized V2 profiles and stable
-    benchmark-only architecture targets.
+    All-K equation fingerprints for public serialized V2 precode profiles and
+    stable precode benchmark-only architecture targets.
 
-    A public WIREHAIR_V2_PROFILE_* ID promises byte-identical equations
-    forever, but the profile expansion transitively consumes the legacy
+    A public precode WIREHAIR_V2_PROFILE_* ID promises byte-identical
+    equations forever, but the profile expansion transitively consumes the legacy
     dense-count/dense-seed/peel-seed tables, the block-byte peel-policy
     classification, the matrix/packet seed derivation, the certified precode
     row construction, the completion coefficient tables, and the version-4
@@ -18,12 +18,14 @@
     implementation, so a coherent future change to any of those inputs would
     silently rewrite every published profile ID.
 
-    This module folds the complete equation-affecting expansion for EVERY
-    supported block count K into one SHA-256 per versioned contract ID.  The
-    digests are compared against checked-in golden constants by
-    V2FingerprintTest.cpp.  Drift under a public profile ID is a
-    compatibility bug; drift under a stable benchmark target invalidates
-    cross-run experiment identity.  Neither is a golden to update silently.
+    This module folds the complete precode equation-affecting expansion for
+    EVERY supported block count K into one SHA-256 per versioned contract ID.
+    The fixed-domain tiny-MDS profile is frozen separately by its canonical
+    name digest, exhaustive projective-line tests, and packet goldens.  The
+    all-K precode digests are compared against checked-in golden constants by
+    V2FingerprintTest.cpp.  Drift under a public profile ID is a compatibility
+    bug; drift under a stable benchmark target invalidates cross-run
+    experiment identity.  Neither is a golden to update silently.
 
     Stream layout (fingerprint version 1).  Every integer is unsigned
     little-endian; SHA-256 output bytes follow the FIPS 180-4 big-endian word
@@ -114,12 +116,12 @@ static const uint32_t kEquationFingerprintCanonicalBlockBytes = 1280u;
 static const uint64_t kEquationFingerprintRawConstructionSeed =
     UINT64_C(0x6a09e667f3bcc909);
 
-/// One public profile or stable benchmark target and its equation contract.
-/// The fingerprint test cross-checks public IDs against the public header and
-/// also pins internal target IDs used in experiment receipts.
+/// One public precode profile or stable precode benchmark target.
+/// The fingerprint test cross-checks precode public IDs against the public
+/// header and also pins internal target IDs used in experiment receipts.
 typedef V2EquationContract EquationFingerprintContract;
 
-/// Returns every frozen public profile and stable benchmark target contract.
+/// Returns every all-K-frozen precode profile and benchmark target contract.
 const EquationFingerprintContract* EquationFingerprintContracts(
     uint32_t& count_out);
 

@@ -27,8 +27,9 @@ meaningful.
 | 28 | 1 | seed attempt | deterministic attempt `0..255` |
 | 29 | 3 | reserved | all zero |
 
-The derived block count is `ceil(message_bytes / block_bytes)` and must be in
-`2..64000`. It is intentionally not serialized a second time.
+The derived block count is `ceil(message_bytes / block_bytes)` and is
+intentionally not serialized a second time. Precode profiles require
+`K=2..64000`. The explicit tiny-MDS profile below instead requires `K=1..2`.
 
 The golden record for a 117-byte message, 16-byte blocks, attempt zero, and the
 current profile is:
@@ -181,6 +182,39 @@ silently relabeled with the older mixed/mix2 ID merely because the generated
 equations happen to be identical.  The default, certified, mixed/mix3, and
 original mixed/mix2 identifiers and golden byte sequences remain unchanged.
 
+`WIREHAIR_V2_PROFILE_TINY_MDS_2026_07` has numeric ID
+`bf014b3fef75d128`. The ID is the first 64 bits of SHA-256 over this exact
+canonical UTF-8/ASCII input, with no newline:
+
+```text
+wirehair:v2:tiny-mds-v1-gf256-projective-line-k1-k2:k2-packet-ids-0-256:k1-all-packet-ids:certified-2026-07
+```
+
+The full digest is
+`bf014b3fef75d128dc78d1dee5efc9f240e9df36db42db527466073e9ecba74c`.
+This explicit profile is defined only for `K=1` and `K=2`; it never changes
+the current/default profile or `dispatch-v1`.
+
+For `K=1`, every `uint32_t` packet ID emits the source block with canonical
+zero padding to `block_bytes` for repair IDs. For `K=2`, packet IDs `0..256`
+enumerate all 257 points of the projective line over GF(256):
+
+- ID 0 has coefficients `[1:0]`;
+- ID 1 has coefficients `[0:1]`; and
+- ID `i` in `2..256` has coefficients `[1:i-1]`.
+
+The arithmetic is the library's frozen GF(256) representation. Any two
+distinct supported K=2 IDs have a nonzero 2-by-2 determinant, so they recover
+both source blocks without a construction seed or weak-seed table. K=2 encode
+or decode calls with an ID above 256 return `WirehairV2_InvalidInput`; they do
+not alias a supported direction. The serialized `seed_attempt` is therefore
+always zero, and a nonzero value is rejected as `WirehairV2_BadSeed`.
+
+This finite ID domain is part of the profile identity rather than an
+implementation limit: a two-dimensional linear code over GF(256) has only 257
+projective directions. Applications needing more K=2 repair IDs must select a
+different versioned profile rather than wrapping IDs under this one.
+
 ### Non-normative July 2026 mixed/mix3 certification snapshot
 
 The production solver was screened with 100,000 common deterministic packet
@@ -236,9 +270,9 @@ profile; they do not alter either older profile or the current default.
 ## Equation freeze and compatibility boundary
 
 All equation-affecting inputs consumed under each public V2 profile ID are
-frozen as of July 2026. The frozen surface is everything the expansion of a
-descriptor transitively consumes, not only the constants listed per profile
-above:
+frozen as of July 2026. For the precode profiles, the frozen surface is
+everything the expansion of a descriptor transitively consumes, not only the
+constants listed per profile above:
 
 - the legacy dense-count, dense-seed, and peel-seed selection tables at every
   supported block count;
@@ -254,16 +288,20 @@ above:
 - version-4 packet-row generation: the production integer degree sampler,
   the peel and mix iterators, prime selection, and packet-ID addressing.
 
-These inputs are pinned by one all-K SHA-256 equation fingerprint per public
-profile ID, computed over every supported block count `K = 2..64000` as a
-single streaming digest of the complete equation-affecting expansion. The
-exact digest stream is documented in `codec/WirehairV2Fingerprint.h`; the
-frozen constants live in `codec/V2FingerprintTest.cpp` and representative
-exact descriptor/packet byte goldens live in `codec/V2PacketGoldenTest.cpp`
-(with additional small-K packet goldens in `codec/V2ProfileTest.cpp`). After
-building, `wirehair_v2_fingerprint_test --print-goldens` and
+The precode inputs are pinned by one all-K SHA-256 equation fingerprint per
+precode profile ID, computed over every supported block count `K = 2..64000`
+as a single streaming digest of the complete equation-affecting expansion.
+The exact digest stream is documented in `codec/WirehairV2Fingerprint.h`; the
+frozen constants live in `codec/V2FingerprintTest.cpp`. The fixed-domain
+tiny-MDS profile instead pins its canonical-name digest, exhaustively decodes
+every ordered pair of its 257 K=2 packet directions at full and partial source
+tails, and freezes representative descriptor/packet bytes. Representative
+goldens for every family live in `codec/V2PacketGoldenTest.cpp` (with
+additional small-K cases in `codec/V2ProfileTest.cpp`). After building,
+`wirehair_v2_fingerprint_test --print-goldens` and
 `wirehair_v2_packet_golden_test --print-goldens` print the paste-ready
-constant blocks; unset constants fail the tests rather than skip.
+precode/packet constant blocks; unset constants fail the tests rather than
+skip.
 
 A changed fingerprint or packet golden under an existing profile ID is a
 compatibility bug, never a golden to refresh. Any payload-normalized,
@@ -286,13 +324,16 @@ implementation copies those bytes before returning.
 explicit supported profile ID. `WIREHAIR_V2_PROFILE_CURRENT` deliberately
 remains an alias for `WIREHAIR_V2_PROFILE_CERTIFIED_2026_07`; existing callers
 and `wirehair_v2_encoder_create()` continue to emit the original GF(256)-only
-equations byte-for-byte. Mixed/mix3, mixed/mix2, and adaptive two-anchor
-mixed/mix2 encoding are explicit opt-ins through the selector (or the corresponding C++
-`Encoder::Create(profileId, ...)` overload). Unknown IDs return
+equations byte-for-byte. Mixed/mix3, mixed/mix2, adaptive two-anchor
+mixed/mix2, and tiny-MDS encoding are explicit opt-ins through the selector
+(or the corresponding C++ `Encoder::Create(profileId, ...)` overload).
+Unknown IDs return
 `WirehairV2_UnsupportedProfile` without falling back to the current profile.
 
 `wirehair_v2_encode()` reports `WirehairV2_BufferTooSmall` and the exact
-required packet size without modifying a short non-null output buffer.
+required packet size without modifying a short non-null output buffer. A K=2
+tiny-MDS ID above 256 is outside the profile domain and returns
+`WirehairV2_InvalidInput` before this capacity classification.
 
 `wirehair_v2_decoder_create()` takes only the serialized descriptor. It derives
 all internal profile state from the record before accepting packets. Encode,

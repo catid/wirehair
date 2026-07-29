@@ -5,3 +5,4 @@ profile.seed
 packet.seed
 oracle.seed
 boundaries.seed
+tiny-mds.seed

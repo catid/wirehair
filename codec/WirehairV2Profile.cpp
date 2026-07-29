@@ -5,6 +5,7 @@
 #include "WirehairV2Plan.h"
 #include "WirehairV2PrecodeEncode.h"
 #include "WirehairV2Solve.h"
+#include "WirehairV2TinyMDS.h"
 
 #include "../WirehairTools.h"
 
@@ -31,12 +32,20 @@ enum class CodecMode
     Decoder
 };
 
+enum class CodecAlgorithm
+{
+    Precode,
+    TinyMds
+};
+
 struct PublicCodec
 {
     wirehair_v2::Codec Impl;
+    wirehair_v2::TinyMdsCodec TinyMds;
     uint64_t MessageBytes = 0u;
     uint32_t BlockBytes = 0u;
     CodecMode Mode = CodecMode::Encoder;
+    CodecAlgorithm Algorithm = CodecAlgorithm::Precode;
     bool Decoded = false;
 };
 
@@ -50,6 +59,15 @@ bool NamedV2ProfileAvailable()
 #else
     return true;
 #endif
+}
+
+bool NamedV2ContractAvailable(
+    const wirehair_v2::V2EquationContract& contract)
+{
+    // The private seed knobs alter only the precode family.  The tiny MDS
+    // profile has no seed state and remains exactly reproducible.
+    return contract.Kind == wirehair_v2::V2EquationKind::TinyMds ||
+        NamedV2ProfileAvailable();
 }
 
 uint64_t ProfileIdForConfiguration(
@@ -117,7 +135,9 @@ uint64_t BlockCountWide(uint64_t message_bytes, uint32_t block_bytes)
 WirehairV2Result ValidateDimensions(
     uint64_t message_bytes,
     uint32_t block_bytes,
-    uint32_t* block_count_out = nullptr)
+    uint32_t* block_count_out = nullptr,
+    uint32_t minimum_block_count = CAT_WIREHAIR_MIN_N,
+    uint32_t maximum_block_count = CAT_WIREHAIR_MAX_N)
 {
     if (block_count_out) {
         *block_count_out = 0u;
@@ -128,8 +148,8 @@ WirehairV2Result ValidateDimensions(
         return WirehairV2_InvalidDimensions;
     }
     const uint64_t block_count = BlockCountWide(message_bytes, block_bytes);
-    if (block_count < CAT_WIREHAIR_MIN_N ||
-        block_count > CAT_WIREHAIR_MAX_N)
+    if (block_count < minimum_block_count ||
+        block_count > maximum_block_count)
     {
         return WirehairV2_InvalidDimensions;
     }
@@ -158,13 +178,23 @@ WirehairV2Result ValidateHostProfile(const WirehairV2Profile& profile)
     if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
-    if (!NamedV2ProfileAvailable()) {
+    if (!NamedV2ContractAvailable(*contract)) {
         return WirehairV2_UnsupportedPlatform;
     }
+    const bool tiny_mds =
+        contract->Kind == wirehair_v2::V2EquationKind::TinyMds;
     const WirehairV2Result dimensions =
-        ValidateDimensions(profile.message_bytes, profile.block_bytes);
+        ValidateDimensions(
+            profile.message_bytes,
+            profile.block_bytes,
+            nullptr,
+            tiny_mds ? 1u : CAT_WIREHAIR_MIN_N,
+            tiny_mds ? 2u : CAT_WIREHAIR_MAX_N);
     if (dimensions != WirehairV2_Success) {
         return dimensions;
+    }
+    if (tiny_mds && profile.seed_attempt != 0u) {
+        return WirehairV2_BadSeed;
     }
     if (contract->Completion ==
             wirehair_v2::CompletionField::MixedGF256GF16 &&
@@ -305,7 +335,11 @@ wirehair_v2::SeedProfile ExpandProfile(const WirehairV2Profile& profile)
 {
     const wirehair_v2::V2EquationContract* contract =
         wirehair_v2::FindV2EquationContract(profile.profile_id, true);
-    if (!contract) return wirehair_v2::SeedProfile{};
+    if (!contract ||
+        contract->Kind != wirehair_v2::V2EquationKind::Precode)
+    {
+        return wirehair_v2::SeedProfile{};
+    }
 
     const uint32_t block_count =
         (uint32_t)BlockCountWide(profile.message_bytes, profile.block_bytes);
@@ -419,16 +453,32 @@ WirehairV2Result CreateEncoderForProfile(
         return WirehairV2_UnsupportedPlatform;
     }
 
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract(profile.profile_id, true);
+    if (!contract) {
+        return WirehairV2_UnsupportedProfile;
+    }
+
     PublicCodec* codec = new (std::nothrow) PublicCodec;
     if (!codec) {
         return WirehairV2_OOM;
     }
-    const wirehair_v2::SeedProfile expanded = ExpandProfile(profile);
-    const WirehairResult result = codec->Impl.InitializePrecodeEncoder(
-        message,
-        profile.message_bytes,
-        profile.block_bytes,
-        &expanded);
+    WirehairResult result = Wirehair_Error;
+    if (contract->Kind == wirehair_v2::V2EquationKind::TinyMds)
+    {
+        result = codec->TinyMds.InitializeEncoder(
+            message, profile.message_bytes, profile.block_bytes);
+        codec->Algorithm = CodecAlgorithm::TinyMds;
+    }
+    else
+    {
+        const wirehair_v2::SeedProfile expanded = ExpandProfile(profile);
+        result = codec->Impl.InitializePrecodeEncoder(
+            message,
+            profile.message_bytes,
+            profile.block_bytes,
+            &expanded);
+    }
     if (result != Wirehair_Success) {
         delete codec;
         return MapResult(result);
@@ -711,7 +761,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     if (!contract) {
         return WirehairV2_UnsupportedProfile;
     }
-    if (!NamedV2ProfileAvailable()) {
+    if (!NamedV2ContractAvailable(*contract)) {
         return WirehairV2_UnsupportedPlatform;
     }
     WirehairV2Profile requested = {};
@@ -731,22 +781,33 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
         return WirehairV2_UnsupportedPlatform;
     }
 
-    const wirehair_v2::MessagePrecodeEncoderOptions options =
-        wirehair_v2::MessageOptionsForContract(*contract);
-    PublicCodec* codec = new (std::nothrow) PublicCodec;
-    if (!codec) {
-        return WirehairV2_OOM;
-    }
-    const WirehairResult create_result = codec->Impl.InitializePrecodeEncoder(
-        message, messageBytes, blockBytes, nullptr, &options);
-    if (create_result != Wirehair_Success) {
-        delete codec;
-        return MapResult(create_result);
-    }
-
+    PublicCodec* codec = nullptr;
     WirehairV2Profile profile = {};
-    WirehairV2Result result = MakePublicProfile(
-        codec->Impl.Profile(), messageBytes, profile);
+    WirehairV2Result result = WirehairV2_Success;
+    if (contract->Kind == wirehair_v2::V2EquationKind::TinyMds)
+    {
+        result = CreateEncoderForProfile(message, requested, codec);
+        profile = requested;
+    }
+    else
+    {
+        const wirehair_v2::MessagePrecodeEncoderOptions options =
+            wirehair_v2::MessageOptionsForContract(*contract);
+        codec = new (std::nothrow) PublicCodec;
+        if (!codec) {
+            return WirehairV2_OOM;
+        }
+        const WirehairResult create_result =
+            codec->Impl.InitializePrecodeEncoder(
+                message, messageBytes, blockBytes, nullptr, &options);
+        if (create_result != Wirehair_Success)
+        {
+            delete codec;
+            return MapResult(create_result);
+        }
+        result = MakePublicProfile(
+            codec->Impl.Profile(), messageBytes, profile);
+    }
     uint8_t encoded[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
     uint32_t encoded_bytes = 0u;
     if (result == WirehairV2_Success) {
@@ -754,6 +815,7 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
             &profile, encoded, sizeof(encoded), &encoded_bytes);
     }
     if (result != WirehairV2_Success ||
+        !codec ||
         encoded_bytes != WIREHAIR_V2_PROFILE_SERIALIZED_BYTES ||
         profile.profile_id != profileId)
     {
@@ -821,9 +883,26 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decoder_create(
     if (!codec) {
         return WirehairV2_OOM;
     }
-    const wirehair_v2::SeedProfile expanded = ExpandProfile(profile);
-    const WirehairResult result = codec->Impl.InitializePrecodeDecoder(
-        profile.message_bytes, profile.block_bytes, &expanded);
+    const wirehair_v2::V2EquationContract* contract =
+        wirehair_v2::FindV2EquationContract(profile.profile_id, true);
+    if (!contract)
+    {
+        delete codec;
+        return WirehairV2_UnsupportedProfile;
+    }
+    WirehairResult result = Wirehair_Error;
+    if (contract->Kind == wirehair_v2::V2EquationKind::TinyMds)
+    {
+        result = codec->TinyMds.InitializeDecoder(
+            profile.message_bytes, profile.block_bytes);
+        codec->Algorithm = CodecAlgorithm::TinyMds;
+    }
+    else
+    {
+        const wirehair_v2::SeedProfile expanded = ExpandProfile(profile);
+        result = codec->Impl.InitializePrecodeDecoder(
+            profile.message_bytes, profile.block_bytes, &expanded);
+    }
     if (result != Wirehair_Success) {
         delete codec;
         return MapResult(result);
@@ -865,11 +944,22 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encode(
         return WirehairV2_InvalidInput;
     }
     *dataBytesOut = required;
+    if (impl->Algorithm == CodecAlgorithm::TinyMds &&
+        impl->TinyMds.BlockCount() == 2u &&
+        blockId > wirehair_v2::TinyMdsCodec::kMaxK2PacketId)
+    {
+        return WirehairV2_InvalidInput;
+    }
     if (outputCapacity < required) {
         return WirehairV2_BufferTooSmall;
     }
-    return MapResult(impl->Impl.Encode(
-        blockId, blockDataOut, outputCapacity, dataBytesOut));
+    const WirehairResult result =
+        impl->Algorithm == CodecAlgorithm::TinyMds ?
+            impl->TinyMds.EncodeResult(
+                blockId, blockDataOut, outputCapacity, dataBytesOut) :
+            impl->Impl.Encode(
+                blockId, blockDataOut, outputCapacity, dataBytesOut);
+    return MapResult(result);
 }
 
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decode(
@@ -882,8 +972,11 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_decode(
     if (!impl || impl->Mode != CodecMode::Decoder || !blockData) {
         return WirehairV2_InvalidInput;
     }
-    const WirehairV2Result result = MapResult(
-        impl->Impl.Decode(blockId, blockData, dataBytes));
+    const WirehairResult decode_result =
+        impl->Algorithm == CodecAlgorithm::TinyMds ?
+            impl->TinyMds.DecodeResult(blockId, blockData, dataBytes) :
+            impl->Impl.Decode(blockId, blockData, dataBytes);
+    const WirehairV2Result result = MapResult(decode_result);
     if (result == WirehairV2_Success) {
         impl->Decoded = true;
     }
@@ -929,11 +1022,17 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_recover(
 
     try
     {
-        // Public V2 decoders always use MessagePrecodeDecoder.  Its recovery
-        // path validates the complete operation and allocates any partial-tail
-        // scratch before publishing directly to the caller's output range.
-        return MapResult(impl->Impl.Recover(
-            messageOut, impl->MessageBytes));
+        // MessagePrecodeDecoder validates the complete operation and allocates
+        // any partial-tail scratch before publishing to the caller.  Tiny MDS
+        // recovery is an allocation-free exact-size copy.  In both cases all
+        // public validation above completes before the output range is used.
+        const WirehairResult result =
+            impl->Algorithm == CodecAlgorithm::TinyMds ?
+                impl->TinyMds.RecoverResult(
+                    messageOut, impl->MessageBytes) :
+                impl->Impl.Recover(
+                    messageOut, impl->MessageBytes);
+        return MapResult(result);
     }
     catch (const std::bad_alloc&) {
         return WirehairV2_OOM;

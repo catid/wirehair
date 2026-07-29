@@ -8,9 +8,18 @@
 
 namespace wirehair_v2 {
 
+enum class V2EquationKind : uint32_t
+{
+    Precode = 0u,
+    TinyMds = 1u
+};
+
 /**
-    Complete equation configurations used by serialized public profiles and
-    benchmark-only architecture targets.
+    Equation configurations used by serialized public profiles and
+    benchmark-only architecture targets.  V2EquationContracts() is the
+    precode fingerprint/benchmark table; the fixed-domain tiny-MDS algorithm
+    has a separate singleton because it has no precode expansion or all-K
+    fingerprint stream.  FindV2EquationContract() resolves both.
 
     The dispatch target has a stable identifier so every experiment can bind
     exact equations without prematurely adding it to the public serialized
@@ -21,6 +30,7 @@ struct V2EquationContract
     uint64_t ProfileId;
     const char* Name;
     const char* CanonicalName;
+    V2EquationKind Kind;
     CompletionField Completion;
     uint32_t RecoveryMixCount;
     bool AdaptiveDenseTwoAnchor;
@@ -32,10 +42,25 @@ struct V2EquationContract
 
 static const uint64_t kWh2DispatchV1ContractId =
     UINT64_C(0xa98c37c23ee7feae);
-static const char kWh2DispatchV1CanonicalName[] =
-    "wirehair:v2:precode-v5-mixed10gf256-2gf65536-even-smallband100-d4:"
-    "packet-v4-mix3:seed-raw-uniform-v1-xorfold32-attempt0-no-tables-"
-    "no-fixups:dispatch-v1-2026-07";
+
+inline const V2EquationContract& TinyMdsV1EquationContract()
+{
+    static const V2EquationContract kContract = {
+        WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+        "tiny_mds_2026_07",
+        "wirehair:v2:tiny-mds-v1-gf256-projective-line-k1-k2:"
+            "k2-packet-ids-0-256:k1-all-packet-ids:certified-2026-07",
+        V2EquationKind::TinyMds,
+        CompletionField::GF256,
+        0u,
+        false,
+        V2PrecodeArchitecture::LegacyD12,
+        V2SeedDerivation::ProfileDerived,
+        1u,
+        true
+    };
+    return kContract;
+}
 
 inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
 {
@@ -44,6 +69,7 @@ inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
             WIREHAIR_V2_PROFILE_CERTIFIED_2026_07,
             "certified_2026_07",
             "wirehair:v2:precode-v2:packet-v4:certified-2026-07",
+            V2EquationKind::Precode,
             CompletionField::GF256,
             kCertifiedPacketMixCount,
             false,
@@ -57,6 +83,7 @@ inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
             "mixed_2026_07",
             "wirehair:v2:precode-v3-mixed10gf256-2gf65536-even:"
                 "packet-v4:certified-2026-07",
+            V2EquationKind::Precode,
             CompletionField::MixedGF256GF16,
             kCertifiedPacketMixCount,
             false,
@@ -70,6 +97,7 @@ inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
             "mixed_mix2_2026_07",
             "wirehair:v2:precode-v3-mixed10gf256-2gf65536-even:"
                 "packet-v4-mix2:certified-2026-07",
+            V2EquationKind::Precode,
             CompletionField::MixedGF256GF16,
             2u,
             false,
@@ -83,6 +111,7 @@ inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
             "mixed_mix2_two_anchor_2026_07",
             "wirehair:v2:precode-v4-mixed10gf256-2gf65536-even-"
                 "d12-two-anchor-k4096:packet-v4-mix2:certified-2026-07",
+            V2EquationKind::Precode,
             CompletionField::MixedGF256GF16,
             2u,
             true,
@@ -94,7 +123,11 @@ inline const V2EquationContract* V2EquationContracts(uint32_t& count_out)
         {
             kWh2DispatchV1ContractId,
             "dispatch-v1",
-            kWh2DispatchV1CanonicalName,
+            "wirehair:v2:precode-v5-mixed10gf256-2gf65536-even-"
+                "smallband100-d4:packet-v4-mix3:seed-raw-uniform-v1-"
+                "xorfold32-attempt0-no-tables-no-fixups:"
+                "dispatch-v1-2026-07",
+            V2EquationKind::Precode,
             CompletionField::MixedGF256GF16,
             kCertifiedPacketMixCount,
             false,
@@ -121,6 +154,12 @@ inline const V2EquationContract* FindV2EquationContract(
             return &contracts[i];
         }
     }
+    const V2EquationContract& tiny = TinyMdsV1EquationContract();
+    if (tiny.ProfileId == id &&
+        (!public_only || tiny.PublicProfile))
+    {
+        return &tiny;
+    }
     return nullptr;
 }
 
@@ -140,6 +179,16 @@ inline const V2EquationContract* FindV2EquationContract(
         }
         if (*left == '\0' && *right == '\0') return &contracts[i];
     }
+    const V2EquationContract& tiny = TinyMdsV1EquationContract();
+    const char* left = tiny.Name;
+    const char* right = name;
+    while (*left && *left == *right) {
+        ++left;
+        ++right;
+    }
+    if (*left == '\0' && *right == '\0') {
+        return &tiny;
+    }
     return nullptr;
 }
 
@@ -154,7 +203,8 @@ inline const V2EquationContract* FindPublicV2EquationContract(
     for (uint32_t i = 0u; i < count; ++i)
     {
         const V2EquationContract& contract = contracts[i];
-        if (contract.PublicProfile &&
+        if (contract.Kind == V2EquationKind::Precode &&
+            contract.PublicProfile &&
             contract.SeedPolicy == V2SeedDerivation::ProfileDerived &&
             contract.SeedAttemptCount == kMaxPacketSeedAttempts &&
             contract.Completion == completion &&
@@ -172,6 +222,7 @@ inline const V2EquationContract* FindPublicV2EquationContract(
 inline MessagePrecodeEncoderOptions MessageOptionsForContract(
     const V2EquationContract& contract)
 {
+    // TinyMds callers branch before this precode-only adapter.
     MessagePrecodeEncoderOptions options;
     options.Architecture = contract.Architecture;
     options.Completion = contract.Completion;
@@ -204,7 +255,8 @@ inline bool MakeRawContractProfile(
     uint64_t construction_seed,
     SeedProfile& profile_out)
 {
-    if (contract.ProfileId != kWh2DispatchV1ContractId ||
+    if (contract.Kind != V2EquationKind::Precode ||
+        contract.ProfileId != kWh2DispatchV1ContractId ||
         contract.PublicProfile ||
         contract.SeedPolicy != V2SeedDerivation::RawUniform ||
         contract.SeedAttemptCount != 1u ||

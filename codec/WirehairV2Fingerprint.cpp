@@ -540,6 +540,7 @@ bool ComputeEquationFingerprint(
         contract.SeedPolicy == V2SeedDerivation::RawUniform &&
         contract.SeedAttemptCount == 1u;
     if (!digest_out ||
+        contract.Kind != V2EquationKind::Precode ||
         min_block_count < kEquationFingerprintMinBlockCount ||
         max_block_count > kEquationFingerprintMaxBlockCount ||
         min_block_count > max_block_count ||

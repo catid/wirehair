@@ -13,16 +13,18 @@ in [V2_WIRE_PROFILE.md](V2_WIRE_PROFILE.md); a decoder is created from that
 descriptor alone. Raw packets and profile IDs do not authenticate either their
 contract or recovered payload.
 
-As compared to other similar libraries, an unlimited number of error
-correction blocks can be produced, and much larger block counts are supported.
-Furthermore, it gets slower as O(N) in the amount of input data rather
-than O(N Log N) like the Leopard block code or O(N^2) like the Fecal fountain code,
-so it is well-suited for large data.
+As compared to other similar libraries, the default fountain profiles can
+produce an unlimited number of error-correction blocks, and much larger block
+counts are supported. (The explicit exact-MDS K=2 profile has a documented
+finite 257-ID domain.) Furthermore, the fountain codec gets slower as O(N) in
+the amount of input data rather than O(N Log N) like the Leopard block code or
+O(N^2) like the Fecal fountain code, so it is well-suited for large data.
 
-This is not an ideal MDS code, so sometimes it will fail to recover N
-original data packets from N symbol packets.  It may take N + 1 or N + 2 or more.
-On average it takes about N + 0.02 packets to recover.  Overall the overhead
-from the code inefficiency is low, compared to LDPC and many other fountain codes.
+The default fountain codec is not an ideal MDS code, so sometimes it will fail
+to recover N original data packets from N symbol packets. It may take N + 1 or
+N + 2 or more. On average it takes about N + 0.02 packets to recover. Overall
+the overhead from the code inefficiency is low, compared to LDPC and many other
+fountain codes.
 
 Legacy decoders are safe to use with datagram retransmission: the first
 accepted payload for a packet ID wins, identical duplicates are idempotent,

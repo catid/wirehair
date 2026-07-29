@@ -248,6 +248,17 @@ WIREHAIR_EXPORT WirehairResult wirehair_wire_profile_init(
 #define WIREHAIR_V2_PROFILE_MIXED_MIX2_TWO_ANCHOR_2026_07 \
     UINT64_C(0x7d8c2436401ba9eb)
 
+/**
+    Exact K=1/K=2 GF(256) MDS profile.
+
+    K=2 packet IDs 0..256 are the 257 distinct points of P^1(GF(256)); any two
+    distinct supported IDs recover the message.  Encoding or decoding a K=2
+    packet ID above 256 returns WirehairV2_InvalidInput.  K=1 is the
+    degenerate repetition code and accepts every uint32_t packet ID.
+*/
+#define WIREHAIR_V2_PROFILE_TINY_MDS_2026_07 \
+    UINT64_C(0xbf014b3fef75d128)
+
 /** Current serialized V2 equation profile. */
 #define WIREHAIR_V2_PROFILE_CURRENT \
     WIREHAIR_V2_PROFILE_CERTIFIED_2026_07
@@ -372,10 +383,12 @@ WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create(
     wirehair_v2_encoder_create().  All mixed profiles require a positive even
     blockBytes value.  The original mixed ID binds exactly three packet mix
     columns; both mixed/mix2 IDs bind exactly two, with the two-anchor ID also
-    binding its adaptive dense construction.  Unknown IDs and invalid mixed
-    dimensions are rejected before codec allocation or serialized-profile
-    output writes.  The output-aliasing rules of wirehair_v2_encoder_create()
-    also apply.
+    binding its adaptive dense construction.  The tiny-MDS profile requires
+    K=ceil(messageBytes/blockBytes) in {1,2} and binds the packet-ID domain
+    documented with WIREHAIR_V2_PROFILE_TINY_MDS_2026_07.  Unknown IDs and
+    invalid profile dimensions are rejected before codec allocation or
+    serialized-profile output writes.  The output-aliasing rules of
+    wirehair_v2_encoder_create() also apply.
 */
 WIREHAIR_EXPORT WirehairV2Result wirehair_v2_encoder_create_profile_id(
     uint64_t profileId,

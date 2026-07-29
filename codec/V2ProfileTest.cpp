@@ -1094,6 +1094,303 @@ bool CheckAdaptiveTwoAnchorDescriptorContract(
     return ok;
 }
 
+bool CheckTinyMdsDescriptorContract()
+{
+    enum : uint32_t { BlockBytes = 16u };
+    uint8_t descriptor[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES] = {};
+    uint32_t descriptor_bytes = 0u;
+
+    // K=1 is available only through the explicit tiny-MDS profile.  The
+    // current/default precode profile retains its K>=2 contract.
+    std::vector<uint8_t> one_block_message(7u);
+    FillMessage(one_block_message);
+    WirehairV2Codec rejected_default =
+        reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+    if (!Check(wirehair_v2_encoder_create(
+            one_block_message.data(), one_block_message.size(), BlockBytes,
+            descriptor, sizeof(descriptor), &descriptor_bytes,
+            &rejected_default) == WirehairV2_InvalidDimensions &&
+            rejected_default == nullptr,
+            "tiny MDS K1 does not rewrite the default profile"))
+    {
+        return false;
+    }
+
+    WirehairV2Codec k1_encoder = nullptr;
+    WirehairV2Codec k1_recreated = nullptr;
+    WirehairV2Codec k1_decoder = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+            one_block_message.data(), one_block_message.size(), BlockBytes,
+            descriptor, sizeof(descriptor), &descriptor_bytes, &k1_encoder) ==
+                WirehairV2_Success &&
+            descriptor_bytes == sizeof(descriptor) && k1_encoder,
+            "tiny MDS K1 explicit creation") ||
+        !Check(wirehair_v2_encoder_create_profile(
+            one_block_message.data(), descriptor, sizeof(descriptor),
+            &k1_recreated) == WirehairV2_Success && k1_recreated,
+            "tiny MDS K1 descriptor recreation") ||
+        !Check(wirehair_v2_decoder_create(
+            descriptor, sizeof(descriptor), &k1_decoder) ==
+                WirehairV2_Success && k1_decoder,
+            "tiny MDS K1 decoder creation"))
+    {
+        wirehair_v2_free(k1_encoder);
+        wirehair_v2_free(k1_recreated);
+        wirehair_v2_free(k1_decoder);
+        return false;
+    }
+
+    WirehairV2Profile parsed = {};
+    uint8_t k1_systematic[BlockBytes];
+    std::memset(k1_systematic, 0xa5, sizeof(k1_systematic));
+    uint8_t k1_packet[BlockBytes] = {};
+    uint8_t k1_recreated_packet[BlockBytes] = {};
+    uint32_t k1_systematic_bytes = 0u;
+    uint32_t k1_bytes = 0u;
+    uint32_t k1_recreated_bytes = 0u;
+    std::vector<uint8_t> k1_recovered(one_block_message.size(), 0xa5u);
+    uint64_t k1_recovered_bytes = 0u;
+    bool ok =
+        Check(wirehair_v2_profile_deserialize(
+            descriptor, sizeof(descriptor), &parsed) ==
+                WirehairV2_Success &&
+            parsed.profile_id == WIREHAIR_V2_PROFILE_TINY_MDS_2026_07 &&
+            parsed.message_bytes == one_block_message.size() &&
+            parsed.block_bytes == BlockBytes && parsed.seed_attempt == 0u,
+            "tiny MDS K1 descriptor fields") &&
+        Check(wirehair_v2_encode(
+            k1_encoder, 0u, k1_systematic, one_block_message.size(),
+            &k1_systematic_bytes) == WirehairV2_Success &&
+            k1_systematic_bytes == one_block_message.size() &&
+            std::memcmp(
+                k1_systematic,
+                one_block_message.data(),
+                one_block_message.size()) == 0 &&
+            std::all_of(
+                k1_systematic + one_block_message.size(),
+                k1_systematic + BlockBytes,
+                [](uint8_t byte) { return byte == 0xa5u; }),
+            "tiny MDS K1 systematic packet has exact length") &&
+        Check(wirehair_v2_encode(
+            k1_encoder, UINT32_MAX, k1_packet, sizeof(k1_packet),
+            &k1_bytes) == WirehairV2_Success && k1_bytes == BlockBytes,
+            "tiny MDS K1 maximum-id encode") &&
+        Check(wirehair_v2_encode(
+            k1_recreated, UINT32_MAX,
+            k1_recreated_packet, sizeof(k1_recreated_packet),
+            &k1_recreated_bytes) == WirehairV2_Success &&
+            k1_recreated_bytes == k1_bytes &&
+            std::memcmp(k1_packet, k1_recreated_packet, k1_bytes) == 0,
+            "tiny MDS K1 descriptor packet identity") &&
+        Check(std::memcmp(
+            k1_packet, one_block_message.data(),
+            one_block_message.size()) == 0 &&
+            std::all_of(
+                k1_packet + one_block_message.size(),
+                k1_packet + BlockBytes,
+                [](uint8_t byte) { return byte == 0u; }),
+            "tiny MDS K1 padded repair") &&
+        Check(wirehair_v2_decode(
+            k1_decoder, UINT32_MAX, k1_packet, k1_bytes) ==
+                WirehairV2_Success,
+            "tiny MDS K1 decode") &&
+        Check(wirehair_v2_recover(
+            k1_decoder, k1_recovered.data(), k1_recovered.size(),
+            &k1_recovered_bytes) == WirehairV2_Success &&
+            k1_recovered_bytes == one_block_message.size() &&
+            k1_recovered == one_block_message,
+            "tiny MDS K1 public recovery");
+    wirehair_v2_free(k1_encoder);
+    wirehair_v2_free(k1_recreated);
+    wirehair_v2_free(k1_decoder);
+    if (!ok) {
+        return false;
+    }
+
+    uint8_t nonzero_attempt[WIREHAIR_V2_PROFILE_SERIALIZED_BYTES];
+    std::memcpy(nonzero_attempt, descriptor, sizeof(nonzero_attempt));
+    nonzero_attempt[28] = 1u;
+    WirehairV2Profile rejected_profile = {};
+    if (!Check(wirehair_v2_profile_deserialize(
+            nonzero_attempt, sizeof(nonzero_attempt), &rejected_profile) ==
+                WirehairV2_BadSeed &&
+            IsZeroProfile(rejected_profile),
+            "tiny MDS nonzero seed attempt rejected"))
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> three_block_message(33u);
+    FillMessage(three_block_message);
+    WirehairV2Codec rejected_k3 =
+        reinterpret_cast<WirehairV2Codec>(uintptr_t(1));
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+            three_block_message.data(), three_block_message.size(), BlockBytes,
+            descriptor, sizeof(descriptor), &descriptor_bytes, &rejected_k3) ==
+                WirehairV2_InvalidDimensions &&
+            rejected_k3 == nullptr,
+            "tiny MDS K3 rejected"))
+    {
+        return false;
+    }
+
+    // K=2 accepts odd block sizes because it is bytewise GF(256), unlike the
+    // mixed GF(2^16) profiles.
+    std::vector<uint8_t> odd_message(29u);
+    FillMessage(odd_message);
+    WirehairV2Codec odd_encoder = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+            odd_message.data(), odd_message.size(), 15u,
+            descriptor, sizeof(descriptor), &descriptor_bytes, &odd_encoder) ==
+                WirehairV2_Success && odd_encoder,
+            "tiny MDS odd block size"))
+    {
+        return false;
+    }
+    wirehair_v2_free(odd_encoder);
+
+    // The selector permits its 32-byte descriptor output to overlap message
+    // because encoder creation must own the source before publishing bytes.
+    std::vector<uint8_t> overlapping_message(32u);
+    FillMessage(overlapping_message);
+    const std::vector<uint8_t> overlapping_original = overlapping_message;
+    WirehairV2Codec overlapping_encoder = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+            overlapping_message.data(), overlapping_message.size(),
+            BlockBytes,
+            overlapping_message.data(), overlapping_message.size(),
+            &descriptor_bytes, &overlapping_encoder) ==
+                WirehairV2_Success &&
+            descriptor_bytes == WIREHAIR_V2_PROFILE_SERIALIZED_BYTES &&
+            overlapping_encoder,
+            "tiny MDS descriptor may overlap copied source"))
+    {
+        wirehair_v2_free(overlapping_encoder);
+        return false;
+    }
+    uint8_t overlapping_block[BlockBytes] = {};
+    uint32_t overlapping_bytes = 0u;
+    if (!Check(wirehair_v2_encode(
+            overlapping_encoder, 0u,
+            overlapping_block, sizeof(overlapping_block),
+            &overlapping_bytes) == WirehairV2_Success &&
+            overlapping_bytes == BlockBytes &&
+            std::memcmp(
+                overlapping_block,
+                overlapping_original.data(),
+                BlockBytes) == 0,
+            "tiny MDS overlapping descriptor preserves owned source"))
+    {
+        wirehair_v2_free(overlapping_encoder);
+        return false;
+    }
+    wirehair_v2_free(overlapping_encoder);
+
+    std::vector<uint8_t> message(31u);
+    FillMessage(message);
+    WirehairV2Codec encoder = nullptr;
+    WirehairV2Codec decoder = nullptr;
+    if (!Check(wirehair_v2_encoder_create_profile_id(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07,
+            message.data(), message.size(), BlockBytes,
+            descriptor, sizeof(descriptor), &descriptor_bytes, &encoder) ==
+                WirehairV2_Success && encoder,
+            "tiny MDS K2 explicit creation") ||
+        !Check(wirehair_v2_decoder_create(
+            descriptor, sizeof(descriptor), &decoder) ==
+                WirehairV2_Success && decoder,
+            "tiny MDS K2 decoder creation"))
+    {
+        wirehair_v2_free(encoder);
+        wirehair_v2_free(decoder);
+        return false;
+    }
+
+    uint8_t packet2[BlockBytes] = {};
+    uint8_t packet256[BlockBytes] = {};
+    uint8_t packet1[BlockBytes];
+    std::memset(packet1, 0xa5, sizeof(packet1));
+    uint32_t packet1_bytes = 0u;
+    uint32_t packet2_bytes = 0u;
+    uint32_t packet256_bytes = 0u;
+    ok =
+        Check(wirehair_v2_encode(
+            encoder, 1u, packet1, BlockBytes - 1u, &packet1_bytes) ==
+                WirehairV2_Success &&
+            packet1_bytes == BlockBytes - 1u &&
+            std::memcmp(
+                packet1, message.data() + BlockBytes,
+                BlockBytes - 1u) == 0 &&
+            packet1[BlockBytes - 1u] == 0xa5u,
+            "tiny MDS K2 final systematic has exact length") &&
+        Check(wirehair_v2_encode(
+            encoder, 2u, packet2, sizeof(packet2), &packet2_bytes) ==
+                WirehairV2_Success && packet2_bytes == BlockBytes,
+            "tiny MDS K2 id 2 encode") &&
+        Check(wirehair_v2_encode(
+            encoder, 256u, packet256, sizeof(packet256),
+            &packet256_bytes) == WirehairV2_Success &&
+            packet256_bytes == BlockBytes,
+            "tiny MDS K2 id 256 encode");
+    uint8_t invalid_packet[BlockBytes];
+    std::memset(invalid_packet, 0xa5, sizeof(invalid_packet));
+    uint8_t invalid_before[BlockBytes];
+    std::memcpy(invalid_before, invalid_packet, sizeof(invalid_before));
+    uint32_t invalid_bytes = 0u;
+    ok = ok &&
+        Check(wirehair_v2_encode(
+            encoder, 257u, invalid_packet, sizeof(invalid_packet),
+            &invalid_bytes) == WirehairV2_InvalidInput &&
+            invalid_bytes == BlockBytes &&
+            std::memcmp(
+                invalid_packet, invalid_before, sizeof(invalid_packet)) == 0,
+            "tiny MDS K2 id 257 public encode rejection") &&
+        Check(wirehair_v2_encode(
+            encoder, 257u, invalid_packet, sizeof(invalid_packet) - 1u,
+            &invalid_bytes) == WirehairV2_InvalidInput &&
+            invalid_bytes == BlockBytes &&
+            std::memcmp(
+                invalid_packet, invalid_before, sizeof(invalid_packet)) == 0,
+            "tiny MDS K2 invalid ID precedes short-capacity rejection") &&
+        Check(wirehair_v2_decode(
+            decoder, 257u, invalid_packet, sizeof(invalid_packet)) ==
+                WirehairV2_InvalidInput,
+            "tiny MDS K2 id 257 public decode rejection") &&
+        Check(wirehair_v2_decode(
+            decoder, 2u, packet2, packet2_bytes) == WirehairV2_NeedMore,
+            "tiny MDS K2 first decode") &&
+        Check(wirehair_v2_decode(
+            decoder, 2u, packet2, packet2_bytes) == WirehairV2_NeedMore,
+            "tiny MDS K2 identical duplicate");
+    uint8_t conflict[BlockBytes];
+    std::memcpy(conflict, packet2, sizeof(conflict));
+    conflict[0] ^= 1u;
+    ok = ok &&
+        Check(wirehair_v2_decode(
+            decoder, 2u, conflict, sizeof(conflict)) ==
+                WirehairV2_InvalidInput,
+            "tiny MDS K2 conflicting duplicate") &&
+        Check(wirehair_v2_decode(
+            decoder, 256u, packet256, packet256_bytes) ==
+                WirehairV2_Success,
+            "tiny MDS K2 second decode");
+    std::vector<uint8_t> recovered(message.size(), 0xa5u);
+    uint64_t recovered_bytes = 0u;
+    ok = ok &&
+        Check(wirehair_v2_recover(
+            decoder, recovered.data(), recovered.size(), &recovered_bytes) ==
+                WirehairV2_Success &&
+            recovered_bytes == message.size() && recovered == message,
+            "tiny MDS K2 public recovery");
+    wirehair_v2_free(encoder);
+    wirehair_v2_free(decoder);
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -1880,6 +2177,9 @@ int main()
         return fail_after_create();
     }
     if (!CheckAdaptiveTwoAnchorDescriptorContract(message)) {
+        return fail_after_create();
+    }
+    if (!CheckTinyMdsDescriptorContract()) {
         return fail_after_create();
     }
 

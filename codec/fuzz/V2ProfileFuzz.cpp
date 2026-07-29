@@ -2,6 +2,7 @@
 
 #include "../V2TinyDenseOracle.h"
 #include "../WirehairV2PrecodeEncode.h"
+#include "../WirehairV2TinyMDS.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -438,6 +439,162 @@ bool FuzzTinyOracle(wirehair_v2::fuzz::Input& input, std::string& failure)
     return true;
 }
 
+bool FuzzTinyMds(wirehair_v2::fuzz::Input& input, std::string& failure)
+{
+    const uint32_t K = input.Bool() ? 1u : 2u;
+    const uint32_t block_bytes = 1u + input.U8() % 32u;
+    const uint32_t tail_bytes = 1u + input.U8() % block_bytes;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(input.U8() ^ (uint8_t)(i * 73u + 19u));
+    }
+
+    wirehair_v2::TinyMdsCodec encoder;
+    if (encoder.InitializeEncoder(
+            message.data(), message_bytes, block_bytes) != Wirehair_Success)
+    {
+        return Fail(failure, "tiny-MDS fuzz encoder initialization failed");
+    }
+
+    uint32_t first_id = input.U32();
+    uint32_t second_id = 0u;
+    if (K == 2u)
+    {
+        first_id %= wirehair_v2::TinyMdsCodec::kMaxK2PacketId + 1u;
+        second_id = input.U32() %
+            wirehair_v2::TinyMdsCodec::kMaxK2PacketId;
+        if (second_id >= first_id) {
+            ++second_id;
+        }
+    }
+    std::vector<uint8_t> first_packet(block_bytes, 0xa5u);
+    uint32_t first_bytes = 0u;
+    if (encoder.EncodeResult(
+            first_id,
+            first_packet.data(),
+            block_bytes,
+            &first_bytes) != Wirehair_Success ||
+        first_bytes == 0u || first_bytes > block_bytes)
+    {
+        return Fail(failure, "tiny-MDS fuzz first encode failed");
+    }
+
+    wirehair_v2::TinyMdsCodec decoder;
+    if (decoder.InitializeDecoder(
+            message_bytes, block_bytes) != Wirehair_Success)
+    {
+        return Fail(failure, "tiny-MDS fuzz decoder initialization failed");
+    }
+    if (K == 2u)
+    {
+        std::vector<uint8_t> invalid(block_bytes, 0xa5u);
+        const std::vector<uint8_t> invalid_before = invalid;
+        uint32_t invalid_bytes = UINT32_C(0x12345678);
+        const uint32_t invalid_id =
+            wirehair_v2::TinyMdsCodec::kMaxK2PacketId +
+            1u + input.U8();
+        if (encoder.EncodeResult(
+                invalid_id,
+                invalid.data(),
+                block_bytes,
+                &invalid_bytes) != Wirehair_InvalidInput ||
+            invalid != invalid_before ||
+            invalid_bytes != UINT32_C(0x12345678) ||
+            decoder.DecodeResult(
+                invalid_id,
+                invalid.data(),
+                block_bytes) != Wirehair_InvalidInput ||
+            decoder.ReceivedCount() != 0u)
+        {
+            return Fail(failure,
+                "tiny-MDS fuzz unsupported ID changed state/output");
+        }
+    }
+
+    const WirehairResult first_result = decoder.DecodeResult(
+        first_id, first_packet.data(), first_bytes);
+    if (first_result !=
+            (K == 1u ? Wirehair_Success : Wirehair_NeedMore) ||
+        decoder.ReceivedCount() != 1u)
+    {
+        return Fail(failure, "tiny-MDS fuzz first decode result mismatch");
+    }
+    if (K == 2u)
+    {
+        if (decoder.DecodeResult(
+                first_id, first_packet.data(), first_bytes) !=
+                Wirehair_NeedMore ||
+            decoder.ReceivedCount() != 1u)
+        {
+            return Fail(failure,
+                "tiny-MDS fuzz matching duplicate changed state");
+        }
+        std::vector<uint8_t> conflict = first_packet;
+        conflict[0] ^= 1u;
+        if (decoder.DecodeResult(
+                first_id, conflict.data(), first_bytes) !=
+                Wirehair_InvalidInput ||
+            decoder.ReceivedCount() != 1u)
+        {
+            return Fail(failure,
+                "tiny-MDS fuzz conflicting duplicate changed state");
+        }
+
+        std::vector<uint8_t> second_packet(block_bytes, 0xa5u);
+        uint32_t second_bytes = 0u;
+        if (encoder.EncodeResult(
+                second_id,
+                second_packet.data(),
+                block_bytes,
+                &second_bytes) != Wirehair_Success ||
+            decoder.DecodeResult(
+                second_id,
+                second_packet.data(),
+                second_bytes) != Wirehair_Success ||
+            decoder.ReceivedCount() != 2u)
+        {
+            return Fail(failure, "tiny-MDS fuzz second decode failed");
+        }
+    }
+    if (!decoder.IsDecoded()) {
+        return Fail(failure, "tiny-MDS fuzz decoder did not complete");
+    }
+
+    std::vector<uint8_t> recovered((size_t)message_bytes + 16u, 0xa5u);
+    if (decoder.RecoverResult(
+            recovered.data() + 8u, message_bytes) != Wirehair_Success ||
+        std::memcmp(
+            recovered.data() + 8u,
+            message.data(),
+            (size_t)message_bytes) != 0 ||
+        !std::all_of(
+            recovered.begin(), recovered.begin() + 8u,
+            [](uint8_t byte) { return byte == 0xa5u; }) ||
+        !std::all_of(
+            recovered.end() - 8u, recovered.end(),
+            [](uint8_t byte) { return byte == 0xa5u; }))
+    {
+        return Fail(failure, "tiny-MDS fuzz recovery/guard mismatch");
+    }
+
+    if (decoder.DecodeResult(
+            first_id, first_packet.data(), first_bytes) != Wirehair_Success)
+    {
+        return Fail(failure,
+            "tiny-MDS fuzz consistent completed packet failed");
+    }
+    first_packet[0] ^= 1u;
+    if (decoder.DecodeResult(
+            first_id, first_packet.data(), first_bytes) != Wirehair_Error)
+    {
+        return Fail(failure,
+            "tiny-MDS fuzz corrupt completed packet was accepted");
+    }
+    return true;
+}
+
 bool FuzzProfileCase(
     const uint8_t* data,
     size_t size,
@@ -447,7 +604,14 @@ bool FuzzProfileCase(
         return true;
     }
     wirehair_v2::fuzz::Input input(data, size);
-    switch (input.U8() % 5u)
+    const uint8_t selector = input.U8();
+    // Keep the five historical corpus selectors stable.  One eighth of
+    // mutated inputs exercises the independently versioned tiny-MDS state
+    // machine without remapping those established seeds.
+    if ((selector & 7u) == 7u) {
+        return FuzzTinyMds(input, failure);
+    }
+    switch (selector % 5u)
     {
     case 0: return FuzzParams(input, failure);
     case 1: return FuzzSystem(input, failure);

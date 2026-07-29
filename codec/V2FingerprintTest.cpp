@@ -140,13 +140,14 @@ bool CheckContractTable()
             (uint32_t)(sizeof(kGoldenBindings) / sizeof(kGoldenBindings[0])));
         return false;
     }
-    uint32_t public_count = 0u;
+    uint32_t precode_public_count = 0u;
     for (uint32_t i = 0; i < contract_count; ++i)
     {
         const wirehair_v2::EquationFingerprintContract& contract =
             contracts[i];
         if (!contract.Name || !contract.Name[0] ||
             !contract.CanonicalName || !contract.CanonicalName[0] ||
+            contract.Kind != wirehair_v2::V2EquationKind::Precode ||
             !BindingForProfileId(contract.ProfileId))
         {
             std::fprintf(stderr,
@@ -165,7 +166,7 @@ bool CheckContractTable()
                     contract.Name);
                 return false;
             }
-            ++public_count;
+            ++precode_public_count;
         }
         uint8_t digest[wirehair_v2::kEquationFingerprintBytes];
         if (!wirehair_v2::ComputeEquationContractNameDigest(
@@ -205,12 +206,79 @@ bool CheckContractTable()
             }
         }
     }
-    if (public_count != 4u)
+    if (precode_public_count != 4u)
     {
         std::fprintf(stderr,
-            "fingerprint: contract table has %u public profiles, expected 4\n",
-            public_count);
+            "fingerprint: contract table has %u public precode profiles, "
+            "expected 4\n",
+            precode_public_count);
         return false;
+    }
+    const wirehair_v2::EquationFingerprintContract* tiny =
+        wirehair_v2::FindV2EquationContract("tiny_mds_2026_07");
+    uint8_t tiny_digest[wirehair_v2::kEquationFingerprintBytes] = {};
+    if (!tiny ||
+        tiny != wirehair_v2::FindV2EquationContract(
+            WIREHAIR_V2_PROFILE_TINY_MDS_2026_07, true) ||
+        tiny->ProfileId != WIREHAIR_V2_PROFILE_TINY_MDS_2026_07 ||
+        tiny->Kind != wirehair_v2::V2EquationKind::TinyMds ||
+        !tiny->PublicProfile ||
+        tiny->SeedAttemptCount != 1u ||
+        tiny->RecoveryMixCount != 0u ||
+        !wirehair_v2::ComputeEquationContractNameDigest(
+            *tiny, tiny_digest))
+    {
+        std::fprintf(stderr,
+            "fingerprint: tiny-MDS contract registry mismatch\n");
+        return false;
+    }
+    uint64_t tiny_digest_id = 0u;
+    for (uint32_t byte = 0u; byte < 8u; ++byte) {
+        tiny_digest_id = (tiny_digest_id << 8u) | tiny_digest[byte];
+    }
+    if (tiny_digest_id != tiny->ProfileId)
+    {
+        std::fprintf(stderr,
+            "fingerprint: tiny-MDS ID %016llx does not match canonical "
+            "SHA-256 prefix %016llx\n",
+            (unsigned long long)tiny->ProfileId,
+            (unsigned long long)tiny_digest_id);
+        return false;
+    }
+    uint8_t rejected_equation_digest[
+        wirehair_v2::kEquationFingerprintBytes];
+    std::memset(
+        rejected_equation_digest, 0xa5,
+        sizeof(rejected_equation_digest));
+    uint8_t rejected_equation_before[
+        wirehair_v2::kEquationFingerprintBytes];
+    std::memcpy(
+        rejected_equation_before,
+        rejected_equation_digest,
+        sizeof(rejected_equation_before));
+    if (wirehair_v2::ComputeEquationFingerprint(
+            *tiny, 2u, 2u, rejected_equation_digest) ||
+        std::memcmp(
+            rejected_equation_digest,
+            rejected_equation_before,
+            sizeof(rejected_equation_digest)) != 0)
+    {
+        std::fprintf(stderr,
+            "fingerprint: tiny MDS entered the precode all-K stream\n");
+        return false;
+    }
+    for (uint32_t i = 0u; i < contract_count; ++i)
+    {
+        if (contracts[i].ProfileId == tiny->ProfileId ||
+            std::strcmp(contracts[i].Name, tiny->Name) == 0 ||
+            std::strcmp(
+                contracts[i].CanonicalName, tiny->CanonicalName) == 0)
+        {
+            std::fprintf(stderr,
+                "fingerprint: tiny-MDS contract collides with %s\n",
+                contracts[i].Name);
+            return false;
+        }
     }
     const wirehair_v2::EquationFingerprintContract* dispatch =
         wirehair_v2::FindV2EquationContract("dispatch-v1");
