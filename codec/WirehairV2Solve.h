@@ -131,6 +131,16 @@ struct PacketRowConfig
 */
 bool IsCanonicalStableTargetPacketRowState();
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/**
+    Compact semantic fingerprint of every ambient packet-row hook.
+
+    The active id permutation, peel-seed phase, and normalized packet-degree
+    CDF are included.  Equation-preserving solver/dispatch oracles are not.
+*/
+uint64_t ActivePacketRowEquationStateFingerprintForTesting();
+#endif
+
 /**
     Validated process-local invariants for one packet-row domain.
 

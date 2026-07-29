@@ -6,6 +6,9 @@
 #include "WirehairV2Solve.h"
 
 #include "../WirehairEnvironment.h"
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+#include "../WirehairCodec.h"
+#endif
 #include "../WirehairTools.h"
 
 #include <wirehair/wirehair.h>
@@ -23,6 +26,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <sstream>
@@ -13838,6 +13842,3531 @@ int CmdPeelTiming(int argc, char** argv)
     return 0;
 }
 
+enum class BandTimingX
+{
+    Frozen,
+    Tracking
+};
+
+struct BandTimingOptions
+{
+    uint32_t BlockCount = 0u;
+    uint32_t BlockBytes = 0u;
+    uint32_t ConstructionSeedBase = 0u;
+    double Loss = 0.0;
+    uint64_t LossSeedBase = 0u;
+    PacketScheduleKind Schedule = PacketScheduleKind::Iid;
+    uint32_t CandidateStaircase = 0u;
+    uint32_t CandidateDenseRows = 0u;
+    uint32_t CandidateGF256Rows = 0u;
+    uint32_t CandidateGF16Rows = 0u;
+    uint32_t CandidatePeriod = 0u;
+    BandTimingX CandidateX = BandTimingX::Frozen;
+    uint32_t WarmupReplicates = 0u;
+    uint32_t Replicates = 0u;
+    uint32_t InnerReps = 0u;
+    uint32_t MaxOverhead = 0u;
+    PeelTimingCacheState CacheState = PeelTimingCacheState::Warm;
+    bool SystematicCache = false;
+    uint64_t EvictBytes = 0u;
+    std::string ContextSha256;
+    double RequiredMargin = 0.0;
+    const wirehair_v2::V2EquationContract* DispatchContract = nullptr;
+};
+
+const char* BandTimingXName(BandTimingX x)
+{
+    return x == BandTimingX::Tracking ? "tracking-x" : "frozen";
+}
+
+bool ParseBandTimingOptions(
+    int argc,
+    char** argv,
+    BandTimingOptions& options)
+{
+    bool have_N = false;
+    bool have_bb = false;
+    bool have_dispatch = false;
+    bool have_seed_policy = false;
+    bool have_construction_seed = false;
+    bool have_loss = false;
+    bool have_loss_seed = false;
+    bool have_schedule = false;
+    bool have_S = false;
+    bool have_D2 = false;
+    bool have_gf256 = false;
+    bool have_gf16 = false;
+    bool have_period = false;
+    bool have_x = false;
+    bool have_warmups = false;
+    bool have_replicates = false;
+    bool have_inner_reps = false;
+    bool have_max_overhead = false;
+    bool have_cache_state = false;
+    bool have_systematic_cache = false;
+    bool have_evict_bytes = false;
+    bool have_context = false;
+    bool have_margin = false;
+
+    for (int i = 0; i < argc; ++i)
+    {
+        const char* value = nullptr;
+        if (!std::strcmp(argv[i], "--N")) {
+            if (!AcceptOptionOnce("bandtiming", "--N", have_N) ||
+                !TakeArg("bandtiming", "--N", argc, argv, i, value) ||
+                !ParseU32Arg("--N", value, options.BlockCount)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--bb")) {
+            if (!AcceptOptionOnce("bandtiming", "--bb", have_bb) ||
+                !TakeArg("bandtiming", "--bb", argc, argv, i, value) ||
+                !ParseU32Arg("--bb", value, options.BlockBytes)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--dispatch-profile")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--dispatch-profile", have_dispatch) ||
+                !TakeArg(
+                    "bandtiming", "--dispatch-profile",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            options.DispatchContract =
+                wirehair_v2::FindV2EquationContract(value);
+            if (!options.DispatchContract ||
+                options.DispatchContract->PublicProfile ||
+                options.DispatchContract->ProfileId !=
+                    wirehair_v2::kWh2DispatchV1ContractId)
+            {
+                std::fprintf(stderr,
+                    "bandtiming --dispatch-profile must be dispatch-v1\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--seed-policy")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--seed-policy", have_seed_policy) ||
+                !TakeArg(
+                    "bandtiming", "--seed-policy", argc, argv, i, value) ||
+                std::strcmp(value, "raw") != 0)
+            {
+                std::fprintf(stderr,
+                    "bandtiming --seed-policy must be raw\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--construction-seed")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--construction-seed",
+                    have_construction_seed) ||
+                !TakeArg(
+                    "bandtiming", "--construction-seed",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--construction-seed", value,
+                    options.ConstructionSeedBase))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--loss")) {
+            if (!AcceptOptionOnce("bandtiming", "--loss", have_loss) ||
+                !TakeArg(
+                    "bandtiming", "--loss", argc, argv, i, value) ||
+                !ParseDoubleArg("--loss", value, options.Loss)) return false;
+        }
+        else if (!std::strcmp(argv[i], "--loss-seed")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--loss-seed", have_loss_seed) ||
+                !TakeArg(
+                    "bandtiming", "--loss-seed", argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--loss-seed", value, options.LossSeedBase))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--schedule")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--schedule", have_schedule) ||
+                !TakeArg(
+                    "bandtiming", "--schedule", argc, argv, i, value) ||
+                !ParsePacketSchedule(value, options.Schedule))
+            {
+                std::fprintf(stderr,
+                    "bandtiming --schedule must be iid, burst, permutation, "
+                    "systematic-first, repair-only, or adversarial\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-staircase")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-staircase", have_S) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-staircase",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--candidate-staircase", value,
+                    options.CandidateStaircase))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-dense-rows")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-dense-rows", have_D2) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-dense-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--candidate-dense-rows", value,
+                    options.CandidateDenseRows))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-gf256-rows")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-gf256-rows", have_gf256) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-gf256-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--candidate-gf256-rows", value,
+                    options.CandidateGF256Rows))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-gf16-rows")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-gf16-rows", have_gf16) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-gf16-rows",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--candidate-gf16-rows", value,
+                    options.CandidateGF16Rows))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-period")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-period", have_period) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-period",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--candidate-period", value,
+                    options.CandidatePeriod))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--candidate-x-geometry")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--candidate-x-geometry", have_x) ||
+                !TakeArg(
+                    "bandtiming", "--candidate-x-geometry",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "frozen")) {
+                options.CandidateX = BandTimingX::Frozen;
+            }
+            else if (!std::strcmp(value, "tracking-x")) {
+                options.CandidateX = BandTimingX::Tracking;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming --candidate-x-geometry must be frozen or "
+                    "tracking-x\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--warmup-replicates")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--warmup-replicates", have_warmups) ||
+                !TakeArg(
+                    "bandtiming", "--warmup-replicates",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--warmup-replicates", value,
+                    options.WarmupReplicates))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--replicates")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--replicates", have_replicates) ||
+                !TakeArg(
+                    "bandtiming", "--replicates", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--replicates", value, options.Replicates))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--inner-reps")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--inner-reps", have_inner_reps) ||
+                !TakeArg(
+                    "bandtiming", "--inner-reps", argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--inner-reps", value, options.InnerReps))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--max-overhead")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--max-overhead", have_max_overhead) ||
+                !TakeArg(
+                    "bandtiming", "--max-overhead",
+                    argc, argv, i, value) ||
+                !ParseU32Arg(
+                    "--max-overhead", value, options.MaxOverhead))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--cache-state")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--cache-state", have_cache_state) ||
+                !TakeArg(
+                    "bandtiming", "--cache-state", argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "cold")) {
+                options.CacheState = PeelTimingCacheState::Cold;
+            }
+            else if (!std::strcmp(value, "warm")) {
+                options.CacheState = PeelTimingCacheState::Warm;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming --cache-state must be cold or warm\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--systematic-cache")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--systematic-cache",
+                    have_systematic_cache) ||
+                !TakeArg(
+                    "bandtiming", "--systematic-cache",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            if (!std::strcmp(value, "off")) {
+                options.SystematicCache = false;
+            }
+            else if (!std::strcmp(value, "on")) {
+                options.SystematicCache = true;
+            }
+            else {
+                std::fprintf(stderr,
+                    "bandtiming --systematic-cache must be off or on\n");
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--evict-bytes")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--evict-bytes", have_evict_bytes) ||
+                !TakeArg(
+                    "bandtiming", "--evict-bytes", argc, argv, i, value) ||
+                !ParseU64Arg(
+                    "--evict-bytes", value, options.EvictBytes))
+            {
+                return false;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--context-sha256")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--context-sha256", have_context) ||
+                !TakeArg(
+                    "bandtiming", "--context-sha256",
+                    argc, argv, i, value))
+            {
+                return false;
+            }
+            options.ContextSha256 = value;
+        }
+        else if (!std::strcmp(argv[i], "--required-margin")) {
+            if (!AcceptOptionOnce(
+                    "bandtiming", "--required-margin", have_margin) ||
+                !TakeArg(
+                    "bandtiming", "--required-margin",
+                    argc, argv, i, value) ||
+                !ParseDoubleArg(
+                    "--required-margin", value, options.RequiredMargin))
+            {
+                return false;
+            }
+        }
+        else {
+            return UnknownArg("bandtiming", argv[i]);
+        }
+    }
+
+    if (!have_N || !have_bb || !have_dispatch || !have_seed_policy ||
+        !have_construction_seed || !have_loss || !have_loss_seed ||
+        !have_schedule || !have_S || !have_D2 || !have_gf256 ||
+        !have_gf16 || !have_period || !have_x || !have_warmups ||
+        !have_replicates || !have_inner_reps || !have_max_overhead ||
+        !have_cache_state || !have_systematic_cache ||
+        !have_evict_bytes || !have_context || !have_margin)
+    {
+        std::fprintf(stderr,
+            "bandtiming requires --N, --bb, --dispatch-profile, "
+            "--seed-policy, --construction-seed, --loss, --loss-seed, "
+            "--schedule, --candidate-staircase, --candidate-dense-rows, "
+            "--candidate-gf256-rows, --candidate-gf16-rows, "
+            "--candidate-period, "
+            "--candidate-x-geometry, --warmup-replicates, --replicates, "
+            "--inner-reps, --max-overhead, --cache-state, "
+            "--systematic-cache, --evict-bytes, --context-sha256, "
+            "and --required-margin\n");
+        return false;
+    }
+
+    const uint64_t total_replicates =
+        (uint64_t)options.WarmupReplicates + options.Replicates;
+    const uint64_t delivered =
+        (uint64_t)options.BlockCount + options.MaxOverhead;
+    const uint64_t heavy_rows =
+        (uint64_t)options.CandidateGF256Rows +
+        options.CandidateGF16Rows;
+    const uint64_t candidate_width =
+        (uint64_t)options.BlockCount + options.CandidateStaircase +
+        options.CandidateDenseRows + heavy_rows;
+    const uint64_t dispatch_width =
+        (uint64_t)options.BlockCount +
+        wirehair_v2::SmallBandStaircaseCount(options.BlockCount) + 4u +
+        wirehair_v2::kMixedGF256Rows +
+        wirehair_v2::kMixedGF16Rows;
+    const long double work_units =
+        (long double)total_replicates * 120.0L *
+        (long double)options.InnerReps * (long double)delivered;
+    if (options.BlockCount < 2u || options.BlockCount > 100u ||
+        options.BlockBytes == 0u ||
+        options.BlockBytes > UINT32_C(0x7fffffff) ||
+        (options.BlockBytes & 1u) != 0u ||
+        !ValidateLoss(options.Loss, "bandtiming") ||
+        (options.Loss == 0.0 && std::signbit(options.Loss)) ||
+        options.CandidateStaircase == 0u ||
+        options.CandidateStaircase > 64000u ||
+        options.CandidateDenseRows > 64u ||
+        options.CandidateGF256Rows <
+            wirehair_v2::kMixedGF256RowsMin ||
+        options.CandidateGF256Rows >
+            wirehair_v2::kMixedGF256Rows ||
+        options.CandidateGF16Rows <
+            wirehair_v2::kMixedGF16RowsMin ||
+        options.CandidateGF16Rows >
+            wirehair_v2::kMixedGF16RowsMax ||
+        heavy_rows == 0u || heavy_rows > 128u ||
+        options.CandidatePeriod < heavy_rows ||
+        options.CandidatePeriod > wirehair_v2::kMixedCoefficientPeriod ||
+        candidate_width > UINT16_MAX ||
+        dispatch_width > UINT16_MAX ||
+        options.Replicates < 3u ||
+        total_replicates > 10000u ||
+        options.InnerReps == 0u || options.InnerReps > 1024u ||
+        options.MaxOverhead > 4096u ||
+        options.MaxOverhead >
+            (uint64_t)options.BlockCount + 512u ||
+        delivered > UINT32_MAX ||
+        options.EvictBytes < 4096u ||
+        options.EvictBytes > kPeelTimingEvictBytesMax ||
+        (options.CacheState == PeelTimingCacheState::Cold &&
+         options.InnerReps != 1u) ||
+        !IsPeelTimingLowerHexSha256(options.ContextSha256) ||
+        options.RequiredMargin < 0.0 ||
+        options.RequiredMargin > 1.0 ||
+        (options.RequiredMargin == 0.0 &&
+         std::signbit(options.RequiredMargin)) ||
+        work_units > 1000000000000.0L)
+    {
+        std::fprintf(stderr, "bandtiming argument domain mismatch\n");
+        return false;
+    }
+    return true;
+}
+
+bool ValidateBandTimingEnvironment()
+{
+    static const char* const kForbidden[] = {
+        "WIREHAIR_V2_PEEL_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_ROW_DEGREES",
+        "WIREHAIR_V2_STAIRCASE_DEGREE_SCALE",
+        "WIREHAIR_V2_BAND_TRACKING_X"
+    };
+    for (const char* name : kForbidden)
+    {
+        const wirehair::EnvironmentValue value(name);
+        if (value.IsSet())
+        {
+            std::fprintf(stderr,
+                "bandtiming forbids ambient %s\n", name);
+            return false;
+        }
+    }
+    return ValidateTargetExperimentEnvironment("bandtiming");
+}
+
+uint32_t BandTimingDerivedConstructionSeed(
+    uint32_t base,
+    uint32_t replicate)
+{
+    return base ^ (uint32_t)(
+        (uint64_t)(replicate + 1u) *
+        UINT64_C(0xd1b54a32d192ed03));
+}
+
+uint64_t BandTimingDerivedLossSeed(uint64_t base, uint32_t replicate)
+{
+    return PeelTimingDerivedLossSeed(base, replicate);
+}
+
+std::string BandTimingDescriptorText(
+    uint32_t staircase,
+    uint32_t dense_rows,
+    uint32_t gf256_rows,
+    uint32_t gf16_rows,
+    uint32_t period,
+    BandTimingX x)
+{
+    std::ostringstream text;
+    text << "S=" << staircase << '\n'
+         << "D2=" << dense_rows << '\n'
+         << "gf256=" << gf256_rows << '\n'
+         << "gf16=" << gf16_rows << '\n'
+         << "P=" << period << '\n'
+         << "x=" << BandTimingXName(x) << '\n';
+    return text.str();
+}
+
+bool ConfigureBandTimingWh2(
+    uint32_t gf256_rows,
+    uint32_t gf16_rows,
+    uint32_t period,
+    BandTimingX x)
+{
+    wirehair_v2::ClearPeelDegreesForTesting();
+    wirehair_v2::ClearStaircaseDegreesForTesting();
+    wirehair_v2::ClearStaircaseRowDegreesForTesting();
+    wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    if (!wirehair_v2::SetTinyMixedFastPathModeForTesting(0) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256RowsMin) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16RowsMin) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(
+            wirehair_v2::kMixedCoefficientPeriod) ||
+        !wirehair_v2::SetMixedCoefficientGeometryForTesting(
+            wirehair_v2::MixedCoefficientGeometry::FrozenPowerX) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(gf16_rows) ||
+        !wirehair_v2::SetMixedCoefficientPeriodForTesting(period) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(gf256_rows) ||
+        !wirehair_v2::SetMixedResidueSkewForTesting(0u) ||
+        !wirehair_v2::SetMixedResidueScheduleForTesting(
+            wirehair_v2::MixedResidueSchedule::Constant))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedResidueHashSeedForTesting(0u);
+    wirehair_v2::SetMixedIndependentExtensionSeedXorForTesting(78u);
+    if (!wirehair_v2::SetMixedIndependentExtensionResiduesForTesting(false) ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(
+            wirehair_v2::MixedResidueBucketMode::Automatic) ||
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u))
+    {
+        return false;
+    }
+    wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+    wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+    if (!wirehair_v2::SetMixedGroupedGF256RowsForTesting(0u)) {
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(
+        x == BandTimingX::Tracking);
+    return true;
+}
+
+struct BandTimingHookCleanup
+{
+    ~BandTimingHookCleanup()
+    {
+        (void)ConfigureBandTimingWh2(
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod,
+            BandTimingX::Frozen);
+        wirehair_v2::ClearMixedBandTrackingXForTesting();
+        wirehair_v2::ClearPeelDegreesForTesting();
+        wirehair_v2::ClearStaircaseDegreesForTesting();
+        wirehair_v2::ClearStaircaseRowDegreesForTesting();
+        wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    }
+};
+
+enum class BandTimingRole
+{
+    Candidate,
+    Dispatch,
+    Wh1
+};
+
+const char* BandTimingBaseRoleName(BandTimingRole role)
+{
+    switch (role)
+    {
+    case BandTimingRole::Candidate: return "candidate";
+    case BandTimingRole::Dispatch:  return "dispatch";
+    case BandTimingRole::Wh1:       return "wh1";
+    }
+    return "unknown";
+}
+
+struct BandTimingDescriptor
+{
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting Explicit;
+    uint32_t GF256Rows = 0u;
+    uint32_t GF16Rows = 0u;
+    uint32_t Period = 0u;
+    BandTimingX X = BandTimingX::Frozen;
+};
+
+bool BuildBandTimingDescriptor(
+    BandTimingRole role,
+    const BandTimingOptions& options,
+    uint32_t construction_seed,
+    BandTimingDescriptor& descriptor)
+{
+    descriptor = BandTimingDescriptor();
+    if (role == BandTimingRole::Wh1) return false;
+    const bool candidate = role == BandTimingRole::Candidate;
+    descriptor.GF256Rows = candidate ?
+        options.CandidateGF256Rows : wirehair_v2::kMixedGF256Rows;
+    descriptor.GF16Rows = candidate ?
+        options.CandidateGF16Rows : wirehair_v2::kMixedGF16Rows;
+    descriptor.Period = candidate ?
+        options.CandidatePeriod : wirehair_v2::kMixedCoefficientPeriod;
+    descriptor.X = candidate ?
+        options.CandidateX : BandTimingX::Frozen;
+    if (!ConfigureBandTimingWh2(
+            descriptor.GF256Rows, descriptor.GF16Rows,
+            descriptor.Period, descriptor.X))
+    {
+        return false;
+    }
+    descriptor.Explicit.Params =
+        wirehair_v2::MakeMixedParams(
+            options.BlockCount, (uint64_t)construction_seed);
+    descriptor.Explicit.Params.Staircase = candidate ?
+        options.CandidateStaircase :
+        wirehair_v2::SmallBandStaircaseCount(options.BlockCount);
+    descriptor.Explicit.Params.DenseRows = candidate ?
+        options.CandidateDenseRows : 4u;
+    descriptor.Explicit.Params.DenseIdentityCorner = false;
+    descriptor.Explicit.Params.DenseTwoAnchor = false;
+    descriptor.Explicit.Params.DenseTwoAnchorPhase = 0u;
+    descriptor.Explicit.Params.SegmentedDenseAnchors =
+        wirehair_v2::DenseAnchorLayout::Disabled;
+    descriptor.Explicit.Packet.PeelSeed =
+        wirehair_v2::RawUniformPacketPeelSeed(
+            (uint64_t)construction_seed);
+    descriptor.Explicit.Packet.MixCount =
+        options.DispatchContract->RecoveryMixCount;
+    descriptor.Explicit.CacheSystematicSource =
+        options.SystematicCache;
+    descriptor.Explicit.CacheReceivedSystematicPackets =
+        options.SystematicCache;
+    return descriptor.Explicit.Params.HeavyRows ==
+            descriptor.GF256Rows + descriptor.GF16Rows &&
+        descriptor.Explicit.PinActiveEquationStateForTesting();
+}
+
+bool SameBandTimingParams(
+    const wirehair_v2::PrecodeParams& a,
+    const wirehair_v2::PrecodeParams& b)
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.Field == b.Field &&
+        a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
+        a.StaircaseDegreeScale == b.StaircaseDegreeScale &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.Seed == b.Seed;
+}
+
+std::string BandTimingParamsDigest(
+    const wirehair_v2::PrecodeParams& p)
+{
+    std::ostringstream text;
+    text << std::setprecision(17)
+         << "wirehair-wh2-bandtiming-params-v1\n"
+         << p.BlockCount << ',' << p.Staircase << ',' << p.DenseRows << ','
+         << p.HeavyRows << ',' << p.SourceHits << ',' << (uint32_t)p.Field
+         << ',' << (p.DegreeBalancedStaircase ? 1 : 0) << ','
+         << p.StaircaseDegreeScale << ','
+         << (p.DenseIdentityCorner ? 1 : 0) << ','
+         << (p.DenseTwoAnchor ? 1 : 0) << ','
+         << p.DenseTwoAnchorPhase << ','
+         << (uint32_t)p.SegmentedDenseAnchors << ','
+         << (uint32_t)p.HeavyFamily << ',' << p.Seed << '\n';
+    return Sha256Hex(text.str());
+}
+
+std::string BandTimingCoefficientDigest(
+    const wirehair_v2::PrecodeSystem& system,
+    uint32_t gf256_rows,
+    uint32_t gf16_rows,
+    uint32_t period)
+{
+    std::ostringstream text;
+    text << "wirehair-wh2-bandtiming-coefficients-v1\n"
+         << gf256_rows << ',' << gf16_rows << ',' << period << '\n';
+    const wirehair_v2::MixedCoefficientRows* rows =
+        wirehair_v2::GetMixedCoefficientRows();
+    if (!rows) return std::string();
+    const uint32_t columns = system.Params.BlockCount +
+        system.Params.Staircase + system.Params.DenseRows +
+        system.Params.HeavyRows;
+    for (uint32_t row = 0u; row < gf256_rows; ++row)
+    {
+        text << "g8:" << row << ':';
+        for (uint32_t column = 0u; column < columns; ++column) {
+            text << (uint32_t)rows->Subfield[row][
+                wirehair_v2::ActiveMixedCoefficientResidue(column)] << ',';
+        }
+        text << '\n';
+    }
+    for (uint32_t row = 0u; row < gf16_rows; ++row)
+    {
+        text << "g16:" << row << ':';
+        for (uint32_t column = 0u; column < columns; ++column) {
+            text << rows->Extension[row][
+                wirehair_v2::ActiveMixedExtensionCoefficientResidue(
+                    column)] << ',';
+        }
+        text << '\n';
+    }
+    return Sha256Hex(text.str());
+}
+
+std::string BandTimingTraceDigest(
+    const BandTimingOptions& options,
+    uint32_t construction_seed,
+    uint64_t loss_seed,
+    const std::vector<uint32_t>& ids)
+{
+    std::ostringstream trace;
+    trace << "wirehair-wh2-bandtiming-loss-trace-v1\nK="
+          << options.BlockCount << "\nblock_bytes=" << options.BlockBytes
+          << "\nconstruction_seed=" << construction_seed
+          << "\nloss_seed=" << loss_seed << "\nloss="
+          << std::setprecision(17) << options.Loss << "\nschedule="
+          << PacketScheduleName(options.Schedule)
+          << "\nmessage_seed_policy="
+             "replicate-loss-seed-partial-final-v1"
+          << "\nids=";
+    for (size_t i = 0u; i < ids.size(); ++i) {
+        if (i != 0u) trace << ',';
+        trace << ids[i];
+    }
+    trace << '\n';
+    return Sha256Hex(trace.str());
+}
+
+uint32_t BandTimingPacketBytes(
+    const BandTimingOptions& options,
+    uint32_t block_id)
+{
+    return block_id + 1u == options.BlockCount ?
+        1u : options.BlockBytes;
+}
+
+struct BandTimingAlignedBytes
+{
+    std::vector<uint8_t> Storage;
+    size_t LogicalBytes = 0u;
+
+    bool Resize(size_t bytes)
+    {
+        if (bytes > std::numeric_limits<size_t>::max() - 63u) {
+            return false;
+        }
+        try {
+            Storage.assign(bytes + 63u, uint8_t{0});
+        }
+        catch (const std::bad_alloc&) {
+            LogicalBytes = 0u;
+            return false;
+        }
+        catch (const std::length_error&) {
+            LogicalBytes = 0u;
+            return false;
+        }
+        LogicalBytes = bytes;
+        const uint8_t* data = Data();
+        return data != nullptr &&
+            (reinterpret_cast<uintptr_t>(data) & 63u) == 0u;
+    }
+
+    uint8_t* Data()
+    {
+        if (Storage.empty()) return nullptr;
+        const uintptr_t base =
+            reinterpret_cast<uintptr_t>(Storage.data());
+        if (base > std::numeric_limits<uintptr_t>::max() - 63u) {
+            return nullptr;
+        }
+        const uintptr_t aligned =
+            (base + 63u) & ~(uintptr_t)63u;
+        if (aligned < base || aligned - base > 63u) return nullptr;
+        return reinterpret_cast<uint8_t*>(aligned);
+    }
+
+    const uint8_t* Data() const
+    {
+        return const_cast<BandTimingAlignedBytes*>(this)->Data();
+    }
+
+    size_t Size() const { return LogicalBytes; }
+};
+
+bool FillBandTimingMessage(
+    BandTimingAlignedBytes& message,
+    size_t bytes,
+    uint64_t seed)
+{
+    if (!message.Resize(bytes)) return false;
+    Rng rng(seed);
+    uint8_t* data = message.Data();
+    for (size_t i = 0u; i < bytes; ++i) {
+        data[i] = (uint8_t)rng.U32();
+    }
+    return true;
+}
+
+struct BandTimingPayload
+{
+    WirehairResult ConstructResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    BandTimingAlignedBytes Bytes;
+    std::vector<uint32_t> DataBytes;
+    size_t IntermediateBytes = 0u;
+    std::string IntermediateSha256;
+    std::string Sha256;
+};
+
+WirehairResult ClassifyBandTimingExplicitEncoderConstruction(
+    WirehairResult result,
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    const BandTimingAlignedBytes& message)
+{
+    if (result == Wirehair_NeedMore) {
+        return Wirehair_BadPeelSeed;
+    }
+    if (result != Wirehair_Error) {
+        return result;
+    }
+
+    // Raw attempt-zero construction deliberately preserves the solver's
+    // result.  A singular square systematic system reports NeedMore for an
+    // all-zero RHS but may report Error for an inconsistent nonzero RHS.
+    // Certify that structural case outside every timed region before
+    // normalizing it to the same explicit weak-seed code used by the selected
+    // profile path.  An Error that is not reproduced as rank deficiency is a
+    // genuine invariant failure and must remain Error.
+    BandTimingAlignedBytes zero_message;
+    if (!zero_message.Resize(message.Size())) {
+        return Wirehair_OOM;
+    }
+    wirehair_v2::MessagePrecodeEncoder probe;
+    const WirehairResult probe_result =
+        probe.InitializeExplicitResultForTesting(
+            zero_message.Data(), zero_message.Size(), options.BlockBytes,
+            descriptor.Explicit);
+    if (probe_result == Wirehair_OOM) {
+        return probe_result;
+    }
+    return probe_result == Wirehair_NeedMore ?
+        Wirehair_BadPeelSeed : result;
+}
+
+WirehairResult BuildBandTimingPayload(
+    BandTimingRole role,
+    const BandTimingOptions& options,
+    const BandTimingDescriptor* descriptor,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const std::vector<uint32_t>& ids,
+    BandTimingPayload& payload)
+{
+    payload = BandTimingPayload();
+    const uint64_t payload_bytes =
+        (uint64_t)ids.size() * options.BlockBytes;
+    if (payload_bytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        payload.ConstructResult = Wirehair_OOM;
+        payload.Result = Wirehair_OOM;
+        return payload.Result;
+    }
+    if (!payload.Bytes.Resize((size_t)payload_bytes)) {
+        payload.ConstructResult = Wirehair_OOM;
+        payload.Result = Wirehair_OOM;
+        return payload.Result;
+    }
+    payload.DataBytes.resize(ids.size());
+
+    if (role == BandTimingRole::Wh1)
+    {
+        wirehair::Codec encoder;
+        encoder.SetWireProfile(wirehair::WireProfile::LegacyCurrent);
+        const uint32_t dense_count =
+            wirehair::GetDenseCount(options.BlockCount);
+        if (dense_count > UINT16_MAX)
+        {
+            payload.ConstructResult = Wirehair_InvalidInput;
+            payload.Result = Wirehair_InvalidInput;
+            return payload.Result;
+        }
+        encoder.OverrideSeeds(
+            (uint16_t)dense_count,
+            (uint16_t)(construction_seed & 0xffffu),
+            (uint16_t)(construction_seed >> 16));
+        payload.ConstructResult = encoder.InitializeEncoder(
+            message.Size(), options.BlockBytes);
+        if (payload.ConstructResult != Wirehair_Success) {
+            payload.Result = payload.ConstructResult;
+            return payload.Result;
+        }
+        payload.Result = encoder.EncodeFeed(
+            message.Data(), options.SystematicCache);
+        if (payload.Result != Wirehair_Success) return payload.Result;
+        for (size_t i = 0u; i < ids.size(); ++i)
+        {
+            const uint32_t bytes = encoder.Encode(
+                ids[i],
+                payload.Bytes.Data() +
+                    i * (size_t)options.BlockBytes,
+                options.BlockBytes);
+            const uint32_t expected =
+                BandTimingPacketBytes(options, ids[i]);
+            if (bytes != expected)
+            {
+                payload.Result = Wirehair_Error;
+                return payload.Result;
+            }
+            payload.DataBytes[i] = bytes;
+        }
+        payload.Sha256 =
+            Sha256HexBytes(
+                payload.Bytes.Data(), payload.Bytes.Size());
+        return payload.Result;
+    }
+
+    if (!descriptor ||
+        !ConfigureBandTimingWh2(
+            descriptor->GF256Rows, descriptor->GF16Rows,
+            descriptor->Period, descriptor->X))
+    {
+        payload.ConstructResult = Wirehair_InvalidInput;
+        payload.Result = Wirehair_InvalidInput;
+        return payload.Result;
+    }
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    payload.ConstructResult =
+        encoder.InitializeExplicitResultForTesting(
+            message.Data(), message.Size(), options.BlockBytes,
+            descriptor->Explicit);
+    payload.ConstructResult =
+        ClassifyBandTimingExplicitEncoderConstruction(
+            payload.ConstructResult, options, *descriptor, message);
+    payload.Result = payload.ConstructResult;
+    if (payload.Result != Wirehair_Success) return payload.Result;
+    const uint64_t intermediate_blocks =
+        (uint64_t)descriptor->Explicit.Params.BlockCount +
+        descriptor->Explicit.Params.Staircase +
+        descriptor->Explicit.Params.DenseRows +
+        descriptor->Explicit.Params.HeavyRows;
+    const uint64_t intermediate_bytes =
+        intermediate_blocks * options.BlockBytes;
+    if (intermediate_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        !encoder.IntermediateBlocks())
+    {
+        payload.Result = Wirehair_Error;
+        return payload.Result;
+    }
+    payload.IntermediateBytes = (size_t)intermediate_bytes;
+    payload.IntermediateSha256 = Sha256HexBytes(
+        encoder.IntermediateBlocks(), payload.IntermediateBytes);
+    for (size_t i = 0u; i < ids.size(); ++i)
+    {
+        uint32_t bytes = 0u;
+        payload.Result = encoder.EncodeResult(
+            ids[i],
+            payload.Bytes.Data() +
+                i * (size_t)options.BlockBytes,
+            options.BlockBytes, &bytes);
+        const uint32_t expected =
+            BandTimingPacketBytes(options, ids[i]);
+        if (payload.Result != Wirehair_Success || bytes != expected)
+        {
+            if (payload.Result == Wirehair_Success) {
+                payload.Result = Wirehair_Error;
+            }
+            return payload.Result;
+        }
+        payload.DataBytes[i] = bytes;
+    }
+    payload.Sha256 =
+        Sha256HexBytes(payload.Bytes.Data(), payload.Bytes.Size());
+    return payload.Result;
+}
+
+struct BandTimingRecovery
+{
+    WirehairResult ConstructResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    WirehairResult RecoveryResult = Wirehair_InvalidInput;
+    bool RecoveryOk = false;
+    uint32_t ReceivedSymbols = 0u;
+    int32_t Overhead = -1;
+    wirehair_v2::PrecodeSolveStats Stats;
+    bool StatsAvailable = false;
+    std::string RecoveredSha256;
+};
+
+constexpr bool BandTimingSemanticRecoveryRetryResult(
+    WirehairResult result)
+{
+    return result == Wirehair_NeedMore;
+}
+
+static_assert(
+    BandTimingSemanticRecoveryRetryResult(Wirehair_NeedMore),
+    "an exactly shared full-schedule NeedMore remains retryable");
+static_assert(
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_Success) &&
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_Error) &&
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_OOM) &&
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_InvalidInput) &&
+    !BandTimingSemanticRecoveryRetryResult(
+        Wirehair_ExtraInsufficient) &&
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_BadPeelSeed) &&
+    !BandTimingSemanticRecoveryRetryResult(Wirehair_BadDenseSeed),
+    "every other decoder result must fail the semantic witness");
+
+bool BandTimingSharedNeedMoreRecovery(
+    const BandTimingRecovery& explicit_recovery,
+    const BandTimingRecovery& dispatch_recovery,
+    size_t expected_symbols)
+{
+    return !explicit_recovery.RecoveryOk &&
+        !dispatch_recovery.RecoveryOk &&
+        explicit_recovery.ConstructResult == Wirehair_Success &&
+        dispatch_recovery.ConstructResult == Wirehair_Success &&
+        BandTimingSemanticRecoveryRetryResult(
+            explicit_recovery.Result) &&
+        dispatch_recovery.Result == explicit_recovery.Result &&
+        explicit_recovery.RecoveryResult == Wirehair_InvalidInput &&
+        dispatch_recovery.RecoveryResult == Wirehair_InvalidInput &&
+        explicit_recovery.ReceivedSymbols ==
+            dispatch_recovery.ReceivedSymbols &&
+        (size_t)explicit_recovery.ReceivedSymbols == expected_symbols &&
+        explicit_recovery.Overhead == -1 &&
+        dispatch_recovery.Overhead == -1 &&
+        !explicit_recovery.StatsAvailable &&
+        !dispatch_recovery.StatsAvailable &&
+        explicit_recovery.RecoveredSha256.empty() &&
+        dispatch_recovery.RecoveredSha256.empty();
+}
+
+bool BandTimingPayloadOutOfMemory(const BandTimingPayload& payload)
+{
+    return payload.ConstructResult == Wirehair_OOM ||
+        payload.Result == Wirehair_OOM;
+}
+
+BandTimingRecovery RunBandTimingRecovery(
+    BandTimingRole role,
+    const BandTimingOptions& options,
+    const BandTimingDescriptor* descriptor,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const std::vector<uint32_t>& ids,
+    const BandTimingPayload& payload)
+{
+    BandTimingRecovery recovery;
+    if (payload.Result != Wirehair_Success ||
+        payload.DataBytes.size() != ids.size())
+    {
+        recovery.ConstructResult = payload.ConstructResult;
+        recovery.Result = payload.Result;
+        return recovery;
+    }
+
+    std::vector<uint8_t> recovered(message.Size(), uint8_t{0});
+    const auto finish_recovery = [&]() {
+        if (recovery.Result != Wirehair_Success) return;
+        if (recovery.RecoveryResult == Wirehair_Success &&
+            std::memcmp(
+                recovered.data(), message.Data(), message.Size()) == 0)
+        {
+            recovery.RecoveryOk = true;
+            recovery.Overhead =
+                (int32_t)recovery.ReceivedSymbols -
+                (int32_t)options.BlockCount;
+            recovery.RecoveredSha256 =
+                Sha256HexBytes(recovered.data(), recovered.size());
+        }
+        else if (recovery.RecoveryResult == Wirehair_Success) {
+            recovery.RecoveryResult = Wirehair_Error;
+        }
+    };
+
+    if (role == BandTimingRole::Wh1)
+    {
+        wirehair::Codec decoder;
+        decoder.SetWireProfile(wirehair::WireProfile::LegacyCurrent);
+        const uint32_t dense_count =
+            wirehair::GetDenseCount(options.BlockCount);
+        if (dense_count > UINT16_MAX)
+        {
+            recovery.ConstructResult = Wirehair_InvalidInput;
+            recovery.Result = Wirehair_InvalidInput;
+            return recovery;
+        }
+        decoder.OverrideSeeds(
+            (uint16_t)dense_count,
+            (uint16_t)(construction_seed & 0xffffu),
+            (uint16_t)(construction_seed >> 16));
+        recovery.ConstructResult = decoder.InitializeDecoder(
+            message.Size(), options.BlockBytes);
+        recovery.Result = recovery.ConstructResult;
+        if (recovery.Result != Wirehair_Success) return recovery;
+        recovery.Result = Wirehair_NeedMore;
+        for (size_t i = 0u; i < ids.size(); ++i)
+        {
+            recovery.Result = decoder.DecodeFeed(
+                ids[i],
+                payload.Bytes.Data() +
+                    i * (size_t)options.BlockBytes,
+                payload.DataBytes[i]);
+            ++recovery.ReceivedSymbols;
+            if (recovery.Result != Wirehair_NeedMore) break;
+        }
+        if (recovery.Result == Wirehair_Success) {
+            recovery.RecoveryResult = decoder.ReconstructOutput(
+                recovered.data(), recovered.size());
+        }
+        finish_recovery();
+        return recovery;
+    }
+
+    if (!descriptor ||
+        !ConfigureBandTimingWh2(
+            descriptor->GF256Rows, descriptor->GF16Rows,
+            descriptor->Period, descriptor->X))
+    {
+        recovery.ConstructResult = Wirehair_InvalidInput;
+        recovery.Result = Wirehair_InvalidInput;
+        return recovery;
+    }
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    recovery.ConstructResult =
+        decoder.InitializeExplicitResultForTesting(
+            message.Size(), options.BlockBytes, descriptor->Explicit);
+    recovery.Result = recovery.ConstructResult;
+    if (recovery.Result != Wirehair_Success) return recovery;
+    recovery.Result = Wirehair_NeedMore;
+    for (size_t i = 0u; i < ids.size(); ++i)
+    {
+        recovery.Result = decoder.DecodeResult(
+            ids[i],
+            payload.Bytes.Data() +
+                i * (size_t)options.BlockBytes,
+            payload.DataBytes[i]);
+        ++recovery.ReceivedSymbols;
+        if (recovery.Result != Wirehair_NeedMore) break;
+    }
+    if (recovery.Result == Wirehair_Success)
+    {
+        recovery.Stats = decoder.SolveStats();
+        recovery.StatsAvailable = true;
+        recovery.RecoveryResult = decoder.RecoverResult(
+            recovered.data(), recovered.size());
+    }
+    finish_recovery();
+    return recovery;
+}
+
+struct BandTimingDirect
+{
+    WirehairResult ConstructResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    wirehair_v2::PrecodeSolveStats Stats;
+    bool StatsAvailable = false;
+    size_t IntermediateBytes = 0u;
+    std::string IntermediateSha256;
+};
+
+bool BandTimingRecoveryOutOfMemory(const BandTimingRecovery& recovery)
+{
+    return recovery.ConstructResult == Wirehair_OOM ||
+        recovery.Result == Wirehair_OOM ||
+        (recovery.Result == Wirehair_Success &&
+         recovery.RecoveryResult == Wirehair_OOM);
+}
+
+bool BandTimingDirectOutOfMemory(const BandTimingDirect& direct)
+{
+    return direct.ConstructResult == Wirehair_OOM ||
+        direct.Result == Wirehair_OOM;
+}
+
+BandTimingDirect RunBandTimingDirect(
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    const std::vector<uint32_t>& ids,
+    const BandTimingPayload& payload,
+    uint32_t prefix_symbols,
+    bool bind_intermediate)
+{
+    BandTimingDirect direct;
+    if (payload.Result != Wirehair_Success)
+    {
+        direct.ConstructResult = payload.ConstructResult;
+        direct.Result = payload.Result;
+        return direct;
+    }
+    if (prefix_symbols > ids.size() ||
+        !ConfigureBandTimingWh2(
+            descriptor.GF256Rows, descriptor.GF16Rows,
+            descriptor.Period, descriptor.X))
+    {
+        direct.ConstructResult = Wirehair_InvalidInput;
+        direct.Result = Wirehair_InvalidInput;
+        return direct;
+    }
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            descriptor.Explicit.Params, system))
+    {
+        direct.ConstructResult = Wirehair_InvalidInput;
+        direct.Result = Wirehair_InvalidInput;
+        return direct;
+    }
+    const uint64_t precode_count =
+        (uint64_t)system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (precode_count > UINT32_MAX ||
+        !runtime.Initialize(
+            options.BlockCount, (uint32_t)precode_count,
+            descriptor.Explicit.Packet.MixCount))
+    {
+        direct.ConstructResult = Wirehair_InvalidInput;
+        direct.Result = Wirehair_InvalidInput;
+        return direct;
+    }
+    direct.ConstructResult = Wirehair_Success;
+    std::vector<wirehair_v2::SolvePacket> packets(prefix_symbols);
+    for (uint32_t i = 0u; i < prefix_symbols; ++i)
+    {
+        packets[i].BlockId = ids[i];
+        packets[i].Data =
+            payload.Bytes.Data() + (size_t)i * options.BlockBytes;
+    }
+    std::vector<uint8_t> intermediate;
+    direct.Result =
+        wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+            system, descriptor.Explicit.Packet, runtime, packets,
+            options.BlockBytes, intermediate, &direct.Stats);
+    direct.StatsAvailable = true;
+    direct.IntermediateBytes = intermediate.size();
+    if (bind_intermediate) {
+        direct.IntermediateSha256 =
+            Sha256HexBytes(intermediate.data(), intermediate.size());
+    }
+    return direct;
+}
+
+const char* BandTimingResultClass(WirehairResult result)
+{
+    if (result == Wirehair_Success) return "success";
+    if (result == Wirehair_BadPeelSeed ||
+        result == Wirehair_BadDenseSeed)
+    {
+        return "weak";
+    }
+    if (result == Wirehair_NeedMore ||
+        result == Wirehair_ExtraInsufficient)
+    {
+        return "need_more";
+    }
+    return "error";
+}
+
+WirehairResult BuildBandTimingRealDispatchPayload(
+    const BandTimingOptions& options,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const std::vector<uint32_t>& ids,
+    BandTimingPayload& payload,
+    wirehair_v2::SeedProfile* profile_out = nullptr)
+{
+    payload = BandTimingPayload();
+    if (!ConfigureBandTimingWh2(
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod,
+            BandTimingX::Frozen))
+    {
+        payload.ConstructResult = Wirehair_InvalidInput;
+        payload.Result = Wirehair_InvalidInput;
+        return payload.Result;
+    }
+    wirehair_v2::SeedProfile profile;
+    if (!wirehair_v2::MakeRawContractProfile(
+            *options.DispatchContract, options.BlockCount,
+            options.BlockBytes, (uint64_t)construction_seed, profile))
+    {
+        payload.ConstructResult = Wirehair_InvalidInput;
+        payload.Result = Wirehair_InvalidInput;
+        return payload.Result;
+    }
+    wirehair_v2::MessagePrecodeEncoderOptions encoder_options =
+        wirehair_v2::MessageOptionsForContract(
+            *options.DispatchContract);
+    encoder_options.CacheSystematicSource = options.SystematicCache;
+    encoder_options.CacheReceivedSystematicPackets =
+        options.SystematicCache;
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    payload.ConstructResult = encoder.InitializeResult(
+        message.Data(), message.Size(), options.BlockBytes,
+        &profile, &encoder_options);
+    payload.Result = payload.ConstructResult;
+    if (payload.Result != Wirehair_Success) return payload.Result;
+    const uint64_t payload_bytes =
+        (uint64_t)ids.size() * options.BlockBytes;
+    const uint64_t intermediate_blocks =
+        (uint64_t)profile.BlockCount + profile.V2StaircaseCount +
+        profile.V2DenseRowCount + profile.V2HeavyRowCount;
+    const uint64_t intermediate_bytes =
+        intermediate_blocks * options.BlockBytes;
+    if (payload_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        intermediate_bytes >
+            (uint64_t)std::numeric_limits<size_t>::max() ||
+        !encoder.IntermediateBlocks())
+    {
+        payload.Result = Wirehair_Error;
+        return payload.Result;
+    }
+    if (!payload.Bytes.Resize((size_t)payload_bytes)) {
+        payload.Result = Wirehair_OOM;
+        return payload.Result;
+    }
+    payload.DataBytes.resize(ids.size());
+    payload.IntermediateBytes = (size_t)intermediate_bytes;
+    payload.IntermediateSha256 = Sha256HexBytes(
+        encoder.IntermediateBlocks(), payload.IntermediateBytes);
+    for (size_t i = 0u; i < ids.size(); ++i)
+    {
+        uint32_t bytes = 0u;
+        payload.Result = encoder.EncodeResult(
+            ids[i],
+            payload.Bytes.Data() +
+                i * (size_t)options.BlockBytes,
+            options.BlockBytes, &bytes);
+        if (payload.Result != Wirehair_Success ||
+            bytes != BandTimingPacketBytes(options, ids[i]))
+        {
+            if (payload.Result == Wirehair_Success) {
+                payload.Result = Wirehair_Error;
+            }
+            return payload.Result;
+        }
+        payload.DataBytes[i] = bytes;
+    }
+    payload.Sha256 =
+        Sha256HexBytes(payload.Bytes.Data(), payload.Bytes.Size());
+    if (profile_out) *profile_out = profile;
+    return payload.Result;
+}
+
+BandTimingRecovery RunBandTimingRealDispatchRecovery(
+    const BandTimingOptions& options,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const std::vector<uint32_t>& ids,
+    const BandTimingPayload& payload)
+{
+    BandTimingRecovery recovery;
+    if (payload.Result != Wirehair_Success ||
+        payload.DataBytes.size() != ids.size())
+    {
+        recovery.ConstructResult = payload.ConstructResult;
+        recovery.Result = payload.Result;
+        return recovery;
+    }
+    if (!ConfigureBandTimingWh2(
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod,
+            BandTimingX::Frozen))
+    {
+        recovery.ConstructResult = Wirehair_InvalidInput;
+        recovery.Result = Wirehair_InvalidInput;
+        return recovery;
+    }
+    wirehair_v2::SeedProfile profile;
+    if (!wirehair_v2::MakeRawContractProfile(
+            *options.DispatchContract, options.BlockCount,
+            options.BlockBytes, (uint64_t)construction_seed, profile))
+    {
+        recovery.ConstructResult = Wirehair_InvalidInput;
+        recovery.Result = Wirehair_InvalidInput;
+        return recovery;
+    }
+    wirehair_v2::MessagePrecodeEncoderOptions decoder_options =
+        wirehair_v2::MessageOptionsForContract(
+            *options.DispatchContract);
+    decoder_options.CacheSystematicSource = options.SystematicCache;
+    decoder_options.CacheReceivedSystematicPackets =
+        options.SystematicCache;
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    recovery.ConstructResult = decoder.InitializeResult(
+        message.Size(), options.BlockBytes, &profile, &decoder_options);
+    recovery.Result = recovery.ConstructResult;
+    if (recovery.Result != Wirehair_Success) return recovery;
+    recovery.Result = Wirehair_NeedMore;
+    for (size_t i = 0u; i < ids.size(); ++i)
+    {
+        recovery.Result = decoder.DecodeResult(
+            ids[i],
+            payload.Bytes.Data() +
+                i * (size_t)options.BlockBytes,
+            payload.DataBytes[i]);
+        ++recovery.ReceivedSymbols;
+        if (recovery.Result != Wirehair_NeedMore) break;
+    }
+    if (recovery.Result != Wirehair_Success) return recovery;
+    std::vector<uint8_t> recovered(message.Size(), uint8_t{0});
+    recovery.RecoveryResult = decoder.RecoverResult(
+        recovered.data(), recovered.size());
+    if (recovery.RecoveryResult == Wirehair_Success &&
+        recovered.size() == message.Size() &&
+        std::memcmp(
+            recovered.data(), message.Data(), message.Size()) == 0)
+    {
+        recovery.RecoveryOk = true;
+        recovery.Overhead =
+            (int32_t)recovery.ReceivedSymbols -
+            (int32_t)options.BlockCount;
+        recovery.RecoveredSha256 =
+            Sha256HexBytes(recovered.data(), recovered.size());
+        recovery.Stats = decoder.SolveStats();
+        recovery.StatsAvailable = true;
+    }
+    else if (recovery.RecoveryResult == Wirehair_Success) {
+        recovery.RecoveryResult = Wirehair_Error;
+    }
+    return recovery;
+}
+
+struct BandTimingTimed
+{
+    WirehairResult ConstructResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    WirehairResult RecoveryResult = Wirehair_InvalidInput;
+    wirehair_v2::PrecodeSolveStats Stats;
+    bool StatsAvailable = false;
+    uint64_t ElapsedNanoseconds = 0u;
+    uint64_t BuildNanoseconds = 0u;
+    uint64_t PeelNanoseconds = 0u;
+    uint64_t ProjectNanoseconds = 0u;
+    uint64_t ResidualNanoseconds = 0u;
+    uint64_t BackSubNanoseconds = 0u;
+    size_t IntermediateBytes = 0u;
+    bool Stable = true;
+    bool Saturated = false;
+    int CpuBefore = -1;
+    int CpuAfter = -1;
+    int CpuMigrated = 0;
+    int64_t MinorFaults = 0;
+    int64_t MajorFaults = 0;
+};
+
+void BandTimingAddU64(
+    uint64_t& total,
+    uint64_t value,
+    bool& saturated)
+{
+    if (value > UINT64_MAX - total) {
+        total = UINT64_MAX;
+        saturated = true;
+    }
+    else {
+        total += value;
+    }
+}
+
+bool BandTimingAccumulateTelemetry(
+    BandTimingTimed& timed,
+    uint64_t elapsed,
+    int cpu_before,
+    int cpu_after,
+    int64_t minor_faults,
+    int64_t major_faults)
+{
+    if (cpu_before < 0 || cpu_after < 0 ||
+        cpu_before != cpu_after ||
+        (timed.CpuBefore >= 0 && cpu_before != timed.CpuBefore) ||
+        minor_faults < 0 || major_faults < 0)
+    {
+        return false;
+    }
+    BandTimingAddU64(
+        timed.ElapsedNanoseconds, elapsed, timed.Saturated);
+    if (timed.CpuBefore < 0) {
+        timed.CpuBefore = cpu_before;
+    }
+    timed.CpuAfter = cpu_after;
+    const int migrated =
+        PeelTimingCpuMigrated(cpu_before, cpu_after);
+    if (migrated < 0 || timed.CpuBefore < 0) {
+        timed.CpuMigrated = -1;
+    }
+    else if (timed.CpuMigrated >= 0 &&
+             (migrated != 0 ||
+              cpu_before != timed.CpuBefore ||
+              cpu_after != timed.CpuBefore))
+    {
+        timed.CpuMigrated = 1;
+    }
+    if (minor_faults < 0) {
+        timed.MinorFaults = -1;
+    }
+    else if (timed.MinorFaults >= 0)
+    {
+        if (minor_faults >
+            std::numeric_limits<int64_t>::max() -
+                timed.MinorFaults)
+        {
+            timed.Saturated = true;
+        }
+        else {
+            timed.MinorFaults += minor_faults;
+        }
+    }
+    if (major_faults < 0) {
+        timed.MajorFaults = -1;
+    }
+    else if (timed.MajorFaults >= 0)
+    {
+        if (major_faults >
+            std::numeric_limits<int64_t>::max() -
+                timed.MajorFaults)
+        {
+            timed.Saturated = true;
+        }
+        else {
+            timed.MajorFaults += major_faults;
+        }
+    }
+    return !timed.Saturated;
+}
+
+bool BandTimingUsageDeltas(
+    const PeelTimingUsage& before,
+    const PeelTimingUsage& after,
+    int64_t& minor,
+    int64_t& major)
+{
+    if (before.MinorFaults < 0 || after.MinorFaults < 0 ||
+        before.MajorFaults < 0 || after.MajorFaults < 0 ||
+        after.MinorFaults < before.MinorFaults ||
+        after.MajorFaults < before.MajorFaults)
+    {
+        return false;
+    }
+    minor = after.MinorFaults - before.MinorFaults;
+    major = after.MajorFaults - before.MajorFaults;
+    return true;
+}
+
+bool BandTimingStatsFitSignedReceipt(const BandTimingTimed& timed)
+{
+    static const uint64_t kMax =
+        (uint64_t)std::numeric_limits<int64_t>::max();
+    return (uint64_t)timed.Stats.InactivatedColumns <= kMax &&
+        (uint64_t)timed.Stats.BlockXors <= kMax &&
+        (uint64_t)timed.Stats.BlockMulAdds <= kMax &&
+        timed.BuildNanoseconds <= kMax &&
+        timed.PeelNanoseconds <= kMax &&
+        timed.ProjectNanoseconds <= kMax &&
+        timed.ResidualNanoseconds <= kMax &&
+        timed.BackSubNanoseconds <= kMax;
+}
+
+std::string BandTimingSolveDigest(
+    WirehairResult result,
+    const wirehair_v2::PrecodeSolveStats& stats,
+    size_t intermediate_bytes,
+    const std::string& intermediate_sha256)
+{
+    PeelTimingDirectObservation observation;
+    observation.Result = result;
+    observation.Stats = stats;
+    observation.IntermediateBytes = intermediate_bytes;
+    observation.IntermediateSha256 = intermediate_sha256;
+    return PeelTimingSolveDigest(observation);
+}
+
+bool TimeBandTimingEncoder(
+    BandTimingRole role,
+    const BandTimingOptions& options,
+    const BandTimingDescriptor* descriptor,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const BandTimingPayload& preflight,
+    std::vector<uint8_t>& eviction,
+    BandTimingTimed& timed)
+{
+    const std::string expected_sha256 = preflight.Sha256;
+    std::unique_ptr<
+        wirehair_v2::ScopedExplicitEquationStateTransactionForTesting>
+        explicit_transaction;
+    if (role != BandTimingRole::Wh1)
+    {
+        if (!descriptor ||
+            !ConfigureBandTimingWh2(
+                descriptor->GF256Rows, descriptor->GF16Rows,
+                descriptor->Period, descriptor->X))
+        {
+            return false;
+        }
+        try {
+            explicit_transaction.reset(
+                new wirehair_v2::
+                    ScopedExplicitEquationStateTransactionForTesting(
+                        descriptor->Explicit));
+        }
+        catch (const std::bad_alloc&) {
+            return false;
+        }
+        if (!explicit_transaction->IsValid()) {
+            return false;
+        }
+    }
+    const uint64_t output_bytes =
+        (uint64_t)options.BlockCount * options.BlockBytes;
+    if (output_bytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+    for (uint32_t inner = 0u; inner < options.InnerReps; ++inner)
+    {
+        if (role != BandTimingRole::Wh1 &&
+            (!descriptor ||
+             !ConfigureBandTimingWh2(
+                 descriptor->GF256Rows, descriptor->GF16Rows,
+                 descriptor->Period, descriptor->X)))
+        {
+            return false;
+        }
+        BandTimingAlignedBytes output;
+        if (!output.Resize((size_t)output_bytes)) return false;
+        std::vector<uint32_t> data_bytes(options.BlockCount, 0u);
+        if (options.CacheState == PeelTimingCacheState::Cold) {
+            EvictPeelTimingCache(eviction);
+        }
+        const PeelTimingUsage usage_before = ReadPeelTimingUsage();
+        const int cpu_before = PeelTimingCurrentCpu();
+        uint64_t begin_ns = 0u;
+        if (cpu_before < 0 ||
+            !ReadPeelTimingMonotonicNanoseconds(begin_ns))
+        {
+            return false;
+        }
+        WirehairResult construct_result = Wirehair_Error;
+        WirehairResult result = Wirehair_Error;
+        uint64_t end_ns = 0u;
+        if (role == BandTimingRole::Wh1)
+        {
+            wirehair::Codec encoder;
+            encoder.SetWireProfile(wirehair::WireProfile::LegacyCurrent);
+            const uint32_t dense_count =
+                wirehair::GetDenseCount(options.BlockCount);
+            if (dense_count > UINT16_MAX) return false;
+            encoder.OverrideSeeds(
+                (uint16_t)dense_count,
+                (uint16_t)(construction_seed & 0xffffu),
+                (uint16_t)(construction_seed >> 16));
+            construct_result = encoder.InitializeEncoder(
+                message.Size(), options.BlockBytes);
+            result = construct_result;
+            if (result == Wirehair_Success) {
+                result = encoder.EncodeFeed(
+                    message.Data(), options.SystematicCache);
+            }
+            for (uint32_t id = 0u;
+                 result == Wirehair_Success &&
+                 id < options.BlockCount; ++id)
+            {
+                data_bytes[id] = encoder.Encode(
+                    id,
+                    output.Data() +
+                        (size_t)id * options.BlockBytes,
+                    options.BlockBytes);
+                if (data_bytes[id] !=
+                    BandTimingPacketBytes(options, id))
+                {
+                    result = Wirehair_Error;
+                }
+            }
+            if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+                end_ns <= begin_ns)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            wirehair_v2::MessagePrecodeEncoder encoder;
+            construct_result =
+                encoder.InitializeExplicitResultForTesting(
+                    message.Data(), message.Size(), options.BlockBytes,
+                    descriptor->Explicit);
+            result = construct_result;
+            for (uint32_t id = 0u;
+                 result == Wirehair_Success &&
+                 id < options.BlockCount; ++id)
+            {
+                result = encoder.EncodeResult(
+                    id,
+                    output.Data() +
+                        (size_t)id * options.BlockBytes,
+                    options.BlockBytes, &data_bytes[id]);
+                if (result == Wirehair_Success &&
+                    data_bytes[id] !=
+                        BandTimingPacketBytes(options, id))
+                {
+                    result = Wirehair_Error;
+                }
+            }
+            if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+                end_ns <= begin_ns)
+            {
+                return false;
+            }
+        }
+        const int cpu_after = PeelTimingCurrentCpu();
+        const PeelTimingUsage usage_after = ReadPeelTimingUsage();
+        int64_t minor = 0;
+        int64_t major = 0;
+        if (!BandTimingUsageDeltas(
+                usage_before, usage_after, minor, major))
+        {
+            return false;
+        }
+        if (inner == 0u) {
+            timed.ConstructResult = construct_result;
+            timed.Result = result;
+        }
+        timed.Stable = timed.Stable &&
+            construct_result == preflight.ConstructResult &&
+            result == preflight.Result &&
+            result == Wirehair_Success &&
+            Sha256HexBytes(output.Data(), output.Size()) ==
+                expected_sha256;
+        if (!BandTimingAccumulateTelemetry(
+                timed, end_ns - begin_ns, cpu_before, cpu_after,
+                minor, major))
+        {
+            return false;
+        }
+    }
+    const bool ambient_stable =
+        role == BandTimingRole::Wh1 ||
+        descriptor->Explicit.EquationState.MatchesActive(
+            descriptor->Explicit.Params);
+    return timed.Stable && !timed.Saturated && ambient_stable;
+}
+
+bool TimeBandTimingDecoder(
+    BandTimingRole role,
+    const BandTimingOptions& options,
+    const BandTimingDescriptor* descriptor,
+    uint32_t construction_seed,
+    const BandTimingAlignedBytes& message,
+    const std::vector<uint32_t>& ids,
+    const BandTimingPayload& payload,
+    const BandTimingRecovery& preflight,
+    std::vector<uint8_t>& eviction,
+    BandTimingTimed& timed)
+{
+    std::unique_ptr<
+        wirehair_v2::ScopedExplicitEquationStateTransactionForTesting>
+        explicit_transaction;
+    if (role != BandTimingRole::Wh1)
+    {
+        if (!descriptor ||
+            !ConfigureBandTimingWh2(
+                descriptor->GF256Rows, descriptor->GF16Rows,
+                descriptor->Period, descriptor->X))
+        {
+            return false;
+        }
+        try {
+            explicit_transaction.reset(
+                new wirehair_v2::
+                    ScopedExplicitEquationStateTransactionForTesting(
+                        descriptor->Explicit));
+        }
+        catch (const std::bad_alloc&) {
+            return false;
+        }
+        if (!explicit_transaction->IsValid()) {
+            return false;
+        }
+    }
+    for (uint32_t inner = 0u; inner < options.InnerReps; ++inner)
+    {
+        if (role != BandTimingRole::Wh1 &&
+            (!descriptor ||
+             !ConfigureBandTimingWh2(
+                 descriptor->GF256Rows, descriptor->GF16Rows,
+                 descriptor->Period, descriptor->X)))
+        {
+            return false;
+        }
+
+        // RunBandTimingRecovery initializes a fresh decoder before starting
+        // its feed timer.  Cold cache conditioning belongs after that init,
+        // so reproduce the operation here rather than timing a reusable pool.
+        BandTimingRecovery current;
+        std::vector<uint8_t> recovered(message.Size(), uint8_t{0});
+        uint64_t elapsed = 0u;
+        int cpu_before = -1;
+        int cpu_after = -1;
+        int64_t minor = 0;
+        int64_t major = 0;
+        if (role == BandTimingRole::Wh1)
+        {
+            wirehair::Codec decoder;
+            decoder.SetWireProfile(wirehair::WireProfile::LegacyCurrent);
+            const uint32_t dense_count =
+                wirehair::GetDenseCount(options.BlockCount);
+            if (dense_count > UINT16_MAX) return false;
+            decoder.OverrideSeeds(
+                (uint16_t)dense_count,
+                (uint16_t)(construction_seed & 0xffffu),
+                (uint16_t)(construction_seed >> 16));
+            current.ConstructResult = decoder.InitializeDecoder(
+                message.Size(), options.BlockBytes);
+            current.Result = current.ConstructResult;
+            if (current.Result == Wirehair_Success)
+            {
+                if (options.CacheState == PeelTimingCacheState::Cold) {
+                    EvictPeelTimingCache(eviction);
+                }
+                const PeelTimingUsage usage_before =
+                    ReadPeelTimingUsage();
+                cpu_before = PeelTimingCurrentCpu();
+                uint64_t begin_ns = 0u;
+                if (cpu_before < 0 ||
+                    !ReadPeelTimingMonotonicNanoseconds(begin_ns))
+                {
+                    return false;
+                }
+                current.Result = Wirehair_NeedMore;
+                for (size_t i = 0u; i < ids.size(); ++i)
+                {
+                    current.Result = decoder.DecodeFeed(
+                        ids[i],
+                        payload.Bytes.Data() +
+                            i * (size_t)options.BlockBytes,
+                        payload.DataBytes[i]);
+                    ++current.ReceivedSymbols;
+                    if (current.Result != Wirehair_NeedMore) break;
+                }
+                uint64_t end_ns = 0u;
+                if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+                    end_ns <= begin_ns)
+                {
+                    return false;
+                }
+                cpu_after = PeelTimingCurrentCpu();
+                const PeelTimingUsage usage_after =
+                    ReadPeelTimingUsage();
+                elapsed = end_ns - begin_ns;
+                if (!BandTimingUsageDeltas(
+                        usage_before, usage_after, minor, major))
+                {
+                    return false;
+                }
+                if (current.Result == Wirehair_Success) {
+                    current.RecoveryResult =
+                        decoder.ReconstructOutput(
+                            recovered.data(), recovered.size());
+                }
+            }
+        }
+        else
+        {
+            wirehair_v2::MessagePrecodeDecoder decoder;
+            current.ConstructResult =
+                decoder.InitializeExplicitResultForTesting(
+                    message.Size(), options.BlockBytes,
+                    descriptor->Explicit);
+            current.Result = current.ConstructResult;
+            if (current.Result == Wirehair_Success)
+            {
+                if (options.CacheState == PeelTimingCacheState::Cold) {
+                    EvictPeelTimingCache(eviction);
+                }
+                const PeelTimingUsage usage_before =
+                    ReadPeelTimingUsage();
+                cpu_before = PeelTimingCurrentCpu();
+                uint64_t begin_ns = 0u;
+                if (cpu_before < 0 ||
+                    !ReadPeelTimingMonotonicNanoseconds(begin_ns))
+                {
+                    return false;
+                }
+                current.Result = Wirehair_NeedMore;
+                for (size_t i = 0u; i < ids.size(); ++i)
+                {
+                    current.Result = decoder.DecodeResult(
+                        ids[i],
+                        payload.Bytes.Data() +
+                            i * (size_t)options.BlockBytes,
+                        payload.DataBytes[i]);
+                    ++current.ReceivedSymbols;
+                    if (current.Result != Wirehair_NeedMore) break;
+                }
+                uint64_t end_ns = 0u;
+                if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+                    end_ns <= begin_ns)
+                {
+                    return false;
+                }
+                cpu_after = PeelTimingCurrentCpu();
+                const PeelTimingUsage usage_after =
+                    ReadPeelTimingUsage();
+                elapsed = end_ns - begin_ns;
+                if (!BandTimingUsageDeltas(
+                        usage_before, usage_after, minor, major))
+                {
+                    return false;
+                }
+                if (current.Result == Wirehair_Success)
+                {
+                    current.Stats = decoder.SolveStats();
+                    current.StatsAvailable = true;
+                    current.RecoveryResult = decoder.RecoverResult(
+                        recovered.data(), recovered.size());
+                }
+            }
+        }
+        if (current.Result == Wirehair_Success &&
+            current.RecoveryResult == Wirehair_Success &&
+            recovered.size() == message.Size() &&
+            std::memcmp(
+                recovered.data(), message.Data(),
+                message.Size()) == 0)
+        {
+            current.RecoveryOk = true;
+            current.Overhead =
+                (int32_t)current.ReceivedSymbols -
+                (int32_t)options.BlockCount;
+            current.RecoveredSha256 =
+                Sha256HexBytes(recovered.data(), recovered.size());
+        }
+        else if (current.Result == Wirehair_Success &&
+                 current.RecoveryResult == Wirehair_Success)
+        {
+            current.RecoveryResult = Wirehair_Error;
+        }
+        if (inner == 0u)
+        {
+            timed.ConstructResult = current.ConstructResult;
+            timed.Result = current.Result;
+            timed.RecoveryResult = current.RecoveryResult;
+            timed.Stats = current.Stats;
+            timed.StatsAvailable = current.StatsAvailable;
+        }
+        timed.Stable = timed.Stable &&
+            current.ConstructResult == preflight.ConstructResult &&
+            current.Result == preflight.Result &&
+            current.RecoveryResult == preflight.RecoveryResult &&
+            current.RecoveryOk == preflight.RecoveryOk &&
+            current.ReceivedSymbols == preflight.ReceivedSymbols &&
+            current.Overhead == preflight.Overhead &&
+            current.RecoveredSha256 == preflight.RecoveredSha256;
+        if (role != BandTimingRole::Wh1)
+        {
+            timed.Stable = timed.Stable &&
+                BandTimingSolveDigest(
+                    current.Result, current.Stats, 0u, std::string()) ==
+                BandTimingSolveDigest(
+                    preflight.Result, preflight.Stats,
+                    0u, std::string());
+            BandTimingAddU64(
+                timed.BuildNanoseconds,
+                current.Stats.BuildNanoseconds, timed.Saturated);
+            BandTimingAddU64(
+                timed.PeelNanoseconds,
+                current.Stats.PeelNanoseconds, timed.Saturated);
+            BandTimingAddU64(
+                timed.ProjectNanoseconds,
+                current.Stats.ProjectNanoseconds, timed.Saturated);
+            BandTimingAddU64(
+                timed.ResidualNanoseconds,
+                current.Stats.ResidualNanoseconds, timed.Saturated);
+            BandTimingAddU64(
+                timed.BackSubNanoseconds,
+                current.Stats.BackSubNanoseconds, timed.Saturated);
+        }
+        if (!BandTimingAccumulateTelemetry(
+                timed, elapsed, cpu_before, cpu_after, minor, major))
+        {
+            return false;
+        }
+    }
+    const bool ambient_stable =
+        role == BandTimingRole::Wh1 ||
+        descriptor->Explicit.EquationState.MatchesActive(
+            descriptor->Explicit.Params);
+    return timed.Stable && !timed.Saturated && ambient_stable;
+}
+
+bool TimeBandTimingDirect(
+    const BandTimingOptions& options,
+    const BandTimingDescriptor& descriptor,
+    const std::vector<uint32_t>& ids,
+    const BandTimingPayload& payload,
+    uint32_t prefix_symbols,
+    const BandTimingDirect& preflight,
+    std::vector<uint8_t>& eviction,
+    BandTimingTimed& timed)
+{
+    for (uint32_t inner = 0u; inner < options.InnerReps; ++inner)
+    {
+        if (!ConfigureBandTimingWh2(
+                descriptor.GF256Rows, descriptor.GF16Rows,
+                descriptor.Period, descriptor.X))
+        {
+            return false;
+        }
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(
+                descriptor.Explicit.Params, system))
+        {
+            return false;
+        }
+        const uint64_t precode_count =
+            (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        wirehair_v2::PacketRowRuntime runtime;
+        if (precode_count > UINT32_MAX ||
+            !runtime.Initialize(
+                options.BlockCount, (uint32_t)precode_count,
+                descriptor.Explicit.Packet.MixCount))
+        {
+            return false;
+        }
+        std::vector<wirehair_v2::SolvePacket> packets(prefix_symbols);
+        for (uint32_t i = 0u; i < prefix_symbols; ++i)
+        {
+            packets[i].BlockId = ids[i];
+            packets[i].Data =
+                payload.Bytes.Data() +
+                    (size_t)i * options.BlockBytes;
+        }
+        std::vector<uint8_t> intermediate;
+        wirehair_v2::PrecodeSolveStats stats;
+        if (options.CacheState == PeelTimingCacheState::Cold) {
+            EvictPeelTimingCache(eviction);
+        }
+        const PeelTimingUsage usage_before = ReadPeelTimingUsage();
+        const int cpu_before = PeelTimingCurrentCpu();
+        uint64_t begin_ns = 0u;
+        if (cpu_before < 0 ||
+            !ReadPeelTimingMonotonicNanoseconds(begin_ns))
+        {
+            return false;
+        }
+        const WirehairResult result =
+            wirehair_v2::
+            SolvePrecodeSystemForValidatedSystemWithRuntime(
+                system, descriptor.Explicit.Packet, runtime, packets,
+                options.BlockBytes, intermediate, &stats);
+        uint64_t end_ns = 0u;
+        if (!ReadPeelTimingMonotonicNanoseconds(end_ns) ||
+            end_ns <= begin_ns)
+        {
+            return false;
+        }
+        const int cpu_after = PeelTimingCurrentCpu();
+        const PeelTimingUsage usage_after = ReadPeelTimingUsage();
+        BandTimingDirect current;
+        current.ConstructResult = Wirehair_Success;
+        current.Result = result;
+        current.Stats = stats;
+        current.StatsAvailable = true;
+        current.IntermediateBytes = intermediate.size();
+        current.IntermediateSha256 =
+            Sha256HexBytes(intermediate.data(), intermediate.size());
+        if (inner == 0u)
+        {
+            timed.ConstructResult = current.ConstructResult;
+            timed.Result = current.Result;
+            timed.Stats = current.Stats;
+            timed.StatsAvailable = true;
+            timed.IntermediateBytes = current.IntermediateBytes;
+        }
+        timed.Stable = timed.Stable &&
+            current.ConstructResult == preflight.ConstructResult &&
+            current.Result == preflight.Result &&
+            current.IntermediateBytes == preflight.IntermediateBytes &&
+            current.IntermediateSha256 ==
+                preflight.IntermediateSha256 &&
+            BandTimingSolveDigest(
+                current.Result, current.Stats,
+                current.IntermediateBytes,
+                current.IntermediateSha256) ==
+            BandTimingSolveDigest(
+                preflight.Result, preflight.Stats,
+                preflight.IntermediateBytes,
+                preflight.IntermediateSha256);
+        BandTimingAddU64(
+            timed.BuildNanoseconds,
+            stats.BuildNanoseconds, timed.Saturated);
+        BandTimingAddU64(
+            timed.PeelNanoseconds,
+            stats.PeelNanoseconds, timed.Saturated);
+        BandTimingAddU64(
+            timed.ProjectNanoseconds,
+            stats.ProjectNanoseconds, timed.Saturated);
+        BandTimingAddU64(
+            timed.ResidualNanoseconds,
+            stats.ResidualNanoseconds, timed.Saturated);
+        BandTimingAddU64(
+            timed.BackSubNanoseconds,
+            stats.BackSubNanoseconds, timed.Saturated);
+        int64_t minor = 0;
+        int64_t major = 0;
+        if (!BandTimingUsageDeltas(
+                usage_before, usage_after, minor, major))
+        {
+            return false;
+        }
+        if (!BandTimingAccumulateTelemetry(
+                timed, end_ns - begin_ns, cpu_before, cpu_after,
+                minor, major))
+        {
+            return false;
+        }
+    }
+    return timed.Stable && !timed.Saturated;
+}
+
+struct BandTimingSemantic
+{
+    uint32_t ConstructionSeed = 0u;
+    uint32_t SeedAttempt = 0u;
+    std::string TraceSha256;
+    std::string MessageSha256;
+    WirehairResult ExplicitConstructResult = Wirehair_Error;
+    WirehairResult DispatchConstructResult = Wirehair_Error;
+    std::string ExplicitParamsSha256;
+    std::string DispatchParamsSha256;
+    bool ParamsEqual = false;
+    std::string ExplicitCoefficientsSha256;
+    std::string DispatchCoefficientsSha256;
+    bool CoefficientsEqual = false;
+    std::string ExplicitPacketRowsSha256;
+    std::string DispatchPacketRowsSha256;
+    bool PacketRowsEqual = false;
+    std::string ExplicitIntermediateSha256;
+    std::string DispatchIntermediateSha256;
+    size_t ExplicitIntermediateBytes = 0u;
+    size_t DispatchIntermediateBytes = 0u;
+    bool IntermediateEqual = false;
+    std::string ExplicitPayloadSha256;
+    std::string DispatchPayloadSha256;
+    bool PayloadEqual = false;
+    WirehairResult ExplicitDirectResult = Wirehair_Error;
+    WirehairResult DispatchDirectResult = Wirehair_Error;
+    std::string ExplicitSolveSha256;
+    std::string DispatchSolveSha256;
+    bool DirectEqual = false;
+    WirehairResult ExplicitDecodeResult = Wirehair_Error;
+    WirehairResult DispatchDecodeResult = Wirehair_Error;
+    int32_t ExplicitOverhead = -1;
+    int32_t DispatchOverhead = -1;
+    std::string ExplicitRecoveredSha256;
+    std::string DispatchRecoveredSha256;
+    bool RecoveryEqual = false;
+    bool MessageEqual = false;
+    bool Pass = false;
+};
+
+constexpr bool BandTimingSharedWeakConstruction(
+    WirehairResult explicit_result,
+    WirehairResult dispatch_result)
+{
+    return explicit_result == dispatch_result &&
+        (explicit_result == Wirehair_BadPeelSeed ||
+         explicit_result == Wirehair_BadDenseSeed);
+}
+
+static_assert(
+    BandTimingSharedWeakConstruction(
+        Wirehair_BadPeelSeed, Wirehair_BadPeelSeed),
+    "a shared peel-weak seed must remain skippable");
+static_assert(
+    BandTimingSharedWeakConstruction(
+        Wirehair_BadDenseSeed, Wirehair_BadDenseSeed),
+    "a shared dense-weak seed must remain skippable");
+static_assert(
+    !BandTimingSharedWeakConstruction(
+        Wirehair_NeedMore, Wirehair_NeedMore),
+    "NeedMore must fail the semantic witness");
+static_assert(
+    !BandTimingSharedWeakConstruction(
+        Wirehair_Error, Wirehair_Error),
+    "Error must fail the semantic witness");
+static_assert(
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadPeelSeed, Wirehair_BadDenseSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadPeelSeed, Wirehair_NeedMore) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadPeelSeed, Wirehair_Error) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadDenseSeed, Wirehair_BadPeelSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadDenseSeed, Wirehair_NeedMore) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_BadDenseSeed, Wirehair_Error) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_NeedMore, Wirehair_BadPeelSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_NeedMore, Wirehair_BadDenseSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_NeedMore, Wirehair_Error) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_Error, Wirehair_BadPeelSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_Error, Wirehair_BadDenseSeed) &&
+    !BandTimingSharedWeakConstruction(
+        Wirehair_Error, Wirehair_NeedMore),
+    "every unequal weak/NeedMore/Error pair must fail");
+
+bool BuildBandTimingSemanticWitness(
+    const BandTimingOptions& options,
+    uint64_t total_replicates,
+    BandTimingSemantic& semantic)
+{
+    static const uint32_t kAttemptCap = 256u;
+    const uint64_t message_bytes =
+        ((uint64_t)options.BlockCount - 1u) * options.BlockBytes + 1u;
+    if (message_bytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+    for (uint32_t attempt = 0u; attempt < kAttemptCap; ++attempt)
+    {
+        const uint32_t construction_seed =
+            options.ConstructionSeedBase + attempt;
+        bool aliases_measured = false;
+        for (uint64_t replicate = 0u;
+             replicate < total_replicates; ++replicate)
+        {
+            if (construction_seed ==
+                BandTimingDerivedConstructionSeed(
+                    options.ConstructionSeedBase,
+                    (uint32_t)replicate))
+            {
+                aliases_measured = true;
+                break;
+            }
+        }
+        if (aliases_measured) continue;
+
+        const uint64_t loss_seed = options.LossSeedBase;
+        const std::vector<uint32_t> ids = BuildPacketSchedule(
+            options.BlockCount,
+            options.BlockCount + options.MaxOverhead,
+            options.Loss, loss_seed, options.Schedule);
+        if (ids.size() !=
+            (size_t)options.BlockCount + options.MaxOverhead)
+        {
+            return false;
+        }
+        BandTimingAlignedBytes message;
+        if (!FillBandTimingMessage(
+                message, (size_t)message_bytes, loss_seed))
+        {
+            return false;
+        }
+        if (std::find_if(
+                message.Data(), message.Data() + message.Size(),
+                [](uint8_t value) { return value != 0u; }) ==
+            message.Data() + message.Size())
+        {
+            return false;
+        }
+
+        BandTimingDescriptor descriptor;
+        if (!BuildBandTimingDescriptor(
+                BandTimingRole::Dispatch, options,
+                construction_seed, descriptor))
+        {
+            return false;
+        }
+        BandTimingPayload explicit_payload;
+        BandTimingPayload dispatch_payload;
+        wirehair_v2::SeedProfile dispatch_profile;
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Dispatch, options, &descriptor,
+            construction_seed, message, ids, explicit_payload);
+        (void)BuildBandTimingRealDispatchPayload(
+            options, construction_seed, message, ids,
+            dispatch_payload, &dispatch_profile);
+        if (explicit_payload.Result != Wirehair_Success ||
+            dispatch_payload.Result != Wirehair_Success)
+        {
+            if (!BandTimingSharedWeakConstruction(
+                    explicit_payload.Result, dispatch_payload.Result) ||
+                explicit_payload.ConstructResult !=
+                    explicit_payload.Result ||
+                dispatch_payload.ConstructResult !=
+                    dispatch_payload.Result ||
+                explicit_payload.IntermediateBytes != 0u ||
+                dispatch_payload.IntermediateBytes != 0u ||
+                !explicit_payload.IntermediateSha256.empty() ||
+                !dispatch_payload.IntermediateSha256.empty() ||
+                !explicit_payload.Sha256.empty() ||
+                !dispatch_payload.Sha256.empty())
+            {
+                return false;
+            }
+            continue;
+        }
+
+        if (!ConfigureBandTimingWh2(
+                wirehair_v2::kMixedGF256Rows,
+                wirehair_v2::kMixedGF16Rows,
+                wirehair_v2::kMixedCoefficientPeriod,
+                BandTimingX::Frozen))
+        {
+            return false;
+        }
+        wirehair_v2::PrecodeParams dispatch_params =
+            wirehair_v2::MakeMixedParams(
+                options.BlockCount, (uint64_t)construction_seed);
+        dispatch_params.Staircase =
+            wirehair_v2::SmallBandStaircaseCount(options.BlockCount);
+        dispatch_params.DenseRows = 4u;
+        dispatch_params.DenseIdentityCorner = false;
+        dispatch_params.DenseTwoAnchor = false;
+        dispatch_params.DenseTwoAnchorPhase = 0u;
+        dispatch_params.SegmentedDenseAnchors =
+            wirehair_v2::DenseAnchorLayout::Disabled;
+        wirehair_v2::PrecodeSystem explicit_system;
+        wirehair_v2::PrecodeSystem dispatch_system;
+        if (!wirehair_v2::BuildPrecodeSystem(
+                descriptor.Explicit.Params, explicit_system) ||
+            !wirehair_v2::BuildPrecodeSystem(
+                dispatch_params, dispatch_system))
+        {
+            return false;
+        }
+        const uint32_t precode_count =
+            dispatch_params.Staircase + dispatch_params.DenseRows +
+            dispatch_params.HeavyRows;
+        wirehair_v2::PacketRowRuntime explicit_runtime;
+        wirehair_v2::PacketRowRuntime dispatch_runtime;
+        if (!explicit_runtime.Initialize(
+                options.BlockCount, precode_count,
+                descriptor.Explicit.Packet.MixCount) ||
+            !dispatch_runtime.Initialize(
+                options.BlockCount, precode_count,
+                options.DispatchContract->RecoveryMixCount))
+        {
+            return false;
+        }
+        wirehair_v2::PacketRowConfig dispatch_packet;
+        dispatch_packet.PeelSeed =
+            wirehair_v2::RawUniformPacketPeelSeed(
+                (uint64_t)construction_seed);
+        dispatch_packet.MixCount =
+            options.DispatchContract->RecoveryMixCount;
+        bool explicit_packet_valid = false;
+        bool dispatch_packet_valid = false;
+        const std::string explicit_packet_sha256 =
+            PeelTimingPacketRowsDigest(
+                options.BlockCount, precode_count,
+                descriptor.Explicit.Packet, explicit_runtime, ids,
+                explicit_packet_valid);
+        const std::string dispatch_packet_sha256 =
+            PeelTimingPacketRowsDigest(
+                options.BlockCount, precode_count,
+                dispatch_packet, dispatch_runtime, ids,
+                dispatch_packet_valid);
+
+        const BandTimingRecovery explicit_recovery =
+            RunBandTimingRecovery(
+                BandTimingRole::Dispatch, options, &descriptor,
+                construction_seed, message, ids, explicit_payload);
+        const BandTimingRecovery dispatch_recovery =
+            RunBandTimingRealDispatchRecovery(
+                options, construction_seed, message, ids,
+                dispatch_payload);
+        if (!explicit_recovery.RecoveryOk ||
+            !dispatch_recovery.RecoveryOk)
+        {
+            if (!BandTimingSharedNeedMoreRecovery(
+                    explicit_recovery, dispatch_recovery, ids.size()))
+            {
+                return false;
+            }
+            continue;
+        }
+        const uint32_t prefix = std::max(
+            explicit_recovery.ReceivedSymbols,
+            dispatch_recovery.ReceivedSymbols);
+        const BandTimingDirect explicit_direct =
+            RunBandTimingDirect(
+                options, descriptor, ids, explicit_payload,
+                prefix, true);
+        const BandTimingDirect dispatch_direct =
+            RunBandTimingDirect(
+                options, descriptor, ids, dispatch_payload,
+                prefix, true);
+
+        semantic = BandTimingSemantic();
+        semantic.ConstructionSeed = construction_seed;
+        semantic.SeedAttempt = attempt;
+        semantic.TraceSha256 = BandTimingTraceDigest(
+            options, construction_seed, loss_seed, ids);
+        semantic.MessageSha256 =
+            Sha256HexBytes(message.Data(), message.Size());
+        semantic.ExplicitConstructResult =
+            explicit_payload.ConstructResult;
+        semantic.DispatchConstructResult =
+            dispatch_payload.ConstructResult;
+        semantic.ExplicitParamsSha256 =
+            BandTimingParamsDigest(explicit_system.Params);
+        semantic.DispatchParamsSha256 =
+            BandTimingParamsDigest(dispatch_system.Params);
+        semantic.ParamsEqual =
+            SameBandTimingParams(
+                explicit_system.Params, dispatch_system.Params) &&
+            descriptor.Explicit.Params.Staircase ==
+                dispatch_profile.V2StaircaseCount &&
+            descriptor.Explicit.Params.DenseRows ==
+                dispatch_profile.V2DenseRowCount &&
+            descriptor.Explicit.Params.HeavyRows ==
+                dispatch_profile.V2HeavyRowCount &&
+            descriptor.Explicit.Params.Seed ==
+                dispatch_profile.V2PrecodeSeed &&
+            descriptor.Explicit.Packet.PeelSeed ==
+                dispatch_profile.V2PacketPeelSeed;
+        semantic.ExplicitCoefficientsSha256 =
+            BandTimingCoefficientDigest(
+                explicit_system,
+                wirehair_v2::kMixedGF256Rows,
+                wirehair_v2::kMixedGF16Rows,
+                wirehair_v2::kMixedCoefficientPeriod);
+        semantic.DispatchCoefficientsSha256 =
+            BandTimingCoefficientDigest(
+                dispatch_system,
+                wirehair_v2::kMixedGF256Rows,
+                wirehair_v2::kMixedGF16Rows,
+                wirehair_v2::kMixedCoefficientPeriod);
+        semantic.CoefficientsEqual =
+            !semantic.ExplicitCoefficientsSha256.empty() &&
+            semantic.ExplicitCoefficientsSha256 ==
+                semantic.DispatchCoefficientsSha256;
+        semantic.ExplicitPacketRowsSha256 =
+            explicit_packet_sha256;
+        semantic.DispatchPacketRowsSha256 =
+            dispatch_packet_sha256;
+        semantic.PacketRowsEqual =
+            explicit_packet_valid && dispatch_packet_valid &&
+            explicit_packet_sha256 == dispatch_packet_sha256;
+        semantic.ExplicitIntermediateSha256 =
+            explicit_payload.IntermediateSha256;
+        semantic.DispatchIntermediateSha256 =
+            dispatch_payload.IntermediateSha256;
+        semantic.ExplicitIntermediateBytes =
+            explicit_payload.IntermediateBytes;
+        semantic.DispatchIntermediateBytes =
+            dispatch_payload.IntermediateBytes;
+        semantic.IntermediateEqual =
+            explicit_payload.IntermediateBytes ==
+                dispatch_payload.IntermediateBytes &&
+            explicit_payload.IntermediateSha256 ==
+                dispatch_payload.IntermediateSha256;
+        semantic.ExplicitPayloadSha256 = explicit_payload.Sha256;
+        semantic.DispatchPayloadSha256 = dispatch_payload.Sha256;
+        semantic.PayloadEqual =
+            explicit_payload.DataBytes == dispatch_payload.DataBytes &&
+            explicit_payload.Bytes.Size() ==
+                dispatch_payload.Bytes.Size() &&
+            std::memcmp(
+                explicit_payload.Bytes.Data(),
+                dispatch_payload.Bytes.Data(),
+                explicit_payload.Bytes.Size()) == 0 &&
+            explicit_payload.Sha256 == dispatch_payload.Sha256;
+        semantic.ExplicitDirectResult = explicit_direct.Result;
+        semantic.DispatchDirectResult = dispatch_direct.Result;
+        semantic.ExplicitSolveSha256 = BandTimingSolveDigest(
+            explicit_direct.Result, explicit_direct.Stats,
+            explicit_direct.IntermediateBytes,
+            explicit_direct.IntermediateSha256);
+        semantic.DispatchSolveSha256 = BandTimingSolveDigest(
+            dispatch_direct.Result, dispatch_direct.Stats,
+            dispatch_direct.IntermediateBytes,
+            dispatch_direct.IntermediateSha256);
+        semantic.DirectEqual =
+            explicit_direct.ConstructResult == Wirehair_Success &&
+            dispatch_direct.ConstructResult == Wirehair_Success &&
+            explicit_direct.Result == Wirehair_Success &&
+            dispatch_direct.Result == Wirehair_Success &&
+            semantic.ExplicitSolveSha256 ==
+                semantic.DispatchSolveSha256;
+        semantic.ExplicitDecodeResult = explicit_recovery.Result;
+        semantic.DispatchDecodeResult = dispatch_recovery.Result;
+        semantic.ExplicitOverhead = explicit_recovery.Overhead;
+        semantic.DispatchOverhead = dispatch_recovery.Overhead;
+        semantic.ExplicitRecoveredSha256 =
+            explicit_recovery.RecoveredSha256;
+        semantic.DispatchRecoveredSha256 =
+            dispatch_recovery.RecoveredSha256;
+        semantic.RecoveryEqual =
+            explicit_recovery.Result == Wirehair_Success &&
+            dispatch_recovery.Result == Wirehair_Success &&
+            explicit_recovery.RecoveryResult == Wirehair_Success &&
+            dispatch_recovery.RecoveryResult == Wirehair_Success &&
+            explicit_recovery.Overhead == dispatch_recovery.Overhead &&
+            explicit_recovery.RecoveredSha256 ==
+                dispatch_recovery.RecoveredSha256;
+        semantic.MessageEqual =
+            explicit_recovery.RecoveredSha256 ==
+                semantic.MessageSha256 &&
+            dispatch_recovery.RecoveredSha256 ==
+                semantic.MessageSha256;
+        semantic.Pass =
+            semantic.ExplicitConstructResult == Wirehair_Success &&
+            semantic.DispatchConstructResult == Wirehair_Success &&
+            semantic.ParamsEqual && semantic.CoefficientsEqual &&
+            semantic.PacketRowsEqual && semantic.IntermediateEqual &&
+            semantic.PayloadEqual && semantic.DirectEqual &&
+            semantic.RecoveryEqual && semantic.MessageEqual;
+        return semantic.Pass;
+    }
+    return false;
+}
+
+enum class BandTimingScope
+{
+    Encoder,
+    Decoder,
+    Direct
+};
+
+const char* BandTimingScopeName(BandTimingScope scope)
+{
+    switch (scope)
+    {
+    case BandTimingScope::Encoder: return "encoder";
+    case BandTimingScope::Decoder: return "decoder";
+    case BandTimingScope::Direct:  return "direct";
+    }
+    return "unknown";
+}
+
+struct BandTimingPanel
+{
+    const char* Name;
+    BandTimingScope Scope;
+    BandTimingRole First;
+    BandTimingRole Second;
+    bool Aa;
+};
+
+static const BandTimingPanel kBandTimingPanels[] = {
+    {"encoder_candidate_dispatch", BandTimingScope::Encoder,
+        BandTimingRole::Candidate, BandTimingRole::Dispatch, false},
+    {"encoder_candidate_wh1", BandTimingScope::Encoder,
+        BandTimingRole::Candidate, BandTimingRole::Wh1, false},
+    {"encoder_dispatch_wh1", BandTimingScope::Encoder,
+        BandTimingRole::Dispatch, BandTimingRole::Wh1, false},
+    {"encoder_candidate_aa", BandTimingScope::Encoder,
+        BandTimingRole::Candidate, BandTimingRole::Candidate, true},
+    {"encoder_dispatch_aa", BandTimingScope::Encoder,
+        BandTimingRole::Dispatch, BandTimingRole::Dispatch, true},
+    {"encoder_wh1_aa", BandTimingScope::Encoder,
+        BandTimingRole::Wh1, BandTimingRole::Wh1, true},
+    {"decoder_candidate_dispatch", BandTimingScope::Decoder,
+        BandTimingRole::Candidate, BandTimingRole::Dispatch, false},
+    {"decoder_candidate_wh1", BandTimingScope::Decoder,
+        BandTimingRole::Candidate, BandTimingRole::Wh1, false},
+    {"decoder_dispatch_wh1", BandTimingScope::Decoder,
+        BandTimingRole::Dispatch, BandTimingRole::Wh1, false},
+    {"decoder_candidate_aa", BandTimingScope::Decoder,
+        BandTimingRole::Candidate, BandTimingRole::Candidate, true},
+    {"decoder_dispatch_aa", BandTimingScope::Decoder,
+        BandTimingRole::Dispatch, BandTimingRole::Dispatch, true},
+    {"decoder_wh1_aa", BandTimingScope::Decoder,
+        BandTimingRole::Wh1, BandTimingRole::Wh1, true},
+    {"direct_candidate_dispatch", BandTimingScope::Direct,
+        BandTimingRole::Candidate, BandTimingRole::Dispatch, false},
+    {"direct_candidate_aa", BandTimingScope::Direct,
+        BandTimingRole::Candidate, BandTimingRole::Candidate, true},
+    {"direct_dispatch_aa", BandTimingScope::Direct,
+        BandTimingRole::Dispatch, BandTimingRole::Dispatch, true}
+};
+
+struct BandTimingScopeObservation
+{
+    WirehairResult ConstructResult = Wirehair_Error;
+    WirehairResult Result = Wirehair_Error;
+    WirehairResult RecoveryResult = Wirehair_InvalidInput;
+    bool RecoveryApplicable = false;
+    bool RecoveryOk = false;
+    uint32_t EncodedSymbols = 0u;
+    uint32_t ReceivedSymbols = 0u;
+    int32_t ArmOverhead = -1;
+    int32_t FixedPrefixSymbols = -1;
+    uint64_t PacketPayloadBytes = 0u;
+    uint64_t IntermediateBytes = 0u;
+};
+
+uint64_t BandTimingPayloadPrefixBytes(
+    const BandTimingPayload& payload,
+    uint32_t count)
+{
+    if (count > payload.DataBytes.size()) return 0u;
+    uint64_t total = 0u;
+    for (uint32_t i = 0u; i < count; ++i) {
+        total += payload.DataBytes[i];
+    }
+    return total;
+}
+
+const BandTimingDescriptor* BandTimingDescriptorForRole(
+    BandTimingRole role,
+    const BandTimingDescriptor& candidate,
+    const BandTimingDescriptor& dispatch)
+{
+    if (role == BandTimingRole::Candidate) return &candidate;
+    if (role == BandTimingRole::Dispatch) return &dispatch;
+    return nullptr;
+}
+
+const BandTimingPayload& BandTimingPayloadForRole(
+    BandTimingRole role,
+    const BandTimingPayload& candidate,
+    const BandTimingPayload& dispatch,
+    const BandTimingPayload& wh1)
+{
+    return role == BandTimingRole::Candidate ? candidate :
+        (role == BandTimingRole::Dispatch ? dispatch : wh1);
+}
+
+const BandTimingRecovery& BandTimingRecoveryForRole(
+    BandTimingRole role,
+    const BandTimingRecovery& candidate,
+    const BandTimingRecovery& dispatch,
+    const BandTimingRecovery& wh1)
+{
+    return role == BandTimingRole::Candidate ? candidate :
+        (role == BandTimingRole::Dispatch ? dispatch : wh1);
+}
+
+std::string BandTimingFailureToken(
+    BandTimingRole role,
+    const BandTimingScopeObservation& observation)
+{
+    if (observation.ConstructResult != Wirehair_Success)
+    {
+        return std::string(BandTimingBaseRoleName(role)) + "_" +
+            BandTimingResultClass(observation.ConstructResult);
+    }
+    if (observation.Result != Wirehair_Success)
+    {
+        return std::string(BandTimingBaseRoleName(role)) + "_" +
+            BandTimingResultClass(observation.Result);
+    }
+    if (observation.RecoveryApplicable && !observation.RecoveryOk)
+    {
+        return std::string(BandTimingBaseRoleName(role)) + "_" +
+            BandTimingResultClass(observation.RecoveryResult);
+    }
+    return std::string();
+}
+
+std::string BandTimingLogicalRoleName(
+    BandTimingRole role,
+    bool aa,
+    bool first)
+{
+    std::string name = BandTimingBaseRoleName(role);
+    if (aa) name += first ? "_a" : "_b";
+    return name;
+}
+
+int CmdBandTiming(int argc, char** argv)
+{
+    BandTimingOptions options;
+    if (!ParseBandTimingOptions(argc, argv, options)) return 1;
+    if (!ValidateBandTimingEnvironment()) return 1;
+    BandTimingHookCleanup hook_cleanup;
+#if !defined(__linux__)
+    std::fprintf(stderr,
+        "bandtiming requires Linux CPU and resource-usage telemetry\n");
+    return 1;
+#endif
+    if (!PinPeelTimingToFirstAllowedCpu())
+    {
+        std::fprintf(stderr,
+            "bandtiming could not pin its first allowed CPU\n");
+        return 2;
+    }
+    const uint64_t message_bytes =
+        ((uint64_t)options.BlockCount - 1u) * options.BlockBytes + 1u;
+    if (message_bytes >
+        (uint64_t)std::numeric_limits<size_t>::max())
+    {
+        std::fprintf(stderr,
+            "bandtiming message size exceeds native address space\n");
+        return 1;
+    }
+    const uint64_t total_replicates =
+        (uint64_t)options.WarmupReplicates + options.Replicates;
+    const uint64_t candidate_width =
+        (uint64_t)options.BlockCount + options.CandidateStaircase +
+        options.CandidateDenseRows + options.CandidateGF256Rows +
+        options.CandidateGF16Rows;
+    const uint64_t dispatch_staircase =
+        wirehair_v2::SmallBandStaircaseCount(options.BlockCount);
+    const uint64_t dispatch_width =
+        (uint64_t)options.BlockCount + dispatch_staircase + 4u +
+        wirehair_v2::kMixedGF256Rows +
+        wirehair_v2::kMixedGF16Rows;
+    const uint64_t packet_slots =
+        (uint64_t)options.BlockCount + options.MaxOverhead;
+    const uint64_t working_blocks =
+        6u * packet_slots + 4u * candidate_width +
+        4u * dispatch_width + 8u * options.BlockCount + 256u;
+    const uint64_t metadata_bytes =
+        (uint64_t)options.BlockCount * 16384u;
+    if (working_blocks >
+            (UINT64_MAX - metadata_bytes - options.EvictBytes) /
+                options.BlockBytes ||
+        working_blocks * options.BlockBytes + metadata_bytes +
+            options.EvictBytes > kPeelTimingWorkingBytesMax)
+    {
+        std::fprintf(stderr,
+            "bandtiming working set exceeds the 4 GiB protocol limit\n");
+        return 1;
+    }
+    uint64_t started_monotonic_ns = 0u;
+    if (!ReadPeelTimingMonotonicNanoseconds(started_monotonic_ns))
+    {
+        std::fprintf(stderr,
+            "bandtiming could not read the monotonic start clock\n");
+        return 2;
+    }
+
+    BandTimingSemantic semantic;
+    if (!BuildBandTimingSemanticWitness(
+            options, total_replicates, semantic))
+    {
+        std::fprintf(stderr,
+            "bandtiming explicit canonical/real dispatch semantic "
+            "witness failed\n");
+        return 2;
+    }
+
+    const std::string candidate_descriptor_text =
+        BandTimingDescriptorText(
+            options.CandidateStaircase,
+            options.CandidateDenseRows,
+            options.CandidateGF256Rows,
+            options.CandidateGF16Rows,
+            options.CandidatePeriod,
+            options.CandidateX);
+    const std::string dispatch_descriptor_text =
+        BandTimingDescriptorText(
+            (uint32_t)dispatch_staircase, 4u,
+            wirehair_v2::kMixedGF256Rows,
+            wirehair_v2::kMixedGF16Rows,
+            wirehair_v2::kMixedCoefficientPeriod,
+            BandTimingX::Frozen);
+    const std::string candidate_descriptor_sha256 =
+        Sha256Hex(candidate_descriptor_text);
+    const std::string dispatch_descriptor_sha256 =
+        Sha256Hex(dispatch_descriptor_text);
+    const uint32_t wh1_dense_count =
+        wirehair::GetDenseCount(options.BlockCount);
+    const uint64_t expected_rows = total_replicates * 120u;
+    std::ostringstream contract_id;
+    contract_id << std::hex << std::setfill('0') << std::setw(16)
+        << options.DispatchContract->ProfileId;
+    std::ostringstream panels;
+    for (size_t i = 0u;
+         i < sizeof(kBandTimingPanels) /
+                sizeof(kBandTimingPanels[0]); ++i)
+    {
+        if (i != 0u) panels << '+';
+        panels << kBandTimingPanels[i].Name;
+    }
+
+    std::ostringstream receipt;
+    receipt << std::setprecision(17);
+    receipt
+        << "# bandtiming"
+        << ",schema=wirehair.wh2.bandtiming.v1"
+        << ",dispatch_profile=dispatch-v1"
+        << ",seed_policy=raw"
+        << ",contract_id=" << contract_id.str()
+        << ",K=" << options.BlockCount
+        << ",bb=" << options.BlockBytes
+        << ",message_bytes=" << message_bytes
+        << ",completion=mixed"
+        << ",candidate_S=" << options.CandidateStaircase
+        << ",candidate_D2=" << options.CandidateDenseRows
+        << ",candidate_gf256=" << options.CandidateGF256Rows
+        << ",candidate_gf16=" << options.CandidateGF16Rows
+        << ",candidate_P=" << options.CandidatePeriod
+        << ",candidate_x_geometry="
+            << BandTimingXName(options.CandidateX)
+        << ",candidate_descriptor_sha256="
+            << candidate_descriptor_sha256
+        << ",dispatch_S=" << dispatch_staircase
+        << ",dispatch_D2=4"
+        << ",dispatch_gf256=" << wirehair_v2::kMixedGF256Rows
+        << ",dispatch_gf16=" << wirehair_v2::kMixedGF16Rows
+        << ",dispatch_P=" << wirehair_v2::kMixedCoefficientPeriod
+        << ",dispatch_x_geometry=frozen"
+        << ",dispatch_descriptor_sha256="
+            << dispatch_descriptor_sha256
+        << ",descriptor_encoding=S-D2-gf256-gf16-P-x-newline-v1"
+        << ",recovery_mix_count="
+            << options.DispatchContract->RecoveryMixCount
+        << ",construction_seed_base="
+            << options.ConstructionSeedBase
+        << ",construction_seed_derivation="
+            "base_xor_d192ed03_times_rep_plus_1_mod2^32_v1"
+        << ",wh2_seed_mapping="
+            "zero-extend-u32-precode_xor-fold-packet-v1"
+        << ",wh1_seed_mapping=low16-peel-high16-dense-v1"
+        << ",wh1_dense_count=" << wh1_dense_count
+        << ",semantic_seed_derivation="
+            "base-plus-attempt-mod2^32-skip-measured-alias-and-"
+            "shared-weak-v1"
+        << ",loss=" << options.Loss
+        << ",loss_seed_base=" << options.LossSeedBase
+        << ",loss_seed_derivation="
+            "base_xor_9e3779b97f4a7c15_times_rep_plus_1_v1"
+        << ",message_seed_policy="
+            "replicate-loss-seed-partial-final-v1"
+        << ",schedule=" << PacketScheduleName(options.Schedule)
+        << ",loss_model=packet-schedule-v1"
+        << ",trace_encoding="
+            "wirehair-wh2-bandtiming-loss-trace-v1"
+        << ",panels=" << panels.str()
+        << ",scope_order=encoder+decoder+direct"
+        << ",warmup_replicates=" << options.WarmupReplicates
+        << ",replicates=" << options.Replicates
+        << ",slots_per_panel=8"
+        << ",panels_per_replicate=15"
+        << ",order=ABBABAAB"
+        << ",label_swap=alternating"
+        << ",inner_reps=" << options.InnerReps
+        << ",max_overhead=" << options.MaxOverhead
+        << ",cache_state="
+            << PeelTimingCacheStateName(options.CacheState)
+        << ",systematic_cache="
+            << (options.SystematicCache ? "on" : "off")
+        << ",wh2_source_cache="
+            << (options.SystematicCache ? 1 : 0)
+        << ",wh2_received_systematic_cache="
+            << (options.SystematicCache ? 1 : 0)
+        << ",wh1_encoder_source_policy="
+            "borrow-when-off-copy-when-on-v1"
+        << ",wh1_decoder_systematic_policy="
+            "native-staging-uncontrolled-v1"
+        << ",wh1_intermediate_policy=unavailable-zero-v1"
+        << ",evict_bytes=" << options.EvictBytes
+        << ",payload_alignment=64"
+        << ",prefault=1"
+        << ",cpu_affinity_policy=first-allowed-affinity-v1"
+        << ",encoder_scope="
+            "fresh-object-init-through-first-K-symbols-v1"
+        << ",decoder_scope="
+            "fresh-init-outside-timer-first-feed-through-own-success-v1"
+        << ",direct_scope="
+            "candidate-dispatch-pair-local-fixed-prefix-solve-v1"
+        << ",weak_seed_policy=panel-local-balanced-censor-v1"
+        << ",hook_path=caller-pinned-explicit-transaction-attempt-zero-v2"
+        << ",codec_reuse=none-fresh-object-every-inner-v1"
+        << ",context_sha256=" << options.ContextSha256
+        << ",uncertainty=paired-log-ratio-t95/v1"
+        << ",required_margin=" << options.RequiredMargin
+        << ",margin_rule="
+            "upper-log-cost-lt-negative-required-margin-and-arm-aa-floors-v1"
+        << ",clock_domain=" << PeelTimingClockDomain()
+        << ",stream_hash_scope=body-plus-done-prefix-v1"
+        << ",started_monotonic_ns=" << started_monotonic_ns
+        << ",expected_rows=" << expected_rows << '\n';
+    receipt
+        << "# band_semantic"
+        << ",timed=0"
+        << ",construction_seed=" << semantic.ConstructionSeed
+        << ",seed_attempt=" << semantic.SeedAttempt
+        << ",seed_attempt_cap=256"
+        << ",canonical_S=" << dispatch_staircase
+        << ",canonical_D2=4"
+        << ",canonical_gf256=" << wirehair_v2::kMixedGF256Rows
+        << ",canonical_gf16=" << wirehair_v2::kMixedGF16Rows
+        << ",canonical_P=" << wirehair_v2::kMixedCoefficientPeriod
+        << ",canonical_x=frozen"
+        << ",trace_sha256=" << semantic.TraceSha256
+        << ",message_sha256=" << semantic.MessageSha256
+        << ",explicit_construct_result="
+            << (int)semantic.ExplicitConstructResult
+        << ",dispatch_construct_result="
+            << (int)semantic.DispatchConstructResult
+        << ",explicit_params_sha256="
+            << semantic.ExplicitParamsSha256
+        << ",dispatch_params_sha256="
+            << semantic.DispatchParamsSha256
+        << ",params_equal=" << (semantic.ParamsEqual ? 1 : 0)
+        << ",explicit_coefficients_sha256="
+            << semantic.ExplicitCoefficientsSha256
+        << ",dispatch_coefficients_sha256="
+            << semantic.DispatchCoefficientsSha256
+        << ",coefficients_equal="
+            << (semantic.CoefficientsEqual ? 1 : 0)
+        << ",explicit_packet_rows_sha256="
+            << semantic.ExplicitPacketRowsSha256
+        << ",dispatch_packet_rows_sha256="
+            << semantic.DispatchPacketRowsSha256
+        << ",packet_rows_equal="
+            << (semantic.PacketRowsEqual ? 1 : 0)
+        << ",explicit_intermediate_sha256="
+            << semantic.ExplicitIntermediateSha256
+        << ",dispatch_intermediate_sha256="
+            << semantic.DispatchIntermediateSha256
+        << ",explicit_intermediate_bytes="
+            << semantic.ExplicitIntermediateBytes
+        << ",dispatch_intermediate_bytes="
+            << semantic.DispatchIntermediateBytes
+        << ",intermediate_equal="
+            << (semantic.IntermediateEqual ? 1 : 0)
+        << ",explicit_payload_sha256="
+            << semantic.ExplicitPayloadSha256
+        << ",dispatch_payload_sha256="
+            << semantic.DispatchPayloadSha256
+        << ",payload_equal=" << (semantic.PayloadEqual ? 1 : 0)
+        << ",explicit_direct_result="
+            << (int)semantic.ExplicitDirectResult
+        << ",dispatch_direct_result="
+            << (int)semantic.DispatchDirectResult
+        << ",explicit_solve_sha256="
+            << semantic.ExplicitSolveSha256
+        << ",dispatch_solve_sha256="
+            << semantic.DispatchSolveSha256
+        << ",direct_equal=" << (semantic.DirectEqual ? 1 : 0)
+        << ",explicit_decode_result="
+            << (int)semantic.ExplicitDecodeResult
+        << ",dispatch_decode_result="
+            << (int)semantic.DispatchDecodeResult
+        << ",explicit_overhead=" << semantic.ExplicitOverhead
+        << ",dispatch_overhead=" << semantic.DispatchOverhead
+        << ",explicit_recovered_sha256="
+            << semantic.ExplicitRecoveredSha256
+        << ",dispatch_recovered_sha256="
+            << semantic.DispatchRecoveredSha256
+        << ",recovery_equal=" << (semantic.RecoveryEqual ? 1 : 0)
+        << ",message_equal=" << (semantic.MessageEqual ? 1 : 0)
+        << ",pass=" << (semantic.Pass ? 1 : 0) << '\n';
+    receipt
+        << "replicate,measured,scope,panel,panel_index,slot,pair,label,"
+        << "role,label_swap,construction_seed,loss_seed,trace_sha256,"
+        << "construct_result,result,result_class,"
+        << "recovery_result,recovery_class,recovery_ok,encoded_symbols,"
+        << "received_symbols,arm_overhead,fixed_prefix_symbols,"
+        << "timing_eligible,panel_censored,censor_reason,"
+        << "preflight_result,timing_result,outcome_stable,elapsed_ns,"
+        << "inner_reps,saturated,cpu_before,cpu_after,cpu_migrated,"
+        << "minflt_delta,majflt_delta,fault_contaminated,stats_available,"
+        << "inactivated,binary_def,heavy_gain,block_xors,block_muladds,"
+        << "build_ns_sum,peel_ns_sum,project_ns_sum,residual_ns_sum,"
+        << "backsub_ns_sum,source_bytes,packet_payload_bytes,"
+        << "intermediate_bytes\n";
+
+    std::vector<uint8_t> eviction((size_t)options.EvictBytes, 0u);
+    EvictPeelTimingCache(eviction);
+    static const char kOrder[] =
+        {'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B'};
+    uint64_t emitted_rows = 0u;
+    for (uint32_t replicate = 0u;
+         replicate < total_replicates; ++replicate)
+    {
+        const uint32_t construction_seed =
+            BandTimingDerivedConstructionSeed(
+                options.ConstructionSeedBase, replicate);
+        const uint64_t loss_seed =
+            BandTimingDerivedLossSeed(
+                options.LossSeedBase, replicate);
+        const std::vector<uint32_t> ids = BuildPacketSchedule(
+            options.BlockCount,
+            options.BlockCount + options.MaxOverhead,
+            options.Loss, loss_seed, options.Schedule);
+        if (ids.size() !=
+            (size_t)options.BlockCount + options.MaxOverhead)
+        {
+            std::fprintf(stderr,
+                "bandtiming packet schedule failed replicate=%u\n",
+                replicate);
+            return 2;
+        }
+        std::vector<uint32_t> first_K(options.BlockCount);
+        for (uint32_t id = 0u; id < options.BlockCount; ++id) {
+            first_K[id] = id;
+        }
+        BandTimingAlignedBytes message;
+        if (!FillBandTimingMessage(
+                message, (size_t)message_bytes, loss_seed))
+        {
+            std::fprintf(stderr,
+                "bandtiming message allocation failed\n");
+            return 2;
+        }
+        if (std::find_if(
+                message.Data(), message.Data() + message.Size(),
+                [](uint8_t value) { return value != 0u; }) ==
+            message.Data() + message.Size())
+        {
+            std::fprintf(stderr,
+                "bandtiming generated an all-zero message\n");
+            return 2;
+        }
+        const std::string trace_sha256 = BandTimingTraceDigest(
+            options, construction_seed, loss_seed, ids);
+
+        BandTimingDescriptor candidate_descriptor;
+        BandTimingDescriptor dispatch_descriptor;
+        if (!BuildBandTimingDescriptor(
+                BandTimingRole::Candidate, options,
+                construction_seed, candidate_descriptor) ||
+            !BuildBandTimingDescriptor(
+                BandTimingRole::Dispatch, options,
+                construction_seed, dispatch_descriptor))
+        {
+            std::fprintf(stderr,
+                "bandtiming descriptor construction failed "
+                "replicate=%u\n", replicate);
+            return 2;
+        }
+        BandTimingPayload candidate_payload;
+        BandTimingPayload dispatch_payload;
+        BandTimingPayload wh1_payload;
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Candidate, options, &candidate_descriptor,
+            construction_seed, message, ids, candidate_payload);
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Dispatch, options, &dispatch_descriptor,
+            construction_seed, message, ids, dispatch_payload);
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Wh1, options, nullptr,
+            construction_seed, message, ids, wh1_payload);
+        BandTimingPayload candidate_encoder;
+        BandTimingPayload dispatch_encoder;
+        BandTimingPayload wh1_encoder;
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Candidate, options, &candidate_descriptor,
+            construction_seed, message, first_K, candidate_encoder);
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Dispatch, options, &dispatch_descriptor,
+            construction_seed, message, first_K, dispatch_encoder);
+        (void)BuildBandTimingPayload(
+            BandTimingRole::Wh1, options, nullptr,
+            construction_seed, message, first_K, wh1_encoder);
+        if (BandTimingPayloadOutOfMemory(candidate_payload) ||
+            BandTimingPayloadOutOfMemory(dispatch_payload) ||
+            BandTimingPayloadOutOfMemory(wh1_payload) ||
+            BandTimingPayloadOutOfMemory(candidate_encoder) ||
+            BandTimingPayloadOutOfMemory(dispatch_encoder) ||
+            BandTimingPayloadOutOfMemory(wh1_encoder))
+        {
+            std::fprintf(stderr,
+                "bandtiming payload preflight ran out of memory "
+                "replicate=%u\n", replicate);
+            return 2;
+        }
+        const BandTimingRecovery candidate_recovery =
+            RunBandTimingRecovery(
+                BandTimingRole::Candidate, options,
+                &candidate_descriptor, construction_seed,
+                message, ids, candidate_payload);
+        const BandTimingRecovery dispatch_recovery =
+            RunBandTimingRecovery(
+                BandTimingRole::Dispatch, options,
+                &dispatch_descriptor, construction_seed,
+                message, ids, dispatch_payload);
+        const BandTimingRecovery wh1_recovery =
+            RunBandTimingRecovery(
+                BandTimingRole::Wh1, options, nullptr,
+                construction_seed, message, ids, wh1_payload);
+        if (BandTimingRecoveryOutOfMemory(candidate_recovery) ||
+            BandTimingRecoveryOutOfMemory(dispatch_recovery) ||
+            BandTimingRecoveryOutOfMemory(wh1_recovery))
+        {
+            std::fprintf(stderr,
+                "bandtiming decoder preflight ran out of memory "
+                "replicate=%u\n", replicate);
+            return 2;
+        }
+
+        for (uint32_t panel_index = 0u;
+             panel_index < sizeof(kBandTimingPanels) /
+                sizeof(kBandTimingPanels[0]); ++panel_index)
+        {
+            const BandTimingPanel& panel =
+                kBandTimingPanels[panel_index];
+            uint32_t direct_prefix =
+                options.BlockCount + options.MaxOverhead;
+            if (panel.Scope == BandTimingScope::Direct)
+            {
+                const BandTimingRecovery& first_recovery =
+                    BandTimingRecoveryForRole(
+                        panel.First, candidate_recovery,
+                        dispatch_recovery, wh1_recovery);
+                const BandTimingRecovery& second_recovery =
+                    BandTimingRecoveryForRole(
+                        panel.Second, candidate_recovery,
+                        dispatch_recovery, wh1_recovery);
+                if (first_recovery.RecoveryOk &&
+                    second_recovery.RecoveryOk)
+                {
+                    direct_prefix = std::max(
+                        first_recovery.ReceivedSymbols,
+                        second_recovery.ReceivedSymbols);
+                }
+            }
+            BandTimingDirect first_direct;
+            BandTimingDirect second_direct;
+            if (panel.Scope == BandTimingScope::Direct)
+            {
+                first_direct = RunBandTimingDirect(
+                    options,
+                    *BandTimingDescriptorForRole(
+                        panel.First, candidate_descriptor,
+                        dispatch_descriptor),
+                    ids,
+                    BandTimingPayloadForRole(
+                        panel.First, candidate_payload,
+                        dispatch_payload, wh1_payload),
+                    direct_prefix, true);
+                if (panel.Aa) {
+                    second_direct = first_direct;
+                }
+                else {
+                    second_direct = RunBandTimingDirect(
+                        options,
+                        *BandTimingDescriptorForRole(
+                            panel.Second, candidate_descriptor,
+                            dispatch_descriptor),
+                        ids,
+                        BandTimingPayloadForRole(
+                            panel.Second, candidate_payload,
+                            dispatch_payload, wh1_payload),
+                        direct_prefix, true);
+                }
+                if (BandTimingDirectOutOfMemory(first_direct) ||
+                    BandTimingDirectOutOfMemory(second_direct))
+                {
+                    std::fprintf(stderr,
+                        "bandtiming direct preflight ran out of memory "
+                        "replicate=%u panel=%u\n",
+                        replicate, panel_index);
+                    return 2;
+                }
+            }
+            const auto make_observation = [&](
+                BandTimingRole role,
+                bool first) -> BandTimingScopeObservation
+            {
+                BandTimingScopeObservation observation;
+                const BandTimingDescriptor* descriptor =
+                    BandTimingDescriptorForRole(
+                        role, candidate_descriptor,
+                        dispatch_descriptor);
+                if (panel.Scope == BandTimingScope::Encoder)
+                {
+                    const BandTimingPayload& encoder =
+                        BandTimingPayloadForRole(
+                            role, candidate_encoder,
+                            dispatch_encoder, wh1_encoder);
+                    observation.ConstructResult =
+                        encoder.ConstructResult;
+                    observation.Result = encoder.Result;
+                    observation.EncodedSymbols = options.BlockCount;
+                    observation.ArmOverhead = 0;
+                    observation.PacketPayloadBytes = message_bytes;
+                }
+                else if (panel.Scope == BandTimingScope::Decoder)
+                {
+                    const BandTimingRecovery& recovery =
+                        BandTimingRecoveryForRole(
+                            role, candidate_recovery,
+                            dispatch_recovery, wh1_recovery);
+                    const BandTimingPayload& payload =
+                        BandTimingPayloadForRole(
+                            role, candidate_payload,
+                            dispatch_payload, wh1_payload);
+                    observation.ConstructResult =
+                        recovery.ConstructResult;
+                    observation.Result = recovery.Result;
+                    observation.RecoveryResult =
+                        recovery.RecoveryResult;
+                    observation.RecoveryApplicable =
+                        recovery.Result == Wirehair_Success;
+                    observation.RecoveryOk = recovery.RecoveryOk;
+                    observation.ReceivedSymbols =
+                        recovery.ReceivedSymbols;
+                    observation.ArmOverhead = recovery.Overhead;
+                    observation.PacketPayloadBytes =
+                        BandTimingPayloadPrefixBytes(
+                            payload, recovery.ReceivedSymbols);
+                }
+                else
+                {
+                    const BandTimingDirect& direct =
+                        first ? first_direct : second_direct;
+                    const BandTimingPayload& payload =
+                        BandTimingPayloadForRole(
+                            role, candidate_payload,
+                            dispatch_payload, wh1_payload);
+                    observation.ConstructResult =
+                        direct.ConstructResult;
+                    observation.Result = direct.Result;
+                    observation.ReceivedSymbols = direct_prefix;
+                    observation.ArmOverhead =
+                        (int32_t)direct_prefix -
+                        (int32_t)options.BlockCount;
+                    observation.FixedPrefixSymbols =
+                        (int32_t)direct_prefix;
+                    observation.PacketPayloadBytes =
+                        BandTimingPayloadPrefixBytes(
+                            payload, direct_prefix);
+                }
+                observation.IntermediateBytes =
+                    descriptor ?
+                    ((uint64_t)options.BlockCount +
+                        descriptor->Explicit.Params.Staircase +
+                        descriptor->Explicit.Params.DenseRows +
+                        descriptor->Explicit.Params.HeavyRows) *
+                            options.BlockBytes :
+                    0u;
+                if (observation.ConstructResult != Wirehair_Success)
+                {
+                    observation.EncodedSymbols = 0u;
+                    observation.ReceivedSymbols = 0u;
+                    observation.ArmOverhead = -1;
+                    observation.FixedPrefixSymbols = -1;
+                    observation.PacketPayloadBytes = 0u;
+                }
+                return observation;
+            };
+            const BandTimingScopeObservation first_observation =
+                make_observation(panel.First, true);
+            const BandTimingScopeObservation second_observation =
+                make_observation(panel.Second, false);
+            const std::string first_failure =
+                BandTimingFailureToken(
+                    panel.First, first_observation);
+            const std::string second_failure =
+                panel.Aa ? first_failure :
+                BandTimingFailureToken(
+                    panel.Second, second_observation);
+            std::string censor_reason = "none";
+            if (!first_failure.empty() || !second_failure.empty())
+            {
+                censor_reason.clear();
+                if (!first_failure.empty()) {
+                    censor_reason = first_failure;
+                }
+                if (!second_failure.empty() &&
+                    second_failure != first_failure)
+                {
+                    if (!censor_reason.empty()) censor_reason += '+';
+                    censor_reason += second_failure;
+                }
+            }
+            const bool timing_eligible =
+                censor_reason == "none";
+
+            for (uint32_t slot = 0u; slot < 8u; ++slot)
+            {
+                const char label = kOrder[slot];
+                const bool swapped = (replicate & 1u) != 0u;
+                const bool logical_first =
+                    (label == 'A') != swapped;
+                const BandTimingRole role = logical_first ?
+                    panel.First : panel.Second;
+                const BandTimingScopeObservation& observation =
+                    logical_first ?
+                    first_observation : second_observation;
+                const BandTimingDescriptor* descriptor =
+                    BandTimingDescriptorForRole(
+                        role, candidate_descriptor,
+                        dispatch_descriptor);
+                const BandTimingPayload& payload =
+                    BandTimingPayloadForRole(
+                        role, candidate_payload,
+                        dispatch_payload, wh1_payload);
+                const BandTimingPayload& encoder_preflight =
+                    BandTimingPayloadForRole(
+                        role, candidate_encoder,
+                        dispatch_encoder, wh1_encoder);
+                const BandTimingRecovery& decoder_preflight =
+                    BandTimingRecoveryForRole(
+                        role, candidate_recovery,
+                        dispatch_recovery, wh1_recovery);
+                const BandTimingDirect& direct_preflight =
+                    logical_first ? first_direct : second_direct;
+                BandTimingTimed timed;
+                if (timing_eligible)
+                {
+                    bool timing_ok = false;
+                    if (panel.Scope == BandTimingScope::Encoder)
+                    {
+                        timing_ok = TimeBandTimingEncoder(
+                            role, options, descriptor,
+                            construction_seed, message,
+                            encoder_preflight, eviction, timed);
+                    }
+                    else if (panel.Scope == BandTimingScope::Decoder)
+                    {
+                        timing_ok = TimeBandTimingDecoder(
+                            role, options, descriptor,
+                            construction_seed, message, ids, payload,
+                            decoder_preflight, eviction, timed);
+                    }
+                    else
+                    {
+                        timing_ok = TimeBandTimingDirect(
+                            options, *descriptor, ids, payload,
+                            direct_prefix, direct_preflight,
+                            eviction, timed);
+                    }
+                    if (!timing_ok)
+                    {
+                        std::fprintf(stderr,
+                            "bandtiming timed operation drifted "
+                            "replicate=%u panel=%u slot=%u\n",
+                            replicate, panel_index, slot);
+                        return 2;
+                    }
+                }
+                else
+                {
+                    timed.Stable = false;
+                    timed.CpuBefore = -1;
+                    timed.CpuAfter = -1;
+                    timed.CpuMigrated = 0;
+                    timed.MinorFaults = 0;
+                    timed.MajorFaults = 0;
+                }
+                const bool stats_available =
+                    timing_eligible &&
+                    panel.Scope != BandTimingScope::Encoder &&
+                    role != BandTimingRole::Wh1 &&
+                    timed.StatsAvailable;
+                if (stats_available &&
+                    !BandTimingStatsFitSignedReceipt(timed))
+                {
+                    std::fprintf(stderr,
+                        "bandtiming solver statistics exceed the signed "
+                        "receipt domain\n");
+                    return 2;
+                }
+                const int64_t inactivated = stats_available ?
+                    (int64_t)timed.Stats.InactivatedColumns : -1;
+                const int64_t binary_def = stats_available ?
+                    (int64_t)(
+                        timed.Stats.InactivatedColumns >=
+                            timed.Stats.BinaryResidualRank ?
+                        timed.Stats.InactivatedColumns -
+                            timed.Stats.BinaryResidualRank : 0u) : -1;
+                const int64_t heavy_gain = stats_available ?
+                    (int64_t)(
+                        timed.Stats.ResidualRank >=
+                            timed.Stats.BinaryResidualRank ?
+                        timed.Stats.ResidualRank -
+                            timed.Stats.BinaryResidualRank : 0u) : -1;
+                const int64_t block_xors = stats_available ?
+                    (int64_t)timed.Stats.BlockXors : -1;
+                const int64_t block_muladds = stats_available ?
+                    (int64_t)timed.Stats.BlockMulAdds : -1;
+                const int64_t build_ns = stats_available ?
+                    (int64_t)timed.BuildNanoseconds : -1;
+                const int64_t peel_ns = stats_available ?
+                    (int64_t)timed.PeelNanoseconds : -1;
+                const int64_t project_ns = stats_available ?
+                    (int64_t)timed.ProjectNanoseconds : -1;
+                const int64_t residual_ns = stats_available ?
+                    (int64_t)timed.ResidualNanoseconds : -1;
+                const int64_t backsub_ns = stats_available ?
+                    (int64_t)timed.BackSubNanoseconds : -1;
+                const char* result_class =
+                    BandTimingResultClass(observation.Result);
+                const char* recovery_class =
+                    observation.RecoveryApplicable ?
+                    BandTimingResultClass(observation.RecoveryResult) :
+                    "not_applicable";
+                receipt
+                    << replicate << ','
+                    << (replicate >=
+                        options.WarmupReplicates ? 1 : 0)
+                    << ',' << BandTimingScopeName(panel.Scope)
+                    << ',' << panel.Name
+                    << ',' << panel_index
+                    << ',' << slot
+                    << ',' << slot / 2u
+                    << ',' << label
+                    << ',' << BandTimingLogicalRoleName(
+                        role, panel.Aa, logical_first)
+                    << ',' << (swapped ? 1 : 0)
+                    << ',' << construction_seed
+                    << ',' << loss_seed
+                    << ',' << trace_sha256
+                    << ',' << (int)observation.ConstructResult
+                    << ',' << (int)observation.Result
+                    << ',' << result_class
+                    << ',' << (observation.RecoveryApplicable ?
+                        (int)observation.RecoveryResult : -1)
+                    << ',' << recovery_class
+                    << ',' << (observation.RecoveryOk ? 1 : 0)
+                    << ',' << observation.EncodedSymbols
+                    << ',' << observation.ReceivedSymbols
+                    << ',' << observation.ArmOverhead
+                    << ',' << observation.FixedPrefixSymbols
+                    << ',' << (timing_eligible ? 1 : 0)
+                    << ',' << (timing_eligible ? 0 : 1)
+                    << ',' << censor_reason
+                    << ',' << (int)observation.Result
+                    << ',' << (timing_eligible ?
+                        (int)timed.Result : -1)
+                    << ',' << (timed.Stable ? 1 : 0)
+                    << ',' << timed.ElapsedNanoseconds
+                    << ',' << (timing_eligible ?
+                        options.InnerReps : 0u)
+                    << ',' << (timed.Saturated ? 1 : 0)
+                    << ',' << timed.CpuBefore
+                    << ',' << timed.CpuAfter
+                    << ',' << timed.CpuMigrated
+                    << ',' << timed.MinorFaults
+                    << ',' << timed.MajorFaults
+                    << ',' << (timing_eligible ?
+                        PeelTimingFaultContaminated(
+                            timed.MinorFaults,
+                            timed.MajorFaults) : 0)
+                    << ',' << (stats_available ? 1 : 0)
+                    << ',' << inactivated
+                    << ',' << binary_def
+                    << ',' << heavy_gain
+                    << ',' << block_xors
+                    << ',' << block_muladds
+                    << ',' << build_ns
+                    << ',' << peel_ns
+                    << ',' << project_ns
+                    << ',' << residual_ns
+                    << ',' << backsub_ns
+                    << ',' << message_bytes
+                    << ',' << observation.PacketPayloadBytes
+                    << ',' << observation.IntermediateBytes
+                    << '\n';
+                ++emitted_rows;
+            }
+        }
+    }
+
+    if (emitted_rows != expected_rows)
+    {
+        std::fprintf(stderr,
+            "bandtiming internal row count mismatch\n");
+        return 2;
+    }
+    uint64_t finished_monotonic_ns = 0u;
+    if (!ReadPeelTimingMonotonicNanoseconds(finished_monotonic_ns) ||
+        finished_monotonic_ns <= started_monotonic_ns)
+    {
+        std::fprintf(stderr,
+            "bandtiming could not read the monotonic finish clock\n");
+        return 2;
+    }
+    const std::string body = receipt.str();
+    std::ostringstream done_prefix_stream;
+    done_prefix_stream << "# bandtiming_done"
+         << ",complete=1"
+         << ",rows=" << emitted_rows
+         << ",finished_monotonic_ns=" << finished_monotonic_ns
+         << ",stream_sha256=";
+    const std::string done_prefix = done_prefix_stream.str();
+    const std::string stream_sha256 =
+        Sha256Hex(body + done_prefix);
+    const std::string done_text =
+        done_prefix + stream_sha256 + '\n';
+    if (std::fwrite(
+            body.data(), 1u, body.size(), stdout) != body.size() ||
+        std::fwrite(
+            done_text.data(), 1u, done_text.size(), stdout) !=
+            done_text.size() ||
+        std::fflush(stdout) != 0)
+    {
+        std::fprintf(stderr,
+            "bandtiming could not write the complete receipt\n");
+        return 2;
+    }
+    return 0;
+}
+
 struct PrecodeSweepRun
 {
     // Cell inputs shared by every config.
@@ -21481,7 +25010,7 @@ int main(int argc, char** argv)
         // configures do.
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE \
-    "peelpmf|peeltiming|precodesweep|precodecost|essearch|"
+    "peelpmf|peeltiming|bandtiming|precodesweep|precodecost|essearch|"
 #else
 #define WIREHAIR_V2_BENCH_SWEEP_USAGE ""
 #endif
@@ -21538,6 +25067,9 @@ int main(int argc, char** argv)
         }
         if (!std::strcmp(argv[1], "peeltiming")) {
             return CmdPeelTiming(argc - 2, argv + 2);
+        }
+        if (!std::strcmp(argv[1], "bandtiming")) {
+            return CmdBandTiming(argc - 2, argv + 2);
         }
         if (!std::strcmp(argv[1], "precodesweep")) {
             return CmdPrecodeSweep(argc - 2, argv + 2);

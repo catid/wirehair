@@ -314,6 +314,103 @@ struct MessagePrecodeEncoderOptions
     bool CacheReceivedSystematicPackets = false;
 };
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/**
+    Opaque identity of the ambient equation hooks pinned by an explicit
+    construction descriptor.
+
+    The two hashes are semantic fingerprints produced by the precode and
+    packet-row state owners.  The tracking-X bit snapshots the corresponding
+    ambient precode choice.  Zero hashes are reserved for an unpinned
+    descriptor.
+*/
+struct ExplicitEquationStateIdentityForTesting
+{
+    uint64_t Precode = 0u;
+    uint64_t PacketRows = 0u;
+    bool MixedBandTrackingX = false;
+
+    bool IsPinned() const noexcept;
+    bool MatchesActive(const PrecodeParams& params) const;
+};
+
+enum class MessagePrecodeDiagnosticIdentityForTesting : uint8_t
+{
+    Uninitialized = 0,
+    NamedContract = 1,
+    ExplicitUnknownArchitecture = 2
+};
+
+/**
+    Exact, test-build-only message-precode construction descriptor.
+
+    Unlike a named SeedProfile, this descriptor is not a wire contract and
+    performs no seed selection or retry.  Params and Packet are consumed
+    exactly once at attempt zero.  After setting Params, Packet, and all
+    ambient equation hooks, the caller must call
+    PinActiveEquationStateForTesting().  The resulting identity makes this a
+    caller-pinned descriptor: initialization rejects a different hook state,
+    initialized endpoints reject pre-existing drift before touching outputs or
+    decode progress, and each complete operation snapshots the pinned
+    process-wide tracking-X bit so concurrent changes cannot mix equations.
+    The cache flags are local lifecycle policy; both are retained in each
+    endpoint's diagnostic Options() value, while each endpoint allocates only
+    the cache it owns.
+*/
+struct ExplicitMessagePrecodeConfigForTesting
+{
+    PrecodeParams Params = {};
+    PacketRowConfig Packet = {};
+    ExplicitEquationStateIdentityForTesting EquationState = {};
+    bool CacheSystematicSource = false;
+    bool CacheReceivedSystematicPackets = false;
+
+    bool PinActiveEquationStateForTesting();
+};
+
+/**
+    Trusted, bounded transaction for timing an already-pinned explicit
+    descriptor without re-fingerprinting ambient hooks on every packet.
+
+    Construction validates the complete ambient identity once and pins its
+    tracking-X bit on the current thread.  Matching explicit endpoints with the
+    same fingerprint-relative Params context then use the transaction identity
+    instead of repeating the ambient fingerprint.  Nesting is supported.  The
+    owner must verify MatchesActive() again after the bounded operation if
+    ambient drift would invalidate its receipt.
+*/
+class ScopedExplicitEquationStateTransactionForTesting
+{
+public:
+    explicit ScopedExplicitEquationStateTransactionForTesting(
+        const ExplicitMessagePrecodeConfigForTesting& config);
+    ~ScopedExplicitEquationStateTransactionForTesting() noexcept;
+
+    ScopedExplicitEquationStateTransactionForTesting(
+        const ScopedExplicitEquationStateTransactionForTesting&) = delete;
+    ScopedExplicitEquationStateTransactionForTesting& operator=(
+        const ScopedExplicitEquationStateTransactionForTesting&) = delete;
+
+    bool IsValid() const noexcept { return Valid; }
+
+private:
+    friend bool ExplicitEquationStateAuthorizedForTesting(
+        const ExplicitEquationStateIdentityForTesting& identity,
+        const PrecodeParams& params);
+
+    ExplicitEquationStateIdentityForTesting Identity = {};
+    CompletionField ParameterField = CompletionField::GF256;
+    double ParameterStaircaseDegreeScale = 0.0;
+    const ScopedExplicitEquationStateTransactionForTesting* Previous = nullptr;
+    bool Valid = false;
+    ScopedMixedBandTrackingXForTesting TrackingSnapshot;
+};
+
+bool ExplicitEquationStateAuthorizedForTesting(
+    const ExplicitEquationStateIdentityForTesting& identity,
+    const PrecodeParams& params);
+#endif
+
 /** True when any selected or mixed V2 precode contract state is present. */
 bool HasMessagePrecodeContractState(const SeedProfile& profile);
 
@@ -404,6 +501,25 @@ public:
         const SeedProfile* seed_override = nullptr,
         const MessagePrecodeEncoderOptions* options = nullptr);
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /**
+        Initialize one exact construction without profile binding or retries.
+
+        NeedMore and Error are returned unchanged so benchmark harnesses can
+        count weak attempt-zero constructions without seed-fixup policy.
+        BlockEncoder().System().Params is the authoritative full descriptor;
+        Profile()/Options() expose only their representable diagnostics and
+        their Architecture members are inert placeholders because the
+        production enum has no Unknown value.  DiagnosticIdentityForTesting()
+        explicitly reports ExplicitUnknownArchitecture.
+    */
+    WirehairResult InitializeExplicitResultForTesting(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const ExplicitMessagePrecodeConfigForTesting& config);
+#endif
+
     bool Encode(
         uint32_t block_id,
         uint8_t* block_out,
@@ -429,6 +545,13 @@ public:
     const PrecodeSolveStats& SolveStats() const;
     /** Complete solved [source-domain | precode] intermediate vector. */
     const uint8_t* IntermediateBlocks() const;
+    /**
+        Diagnostic access to the solved block encoder.
+
+        For an explicit test configuration, output must still go through this
+        endpoint's EncodeResult(): direct calls on the returned low-level
+        object bypass the caller-pinned ambient-state contract.
+    */
     const PrecodeEncoder& BlockEncoder() const;
 
     /** Release the optional source cache.  Safe to call repeatedly. */
@@ -436,7 +559,48 @@ public:
     bool HasSystematicSourceCache() const;
     size_t SystematicSourceCacheBytes() const;
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    MessagePrecodeDiagnosticIdentityForTesting
+        DiagnosticIdentityForTesting() const;
+    const ExplicitEquationStateIdentityForTesting&
+        PinnedEquationStateForTesting() const;
+#endif
+
 private:
+    enum class ConfigurationFailurePolicy
+    {
+        Raw,
+        ClassifySelectedWeak,
+        SelectRetry
+    };
+
+    friend class MessagePrecodeDecoder;
+    void Swap(MessagePrecodeEncoder& other) noexcept;
+    WirehairResult InitializeConfigurationResult(
+        const void* message,
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const PrecodeParams& params,
+        const PacketRowConfig& packet_config,
+        const SeedProfile& profile,
+        const MessagePrecodeEncoderOptions& options,
+        uint32_t packet_seed_attempt,
+        bool require_exact_params,
+        bool bind_profile,
+        ConfigurationFailurePolicy failure_policy);
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    static bool SameExplicitParams(
+        const PrecodeParams& a,
+        const PrecodeParams& b);
+    static SeedProfile MakeExplicitDiagnosticProfile(
+        uint32_t block_count,
+        uint32_t block_bytes,
+        const ExplicitMessagePrecodeConfigForTesting& config);
+    static MessagePrecodeEncoderOptions MakeExplicitDiagnosticOptions(
+        const ExplicitMessagePrecodeConfigForTesting& config);
+#endif
+
     SeedProfile ProfileValue = {};
     MessagePrecodeEncoderOptions OptionsValue = {};
     PrecodeEncoder EncoderValue;
@@ -444,6 +608,10 @@ private:
     uint64_t MessageBytesValue = 0;
     uint32_t BlockBytesValue = 0;
     std::vector<uint8_t> SystematicSourceCache;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ExplicitEquationStateIdentityForTesting ExplicitEquationStateValue = {};
+    bool ExplicitConfigurationValue = false;
+#endif
     bool Initialized = false;
 };
 

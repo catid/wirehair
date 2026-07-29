@@ -335,7 +335,7 @@ if(NOT production_usage_result EQUAL 1 OR
         "stderr=${production_usage_err}")
 endif()
 
-foreach(test_only_mode IN ITEMS preferredattempt peeltiming)
+foreach(test_only_mode IN ITEMS preferredattempt peeltiming bandtiming)
     execute_process(
         COMMAND "${codec_exe_dir}/wirehair_v2_bench${TEST_EXE_SUFFIX}"
             "${test_only_mode}"

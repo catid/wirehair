@@ -178,6 +178,46 @@ bool CheckRawPinnedWeakClassification()
                 block_bytes, (int)zero_result, (int)nonzero_result);
             return false;
         }
+
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting explicit_config;
+        if (!wirehair_v2::ResolveMessagePrecodeConfiguration(
+                profile,
+                options,
+                explicit_config.Params,
+                explicit_config.Packet) ||
+            !explicit_config.PinActiveEquationStateForTesting())
+        {
+            std::fprintf(stderr,
+                "seed selection: weak explicit configuration resolution "
+                "failed bb=%u\n", block_bytes);
+            return false;
+        }
+        wirehair_v2::MessagePrecodeEncoder explicit_zero;
+        wirehair_v2::MessagePrecodeEncoder explicit_nonzero;
+        const WirehairResult explicit_zero_result =
+            explicit_zero.InitializeExplicitResultForTesting(
+                zero_message.data(), zero_message.size(),
+                block_bytes, explicit_config);
+        const WirehairResult explicit_nonzero_result =
+            explicit_nonzero.InitializeExplicitResultForTesting(
+                nonzero_message.data(), nonzero_message.size(),
+                block_bytes, explicit_config);
+        if (explicit_zero_result != Wirehair_NeedMore ||
+            (explicit_nonzero_result != Wirehair_NeedMore &&
+             explicit_nonzero_result != Wirehair_Error) ||
+            (block_bytes == 2u &&
+             explicit_nonzero_result != Wirehair_Error) ||
+            explicit_zero.IsInitialized() ||
+            explicit_nonzero.IsInitialized())
+        {
+            std::fprintf(stderr,
+                "seed selection: explicit attempt-zero result was not raw "
+                "bb=%u zero=%d nonzero=%d\n",
+                block_bytes,
+                (int)explicit_zero_result,
+                (int)explicit_nonzero_result);
+            return false;
+        }
         if (block_bytes == 2u)
         {
             // The exact-width diagnostic zero block is the fourth guarded
@@ -195,6 +235,25 @@ bool CheckRawPinnedWeakClassification()
                 std::fprintf(stderr,
                     "seed selection: weak-seed diagnostic OOM was not "
                     "transactional result=%d\n", (int)oom_result);
+                return false;
+            }
+
+            // The explicit path has no fourth diagnostic allocation or
+            // zero-RHS rerun.  Countdown three therefore reaches and returns
+            // the original Error unchanged.
+            wirehair_v2::MessagePrecodeEncoder explicit_no_probe;
+            wirehair_v2::SetAllocationFailureCountdownForTesting(3);
+            const WirehairResult explicit_no_probe_result =
+                explicit_no_probe.InitializeExplicitResultForTesting(
+                    nonzero_message.data(), nonzero_message.size(),
+                    block_bytes, explicit_config);
+            wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+            if (explicit_no_probe_result != Wirehair_Error ||
+                explicit_no_probe.IsInitialized())
+            {
+                std::fprintf(stderr,
+                    "seed selection: explicit weak path performed a hidden "
+                    "probe result=%d\n", (int)explicit_no_probe_result);
                 return false;
             }
         }

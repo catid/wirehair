@@ -79,6 +79,21 @@ public:
         const SeedProfile* seed_override = nullptr,
         const MessagePrecodeEncoderOptions* options = nullptr);
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    /**
+        Initialize one exact construction without profile binding or retries.
+
+        The returned diagnostic Profile() is intentionally non-replayable as a
+        named wire contract: its contract versions are zero.  System().Params
+        is the authoritative full explicit descriptor, and
+        DiagnosticIdentityForTesting() reports ExplicitUnknownArchitecture.
+    */
+    WirehairResult InitializeExplicitResultForTesting(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        const ExplicitMessagePrecodeConfigForTesting& config);
+#endif
+
     /** Identical duplicate ids are ignored; conflicting duplicates fail. */
     WirehairResult DecodeResult(
         uint32_t block_id,
@@ -116,6 +131,10 @@ public:
     uint32_t CachedSystematicPacketCount() const;
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    MessagePrecodeDiagnosticIdentityForTesting
+        DiagnosticIdentityForTesting() const;
+    const ExplicitEquationStateIdentityForTesting&
+        PinnedEquationStateForTesting() const;
     bool HasIncrementalResumeStateForTesting() const;
     size_t IncrementalResumeBytesForTesting() const;
     size_t ColdReceiveCapacityBytesForTesting() const;
@@ -124,6 +143,15 @@ public:
 private:
     WirehairResult AttemptSolve();
     void Swap(MessagePrecodeDecoder& other) noexcept;
+    WirehairResult InitializeConfigurationResult(
+        uint64_t message_bytes,
+        uint32_t block_bytes,
+        PrecodeSystem&& system,
+        const PacketRowConfig& packet_config,
+        const SeedProfile& profile,
+        const MessagePrecodeEncoderOptions& options,
+        uint32_t packet_seed_attempt,
+        bool bind_profile);
 
     SeedProfile ProfileValue = {};
     MessagePrecodeEncoderOptions OptionsValue = {};
@@ -153,6 +181,10 @@ private:
     uint32_t PacketSeedAttemptValue = 0;
     WirehairResult LastSolveResult = Wirehair_NeedMore;
     bool PendingPacket = false;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    ExplicitEquationStateIdentityForTesting ExplicitEquationStateValue = {};
+    bool ExplicitConfigurationValue = false;
+#endif
     bool Initialized = false;
     bool Decoded = false;
 };

@@ -1727,6 +1727,211 @@ MessagePrecodeEncoder::MessagePrecodeEncoder()
 {
 }
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool ExplicitEquationStateIdentityForTesting::IsPinned() const noexcept
+{
+    return Precode != 0u && PacketRows != 0u;
+}
+
+bool ExplicitEquationStateIdentityForTesting::MatchesActive(
+    const PrecodeParams& params) const
+{
+    return IsPinned() &&
+        MixedBandTrackingX ==
+            (params.Field == CompletionField::MixedGF256GF16 &&
+             AmbientMixedBandTrackingXForTesting()) &&
+        Precode ==
+            ActivePrecodeEquationStateFingerprintForTesting(params) &&
+        PacketRows ==
+            ActivePacketRowEquationStateFingerprintForTesting();
+}
+
+bool ExplicitMessagePrecodeConfigForTesting::
+    PinActiveEquationStateForTesting()
+{
+    ExplicitEquationStateIdentityForTesting next;
+    next.Precode =
+        ActivePrecodeEquationStateFingerprintForTesting(Params);
+    next.PacketRows =
+        ActivePacketRowEquationStateFingerprintForTesting();
+    next.MixedBandTrackingX =
+        Params.Field == CompletionField::MixedGF256GF16 &&
+        AmbientMixedBandTrackingXForTesting();
+    if (!next.IsPinned()) {
+        return false;
+    }
+    EquationState = next;
+    return true;
+}
+
+namespace {
+
+thread_local const ScopedExplicitEquationStateTransactionForTesting*
+    ActiveExplicitEquationStateTransaction = nullptr;
+
+bool SameExplicitEquationStateIdentity(
+    const ExplicitEquationStateIdentityForTesting& left,
+    const ExplicitEquationStateIdentityForTesting& right)
+{
+    return left.Precode == right.Precode &&
+        left.PacketRows == right.PacketRows &&
+        left.MixedBandTrackingX == right.MixedBandTrackingX;
+}
+
+bool SameExplicitEquationStateParameterContext(
+    const PrecodeParams& params,
+    CompletionField field,
+    double staircase_degree_scale)
+{
+    // These are the only Params inputs consumed by
+    // ActivePrecodeEquationStateFingerprintForTesting().  Compare the double
+    // bit-for-bit to match HookStateHasher::Double, including signed zero and
+    // any diagnostic NaN payload.
+    return params.Field == field &&
+        std::memcmp(
+            &params.StaircaseDegreeScale,
+            &staircase_degree_scale,
+            sizeof(staircase_degree_scale)) == 0;
+}
+
+} // namespace
+
+ScopedExplicitEquationStateTransactionForTesting::
+    ScopedExplicitEquationStateTransactionForTesting(
+        const ExplicitMessagePrecodeConfigForTesting& config)
+    : Identity(config.EquationState)
+    , ParameterField(config.Params.Field)
+    , ParameterStaircaseDegreeScale(config.Params.StaircaseDegreeScale)
+    , Previous(ActiveExplicitEquationStateTransaction)
+    , Valid(Identity.MatchesActive(config.Params))
+    , TrackingSnapshot(
+        Valid &&
+            config.Params.Field == CompletionField::MixedGF256GF16,
+        config.EquationState.MixedBandTrackingX)
+{
+    // An invalid nested transaction must not inherit an outer authorization.
+    ActiveExplicitEquationStateTransaction = Valid ? this : nullptr;
+}
+
+ScopedExplicitEquationStateTransactionForTesting::
+    ~ScopedExplicitEquationStateTransactionForTesting() noexcept
+{
+    ActiveExplicitEquationStateTransaction = Previous;
+}
+
+bool ExplicitEquationStateAuthorizedForTesting(
+    const ExplicitEquationStateIdentityForTesting& identity,
+    const PrecodeParams& params)
+{
+    return (
+            ActiveExplicitEquationStateTransaction &&
+            SameExplicitEquationStateIdentity(
+                identity, ActiveExplicitEquationStateTransaction->Identity) &&
+            SameExplicitEquationStateParameterContext(
+                params,
+                ActiveExplicitEquationStateTransaction->ParameterField,
+                ActiveExplicitEquationStateTransaction->
+                    ParameterStaircaseDegreeScale)
+        ) ||
+        identity.MatchesActive(params);
+}
+#endif
+
+void MessagePrecodeEncoder::Swap(MessagePrecodeEncoder& other) noexcept
+{
+    using std::swap;
+    swap(ProfileValue, other.ProfileValue);
+    swap(OptionsValue, other.OptionsValue);
+    EncoderValue.Swap(other.EncoderValue);
+    swap(SolveStatsValue, other.SolveStatsValue);
+    swap(MessageBytesValue, other.MessageBytesValue);
+    swap(BlockBytesValue, other.BlockBytesValue);
+    SystematicSourceCache.swap(other.SystematicSourceCache);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    swap(ExplicitEquationStateValue, other.ExplicitEquationStateValue);
+    swap(ExplicitConfigurationValue, other.ExplicitConfigurationValue);
+#endif
+    swap(Initialized, other.Initialized);
+}
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool MessagePrecodeEncoder::SameExplicitParams(
+    const PrecodeParams& a,
+    const PrecodeParams& b)
+{
+    return a.BlockCount == b.BlockCount &&
+        a.Staircase == b.Staircase &&
+        a.DenseRows == b.DenseRows &&
+        a.HeavyRows == b.HeavyRows &&
+        a.SourceHits == b.SourceHits &&
+        a.Field == b.Field &&
+        a.DegreeBalancedStaircase == b.DegreeBalancedStaircase &&
+        a.StaircaseDegreeScale == b.StaircaseDegreeScale &&
+        a.DenseIdentityCorner == b.DenseIdentityCorner &&
+        a.DenseTwoAnchor == b.DenseTwoAnchor &&
+        a.DenseTwoAnchorPhase == b.DenseTwoAnchorPhase &&
+        a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
+        a.HeavyFamily == b.HeavyFamily &&
+        a.Seed == b.Seed;
+}
+
+SeedProfile MessagePrecodeEncoder::MakeExplicitDiagnosticProfile(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    const ExplicitMessagePrecodeConfigForTesting& config)
+{
+    SeedProfile profile;
+    profile.BlockCount = block_count;
+    profile.BlockBytes = block_bytes;
+    profile.V2SeedSelected = true;
+    profile.V2SeedAttempt = 0u;
+    // An explicit experiment is deliberately not a named/replayable wire
+    // contract.  These zero versions make ordinary profile replay fail closed.
+    profile.V2PrecodeContractVersion = 0u;
+    profile.V2PacketRowContractVersion = 0u;
+    // Architecture has no Unknown enumerator in the production wire type.
+    // Leave its inert default as a compatibility placeholder; the hook-only
+    // DiagnosticIdentityForTesting accessor explicitly reports Unknown.
+    profile.V2Architecture = V2PrecodeArchitecture::LegacyD12;
+    profile.V2SeedPolicy = V2SeedDerivation::RawUniform;
+    profile.V2StaircaseCount = config.Params.Staircase;
+    profile.V2DenseRowCount = config.Params.DenseRows;
+    profile.V2HeavyRowCount = config.Params.HeavyRows;
+    profile.V2CompletionField = config.Params.Field;
+    profile.V2SourceHits = config.Params.SourceHits;
+    profile.V2PrecodeSeed = config.Params.Seed;
+    profile.V2PacketPeelSeed = config.Packet.PeelSeed;
+    profile.V2RecoveryMixCount = config.Packet.MixCount;
+    profile.V2DenseIdentityCorner = config.Params.DenseIdentityCorner;
+    profile.V2DenseTwoAnchor = config.Params.DenseTwoAnchor;
+    // The descriptor records one concrete matrix, not a K-dependent policy.
+    profile.V2AdaptiveDenseTwoAnchor = false;
+    profile.V2PrecodeSeedSalt = 0u;
+    profile.V2RecoveryRowSeedSalt = 0u;
+    return profile;
+}
+
+MessagePrecodeEncoderOptions
+MessagePrecodeEncoder::MakeExplicitDiagnosticOptions(
+    const ExplicitMessagePrecodeConfigForTesting& config)
+{
+    MessagePrecodeEncoderOptions options;
+    // Inert compatibility placeholder; DiagnosticIdentityForTesting reports
+    // that no named architecture applies to an explicit descriptor.
+    options.Architecture = V2PrecodeArchitecture::LegacyD12;
+    options.RecoveryMixCount = config.Packet.MixCount;
+    options.DenseIdentityCorner = config.Params.DenseIdentityCorner;
+    options.AdaptiveDenseTwoAnchor = false;
+    options.PrecodeSeedSalt = 0u;
+    options.RecoveryRowSeedSalt = 0u;
+    options.Completion = config.Params.Field;
+    options.CacheSystematicSource = config.CacheSystematicSource;
+    options.CacheReceivedSystematicPackets =
+        config.CacheReceivedSystematicPackets;
+    return options;
+}
+#endif
+
 namespace {
 
 bool IsSupportedMessagePrecodeContract(
@@ -2121,6 +2326,57 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         return Wirehair_InvalidInput;
     }
 
+    PrecodeParams base_params;
+    PacketRowConfig base_config;
+    if (!ResolveMessagePrecodeConfiguration(
+            profile, opts, base_params, base_config))
+    {
+        return Wirehair_InvalidInput;
+    }
+    uint32_t packet_seed_attempt = profile.V2SeedSelected ?
+        profile.V2SeedAttempt : 0u;
+    WirehairResult result = InitializeConfigurationResult(
+        message,
+        message_bytes,
+        block_bytes,
+        base_params,
+        base_config,
+        profile,
+        opts,
+        packet_seed_attempt,
+        false,
+        true,
+        profile.V2SeedSelected ?
+            ConfigurationFailurePolicy::ClassifySelectedWeak :
+            ConfigurationFailurePolicy::SelectRetry);
+    return result;
+}
+
+WirehairResult MessagePrecodeEncoder::InitializeConfigurationResult(
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const PrecodeParams& params,
+    const PacketRowConfig& packet_config,
+    const SeedProfile& profile,
+    const MessagePrecodeEncoderOptions& options,
+    uint32_t packet_seed_attempt,
+    bool require_exact_params,
+    bool bind_profile,
+    ConfigurationFailurePolicy failure_policy)
+{
+    if (gf256_init() != 0) {
+        return Wirehair_UnsupportedPlatform;
+    }
+    uint32_t block_count = 0u;
+    if (!message ||
+        !MessageBlockCount(message_bytes, block_bytes, block_count) ||
+        params.BlockCount != block_count ||
+        (params.Field == CompletionField::MixedGF256GF16 &&
+         (block_bytes & 1u) != 0u))
+    {
+        return Wirehair_InvalidInput;
+    }
     const uint64_t padded_source_bytes =
         (uint64_t)block_count * (uint64_t)block_bytes;
     if (padded_source_bytes > (uint64_t)((size_t)-1)) {
@@ -2138,7 +2394,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         const uint8_t* const message_data =
             static_cast<const uint8_t*>(message);
         std::vector<uint8_t> systematic_source_cache;
-        if (opts.CacheSystematicSource)
+        if (options.CacheSystematicSource)
         {
             GuardedAllocation();
             systematic_source_cache.assign(
@@ -2156,27 +2412,30 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
                 final_bytes);
         }
 
-        PrecodeParams base_params;
-        PacketRowConfig base_config;
-        if (!ResolveMessagePrecodeConfiguration(
-                profile, opts, base_params, base_config))
-        {
-            return Wirehair_InvalidInput;
-        }
-        uint32_t packet_seed_attempt = profile.V2SeedSelected ?
-            profile.V2SeedAttempt : 0u;
-        PrecodeParams params = base_params;
-        PacketRowConfig packet_config = base_config;
-
         GuardedAllocation();
         PrecodeSystem system;
         if (!BuildPrecodeSystem(params, system)) {
             return Wirehair_InvalidInput;
         }
-        const uint64_t precode_count_wide = (uint64_t)params.Staircase +
-            params.DenseRows + params.HeavyRows;
+        if (require_exact_params)
+        {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (!SameExplicitParams(params, system.Params)) {
+                return Wirehair_InvalidInput;
+            }
+#else
+            return Wirehair_InvalidInput;
+#endif
+        }
+        const uint64_t precode_count_wide =
+            (uint64_t)system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
         PacketRowRuntime solve_runtime;
         if (precode_count_wide > UINT32_MAX ||
+            !IsPacketRowDomainValid(
+                block_count,
+                (uint32_t)precode_count_wide,
+                packet_config.MixCount) ||
             !solve_runtime.Initialize(
                 block_count,
                 (uint32_t)precode_count_wide,
@@ -2200,10 +2459,11 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         GuardedAllocation();
         std::vector<uint8_t> intermediate_blocks;
         PrecodeSolveStats solve_stats;
+        PacketRowConfig selected_packet_config = packet_config;
         WirehairResult solve_result =
             SolvePrecodeSystemForValidatedSystemWithRuntime(
             system,
-            packet_config,
+            selected_packet_config,
             solve_runtime,
             packets,
             block_bytes,
@@ -2212,7 +2472,8 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         if (solve_result == Wirehair_NeedMore ||
             solve_result == Wirehair_Error)
         {
-            if (profile.V2SeedSelected)
+            if (failure_policy ==
+                ConfigurationFailurePolicy::ClassifySelectedWeak)
             {
                 if (solve_result == Wirehair_NeedMore) {
                     return Wirehair_BadPeelSeed;
@@ -2237,7 +2498,7 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
                 const WirehairResult structural_result =
                     SolvePrecodeSystemForValidatedSystemWithRuntime(
                         system,
-                        packet_config,
+                        selected_packet_config,
                         solve_runtime,
                         packets,
                         block_bytes,
@@ -2248,31 +2509,39 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
                 return structural_result == Wirehair_NeedMore ?
                     Wirehair_BadPeelSeed : solve_result;
             }
-            PrecodeSystem selected_system;
-            PacketRowConfig selected_config;
-            const WirehairResult select_result = SelectSystematicConfiguration(
-                base_params,
-                base_config,
-                selected_system,
-                selected_config,
-                &packet_seed_attempt);
-            if (select_result != Wirehair_Success) {
-                return select_result;
+            if (failure_policy == ConfigurationFailurePolicy::SelectRetry)
+            {
+                PrecodeSystem selected_system;
+                PacketRowConfig retry_config;
+                const WirehairResult select_result =
+                    SelectSystematicConfiguration(
+                        params,
+                        packet_config,
+                        selected_system,
+                        retry_config,
+                        &packet_seed_attempt);
+                if (select_result != Wirehair_Success) {
+                    return select_result;
+                }
+                if (packet_seed_attempt == 0u) {
+                    return Wirehair_Error;
+                }
+                intermediate_blocks.clear();
+                system = std::move(selected_system);
+                selected_packet_config = retry_config;
+                solve_result =
+                    SolvePrecodeSystemForValidatedSystemWithRuntime(
+                        system,
+                        selected_packet_config,
+                        solve_runtime,
+                        packets,
+                        block_bytes,
+                        intermediate_blocks,
+                        &solve_stats);
             }
-            if (packet_seed_attempt == 0u) {
-                return Wirehair_Error;
+            else {
+                return solve_result;
             }
-            intermediate_blocks.clear();
-            system = std::move(selected_system);
-            solve_result = SolvePrecodeSystemForValidatedSystemWithRuntime(
-                system,
-                selected_config,
-                solve_runtime,
-                packets,
-                block_bytes,
-                intermediate_blocks,
-                &solve_stats);
-            packet_config = selected_config;
         }
         if (solve_result != Wirehair_Success) {
             return solve_result;
@@ -2282,27 +2551,32 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         PrecodeEncoder next_encoder;
         const WirehairResult encoder_result = next_encoder.InitializeSolvedSystem(
             system,
-            packet_config,
+            selected_packet_config,
             intermediate_blocks,
             block_bytes);
         if (encoder_result != Wirehair_Success) {
             return encoder_result;
         }
 
-        EncoderValue.Swap(next_encoder);
-        ProfileValue = profile;
-        BindMessagePrecodeProfile(
-            ProfileValue,
-            opts,
-            system,
-            packet_config,
-            packet_seed_attempt);
-        OptionsValue = opts;
-        SolveStatsValue = solve_stats;
-        MessageBytesValue = message_bytes;
-        BlockBytesValue = block_bytes;
-        SystematicSourceCache.swap(systematic_source_cache);
-        Initialized = true;
+        MessagePrecodeEncoder next;
+        next.EncoderValue.Swap(next_encoder);
+        next.ProfileValue = profile;
+        if (bind_profile)
+        {
+            BindMessagePrecodeProfile(
+                next.ProfileValue,
+                options,
+                system,
+                selected_packet_config,
+                packet_seed_attempt);
+        }
+        next.OptionsValue = options;
+        next.SolveStatsValue = solve_stats;
+        next.MessageBytesValue = message_bytes;
+        next.BlockBytesValue = block_bytes;
+        next.SystematicSourceCache.swap(systematic_source_cache);
+        next.Initialized = true;
+        Swap(next);
         return Wirehair_Success;
     }
     catch (const std::bad_alloc&) {
@@ -2312,6 +2586,59 @@ WirehairResult MessagePrecodeEncoder::InitializeResult(
         return Wirehair_OOM;
     }
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+WirehairResult MessagePrecodeEncoder::InitializeExplicitResultForTesting(
+    const void* message,
+    uint64_t message_bytes,
+    uint32_t block_bytes,
+    const ExplicitMessagePrecodeConfigForTesting& config)
+{
+    uint32_t block_count = 0u;
+    if (!message ||
+        !MessageBlockCount(message_bytes, block_bytes, block_count) ||
+        config.Params.BlockCount != block_count ||
+        !ExplicitEquationStateAuthorizedForTesting(
+            config.EquationState, config.Params))
+    {
+        return Wirehair_InvalidInput;
+    }
+    const ScopedMixedBandTrackingXForTesting tracking_x_snapshot(
+        config.Params.Field == CompletionField::MixedGF256GF16,
+        config.EquationState.MixedBandTrackingX);
+    const SeedProfile profile = MakeExplicitDiagnosticProfile(
+        block_count, block_bytes, config);
+    const MessagePrecodeEncoderOptions options =
+        MakeExplicitDiagnosticOptions(config);
+    MessagePrecodeEncoder next;
+    const WirehairResult result = next.InitializeConfigurationResult(
+        message,
+        message_bytes,
+        block_bytes,
+        config.Params,
+        config.Packet,
+        profile,
+        options,
+        0u,
+        true,
+        false,
+        ConfigurationFailurePolicy::Raw);
+    if (result != Wirehair_Success) {
+        return result;
+    }
+    // The scoped snapshot made construction independent of concurrent
+    // tracking-X changes.  Still reject a different final ambient state so a
+    // caller cannot accidentally publish an endpoint under stale controls.
+    if (!ExplicitEquationStateAuthorizedForTesting(
+            config.EquationState, config.Params)) {
+        return Wirehair_InvalidInput;
+    }
+    next.ExplicitEquationStateValue = config.EquationState;
+    next.ExplicitConfigurationValue = true;
+    Swap(next);
+    return Wirehair_Success;
+}
+#endif
 
 bool MessagePrecodeEncoder::Encode(
     uint32_t block_id,
@@ -2335,6 +2662,19 @@ WirehairResult MessagePrecodeEncoder::EncodeResult(
     if (!Initialized || !block_out || !data_bytes_out) {
         return Wirehair_InvalidInput;
     }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (ExplicitConfigurationValue &&
+        !ExplicitEquationStateAuthorizedForTesting(
+            ExplicitEquationStateValue, EncoderValue.System().Params))
+    {
+        return Wirehair_Error;
+    }
+    const ScopedMixedBandTrackingXForTesting tracking_x_snapshot(
+        ExplicitConfigurationValue &&
+            EncoderValue.System().Params.Field ==
+                CompletionField::MixedGF256GF16,
+        ExplicitEquationStateValue.MixedBandTrackingX);
+#endif
 
     const uint32_t K = ProfileValue.BlockCount;
     if (block_id < K)
@@ -2467,5 +2807,25 @@ size_t MessagePrecodeEncoder::SystematicSourceCacheBytes() const
 {
     return SystematicSourceCache.size();
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+MessagePrecodeDiagnosticIdentityForTesting
+MessagePrecodeEncoder::DiagnosticIdentityForTesting() const
+{
+    if (!Initialized) {
+        return MessagePrecodeDiagnosticIdentityForTesting::Uninitialized;
+    }
+    return ExplicitConfigurationValue ?
+        MessagePrecodeDiagnosticIdentityForTesting::
+            ExplicitUnknownArchitecture :
+        MessagePrecodeDiagnosticIdentityForTesting::NamedContract;
+}
+
+const ExplicitEquationStateIdentityForTesting&
+MessagePrecodeEncoder::PinnedEquationStateForTesting() const
+{
+    return ExplicitEquationStateValue;
+}
+#endif
 
 } // namespace wirehair_v2

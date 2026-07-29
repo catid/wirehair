@@ -18,6 +18,70 @@ namespace wirehair_v2 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 namespace {
 
+class HookStateHasher
+{
+public:
+    void U8(uint8_t value)
+    {
+        Value ^= value;
+        Value *= UINT64_C(1099511628211);
+    }
+
+    void U32(uint32_t value)
+    {
+        for (unsigned i = 0; i < 4; ++i) {
+            U8((uint8_t)(value >> (8u * i)));
+        }
+    }
+
+    void U64(uint64_t value)
+    {
+        for (unsigned i = 0; i < 8; ++i) {
+            U8((uint8_t)(value >> (8u * i)));
+        }
+    }
+
+    void Double(double value)
+    {
+        uint64_t bits = 0u;
+        static_assert(sizeof(bits) == sizeof(value),
+            "double fingerprint representation");
+        std::memcpy(&bits, &value, sizeof(bits));
+        U64(bits);
+    }
+
+    uint64_t Finish() const
+    {
+        // Zero is reserved by the explicit descriptor for "not pinned".
+        return Value != 0u ? Value : UINT64_C(0x9e3779b97f4a7c15);
+    }
+
+private:
+    uint64_t Value = UINT64_C(14695981039346656037);
+};
+
+uint64_t FingerprintDoubleVector(const std::vector<double>& values)
+{
+    HookStateHasher hash;
+    hash.U64(UINT64_C(0x57483244424c5631)); // "WH2DBLV1"
+    hash.U64((uint64_t)values.size());
+    for (double value : values) {
+        hash.Double(value);
+    }
+    return hash.Finish();
+}
+
+uint64_t FingerprintU32Vector(const std::vector<uint32_t>& values)
+{
+    HookStateHasher hash;
+    hash.U64(UINT64_C(0x5748325533325631)); // "WH2U32V1"
+    hash.U64((uint64_t)values.size());
+    for (uint32_t value : values) {
+        hash.U32(value);
+    }
+    return hash.Finish();
+}
+
 bool IsAsciiSpace(char c)
 {
     return c == ' ' || c == '\t' || c == '\r' ||
@@ -167,15 +231,21 @@ bool ParseStaircaseDegreeScaleForTesting(
 /// that leaves the declared symbol undefined (it was silently discarded as an
 /// unused static, and essearch could not link against it).
 static thread_local std::vector<double> g_staircase_degrees_override;
+static thread_local uint64_t g_staircase_degrees_fingerprint =
+    FingerprintDoubleVector(g_staircase_degrees_override);
 
 void SetStaircaseDegreesForTesting(const std::vector<double>& weights)
 {
     g_staircase_degrees_override = weights;
+    g_staircase_degrees_fingerprint =
+        FingerprintDoubleVector(g_staircase_degrees_override);
 }
 
 void ClearStaircaseDegreesForTesting()
 {
     g_staircase_degrees_override.clear();
+    g_staircase_degrees_fingerprint =
+        FingerprintDoubleVector(g_staircase_degrees_override);
 }
 
 /// Per-thread override of the target mean staircase row degree.  The exact
@@ -206,15 +276,21 @@ void ClearStaircaseDegreeScaleForTesting()
 /// Same scope rule as the two overrides above: wirehair_v2 scope, not the
 /// anonymous namespace, or the declared symbol is left undefined.
 static thread_local std::vector<uint32_t> g_staircase_row_degrees_override;
+static thread_local uint64_t g_staircase_row_degrees_fingerprint =
+    FingerprintU32Vector(g_staircase_row_degrees_override);
 
 void SetStaircaseRowDegreesForTesting(const std::vector<uint32_t>& degrees)
 {
     g_staircase_row_degrees_override = degrees;
+    g_staircase_row_degrees_fingerprint =
+        FingerprintU32Vector(g_staircase_row_degrees_override);
 }
 
 void ClearStaircaseRowDegreesForTesting()
 {
     g_staircase_row_degrees_override.clear();
+    g_staircase_row_degrees_fingerprint =
+        FingerprintU32Vector(g_staircase_row_degrees_override);
 }
 #endif
 
@@ -286,6 +362,20 @@ static const ParsedScaleEnvironment& StaircaseDegreeScaleEnvironment()
         return out;
     }();
     return parsed;
+}
+
+static uint64_t StaircaseDegreesEnvironmentFingerprint()
+{
+    static const uint64_t fingerprint =
+        FingerprintDoubleVector(StaircaseDegreesEnvironment().Values);
+    return fingerprint;
+}
+
+static uint64_t StaircaseRowDegreesEnvironmentFingerprint()
+{
+    static const uint64_t fingerprint =
+        FingerprintU32Vector(StaircaseRowDegreesEnvironment().Values);
+    return fingerprint;
 }
 
 static const std::vector<double>* ActiveStaircaseDegreeDistribution()
@@ -1590,8 +1680,9 @@ uint8_t HeavyCoefficient(
 /// once from WIREHAIR_V2_BAND_TRACKING_X so a sweep can toggle it per process
 /// without threading a new flag through every bench mode.
 static std::atomic<int> MixedBandTrackingXOverride{-1};
+static thread_local int MixedBandTrackingXScopedOverride = -1;
 
-static bool MixedBandTrackingXEnabled()
+static bool MixedBandTrackingXAmbientEnabled()
 {
     const int override_value =
         MixedBandTrackingXOverride.load(std::memory_order_relaxed);
@@ -1604,6 +1695,13 @@ static bool MixedBandTrackingXEnabled()
         return value.IsSet() && value.Get()[0] == '1';
     }();
     return enabled;
+}
+
+static bool MixedBandTrackingXEnabled()
+{
+    return MixedBandTrackingXScopedOverride >= 0 ?
+        MixedBandTrackingXScopedOverride != 0 :
+        MixedBandTrackingXAmbientEnabled();
 }
 #define MixedBandTrackingXForTesting MixedBandTrackingXEnabled()
 
@@ -2604,6 +2702,98 @@ bool IsCanonicalMixedCompletionState()
         !ActiveMixedIndependentExtensionResidues() &&
         ActiveMixedGroupedGF256Rows() == 0u;
 }
+
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+bool AmbientMixedBandTrackingXForTesting()
+{
+    return MixedBandTrackingXAmbientEnabled();
+}
+
+ScopedMixedBandTrackingXForTesting::
+    ScopedMixedBandTrackingXForTesting(
+        bool active,
+        bool enabled) noexcept
+    : Previous(MixedBandTrackingXScopedOverride)
+{
+    if (active) {
+        MixedBandTrackingXScopedOverride = enabled ? 1 : 0;
+    }
+}
+
+ScopedMixedBandTrackingXForTesting::
+    ~ScopedMixedBandTrackingXForTesting() noexcept
+{
+    MixedBandTrackingXScopedOverride = Previous;
+}
+
+uint64_t ActivePrecodeEquationStateFingerprintForTesting(
+    const PrecodeParams& params)
+{
+    HookStateHasher hash;
+    hash.U64(UINT64_C(0x5748325052465031)); // "WH2PRFP1"
+
+    // The params field supplies the fallback, so hash the effective value
+    // rather than whether an identical value came from params, TLS, or env.
+    hash.Double(ActiveStaircaseDegreeScale(
+        params.StaircaseDegreeScale));
+    hash.U8(StaircaseHookConfigurationValid() ? 1u : 0u);
+
+    const std::vector<uint32_t>* const pinned =
+        ActiveStaircaseRowDegrees();
+    hash.U8(pinned ? 1u : 0u);
+    if (pinned) {
+        hash.U64(pinned == &g_staircase_row_degrees_override ?
+            g_staircase_row_degrees_fingerprint :
+            StaircaseRowDegreesEnvironmentFingerprint());
+    }
+
+    // A realized row sequence wins over a shape, matching construction.
+    if (pinned) {
+        hash.U8(0u);
+    } else
+    {
+        const std::vector<double>* const shape =
+            ActiveStaircaseDegreeDistribution();
+        hash.U8(shape ? 1u : 0u);
+        if (shape) {
+            hash.U64(shape == &g_staircase_degrees_override ?
+                g_staircase_degrees_fingerprint :
+                StaircaseDegreesEnvironmentFingerprint());
+        }
+    }
+
+    hash.U32((uint32_t)params.Field);
+    if (params.Field == CompletionField::MixedGF256GF16)
+    {
+        hash.U32(ActiveMixedCoefficientPeriod());
+        hash.U32(ActiveMixedGF256Rows());
+        hash.U32(ActiveMixedGF16Rows());
+        hash.U32((uint32_t)ActiveMixedCoefficientGeometry());
+        hash.U32((uint32_t)ActiveMixedResidueSchedule());
+        hash.U32(ActiveMixedResidueSkew());
+        if (ActiveMixedResidueSchedule() == MixedResidueSchedule::Hashed) {
+            hash.U32(ActiveMixedResidueHashSeed());
+        }
+        const bool independent =
+            ActiveMixedIndependentExtensionResidues();
+        hash.U8(independent ? 1u : 0u);
+        if (independent) {
+            hash.U32(MixedExtensionResidueHashSeedForTesting);
+        }
+        const uint32_t grouped = ActiveMixedGroupedGF256Rows();
+        hash.U32(grouped);
+        if (grouped != 0u)
+        {
+            hash.U32(ActiveMixedGroupedGF256RowMask());
+            hash.U32(ActiveMixedGroupedGF256HashSeed());
+        }
+        // Tracking-X is stored separately in the explicit identity.  Do not
+        // sample it here too: a concurrent process-wide toggle could otherwise
+        // tear the hash and the dedicated bit across two ambient states.
+    }
+    return hash.Finish();
+}
+#endif
 
 uint8_t HeavyCoefficientForParams(
     const PrecodeParams& params,

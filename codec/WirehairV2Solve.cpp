@@ -39,6 +39,58 @@ struct PeelDegreeCdfState
     std::vector<double> Cdf;
 };
 
+class PacketHookStateHasher
+{
+public:
+    void U8(uint8_t value)
+    {
+        Value ^= value;
+        Value *= UINT64_C(1099511628211);
+    }
+
+    void U32(uint32_t value)
+    {
+        for (unsigned i = 0; i < 4; ++i) {
+            U8((uint8_t)(value >> (8u * i)));
+        }
+    }
+
+    void U64(uint64_t value)
+    {
+        for (unsigned i = 0; i < 8; ++i) {
+            U8((uint8_t)(value >> (8u * i)));
+        }
+    }
+
+    void Double(double value)
+    {
+        uint64_t bits = 0u;
+        static_assert(sizeof(bits) == sizeof(value),
+            "double fingerprint representation");
+        std::memcpy(&bits, &value, sizeof(bits));
+        U64(bits);
+    }
+
+    uint64_t Finish() const
+    {
+        return Value != 0u ? Value : UINT64_C(0x9e3779b97f4a7c15);
+    }
+
+private:
+    uint64_t Value = UINT64_C(14695981039346656037);
+};
+
+uint64_t FingerprintPeelDegreeCdf(const std::vector<double>& cdf)
+{
+    PacketHookStateHasher hash;
+    hash.U64(UINT64_C(0x5748325043444631)); // "WH2PCDF1"
+    hash.U64((uint64_t)cdf.size());
+    for (double value : cdf) {
+        hash.Double(value);
+    }
+    return hash.Finish();
+}
+
 // PeelRowParameters clamps every sampled degree to 64.  Canonicalizing every
 // override onto exactly 64 bins is therefore semantics-preserving: missing
 // bins have zero mass and all input mass at degrees >= 64 belongs to bin 64.
@@ -52,6 +104,8 @@ static_assert(
 /// remains an active-invalid state so it cannot silently fall through to an
 /// environment override or the shipped law.
 thread_local PeelDegreeCdfState PeelDegreeOverride;
+thread_local uint64_t PeelDegreeOverrideFingerprint =
+    FingerprintPeelDegreeCdf(PeelDegreeOverride.Cdf);
 
 bool IsAsciiSpace(char c)
 {
@@ -179,6 +233,13 @@ const PeelDegreeCdfState& EnvironmentPeelDegreeCdf()
         return result;
     }();
     return parsed;
+}
+
+uint64_t EnvironmentPeelDegreeCdfFingerprint()
+{
+    static const uint64_t fingerprint =
+        FingerprintPeelDegreeCdf(EnvironmentPeelDegreeCdf().Cdf);
+    return fingerprint;
 }
 
 /// Resolve thread-local override first, environment second, stock otherwise.
@@ -5136,6 +5197,26 @@ bool IsCanonicalStableTargetPacketRowState()
 }
 
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+uint64_t ActivePacketRowEquationStateFingerprintForTesting()
+{
+    PacketHookStateHasher hash;
+    hash.U64(UINT64_C(0x574832504b465031)); // "WH2PKFP1"
+    hash.U32(PacketRowSeedMultiplier);
+    hash.U8(PacketRowSeedAvalanche ? 1u : 0u);
+    hash.U32(OddPacketPeelSeedXor);
+
+    const std::vector<double>* cdf = nullptr;
+    const bool valid = ActivePeelDegreeCdf(cdf);
+    hash.U8(valid ? 1u : 0u);
+    hash.U8(cdf ? 1u : 0u);
+    if (cdf) {
+        hash.U64(cdf == &PeelDegreeOverride.Cdf ?
+            PeelDegreeOverrideFingerprint :
+            EnvironmentPeelDegreeCdfFingerprint());
+    }
+    return hash.Finish();
+}
+
 bool SetTinyMixedFastPathModeForTesting(int mode)
 {
     if (mode < -1 || mode > 1) {
@@ -5236,18 +5317,24 @@ bool SetPeelDegreesForTesting(const std::vector<double>& weights)
     {
         // Empty has always been the explicit clear spelling.
         PeelDegreeOverride = PeelDegreeCdfState();
+        PeelDegreeOverrideFingerprint =
+            FingerprintPeelDegreeCdf(PeelDegreeOverride.Cdf);
         return true;
     }
     PeelDegreeCdfState candidate;
     candidate.IsSet = true;
     candidate.Valid = MakePeelDegreeCdf(weights, candidate.Cdf);
     PeelDegreeOverride = std::move(candidate);
+    PeelDegreeOverrideFingerprint =
+        FingerprintPeelDegreeCdf(PeelDegreeOverride.Cdf);
     return PeelDegreeOverride.Valid;
 }
 
 void ClearPeelDegreesForTesting()
 {
     PeelDegreeOverride = PeelDegreeCdfState();
+    PeelDegreeOverrideFingerprint =
+        FingerprintPeelDegreeCdf(PeelDegreeOverride.Cdf);
 }
 
 bool PeelDegreeConfigurationValidForTesting()

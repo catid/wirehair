@@ -1615,9 +1615,11 @@ def _thermal_window_from_csv(
     return summary
 
 
-def _finalize_paired_context(frozen_context, stdout, capture):
-    """Finalize thermal evidence through the same retained prelaunch file."""
-    start_ns, finish_ns = _peeltiming_run_bounds(stdout)
+def _finalize_paired_context(
+        frozen_context, stdout, capture, *,
+        run_bounds=_peeltiming_run_bounds):
+    """Finalize thermal evidence using authenticated native run bounds."""
+    start_ns, finish_ns = run_bounds(stdout)
     _validate_runtime_identity(frozen_context["bound"])
     interval = (
         frozen_context["bound"]["thermal_sampling_interval_ms"] / 1000.0)

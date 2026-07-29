@@ -4,10 +4,12 @@
 #include "../WirehairTools.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -599,7 +601,10 @@ bool SameOptions(
         a.AdaptiveDenseTwoAnchor == b.AdaptiveDenseTwoAnchor &&
         a.PrecodeSeedSalt == b.PrecodeSeedSalt &&
         a.RecoveryRowSeedSalt == b.RecoveryRowSeedSalt &&
-        a.Completion == b.Completion;
+        a.Completion == b.Completion &&
+        a.CacheSystematicSource == b.CacheSystematicSource &&
+        a.CacheReceivedSystematicPackets ==
+            b.CacheReceivedSystematicPackets;
 }
 
 bool SamePrecodeParams(
@@ -620,6 +625,1348 @@ bool SamePrecodeParams(
         a.SegmentedDenseAnchors == b.SegmentedDenseAnchors &&
         a.HeavyFamily == b.HeavyFamily &&
         a.Seed == b.Seed;
+}
+
+bool CheckExplicitDiagnostics(
+    const wirehair_v2::MessagePrecodeEncoder& encoder,
+    const wirehair_v2::MessagePrecodeDecoder& decoder,
+    const wirehair_v2::ExplicitMessagePrecodeConfigForTesting& config,
+    uint32_t K,
+    uint32_t block_bytes,
+    const char* label)
+{
+    const auto profile_matches =
+        [&](const wirehair_v2::SeedProfile& profile) {
+            return profile.BlockCount == K &&
+                profile.BlockBytes == block_bytes &&
+                profile.V2SeedSelected &&
+                profile.V2SeedAttempt == 0u &&
+                profile.V2PrecodeContractVersion == 0u &&
+                profile.V2PacketRowContractVersion == 0u &&
+                profile.V2SeedPolicy ==
+                    wirehair_v2::V2SeedDerivation::RawUniform &&
+                profile.V2StaircaseCount == config.Params.Staircase &&
+                profile.V2DenseRowCount == config.Params.DenseRows &&
+                profile.V2HeavyRowCount == config.Params.HeavyRows &&
+                profile.V2CompletionField == config.Params.Field &&
+                profile.V2SourceHits == config.Params.SourceHits &&
+                profile.V2PrecodeSeed == config.Params.Seed &&
+                profile.V2PacketPeelSeed == config.Packet.PeelSeed &&
+                profile.V2RecoveryMixCount == config.Packet.MixCount &&
+                profile.V2DenseIdentityCorner ==
+                    config.Params.DenseIdentityCorner &&
+                profile.V2DenseTwoAnchor == config.Params.DenseTwoAnchor &&
+                !profile.V2AdaptiveDenseTwoAnchor &&
+                profile.V2PrecodeSeedSalt == 0u &&
+                profile.V2RecoveryRowSeedSalt == 0u;
+        };
+    const auto options_match =
+        [&](const wirehair_v2::MessagePrecodeEncoderOptions& options) {
+            return options.RecoveryMixCount == config.Packet.MixCount &&
+                options.DenseIdentityCorner ==
+                    config.Params.DenseIdentityCorner &&
+                !options.AdaptiveDenseTwoAnchor &&
+                options.PrecodeSeedSalt == 0u &&
+                options.RecoveryRowSeedSalt == 0u &&
+                options.Completion == config.Params.Field &&
+                options.CacheSystematicSource ==
+                    config.CacheSystematicSource &&
+                options.CacheReceivedSystematicPackets ==
+                    config.CacheReceivedSystematicPackets;
+        };
+    if (!encoder.IsInitialized() || !decoder.IsInitialized() ||
+        !profile_matches(encoder.Profile()) ||
+        !profile_matches(decoder.Profile()) ||
+        !options_match(encoder.Options()) ||
+        !options_match(decoder.Options()) ||
+        encoder.DiagnosticIdentityForTesting() !=
+            wirehair_v2::MessagePrecodeDiagnosticIdentityForTesting::
+                ExplicitUnknownArchitecture ||
+        decoder.DiagnosticIdentityForTesting() !=
+            wirehair_v2::MessagePrecodeDiagnosticIdentityForTesting::
+                ExplicitUnknownArchitecture ||
+        encoder.PinnedEquationStateForTesting().Precode !=
+            config.EquationState.Precode ||
+        encoder.PinnedEquationStateForTesting().PacketRows !=
+            config.EquationState.PacketRows ||
+        encoder.PinnedEquationStateForTesting().MixedBandTrackingX !=
+            config.EquationState.MixedBandTrackingX ||
+        decoder.PinnedEquationStateForTesting().Precode !=
+            config.EquationState.Precode ||
+        decoder.PinnedEquationStateForTesting().PacketRows !=
+            config.EquationState.PacketRows ||
+        decoder.PinnedEquationStateForTesting().MixedBandTrackingX !=
+            config.EquationState.MixedBandTrackingX ||
+        !SamePrecodeParams(
+            encoder.BlockEncoder().System().Params, config.Params) ||
+        !SamePrecodeParams(decoder.System().Params, config.Params) ||
+        encoder.SolveStats().PacketSeedAttempt != 0u ||
+        decoder.PacketSeedAttempt() != 0u ||
+        decoder.PacketPeelSeed() != config.Packet.PeelSeed ||
+        encoder.HasSystematicSourceCache() !=
+            config.CacheSystematicSource ||
+        decoder.HasSystematicPacketCache() !=
+            config.CacheReceivedSystematicPackets)
+    {
+        std::fprintf(stderr,
+            "explicit %s: diagnostic/configuration state mismatch\n", label);
+        return false;
+    }
+    return true;
+}
+
+bool RunOneExplicitConfiguration(
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting config,
+    uint32_t block_bytes,
+    uint32_t tail_bytes,
+    const char* label)
+{
+    const uint32_t K = config.Params.BlockCount;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 73u + K * 11u + block_bytes);
+    }
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    const WirehairResult encode_init =
+        encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config);
+    const WirehairResult decode_init =
+        decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config);
+    if (encode_init != Wirehair_Success ||
+        decode_init != Wirehair_Success ||
+        !CheckExplicitDiagnostics(
+            encoder, decoder, config, K, block_bytes, label) ||
+        !CompleteDirectRepairOnly(
+            encoder, decoder, message, K, block_bytes, label))
+    {
+        std::fprintf(stderr,
+            "explicit %s: roundtrip failed enc=%d dec=%d\n",
+            label, (int)encode_init, (int)decode_init);
+        return false;
+    }
+    return true;
+}
+
+bool RunExplicitEquationStatePinningCases()
+{
+    struct RestoreHooks
+    {
+        ~RestoreHooks()
+        {
+            wirehair_v2::ClearMixedBandTrackingXForTesting();
+            (void)wirehair_v2::SetMixedCoefficientGeometryForTesting(
+                wirehair_v2::MixedCoefficientGeometry::FrozenPowerX);
+            (void)wirehair_v2::SetMixedGF16RowsForTesting(
+                wirehair_v2::kMixedGF16Rows);
+            (void)wirehair_v2::SetMixedGF256RowsForTesting(
+                wirehair_v2::kMixedGF256Rows);
+            (void)wirehair_v2::SetMixedCoefficientPeriodForTesting(
+                wirehair_v2::kMixedCoefficientPeriod);
+            (void)wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u);
+            wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+            wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+            wirehair_v2::ClearPeelDegreesForTesting();
+            (void)wirehair_v2::SetMixedResidueBucketModeForTesting(
+                wirehair_v2::MixedResidueBucketMode::Automatic);
+        }
+    } restore;
+
+    static const uint32_t K = 43u;
+    static const uint32_t block_bytes = 18u;
+    static const uint32_t tail_bytes = 7u;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 29u + 0x53u);
+    }
+
+    if (!wirehair_v2::SetMixedGF16RowsForTesting(0u) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(8u))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting config;
+    config.Params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0xb1716d94ac2058e3));
+    config.Params.Staircase = 9u;
+    config.Params.DenseRows = 4u;
+    config.Params.SourceHits = 2u;
+    config.Params.DegreeBalancedStaircase = true;
+    config.Params.StaircaseDegreeScale = 8.5;
+    config.Packet.PeelSeed = UINT32_C(0x41f06c33);
+    config.Packet.MixCount = 3u;
+    if (config.Params.HeavyRows != 8u ||
+        !config.PinActiveEquationStateForTesting())
+    {
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoder encoder;
+    wirehair_v2::MessagePrecodeDecoder decoder;
+    if (encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+            Wirehair_Success ||
+        decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "explicit pinning: initial 8+0 construction failed\n");
+        return false;
+    }
+
+    const uint32_t probe_id = 3u * K + 17u;
+    std::vector<uint8_t> probe(block_bytes, 0u);
+    uint32_t probe_bytes = 0u;
+    if (encoder.EncodeResult(
+            probe_id, probe.data(), block_bytes, &probe_bytes) !=
+            Wirehair_Success ||
+        !CompleteDirectRepairOnly(
+            encoder, decoder, message, K, block_bytes, "pinning"))
+    {
+        return false;
+    }
+
+    // The same S/D/H and total H=8 used to accept both 8+0 and 6+2 ambient
+    // row splits even though they generate different mixed equations.
+    if (!wirehair_v2::SetMixedGF256RowsForTesting(6u) ||
+        !wirehair_v2::SetMixedGF16RowsForTesting(2u))
+    {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoder stale_encoder;
+    wirehair_v2::MessagePrecodeDecoder stale_decoder;
+    if (config.EquationState.MatchesActive(config.Params) ||
+        stale_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+            Wirehair_InvalidInput ||
+        stale_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config) != Wirehair_InvalidInput ||
+        encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+            Wirehair_InvalidInput ||
+        decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config) != Wirehair_InvalidInput ||
+        !encoder.IsInitialized() || !decoder.IsDecoded())
+    {
+        std::fprintf(stderr,
+            "explicit pinning: stale 8+0 descriptor accepted at 6+2\n");
+        return false;
+    }
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting split = config;
+    if (!split.PinActiveEquationStateForTesting() ||
+        split.EquationState.Precode == config.EquationState.Precode)
+    {
+        std::fprintf(stderr,
+            "explicit pinning: same-total split identity did not change\n");
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoder split_encoder;
+    wirehair_v2::MessagePrecodeDecoder split_decoder;
+    if (split_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, split) !=
+            Wirehair_Success ||
+        split_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, split) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "explicit pinning: repinned 6+2 construction failed\n");
+        return false;
+    }
+    const uint64_t columns = (uint64_t)K + config.Params.Staircase +
+        config.Params.DenseRows + config.Params.HeavyRows;
+    if (std::memcmp(
+            encoder.IntermediateBlocks(),
+            split_encoder.IntermediateBlocks(),
+            (size_t)columns * block_bytes) == 0)
+    {
+        std::fprintf(stderr,
+            "explicit pinning: 8+0 and 6+2 intermediates unexpectedly match\n");
+        return false;
+    }
+
+    if (!wirehair_v2::SetMixedGF16RowsForTesting(0u) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(8u) ||
+        !config.EquationState.MatchesActive(config.Params))
+    {
+        return false;
+    }
+
+    const auto reject_drift = [&](const char* label) {
+        std::vector<uint8_t> encoded(block_bytes, 0xa5u);
+        uint32_t encoded_bytes = UINT32_C(0xdeadbeef);
+        uint64_t encoded_ops = UINT64_MAX;
+        const uint32_t received = decoder.ReceivedCount();
+        std::vector<uint8_t> recovered(message.size(), 0x5au);
+        if (encoder.EncodeResult(
+                probe_id,
+                encoded.data(),
+                block_bytes,
+                &encoded_bytes,
+                &encoded_ops) != Wirehair_Error ||
+            encoded_bytes != UINT32_C(0xdeadbeef) ||
+            encoded_ops != UINT64_MAX ||
+            !std::all_of(encoded.begin(), encoded.end(),
+                [](uint8_t value) { return value == 0xa5u; }) ||
+            decoder.DecodeResult(
+                probe_id, probe.data(), probe_bytes) != Wirehair_Error ||
+            decoder.ReceivedCount() != received ||
+            decoder.RecoverResult(
+                recovered.data(), recovered.size()) != Wirehair_Error ||
+            !std::all_of(recovered.begin(), recovered.end(),
+                [](uint8_t value) { return value == 0x5au; }))
+        {
+            std::fprintf(stderr,
+                "explicit pinning: %s drift was not fail-closed\n", label);
+            return false;
+        }
+        return true;
+    };
+
+    wirehair_v2::SetMixedBandTrackingXForTesting(false);
+    if (config.EquationState.MatchesActive(config.Params) ||
+        !reject_drift("tracking-X"))
+    {
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    if (!config.EquationState.MatchesActive(config.Params) ||
+        !wirehair_v2::SetPacketRowSeedMultiplierForTesting(3u) ||
+        config.EquationState.MatchesActive(config.Params) ||
+        !reject_drift("packet-row"))
+    {
+        return false;
+    }
+    if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u) ||
+        !config.EquationState.MatchesActive(config.Params))
+    {
+        return false;
+    }
+
+    // Bucket selection changes only how the same mixed RHS is accumulated.
+    // It must remain outside the equation identity and preserve the solve.
+    if (!wirehair_v2::SetMixedResidueBucketModeForTesting(
+            wirehair_v2::MixedResidueBucketMode::Separate) ||
+        !config.EquationState.MatchesActive(config.Params))
+    {
+        return false;
+    }
+    wirehair_v2::MessagePrecodeEncoder bucket_encoder;
+    if (bucket_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+            Wirehair_Success ||
+        std::memcmp(
+            encoder.IntermediateBlocks(),
+            bucket_encoder.IntermediateBlocks(),
+            (size_t)columns * block_bytes) != 0 ||
+        !wirehair_v2::SetMixedResidueBucketModeForTesting(
+            wirehair_v2::MixedResidueBucketMode::Automatic) ||
+        !config.EquationState.MatchesActive(config.Params))
+    {
+        std::fprintf(stderr,
+            "explicit pinning: execution-only bucket mode changed identity "
+            "or equations\n");
+        return false;
+    }
+
+    std::vector<uint8_t> recovered(message.size(), 0u);
+    if (decoder.RecoverResult(recovered.data(), recovered.size()) !=
+            Wirehair_Success ||
+        recovered != message)
+    {
+        std::fprintf(stderr,
+            "explicit pinning: restored hook state did not resume\n");
+        return false;
+    }
+    std::printf(
+        "explicit equation-state pinning 8+0->6+2, tracking-X, and packet "
+        "drift: PASS\n");
+    return true;
+}
+
+bool RunExplicitTrackingXConcurrencyCase()
+{
+    struct RestoreHooks
+    {
+        ~RestoreHooks()
+        {
+            wirehair_v2::ClearMixedBandTrackingXForTesting();
+            (void)wirehair_v2::SetMixedGF16RowsForTesting(
+                wirehair_v2::kMixedGF16Rows);
+            (void)wirehair_v2::SetMixedGF256RowsForTesting(
+                wirehair_v2::kMixedGF256Rows);
+        }
+    } restore;
+
+    static const uint32_t K = 12000u;
+    static const uint32_t block_bytes = 2u;
+    std::vector<uint8_t> message((size_t)K * block_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 73u + 19u);
+    }
+    if (!wirehair_v2::SetMixedGF16RowsForTesting(0u) ||
+        !wirehair_v2::SetMixedGF256RowsForTesting(8u))
+    {
+        return false;
+    }
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting base;
+    base.Params = wirehair_v2::MakeMixedParams(
+        K, UINT64_C(0xb1716d94ac2058e3));
+    base.Params.DenseRows = 4u;
+    base.Packet.PeelSeed = UINT32_C(0x41f06c33);
+    base.Packet.MixCount = 3u;
+
+    // First prove the scoped primitive itself.  Algebra must follow the
+    // innermost snapshot, while the equation identity continues to describe
+    // the caller-visible ambient state.  The thrown marker verifies that
+    // unwinding an inner operation restores the outer operation's snapshot.
+    wirehair_v2::SetMixedBandTrackingXForTesting(false);
+    const wirehair_v2::MixedCoefficientRows* const frozen =
+        wirehair_v2::GetMixedCoefficientRows();
+    if (!frozen) {
+        return false;
+    }
+    const wirehair_v2::MixedCoefficientRows frozen_copy = *frozen;
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    const wirehair_v2::MixedCoefficientRows* const tracked =
+        wirehair_v2::GetMixedCoefficientRows();
+    if (!tracked ||
+        std::memcmp(
+            &frozen_copy, tracked,
+            sizeof(wirehair_v2::MixedCoefficientRows)) == 0)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X scope: stable witnesses match\n");
+        return false;
+    }
+    const wirehair_v2::MixedCoefficientRows tracked_copy = *tracked;
+    const uint64_t ambient_fingerprint =
+        wirehair_v2::ActivePrecodeEquationStateFingerprintForTesting(
+            base.Params);
+    wirehair_v2::SetMixedBandTrackingXForTesting(false);
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting stable_identity_off =
+        base;
+    if (!stable_identity_off.PinActiveEquationStateForTesting()) {
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting stable_identity_on =
+        base;
+    if (!stable_identity_on.PinActiveEquationStateForTesting() ||
+        stable_identity_off.EquationState.Precode !=
+            stable_identity_on.EquationState.Precode ||
+        stable_identity_off.EquationState.PacketRows !=
+            stable_identity_on.EquationState.PacketRows ||
+        stable_identity_off.EquationState.MixedBandTrackingX ||
+        !stable_identity_on.EquationState.MixedBandTrackingX)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X identity: stable split is inconsistent\n");
+        return false;
+    }
+    const auto identity_matches = [](
+        const wirehair_v2::ExplicitEquationStateIdentityForTesting& left,
+        const wirehair_v2::ExplicitEquationStateIdentityForTesting& right)
+    {
+        return left.Precode == right.Precode &&
+            left.PacketRows == right.PacketRows &&
+            left.MixedBandTrackingX == right.MixedBandTrackingX;
+    };
+    std::atomic<bool> stop_identity_toggle{false};
+    std::thread identity_toggler([&] {
+        bool enabled = false;
+        while (!stop_identity_toggle.load(std::memory_order_acquire))
+        {
+            wirehair_v2::SetMixedBandTrackingXForTesting(enabled);
+            enabled = !enabled;
+        }
+    });
+    bool identity_ok = true;
+    for (uint32_t trial = 0u; trial < 200000u; ++trial)
+    {
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting sampled = base;
+        if (!sampled.PinActiveEquationStateForTesting() ||
+            (
+                !identity_matches(
+                    sampled.EquationState,
+                    stable_identity_off.EquationState) &&
+                !identity_matches(
+                    sampled.EquationState,
+                    stable_identity_on.EquationState)
+            ))
+        {
+            identity_ok = false;
+            break;
+        }
+    }
+    stop_identity_toggle.store(true, std::memory_order_release);
+    identity_toggler.join();
+    if (!identity_ok)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X identity: concurrent pin was torn\n");
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    {
+        wirehair_v2::ScopedMixedBandTrackingXForTesting outer(true, false);
+        wirehair_v2::ScopedMixedBandTrackingXForTesting inactive(false, true);
+        if (!wirehair_v2::AmbientMixedBandTrackingXForTesting() ||
+            wirehair_v2::
+                ActivePrecodeEquationStateFingerprintForTesting(base.Params) !=
+                ambient_fingerprint ||
+            std::memcmp(
+                &frozen_copy, wirehair_v2::GetMixedCoefficientRows(),
+                sizeof(frozen_copy)) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X scope: outer snapshot mismatch\n");
+            return false;
+        }
+        bool caught = false;
+        try
+        {
+            wirehair_v2::ScopedMixedBandTrackingXForTesting inner(true, true);
+            if (std::memcmp(
+                    &tracked_copy, wirehair_v2::GetMixedCoefficientRows(),
+                    sizeof(tracked_copy)) != 0)
+            {
+                std::fprintf(stderr,
+                    "explicit tracking-X scope: inner snapshot mismatch\n");
+                return false;
+            }
+            throw 17;
+        }
+        catch (int marker)
+        {
+            caught = marker == 17;
+        }
+        if (!caught ||
+            std::memcmp(
+                &frozen_copy, wirehair_v2::GetMixedCoefficientRows(),
+                sizeof(frozen_copy)) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X scope: unwind did not restore outer\n");
+            return false;
+        }
+    }
+    if (!wirehair_v2::AmbientMixedBandTrackingXForTesting() ||
+        std::memcmp(
+            &tracked_copy, wirehair_v2::GetMixedCoefficientRows(),
+            sizeof(tracked_copy)) != 0)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X scope: outer teardown did not restore "
+            "ambient state\n");
+        return false;
+    }
+
+    const auto initialize_at = [&](
+        bool tracking,
+        wirehair_v2::MessagePrecodeEncoder& encoder)
+    {
+        wirehair_v2::SetMixedBandTrackingXForTesting(tracking);
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting config = base;
+        return config.PinActiveEquationStateForTesting() &&
+            encoder.InitializeExplicitResultForTesting(
+                message.data(), message.size(), block_bytes, config) ==
+                Wirehair_Success;
+    };
+
+    wirehair_v2::MessagePrecodeEncoder stable_on;
+    wirehair_v2::MessagePrecodeEncoder stable_off;
+    if (!initialize_at(true, stable_on) ||
+        !initialize_at(false, stable_off))
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X concurrency: stable construction failed\n");
+        return false;
+    }
+    const size_t intermediate_bytes = (size_t)(
+        K + base.Params.Staircase + base.Params.DenseRows +
+        base.Params.HeavyRows) * block_bytes;
+    if (std::memcmp(
+            stable_on.IntermediateBlocks(),
+            stable_off.IntermediateBlocks(),
+            intermediate_bytes) == 0)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X concurrency: stable witnesses match\n");
+        return false;
+    }
+
+    std::vector<uint8_t> transaction_off_expected(block_bytes, 0u);
+    uint32_t transaction_off_expected_bytes = 0u;
+    if (stable_off.EncodeResult(
+            K,
+            transaction_off_expected.data(),
+            block_bytes,
+            &transaction_off_expected_bytes) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X transaction: frozen setup failed\n");
+        return false;
+    }
+
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting
+        transaction_config = base;
+    std::vector<uint8_t> transaction_expected(block_bytes, 0u);
+    uint32_t transaction_expected_bytes = 0u;
+    if (!transaction_config.PinActiveEquationStateForTesting() ||
+        stable_on.EncodeResult(
+            K,
+            transaction_expected.data(),
+            block_bytes,
+            &transaction_expected_bytes) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X transaction: setup failed\n");
+        return false;
+    }
+    std::vector<uint8_t> transaction_actual(block_bytes, 0xa5u);
+    uint32_t transaction_actual_bytes = UINT32_MAX;
+    {
+        wirehair_v2::ScopedExplicitEquationStateTransactionForTesting
+            transaction(transaction_config);
+        if (!transaction.IsValid()) {
+            return false;
+        }
+        wirehair_v2::SetMixedBandTrackingXForTesting(false);
+        if (stable_on.EncodeResult(
+                K,
+                transaction_actual.data(),
+                block_bytes,
+                &transaction_actual_bytes) != Wirehair_Success ||
+            transaction_actual_bytes != transaction_expected_bytes ||
+            transaction_actual != transaction_expected)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X transaction: pinned encode drifted\n");
+            return false;
+        }
+
+        // A transaction is an authorization for the descriptor context it
+        // validated, not for an arbitrary Params value carrying the same
+        // copied ambient identity.  In particular, StaircaseDegreeScale is a
+        // fallback input to the precode fingerprint.
+        wirehair_v2::SetMixedBandTrackingXForTesting(true);
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting stale_config =
+            transaction_config;
+        stale_config.Params.StaircaseDegreeScale += 1.0;
+        wirehair_v2::MessagePrecodeDecoder stale_decoder;
+        if (stale_config.EquationState.MatchesActive(stale_config.Params) ||
+            stale_decoder.InitializeExplicitResultForTesting(
+                message.size(), block_bytes, stale_config) !=
+                    Wirehair_InvalidInput ||
+            stale_decoder.IsInitialized())
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X transaction: stale Params inherited "
+                "authorization\n");
+            return false;
+        }
+
+        // An invalid inner scope must suppress, rather than inherit, the
+        // outer transaction.  Its teardown must then restore the outer scope.
+        {
+            wirehair_v2::ScopedExplicitEquationStateTransactionForTesting
+                invalid_nested(stale_config);
+            if (invalid_nested.IsValid()) {
+                return false;
+            }
+            wirehair_v2::SetMixedBandTrackingXForTesting(false);
+            std::fill(
+                transaction_actual.begin(),
+                transaction_actual.end(),
+                uint8_t{0x3c});
+            transaction_actual_bytes = UINT32_MAX;
+            if (stable_on.EncodeResult(
+                    K,
+                    transaction_actual.data(),
+                    block_bytes,
+                    &transaction_actual_bytes) != Wirehair_Error ||
+                transaction_actual_bytes != UINT32_MAX ||
+                transaction_actual != std::vector<uint8_t>(
+                    block_bytes, uint8_t{0x3c}))
+            {
+                std::fprintf(stderr,
+                    "explicit tracking-X transaction: invalid nested scope "
+                    "inherited outer authorization\n");
+                return false;
+            }
+        }
+        std::fill(
+            transaction_actual.begin(),
+            transaction_actual.end(),
+            uint8_t{0xa5});
+        transaction_actual_bytes = UINT32_MAX;
+        if (stable_on.EncodeResult(
+                K,
+                transaction_actual.data(),
+                block_bytes,
+                &transaction_actual_bytes) != Wirehair_Success ||
+            transaction_actual_bytes != transaction_expected_bytes ||
+            transaction_actual != transaction_expected)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X transaction: invalid nested teardown "
+                "did not restore outer authorization\n");
+            return false;
+        }
+
+        // A valid inner transaction authorizes only its own identity.  Throw
+        // through it to exercise both the authorization-stack and tracking-X
+        // snapshot destructors, then prove that the outer transaction resumes.
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting nested_config =
+            base;
+        if (!nested_config.PinActiveEquationStateForTesting()) {
+            return false;
+        }
+        bool caught = false;
+        try
+        {
+            wirehair_v2::ScopedExplicitEquationStateTransactionForTesting
+                nested(nested_config);
+            if (!nested.IsValid()) {
+                return false;
+            }
+            std::fill(
+                transaction_actual.begin(),
+                transaction_actual.end(),
+                uint8_t{0x69});
+            transaction_actual_bytes = UINT32_MAX;
+            if (stable_on.EncodeResult(
+                    K,
+                    transaction_actual.data(),
+                    block_bytes,
+                    &transaction_actual_bytes) != Wirehair_Error ||
+                transaction_actual_bytes != UINT32_MAX ||
+                transaction_actual != std::vector<uint8_t>(
+                    block_bytes, uint8_t{0x69}))
+            {
+                std::fprintf(stderr,
+                    "explicit tracking-X transaction: nested identity "
+                    "authorized the outer endpoint\n");
+                return false;
+            }
+            if (stable_off.EncodeResult(
+                    K,
+                    transaction_actual.data(),
+                    block_bytes,
+                    &transaction_actual_bytes) != Wirehair_Success ||
+                transaction_actual_bytes !=
+                    transaction_off_expected_bytes ||
+                transaction_actual != transaction_off_expected)
+            {
+                std::fprintf(stderr,
+                    "explicit tracking-X transaction: nested endpoint "
+                    "authorization failed\n");
+                return false;
+            }
+            throw 23;
+        }
+        catch (int marker)
+        {
+            caught = marker == 23;
+        }
+        std::fill(
+            transaction_actual.begin(),
+            transaction_actual.end(),
+            uint8_t{0x96});
+        transaction_actual_bytes = UINT32_MAX;
+        if (!caught ||
+            stable_on.EncodeResult(
+                K,
+                transaction_actual.data(),
+                block_bytes,
+                &transaction_actual_bytes) != Wirehair_Success ||
+            transaction_actual_bytes != transaction_expected_bytes ||
+            transaction_actual != transaction_expected)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X transaction: nested unwind did not "
+                "restore outer authorization\n");
+            return false;
+        }
+    }
+    std::fill(
+        transaction_actual.begin(), transaction_actual.end(), uint8_t{0x5a});
+    transaction_actual_bytes = UINT32_MAX;
+    if (stable_on.EncodeResult(
+            K,
+            transaction_actual.data(),
+            block_bytes,
+            &transaction_actual_bytes) != Wirehair_Error ||
+        transaction_actual_bytes != UINT32_MAX ||
+        transaction_actual !=
+            std::vector<uint8_t>(block_bytes, uint8_t{0x5a}))
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X transaction: teardown retained authority\n");
+        return false;
+    }
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    {
+        // A rejected transaction is not an equation-state override.  In
+        // particular, its untrusted tracking bit must not perturb ordinary
+        // hook consumers for the lifetime of the invalid scope.
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting invalid =
+            transaction_config;
+        invalid.EquationState.MixedBandTrackingX = false;
+        wirehair_v2::ScopedExplicitEquationStateTransactionForTesting
+            invalid_transaction(invalid);
+        if (invalid_transaction.IsValid() ||
+            std::memcmp(
+                &tracked_copy, wirehair_v2::GetMixedCoefficientRows(),
+                sizeof(tracked_copy)) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X transaction: invalid scope changed "
+                "effective hook state\n");
+            return false;
+        }
+    }
+    if (std::memcmp(
+            &tracked_copy, wirehair_v2::GetMixedCoefficientRows(),
+            sizeof(tracked_copy)) != 0)
+    {
+        std::fprintf(stderr,
+            "explicit tracking-X transaction: invalid scope teardown "
+            "changed ambient hook state\n");
+        return false;
+    }
+
+    bool observed_success = false;
+    for (uint32_t delay_us = 0u; delay_us <= 5000u; delay_us += 100u)
+    {
+        wirehair_v2::SetMixedBandTrackingXForTesting(true);
+        wirehair_v2::ExplicitMessagePrecodeConfigForTesting config = base;
+        if (!config.PinActiveEquationStateForTesting()) {
+            return false;
+        }
+        std::atomic<bool> entered{false};
+        std::thread toggler([&] {
+            entered.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(delay_us));
+            wirehair_v2::SetMixedBandTrackingXForTesting(false);
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(500u));
+            wirehair_v2::SetMixedBandTrackingXForTesting(true);
+        });
+        while (!entered.load(std::memory_order_acquire)) {
+        }
+
+        wirehair_v2::MessagePrecodeEncoder raced;
+        const WirehairResult result =
+            raced.InitializeExplicitResultForTesting(
+                message.data(), message.size(), block_bytes, config);
+        toggler.join();
+        if (result == Wirehair_InvalidInput) {
+            continue;
+        }
+        if (result != Wirehair_Success ||
+            std::memcmp(
+                raced.IntermediateBlocks(),
+                stable_on.IntermediateBlocks(),
+                intermediate_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit tracking-X concurrency: mixed-state publication "
+                "at delay=%u result=%d\n",
+                delay_us, (int)result);
+            return false;
+        }
+        observed_success = true;
+    }
+    if (!observed_success) {
+        std::fprintf(stderr,
+            "explicit tracking-X concurrency: no successful race witness\n");
+        return false;
+    }
+    std::printf(
+        "explicit tracking-X concurrent ABA snapshot: PASS\n");
+    return true;
+}
+
+bool RunExplicitConfigurationCases()
+{
+    static const uint32_t K = 64u;
+    static const uint32_t block_bytes = 16u;
+    static const uint32_t tail_bytes = 7u;
+    const uint64_t message_bytes =
+        (uint64_t)(K - 1u) * block_bytes + tail_bytes;
+    std::vector<uint8_t> message((size_t)message_bytes);
+    for (size_t i = 0u; i < message.size(); ++i) {
+        message[i] = (uint8_t)(i * 47u + 19u);
+    }
+
+    wirehair_v2::MessagePrecodeEncoderOptions normal_options;
+    normal_options.Architecture =
+        wirehair_v2::V2PrecodeArchitecture::SmallBandD4;
+    normal_options.Completion =
+        wirehair_v2::CompletionField::MixedGF256GF16;
+    wirehair_v2::MessagePrecodeEncoder normal;
+    if (normal.InitializeResult(
+            message.data(), message_bytes, block_bytes,
+            nullptr, &normal_options) != Wirehair_Success)
+    {
+        std::fprintf(stderr, "explicit canonical: normal init failed\n");
+        return false;
+    }
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting config;
+    config.Params = normal.BlockEncoder().System().Params;
+    config.Packet.PeelSeed = normal.Profile().V2PacketPeelSeed;
+    config.Packet.MixCount = normal.Profile().V2RecoveryMixCount;
+    config.CacheSystematicSource = false;
+    config.CacheReceivedSystematicPackets = false;
+    if (!config.PinActiveEquationStateForTesting() ||
+        normal.DiagnosticIdentityForTesting() !=
+            wirehair_v2::MessagePrecodeDiagnosticIdentityForTesting::
+                NamedContract)
+    {
+        std::fprintf(stderr,
+            "explicit canonical: equation-state pin failed\n");
+        return false;
+    }
+
+    wirehair_v2::MessagePrecodeEncoder explicit_encoder;
+    wirehair_v2::MessagePrecodeDecoder explicit_decoder;
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting unpinned = config;
+    unpinned.EquationState = {};
+    wirehair_v2::MessagePrecodeEncoder unpinned_encoder;
+    wirehair_v2::MessagePrecodeDecoder unpinned_decoder;
+    if (unpinned_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, unpinned) !=
+            Wirehair_InvalidInput ||
+        unpinned_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, unpinned) != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "explicit canonical: unpinned descriptor was accepted\n");
+        return false;
+    }
+    if (explicit_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+            Wirehair_Success ||
+        explicit_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config) != Wirehair_Success ||
+        !CheckExplicitDiagnostics(
+            explicit_encoder, explicit_decoder, config,
+            K, block_bytes, "canonical"))
+    {
+        return false;
+    }
+    const uint64_t columns = (uint64_t)K + config.Params.Staircase +
+        config.Params.DenseRows + config.Params.HeavyRows;
+    const size_t intermediate_bytes = (size_t)(columns * block_bytes);
+    if (std::memcmp(
+            normal.IntermediateBlocks(),
+            explicit_encoder.IntermediateBlocks(),
+            intermediate_bytes) != 0)
+    {
+        std::fprintf(stderr,
+            "explicit canonical: intermediate vector differs from normal\n");
+        return false;
+    }
+    for (uint32_t id = 0u; id < K + 24u; ++id)
+    {
+        std::vector<uint8_t> expected(block_bytes, 0xa5u);
+        std::vector<uint8_t> actual(block_bytes, 0x5au);
+        uint32_t expected_bytes = UINT32_MAX;
+        uint32_t actual_bytes = UINT32_MAX;
+        uint64_t expected_ops = UINT64_MAX;
+        uint64_t actual_ops = UINT64_MAX;
+        if (normal.EncodeResult(
+                id, expected.data(), block_bytes,
+                &expected_bytes, &expected_ops) != Wirehair_Success ||
+            explicit_encoder.EncodeResult(
+                id, actual.data(), block_bytes,
+                &actual_bytes, &actual_ops) != Wirehair_Success ||
+            expected_bytes != actual_bytes ||
+            expected_ops != actual_ops ||
+            std::memcmp(
+                expected.data(), actual.data(), expected_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit canonical: packet %u differs from normal\n", id);
+            return false;
+        }
+    }
+
+    wirehair_v2::MessagePrecodeEncoder replay_encoder;
+    wirehair_v2::MessagePrecodeDecoder replay_decoder;
+    if (replay_encoder.InitializeResult(
+            message.data(), message_bytes, block_bytes,
+            &explicit_encoder.Profile(), &explicit_encoder.Options()) !=
+            Wirehair_InvalidInput ||
+        replay_decoder.InitializeResult(
+            message_bytes, block_bytes,
+            &explicit_decoder.Profile(), &explicit_decoder.Options()) !=
+            Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "explicit canonical: diagnostic profile replay did not fail closed\n");
+        return false;
+    }
+
+    // Exercise all four symmetric cache receipts and replacement transitions
+    // on the same live objects.
+    wirehair_v2::MessagePrecodeEncoder cache_encoder;
+    wirehair_v2::MessagePrecodeDecoder cache_decoder;
+    const uint32_t cache_masks[] = {0u, 1u, 2u, 3u, 0u};
+    for (uint32_t mask : cache_masks)
+    {
+        config.CacheSystematicSource = (mask & 1u) != 0u;
+        config.CacheReceivedSystematicPackets = (mask & 2u) != 0u;
+        if (cache_encoder.InitializeExplicitResultForTesting(
+                message.data(), message_bytes, block_bytes, config) !=
+                Wirehair_Success ||
+            cache_decoder.InitializeExplicitResultForTesting(
+                message_bytes, block_bytes, config) != Wirehair_Success ||
+            !CheckExplicitDiagnostics(
+                cache_encoder, cache_decoder, config,
+                K, block_bytes, "cache replacement"))
+        {
+            return false;
+        }
+        std::vector<uint8_t> source(block_bytes, 0u);
+        uint32_t source_bytes = 0u;
+        if (cache_encoder.EncodeResult(
+                K - 1u, source.data(), block_bytes, &source_bytes) !=
+                Wirehair_Success ||
+            source_bytes != tail_bytes ||
+            std::memcmp(
+                source.data(),
+                message.data() + (size_t)(K - 1u) * block_bytes,
+                tail_bytes) != 0)
+        {
+            std::fprintf(stderr,
+                "explicit cache replacement: systematic source mismatch\n");
+            return false;
+        }
+        if (cache_decoder.DecodeResult(
+                K - 1u, source.data(), source_bytes) != Wirehair_NeedMore ||
+            cache_decoder.CachedSystematicPacketCount() !=
+                (config.CacheReceivedSystematicPackets ? 1u : 0u) ||
+            !CompleteDirectRepairOnly(
+                cache_encoder,
+                cache_decoder,
+                message,
+                K,
+                block_bytes,
+                "cache replacement"))
+        {
+            std::fprintf(stderr,
+                "explicit cache replacement: roundtrip/cache count failed\n");
+            return false;
+        }
+    }
+
+    // Invalid dimensions, mixed odd widths, and equation-active overrides are
+    // rejected before replacing either endpoint.
+    const wirehair_v2::SeedProfile preserved_encoder_profile =
+        cache_encoder.Profile();
+    const wirehair_v2::SeedProfile preserved_decoder_profile =
+        cache_decoder.Profile();
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting invalid = config;
+    ++invalid.Params.BlockCount;
+    if (cache_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, invalid) !=
+            Wirehair_InvalidInput ||
+        cache_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, invalid) != Wirehair_InvalidInput ||
+        cache_encoder.Profile().V2PrecodeSeed !=
+            preserved_encoder_profile.V2PrecodeSeed ||
+        cache_decoder.Profile().V2PrecodeSeed !=
+            preserved_decoder_profile.V2PrecodeSeed)
+    {
+        std::fprintf(stderr,
+            "explicit invalid dimensions were accepted or changed state\n");
+        return false;
+    }
+    invalid = config;
+    invalid.Packet.MixCount = 0u;
+    if (cache_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, invalid) !=
+            Wirehair_InvalidInput ||
+        cache_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, invalid) != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "explicit invalid packet-row configuration was accepted\n");
+        return false;
+    }
+    const uint32_t odd_block_bytes = block_bytes - 1u;
+    const uint64_t odd_message_bytes =
+        (uint64_t)(K - 1u) * odd_block_bytes + tail_bytes;
+    if (cache_encoder.InitializeExplicitResultForTesting(
+            message.data(), odd_message_bytes, odd_block_bytes, config) !=
+            Wirehair_InvalidInput ||
+        cache_decoder.InitializeExplicitResultForTesting(
+            odd_message_bytes, odd_block_bytes, config) !=
+            Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr, "explicit mixed odd width was accepted\n");
+        return false;
+    }
+    wirehair_v2::SetStaircaseDegreeScaleForTesting(3.25);
+    const WirehairResult overridden_encoder =
+        cache_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config);
+    const WirehairResult overridden_decoder =
+        cache_decoder.InitializeExplicitResultForTesting(
+            message_bytes, block_bytes, config);
+    wirehair_v2::ClearStaircaseDegreeScaleForTesting();
+    if (overridden_encoder != Wirehair_InvalidInput ||
+        overridden_decoder != Wirehair_InvalidInput)
+    {
+        std::fprintf(stderr,
+            "explicit effective-parameter override was not rejected\n");
+        return false;
+    }
+
+    // Exhaust every encoder-guarded allocation, checking that the complete
+    // live object remains byte-for-byte operational after each OOM.
+    config.CacheSystematicSource = true;
+    config.CacheReceivedSystematicPackets = true;
+    wirehair_v2::MessagePrecodeEncoder oom_encoder;
+    if (oom_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+        Wirehair_Success)
+    {
+        return false;
+    }
+    const std::vector<uint8_t> encoder_intermediate(
+        oom_encoder.IntermediateBlocks(),
+        oom_encoder.IntermediateBlocks() + intermediate_bytes);
+    const wirehair_v2::SeedProfile encoder_profile = oom_encoder.Profile();
+    const wirehair_v2::MessagePrecodeEncoderOptions encoder_options =
+        oom_encoder.Options();
+    unsigned encoder_ooms = 0u;
+    bool encoder_succeeded = false;
+    for (int64_t countdown = 0; countdown < 16; ++countdown)
+    {
+        wirehair_v2::SetAllocationFailureCountdownForTesting(countdown);
+        const WirehairResult result =
+            oom_encoder.InitializeExplicitResultForTesting(
+                message.data(), message_bytes, block_bytes, config);
+        wirehair_v2::SetAllocationFailureCountdownForTesting(-1);
+        if (result == Wirehair_OOM)
+        {
+            ++encoder_ooms;
+            std::vector<uint8_t> preserved_source(block_bytes, 0u);
+            uint32_t preserved_source_bytes = 0u;
+            if (oom_encoder.Profile().V2PrecodeSeed !=
+                    encoder_profile.V2PrecodeSeed ||
+                oom_encoder.Profile().BlockCount !=
+                    encoder_profile.BlockCount ||
+                oom_encoder.Profile().BlockBytes !=
+                    encoder_profile.BlockBytes ||
+                oom_encoder.Profile().V2PrecodeContractVersion !=
+                    encoder_profile.V2PrecodeContractVersion ||
+                oom_encoder.Profile().V2PacketRowContractVersion !=
+                    encoder_profile.V2PacketRowContractVersion ||
+                oom_encoder.Profile().V2StaircaseCount !=
+                    encoder_profile.V2StaircaseCount ||
+                oom_encoder.Profile().V2DenseRowCount !=
+                    encoder_profile.V2DenseRowCount ||
+                oom_encoder.Profile().V2HeavyRowCount !=
+                    encoder_profile.V2HeavyRowCount ||
+                !SameOptions(oom_encoder.Options(), encoder_options) ||
+                !oom_encoder.HasSystematicSourceCache() ||
+                oom_encoder.SystematicSourceCacheBytes() != message.size() ||
+                std::memcmp(
+                    oom_encoder.IntermediateBlocks(),
+                    encoder_intermediate.data(),
+                    intermediate_bytes) != 0 ||
+                oom_encoder.EncodeResult(
+                    K - 1u,
+                    preserved_source.data(),
+                    block_bytes,
+                    &preserved_source_bytes) != Wirehair_Success ||
+                preserved_source_bytes != tail_bytes ||
+                std::memcmp(
+                    preserved_source.data(),
+                    message.data() + (size_t)(K - 1u) * block_bytes,
+                    tail_bytes) != 0)
+            {
+                std::fprintf(stderr,
+                    "explicit encoder OOM did not preserve live state\n");
+                return false;
+            }
+            continue;
+        }
+        if (result != Wirehair_Success || encoder_ooms != 5u) {
+            std::fprintf(stderr,
+                "explicit encoder OOM sweep ended result=%d failures=%u\n",
+                (int)result, encoder_ooms);
+            return false;
+        }
+        encoder_succeeded = true;
+        break;
+    }
+    if (!encoder_succeeded) {
+        std::fprintf(stderr,
+            "explicit encoder OOM sweep never reached success\n");
+        return false;
+    }
+
+    // Decoder OOM sweeps start from a partially fed cached decoder.  Duplicate
+    // validation after every failed reinit proves its packet table, payload,
+    // progress counters, and cache remained coherent.
+    wirehair_v2::MessagePrecodeEncoder feed_encoder;
+    if (feed_encoder.InitializeExplicitResultForTesting(
+            message.data(), message_bytes, block_bytes, config) !=
+        Wirehair_Success)
+    {
+        return false;
+    }
+    std::vector<uint8_t> packet(block_bytes, 0u);
+    uint32_t packet_bytes = 0u;
+    if (feed_encoder.EncodeResult(
+            0u, packet.data(), block_bytes, &packet_bytes) !=
+        Wirehair_Success)
+    {
+        return false;
+    }
+    unsigned decoder_ooms = 0u;
+    bool decoder_succeeded = false;
+    for (int64_t countdown = 0; countdown < 16; ++countdown)
+    {
+        wirehair_v2::MessagePrecodeDecoder decoder;
+        if (decoder.InitializeExplicitResultForTesting(
+                message_bytes, block_bytes, config) != Wirehair_Success ||
+            decoder.DecodeResult(0u, packet.data(), packet_bytes) !=
+                Wirehair_NeedMore)
+        {
+            return false;
+        }
+        const wirehair_v2::SeedProfile decoder_profile = decoder.Profile();
+        const wirehair_v2::MessagePrecodeEncoderOptions decoder_options =
+            decoder.Options();
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(countdown);
+        const WirehairResult result =
+            decoder.InitializeExplicitResultForTesting(
+                message_bytes, block_bytes, config);
+        wirehair_v2::SetDecoderAllocationFailureCountdownForTesting(-1);
+        if (result == Wirehair_OOM)
+        {
+            ++decoder_ooms;
+            if (decoder.Profile().V2PrecodeSeed !=
+                    decoder_profile.V2PrecodeSeed ||
+                decoder.Profile().BlockCount !=
+                    decoder_profile.BlockCount ||
+                decoder.Profile().BlockBytes !=
+                    decoder_profile.BlockBytes ||
+                decoder.Profile().V2PrecodeContractVersion !=
+                    decoder_profile.V2PrecodeContractVersion ||
+                decoder.Profile().V2PacketRowContractVersion !=
+                    decoder_profile.V2PacketRowContractVersion ||
+                decoder.Profile().V2StaircaseCount !=
+                    decoder_profile.V2StaircaseCount ||
+                decoder.Profile().V2DenseRowCount !=
+                    decoder_profile.V2DenseRowCount ||
+                decoder.Profile().V2HeavyRowCount !=
+                    decoder_profile.V2HeavyRowCount ||
+                !SameOptions(decoder.Options(), decoder_options) ||
+                decoder.ReceivedCount() != 1u ||
+                decoder.SolveAttemptCount() != 0u ||
+                decoder.CachedSystematicPacketCount() != 1u ||
+                !decoder.HasSystematicPacketCache() ||
+                !SamePrecodeParams(decoder.System().Params, config.Params) ||
+                decoder.DecodeResult(
+                    0u, packet.data(), packet_bytes) != Wirehair_NeedMore ||
+                decoder.ReceivedCount() != 1u)
+            {
+                std::fprintf(stderr,
+                    "explicit decoder OOM did not preserve partial state\n");
+                return false;
+            }
+            continue;
+        }
+        if (result != Wirehair_Success || decoder_ooms != 6u) {
+            std::fprintf(stderr,
+                "explicit decoder OOM sweep ended result=%d failures=%u\n",
+                (int)result, decoder_ooms);
+            return false;
+        }
+        decoder_succeeded = true;
+        break;
+    }
+    if (!decoder_succeeded) {
+        std::fprintf(stderr,
+            "explicit decoder OOM sweep never reached success\n");
+        return false;
+    }
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting pure;
+    pure.Params = wirehair_v2::MakeCertifiedParams(
+        37u, UINT64_C(0x91f4b3c28765a10d));
+    pure.Params.Staircase = 11u;
+    pure.Params.DenseRows = 6u;
+    pure.Params.HeavyRows = 9u;
+    pure.Params.SourceHits = 3u;
+    pure.Params.DegreeBalancedStaircase = true;
+    pure.Params.StaircaseDegreeScale = 7.25;
+    pure.Params.DenseIdentityCorner = true;
+    pure.Packet.PeelSeed = UINT32_C(0x6bd073a1);
+    pure.Packet.MixCount = 3u;
+    if (!pure.PinActiveEquationStateForTesting() ||
+        !RunOneExplicitConfiguration(
+            pure, 15u, 4u, "noncanonical GF256"))
+    {
+        return false;
+    }
+
+    wirehair_v2::ExplicitMessagePrecodeConfigForTesting tracking;
+    const bool tracking_rows_configured =
+        wirehair_v2::SetMixedGF16RowsForTesting(0u) &&
+        wirehair_v2::SetMixedGF256RowsForTesting(8u);
+    tracking.Params = wirehair_v2::MakeMixedParams(
+        43u, UINT64_C(0xb1716d94ac2058e3));
+    tracking.Params.Staircase = 9u;
+    tracking.Params.DenseRows = 4u;
+    tracking.Params.SourceHits = 2u;
+    tracking.Params.DegreeBalancedStaircase = true;
+    tracking.Params.StaircaseDegreeScale = 8.5;
+    tracking.Packet.PeelSeed = UINT32_C(0x41f06c33);
+    tracking.Packet.MixCount = 3u;
+    wirehair_v2::SetMixedBandTrackingXForTesting(true);
+    const bool tracking_ok = tracking_rows_configured &&
+        tracking.Params.HeavyRows == 8u &&
+        wirehair_v2::ActiveMixedCoefficientPeriod() == 244u &&
+        tracking.PinActiveEquationStateForTesting() &&
+        RunOneExplicitConfiguration(
+            tracking, 18u, 7u, "noncanonical mixed tracking-X");
+    wirehair_v2::ClearMixedBandTrackingXForTesting();
+    const bool tracking_rows_restored =
+        wirehair_v2::SetMixedGF256RowsForTesting(
+            wirehair_v2::kMixedGF256Rows) &&
+        wirehair_v2::SetMixedGF16RowsForTesting(
+            wirehair_v2::kMixedGF16Rows);
+    if (!tracking_ok || !tracking_rows_restored ||
+        !RunExplicitTrackingXConcurrencyCase() ||
+        !RunExplicitEquationStatePinningCases())
+    {
+        return false;
+    }
+
+    std::printf(
+        "explicit exact configuration, pinned equation state, cache "
+        "replacement, and OOM: PASS\n");
+    return true;
 }
 
 bool RunArchitectureBoundaryCases()
@@ -1534,6 +2881,7 @@ int main(int argc, char** argv)
     ok = RunForcedNeedMoreResumeCase() && ok;
     ok = RunMixedColdRetryCase() && ok;
     ok = RunUnauthenticatedCorruptionBoundary() && ok;
+    ok = RunExplicitConfigurationCases() && ok;
     ok = RunArchitectureBoundaryCases() && ok;
     ok = RunBoundContractCases() && ok;
     return ok ? 0 : 1;

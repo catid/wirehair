@@ -2622,6 +2622,34 @@ expect_failure("argument domain mismatch" peeltiming
     --context-sha256
     0000000000000000000000000000000000000000000000000000000000000000
     --required-margin 0.05)
+# Keep peeltiming's balanced label-swap protocol stricter than bandtiming.
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 0 --replicates 5 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
+expect_failure("argument domain mismatch" peeltiming
+    --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-pmf 0,1 --candidate-scale identity
+    --warmup-replicates 1 --replicates 4 --inner-reps 1
+    --max-overhead 8 --cache-state warm --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0.05)
 expect_failure("bad --loss value" peeltiming
     --N 16 --bb 2 --target-profile dispatch-v1 --seed-policy raw
     --construction-seed 7 --loss -0 --loss-seed 9 --schedule iid
@@ -2705,6 +2733,555 @@ expect_env_failure(
     "forbids ambient WIREHAIR_V2_BAND_TRACKING_X"
     "WIREHAIR_V2_BAND_TRACKING_X=1"
     ${peeltiming_base_args})
+
+# The completion-band timing protocol is intentionally separate from
+# peeltiming: it adds WH1 receive-through-success and encoder-init scopes while
+# retaining candidate-versus-dispatch fixed-prefix direct-solve panels.
+set(bandtiming_base_args
+    bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+    --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+run_bench(
+    bandtiming_result bandtiming_out bandtiming_err
+    ${bandtiming_base_args})
+string(REGEX MATCH
+    "^# bandtiming[^\n]*" bandtiming_manifest "${bandtiming_out}")
+string(REGEX MATCH
+    "\n# band_semantic[^\n]*" bandtiming_semantic "${bandtiming_out}")
+if(NOT bandtiming_result EQUAL 0 OR bandtiming_err OR
+   NOT bandtiming_manifest OR NOT bandtiming_semantic OR
+   NOT bandtiming_manifest MATCHES
+       "schema=wirehair.wh2.bandtiming.v1,dispatch_profile=dispatch-v1,seed_policy=raw," OR
+   NOT bandtiming_manifest MATCHES
+       "completion=mixed,candidate_S=5,candidate_D2=4,candidate_gf256=10,candidate_gf16=2,candidate_P=244,candidate_x_geometry=frozen," OR
+   NOT bandtiming_manifest MATCHES
+       "semantic_seed_derivation=base-plus-attempt-mod2\\^32-skip-measured-alias-and-shared-weak-v1," OR
+   NOT bandtiming_manifest MATCHES
+       "panels_per_replicate=15,order=ABBABAAB,label_swap=alternating,inner_reps=1,max_overhead=16,cache_state=warm,systematic_cache=off,wh2_source_cache=0,wh2_received_systematic_cache=0," OR
+   NOT bandtiming_manifest MATCHES
+       "payload_alignment=64,prefault=1,cpu_affinity_policy=first-allowed-affinity-v1,encoder_scope=fresh-object-init-through-first-K-symbols-v1,decoder_scope=fresh-init-outside-timer-first-feed-through-own-success-v1,direct_scope=candidate-dispatch-pair-local-fixed-prefix-solve-v1," OR
+   NOT bandtiming_manifest MATCHES
+       "weak_seed_policy=panel-local-balanced-censor-v1,hook_path=caller-pinned-explicit-transaction-attempt-zero-v2,codec_reuse=none-fresh-object-every-inner-v1," OR
+   NOT bandtiming_manifest MATCHES "expected_rows=360$" OR
+   NOT bandtiming_semantic MATCHES
+       "seed_attempt_cap=256,canonical_S=5,canonical_D2=4,canonical_gf256=10,canonical_gf16=2,canonical_P=244,canonical_x=frozen," OR
+   NOT bandtiming_semantic MATCHES
+       "params_equal=1,.*coefficients_equal=1,.*packet_rows_equal=1,.*intermediate_equal=1,.*payload_equal=1,.*direct_equal=1,.*recovery_equal=1,message_equal=1,pass=1$")
+    message(FATAL_ERROR
+        "native band timing did not produce its canonical semantic receipt\n"
+        "rc=${bandtiming_result}\nstdout=${bandtiming_out}\n"
+        "stderr=${bandtiming_err}")
+endif()
+
+set(bandtiming_panel_names
+    encoder_candidate_dispatch
+    encoder_candidate_wh1
+    encoder_dispatch_wh1
+    encoder_candidate_aa
+    encoder_dispatch_aa
+    encoder_wh1_aa
+    decoder_candidate_dispatch
+    decoder_candidate_wh1
+    decoder_dispatch_wh1
+    decoder_candidate_aa
+    decoder_dispatch_aa
+    decoder_wh1_aa
+    direct_candidate_dispatch
+    direct_candidate_aa
+    direct_dispatch_aa)
+set(bandtiming_panel_scopes
+    encoder encoder encoder encoder encoder encoder
+    decoder decoder decoder decoder decoder decoder
+    direct direct direct)
+set(bandtiming_panel_first
+    candidate candidate dispatch candidate dispatch wh1
+    candidate candidate dispatch candidate dispatch wh1
+    candidate candidate dispatch)
+set(bandtiming_panel_second
+    dispatch wh1 wh1 candidate dispatch wh1
+    dispatch wh1 wh1 candidate dispatch wh1
+    dispatch candidate dispatch)
+set(bandtiming_panel_aa
+    0 0 0 1 1 1 0 0 0 1 1 1 0 1 1)
+set(bandtiming_order A B B A B A A B)
+string(REPLACE "\n" ";" bandtiming_lines "${bandtiming_out}")
+set(bandtiming_row_index 0)
+foreach(bandtiming_line IN LISTS bandtiming_lines)
+    if(NOT bandtiming_line MATCHES "^[0-9]+,")
+        continue()
+    endif()
+    string(REPLACE "," ";" bandtiming_fields "${bandtiming_line}")
+    list(LENGTH bandtiming_fields bandtiming_field_count)
+    if(NOT bandtiming_field_count EQUAL 52)
+        message(FATAL_ERROR
+            "bandtiming row has the wrong field count\n${bandtiming_line}")
+    endif()
+    math(EXPR bandtiming_expected_replicate
+        "${bandtiming_row_index} / 120")
+    math(EXPR bandtiming_within_replicate
+        "${bandtiming_row_index} % 120")
+    math(EXPR bandtiming_expected_panel
+        "${bandtiming_within_replicate} / 8")
+    math(EXPR bandtiming_expected_slot
+        "${bandtiming_within_replicate} % 8")
+    math(EXPR bandtiming_expected_pair
+        "${bandtiming_expected_slot} / 2")
+    math(EXPR bandtiming_expected_swap
+        "${bandtiming_expected_replicate} % 2")
+    list(GET bandtiming_panel_names ${bandtiming_expected_panel}
+        bandtiming_expected_panel_name)
+    list(GET bandtiming_panel_scopes ${bandtiming_expected_panel}
+        bandtiming_expected_scope)
+    list(GET bandtiming_panel_first ${bandtiming_expected_panel}
+        bandtiming_expected_first)
+    list(GET bandtiming_panel_second ${bandtiming_expected_panel}
+        bandtiming_expected_second)
+    list(GET bandtiming_panel_aa ${bandtiming_expected_panel}
+        bandtiming_expected_aa)
+    list(GET bandtiming_order ${bandtiming_expected_slot}
+        bandtiming_expected_label)
+    if((bandtiming_expected_swap EQUAL 0 AND
+        bandtiming_expected_label STREQUAL "A") OR
+       (bandtiming_expected_swap EQUAL 1 AND
+        bandtiming_expected_label STREQUAL "B"))
+        set(bandtiming_expected_role "${bandtiming_expected_first}")
+        set(bandtiming_logical_first 1)
+    else()
+        set(bandtiming_expected_role "${bandtiming_expected_second}")
+        set(bandtiming_logical_first 0)
+    endif()
+    if(bandtiming_expected_aa)
+        if(bandtiming_logical_first)
+            string(APPEND bandtiming_expected_role "_a")
+        else()
+            string(APPEND bandtiming_expected_role "_b")
+        endif()
+    endif()
+    foreach(bandtiming_field_index IN ITEMS
+            0 1 2 3 4 5 6 7 8 9 13 14 15 16 17 18 23 24 25 26 27
+            28 29 30 31 32 33 34 35 36 37 38 49 50 51)
+        list(GET bandtiming_fields ${bandtiming_field_index}
+            "bandtiming_f${bandtiming_field_index}")
+    endforeach()
+    if(NOT bandtiming_f0 EQUAL bandtiming_expected_replicate OR
+       NOT "${bandtiming_f1}" STREQUAL "1" OR
+       NOT "${bandtiming_f2}" STREQUAL "${bandtiming_expected_scope}" OR
+       NOT "${bandtiming_f3}" STREQUAL
+           "${bandtiming_expected_panel_name}" OR
+       NOT bandtiming_f4 EQUAL bandtiming_expected_panel OR
+       NOT bandtiming_f5 EQUAL bandtiming_expected_slot OR
+       NOT bandtiming_f6 EQUAL bandtiming_expected_pair OR
+       NOT "${bandtiming_f7}" STREQUAL "${bandtiming_expected_label}" OR
+       NOT "${bandtiming_f8}" STREQUAL "${bandtiming_expected_role}" OR
+       NOT bandtiming_f9 EQUAL bandtiming_expected_swap OR
+       NOT "${bandtiming_f13}" STREQUAL "0" OR
+       NOT "${bandtiming_f14}" STREQUAL "0" OR
+       NOT "${bandtiming_f15}" STREQUAL "success" OR
+       NOT "${bandtiming_f23}" STREQUAL "1" OR
+       NOT "${bandtiming_f24}" STREQUAL "0" OR
+       NOT "${bandtiming_f25}" STREQUAL "none" OR
+       NOT "${bandtiming_f26}" STREQUAL "0" OR
+       NOT "${bandtiming_f27}" STREQUAL "0" OR
+       NOT "${bandtiming_f28}" STREQUAL "1" OR
+       NOT bandtiming_f29 MATCHES "^[1-9][0-9]*$" OR
+       NOT "${bandtiming_f30}" STREQUAL "1" OR
+       NOT "${bandtiming_f31}" STREQUAL "0" OR
+       NOT bandtiming_f32 MATCHES "^[0-9]+$" OR
+       NOT "${bandtiming_f32}" STREQUAL "${bandtiming_f33}" OR
+       NOT "${bandtiming_f34}" STREQUAL "0" OR
+       NOT bandtiming_f35 MATCHES "^[0-9]+$" OR
+       NOT bandtiming_f36 MATCHES "^[0-9]+$" OR
+       NOT bandtiming_f37 MATCHES "^[01]$" OR
+       NOT "${bandtiming_f49}" STREQUAL "31" OR
+       NOT bandtiming_f50 MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR
+            "bandtiming canonical row violates order, balance, outcome, "
+            "CPU, fault, or byte provenance\n${bandtiming_line}")
+    endif()
+    if((bandtiming_f35 GREATER 0 OR bandtiming_f36 GREATER 0) AND
+       NOT "${bandtiming_f37}" STREQUAL "1")
+        message(FATAL_ERROR
+            "bandtiming fault-contamination flag is false for a faulted row\n"
+            "${bandtiming_line}")
+    endif()
+    if(bandtiming_f35 EQUAL 0 AND bandtiming_f36 EQUAL 0 AND
+       NOT "${bandtiming_f37}" STREQUAL "0")
+        message(FATAL_ERROR
+            "bandtiming fault-contamination flag is true without a fault\n"
+            "${bandtiming_line}")
+    endif()
+    if(bandtiming_expected_scope STREQUAL "decoder")
+        if(NOT "${bandtiming_f16}" STREQUAL "0" OR
+           NOT "${bandtiming_f17}" STREQUAL "success" OR
+           NOT "${bandtiming_f18}" STREQUAL "1")
+            message(FATAL_ERROR
+                "bandtiming decoder row lost full byte recovery\n"
+                "${bandtiming_line}")
+        endif()
+    elseif(NOT "${bandtiming_f16}" STREQUAL "-1" OR
+           NOT "${bandtiming_f17}" STREQUAL "not_applicable" OR
+           NOT "${bandtiming_f18}" STREQUAL "0")
+        message(FATAL_ERROR
+            "bandtiming non-decoder row fabricated recovery\n"
+            "${bandtiming_line}")
+    endif()
+    if(bandtiming_expected_role MATCHES "^wh1")
+        if(NOT "${bandtiming_f38}" STREQUAL "0" OR
+           NOT "${bandtiming_f51}" STREQUAL "0")
+            message(FATAL_ERROR
+                "bandtiming WH1 row fabricated solver/intermediate data\n"
+                "${bandtiming_line}")
+        endif()
+    elseif(bandtiming_expected_scope STREQUAL "encoder")
+        if(NOT "${bandtiming_f38}" STREQUAL "0" OR
+           NOT "${bandtiming_f51}" STREQUAL "74")
+            message(FATAL_ERROR
+                "bandtiming WH2 encoder byte/stat provenance is wrong\n"
+                "${bandtiming_line}")
+        endif()
+    elseif(NOT "${bandtiming_f38}" STREQUAL "1" OR
+           NOT "${bandtiming_f51}" STREQUAL "74")
+        message(FATAL_ERROR
+            "bandtiming WH2 solve row lacks stats/intermediate provenance\n"
+            "${bandtiming_line}")
+    endif()
+    math(EXPR bandtiming_row_index "${bandtiming_row_index} + 1")
+endforeach()
+if(NOT bandtiming_row_index EQUAL 360)
+    message(FATAL_ERROR
+        "bandtiming emitted ${bandtiming_row_index} rows instead of 360")
+endif()
+
+string(REGEX MATCH
+    "\n0,1,encoder,encoder_candidate_dispatch,0,0,0,A,candidate,0,3516067076,11400714819323198492,([0-9a-f]+),"
+    bandtiming_first_row "${bandtiming_out}")
+set(bandtiming_first_trace_sha256 "${CMAKE_MATCH_1}")
+if(NOT bandtiming_first_row)
+    message(FATAL_ERROR
+        "bandtiming first derived construction/loss seed is wrong")
+endif()
+string(REGEX MATCH
+    "# bandtiming_done,[^\n]*\n$" bandtiming_done "${bandtiming_out}")
+string(REGEX REPLACE
+    "# bandtiming_done,[^\n]*\n$" "" bandtiming_body "${bandtiming_out}")
+string(REGEX REPLACE
+    "stream_sha256=[0-9a-f]+\n$" "stream_sha256="
+    bandtiming_done_prefix "${bandtiming_done}")
+string(SHA256 bandtiming_bound_sha256
+    "${bandtiming_body}${bandtiming_done_prefix}")
+extract_receipt_field(
+    "${bandtiming_done}" stream_sha256 bandtiming_done_sha256)
+if(NOT bandtiming_bound_sha256 STREQUAL bandtiming_done_sha256)
+    message(FATAL_ERROR
+        "bandtiming terminal stream hash does not bind the receipt")
+endif()
+
+# Candidate geometry is descriptive and cannot perturb the shared seed/loss
+# population.  This also traverses the pure-GF256 tracking-X hook path.
+run_bench(
+    bandtiming_alt_result bandtiming_alt_out bandtiming_alt_err
+    bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+    --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 0
+    --candidate-period 244 --candidate-x-geometry tracking-x
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+string(REGEX MATCH
+    "^# bandtiming[^\n]*" bandtiming_alt_manifest
+    "${bandtiming_alt_out}")
+string(REGEX MATCH
+    "\n0,1,encoder,encoder_candidate_dispatch,0,0,0,A,candidate,0,3516067076,11400714819323198492,([0-9a-f]+),"
+    bandtiming_alt_first_row "${bandtiming_alt_out}")
+set(bandtiming_alt_first_trace_sha256 "${CMAKE_MATCH_1}")
+extract_receipt_field(
+    "${bandtiming_manifest}" candidate_descriptor_sha256
+    bandtiming_candidate_descriptor_sha256)
+extract_receipt_field(
+    "${bandtiming_alt_manifest}" candidate_descriptor_sha256
+    bandtiming_alt_candidate_descriptor_sha256)
+if(NOT bandtiming_alt_result EQUAL 0 OR bandtiming_alt_err OR
+   NOT bandtiming_alt_manifest MATCHES
+       "candidate_gf256=10,candidate_gf16=0,candidate_P=244,candidate_x_geometry=tracking-x," OR
+   NOT bandtiming_alt_first_row OR
+   NOT bandtiming_alt_first_trace_sha256 STREQUAL
+       bandtiming_first_trace_sha256 OR
+   bandtiming_alt_candidate_descriptor_sha256 STREQUAL
+       bandtiming_candidate_descriptor_sha256)
+    message(FATAL_ERROR
+        "bandtiming candidate geometry changed the common trace or "
+        "descriptor binding\nrc=${bandtiming_alt_result}\n"
+        "stdout=${bandtiming_alt_out}\nstderr=${bandtiming_alt_err}")
+endif()
+
+# Exercise both source-cache receipts and every loss schedule accepted by the
+# all-K reliability protocol.
+expect_success(
+    "warmup_replicates=1,replicates=3,slots_per_panel=8,panels_per_replicate=15,order=ABBABAAB,label_swap=alternating,inner_reps=1,max_overhead=16,cache_state=cold,systematic_cache=on,wh2_source_cache=1,wh2_received_systematic_cache=1,"
+    bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+    --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 1 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state cold --systematic-cache on
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+foreach(bandtiming_schedule IN ITEMS burst permutation systematic-first
+        repair-only adversarial)
+    expect_success(
+        "schedule=${bandtiming_schedule},loss_model=packet-schedule-v1,trace_encoding=wirehair-wh2-bandtiming-loss-trace-v1,"
+        bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
+        --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+        --schedule ${bandtiming_schedule}
+        --candidate-staircase 5 --candidate-dense-rows 4
+        --candidate-gf256-rows 10 --candidate-gf16-rows 2
+        --candidate-period 244 --candidate-x-geometry frozen
+        --warmup-replicates 0 --replicates 3 --inner-reps 1
+        --max-overhead 16 --cache-state warm --systematic-cache off
+        --evict-bytes 4096 --context-sha256
+        0000000000000000000000000000000000000000000000000000000000000000
+        --required-margin 0)
+endforeach()
+
+# The nonzero RHS for this raw explicit construction reports Error, while an
+# untimed exact-config zero-RHS probe reports NeedMore.  Native output must
+# normalize that certified singularity to BadPeelSeed in every scope sharing
+# the constructor.  Candidate-containing panels are censored without
+# contaminating independent dispatch A/A panels; no failed row may fabricate
+# recovery or timing telemetry.
+run_bench(
+    bandtiming_weak_result bandtiming_weak_out bandtiming_weak_err
+    bandtiming --N 10 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+    --schedule repair-only --candidate-staircase 1
+    --candidate-dense-rows 1 --candidate-gf256-rows 1
+    --candidate-gf16-rows 0 --candidate-period 1
+    --candidate-x-geometry tracking-x --warmup-replicates 0
+    --replicates 3 --inner-reps 1 --max-overhead 16
+    --cache-state warm --systematic-cache off --evict-bytes 4096
+    --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+set(bandtiming_weak_encoder_rows 0)
+set(bandtiming_weak_decoder_rows 0)
+set(bandtiming_weak_direct_rows 0)
+set(bandtiming_independent_dispatch_rows 0)
+string(REPLACE "\n" ";" bandtiming_weak_lines "${bandtiming_weak_out}")
+foreach(bandtiming_line IN LISTS bandtiming_weak_lines)
+    if(NOT bandtiming_line MATCHES "^[0-9]+,")
+        continue()
+    endif()
+    string(REPLACE "," ";" bandtiming_fields "${bandtiming_line}")
+    list(GET bandtiming_fields 2 bandtiming_scope)
+    list(GET bandtiming_fields 3 bandtiming_panel)
+    list(GET bandtiming_fields 8 bandtiming_role)
+    list(GET bandtiming_fields 13 bandtiming_construct_result)
+    list(GET bandtiming_fields 14 bandtiming_result)
+    list(GET bandtiming_fields 15 bandtiming_result_class)
+    list(GET bandtiming_fields 16 bandtiming_recovery_result)
+    list(GET bandtiming_fields 17 bandtiming_recovery_class)
+    list(GET bandtiming_fields 18 bandtiming_recovery_ok)
+    list(GET bandtiming_fields 19 bandtiming_encoded)
+    list(GET bandtiming_fields 20 bandtiming_received)
+    list(GET bandtiming_fields 21 bandtiming_overhead)
+    list(GET bandtiming_fields 22 bandtiming_fixed_prefix)
+    list(GET bandtiming_fields 23 bandtiming_eligible)
+    list(GET bandtiming_fields 24 bandtiming_censored)
+    list(GET bandtiming_fields 25 bandtiming_reason)
+    list(GET bandtiming_fields 26 bandtiming_preflight_result)
+    list(GET bandtiming_fields 27 bandtiming_timing_result)
+    list(GET bandtiming_fields 28 bandtiming_stable)
+    list(GET bandtiming_fields 29 bandtiming_elapsed)
+    list(GET bandtiming_fields 30 bandtiming_inner)
+    list(GET bandtiming_fields 31 bandtiming_saturated)
+    list(GET bandtiming_fields 32 bandtiming_cpu_before)
+    list(GET bandtiming_fields 33 bandtiming_cpu_after)
+    list(GET bandtiming_fields 34 bandtiming_cpu_migrated)
+    list(GET bandtiming_fields 35 bandtiming_minflt)
+    list(GET bandtiming_fields 36 bandtiming_majflt)
+    list(GET bandtiming_fields 37 bandtiming_fault_contaminated)
+    list(GET bandtiming_fields 38 bandtiming_stats_available)
+    list(GET bandtiming_fields 50 bandtiming_packet_bytes)
+    list(GET bandtiming_fields 51 bandtiming_intermediate_bytes)
+    if(bandtiming_role MATCHES "^candidate")
+        if(bandtiming_scope STREQUAL "encoder")
+            math(EXPR bandtiming_weak_encoder_rows
+                "${bandtiming_weak_encoder_rows} + 1")
+        elseif(bandtiming_scope STREQUAL "decoder")
+            math(EXPR bandtiming_weak_decoder_rows
+                "${bandtiming_weak_decoder_rows} + 1")
+        elseif(bandtiming_scope STREQUAL "direct")
+            math(EXPR bandtiming_weak_direct_rows
+                "${bandtiming_weak_direct_rows} + 1")
+        endif()
+        if(NOT "${bandtiming_construct_result}" STREQUAL "4" OR
+           NOT "${bandtiming_result}" STREQUAL "4" OR
+           NOT "${bandtiming_result_class}" STREQUAL "weak" OR
+           NOT "${bandtiming_eligible}" STREQUAL "0" OR
+           NOT "${bandtiming_censored}" STREQUAL "1" OR
+           NOT bandtiming_reason MATCHES "candidate_weak" OR
+           NOT "${bandtiming_recovery_result}" STREQUAL "-1" OR
+           NOT "${bandtiming_recovery_class}" STREQUAL "not_applicable" OR
+           NOT "${bandtiming_recovery_ok}" STREQUAL "0" OR
+           NOT "${bandtiming_encoded}" STREQUAL "0" OR
+           NOT "${bandtiming_received}" STREQUAL "0" OR
+           NOT "${bandtiming_overhead}" STREQUAL "-1" OR
+           NOT "${bandtiming_fixed_prefix}" STREQUAL "-1" OR
+           NOT "${bandtiming_preflight_result}" STREQUAL "4" OR
+           NOT "${bandtiming_timing_result}" STREQUAL "-1" OR
+           NOT "${bandtiming_stable}" STREQUAL "0" OR
+           NOT "${bandtiming_elapsed}" STREQUAL "0" OR
+           NOT "${bandtiming_inner}" STREQUAL "0" OR
+           NOT "${bandtiming_saturated}" STREQUAL "0" OR
+           NOT "${bandtiming_cpu_before}" STREQUAL "-1" OR
+           NOT "${bandtiming_cpu_after}" STREQUAL "-1" OR
+           NOT "${bandtiming_cpu_migrated}" STREQUAL "0" OR
+           NOT "${bandtiming_minflt}" STREQUAL "0" OR
+           NOT "${bandtiming_majflt}" STREQUAL "0" OR
+           NOT "${bandtiming_fault_contaminated}" STREQUAL "0" OR
+           NOT "${bandtiming_stats_available}" STREQUAL "0" OR
+           NOT "${bandtiming_packet_bytes}" STREQUAL "0" OR
+           NOT "${bandtiming_intermediate_bytes}" STREQUAL "26")
+            message(FATAL_ERROR
+                "bandtiming probe-certified candidate weak row fabricated "
+                "timing or lost its normalized class\n${bandtiming_line}")
+        endif()
+        foreach(bandtiming_solver_field RANGE 39 48)
+            list(GET bandtiming_fields ${bandtiming_solver_field}
+                bandtiming_solver_value)
+            if(NOT "${bandtiming_solver_value}" STREQUAL "-1")
+                message(FATAL_ERROR
+                    "bandtiming censored row fabricated solver stats\n"
+                    "${bandtiming_line}")
+            endif()
+        endforeach()
+    endif()
+    if(bandtiming_panel MATCHES
+       "^(encoder|decoder|direct)_dispatch_aa$")
+        math(EXPR bandtiming_independent_dispatch_rows
+            "${bandtiming_independent_dispatch_rows} + 1")
+        if(NOT "${bandtiming_eligible}" STREQUAL "1" OR
+           NOT "${bandtiming_censored}" STREQUAL "0" OR
+           NOT "${bandtiming_reason}" STREQUAL "none")
+            message(FATAL_ERROR
+                "candidate weak seed contaminated an independent dispatch "
+                "panel\n${bandtiming_line}")
+        endif()
+    endif()
+endforeach()
+if(NOT bandtiming_weak_result EQUAL 0 OR bandtiming_weak_err OR
+   NOT bandtiming_weak_encoder_rows EQUAL 48 OR
+   NOT bandtiming_weak_decoder_rows EQUAL 48 OR
+   NOT bandtiming_weak_direct_rows EQUAL 36 OR
+   NOT bandtiming_independent_dispatch_rows EQUAL 72 OR
+   NOT bandtiming_weak_out MATCHES
+       "\n# bandtiming_done,complete=1,rows=360,finished_monotonic_ns=[0-9]+,stream_sha256=[0-9a-f]+\n$")
+    message(FATAL_ERROR
+        "native bandtiming weak/panel-isolation regression failed\n"
+        "rc=${bandtiming_weak_result}\nstdout=${bandtiming_weak_out}\n"
+        "stderr=${bandtiming_weak_err}")
+endif()
+
+# The bounded semantic witness may skip only a weakness reproduced by both
+# the explicit canonical path and the real dispatch path.  This K=5 seed is a
+# known shared weak construction; attempt one is sound and must be selected.
+# The compile-time predicate truth table separately locks out Error, NeedMore,
+# unequal-weak, and weak/nonweak divergences without a test-only fault hook.
+run_bench(
+    bandtiming_shared_weak_result
+    bandtiming_shared_weak_out
+    bandtiming_shared_weak_err
+    bandtiming --N 5 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 321981943
+    --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-staircase 2 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+if(NOT bandtiming_shared_weak_result EQUAL 0 OR
+   bandtiming_shared_weak_err OR
+   NOT bandtiming_shared_weak_out MATCHES
+       "\n# band_semantic,timed=0,construction_seed=321981944,seed_attempt=1,seed_attempt_cap=256,.*pass=1\n")
+    message(FATAL_ERROR
+        "bandtiming semantic witness did not skip exactly the shared weak "
+        "construction\nrc=${bandtiming_shared_weak_result}\n"
+        "stdout=${bandtiming_shared_weak_out}\n"
+        "stderr=${bandtiming_shared_weak_err}")
+endif()
+
+expect_failure("requires --N" bandtiming)
+expect_failure("duplicate --N" ${bandtiming_base_args} --N 17)
+expect_failure("argument domain mismatch" bandtiming
+    --N 16 --bb 2 --dispatch-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 0 --replicates 2 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+expect_failure("candidate-x-geometry must be frozen or tracking-x"
+    bandtiming --N 16 --bb 2 --dispatch-profile dispatch-v1
+    --seed-policy raw --construction-seed 7 --loss 0.1 --loss-seed 9
+    --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry tracking
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+expect_failure("bad --construction-seed value" bandtiming
+    --N 16 --bb 2 --dispatch-profile dispatch-v1 --seed-policy raw
+    --construction-seed 4294967296 --loss 0.1 --loss-seed 9
+    --schedule iid --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 0 --replicates 3 --inner-reps 1
+    --max-overhead 16 --cache-state warm --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+expect_failure("argument domain mismatch" bandtiming
+    --N 16 --bb 2 --dispatch-profile dispatch-v1 --seed-policy raw
+    --construction-seed 7 --loss 0.1 --loss-seed 9 --schedule iid
+    --candidate-staircase 5 --candidate-dense-rows 4
+    --candidate-gf256-rows 10 --candidate-gf16-rows 2
+    --candidate-period 244 --candidate-x-geometry frozen
+    --warmup-replicates 0 --replicates 3 --inner-reps 2
+    --max-overhead 16 --cache-state cold --systematic-cache off
+    --evict-bytes 4096 --context-sha256
+    0000000000000000000000000000000000000000000000000000000000000000
+    --required-margin 0)
+foreach(bandtiming_env IN ITEMS
+        WIREHAIR_V2_PEEL_DEGREES
+        WIREHAIR_V2_STAIRCASE_DEGREES
+        WIREHAIR_V2_STAIRCASE_ROW_DEGREES
+        WIREHAIR_V2_STAIRCASE_DEGREE_SCALE
+        WIREHAIR_V2_BAND_TRACKING_X)
+    expect_env_failure(
+        "forbids ambient ${bandtiming_env}"
+        "${bandtiming_env}=1"
+        ${bandtiming_base_args})
+endforeach()
 endif()
 
 run_bench(route_result route_mixed route_err preferredattempt --mode route

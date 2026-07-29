@@ -4,6 +4,98 @@ Audit date: 2026-07-28
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-za5v`, `wirehair-g8iv`, `wirehair-tz5b.1`
 
+## 2026-07-28 protected all-K campaign prelaunch checkpoint
+
+`wirehair-za5v` remains open.  No protected all-K selection or holdout outcome
+has been launched or read at this checkpoint.
+
+The native test-only `bandtiming` path is implemented end to end.  Candidate,
+dispatch-v1, and WH1 use shared nonzero payloads, matched raw construction and
+loss seeds, all six loss schedules, counterbalanced candidate/control and A/A
+panels, and authenticated CPU/cache/thermal context.  Encoder timing includes
+initialization plus the first K symbols; cross-codec decoder timing covers the
+first feed through first success; candidate-versus-dispatch direct timing
+isolates the common solver.  Explicit candidate parameters are transactional
+per encoder/decoder instance, and the untimed semantic bridge proves the
+canonical explicit descriptor identical to real dispatch.
+
+The immutable screens contain 220/220 frozen jobs and 380/380 local-neighbor
+jobs.  Their raw archives hash to
+`4d03f4af545113cc8c8c8e8bcaff73886cf025270a33b4ccb0b2d7de03a7e85f42`
+and
+`939252436007f0d1c6119a535a05e5558c0e68eba61fb6ffb2168bbb665bd063`.
+Pure8 with S-1 and D2=3 led the local screen at exact geometric
+candidate/dispatch ratios 0.754434441 encoder, 0.728543396 decoder, and
+0.711185307 direct solve.  It had no candidate-only weak construction; the
+single K=5 weakness was control-only and duplicated by cache state.  The
+predeclared all-K roster keeps that leader plus the S+0, D2=5, and pure9
+hedges, with no retries or seed repair before architecture selection.
+
+The stable protected runner artifacts are:
+
+- strict parser:
+  `66a1c7e83149914b8063d03eafac771d9ff9edbaf3be084f30557d1938fd92c2`;
+- parser tests:
+  `27f3ca2761126630b985846948fefd1a7740417a6fc298ab8f1ca61ab92002ae`;
+- campaign runner:
+  `daa12df8587b0072d97c68aa86902fcc843fc05497887b9b56a0deb0fbe04899`;
+- campaign tests:
+  `92a24becb41918e20d2faf2d8bf754a3a2d133d49fb1626e624a8995a691c568`.
+
+The exact result-free plan has roster SHA-256
+`d7f032731d3f5b1a52d37cb27cc4236e92ef8be46efa5445934c8356288421fc`,
+selection job-list SHA-256
+`021dcb0607d83e5ce5da1d4ebbafbab43f1dfcef34209b64326a877fe97e2b63`,
+matched-cell-set SHA-256
+`6cc049811a0826e1be9fa750497ba03028fd263a2dc3328f9409b8cbaf9a8cdf`,
+and policy SHA-256
+`bd7f3bb0497e141af20e3c3189006702b77e832ddfd3581475a0303bd589780c`.
+Selection is 2,376 jobs and 456,192 raw recovery cells per candidate across
+every K=2..100 and every schedule.  Each possible holdout is 594 jobs with
+disjoint construction/loss seed sets and 256 replicates per K/schedule.
+
+All 600 archived screen receipts replayed exactly; all 1,800 legacy replicate
+records enriched to the same candidate, dispatch, and WH1 construction
+result/class, and all 600 stream hashes are unique.  Warning-strict Python
+tests pass 64/64; the formerly racy real-signal probe also passes 50/50 author
+stress and 20/20 independent root stress.  Release benchmark CLI and seed
+selection tests pass, as do the prior broad Release 43/43 non-long tests,
+strict Clang ASan+UBSan benchmark CLI gate, production build-policy gate, and
+the exact all-K fingerprint run in 2,681.15 seconds.
+
+Two independent exact-hash reviews certified the four frozen Python artifacts
+without findings.  The broader review independently passed 120 signal tests,
+200 exited-leader repetitions, three direct cleanup attacks, 199 malformed
+schema cases, 4,624 paired recovery states/300,560 threshold outcomes, an
+independent Student-t oracle, 200 randomized Pareto/ranking cases, every
+result-free plan, and all 600 archived receipt replays.  Start and end hashes
+were identical.
+
+Repeated source-reading and adversarial passes repaired aggregate timing
+weighting/coverage, raw holdout action routing, candidate-only failure
+classification, malformed nested evidence, selection-manifest TOCTOU,
+exited-leader descendant cleanup, asynchronous TERM/HUP cleanup races, and
+caller-controlled unhashable schema fields.  A later independent gate exposed
+and repaired the ready-file race in the signal regression itself.  The final
+runner records signals and raises only at cleanup-safe points; a traced TERM at
+the former exception-to-cleanup transition preserves the original exception
+and leaves no live process group.
+
+Five consecutive full-core fuzz waves completed 640/640 workers and
+45,378,600,820 mutations with zero artifacts.  The hardened thermal sampler
+remains live; under 100 percent CPU load the post-EXPO system is typically
+about 62-64 C CPU and 50-52.25 C hottest DIMM, with zero sensor or EDAC
+errors.
+
+Next: commit and push this prelaunch checkpoint to GitHub plus Dolt, then run
+the protected selection on exclusive CPUs 0-31 while low-priority fuzzing
+keeps CPUs 32-127 occupied.
+Only the runner-derived sole survivor may enter its predeclared disjoint
+holdout.  Promote a new per-instance contract/profile and fingerprint only if
+the cumulative recovery, direct-solve, WH1 encoder/decoder throughput, and
+reliability gates all pass; otherwise retain dispatch-v1 and record the exact
+remaining gap.
+
 ## 2026-07-28 canonical tiny-completion checkpoint
 
 The first `wirehair-za5v` checkpoint is complete on the exact current source

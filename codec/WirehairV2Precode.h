@@ -318,6 +318,54 @@ bool MakeStaircaseDegreeMixture(
 */
 bool IsCanonicalStableTargetStaircaseState();
 
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+/**
+    Compact semantic fingerprint of every ambient precode hook that can alter
+    the supplied parameter set's equations.
+
+    This includes the effective staircase scale/shape/realized degrees and,
+    for mixed completion, the complete active row split, coefficient geometry,
+    and residue schedules.  The process-wide tracking-X regime has a dedicated
+    single-read field in ExplicitEquationStateIdentityForTesting, so it is
+    deliberately excluded here.  Execution-only controls such as the
+    residue-bucket implementation are also excluded.
+*/
+uint64_t ActivePrecodeEquationStateFingerprintForTesting(
+    const PrecodeParams& params);
+
+/**
+    Return the process-wide/environment tracking-X selection, ignoring any
+    scoped explicit-operation snapshot on the current thread.
+*/
+bool AmbientMixedBandTrackingXForTesting();
+
+/**
+    Pin the effective tracking-X selection on this thread for one complete
+    explicit operation.
+
+    The benchmark control remains process-wide, but an already-pinned explicit
+    endpoint must not assemble equations from two states if another worker
+    changes that control concurrently.  Nesting is supported so decoder retry
+    recursion retains the outer snapshot.
+*/
+class ScopedMixedBandTrackingXForTesting
+{
+public:
+    ScopedMixedBandTrackingXForTesting(
+        bool active,
+        bool enabled) noexcept;
+    ~ScopedMixedBandTrackingXForTesting() noexcept;
+
+    ScopedMixedBandTrackingXForTesting(
+        const ScopedMixedBandTrackingXForTesting&) = delete;
+    ScopedMixedBandTrackingXForTesting& operator=(
+        const ScopedMixedBandTrackingXForTesting&) = delete;
+
+private:
+    int Previous = -1;
+};
+#endif
+
 struct PrecodeSystem
 {
     PrecodeParams Params = {};
