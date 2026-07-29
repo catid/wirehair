@@ -8,8 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -636,6 +639,7 @@ class RepairTimingRoundTripTests(unittest.TestCase):
             ("construction_seed_derivation", []),
             ("loss", -0.0),
             ("loss", -0.001),
+            ("loss", 0.9900000000001),
             ("loss", 1.0),
             ("loss", float("nan")),
             ("loss", float("inf")),
@@ -659,7 +663,7 @@ class RepairTimingRoundTripTests(unittest.TestCase):
             "block_count": 2,
             "block_bytes": 4096,
             "construction_seed": 0xffffffff,
-            "loss": 0.999,
+            "loss": 0.99,
             "loss_seed": 0xffffffffffffffff,
             "replicates": 3,
             "inner_reps": 1024,
@@ -674,6 +678,23 @@ class RepairTimingRoundTripTests(unittest.TestCase):
             "inner_reps": 1,
         })
         repair.validate_repairtiming_dimensions(**valid)
+        boundary_stdout, boundary_context = synthetic_stream(loss=0.99)
+        boundary_kwargs = parse_kwargs(boundary_context)
+        boundary_kwargs["loss"] = 0.99
+        self.assertEqual(
+            repair.parse_repairtiming_output(
+                boundary_stdout, **boundary_kwargs).manifest["loss"],
+            0.99,
+        )
+        over_boundary_lines = boundary_stdout.splitlines(keepends=True)
+        over_boundary_lines[0] = over_boundary_lines[0].replace(
+            f"loss={0.99:.17g},",
+            f"loss={0.9900000000001:.17g},",
+            1,
+        )
+        with self.assertRaises(repair.MeasurementError):
+            repair.parse_repairtiming_output(
+                _rehash(over_boundary_lines), **boundary_kwargs)
         self.assertEqual(
             repair._dispatch_intermediate_bytes(16, 2), 74)
         self.assertEqual(
@@ -1123,6 +1144,246 @@ class RepairTimingMutationTests(RepairTimingRoundTripTests):
                 size - 1):
             with self.assertRaises(repair.MeasurementError):
                 self.parse()
+
+
+class RepairTimingProcessCaptureTests(unittest.TestCase):
+    @staticmethod
+    def run_script(
+            source, *, stdout_limit=4096, stderr_limit=4096,
+            diagnostic_limit=256):
+        return repair._run_repairtiming_checked(
+            [sys.executable, "-c", source],
+            peel_codec.isolated_codec_env(),
+            stdout_limit=stdout_limit,
+            stderr_limit=stderr_limit,
+            diagnostic_limit=diagnostic_limit,
+        )
+
+    def assert_process_absent(self, process_id, *, process_group=False):
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                if process_group:
+                    os.killpg(process_id, 0)
+                else:
+                    os.kill(process_id, 0)
+            except ProcessLookupError:
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"process {process_id} survived cleanup")
+            time.sleep(0.01)
+
+    def wait_for_path(self, path, process=None):
+        deadline = time.monotonic() + 5.0
+        while not path.exists():
+            if process is not None and process.poll() is not None:
+                self.fail(
+                    f"process exited {process.returncode} before {path} existed")
+            if time.monotonic() >= deadline:
+                self.fail(f"timed out waiting for {path}")
+            time.sleep(0.01)
+
+    def test_success_has_devnull_stdin_isolated_env_and_private_session(self):
+        source = "\n".join((
+            "import os",
+            "import sys",
+            "assert sys.stdin.buffer.read() == b''",
+            "assert 'WIREHAIR_V2_CAPTURE_SENTINEL' not in os.environ",
+            "sys.stdout.write(",
+            "    f'{os.getpid()} {os.getpgrp()} {os.getsid(0)}')",
+        ))
+        with mock.patch.dict(
+                os.environ,
+                {"WIREHAIR_V2_CAPTURE_SENTINEL": "must-not-leak"}):
+            stdout = self.run_script(source)
+        process_id, process_group, session_id = map(int, stdout.split())
+        self.assertEqual(process_id, process_group)
+        self.assertEqual(process_id, session_id)
+        self.assertNotEqual(process_group, os.getpgrp())
+
+    def test_exact_stdout_cap_and_success_stderr_rejection(self):
+        self.assertEqual(
+            self.run_script(
+                "import os; os.write(1, b'x' * 32)",
+                stdout_limit=32),
+            "x" * 32,
+        )
+        with self.assertRaisesRegex(
+                repair.MeasurementError, "stdout exceeds"):
+            self.run_script(
+                "import os; os.write(1, b'x' * 33)",
+                stdout_limit=32)
+        with self.assertRaisesRegex(
+                repair.MeasurementError, "unexpected stderr"):
+            self.run_script(
+                "import os; os.write(2, b'unexpected warning')")
+
+    def test_stdout_flood_is_killed_reaped_and_bounded_during_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "child.pid"
+            source = "\n".join((
+                "import os",
+                "import signal",
+                "from pathlib import Path",
+                f"Path({str(pid_path)!r}).write_text(str(os.getpid()))",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "while True:",
+                "    os.write(1, b'x' * 4096)",
+            ))
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                    repair.MeasurementError, "stdout exceeds"):
+                self.run_script(source, stdout_limit=31)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 5.0)
+            child_pid = int(pid_path.read_text())
+            self.assert_process_absent(child_pid, process_group=True)
+
+    def test_stderr_flood_is_killed_promptly(self):
+        source = "\n".join((
+            "import os",
+            "import time",
+            "os.write(2, b'e' * 4096)",
+            "time.sleep(60)",
+        ))
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+                repair.MeasurementError, "stderr exceeds"):
+            self.run_script(source, stderr_limit=31)
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_descendant_writer_is_killed_with_private_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            child_pid_path = Path(temporary) / "descendant.pid"
+            child_source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                f"Path({str(child_pid_path)!r}).write_text(str(os.getpid()))",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "while True:",
+                "    os.write(1, b'd' * 4096)",
+            ))
+            leader_source = "\n".join((
+                "import subprocess",
+                "import sys",
+                "import time",
+                f"subprocess.Popen([sys.executable, '-c', {child_source!r}])",
+                "time.sleep(60)",
+            ))
+            with self.assertRaisesRegex(
+                    repair.MeasurementError, "stdout exceeds"):
+                self.run_script(leader_source, stdout_limit=31)
+            child_pid = int(child_pid_path.read_text())
+            self.assert_process_absent(child_pid)
+
+    def test_exited_leader_with_silent_pipe_holder_does_not_deadlock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            child_pid_path = Path(temporary) / "holder.pid"
+            child_source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import time",
+                f"Path({str(child_pid_path)!r}).write_text(str(os.getpid()))",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "time.sleep(60)",
+            ))
+            leader_source = "\n".join((
+                "from pathlib import Path",
+                "import subprocess",
+                "import sys",
+                "import time",
+                f"path = Path({str(child_pid_path)!r})",
+                f"subprocess.Popen([sys.executable, '-c', {child_source!r}])",
+                "while not path.exists():",
+                "    time.sleep(0.001)",
+            ))
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                    repair.MeasurementError, "held an output pipe open"):
+                self.run_script(leader_source)
+            self.assertLess(time.monotonic() - started, 5.0)
+            child_pid = int(child_pid_path.read_text())
+            self.assert_process_absent(child_pid)
+
+    def test_parent_sigkill_triggers_native_parent_death_kill(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target_pid_path = Path(temporary) / "target.pid"
+            target_source = "\n".join((
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import time",
+                f"Path({str(target_pid_path)!r}).write_text(str(os.getpid()))",
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                "time.sleep(60)",
+            ))
+            helper_source = "\n".join((
+                "import sys",
+                f"sys.path.insert(0, {HERE!r})",
+                "import peel_codec",
+                "import repair_timing_codec as repair",
+                "repair._run_repairtiming_checked(",
+                f"    [{sys.executable!r}, '-c', {target_source!r}],",
+                "    peel_codec.isolated_codec_env(),",
+                "    stdout_limit=4096, stderr_limit=4096)",
+            ))
+            helper = subprocess.Popen(
+                [sys.executable, "-c", helper_source],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            target_pid = None
+            try:
+                self.wait_for_path(target_pid_path, helper)
+                target_pid = int(target_pid_path.read_text())
+                helper.kill()
+                helper.wait(timeout=5.0)
+                self.assert_process_absent(target_pid, process_group=True)
+            finally:
+                if helper.poll() is None:
+                    os.killpg(helper.pid, signal.SIGKILL)
+                    helper.wait(timeout=5.0)
+                if (
+                    target_pid is not None and
+                    repair._repairtiming_process_group_exists(target_pid)
+                ):
+                    os.killpg(target_pid, signal.SIGKILL)
+
+    def test_nonzero_diagnostic_is_stderr_first_and_bounded(self):
+        source = "\n".join((
+            "import os",
+            "os.write(1, b'ignored stdout')",
+            "os.write(2, b'failure-detail:' + b'z' * 256)",
+            "raise SystemExit(7)",
+        ))
+        with self.assertRaises(repair.MeasurementError) as caught:
+            self.run_script(source, diagnostic_limit=32)
+        message = str(caught.exception)
+        self.assertIn("exited 7", message)
+        self.assertIn("stderr='failure-detail:", message)
+        self.assertIn("[truncated]", message)
+        self.assertNotIn("ignored stdout", message)
+        self.assertLess(len(message), 512)
+
+    def test_concurrent_pipe_drain_and_strict_ascii_decode(self):
+        source = "\n".join((
+            "import os",
+            "for unused in range(16):",
+            "    os.write(1, b'o' * 4096)",
+            "    os.write(2, b'e' * 4096)",
+            "raise SystemExit(3)",
+        ))
+        with self.assertRaisesRegex(
+                repair.MeasurementError, "exited 3"):
+            self.run_script(
+                source, stdout_limit=65536, stderr_limit=65536)
+        with self.assertRaisesRegex(
+                repair.MeasurementError, "non-ASCII stdout"):
+            self.run_script("import os; os.write(1, b'\\xff')")
 
 
 class RepairTimingGzipTests(unittest.TestCase):

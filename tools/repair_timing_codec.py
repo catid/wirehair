@@ -9,13 +9,20 @@ aggregation and does not alter the durable bandtiming v1/v2 consumers.
 
 import copy
 import csv
+import ctypes
+import functools
 import hashlib
 import io
 import json
 import math
 import os
+import selectors
+import signal
 import stat
 import struct
+import subprocess
+import sys
+import time
 import zlib
 from dataclasses import dataclass
 from typing import Optional
@@ -554,6 +561,30 @@ REPAIRTIMING_GZIP_COMPRESSED_BYTE_LIMIT = 512 * 1024 * 1024
 REPAIRTIMING_GZIP_DECOMPRESSED_BYTE_LIMIT = (
     REPAIRTIMING_NATIVE_STDOUT_BYTE_LIMIT
 )
+REPAIRTIMING_STDERR_BYTE_LIMIT = 64 * 1024
+REPAIRTIMING_DIAGNOSTIC_BYTE_LIMIT = 4096
+REPAIRTIMING_CAPTURE_CHUNK_BYTES = 64 * 1024
+REPAIRTIMING_REAP_TIMEOUT_SECONDS = 2.0
+REPAIRTIMING_TERMINATE_GRACE_SECONDS = 0.1
+REPAIRTIMING_GROUP_CONFIRM_SECONDS = 2.0
+REPAIRTIMING_SELECT_POLL_SECONDS = 0.05
+REPAIRTIMING_POST_EXIT_DRAIN_SECONDS = 0.5
+_REPAIRTIMING_PR_SET_PDEATHSIG = 1
+
+if sys.platform.startswith("linux"):
+    _REPAIRTIMING_LIBC = ctypes.CDLL(None, use_errno=True)
+    _REPAIRTIMING_PRCTL = getattr(_REPAIRTIMING_LIBC, "prctl", None)
+    if _REPAIRTIMING_PRCTL is not None:
+        _REPAIRTIMING_PRCTL.argtypes = (
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        )
+        _REPAIRTIMING_PRCTL.restype = ctypes.c_int
+else:
+    _REPAIRTIMING_PRCTL = None
 
 
 def repair_arm(value):
@@ -659,7 +690,7 @@ def validate_repairtiming_dimensions(
         not math.isfinite(numeric_loss) or
         (numeric_loss == 0.0 and
          math.copysign(1.0, numeric_loss) < 0.0) or
-        not 0.0 <= numeric_loss < 1.0 or
+        not 0.0 <= numeric_loss <= 0.99 or
         type(schedule) is not str or
         schedule not in REPAIRTIMING_SCHEDULES or
         type(warmup_replicates) is not int or warmup_replicates < 0 or
@@ -924,7 +955,7 @@ def _parse_manifest(
             raw[name], f"repairtiming manifest.{name}", minimum=0)
     manifest["loss"] = peel_codec._parse_finite_float(
         raw["loss"], "repairtiming manifest.loss",
-        minimum=0.0, maximum=1.0)
+        minimum=0.0, maximum=0.99)
     manifest["required_margin"] = peel_codec._parse_finite_float(
         raw["required_margin"], "repairtiming manifest.required_margin",
         minimum=0.0, maximum=1.0)
@@ -1022,7 +1053,7 @@ def _parse_manifest(
     if raw["required_margin"] != f"{float(required_margin):.17g}":
         raise MeasurementError(
             "repairtiming required margin spelling is noncanonical")
-    if (manifest["loss"] >= 1.0 or
+    if (manifest["loss"] > 0.99 or
             manifest["started_monotonic_ns"] < 1):
         raise MeasurementError("repairtiming manifest domain is invalid")
     return manifest
@@ -2465,6 +2496,308 @@ def _repairtiming_run_bounds(stdout):
     return started_ns, finished_ns
 
 
+def _arm_repairtiming_parent_death(expected_parent_pid):
+    """Arm Linux parent-death SIGKILL, closing the fork-to-prctl race."""
+    if (
+        _REPAIRTIMING_PRCTL is None or
+        _REPAIRTIMING_PRCTL(
+            _REPAIRTIMING_PR_SET_PDEATHSIG,
+            signal.SIGKILL,
+            0,
+            0,
+            0,
+        ) != 0
+    ):
+        os._exit(127)
+    # PR_SET_PDEATHSIG is not retroactive.  If the campaign worker died
+    # between fork() and prctl(), terminate before exec rather than orphaning.
+    if os.getppid() != expected_parent_pid:
+        os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(127)
+
+
+def _repairtiming_process_group_exists(process_group):
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_repairtiming_process_group(process_group, signal_number):
+    try:
+        os.killpg(process_group, signal_number)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _terminate_repairtiming_process_group(process):
+    """TERM, KILL, reap the leader, and confirm its private group is gone."""
+    process_group = process.pid
+    if _repairtiming_process_group_exists(process_group):
+        _signal_repairtiming_process_group(
+            process_group, signal.SIGTERM)
+        deadline = time.monotonic() + REPAIRTIMING_TERMINATE_GRACE_SECONDS
+        while (
+            _repairtiming_process_group_exists(process_group) and
+            time.monotonic() < deadline
+        ):
+            process.poll()
+            time.sleep(0.005)
+        if _repairtiming_process_group_exists(process_group):
+            _signal_repairtiming_process_group(
+                process_group, signal.SIGKILL)
+    elif process.poll() is None:
+        # This is only reachable if child setup failed before setsid().
+        process.kill()
+
+    try:
+        process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        if _repairtiming_process_group_exists(process_group):
+            _signal_repairtiming_process_group(
+                process_group, signal.SIGKILL)
+        else:
+            process.kill()
+        try:
+            process.wait(timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise MeasurementError(
+                "could not promptly reap repairtiming benchmark leader"
+            ) from error
+
+    deadline = time.monotonic() + REPAIRTIMING_GROUP_CONFIRM_SECONDS
+    while (
+        _repairtiming_process_group_exists(process_group) and
+        time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    if _repairtiming_process_group_exists(process_group):
+        raise MeasurementError(
+            "repairtiming benchmark process group survived SIGKILL")
+
+
+def _repairtiming_diagnostic(stdout, stderr, limit):
+    """Return one bounded, escaped diagnostic from already bounded pipes."""
+    label, payload = (
+        ("stderr", stderr) if stderr else
+        ("stdout", stdout) if stdout else
+        ("output", "")
+    )
+    # Slice before repr(): escaping an otherwise valid 150-MiB stdout must not
+    # transiently allocate a many-times-larger failure message.
+    sample = payload[:limit]
+    rendered = repr(sample)
+    truncated = len(sample) != len(payload) or len(rendered) > limit
+    rendered = rendered[:limit]
+    if truncated:
+        rendered += "... [truncated]"
+    return f"{label}={rendered}"
+
+
+def _repairtiming_command_label(command):
+    """Render only a bounded executable label, never attacker-sized argv."""
+    try:
+        executable = os.fsdecode(os.fspath(command[0]))
+    except (IndexError, TypeError, ValueError):
+        return "<invalid-command>"
+    sample = executable[:256]
+    rendered = repr(sample)
+    truncated = len(sample) != len(executable) or len(rendered) > 256
+    rendered = rendered[:256]
+    if truncated:
+        rendered += "... [truncated]"
+    return rendered
+
+
+def _run_repairtiming_checked(
+        command, env, *, stdout_limit=None, stderr_limit=None,
+        diagnostic_limit=None):
+    """Run repairtiming while bounding and concurrently draining both pipes."""
+    if stdout_limit is None:
+        stdout_limit = REPAIRTIMING_NATIVE_STDOUT_BYTE_LIMIT
+    if stderr_limit is None:
+        stderr_limit = REPAIRTIMING_STDERR_BYTE_LIMIT
+    if diagnostic_limit is None:
+        diagnostic_limit = REPAIRTIMING_DIAGNOSTIC_BYTE_LIMIT
+    for label, value in (
+        ("stdout", stdout_limit),
+        ("stderr", stderr_limit),
+        ("diagnostic", diagnostic_limit),
+    ):
+        if type(value) is not int or value < 1:
+            raise MeasurementError(
+                f"repairtiming {label} byte limit must be a positive integer")
+    if _REPAIRTIMING_PRCTL is None:
+        raise MeasurementError(
+            "repairtiming subprocess isolation requires Linux prctl")
+
+    command_label = _repairtiming_command_label(command)
+    expected_parent_pid = os.getpid()
+    try:
+        # A private session lets this runner clean up every benchmark
+        # descendant.  PDEATHSIG covers abrupt campaign-worker death despite
+        # that isolation; the child-side PPID check closes the preexec race.
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            bufsize=0,
+            start_new_session=True,
+            preexec_fn=functools.partial(
+                _arm_repairtiming_parent_death, expected_parent_pid),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raw_detail = str(error)
+        sample = raw_detail[:diagnostic_limit]
+        rendered = repr(sample)
+        detail = rendered[:diagnostic_limit]
+        if (
+            len(sample) != len(raw_detail) or
+            len(rendered) > diagnostic_limit
+        ):
+            detail += "... [truncated]"
+        raise MeasurementError(
+            f"could not execute repairtiming benchmark {command_label}: "
+            f"{detail}") from error
+
+    selector = None
+    streams = {}
+    buffers = {}
+    limits = {}
+    returncode = None
+    overflow = None
+    pipe_holder = False
+    unexpected_descendants = False
+    post_exit_deadline = None
+    try:
+        selector = selectors.DefaultSelector()
+        streams = {
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        }
+        buffers = {
+            "stdout": bytearray(),
+            "stderr": bytearray(),
+        }
+        limits = {
+            "stdout": stdout_limit,
+            "stderr": stderr_limit,
+        }
+        for name, stream in streams.items():
+            if stream is None:
+                raise MeasurementError(
+                    f"repairtiming benchmark has no {name} pipe")
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+
+        while selector.get_map():
+            try:
+                events = selector.select(
+                    timeout=REPAIRTIMING_SELECT_POLL_SECONDS)
+            except InterruptedError:
+                continue
+            now = time.monotonic()
+            if process.poll() is not None and post_exit_deadline is None:
+                post_exit_deadline = (
+                    now + REPAIRTIMING_POST_EXIT_DRAIN_SECONDS)
+            if not events:
+                if post_exit_deadline is not None:
+                    pipe_holder = True
+                    break
+                continue
+            for key, unused_mask in events:
+                name = key.data
+                target = buffers[name]
+                remaining = limits[name] - len(target)
+                read_size = min(
+                    REPAIRTIMING_CAPTURE_CHUNK_BYTES, remaining + 1)
+                try:
+                    chunk = os.read(key.fd, read_size)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                target.extend(chunk)
+                if len(target) > limits[name]:
+                    overflow = name
+                    break
+            if overflow is not None:
+                break
+            if process.poll() is not None and post_exit_deadline is None:
+                post_exit_deadline = (
+                    time.monotonic() +
+                    REPAIRTIMING_POST_EXIT_DRAIN_SECONDS
+                )
+            if (
+                post_exit_deadline is not None and
+                selector.get_map() and
+                time.monotonic() >= post_exit_deadline
+            ):
+                pipe_holder = True
+                break
+
+        if overflow is not None:
+            raise MeasurementError(
+                f"repairtiming benchmark {overflow} exceeds its byte limit "
+                f"({limits[overflow]} bytes)")
+        if pipe_holder:
+            raise MeasurementError(
+                "repairtiming benchmark leader exited while a descendant "
+                "held an output pipe open")
+        try:
+            returncode = process.wait(
+                timeout=REPAIRTIMING_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            raise MeasurementError(
+                "repairtiming benchmark closed its output pipes before exit"
+            ) from error
+        unexpected_descendants = _repairtiming_process_group_exists(
+            process.pid)
+    finally:
+        try:
+            _terminate_repairtiming_process_group(process)
+        finally:
+            try:
+                if selector is not None:
+                    selector.close()
+            finally:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+
+    if unexpected_descendants:
+        raise MeasurementError(
+            "repairtiming benchmark left an unexpected descendant")
+    decoded = {}
+    for name, payload in buffers.items():
+        try:
+            decoded[name] = payload.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise MeasurementError(
+                f"repairtiming benchmark emitted non-ASCII {name}") from error
+    stdout = decoded["stdout"]
+    stderr = decoded["stderr"]
+    diagnostic = _repairtiming_diagnostic(
+        stdout, stderr, diagnostic_limit)
+    if returncode != 0:
+        raise MeasurementError(
+            f"repairtiming benchmark {command_label} exited {returncode}: "
+            f"{diagnostic}")
+    if stderr:
+        raise MeasurementError(
+            "repairtiming benchmark wrote unexpected stderr: "
+            f"{diagnostic}")
+    return stdout
+
+
 def repairtiming_probe(
         bench, block_count, block_bytes, repair_arm, *,
         repair_policy=REPAIR_V1_POLICY_NAME,
@@ -2537,7 +2870,7 @@ def repairtiming_probe(
             "--context-sha256", context_sha256,
             "--required-margin", f"{float(required_margin):.17g}",
         ]
-        stdout = peel_codec._run_checked(
+        stdout = _run_repairtiming_checked(
             command, peel_codec.isolated_codec_env())
         if len(stdout) > REPAIRTIMING_NATIVE_STDOUT_BYTE_LIMIT:
             raise MeasurementError(
