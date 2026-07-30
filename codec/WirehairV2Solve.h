@@ -306,15 +306,19 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
-    // Appended common receipts: keep all earlier production-stat member
-    // offsets stable while exposing compaction scan and heapify work to the
-    // production cost model.
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    (defined(WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT) && \
+     WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0)
+    // Experiment receipts.  Keep these absent when both test hooks and heap
+    // compaction are disabled: the zero experiment must preserve the shipped
+    // stats and resume-state layout exactly.  Enabled production experiments
+    // still expose the scan and heapify work needed by physical A/B tooling.
     uint64_t PeelHeapCompactionRebuildColumnProbes = 0;
     uint64_t PeelHeapCompactionHeapifyInputKeys = 0;
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    // Experiment-only lazy-heap diagnostics.  Apart from the two common work
-    // receipts above, the shipped stats layout and ABI do not contain these
-    // fields when test hooks are disabled.
+    // Additional experiment-only lazy-heap diagnostics.  The shipped stats
+    // layout and ABI do not contain these fields when test hooks are disabled.
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
     // The density gate is checked once at each eligible pre-compaction

@@ -866,8 +866,11 @@ struct PeelResult
     uint64_t AdjacencyVisits = 0u;
     uint64_t RowScanSteps = 0u;
     uint64_t HeapOperations = 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
     uint64_t HeapCompactionRebuildColumnProbes = 0u;
     uint64_t HeapCompactionHeapifyInputKeys = 0u;
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint64_t HeapResolvedStalePops = 0u;
     uint64_t HeapUnresolvedCountMismatchPops = 0u;
@@ -7772,10 +7775,13 @@ static WirehairResult SolvePrecodeSystemImpl(
         st.PeelAdjacencyVisits = peel.AdjacencyVisits;
         st.PeelRowScanSteps = peel.RowScanSteps;
         st.PeelHeapOperations = peel.HeapOperations;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
         st.PeelHeapCompactionRebuildColumnProbes =
             peel.HeapCompactionRebuildColumnProbes;
         st.PeelHeapCompactionHeapifyInputKeys =
             peel.HeapCompactionHeapifyInputKeys;
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         st.PeelHeapResolvedStalePops =
             peel.HeapResolvedStalePops;
