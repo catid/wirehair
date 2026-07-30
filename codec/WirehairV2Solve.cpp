@@ -36,10 +36,28 @@
 namespace wirehair_v2 {
 namespace {
 
+// Snapshot of the ambient packet-row equation policy for one synchronous
+// top-level operation.  Test hooks are thread-local, so this must remain
+// stack-only and must never be persisted in an encoder, decoder, or resume
+// state.  Production builds deliberately leave the type empty: there is no
+// runtime hook flag or branch in the frozen equation path.
+struct PacketRowPolicy
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint32_t RowSeedMultiplier = 1u;
+    uint32_t OddPeelSeedXor = 0u;
+    bool RowSeedAvalanche = false;
+    bool DegreeStateValid = true;
+    bool DegreeActive = false;
+    std::array<double, 64u> DegreeCdf = {};
+#endif
+};
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
+thread_local uint64_t* SolvePacketRowPolicyCaptureCounter = nullptr;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 thread_local int CertifiedPackedResidualTestModeValue = 0;
 thread_local int64_t
@@ -294,9 +312,9 @@ bool ActivePeelDegreeCdf(const std::vector<double>*& cdf)
     The N/2 and kMaxPeelCount clamps are applied exactly as the stock path
     applies them, so an override cannot change the row-weight invariant.
 */
-template<bool CountComparisons>
+template<bool CountComparisons, class Cdf>
 uint32_t SamplePeelDegreeOverrideImpl(
-    const std::vector<double>& cdf,
+    const Cdf& cdf,
     uint32_t rv,
     uint16_t peel_column_count,
     uint32_t fallback,
@@ -360,8 +378,9 @@ uint32_t SamplePeelDegreeOverrideImpl(
     return weight;
 }
 
+template<class Cdf>
 uint32_t SamplePeelDegreeOverride(
-    const std::vector<double>& cdf,
+    const Cdf& cdf,
     uint32_t rv,
     uint16_t peel_column_count,
     uint32_t fallback)
@@ -372,26 +391,82 @@ uint32_t SamplePeelDegreeOverride(
         cdf, rv, peel_column_count, fallback, nullptr);
 }
 
-bool ApplyPeelDegreeOverride(
+void ApplyPeelDegreeOverride(
+    const PacketRowPolicy& policy,
     uint32_t row_seed,
     uint32_t p_seed,
     uint16_t peel_column_count,
     wirehair::PeelRowParameters& params)
 {
-    const std::vector<double>* cdf = nullptr;
-    if (!ActivePeelDegreeCdf(cdf)) {
-        return false;
-    }
-    if (cdf == nullptr || peel_column_count == 0u) {
-        return true;
+    if (!policy.DegreeActive || peel_column_count == 0u) {
+        return;
     }
     wirehair::PCGRandom prng;
     prng.Seed(row_seed, p_seed);
     params.PeelCount = (uint16_t)SamplePeelDegreeOverride(
-        *cdf, prng.Next(), peel_column_count, params.PeelCount);
-    return true;
+        policy.DegreeCdf,
+        prng.Next(),
+        peel_column_count,
+        params.PeelCount);
 }
 #endif
+
+bool CapturePacketRowPolicy(PacketRowPolicy& policy)
+{
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    policy.RowSeedMultiplier = PacketRowSeedMultiplier;
+    policy.OddPeelSeedXor = OddPacketPeelSeedXor;
+    policy.RowSeedAvalanche = PacketRowSeedAvalanche;
+    policy.DegreeActive = false;
+    const std::vector<double>* cdf = nullptr;
+    policy.DegreeStateValid = ActivePeelDegreeCdf(cdf);
+    if (policy.DegreeStateValid && cdf != nullptr)
+    {
+        if (cdf->size() != policy.DegreeCdf.size())
+        {
+            policy.DegreeStateValid = false;
+            return false;
+        }
+        std::copy(cdf->begin(), cdf->end(), policy.DegreeCdf.begin());
+        policy.DegreeActive = true;
+    }
+    return policy.DegreeStateValid;
+#else
+    (void)policy;
+    return true;
+#endif
+}
+
+bool CaptureSolvePacketRowPolicy(PacketRowPolicy& policy)
+{
+    const bool captured = CapturePacketRowPolicy(policy);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    if (SolvePacketRowPolicyCaptureCounter)
+    {
+        ++*SolvePacketRowPolicyCaptureCounter;
+        // The exact-once self-test installs a degree-three TLS law before
+        // entering solve.  Change the ambient law to degree one only AFTER
+        // the solve has taken its owned snapshot.  Correct packet iteration
+        // continues to use the captured degree-three policy; any accidental
+        // per-row recapture becomes observably four rather than six row
+        // references and cannot false-pass merely because this wrapper was
+        // called once.
+        if (captured &&
+            PeelDegreeOverride.IsSet &&
+            PeelDegreeOverride.Valid &&
+            PeelDegreeOverride.Cdf.size() == kPeelOverrideCdfSize)
+        {
+            std::fill(
+                PeelDegreeOverride.Cdf.begin(),
+                PeelDegreeOverride.Cdf.end(),
+                1.0);
+            PeelDegreeOverrideFingerprint =
+                FingerprintPeelDegreeCdf(PeelDegreeOverride.Cdf);
+        }
+    }
+#endif
+    return captured;
+}
 
 static void MaybeFailCertifiedPackedResumeAllocation()
 {
@@ -546,11 +621,13 @@ void CaptureMixedNullWitness(
     MixedNullWitnessDiagnostic* sink) noexcept;
 #endif
 
-inline uint32_t PacketRowSeedForBlockId(uint32_t block_id)
+inline uint32_t PacketRowSeedForBlockId(
+    uint32_t block_id,
+    const PacketRowPolicy& policy)
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    uint32_t seed = block_id * PacketRowSeedMultiplier;
-    if (PacketRowSeedAvalanche)
+    uint32_t seed = block_id * policy.RowSeedMultiplier;
+    if (policy.RowSeedAvalanche)
     {
         seed = (seed ^ (seed >> 16)) * UINT32_C(0x7feb352d);
         seed = (seed ^ (seed >> 15)) * UINT32_C(0x846ca68b);
@@ -558,39 +635,39 @@ inline uint32_t PacketRowSeedForBlockId(uint32_t block_id)
     }
     return seed;
 #else
+    (void)policy;
     return block_id;
 #endif
 }
 
 inline uint32_t PacketPeelSeedForBlockId(
     uint32_t block_id,
-    const PacketRowConfig& config)
+    const PacketRowConfig& config,
+    const PacketRowPolicy& policy)
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if ((block_id & 1u) != 0u) {
-        return config.PeelSeed ^ OddPacketPeelSeedXor;
+        return config.PeelSeed ^ policy.OddPeelSeedXor;
     }
 #else
     (void)block_id;
+    (void)policy;
 #endif
     return config.PeelSeed;
 }
 
-bool InitializePacketRowParameters(
+void InitializePacketRowParameters(
     uint32_t source_count,
     uint32_t precode_count,
     uint32_t block_id,
     const PacketRowConfig& config,
-    const PacketRowRuntime& runtime,
+    const PacketRowPolicy& policy,
     wirehair::PeelRowParameters& params)
 {
-    if (!runtime.IsValidFor(
-            source_count, precode_count, config.MixCount))
-    {
-        return false;
-    }
-    const uint32_t row_seed = PacketRowSeedForBlockId(block_id);
-    const uint32_t peel_seed = PacketPeelSeedForBlockId(block_id, config);
+    const uint32_t row_seed =
+        PacketRowSeedForBlockId(block_id, policy);
+    const uint32_t peel_seed =
+        PacketPeelSeedForBlockId(block_id, config, policy);
     params.Initialize(
         row_seed,
         peel_seed,
@@ -600,31 +677,60 @@ bool InitializePacketRowParameters(
     // V2 overrides the weight AFTER V1 has produced the row, so WirehairTools
     // and the wire-format row layout stay untouched; only PeelCount moves, and
     // only when an override is installed.
-    if (!ApplyPeelDegreeOverride(
-            row_seed, peel_seed, (uint16_t)source_count, params))
+    ApplyPeelDegreeOverride(
+        policy,
+        row_seed,
+        peel_seed,
+        (uint16_t)source_count,
+        params);
+#endif
+}
+
+struct PacketRowRuntimeValues
+{
+    uint16_t SourcePrimeValue = 0u;
+    uint16_t PrecodePrimeValue = 0u;
+
+    uint16_t SourcePrime() const { return SourcePrimeValue; }
+    uint16_t PrecodePrime() const { return PrecodePrimeValue; }
+};
+
+bool ValidatePacketRowRuntime(
+    uint32_t source_count,
+    uint32_t precode_count,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    PacketRowRuntimeValues& values)
+{
+    if (!runtime.IsValidFor(
+            source_count, precode_count, config.MixCount))
     {
         return false;
     }
-#endif
+    values.SourcePrimeValue = runtime.SourcePrime();
+    values.PrecodePrimeValue = runtime.PrecodePrime();
     return true;
 }
 
 template<class Prepare, class Append>
-bool ForEachPacketMatrixColumn(
+bool ForEachPacketMatrixColumnCore(
     uint32_t source_count,
     uint32_t precode_count,
     uint32_t block_id,
     const PacketRowConfig& config,
-    const PacketRowRuntime& runtime,
+    const PacketRowPolicy& policy,
+    const PacketRowRuntimeValues& runtime,
     const Prepare& prepare,
     const Append& append)
 {
     wirehair::PeelRowParameters params;
-    if (!InitializePacketRowParameters(
-            source_count, precode_count, block_id, config, runtime, params))
-    {
-        return false;
-    }
+    InitializePacketRowParameters(
+        source_count,
+        precode_count,
+        block_id,
+        config,
+        policy,
+        params);
     if (!prepare((size_t)params.PeelCount + config.MixCount)) {
         return false;
     }
@@ -646,6 +752,65 @@ bool ForEachPacketMatrixColumn(
         append(source_count + mix.Columns[i]);
     }
     return true;
+}
+
+template<class Prepare, class Append>
+bool ForEachPacketMatrixColumnWithPolicy(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowPolicy& policy,
+    const PacketRowRuntime& runtime,
+    const Prepare& prepare,
+    const Append& append)
+{
+    PacketRowRuntimeValues values;
+    if (!ValidatePacketRowRuntime(
+            source_count, precode_count, config, runtime, values))
+    {
+        return false;
+    }
+    return ForEachPacketMatrixColumnCore(
+        source_count,
+        precode_count,
+        block_id,
+        config,
+        policy,
+        values,
+        prepare,
+        append);
+}
+
+template<class Prepare, class Append>
+bool ForEachPacketMatrixColumn(
+    uint32_t source_count,
+    uint32_t precode_count,
+    uint32_t block_id,
+    const PacketRowConfig& config,
+    const PacketRowRuntime& runtime,
+    const Prepare& prepare,
+    const Append& append)
+{
+    PacketRowRuntimeValues values;
+    if (!ValidatePacketRowRuntime(
+            source_count, precode_count, config, runtime, values))
+    {
+        return false;
+    }
+    PacketRowPolicy policy;
+    if (!CapturePacketRowPolicy(policy)) {
+        return false;
+    }
+    return ForEachPacketMatrixColumnCore(
+        source_count,
+        precode_count,
+        block_id,
+        config,
+        policy,
+        values,
+        prepare,
+        append);
 }
 
 struct PeelResult
@@ -6215,6 +6380,196 @@ uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
 }
+
+bool CheckPacketRowPolicySnapshotForTesting()
+{
+    const auto reset_hooks = [] {
+        (void)SetPacketRowSeedMultiplierForTesting(1u);
+        SetPacketRowSeedAvalancheForTesting(false);
+        SetOddPacketPeelSeedXorForTesting(0u);
+        ClearPeelDegreesForTesting();
+        SolvePacketRowPolicyCaptureCounter = nullptr;
+    };
+    reset_hooks();
+    try
+    {
+        static const uint32_t K = 128u;
+        static const uint32_t P = 32u;
+        static const uint32_t block_id = 17u;
+        PacketRowConfig config;
+        config.PeelSeed = UINT32_C(0x13579bdf);
+        config.MixCount = 3u;
+        PacketRowRuntime runtime;
+        if (!runtime.Initialize(K, P, config.MixCount) ||
+            !SetPacketRowSeedMultiplierForTesting(3u))
+        {
+            reset_hooks();
+            return false;
+        }
+        SetPacketRowSeedAvalancheForTesting(true);
+        SetOddPacketPeelSeedXorForTesting(UINT32_C(0x2468ace0));
+        std::vector<double> first_degree_law(64u, 0.0);
+        first_degree_law[2] = 1.0;
+        if (!SetPeelDegreesForTesting(first_degree_law))
+        {
+            reset_hooks();
+            return false;
+        }
+
+        PacketRowRuntimeValues values;
+        PacketRowPolicy policy;
+        if (!ValidatePacketRowRuntime(K, P, config, runtime, values) ||
+            !CapturePacketRowPolicy(policy))
+        {
+            reset_hooks();
+            return false;
+        }
+
+        std::vector<uint32_t> before;
+        std::vector<uint32_t> after;
+        const auto collect = [&](
+            std::vector<uint32_t>& row) {
+                return ForEachPacketMatrixColumnCore(
+                    K,
+                    P,
+                    block_id,
+                    config,
+                    policy,
+                    values,
+                    [&row](size_t count) {
+                        row.reserve(count);
+                        return true;
+                    },
+                    [&row](uint32_t column) {
+                        row.push_back(column);
+                    });
+            };
+        if (!collect(before))
+        {
+            reset_hooks();
+            return false;
+        }
+
+        // Replace every ambient hook, including the TLS vector that supplied
+        // the PMF.  The second row must still use the owned policy snapshot.
+        (void)SetPacketRowSeedMultiplierForTesting(5u);
+        SetPacketRowSeedAvalancheForTesting(false);
+        SetOddPacketPeelSeedXorForTesting(0u);
+        std::vector<double> second_degree_law(64u, 0.0);
+        second_degree_law[0] = 1.0;
+        const bool stable =
+            SetPeelDegreesForTesting(second_degree_law) &&
+            collect(after);
+
+        const std::vector<uint32_t> changed =
+            GeneratePacketMatrixRowWithRuntime(
+                K, P, block_id, config, runtime);
+        reset_hooks();
+        if (!stable ||
+            before.empty() || before != after ||
+            changed.empty() || changed == before)
+        {
+            return false;
+        }
+
+        // A real multi-packet solve must resolve ambient policy once for the
+        // complete row batch.  Instrument only the solve-scoped capture helper
+        // so ordinary row generation/evaluation timing is not perturbed.
+        static const uint32_t solve_K = 512u;
+        PrecodeSystem system;
+        if (!BuildPrecodeSystem(
+                MakeCertifiedParams(
+                    solve_K, UINT64_C(0x534f4c5645434150)),
+                system))
+        {
+            return false;
+        }
+        const uint32_t solve_P = system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        PacketRowConfig solve_config;
+        solve_config.PeelSeed = UINT32_C(0x91c3e57a);
+        solve_config.MixCount = kCertifiedPacketMixCount;
+        PacketRowRuntime solve_runtime;
+        if (!solve_runtime.Initialize(
+                solve_K, solve_P, solve_config.MixCount))
+        {
+            return false;
+        }
+        static const uint32_t solve_block_bytes = 17u;
+        std::vector<uint8_t> packet_data(
+            (size_t)(solve_K + 64u) * solve_block_bytes);
+        for (size_t i = 0u; i < packet_data.size(); ++i) {
+            packet_data[i] = (uint8_t)(i * 131u + (i >> 5));
+        }
+        std::vector<SolvePacket> packets(solve_K + 64u);
+        for (uint32_t id = 0u; id < packets.size(); ++id)
+        {
+            packets[id].BlockId = id;
+            packets[id].Data =
+                packet_data.data() + (size_t)id * solve_block_bytes;
+        }
+        std::vector<double> solve_degree_law(64u, 0.0);
+        solve_degree_law[2u] = 1.0;
+        if (!SetPeelDegreesForTesting(solve_degree_law))
+        {
+            reset_hooks();
+            return false;
+        }
+        std::vector<uint8_t> expected_intermediate;
+        PrecodeSolveStats expected_stats;
+        const WirehairResult expected_result =
+            SolvePrecodeSystemWithRuntime(
+                system,
+                solve_config,
+                solve_runtime,
+                packets,
+                solve_block_bytes,
+                expected_intermediate,
+                &expected_stats);
+        uint64_t captures = 0u;
+        SolvePacketRowPolicyCaptureCounter = &captures;
+        std::vector<uint8_t> intermediate;
+        PrecodeSolveStats stats;
+        const WirehairResult result = SolvePrecodeSystemWithRuntime(
+            system,
+            solve_config,
+            solve_runtime,
+            packets,
+            solve_block_bytes,
+            intermediate,
+            &stats);
+        SolvePacketRowPolicyCaptureCounter = nullptr;
+        // Prove the post-capture perturbation is itself discriminating: a
+        // normal solve that now snapshots the ambient degree-one law must
+        // build a different number of packet-row references.
+        std::vector<uint8_t> recaptured_intermediate;
+        PrecodeSolveStats recaptured_stats;
+        (void)SolvePrecodeSystemWithRuntime(
+            system,
+            solve_config,
+            solve_runtime,
+            packets,
+            solve_block_bytes,
+            recaptured_intermediate,
+            &recaptured_stats);
+        reset_hooks();
+        return result == expected_result &&
+            captures == 1u &&
+            expected_stats.PacketRows == packets.size() &&
+            stats.PacketRows == packets.size() &&
+            recaptured_stats.PacketRows == packets.size() &&
+            stats.BinaryRowReferences ==
+                expected_stats.BinaryRowReferences &&
+            recaptured_stats.BinaryRowReferences !=
+                expected_stats.BinaryRowReferences &&
+            intermediate == expected_intermediate;
+    }
+    catch (...)
+    {
+        reset_hooks();
+        return false;
+    }
+}
 #endif
 
 void PrecodeSolveResumeState::Clear()
@@ -6463,7 +6818,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketTailPaired(
     uint32_t source_count,
     uint32_t precode_count,
     const PacketRowConfig& config,
-    const PacketRowRuntime& runtime,
+    const PacketRowRuntimeValues& runtime,
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes,
     uint8_t* block_out)
@@ -6521,7 +6876,7 @@ static WH2_PACKET_NOINLINE void EvaluatePacketSetXor(
     uint32_t source_count,
     uint32_t precode_count,
     const PacketRowConfig& config,
-    const PacketRowRuntime& runtime,
+    const PacketRowRuntimeValues& runtime,
     const uint8_t* intermediate_blocks,
     uint32_t block_bytes,
     uint8_t* block_out)
@@ -6568,10 +6923,12 @@ static bool EvaluatePacketBlockImpl(
     const uint32_t K = system.Params.BlockCount;
     const uint64_t P_wide = (uint64_t)system.Params.Staircase +
         system.Params.DenseRows + system.Params.HeavyRows;
+    PacketRowRuntimeValues runtime_values;
     if (!intermediate_blocks ||
         !block_out || block_bytes == 0u || block_bytes > 0x7fffffffu ||
         P_wide > UINT32_MAX ||
-        !runtime.IsValidFor(K, (uint32_t)P_wide, config.MixCount))
+        !ValidatePacketRowRuntime(
+            K, (uint32_t)P_wide, config, runtime, runtime_values))
     {
         return false;
     }
@@ -6597,64 +6954,17 @@ static bool EvaluatePacketBlockImpl(
     }
     const uint32_t P = (uint32_t)P_wide;
 
-    wirehair::PeelRowParameters params;
-    const uint32_t packet_row_seed = PacketRowSeedForBlockId(block_id);
-    const uint32_t packet_peel_seed = PacketPeelSeedForBlockId(block_id, config);
-    params.Initialize(
-        packet_row_seed,
-        packet_peel_seed,
-        (uint16_t)K,
-        (uint16_t)P);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    /*
-        The peel-degree override MUST be applied here as well as in
-        InitializePacketRowParameters.
-
-        This is the ENCODER's row builder and that one is the DECODER's, and an
-        override applied to only one of them makes the two disagree about the
-        degree of every block id whose weight the override moves.  The encoder
-        then emits a packet built from one equation while the solver builds a
-        different one, the solve returns Wirehair_Success over a system that
-        does not describe the data, and the payload comes back corrupt.
-
-        That is not hypothetical -- it was the state of this file, and it made
-        every non-stock distribution fail 100% end to end while looking like a
-        large win in the precode paths, which build and solve through this same
-        overridden routine and so never disagree with themselves.
-
-        THE IDENTITY CONTROL CANNOT CATCH THIS, which is why it survived a full
-        campaign.  Feeding the stock PMF maps to the stock degrees on BOTH
-        sides by construction, so the two paths agree and the control passes;
-        the control is a faithful test of one hook and is structurally blind to
-        an asymmetry between two, because its only input is the fixed point of
-        both.  Any future hook that alters row construction has to be applied
-        at every site that builds a row, and the check for that is a NON-stock
-        distribution decoding end to end, not a stock one.
-
-        WHAT THE ASYMMETRY LOOKED LIKE FROM THE OUTSIDE, recorded because it was
-        mistaken for physics for most of a day: every candidate distribution
-        "failed 100% of trials", always all-or-nothing and never partial, because
-        the corruption is deterministic in block id.  That produced a published
-        "decodable region" table whose tolerances were really the L1 distance at
-        which the first IN-RANGE block id's sampled degree flips -- so p1 x1.5 at
-        L1 0.00772 passed (first flip at id 159, out of range) while P(2) -1% at
-        the SMALLER L1 0.00503 failed (first flip at id 26).  Distance did not
-        predict; flip position did.  With both sides agreeing, distributions as
-        far as L1 0.676 from stock decode every trial at zero overhead.
-
-        AND NOTE WHAT THE END-TO-END GATE MUST READ.  After this fix, `compare`'s
-        FAIL column does not discriminate peel distributions at all: an
-        all-mass-on-degree-1 peel matrix still reports 0 failures, because the
-        codec spends OVERHEAD rather than failing.  The discriminating column is
-        OH_mean (with OH95) -- all-degree-1 costs 5.02 extra packets where the
-        shipped law costs 0.0000.  A gate reading FAIL is vacuous.
-    */
-    if (!ApplyPeelDegreeOverride(
-            packet_row_seed, packet_peel_seed, (uint16_t)K, params))
-    {
+    PacketRowPolicy policy;
+    if (!CapturePacketRowPolicy(policy)) {
         return false;
     }
-#endif
+    wirehair::PeelRowParameters params;
+    // Encoder evaluation and decoder row generation deliberately share this
+    // sole row-parameter initializer.  A non-stock policy must never be
+    // applied to one side only: solve success does not prove that the recovered
+    // bytes satisfy the packets that the encoder actually emitted.
+    InitializePacketRowParameters(
+        K, P, block_id, config, policy, params);
     uint64_t operations = 1u;
     // The existing schedules are already optimal until the row contains six
     // total terms.  Above that crossover, pairing the complete tail removes
@@ -6672,12 +6982,12 @@ static bool EvaluatePacketBlockImpl(
             packet_terms <= kPacketSetXorMaxTerms)
         {
             EvaluatePacketSetXor(
-                params, K, P, config, runtime, intermediate_blocks,
+                params, K, P, config, runtime_values, intermediate_blocks,
                 block_bytes, block_out);
         }
         else {
             EvaluatePacketTailPaired(
-                params, K, P, config, runtime, intermediate_blocks,
+                params, K, P, config, runtime_values, intermediate_blocks,
                 block_bytes, block_out);
         }
         if (block_ops_out) {
@@ -6686,13 +6996,13 @@ static bool EvaluatePacketBlockImpl(
         return true;
     }
     wirehair::PeelRowIterator source(
-        params, (uint16_t)K, runtime.SourcePrime());
+        params, (uint16_t)K, runtime_values.SourcePrime());
     const uint8_t* first_source =
         intermediate_blocks + (size_t)source.GetColumn() * block_bytes;
     if (config.MixCount == kCertifiedPacketMixCount)
     {
         const wirehair::RowMixIterator mix(
-            params, (uint16_t)P, runtime.PrecodePrime());
+            params, (uint16_t)P, runtime_values.PrecodePrime());
         // The certified three-mix contract mirrors the production codec's
         // fused evaluation schedule: initialize from two sources with addset
         // (or source 0 + mix 0 for a weight-one row), then consume the final
@@ -6745,7 +7055,7 @@ static bool EvaluatePacketBlockImpl(
     else if (config.MixCount == 2u)
     {
         const wirehair::RowMixIterator mix(
-            params, (uint16_t)P, runtime.PrecodePrime());
+            params, (uint16_t)P, runtime_values.PrecodePrime());
         // The two-mix packet contract has the same fused opportunities:
         // initialize from two sources when possible, then consume both mix
         // terms in one destination pass.  A weight-one source row instead
@@ -7016,6 +7326,7 @@ static WirehairResult SolvePrecodeSystemImpl(
     {
         return Wirehair_UnsupportedPlatform;
     }
+    PacketRowPolicy policy;
 
     const auto terminal_error = [&]() -> WirehairResult {
         if (stats) {
@@ -7081,15 +7392,23 @@ static WirehairResult SolvePrecodeSystemImpl(
             rows.AppendRow(columns, nullptr);
             st.BinaryRowReferences += columns.size();
         }
+        // This is the first point at which the old path resolved ambient row
+        // policy.  Capture once for the packet batch, while still inside the
+        // solve's allocation boundary because first-use environment parsing
+        // may allocate.
+        if (!CaptureSolvePacketRowPolicy(policy)) {
+            return Wirehair_InvalidInput;
+        }
         for (const SolvePacket& packet : packets)
         {
             size_t packet_references = 0u;
             rows.BeginRow(packet.Data);
-            const bool generated = ForEachPacketMatrixColumn(
+            const bool generated = ForEachPacketMatrixColumnWithPolicy(
                 K,
                 P,
                 packet.BlockId,
                 config,
+                policy,
                 runtime,
                 [&packet_references](size_t count) {
                     packet_references = count;

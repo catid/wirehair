@@ -953,6 +953,25 @@ bool CheckPacketEvaluationFusion()
                 "solve: public runtime solve skipped system validation\n");
             return false;
         }
+        const std::vector<double> invalid_degree_law(1u, -1.0);
+        const bool invalid_hook_active =
+            !wirehair_v2::SetPeelDegreesForTesting(invalid_degree_law) &&
+            !wirehair_v2::PeelDegreeConfigurationValidForTesting();
+        stats.PacketRows = UINT32_C(0x76543210);
+        const WirehairResult invalid_hook_result =
+            wirehair_v2::SolvePrecodeSystemWithRuntime(
+                system, config, runtime, packets, block_bytes,
+                solved, &stats);
+        wirehair_v2::ClearPeelDegreesForTesting();
+        if (!invalid_hook_active ||
+            invalid_hook_result != Wirehair_InvalidInput ||
+            solved != solved_before ||
+            stats.PacketRows != UINT32_C(0x76543210))
+        {
+            std::fprintf(stderr,
+                "solve: invalid packet-row hook was not atomic\n");
+            return false;
+        }
         if (runtime.Initialize(1u, P, config.MixCount) ||
             runtime.IsValidFor(K, P, config.MixCount) ||
             runtime.SourcePrime() != 0u || runtime.PrecodePrime() != 0u)
@@ -1432,6 +1451,192 @@ bool CheckPacketRuntimeBoundaries()
         }
     }
     std::printf("packet runtime domain boundaries: PASS\n");
+    return true;
+}
+
+bool CheckConcurrentPacketRowPolicies()
+{
+    static const uint32_t K = 512u;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(
+            wirehair_v2::MakeCertifiedParams(
+                K, UINT64_C(0x544c53524f57534e)),
+            system))
+    {
+        return false;
+    }
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x7a91c3e5);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PacketRowRuntime runtime;
+    if (!runtime.Initialize(K, P, config.MixCount)) {
+        return false;
+    }
+    uint8_t zero = 0u;
+    std::vector<wirehair_v2::SolvePacket> packets(K + 64u);
+    for (uint32_t id = 0u; id < packets.size(); ++id)
+    {
+        packets[id].BlockId = id;
+        packets[id].Data = &zero;
+    }
+
+    struct Outcome
+    {
+        WirehairResult Result = Wirehair_Error;
+        std::vector<uint8_t> Intermediate;
+        wirehair_v2::PrecodeSolveStats Stats;
+        bool Ok = false;
+    };
+    const auto reset_hooks = [] {
+        (void)wirehair_v2::SetPacketRowSeedMultiplierForTesting(1u);
+        wirehair_v2::SetPacketRowSeedAvalancheForTesting(false);
+        wirehair_v2::SetOddPacketPeelSeedXorForTesting(0u);
+        wirehair_v2::ClearPeelDegreesForTesting();
+    };
+    struct ConcurrentSync
+    {
+        std::atomic<uint32_t> Configured{0u};
+        std::atomic<bool> Cancel{false};
+    };
+    const auto run = [&](
+        uint32_t arm,
+        Outcome& out,
+        ConcurrentSync* sync) {
+        try
+        {
+            std::vector<double> degree_law(64u, 0.0);
+            degree_law[arm == 0u ? 2u : 0u] = 1.0;
+            if (!wirehair_v2::SetPacketRowSeedMultiplierForTesting(
+                    arm == 0u ? 3u : 5u) ||
+                !wirehair_v2::SetPeelDegreesForTesting(degree_law))
+            {
+                if (sync) {
+                    sync->Cancel.store(true, std::memory_order_release);
+                }
+                reset_hooks();
+                return;
+            }
+            wirehair_v2::SetPacketRowSeedAvalancheForTesting(arm != 0u);
+            wirehair_v2::SetOddPacketPeelSeedXorForTesting(
+                arm == 0u ?
+                    UINT32_C(0x11111111) : UINT32_C(0x22222222));
+            if (sync)
+            {
+                sync->Configured.fetch_add(1u, std::memory_order_acq_rel);
+                while (sync->Configured.load(std::memory_order_acquire) != 2u &&
+                       !sync->Cancel.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                if (sync->Cancel.load(std::memory_order_acquire))
+                {
+                    reset_hooks();
+                    return;
+                }
+            }
+            out.Result = wirehair_v2::SolvePrecodeSystemWithRuntime(
+                system,
+                config,
+                runtime,
+                packets,
+                0u,
+                out.Intermediate,
+                &out.Stats);
+            out.Ok = true;
+        }
+        catch (...) {
+            if (sync) {
+                sync->Cancel.store(true, std::memory_order_release);
+            }
+            out.Ok = false;
+        }
+        reset_hooks();
+    };
+    const auto same_deterministic_stats = [](
+        wirehair_v2::PrecodeSolveStats left,
+        wirehair_v2::PrecodeSolveStats right) {
+            left.BuildNanoseconds = right.BuildNanoseconds = 0u;
+            left.PeelNanoseconds = right.PeelNanoseconds = 0u;
+            left.ProjectNanoseconds = right.ProjectNanoseconds = 0u;
+            left.ResidualNanoseconds = right.ResidualNanoseconds = 0u;
+            left.BackSubNanoseconds = right.BackSubNanoseconds = 0u;
+            return SameExactSolveStats(left, right);
+        };
+
+    Outcome expected[2];
+    run(0u, expected[0], nullptr);
+    run(1u, expected[1], nullptr);
+    if (!expected[0].Ok || !expected[1].Ok ||
+        expected[0].Stats.BinaryRowReferences ==
+            expected[1].Stats.BinaryRowReferences)
+    {
+        reset_hooks();
+        std::fprintf(stderr,
+            "solve: concurrent packet-row policy controls were not distinct\n");
+        return false;
+    }
+
+    Outcome actual[2];
+    ConcurrentSync sync;
+    std::atomic<uint32_t> ready{0u};
+    std::atomic<bool> start{false};
+    std::thread workers[2];
+    try
+    {
+        workers[0] = std::thread([&] {
+            ready.fetch_add(1u, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            run(0u, actual[0], &sync);
+        });
+        workers[1] = std::thread([&] {
+            ready.fetch_add(1u, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            run(1u, actual[1], &sync);
+        });
+    }
+    catch (...)
+    {
+        sync.Cancel.store(true, std::memory_order_release);
+        start.store(true, std::memory_order_release);
+        for (std::thread& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        reset_hooks();
+        std::fprintf(stderr,
+            "solve: concurrent packet-row thread launch failed\n");
+        return false;
+    }
+    while (ready.load(std::memory_order_acquire) != 2u) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    workers[0].join();
+    workers[1].join();
+    reset_hooks();
+
+    for (uint32_t arm = 0u; arm < 2u; ++arm)
+    {
+        if (!actual[arm].Ok ||
+            actual[arm].Result != expected[arm].Result ||
+            actual[arm].Intermediate != expected[arm].Intermediate ||
+            !same_deterministic_stats(
+                actual[arm].Stats, expected[arm].Stats))
+        {
+            std::fprintf(stderr,
+                "solve: concurrent packet-row TLS isolation failed arm=%u\n",
+                arm);
+            return false;
+        }
+    }
+    std::printf("concurrent packet-row TLS policy isolation: PASS\n");
     return true;
 }
 
@@ -5798,7 +6003,17 @@ int main(int argc, char** argv)
     ok = CheckPacketRowInto() && ok;
     ok = CheckOddPacketPeelSeedInterleave() && ok;
     ok = CheckPacketRowSeedPermutation() && ok;
+    if (!wirehair_v2::CheckPacketRowPolicySnapshotForTesting())
+    {
+        std::fprintf(stderr,
+            "packet row policy snapshot: FAILED\n");
+        ok = false;
+    }
+    else {
+        std::printf("packet row policy snapshot: PASS\n");
+    }
     ok = CheckPacketRuntimeBoundaries() && ok;
+    ok = CheckConcurrentPacketRowPolicies() && ok;
     ok = CheckTinyDenseOracle() && ok;
     ok = CheckHeavyCoefficientBoundaryOracle() && ok;
     ok = CheckCertifiedPackedResidualDispatch() && ok;

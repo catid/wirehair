@@ -139,6 +139,12 @@ void SetCertifiedPackedResumeAllocationFailureCountdownForTesting(
     reference kernels across widths and scale specials.
 */
 bool CheckTinyMixedScalarHelpersForTesting();
+
+/**
+    Prove one operation's captured packet-row policy owns its hook snapshot
+    and one multi-packet solve captures exactly one policy for the row batch.
+*/
+bool CheckPacketRowPolicySnapshotForTesting();
 #endif
 
 struct PacketRowConfig
@@ -389,15 +395,16 @@ void SetPacketRowSeedAvalancheForTesting(bool enabled);
     because a comment asserting an artefact, in the file a reader reaches
     first, is worse than no comment.
 
-    THE BUG, and the reason this hook needs applying in TWO places.  The
-    override was originally installed only in InitializePacketRowParameters,
-    the DECODER's row builder.  EvaluatePacketBlockImpl builds the ENCODER's
-    rows and called PeelRowParameters::Initialize raw.  So with any override
-    active the encoder emitted packets built from stock degrees while the
-    solver built equations from overridden ones; every block id whose degree
-    moved produced a wrong equation, the solve returned Wirehair_Success over a
-    system that did not describe the data, and the payload came back corrupt.
-    Deterministic in block id, hence always 0/N or N/N and never partial.
+    THE BUG, and the reason both consumers now use ONE canonical initializer.
+    The override was originally installed only in the DECODER's row builder.
+    The ENCODER built its rows with PeelRowParameters::Initialize directly.
+    So with any override active the encoder emitted packets built from stock
+    degrees while the solver built equations from overridden ones; every block
+    id whose degree moved produced a wrong equation, the solve returned
+    Wirehair_Success over a system that did not describe the data, and the
+    payload came back corrupt.  Deterministic in block id, hence always 0/N or
+    N/N and never partial.  Keeping the policy in one initializer prevents a
+    future hook from being added to only one side again.
 
     WHY THE IDENTITY GATE ABOVE CANNOT CATCH IT.  Stock maps to stock degrees
     on both sides by construction, so the two paths agree and the control
