@@ -251,6 +251,10 @@ bool SameStats(
         a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
         a.PeelRowScanSteps == b.PeelRowScanSteps &&
         a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.PeelHeapCompactionRebuildColumnProbes ==
+            b.PeelHeapCompactionRebuildColumnProbes &&
+        a.PeelHeapCompactionHeapifyInputKeys ==
+            b.PeelHeapCompactionHeapifyInputKeys &&
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&

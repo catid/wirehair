@@ -864,6 +864,8 @@ struct PeelResult
     uint64_t AdjacencyVisits = 0u;
     uint64_t RowScanSteps = 0u;
     uint64_t HeapOperations = 0u;
+    uint64_t HeapCompactionRebuildColumnProbes = 0u;
+    uint64_t HeapCompactionHeapifyInputKeys = 0u;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint64_t HeapResolvedStalePops = 0u;
     uint64_t HeapUnresolvedCountMismatchPops = 0u;
@@ -884,8 +886,6 @@ struct PeelResult
     uint32_t HeapCompactions = 0u;
     uint64_t HeapCompactionInputKeys = 0u;
     uint64_t HeapCompactionOutputKeys = 0u;
-    uint64_t HeapCompactionRebuildColumnProbes = 0u;
-    uint64_t HeapCompactionHeapifyKeys = 0u;
 #endif
 };
 
@@ -6168,10 +6168,14 @@ PeelResult PeelBinaryRowsImplementation(
                             std::make_heap(
                                 degree_two_heap.begin(),
                                 degree_two_heap.end());
-                            // HeapOperations charges logical rebuild
-                            // insertions, while the separate receipts below
-                            // expose the full column scan and make_heap input.
-                            out.HeapOperations += degree_two_heap.size();
+                            // C counts the original-column probes in the
+                            // rebuild scan; M counts retained keys presented
+                            // to make_heap.  Neither operation is a push_heap,
+                            // so neither belongs in HeapOperations.
+                            out.HeapCompactionRebuildColumnProbes +=
+                                column_count;
+                            out.HeapCompactionHeapifyInputKeys +=
+                                degree_two_heap.size();
                             CAT_DEBUG_ASSERT(
                                 degree_two_heap.size() <= post_pop_keys);
                             CAT_DEBUG_ASSERT(
@@ -6198,10 +6202,6 @@ PeelResult PeelBinaryRowsImplementation(
                             ++out.HeapCompactions;
                             out.HeapCompactionInputKeys = post_pop_keys;
                             out.HeapCompactionOutputKeys =
-                                degree_two_heap.size();
-                            out.HeapCompactionRebuildColumnProbes =
-                                column_count;
-                            out.HeapCompactionHeapifyKeys =
                                 degree_two_heap.size();
 #endif
                         }
@@ -7751,6 +7751,10 @@ static WirehairResult SolvePrecodeSystemImpl(
         st.PeelAdjacencyVisits = peel.AdjacencyVisits;
         st.PeelRowScanSteps = peel.RowScanSteps;
         st.PeelHeapOperations = peel.HeapOperations;
+        st.PeelHeapCompactionRebuildColumnProbes =
+            peel.HeapCompactionRebuildColumnProbes;
+        st.PeelHeapCompactionHeapifyInputKeys =
+            peel.HeapCompactionHeapifyInputKeys;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
         st.PeelHeapResolvedStalePops =
             peel.HeapResolvedStalePops;
@@ -7789,10 +7793,6 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapCompactionInputKeys;
         st.PeelHeapCompactionOutputKeys =
             peel.HeapCompactionOutputKeys;
-        st.PeelHeapCompactionRebuildColumnProbes =
-            peel.HeapCompactionRebuildColumnProbes;
-        st.PeelHeapCompactionHeapifyKeys =
-            peel.HeapCompactionHeapifyKeys;
 #endif
         if (peel.PeelOrder.size() + peel.InactiveOrder.size() != L) {
             return terminal_error();

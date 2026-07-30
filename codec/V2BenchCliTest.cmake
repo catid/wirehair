@@ -4104,9 +4104,24 @@ endif()
 # multiply-add branch never ran and its BlockMulAdds were never counted
 # (~1.7% low, with all nineteen other counter columns still matching).
 #
-# precodecost emits the full per-cell counter receipt.  Its structural and
-# counter columns are the first 26 fields of every data row; the remaining
-# fields are wall-clock timings and are not reproducible.
+# precodecost emits the full per-cell counter receipt.  Its original
+# structural and counter columns are fields 0..25 of every data row.  The
+# compaction C/M counters are append-only fields 37 and 38; fields 26..36
+# remain the nine wall-clock timings and two activity flags and are not
+# reproducible counters.
+set(precodecost_counter_schema
+    "wirehair.wh2.precodecost.counters.v2")
+string(CONCAT precodecost_columns
+    "S,H,D2,scale,cell,ok,L,inact,packet_rows,peeled,residual_rows,"
+    "residual_rank,binary_rank,block_xors,block_muladds,block_copies,"
+    "block_zero_fills,peel_adjacency_visits,peel_row_scan_steps,"
+    "peel_heap_ops,projection_word_xors,residual_coeff_word_xors,"
+    "residual_coeff_byte_ops,binary_row_refs,binary_row_bytes,"
+    "binary_adj_bytes,total_ns,sysbuild_ns,runtime_ns,solve_ns,"
+    "solve_build_ns,solve_peel_ns,solve_project_ns,solve_residual_ns,"
+    "solve_backsub_ns,shape,peel,"
+    "peel_heap_compaction_rebuild_column_probes,"
+    "peel_heap_compaction_heapify_input_keys")
 function(precodecost_counters out_var)
     run_bench(result out err precodecost ${ARGN})
     if(NOT result MATCHES "^-?[0-9]+$" OR NOT result EQUAL 0)
@@ -4114,6 +4129,34 @@ function(precodecost_counters out_var)
             "precodecost failed: ${ARGN}\nstdout=${out}\nstderr=${err}")
     endif()
     reject_sanitizer("${out}${err}" "precodecost counters: ${ARGN}")
+    string(REGEX MATCH "^[^\n]*" manifest "${out}")
+    set(schema_suffix ",counter_schema=${precodecost_counter_schema}")
+    string(LENGTH "${manifest}" manifest_length)
+    string(LENGTH "${schema_suffix}" schema_suffix_length)
+    math(EXPR schema_position
+        "${manifest_length} - ${schema_suffix_length}")
+    if(schema_position LESS 0)
+        set(actual_schema_suffix "")
+    else()
+        string(SUBSTRING "${manifest}" ${schema_position} -1
+            actual_schema_suffix)
+    endif()
+    if(NOT "${actual_schema_suffix}" STREQUAL "${schema_suffix}")
+        message(FATAL_ERROR
+            "precodecost counter schema banner changed: ${ARGN}\n"
+            "manifest=${manifest}")
+    endif()
+    string(FIND "${out}" "\n${precodecost_columns}\n" header_position)
+    if(header_position EQUAL -1)
+        message(FATAL_ERROR
+            "precodecost column schema changed: ${ARGN}\nstdout=${out}")
+    endif()
+    string(REPLACE "," ";" header_fields "${precodecost_columns}")
+    list(LENGTH header_fields header_width)
+    if(NOT header_width EQUAL 39)
+        message(FATAL_ERROR
+            "precodecost test column contract has width ${header_width}")
+    endif()
     # Data rows start with the config's S; the receipt line starts with '#'
     # and the column header with 'S'.  Rows contain no semicolons, so
     # collecting them with MATCHALL cannot be confused by CMake's list
@@ -4122,22 +4165,21 @@ function(precodecost_counters out_var)
     string(REGEX MATCHALL "\n[0-9][^\n]*" rows "\n${out}")
     foreach(row IN LISTS rows)
         string(STRIP "${row}" row)
-        # CMake's regex engine has no {n} repetition, so drop the trailing
-        # non-counter fields one at a time: nine wall-clock timings
-        # (total_ns..solve_backsub_ns) and the two trailing activity flags,
-        # `shape` and `peel`.  The count must track the row, and it did not:
-        # it still said nine after `shape` was appended, so total_ns was being
-        # compared as if it were a counter.  That never showed up because this
-        # file aborts earlier, at the --mixed-gf16-rows expectation, which went
-        # stale when kMixedGF16RowsMin became 0.
-        foreach(ignored RANGE 1 11)
-            if(NOT row MATCHES ",[^,]*$")
-                message(FATAL_ERROR
-                    "unexpected precodecost row shape: ${row}")
-            endif()
-            string(REGEX REPLACE ",[^,]*$" "" row "${row}")
-        endforeach()
-        set(counters "${counters}${row}\n")
+        string(REPLACE "," ";" fields "${row}")
+        list(LENGTH fields row_width)
+        if(NOT row_width EQUAL header_width)
+            message(FATAL_ERROR
+                "precodecost row width ${row_width} != ${header_width}: "
+                "${row}")
+        endif()
+        list(SUBLIST fields 0 26 counter_fields)
+        list(GET fields 37 compaction_column_probes)
+        list(GET fields 38 compaction_heapify_input_keys)
+        list(APPEND counter_fields
+            "${compaction_column_probes}"
+            "${compaction_heapify_input_keys}")
+        list(JOIN counter_fields "," counter_row)
+        set(counters "${counters}${counter_row}\n")
     endforeach()
     if(counters STREQUAL "")
         message(FATAL_ERROR

@@ -4545,6 +4545,10 @@ bool SameNonTimingSolveStats(
         a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
         a.PeelRowScanSteps == b.PeelRowScanSteps &&
         a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.PeelHeapCompactionRebuildColumnProbes ==
+            b.PeelHeapCompactionRebuildColumnProbes &&
+        a.PeelHeapCompactionHeapifyInputKeys ==
+            b.PeelHeapCompactionHeapifyInputKeys &&
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
@@ -12712,6 +12716,9 @@ PeelTimingDirectObservation RunPeelTimingDirect(
 std::string PeelTimingSolveDigest(
     const PeelTimingDirectObservation& observation)
 {
+    // Frozen peeltiming solve-v1 preimage.  Later common stats, including
+    // heap-compaction C/M, require a new digest domain and peeltiming schema
+    // rather than silently changing this equality witness.
     const wirehair_v2::PrecodeSolveStats& s = observation.Stats;
     std::ostringstream text;
     text << "wirehair-wh2-peeltiming-solve-v1\n"
@@ -19967,7 +19974,8 @@ int CmdPrecodeCost(int argc, char** argv)
         "seed_base=%llu,cells=[%u,%u),configs=%u,reps=%u,warmup=%u,threads=%u,"
         "pool_blocks=%llu,completion=%s,schedule=%s,geometry=%s,period=%u,"
         "gf16_rows=%u,gf256_rows_default=%u,band_tracking_x=%s,"
-        "degree_scale_default=%.2f,certified_packed_residual=%s\n",
+        "degree_scale_default=%.2f,certified_packed_residual=%s,"
+        "counter_schema=wirehair.wh2.precodecost.counters.v2\n",
         run.BlockCount, run.TimingBlockBytes, run.Overhead, run.MixCount,
         run.Loss, (unsigned long long)run.SeedBase, cell_begin, cell_end,
         (uint32_t)configs.size(), reps, warmup, cost_threads,
@@ -19985,10 +19993,12 @@ int CmdPrecodeCost(int argc, char** argv)
     // FOUR columns wide -- N1 left, the degree scale took its slot -- because
     // paired-timing harnesses read total_ns positionally at column 27 and
     // nothing may renumber ahead of it.  The shape-active flag is therefore
-    // APPENDED as the last column: without it a shaped and an unshaped config
-    // both print 6,9,1,21.33 while measuring different constructions
-    // (block_xors 1782 vs 1764 on the same cell), and a trailing column
-    // resolves that without moving total_ns or ok.
+    // APPENDED near the end: without it a shaped and an unshaped config both
+    // print 6,9,1,21.33 while measuring different constructions (block_xors
+    // 1782 vs 1764 on the same cell), and a trailing column resolves that
+    // without moving total_ns or ok.  The two compaction work counters are
+    // appended after both activity flags under the explicitly versioned
+    // counter schema, again without renumbering any older column.
     std::printf(
         "S,H,D2,scale,cell,ok,L,inact,packet_rows,peeled,residual_rows,"
         "residual_rank,binary_rank,block_xors,block_muladds,block_copies,"
@@ -19997,7 +20007,9 @@ int CmdPrecodeCost(int argc, char** argv)
         "residual_coeff_byte_ops,binary_row_refs,binary_row_bytes,"
         "binary_adj_bytes,total_ns,sysbuild_ns,runtime_ns,solve_ns,"
         "solve_build_ns,solve_peel_ns,solve_project_ns,solve_residual_ns,"
-        "solve_backsub_ns,shape,peel\n");
+        "solve_backsub_ns,shape,peel,"
+        "peel_heap_compaction_rebuild_column_probes,"
+        "peel_heap_compaction_heapify_input_keys\n");
     std::fflush(stdout);
 
     if (configs.size() > SIZE_MAX / cell_count) {
@@ -20123,7 +20135,8 @@ int CmdPrecodeCost(int argc, char** argv)
                 "%u,%u,%u,%.2f,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
                 "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
                 "%llu,%llu,%llu,"
-                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u\n",
+                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u,"
+                "%llu,%llu\n",
                 config.Staircase, config.MixedGF256Rows, config.DenseRows,
                 DegreeScaleDegrees(run.ActiveDegreeScaleCenti(config)),
                 cell_begin + index,
@@ -20153,7 +20166,11 @@ int CmdPrecodeCost(int argc, char** argv)
                 (unsigned long long)sample.SolveResidualNs,
                 (unsigned long long)sample.SolveBackSubNs,
                 config.ShapeActive ? 1u : 0u,
-                config.PeelActive ? 1u : 0u);
+                config.PeelActive ? 1u : 0u,
+                (unsigned long long)
+                    s.PeelHeapCompactionRebuildColumnProbes,
+                (unsigned long long)
+                    s.PeelHeapCompactionHeapifyInputKeys);
         }
         std::fflush(stdout);
     }

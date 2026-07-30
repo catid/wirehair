@@ -67,6 +67,10 @@ bool SameExactSolveStats(
         a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
         a.PeelRowScanSteps == b.PeelRowScanSteps &&
         a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.PeelHeapCompactionRebuildColumnProbes ==
+            b.PeelHeapCompactionRebuildColumnProbes &&
+        a.PeelHeapCompactionHeapifyInputKeys ==
+            b.PeelHeapCompactionHeapifyInputKeys &&
         a.PeelHeapResolvedStalePops ==
             b.PeelHeapResolvedStalePops &&
         a.PeelHeapUnresolvedCountMismatchPops ==
@@ -104,10 +108,6 @@ bool SameExactSolveStats(
             b.PeelHeapCompactionInputKeys &&
         a.PeelHeapCompactionOutputKeys ==
             b.PeelHeapCompactionOutputKeys &&
-        a.PeelHeapCompactionRebuildColumnProbes ==
-            b.PeelHeapCompactionRebuildColumnProbes &&
-        a.PeelHeapCompactionHeapifyKeys ==
-            b.PeelHeapCompactionHeapifyKeys &&
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
@@ -187,8 +187,8 @@ bool SameSolveStatsExceptHeapExperimentAndTiming(
         b.PeelHeapCompactionOutputKeys = 0u;
     a.PeelHeapCompactionRebuildColumnProbes =
         b.PeelHeapCompactionRebuildColumnProbes = 0u;
-    a.PeelHeapCompactionHeapifyKeys =
-        b.PeelHeapCompactionHeapifyKeys = 0u;
+    a.PeelHeapCompactionHeapifyInputKeys =
+        b.PeelHeapCompactionHeapifyInputKeys = 0u;
     a.BuildNanoseconds = b.BuildNanoseconds = 0u;
     a.PeelNanoseconds = b.PeelNanoseconds = 0u;
     a.ProjectNanoseconds = b.ProjectNanoseconds = 0u;
@@ -4436,7 +4436,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             baseline.Stats.PeelHeapCompactionInputKeys != 0u ||
             baseline.Stats.PeelHeapCompactionOutputKeys != 0u ||
             baseline.Stats.PeelHeapCompactionRebuildColumnProbes != 0u ||
-            baseline.Stats.PeelHeapCompactionHeapifyKeys != 0u ||
+            baseline.Stats.PeelHeapCompactionHeapifyInputKeys != 0u ||
             baseline.Stats.PeelHeapUnresolvedCountMismatchPops != 0u)
         {
             std::fprintf(stderr,
@@ -4473,7 +4473,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             uint64_t CompactionInput = 0u;
             uint64_t CompactionOutput = 0u;
             uint64_t ColumnProbes = 0u;
-            uint64_t HeapifyKeys = 0u;
+            uint64_t HeapifyInputKeys = 0u;
             uint64_t StalePops = 0u;
             uint64_t HeapOperations = 0u;
             uint32_t SeamChecks = 0u;
@@ -4503,8 +4503,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     stats.PeelHeapCompactionOutputKeys;
                 receipt.ColumnProbes =
                     stats.PeelHeapCompactionRebuildColumnProbes;
-                receipt.HeapifyKeys =
-                    stats.PeelHeapCompactionHeapifyKeys;
+                receipt.HeapifyInputKeys =
+                    stats.PeelHeapCompactionHeapifyInputKeys;
                 receipt.StalePops =
                     stats.PeelHeapResolvedStalePops;
                 receipt.HeapOperations = stats.PeelHeapOperations;
@@ -4544,7 +4544,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 a.CompactionInput == b.CompactionInput &&
                 a.CompactionOutput == b.CompactionOutput &&
                 a.ColumnProbes == b.ColumnProbes &&
-                a.HeapifyKeys == b.HeapifyKeys &&
+                a.HeapifyInputKeys == b.HeapifyInputKeys &&
                 a.StalePops == b.StalePops &&
                 a.HeapOperations == b.HeapOperations &&
                 a.SeamChecks == b.SeamChecks &&
@@ -4597,8 +4597,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             const uint64_t expected_heap_operations =
                 stale_count_ordered ?
                     baseline.Stats.PeelHeapOperations -
-                        saved_stale_pops +
-                        receipt.CompactionOutput :
+                        saved_stale_pops :
                     UINT64_MAX;
             const uint64_t maximum_proof_pops = enabled ?
                 (uint64_t)receipt.ThresholdCandidates *
@@ -4636,7 +4635,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     receipt.CompactionInput == 0u &&
                     receipt.CompactionOutput == 0u &&
                     receipt.ColumnProbes == 0u &&
-                    receipt.HeapifyKeys == 0u &&
+                    receipt.HeapifyInputKeys == 0u &&
                     receipt.StalePops ==
                         baseline.Stats.PeelHeapResolvedStalePops &&
                     receipt.HeapOperations ==
@@ -4651,7 +4650,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     receipt.CompactionOutput <=
                         receipt.TriggerRemainingColumns &&
                     receipt.ColumnProbes == column_count &&
-                    receipt.HeapifyKeys ==
+                    receipt.HeapifyInputKeys ==
                         receipt.CompactionOutput) &&
                 receipt.CompactionOutput <= receipt.CompactionInput;
             const bool valid =
@@ -4669,7 +4668,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 "K=%u C0FFEE d4 heap compaction d=%u T=%u "
                 "H=%llu cutoff=%llu seams=%u q/a/s=%u/%u/%u "
                 "proof/def/candidate=%llu/%u/%u trigger=%u/%llu/R%u "
-                "keys=%llu->%llu scan/heapify=%llu/%llu "
+                "keys=%llu->%llu C/M=%llu/%llu "
                 "stale=%llu/%llu ops=%llu/%llu: %s\n",
                 K, density_percent, stale_pop_threshold,
                 (unsigned long long)receipt.MaxInput,
@@ -4687,7 +4686,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 (unsigned long long)receipt.CompactionInput,
                 (unsigned long long)receipt.CompactionOutput,
                 (unsigned long long)receipt.ColumnProbes,
-                (unsigned long long)receipt.HeapifyKeys,
+                (unsigned long long)receipt.HeapifyInputKeys,
                 (unsigned long long)receipt.StalePops,
                 (unsigned long long)
                     baseline.Stats.PeelHeapResolvedStalePops,
@@ -4769,8 +4768,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
             expected.StalePops = triggers ?
                 (stale_pop_threshold == 64u ? 390u : 804u) :
                 (is_small ? 8272u : 2564u);
+            // Exact push_heap + invalid-pop_heap totals: M is make_heap
+            // input, not a set of logical rebuild insertions.
             expected.HeapOperations = triggers ?
-                (stale_pop_threshold == 64u ? 16940u : 17354u) :
+                (stale_pop_threshold == 64u ? 16938u : 17352u) :
                 (is_small ? 24820u : 131264u);
             expected.SeamChecks = is_small ? 150u : 571u;
             expected.StalePopThreshold = stale_pop_threshold;
@@ -4792,7 +4793,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             expected.CompactionInput = expected.TriggerPostPopKeys;
             expected.CompactionOutput = triggers ? 2u : 0u;
             expected.ColumnProbes = triggers ? column_count : 0u;
-            expected.HeapifyKeys = expected.CompactionOutput;
+            expected.HeapifyInputKeys = expected.CompactionOutput;
             if (!same_receipt(actual, expected))
             {
                 std::fprintf(stderr,
@@ -4800,7 +4801,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     "K=%u density=%u T=%u H/cutoff=%llu/%llu "
                     "q/a/s=%u/%u/%u proof/def/candidate=%llu/%u/%u "
                     "trigger=%u/%llu/R%u keys=%llu->%llu "
-                    "scan/heapify=%llu/%llu stale/ops=%llu/%llu\n",
+                    "C/M=%llu/%llu stale/ops=%llu/%llu\n",
                     K, density_percent, stale_pop_threshold,
                     (unsigned long long)actual.MaxInput,
                     (unsigned long long)actual.Cutoff,
@@ -4816,7 +4817,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     (unsigned long long)actual.CompactionInput,
                     (unsigned long long)actual.CompactionOutput,
                     (unsigned long long)actual.ColumnProbes,
-                    (unsigned long long)actual.HeapifyKeys,
+                    (unsigned long long)actual.HeapifyInputKeys,
                     (unsigned long long)actual.StalePops,
                     (unsigned long long)actual.HeapOperations);
                 return false;

@@ -721,6 +721,8 @@ def seed_disjointness_proof():
 
 def selection_policy():
     """Return the prebound policy; this function never reads outcomes."""
+    # "Available" is relative to the frozen repairtiming v3 stats tuple, not
+    # an instruction to reinterpret that schema when PrecodeSolveStats grows.
     work_statistics = {
         "fields":
             "every-available-PrecodeSolveStats-work-counter-and-phase-ns",

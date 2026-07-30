@@ -1006,6 +1006,10 @@ bool SameRepairTimingStatsStructural(
         a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
         a.PeelRowScanSteps == b.PeelRowScanSteps &&
         a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.PeelHeapCompactionRebuildColumnProbes ==
+            b.PeelHeapCompactionRebuildColumnProbes &&
+        a.PeelHeapCompactionHeapifyInputKeys ==
+            b.PeelHeapCompactionHeapifyInputKeys &&
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
@@ -1057,6 +1061,13 @@ bool RepairTimingAddStats(
     WIREHAIR_REPAIR_TIMING_ADD_STAT(PeelAdjacencyVisits);
     WIREHAIR_REPAIR_TIMING_ADD_STAT(PeelRowScanSteps);
     WIREHAIR_REPAIR_TIMING_ADD_STAT(PeelHeapOperations);
+    // Preserve the common structural receipt for in-memory A/A equality.
+    // The frozen repairtiming v3 row and digest schemas intentionally do not
+    // acquire columns for these newly production-visible counters.
+    WIREHAIR_REPAIR_TIMING_ADD_STAT(
+        PeelHeapCompactionRebuildColumnProbes);
+    WIREHAIR_REPAIR_TIMING_ADD_STAT(
+        PeelHeapCompactionHeapifyInputKeys);
     WIREHAIR_REPAIR_TIMING_ADD_STAT(ProjectionWordXors);
     WIREHAIR_REPAIR_TIMING_ADD_STAT(ResidualCoeffWordXors);
     WIREHAIR_REPAIR_TIMING_ADD_STAT(ResidualCoeffByteOps);
@@ -1131,6 +1142,8 @@ void AppendRepairTimingStructuralStats(
     const wirehair_v2::PrecodeSolveStats* stats,
     bool available)
 {
+    // Frozen selector-structural-v1 subset.  Heap-compaction C/M remain
+    // internal until a future repairtiming protocol and digest-domain bump.
     const auto value = [&](uint64_t v) -> std::string {
         return available ?
             std::to_string(v) : std::string("-1");
@@ -2477,6 +2490,9 @@ void SetRepairTimingStatsRow(
     const wirehair_v2::PrecodeSolveStats* stats,
     bool available)
 {
+    // Frozen repairtiming v3 36-field row subset.  Do not append later
+    // PrecodeSolveStats members without versioning the native and parser
+    // schemas together.
     if (!available || !stats)
     {
         index += 36u;
@@ -2522,7 +2538,7 @@ void SetRepairTimingStatsRow(
     };
     static_assert(
         sizeof(values) / sizeof(values[0]) == 36u,
-        "repairtiming stats row must contain all fields");
+        "repairtiming v3 stats row must retain 36 fields");
     for (uint64_t value : values) {
         row.Set(index++, value);
     }

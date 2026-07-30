@@ -261,8 +261,14 @@ struct PrecodeSolveStats
                          resolving peeled and inactivated columns.
         PeelRowScanSteps  row-column steps walked by the degree-two scan and
                          the inactivation fallback cursor.
-        PeelHeapOperations  degree-two heap pushes (including compaction
-                         rebuild insertions) and lazy pops.
+        PeelHeapOperations  degree-two push_heap calls and invalid-root
+                         pop_heap calls.  A compaction rebuild uses make_heap,
+                         so its work is reported by the two counters below
+                         rather than as fictional logical insertions.
+        PeelHeapCompactionRebuildColumnProbes  original binary-system columns
+                         inspected while rebuilding the lazy heap.
+        PeelHeapCompactionHeapifyInputKeys  retained keys passed to make_heap
+                         after the rebuild scan.
         ProjectionWordXors  64-bit words XORed while accumulating the affine
                          projection of a peeled column onto inactive columns.
         ResidualCoeffWordXors  64-bit words XORed by packed GF(2) residual
@@ -300,14 +306,21 @@ struct PrecodeSolveStats
     uint64_t ResidualNanoseconds = 0;
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
+    // Appended common receipts: keep all earlier production-stat member
+    // offsets stable while exposing compaction scan and heapify work to the
+    // production cost model.
+    uint64_t PeelHeapCompactionRebuildColumnProbes = 0;
+    uint64_t PeelHeapCompactionHeapifyInputKeys = 0;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    // Experiment-only lazy-heap diagnostics.  The shipped stats layout and
-    // ABI do not contain these fields when test hooks are disabled.
+    // Experiment-only lazy-heap diagnostics.  Apart from the two common work
+    // receipts above, the shipped stats layout and ABI do not contain these
+    // fields when test hooks are disabled.
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
-    // The density gate is checked once at each queue-drained heap-selection
-    // seam.  Enough initial density slack must remain after the configured
-    // number of actual invalid-root pops before compaction may trigger once.
+    // The density gate is checked once at each eligible pre-compaction
+    // queue-drained heap-selection seam.  Enough initial density slack must
+    // remain after the configured number of actual invalid-root pops before
+    // compaction may trigger once.
     uint32_t PeelHeapCompactionDensitySeamChecks = 0;
     uint64_t PeelHeapCompactionDensityMaxInputKeys = 0;
     uint64_t PeelHeapCompactionDensityCutoffKeys = 0;
@@ -329,11 +342,6 @@ struct PrecodeSolveStats
     uint32_t PeelHeapCompactions = 0;
     uint64_t PeelHeapCompactionInputKeys = 0;
     uint64_t PeelHeapCompactionOutputKeys = 0;
-    // Additional rebuild diagnostics: one probe per original binary-system
-    // column and one make_heap input per retained output key.  OutputKeys are
-    // also counted as logical pushes in PeelHeapOperations.
-    uint64_t PeelHeapCompactionRebuildColumnProbes = 0;
-    uint64_t PeelHeapCompactionHeapifyKeys = 0;
     // Per cold solve, incremented exactly once when the tiny mixed completion
     // solver accepts the quotient shape and supplies the terminal result.
     // Forced-path tests use this to distinguish real engagement from a

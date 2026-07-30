@@ -171,7 +171,9 @@ REPAIRTIMING_ROWS_PER_CELL = 1 + REPAIR_V1_ATTEMPT_CAP + (
 )
 assert REPAIRTIMING_ROWS_PER_CELL == 121
 
-# Every stable field exposed by PrecodeSolveStats in a test-hook build.
+# Frozen repairtiming v3 subset of PrecodeSolveStats.  Later common or
+# test-hook fields require a native/parser schema bump rather than append-only
+# reinterpretation of these 36 positions.
 REPAIRTIMING_STATS_FIELDS = (
     "packet_rows",
     "peeled_columns",

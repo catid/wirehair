@@ -1046,6 +1046,9 @@ std::string HashCoefficients()
 
 std::string HashSolveStats(const wirehair_v2::PrecodeSolveStats& stats)
 {
+    // Frozen hook-timing v1 structural subset.  Do not append later common
+    // stats (including heap-compaction C/M) under WH2HTSOLVESTATS1: doing so
+    // requires a new hash domain and hook-timing protocol version.
     Hasher hash("WH2HTSOLVESTATS1");
     hash.U32(stats.PacketRows);
     hash.U32(stats.PeeledColumns);
