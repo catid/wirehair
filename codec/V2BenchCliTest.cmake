@@ -4129,7 +4129,11 @@ function(precodecost_counters out_var)
             "precodecost failed: ${ARGN}\nstdout=${out}\nstderr=${err}")
     endif()
     reject_sanitizer("${out}${err}" "precodecost counters: ${ARGN}")
-    string(REGEX MATCH "^[^\n]*" manifest "${out}")
+    # execute_process may preserve CRLF on Windows.  Normalize only the
+    # parsing copy so the exact line-oriented schema checks remain portable.
+    string(REPLACE "\r\n" "\n" precodecost_out "${out}")
+    string(REPLACE "\r" "\n" precodecost_out "${precodecost_out}")
+    string(REGEX MATCH "^[^\n]*" manifest "${precodecost_out}")
     set(schema_suffix ",counter_schema=${precodecost_counter_schema}")
     string(LENGTH "${manifest}" manifest_length)
     string(LENGTH "${schema_suffix}" schema_suffix_length)
@@ -4146,7 +4150,8 @@ function(precodecost_counters out_var)
             "precodecost counter schema banner changed: ${ARGN}\n"
             "manifest=${manifest}")
     endif()
-    string(FIND "${out}" "\n${precodecost_columns}\n" header_position)
+    string(FIND
+        "${precodecost_out}" "\n${precodecost_columns}\n" header_position)
     if(header_position EQUAL -1)
         message(FATAL_ERROR
             "precodecost column schema changed: ${ARGN}\nstdout=${out}")
@@ -4162,7 +4167,8 @@ function(precodecost_counters out_var)
     # collecting them with MATCHALL cannot be confused by CMake's list
     # separator.
     set(counters "")
-    string(REGEX MATCHALL "\n[0-9][^\n]*" rows "\n${out}")
+    string(REGEX MATCHALL
+        "\n[0-9][^\n]*" rows "\n${precodecost_out}")
     foreach(row IN LISTS rows)
         string(STRIP "${row}" row)
         string(REPLACE "," ";" fields "${row}")
