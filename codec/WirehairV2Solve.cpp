@@ -18,6 +18,16 @@
 #include <stdexcept>
 #include <utility>
 
+// Non-binding cache prefetch used by the memory-bound peel stage.  A miss or
+// a no-op implementation never changes codec behavior.
+#if defined(__GNUC__) || defined(__clang__)
+#define WIREHAIR_V2_PREFETCH(pointer, for_write) \
+    __builtin_prefetch((pointer), (for_write), 3)
+#else
+#define WIREHAIR_V2_PREFETCH(pointer, for_write) \
+    do { (void)(pointer); (void)(for_write); } while (false)
+#endif
+
 #if defined(__linux__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -655,10 +665,9 @@ struct PeelResult
 struct PeelRowState
 {
     // Validated WH2 systems have at most UINT16_MAX columns, so the live
-    // degree and XOR of the live column ids at degree one or two fit in the
-    // same four bytes previously used by the live-degree vector.  The XOR is
-    // first recorded by the existing degree-two scan, then reduced to the
-    // sole live column when the degree falls to one.
+    // degree and XOR of all live column ids fit in the same four bytes
+    // previously used by the live-degree vector.  The XOR is initialized
+    // from the full row and updated whenever a column is resolved.
     uint16_t Live = 0u;
     uint16_t LowDegreeXor = 0u;
 };
@@ -5681,41 +5690,114 @@ PeelResult PeelBinaryRowsImplementation(
         }
     };
 
+    // Once the working set outgrows the fast caches, pipeline the singleton
+    // queue's row -> column -> adjacency dependency chain.  A stale queued
+    // row has live degree zero and LowDegreeXor zero, while a live singleton
+    // carries its sole valid column, so every speculative index is bounded.
+    const bool deep_prefetch = column_count >= 2048u;
     uint32_t remaining = column_count;
     size_t queue_head = 0u;
     while (remaining > 0u)
     {
-        while (queue_head < queue.size())
+        if (!deep_prefetch)
         {
-            const uint32_t row = queue[queue_head++];
-            if (row_state[row].Live != 1u) {
-                continue;
-            }
-            uint32_t column = UINT32_MAX;
-            if (UseLowDegreeXor) {
-                column = row_state[row].LowDegreeXor;
-                CAT_DEBUG_ASSERT(
-                    column < column_count && !resolved[column]);
-            }
-            else
+            // Keep the small-system loop free of prefetch branches and
+            // lookahead code: its working set is already cache-resident.
+            while (queue_head < queue.size())
             {
-                for (uint32_t candidate : rows[row].Columns)
-                {
-                    if (!resolved[candidate]) {
-                        column = candidate;
-                        break;
-                    }
-                }
-                if (column == UINT32_MAX) {
+                const uint32_t row = queue[queue_head++];
+                if (row_state[row].Live != 1u) {
                     continue;
                 }
+                uint32_t column = UINT32_MAX;
+                if (UseLowDegreeXor) {
+                    column = row_state[row].LowDegreeXor;
+                    CAT_DEBUG_ASSERT(
+                        column < column_count && !resolved[column]);
+                }
+                else
+                {
+                    for (uint32_t candidate : rows[row].Columns)
+                    {
+                        if (!resolved[candidate]) {
+                            column = candidate;
+                            break;
+                        }
+                    }
+                    if (column == UINT32_MAX) {
+                        continue;
+                    }
+                }
+                out.UsedRows[row] = 1u;
+                out.SolveRow[column] = row;
+                out.PeelOrder.push_back(column);
+                resolve(column);
+                CAT_DEBUG_ASSERT(row_state[row].Live == 0u);
+                --remaining;
             }
-            out.UsedRows[row] = 1u;
-            out.SolveRow[column] = row;
-            out.PeelOrder.push_back(column);
-            resolve(column);
-            CAT_DEBUG_ASSERT(row_state[row].Live == 0u);
-            --remaining;
+        }
+        else
+        {
+            while (queue_head < queue.size())
+            {
+                if (queue_head + 8u < queue.size())
+                {
+                    const uint32_t ahead_row = queue[queue_head + 8u];
+                    WIREHAIR_V2_PREFETCH(
+                        row_state.data() + ahead_row, 0);
+                }
+                if (queue_head + 4u < queue.size())
+                {
+                    const uint32_t ahead_row = queue[queue_head + 4u];
+                    const uint32_t ahead_column =
+                        row_state[ahead_row].LowDegreeXor;
+                    CAT_DEBUG_ASSERT(ahead_column < column_count);
+                    WIREHAIR_V2_PREFETCH(
+                        column_offsets.data() + ahead_column, 0);
+                }
+                if (queue_head + 2u < queue.size())
+                {
+                    const uint32_t ahead_row = queue[queue_head + 2u];
+                    const uint32_t ahead_column =
+                        row_state[ahead_row].LowDegreeXor;
+                    CAT_DEBUG_ASSERT(ahead_column < column_count);
+                    const size_t ahead_offset =
+                        column_offsets[ahead_column];
+                    if (ahead_offset < column_rows.size()) {
+                        WIREHAIR_V2_PREFETCH(
+                            column_rows.data() + ahead_offset, 0);
+                    }
+                }
+                const uint32_t row = queue[queue_head++];
+                if (row_state[row].Live != 1u) {
+                    continue;
+                }
+                uint32_t column = UINT32_MAX;
+                if (UseLowDegreeXor) {
+                    column = row_state[row].LowDegreeXor;
+                    CAT_DEBUG_ASSERT(
+                        column < column_count && !resolved[column]);
+                }
+                else
+                {
+                    for (uint32_t candidate : rows[row].Columns)
+                    {
+                        if (!resolved[candidate]) {
+                            column = candidate;
+                            break;
+                        }
+                    }
+                    if (column == UINT32_MAX) {
+                        continue;
+                    }
+                }
+                out.UsedRows[row] = 1u;
+                out.SolveRow[column] = row;
+                out.PeelOrder.push_back(column);
+                resolve(column);
+                CAT_DEBUG_ASSERT(row_state[row].Live == 0u);
+                --remaining;
+            }
         }
         if (remaining == 0u) {
             break;
