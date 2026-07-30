@@ -77,6 +77,12 @@ bool SameExactSolveStats(
             b.PeelHeapCompactionDensityMaxInputKeys &&
         a.PeelHeapCompactionDensityCutoffKeys ==
             b.PeelHeapCompactionDensityCutoffKeys &&
+        a.PeelHeapCompactionDensityQualifiedSeams ==
+            b.PeelHeapCompactionDensityQualifiedSeams &&
+        a.PeelHeapCompactionValidRootDeferrals ==
+            b.PeelHeapCompactionValidRootDeferrals &&
+        a.PeelHeapCompactionStaleRootTriggers ==
+            b.PeelHeapCompactionStaleRootTriggers &&
         a.PeelHeapCompactions == b.PeelHeapCompactions &&
         a.PeelHeapCompactionInputKeys ==
             b.PeelHeapCompactionInputKeys &&
@@ -136,6 +142,12 @@ bool SameSolveStatsExceptHeapExperimentAndTiming(
         b.PeelHeapCompactionDensityMaxInputKeys = 0u;
     a.PeelHeapCompactionDensityCutoffKeys =
         b.PeelHeapCompactionDensityCutoffKeys = 0u;
+    a.PeelHeapCompactionDensityQualifiedSeams =
+        b.PeelHeapCompactionDensityQualifiedSeams = 0u;
+    a.PeelHeapCompactionValidRootDeferrals =
+        b.PeelHeapCompactionValidRootDeferrals = 0u;
+    a.PeelHeapCompactionStaleRootTriggers =
+        b.PeelHeapCompactionStaleRootTriggers = 0u;
     a.PeelHeapCompactions = b.PeelHeapCompactions = 0u;
     a.PeelHeapCompactionInputKeys =
         b.PeelHeapCompactionInputKeys = 0u;
@@ -4341,6 +4353,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
             baseline.Stats.PeelHeapCompactionDensitySeamChecks != 0u ||
             baseline.Stats.PeelHeapCompactionDensityMaxInputKeys != 0u ||
             baseline.Stats.PeelHeapCompactionDensityCutoffKeys != 0u ||
+            baseline.Stats.PeelHeapCompactionDensityQualifiedSeams != 0u ||
+            baseline.Stats.PeelHeapCompactionValidRootDeferrals != 0u ||
+            baseline.Stats.PeelHeapCompactionStaleRootTriggers != 0u ||
             baseline.Stats.PeelHeapCompactions != 0u ||
             baseline.Stats.PeelHeapCompactionInputKeys != 0u ||
             baseline.Stats.PeelHeapCompactionOutputKeys != 0u ||
@@ -4375,16 +4390,25 @@ bool CheckBinaryPeelHeapCompactionOracle()
         const uint64_t column_count = (uint64_t)K +
             system.Params.Staircase + system.Params.DenseRows +
             system.Params.HeavyRows;
-        uint64_t density_190_max_input = 0u;
-        uint64_t density_190_cutoff = 0u;
-        uint64_t density_190_compaction_input = 0u;
-        uint64_t density_190_compaction_output = 0u;
-        uint64_t density_190_column_probes = 0u;
-        uint64_t density_190_heapify_keys = 0u;
-        uint64_t density_190_stale = 0u;
-        uint64_t density_190_heap_operations = 0u;
-        uint32_t density_190_seam_checks = 0u;
-        uint32_t density_190_compactions = 0u;
+        struct DensityReceipt
+        {
+            uint64_t MaxInput = 0u;
+            uint64_t Cutoff = 0u;
+            uint64_t CompactionInput = 0u;
+            uint64_t CompactionOutput = 0u;
+            uint64_t ColumnProbes = 0u;
+            uint64_t HeapifyKeys = 0u;
+            uint64_t StalePops = 0u;
+            uint64_t HeapOperations = 0u;
+            uint32_t SeamChecks = 0u;
+            uint32_t QualifiedSeams = 0u;
+            uint32_t ValidRootDeferrals = 0u;
+            uint32_t StaleRootTriggers = 0u;
+            uint32_t Compactions = 0u;
+        };
+        DensityReceipt density_50;
+        DensityReceipt density_190;
+        DensityReceipt density_195;
         for (uint32_t density_percent : kDensityPercents)
         {
             wirehair_v2::ResetBinaryPeelOracleComparisonsForTesting();
@@ -4394,9 +4418,17 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 wirehair_v2::BinaryPeelOracleComparisonsForTesting();
             const uint64_t cutoff_keys =
                 (column_count * density_percent + 99u) / 100u;
-            const bool should_compact =
+            const bool should_qualify =
                 candidate.Stats.PeelHeapCompactionDensityMaxInputKeys >=
                     cutoff_keys;
+            const uint32_t qualified_seams =
+                candidate.Stats.PeelHeapCompactionDensityQualifiedSeams;
+            const uint32_t valid_root_deferrals =
+                candidate.Stats.PeelHeapCompactionValidRootDeferrals;
+            const uint32_t stale_root_triggers =
+                candidate.Stats.PeelHeapCompactionStaleRootTriggers;
+            const bool did_compact =
+                candidate.Stats.PeelHeapCompactions == 1u;
             const bool stale_count_ordered =
                 candidate.Stats.PeelHeapResolvedStalePops <=
                     baseline.Stats.PeelHeapResolvedStalePops;
@@ -4420,17 +4452,22 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 candidate.Stats.PeelHeapCompactionDensitySeamChecks == 0u ||
                 candidate.Stats.PeelHeapCompactionDensityCutoffKeys !=
                     cutoff_keys ||
-                candidate.Stats.PeelHeapCompactions !=
-                    (should_compact ? 1u : 0u) ||
-                (should_compact &&
-                 (candidate.Stats.PeelHeapCompactionInputKeys !=
-                    candidate.Stats.PeelHeapCompactionDensityMaxInputKeys ||
-                  candidate.Stats.PeelHeapCompactionInputKeys < cutoff_keys ||
+                (qualified_seams != 0u) != should_qualify ||
+                qualified_seams >
+                    candidate.Stats.PeelHeapCompactionDensitySeamChecks ||
+                qualified_seams !=
+                    valid_root_deferrals + stale_root_triggers ||
+                stale_root_triggers > 1u ||
+                candidate.Stats.PeelHeapCompactions > 1u ||
+                stale_root_triggers !=
+                    candidate.Stats.PeelHeapCompactions ||
+                (did_compact &&
+                 (candidate.Stats.PeelHeapCompactionInputKeys < cutoff_keys ||
                   candidate.Stats.PeelHeapCompactionRebuildColumnProbes !=
                     column_count ||
                   candidate.Stats.PeelHeapCompactionHeapifyKeys !=
                     candidate.Stats.PeelHeapCompactionOutputKeys)) ||
-                (!should_compact &&
+                (!did_compact &&
                  (candidate.Stats.PeelHeapCompactionInputKeys != 0u ||
                   candidate.Stats.PeelHeapCompactionOutputKeys != 0u ||
                   candidate.Stats.
@@ -4451,7 +4488,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     "K=%u density=%u result=%d/%d comparisons=%llu "
                     "resolved_stale=%llu/%llu mismatch=%llu "
                     "seam_checks=%u max_input=%llu cutoff=%llu "
-                    "compactions=%u expected=%u saved_pops=%llu "
+                    "qualified=%u deferrals=%u stale_triggers=%u "
+                    "compactions=%u saved_pops=%llu "
                     "heap_ops=%llu/%llu expected_ops=%llu "
                     "compact_keys=%llu->%llu probes=%llu heapify=%llu\n",
                     K, density_percent,
@@ -4469,8 +4507,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
                         PeelHeapCompactionDensityMaxInputKeys,
                     (unsigned long long)candidate.Stats.
                         PeelHeapCompactionDensityCutoffKeys,
+                    qualified_seams,
+                    valid_root_deferrals,
+                    stale_root_triggers,
                     candidate.Stats.PeelHeapCompactions,
-                    should_compact ? 1u : 0u,
                     (unsigned long long)saved_stale_pops,
                     (unsigned long long)
                         candidate.Stats.PeelHeapOperations,
@@ -4487,34 +4527,52 @@ bool CheckBinaryPeelHeapCompactionOracle()
                         PeelHeapCompactionHeapifyKeys);
                 return false;
             }
-            if (density_percent == 190u)
+            DensityReceipt* receipt = nullptr;
+            if (density_percent == 50u) {
+                receipt = &density_50;
+            }
+            else if (density_percent == 190u) {
+                receipt = &density_190;
+            }
+            else if (density_percent == 195u) {
+                receipt = &density_195;
+            }
+            if (receipt != nullptr)
             {
-                density_190_max_input =
+                receipt->MaxInput =
                     candidate.Stats.PeelHeapCompactionDensityMaxInputKeys;
-                density_190_cutoff =
+                receipt->Cutoff =
                     candidate.Stats.PeelHeapCompactionDensityCutoffKeys;
-                density_190_compaction_input =
+                receipt->CompactionInput =
                     candidate.Stats.PeelHeapCompactionInputKeys;
-                density_190_compaction_output =
+                receipt->CompactionOutput =
                     candidate.Stats.PeelHeapCompactionOutputKeys;
-                density_190_column_probes =
+                receipt->ColumnProbes =
                     candidate.Stats.
                         PeelHeapCompactionRebuildColumnProbes;
-                density_190_heapify_keys =
+                receipt->HeapifyKeys =
                     candidate.Stats.PeelHeapCompactionHeapifyKeys;
-                density_190_stale =
+                receipt->StalePops =
                     candidate.Stats.PeelHeapResolvedStalePops;
-                density_190_heap_operations =
+                receipt->HeapOperations =
                     candidate.Stats.PeelHeapOperations;
-                density_190_seam_checks =
+                receipt->SeamChecks =
                     candidate.Stats.PeelHeapCompactionDensitySeamChecks;
-                density_190_compactions =
+                receipt->QualifiedSeams =
+                    candidate.Stats.
+                        PeelHeapCompactionDensityQualifiedSeams;
+                receipt->ValidRootDeferrals =
+                    candidate.Stats.PeelHeapCompactionValidRootDeferrals;
+                receipt->StaleRootTriggers =
+                    candidate.Stats.PeelHeapCompactionStaleRootTriggers;
+                receipt->Compactions =
                     candidate.Stats.PeelHeapCompactions;
             }
             std::printf(
                 "K=%u C0FFEE d4 heap compaction density=%u "
                 "resolved_stale=%llu/%llu seam_checks=%u "
-                "max_input=%llu cutoff=%llu compactions=%u "
+                "max_input=%llu cutoff=%llu qualified=%u "
+                "deferrals=%u stale_triggers=%u compactions=%u "
                 "compact_keys=%llu->%llu probes=%llu heapify=%llu "
                 "saved_pops=%llu heap_ops=%llu/%llu\n",
                 K, density_percent,
@@ -4527,6 +4585,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     PeelHeapCompactionDensityMaxInputKeys,
                 (unsigned long long)candidate.Stats.
                     PeelHeapCompactionDensityCutoffKeys,
+                candidate.Stats.PeelHeapCompactionDensityQualifiedSeams,
+                candidate.Stats.PeelHeapCompactionValidRootDeferrals,
+                candidate.Stats.PeelHeapCompactionStaleRootTriggers,
                 candidate.Stats.PeelHeapCompactions,
                 (unsigned long long)
                     candidate.Stats.PeelHeapCompactionInputKeys,
@@ -4655,38 +4716,53 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 threaded[0].Stats.PeelHeapOperations !=
                     baseline.Stats.PeelHeapOperations ||
                 threaded[1].Stats.PeelHeapResolvedStalePops !=
-                    density_190_stale ||
+                    density_190.StalePops ||
                 threaded[1].Stats.PeelHeapOperations !=
-                    density_190_heap_operations ||
+                    density_190.HeapOperations ||
                 threaded[0].Stats.
                     PeelHeapCompactionDensitySeamChecks != 0u ||
                 threaded[1].Stats.
                     PeelHeapCompactionDensitySeamChecks !=
-                    density_190_seam_checks ||
+                    density_190.SeamChecks ||
                 threaded[0].Stats.
                     PeelHeapCompactionDensityMaxInputKeys != 0u ||
                 threaded[0].Stats.
                     PeelHeapCompactionDensityCutoffKeys != 0u ||
                 threaded[1].Stats.
                     PeelHeapCompactionDensityMaxInputKeys !=
-                    density_190_max_input ||
+                    density_190.MaxInput ||
                 threaded[1].Stats.
                     PeelHeapCompactionDensityCutoffKeys !=
-                    density_190_cutoff ||
+                    density_190.Cutoff ||
+                threaded[0].Stats.
+                    PeelHeapCompactionDensityQualifiedSeams != 0u ||
+                threaded[0].Stats.
+                    PeelHeapCompactionValidRootDeferrals != 0u ||
+                threaded[0].Stats.
+                    PeelHeapCompactionStaleRootTriggers != 0u ||
+                threaded[1].Stats.
+                    PeelHeapCompactionDensityQualifiedSeams !=
+                    density_190.QualifiedSeams ||
+                threaded[1].Stats.
+                    PeelHeapCompactionValidRootDeferrals !=
+                    density_190.ValidRootDeferrals ||
+                threaded[1].Stats.
+                    PeelHeapCompactionStaleRootTriggers !=
+                    density_190.StaleRootTriggers ||
                 threaded[0].Stats.PeelHeapCompactionInputKeys != 0u ||
                 threaded[0].Stats.PeelHeapCompactionOutputKeys != 0u ||
                 threaded[1].Stats.PeelHeapCompactionInputKeys !=
-                    density_190_compaction_input ||
+                    density_190.CompactionInput ||
                 threaded[1].Stats.PeelHeapCompactionOutputKeys !=
-                    density_190_compaction_output ||
+                    density_190.CompactionOutput ||
                 threaded[0].Stats.
                     PeelHeapCompactionRebuildColumnProbes != 0u ||
                 threaded[0].Stats.PeelHeapCompactionHeapifyKeys != 0u ||
                 threaded[1].Stats.
                     PeelHeapCompactionRebuildColumnProbes !=
-                    density_190_column_probes ||
+                    density_190.ColumnProbes ||
                 threaded[1].Stats.PeelHeapCompactionHeapifyKeys !=
-                    density_190_heapify_keys ||
+                    density_190.HeapifyKeys ||
                 threaded[0].Stats.
                     PeelHeapUnresolvedCountMismatchPops != 0u ||
                 threaded[1].Stats.
@@ -4723,92 +4799,148 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 return false;
             }
         }
-        const bool density_190_should_compact = K == 8192u;
-        const uint64_t density_190_expected_max_input =
-            K == 8192u ? 16222u : 120825u;
-        const uint64_t density_190_expected_cutoff =
-            (column_count * 190u + 99u) / 100u;
-        const uint32_t density_190_expected_seam_checks =
-            K == 8192u ? 150u : 571u;
-        const uint64_t density_190_expected_compaction_input =
-            K == 8192u ? 16222u : 0u;
-        const uint64_t density_190_expected_compaction_output =
-            K == 8192u ? 2u : 0u;
-        if (baseline.Stats.PeelHeapResolvedStalePops == 0u ||
-            density_190_max_input != density_190_expected_max_input ||
-            density_190_seam_checks !=
-                density_190_expected_seam_checks ||
-            density_190_cutoff != density_190_expected_cutoff ||
-            density_190_compactions !=
-                (density_190_should_compact ? 1u : 0u) ||
-            density_190_compaction_input !=
-                density_190_expected_compaction_input ||
-            density_190_compaction_output !=
-                density_190_expected_compaction_output ||
-            (density_190_should_compact &&
-             (density_190_max_input < density_190_cutoff ||
-              density_190_compaction_input != density_190_max_input ||
-              density_190_compaction_input <=
-                density_190_compaction_output ||
-              density_190_column_probes != column_count ||
-              density_190_heapify_keys != density_190_compaction_output ||
-              density_190_stale >=
-                baseline.Stats.PeelHeapResolvedStalePops ||
-              density_190_heap_operations >=
-                baseline.Stats.PeelHeapOperations)) ||
-            (!density_190_should_compact &&
-             (density_190_max_input >= density_190_cutoff ||
-              density_190_compaction_input != 0u ||
-              density_190_compaction_output != 0u ||
-              density_190_column_probes != 0u ||
-              density_190_heapify_keys != 0u ||
-              density_190_stale !=
-                baseline.Stats.PeelHeapResolvedStalePops ||
-              density_190_heap_operations !=
-                baseline.Stats.PeelHeapOperations)))
-        {
-            std::fprintf(stderr,
-                "solve: heap compaction density190 fixture failed "
-                "K=%u max_input=%llu cutoff=%llu seam_checks=%u "
-                "compactions=%u compact_keys=%llu->%llu "
-                "probes=%llu heapify=%llu "
-                "stale=%llu/%llu heap_ops=%llu/%llu\n",
-                K,
-                (unsigned long long)density_190_max_input,
-                (unsigned long long)density_190_cutoff,
-                density_190_seam_checks,
-                density_190_compactions,
-                (unsigned long long)density_190_compaction_input,
-                (unsigned long long)density_190_compaction_output,
-                (unsigned long long)density_190_column_probes,
-                (unsigned long long)density_190_heapify_keys,
-                (unsigned long long)density_190_stale,
+        const auto check_target_density = [&](
+            uint32_t density_percent,
+            const DensityReceipt& receipt) {
+            const bool should_compact = K == 8192u;
+            const uint64_t expected_max_input =
+                K == 8192u ? 16222u : 120825u;
+            const uint64_t expected_cutoff =
+                (column_count * density_percent + 99u) / 100u;
+            const uint32_t expected_seam_checks =
+                K == 8192u ? 150u : 571u;
+            const uint32_t expected_trigger_count =
+                should_compact ? 1u : 0u;
+            const uint64_t expected_compaction_input =
+                should_compact ? 16222u : 0u;
+            const uint64_t expected_compaction_output =
+                should_compact ? 2u : 0u;
+            if (baseline.Stats.PeelHeapResolvedStalePops == 0u ||
+                receipt.MaxInput != expected_max_input ||
+                receipt.SeamChecks != expected_seam_checks ||
+                receipt.Cutoff != expected_cutoff ||
+                receipt.QualifiedSeams != expected_trigger_count ||
+                receipt.ValidRootDeferrals != 0u ||
+                receipt.StaleRootTriggers != expected_trigger_count ||
+                receipt.Compactions != expected_trigger_count ||
+                receipt.CompactionInput != expected_compaction_input ||
+                receipt.CompactionOutput != expected_compaction_output ||
+                (should_compact &&
+                 (receipt.MaxInput < receipt.Cutoff ||
+                  receipt.CompactionInput <= receipt.CompactionOutput ||
+                  receipt.ColumnProbes != column_count ||
+                  receipt.HeapifyKeys != receipt.CompactionOutput ||
+                  receipt.StalePops >=
+                    baseline.Stats.PeelHeapResolvedStalePops ||
+                  receipt.HeapOperations >=
+                    baseline.Stats.PeelHeapOperations)) ||
+                (!should_compact &&
+                 (receipt.MaxInput >= receipt.Cutoff ||
+                  receipt.CompactionInput != 0u ||
+                  receipt.CompactionOutput != 0u ||
+                  receipt.ColumnProbes != 0u ||
+                  receipt.HeapifyKeys != 0u ||
+                  receipt.StalePops !=
+                    baseline.Stats.PeelHeapResolvedStalePops ||
+                  receipt.HeapOperations !=
+                    baseline.Stats.PeelHeapOperations)))
+            {
+                std::fprintf(stderr,
+                    "solve: heap compaction target fixture failed "
+                    "K=%u density=%u max_input=%llu cutoff=%llu "
+                    "seam_checks=%u qualified=%u deferrals=%u "
+                    "stale_triggers=%u compactions=%u "
+                    "compact_keys=%llu->%llu probes=%llu heapify=%llu "
+                    "stale=%llu/%llu heap_ops=%llu/%llu\n",
+                    K, density_percent,
+                    (unsigned long long)receipt.MaxInput,
+                    (unsigned long long)receipt.Cutoff,
+                    receipt.SeamChecks,
+                    receipt.QualifiedSeams,
+                    receipt.ValidRootDeferrals,
+                    receipt.StaleRootTriggers,
+                    receipt.Compactions,
+                    (unsigned long long)receipt.CompactionInput,
+                    (unsigned long long)receipt.CompactionOutput,
+                    (unsigned long long)receipt.ColumnProbes,
+                    (unsigned long long)receipt.HeapifyKeys,
+                    (unsigned long long)receipt.StalePops,
+                    (unsigned long long)
+                        baseline.Stats.PeelHeapResolvedStalePops,
+                    (unsigned long long)receipt.HeapOperations,
+                    (unsigned long long)baseline.Stats.PeelHeapOperations);
+                return false;
+            }
+            std::printf(
+                "K=%u C0FFEE d4 heap compaction density=%u "
+                "baseline_stale=%llu max_input=%llu cutoff=%llu "
+                "seam_checks=%u qualified=%u deferrals=%u "
+                "stale_triggers=%u compactions=%u "
+                "compact_keys=%llu->%llu probes=%llu heapify=%llu "
+                "stale=%llu heap_ops=%llu/%llu: PASS\n",
+                K, density_percent,
                 (unsigned long long)
                     baseline.Stats.PeelHeapResolvedStalePops,
-                (unsigned long long)density_190_heap_operations,
+                (unsigned long long)receipt.MaxInput,
+                (unsigned long long)receipt.Cutoff,
+                receipt.SeamChecks,
+                receipt.QualifiedSeams,
+                receipt.ValidRootDeferrals,
+                receipt.StaleRootTriggers,
+                receipt.Compactions,
+                (unsigned long long)receipt.CompactionInput,
+                (unsigned long long)receipt.CompactionOutput,
+                (unsigned long long)receipt.ColumnProbes,
+                (unsigned long long)receipt.HeapifyKeys,
+                (unsigned long long)receipt.StalePops,
+                (unsigned long long)receipt.HeapOperations,
                 (unsigned long long)baseline.Stats.PeelHeapOperations);
+            return true;
+        };
+        if (!check_target_density(190u, density_190) ||
+            !check_target_density(195u, density_195))
+        {
             return false;
         }
-        std::printf(
-            "K=%u C0FFEE d4 heap compaction baseline_stale=%llu "
-            "density190 max_input=%llu cutoff=%llu seam_checks=%u "
-            "compactions=%u "
-            "compact_keys=%llu->%llu probes=%llu heapify=%llu "
-            "stale=%llu heap_ops=%llu/%llu: PASS\n",
-            K,
-            (unsigned long long)
-                baseline.Stats.PeelHeapResolvedStalePops,
-            (unsigned long long)density_190_max_input,
-            (unsigned long long)density_190_cutoff,
-            density_190_seam_checks,
-            density_190_compactions,
-            (unsigned long long)density_190_compaction_input,
-            (unsigned long long)density_190_compaction_output,
-            (unsigned long long)density_190_column_probes,
-            (unsigned long long)density_190_heapify_keys,
-            (unsigned long long)density_190_stale,
-            (unsigned long long)density_190_heap_operations,
-            (unsigned long long)baseline.Stats.PeelHeapOperations);
+        if (K == 8192u &&
+            (density_50.MaxInput != 4757u ||
+             density_50.Cutoff != 4143u ||
+             density_50.SeamChecks != 118u ||
+             density_50.QualifiedSeams != 2u ||
+             density_50.ValidRootDeferrals != 1u ||
+             density_50.StaleRootTriggers != 1u ||
+             density_50.Compactions != 1u ||
+             density_50.CompactionInput != 4757u ||
+             density_50.CompactionOutput != 3299u))
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction valid-root retry fixture failed "
+                "max_input=%llu cutoff=%llu seam_checks=%u qualified=%u "
+                "deferrals=%u stale_triggers=%u compactions=%u "
+                "compact_keys=%llu->%llu\n",
+                (unsigned long long)density_50.MaxInput,
+                (unsigned long long)density_50.Cutoff,
+                density_50.SeamChecks,
+                density_50.QualifiedSeams,
+                density_50.ValidRootDeferrals,
+                density_50.StaleRootTriggers,
+                density_50.Compactions,
+                (unsigned long long)density_50.CompactionInput,
+                (unsigned long long)density_50.CompactionOutput);
+            return false;
+        }
+        if (K == 8192u)
+        {
+            std::printf(
+                "K=8192 C0FFEE d4 heap compaction density=50 "
+                "valid-root retry qualified=%u deferrals=%u "
+                "stale_triggers=%u compact_keys=%llu->%llu: PASS\n",
+                density_50.QualifiedSeams,
+                density_50.ValidRootDeferrals,
+                density_50.StaleRootTriggers,
+                (unsigned long long)density_50.CompactionInput,
+                (unsigned long long)density_50.CompactionOutput);
+        }
     }
     if (wirehair_v2::BinaryPeelHeapCompactionDensityPercentForTesting() !=
         original_density_percent)

@@ -31,9 +31,9 @@
 // Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
 // path exactly.  A nonzero build override is a percentage of the original
 // binary-system column count (190 means 1.90x); queue-drained selection seams
-// compact once when the heap reaches that density.  Test-hook builds may
-// override the value per thread without changing the production ABI or
-// exporting another production symbol.
+// compact once when the heap reaches that density and its root is stale.
+// Test-hook builds may override the value per thread without changing the
+// production ABI or exporting another production symbol.
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT 0u
 #endif
@@ -853,6 +853,9 @@ struct PeelResult
     uint32_t HeapCompactionDensitySeamChecks = 0u;
     uint64_t HeapCompactionDensityMaxInputKeys = 0u;
     uint64_t HeapCompactionDensityCutoffKeys = 0u;
+    uint32_t HeapCompactionDensityQualifiedSeams = 0u;
+    uint32_t HeapCompactionValidRootDeferrals = 0u;
+    uint32_t HeapCompactionStaleRootTriggers = 0u;
     uint32_t HeapCompactions = 0u;
     uint64_t HeapCompactionInputKeys = 0u;
     uint64_t HeapCompactionOutputKeys = 0u;
@@ -6013,7 +6016,8 @@ PeelResult PeelBinaryRowsImplementation(
         // including transitively appended rows, has drained.  Check once per
         // heap-selection episode before examining or popping its root.  A
         // rejected seam does not disable later checks because the lazy backlog
-        // may become dense enough in a later episode.
+        // may become dense enough, or a currently valid root may become stale,
+        // in a later episode.
         if (EnableHeapCompaction &&
             !heap_compacted &&
             heap_compaction_density_percent != 0u)
@@ -6031,41 +6035,64 @@ PeelResult PeelBinaryRowsImplementation(
             (void)input_keys;
             if ((uint64_t)input_keys >= heap_compaction_density_cutoff)
             {
-                const size_t retained_capacity =
-                    degree_two_heap.capacity();
-                (void)retained_capacity;
-                degree_two_heap.clear();
-                for (uint32_t live_column = 0u;
-                     live_column < column_count;
-                     ++live_column)
-                {
-                    if (!resolved[live_column] &&
-                        degree_two_refs[live_column] != 0u)
-                    {
-                        degree_two_heap.push_back(
-                            degree_two_key(live_column));
-                    }
-                }
-                std::make_heap(
-                    degree_two_heap.begin(), degree_two_heap.end());
-                // Rebuilding inserts one current key per retained column.
-                // Count those logical pushes just like add_degree_two() so
-                // HeapOperations exposes the compaction's insertion cost in
-                // addition to the lazy pops that it avoids.
-                out.HeapOperations += degree_two_heap.size();
-                CAT_DEBUG_ASSERT(
-                    degree_two_heap.size() <= input_keys);
-                CAT_DEBUG_ASSERT(
-                    degree_two_heap.capacity() == retained_capacity);
-                heap_compacted = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                ++out.HeapCompactions;
-                out.HeapCompactionInputKeys = input_keys;
-                out.HeapCompactionOutputKeys =
-                    degree_two_heap.size();
-                out.HeapCompactionRebuildColumnProbes = column_count;
-                out.HeapCompactionHeapifyKeys = degree_two_heap.size();
+                ++out.HeapCompactionDensityQualifiedSeams;
 #endif
+                CAT_DEBUG_ASSERT(!degree_two_heap.empty());
+                const uint64_t root_key = degree_two_heap.front();
+                const uint32_t root_column =
+                    degree_two_rank_column[(uint32_t)root_key];
+                const bool root_is_stale =
+                    resolved[root_column] ||
+                    degree_two_refs[root_column] !=
+                        (uint32_t)(root_key >> 32);
+                if (!root_is_stale)
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    ++out.HeapCompactionValidRootDeferrals;
+#endif
+                }
+                else
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    ++out.HeapCompactionStaleRootTriggers;
+#endif
+                    const size_t retained_capacity =
+                        degree_two_heap.capacity();
+                    (void)retained_capacity;
+                    degree_two_heap.clear();
+                    for (uint32_t live_column = 0u;
+                         live_column < column_count;
+                         ++live_column)
+                    {
+                        if (!resolved[live_column] &&
+                            degree_two_refs[live_column] != 0u)
+                        {
+                            degree_two_heap.push_back(
+                                degree_two_key(live_column));
+                        }
+                    }
+                    std::make_heap(
+                        degree_two_heap.begin(), degree_two_heap.end());
+                    // Rebuilding inserts one current key per retained column.
+                    // Count those logical pushes just like add_degree_two() so
+                    // HeapOperations exposes the compaction's insertion cost
+                    // in addition to the lazy pops that it avoids.
+                    out.HeapOperations += degree_two_heap.size();
+                    CAT_DEBUG_ASSERT(
+                        degree_two_heap.size() <= input_keys);
+                    CAT_DEBUG_ASSERT(
+                        degree_two_heap.capacity() == retained_capacity);
+                    heap_compacted = true;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    ++out.HeapCompactions;
+                    out.HeapCompactionInputKeys = input_keys;
+                    out.HeapCompactionOutputKeys =
+                        degree_two_heap.size();
+                    out.HeapCompactionRebuildColumnProbes = column_count;
+                    out.HeapCompactionHeapifyKeys = degree_two_heap.size();
+#endif
+                }
             }
         }
 
@@ -7593,6 +7620,12 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapCompactionDensityMaxInputKeys;
         st.PeelHeapCompactionDensityCutoffKeys =
             peel.HeapCompactionDensityCutoffKeys;
+        st.PeelHeapCompactionDensityQualifiedSeams =
+            peel.HeapCompactionDensityQualifiedSeams;
+        st.PeelHeapCompactionValidRootDeferrals =
+            peel.HeapCompactionValidRootDeferrals;
+        st.PeelHeapCompactionStaleRootTriggers =
+            peel.HeapCompactionStaleRootTriggers;
         st.PeelHeapCompactions = peel.HeapCompactions;
         st.PeelHeapCompactionInputKeys =
             peel.HeapCompactionInputKeys;
