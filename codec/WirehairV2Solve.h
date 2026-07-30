@@ -306,16 +306,26 @@ struct PrecodeSolveStats
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
     // The density gate is checked once at each queue-drained heap-selection
-    // seam until a stale-root trigger compacts it.  MaxInputKeys and CutoffKeys
-    // receipt the decision.
+    // seam.  Enough initial density slack must remain after the configured
+    // number of actual invalid-root pops before compaction may trigger once.
     uint32_t PeelHeapCompactionDensitySeamChecks = 0;
     uint64_t PeelHeapCompactionDensityMaxInputKeys = 0;
     uint64_t PeelHeapCompactionDensityCutoffKeys = 0;
-    // A density-qualified seam triggers only when its current root is stale.
-    // Valid-root deferrals fall through to baseline selection and retry later.
+    uint32_t PeelHeapCompactionStalePopThreshold = 0;
     uint32_t PeelHeapCompactionDensityQualifiedSeams = 0;
-    uint32_t PeelHeapCompactionValidRootDeferrals = 0;
-    uint32_t PeelHeapCompactionStaleRootTriggers = 0;
+    // ProofArmed requires enough density slack to survive T actual pops.
+    // Marginal dense seams defer without entering the proof-aware loop.
+    uint32_t PeelHeapCompactionProofArmedSeams = 0;
+    uint32_t PeelHeapCompactionInsufficientDensitySlackDeferrals = 0;
+    uint64_t PeelHeapCompactionProofStalePops = 0;
+    uint32_t PeelHeapCompactionInsufficientProofDeferrals = 0;
+    uint32_t PeelHeapCompactionStalePopThresholdCandidates = 0;
+    uint32_t PeelHeapCompactionStalePopThresholdTriggers = 0;
+    // Trigger-only state: exact same-episode proof prefix, post-pop heap size,
+    // and unresolved columns immediately before the exact rebuild.
+    uint32_t PeelHeapCompactionTriggerProofStalePops = 0;
+    uint64_t PeelHeapCompactionTriggerPostPopKeys = 0;
+    uint32_t PeelHeapCompactionTriggerRemainingColumns = 0;
     uint32_t PeelHeapCompactions = 0;
     uint64_t PeelHeapCompactionInputKeys = 0;
     uint64_t PeelHeapCompactionOutputKeys = 0;
@@ -505,16 +515,19 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
 
 /**
     Override the calling thread's one-shot lazy-heap density percentage.
-    190 means 1.90 times the original binary-system column count.  The
-    queue-drained gate checks once per heap-selection episode until a
-    density-qualified stale root causes compaction; a valid root defers the
-    decision to a later episode.  Zero disables the experiment.  The value is
-    captured once at binary-peel entry, and the independent oracle always
-    remains off.
+    190 means 1.90 times the original binary-system column count.  A qualifying
+    queue-drained episode counts only roots the baseline loop actually rejects.
+    The count resets at each episode, and compaction requires enough initial
+    density slack to survive the configured proof prefix.  Zero in either
+    control disables the experiment.  Values are captured once at binary-peel
+    entry, and the independent oracle always remains off.
 */
 void SetBinaryPeelHeapCompactionDensityPercentForTesting(
     uint32_t density_percent);
 uint32_t BinaryPeelHeapCompactionDensityPercentForTesting();
+void SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
+    uint32_t stale_pop_threshold);
+uint32_t BinaryPeelHeapCompactionStalePopThresholdForTesting();
 
 /**
     Compare packed-GF(2) residual insertion against the byte GF(256) oracle at

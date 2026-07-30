@@ -31,11 +31,15 @@
 // Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
 // path exactly.  A nonzero build override is a percentage of the original
 // binary-system column count (190 means 1.90x); queue-drained selection seams
-// compact once when the heap reaches that density and its root is stale.
-// Test-hook builds may override the value per thread without changing the
-// production ABI or exporting another production symbol.
+// arm a same-episode stale-pop proof and compact once only after the configured
+// threshold of invalid roots has actually been popped while density remains
+// above the cutoff.  Test-hook builds may override both values per thread
+// without changing the production ABI or exporting production symbols.
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT 0u
+#endif
+#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD
+#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD 64u
 #endif
 
 #if defined(__linux__)
@@ -50,10 +54,21 @@ static_assert(
     (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT <=
         UINT32_MAX,
     "peel heap compaction density percent must fit uint32_t");
+static_assert(
+    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD <=
+        UINT32_MAX,
+    "peel heap compaction stale-pop threshold must fit uint32_t");
+#if WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+static_assert(
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0,
+    "enabled peel heap compaction requires a nonzero stale-pop threshold");
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
     WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
 static const uint32_t kCompiledPeelHeapCompactionDensityPercent =
     (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT;
+static const uint32_t kCompiledPeelHeapCompactionStalePopThreshold =
+    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD;
 #endif
 
 // Snapshot of the ambient packet-row equation policy for one synchronous
@@ -80,6 +95,8 @@ thread_local bool PacketRowSeedAvalanche = false;
 thread_local uint64_t* SolvePacketRowPolicyCaptureCounter = nullptr;
 thread_local uint32_t BinaryPeelHeapCompactionDensityPercent =
     kCompiledPeelHeapCompactionDensityPercent;
+thread_local uint32_t BinaryPeelHeapCompactionStalePopThreshold =
+    kCompiledPeelHeapCompactionStalePopThreshold;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 thread_local int CertifiedPackedResidualTestModeValue = 0;
 thread_local int64_t
@@ -853,9 +870,17 @@ struct PeelResult
     uint32_t HeapCompactionDensitySeamChecks = 0u;
     uint64_t HeapCompactionDensityMaxInputKeys = 0u;
     uint64_t HeapCompactionDensityCutoffKeys = 0u;
+    uint32_t HeapCompactionStalePopThreshold = 0u;
     uint32_t HeapCompactionDensityQualifiedSeams = 0u;
-    uint32_t HeapCompactionValidRootDeferrals = 0u;
-    uint32_t HeapCompactionStaleRootTriggers = 0u;
+    uint32_t HeapCompactionProofArmedSeams = 0u;
+    uint32_t HeapCompactionInsufficientDensitySlackDeferrals = 0u;
+    uint64_t HeapCompactionProofStalePops = 0u;
+    uint32_t HeapCompactionInsufficientProofDeferrals = 0u;
+    uint32_t HeapCompactionStalePopThresholdCandidates = 0u;
+    uint32_t HeapCompactionStalePopThresholdTriggers = 0u;
+    uint32_t HeapCompactionTriggerProofStalePops = 0u;
+    uint64_t HeapCompactionTriggerPostPopKeys = 0u;
+    uint32_t HeapCompactionTriggerRemainingColumns = 0u;
     uint32_t HeapCompactions = 0u;
     uint64_t HeapCompactionInputKeys = 0u;
     uint64_t HeapCompactionOutputKeys = 0u;
@@ -5663,6 +5688,18 @@ PeelResult PeelBinaryRowsImplementation(
     const BinaryEquationArena& rows,
     uint32_t heap_compaction_density_percent)
 {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // The true specialization snapshots the calling thread's proof policy
+    // once.  The false specialization optimizes this read away completely.
+    const uint32_t heap_compaction_stale_pop_threshold =
+        EnableHeapCompaction ?
+            BinaryPeelHeapCompactionStalePopThreshold : 0u;
+#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+    const uint32_t heap_compaction_stale_pop_threshold =
+        kCompiledPeelHeapCompactionStalePopThreshold;
+#else
+    const uint32_t heap_compaction_stale_pop_threshold = 0u;
+#endif
     PeelResult out;
     out.SolveRow.assign(column_count, UINT32_MAX);
     out.UsedRows.assign(rows.size(), 0u);
@@ -6013,14 +6050,15 @@ PeelResult PeelBinaryRowsImplementation(
         }
 
         // This is the only permitted compaction seam: all singleton work,
-        // including transitively appended rows, has drained.  Check once per
-        // heap-selection episode before examining or popping its root.  A
-        // rejected seam does not disable later checks because the lazy backlog
-        // may become dense enough, or a currently valid root may become stale,
-        // in a later episode.
+        // including transitively appended rows, has drained.  A dense heap
+        // arms a proof counter for this selection episode only.  The existing
+        // lazy-pop loop must then expose and pop T genuinely invalid roots
+        // before a rebuild is even considered; a later episode starts over.
+        bool heap_compaction_proof_armed = false;
         if (EnableHeapCompaction &&
             !heap_compacted &&
-            heap_compaction_density_percent != 0u)
+            heap_compaction_density_percent != 0u &&
+            heap_compaction_stale_pop_threshold != 0u)
         {
             CAT_DEBUG_ASSERT(queue_head == queue.size());
             const size_t input_keys = degree_two_heap.size();
@@ -6031,6 +6069,8 @@ PeelResult PeelBinaryRowsImplementation(
                 (uint64_t)input_keys);
             out.HeapCompactionDensityCutoffKeys =
                 heap_compaction_density_cutoff;
+            out.HeapCompactionStalePopThreshold =
+                heap_compaction_stale_pop_threshold;
 #endif
             (void)input_keys;
             if ((uint64_t)input_keys >= heap_compaction_density_cutoff)
@@ -6038,89 +6078,174 @@ PeelResult PeelBinaryRowsImplementation(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
                 ++out.HeapCompactionDensityQualifiedSeams;
 #endif
-                CAT_DEBUG_ASSERT(!degree_two_heap.empty());
-                const uint64_t root_key = degree_two_heap.front();
-                const uint32_t root_column =
-                    degree_two_rank_column[(uint32_t)root_key];
-                const bool root_is_stale =
-                    resolved[root_column] ||
-                    degree_two_refs[root_column] !=
-                        (uint32_t)(root_key >> 32);
-                if (!root_is_stale)
+                const uint64_t density_slack =
+                    (uint64_t)input_keys - heap_compaction_density_cutoff;
+                if (density_slack >= heap_compaction_stale_pop_threshold)
                 {
+                    heap_compaction_proof_armed = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactionValidRootDeferrals;
+                    ++out.HeapCompactionProofArmedSeams;
 #endif
                 }
                 else
                 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactionStaleRootTriggers;
-#endif
-                    const size_t retained_capacity =
-                        degree_two_heap.capacity();
-                    (void)retained_capacity;
-                    degree_two_heap.clear();
-                    for (uint32_t live_column = 0u;
-                         live_column < column_count;
-                         ++live_column)
-                    {
-                        if (!resolved[live_column] &&
-                            degree_two_refs[live_column] != 0u)
-                        {
-                            degree_two_heap.push_back(
-                                degree_two_key(live_column));
-                        }
-                    }
-                    std::make_heap(
-                        degree_two_heap.begin(), degree_two_heap.end());
-                    // Rebuilding inserts one current key per retained column.
-                    // Count those logical pushes just like add_degree_two() so
-                    // HeapOperations exposes the compaction's insertion cost
-                    // in addition to the lazy pops that it avoids.
-                    out.HeapOperations += degree_two_heap.size();
-                    CAT_DEBUG_ASSERT(
-                        degree_two_heap.size() <= input_keys);
-                    CAT_DEBUG_ASSERT(
-                        degree_two_heap.capacity() == retained_capacity);
-                    heap_compacted = true;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactions;
-                    out.HeapCompactionInputKeys = input_keys;
-                    out.HeapCompactionOutputKeys =
-                        degree_two_heap.size();
-                    out.HeapCompactionRebuildColumnProbes = column_count;
-                    out.HeapCompactionHeapifyKeys = degree_two_heap.size();
+                    ++out.
+                        HeapCompactionInsufficientDensitySlackDeferrals;
 #endif
                 }
             }
         }
+        (void)heap_compaction_proof_armed;
 
         uint32_t best = UINT32_MAX;
-        while (!degree_two_heap.empty())
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+        if (EnableHeapCompaction && heap_compaction_proof_armed)
         {
-            const uint64_t candidate = degree_two_heap.front();
-            const uint32_t column =
-                degree_two_rank_column[(uint32_t)candidate];
-            if (resolved[column] ||
-                degree_two_refs[column] != (uint32_t)(candidate >> 32))
-            {
+            uint32_t proof_stale_pops = 0u;
+            bool proof_active = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                if (resolved[column]) {
-                    ++out.HeapResolvedStalePops;
-                }
-                else {
-                    ++out.HeapUnresolvedCountMismatchPops;
-                }
+            bool threshold_candidate = false;
 #endif
-                std::pop_heap(
-                    degree_two_heap.begin(), degree_two_heap.end());
-                degree_two_heap.pop_back();
-                ++out.HeapOperations;
-                continue;
+            while (!degree_two_heap.empty())
+            {
+                const uint64_t candidate = degree_two_heap.front();
+                const uint32_t column =
+                    degree_two_rank_column[(uint32_t)candidate];
+                if (resolved[column] ||
+                    degree_two_refs[column] !=
+                        (uint32_t)(candidate >> 32))
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    if (resolved[column]) {
+                        ++out.HeapResolvedStalePops;
+                    }
+                    else {
+                        ++out.HeapUnresolvedCountMismatchPops;
+                    }
+#endif
+                    std::pop_heap(
+                        degree_two_heap.begin(), degree_two_heap.end());
+                    degree_two_heap.pop_back();
+                    ++out.HeapOperations;
+                    if (proof_active)
+                    {
+                        ++proof_stale_pops;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                        ++out.HeapCompactionProofStalePops;
+#endif
+                        if (proof_stale_pops >=
+                            heap_compaction_stale_pop_threshold)
+                        {
+                            proof_active = false;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                            threshold_candidate = true;
+                            ++out.
+                                HeapCompactionStalePopThresholdCandidates;
+#endif
+                            const size_t post_pop_keys =
+                                degree_two_heap.size();
+                            (void)post_pop_keys;
+                            CAT_DEBUG_ASSERT(
+                                (uint64_t)post_pop_keys >=
+                                    heap_compaction_density_cutoff);
+                            const size_t retained_capacity =
+                                degree_two_heap.capacity();
+                            (void)retained_capacity;
+                            degree_two_heap.clear();
+                            for (uint32_t live_column = 0u;
+                                 live_column < column_count;
+                                 ++live_column)
+                            {
+                                if (!resolved[live_column] &&
+                                    degree_two_refs[live_column] != 0u)
+                                {
+                                    degree_two_heap.push_back(
+                                        degree_two_key(live_column));
+                                }
+                            }
+                            std::make_heap(
+                                degree_two_heap.begin(),
+                                degree_two_heap.end());
+                            // HeapOperations charges logical rebuild
+                            // insertions, while the separate receipts below
+                            // expose the full column scan and make_heap input.
+                            out.HeapOperations += degree_two_heap.size();
+                            CAT_DEBUG_ASSERT(
+                                degree_two_heap.size() <= post_pop_keys);
+                            CAT_DEBUG_ASSERT(
+                                degree_two_heap.capacity() ==
+                                    retained_capacity);
+                            CAT_DEBUG_ASSERT(
+                                degree_two_heap.size() <= remaining);
+                            // Resolving a retained key may immediately lower a
+                            // partner's reference count, but that transition
+                            // also queues the resulting singleton.  The outer
+                            // loop drains that queue before the next heap seam,
+                            // so clearing all pre-rebuild key history here
+                            // cannot skip the affected column.
+                            heap_compacted = true;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                            ++out.
+                                HeapCompactionStalePopThresholdTriggers;
+                            out.HeapCompactionTriggerProofStalePops =
+                                proof_stale_pops;
+                            out.HeapCompactionTriggerPostPopKeys =
+                                post_pop_keys;
+                            out.HeapCompactionTriggerRemainingColumns =
+                                remaining;
+                            ++out.HeapCompactions;
+                            out.HeapCompactionInputKeys = post_pop_keys;
+                            out.HeapCompactionOutputKeys =
+                                degree_two_heap.size();
+                            out.HeapCompactionRebuildColumnProbes =
+                                column_count;
+                            out.HeapCompactionHeapifyKeys =
+                                degree_two_heap.size();
+#endif
+                        }
+                    }
+                    continue;
+                }
+                best = column;
+                break;
             }
-            best = column;
-            break;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            if (!threshold_candidate) {
+                ++out.HeapCompactionInsufficientProofDeferrals;
+            }
+#endif
+        }
+        else
+#endif
+        {
+            while (!degree_two_heap.empty())
+            {
+                const uint64_t candidate = degree_two_heap.front();
+                const uint32_t column =
+                    degree_two_rank_column[(uint32_t)candidate];
+                if (resolved[column] ||
+                    degree_two_refs[column] !=
+                        (uint32_t)(candidate >> 32))
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    if (resolved[column]) {
+                        ++out.HeapResolvedStalePops;
+                    }
+                    else {
+                        ++out.HeapUnresolvedCountMismatchPops;
+                    }
+#endif
+                    std::pop_heap(
+                        degree_two_heap.begin(), degree_two_heap.end());
+                    degree_two_heap.pop_back();
+                    ++out.HeapOperations;
+                    continue;
+                }
+                best = column;
+                break;
+            }
         }
         while (best == UINT32_MAX)
         {
@@ -6155,18 +6280,24 @@ PeelResult PeelBinaryRows(
     const BinaryEquationArena& rows)
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    // Snapshot the thread-local experiment policy once per peel.  The solver
-    // never re-reads ambient state while processing rows.
+    // Select the specialization before processing rows.  The enabled
+    // specialization snapshots the same calling thread's threshold at entry;
+    // this synchronous peel cannot race another operation on that TLS state.
     const uint32_t heap_compaction_density_percent =
         BinaryPeelHeapCompactionDensityPercent;
-    PeelResult out = heap_compaction_density_percent == 0u ?
+    const uint32_t heap_compaction_stale_pop_threshold =
+        BinaryPeelHeapCompactionStalePopThreshold;
+    PeelResult out =
+        heap_compaction_density_percent == 0u ||
+        heap_compaction_stale_pop_threshold == 0u ?
         PeelBinaryRowsImplementation<true, false>(
             column_count, rows, 0u) :
         PeelBinaryRowsImplementation<true, true>(
             column_count, rows, heap_compaction_density_percent);
 #elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
     PeelResult out = PeelBinaryRowsImplementation<true, true>(
-        column_count, rows, kCompiledPeelHeapCompactionDensityPercent);
+        column_count, rows,
+        kCompiledPeelHeapCompactionDensityPercent);
 #else
     PeelResult out = PeelBinaryRowsImplementation<true, false>(
         column_count, rows, 0u);
@@ -6545,6 +6676,17 @@ void SetBinaryPeelHeapCompactionDensityPercentForTesting(
 uint32_t BinaryPeelHeapCompactionDensityPercentForTesting()
 {
     return BinaryPeelHeapCompactionDensityPercent;
+}
+
+void SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
+    uint32_t stale_pop_threshold)
+{
+    BinaryPeelHeapCompactionStalePopThreshold = stale_pop_threshold;
+}
+
+uint32_t BinaryPeelHeapCompactionStalePopThresholdForTesting()
+{
+    return BinaryPeelHeapCompactionStalePopThreshold;
 }
 
 bool CheckPacketRowPolicySnapshotForTesting()
@@ -7620,12 +7762,28 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapCompactionDensityMaxInputKeys;
         st.PeelHeapCompactionDensityCutoffKeys =
             peel.HeapCompactionDensityCutoffKeys;
+        st.PeelHeapCompactionStalePopThreshold =
+            peel.HeapCompactionStalePopThreshold;
         st.PeelHeapCompactionDensityQualifiedSeams =
             peel.HeapCompactionDensityQualifiedSeams;
-        st.PeelHeapCompactionValidRootDeferrals =
-            peel.HeapCompactionValidRootDeferrals;
-        st.PeelHeapCompactionStaleRootTriggers =
-            peel.HeapCompactionStaleRootTriggers;
+        st.PeelHeapCompactionProofArmedSeams =
+            peel.HeapCompactionProofArmedSeams;
+        st.PeelHeapCompactionInsufficientDensitySlackDeferrals =
+            peel.HeapCompactionInsufficientDensitySlackDeferrals;
+        st.PeelHeapCompactionProofStalePops =
+            peel.HeapCompactionProofStalePops;
+        st.PeelHeapCompactionInsufficientProofDeferrals =
+            peel.HeapCompactionInsufficientProofDeferrals;
+        st.PeelHeapCompactionStalePopThresholdCandidates =
+            peel.HeapCompactionStalePopThresholdCandidates;
+        st.PeelHeapCompactionStalePopThresholdTriggers =
+            peel.HeapCompactionStalePopThresholdTriggers;
+        st.PeelHeapCompactionTriggerProofStalePops =
+            peel.HeapCompactionTriggerProofStalePops;
+        st.PeelHeapCompactionTriggerPostPopKeys =
+            peel.HeapCompactionTriggerPostPopKeys;
+        st.PeelHeapCompactionTriggerRemainingColumns =
+            peel.HeapCompactionTriggerRemainingColumns;
         st.PeelHeapCompactions = peel.HeapCompactions;
         st.PeelHeapCompactionInputKeys =
             peel.HeapCompactionInputKeys;
