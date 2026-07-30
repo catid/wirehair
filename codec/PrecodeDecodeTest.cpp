@@ -268,6 +268,16 @@ bool SameStats(
             b.ResidualCoefficientStorageBytes &&
         a.CertifiedPackedResumeMaterializations ==
             b.CertifiedPackedResumeMaterializations &&
+        a.CertifiedFixedHQuotientUses ==
+            b.CertifiedFixedHQuotientUses &&
+        a.CertifiedFixedHCoefficientStorageBytes ==
+            b.CertifiedFixedHCoefficientStorageBytes &&
+        a.CertifiedSquareQuotientColumns ==
+            b.CertifiedSquareQuotientColumns &&
+        a.CertifiedHeavyRhsRowsBuilt ==
+            b.CertifiedHeavyRhsRowsBuilt &&
+        a.CertifiedLegacyHeavyRowsReplayed ==
+            b.CertifiedLegacyHeavyRowsReplayed &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
@@ -2055,7 +2065,8 @@ bool RunCertifiedResumeBenchmark(
         "tail_packets,retained,tail_path,"
         "resume_bytes,cold_bytes,total_solve_attempts,inactivated,"
         "binary_rank,residual_rank,quotient_deficiency,packed_uses,"
-        "materializations,result\n",
+        "materializations,result,fixed_h_uses,fixed_h_bytes,"
+        "square_q_columns,heavy_rhs_rows,legacy_replay_rows\n",
         K, block_bytes, (size_t)collision_pair_count, repetitions);
 
     const int modes[4] = {-1, 1, 1, -1};
@@ -2193,12 +2204,51 @@ bool RunCertifiedResumeBenchmark(
                         encoder.BlockEncoder().System().Params.HeavyRows &&
                     tail_packets == collision_pair_count &&
                     decoder.SolveAttemptCount() == 1u + tail_packets;
+                const uint32_t heavy_rows =
+                    encoder.BlockEncoder().System().Params.HeavyRows;
+                const bool fixed_h_expected =
+                    packed_mode ||
+                    block_bytes >=
+                        wirehair_v2::kLegacyByteQuotientMinBlockBytes;
+                const bool fixed_h_work_pair =
+                    (cold_stats.CertifiedHeavyRhsRowsBuilt == 0u &&
+                        cold_stats.CertifiedLegacyHeavyRowsReplayed == 0u) ||
+                    (cold_stats.CertifiedHeavyRhsRowsBuilt == heavy_rows &&
+                        cold_stats.CertifiedLegacyHeavyRowsReplayed ==
+                            heavy_rows);
+                const bool fixed_h_checkpoint_work_ok =
+                    fixed_h_work_pair &&
+                    (resume_requested ||
+                        cold_stats.CertifiedHeavyRhsRowsBuilt == 0u) &&
+                    (!retained ||
+                        cold_stats.CertifiedHeavyRhsRowsBuilt == heavy_rows) &&
+                    (materializations == 0u ||
+                        cold_stats.CertifiedHeavyRhsRowsBuilt == heavy_rows);
+                const bool fixed_h_shape_ok = fixed_h_expected ?
+                    cold_stats.CertifiedFixedHQuotientUses == 1u &&
+                        cold_stats.
+                            CertifiedFixedHCoefficientStorageBytes ==
+                            (uint64_t)heavy_rows * heavy_rows &&
+                        cold_stats.CertifiedSquareQuotientColumns == 0u &&
+                        fixed_h_checkpoint_work_ok :
+                    cold_stats.CertifiedFixedHQuotientUses == 0u &&
+                        cold_stats.
+                            CertifiedFixedHCoefficientStorageBytes == 0u &&
+                        cold_stats.CertifiedSquareQuotientColumns == 0u &&
+                        cold_stats.CertifiedHeavyRhsRowsBuilt == heavy_rows &&
+                        cold_stats.CertifiedLegacyHeavyRowsReplayed == 0u;
+                const bool fixed_h_rank_ok =
+                    cold_stats.ResidualRank ==
+                        cold_stats.BinaryResidualRank + heavy_rows;
                 if (!engagement_ok || !policy_state_ok ||
-                    !materialization_ok || !shape_ok)
+                    !materialization_ok || !shape_ok || !fixed_h_shape_ok ||
+                    !fixed_h_rank_ok)
                 {
                     std::fprintf(stderr,
                         "resume benchmark lane contract failed "
                         "rep=%u policy=%u lane=%u packed=%llu mat=%llu "
+                        "fixed=%u fixed_bytes=%llu square_q=%u "
+                        "rhs=%u replay=%u "
                         "retained=%u q=%u tail=%u attempts=%u\n",
                         rep,
                         policy_lane,
@@ -2208,6 +2258,13 @@ bool RunCertifiedResumeBenchmark(
                         (unsigned long long)
                             cold_stats.
                                 CertifiedPackedResumeMaterializations,
+                        cold_stats.CertifiedFixedHQuotientUses,
+                        (unsigned long long)
+                            cold_stats.
+                                CertifiedFixedHCoefficientStorageBytes,
+                        cold_stats.CertifiedSquareQuotientColumns,
+                        cold_stats.CertifiedHeavyRhsRowsBuilt,
+                        cold_stats.CertifiedLegacyHeavyRowsReplayed,
                         retained ? 1u : 0u,
                         quotient_deficiency,
                         tail_packets,
@@ -2248,7 +2305,7 @@ bool RunCertifiedResumeBenchmark(
 
                 std::printf(
                     "%u,%u,%u,%s,%u,%llu,%llu,%u,%u,%s,%zu,%zu,%u,"
-                    "%u,%u,%u,%u,%llu,%llu,%d\n",
+                    "%u,%u,%u,%u,%llu,%llu,%d,%u,%llu,%u,%u,%u\n",
                     rep,
                     policy_lane,
                     lane,
@@ -2270,7 +2327,13 @@ bool RunCertifiedResumeBenchmark(
                         cold_stats.CertifiedPackedResidualUses,
                     (unsigned long long)
                         cold_stats.CertifiedPackedResumeMaterializations,
-                    (int)result);
+                    (int)result,
+                    cold_stats.CertifiedFixedHQuotientUses,
+                    (unsigned long long)
+                        cold_stats.CertifiedFixedHCoefficientStorageBytes,
+                    cold_stats.CertifiedSquareQuotientColumns,
+                    cold_stats.CertifiedHeavyRhsRowsBuilt,
+                    cold_stats.CertifiedLegacyHeavyRowsReplayed);
 
                 if (result != Wirehair_Success)
                 {

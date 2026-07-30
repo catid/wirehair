@@ -194,7 +194,17 @@ bool SamePathIndependentStats(
         a.ResidualCoefficientStorageBytes ==
             b.ResidualCoefficientStorageBytes &&
         a.CertifiedPackedResumeMaterializations ==
-            b.CertifiedPackedResumeMaterializations;
+            b.CertifiedPackedResumeMaterializations &&
+        a.CertifiedFixedHQuotientUses ==
+            b.CertifiedFixedHQuotientUses &&
+        a.CertifiedFixedHCoefficientStorageBytes ==
+            b.CertifiedFixedHCoefficientStorageBytes &&
+        a.CertifiedSquareQuotientColumns ==
+            b.CertifiedSquareQuotientColumns &&
+        a.CertifiedHeavyRhsRowsBuilt ==
+            b.CertifiedHeavyRhsRowsBuilt &&
+        a.CertifiedLegacyHeavyRowsReplayed ==
+            b.CertifiedLegacyHeavyRowsReplayed;
 }
 
 bool CompareOutcomes(

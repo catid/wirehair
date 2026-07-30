@@ -261,10 +261,13 @@ struct PrecodeSolveStats
         ResidualCoeffWordXors  64-bit words XORed by packed GF(2) residual
                          elimination (mixed or certified completion).
         ResidualCoeffByteOps  coefficient bytes touched by GF(256) residual
-                         or quotient elimination, including each q-byte packed
-                         certified quotient relation scan.  Representation
-                         changes may move work between these two coefficient
-                         counters while preserving the payload-block counters.
+                         or quotient elimination.  This includes relation
+                         updates, fixed-H column-span elimination, and
+                         fixed-H syndrome dot products; bit probes used to
+                         select a relation are not byte operations.
+                         Equivalent coefficient representations may move work
+                         between the word and byte counters; terminal
+                         classifiers may also eliminate payload-block work.
     */
     uint64_t BlockCopies = 0;
     uint64_t BlockZeroFills = 0;
@@ -300,6 +303,17 @@ struct PrecodeSolveStats
     uint32_t CertifiedPackedResidualUses = 0;
     uint64_t ResidualCoefficientStorageBytes = 0;
     uint32_t CertifiedPackedResumeMaterializations = 0;
+    // Certified GF(256) completion diagnostics.  The first two are specific
+    // to the q>H classifier; the remaining fields also describe the q<=H and
+    // legacy paths.  Together they prove the terminal path retained only
+    // fixed H-by-H coefficient state, allocated no square quotient, skipped
+    // heavy RHS work when the quotient already spans all H rows, and replayed
+    // original heavy rows at most once when publishing a byte checkpoint.
+    uint32_t CertifiedFixedHQuotientUses = 0;
+    uint64_t CertifiedFixedHCoefficientStorageBytes = 0;
+    uint32_t CertifiedSquareQuotientColumns = 0;
+    uint32_t CertifiedHeavyRhsRowsBuilt = 0;
+    uint32_t CertifiedLegacyHeavyRowsReplayed = 0;
     uint64_t MixedJointSourceXors = 0;
     uint64_t MixedJointMarginalXors = 0;
     uint64_t MixedJointMarginalCopies = 0;
@@ -463,6 +477,14 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
     word boundaries, including poisoned tail bits and inconsistent RHS rows.
 */
 bool CheckPackedBinaryResidualOracleForTesting();
+
+/**
+    Differentially verify the fixed-H certified q>H classifier against
+    independently constructed dense quotients.  Covers full-rank and
+    chronologically deficient matrices, packed-word boundaries, byte/packed
+    binary bases, and every production heavy-row count from zero through 12.
+*/
+bool CheckCertifiedFixedHQuotientFactorForTesting();
 
 /**
     Compare fused mixed-pivot and unused-row RHS initialization against the

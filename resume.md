@@ -1,9 +1,66 @@
 # Resume notes — WH2 codec performance and reliability
 
-Audit date: 2026-07-29
+Audit date: 2026-07-30
 Branch: `feat/wh2-opcount-cost-model`
 Primary Beads: `wirehair-rv4a`, `wirehair-rv4a.1`,
 `wirehair-rv4a.2`, `wirehair-rv4a.3`, `wirehair-rv4a.4`
+
+## 2026-07-30 certified q>H fixed-H solve checkpoint
+
+`wirehair-qlxb` is closed at pushed commit `a052e74`.  Mixed completion now
+checks exact left-null syndromes before returning NeedMore for q>H, including
+the frozen H=12, q=13 rank-11 conflict.  Later pushed checkpoints through
+`d7d9825` completed the deterministic solve-work receipts and zero-width
+portability fixes.
+
+`wirehair-1t0m.11` replaces the certified GF(256) q>H square quotient with a
+streamed H-by-H column-span factor.  A full-row-rank no-checkpoint solve
+returns NeedMore without allocating q-by-q coefficients, q payload blocks, or
+heavy RHS blocks.  A deficient solve applies the exact chronological
+left-null syndrome.  A retained checkpoint skips the quotient, transactionally
+materializes the established byte basis when necessary, and replays each of
+the H original heavy rows exactly once.  q<=H, H=0, result/rank/ResidualRows,
+caller no-write, conservative-budget, OOM-hook, and resume behavior remain
+covered by differential tests.  The final codec-only diff SHA-256 before
+documentation is
+`8485a4a5354524153dd0fe288ecd81e62ea7bc276fbafaa06600f021cc52641b`;
+two independent final source audits and the primary source-reading pass are
+clean.
+
+The exact-final 11-repetition ABBA receipt is
+`/tmp/wh2-fixed-h-exact-final-abba-20260730T082858Z`.  Its frozen `a052e74`
+baseline binary SHA-256 is
+`7567f4d722ababc3097764b8ae878bc45f34f3978f06090856437da99b949c14`;
+the exact candidate is
+`c9ff1d41a76594ce8eab99218b6b787345a7a8c2ef76c2272081dd53709825f2`.
+All 528 paired A/B rows match on every non-timing legacy field and all 1,056
+results succeed.  Packed cold-tail solve medians are flat at q13
+(1.417704 -> 1.420234 ms, paired ratio 1.000759), 15.33% faster at q25
+(15.687885 -> 13.280610 ms, ratio 0.846730), and 17.11% faster at q76
+(76.578806 -> 63.615193 ms, ratio 0.828864).  Packed retained initialization
+improves 3.93%, 5.63%, and 6.57%, respectively.  Candidate diagnostics prove
+144 coefficient bytes, zero square-q columns, and zero heavy RHS/replay rows
+for cold packed solves; retained packed solves build/replay exactly 12 rows.
+The benchmark window stayed at 100% CPU, 63.25-63.375 C CPU, 51.75 C hottest
+DIMM, and zero DIMM-read/EDAC errors.
+
+Release/no-hooks and warning-strict builds pass.  Strict and ASan+UBSan solve,
+decode, encode, and roundtrip suites pass on the exact production code; the
+solve suite includes the dense H=0..12 q13/q25/q76 oracle, same-input
+legacy-vs-packed full-rank receipt differential, frozen deficient
+consistent/conflict fixture, byte-identical retained state, and two-packet
+resume.  The canonical five-contract K=2..64000 equation-fingerprint sweep is
+fully clean: certified, mixed, mix2, mix2-two-anchor, and dispatch-v1 all
+matched for every K.  The exact CTest passed 1/1 in 2,808.40 seconds.
+
+After `.11` is committed and pushed, freeze that commit as the next timing
+baseline.  The highest-payoff ready implementation is `wirehair-1q6c`: port
+the historical peel fast path selectively, preserving the current global
+`LowDegreeXor` invariant and work receipts rather than cherry-picking
+`848190e`.  Stage flat CSR, fused resolve, and prefetch changes separately.
+`wirehair-p1bu` records the smaller follow-up suggested by q13: remove the
+three common H<=12 classifier allocations with about 184 bytes of scoped
+inline storage and retain an exact dynamic H=13..128 fallback.
 
 ## 2026-07-29 current state and next work
 

@@ -4556,6 +4556,16 @@ bool SameNonTimingSolveStats(
             b.ResidualCoefficientStorageBytes &&
         a.CertifiedPackedResumeMaterializations ==
             b.CertifiedPackedResumeMaterializations &&
+        a.CertifiedFixedHQuotientUses ==
+            b.CertifiedFixedHQuotientUses &&
+        a.CertifiedFixedHCoefficientStorageBytes ==
+            b.CertifiedFixedHCoefficientStorageBytes &&
+        a.CertifiedSquareQuotientColumns ==
+            b.CertifiedSquareQuotientColumns &&
+        a.CertifiedHeavyRhsRowsBuilt ==
+            b.CertifiedHeavyRhsRowsBuilt &&
+        a.CertifiedLegacyHeavyRowsReplayed ==
+            b.CertifiedLegacyHeavyRowsReplayed &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&

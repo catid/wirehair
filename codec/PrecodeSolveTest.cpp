@@ -84,6 +84,16 @@ bool SameExactSolveStats(
             b.ResidualCoefficientStorageBytes &&
         a.CertifiedPackedResumeMaterializations ==
             b.CertifiedPackedResumeMaterializations &&
+        a.CertifiedFixedHQuotientUses ==
+            b.CertifiedFixedHQuotientUses &&
+        a.CertifiedFixedHCoefficientStorageBytes ==
+            b.CertifiedFixedHCoefficientStorageBytes &&
+        a.CertifiedSquareQuotientColumns ==
+            b.CertifiedSquareQuotientColumns &&
+        a.CertifiedHeavyRhsRowsBuilt ==
+            b.CertifiedHeavyRhsRowsBuilt &&
+        a.CertifiedLegacyHeavyRowsReplayed ==
+            b.CertifiedLegacyHeavyRowsReplayed &&
         a.MixedJointSourceXors == b.MixedJointSourceXors &&
         a.MixedJointMarginalXors == b.MixedJointMarginalXors &&
         a.MixedJointMarginalCopies == b.MixedJointMarginalCopies &&
@@ -1913,6 +1923,25 @@ bool CheckCertifiedPackedResidualDispatch()
         packet.BlockId = 0u;
         packet.Data = oracle_message.data();
     }
+    const uint32_t oracle_heavy_rows = oracle_system.Params.HeavyRows;
+    static const uint32_t legacy_no_resume_block_bytes = 3u;
+    std::vector<uint8_t> legacy_no_resume_output(9u, 0x5au);
+    const std::vector<uint8_t> legacy_no_resume_before =
+        legacy_no_resume_output;
+    wirehair_v2::PrecodeSolveStats legacy_no_resume_stats;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                oracle_system, oracle_config, deficient,
+                legacy_no_resume_block_bytes, legacy_no_resume_output,
+                &legacy_no_resume_stats) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: forced legacy no-resume deficiency failed\n");
+            return false;
+        }
+    }
     std::vector<uint8_t> no_resume_output(9u, 0x5au);
     const std::vector<uint8_t> no_resume_before = no_resume_output;
     wirehair_v2::PrecodeSolveStats no_resume_stats;
@@ -1921,7 +1950,7 @@ bool CheckCertifiedPackedResidualDispatch()
         if (!scope.IsValid() ||
             wirehair_v2::SolvePrecodeSystem(
                 oracle_system, oracle_config, deficient,
-                oracle_block_bytes, no_resume_output,
+                legacy_no_resume_block_bytes, no_resume_output,
                 &no_resume_stats) != Wirehair_NeedMore)
         {
             std::fprintf(stderr,
@@ -1929,15 +1958,128 @@ bool CheckCertifiedPackedResidualDispatch()
             return false;
         }
     }
-    if (no_resume_output != no_resume_before ||
+    if (legacy_no_resume_output != legacy_no_resume_before ||
+        legacy_no_resume_stats.CertifiedPackedResidualUses != 0u ||
+        legacy_no_resume_stats.CertifiedPackedResumeMaterializations != 0u ||
+        legacy_no_resume_stats.CertifiedFixedHQuotientUses != 0u ||
+        legacy_no_resume_stats.CertifiedFixedHCoefficientStorageBytes != 0u ||
+        legacy_no_resume_stats.CertifiedSquareQuotientColumns != 0u ||
+        legacy_no_resume_stats.CertifiedHeavyRhsRowsBuilt !=
+            oracle_heavy_rows ||
+        legacy_no_resume_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        no_resume_output != no_resume_before ||
         no_resume_stats.CertifiedPackedResidualUses != 1u ||
         no_resume_stats.CertifiedPackedResumeMaterializations != 0u ||
+        no_resume_stats.CertifiedFixedHQuotientUses != 1u ||
+        no_resume_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)oracle_heavy_rows * oracle_heavy_rows ||
+        no_resume_stats.CertifiedSquareQuotientColumns != 0u ||
+        no_resume_stats.CertifiedHeavyRhsRowsBuilt != 0u ||
+        no_resume_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        no_resume_stats.InactivatedColumns !=
+            legacy_no_resume_stats.InactivatedColumns ||
+        no_resume_stats.BinaryResidualRank !=
+            legacy_no_resume_stats.BinaryResidualRank ||
+        no_resume_stats.ResidualRank !=
+            legacy_no_resume_stats.ResidualRank ||
+        no_resume_stats.ResidualRows !=
+            legacy_no_resume_stats.ResidualRows ||
+        no_resume_stats.ResidualRank !=
+            no_resume_stats.BinaryResidualRank + oracle_heavy_rows ||
         no_resume_stats.InactivatedColumns -
             no_resume_stats.BinaryResidualRank <=
                 oracle_system.Params.HeavyRows)
     {
         std::fprintf(stderr,
             "solve: packed q>H no-resume/materialization contract failed\n");
+        return false;
+    }
+
+    // A q>H checkpoint rejected by the conservative persistent-byte budget
+    // must take the same fixed-H/no-RHS path as an explicit no-resume solve.
+    // The untouched allocation hook proves the rejected path never reached
+    // either transactional byte-materialization allocation.
+    wirehair_v2::PacketRowRuntime qgt_budget_runtime;
+    const uint32_t qgt_precode_count =
+        oracle_system.Params.Staircase +
+        oracle_system.Params.DenseRows +
+        oracle_system.Params.HeavyRows;
+    if (!qgt_budget_runtime.Initialize(
+            oracle_K, qgt_precode_count, oracle_config.MixCount))
+    {
+        std::fprintf(stderr,
+            "solve: q>H budget runtime initialization failed\n");
+        return false;
+    }
+    wirehair_v2::PrecodeSolveResumeState qgt_budget_resume;
+    qgt_budget_resume.Active = true;
+    qgt_budget_resume.SourceCount = UINT32_C(0x71627421);
+    qgt_budget_resume.CoefficientScratch.assign(3u, 0x5au);
+    const wirehair_v2::PrecodeSolveResumeState qgt_budget_resume_before =
+        qgt_budget_resume;
+    std::vector<uint8_t> qgt_budget_output(7u, 0x96u);
+    const std::vector<uint8_t> qgt_budget_output_before =
+        qgt_budget_output;
+    wirehair_v2::PrecodeSolveStats qgt_budget_stats;
+    wirehair_v2::PrecodeSolveResumeState qgt_armed_resume;
+    qgt_armed_resume.Active = true;
+    qgt_armed_resume.SourceCount = UINT32_C(0x7161726d);
+    const wirehair_v2::PrecodeSolveResumeState qgt_armed_resume_before =
+        qgt_armed_resume;
+    std::vector<uint8_t> qgt_armed_output(5u, 0x6du);
+    const std::vector<uint8_t> qgt_armed_output_before =
+        qgt_armed_output;
+    wirehair_v2::PrecodeSolveStats qgt_armed_stats;
+    qgt_armed_stats.BlockCopies = UINT64_C(0x0123456789abcdef);
+    const wirehair_v2::PrecodeSolveStats qgt_armed_stats_before =
+        qgt_armed_stats;
+    WirehairResult qgt_budget_result = Wirehair_Error;
+    WirehairResult qgt_armed_result = Wirehair_Error;
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(0);
+        qgt_budget_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                oracle_system, oracle_config, qgt_budget_runtime, deficient,
+                oracle_block_bytes, qgt_budget_output, &qgt_budget_stats,
+                &qgt_budget_resume, 0u);
+        qgt_armed_result =
+            wirehair_v2::SolvePrecodeSystemForValidatedSystemWithRuntime(
+                oracle_system, oracle_config, qgt_budget_runtime, deficient,
+                oracle_block_bytes, qgt_armed_output, &qgt_armed_stats,
+                &qgt_armed_resume, SIZE_MAX);
+        wirehair_v2::
+            SetCertifiedPackedResumeAllocationFailureCountdownForTesting(-1);
+        if (!scope.IsValid())
+        {
+            std::fprintf(stderr,
+                "solve: q>H budget hook scope failed\n");
+            return false;
+        }
+    }
+    if (qgt_budget_result != Wirehair_NeedMore ||
+        qgt_budget_output != qgt_budget_output_before ||
+        !SameResumeState(
+            qgt_budget_resume, qgt_budget_resume_before, true) ||
+        qgt_budget_stats.CertifiedFixedHQuotientUses != 1u ||
+        qgt_budget_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)oracle_heavy_rows * oracle_heavy_rows ||
+        qgt_budget_stats.CertifiedSquareQuotientColumns != 0u ||
+        qgt_budget_stats.CertifiedHeavyRhsRowsBuilt != 0u ||
+        qgt_budget_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        qgt_budget_stats.ResidualRank !=
+            qgt_budget_stats.BinaryResidualRank + oracle_heavy_rows ||
+        qgt_armed_result != Wirehair_OOM ||
+        qgt_armed_output != qgt_armed_output_before ||
+        !SameResumeState(
+            qgt_armed_resume, qgt_armed_resume_before, true) ||
+        !SameExactSolveStats(
+            qgt_armed_stats, qgt_armed_stats_before))
+    {
+        std::fprintf(stderr,
+            "solve: q>H budget did not skip materialization "
+            "transactionally\n");
         return false;
     }
 
@@ -1994,7 +2136,19 @@ bool CheckCertifiedPackedResidualDispatch()
         byte_stats.BlockXors != packed_stats.BlockXors ||
         byte_stats.BlockMulAdds != packed_stats.BlockMulAdds ||
         packed_stats.CertifiedPackedResidualUses != 1u ||
-        packed_stats.CertifiedPackedResumeMaterializations != 1u)
+        packed_stats.CertifiedPackedResumeMaterializations != 1u ||
+        byte_stats.CertifiedFixedHQuotientUses != 1u ||
+        packed_stats.CertifiedFixedHQuotientUses != 1u ||
+        byte_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)oracle_heavy_rows * oracle_heavy_rows ||
+        packed_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)oracle_heavy_rows * oracle_heavy_rows ||
+        byte_stats.CertifiedSquareQuotientColumns != 0u ||
+        packed_stats.CertifiedSquareQuotientColumns != 0u ||
+        byte_stats.CertifiedHeavyRhsRowsBuilt != oracle_heavy_rows ||
+        packed_stats.CertifiedHeavyRhsRowsBuilt != oracle_heavy_rows ||
+        byte_stats.CertifiedLegacyHeavyRowsReplayed != oracle_heavy_rows ||
+        packed_stats.CertifiedLegacyHeavyRowsReplayed != oracle_heavy_rows)
     {
         std::fprintf(stderr,
             "solve: packed cold resume materialization mismatch\n");
@@ -2141,6 +2295,22 @@ bool CheckCertifiedPackedResidualDispatch()
         qh_byte_stats.BlockMulAdds != qh_packed_stats.BlockMulAdds ||
         qh_byte_stats.BlockCopies != qh_packed_stats.BlockCopies ||
         qh_packed_stats.CertifiedPackedResumeMaterializations != 1u ||
+        qh_byte_stats.CertifiedFixedHQuotientUses != 0u ||
+        qh_packed_stats.CertifiedFixedHQuotientUses != 0u ||
+        qh_byte_stats.CertifiedFixedHCoefficientStorageBytes != 0u ||
+        qh_packed_stats.CertifiedFixedHCoefficientStorageBytes != 0u ||
+        qh_byte_stats.CertifiedSquareQuotientColumns !=
+            qh_system.Params.HeavyRows ||
+        qh_packed_stats.CertifiedSquareQuotientColumns !=
+            qh_system.Params.HeavyRows ||
+        qh_byte_stats.CertifiedHeavyRhsRowsBuilt !=
+            qh_system.Params.HeavyRows ||
+        qh_packed_stats.CertifiedHeavyRhsRowsBuilt !=
+            qh_system.Params.HeavyRows ||
+        qh_byte_stats.CertifiedLegacyHeavyRowsReplayed !=
+            qh_system.Params.HeavyRows ||
+        qh_packed_stats.CertifiedLegacyHeavyRowsReplayed !=
+            qh_system.Params.HeavyRows ||
         qh_byte_resume.SourceCount != qh_packed_resume.SourceCount ||
         qh_byte_resume.PrecodeCount != qh_packed_resume.PrecodeCount ||
         qh_byte_resume.ColumnCount != qh_packed_resume.ColumnCount ||
@@ -4063,6 +4233,251 @@ bool CheckPackedBinaryResidualOracle()
     return true;
 }
 
+bool CheckCertifiedFixedHQuotientFactor()
+{
+    if (!wirehair_v2::CheckCertifiedFixedHQuotientFactorForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: certified fixed-H q>H factor oracle failed\n");
+        return false;
+    }
+    std::printf(
+        "certified fixed-H q>H packed/byte dense quotient oracle: PASS\n");
+    return true;
+}
+
+bool CheckCertifiedFixedHDeficientEndToEnd()
+{
+    static const uint32_t K = 64u;
+    static const uint32_t block_bytes = 3u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeCertifiedParams(
+            K, UINT64_C(0x7150425a000109ff));
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system))
+    {
+        std::fprintf(stderr,
+            "solve: fixed-H deficient fixture build failed\n");
+        return false;
+    }
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed = UINT32_C(0x57eaa047);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    std::vector<uint8_t> zero_block(block_bytes, 0u);
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id + 1u < K; ++id)
+    {
+        packets[id].BlockId = id;
+        packets[id].Data = zero_block.data();
+    }
+    packets.back().BlockId = 0u;
+    packets.back().Data = zero_block.data();
+
+    wirehair_v2::PrecodeSolveStats byte_stats;
+    wirehair_v2::PrecodeSolveStats packed_stats;
+    std::vector<uint8_t> byte_output(7u, 0xa5u);
+    std::vector<uint8_t> packed_output = byte_output;
+    const std::vector<uint8_t> output_before = byte_output;
+    WirehairResult byte_result = Wirehair_Error;
+    WirehairResult packed_result = Wirehair_Error;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid()) {
+            return false;
+        }
+        byte_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes,
+            byte_output, &byte_stats);
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid()) {
+            return false;
+        }
+        packed_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes,
+            packed_output, &packed_stats);
+    }
+    const uint32_t H = system.Params.HeavyRows;
+    if (byte_result != Wirehair_NeedMore ||
+        packed_result != Wirehair_NeedMore ||
+        byte_output != output_before || packed_output != output_before ||
+        H != 12u ||
+        byte_stats.InactivatedColumns != 39u ||
+        packed_stats.InactivatedColumns != 39u ||
+        byte_stats.BinaryResidualRank != 26u ||
+        packed_stats.BinaryResidualRank != 26u ||
+        byte_stats.ResidualRank != 37u ||
+        packed_stats.ResidualRank != 37u ||
+        byte_stats.ResidualRows != 39u ||
+        packed_stats.ResidualRows != 39u ||
+        byte_stats.CertifiedFixedHQuotientUses != 0u ||
+        packed_stats.CertifiedFixedHQuotientUses != 1u ||
+        packed_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)H * H ||
+        byte_stats.CertifiedSquareQuotientColumns != 0u ||
+        packed_stats.CertifiedSquareQuotientColumns != 0u ||
+        byte_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        packed_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        byte_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        packed_stats.CertifiedLegacyHeavyRowsReplayed != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: fixed-H deficient consistent fixture mismatch\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeSolveResumeState byte_resume;
+    wirehair_v2::PrecodeSolveResumeState packed_resume;
+    wirehair_v2::PrecodeSolveStats byte_resume_stats;
+    wirehair_v2::PrecodeSolveStats packed_resume_stats;
+    std::vector<uint8_t> byte_resume_output(5u, 0x3cu);
+    std::vector<uint8_t> packed_resume_output = byte_resume_output;
+    const std::vector<uint8_t> resume_output_before = byte_resume_output;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes,
+                byte_resume_output, &byte_resume_stats, &byte_resume) !=
+                Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: fixed-H deficient byte checkpoint failed\n");
+            return false;
+        }
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid() ||
+            wirehair_v2::SolvePrecodeSystem(
+                system, config, packets, block_bytes,
+                packed_resume_output, &packed_resume_stats,
+                &packed_resume) != Wirehair_NeedMore)
+        {
+            std::fprintf(stderr,
+                "solve: fixed-H deficient packed checkpoint failed\n");
+            return false;
+        }
+    }
+    if (byte_resume_output != resume_output_before ||
+        packed_resume_output != resume_output_before ||
+        !byte_resume.Active || !packed_resume.Active ||
+        !SameResumeState(byte_resume, packed_resume, false) ||
+        byte_resume.Rank != 37u ||
+        packed_resume.Rank != 37u ||
+        byte_resume_stats.CertifiedFixedHQuotientUses != 0u ||
+        packed_resume_stats.CertifiedFixedHQuotientUses != 1u ||
+        packed_resume_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)H * H ||
+        byte_resume_stats.CertifiedSquareQuotientColumns != 0u ||
+        packed_resume_stats.CertifiedSquareQuotientColumns != 0u ||
+        byte_resume_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        packed_resume_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        byte_resume_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        packed_resume_stats.CertifiedLegacyHeavyRowsReplayed != H ||
+        byte_resume_stats.CertifiedPackedResumeMaterializations != 0u ||
+        packed_resume_stats.CertifiedPackedResumeMaterializations != 1u)
+    {
+        std::fprintf(stderr,
+            "solve: fixed-H deficient checkpoint mismatch\n");
+        return false;
+    }
+    WirehairResult byte_resume_result = Wirehair_NeedMore;
+    WirehairResult packed_resume_result = Wirehair_NeedMore;
+    uint32_t resume_packets = 0u;
+    for (uint32_t id = 63u;
+         id < K + 64u && byte_resume_result == Wirehair_NeedMore;
+         ++id)
+    {
+        byte_resume_result = wirehair_v2::ResumePrecodeSystem(
+            system, config, id, zero_block.data(), block_bytes,
+            byte_resume, byte_resume_output);
+        packed_resume_result = wirehair_v2::ResumePrecodeSystem(
+            system, config, id, zero_block.data(), block_bytes,
+            packed_resume, packed_resume_output);
+        ++resume_packets;
+        if (byte_resume_result != packed_resume_result ||
+            (byte_resume_result == Wirehair_NeedMore &&
+             !SameResumeState(byte_resume, packed_resume, false)))
+        {
+            std::fprintf(stderr,
+                "solve: fixed-H deficient checkpoint replay diverged\n");
+            return false;
+        }
+    }
+    if (byte_resume_result != Wirehair_Success ||
+        packed_resume_result != Wirehair_Success ||
+        resume_packets != 2u ||
+        byte_resume.Active || packed_resume.Active ||
+        byte_resume_output != packed_resume_output ||
+        !std::all_of(
+            packed_resume_output.begin(), packed_resume_output.end(),
+            [](uint8_t value) { return value == 0u; }))
+    {
+        std::fprintf(stderr,
+            "solve: fixed-H deficient checkpoint resume failed\n");
+        return false;
+    }
+
+    std::vector<uint8_t> corrupt_block(block_bytes, 0u);
+    corrupt_block[0] = 1u;
+    packets[1].Data = corrupt_block.data();
+    byte_stats = wirehair_v2::PrecodeSolveStats{};
+    packed_stats = wirehair_v2::PrecodeSolveStats{};
+    byte_output.assign(7u, 0x6du);
+    packed_output = byte_output;
+    const std::vector<uint8_t> conflict_output_before = byte_output;
+    {
+        CertifiedPackedResidualModeScope scope(-1);
+        if (!scope.IsValid()) {
+            return false;
+        }
+        byte_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes,
+            byte_output, &byte_stats);
+    }
+    {
+        CertifiedPackedResidualModeScope scope(1);
+        if (!scope.IsValid()) {
+            return false;
+        }
+        packed_result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, block_bytes,
+            packed_output, &packed_stats);
+    }
+    if (byte_result != Wirehair_Error ||
+        packed_result != Wirehair_Error ||
+        byte_output != conflict_output_before ||
+        packed_output != conflict_output_before ||
+        byte_stats.BinaryResidualRank != 26u ||
+        packed_stats.BinaryResidualRank != 26u ||
+        byte_stats.ResidualRank != 0u ||
+        packed_stats.ResidualRank != 0u ||
+        byte_stats.ResidualRows != 39u ||
+        packed_stats.ResidualRows != 39u ||
+        byte_stats.CertifiedFixedHQuotientUses != 0u ||
+        packed_stats.CertifiedFixedHQuotientUses != 1u ||
+        packed_stats.CertifiedFixedHCoefficientStorageBytes !=
+            (uint64_t)H * H ||
+        byte_stats.CertifiedSquareQuotientColumns != 0u ||
+        packed_stats.CertifiedSquareQuotientColumns != 0u ||
+        byte_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        packed_stats.CertifiedHeavyRhsRowsBuilt != H ||
+        byte_stats.CertifiedLegacyHeavyRowsReplayed != 0u ||
+        packed_stats.CertifiedLegacyHeavyRowsReplayed != 0u)
+    {
+        std::fprintf(stderr,
+            "solve: fixed-H deficient conflict fixture mismatch\n");
+        return false;
+    }
+
+    std::printf(
+        "certified fixed-H q=13 rank-11 consistent/conflict fixture: "
+        "PASS\n");
+    return true;
+}
+
 bool CheckMixedRhsFusionOracle()
 {
     if (!wirehair_v2::CheckMixedRhsFusionOracleForTesting())
@@ -5394,6 +5809,8 @@ int main(int argc, char** argv)
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;
+    ok = CheckCertifiedFixedHQuotientFactor() && ok;
+    ok = CheckCertifiedFixedHDeficientEndToEnd() && ok;
     ok = CheckMixedRhsFusionOracle() && ok;
     ok = CheckMixedNullWitnessCanonicalization() && ok;
     ok = CheckMixedQuotientRankFirstOracles() && ok;

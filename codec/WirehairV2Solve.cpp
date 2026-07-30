@@ -1797,6 +1797,365 @@ ResidualInsertResult InsertResidualRow(
     return ResidualInsertResult::Inserted;
 }
 
+/**
+    Fixed-storage factorization for a certified q>H quotient.
+
+    The quotient has H GF(256) equation rows and q free-variable columns.
+    Storing it by rows costs H*q bytes, while the ordinary square residual
+    helper costs q*q bytes and q payload blocks.  Neither is necessary merely
+    to classify a system that can never have a unique solution.
+
+    Process one quotient column at a time as an H-byte vector and insert it
+    into an H-by-H RREF basis for the column span.  A missing pivot coordinate
+    h then gives the canonical causal left-null relation
+
+        lambda[h] = 1, lambda[p] = Basis[p,h] for every pivot p.
+
+    Because every basis vector's first nonzero coordinate is its pivot,
+    Basis[p,h] can be nonzero only for p < h.  Checking missing coordinates in
+    ascending order therefore reproduces the historical first inconsistent
+    heavy-row receipt without retaining any q-sized coefficient storage.
+*/
+struct CertifiedFixedHQuotientFactor
+{
+    std::vector<uint8_t> Basis;
+    std::vector<uint8_t> HavePivot;
+    uint32_t Rank = 0u;
+};
+
+bool FactorCertifiedQGreaterThanHStreaming(
+    uint32_t inactive_count,
+    uint32_t heavy_rows,
+    uint32_t packed_words,
+    uint32_t heavy_words,
+    const std::vector<uint32_t>& free_columns,
+    const std::vector<uint64_t>& projected_heavy,
+    const std::vector<uint64_t>& binary_pivot_coeff,
+    const std::vector<uint8_t>& byte_pivot_coeff,
+    const std::vector<uint8_t>& have_pivot,
+    bool packed_binary_basis,
+    CertifiedFixedHQuotientFactor& factor,
+    PrecodeSolveStats& stats)
+{
+    const uint32_t quotient_columns = (uint32_t)free_columns.size();
+    const uint64_t transform_bytes =
+        (uint64_t)heavy_rows * heavy_rows;
+    const uint64_t projected_words =
+        (uint64_t)inactive_count * heavy_words;
+    const uint64_t packed_basis_words =
+        (uint64_t)inactive_count * packed_words;
+    const uint64_t byte_basis_bytes =
+        (uint64_t)inactive_count * inactive_count;
+    uint32_t binary_rank = 0u;
+    for (uint8_t present : have_pivot) {
+        binary_rank += present != 0u ? 1u : 0u;
+    }
+    if (quotient_columns <= heavy_rows ||
+        packed_words != PackedWordCount(inactive_count) ||
+        heavy_words != (heavy_rows + 7u) / 8u ||
+        projected_words > std::numeric_limits<size_t>::max() ||
+        packed_basis_words > std::numeric_limits<size_t>::max() ||
+        byte_basis_bytes > std::numeric_limits<size_t>::max() ||
+        projected_heavy.size() != (size_t)projected_words ||
+        have_pivot.size() != inactive_count ||
+        binary_rank > inactive_count ||
+        quotient_columns != inactive_count - binary_rank ||
+        transform_bytes > std::numeric_limits<size_t>::max() ||
+        (packed_binary_basis ?
+            binary_pivot_coeff.size() !=
+                (size_t)packed_basis_words :
+            byte_pivot_coeff.size() !=
+                (size_t)byte_basis_bytes))
+    {
+        return false;
+    }
+
+    factor = CertifiedFixedHQuotientFactor{};
+    factor.Basis.assign((size_t)transform_bytes, uint8_t{0});
+    factor.HavePivot.assign(heavy_rows, uint8_t{0});
+    if (heavy_rows == 0u) {
+        return true;
+    }
+
+    std::vector<uint8_t> column(heavy_rows, uint8_t{0});
+    const auto heavy_coefficient =
+        [&](uint32_t inactive, uint32_t heavy) -> uint8_t
+    {
+        return (uint8_t)(
+            projected_heavy[
+                (size_t)inactive * heavy_words + (heavy >> 3)] >>
+            ((heavy & 7u) * 8u));
+    };
+
+    uint32_t previous_free_column = UINT32_MAX;
+    for (uint32_t free_column : free_columns)
+    {
+        if (free_column >= inactive_count || have_pivot[free_column] ||
+            (previous_free_column != UINT32_MAX &&
+             free_column <= previous_free_column))
+        {
+            return false;
+        }
+        previous_free_column = free_column;
+        for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy) {
+            column[heavy] = heavy_coefficient(free_column, heavy);
+        }
+
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            if (!have_pivot[pivot]) {
+                continue;
+            }
+            uint8_t relation_scale = 0u;
+            if (packed_binary_basis)
+            {
+                const uint64_t* relation =
+                    binary_pivot_coeff.data() +
+                        (size_t)pivot * packed_words;
+                relation_scale = (uint8_t)(
+                    (relation[free_column >> 6] >>
+                        (free_column & 63u)) & UINT64_C(1));
+            }
+            else {
+                relation_scale =
+                    byte_pivot_coeff[
+                        (size_t)pivot * inactive_count + free_column];
+            }
+            if (relation_scale == 0u) {
+                continue;
+            }
+            for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy)
+            {
+                const uint8_t coefficient =
+                    heavy_coefficient(pivot, heavy);
+                column[heavy] ^= relation_scale == 1u ?
+                    coefficient :
+                    gf256_mul(relation_scale, coefficient);
+            }
+            stats.ResidualCoeffByteOps += heavy_rows;
+        }
+
+        for (uint32_t pivot = 0u; pivot < heavy_rows; ++pivot)
+        {
+            const uint8_t scale = column[pivot];
+            if (scale == 0u || !factor.HavePivot[pivot]) {
+                continue;
+            }
+            const uint8_t* basis =
+                factor.Basis.data() + (size_t)pivot * heavy_rows;
+            for (uint32_t heavy = pivot;
+                 heavy < heavy_rows; ++heavy)
+            {
+                column[heavy] ^= scale == 1u ?
+                    basis[heavy] :
+                    gf256_mul(scale, basis[heavy]);
+            }
+            stats.ResidualCoeffByteOps += heavy_rows - pivot;
+        }
+
+        uint32_t pivot_row = heavy_rows;
+        for (uint32_t row = 0u; row < heavy_rows; ++row)
+        {
+            if (column[row] != 0u) {
+                pivot_row = row;
+                break;
+            }
+        }
+        if (pivot_row == heavy_rows) {
+            continue;
+        }
+
+        const uint8_t pivot_value = column[pivot_row];
+        if (pivot_value != 1u)
+        {
+            const uint8_t inverse = gf256_inv(pivot_value);
+            if (inverse == 0u) {
+                return false;
+            }
+            for (uint32_t heavy = pivot_row;
+                 heavy < heavy_rows; ++heavy)
+            {
+                column[heavy] = gf256_mul(column[heavy], inverse);
+            }
+            stats.ResidualCoeffByteOps += heavy_rows - pivot_row;
+        }
+
+        for (uint32_t existing = 0u;
+             existing < heavy_rows; ++existing)
+        {
+            if (!factor.HavePivot[existing]) {
+                continue;
+            }
+            uint8_t* basis =
+                factor.Basis.data() + (size_t)existing * heavy_rows;
+            const uint8_t scale = basis[pivot_row];
+            if (scale == 0u) {
+                continue;
+            }
+            for (uint32_t heavy = pivot_row;
+                 heavy < heavy_rows; ++heavy)
+            {
+                basis[heavy] ^= scale == 1u ?
+                    column[heavy] :
+                    gf256_mul(scale, column[heavy]);
+            }
+            stats.ResidualCoeffByteOps += heavy_rows - pivot_row;
+        }
+        std::memcpy(
+            factor.Basis.data() + (size_t)pivot_row * heavy_rows,
+            column.data(), heavy_rows);
+        factor.HavePivot[pivot_row] = 1u;
+        ++factor.Rank;
+        if (factor.Rank == heavy_rows) {
+            break;
+        }
+    }
+    return factor.Rank <= heavy_rows;
+}
+
+enum class CertifiedFixedHSyndromeResult
+{
+    Consistent,
+    Inconsistent,
+    Invalid
+};
+
+CertifiedFixedHSyndromeResult EvaluateCertifiedFixedHSyndromes(
+    uint32_t inactive_count,
+    uint32_t heavy_rows,
+    uint32_t heavy_words,
+    uint32_t block_bytes,
+    const CertifiedFixedHQuotientFactor& factor,
+    const std::vector<uint64_t>& projected_heavy,
+    const std::vector<uint8_t>& heavy_rhs,
+    const std::vector<uint8_t>& pivot_rhs,
+    const std::vector<uint8_t>& have_pivot,
+    uint32_t& first_conflict,
+    PrecodeSolveStats& stats)
+{
+    first_conflict = heavy_rows;
+    const uint64_t transform_bytes =
+        (uint64_t)heavy_rows * heavy_rows;
+    const uint64_t projected_words =
+        (uint64_t)inactive_count * heavy_words;
+    const uint64_t heavy_rhs_bytes =
+        (uint64_t)heavy_rows * block_bytes;
+    const uint64_t pivot_rhs_bytes =
+        (uint64_t)inactive_count * block_bytes;
+    uint32_t pivot_count = 0u;
+    for (uint8_t present : factor.HavePivot) {
+        pivot_count += present != 0u ? 1u : 0u;
+    }
+    if (heavy_words != (heavy_rows + 7u) / 8u ||
+        transform_bytes > std::numeric_limits<size_t>::max() ||
+        projected_words > std::numeric_limits<size_t>::max() ||
+        heavy_rhs_bytes > std::numeric_limits<size_t>::max() ||
+        pivot_rhs_bytes > std::numeric_limits<size_t>::max() ||
+        factor.Basis.size() != (size_t)transform_bytes ||
+        factor.HavePivot.size() != heavy_rows ||
+        factor.Rank != pivot_count ||
+        factor.Rank > heavy_rows ||
+        projected_heavy.size() != (size_t)projected_words ||
+        heavy_rhs.size() != (size_t)heavy_rhs_bytes ||
+        pivot_rhs.size() != (size_t)pivot_rhs_bytes ||
+        have_pivot.size() != inactive_count)
+    {
+        return CertifiedFixedHSyndromeResult::Invalid;
+    }
+    if (factor.Rank == heavy_rows) {
+        return CertifiedFixedHSyndromeResult::Consistent;
+    }
+
+    const uint8_t* const heavy_rhs_data =
+        PayloadData(heavy_rhs, block_bytes);
+    const uint8_t* const pivot_rhs_data =
+        PayloadData(pivot_rhs, block_bytes);
+    std::vector<uint8_t> left_null(heavy_rows, uint8_t{0});
+    std::vector<uint8_t> syndrome =
+        MakeBlockStorage(block_bytes);
+    uint8_t* const syndrome_data =
+        PayloadData(syndrome, block_bytes);
+    bool syndrome_needs_clear = false;
+    ++stats.BlockZeroFills;
+    const auto heavy_coefficient =
+        [&](uint32_t inactive, uint32_t heavy) -> uint8_t
+    {
+        return (uint8_t)(
+            projected_heavy[
+                (size_t)inactive * heavy_words + (heavy >> 3)] >>
+            ((heavy & 7u) * 8u));
+    };
+
+    for (uint32_t dependency = 0u;
+         dependency < heavy_rows; ++dependency)
+    {
+        if (factor.HavePivot[dependency]) {
+            continue;
+        }
+        std::fill(
+            left_null.begin(), left_null.end(), uint8_t{0});
+        left_null[dependency] = 1u;
+        for (uint32_t pivot = 0u; pivot < heavy_rows; ++pivot)
+        {
+            if (factor.HavePivot[pivot]) {
+                left_null[pivot] =
+                    factor.Basis[
+                        (size_t)pivot * heavy_rows + dependency];
+            }
+        }
+
+        if (syndrome_needs_clear)
+        {
+            std::fill(
+                syndrome.begin(), syndrome.end(), uint8_t{0});
+            ++stats.BlockZeroFills;
+        }
+        syndrome_needs_clear = true;
+        for (uint32_t heavy = 0u; heavy < heavy_rows; ++heavy)
+        {
+            const uint8_t scale = left_null[heavy];
+            if (scale == 0u) {
+                continue;
+            }
+            AddScaledBlock(
+                syndrome_data, scale,
+                heavy_rhs_data + (size_t)heavy * block_bytes,
+                block_bytes, stats);
+        }
+        for (uint32_t pivot = 0u; pivot < inactive_count; ++pivot)
+        {
+            if (!have_pivot[pivot]) {
+                continue;
+            }
+            uint8_t scale = 0u;
+            for (uint32_t heavy = 0u;
+                 heavy < heavy_rows; ++heavy)
+            {
+                const uint8_t left_scale = left_null[heavy];
+                const uint8_t coefficient =
+                    heavy_coefficient(pivot, heavy);
+                if (left_scale != 0u && coefficient != 0u) {
+                    scale ^= gf256_mul(left_scale, coefficient);
+                }
+            }
+            stats.ResidualCoeffByteOps += heavy_rows;
+            if (scale == 0u) {
+                continue;
+            }
+            AddScaledBlock(
+                syndrome_data, scale,
+                pivot_rhs_data + (size_t)pivot * block_bytes,
+                block_bytes, stats);
+        }
+        if (!RowIsZero(syndrome_data, block_bytes))
+        {
+            first_conflict = dependency;
+            return CertifiedFixedHSyndromeResult::Inconsistent;
+        }
+    }
+    return CertifiedFixedHSyndromeResult::Consistent;
+}
+
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
 static bool CacheMixedGroupedGF256ResidueBlockShifts(
     uint32_t column_limit,
@@ -7197,11 +7556,84 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
         }
 
+        // The rows inserted so far are binary.  Identify their free columns
+        // before touching any heavy payload bytes: q>H is already known to be
+        // terminal, and its coefficient rank can usually classify NeedMore
+        // with fixed H-by-H scalar storage alone.
+        const uint32_t binary_rank = rank;
+        // The quotient replaces GF(256) block operations with scalar
+        // coefficient passes.  Certified production always reaches it through
+        // the packed basis; the width gate belongs only to the forced byte
+        // reference retained for exact differential testing.
+        const bool use_binary_quotient =
+            certified_packed ||
+            DispatchBlockBytes(block_bytes) >=
+                kLegacyByteQuotientMinBlockBytes;
+        std::vector<uint32_t> free_columns;
+        if (use_binary_quotient)
+        {
+            free_columns.reserve(R - binary_rank);
+            for (uint32_t column = 0; column < R; ++column) {
+                if (!have_pivot[column]) {
+                    free_columns.push_back(column);
+                }
+            }
+        }
+        const uint32_t quotient_columns =
+            (uint32_t)free_columns.size();
+        if (use_binary_quotient &&
+            binary_rank + quotient_columns != R)
+        {
+            return terminal_error();
+        }
+        const bool quotient_exceeds_heavy_rows =
+            use_binary_quotient && quotient_columns > H;
+        const bool checkpoint_candidate =
+            resume_state != nullptr && !legacy_resume_cannot_fit;
+        const bool direct_fixed_h_checkpoint =
+            quotient_exceeds_heavy_rows && checkpoint_candidate;
+        CertifiedFixedHQuotientFactor fixed_h_factor;
+        if (quotient_exceeds_heavy_rows)
+        {
+            if (!FactorCertifiedQGreaterThanHStreaming(
+                    R, H, words, heavy_words, free_columns,
+                    projected_heavy, binary_pivot_coeff, pivot_coeff,
+                    have_pivot, certified_packed, fixed_h_factor, st))
+            {
+                return terminal_error();
+            }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            st.CertifiedFixedHQuotientUses = 1u;
+            st.CertifiedFixedHCoefficientStorageBytes =
+                (uint64_t)H * H;
+#endif
+            // Full row rank makes the H-by-q map surjective.  With q>H the
+            // solve still cannot be unique, but every RHS is consistent.  A
+            // caller that will not retain a checkpoint therefore needs no
+            // heavy RHS allocation, bucket scan, or payload arithmetic.
+            if (fixed_h_factor.Rank == H && !checkpoint_candidate)
+            {
+                st.ResidualRows += H;
+                st.ResidualRank = binary_rank + H;
+                phase_end = SolveClock::now();
+                st.ResidualNanoseconds = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        phase_end - phase_start).count();
+                if (stats) {
+                    *stats = st;
+                }
+                return Wirehair_NeedMore;
+            }
+        }
+
         std::vector<uint8_t> heavy_rhs =
             MakeBlockStorage((size_t)H * block_bytes);
         uint8_t* const heavy_rhs_data =
             PayloadData(heavy_rhs, block_bytes);
         st.BlockZeroFills += H;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        st.CertifiedHeavyRhsRowsBuilt = H;
+#endif
         void* heavy_destinations[128];
         uint8_t heavy_scales[128];
         for (uint32_t heavy = 0; heavy < H; ++heavy) {
@@ -7289,66 +7721,91 @@ static WirehairResult SolvePrecodeSystemImpl(
                     st);
             }
         }
-        // The rows inserted so far are binary.  Keep that GF(2) factorization
-        // intact and solve the heavy equations only on its free-variable
-        // quotient.  Updating all binary pivots with each heavy pivot would
-        // turn cheap XOR relationships into an R-wide GF(256) Gauss-Jordan
-        // solve.  The quotient has at most H columns in the useful regime.
-        const uint32_t binary_rank = rank;
-        // The quotient replaces GF(256) block operations with a few more
-        // scalar coefficient passes.  Certified production always reaches it
-        // through the packed basis; the width gate below belongs only to the
-        // forced byte reference retained for exact differential testing.
-        // DISPATCH, not sizing: the quotient trades block operations for
-        // scalar coefficient passes, so it changes the operation mix the
-        // counters report and a payload-free solve must select it exactly as
-        // a large payload does.
-        const bool use_binary_quotient =
-            certified_packed ||
-            DispatchBlockBytes(block_bytes) >=
-                kLegacyByteQuotientMinBlockBytes;
-        std::vector<uint32_t> free_columns;
-        if (use_binary_quotient)
+
+        if (quotient_exceeds_heavy_rows)
         {
-            free_columns.reserve(R - binary_rank);
-            for (uint32_t column = 0; column < R; ++column) {
-                if (!have_pivot[column]) {
-                    free_columns.push_back(column);
+            if (fixed_h_factor.Rank < H)
+            {
+                // Each missing pivot coordinate h describes the chronological
+                // dependency of original heavy row h on earlier pivot rows.
+                // Apply that exact left-null vector directly to the reduced
+                // RHS, without materializing H reduced RHS blocks.
+                uint32_t first_conflict = H;
+                const CertifiedFixedHSyndromeResult syndrome_result =
+                    EvaluateCertifiedFixedHSyndromes(
+                        R, H, heavy_words, block_bytes, fixed_h_factor,
+                        projected_heavy, heavy_rhs, pivot_rhs, have_pivot,
+                        first_conflict, st);
+                if (syndrome_result ==
+                    CertifiedFixedHSyndromeResult::Invalid)
+                {
+                    return terminal_error();
+                }
+                if (syndrome_result ==
+                    CertifiedFixedHSyndromeResult::Inconsistent)
+                {
+                    st.ResidualRows += first_conflict + 1u;
+                    return terminal_error();
                 }
             }
-        }
-        const uint32_t quotient_columns =
-            (uint32_t)free_columns.size();
-        if (use_binary_quotient &&
-            binary_rank + quotient_columns != R)
-        {
-            return terminal_error();
+
+            st.ResidualRows += H;
+            st.ResidualRank = binary_rank + fixed_h_factor.Rank;
+            if (!checkpoint_candidate)
+            {
+                phase_end = SolveClock::now();
+                st.ResidualNanoseconds = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        phase_end - phase_start).count();
+                if (stats) {
+                    *stats = st;
+                }
+                return Wirehair_NeedMore;
+            }
         }
 
+        const bool execute_binary_quotient =
+            use_binary_quotient && !direct_fixed_h_checkpoint;
+        const uint32_t quotient_storage_columns =
+            execute_binary_quotient ? quotient_columns : 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        st.CertifiedSquareQuotientColumns =
+            quotient_storage_columns;
+#endif
         std::vector<uint8_t> quotient_pivot_coeff(
-            (size_t)quotient_columns * quotient_columns, 0u);
+            (size_t)quotient_storage_columns *
+                quotient_storage_columns, 0u);
         size_t quotient_value_bytes = 0u;
-        if (quotient_columns != 0u &&
-            !checked_block_storage(quotient_columns, quotient_value_bytes))
+        if (quotient_storage_columns != 0u &&
+            !checked_block_storage(
+                quotient_storage_columns, quotient_value_bytes))
         {
             return Wirehair_OOM;
         }
         std::vector<uint8_t> quotient_pivot_rhs =
-            MakeBlockStorage(quotient_value_bytes);
-        st.BlockZeroFills += quotient_columns +
-            (use_binary_quotient ? 1u : 0u);
+            execute_binary_quotient ?
+                MakeBlockStorage(quotient_value_bytes) :
+                std::vector<uint8_t>();
+        st.BlockZeroFills += quotient_storage_columns +
+            (execute_binary_quotient ? 1u : 0u);
         std::vector<uint8_t> quotient_have_pivot(
-            quotient_columns, 0u);
-        std::vector<uint8_t> quotient_coeff(quotient_columns, 0u);
+            quotient_storage_columns, 0u);
+        std::vector<uint8_t> quotient_coeff(
+            quotient_storage_columns, 0u);
+        // The direct fixed-H path never dereferences quotient payload state;
+        // leave both vectors truly empty instead of paying for zero-width
+        // allocation markers that exist only for executed receipt paths.
         std::vector<uint8_t> quotient_rhs =
-            MakeBlockStorage(use_binary_quotient ? block_bytes : 0u);
+            execute_binary_quotient ?
+                MakeBlockStorage(block_bytes) :
+                std::vector<uint8_t>();
         uint8_t* const quotient_rhs_data =
             PayloadData(quotient_rhs, block_bytes);
         uint8_t* const quotient_pivot_rhs_data =
             PayloadData(quotient_pivot_rhs, block_bytes);
         uint32_t quotient_rank = 0u;
 
-        if (use_binary_quotient)
+        if (execute_binary_quotient)
         {
             for (uint32_t heavy = 0; heavy < H; ++heavy)
             {
@@ -7462,7 +7919,7 @@ static WirehairResult SolvePrecodeSystemImpl(
             }
             rank = binary_rank + quotient_rank;
         }
-        else
+        else if (!use_binary_quotient)
         {
             for (uint32_t heavy = 0; heavy < H; ++heavy)
             {
@@ -7490,7 +7947,9 @@ static WirehairResult SolvePrecodeSystemImpl(
                 }
             }
         }
-        st.ResidualRank = rank;
+        if (!direct_fixed_h_checkpoint) {
+            st.ResidualRank = rank;
+        }
 
         // ResumePrecodeSystem accepts arbitrary new binary packet rows in the
         // original R-column coordinates.  A rare deficient cold solve must
@@ -7506,7 +7965,8 @@ static WirehairResult SolvePrecodeSystemImpl(
         }
         if (rank < R && resume_state && use_binary_quotient)
         {
-            const uint32_t expected_rank = rank;
+            const uint32_t expected_rank = direct_fixed_h_checkpoint ?
+                binary_rank + fixed_h_factor.Rank : rank;
             if (certified_packed)
             {
                 // The public resume state deliberately retains its established
@@ -7584,6 +8044,9 @@ static WirehairResult SolvePrecodeSystemImpl(
 #endif
             }
             rank = binary_rank;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            st.CertifiedLegacyHeavyRowsReplayed = 0u;
+#endif
             for (uint32_t heavy = 0; heavy < H; ++heavy)
             {
                 std::fill(coeff.begin(), coeff.end(), uint8_t{0});
@@ -7596,8 +8059,13 @@ static WirehairResult SolvePrecodeSystemImpl(
                     coeff[index] = (uint8_t)(
                         projected_heavy[
                             (size_t)index * heavy_words + (heavy >> 3)] >>
-                        ((heavy & 7u) * 8u));
+                            ((heavy & 7u) * 8u));
                 }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                // Count attempted rows exactly: an inconsistent replay can
+                // terminate before all H rows have been visited.
+                ++st.CertifiedLegacyHeavyRowsReplayed;
+#endif
                 if (InsertResidualRow(
                         coeff, rhs, R, block_bytes,
                         pivot_coeff, pivot_rhs, have_pivot,
@@ -10099,6 +10567,462 @@ WH2_TEST_NOINLINE bool CheckMixedNullWitnessCanonicalizationForTesting()
     catch (...) {
         return false;
     }
+}
+
+WH2_TEST_NOINLINE bool CheckCertifiedFixedHQuotientFactorForTesting()
+{
+    if (gf256_init() != 0) {
+        return false;
+    }
+
+    try
+    {
+        uint64_t random_state = UINT64_C(0x243f6a8885a308d3);
+        const auto next_random = [&random_state]()
+            WH2_TEST_LAMBDA_NOINLINE -> uint64_t {
+            random_state += UINT64_C(0x9e3779b97f4a7c15);
+            uint64_t value = random_state;
+            value = (value ^ (value >> 30)) *
+                UINT64_C(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)) *
+                UINT64_C(0x94d049bb133111eb);
+            return value ^ (value >> 31);
+        };
+
+        for (uint32_t H = 0u; H <= 12u; ++H)
+        {
+            const uint32_t q_values[] = {
+                H + 1u + H % 3u,
+                std::max(H + 1u, 25u),
+                std::max(H + 1u, 76u)
+            };
+            for (uint32_t q : q_values)
+            {
+                const uint32_t widths[] = {
+                    q,
+                    std::max(q, 63u),
+                    std::max(q, 64u),
+                    std::max(q, 65u),
+                    std::max(q, 129u)
+                };
+                for (size_t width_index = 0u;
+                     width_index < sizeof(widths) / sizeof(widths[0]);
+                     ++width_index)
+                {
+                    const uint32_t R = widths[width_index];
+                    bool duplicate_width = false;
+                    for (size_t earlier = 0u;
+                         earlier < width_index; ++earlier)
+                    {
+                        duplicate_width |= widths[earlier] == R;
+                    }
+                    if (duplicate_width) {
+                        continue;
+                    }
+                    const uint32_t words = PackedWordCount(R);
+                    const uint32_t heavy_words = (H + 7u) / 8u;
+                    for (uint32_t pattern = 0u; pattern < 4u; ++pattern)
+                    {
+                        // Construct Q by chronological rows.  Every accepted row
+                        // receives a fresh leading coordinate; rejected rows are
+                        // explicit combinations of earlier accepted rows.
+                        std::vector<uint8_t> quotient((size_t)H * q, 0u);
+                        std::vector<uint8_t> row_independent(H, 0u);
+                        std::vector<uint32_t> independent_rows;
+                        uint32_t expected_rank = 0u;
+                        for (uint32_t row = 0u; row < H; ++row)
+                        {
+                            bool independent = false;
+                            switch (pattern)
+                            {
+                            case 0u:
+                                independent = true;
+                                break;
+                            case 1u:
+                                independent = row % 3u != 1u;
+                                break;
+                            case 2u:
+                                independent = false;
+                                break;
+                            default:
+                                independent = row != H / 2u;
+                                break;
+                            }
+                            if (independent)
+                            {
+                                uint8_t* const destination =
+                                    quotient.data() + (size_t)row * q;
+                                destination[expected_rank] = 1u;
+                                for (uint32_t column = expected_rank + 1u;
+                                     column < q; ++column)
+                                {
+                                    destination[column] =
+                                        (uint8_t)next_random();
+                                }
+                                row_independent[row] = 1u;
+                                independent_rows.push_back(row);
+                                ++expected_rank;
+                                continue;
+                            }
+
+                            bool used_source = false;
+                            uint8_t* const destination =
+                                quotient.data() + (size_t)row * q;
+                            for (uint32_t source_row : independent_rows)
+                            {
+                                uint8_t scale = (uint8_t)next_random();
+                                if (!used_source && scale == 0u) {
+                                    scale = 1u;
+                                }
+                                if (scale == 0u) {
+                                    continue;
+                                }
+                                used_source = true;
+                                const uint8_t* const source =
+                                    quotient.data() + (size_t)source_row * q;
+                                for (uint32_t column = 0u;
+                                     column < q; ++column)
+                                {
+                                    destination[column] ^=
+                                        scale == 1u ?
+                                            source[column] :
+                                            gf256_mul(scale, source[column]);
+                                }
+                            }
+                        }
+
+                        // Shuffle which original coordinates are free so relation
+                        // probes cross 63/64/128-bit packed-word boundaries.
+                        std::vector<uint32_t> coordinates(R);
+                        for (uint32_t i = 0u; i < R; ++i) {
+                            coordinates[i] = i;
+                        }
+                        for (uint32_t count = R; count > 1u; --count)
+                        {
+                            std::swap(
+                                coordinates[count - 1u],
+                                coordinates[
+                                    (uint32_t)(next_random() % count)]);
+                        }
+                        std::vector<uint32_t> free_columns(
+                            coordinates.begin(), coordinates.begin() + q);
+                        std::sort(free_columns.begin(), free_columns.end());
+                        std::vector<uint8_t> have_pivot(R, 1u);
+                        for (uint32_t free_column : free_columns) {
+                            have_pivot[free_column] = 0u;
+                        }
+
+                        std::vector<uint64_t> packed_basis(
+                            (size_t)R * words, uint64_t{0});
+                        std::vector<uint8_t> byte_basis(
+                            (size_t)R * R, uint8_t{0});
+                        for (uint32_t pivot = 0u; pivot < R; ++pivot)
+                        {
+                            if (!have_pivot[pivot]) {
+                                continue;
+                            }
+                            packed_basis[
+                                (size_t)pivot * words + (pivot >> 6)] |=
+                                UINT64_C(1) << (pivot & 63u);
+                            byte_basis[(size_t)pivot * R + pivot] = 1u;
+                            for (uint32_t free_column : free_columns)
+                            {
+                                if ((next_random() & 3u) != 0u) {
+                                    continue;
+                                }
+                                packed_basis[
+                                    (size_t)pivot * words +
+                                        (free_column >> 6)] |=
+                                    UINT64_C(1) << (free_column & 63u);
+                                byte_basis[
+                                    (size_t)pivot * R + free_column] = 1u;
+                            }
+                        }
+
+                        // Pick arbitrary heavy columns for binary pivots, then
+                        // solve for each free heavy column so the implied quotient
+                        // is exactly the independently constructed Q above.
+                        std::vector<uint8_t> heavy_coefficients(
+                            (size_t)R * H, uint8_t{0});
+                        for (uint32_t pivot = 0u; pivot < R; ++pivot)
+                        {
+                            if (!have_pivot[pivot]) {
+                                continue;
+                            }
+                            for (uint32_t heavy = 0u; heavy < H; ++heavy) {
+                                heavy_coefficients[
+                                    (size_t)pivot * H + heavy] =
+                                    (uint8_t)next_random();
+                            }
+                        }
+                        for (uint32_t free_index = 0u;
+                             free_index < q; ++free_index)
+                        {
+                            const uint32_t free_column =
+                                free_columns[free_index];
+                            for (uint32_t heavy = 0u; heavy < H; ++heavy)
+                            {
+                                uint8_t coefficient =
+                                    quotient[(size_t)heavy * q + free_index];
+                                for (uint32_t pivot = 0u;
+                                     pivot < R; ++pivot)
+                                {
+                                    if (!have_pivot[pivot] ||
+                                        byte_basis[
+                                            (size_t)pivot * R +
+                                                free_column] == 0u)
+                                    {
+                                        continue;
+                                    }
+                                    coefficient ^= heavy_coefficients[
+                                        (size_t)pivot * H + heavy];
+                                }
+                                heavy_coefficients[
+                                    (size_t)free_column * H + heavy] =
+                                    coefficient;
+                            }
+                        }
+
+                        std::vector<uint64_t> projected_heavy(
+                            (size_t)R * heavy_words, uint64_t{0});
+                        for (uint32_t column = 0u; column < R; ++column)
+                        {
+                            for (uint32_t heavy = 0u; heavy < H; ++heavy)
+                            {
+                                projected_heavy[
+                                    (size_t)column * heavy_words +
+                                        (heavy >> 3)] |=
+                                    (uint64_t)heavy_coefficients[
+                                        (size_t)column * H + heavy] <<
+                                    ((heavy & 7u) * 8u);
+                            }
+                        }
+
+                        CertifiedFixedHQuotientFactor packed_factor;
+                        CertifiedFixedHQuotientFactor byte_factor;
+                        PrecodeSolveStats packed_stats = {};
+                        PrecodeSolveStats byte_stats = {};
+                        if (!FactorCertifiedQGreaterThanHStreaming(
+                                R, H, words, heavy_words, free_columns,
+                                projected_heavy, packed_basis, byte_basis,
+                                have_pivot, true, packed_factor, packed_stats) ||
+                            !FactorCertifiedQGreaterThanHStreaming(
+                                R, H, words, heavy_words, free_columns,
+                                projected_heavy, packed_basis, byte_basis,
+                                have_pivot, false, byte_factor, byte_stats) ||
+                            packed_factor.Rank != expected_rank ||
+                            packed_factor.Rank != byte_factor.Rank ||
+                            packed_factor.HavePivot != row_independent ||
+                            packed_factor.HavePivot != byte_factor.HavePivot ||
+                            packed_factor.Basis != byte_factor.Basis ||
+                            packed_stats.ResidualCoeffByteOps !=
+                                byte_stats.ResidualCoeffByteOps)
+                        {
+                            return false;
+                        }
+
+                        // Reconstruct Q from each input representation and verify
+                        // every canonical missing-coordinate relation annihilates
+                        // it.  Nonzero coefficients must involve only earlier
+                        // chronological pivot rows.
+                        for (uint32_t free_index = 0u;
+                             free_index < q; ++free_index)
+                        {
+                            const uint32_t free_column =
+                                free_columns[free_index];
+                            for (uint32_t heavy = 0u; heavy < H; ++heavy)
+                            {
+                                uint8_t reconstructed = heavy_coefficients[
+                                    (size_t)free_column * H + heavy];
+                                for (uint32_t pivot = 0u;
+                                     pivot < R; ++pivot)
+                                {
+                                    if (!have_pivot[pivot]) {
+                                        continue;
+                                    }
+                                    const uint8_t packed_relation = (uint8_t)(
+                                        (packed_basis[
+                                            (size_t)pivot * words +
+                                                (free_column >> 6)] >>
+                                            (free_column & 63u)) & 1u);
+                                    const uint8_t byte_relation = byte_basis[
+                                        (size_t)pivot * R + free_column];
+                                    if (packed_relation != byte_relation) {
+                                        return false;
+                                    }
+                                    if (packed_relation != 0u) {
+                                        reconstructed ^= heavy_coefficients[
+                                            (size_t)pivot * H + heavy];
+                                    }
+                                }
+                                if (reconstructed !=
+                                    quotient[
+                                        (size_t)heavy * q + free_index])
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                        for (uint32_t dependency = 0u;
+                             dependency < H; ++dependency)
+                        {
+                            if (packed_factor.HavePivot[dependency]) {
+                                continue;
+                            }
+                            for (uint32_t column = 0u;
+                                 column < q; ++column)
+                            {
+                                uint8_t syndrome =
+                                    quotient[
+                                        (size_t)dependency * q + column];
+                                for (uint32_t pivot = 0u;
+                                     pivot < H; ++pivot)
+                                {
+                                    if (!packed_factor.HavePivot[pivot]) {
+                                        continue;
+                                    }
+                                    const uint8_t scale =
+                                        packed_factor.Basis[
+                                            (size_t)pivot * H + dependency];
+                                    if (pivot >= dependency && scale != 0u) {
+                                        return false;
+                                    }
+                                    if (scale != 0u) {
+                                        syndrome ^= gf256_mul(
+                                            scale,
+                                            quotient[
+                                                (size_t)pivot * q + column]);
+                                    }
+                                }
+                                if (syndrome != 0u) {
+                                    return false;
+                                }
+                            }
+                        }
+
+                        if (expected_rank < H)
+                        {
+                            static const uint32_t kSyndromeBlockBytes = 3u;
+                            std::vector<uint8_t> free_values(
+                                (size_t)q * kSyndromeBlockBytes);
+                            std::vector<uint8_t> pivot_rhs(
+                                (size_t)R * kSyndromeBlockBytes, uint8_t{0});
+                            for (uint8_t& value : free_values) {
+                                value = (uint8_t)next_random();
+                            }
+                            for (uint32_t pivot = 0u; pivot < R; ++pivot)
+                            {
+                                if (!have_pivot[pivot]) {
+                                    continue;
+                                }
+                                for (uint32_t byte = 0u;
+                                     byte < kSyndromeBlockBytes; ++byte)
+                                {
+                                    pivot_rhs[
+                                        (size_t)pivot *
+                                            kSyndromeBlockBytes + byte] =
+                                        (uint8_t)next_random();
+                                }
+                            }
+
+                            // Choose d so d + C_P r is the consistent quotient
+                            // RHS Qz.  This exercises both heavy_rhs and nonzero
+                            // binary-pivot RHS terms in the production evaluator.
+                            std::vector<uint8_t> heavy_rhs(
+                                (size_t)H * kSyndromeBlockBytes, uint8_t{0});
+                            for (uint32_t heavy = 0u; heavy < H; ++heavy)
+                            {
+                                for (uint32_t byte = 0u;
+                                     byte < kSyndromeBlockBytes; ++byte)
+                                {
+                                    uint8_t value = 0u;
+                                    for (uint32_t free_index = 0u;
+                                         free_index < q; ++free_index)
+                                    {
+                                        const uint8_t scale = quotient[
+                                            (size_t)heavy * q + free_index];
+                                        if (scale != 0u) {
+                                            value ^= gf256_mul(
+                                                scale,
+                                                free_values[
+                                                    (size_t)free_index *
+                                                        kSyndromeBlockBytes +
+                                                    byte]);
+                                        }
+                                    }
+                                    for (uint32_t pivot = 0u;
+                                         pivot < R; ++pivot)
+                                    {
+                                        if (!have_pivot[pivot]) {
+                                            continue;
+                                        }
+                                        const uint8_t scale =
+                                            heavy_coefficients[
+                                                (size_t)pivot * H + heavy];
+                                        if (scale != 0u) {
+                                            value ^= gf256_mul(
+                                                scale,
+                                                pivot_rhs[
+                                                    (size_t)pivot *
+                                                        kSyndromeBlockBytes +
+                                                    byte]);
+                                        }
+                                    }
+                                    heavy_rhs[
+                                        (size_t)heavy *
+                                            kSyndromeBlockBytes + byte] = value;
+                                }
+                            }
+
+                            uint32_t first_conflict = H;
+                            PrecodeSolveStats consistent_stats = {};
+                            if (EvaluateCertifiedFixedHSyndromes(
+                                    R, H, heavy_words, kSyndromeBlockBytes,
+                                    packed_factor, projected_heavy, heavy_rhs,
+                                    pivot_rhs, have_pivot, first_conflict,
+                                    consistent_stats) !=
+                                    CertifiedFixedHSyndromeResult::Consistent ||
+                                first_conflict != H)
+                            {
+                                return false;
+                            }
+
+                            uint32_t earliest_dependency = 0u;
+                            while (earliest_dependency < H &&
+                                   packed_factor.
+                                       HavePivot[earliest_dependency])
+                            {
+                                ++earliest_dependency;
+                            }
+                            if (earliest_dependency >= H) {
+                                return false;
+                            }
+                            std::vector<uint8_t> conflicting_rhs = heavy_rhs;
+                            conflicting_rhs[
+                                (size_t)earliest_dependency *
+                                    kSyndromeBlockBytes] ^= 1u;
+                            PrecodeSolveStats conflict_stats = {};
+                            first_conflict = H;
+                            if (EvaluateCertifiedFixedHSyndromes(
+                                    R, H, heavy_words, kSyndromeBlockBytes,
+                                    packed_factor, projected_heavy,
+                                    conflicting_rhs, pivot_rhs, have_pivot,
+                                    first_conflict, conflict_stats) !=
+                                    CertifiedFixedHSyndromeResult::Inconsistent ||
+                                first_conflict != earliest_dependency)
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
 }
 
 WH2_TEST_NOINLINE bool CheckPackedBinaryResidualOracleForTesting()
