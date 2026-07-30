@@ -3718,6 +3718,12 @@ bool CheckMixedQuotientRankFirstOracles()
             "solve: mixed quotient factor/replay oracle failed\n");
         return false;
     }
+    if (!wirehair_v2::CheckMixedQGreaterThanHSyndromeForTesting())
+    {
+        std::fprintf(stderr,
+            "solve: mixed q>H syndrome classification oracle failed\n");
+        return false;
+    }
     {
         MixedCoefficientPeriodScope period(32u);
         MixedCoefficientGeometryScope geometry(
@@ -3784,8 +3790,8 @@ bool CheckMixedQuotientRankFirstOracles()
         }
     }
     std::printf(
-        "mixed quotient factor/replay and constant/independent/grouped "
-        "deficient syndromes: PASS\n");
+        "mixed quotient factor/replay, q>H, and "
+        "constant/independent/grouped deficient syndromes: PASS\n");
     return true;
 }
 

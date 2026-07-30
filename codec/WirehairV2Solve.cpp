@@ -2968,6 +2968,124 @@ bool BuildMixedQuotientTransform(
     return true;
 }
 
+// A q>H quotient cannot have a unique solution, but it may still have an
+// inconsistent RHS when its H coefficient rows are dependent.  Factor the
+// rectangular H-by-q coefficient matrix by rows while carrying the exact
+// H-by-H left transform.  Unlike MixedQuotientRowPlan, this path never stores
+// a pivot column in an 8-bit slot and never allocates q-by-q state: q may be
+// as large as the inactive-column cap while H remains tiny.
+bool FactorMixedCompletionRectangularSyndromes(
+    std::vector<uint16_t>& quotient_rows,
+    uint32_t row_count,
+    uint32_t column_count,
+    MixedQuotientFactorization& factor,
+    std::array<uint8_t, kMixedCompletionRowsMax>& dependency_rows,
+    uint32_t& dependency_count)
+{
+    dependency_rows.fill(UINT8_MAX);
+    dependency_count = 0u;
+    const uint64_t coefficient_count =
+        (uint64_t)row_count * column_count;
+    if (row_count > kMixedCompletionRowsMax ||
+        column_count <= row_count ||
+        column_count > kMaxInactiveColumns ||
+        coefficient_count > quotient_rows.max_size() ||
+        quotient_rows.size() != (size_t)coefficient_count)
+    {
+        return false;
+    }
+
+    factor = MixedQuotientFactorization{};
+    factor.PivotRows.fill(UINT8_MAX);
+    for (uint32_t row = 0u; row < row_count; ++row) {
+        factor.Transform[
+            (size_t)row * kMixedCompletionRowsMax + row] = 1u;
+    }
+
+    std::array<uint8_t, kMixedCompletionRowsMax> row_used = {};
+    for (uint32_t column = 0u;
+         column < column_count && factor.Rank < row_count;
+         ++column)
+    {
+        uint32_t pivot_row = row_count;
+        for (uint32_t row = 0u; row < row_count; ++row)
+        {
+            if (!row_used[row] &&
+                quotient_rows[(size_t)row * column_count + column] != 0u)
+            {
+                pivot_row = row;
+                break;
+            }
+        }
+        if (pivot_row == row_count) {
+            continue;
+        }
+
+        row_used[pivot_row] = 1u;
+        ++factor.Rank;
+        uint16_t* pivot_coeff = quotient_rows.data() +
+            (size_t)pivot_row * column_count;
+        uint16_t* pivot_transform = factor.Transform.data() +
+            (size_t)pivot_row * kMixedCompletionRowsMax;
+        const uint16_t pivot_value = pivot_coeff[column];
+        if (pivot_value != 1u)
+        {
+            const uint16_t inverse =
+                GF16InverseInitialized(pivot_value);
+            if (inverse == 0u) {
+                return false;
+            }
+            for (uint32_t k = column; k < column_count; ++k) {
+                pivot_coeff[k] =
+                    GF16MultiplyInitialized(pivot_coeff[k], inverse);
+            }
+            for (uint32_t k = 0u; k < row_count; ++k) {
+                pivot_transform[k] =
+                    GF16MultiplyInitialized(pivot_transform[k], inverse);
+            }
+        }
+
+        for (uint32_t row = 0u; row < row_count; ++row)
+        {
+            if (row == pivot_row) {
+                continue;
+            }
+            uint16_t* coeff = quotient_rows.data() +
+                (size_t)row * column_count;
+            const uint16_t scale = coeff[column];
+            if (scale == 0u) {
+                continue;
+            }
+            for (uint32_t k = column; k < column_count; ++k) {
+                coeff[k] ^= GF16MultiplyInitialized(
+                    scale, pivot_coeff[k]);
+            }
+            uint16_t* transform = factor.Transform.data() +
+                (size_t)row * kMixedCompletionRowsMax;
+            for (uint32_t k = 0u; k < row_count; ++k) {
+                transform[k] ^= GF16MultiplyInitialized(
+                    scale, pivot_transform[k]);
+            }
+        }
+    }
+
+    for (uint32_t row = 0u; row < row_count; ++row)
+    {
+        if (row_used[row]) {
+            continue;
+        }
+        const uint16_t* coeff = quotient_rows.data() +
+            (size_t)row * column_count;
+        for (uint32_t column = 0u; column < column_count; ++column) {
+            if (coeff[column] != 0u) {
+                return false;
+            }
+        }
+        dependency_rows[dependency_count++] = (uint8_t)row;
+    }
+    return dependency_count == row_count - factor.Rank;
+}
+
 // ---------------------------------------------------------------------------
 // Tiny-K mixed completion fast path.
 //
@@ -3667,9 +3785,6 @@ WirehairResult SolveMixedCompletionQuotient(
     stats.BinaryResidualRank = binary_rank;
     stats.ResidualRank = binary_rank;
     const uint32_t quotient_columns = inactive_count - binary_rank;
-    if (quotient_columns > H) {
-        return Wirehair_NeedMore;
-    }
     std::vector<uint32_t> free_columns;
     free_columns.reserve(quotient_columns);
     for (uint32_t column = 0; column < inactive_count; ++column) {
@@ -3838,10 +3953,30 @@ WirehairResult SolveMixedCompletionQuotient(
     }
 
     MixedQuotientFactorization factor;
-    if (!FactorMixedCompletionQuotient(
-            quotient_rows, H, quotient_columns, factor))
+    const bool rectangular_quotient = quotient_columns > H;
+    std::array<uint8_t, kMixedCompletionRowsMax> dependency_rows = {};
+    uint32_t dependency_count = 0u;
+    if (rectangular_quotient)
+    {
+        if (!FactorMixedCompletionRectangularSyndromes(
+                quotient_rows, H, quotient_columns, factor,
+                dependency_rows, dependency_count))
+        {
+            return Wirehair_Error;
+        }
+    }
+    else if (!FactorMixedCompletionQuotient(
+                 quotient_rows, H, quotient_columns, factor))
     {
         return Wirehair_Error;
+    }
+
+    // Full row rank means the H completion equations span every possible RHS:
+    // there is no left-nullspace syndrome to check.  Preserve the historical
+    // q>H NeedMore receipt and avoid scanning payload buckets on this common
+    // case.
+    if (rectangular_quotient && dependency_count == 0u) {
+        return Wirehair_NeedMore;
     }
 
     const uint32_t elements = block_bytes / 2u;
@@ -3851,21 +3986,22 @@ WirehairResult SolveMixedCompletionQuotient(
 
     if (factor.Rank < quotient_columns)
     {
-        if (!BuildMixedQuotientTransform(
-                H, quotient_columns, factor))
+        if (!rectangular_quotient)
         {
-            return Wirehair_Error;
-        }
-        // Preserve the historical distinction between an underdetermined,
-        // consistent system (NeedMore) and corrupted/inconsistent payloads
-        // (Error).  The dependent factor rows are exact left-nullspace
-        // syndromes.  Evaluate only those rows instead of constructing and
-        // reducing every completion RHS block.
-        std::array<uint8_t, kMixedCompletionRowsMax> dependency_rows = {};
-        uint32_t dependency_count = 0u;
-        for (uint32_t row = 0u; row < H; ++row) {
-            if (factor.Rows[row].PivotColumn == UINT8_MAX) {
-                dependency_rows[dependency_count++] = (uint8_t)row;
+            if (!BuildMixedQuotientTransform(
+                    H, quotient_columns, factor))
+            {
+                return Wirehair_Error;
+            }
+            // Preserve the historical distinction between an underdetermined,
+            // consistent system (NeedMore) and corrupted/inconsistent
+            // payloads (Error).  The dependent factor rows are exact
+            // left-nullspace syndromes.  Evaluate only those rows instead of
+            // constructing and reducing every completion RHS block.
+            for (uint32_t row = 0u; row < H; ++row) {
+                if (factor.Rows[row].PivotColumn == UINT8_MAX) {
+                    dependency_rows[dependency_count++] = (uint8_t)row;
+                }
             }
         }
         if (dependency_count != H - factor.Rank) {
@@ -4124,7 +4260,12 @@ WirehairResult SolveMixedCompletionQuotient(
             }
         }
         stats.ResidualRows += H;
-        stats.ResidualRank = binary_rank + factor.Rank;
+        // Preserve the historical q>H ResidualRank receipt for compatibility;
+        // the rectangular factor exists only to classify its left-nullspace
+        // syndromes and never publishes completion-variable values.
+        if (!rectangular_quotient) {
+            stats.ResidualRank = binary_rank + factor.Rank;
+        }
         return Wirehair_NeedMore;
     }
 
@@ -8940,7 +9081,310 @@ WH2_TEST_NOINLINE bool CheckMixedQuotientFactorReplayForTesting()
                 }
             }
         }
+
+        // The production q>H path uses a different rectangular factor that
+        // carries its H-by-H transform directly.  Exercise widths on both
+        // sides of an 8-bit column index and at the inactive-column cap,
+        // including full row rank, one exact dependency, and a pivot beyond
+        // column 255.  Verify the transform against the untouched matrix so a
+        // self-consistent but incorrect reduced form cannot pass.
+        const uint32_t rectangular_rows =
+            kMixedGF256Rows + kMixedGF16Rows;
+        const uint32_t rectangular_columns[] = {
+            rectangular_rows + 1u,
+            257u,
+            kMaxInactiveColumns
+        };
+        for (uint32_t column_count : rectangular_columns)
+        {
+            for (uint32_t shape = 0u; shape < 3u; ++shape)
+            {
+                std::vector<uint16_t> original(
+                    (size_t)rectangular_rows * column_count, 0u);
+                const uint32_t independent_rows =
+                    shape == 1u ?
+                        rectangular_rows - 1u :
+                        rectangular_rows;
+                for (uint32_t row = 0u;
+                     row < independent_rows;
+                     ++row)
+                {
+                    original[(size_t)row * column_count + row] = 1u;
+                    for (uint32_t column = rectangular_rows;
+                         column < column_count; ++column)
+                    {
+                        original[(size_t)row * column_count + column] =
+                            next_random();
+                    }
+                }
+                if (shape == 1u)
+                {
+                    const uint16_t scale = UINT16_C(0x5a17);
+                    uint16_t* dependent = original.data() +
+                        (size_t)(rectangular_rows - 1u) * column_count;
+                    const uint16_t* first = original.data();
+                    const uint16_t* second =
+                        original.data() + column_count;
+                    for (uint32_t column = 0u;
+                         column < column_count;
+                         ++column)
+                    {
+                        dependent[column] = (uint16_t)(
+                            first[column] ^
+                            GF16MultiplyInitialized(
+                                scale, second[column]));
+                    }
+                }
+                else if (shape == 2u)
+                {
+                    // Move the final independent pivot beyond uint8 range.
+                    uint16_t* last = original.data() +
+                        (size_t)(rectangular_rows - 1u) * column_count;
+                    std::fill(last, last + column_count, uint16_t{0});
+                    last[column_count - 1u] = 1u;
+                }
+
+                std::vector<uint16_t> reduced = original;
+                MixedQuotientFactorization factor;
+                std::array<
+                    uint8_t, kMixedCompletionRowsMax> dependencies = {};
+                uint32_t dependency_count = 0u;
+                const uint32_t expected_rank =
+                    shape == 1u ?
+                        rectangular_rows - 1u :
+                        rectangular_rows;
+                if (!FactorMixedCompletionRectangularSyndromes(
+                        reduced, rectangular_rows, column_count,
+                        factor, dependencies, dependency_count) ||
+                    factor.Rank != expected_rank ||
+                    dependency_count != rectangular_rows - expected_rank)
+                {
+                    return false;
+                }
+                std::array<
+                    uint8_t, kMixedCompletionRowsMax> is_dependency = {};
+                for (uint32_t i = 0u; i < dependency_count; ++i)
+                {
+                    if (dependencies[i] >= rectangular_rows ||
+                        is_dependency[dependencies[i]])
+                    {
+                        return false;
+                    }
+                    is_dependency[dependencies[i]] = 1u;
+                }
+                for (uint32_t row = 0u;
+                     row < rectangular_rows;
+                     ++row)
+                {
+                    const uint16_t* transform = factor.Transform.data() +
+                        (size_t)row * kMixedCompletionRowsMax;
+                    bool reduced_zero = true;
+                    for (uint32_t column = 0u;
+                         column < column_count;
+                         ++column)
+                    {
+                        uint16_t value = 0u;
+                        for (uint32_t source = 0u;
+                             source < rectangular_rows;
+                             ++source)
+                        {
+                            value ^= GF16MultiplyInitialized(
+                                transform[source],
+                                original[
+                                    (size_t)source * column_count +
+                                    column]);
+                        }
+                        const uint16_t actual =
+                            reduced[(size_t)row * column_count + column];
+                        if (value != actual) {
+                            return false;
+                        }
+                        reduced_zero = reduced_zero && actual == 0u;
+                    }
+                    if (reduced_zero != (is_dependency[row] != 0u)) {
+                        return false;
+                    }
+                }
+            }
+        }
         return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+WH2_TEST_NOINLINE bool CheckMixedQGreaterThanHSyndromeForTesting()
+{
+    if (!InitializeGF16() || !IsCanonicalMixedCompletionState()) {
+        return false;
+    }
+    try
+    {
+        const uint32_t H = kMixedGF256Rows + kMixedGF16Rows;
+        const uint32_t quotient_columns = H + 1u;
+        const uint32_t column_count = kMixedCoefficientPeriod + H;
+        const uint32_t projection_words =
+            PackedWordCount(quotient_columns);
+        const uint32_t block_bytes = 2u;
+        if (H != 12u || quotient_columns != 13u ||
+            projection_words != 1u || column_count <= 246u)
+        {
+            return false;
+        }
+
+        PrecodeSystem system;
+        system.Params = MakeMixedParams(
+            column_count, UINT64_C(0x716c786271313300));
+        if (system.Params.Field != CompletionField::MixedGF256GF16 ||
+            system.Params.HeavyRows != H)
+        {
+            return false;
+        }
+
+        // These free inactive columns expose coefficient residues 0..10,0,1,
+        // so their H-by-13 quotient has rank 11.  Known column 12 carries the
+        // missing Cauchy direction and therefore creates a nonzero syndrome.
+        const uint32_t free_column_ids[quotient_columns] = {
+            0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u,
+            244u, 245u
+        };
+        const MixedCoefficientRows* coefficient_rows =
+            GetMixedCoefficientRows();
+        if (!coefficient_rows) {
+            return false;
+        }
+        const auto append_coefficient_row = [&](
+            uint32_t column,
+            std::vector<uint16_t>& matrix)
+        {
+            const uint32_t residue =
+                ActiveMixedCoefficientResidue(column);
+            for (uint32_t row = 0u; row < kMixedGF256Rows; ++row) {
+                matrix.push_back(
+                    coefficient_rows->Subfield[row][residue]);
+            }
+            for (uint32_t row = 0u; row < kMixedGF16Rows; ++row) {
+                matrix.push_back(
+                    coefficient_rows->Extension[row][residue]);
+            }
+        };
+        std::vector<uint16_t> free_transpose;
+        free_transpose.reserve((size_t)quotient_columns * H);
+        for (uint32_t column : free_column_ids) {
+            append_coefficient_row(column, free_transpose);
+        }
+        std::vector<uint16_t> augmented_transpose = free_transpose;
+        append_coefficient_row(12u, augmented_transpose);
+        MixedQuotientFactorization free_factor;
+        MixedQuotientFactorization augmented_factor;
+        if (!FactorMixedCompletionQuotient(
+                free_transpose, quotient_columns, H, free_factor) ||
+            !FactorMixedCompletionQuotient(
+                augmented_transpose, quotient_columns + 1u, H,
+                augmented_factor) ||
+            free_factor.Rank != H - 1u ||
+            augmented_factor.Rank != H)
+        {
+            return false;
+        }
+
+        std::vector<uint32_t> inactive_index(
+            column_count, UINT32_MAX);
+        std::vector<uint32_t> inactive_columns(quotient_columns);
+        for (uint32_t i = 0u; i < quotient_columns; ++i)
+        {
+            inactive_index[free_column_ids[i]] = i;
+            inactive_columns[i] = free_column_ids[i];
+        }
+        const std::vector<uint64_t> projection(
+            (size_t)column_count * projection_words, UINT64_C(0));
+        const std::vector<uint64_t> binary_coeff(
+            (size_t)quotient_columns * projection_words, UINT64_C(0));
+        const std::vector<uint8_t> binary_rhs(
+            (size_t)quotient_columns * block_bytes, uint8_t{0});
+        const std::vector<uint8_t> have_pivot(
+            quotient_columns, uint8_t{0});
+        const std::vector<uint8_t> zero_values(
+            (size_t)column_count * block_bytes, uint8_t{0});
+
+        const int previous_fast_path_mode =
+            TinyMixedFastPathTestModeValue;
+        struct RestoreTinyFastPathMode
+        {
+            int Previous;
+            ~RestoreTinyFastPathMode()
+            {
+                TinyMixedFastPathTestModeValue = Previous;
+            }
+        } restore_fast_path_mode = {previous_fast_path_mode};
+        TinyMixedFastPathTestModeValue = -1;
+
+        PrecodeSolveStats consistent_stats;
+        std::vector<uint8_t> consistent_values = zero_values;
+        const WirehairResult consistent =
+            SolveMixedCompletionQuotient(
+                system, column_count, quotient_columns,
+                projection_words, block_bytes,
+                inactive_index, inactive_columns, projection,
+                binary_coeff, binary_rhs, have_pivot, 0u,
+                consistent_values, consistent_stats);
+        if (consistent != Wirehair_NeedMore ||
+            consistent_values != zero_values ||
+            consistent_stats.TinyMixedFastPathAcceptances != 0u ||
+            consistent_stats.BinaryResidualRank != 0u ||
+            consistent_stats.ResidualRank != 0u ||
+            consistent_stats.ResidualRows != H)
+        {
+            return false;
+        }
+
+        // Column 246 has the same production-period residue as free column 2,
+        // so a nonzero known value lies in the quotient image.  This guards
+        // against a "reject every nonzero RHS" implementation accidentally
+        // passing the inconsistent case below.
+        std::vector<uint8_t> nonzero_values = zero_values;
+        nonzero_values[(size_t)246u * block_bytes] = 0x5au;
+        nonzero_values[(size_t)246u * block_bytes + 1u] = 0xa5u;
+        const std::vector<uint8_t> nonzero_before = nonzero_values;
+        PrecodeSolveStats nonzero_stats;
+        const WirehairResult nonzero_consistent =
+            SolveMixedCompletionQuotient(
+                system, column_count, quotient_columns,
+                projection_words, block_bytes,
+                inactive_index, inactive_columns, projection,
+                binary_coeff, binary_rhs, have_pivot, 0u,
+                nonzero_values, nonzero_stats);
+        if (nonzero_consistent != Wirehair_NeedMore ||
+            nonzero_values != nonzero_before ||
+            nonzero_stats.TinyMixedFastPathAcceptances != 0u ||
+            nonzero_stats.BinaryResidualRank != 0u ||
+            nonzero_stats.ResidualRank != 0u ||
+            nonzero_stats.ResidualRows != H ||
+            nonzero_stats.BlockXors + nonzero_stats.BlockMulAdds == 0u)
+        {
+            return false;
+        }
+
+        std::vector<uint8_t> conflict_values = zero_values;
+        conflict_values[(size_t)12u * block_bytes] = 1u;
+        const std::vector<uint8_t> conflict_before = conflict_values;
+        PrecodeSolveStats conflict_stats;
+        const WirehairResult conflict =
+            SolveMixedCompletionQuotient(
+                system, column_count, quotient_columns,
+                projection_words, block_bytes,
+                inactive_index, inactive_columns, projection,
+                binary_coeff, binary_rhs, have_pivot, 0u,
+                conflict_values, conflict_stats);
+        return conflict == Wirehair_Error &&
+            conflict_values == conflict_before &&
+            conflict_stats.TinyMixedFastPathAcceptances == 0u &&
+            conflict_stats.BinaryResidualRank == 0u &&
+            conflict_stats.ResidualRank == 0u &&
+            conflict_stats.ResidualRows > 0u &&
+            conflict_stats.ResidualRows <= H &&
+            conflict_stats.BlockXors + conflict_stats.BlockMulAdds > 0u;
     }
     catch (...) {
         return false;

@@ -458,6 +458,14 @@ bool CheckPackedBinaryResidualOracleForTesting();
 */
 bool CheckMixedRhsFusionOracleForTesting();
 
+/**
+    Exercise the production-period H=12, q=13 rectangular mixed quotient.
+    The fixed free columns span only residues 0..10: a zero RHS is consistent
+    NeedMore, while a known residue-12 value must be rejected by its exact
+    left-nullspace syndrome without changing the caller's values.
+*/
+bool CheckMixedQGreaterThanHSyndromeForTesting();
+
 enum class MixedNullWitnessStatus : uint32_t
 {
     None = 0,
