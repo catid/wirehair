@@ -318,18 +318,22 @@ struct PrecodeSolveStats
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
     // The density gate is checked once at each eligible pre-compaction
-    // queue-drained heap-selection seam.  Enough initial density slack must
-    // remain after the configured number of actual invalid-root pops before
-    // compaction may trigger once.
+    // queue-drained heap-selection seam.  After the configured invalid-root
+    // proof pops, the heap must be guaranteed to contain CutoffKeys entries
+    // beyond the maximum possible rebuild output before compaction may
+    // trigger once.
     uint32_t PeelHeapCompactionDensitySeamChecks = 0;
     uint64_t PeelHeapCompactionDensityMaxInputKeys = 0;
     uint64_t PeelHeapCompactionDensityCutoffKeys = 0;
     uint32_t PeelHeapCompactionStalePopThreshold = 0;
     uint32_t PeelHeapCompactionDensityQualifiedSeams = 0;
-    // ProofArmed requires enough density slack to survive T actual pops.
+    // ProofArmed requires enough density slack to survive T actual pops and
+    // still leave at least CutoffKeys entries beyond the maximum possible
+    // rebuild output (one per remaining unresolved column).
     // Marginal dense seams defer without entering the proof-aware loop.
     uint32_t PeelHeapCompactionProofArmedSeams = 0;
-    uint32_t PeelHeapCompactionInsufficientDensitySlackDeferrals = 0;
+    uint32_t PeelHeapCompactionInsufficientProofPopSlackDeferrals = 0;
+    uint32_t PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals = 0;
     uint64_t PeelHeapCompactionProofStalePops = 0;
     uint32_t PeelHeapCompactionInsufficientProofDeferrals = 0;
     uint32_t PeelHeapCompactionStalePopThresholdCandidates = 0;
@@ -525,10 +529,12 @@ uint64_t BinaryPeelOracleComparisonsForTesting();
     Override the calling thread's one-shot lazy-heap density percentage.
     190 means 1.90 times the original binary-system column count.  A qualifying
     queue-drained episode counts only roots the baseline loop actually rejects.
-    The count resets at each episode, and compaction requires enough initial
-    density slack to survive the configured proof prefix.  Zero in either
-    control disables the experiment.  Values are captured once at binary-peel
-    entry, and the independent oracle always remains off.
+    The count resets at each episode.  Compaction requires enough initial
+    density slack to survive the proof prefix and then still guarantee that
+    many rebuild-removable entries after reserving one possible output key per
+    unresolved column.  Zero in either control disables the experiment.
+    Values are captured once at binary-peel entry, and the independent oracle
+    always remains off.
 */
 void SetBinaryPeelHeapCompactionDensityPercentForTesting(
     uint32_t density_percent);

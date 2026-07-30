@@ -87,8 +87,10 @@ bool SameExactSolveStats(
             b.PeelHeapCompactionDensityQualifiedSeams &&
         a.PeelHeapCompactionProofArmedSeams ==
             b.PeelHeapCompactionProofArmedSeams &&
-        a.PeelHeapCompactionInsufficientDensitySlackDeferrals ==
-            b.PeelHeapCompactionInsufficientDensitySlackDeferrals &&
+        a.PeelHeapCompactionInsufficientProofPopSlackDeferrals ==
+            b.PeelHeapCompactionInsufficientProofPopSlackDeferrals &&
+        a.PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals ==
+            b.PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals &&
         a.PeelHeapCompactionProofStalePops ==
             b.PeelHeapCompactionProofStalePops &&
         a.PeelHeapCompactionInsufficientProofDeferrals ==
@@ -164,8 +166,11 @@ bool SameSolveStatsExceptHeapExperimentAndTiming(
         b.PeelHeapCompactionDensityQualifiedSeams = 0u;
     a.PeelHeapCompactionProofArmedSeams =
         b.PeelHeapCompactionProofArmedSeams = 0u;
-    a.PeelHeapCompactionInsufficientDensitySlackDeferrals =
-        b.PeelHeapCompactionInsufficientDensitySlackDeferrals = 0u;
+    a.PeelHeapCompactionInsufficientProofPopSlackDeferrals =
+        b.PeelHeapCompactionInsufficientProofPopSlackDeferrals = 0u;
+    a.PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals =
+        b.PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals =
+            0u;
     a.PeelHeapCompactionProofStalePops =
         b.PeelHeapCompactionProofStalePops = 0u;
     a.PeelHeapCompactionInsufficientProofDeferrals =
@@ -4296,7 +4301,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
 {
     static const uint32_t kBlockBytes = 2u;
     static const uint32_t kDensityPercents[] = {
-        1u, 50u, 100u, 150u, 175u, 180u,
+        1u, 50u, 100u, 150u, 165u, 175u, 180u,
         185u, 187u, 188u, 190u, 195u, 196u,
         199u, 200u, 205u, UINT32_MAX
     };
@@ -4420,7 +4425,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
             baseline.Stats.PeelHeapCompactionDensityQualifiedSeams != 0u ||
             baseline.Stats.PeelHeapCompactionProofArmedSeams != 0u ||
             baseline.Stats.
-                PeelHeapCompactionInsufficientDensitySlackDeferrals != 0u ||
+                PeelHeapCompactionInsufficientProofPopSlackDeferrals != 0u ||
+            baseline.Stats.
+                PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals !=
+                    0u ||
             baseline.Stats.PeelHeapCompactionProofStalePops != 0u ||
             baseline.Stats.
                 PeelHeapCompactionInsufficientProofDeferrals != 0u ||
@@ -4480,7 +4488,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
             uint32_t StalePopThreshold = 0u;
             uint32_t QualifiedSeams = 0u;
             uint32_t ProofArmedSeams = 0u;
-            uint32_t InsufficientDensitySlackDeferrals = 0u;
+            uint32_t ProofPopSlackDeferrals = 0u;
+            uint32_t RemovableKeyExcessDeferrals = 0u;
             uint64_t ProofStalePops = 0u;
             uint32_t InsufficientProofDeferrals = 0u;
             uint32_t ThresholdCandidates = 0u;
@@ -4516,9 +4525,12 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     stats.PeelHeapCompactionDensityQualifiedSeams;
                 receipt.ProofArmedSeams =
                     stats.PeelHeapCompactionProofArmedSeams;
-                receipt.InsufficientDensitySlackDeferrals =
+                receipt.ProofPopSlackDeferrals =
                     stats.
-                        PeelHeapCompactionInsufficientDensitySlackDeferrals;
+                        PeelHeapCompactionInsufficientProofPopSlackDeferrals;
+                receipt.RemovableKeyExcessDeferrals =
+                    stats.
+                        PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals;
                 receipt.ProofStalePops =
                     stats.PeelHeapCompactionProofStalePops;
                 receipt.InsufficientProofDeferrals =
@@ -4551,8 +4563,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 a.StalePopThreshold == b.StalePopThreshold &&
                 a.QualifiedSeams == b.QualifiedSeams &&
                 a.ProofArmedSeams == b.ProofArmedSeams &&
-                a.InsufficientDensitySlackDeferrals ==
-                    b.InsufficientDensitySlackDeferrals &&
+                a.ProofPopSlackDeferrals ==
+                    b.ProofPopSlackDeferrals &&
+                a.RemovableKeyExcessDeferrals ==
+                    b.RemovableKeyExcessDeferrals &&
                 a.ProofStalePops == b.ProofStalePops &&
                 a.InsufficientProofDeferrals ==
                     b.InsufficientProofDeferrals &&
@@ -4583,9 +4597,6 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 density_percent != 0u && stale_pop_threshold != 0u;
             const bool should_qualify =
                 enabled && receipt.MaxInput >= cutoff_keys;
-            const bool should_arm =
-                should_qualify &&
-                receipt.MaxInput - cutoff_keys >= stale_pop_threshold;
             const bool did_compact = receipt.Compactions == 1u;
             const bool stale_count_ordered =
                 receipt.StalePops <=
@@ -4611,11 +4622,11 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 receipt.Cutoff == cutoff_keys &&
                 receipt.StalePopThreshold == stale_pop_threshold &&
                 (receipt.QualifiedSeams != 0u) == should_qualify &&
-                (receipt.ProofArmedSeams != 0u) == should_arm &&
                 receipt.QualifiedSeams <= receipt.SeamChecks &&
                 receipt.QualifiedSeams ==
                     receipt.ProofArmedSeams +
-                        receipt.InsufficientDensitySlackDeferrals &&
+                        receipt.ProofPopSlackDeferrals +
+                        receipt.RemovableKeyExcessDeferrals &&
                 receipt.ProofArmedSeams ==
                     receipt.InsufficientProofDeferrals +
                         receipt.ThresholdCandidates &&
@@ -4643,6 +4654,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     receipt.TriggerProofStalePops ==
                         stale_pop_threshold &&
                     receipt.TriggerPostPopKeys >= cutoff_keys &&
+                    receipt.TriggerPostPopKeys >=
+                        receipt.TriggerRemainingColumns &&
+                    receipt.TriggerPostPopKeys -
+                        receipt.TriggerRemainingColumns >= cutoff_keys &&
                     receipt.CompactionInput ==
                         receipt.TriggerPostPopKeys &&
                     receipt.TriggerRemainingColumns != 0u &&
@@ -4666,7 +4681,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 receipt.HeapOperations == expected_heap_operations;
             std::printf(
                 "K=%u C0FFEE d4 heap compaction d=%u T=%u "
-                "H=%llu cutoff=%llu seams=%u q/a/s=%u/%u/%u "
+                "H=%llu cutoff=%llu seams=%u q/a/p/r=%u/%u/%u/%u "
                 "proof/def/candidate=%llu/%u/%u trigger=%u/%llu/R%u "
                 "keys=%llu->%llu C/M=%llu/%llu "
                 "stale=%llu/%llu ops=%llu/%llu: %s\n",
@@ -4676,7 +4691,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 receipt.SeamChecks,
                 receipt.QualifiedSeams,
                 receipt.ProofArmedSeams,
-                receipt.InsufficientDensitySlackDeferrals,
+                receipt.ProofPopSlackDeferrals,
+                receipt.RemovableKeyExcessDeferrals,
                 (unsigned long long)receipt.ProofStalePops,
                 receipt.InsufficientProofDeferrals,
                 receipt.ThresholdCandidates,
@@ -4696,6 +4712,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
             return valid;
         };
 
+        CompactionReceipt density_100;
+        CompactionReceipt density_175;
         CompactionReceipt density_190;
         CompactionReceipt density_195;
         for (uint32_t density_percent : kDensityPercents)
@@ -4704,7 +4722,13 @@ bool CheckBinaryPeelHeapCompactionOracle()
             if (!check_case(density_percent, 64u, receipt)) {
                 return false;
             }
-            if (density_percent == 190u) {
+            if (density_percent == 100u) {
+                density_100 = receipt;
+            }
+            else if (density_percent == 175u) {
+                density_175 = receipt;
+            }
+            else if (density_percent == 190u) {
                 density_190 = receipt;
             }
             else if (density_percent == 195u) {
@@ -4718,11 +4742,15 @@ bool CheckBinaryPeelHeapCompactionOracle()
         };
         static const ThresholdCase kThresholdCases[] = {
             {190u, 0u},
+            {190u, 476u},
+            {190u, 477u},
             {190u, 478u},
             {190u, 479u},
             {190u, UINT32_MAX},
             {195u, 65u}
         };
+        CompactionReceipt density_190_threshold_476;
+        CompactionReceipt density_190_threshold_477;
         CompactionReceipt density_190_threshold_478;
         CompactionReceipt density_190_threshold_479;
         CompactionReceipt density_195_threshold_65;
@@ -4737,6 +4765,16 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 return false;
             }
             if (threshold_case.DensityPercent == 190u &&
+                threshold_case.StalePopThreshold == 476u)
+            {
+                density_190_threshold_476 = receipt;
+            }
+            else if (threshold_case.DensityPercent == 190u &&
+                     threshold_case.StalePopThreshold == 477u)
+            {
+                density_190_threshold_477 = receipt;
+            }
+            else if (threshold_case.DensityPercent == 190u &&
                 threshold_case.StalePopThreshold == 478u)
             {
                 density_190_threshold_478 = receipt;
@@ -4759,26 +4797,42 @@ bool CheckBinaryPeelHeapCompactionOracle()
             const bool is_small = K == 8192u;
             const bool triggers =
                 is_small &&
+                density_percent == 190u &&
                 (stale_pop_threshold == 64u ||
-                 stale_pop_threshold == 478u);
+                 stale_pop_threshold == 476u);
+            const bool proof_pop_slack_deferral =
+                is_small &&
+                ((density_percent == 190u &&
+                  stale_pop_threshold == 479u) ||
+                 (density_percent == 195u &&
+                  stale_pop_threshold == 65u));
+            const bool removable_key_excess_deferral =
+                is_small &&
+                ((density_percent == 190u &&
+                  (stale_pop_threshold == 477u ||
+                   stale_pop_threshold == 478u)) ||
+                 (density_percent == 195u &&
+                  stale_pop_threshold == 64u));
             CompactionReceipt expected;
             expected.MaxInput = is_small ? 16222u : 120825u;
             expected.Cutoff =
                 (column_count * density_percent + 99u) / 100u;
             expected.StalePops = triggers ?
-                (stale_pop_threshold == 64u ? 390u : 804u) :
+                (stale_pop_threshold == 64u ? 390u : 802u) :
                 (is_small ? 8272u : 2564u);
             // Exact push_heap + invalid-pop_heap totals: M is make_heap
             // input, not a set of logical rebuild insertions.
             expected.HeapOperations = triggers ?
-                (stale_pop_threshold == 64u ? 16938u : 17352u) :
+                (stale_pop_threshold == 64u ? 16938u : 17350u) :
                 (is_small ? 24820u : 131264u);
             expected.SeamChecks = is_small ? 150u : 571u;
             expected.StalePopThreshold = stale_pop_threshold;
             expected.QualifiedSeams = is_small ? 1u : 0u;
             expected.ProofArmedSeams = triggers ? 1u : 0u;
-            expected.InsufficientDensitySlackDeferrals =
-                is_small && !triggers ? 1u : 0u;
+            expected.ProofPopSlackDeferrals =
+                proof_pop_slack_deferral ? 1u : 0u;
+            expected.RemovableKeyExcessDeferrals =
+                removable_key_excess_deferral ? 1u : 0u;
             expected.ProofStalePops =
                 triggers ? stale_pop_threshold : 0u;
             expected.ThresholdCandidates = triggers ? 1u : 0u;
@@ -4786,7 +4840,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             expected.TriggerProofStalePops =
                 triggers ? stale_pop_threshold : 0u;
             expected.TriggerPostPopKeys = triggers ?
-                (stale_pop_threshold == 64u ? 16158u : 15744u) :
+                (stale_pop_threshold == 64u ? 16158u : 15746u) :
                 0u;
             expected.TriggerRemainingColumns = triggers ? 2u : 0u;
             expected.Compactions = triggers ? 1u : 0u;
@@ -4799,7 +4853,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 std::fprintf(stderr,
                     "solve: heap compaction exact boundary failed "
                     "K=%u density=%u T=%u H/cutoff=%llu/%llu "
-                    "q/a/s=%u/%u/%u proof/def/candidate=%llu/%u/%u "
+                    "q/a/p/r=%u/%u/%u/%u "
+                    "proof/def/candidate=%llu/%u/%u "
                     "trigger=%u/%llu/R%u keys=%llu->%llu "
                     "C/M=%llu/%llu stale/ops=%llu/%llu\n",
                     K, density_percent, stale_pop_threshold,
@@ -4807,7 +4862,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     (unsigned long long)actual.Cutoff,
                     actual.QualifiedSeams,
                     actual.ProofArmedSeams,
-                    actual.InsufficientDensitySlackDeferrals,
+                    actual.ProofPopSlackDeferrals,
+                    actual.RemovableKeyExcessDeferrals,
                     (unsigned long long)actual.ProofStalePops,
                     actual.InsufficientProofDeferrals,
                     actual.ThresholdCandidates,
@@ -4827,6 +4883,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
         if (!check_exact_boundary(190u, 64u, density_190) ||
             !check_exact_boundary(195u, 64u, density_195) ||
             !check_exact_boundary(
+                190u, 476u, density_190_threshold_476) ||
+            !check_exact_boundary(
+                190u, 477u, density_190_threshold_477) ||
+            !check_exact_boundary(
                 190u, 478u, density_190_threshold_478) ||
             !check_exact_boundary(
                 190u, 479u, density_190_threshold_479) ||
@@ -4835,13 +4895,72 @@ bool CheckBinaryPeelHeapCompactionOracle()
         {
             return false;
         }
+        // Pin both retry directions.  At K=8192, early removable-excess
+        // deferrals eventually expose a much stronger later compaction.  At
+        // K=64000, repeated deferrals/short proofs reject the known losing
+        // rebuild completely.
+        const CompactionReceipt& retry =
+            K == 8192u ? density_100 : density_175;
+        const bool retry_exact =
+            K == 8192u ?
+                retry.MaxInput == 16222u &&
+                    retry.Cutoff == 8286u &&
+                    retry.SeamChecks == 150u &&
+                    retry.QualifiedSeams == 22u &&
+                    retry.ProofArmedSeams == 5u &&
+                    retry.ProofPopSlackDeferrals == 0u &&
+                    retry.RemovableKeyExcessDeferrals == 17u &&
+                    retry.ProofStalePops == 69u &&
+                    retry.InsufficientProofDeferrals == 4u &&
+                    retry.ThresholdCandidates == 1u &&
+                    retry.ThresholdTriggers == 1u &&
+                    retry.TriggerProofStalePops == 64u &&
+                    retry.TriggerPostPopKeys == 16158u &&
+                    retry.TriggerRemainingColumns == 2u &&
+                    retry.Compactions == 1u :
+                retry.MaxInput == 120825u &&
+                    retry.Cutoff == 112634u &&
+                    retry.SeamChecks == 571u &&
+                    retry.QualifiedSeams == 39u &&
+                    retry.ProofArmedSeams == 15u &&
+                    retry.ProofPopSlackDeferrals == 0u &&
+                    retry.RemovableKeyExcessDeferrals == 24u &&
+                    retry.ProofStalePops == 183u &&
+                    retry.InsufficientProofDeferrals == 15u &&
+                    retry.ThresholdCandidates == 0u &&
+                    retry.ThresholdTriggers == 0u &&
+                    retry.TriggerProofStalePops == 0u &&
+                    retry.TriggerPostPopKeys == 0u &&
+                    retry.TriggerRemainingColumns == 0u &&
+                    retry.Compactions == 0u;
+        if (!retry_exact)
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction removable-excess retry failed "
+                "K=%u H/cutoff=%llu/%llu q/a/p/r=%u/%u/%u/%u "
+                "proof/def/candidate=%llu/%u/%u trigger=%u/%llu/R%u\n",
+                K,
+                (unsigned long long)retry.MaxInput,
+                (unsigned long long)retry.Cutoff,
+                retry.QualifiedSeams,
+                retry.ProofArmedSeams,
+                retry.ProofPopSlackDeferrals,
+                retry.RemovableKeyExcessDeferrals,
+                (unsigned long long)retry.ProofStalePops,
+                retry.InsufficientProofDeferrals,
+                retry.ThresholdCandidates,
+                retry.TriggerProofStalePops,
+                (unsigned long long)retry.TriggerPostPopKeys,
+                retry.TriggerRemainingColumns);
+            return false;
+        }
         if (K == 8192u)
         {
             static const uint32_t kThreadDensityPercents[2] = {
-                195u, 190u
+                190u, 195u
             };
             static const uint32_t kThreadStalePopThresholds[2] = {
-                64u, 479u
+                476u, 64u
             };
             Observation threaded[2];
             uint32_t initial_density_percent[2] = {};
@@ -4964,10 +5083,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     threaded[1].Stats, baseline.Stats) ||
                 !same_receipt(
                     capture_receipt(threaded[0].Stats),
-                    density_195) ||
+                    density_190_threshold_476) ||
                 !same_receipt(
                     capture_receipt(threaded[1].Stats),
-                    density_190_threshold_479) ||
+                    density_195) ||
                 threaded[0].Stats.
                     PeelHeapUnresolvedCountMismatchPops != 0u ||
                 threaded[1].Stats.

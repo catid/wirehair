@@ -31,9 +31,11 @@
 // Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
 // path exactly.  A nonzero build override is a percentage of the original
 // binary-system column count (190 means 1.90x); queue-drained selection seams
-// arm a same-episode stale-pop proof and compact once only after the configured
-// threshold of invalid roots has actually been popped while density remains
-// above the cutoff.  Test-hook builds may override both values per thread
+// arm a same-episode stale-pop proof only when the post-proof heap is
+// guaranteed to contain at least that many entries beyond the maximum
+// rebuild-retained population.
+// Compaction occurs once after the configured threshold of invalid roots has
+// actually been popped.  Test-hook builds may override both values per thread
 // without changing the production ABI or exporting production symbols.
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT 0u
@@ -875,7 +877,8 @@ struct PeelResult
     uint32_t HeapCompactionStalePopThreshold = 0u;
     uint32_t HeapCompactionDensityQualifiedSeams = 0u;
     uint32_t HeapCompactionProofArmedSeams = 0u;
-    uint32_t HeapCompactionInsufficientDensitySlackDeferrals = 0u;
+    uint32_t HeapCompactionInsufficientProofPopSlackDeferrals = 0u;
+    uint32_t HeapCompactionInsufficientRemovableKeyExcessDeferrals = 0u;
     uint64_t HeapCompactionProofStalePops = 0u;
     uint32_t HeapCompactionInsufficientProofDeferrals = 0u;
     uint32_t HeapCompactionStalePopThresholdCandidates = 0u;
@@ -6051,9 +6054,11 @@ PeelResult PeelBinaryRowsImplementation(
 
         // This is the only permitted compaction seam: all singleton work,
         // including transitively appended rows, has drained.  A dense heap
-        // arms a proof counter for this selection episode only.  The existing
-        // lazy-pop loop must then expose and pop T genuinely invalid roots
-        // before a rebuild is even considered; a later episode starts over.
+        // arms a proof counter for this selection episode only if H0-D-T >= R:
+        // after T pops, rebuilding can retain at most R keys and therefore
+        // removes at least D entries.  The existing lazy-pop loop must then
+        // expose and pop T genuinely invalid roots before a rebuild is
+        // considered; a later episode starts over.
         bool heap_compaction_proof_armed = false;
         if (EnableHeapCompaction &&
             !heap_compacted &&
@@ -6080,18 +6085,27 @@ PeelResult PeelBinaryRowsImplementation(
 #endif
                 const uint64_t density_slack =
                     (uint64_t)input_keys - heap_compaction_density_cutoff;
-                if (density_slack >= heap_compaction_stale_pop_threshold)
+                if (density_slack < heap_compaction_stale_pop_threshold)
                 {
-                    heap_compaction_proof_armed = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactionProofArmedSeams;
+                    ++out.
+                        HeapCompactionInsufficientProofPopSlackDeferrals;
+#endif
+                }
+                else if (
+                    density_slack - heap_compaction_stale_pop_threshold <
+                        (uint64_t)remaining)
+                {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    ++out.
+                        HeapCompactionInsufficientRemovableKeyExcessDeferrals;
 #endif
                 }
                 else
                 {
+                    heap_compaction_proof_armed = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.
-                        HeapCompactionInsufficientDensitySlackDeferrals;
+                    ++out.HeapCompactionProofArmedSeams;
 #endif
                 }
             }
@@ -6150,6 +6164,13 @@ PeelResult PeelBinaryRowsImplementation(
                             CAT_DEBUG_ASSERT(
                                 (uint64_t)post_pop_keys >=
                                     heap_compaction_density_cutoff);
+                            CAT_DEBUG_ASSERT(
+                                (uint64_t)post_pop_keys >=
+                                    (uint64_t)remaining);
+                            CAT_DEBUG_ASSERT(
+                                (uint64_t)post_pop_keys -
+                                    (uint64_t)remaining >=
+                                        heap_compaction_density_cutoff);
                             const size_t retained_capacity =
                                 degree_two_heap.capacity();
                             (void)retained_capacity;
@@ -7772,8 +7793,12 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapCompactionDensityQualifiedSeams;
         st.PeelHeapCompactionProofArmedSeams =
             peel.HeapCompactionProofArmedSeams;
-        st.PeelHeapCompactionInsufficientDensitySlackDeferrals =
-            peel.HeapCompactionInsufficientDensitySlackDeferrals;
+        st.PeelHeapCompactionInsufficientProofPopSlackDeferrals =
+            peel.HeapCompactionInsufficientProofPopSlackDeferrals;
+        st.
+            PeelHeapCompactionInsufficientRemovableKeyExcessDeferrals =
+            peel.
+                HeapCompactionInsufficientRemovableKeyExcessDeferrals;
         st.PeelHeapCompactionProofStalePops =
             peel.HeapCompactionProofStalePops;
         st.PeelHeapCompactionInsufficientProofDeferrals =
