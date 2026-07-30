@@ -4019,7 +4019,12 @@ WirehairResult SolveMixedCompletionQuotient(
         std::vector<uint8_t> source_low = MakeBlockStorage(elements);
         std::vector<uint8_t> source_high = MakeBlockStorage(elements);
         std::vector<uint8_t> residue_bucket = MakeBlockStorage(block_bytes);
-        ++stats.BlockZeroFills;
+        // syndrome_low with syndrome_high is one whole payload block per
+        // dependency, source_low with source_high is one scratch block, and
+        // residue_bucket is one more.  Count the zero-initialization done by
+        // every MakeBlockStorage above; the per-residue refills are counted
+        // separately in accumulate_syndrome_schedule().
+        stats.BlockZeroFills += dependency_count + 2u;
 
         const auto add_syndrome_source = [&](
             uint32_t residue,
@@ -9322,6 +9327,8 @@ WH2_TEST_NOINLINE bool CheckMixedQGreaterThanHSyndromeForTesting()
 
         PrecodeSolveStats consistent_stats;
         std::vector<uint8_t> consistent_values = zero_values;
+        const uint64_t expected_dependency_zero_fills =
+            kMixedCoefficientPeriod + 1u + 2u;
         const WirehairResult consistent =
             SolveMixedCompletionQuotient(
                 system, column_count, quotient_columns,
@@ -9334,7 +9341,38 @@ WH2_TEST_NOINLINE bool CheckMixedQGreaterThanHSyndromeForTesting()
             consistent_stats.TinyMixedFastPathAcceptances != 0u ||
             consistent_stats.BinaryResidualRank != 0u ||
             consistent_stats.ResidualRank != 0u ||
-            consistent_stats.ResidualRows != H)
+            consistent_stats.ResidualRows != H ||
+            consistent_stats.BlockZeroFills !=
+                expected_dependency_zero_fills)
+        {
+            return false;
+        }
+
+        // Payload-free solves exercise the cost-model dispatch while retaining
+        // zero real bytes.  MakeBlockStorage keeps data() non-null for the
+        // zero-length kernel calls below; an ordinary empty vector would not
+        // test that contract safely.
+        const std::vector<uint8_t> zero_binary_rhs =
+            MakeBlockStorage(0u);
+        std::vector<uint8_t> zero_width_values =
+            MakeBlockStorage(0u);
+        PrecodeSolveStats zero_width_stats;
+        const WirehairResult zero_width_consistent =
+            SolveMixedCompletionQuotient(
+                system, column_count, quotient_columns,
+                projection_words, 0u,
+                inactive_index, inactive_columns, projection,
+                binary_coeff, zero_binary_rhs, have_pivot, 0u,
+                zero_width_values, zero_width_stats);
+        if (zero_width_consistent != Wirehair_NeedMore ||
+            !zero_width_values.empty() ||
+            zero_width_values.capacity() == 0u ||
+            zero_width_stats.TinyMixedFastPathAcceptances != 0u ||
+            zero_width_stats.BinaryResidualRank != 0u ||
+            zero_width_stats.ResidualRank != 0u ||
+            zero_width_stats.ResidualRows != H ||
+            zero_width_stats.BlockZeroFills !=
+                expected_dependency_zero_fills)
         {
             return false;
         }
@@ -9361,6 +9399,8 @@ WH2_TEST_NOINLINE bool CheckMixedQGreaterThanHSyndromeForTesting()
             nonzero_stats.BinaryResidualRank != 0u ||
             nonzero_stats.ResidualRank != 0u ||
             nonzero_stats.ResidualRows != H ||
+            nonzero_stats.BlockZeroFills !=
+                expected_dependency_zero_fills ||
             nonzero_stats.BlockXors + nonzero_stats.BlockMulAdds == 0u)
         {
             return false;
@@ -9384,6 +9424,8 @@ WH2_TEST_NOINLINE bool CheckMixedQGreaterThanHSyndromeForTesting()
             conflict_stats.ResidualRank == 0u &&
             conflict_stats.ResidualRows > 0u &&
             conflict_stats.ResidualRows <= H &&
+            conflict_stats.BlockZeroFills ==
+                expected_dependency_zero_fills &&
             conflict_stats.BlockXors + conflict_stats.BlockMulAdds > 0u;
     }
     catch (...) {
