@@ -67,6 +67,15 @@ bool SameExactSolveStats(
         a.PeelAdjacencyVisits == b.PeelAdjacencyVisits &&
         a.PeelRowScanSteps == b.PeelRowScanSteps &&
         a.PeelHeapOperations == b.PeelHeapOperations &&
+        a.PeelHeapResolvedStalePops ==
+            b.PeelHeapResolvedStalePops &&
+        a.PeelHeapUnresolvedCountMismatchPops ==
+            b.PeelHeapUnresolvedCountMismatchPops &&
+        a.PeelHeapCompactions == b.PeelHeapCompactions &&
+        a.PeelHeapCompactionInputKeys ==
+            b.PeelHeapCompactionInputKeys &&
+        a.PeelHeapCompactionOutputKeys ==
+            b.PeelHeapCompactionOutputKeys &&
         a.ProjectionWordXors == b.ProjectionWordXors &&
         a.ResidualCoeffWordXors == b.ResidualCoeffWordXors &&
         a.ResidualCoeffByteOps == b.ResidualCoeffByteOps &&
@@ -100,6 +109,28 @@ bool SameExactSolveStats(
         a.MixedJointScratchBytes == b.MixedJointScratchBytes &&
         a.MixedJointActiveDeltas == b.MixedJointActiveDeltas &&
         a.MixedDualSourceColumns == b.MixedDualSourceColumns;
+}
+
+bool SameSolveStatsExceptHeapExperimentAndTiming(
+    wirehair_v2::PrecodeSolveStats a,
+    wirehair_v2::PrecodeSolveStats b)
+{
+    a.PeelHeapOperations = b.PeelHeapOperations = 0u;
+    a.PeelHeapResolvedStalePops =
+        b.PeelHeapResolvedStalePops = 0u;
+    a.PeelHeapUnresolvedCountMismatchPops =
+        b.PeelHeapUnresolvedCountMismatchPops = 0u;
+    a.PeelHeapCompactions = b.PeelHeapCompactions = 0u;
+    a.PeelHeapCompactionInputKeys =
+        b.PeelHeapCompactionInputKeys = 0u;
+    a.PeelHeapCompactionOutputKeys =
+        b.PeelHeapCompactionOutputKeys = 0u;
+    a.BuildNanoseconds = b.BuildNanoseconds = 0u;
+    a.PeelNanoseconds = b.PeelNanoseconds = 0u;
+    a.ProjectNanoseconds = b.ProjectNanoseconds = 0u;
+    a.ResidualNanoseconds = b.ResidualNanoseconds = 0u;
+    a.BackSubNanoseconds = b.BackSubNanoseconds = 0u;
+    return SameExactSolveStats(a, b);
 }
 
 bool SameResumeAlgebraState(
@@ -403,6 +434,28 @@ public:
     {
         wirehair_v2::SetBinaryPeelOracleForTesting(false);
     }
+};
+
+class BinaryPeelHeapCompactionThresholdScope
+{
+public:
+    explicit BinaryPeelHeapCompactionThresholdScope(uint32_t threshold)
+        : Previous(
+            wirehair_v2::
+                BinaryPeelHeapCompactionThresholdForTesting())
+    {
+        wirehair_v2::SetBinaryPeelHeapCompactionThresholdForTesting(
+            threshold);
+    }
+
+    ~BinaryPeelHeapCompactionThresholdScope()
+    {
+        wirehair_v2::SetBinaryPeelHeapCompactionThresholdForTesting(
+            Previous);
+    }
+
+private:
+    uint32_t Previous;
 };
 
 bool CheckLowestBitIndex()
@@ -4150,6 +4203,398 @@ bool CheckBinaryPeelLowDegreeXorOracle()
     return true;
 }
 
+bool CheckBinaryPeelHeapCompactionOracle()
+{
+    static const uint32_t kBlockBytes = 2u;
+    static const uint32_t kThresholds[] = {
+        1u, 2u, 4u, 8u, 16u, 32u,
+        64u, 128u, 256u, 512u, 1024u, 2048u, 4096u, UINT32_MAX
+    };
+    static const uint32_t kBlockCounts[] = {8192u, 64000u};
+
+    if (!wirehair_v2::IsCanonicalMixedCompletionState() ||
+        !wirehair_v2::IsCanonicalStableTargetStaircaseState() ||
+        !wirehair_v2::IsCanonicalStaircaseDegreeScaleState() ||
+        !wirehair_v2::IsCanonicalStableTargetPacketRowState() ||
+        !wirehair_v2::IsCanonicalPacketDegreeState())
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction canonical binary fixture rejected\n");
+        return false;
+    }
+    MixedCoefficientPeriodScope period_scope(
+        wirehair_v2::kMixedCoefficientPeriod);
+    MixedGF256RowsScope gf256_scope(wirehair_v2::kMixedGF256Rows);
+    MixedGF16RowsScope gf16_scope(wirehair_v2::kMixedGF16Rows);
+    if (!period_scope.IsValid() ||
+        !gf256_scope.IsValid() ||
+        !gf16_scope.IsValid() ||
+        wirehair_v2::ActiveMixedCoefficientPeriod() !=
+            wirehair_v2::kMixedCoefficientPeriod ||
+        wirehair_v2::ActiveMixedGF256Rows() !=
+            wirehair_v2::kMixedGF256Rows ||
+        wirehair_v2::ActiveMixedGF16Rows() !=
+            wirehair_v2::kMixedGF16Rows)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction canonical mixed fixture rejected\n");
+        return false;
+    }
+
+    const uint32_t original_threshold =
+        wirehair_v2::BinaryPeelHeapCompactionThresholdForTesting();
+    for (uint32_t K : kBlockCounts)
+    {
+        wirehair_v2::PrecodeParams params =
+            wirehair_v2::MakeMixedParams(
+                K, UINT64_C(0xC0FFEE));
+        // Exact historical pathology/control fixture: dispatched
+        // mixed-p244-d4 structure with the raw C0FFEE construction and packet
+        // seeds.  Completion arithmetic does not affect binary selection.
+        params.DenseRows = 4u;
+        if (params.DenseRows != 4u || params.HeavyRows != 12u)
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction fixture shape changed "
+                "K=%u D2=%u H=%u\n",
+                K, params.DenseRows, params.HeavyRows);
+            return false;
+        }
+        wirehair_v2::PrecodeSystem system;
+        if (!wirehair_v2::BuildPrecodeSystem(params, system))
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction system build failed K=%u\n", K);
+            return false;
+        }
+        wirehair_v2::PacketRowConfig config;
+        config.PeelSeed = UINT32_C(0xC0FFEE);
+        config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+
+        std::vector<uint8_t> source((size_t)K * kBlockBytes);
+        for (size_t i = 0u; i < source.size(); ++i) {
+            source[i] =
+                (uint8_t)(0x5bu + i * 173u + (i >> 7));
+        }
+        std::vector<wirehair_v2::SolvePacket> packets(K);
+        for (uint32_t id = 0u; id < K; ++id)
+        {
+            packets[id].BlockId = id;
+            packets[id].Data =
+                source.data() + (size_t)id * kBlockBytes;
+        }
+
+        struct Observation
+        {
+            WirehairResult Result = Wirehair_Error;
+            std::vector<uint8_t> Intermediate;
+            wirehair_v2::PrecodeSolveStats Stats;
+        };
+        const auto run = [&](
+            uint32_t threshold,
+            bool oracle,
+            Observation& observation) {
+            BinaryPeelHeapCompactionThresholdScope threshold_scope(
+                threshold);
+            observation.Intermediate.assign(7u, uint8_t{0xa5u});
+            if (oracle)
+            {
+                BinaryPeelOracleScope oracle_scope;
+                observation.Result = wirehair_v2::SolvePrecodeSystem(
+                    system, config, packets, kBlockBytes,
+                    observation.Intermediate, &observation.Stats);
+            }
+            else
+            {
+                observation.Result = wirehair_v2::SolvePrecodeSystem(
+                    system, config, packets, kBlockBytes,
+                    observation.Intermediate, &observation.Stats);
+            }
+        };
+
+        Observation baseline;
+        run(0u, false, baseline);
+        if ((baseline.Result != Wirehair_Success &&
+             baseline.Result != Wirehair_NeedMore) ||
+            baseline.Stats.PeelHeapCompactions != 0u ||
+            baseline.Stats.PeelHeapUnresolvedCountMismatchPops != 0u)
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction baseline invalid K=%u result=%d "
+                "resolved_stale=%llu mismatch=%llu compactions=%u\n",
+                K, (int)baseline.Result,
+                (unsigned long long)
+                    baseline.Stats.PeelHeapResolvedStalePops,
+                (unsigned long long)
+                    baseline.Stats.PeelHeapUnresolvedCountMismatchPops,
+                baseline.Stats.PeelHeapCompactions);
+            return false;
+        }
+        if (baseline.Result == Wirehair_Success &&
+            !wirehair_v2::VerifyPrecodeSolution(
+                system, config, packets, baseline.Intermediate.data(),
+                kBlockBytes))
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction baseline verification failed K=%u\n",
+                K);
+            return false;
+        }
+
+        uint64_t threshold_one_input = 0u;
+        uint64_t threshold_one_output = 0u;
+        uint64_t threshold_one_stale = 0u;
+        for (uint32_t threshold : kThresholds)
+        {
+            wirehair_v2::ResetBinaryPeelOracleComparisonsForTesting();
+            Observation candidate;
+            run(threshold, true, candidate);
+            const uint64_t comparisons =
+                wirehair_v2::BinaryPeelOracleComparisonsForTesting();
+            const bool should_engage =
+                baseline.Stats.PeelHeapResolvedStalePops >= threshold;
+            if (candidate.Result != baseline.Result ||
+                candidate.Intermediate != baseline.Intermediate ||
+                !SameSolveStatsExceptHeapExperimentAndTiming(
+                    candidate.Stats, baseline.Stats) ||
+                comparisons != 1u ||
+                candidate.Stats.PeelHeapUnresolvedCountMismatchPops != 0u ||
+                candidate.Stats.PeelHeapCompactions !=
+                    (should_engage ? 1u : 0u) ||
+                candidate.Stats.PeelHeapResolvedStalePops >
+                    baseline.Stats.PeelHeapResolvedStalePops ||
+                candidate.Stats.PeelHeapOperations >
+                    baseline.Stats.PeelHeapOperations ||
+                candidate.Stats.PeelHeapCompactionOutputKeys >
+                    candidate.Stats.PeelHeapCompactionInputKeys)
+            {
+                std::fprintf(stderr,
+                    "solve: heap compaction differential failed "
+                    "K=%u threshold=%u result=%d/%d comparisons=%llu "
+                    "resolved_stale=%llu/%llu mismatch=%llu "
+                    "compactions=%u expected=%u heap_ops=%llu/%llu "
+                    "keys=%llu->%llu\n",
+                    K, threshold,
+                    (int)candidate.Result, (int)baseline.Result,
+                    (unsigned long long)comparisons,
+                    (unsigned long long)
+                        candidate.Stats.PeelHeapResolvedStalePops,
+                    (unsigned long long)
+                        baseline.Stats.PeelHeapResolvedStalePops,
+                    (unsigned long long)
+                        candidate.Stats.
+                            PeelHeapUnresolvedCountMismatchPops,
+                    candidate.Stats.PeelHeapCompactions,
+                    should_engage ? 1u : 0u,
+                    (unsigned long long)
+                        candidate.Stats.PeelHeapOperations,
+                    (unsigned long long)
+                        baseline.Stats.PeelHeapOperations,
+                    (unsigned long long)
+                        candidate.Stats.PeelHeapCompactionInputKeys,
+                    (unsigned long long)
+                        candidate.Stats.PeelHeapCompactionOutputKeys);
+                return false;
+            }
+            if (threshold == 1u)
+            {
+                threshold_one_input =
+                    candidate.Stats.PeelHeapCompactionInputKeys;
+                threshold_one_output =
+                    candidate.Stats.PeelHeapCompactionOutputKeys;
+                threshold_one_stale =
+                    candidate.Stats.PeelHeapResolvedStalePops;
+            }
+            std::printf(
+                "K=%u C0FFEE d4 heap compaction threshold=%u "
+                "resolved_stale=%llu/%llu compactions=%u "
+                "keys=%llu->%llu heap_ops=%llu/%llu\n",
+                K, threshold,
+                (unsigned long long)
+                    candidate.Stats.PeelHeapResolvedStalePops,
+                (unsigned long long)
+                    baseline.Stats.PeelHeapResolvedStalePops,
+                candidate.Stats.PeelHeapCompactions,
+                (unsigned long long)
+                    candidate.Stats.PeelHeapCompactionInputKeys,
+                (unsigned long long)
+                    candidate.Stats.PeelHeapCompactionOutputKeys,
+                (unsigned long long)
+                    candidate.Stats.PeelHeapOperations,
+                (unsigned long long)
+                    baseline.Stats.PeelHeapOperations);
+        }
+        if (K == 8192u)
+        {
+            Observation threaded[2];
+            uint32_t initial_threshold[2] = {};
+            bool installed_threshold[2] = {};
+            bool restored_threshold[2] = {};
+            bool worker_ok[2] = {};
+            std::atomic<uint32_t> ready(0u);
+            std::atomic<bool> go(false);
+            std::atomic<bool> cancel(false);
+            std::thread workers[2];
+            try
+            {
+                for (uint32_t index = 0u; index < 2u; ++index)
+                {
+                    workers[index] = std::thread([&, index] {
+                        initial_threshold[index] =
+                            wirehair_v2::
+                                BinaryPeelHeapCompactionThresholdForTesting();
+                        try
+                        {
+                            {
+                                BinaryPeelHeapCompactionThresholdScope
+                                    threshold_scope(index);
+                                installed_threshold[index] =
+                                    wirehair_v2::
+                                        BinaryPeelHeapCompactionThresholdForTesting() ==
+                                    index;
+                                ready.fetch_add(
+                                    1u, std::memory_order_release);
+                                while (!go.load(std::memory_order_acquire) &&
+                                       !cancel.load(std::memory_order_acquire))
+                                {
+                                    std::this_thread::yield();
+                                }
+                                if (!cancel.load(std::memory_order_acquire))
+                                {
+                                    threaded[index].Intermediate.assign(
+                                        7u, uint8_t{0xa5u});
+                                    threaded[index].Result =
+                                        wirehair_v2::SolvePrecodeSystem(
+                                            system, config, packets,
+                                            kBlockBytes,
+                                            threaded[index].Intermediate,
+                                            &threaded[index].Stats);
+                                    worker_ok[index] = true;
+                                }
+                            }
+                            restored_threshold[index] =
+                                wirehair_v2::
+                                    BinaryPeelHeapCompactionThresholdForTesting() ==
+                                initial_threshold[index];
+                        }
+                        catch (...)
+                        {
+                            restored_threshold[index] =
+                                wirehair_v2::
+                                    BinaryPeelHeapCompactionThresholdForTesting() ==
+                                initial_threshold[index];
+                            cancel.store(true, std::memory_order_release);
+                            go.store(true, std::memory_order_release);
+                        }
+                    });
+                }
+            }
+            catch (...)
+            {
+                cancel.store(true, std::memory_order_release);
+                go.store(true, std::memory_order_release);
+                for (std::thread& worker : workers) {
+                    if (worker.joinable()) {
+                        worker.join();
+                    }
+                }
+                std::fprintf(stderr,
+                    "solve: heap compaction TLS thread launch failed\n");
+                return false;
+            }
+            while (ready.load(std::memory_order_acquire) != 2u &&
+                   !cancel.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            go.store(true, std::memory_order_release);
+            for (std::thread& worker : workers) {
+                if (worker.joinable()) {
+                    worker.join();
+                }
+            }
+            if (cancel.load(std::memory_order_acquire) ||
+                !worker_ok[0] ||
+                !worker_ok[1] ||
+                !installed_threshold[0] ||
+                !installed_threshold[1] ||
+                !restored_threshold[0] ||
+                !restored_threshold[1] ||
+                threaded[0].Result != baseline.Result ||
+                threaded[1].Result != baseline.Result ||
+                threaded[0].Intermediate != baseline.Intermediate ||
+                threaded[1].Intermediate != baseline.Intermediate ||
+                !SameSolveStatsExceptHeapExperimentAndTiming(
+                    threaded[0].Stats, baseline.Stats) ||
+                !SameSolveStatsExceptHeapExperimentAndTiming(
+                    threaded[1].Stats, baseline.Stats) ||
+                threaded[0].Stats.PeelHeapCompactions != 0u ||
+                threaded[1].Stats.PeelHeapCompactions != 1u ||
+                threaded[0].Stats.
+                    PeelHeapUnresolvedCountMismatchPops != 0u ||
+                threaded[1].Stats.
+                    PeelHeapUnresolvedCountMismatchPops != 0u ||
+                wirehair_v2::
+                    BinaryPeelHeapCompactionThresholdForTesting() !=
+                    original_threshold)
+            {
+                std::fprintf(stderr,
+                    "solve: heap compaction TLS isolation failed "
+                    "ok=%u/%u installed=%u/%u restored=%u/%u "
+                    "result=%d/%d/%d compactions=%u/%u "
+                    "mismatch=%llu/%llu\n",
+                    worker_ok[0] ? 1u : 0u,
+                    worker_ok[1] ? 1u : 0u,
+                    installed_threshold[0] ? 1u : 0u,
+                    installed_threshold[1] ? 1u : 0u,
+                    restored_threshold[0] ? 1u : 0u,
+                    restored_threshold[1] ? 1u : 0u,
+                    (int)threaded[0].Result,
+                    (int)threaded[1].Result,
+                    (int)baseline.Result,
+                    threaded[0].Stats.PeelHeapCompactions,
+                    threaded[1].Stats.PeelHeapCompactions,
+                    (unsigned long long)threaded[0].Stats.
+                        PeelHeapUnresolvedCountMismatchPops,
+                    (unsigned long long)threaded[1].Stats.
+                        PeelHeapUnresolvedCountMismatchPops);
+                return false;
+            }
+        }
+        if (baseline.Stats.PeelHeapResolvedStalePops == 0u ||
+            threshold_one_input <= threshold_one_output)
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction fixture did not exercise shrink "
+                "K=%u stale=%llu keys=%llu->%llu\n",
+                K,
+                (unsigned long long)
+                    baseline.Stats.PeelHeapResolvedStalePops,
+                (unsigned long long)threshold_one_input,
+                (unsigned long long)threshold_one_output);
+            return false;
+        }
+        std::printf(
+            "K=%u C0FFEE d4 heap compaction baseline_stale=%llu "
+            "threshold1_stale=%llu keys=%llu->%llu heap_ops=%llu: PASS\n",
+            K,
+            (unsigned long long)
+                baseline.Stats.PeelHeapResolvedStalePops,
+            (unsigned long long)threshold_one_stale,
+            (unsigned long long)threshold_one_input,
+            (unsigned long long)threshold_one_output,
+            (unsigned long long)baseline.Stats.PeelHeapOperations);
+    }
+    if (wirehair_v2::BinaryPeelHeapCompactionThresholdForTesting() !=
+        original_threshold)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction threshold scope did not restore state\n");
+        return false;
+    }
+    return true;
+}
+
 bool CheckMixedSystematicSolve()
 {
     const uint32_t K = 64u;
@@ -6022,6 +6467,7 @@ int main(int argc, char** argv)
     ok = CheckMixedProjectionResidueBucketsOracle() && ok;
     ok = CheckMixedMix1EndToEnd() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
+    ok = CheckBinaryPeelHeapCompactionOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;
     ok = CheckCertifiedFixedHQuotientFactor() && ok;

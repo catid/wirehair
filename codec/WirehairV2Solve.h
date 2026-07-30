@@ -300,6 +300,13 @@ struct PrecodeSolveStats
     uint64_t BackSubNanoseconds = 0;
     uint32_t PacketSeedAttempt = 0;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Experiment-only lazy-heap diagnostics.  The shipped stats layout and
+    // ABI do not contain these fields when test hooks are disabled.
+    uint64_t PeelHeapResolvedStalePops = 0;
+    uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
+    uint32_t PeelHeapCompactions = 0;
+    uint64_t PeelHeapCompactionInputKeys = 0;
+    uint64_t PeelHeapCompactionOutputKeys = 0;
     // Per cold solve, incremented exactly once when the tiny mixed completion
     // solver accepts the quotient shape and supplies the terminal result.
     // Forced-path tests use this to distinguish real engagement from a
@@ -478,6 +485,15 @@ void SetBinaryPeelOracleForTesting(bool enabled);
 /** Reset/read the number of successful optimized-versus-scan comparisons. */
 void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
+
+/**
+    Override the one-shot lazy-heap compaction cumulative stale-pop threshold
+    in the calling thread.  Valid heap roots do not reset the count.  Zero
+    disables the experiment.  The value is captured once at binary-peel entry,
+    and the independent oracle always remains off.
+*/
+void SetBinaryPeelHeapCompactionThresholdForTesting(uint32_t threshold);
+uint32_t BinaryPeelHeapCompactionThresholdForTesting();
 
 /**
     Compare packed-GF(2) residual insertion against the byte GF(256) oracle at

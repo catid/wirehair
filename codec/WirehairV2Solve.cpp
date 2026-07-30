@@ -28,6 +28,14 @@
     do { (void)(pointer); (void)(for_write); } while (false)
 #endif
 
+// Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
+// path exactly.  A nonzero build override compacts after this many stale pops;
+// test-hook builds may override the value per thread without changing the
+// production ABI or exporting another production symbol.
+#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD
+#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD 0u
+#endif
+
 #if defined(__linux__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -35,6 +43,16 @@
 
 namespace wirehair_v2 {
 namespace {
+
+static_assert(
+    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD <=
+        UINT32_MAX,
+    "peel heap compaction threshold must fit uint32_t");
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0
+static const uint32_t kCompiledPeelHeapCompactionThreshold =
+    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD;
+#endif
 
 // Snapshot of the ambient packet-row equation policy for one synchronous
 // top-level operation.  Test hooks are thread-local, so this must remain
@@ -58,6 +76,8 @@ thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 thread_local uint64_t* SolvePacketRowPolicyCaptureCounter = nullptr;
+thread_local uint32_t BinaryPeelHeapCompactionThreshold =
+    kCompiledPeelHeapCompactionThreshold;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 thread_local int CertifiedPackedResidualTestModeValue = 0;
 thread_local int64_t
@@ -825,6 +845,13 @@ struct PeelResult
     uint64_t AdjacencyVisits = 0u;
     uint64_t RowScanSteps = 0u;
     uint64_t HeapOperations = 0u;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    uint64_t HeapResolvedStalePops = 0u;
+    uint64_t HeapUnresolvedCountMismatchPops = 0u;
+    uint32_t HeapCompactions = 0u;
+    uint64_t HeapCompactionInputKeys = 0u;
+    uint64_t HeapCompactionOutputKeys = 0u;
+#endif
 };
 
 struct PeelRowState
@@ -5620,10 +5647,11 @@ PeelScratch& GetPeelScratch()
     return scratch;
 }
 
-template<bool UseLowDegreeXor>
+template<bool UseLowDegreeXor, bool EnableHeapCompaction>
 PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
-    const BinaryEquationArena& rows)
+    const BinaryEquationArena& rows,
+    uint32_t heap_compaction_threshold)
 {
     PeelResult out;
     out.SolveRow.assign(column_count, UINT32_MAX);
@@ -5862,6 +5890,11 @@ PeelResult PeelBinaryRowsImplementation(
     const bool deep_prefetch = column_count >= 2048u;
     uint32_t remaining = column_count;
     size_t queue_head = 0u;
+    // Count cumulatively across heap-selection episodes.  Valid roots do not
+    // reset this counter: the experiment asks whether one linear rebuild pays
+    // back after a bounded amount of total lazy-deletion work in this peel.
+    uint32_t stale_pops_before_compaction = 0u;
+    bool heap_compacted = false;
     while (remaining > 0u)
     {
         if (!deep_prefetch)
@@ -5977,10 +6010,59 @@ PeelResult PeelBinaryRowsImplementation(
             if (resolved[column] ||
                 degree_two_refs[column] != (uint32_t)(candidate >> 32))
             {
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                if (resolved[column]) {
+                    ++out.HeapResolvedStalePops;
+                }
+                else {
+                    ++out.HeapUnresolvedCountMismatchPops;
+                }
+#endif
                 std::pop_heap(
                     degree_two_heap.begin(), degree_two_heap.end());
                 degree_two_heap.pop_back();
                 ++out.HeapOperations;
+                if (EnableHeapCompaction &&
+                    !heap_compacted &&
+                    heap_compaction_threshold != 0u &&
+                    ++stale_pops_before_compaction >=
+                        heap_compaction_threshold)
+                {
+                    // This is the only permitted compaction seam: all
+                    // singleton work, including transitively appended rows,
+                    // has drained before the lazy heap is consulted.
+                    CAT_DEBUG_ASSERT(queue_head == queue.size());
+                    const size_t input_keys = degree_two_heap.size();
+                    const size_t retained_capacity =
+                        degree_two_heap.capacity();
+                    (void)input_keys;
+                    (void)retained_capacity;
+                    degree_two_heap.clear();
+                    for (uint32_t live_column = 0u;
+                         live_column < column_count;
+                         ++live_column)
+                    {
+                        if (!resolved[live_column] &&
+                            degree_two_refs[live_column] != 0u)
+                        {
+                            degree_two_heap.push_back(
+                                degree_two_key(live_column));
+                        }
+                    }
+                    std::make_heap(
+                        degree_two_heap.begin(), degree_two_heap.end());
+                    CAT_DEBUG_ASSERT(
+                        degree_two_heap.size() <= input_keys);
+                    CAT_DEBUG_ASSERT(
+                        degree_two_heap.capacity() == retained_capacity);
+                    heap_compacted = true;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    ++out.HeapCompactions;
+                    out.HeapCompactionInputKeys += input_keys;
+                    out.HeapCompactionOutputKeys +=
+                        degree_two_heap.size();
+#endif
+                }
                 continue;
             }
             best = column;
@@ -6018,12 +6100,31 @@ PeelResult PeelBinaryRows(
     uint32_t column_count,
     const BinaryEquationArena& rows)
 {
-    PeelResult out = PeelBinaryRowsImplementation<true>(column_count, rows);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+    // Snapshot the thread-local experiment policy once per peel.  The solver
+    // never re-reads ambient state while processing rows.
+    const uint32_t heap_compaction_threshold =
+        BinaryPeelHeapCompactionThreshold;
+    PeelResult out = heap_compaction_threshold == 0u ?
+        PeelBinaryRowsImplementation<true, false>(
+            column_count, rows, 0u) :
+        PeelBinaryRowsImplementation<true, true>(
+            column_count, rows, heap_compaction_threshold);
+#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0
+    PeelResult out = PeelBinaryRowsImplementation<true, true>(
+        column_count, rows, kCompiledPeelHeapCompactionThreshold);
+#else
+    PeelResult out = PeelBinaryRowsImplementation<true, false>(
+        column_count, rows, 0u);
+#endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     if (BinaryPeelOracleUsers.load(std::memory_order_relaxed) != 0u)
     {
+        // The independent row-scan reference deliberately ignores both the
+        // compile-time experiment and the calling thread's override.
         const PeelResult reference =
-            PeelBinaryRowsImplementation<false>(column_count, rows);
+            PeelBinaryRowsImplementation<false, false>(
+                column_count, rows, 0u);
         std::vector<uint32_t> last_row(column_count, UINT32_MAX);
         bool duplicate_free = true;
         for (uint32_t row = 0u; row < (uint32_t)rows.size(); ++row)
@@ -6379,6 +6480,16 @@ void ResetBinaryPeelOracleComparisonsForTesting()
 uint64_t BinaryPeelOracleComparisonsForTesting()
 {
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
+}
+
+void SetBinaryPeelHeapCompactionThresholdForTesting(uint32_t threshold)
+{
+    BinaryPeelHeapCompactionThreshold = threshold;
+}
+
+uint32_t BinaryPeelHeapCompactionThresholdForTesting()
+{
+    return BinaryPeelHeapCompactionThreshold;
 }
 
 bool CheckPacketRowPolicySnapshotForTesting()
@@ -7443,6 +7554,17 @@ static WirehairResult SolvePrecodeSystemImpl(
         st.PeelAdjacencyVisits = peel.AdjacencyVisits;
         st.PeelRowScanSteps = peel.RowScanSteps;
         st.PeelHeapOperations = peel.HeapOperations;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+        st.PeelHeapResolvedStalePops =
+            peel.HeapResolvedStalePops;
+        st.PeelHeapUnresolvedCountMismatchPops =
+            peel.HeapUnresolvedCountMismatchPops;
+        st.PeelHeapCompactions = peel.HeapCompactions;
+        st.PeelHeapCompactionInputKeys =
+            peel.HeapCompactionInputKeys;
+        st.PeelHeapCompactionOutputKeys =
+            peel.HeapCompactionOutputKeys;
+#endif
         if (peel.PeelOrder.size() + peel.InactiveOrder.size() != L) {
             return terminal_error();
         }
