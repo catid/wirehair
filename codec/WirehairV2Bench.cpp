@@ -23859,25 +23859,48 @@ int CmdEsSearch(int argc, char** argv)
     Sum the solve counters for one config over a fixed cell span at a given
     solve width, using the same cell protocol essearch defines.
 
-    Exists for the zero-width parity guard at the end of CmdSelfTest: the whole
-    point is to run the SAME cells through the SAME protocol and vary nothing
-    but the width, so any counter difference is attributable to the width alone.
+    Exists for the zero-width parity guard at the end of CmdSelfTest.  Width
+    comparisons run the SAME cells through the SAME protocol and vary nothing
+    but width.  Forced-route comparisons also return the exact success mask so
+    aggregate counter deltas are formed over identical cells.
 */
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+enum class ParitySecondarySchedule
+{
+    None,
+    IndependentExtension,
+    GroupedGF256
+};
+
 bool HarvestParityCounters(
     const char* config_text,
     uint32_t solve_block_bytes,
     wirehair_v2::PrecodeSolveStats& total_out,
-    bool force_joint_delta = false)
+    wirehair_v2::MixedResidueBucketMode bucket_mode =
+        wirehair_v2::MixedResidueBucketMode::Automatic,
+    uint32_t* solved_out = nullptr,
+    uint64_t* success_mask_out = nullptr,
+    ParitySecondarySchedule secondary_schedule =
+        ParitySecondarySchedule::None,
+    uint32_t block_count = 128u,
+    uint32_t cell_count = 40u,
+    uint32_t minimum_solved = 30u)
 {
+    if (solved_out) {
+        *solved_out = 0u;
+    }
+    if (success_mask_out) {
+        *success_mask_out = 0u;
+    }
     std::vector<PrecodeSweepConfig> configs;
     if (!ParsePrecodeSweepConfigText(config_text, configs) ||
-        configs.size() != 1u)
+        configs.size() != 1u || cell_count == 0u || cell_count > 64u ||
+        minimum_solved == 0u || minimum_solved > cell_count)
     {
         return false;
     }
     PrecodeSweepRun run;
-    run.BlockCount = 128u;
+    run.BlockCount = block_count;
     run.BlockBytes = 1280u;
     run.Overhead = 0u;
     run.MixCount = 3u;
@@ -23890,20 +23913,27 @@ bool HarvestParityCounters(
     run.GF16Rows = 0u;
     run.Period = 244u;
     run.SolveBlockBytesOverride = solve_block_bytes;
-    if (force_joint_delta)
+    if (secondary_schedule != ParitySecondarySchedule::None)
     {
-        // Exercise the secondary-schedule bucket path that originally rejected
-        // block_bytes == 0.  Independent extension residues require shared-X,
-        // a hashed primary schedule, and P > H; the explicit bucket mode keeps
-        // this small K=128 regression out of the automatic size thresholds.
+        // Exercise secondary-schedule bucket paths that originally rejected
+        // block_bytes == 0.  Independent extension residues use hashed B,
+        // while grouped GF(256) rows use constant-schedule C.
         run.Geometry = wirehair_v2::MixedCoefficientGeometry::SharedCauchyX;
         run.GF16Rows = wirehair_v2::kMixedGF16Rows;
         run.Period = 32u;
-        run.ResidueSchedule = wirehair_v2::MixedResidueSchedule::Hashed;
-        run.IndependentExtensionResidues = true;
-        run.BucketMode =
-            wirehair_v2::MixedResidueBucketMode::JointDelta;
+        if (secondary_schedule ==
+            ParitySecondarySchedule::IndependentExtension)
+        {
+            run.ResidueSchedule = wirehair_v2::MixedResidueSchedule::Hashed;
+            run.IndependentExtensionResidues = true;
+        }
+        else
+        {
+            run.ResidueSchedule = wirehair_v2::MixedResidueSchedule::Constant;
+            run.GroupedGF256Rows = 5u;
+        }
     }
+    run.BucketMode = bucket_mode;
     // Configure the complete arm, even though both sides of this helper use
     // the same config.  Merely sharing stale thread-local state makes a parity
     // comparison agree for the wrong construction; ConfigureThread clears or
@@ -23917,8 +23947,10 @@ bool HarvestParityCounters(
     std::vector<wirehair_v2::SolvePacket> packets(run.BlockCount);
     total_out = wirehair_v2::PrecodeSolveStats();
     uint32_t solved = 0u;
-    for (uint32_t cell = 30000u; cell < 30040u; ++cell)
+    uint64_t success_mask = 0u;
+    for (uint32_t offset = 0u; offset < cell_count; ++offset)
     {
+        const uint32_t cell = 30000u + offset;
         wirehair_v2::PrecodeSolveStats stats;
         const uint8_t failed = run.RunCell(
             configs[0], cell, packets, packet_data.data(), &stats);
@@ -23926,6 +23958,7 @@ bool HarvestParityCounters(
             continue;
         }
         ++solved;
+        success_mask |= UINT64_C(1) << offset;
         total_out.BlockXors += stats.BlockXors;
         total_out.BlockMulAdds += stats.BlockMulAdds;
         total_out.BlockCopies += stats.BlockCopies;
@@ -23941,7 +23974,74 @@ bool HarvestParityCounters(
     }
     // A config that never decodes carries no counters to compare, which would
     // make the parity check pass vacuously.
-    return solved >= 30u;
+    if (solved_out) {
+        *solved_out = solved;
+    }
+    if (success_mask_out) {
+        *success_mask_out = success_mask;
+    }
+    return solved >= minimum_solved;
+}
+
+bool SameHarvestedParityCounters(
+    const wirehair_v2::PrecodeSolveStats& narrow,
+    const wirehair_v2::PrecodeSolveStats& wide,
+    bool compare_scratch_bytes)
+{
+    return narrow.BlockXors == wide.BlockXors &&
+        narrow.BlockMulAdds == wide.BlockMulAdds &&
+        narrow.BlockCopies == wide.BlockCopies &&
+        narrow.BlockZeroFills == wide.BlockZeroFills &&
+        narrow.BlockAddSets == wide.BlockAddSets &&
+        narrow.BlockAddSetSources == wide.BlockAddSetSources &&
+        narrow.MixedJointSourceXors == wide.MixedJointSourceXors &&
+        narrow.MixedJointMarginalXors == wide.MixedJointMarginalXors &&
+        narrow.MixedJointMarginalCopies ==
+            wide.MixedJointMarginalCopies &&
+        (!compare_scratch_bytes ||
+         narrow.MixedJointScratchBytes == wide.MixedJointScratchBytes) &&
+        narrow.MixedJointActiveDeltas == wide.MixedJointActiveDeltas &&
+        narrow.MixedDualSourceColumns == wide.MixedDualSourceColumns;
+}
+
+bool HasNoJointBucketDiagnostics(
+    const wirehair_v2::PrecodeSolveStats& stats)
+{
+    return stats.MixedJointSourceXors == 0u &&
+        stats.MixedJointMarginalXors == 0u &&
+        stats.MixedJointMarginalCopies == 0u &&
+        stats.MixedJointScratchBytes == 0u &&
+        stats.MixedJointActiveDeltas == 0u;
+}
+
+struct HarvestedParityPair
+{
+    wirehair_v2::PrecodeSolveStats Narrow;
+    wirehair_v2::PrecodeSolveStats Wide;
+    uint32_t NarrowSolved = 0u;
+    uint32_t WideSolved = 0u;
+    uint64_t NarrowMask = 0u;
+    uint64_t WideMask = 0u;
+};
+
+bool HarvestParityPair(
+    const char* config_text,
+    wirehair_v2::MixedResidueBucketMode bucket_mode,
+    ParitySecondarySchedule secondary_schedule,
+    HarvestedParityPair& pair,
+    uint32_t block_count = 128u,
+    uint32_t cell_count = 40u,
+    uint32_t minimum_solved = 30u)
+{
+    const bool narrow_ok = HarvestParityCounters(
+        config_text, 0u, pair.Narrow, bucket_mode,
+        &pair.NarrowSolved, &pair.NarrowMask, secondary_schedule,
+        block_count, cell_count, minimum_solved);
+    const bool wide_ok = HarvestParityCounters(
+        config_text, 1280u, pair.Wide, bucket_mode,
+        &pair.WideSolved, &pair.WideMask, secondary_schedule,
+        block_count, cell_count, minimum_solved);
+    return narrow_ok && wide_ok;
 }
 #endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
 
@@ -25480,15 +25580,27 @@ int CmdSelfTest()
         {
             wirehair_v2::PrecodeSolveStats narrow;
             wirehair_v2::PrecodeSolveStats wide;
-            if (!HarvestParityCounters(parity_case.Config, 0u, narrow) ||
-                !HarvestParityCounters(parity_case.Config, 1280u, wide))
+            uint32_t narrow_solved = 0u;
+            uint32_t wide_solved = 0u;
+            uint64_t narrow_mask = 0u;
+            uint64_t wide_mask = 0u;
+            if (!HarvestParityCounters(
+                    parity_case.Config, 0u, narrow,
+                    wirehair_v2::MixedResidueBucketMode::Automatic,
+                    &narrow_solved, &narrow_mask) ||
+                !HarvestParityCounters(
+                    parity_case.Config, 1280u, wide,
+                    wirehair_v2::MixedResidueBucketMode::Automatic,
+                    &wide_solved, &wide_mask))
             {
                 std::fprintf(stderr,
                     "zero-width parity: could not harvest %s\n",
                     parity_case.Config);
                 return 1;
             }
-            if (narrow.BlockXors != wide.BlockXors ||
+            if (narrow_solved != wide_solved ||
+                narrow_mask != wide_mask ||
+                narrow.BlockXors != wide.BlockXors ||
                 narrow.BlockMulAdds != wide.BlockMulAdds ||
                 narrow.BlockCopies != wide.BlockCopies ||
                 narrow.BlockZeroFills != wide.BlockZeroFills ||
@@ -25517,6 +25629,10 @@ int CmdSelfTest()
                     (unsigned long long)wide.BlockZeroFills,
                     (unsigned long long)wide.BlockAddSets,
                     (unsigned long long)wide.BlockAddSetSources);
+                std::fprintf(stderr,
+                    "  cells width0=%u/%010llx width1280=%u/%010llx\n",
+                    narrow_solved, (unsigned long long)narrow_mask,
+                    wide_solved, (unsigned long long)wide_mask);
                 return 1;
             }
         }
@@ -25524,19 +25640,63 @@ int CmdSelfTest()
     std::printf("zero-width counter parity: PASS\n");
 
     // The generic cases above deliberately stay on the shipping/default
-    // schedule.  Also force the independent-extension joint-delta path:
-    // MixedJointResidueBuckets used to reject width zero before walking this
-    // schedule, so generic block-op parity could pass while this branch
-    // remained completely untested.
+    // schedule.  Also force the independent-extension joint-delta and dual
+    // paths: their bucket storage used to reject width zero before walking
+    // this schedule, so generic block-op parity could pass while these
+    // branches remained completely untested.
     {
         static const char* kConfig = "6,9,1,21.3333";
         wirehair_v2::PrecodeSolveStats narrow;
         wirehair_v2::PrecodeSolveStats wide;
-        if (!HarvestParityCounters(kConfig, 0u, narrow, true) ||
-            !HarvestParityCounters(kConfig, 1280u, wide, true))
+        wirehair_v2::PrecodeSolveStats narrow_separate;
+        wirehair_v2::PrecodeSolveStats wide_separate;
+        wirehair_v2::PrecodeSolveStats narrow_dual;
+        wirehair_v2::PrecodeSolveStats wide_dual;
+        uint32_t narrow_solved = 0u;
+        uint32_t wide_solved = 0u;
+        uint32_t separate_solved = 0u;
+        uint32_t wide_separate_solved = 0u;
+        uint32_t dual_solved = 0u;
+        uint32_t wide_dual_solved = 0u;
+        uint64_t narrow_mask = 0u;
+        uint64_t wide_mask = 0u;
+        uint64_t separate_mask = 0u;
+        uint64_t wide_separate_mask = 0u;
+        uint64_t dual_mask = 0u;
+        uint64_t wide_dual_mask = 0u;
+        if (!HarvestParityCounters(
+                kConfig, 0u, narrow,
+                wirehair_v2::MixedResidueBucketMode::JointDelta,
+                &narrow_solved, &narrow_mask,
+                ParitySecondarySchedule::IndependentExtension) ||
+            !HarvestParityCounters(
+                kConfig, 1280u, wide,
+                wirehair_v2::MixedResidueBucketMode::JointDelta,
+                &wide_solved, &wide_mask,
+                ParitySecondarySchedule::IndependentExtension) ||
+            !HarvestParityCounters(
+                kConfig, 0u, narrow_separate,
+                wirehair_v2::MixedResidueBucketMode::Separate,
+                &separate_solved, &separate_mask,
+                ParitySecondarySchedule::IndependentExtension) ||
+            !HarvestParityCounters(
+                kConfig, 1280u, wide_separate,
+                wirehair_v2::MixedResidueBucketMode::Separate,
+                &wide_separate_solved, &wide_separate_mask,
+                ParitySecondarySchedule::IndependentExtension) ||
+            !HarvestParityCounters(
+                kConfig, 0u, narrow_dual,
+                wirehair_v2::MixedResidueBucketMode::Dual,
+                &dual_solved, &dual_mask,
+                ParitySecondarySchedule::IndependentExtension) ||
+            !HarvestParityCounters(
+                kConfig, 1280u, wide_dual,
+                wirehair_v2::MixedResidueBucketMode::Dual,
+                &wide_dual_solved, &wide_dual_mask,
+                ParitySecondarySchedule::IndependentExtension))
         {
             std::fprintf(stderr,
-                "zero-width joint-delta parity: could not harvest %s\n",
+                "zero-width mixed-bucket parity: could not harvest %s\n",
                 kConfig);
             return 1;
         }
@@ -25548,7 +25708,9 @@ int CmdSelfTest()
             wide.MixedJointSourceXors != 0u &&
             wide.MixedJointMarginalXors != 0u &&
             wide.MixedJointMarginalCopies != 0u &&
-            wide.MixedJointActiveDeltas != 0u;
+            wide.MixedJointActiveDeltas != 0u &&
+            narrow_dual.MixedDualSourceColumns != 0u &&
+            wide_dual.MixedDualSourceColumns != 0u;
         const bool counters_match =
             narrow.BlockXors == wide.BlockXors &&
             narrow.BlockMulAdds == wide.BlockMulAdds &&
@@ -25562,16 +25724,89 @@ int CmdSelfTest()
                 wide.MixedJointMarginalCopies &&
             narrow.MixedJointActiveDeltas == wide.MixedJointActiveDeltas &&
             narrow.MixedDualSourceColumns == wide.MixedDualSourceColumns;
+        const bool separate_counters_match =
+            narrow_separate.BlockXors == wide_separate.BlockXors &&
+            narrow_separate.BlockMulAdds == wide_separate.BlockMulAdds &&
+            narrow_separate.BlockCopies == wide_separate.BlockCopies &&
+            narrow_separate.BlockZeroFills ==
+                wide_separate.BlockZeroFills &&
+            narrow_separate.BlockAddSets == wide_separate.BlockAddSets &&
+            narrow_separate.BlockAddSetSources ==
+                wide_separate.BlockAddSetSources &&
+            narrow_separate.MixedJointSourceXors ==
+                wide_separate.MixedJointSourceXors &&
+            narrow_separate.MixedJointMarginalXors ==
+                wide_separate.MixedJointMarginalXors &&
+            narrow_separate.MixedJointMarginalCopies ==
+                wide_separate.MixedJointMarginalCopies &&
+            narrow_separate.MixedJointScratchBytes ==
+                wide_separate.MixedJointScratchBytes &&
+            narrow_separate.MixedJointActiveDeltas ==
+                wide_separate.MixedJointActiveDeltas &&
+            narrow_separate.MixedDualSourceColumns ==
+                wide_separate.MixedDualSourceColumns;
+        const bool dual_counters_match =
+            narrow_dual.BlockXors == wide_dual.BlockXors &&
+            narrow_dual.BlockMulAdds == wide_dual.BlockMulAdds &&
+            narrow_dual.BlockCopies == wide_dual.BlockCopies &&
+            narrow_dual.BlockZeroFills == wide_dual.BlockZeroFills &&
+            narrow_dual.BlockAddSets == wide_dual.BlockAddSets &&
+            narrow_dual.BlockAddSetSources ==
+                wide_dual.BlockAddSetSources &&
+            narrow_dual.MixedJointSourceXors ==
+                wide_dual.MixedJointSourceXors &&
+            narrow_dual.MixedJointMarginalXors ==
+                wide_dual.MixedJointMarginalXors &&
+            narrow_dual.MixedJointMarginalCopies ==
+                wide_dual.MixedJointMarginalCopies &&
+            narrow_dual.MixedJointScratchBytes ==
+                wide_dual.MixedJointScratchBytes &&
+            narrow_dual.MixedJointActiveDeltas ==
+                wide_dual.MixedJointActiveDeltas &&
+            narrow_dual.MixedDualSourceColumns ==
+                wide_dual.MixedDualSourceColumns;
+        const bool dual_diagnostics_clean =
+            HasNoJointBucketDiagnostics(narrow_dual) &&
+            HasNoJointBucketDiagnostics(wide_dual);
         // ScratchBytes is actual P*width allocation volume rather than an
         // operation count.  It is expected to differ: zero at width 0 and
         // nonzero at the historical table's claimed 1280-byte width.
         const bool scratch_matches_width =
             narrow.MixedJointScratchBytes == 0u &&
             wide.MixedJointScratchBytes != 0u;
-        if (!joint_exercised || !counters_match || !scratch_matches_width)
+        static const uint64_t kPeriod = 32u;
+        static const uint64_t kSeparateBucketZeroFills =
+            1u + 2u * kPeriod;
+        const bool cell_sets_match =
+            narrow_mask == wide_mask &&
+            narrow_mask == separate_mask &&
+            narrow_mask == wide_separate_mask &&
+            narrow_mask == dual_mask &&
+            narrow_mask == wide_dual_mask;
+        const bool route_receipts_match =
+            narrow_solved == wide_solved &&
+            narrow_solved == separate_solved &&
+            narrow_solved == wide_separate_solved &&
+            narrow_solved == dual_solved &&
+            narrow_solved == wide_dual_solved &&
+            cell_sets_match &&
+            narrow.MixedJointMarginalCopies ==
+                (uint64_t)narrow_solved * 2u * kPeriod &&
+            narrow.BlockCopies ==
+                narrow_separate.BlockCopies +
+                    narrow.MixedJointMarginalCopies &&
+            narrow_dual.BlockCopies == narrow_separate.BlockCopies &&
+            narrow_dual.BlockZeroFills +
+                    (uint64_t)dual_solved * kSeparateBucketZeroFills ==
+                narrow_separate.BlockZeroFills +
+                    (uint64_t)separate_solved * 2u * kPeriod;
+        if (!joint_exercised || !counters_match ||
+            !separate_counters_match || !dual_counters_match ||
+            !dual_diagnostics_clean || !scratch_matches_width ||
+            !route_receipts_match)
         {
             std::fprintf(stderr,
-                "zero-width joint-delta parity BROKEN for %s\n"
+                "zero-width mixed-bucket parity BROKEN for %s\n"
                 "  width 0     xors=%llu muladds=%llu copies=%llu "
                 "zerofills=%llu addsets=%llu addset_sources=%llu "
                 "joint_source=%llu joint_marginal=%llu joint_copies=%llu "
@@ -25605,10 +25840,230 @@ int CmdSelfTest()
                 wide.MixedJointActiveDeltas,
                 (unsigned long long)wide.MixedJointScratchBytes,
                 (unsigned long long)wide.MixedDualSourceColumns);
+            std::fprintf(stderr,
+                "  route cells joint0=%u/%010llx joint1280=%u/%010llx "
+                "separate0=%u/%010llx separate1280=%u/%010llx "
+                "dual0=%u/%010llx "
+                "dual1280=%u/%010llx\n"
+                "  route counters separate0 copies=%llu zerofills=%llu; "
+                "separate1280 copies=%llu zerofills=%llu; "
+                "dual0 copies=%llu zerofills=%llu; "
+                "dual1280 copies=%llu zerofills=%llu\n",
+                narrow_solved, (unsigned long long)narrow_mask,
+                wide_solved, (unsigned long long)wide_mask,
+                separate_solved, (unsigned long long)separate_mask,
+                wide_separate_solved,
+                (unsigned long long)wide_separate_mask,
+                dual_solved, (unsigned long long)dual_mask,
+                wide_dual_solved, (unsigned long long)wide_dual_mask,
+                (unsigned long long)narrow_separate.BlockCopies,
+                (unsigned long long)narrow_separate.BlockZeroFills,
+                (unsigned long long)wide_separate.BlockCopies,
+                (unsigned long long)wide_separate.BlockZeroFills,
+                (unsigned long long)narrow_dual.BlockCopies,
+                (unsigned long long)narrow_dual.BlockZeroFills,
+                (unsigned long long)wide_dual.BlockCopies,
+                (unsigned long long)wide_dual.BlockZeroFills);
             return 1;
         }
     }
-    std::printf("zero-width joint-delta counter parity: PASS\n");
+
+    // The independent-extension fixture above does not enter the grouped
+    // GF(256) helpers.  Exercise all three grouped RHS routes at both widths,
+    // including their exact route receipts and success cells.
+    {
+        // Grouped rows are defined over the shipping ten-row GF(256) suffix;
+        // ConfigureThread correctly rejects grouping under any other H8.
+        static const char* kConfig = "6,10,1,6.07";
+        static const uint64_t kPeriod = 32u;
+        static const uint64_t kSeparateBucketZeroFills =
+            1u + 2u * kPeriod;
+        HarvestedParityPair joint;
+        HarvestedParityPair separate;
+        HarvestedParityPair dual;
+        const bool joint_ok = HarvestParityPair(
+            kConfig, wirehair_v2::MixedResidueBucketMode::JointDelta,
+            ParitySecondarySchedule::GroupedGF256, joint);
+        const bool separate_ok = HarvestParityPair(
+            kConfig, wirehair_v2::MixedResidueBucketMode::Separate,
+            ParitySecondarySchedule::GroupedGF256, separate);
+        const bool dual_ok = HarvestParityPair(
+            kConfig, wirehair_v2::MixedResidueBucketMode::Dual,
+            ParitySecondarySchedule::GroupedGF256, dual);
+        if (!joint_ok || !separate_ok || !dual_ok)
+        {
+            std::fprintf(stderr,
+                "zero-width grouped mixed-bucket parity: could not harvest "
+                "%s\n"
+                "  joint0=%u/%010llx joint1280=%u/%010llx "
+                "separate0=%u/%010llx separate1280=%u/%010llx "
+                "dual0=%u/%010llx dual1280=%u/%010llx "
+                "(required >=30/40 each)\n",
+                kConfig,
+                joint.NarrowSolved,
+                (unsigned long long)joint.NarrowMask,
+                joint.WideSolved,
+                (unsigned long long)joint.WideMask,
+                separate.NarrowSolved,
+                (unsigned long long)separate.NarrowMask,
+                separate.WideSolved,
+                (unsigned long long)separate.WideMask,
+                dual.NarrowSolved,
+                (unsigned long long)dual.NarrowMask,
+                dual.WideSolved,
+                (unsigned long long)dual.WideMask);
+            return 1;
+        }
+        const bool cell_sets_match =
+            joint.NarrowSolved == joint.WideSolved &&
+            joint.NarrowSolved == separate.NarrowSolved &&
+            joint.NarrowSolved == separate.WideSolved &&
+            joint.NarrowSolved == dual.NarrowSolved &&
+            joint.NarrowSolved == dual.WideSolved &&
+            joint.NarrowMask == joint.WideMask &&
+            joint.NarrowMask == separate.NarrowMask &&
+            joint.NarrowMask == separate.WideMask &&
+            joint.NarrowMask == dual.NarrowMask &&
+            joint.NarrowMask == dual.WideMask;
+        const bool routes_engaged =
+            joint.Narrow.MixedJointSourceXors != 0u &&
+            joint.Narrow.MixedJointMarginalXors != 0u &&
+            joint.Narrow.MixedJointMarginalCopies != 0u &&
+            joint.Narrow.MixedJointActiveDeltas != 0u &&
+            joint.Wide.MixedJointSourceXors != 0u &&
+            joint.Wide.MixedJointMarginalXors != 0u &&
+            joint.Wide.MixedJointMarginalCopies != 0u &&
+            joint.Wide.MixedJointActiveDeltas != 0u &&
+            joint.Narrow.MixedDualSourceColumns == 0u &&
+            joint.Wide.MixedDualSourceColumns == 0u &&
+            HasNoJointBucketDiagnostics(separate.Narrow) &&
+            HasNoJointBucketDiagnostics(separate.Wide) &&
+            separate.Narrow.MixedDualSourceColumns == 0u &&
+            separate.Wide.MixedDualSourceColumns == 0u &&
+            HasNoJointBucketDiagnostics(dual.Narrow) &&
+            HasNoJointBucketDiagnostics(dual.Wide) &&
+            dual.Narrow.MixedDualSourceColumns != 0u &&
+            dual.Wide.MixedDualSourceColumns != 0u;
+        const bool width_counters_match =
+            SameHarvestedParityCounters(
+                joint.Narrow, joint.Wide, false) &&
+            SameHarvestedParityCounters(
+                separate.Narrow, separate.Wide, true) &&
+            SameHarvestedParityCounters(dual.Narrow, dual.Wide, true) &&
+            joint.Narrow.MixedJointScratchBytes == 0u &&
+            joint.Wide.MixedJointScratchBytes ==
+                (uint64_t)joint.WideSolved * 3u * kPeriod * 1280u;
+        const bool route_receipts_match =
+            joint.Narrow.MixedJointMarginalCopies ==
+                (uint64_t)joint.NarrowSolved * 2u * kPeriod &&
+            joint.Narrow.BlockCopies ==
+                separate.Narrow.BlockCopies +
+                    joint.Narrow.MixedJointMarginalCopies &&
+            dual.Narrow.BlockCopies == separate.Narrow.BlockCopies &&
+            dual.Narrow.BlockZeroFills +
+                    (uint64_t)dual.NarrowSolved *
+                        kSeparateBucketZeroFills ==
+                separate.Narrow.BlockZeroFills +
+                    (uint64_t)separate.NarrowSolved * 2u * kPeriod;
+        if (!cell_sets_match || !routes_engaged ||
+            !width_counters_match || !route_receipts_match)
+        {
+            std::fprintf(stderr,
+                "zero-width grouped mixed-bucket parity BROKEN for %s\n"
+                "  cells joint0=%u/%010llx joint1280=%u/%010llx "
+                "separate0=%u/%010llx separate1280=%u/%010llx "
+                "dual0=%u/%010llx dual1280=%u/%010llx\n",
+                kConfig,
+                joint.NarrowSolved,
+                (unsigned long long)joint.NarrowMask,
+                joint.WideSolved,
+                (unsigned long long)joint.WideMask,
+                separate.NarrowSolved,
+                (unsigned long long)separate.NarrowMask,
+                separate.WideSolved,
+                (unsigned long long)separate.WideMask,
+                dual.NarrowSolved,
+                (unsigned long long)dual.NarrowMask,
+                dual.WideSolved,
+                (unsigned long long)dual.WideMask);
+            std::fprintf(stderr,
+                "  joint0 copies=%llu zerofills=%llu source=%llu "
+                "marginal=%llu marginal_copies=%llu scratch=%llu deltas=%u\n"
+                "  joint1280 copies=%llu zerofills=%llu source=%llu "
+                "marginal=%llu marginal_copies=%llu scratch=%llu deltas=%u\n"
+                "  separate0 copies=%llu zerofills=%llu; "
+                "separate1280 copies=%llu zerofills=%llu\n"
+                "  dual0 copies=%llu zerofills=%llu source=%llu; "
+                "dual1280 copies=%llu zerofills=%llu source=%llu\n",
+                (unsigned long long)joint.Narrow.BlockCopies,
+                (unsigned long long)joint.Narrow.BlockZeroFills,
+                (unsigned long long)joint.Narrow.MixedJointSourceXors,
+                (unsigned long long)joint.Narrow.MixedJointMarginalXors,
+                (unsigned long long)joint.Narrow.MixedJointMarginalCopies,
+                (unsigned long long)joint.Narrow.MixedJointScratchBytes,
+                joint.Narrow.MixedJointActiveDeltas,
+                (unsigned long long)joint.Wide.BlockCopies,
+                (unsigned long long)joint.Wide.BlockZeroFills,
+                (unsigned long long)joint.Wide.MixedJointSourceXors,
+                (unsigned long long)joint.Wide.MixedJointMarginalXors,
+                (unsigned long long)joint.Wide.MixedJointMarginalCopies,
+                (unsigned long long)joint.Wide.MixedJointScratchBytes,
+                joint.Wide.MixedJointActiveDeltas,
+                (unsigned long long)separate.Narrow.BlockCopies,
+                (unsigned long long)separate.Narrow.BlockZeroFills,
+                (unsigned long long)separate.Wide.BlockCopies,
+                (unsigned long long)separate.Wide.BlockZeroFills,
+                (unsigned long long)dual.Narrow.BlockCopies,
+                (unsigned long long)dual.Narrow.BlockZeroFills,
+                (unsigned long long)dual.Narrow.MixedDualSourceColumns,
+                (unsigned long long)dual.Wide.BlockCopies,
+                (unsigned long long)dual.Wide.BlockZeroFills,
+                (unsigned long long)dual.Wide.MixedDualSourceColumns);
+            return 1;
+        }
+    }
+
+    // Forced modes exercise every implementation and counter path above.
+    // Separately pin the Automatic policy at its exact P32/1280 crossover
+    // through the solver's dispatch-width helper.  This is a policy unit
+    // guard rather than a large raw-seed recovery fixture: recovery rank is
+    // orthogonal to whether a zero-width solve selected the production route.
+    {
+        const bool below_zero = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                9999u, 0u, 32u);
+        const bool below_wide = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                9999u, 1280u, 32u);
+        const bool at_zero = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                10000u, 0u, 32u);
+        const bool at_wide = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                10000u, 1280u, 32u);
+        const bool non_p32_zero = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                10000u, 0u, 48u);
+        const bool non_p32_wide = wirehair_v2::
+            UseAutomaticMixedJointResidueBucketsForSolveTesting(
+                10000u, 1280u, 48u);
+        if (below_zero || below_wide || !at_zero || !at_wide ||
+            non_p32_zero || non_p32_wide ||
+            below_zero != below_wide || at_zero != at_wide ||
+            non_p32_zero != non_p32_wide)
+        {
+            std::fprintf(stderr,
+                "zero-width automatic mixed-bucket dispatch BROKEN\n"
+                "  P32 K9999 width0=%u width1280=%u (expected 0,0)\n"
+                "  P32 K10000 width0=%u width1280=%u (expected 1,1)\n"
+                "  P48 K10000 width0=%u width1280=%u (expected 0,0)\n",
+                below_zero ? 1u : 0u, below_wide ? 1u : 0u,
+                at_zero ? 1u : 0u, at_wide ? 1u : 0u,
+                non_p32_zero ? 1u : 0u, non_p32_wide ? 1u : 0u);
+            return 1;
+        }
+    }
+    std::printf("zero-width mixed-bucket counter parity: PASS\n");
 #endif // WIREHAIR_V2_ENABLE_TEST_HOOKS
     return 0;
 }

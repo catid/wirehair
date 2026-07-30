@@ -9,6 +9,7 @@
 #include "../gf256.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -91,10 +92,9 @@ bool SameExactSolveStats(
         a.MixedDualSourceColumns == b.MixedDualSourceColumns;
 }
 
-bool SameResumeState(
+bool SameResumeAlgebraState(
     const wirehair_v2::PrecodeSolveResumeState& a,
-    const wirehair_v2::PrecodeSolveResumeState& b,
-    bool compare_stats)
+    const wirehair_v2::PrecodeSolveResumeState& b)
 {
     return a.SourceCount == b.SourceCount &&
         a.PrecodeCount == b.PrecodeCount &&
@@ -107,7 +107,6 @@ bool SameResumeState(
         a.Config.MixCount == b.Config.MixCount &&
         a.Runtime.SourcePrime() == b.Runtime.SourcePrime() &&
         a.Runtime.PrecodePrime() == b.Runtime.PrecodePrime() &&
-        (!compare_stats || SameExactSolveStats(a.Stats, b.Stats)) &&
         a.InactiveIndex == b.InactiveIndex &&
         a.InactiveColumns == b.InactiveColumns &&
         a.Projection == b.Projection &&
@@ -115,9 +114,34 @@ bool SameResumeState(
         a.PivotCoefficients == b.PivotCoefficients &&
         a.PivotRhs == b.PivotRhs &&
         a.HavePivot == b.HavePivot &&
-        a.CoefficientScratch == b.CoefficientScratch &&
-        a.RhsScratch == b.RhsScratch &&
         a.Active == b.Active;
+}
+
+bool SameResumeState(
+    const wirehair_v2::PrecodeSolveResumeState& a,
+    const wirehair_v2::PrecodeSolveResumeState& b,
+    bool compare_stats)
+{
+    return SameResumeAlgebraState(a, b) &&
+        (!compare_stats || SameExactSolveStats(a.Stats, b.Stats)) &&
+        a.CoefficientScratch == b.CoefficientScratch &&
+        a.RhsScratch == b.RhsScratch;
+}
+
+std::array<size_t, 9u> ResumeCapacities(
+    const wirehair_v2::PrecodeSolveResumeState& state)
+{
+    return {{
+        state.InactiveIndex.capacity(),
+        state.InactiveColumns.capacity(),
+        state.Projection.capacity(),
+        state.Values.capacity(),
+        state.PivotCoefficients.capacity(),
+        state.PivotRhs.capacity(),
+        state.HavePivot.capacity(),
+        state.CoefficientScratch.capacity(),
+        state.RhsScratch.capacity()
+    }};
 }
 
 class MixedProjectionOracleScope
@@ -2387,7 +2411,9 @@ bool CheckCertifiedPackedResidualDispatch()
     return true;
 }
 
-bool CheckIncrementalResumeCase(uint32_t block_bytes)
+bool CheckIncrementalResumeCase(
+    uint32_t block_bytes,
+    wirehair_v2::PrecodeSolveStats* completed_stats_out = nullptr)
 {
     const uint32_t K = 64u;
     wirehair_v2::PrecodeParams params =
@@ -2409,11 +2435,14 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     for (size_t i = 0; i < message.size(); ++i) {
         message[i] = (uint8_t)(i * 197u + (i >> 3) + 41u);
     }
+    uint8_t zero_message_byte = 0u;
+    uint8_t* const message_data = block_bytes == 0u ?
+        &zero_message_byte : message.data();
     std::vector<wirehair_v2::SolvePacket> systematic(K);
     for (uint32_t id = 0; id < K; ++id) {
         systematic[id].BlockId = id;
         systematic[id].Data =
-            message.data() + (size_t)id * block_bytes;
+            message_data + (size_t)id * block_bytes;
     }
     std::vector<uint8_t> expected;
     if (wirehair_v2::SolvePrecodeSystem(
@@ -2426,7 +2455,7 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
     std::vector<wirehair_v2::SolvePacket> deficient(K);
     for (wirehair_v2::SolvePacket& packet : deficient) {
         packet.BlockId = 0u;
-        packet.Data = message.data();
+        packet.Data = message_data;
     }
     std::vector<uint8_t> output(11u, 0xa5u);
     const std::vector<uint8_t> sentinel = output;
@@ -2442,64 +2471,147 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         return false;
     }
 
-    const uint32_t rank_before = resume.Rank;
+    // Copying an empty vector is not required to preserve its capacity.
+    // Strip all payload backing explicitly so the zero-width case proves
+    // ResumePrecodeSystem never relies on a lucky non-null data() pointer.
+    if (block_bytes == 0u)
+    {
+        std::vector<uint8_t>().swap(resume.Values);
+        std::vector<uint8_t>().swap(resume.PivotRhs);
+        std::vector<uint8_t>().swap(resume.RhsScratch);
+    }
+
+    // Resume is a GF(256)-checkpoint API, so neither the supported mixed field
+    // nor a forged enum may fall through as if it were GF(256).
+    for (const wirehair_v2::CompletionField invalid_field : {
+             wirehair_v2::CompletionField::MixedGF256GF16,
+             static_cast<wirehair_v2::CompletionField>(
+                 UINT32_C(0xffffffff))})
+    {
+        for (const bool allow_insert : {false, true})
+        {
+            wirehair_v2::PrecodeSystem invalid_system = system;
+            invalid_system.Params.Field = invalid_field;
+            wirehair_v2::PrecodeSolveResumeState invalid_resume = resume;
+            const wirehair_v2::PrecodeSolveResumeState invalid_resume_before =
+                invalid_resume;
+            const size_t invalid_bytes_before =
+                invalid_resume.PersistentBytes();
+            const std::array<size_t, 9u> invalid_capacities_before =
+                ResumeCapacities(invalid_resume);
+            std::vector<uint8_t> invalid_output = sentinel;
+            wirehair_v2::PrecodeSolveStats invalid_stats;
+            invalid_stats.BlockCopies = UINT64_C(0x0123456789abcdef);
+            const wirehair_v2::PrecodeSolveStats invalid_stats_before =
+                invalid_stats;
+            if (wirehair_v2::ResumePrecodeSystem(
+                    invalid_system, config, 0u, message_data, block_bytes,
+                    invalid_resume, invalid_output, &invalid_stats,
+                    allow_insert) != Wirehair_InvalidInput ||
+                !SameResumeState(
+                    invalid_resume, invalid_resume_before, true) ||
+                invalid_resume.PersistentBytes() != invalid_bytes_before ||
+                ResumeCapacities(invalid_resume) !=
+                    invalid_capacities_before ||
+                invalid_output != sentinel ||
+                !SameExactSolveStats(invalid_stats, invalid_stats_before))
+            {
+                std::fprintf(stderr,
+                    "solve: invalid resume completion field was accepted\n");
+                return false;
+            }
+        }
+    }
+
     const size_t bytes_before = resume.PersistentBytes();
-    const std::vector<uint8_t> coefficient_scratch_before =
-        resume.CoefficientScratch;
-    const std::vector<uint8_t> rhs_scratch_before = resume.RhsScratch;
-    const std::vector<uint8_t> pivot_coefficients_before =
-        resume.PivotCoefficients;
-    const std::vector<uint8_t> pivot_rhs_before = resume.PivotRhs;
-    const std::vector<uint8_t> have_pivot_before = resume.HavePivot;
+    const std::array<size_t, 9u> capacities_before =
+        ResumeCapacities(resume);
+    const wirehair_v2::PrecodeSolveResumeState resume_before = resume;
     const uint64_t block_copies_before = resume.Stats.BlockCopies;
+    const uint64_t block_xors_before = resume.Stats.BlockXors;
+    const uint32_t P = system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    const std::vector<uint32_t> duplicate_columns =
+        wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+            K, P, 0u, config, resume.Runtime);
+    if (duplicate_columns.empty()) {
+        return false;
+    }
     if (wirehair_v2::ResumePrecodeSystem(
-            system, config, 0u, message.data(), block_bytes,
+            system, config, 0u, message_data, block_bytes,
             resume, output, nullptr, false) != Wirehair_NeedMore ||
-        resume.Rank != rank_before ||
+        !SameResumeState(resume, resume_before, true) ||
         resume.PersistentBytes() != bytes_before ||
-        resume.CoefficientScratch != coefficient_scratch_before ||
-        resume.RhsScratch != rhs_scratch_before ||
-        resume.PivotCoefficients != pivot_coefficients_before ||
-        resume.PivotRhs != pivot_rhs_before ||
-        resume.HavePivot != have_pivot_before ||
-        resume.Stats.BlockCopies != block_copies_before ||
+        ResumeCapacities(resume) != capacities_before ||
         output != sentinel)
     {
         std::fprintf(stderr, "solve: exact checkpoint duplicate changed state\n");
         return false;
     }
-    std::vector<uint8_t> corrupt(message.begin(), message.begin() + block_bytes);
-    corrupt[0] ^= 1u;
+
+    // Duplicate-validation mode must also reject a genuinely independent row
+    // without consuming it or publishing speculative counters.
+    wirehair_v2::PrecodeSolveStats independent_stats;
+    independent_stats.BlockCopies = UINT64_C(0xfedcba9876543210);
+    const wirehair_v2::PrecodeSolveStats independent_stats_before =
+        independent_stats;
     if (wirehair_v2::ResumePrecodeSystem(
-            system, config, 0u, corrupt.data(), block_bytes,
-            resume, output, nullptr, false) != Wirehair_Error ||
-        resume.Rank != rank_before ||
-        resume.CoefficientScratch != coefficient_scratch_before ||
-        resume.RhsScratch != rhs_scratch_before ||
-        resume.PivotCoefficients != pivot_coefficients_before ||
-        resume.PivotRhs != pivot_rhs_before ||
-        resume.HavePivot != have_pivot_before ||
-        resume.Stats.BlockCopies != block_copies_before ||
-        output != sentinel)
+            system, config, 1u, message_data + block_bytes, block_bytes,
+            resume, output, &independent_stats, false) != Wirehair_Error ||
+        !SameResumeState(resume, resume_before, true) ||
+        resume.PersistentBytes() != bytes_before ||
+        ResumeCapacities(resume) != capacities_before ||
+        output != sentinel ||
+        !SameExactSolveStats(
+            independent_stats, independent_stats_before))
     {
         std::fprintf(stderr,
-            "solve: conflicting checkpoint duplicate was accepted\n");
+            "solve: independent checkpoint validation changed state\n");
         return false;
+    }
+
+    std::vector<uint8_t> corrupt;
+    if (block_bytes != 0u)
+    {
+        corrupt.assign(message.begin(), message.begin() + block_bytes);
+        corrupt[0] ^= 1u;
+        if (wirehair_v2::ResumePrecodeSystem(
+                system, config, 0u, corrupt.data(), block_bytes,
+                resume, output, nullptr, false) != Wirehair_Error ||
+            !SameResumeState(resume, resume_before, true) ||
+            resume.PersistentBytes() != bytes_before ||
+            ResumeCapacities(resume) != capacities_before ||
+            output != sentinel)
+        {
+            std::fprintf(stderr,
+                "solve: conflicting checkpoint duplicate was accepted\n");
+            return false;
+        }
     }
 
     // Direct insertion of the same algebraic row is allowed to update solve
     // receipts/scratch, but it cannot add a pivot.  It still performs exactly
     // one whole-block copy into RhsScratch.
     wirehair_v2::PrecodeSolveResumeState dependent_resume = resume;
+    const std::array<size_t, 9u> dependent_capacities_before =
+        ResumeCapacities(dependent_resume);
     std::vector<uint8_t> dependent_output = sentinel;
     wirehair_v2::PrecodeSolveStats dependent_stats;
     if (wirehair_v2::ResumePrecodeSystem(
-            system, config, 0u, message.data(), block_bytes,
+            system, config, 0u, message_data, block_bytes,
             dependent_resume, dependent_output, &dependent_stats, true) !=
             Wirehair_NeedMore ||
-        dependent_resume.Rank != rank_before ||
+        !SameResumeAlgebraState(dependent_resume, resume) ||
         dependent_resume.Stats.BlockCopies != block_copies_before + 1u ||
         dependent_stats.BlockCopies != block_copies_before + 1u ||
+        dependent_resume.Stats.BlockXors !=
+            block_xors_before + duplicate_columns.size() ||
+        dependent_stats.BlockXors !=
+            dependent_resume.Stats.BlockXors ||
+        !SameExactSolveStats(
+            dependent_stats, dependent_resume.Stats) ||
+        ResumeCapacities(dependent_resume) !=
+            dependent_capacities_before ||
         dependent_output != sentinel)
     {
         std::fprintf(stderr,
@@ -2507,27 +2619,90 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         return false;
     }
 
-    // A mutating resume call also consumes a conflicting packet before its
-    // zero coefficient row exposes the nonzero syndrome.  The algebraic
-    // checkpoint and output stay intact, while the physical input copy is
-    // retained in the diagnostic receipt.
-    wirehair_v2::PrecodeSolveResumeState conflicting_resume = resume;
-    std::vector<uint8_t> conflicting_output = sentinel;
-    wirehair_v2::PrecodeSolveStats conflicting_stats;
-    if (wirehair_v2::ResumePrecodeSystem(
-            system, config, 0u, corrupt.data(), block_bytes,
-            conflicting_resume, conflicting_output,
-            &conflicting_stats, true) != Wirehair_Error ||
-        conflicting_resume.Rank != rank_before ||
-        conflicting_resume.PivotCoefficients != pivot_coefficients_before ||
-        conflicting_resume.PivotRhs != pivot_rhs_before ||
-        conflicting_resume.HavePivot != have_pivot_before ||
-        conflicting_resume.Stats.BlockCopies != block_copies_before + 1u ||
-        conflicting_stats.BlockCopies != block_copies_before + 1u ||
-        conflicting_output != sentinel)
+    if (block_bytes != 0u)
+    {
+        // A mutating resume call also consumes a conflicting packet before its
+        // zero coefficient row exposes the nonzero syndrome.  The algebraic
+        // checkpoint and output stay intact, while the physical input copy is
+        // retained in the diagnostic receipt.
+        wirehair_v2::PrecodeSolveResumeState conflicting_resume = resume;
+        const std::array<size_t, 9u> conflicting_capacities_before =
+            ResumeCapacities(conflicting_resume);
+        std::vector<uint8_t> conflicting_output = sentinel;
+        wirehair_v2::PrecodeSolveStats conflicting_stats;
+        if (wirehair_v2::ResumePrecodeSystem(
+                system, config, 0u, corrupt.data(), block_bytes,
+                conflicting_resume, conflicting_output,
+                &conflicting_stats, true) != Wirehair_Error ||
+            !SameResumeAlgebraState(conflicting_resume, resume) ||
+            conflicting_resume.Stats.BlockCopies !=
+                block_copies_before + 1u ||
+            conflicting_stats.BlockCopies != block_copies_before + 1u ||
+            conflicting_resume.Stats.BlockXors !=
+                block_xors_before + duplicate_columns.size() ||
+            conflicting_stats.BlockXors !=
+                conflicting_resume.Stats.BlockXors ||
+            !SameExactSolveStats(
+                conflicting_stats, conflicting_resume.Stats) ||
+            ResumeCapacities(conflicting_resume) !=
+                conflicting_capacities_before ||
+            conflicting_output != sentinel)
+        {
+            std::fprintf(stderr,
+                "solve: conflicting resume copy receipt mismatch\n");
+            return false;
+        }
+    }
+
+    // Reduce a checkpoint clone to one inactive coordinate and no pivots.
+    // The accepted row then performs exactly one projection XOR per generated
+    // column, inserts the sole pivot, completes, and publishes its receipt
+    // before Clear() resets the checkpoint.
+    const std::vector<uint32_t> zero_rank_columns =
+        wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+            K, P, 1u, config, resume.Runtime);
+    wirehair_v2::PrecodeSolveResumeState zero_rank_resume = resume;
+    zero_rank_resume.InactiveCount = 1u;
+    zero_rank_resume.ProjectionWords = 1u;
+    zero_rank_resume.Rank = 0u;
+    std::fill(
+        zero_rank_resume.InactiveIndex.begin(),
+        zero_rank_resume.InactiveIndex.end(), UINT32_MAX);
+    if (!zero_rank_columns.empty()) {
+        zero_rank_resume.InactiveIndex[zero_rank_columns.front()] = 0u;
+    }
+    zero_rank_resume.InactiveColumns.assign(
+        1u, zero_rank_columns.empty() ? 0u : zero_rank_columns.front());
+    zero_rank_resume.Projection.assign(
+        zero_rank_resume.ColumnCount, UINT64_C(0));
+    zero_rank_resume.PivotCoefficients.assign(1u, uint8_t{0});
+    zero_rank_resume.PivotRhs.assign(block_bytes, uint8_t{0});
+    zero_rank_resume.HavePivot.assign(1u, uint8_t{0});
+    zero_rank_resume.CoefficientScratch.assign(1u, uint8_t{0});
+    zero_rank_resume.RhsScratch.assign(block_bytes, uint8_t{0});
+    const uint64_t zero_rank_xors_before =
+        zero_rank_resume.Stats.BlockXors;
+    std::vector<uint8_t> zero_rank_output = sentinel;
+    wirehair_v2::PrecodeSolveStats zero_rank_stats;
+    const wirehair_v2::PrecodeSolveResumeState cleared_resume;
+    if (zero_rank_columns.empty() ||
+        wirehair_v2::ResumePrecodeSystem(
+            system, config, 1u,
+            message_data + block_bytes, block_bytes,
+            zero_rank_resume, zero_rank_output,
+            &zero_rank_stats, true) != Wirehair_Success ||
+        !SameResumeState(zero_rank_resume, cleared_resume, true) ||
+        ResumeCapacities(zero_rank_resume) !=
+            ResumeCapacities(cleared_resume) ||
+        zero_rank_resume.PersistentBytes() !=
+            cleared_resume.PersistentBytes() ||
+        zero_rank_stats.BlockXors !=
+            zero_rank_xors_before + zero_rank_columns.size() ||
+        zero_rank_output.size() !=
+            (size_t)resume.ColumnCount * block_bytes)
     {
         std::fprintf(stderr,
-            "solve: conflicting resume copy receipt mismatch\n");
+            "solve: zero-rank resume projection receipt mismatch\n");
         return false;
     }
 
@@ -2537,11 +2712,17 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         const uint32_t call_rank_before = resume.Rank;
         const uint32_t inactive_count = resume.InactiveCount;
         const uint64_t call_copies_before = resume.Stats.BlockCopies;
+        const uint64_t call_xors_before = resume.Stats.BlockXors;
+        const std::array<size_t, 9u> call_capacities_before =
+            ResumeCapacities(resume);
+        const std::vector<uint32_t> call_columns =
+            wirehair_v2::GeneratePacketMatrixRowWithRuntime(
+                K, P, id, config, resume.Runtime);
         result = wirehair_v2::ResumePrecodeSystem(
             system,
             config,
             id,
-            message.data() + (size_t)id * block_bytes,
+            message_data + (size_t)id * block_bytes,
             block_bytes,
             resume,
             output,
@@ -2560,11 +2741,18 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
             (result == Wirehair_Success ? inactive_count : 0u);
         const uint64_t actual_copies = result == Wirehair_Success ?
             stats.BlockCopies : resume.Stats.BlockCopies;
+        const uint64_t actual_xors = result == Wirehair_Success ?
+            stats.BlockXors : resume.Stats.BlockXors;
         if (actual_copies != expected_copies ||
-            !rank_transition_valid)
+            call_columns.empty() ||
+            actual_xors < call_xors_before + call_columns.size() ||
+            !rank_transition_valid ||
+            (result != Wirehair_Success && output != sentinel) ||
+            (result == Wirehair_NeedMore &&
+             ResumeCapacities(resume) != call_capacities_before))
         {
             std::fprintf(stderr,
-                "solve: resume copy receipt mismatch id=%u got=%llu "
+                "solve: resume copy/XOR receipt mismatch id=%u got=%llu "
                 "expected=%llu\n",
                 id,
                 (unsigned long long)actual_copies,
@@ -2579,12 +2767,16 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
         }
     }
     if (result != Wirehair_Success || resume.Active || output != expected ||
-        !wirehair_v2::VerifyPrecodeSolution(
-            system, config, systematic,
-            output.data(), block_bytes))
+        (block_bytes != 0u &&
+         !wirehair_v2::VerifyPrecodeSolution(
+             system, config, systematic,
+             output.data(), block_bytes)))
     {
         std::fprintf(stderr, "solve: resumed solution mismatch\n");
         return false;
+    }
+    if (completed_stats_out) {
+        *completed_stats_out = stats;
     }
     std::printf(
         "incremental rank-deficient resume bb=%u: PASS\n", block_bytes);
@@ -2593,7 +2785,33 @@ bool CheckIncrementalResumeCase(uint32_t block_bytes)
 
 bool CheckIncrementalResume()
 {
-    return CheckIncrementalResumeCase(17u) &&
+    wirehair_v2::PrecodeSolveStats zero_width_stats;
+    wirehair_v2::PrecodeSolveStats counting_width_stats;
+    if (!CheckIncrementalResumeCase(0u, &zero_width_stats) ||
+        !CheckIncrementalResumeCase(
+            1280u, // WirehairV2Solve.cpp kCountingDispatchBlockBytes
+            &counting_width_stats))
+    {
+        return false;
+    }
+    zero_width_stats.BuildNanoseconds = 0u;
+    zero_width_stats.PeelNanoseconds = 0u;
+    zero_width_stats.ProjectNanoseconds = 0u;
+    zero_width_stats.ResidualNanoseconds = 0u;
+    zero_width_stats.BackSubNanoseconds = 0u;
+    counting_width_stats.BuildNanoseconds = 0u;
+    counting_width_stats.PeelNanoseconds = 0u;
+    counting_width_stats.ProjectNanoseconds = 0u;
+    counting_width_stats.ResidualNanoseconds = 0u;
+    counting_width_stats.BackSubNanoseconds = 0u;
+    if (!SameExactSolveStats(zero_width_stats, counting_width_stats))
+    {
+        std::fprintf(stderr,
+            "solve: zero/counting-width resume receipt mismatch\n");
+        return false;
+    }
+    return
+        CheckIncrementalResumeCase(17u) &&
         CheckIncrementalResumeCase(
             wirehair_v2::kLegacyByteQuotientMinBlockBytes);
 }
@@ -2901,13 +3119,10 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 stats.MixedJointActiveDeltas == 0u &&
                 stats.MixedDualSourceColumns == 0u;
         };
-        const auto joint_initializer_receipts_valid = [&](
-            const wirehair_v2::PrecodeSolveStats& joint,
+        const auto bucket_route_receipts_valid = [&](
+            const wirehair_v2::PrecodeSolveStats& selected,
             const wirehair_v2::PrecodeSolveStats& separate) -> bool
         {
-            if (!joint_bucketed) {
-                return true;
-            }
             const uint64_t populated_residues =
                 std::min<uint32_t>(period, column_count);
             const uint64_t separate_bucket_zero_fills =
@@ -2915,6 +3130,26 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                     (1u +
                      (independent_extension_residues ? 1u : 0u) +
                      (grouped_gf256_rows != 0u ? 1u : 0u));
+            if (dual_bucketed)
+            {
+                return selected.BlockCopies == separate.BlockCopies &&
+                    selected.BlockZeroFills +
+                        separate_bucket_zero_fills ==
+                    separate.BlockZeroFills +
+                        (uint64_t)2u * period;
+            }
+            if (!joint_bucketed) {
+                return true;
+            }
+            const wirehair_v2::PrecodeSolveStats& joint = selected;
+            if (joint.MixedJointMarginalCopies !=
+                    (uint64_t)2u * period ||
+                joint.BlockCopies !=
+                    separate.BlockCopies +
+                        joint.MixedJointMarginalCopies)
+            {
+                return false;
+            }
             if (joint.BlockZeroFills + separate_bucket_zero_fills <
                     separate.BlockZeroFills ||
                 joint.BlockAddSets < separate.BlockAddSets ||
@@ -2974,7 +3209,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 }
             }
             if (separate_expected != expected ||
-                !joint_initializer_receipts_valid(
+                !bucket_route_receipts_valid(
                     systematic_stats, separate_stats))
             {
                 std::fprintf(stderr,
@@ -3051,7 +3286,7 @@ bool CheckMixedProjectionResidueBucketsOracleForPeriod(
                 }
             }
             if (separate_recovered != recovered ||
-                !joint_initializer_receipts_valid(
+                !bucket_route_receipts_valid(
                     repair_stats, separate_stats))
             {
                 std::fprintf(stderr,
@@ -3285,8 +3520,8 @@ bool CheckMixedProjectionResidueBucketsOracle()
     }
     // Keep grouped coverage bounded to the two boundary pairs above: every
     // solve still compares optimized projection against the dense expansion,
-    // while explicit separate/joint modes cover P32, P48, and P64 at the
-    // minimum, finalist, and maximum useful grouped suffix sizes.
+    // while explicit separate/dual/joint modes cover P32, P48, and P64 at
+    // the minimum, finalist, and maximum useful grouped suffix sizes.
     const uint32_t grouped_periods[] = {32u, 48u, 64u};
     for (const uint32_t period : grouped_periods)
     {
@@ -3301,6 +3536,17 @@ bool CheckMixedProjectionResidueBucketsOracle()
                 wirehair_v2::MixedResidueBucketMode::Separate,
                 false,
                 1u) ||
+            !CheckMixedProjectionResidueBucketsOracleForPeriod(
+                period,
+                wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,
+                wirehair_v2::kMixedGF16Rows,
+                0u,
+                wirehair_v2::MixedResidueSchedule::Constant,
+                false,
+                wirehair_v2::kMixedGF256Rows,
+                wirehair_v2::MixedResidueBucketMode::Dual,
+                false,
+                5u) ||
             !CheckMixedProjectionResidueBucketsOracleForPeriod(
                 period,
                 wirehair_v2::MixedCoefficientGeometry::SharedCauchyX,

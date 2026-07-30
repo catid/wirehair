@@ -153,7 +153,8 @@ function(expect_selftest)
             "peel canonical fixed-depth CDF: PASS"
             "peel extreme-range law acceptance: PASS"
             "loss boundary oracle: PASS"
-            "zero-width joint-delta counter parity: PASS")
+            "zero-width counter parity: PASS"
+            "zero-width mixed-bucket counter parity: PASS")
         if(NOT out MATCHES "${pattern}")
             message(FATAL_ERROR
                 "selftest missing output '${pattern}'\nstdout=${out}")

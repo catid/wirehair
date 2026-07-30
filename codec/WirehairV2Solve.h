@@ -174,6 +174,16 @@ bool IsCanonicalPacketDegreeState();
     CDF are included.  Equation-preserving solver/dispatch oracles are not.
 */
 uint64_t ActivePacketRowEquationStateFingerprintForTesting();
+
+/**
+    Test the automatic joint-bucket decision through the solver's real
+    dispatch-width normalization.  In particular, block_bytes == 0 means the
+    calibrated counting width rather than a zero-byte production payload.
+*/
+bool UseAutomaticMixedJointResidueBucketsForSolveTesting(
+    uint32_t block_count,
+    uint32_t block_bytes,
+    uint32_t coefficient_period);
 #endif
 
 /**
@@ -235,7 +245,9 @@ struct PrecodeSolveStats
         pure function of the structural configuration and the delivered packet
         set, so repeated evaluations of one cell reproduce it exactly.
 
-        BlockCopies      whole-payload-block memcpy operations.
+        BlockCopies      whole-payload-block logical copy passes: memcpy,
+                         a distinguished first source fused into set-form
+                         initialization, and payload-plane conversion passes.
         BlockZeroFills   whole-payload-block zero fills, including the bulk
                          zero-initialization of the value workspace (counted
                          in whole blocks, not bytes).
@@ -256,8 +268,10 @@ struct PrecodeSolveStats
     */
     uint64_t BlockCopies = 0;
     uint64_t BlockZeroFills = 0;
-    // gf256_addset_multi_mem writes dst = XOR(sources) in ONE pass, so it is
-    // neither a BlockXor (which accumulates into an existing dst) nor a copy.
+    // gf256_addset_multi_mem writes dst = XOR(sources) in ONE pass, so the
+    // kernel call is neither a BlockXor (which accumulates into an existing
+    // dst) nor another BlockCopy.  Its distinguished first source retains the
+    // caller-attributed logical BlockCopy documented above.
     // Profiling at a 64 KiB payload put it at 8.0% of runtime with no counter
     // behind it, which is why the cost model could not see it.
     // BlockAddSets counts the calls; BlockAddSetSources counts the source
@@ -746,6 +760,9 @@ WirehairResult SolvePrecodeSystemForValidatedSystemWithRuntime(
     Allocations finish before an inserting call changes the algebraic state, so
     OOM is retryable.  On OOM, stats receives the unchanged checkpoint counters
     when non-null.  Output remains unchanged on NeedMore and every failure.
+    A zero block width is the supported payload-free receipt mode; block_data
+    must still be non-null, but copied empty checkpoint vectors need no backing
+    capacity.
 */
 WirehairResult ResumePrecodeSystem(
     const PrecodeSystem& system,
