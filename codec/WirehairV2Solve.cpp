@@ -37,11 +37,22 @@
 // Compaction occurs once after the configured threshold of invalid roots has
 // actually been popped.  Test-hook builds may override both values per thread
 // without changing the production ABI or exporting production symbols.
+//
+// Stale-pop policy 0 retains the original fixed threshold.  Policy 1 scales
+// it smoothly as clamp(64, 256, ceil(K / divisor)); policies 2 and 3 are
+// quantized controls for the all-K experiment.  The default stays fixed so
+// historical experiment build commands remain reproducible.
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT 0u
 #endif
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD 64u
+#endif
+#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY
+#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY 0u
+#endif
+#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_DIVISOR
+#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_DIVISOR 250u
 #endif
 
 #if defined(__linux__)
@@ -60,17 +71,67 @@ static_assert(
     (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD <=
         UINT32_MAX,
     "peel heap compaction stale-pop threshold must fit uint32_t");
-#if WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+static_assert(
+    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY <= 3u,
+    "peel heap compaction stale-pop policy must be in [0, 3]");
+static_assert(
+    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_DIVISOR <=
+        UINT32_MAX,
+    "peel heap compaction stale-pop divisor must fit uint32_t");
+#if WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0 && \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 0
 static_assert(
     WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0,
     "enabled peel heap compaction requires a nonzero stale-pop threshold");
+#endif
+#if (defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+     WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0) && \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 1
+static_assert(
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_DIVISOR != 0,
+    "scaled peel heap compaction requires a nonzero divisor");
 #endif
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
     WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
 static const uint32_t kCompiledPeelHeapCompactionDensityPercent =
     (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 0
 static const uint32_t kCompiledPeelHeapCompactionStalePopThreshold =
     (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD;
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+static const uint32_t kCompiledPeelHeapCompactionStalePopPolicy =
+    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY;
+#endif
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 1
+static const uint32_t kCompiledPeelHeapCompactionStalePopDivisor =
+    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_DIVISOR;
+#endif
+
+GF256_FORCE_INLINE uint32_t ResolveCompiledPeelHeapCompactionThreshold(
+    uint32_t block_count)
+{
+#if WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 0
+    (void)block_count;
+    return kCompiledPeelHeapCompactionStalePopThreshold;
+#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 1
+    static const uint32_t kMinimum = 64u;
+    static const uint32_t kMaximum = 256u;
+    const uint32_t divisor =
+        kCompiledPeelHeapCompactionStalePopDivisor;
+    const uint32_t scaled =
+        block_count / divisor + (block_count % divisor != 0u ? 1u : 0u);
+    return std::max(kMinimum, std::min(kMaximum, scaled));
+#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_POLICY == 2
+    return block_count <= 16000u ? 64u :
+        block_count <= 32000u ? 128u : 256u;
+#else
+    return block_count <= 24000u ? 64u :
+        block_count <= 48000u ? 128u : 256u;
+#endif
+}
 #endif
 
 // Snapshot of the ambient packet-row equation policy for one synchronous
@@ -99,6 +160,8 @@ thread_local uint32_t BinaryPeelHeapCompactionDensityPercent =
     kCompiledPeelHeapCompactionDensityPercent;
 thread_local uint32_t BinaryPeelHeapCompactionStalePopThreshold =
     kCompiledPeelHeapCompactionStalePopThreshold;
+thread_local bool BinaryPeelHeapCompactionStalePopThresholdOverrideActive =
+    false;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 thread_local int CertifiedPackedResidualTestModeValue = 0;
 thread_local int64_t
@@ -5692,18 +5755,16 @@ template<bool UseLowDegreeXor, bool EnableHeapCompaction>
 PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
     const BinaryEquationArena& rows,
-    uint32_t heap_compaction_density_percent)
+    uint32_t heap_compaction_density_percent
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+    ,
+    uint32_t heap_compaction_stale_pop_threshold
+#endif
+    )
 {
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    // The true specialization snapshots the calling thread's proof policy
-    // once.  The false specialization optimizes this read away completely.
-    const uint32_t heap_compaction_stale_pop_threshold =
-        EnableHeapCompaction ?
-            BinaryPeelHeapCompactionStalePopThreshold : 0u;
-#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
-    const uint32_t heap_compaction_stale_pop_threshold =
-        kCompiledPeelHeapCompactionStalePopThreshold;
-#else
+#if !defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) && \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT == 0
     const uint32_t heap_compaction_stale_pop_threshold = 0u;
 #endif
     PeelResult out;
@@ -6300,28 +6361,38 @@ PeelResult PeelBinaryRowsImplementation(
 }
 
 PeelResult PeelBinaryRows(
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+    uint32_t block_count,
+#endif
     uint32_t column_count,
     const BinaryEquationArena& rows)
 {
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-    // Select the specialization before processing rows.  The enabled
-    // specialization snapshots the same calling thread's threshold at entry;
-    // this synchronous peel cannot race another operation on that TLS state.
+    // Snapshot both controls before processing rows.  A literal TLS threshold
+    // overrides the compiled K policy on this thread only; clearing it restores
+    // that policy.  This synchronous peel cannot race another thread's state.
     const uint32_t heap_compaction_density_percent =
         BinaryPeelHeapCompactionDensityPercent;
     const uint32_t heap_compaction_stale_pop_threshold =
-        BinaryPeelHeapCompactionStalePopThreshold;
+        BinaryPeelHeapCompactionStalePopThresholdOverrideActive ?
+            BinaryPeelHeapCompactionStalePopThreshold :
+            ResolveCompiledPeelHeapCompactionThreshold(block_count);
     PeelResult out =
         heap_compaction_density_percent == 0u ||
         heap_compaction_stale_pop_threshold == 0u ?
         PeelBinaryRowsImplementation<true, false>(
-            column_count, rows, 0u) :
+            column_count, rows, 0u, 0u) :
         PeelBinaryRowsImplementation<true, true>(
-            column_count, rows, heap_compaction_density_percent);
+            column_count, rows, heap_compaction_density_percent,
+            heap_compaction_stale_pop_threshold);
 #elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+    const uint32_t heap_compaction_stale_pop_threshold =
+        ResolveCompiledPeelHeapCompactionThreshold(block_count);
     PeelResult out = PeelBinaryRowsImplementation<true, true>(
         column_count, rows,
-        kCompiledPeelHeapCompactionDensityPercent);
+        kCompiledPeelHeapCompactionDensityPercent,
+        heap_compaction_stale_pop_threshold);
 #else
     PeelResult out = PeelBinaryRowsImplementation<true, false>(
         column_count, rows, 0u);
@@ -6333,7 +6404,7 @@ PeelResult PeelBinaryRows(
         // compile-time experiment and the calling thread's override.
         const PeelResult reference =
             PeelBinaryRowsImplementation<false, false>(
-                column_count, rows, 0u);
+                column_count, rows, 0u, 0u);
         std::vector<uint32_t> last_row(column_count, UINT32_MAX);
         bool duplicate_free = true;
         for (uint32_t row = 0u; row < (uint32_t)rows.size(); ++row)
@@ -6706,11 +6777,45 @@ void SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
     uint32_t stale_pop_threshold)
 {
     BinaryPeelHeapCompactionStalePopThreshold = stale_pop_threshold;
+    BinaryPeelHeapCompactionStalePopThresholdOverrideActive = true;
 }
 
 uint32_t BinaryPeelHeapCompactionStalePopThresholdForTesting()
 {
     return BinaryPeelHeapCompactionStalePopThreshold;
+}
+
+void ClearBinaryPeelHeapCompactionStalePopThresholdForTesting()
+{
+    BinaryPeelHeapCompactionStalePopThresholdOverrideActive = false;
+}
+
+bool BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting()
+{
+    return BinaryPeelHeapCompactionStalePopThresholdOverrideActive;
+}
+
+uint32_t BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+    uint32_t block_count)
+{
+    return BinaryPeelHeapCompactionStalePopThresholdOverrideActive ?
+        BinaryPeelHeapCompactionStalePopThreshold :
+        ResolveCompiledPeelHeapCompactionThreshold(block_count);
+}
+
+uint32_t BinaryPeelHeapCompactionCompiledStalePopThresholdForTesting()
+{
+    return kCompiledPeelHeapCompactionStalePopThreshold;
+}
+
+uint32_t BinaryPeelHeapCompactionStalePopPolicyForTesting()
+{
+    return kCompiledPeelHeapCompactionStalePopPolicy;
+}
+
+uint32_t BinaryPeelHeapCompactionStalePopDivisorForTesting()
+{
+    return kCompiledPeelHeapCompactionStalePopDivisor;
 }
 
 bool CheckPacketRowPolicySnapshotForTesting()
@@ -7768,7 +7873,12 @@ static WirehairResult SolvePrecodeSystemImpl(
                 phase_end - phase_start).count();
 
         phase_start = phase_end;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+        PeelResult peel = PeelBinaryRows(K, L, rows);
+#else
         PeelResult peel = PeelBinaryRows(L, rows);
+#endif
         st.BinaryAdjacencyStorageBytes = peel.AdjacencyStorageBytes;
         st.BinaryAdjacencyStorageAllocations =
             peel.AdjacencyStorageAllocations;

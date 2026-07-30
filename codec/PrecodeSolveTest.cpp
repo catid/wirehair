@@ -2,6 +2,7 @@
 #include "WirehairV2Precode.h"
 #include "WirehairV2PrecodeDecode.h"
 #include "WirehairV2PrecodeEncode.h"
+#include "WirehairV2Seeds.h"
 #include "WirehairV2Solve.h"
 #include "V2TinyDenseOracle.h"
 
@@ -194,6 +195,18 @@ bool SameSolveStatsExceptHeapExperimentAndTiming(
         b.PeelHeapCompactionRebuildColumnProbes = 0u;
     a.PeelHeapCompactionHeapifyInputKeys =
         b.PeelHeapCompactionHeapifyInputKeys = 0u;
+    a.BuildNanoseconds = b.BuildNanoseconds = 0u;
+    a.PeelNanoseconds = b.PeelNanoseconds = 0u;
+    a.ProjectNanoseconds = b.ProjectNanoseconds = 0u;
+    a.ResidualNanoseconds = b.ResidualNanoseconds = 0u;
+    a.BackSubNanoseconds = b.BackSubNanoseconds = 0u;
+    return SameExactSolveStats(a, b);
+}
+
+bool SameSolveStatsExceptTiming(
+    wirehair_v2::PrecodeSolveStats a,
+    wirehair_v2::PrecodeSolveStats b)
+{
     a.BuildNanoseconds = b.BuildNanoseconds = 0u;
     a.PeelNanoseconds = b.PeelNanoseconds = 0u;
     a.ProjectNanoseconds = b.ProjectNanoseconds = 0u;
@@ -534,7 +547,10 @@ public:
         uint32_t stale_pop_threshold)
         : Previous(
             wirehair_v2::
-                BinaryPeelHeapCompactionStalePopThresholdForTesting())
+                BinaryPeelHeapCompactionStalePopThresholdForTesting()),
+          PreviousActive(
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting())
     {
         wirehair_v2::
             SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
@@ -546,10 +562,46 @@ public:
         wirehair_v2::
             SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
                 Previous);
+        if (!PreviousActive) {
+            wirehair_v2::
+                ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+        }
     }
 
 private:
     uint32_t Previous;
+    bool PreviousActive;
+};
+
+class BinaryPeelHeapCompactionCompiledStalePopThresholdScope
+{
+public:
+    BinaryPeelHeapCompactionCompiledStalePopThresholdScope()
+        : Previous(
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForTesting()),
+          PreviousActive(
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting())
+    {
+        wirehair_v2::
+            ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+    }
+
+    ~BinaryPeelHeapCompactionCompiledStalePopThresholdScope()
+    {
+        wirehair_v2::
+            SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
+                Previous);
+        if (!PreviousActive) {
+            wirehair_v2::
+                ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+        }
+    }
+
+private:
+    uint32_t Previous;
+    bool PreviousActive;
 };
 
 bool CheckLowestBitIndex()
@@ -4297,6 +4349,605 @@ bool CheckBinaryPeelLowDegreeXorOracle()
     return true;
 }
 
+bool CheckBinaryPeelHeapCompactionThresholdPolicy()
+{
+    const uint32_t original_threshold =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForTesting();
+    const bool original_override_active =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
+    const auto restore = [&] {
+        wirehair_v2::
+            SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
+                original_threshold);
+        if (!original_override_active) {
+            wirehair_v2::
+                ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+        }
+    };
+
+    const uint32_t policy =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopPolicyForTesting();
+    const uint32_t divisor =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopDivisorForTesting();
+    const uint32_t fixed_threshold =
+        wirehair_v2::
+            BinaryPeelHeapCompactionCompiledStalePopThresholdForTesting();
+    if (policy > 3u || (policy == 1u && divisor == 0u))
+    {
+        std::fprintf(stderr,
+            "solve: invalid compiled heap threshold policy=%u divisor=%u\n",
+            policy, divisor);
+        restore();
+        return false;
+    }
+
+    const auto expected_for = [&](uint32_t K) {
+        uint32_t expected = fixed_threshold;
+        if (policy == 1u)
+        {
+            const uint32_t scaled =
+                K / divisor + (K % divisor != 0u ? 1u : 0u);
+            expected = std::max(64u, std::min(256u, scaled));
+        }
+        else if (policy == 2u) {
+            expected = K <= 16000u ? 64u :
+                K <= 32000u ? 128u : 256u;
+        }
+        else if (policy == 3u) {
+            expected = K <= 24000u ? 64u :
+                K <= 48000u ? 128u : 256u;
+        }
+        return expected;
+    };
+
+    bool fresh_override_active = true;
+    uint32_t fresh_threshold = UINT32_MAX;
+    std::thread fresh_worker;
+    try
+    {
+        fresh_worker = std::thread([&] {
+            fresh_override_active =
+                wirehair_v2::
+                    BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
+            fresh_threshold =
+                wirehair_v2::
+                    BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                        32000u);
+        });
+    }
+    catch (...)
+    {
+        std::fprintf(stderr,
+            "solve: heap threshold fresh-thread launch failed\n");
+        restore();
+        return false;
+    }
+    fresh_worker.join();
+    if (fresh_override_active ||
+        fresh_threshold != expected_for(32000u))
+    {
+        std::fprintf(stderr,
+            "solve: heap threshold fresh-thread default mismatch "
+            "active=%u threshold=%u expected=%u\n",
+            fresh_override_active ? 1u : 0u,
+            fresh_threshold, expected_for(32000u));
+        restore();
+        return false;
+    }
+
+    wirehair_v2::
+        ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+    const bool initial_clear_restored_compiled =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                32000u) == expected_for(32000u);
+    uint32_t previous = 0u;
+    for (uint32_t K = 2u; K <= 64000u; ++K)
+    {
+        const uint32_t expected = expected_for(K);
+        const uint32_t actual =
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                    K);
+        if (actual != expected || (K != 2u && actual < previous))
+        {
+            std::fprintf(stderr,
+                "solve: heap threshold policy mismatch "
+                "policy=%u divisor=%u K=%u actual=%u expected=%u previous=%u\n",
+                policy, divisor, K, actual, expected, previous);
+            restore();
+            return false;
+        }
+        previous = actual;
+    }
+
+    bool nested_inner_valid = false;
+    bool nested_override_restored = false;
+    {
+        BinaryPeelHeapCompactionStalePopThresholdScope outer_scope(123u);
+        {
+            BinaryPeelHeapCompactionStalePopThresholdScope inner_scope(456u);
+            nested_inner_valid =
+                wirehair_v2::
+                    BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() &&
+                wirehair_v2::
+                    BinaryPeelHeapCompactionStalePopThresholdForTesting() ==
+                        456u;
+        }
+        nested_override_restored =
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() &&
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForTesting() == 123u;
+    }
+
+    wirehair_v2::SetBinaryPeelHeapCompactionStalePopThresholdForTesting(0u);
+    const bool zero_override =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() &&
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                32000u) == 0u;
+    wirehair_v2::SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
+        UINT32_MAX);
+    const bool maximum_override =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() &&
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                32000u) == UINT32_MAX;
+    wirehair_v2::
+        ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+    const bool cleared =
+        !wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() &&
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                32000u) == expected_for(32000u);
+    restore();
+    if (!initial_clear_restored_compiled ||
+        !nested_inner_valid ||
+        !nested_override_restored ||
+        !zero_override || !maximum_override || !cleared ||
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdForTesting() !=
+                original_threshold ||
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() !=
+                original_override_active)
+    {
+        std::fprintf(stderr,
+            "solve: heap threshold override/restore mismatch "
+            "initial_clear=%u inner=%u nested=%u zero=%u maximum=%u cleared=%u "
+            "active=%u/%u value=%u/%u\n",
+            initial_clear_restored_compiled ? 1u : 0u,
+            nested_inner_valid ? 1u : 0u,
+            nested_override_restored ? 1u : 0u,
+            zero_override ? 1u : 0u,
+            maximum_override ? 1u : 0u,
+            cleared ? 1u : 0u,
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() ?
+                    1u : 0u,
+            original_override_active ? 1u : 0u,
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForTesting(),
+            original_threshold);
+        return false;
+    }
+    return true;
+}
+
+bool CheckBinaryPeelHeapCompactionCompiledPolicySolve()
+{
+    const uint32_t policy =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopPolicyForTesting();
+    const uint32_t divisor =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopDivisorForTesting();
+    uint32_t K = 8192u;
+    if (policy == 1u)
+    {
+        const uint64_t first_unclamped_boundary =
+            (uint64_t)divisor * 64u;
+        if (first_unclamped_boundary <= 64000u) {
+            K = (uint32_t)first_unclamped_boundary;
+        }
+        else {
+            K = 64000u;
+        }
+    }
+    else if (policy == 2u) {
+        K = 16000u;
+    }
+    else if (policy == 3u) {
+        K = 24000u;
+    }
+
+    static const uint32_t kBlockBytes = 2u;
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeMixedParams(
+            K, UINT64_C(0x636f6d70696c6564));
+    params.DenseRows = 4u;
+    wirehair_v2::PacketRowConfig base_config;
+    base_config.PeelSeed = UINT32_C(0x706f6c79);
+    base_config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    wirehair_v2::PrecodeSystem system;
+    wirehair_v2::PacketRowConfig config;
+    if (wirehair_v2::SelectSystematicConfiguration(
+            params, base_config, system, config) != Wirehair_Success)
+    {
+        std::fprintf(stderr,
+            "solve: compiled heap policy fixture selection failed "
+            "policy=%u divisor=%u K=%u\n",
+            policy, divisor, K);
+        return false;
+    }
+
+    std::vector<uint8_t> source((size_t)K * kBlockBytes);
+    for (size_t i = 0u; i < source.size(); ++i) {
+        source[i] =
+            (uint8_t)(0x5du + i * 181u + (i >> 5));
+    }
+    std::vector<wirehair_v2::SolvePacket> packets(K);
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        packets[id].BlockId = id;
+        packets[id].Data =
+            source.data() + (size_t)id * kBlockBytes;
+    }
+
+    struct Observation
+    {
+        WirehairResult Result = Wirehair_Error;
+        std::vector<uint8_t> Intermediate;
+        wirehair_v2::PrecodeSolveStats Stats;
+    };
+    Observation compiled;
+    Observation explicit_threshold;
+    uint32_t resolved_threshold = 0u;
+    uint32_t column_count_threshold = 0u;
+    {
+        BinaryPeelHeapCompactionDensityScope density_scope(100u);
+        BinaryPeelHeapCompactionCompiledStalePopThresholdScope
+            threshold_scope;
+        resolved_threshold =
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                    K);
+        const uint32_t L = K + system.Params.Staircase +
+            system.Params.DenseRows + system.Params.HeavyRows;
+        column_count_threshold =
+            wirehair_v2::
+                BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+                    L);
+        compiled.Intermediate.assign(7u, uint8_t{0xa5u});
+        compiled.Result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, kBlockBytes,
+            compiled.Intermediate, &compiled.Stats);
+    }
+    {
+        BinaryPeelHeapCompactionDensityScope density_scope(100u);
+        BinaryPeelHeapCompactionStalePopThresholdScope threshold_scope(
+            resolved_threshold);
+        explicit_threshold.Intermediate.assign(7u, uint8_t{0x3cu});
+        explicit_threshold.Result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, kBlockBytes,
+            explicit_threshold.Intermediate, &explicit_threshold.Stats);
+    }
+
+    const bool must_discriminate_source_count =
+        policy == 2u || policy == 3u ||
+        (policy == 1u && (uint64_t)divisor * 64u <= 64000u);
+    const bool compiled_verified =
+        compiled.Result == Wirehair_Success &&
+        wirehair_v2::VerifyPrecodeSolution(
+            system, config, packets, compiled.Intermediate.data(),
+            kBlockBytes);
+    const bool explicit_verified =
+        explicit_threshold.Result == Wirehair_Success &&
+        wirehair_v2::VerifyPrecodeSolution(
+            system, config, packets,
+            explicit_threshold.Intermediate.data(), kBlockBytes);
+    if (compiled.Stats.PeelHeapCompactionStalePopThreshold !=
+            resolved_threshold ||
+        (must_discriminate_source_count &&
+         column_count_threshold == resolved_threshold) ||
+        compiled.Result != explicit_threshold.Result ||
+        compiled.Intermediate != explicit_threshold.Intermediate ||
+        !SameSolveStatsExceptTiming(
+            compiled.Stats, explicit_threshold.Stats) ||
+        !compiled_verified || !explicit_verified)
+    {
+        std::fprintf(stderr,
+            "solve: compiled heap policy real-solve mismatch "
+            "policy=%u divisor=%u K=%u T(K)=%u T(L)=%u "
+            "stats_T=%u result=%d/%d verify=%u/%u\n",
+            policy, divisor, K,
+            resolved_threshold, column_count_threshold,
+            compiled.Stats.PeelHeapCompactionStalePopThreshold,
+            (int)compiled.Result, (int)explicit_threshold.Result,
+            compiled_verified ? 1u : 0u,
+            explicit_verified ? 1u : 0u);
+        return false;
+    }
+    std::printf(
+        "K=%u compiled heap policy=%u divisor=%u T(K/L)=%u/%u "
+        "real-solve twin: PASS\n",
+        K, policy, divisor,
+        resolved_threshold, column_count_threshold);
+    return true;
+}
+
+bool CheckBinaryPeelHeapCompactionLossPayloadOracle()
+{
+    static const uint32_t K = 8192u;
+    static const uint32_t kBlockBytes = 2u;
+    static const uint64_t kConstructionSeed = 0u;
+    static const uint64_t kLossSeed =
+        UINT64_C(0x9187a133764b6b45);
+    static const double kLossRate = 0.10;
+
+    if (!wirehair_v2::IsCanonicalMixedCompletionState() ||
+        !wirehair_v2::IsCanonicalStableTargetStaircaseState() ||
+        !wirehair_v2::IsCanonicalStaircaseDegreeScaleState() ||
+        !wirehair_v2::IsCanonicalStableTargetPacketRowState() ||
+        !wirehair_v2::IsCanonicalPacketDegreeState())
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss fixture rejected noncanonical state\n");
+        return false;
+    }
+    MixedCoefficientPeriodScope period_scope(
+        wirehair_v2::kMixedCoefficientPeriod);
+    MixedGF256RowsScope gf256_scope(wirehair_v2::kMixedGF256Rows);
+    MixedGF16RowsScope gf16_scope(wirehair_v2::kMixedGF16Rows);
+    if (!period_scope.IsValid() ||
+        !gf256_scope.IsValid() ||
+        !gf16_scope.IsValid())
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss fixture hook setup failed\n");
+        return false;
+    }
+
+    wirehair_v2::PrecodeParams params =
+        wirehair_v2::MakeMixedParams(K, kConstructionSeed);
+    params.DenseRows = 4u;
+    wirehair_v2::PrecodeSystem system;
+    if (!wirehair_v2::BuildPrecodeSystem(params, system))
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss fixture system build failed\n");
+        return false;
+    }
+    wirehair_v2::PacketRowConfig config;
+    config.PeelSeed =
+        wirehair_v2::RawUniformPacketPeelSeed(kConstructionSeed);
+    config.MixCount = wirehair_v2::kCertifiedPacketMixCount;
+    const uint32_t L = K + system.Params.Staircase +
+        system.Params.DenseRows + system.Params.HeavyRows;
+    if (system.Params.Staircase != 78u ||
+        system.Params.DenseRows != 4u ||
+        system.Params.HeavyRows != 12u ||
+        L != 8286u ||
+        config.PeelSeed != 0u ||
+        config.MixCount != 3u)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss fixture shape changed "
+            "S/D2/H/L=%u/%u/%u/%u peel=%u mix=%u\n",
+            system.Params.Staircase,
+            system.Params.DenseRows,
+            system.Params.HeavyRows,
+            L, config.PeelSeed, config.MixCount);
+        return false;
+    }
+
+    std::vector<uint8_t> source((size_t)K * kBlockBytes);
+    for (size_t i = 0u; i < source.size(); ++i) {
+        source[i] =
+            (uint8_t)(0x5bu + i * 173u + (i >> 7));
+    }
+    std::vector<wirehair_v2::SolvePacket> systematic(K);
+    for (uint32_t id = 0u; id < K; ++id)
+    {
+        systematic[id].BlockId = id;
+        systematic[id].Data =
+            source.data() + (size_t)id * kBlockBytes;
+    }
+
+    struct Observation
+    {
+        WirehairResult Result = Wirehair_Error;
+        std::vector<uint8_t> Intermediate;
+        wirehair_v2::PrecodeSolveStats Stats;
+    };
+    const auto run = [&](
+        const std::vector<wirehair_v2::SolvePacket>& packets,
+        uint32_t density_percent,
+        uint32_t stale_pop_threshold,
+        Observation& observation) {
+        BinaryPeelHeapCompactionDensityScope density_scope(
+            density_percent);
+        BinaryPeelHeapCompactionStalePopThresholdScope threshold_scope(
+            stale_pop_threshold);
+        observation.Intermediate.assign(7u, uint8_t{0xa5u});
+        observation.Result = wirehair_v2::SolvePrecodeSystem(
+            system, config, packets, kBlockBytes,
+            observation.Intermediate, &observation.Stats);
+    };
+
+    Observation encoder;
+    run(systematic, 0u, 16u, encoder);
+    if (encoder.Result != Wirehair_Success ||
+        encoder.Intermediate.size() != (size_t)L * kBlockBytes ||
+        !wirehair_v2::VerifyPrecodeSolution(
+            system, config, systematic, encoder.Intermediate.data(),
+            kBlockBytes))
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss fixture encoder failed "
+            "result=%d bytes=%zu/%zu\n",
+            (int)encoder.Result,
+            encoder.Intermediate.size(),
+            (size_t)L * kBlockBytes);
+        return false;
+    }
+
+    const uint64_t derived_loss_seed =
+        UINT64_C(55) ^
+        ((uint64_t)K * UINT64_C(0x9e3779b97f4a7c15)) ^
+        ((uint64_t)kBlockBytes * UINT64_C(0xbf58476d1ce4e5b9));
+    if (derived_loss_seed != kLossSeed)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss seed derivation changed "
+            "actual=%016llx expected=%016llx\n",
+            (unsigned long long)derived_loss_seed,
+            (unsigned long long)kLossSeed);
+        return false;
+    }
+    uint64_t loss_state = kLossSeed;
+    const auto next_loss_unit = [&]() {
+        uint64_t z =
+            (loss_state += UINT64_C(0x9e3779b97f4a7c15));
+        z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+        z ^= z >> 31;
+        return static_cast<double>(z >> 11) *
+            (1.0 / 9007199254740992.0);
+    };
+    std::vector<uint32_t> received_ids;
+    received_ids.reserve(K);
+    uint32_t next_id = 0u;
+    uint32_t dropped = 0u;
+    while (received_ids.size() < K)
+    {
+        const uint32_t id = next_id++;
+        if (next_loss_unit() < kLossRate) {
+            ++dropped;
+        }
+        else {
+            received_ids.push_back(id);
+        }
+    }
+    if (received_ids.back() != 9039u ||
+        next_id != 9040u ||
+        dropped != 848u)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss trace changed "
+            "last/next/dropped=%u/%u/%u\n",
+            received_ids.back(), next_id, dropped);
+        return false;
+    }
+
+    std::vector<uint8_t> received_storage((size_t)K * kBlockBytes);
+    std::vector<wirehair_v2::SolvePacket> received(K);
+    bool payload_has_nonzero = false;
+    for (size_t i = 0u; i < received_ids.size(); ++i)
+    {
+        uint8_t* block =
+            received_storage.data() + i * kBlockBytes;
+        const uint32_t id = received_ids[i];
+        if (!wirehair_v2::EvaluatePacketBlockForValidatedSystem(
+                system, config, encoder.Intermediate.data(),
+                kBlockBytes, id, block))
+        {
+            std::fprintf(stderr,
+                "solve: heap compaction loss packet evaluation failed "
+                "id=%u\n",
+                id);
+            return false;
+        }
+        payload_has_nonzero =
+            payload_has_nonzero || block[0] != 0u || block[1] != 0u;
+        received[i].BlockId = id;
+        received[i].Data = block;
+    }
+
+    Observation control;
+    Observation candidate;
+    run(received, 0u, 16u, control);
+    run(received, 150u, 16u, candidate);
+    const bool control_verified =
+        control.Result == Wirehair_Success &&
+        wirehair_v2::VerifyPrecodeSolution(
+            system, config, received, control.Intermediate.data(),
+            kBlockBytes);
+    const bool candidate_verified =
+        candidate.Result == Wirehair_Success &&
+        wirehair_v2::VerifyPrecodeSolution(
+            system, config, received, candidate.Intermediate.data(),
+            kBlockBytes);
+    const bool algebra_exact =
+        control.Intermediate == candidate.Intermediate &&
+        control.Intermediate == encoder.Intermediate &&
+        SameSolveStatsExceptHeapExperimentAndTiming(
+            control.Stats, candidate.Stats);
+    const bool control_receipt_exact =
+        control.Stats.PeelHeapResolvedStalePops == 863u &&
+        control.Stats.PeelHeapOperations == 17411u &&
+        control.Stats.PeelHeapCompactions == 0u;
+    const bool candidate_receipt_exact =
+        candidate.Stats.PacketRows == K &&
+        candidate.Stats.PeeledColumns == 8137u &&
+        candidate.Stats.InactivatedColumns == 149u &&
+        candidate.Stats.ResidualRows == 149u &&
+        candidate.Stats.ResidualRank == 149u &&
+        candidate.Stats.PeelHeapCompactionInputKeys == 14341u &&
+        candidate.Stats.PeelHeapCompactionOutputKeys == 1075u &&
+        candidate.Stats.PeelHeapCompactionRebuildColumnProbes == 8286u &&
+        candidate.Stats.PeelHeapCompactionHeapifyInputKeys == 1075u &&
+        candidate.Stats.PeelHeapCompactions == 1u &&
+        candidate.Stats.PeelHeapCompactionStalePopThreshold == 16u &&
+        candidate.Stats.PeelHeapResolvedStalePops == 468u &&
+        candidate.Stats.PeelHeapOperations == 17016u &&
+        candidate.Stats.PeelHeapUnresolvedCountMismatchPops == 0u;
+    if (!payload_has_nonzero ||
+        !control_verified ||
+        !candidate_verified ||
+        !algebra_exact ||
+        !control_receipt_exact ||
+        !candidate_receipt_exact)
+    {
+        std::fprintf(stderr,
+            "solve: heap compaction loss payload oracle failed "
+            "payload=%u verify=%u/%u algebra=%u receipt=%u/%u "
+            "result=%d/%d keys=%llu->%llu C/M=%llu/%llu "
+            "stale/ops=%llu/%llu\n",
+            payload_has_nonzero ? 1u : 0u,
+            control_verified ? 1u : 0u,
+            candidate_verified ? 1u : 0u,
+            algebra_exact ? 1u : 0u,
+            control_receipt_exact ? 1u : 0u,
+            candidate_receipt_exact ? 1u : 0u,
+            (int)control.Result, (int)candidate.Result,
+            (unsigned long long)
+                candidate.Stats.PeelHeapCompactionInputKeys,
+            (unsigned long long)
+                candidate.Stats.PeelHeapCompactionOutputKeys,
+            (unsigned long long)
+                candidate.Stats.PeelHeapCompactionRebuildColumnProbes,
+            (unsigned long long)
+                candidate.Stats.PeelHeapCompactionHeapifyInputKeys,
+            (unsigned long long)
+                candidate.Stats.PeelHeapResolvedStalePops,
+            (unsigned long long)candidate.Stats.PeelHeapOperations);
+        return false;
+    }
+    std::printf(
+        "K=8192 IID-loss nonzero-payload heap compaction "
+        "keys=14341->1075 C/M=8286/1075: PASS\n");
+    return true;
+}
+
 bool CheckBinaryPeelHeapCompactionOracle()
 {
     static const uint32_t kBlockBytes = 2u;
@@ -4342,6 +4993,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
     const uint32_t original_stale_pop_threshold =
         wirehair_v2::
             BinaryPeelHeapCompactionStalePopThresholdForTesting();
+    const bool original_stale_pop_threshold_override_active =
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
     for (uint32_t K : kBlockCounts)
     {
         wirehair_v2::PrecodeParams params =
@@ -4965,6 +5619,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
             Observation threaded[2];
             uint32_t initial_density_percent[2] = {};
             uint32_t initial_stale_pop_threshold[2] = {};
+            bool initial_stale_pop_threshold_override_active[2] = {};
             bool installed[2] = {};
             bool restored[2] = {};
             bool worker_ok[2] = {};
@@ -4983,6 +5638,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
                         initial_stale_pop_threshold[index] =
                             wirehair_v2::
                                 BinaryPeelHeapCompactionStalePopThresholdForTesting();
+                        initial_stale_pop_threshold_override_active[index] =
+                            wirehair_v2::
+                                BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
                         try
                         {
                             {
@@ -4998,7 +5656,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
                                         kThreadDensityPercents[index] &&
                                     wirehair_v2::
                                         BinaryPeelHeapCompactionStalePopThresholdForTesting() ==
-                                        kThreadStalePopThresholds[index];
+                                        kThreadStalePopThresholds[index] &&
+                                    wirehair_v2::
+                                        BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
                                 ready.fetch_add(
                                     1u, std::memory_order_release);
                                 while (!go.load(std::memory_order_acquire) &&
@@ -5025,7 +5685,11 @@ bool CheckBinaryPeelHeapCompactionOracle()
                                     initial_density_percent[index] &&
                                 wirehair_v2::
                                     BinaryPeelHeapCompactionStalePopThresholdForTesting() ==
-                                    initial_stale_pop_threshold[index];
+                                    initial_stale_pop_threshold[index] &&
+                                wirehair_v2::
+                                    BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() ==
+                                    initial_stale_pop_threshold_override_active[
+                                        index];
                         }
                         catch (...)
                         {
@@ -5035,7 +5699,11 @@ bool CheckBinaryPeelHeapCompactionOracle()
                                     initial_density_percent[index] &&
                                 wirehair_v2::
                                     BinaryPeelHeapCompactionStalePopThresholdForTesting() ==
-                                    initial_stale_pop_threshold[index];
+                                    initial_stale_pop_threshold[index] &&
+                                wirehair_v2::
+                                    BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() ==
+                                    initial_stale_pop_threshold_override_active[
+                                        index];
                             cancel.store(true, std::memory_order_release);
                             go.store(true, std::memory_order_release);
                         }
@@ -5096,7 +5764,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     original_density_percent ||
                 wirehair_v2::
                     BinaryPeelHeapCompactionStalePopThresholdForTesting() !=
-                    original_stale_pop_threshold)
+                    original_stale_pop_threshold ||
+                wirehair_v2::
+                    BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() !=
+                    original_stale_pop_threshold_override_active)
             {
                 std::fprintf(stderr,
                     "solve: heap compaction TLS isolation failed "
@@ -5130,7 +5801,10 @@ bool CheckBinaryPeelHeapCompactionOracle()
             original_density_percent ||
         wirehair_v2::
             BinaryPeelHeapCompactionStalePopThresholdForTesting() !=
-            original_stale_pop_threshold)
+            original_stale_pop_threshold ||
+        wirehair_v2::
+            BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting() !=
+            original_stale_pop_threshold_override_active)
     {
         std::fprintf(stderr,
             "solve: heap compaction policy scope did not restore state\n");
@@ -7011,6 +7685,9 @@ int main(int argc, char** argv)
     ok = CheckMixedProjectionResidueBucketsOracle() && ok;
     ok = CheckMixedMix1EndToEnd() && ok;
     ok = CheckBinaryPeelLowDegreeXorOracle() && ok;
+    ok = CheckBinaryPeelHeapCompactionThresholdPolicy() && ok;
+    ok = CheckBinaryPeelHeapCompactionCompiledPolicySolve() && ok;
+    ok = CheckBinaryPeelHeapCompactionLossPayloadOracle() && ok;
     ok = CheckBinaryPeelHeapCompactionOracle() && ok;
     ok = CheckMixedSystematicSolve() && ok;
     ok = CheckPackedBinaryResidualOracle() && ok;

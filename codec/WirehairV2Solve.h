@@ -546,6 +546,16 @@ uint32_t BinaryPeelHeapCompactionDensityPercentForTesting();
 void SetBinaryPeelHeapCompactionStalePopThresholdForTesting(
     uint32_t stale_pop_threshold);
 uint32_t BinaryPeelHeapCompactionStalePopThresholdForTesting();
+/** Clear/query the literal threshold override and restore the compiled K rule. */
+void ClearBinaryPeelHeapCompactionStalePopThresholdForTesting();
+bool BinaryPeelHeapCompactionStalePopThresholdOverrideActiveForTesting();
+/** Resolve the calling thread's active threshold for one source block count. */
+uint32_t BinaryPeelHeapCompactionStalePopThresholdForBlockCountForTesting(
+    uint32_t block_count);
+/** Read the compiled fixed threshold, policy mode, and smooth-policy divisor. */
+uint32_t BinaryPeelHeapCompactionCompiledStalePopThresholdForTesting();
+uint32_t BinaryPeelHeapCompactionStalePopPolicyForTesting();
+uint32_t BinaryPeelHeapCompactionStalePopDivisorForTesting();
 
 /**
     Compare packed-GF(2) residual insertion against the byte GF(256) oracle at
