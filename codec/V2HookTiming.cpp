@@ -6,6 +6,8 @@
 #include <wirehair/wirehair.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,8 +20,12 @@
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 #if defined(__linux__)
@@ -309,6 +315,8 @@ struct Options
     uint32_t InnerReps = 0u;
     uint64_t MaxWorkingMiB = 0u;
     std::string ContextSha256;
+    int ReadyFd = -1;
+    int GoFd = -1;
 };
 
 const char* ScheduleName(Schedule schedule)
@@ -347,6 +355,18 @@ bool ParseCanonicalU32(const char* text, uint32_t& value)
     uint64_t parsed = 0u;
     if (!ParseCanonicalU64(text, parsed) || parsed > UINT32_MAX) return false;
     value = (uint32_t)parsed;
+    return true;
+}
+
+bool ParseCanonicalFd(const char* text, int& value)
+{
+    uint64_t parsed = 0u;
+    if (!ParseCanonicalU64(text, parsed) ||
+        parsed < 3u || parsed > (uint64_t)INT_MAX)
+    {
+        return false;
+    }
+    value = (int)parsed;
     return true;
 }
 
@@ -432,7 +452,8 @@ void Usage(const char* program)
         "--loss-ppm N --schedule iid|burst|permutation|systematic-first|"
         "repair-only|adversarial --scope semantic|row|encoder|decoder-feed|"
         "decoder-full|direct|all --warmup-reps N --inner-reps N "
-        "--max-working-mib N --context-sha256 HEX\n", program);
+        "--max-working-mib N --context-sha256 HEX "
+        "[--ready-fd N --go-fd N]\n", program);
 }
 
 bool ParseOptions(int argc, char** argv, Options& options)
@@ -444,7 +465,8 @@ bool ParseOptions(int argc, char** argv, Options& options)
         SeenSchedule = 1 << 5, SeenScope = 1 << 6,
         SeenWarmup = 1 << 7, SeenInner = 1 << 8,
         SeenMemory = 1 << 9, SeenContext = 1 << 10,
-        SeenAll = (1 << 11) - 1
+        SeenReadyFd = 1 << 11, SeenGoFd = 1 << 12,
+        SeenRequired = (1 << 11) - 1
     };
     uint32_t seen = 0u;
     for (int i = 1; i < argc; ++i)
@@ -479,13 +501,31 @@ bool ParseOptions(int argc, char** argv, Options& options)
         } else if (!std::strcmp(option, "--context-sha256")) {
             bit = SeenContext; ok = IsLowerHexSha256(value);
             if (ok) options.ContextSha256 = value;
+        } else if (!std::strcmp(option, "--ready-fd")) {
+            bit = SeenReadyFd;
+            ok = ParseCanonicalFd(value, options.ReadyFd);
+        } else if (!std::strcmp(option, "--go-fd")) {
+            bit = SeenGoFd;
+            ok = ParseCanonicalFd(value, options.GoFd);
         } else {
             return false;
         }
         if (!ok || (seen & bit) != 0u) return false;
         seen |= bit;
     }
-    return seen == SeenAll &&
+    const bool ready_seen = (seen & SeenReadyFd) != 0u;
+    const bool go_seen = (seen & SeenGoFd) != 0u;
+    const bool barrier_enabled = ready_seen && go_seen;
+    const bool one_timed_scope =
+        options.Scopes != ScopeSemantic &&
+        options.Scopes != ScopeAll &&
+        (options.Scopes & (options.Scopes - 1u)) == 0u;
+    return (seen & SeenRequired) == SeenRequired &&
+        ready_seen == go_seen &&
+        (!barrier_enabled ||
+            (options.ReadyFd != options.GoFd &&
+             options.WarmupReps == 0u &&
+             one_timed_scope)) &&
         options.K >= 2u && options.K <= 64000u &&
         options.BlockBytes > 0u &&
         options.BlockBytes <= UINT32_C(0x7fffffff) &&
@@ -510,6 +550,165 @@ bool RejectEquationEnvironment()
         }
     }
     return true;
+}
+
+class StartBarrier
+{
+public:
+    StartBarrier(int ready_fd, int go_fd)
+        : ReadyFd(ready_fd)
+        , GoFd(go_fd)
+    {
+    }
+
+    ~StartBarrier()
+    {
+        CloseIgnoringErrors(ReadyFd);
+        CloseIgnoringErrors(GoFd);
+    }
+
+    StartBarrier(const StartBarrier&) = delete;
+    StartBarrier& operator=(const StartBarrier&) = delete;
+
+    bool Enabled() const
+    {
+        return ReadyFd >= 0;
+    }
+
+    bool Consumed() const
+    {
+        return WasConsumed;
+    }
+
+    bool Validate() const
+    {
+        if (!Enabled()) return GoFd < 0;
+#if defined(__unix__) || defined(__APPLE__)
+        return ReadyFd >= 3 && GoFd >= 3 && ReadyFd != GoFd &&
+            ValidatePipeEnd(ReadyFd, O_WRONLY) &&
+            ValidatePipeEnd(GoFd, O_RDONLY);
+#else
+        return false;
+#endif
+    }
+
+    bool Rendezvous()
+    {
+        if (!Enabled() || WasConsumed || !Validate()) return false;
+        WasConsumed = true;
+#if defined(__unix__) || defined(__APPLE__)
+        const bool ready_ok = WriteReadyAndClose();
+        if (!ready_ok)
+        {
+            CloseIgnoringErrors(GoFd);
+            return false;
+        }
+        return ReadGoAndClose();
+#else
+        return false;
+#endif
+    }
+
+private:
+#if defined(__unix__) || defined(__APPLE__)
+    static bool ValidatePipeEnd(int fd, int access_mode)
+    {
+        struct stat status = {};
+        const int descriptor_flags = fcntl(fd, F_GETFD);
+        const int file_flags = fcntl(fd, F_GETFL);
+        if (descriptor_flags < 0 || file_flags < 0 ||
+            fstat(fd, &status) != 0 ||
+            !S_ISFIFO(status.st_mode) ||
+            (file_flags & O_ACCMODE) != access_mode ||
+            (file_flags & O_NONBLOCK) != 0)
+        {
+            return false;
+        }
+#if defined(O_PATH)
+        if ((file_flags & O_PATH) != 0) return false;
+#endif
+        return true;
+    }
+
+    static ssize_t ReadRetry(int fd, void* data, size_t bytes)
+    {
+        for (;;)
+        {
+            const ssize_t result = read(fd, data, bytes);
+            if (result >= 0 || errno != EINTR) return result;
+        }
+    }
+
+    static ssize_t WriteRetry(int fd, const void* data, size_t bytes)
+    {
+        for (;;)
+        {
+            const ssize_t result = write(fd, data, bytes);
+            if (result >= 0 || errno != EINTR) return result;
+        }
+    }
+
+    bool WriteReadyAndClose()
+    {
+        struct sigaction ignored = {};
+        struct sigaction previous = {};
+        ignored.sa_handler = SIG_IGN;
+        if (sigemptyset(&ignored.sa_mask) != 0 ||
+            sigaction(SIGPIPE, &ignored, &previous) != 0)
+        {
+            CloseIgnoringErrors(ReadyFd);
+            return false;
+        }
+        const char ready = 'R';
+        const ssize_t written = WriteRetry(ReadyFd, &ready, 1u);
+        const bool restored =
+            sigaction(SIGPIPE, &previous, nullptr) == 0;
+        const bool closed = CloseChecked(ReadyFd);
+        return written == 1 && restored && closed;
+    }
+
+    bool ReadGoAndClose()
+    {
+        char go = '\0';
+        const ssize_t first = ReadRetry(GoFd, &go, 1u);
+        char extra = '\0';
+        const ssize_t second =
+            first == 1 && go == 'G' ?
+            ReadRetry(GoFd, &extra, 1u) : -1;
+        const bool closed = CloseChecked(GoFd);
+        return first == 1 && go == 'G' && second == 0 && closed;
+    }
+
+    static bool CloseChecked(int& fd)
+    {
+        if (fd < 0) return false;
+        const int closing = fd;
+        fd = -1;
+        return close(closing) == 0;
+    }
+
+    static void CloseIgnoringErrors(int& fd)
+    {
+        if (fd < 0) return;
+        const int closing = fd;
+        fd = -1;
+        (void)close(closing);
+    }
+#else
+    static void CloseIgnoringErrors(int& fd)
+    {
+        fd = -1;
+    }
+#endif
+
+    int ReadyFd = -1;
+    int GoFd = -1;
+    bool WasConsumed = false;
+};
+
+const char* StartBarrierName(const Options& options)
+{
+    return options.ReadyFd >= 0 ? "ready-go-pipe-v1" : "none";
 }
 
 bool PinToFirstAllowedCpu(int& cpu_out)
@@ -1096,6 +1295,7 @@ bool UsageDelta(
 template<class TimedOperation>
 bool MeasureInvocation(
     int pinned_cpu,
+    StartBarrier* start_barrier,
     const TimedOperation& operation,
     TimingSample& sample)
 {
@@ -1105,6 +1305,7 @@ bool MeasureInvocation(
     (void)pinned_cpu;
     return false;
 #endif
+    if (start_barrier && !start_barrier->Rendezvous()) return false;
     UsageSnapshot before_usage;
     UsageSnapshot after_usage;
     uint64_t before_ns = 0u;
@@ -1563,6 +1764,7 @@ bool RunRowBatch(
     const Fixture& fixture,
     int pinned_cpu,
     uint32_t repetitions,
+    StartBarrier* start_barrier,
     TimingSample& sample,
     uint64_t& sink)
 {
@@ -1576,6 +1778,7 @@ bool RunRowBatch(
         fixture.Params.HeavyRows;
     const bool measured = MeasureInvocation(
         pinned_cpu,
+        start_barrier,
         [&]() {
             for (uint32_t repetition = 0u;
                  repetition < repetitions;
@@ -1615,6 +1818,7 @@ bool RunEncoderBatch(
     const Fixture& fixture,
     int pinned_cpu,
     uint32_t repetitions,
+    StartBarrier* start_barrier,
     TimingSample& sample,
     uint64_t& sink)
 {
@@ -1622,6 +1826,7 @@ bool RunEncoderBatch(
     std::vector<uint8_t> output(fixture.Message.size(), 0u);
     const bool measured = MeasureInvocation(
         pinned_cpu,
+        start_barrier,
         [&]() {
             for (uint32_t repetition = 0u;
                  repetition < repetitions;
@@ -1724,6 +1929,7 @@ bool RunDecoderFeedBatch(
     const Fixture& fixture,
     int pinned_cpu,
     uint32_t repetitions,
+    StartBarrier* start_barrier,
     TimingSample& sample,
     uint64_t& sink)
 {
@@ -1751,6 +1957,7 @@ bool RunDecoderFeedBatch(
     }
     const bool measured = MeasureInvocation(
         pinned_cpu,
+        start_barrier,
         [&]() {
             for (uint32_t repetition = 0u;
                  repetition < repetitions;
@@ -1807,6 +2014,7 @@ bool RunDecoderFullBatch(
     const Fixture& fixture,
     int pinned_cpu,
     uint32_t repetitions,
+    StartBarrier* start_barrier,
     TimingSample& sample,
     uint64_t& sink)
 {
@@ -1814,6 +2022,7 @@ bool RunDecoderFullBatch(
     std::vector<uint8_t> recovered(fixture.Message.size(), 0u);
     const bool measured = MeasureInvocation(
         pinned_cpu,
+        start_barrier,
         [&]() {
             for (uint32_t repetition = 0u;
                  repetition < repetitions;
@@ -1877,6 +2086,7 @@ bool RunDirectBatch(
     const Fixture& fixture,
     int pinned_cpu,
     uint32_t repetitions,
+    StartBarrier* start_barrier,
     TimingSample& sample,
     uint64_t& sink)
 {
@@ -1885,6 +2095,7 @@ bool RunDirectBatch(
     wirehair_v2::PrecodeSolveStats stats;
     const bool measured = MeasureInvocation(
         pinned_cpu,
+        start_barrier,
         [&]() {
             for (uint32_t repetition = 0u;
                  repetition < repetitions;
@@ -1928,6 +2139,7 @@ bool RunScope(
     const char* name,
     uint64_t work_items_per_rep,
     int pinned_cpu,
+    StartBarrier* start_barrier,
     const RunBatch& run_batch,
     TimingResult& result)
 {
@@ -1941,6 +2153,7 @@ bool RunScope(
         uint64_t ignored_sink = 0u;
         if (!run_batch(
                 options, pinned_cpu, 1u,
+                nullptr,
                 ignored_sample, ignored_sink))
         {
             return false;
@@ -1951,6 +2164,7 @@ bool RunScope(
     uint64_t sink = 0u;
     if (!run_batch(
             options, pinned_cpu, options.InnerReps,
+            start_barrier,
             sample, sink))
     {
         return false;
@@ -1963,40 +2177,46 @@ bool RunSelectedTimings(
     const Options& options,
     const Fixture& fixture,
     int pinned_cpu,
+    StartBarrier* start_barrier,
     std::vector<TimingResult>& results)
 {
     results.clear();
     const auto row = [&](const Options& local, int cpu, uint32_t reps,
+                         StartBarrier* barrier,
                          TimingSample& sample, uint64_t& sink) {
         return RunRowBatch(
-            local, fixture, cpu, reps, sample, sink);
+            local, fixture, cpu, reps, barrier, sample, sink);
     };
     const auto encoder = [&](const Options& local, int cpu, uint32_t reps,
+                             StartBarrier* barrier,
                              TimingSample& sample, uint64_t& sink) {
         return RunEncoderBatch(
-            local, fixture, cpu, reps, sample, sink);
+            local, fixture, cpu, reps, barrier, sample, sink);
     };
     const auto feed = [&](const Options& local, int cpu, uint32_t reps,
+                          StartBarrier* barrier,
                           TimingSample& sample, uint64_t& sink) {
         return RunDecoderFeedBatch(
-            local, fixture, cpu, reps, sample, sink);
+            local, fixture, cpu, reps, barrier, sample, sink);
     };
     const auto full = [&](const Options& local, int cpu, uint32_t reps,
+                          StartBarrier* barrier,
                           TimingSample& sample, uint64_t& sink) {
         return RunDecoderFullBatch(
-            local, fixture, cpu, reps, sample, sink);
+            local, fixture, cpu, reps, barrier, sample, sink);
     };
     const auto direct = [&](const Options& local, int cpu, uint32_t reps,
+                            StartBarrier* barrier,
                             TimingSample& sample, uint64_t& sink) {
         return RunDirectBatch(
-            local, fixture, cpu, reps, sample, sink);
+            local, fixture, cpu, reps, barrier, sample, sink);
     };
     if ((options.Scopes & ScopeRow) != 0u)
     {
         TimingResult result;
         if (!RunScope(
                 options, "row", fixture.DeliveredIds.size(),
-                pinned_cpu, row, result))
+                pinned_cpu, start_barrier, row, result))
         {
             return false;
         }
@@ -2007,7 +2227,7 @@ bool RunSelectedTimings(
         TimingResult result;
         if (!RunScope(
                 options, "encoder", options.K,
-                pinned_cpu, encoder, result))
+                pinned_cpu, start_barrier, encoder, result))
         {
             return false;
         }
@@ -2018,7 +2238,7 @@ bool RunSelectedTimings(
         TimingResult result;
         if (!RunScope(
                 options, "decoder-feed", fixture.DeliveredIds.size(),
-                pinned_cpu, feed, result))
+                pinned_cpu, start_barrier, feed, result))
         {
             return false;
         }
@@ -2029,7 +2249,7 @@ bool RunSelectedTimings(
         TimingResult result;
         if (!RunScope(
                 options, "decoder-full", fixture.DeliveredIds.size(),
-                pinned_cpu, full, result))
+                pinned_cpu, start_barrier, full, result))
         {
             return false;
         }
@@ -2040,7 +2260,7 @@ bool RunSelectedTimings(
         TimingResult result;
         if (!RunScope(
                 options, "direct", fixture.DeliveredIds.size(),
-                pinned_cpu, direct, result))
+                pinned_cpu, start_barrier, direct, result))
         {
             return false;
         }
@@ -2077,7 +2297,9 @@ bool EmitReceipt(
         << ",\"max_working_mib\":" << options.MaxWorkingMiB
         << ",\"context_sha256\":\"" << options.ContextSha256
         << "\",\"cpu\":" << cpu
-        << ",\"clock\":\"CLOCK_MONOTONIC\"}\n";
+        << ",\"clock\":\"CLOCK_MONOTONIC\""
+        << ",\"start_barrier\":\"" << StartBarrierName(options)
+        << "\"}\n";
     body
         << "{\"record\":\"semantic\",\"schema\":\"" << kSchema
         << "\",\"profile\":\"dispatch-v1\",\"status\":\""
@@ -2182,6 +2404,11 @@ int Main(int argc, char** argv)
         Usage(argv[0]);
         return 2;
     }
+    StartBarrier start_barrier(options.ReadyFd, options.GoFd);
+    if (!start_barrier.Validate()) {
+        std::fprintf(stderr, "start barrier descriptor validation failed\n");
+        return 2;
+    }
     if (!RejectEquationEnvironment()) return 2;
     if (!CheckSha256()) {
         std::fprintf(stderr, "SHA-256 self-check failed\n");
@@ -2216,10 +2443,24 @@ int Main(int argc, char** argv)
         return 1;
     }
     std::vector<TimingResult> timings;
+    StartBarrier* measured_barrier =
+        start_barrier.Enabled() ? &start_barrier : nullptr;
     if (prepared == PrepareResult::Success &&
-        !RunSelectedTimings(options, fixture, cpu, timings))
+        !RunSelectedTimings(
+            options, fixture, cpu, measured_barrier, timings))
     {
         std::fprintf(stderr, "timing scope failed\n");
+        return 1;
+    }
+    if (prepared == PrepareResult::WeakRoot &&
+        start_barrier.Enabled() &&
+        !start_barrier.Rendezvous())
+    {
+        std::fprintf(stderr, "weak-root start barrier failed\n");
+        return 1;
+    }
+    if (start_barrier.Enabled() && !start_barrier.Consumed()) {
+        std::fprintf(stderr, "start barrier was not consumed\n");
         return 1;
     }
     if (prepared == PrepareResult::WeakRoot && !timings.empty()) {
