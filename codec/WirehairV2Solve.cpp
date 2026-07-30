@@ -5632,31 +5632,15 @@ PeelResult PeelBinaryRowsImplementation(
         std::push_heap(degree_two_heap.begin(), degree_two_heap.end());
         out.HeapOperations += 2u;
     };
-    const auto remove_degree_two = [&](
-        uint32_t row,
-        uint32_t resolved_column)
-    {
-        PeelRowState& state = row_state[row];
-        if (state.Live != 2u) {
-            return;
-        }
-        const uint32_t other =
-            (uint32_t)state.LowDegreeXor ^ resolved_column;
-        CAT_DEBUG_ASSERT(other < column_count && !resolved[other]);
-        if (degree_two_refs[other] > 0u) {
-            --degree_two_refs[other];
-        }
-        // If the lower degree remains nonzero, its matching key is still in
-        // the lazy heap from the earlier increment.  It cannot have reached
-        // the top while a higher key for this unresolved column existed, so
-        // pushing it again here would only create a duplicate.  Degree zero
-        // needs no live heap key.  resolve() reduces LowDegreeXor to `other`
-        // for every degree, so this path no longer writes it.
-    };
     for (uint32_t r = 0; r < (uint32_t)rows.size(); ++r) {
         add_degree_two(r);
     }
 
+    // Dispatch once on the pre-decrement degree instead of handling the same
+    // live-degree transition through separate remove/decrement/add checks.
+    // The updates and their order are unchanged: leave degree two by dropping
+    // the partner's live reference and enqueueing the resulting singleton;
+    // enter degree two through the existing ordered heap insertion path.
     const auto resolve = [&](uint32_t column) {
         resolved[column] = 1u;
         out.AdjacencyVisits += column_offsets[(size_t)column + 1u] -
@@ -5666,15 +5650,33 @@ PeelResult PeelBinaryRowsImplementation(
              ++ref)
         {
             const uint32_t row = column_rows[ref];
-            if (row_state[row].Live == 0u) {
+            PeelRowState& state = row_state[row];
+            const uint16_t live = state.Live;
+            if (live == 0u) {
                 continue;
             }
-            remove_degree_two(row, column);
-            row_state[row].LowDegreeXor ^= (uint16_t)column;
-            --row_state[row].Live;
-            add_degree_two(row);
-            if (row_state[row].Live == 1u) {
+
+            if (live == 2u)
+            {
+                const uint32_t other =
+                    (uint32_t)state.LowDegreeXor ^ column;
+                CAT_DEBUG_ASSERT(
+                    other < column_count && !resolved[other]);
+                if (degree_two_refs[other] > 0u) {
+                    --degree_two_refs[other];
+                }
+                // The lower key, if any, is already in the lazy heap; adding
+                // another copy would change only stale-pop work.
+                state.LowDegreeXor = (uint16_t)other;
+                state.Live = 1u;
                 queue.push_back(row);
+                continue;
+            }
+
+            state.LowDegreeXor ^= (uint16_t)column;
+            state.Live = (uint16_t)(live - 1u);
+            if (live == 3u) {
+                add_degree_two(row);
             }
         }
     };
