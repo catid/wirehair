@@ -304,6 +304,13 @@ struct PrecodeSolveStats
     // ABI do not contain these fields when test hooks are disabled.
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
+    // The decision is made at most once.  EligibilityInputKeys and
+    // EligibilityMinimumKeys describe that check; an ineligible decision
+    // increments IneligibleSkips and never rebuilds later.
+    uint32_t PeelHeapCompactionEligibilityChecks = 0;
+    uint64_t PeelHeapCompactionEligibilityInputKeys = 0;
+    uint64_t PeelHeapCompactionEligibilityMinimumKeys = 0;
+    uint32_t PeelHeapCompactionIneligibleSkips = 0;
     uint32_t PeelHeapCompactions = 0;
     uint64_t PeelHeapCompactionInputKeys = 0;
     uint64_t PeelHeapCompactionOutputKeys = 0;
@@ -487,10 +494,11 @@ void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
 /**
-    Override the one-shot lazy-heap compaction cumulative stale-pop threshold
-    in the calling thread.  Valid heap roots do not reset the count.  Zero
-    disables the experiment.  The value is captured once at binary-peel entry,
-    and the independent oracle always remains off.
+    Override the cumulative stale-pop threshold for the calling thread's
+    one-shot lazy-heap eligibility decision.  Valid heap roots do not reset the
+    count.  At the threshold the peel either compacts once or permanently skips
+    it.  Zero disables the experiment.  The value is captured once at
+    binary-peel entry, and the independent oracle always remains off.
 */
 void SetBinaryPeelHeapCompactionThresholdForTesting(uint32_t threshold);
 uint32_t BinaryPeelHeapCompactionThresholdForTesting();

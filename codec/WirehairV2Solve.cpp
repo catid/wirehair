@@ -29,9 +29,10 @@
 #endif
 
 // Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
-// path exactly.  A nonzero build override compacts after this many stale pops;
-// test-hook builds may override the value per thread without changing the
-// production ABI or exporting another production symbol.
+// path exactly.  A nonzero build override makes one heap-density decision after
+// this many stale pops and may compact once; test-hook builds may override the
+// value per thread without changing the production ABI or exporting another
+// production symbol.
 #ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD
 #define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD 0u
 #endif
@@ -848,6 +849,10 @@ struct PeelResult
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint64_t HeapResolvedStalePops = 0u;
     uint64_t HeapUnresolvedCountMismatchPops = 0u;
+    uint32_t HeapCompactionEligibilityChecks = 0u;
+    uint64_t HeapCompactionEligibilityInputKeys = 0u;
+    uint64_t HeapCompactionEligibilityMinimumKeys = 0u;
+    uint32_t HeapCompactionIneligibleSkips = 0u;
     uint32_t HeapCompactions = 0u;
     uint64_t HeapCompactionInputKeys = 0u;
     uint64_t HeapCompactionOutputKeys = 0u;
@@ -5894,7 +5899,7 @@ PeelResult PeelBinaryRowsImplementation(
     // reset this counter: the experiment asks whether one linear rebuild pays
     // back after a bounded amount of total lazy-deletion work in this peel.
     uint32_t stale_pops_before_compaction = 0u;
-    bool heap_compacted = false;
+    bool heap_compaction_decided = false;
     while (remaining > 0u)
     {
         if (!deep_prefetch)
@@ -6023,44 +6028,65 @@ PeelResult PeelBinaryRowsImplementation(
                 degree_two_heap.pop_back();
                 ++out.HeapOperations;
                 if (EnableHeapCompaction &&
-                    !heap_compacted &&
+                    !heap_compaction_decided &&
                     heap_compaction_threshold != 0u &&
                     ++stale_pops_before_compaction >=
                         heap_compaction_threshold)
                 {
                     // This is the only permitted compaction seam: all
                     // singleton work, including transitively appended rows,
-                    // has drained before the lazy heap is consulted.
+                    // has drained before the lazy heap is consulted.  Decide
+                    // permanently at the first threshold crossing.  Rebuilding
+                    // is eligible only when at least ceil(1.5 times
+                    // column_count) heap keys remain, bounding the linear
+                    // scan's exposure on ordinary systems whose lazy backlog
+                    // is still small.
                     CAT_DEBUG_ASSERT(queue_head == queue.size());
                     const size_t input_keys = degree_two_heap.size();
-                    const size_t retained_capacity =
-                        degree_two_heap.capacity();
-                    (void)input_keys;
-                    (void)retained_capacity;
-                    degree_two_heap.clear();
-                    for (uint32_t live_column = 0u;
-                         live_column < column_count;
-                         ++live_column)
-                    {
-                        if (!resolved[live_column] &&
-                            degree_two_refs[live_column] != 0u)
-                        {
-                            degree_two_heap.push_back(
-                                degree_two_key(live_column));
-                        }
-                    }
-                    std::make_heap(
-                        degree_two_heap.begin(), degree_two_heap.end());
-                    CAT_DEBUG_ASSERT(
-                        degree_two_heap.size() <= input_keys);
-                    CAT_DEBUG_ASSERT(
-                        degree_two_heap.capacity() == retained_capacity);
-                    heap_compacted = true;
+                    const size_t minimum_keys = (size_t)column_count +
+                        column_count / 2u + column_count % 2u;
+                    heap_compaction_decided = true;
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactions;
-                    out.HeapCompactionInputKeys += input_keys;
-                    out.HeapCompactionOutputKeys +=
-                        degree_two_heap.size();
+                    ++out.HeapCompactionEligibilityChecks;
+                    out.HeapCompactionEligibilityInputKeys = input_keys;
+                    out.HeapCompactionEligibilityMinimumKeys = minimum_keys;
+#endif
+                    (void)input_keys;
+                    (void)minimum_keys;
+                    if (input_keys >= minimum_keys)
+                    {
+                        const size_t retained_capacity =
+                            degree_two_heap.capacity();
+                        (void)retained_capacity;
+                        degree_two_heap.clear();
+                        for (uint32_t live_column = 0u;
+                             live_column < column_count;
+                             ++live_column)
+                        {
+                            if (!resolved[live_column] &&
+                                degree_two_refs[live_column] != 0u)
+                            {
+                                degree_two_heap.push_back(
+                                    degree_two_key(live_column));
+                            }
+                        }
+                        std::make_heap(
+                            degree_two_heap.begin(), degree_two_heap.end());
+                        CAT_DEBUG_ASSERT(
+                            degree_two_heap.size() <= input_keys);
+                        CAT_DEBUG_ASSERT(
+                            degree_two_heap.capacity() == retained_capacity);
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                        ++out.HeapCompactions;
+                        out.HeapCompactionInputKeys = input_keys;
+                        out.HeapCompactionOutputKeys =
+                            degree_two_heap.size();
+#endif
+                    }
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                    else {
+                        ++out.HeapCompactionIneligibleSkips;
+                    }
 #endif
                 }
                 continue;
@@ -7559,6 +7585,14 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapResolvedStalePops;
         st.PeelHeapUnresolvedCountMismatchPops =
             peel.HeapUnresolvedCountMismatchPops;
+        st.PeelHeapCompactionEligibilityChecks =
+            peel.HeapCompactionEligibilityChecks;
+        st.PeelHeapCompactionEligibilityInputKeys =
+            peel.HeapCompactionEligibilityInputKeys;
+        st.PeelHeapCompactionEligibilityMinimumKeys =
+            peel.HeapCompactionEligibilityMinimumKeys;
+        st.PeelHeapCompactionIneligibleSkips =
+            peel.HeapCompactionIneligibleSkips;
         st.PeelHeapCompactions = peel.HeapCompactions;
         st.PeelHeapCompactionInputKeys =
             peel.HeapCompactionInputKeys;

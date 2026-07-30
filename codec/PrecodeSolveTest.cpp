@@ -71,6 +71,14 @@ bool SameExactSolveStats(
             b.PeelHeapResolvedStalePops &&
         a.PeelHeapUnresolvedCountMismatchPops ==
             b.PeelHeapUnresolvedCountMismatchPops &&
+        a.PeelHeapCompactionEligibilityChecks ==
+            b.PeelHeapCompactionEligibilityChecks &&
+        a.PeelHeapCompactionEligibilityInputKeys ==
+            b.PeelHeapCompactionEligibilityInputKeys &&
+        a.PeelHeapCompactionEligibilityMinimumKeys ==
+            b.PeelHeapCompactionEligibilityMinimumKeys &&
+        a.PeelHeapCompactionIneligibleSkips ==
+            b.PeelHeapCompactionIneligibleSkips &&
         a.PeelHeapCompactions == b.PeelHeapCompactions &&
         a.PeelHeapCompactionInputKeys ==
             b.PeelHeapCompactionInputKeys &&
@@ -120,6 +128,14 @@ bool SameSolveStatsExceptHeapExperimentAndTiming(
         b.PeelHeapResolvedStalePops = 0u;
     a.PeelHeapUnresolvedCountMismatchPops =
         b.PeelHeapUnresolvedCountMismatchPops = 0u;
+    a.PeelHeapCompactionEligibilityChecks =
+        b.PeelHeapCompactionEligibilityChecks = 0u;
+    a.PeelHeapCompactionEligibilityInputKeys =
+        b.PeelHeapCompactionEligibilityInputKeys = 0u;
+    a.PeelHeapCompactionEligibilityMinimumKeys =
+        b.PeelHeapCompactionEligibilityMinimumKeys = 0u;
+    a.PeelHeapCompactionIneligibleSkips =
+        b.PeelHeapCompactionIneligibleSkips = 0u;
     a.PeelHeapCompactions = b.PeelHeapCompactions = 0u;
     a.PeelHeapCompactionInputKeys =
         b.PeelHeapCompactionInputKeys = 0u;
@@ -4316,17 +4332,26 @@ bool CheckBinaryPeelHeapCompactionOracle()
         run(0u, false, baseline);
         if ((baseline.Result != Wirehair_Success &&
              baseline.Result != Wirehair_NeedMore) ||
+            baseline.Stats.PeelHeapCompactionEligibilityChecks != 0u ||
+            baseline.Stats.PeelHeapCompactionEligibilityInputKeys != 0u ||
+            baseline.Stats.PeelHeapCompactionEligibilityMinimumKeys != 0u ||
+            baseline.Stats.PeelHeapCompactionIneligibleSkips != 0u ||
             baseline.Stats.PeelHeapCompactions != 0u ||
+            baseline.Stats.PeelHeapCompactionInputKeys != 0u ||
+            baseline.Stats.PeelHeapCompactionOutputKeys != 0u ||
             baseline.Stats.PeelHeapUnresolvedCountMismatchPops != 0u)
         {
             std::fprintf(stderr,
                 "solve: heap compaction baseline invalid K=%u result=%d "
-                "resolved_stale=%llu mismatch=%llu compactions=%u\n",
+                "resolved_stale=%llu mismatch=%llu checks=%u skips=%u "
+                "compactions=%u\n",
                 K, (int)baseline.Result,
                 (unsigned long long)
                     baseline.Stats.PeelHeapResolvedStalePops,
                 (unsigned long long)
                     baseline.Stats.PeelHeapUnresolvedCountMismatchPops,
+                baseline.Stats.PeelHeapCompactionEligibilityChecks,
+                baseline.Stats.PeelHeapCompactionIneligibleSkips,
                 baseline.Stats.PeelHeapCompactions);
             return false;
         }
@@ -4341,9 +4366,20 @@ bool CheckBinaryPeelHeapCompactionOracle()
             return false;
         }
 
-        uint64_t threshold_one_input = 0u;
-        uint64_t threshold_one_output = 0u;
-        uint64_t threshold_one_stale = 0u;
+        const uint64_t column_count = (uint64_t)K +
+            system.Params.Staircase + system.Params.DenseRows +
+            system.Params.HeavyRows;
+        const uint64_t eligibility_minimum =
+            column_count + column_count / 2u + column_count % 2u;
+        uint64_t threshold_512_eligibility_input = 0u;
+        uint64_t threshold_512_eligibility_minimum = 0u;
+        uint64_t threshold_512_compaction_input = 0u;
+        uint64_t threshold_512_compaction_output = 0u;
+        uint64_t threshold_512_stale = 0u;
+        uint64_t threshold_512_heap_operations = 0u;
+        uint32_t threshold_512_checks = 0u;
+        uint32_t threshold_512_skips = 0u;
+        uint32_t threshold_512_compactions = 0u;
         for (uint32_t threshold : kThresholds)
         {
             wirehair_v2::ResetBinaryPeelOracleComparisonsForTesting();
@@ -4351,16 +4387,38 @@ bool CheckBinaryPeelHeapCompactionOracle()
             run(threshold, true, candidate);
             const uint64_t comparisons =
                 wirehair_v2::BinaryPeelOracleComparisonsForTesting();
-            const bool should_engage =
+            const bool should_decide =
                 baseline.Stats.PeelHeapResolvedStalePops >= threshold;
+            const bool should_compact = should_decide &&
+                candidate.Stats.PeelHeapCompactionEligibilityInputKeys >=
+                    eligibility_minimum;
             if (candidate.Result != baseline.Result ||
                 candidate.Intermediate != baseline.Intermediate ||
                 !SameSolveStatsExceptHeapExperimentAndTiming(
                     candidate.Stats, baseline.Stats) ||
                 comparisons != 1u ||
                 candidate.Stats.PeelHeapUnresolvedCountMismatchPops != 0u ||
+                candidate.Stats.PeelHeapCompactionEligibilityChecks !=
+                    (should_decide ? 1u : 0u) ||
+                candidate.Stats.PeelHeapCompactionEligibilityMinimumKeys !=
+                    (should_decide ? eligibility_minimum : 0u) ||
+                candidate.Stats.PeelHeapCompactionIneligibleSkips !=
+                    (should_decide && !should_compact ? 1u : 0u) ||
                 candidate.Stats.PeelHeapCompactions !=
-                    (should_engage ? 1u : 0u) ||
+                    (should_compact ? 1u : 0u) ||
+                candidate.Stats.PeelHeapCompactionEligibilityChecks !=
+                    candidate.Stats.PeelHeapCompactionIneligibleSkips +
+                        candidate.Stats.PeelHeapCompactions ||
+                (should_compact &&
+                 candidate.Stats.PeelHeapCompactionInputKeys !=
+                    candidate.Stats.PeelHeapCompactionEligibilityInputKeys) ||
+                (!should_compact &&
+                 (candidate.Stats.PeelHeapCompactionInputKeys != 0u ||
+                  candidate.Stats.PeelHeapCompactionOutputKeys != 0u ||
+                  candidate.Stats.PeelHeapResolvedStalePops !=
+                    baseline.Stats.PeelHeapResolvedStalePops ||
+                  candidate.Stats.PeelHeapOperations !=
+                    baseline.Stats.PeelHeapOperations)) ||
                 candidate.Stats.PeelHeapResolvedStalePops >
                     baseline.Stats.PeelHeapResolvedStalePops ||
                 candidate.Stats.PeelHeapOperations >
@@ -4372,8 +4430,9 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     "solve: heap compaction differential failed "
                     "K=%u threshold=%u result=%d/%d comparisons=%llu "
                     "resolved_stale=%llu/%llu mismatch=%llu "
+                    "checks=%u expected=%u eligibility=%llu/%llu skips=%u "
                     "compactions=%u expected=%u heap_ops=%llu/%llu "
-                    "keys=%llu->%llu\n",
+                    "compact_keys=%llu->%llu\n",
                     K, threshold,
                     (int)candidate.Result, (int)baseline.Result,
                     (unsigned long long)comparisons,
@@ -4384,8 +4443,15 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     (unsigned long long)
                         candidate.Stats.
                             PeelHeapUnresolvedCountMismatchPops,
+                    candidate.Stats.PeelHeapCompactionEligibilityChecks,
+                    should_decide ? 1u : 0u,
+                    (unsigned long long)candidate.Stats.
+                        PeelHeapCompactionEligibilityInputKeys,
+                    (unsigned long long)candidate.Stats.
+                        PeelHeapCompactionEligibilityMinimumKeys,
+                    candidate.Stats.PeelHeapCompactionIneligibleSkips,
                     candidate.Stats.PeelHeapCompactions,
-                    should_engage ? 1u : 0u,
+                    should_compact ? 1u : 0u,
                     (unsigned long long)
                         candidate.Stats.PeelHeapOperations,
                     (unsigned long long)
@@ -4396,24 +4462,45 @@ bool CheckBinaryPeelHeapCompactionOracle()
                         candidate.Stats.PeelHeapCompactionOutputKeys);
                 return false;
             }
-            if (threshold == 1u)
+            if (threshold == 512u)
             {
-                threshold_one_input =
+                threshold_512_eligibility_input =
+                    candidate.Stats.
+                        PeelHeapCompactionEligibilityInputKeys;
+                threshold_512_eligibility_minimum =
+                    candidate.Stats.
+                        PeelHeapCompactionEligibilityMinimumKeys;
+                threshold_512_compaction_input =
                     candidate.Stats.PeelHeapCompactionInputKeys;
-                threshold_one_output =
+                threshold_512_compaction_output =
                     candidate.Stats.PeelHeapCompactionOutputKeys;
-                threshold_one_stale =
+                threshold_512_stale =
                     candidate.Stats.PeelHeapResolvedStalePops;
+                threshold_512_heap_operations =
+                    candidate.Stats.PeelHeapOperations;
+                threshold_512_checks =
+                    candidate.Stats.PeelHeapCompactionEligibilityChecks;
+                threshold_512_skips =
+                    candidate.Stats.PeelHeapCompactionIneligibleSkips;
+                threshold_512_compactions =
+                    candidate.Stats.PeelHeapCompactions;
             }
             std::printf(
                 "K=%u C0FFEE d4 heap compaction threshold=%u "
-                "resolved_stale=%llu/%llu compactions=%u "
-                "keys=%llu->%llu heap_ops=%llu/%llu\n",
+                "resolved_stale=%llu/%llu checks=%u "
+                "eligibility=%llu/%llu skips=%u compactions=%u "
+                "compact_keys=%llu->%llu heap_ops=%llu/%llu\n",
                 K, threshold,
                 (unsigned long long)
                     candidate.Stats.PeelHeapResolvedStalePops,
                 (unsigned long long)
                     baseline.Stats.PeelHeapResolvedStalePops,
+                candidate.Stats.PeelHeapCompactionEligibilityChecks,
+                (unsigned long long)candidate.Stats.
+                    PeelHeapCompactionEligibilityInputKeys,
+                (unsigned long long)candidate.Stats.
+                    PeelHeapCompactionEligibilityMinimumKeys,
+                candidate.Stats.PeelHeapCompactionIneligibleSkips,
                 candidate.Stats.PeelHeapCompactions,
                 (unsigned long long)
                     candidate.Stats.PeelHeapCompactionInputKeys,
@@ -4426,6 +4513,7 @@ bool CheckBinaryPeelHeapCompactionOracle()
         }
         if (K == 8192u)
         {
+            static const uint32_t kThreadThresholds[2] = {0u, 512u};
             Observation threaded[2];
             uint32_t initial_threshold[2] = {};
             bool installed_threshold[2] = {};
@@ -4447,11 +4535,12 @@ bool CheckBinaryPeelHeapCompactionOracle()
                         {
                             {
                                 BinaryPeelHeapCompactionThresholdScope
-                                    threshold_scope(index);
+                                    threshold_scope(
+                                        kThreadThresholds[index]);
                                 installed_threshold[index] =
                                     wirehair_v2::
                                         BinaryPeelHeapCompactionThresholdForTesting() ==
-                                    index;
+                                    kThreadThresholds[index];
                                 ready.fetch_add(
                                     1u, std::memory_order_release);
                                 while (!go.load(std::memory_order_acquire) &&
@@ -4530,6 +4619,38 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     threaded[1].Stats, baseline.Stats) ||
                 threaded[0].Stats.PeelHeapCompactions != 0u ||
                 threaded[1].Stats.PeelHeapCompactions != 1u ||
+                threaded[0].Stats.PeelHeapResolvedStalePops !=
+                    baseline.Stats.PeelHeapResolvedStalePops ||
+                threaded[0].Stats.PeelHeapOperations !=
+                    baseline.Stats.PeelHeapOperations ||
+                threaded[1].Stats.PeelHeapResolvedStalePops !=
+                    threshold_512_stale ||
+                threaded[1].Stats.PeelHeapOperations !=
+                    threshold_512_heap_operations ||
+                threaded[0].Stats.
+                    PeelHeapCompactionEligibilityChecks != 0u ||
+                threaded[1].Stats.
+                    PeelHeapCompactionEligibilityChecks != 1u ||
+                threaded[0].Stats.
+                    PeelHeapCompactionEligibilityInputKeys != 0u ||
+                threaded[0].Stats.
+                    PeelHeapCompactionEligibilityMinimumKeys != 0u ||
+                threaded[1].Stats.
+                    PeelHeapCompactionEligibilityInputKeys !=
+                    threshold_512_eligibility_input ||
+                threaded[1].Stats.
+                    PeelHeapCompactionEligibilityMinimumKeys !=
+                    threshold_512_eligibility_minimum ||
+                threaded[0].Stats.
+                    PeelHeapCompactionIneligibleSkips != 0u ||
+                threaded[1].Stats.
+                    PeelHeapCompactionIneligibleSkips != 0u ||
+                threaded[0].Stats.PeelHeapCompactionInputKeys != 0u ||
+                threaded[0].Stats.PeelHeapCompactionOutputKeys != 0u ||
+                threaded[1].Stats.PeelHeapCompactionInputKeys !=
+                    threshold_512_compaction_input ||
+                threaded[1].Stats.PeelHeapCompactionOutputKeys !=
+                    threshold_512_compaction_output ||
                 threaded[0].Stats.
                     PeelHeapUnresolvedCountMismatchPops != 0u ||
                 threaded[1].Stats.
@@ -4541,7 +4662,8 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 std::fprintf(stderr,
                     "solve: heap compaction TLS isolation failed "
                     "ok=%u/%u installed=%u/%u restored=%u/%u "
-                    "result=%d/%d/%d compactions=%u/%u "
+                    "result=%d/%d/%d checks=%u/%u skips=%u/%u "
+                    "compactions=%u/%u "
                     "mismatch=%llu/%llu\n",
                     worker_ok[0] ? 1u : 0u,
                     worker_ok[1] ? 1u : 0u,
@@ -4552,6 +4674,14 @@ bool CheckBinaryPeelHeapCompactionOracle()
                     (int)threaded[0].Result,
                     (int)threaded[1].Result,
                     (int)baseline.Result,
+                    threaded[0].Stats.
+                        PeelHeapCompactionEligibilityChecks,
+                    threaded[1].Stats.
+                        PeelHeapCompactionEligibilityChecks,
+                    threaded[0].Stats.
+                        PeelHeapCompactionIneligibleSkips,
+                    threaded[1].Stats.
+                        PeelHeapCompactionIneligibleSkips,
                     threaded[0].Stats.PeelHeapCompactions,
                     threaded[1].Stats.PeelHeapCompactions,
                     (unsigned long long)threaded[0].Stats.
@@ -4561,28 +4691,73 @@ bool CheckBinaryPeelHeapCompactionOracle()
                 return false;
             }
         }
+        const bool threshold_512_should_compact = K == 8192u;
         if (baseline.Stats.PeelHeapResolvedStalePops == 0u ||
-            threshold_one_input <= threshold_one_output)
+            threshold_512_checks != 1u ||
+            threshold_512_eligibility_minimum != eligibility_minimum ||
+            threshold_512_skips !=
+                (threshold_512_should_compact ? 0u : 1u) ||
+            threshold_512_compactions !=
+                (threshold_512_should_compact ? 1u : 0u) ||
+            (K == 8192u &&
+             (threshold_512_eligibility_input != 16036u ||
+              threshold_512_compaction_output != 2u)) ||
+            (K == 64000u &&
+             threshold_512_eligibility_input != 29940u) ||
+            (threshold_512_should_compact &&
+             (threshold_512_eligibility_input < eligibility_minimum ||
+              threshold_512_compaction_input !=
+                threshold_512_eligibility_input ||
+              threshold_512_compaction_input <=
+                threshold_512_compaction_output ||
+              threshold_512_stale >=
+                baseline.Stats.PeelHeapResolvedStalePops ||
+              threshold_512_heap_operations >=
+                baseline.Stats.PeelHeapOperations)) ||
+            (!threshold_512_should_compact &&
+             (threshold_512_eligibility_input >= eligibility_minimum ||
+              threshold_512_compaction_input != 0u ||
+              threshold_512_compaction_output != 0u ||
+              threshold_512_stale !=
+                baseline.Stats.PeelHeapResolvedStalePops ||
+              threshold_512_heap_operations !=
+                baseline.Stats.PeelHeapOperations)))
         {
             std::fprintf(stderr,
-                "solve: heap compaction fixture did not exercise shrink "
-                "K=%u stale=%llu keys=%llu->%llu\n",
+                "solve: heap compaction t512 eligibility fixture failed "
+                "K=%u decision=%llu/%llu checks=%u skips=%u "
+                "compactions=%u compact_keys=%llu->%llu "
+                "stale=%llu/%llu heap_ops=%llu/%llu\n",
                 K,
+                (unsigned long long)threshold_512_eligibility_input,
+                (unsigned long long)threshold_512_eligibility_minimum,
+                threshold_512_checks,
+                threshold_512_skips,
+                threshold_512_compactions,
+                (unsigned long long)threshold_512_compaction_input,
+                (unsigned long long)threshold_512_compaction_output,
+                (unsigned long long)threshold_512_stale,
                 (unsigned long long)
                     baseline.Stats.PeelHeapResolvedStalePops,
-                (unsigned long long)threshold_one_input,
-                (unsigned long long)threshold_one_output);
+                (unsigned long long)threshold_512_heap_operations,
+                (unsigned long long)baseline.Stats.PeelHeapOperations);
             return false;
         }
         std::printf(
             "K=%u C0FFEE d4 heap compaction baseline_stale=%llu "
-            "threshold1_stale=%llu keys=%llu->%llu heap_ops=%llu: PASS\n",
+            "threshold512 decision=%llu/%llu skips=%u compactions=%u "
+            "compact_keys=%llu->%llu stale=%llu heap_ops=%llu/%llu: PASS\n",
             K,
             (unsigned long long)
                 baseline.Stats.PeelHeapResolvedStalePops,
-            (unsigned long long)threshold_one_stale,
-            (unsigned long long)threshold_one_input,
-            (unsigned long long)threshold_one_output,
+            (unsigned long long)threshold_512_eligibility_input,
+            (unsigned long long)threshold_512_eligibility_minimum,
+            threshold_512_skips,
+            threshold_512_compactions,
+            (unsigned long long)threshold_512_compaction_input,
+            (unsigned long long)threshold_512_compaction_output,
+            (unsigned long long)threshold_512_stale,
+            (unsigned long long)threshold_512_heap_operations,
             (unsigned long long)baseline.Stats.PeelHeapOperations);
     }
     if (wirehair_v2::BinaryPeelHeapCompactionThresholdForTesting() !=
