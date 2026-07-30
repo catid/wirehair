@@ -29,12 +29,13 @@
 #endif
 
 // Experiment-only one-shot lazy-heap compaction.  Zero preserves the shipped
-// path exactly.  A nonzero build override makes one heap-density decision after
-// this many stale pops and may compact once; test-hook builds may override the
-// value per thread without changing the production ABI or exporting another
-// production symbol.
-#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD
-#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD 0u
+// path exactly.  A nonzero build override is a percentage of the original
+// binary-system column count (190 means 1.90x); queue-drained selection seams
+// compact once when the heap reaches that density.  Test-hook builds may
+// override the value per thread without changing the production ABI or
+// exporting another production symbol.
+#ifndef WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT
+#define WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT 0u
 #endif
 
 #if defined(__linux__)
@@ -46,13 +47,13 @@ namespace wirehair_v2 {
 namespace {
 
 static_assert(
-    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD <=
+    (uint64_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT <=
         UINT32_MAX,
-    "peel heap compaction threshold must fit uint32_t");
+    "peel heap compaction density percent must fit uint32_t");
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS) || \
-    WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0
-static const uint32_t kCompiledPeelHeapCompactionThreshold =
-    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD;
+    WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
+static const uint32_t kCompiledPeelHeapCompactionDensityPercent =
+    (uint32_t)WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT;
 #endif
 
 // Snapshot of the ambient packet-row equation policy for one synchronous
@@ -77,8 +78,8 @@ thread_local uint32_t OddPacketPeelSeedXor = 0u;
 thread_local uint32_t PacketRowSeedMultiplier = 1u;
 thread_local bool PacketRowSeedAvalanche = false;
 thread_local uint64_t* SolvePacketRowPolicyCaptureCounter = nullptr;
-thread_local uint32_t BinaryPeelHeapCompactionThreshold =
-    kCompiledPeelHeapCompactionThreshold;
+thread_local uint32_t BinaryPeelHeapCompactionDensityPercent =
+    kCompiledPeelHeapCompactionDensityPercent;
 thread_local MixedNullWitnessDiagnostic* MixedNullWitnessSink = nullptr;
 thread_local int CertifiedPackedResidualTestModeValue = 0;
 thread_local int64_t
@@ -849,13 +850,14 @@ struct PeelResult
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     uint64_t HeapResolvedStalePops = 0u;
     uint64_t HeapUnresolvedCountMismatchPops = 0u;
-    uint32_t HeapCompactionEligibilityChecks = 0u;
-    uint64_t HeapCompactionEligibilityInputKeys = 0u;
-    uint64_t HeapCompactionEligibilityMinimumKeys = 0u;
-    uint32_t HeapCompactionIneligibleSkips = 0u;
+    uint32_t HeapCompactionDensitySeamChecks = 0u;
+    uint64_t HeapCompactionDensityMaxInputKeys = 0u;
+    uint64_t HeapCompactionDensityCutoffKeys = 0u;
     uint32_t HeapCompactions = 0u;
     uint64_t HeapCompactionInputKeys = 0u;
     uint64_t HeapCompactionOutputKeys = 0u;
+    uint64_t HeapCompactionRebuildColumnProbes = 0u;
+    uint64_t HeapCompactionHeapifyKeys = 0u;
 #endif
 };
 
@@ -5656,7 +5658,7 @@ template<bool UseLowDegreeXor, bool EnableHeapCompaction>
 PeelResult PeelBinaryRowsImplementation(
     uint32_t column_count,
     const BinaryEquationArena& rows,
-    uint32_t heap_compaction_threshold)
+    uint32_t heap_compaction_density_percent)
 {
     PeelResult out;
     out.SolveRow.assign(column_count, UINT32_MAX);
@@ -5895,11 +5897,12 @@ PeelResult PeelBinaryRowsImplementation(
     const bool deep_prefetch = column_count >= 2048u;
     uint32_t remaining = column_count;
     size_t queue_head = 0u;
-    // Count cumulatively across heap-selection episodes.  Valid roots do not
-    // reset this counter: the experiment asks whether one linear rebuild pays
-    // back after a bounded amount of total lazy-deletion work in this peel.
-    uint32_t stale_pops_before_compaction = 0u;
-    bool heap_compaction_decided = false;
+    const uint64_t heap_compaction_density_cutoff =
+        EnableHeapCompaction ?
+            ((uint64_t)column_count *
+                heap_compaction_density_percent + 99u) / 100u :
+            0u;
+    bool heap_compacted = false;
     while (remaining > 0u)
     {
         if (!deep_prefetch)
@@ -6006,6 +6009,66 @@ PeelResult PeelBinaryRowsImplementation(
             break;
         }
 
+        // This is the only permitted compaction seam: all singleton work,
+        // including transitively appended rows, has drained.  Check once per
+        // heap-selection episode before examining or popping its root.  A
+        // rejected seam does not disable later checks because the lazy backlog
+        // may become dense enough in a later episode.
+        if (EnableHeapCompaction &&
+            !heap_compacted &&
+            heap_compaction_density_percent != 0u)
+        {
+            CAT_DEBUG_ASSERT(queue_head == queue.size());
+            const size_t input_keys = degree_two_heap.size();
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+            ++out.HeapCompactionDensitySeamChecks;
+            out.HeapCompactionDensityMaxInputKeys = std::max(
+                out.HeapCompactionDensityMaxInputKeys,
+                (uint64_t)input_keys);
+            out.HeapCompactionDensityCutoffKeys =
+                heap_compaction_density_cutoff;
+#endif
+            (void)input_keys;
+            if ((uint64_t)input_keys >= heap_compaction_density_cutoff)
+            {
+                const size_t retained_capacity =
+                    degree_two_heap.capacity();
+                (void)retained_capacity;
+                degree_two_heap.clear();
+                for (uint32_t live_column = 0u;
+                     live_column < column_count;
+                     ++live_column)
+                {
+                    if (!resolved[live_column] &&
+                        degree_two_refs[live_column] != 0u)
+                    {
+                        degree_two_heap.push_back(
+                            degree_two_key(live_column));
+                    }
+                }
+                std::make_heap(
+                    degree_two_heap.begin(), degree_two_heap.end());
+                // Rebuilding inserts one current key per retained column.
+                // Count those logical pushes just like add_degree_two() so
+                // HeapOperations exposes the compaction's insertion cost in
+                // addition to the lazy pops that it avoids.
+                out.HeapOperations += degree_two_heap.size();
+                CAT_DEBUG_ASSERT(
+                    degree_two_heap.size() <= input_keys);
+                CAT_DEBUG_ASSERT(
+                    degree_two_heap.capacity() == retained_capacity);
+                heap_compacted = true;
+#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
+                ++out.HeapCompactions;
+                out.HeapCompactionInputKeys = input_keys;
+                out.HeapCompactionOutputKeys =
+                    degree_two_heap.size();
+                out.HeapCompactionRebuildColumnProbes = column_count;
+                out.HeapCompactionHeapifyKeys = degree_two_heap.size();
+#endif
+            }
+        }
+
         uint32_t best = UINT32_MAX;
         while (!degree_two_heap.empty())
         {
@@ -6027,68 +6090,6 @@ PeelResult PeelBinaryRowsImplementation(
                     degree_two_heap.begin(), degree_two_heap.end());
                 degree_two_heap.pop_back();
                 ++out.HeapOperations;
-                if (EnableHeapCompaction &&
-                    !heap_compaction_decided &&
-                    heap_compaction_threshold != 0u &&
-                    ++stale_pops_before_compaction >=
-                        heap_compaction_threshold)
-                {
-                    // This is the only permitted compaction seam: all
-                    // singleton work, including transitively appended rows,
-                    // has drained before the lazy heap is consulted.  Decide
-                    // permanently at the first threshold crossing.  Rebuilding
-                    // is eligible only when at least ceil(1.5 times
-                    // column_count) heap keys remain, bounding the linear
-                    // scan's exposure on ordinary systems whose lazy backlog
-                    // is still small.
-                    CAT_DEBUG_ASSERT(queue_head == queue.size());
-                    const size_t input_keys = degree_two_heap.size();
-                    const size_t minimum_keys = (size_t)column_count +
-                        column_count / 2u + column_count % 2u;
-                    heap_compaction_decided = true;
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    ++out.HeapCompactionEligibilityChecks;
-                    out.HeapCompactionEligibilityInputKeys = input_keys;
-                    out.HeapCompactionEligibilityMinimumKeys = minimum_keys;
-#endif
-                    (void)input_keys;
-                    (void)minimum_keys;
-                    if (input_keys >= minimum_keys)
-                    {
-                        const size_t retained_capacity =
-                            degree_two_heap.capacity();
-                        (void)retained_capacity;
-                        degree_two_heap.clear();
-                        for (uint32_t live_column = 0u;
-                             live_column < column_count;
-                             ++live_column)
-                        {
-                            if (!resolved[live_column] &&
-                                degree_two_refs[live_column] != 0u)
-                            {
-                                degree_two_heap.push_back(
-                                    degree_two_key(live_column));
-                            }
-                        }
-                        std::make_heap(
-                            degree_two_heap.begin(), degree_two_heap.end());
-                        CAT_DEBUG_ASSERT(
-                            degree_two_heap.size() <= input_keys);
-                        CAT_DEBUG_ASSERT(
-                            degree_two_heap.capacity() == retained_capacity);
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                        ++out.HeapCompactions;
-                        out.HeapCompactionInputKeys = input_keys;
-                        out.HeapCompactionOutputKeys =
-                            degree_two_heap.size();
-#endif
-                    }
-#if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
-                    else {
-                        ++out.HeapCompactionIneligibleSkips;
-                    }
-#endif
-                }
                 continue;
             }
             best = column;
@@ -6129,16 +6130,16 @@ PeelResult PeelBinaryRows(
 #if defined(WIREHAIR_V2_ENABLE_TEST_HOOKS)
     // Snapshot the thread-local experiment policy once per peel.  The solver
     // never re-reads ambient state while processing rows.
-    const uint32_t heap_compaction_threshold =
-        BinaryPeelHeapCompactionThreshold;
-    PeelResult out = heap_compaction_threshold == 0u ?
+    const uint32_t heap_compaction_density_percent =
+        BinaryPeelHeapCompactionDensityPercent;
+    PeelResult out = heap_compaction_density_percent == 0u ?
         PeelBinaryRowsImplementation<true, false>(
             column_count, rows, 0u) :
         PeelBinaryRowsImplementation<true, true>(
-            column_count, rows, heap_compaction_threshold);
-#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_STALE_POP_THRESHOLD != 0
+            column_count, rows, heap_compaction_density_percent);
+#elif WIREHAIR_V2_PEEL_HEAP_COMPACTION_DENSITY_PERCENT != 0
     PeelResult out = PeelBinaryRowsImplementation<true, true>(
-        column_count, rows, kCompiledPeelHeapCompactionThreshold);
+        column_count, rows, kCompiledPeelHeapCompactionDensityPercent);
 #else
     PeelResult out = PeelBinaryRowsImplementation<true, false>(
         column_count, rows, 0u);
@@ -6508,14 +6509,15 @@ uint64_t BinaryPeelOracleComparisonsForTesting()
     return BinaryPeelOracleComparisons.load(std::memory_order_relaxed);
 }
 
-void SetBinaryPeelHeapCompactionThresholdForTesting(uint32_t threshold)
+void SetBinaryPeelHeapCompactionDensityPercentForTesting(
+    uint32_t density_percent)
 {
-    BinaryPeelHeapCompactionThreshold = threshold;
+    BinaryPeelHeapCompactionDensityPercent = density_percent;
 }
 
-uint32_t BinaryPeelHeapCompactionThresholdForTesting()
+uint32_t BinaryPeelHeapCompactionDensityPercentForTesting()
 {
-    return BinaryPeelHeapCompactionThreshold;
+    return BinaryPeelHeapCompactionDensityPercent;
 }
 
 bool CheckPacketRowPolicySnapshotForTesting()
@@ -7585,19 +7587,21 @@ static WirehairResult SolvePrecodeSystemImpl(
             peel.HeapResolvedStalePops;
         st.PeelHeapUnresolvedCountMismatchPops =
             peel.HeapUnresolvedCountMismatchPops;
-        st.PeelHeapCompactionEligibilityChecks =
-            peel.HeapCompactionEligibilityChecks;
-        st.PeelHeapCompactionEligibilityInputKeys =
-            peel.HeapCompactionEligibilityInputKeys;
-        st.PeelHeapCompactionEligibilityMinimumKeys =
-            peel.HeapCompactionEligibilityMinimumKeys;
-        st.PeelHeapCompactionIneligibleSkips =
-            peel.HeapCompactionIneligibleSkips;
+        st.PeelHeapCompactionDensitySeamChecks =
+            peel.HeapCompactionDensitySeamChecks;
+        st.PeelHeapCompactionDensityMaxInputKeys =
+            peel.HeapCompactionDensityMaxInputKeys;
+        st.PeelHeapCompactionDensityCutoffKeys =
+            peel.HeapCompactionDensityCutoffKeys;
         st.PeelHeapCompactions = peel.HeapCompactions;
         st.PeelHeapCompactionInputKeys =
             peel.HeapCompactionInputKeys;
         st.PeelHeapCompactionOutputKeys =
             peel.HeapCompactionOutputKeys;
+        st.PeelHeapCompactionRebuildColumnProbes =
+            peel.HeapCompactionRebuildColumnProbes;
+        st.PeelHeapCompactionHeapifyKeys =
+            peel.HeapCompactionHeapifyKeys;
 #endif
         if (peel.PeelOrder.size() + peel.InactiveOrder.size() != L) {
             return terminal_error();

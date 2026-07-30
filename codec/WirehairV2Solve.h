@@ -261,7 +261,8 @@ struct PrecodeSolveStats
                          resolving peeled and inactivated columns.
         PeelRowScanSteps  row-column steps walked by the degree-two scan and
                          the inactivation fallback cursor.
-        PeelHeapOperations  degree-two heap pushes and lazy pops.
+        PeelHeapOperations  degree-two heap pushes (including compaction
+                         rebuild insertions) and lazy pops.
         ProjectionWordXors  64-bit words XORed while accumulating the affine
                          projection of a peeled column onto inactive columns.
         ResidualCoeffWordXors  64-bit words XORed by packed GF(2) residual
@@ -304,16 +305,19 @@ struct PrecodeSolveStats
     // ABI do not contain these fields when test hooks are disabled.
     uint64_t PeelHeapResolvedStalePops = 0;
     uint64_t PeelHeapUnresolvedCountMismatchPops = 0;
-    // The decision is made at most once.  EligibilityInputKeys and
-    // EligibilityMinimumKeys describe that check; an ineligible decision
-    // increments IneligibleSkips and never rebuilds later.
-    uint32_t PeelHeapCompactionEligibilityChecks = 0;
-    uint64_t PeelHeapCompactionEligibilityInputKeys = 0;
-    uint64_t PeelHeapCompactionEligibilityMinimumKeys = 0;
-    uint32_t PeelHeapCompactionIneligibleSkips = 0;
+    // The density gate is checked once at each queue-drained heap-selection
+    // seam until it compacts.  MaxInputKeys and CutoffKeys receipt the decision.
+    uint32_t PeelHeapCompactionDensitySeamChecks = 0;
+    uint64_t PeelHeapCompactionDensityMaxInputKeys = 0;
+    uint64_t PeelHeapCompactionDensityCutoffKeys = 0;
     uint32_t PeelHeapCompactions = 0;
     uint64_t PeelHeapCompactionInputKeys = 0;
     uint64_t PeelHeapCompactionOutputKeys = 0;
+    // Additional rebuild diagnostics: one probe per original binary-system
+    // column and one make_heap input per retained output key.  OutputKeys are
+    // also counted as logical pushes in PeelHeapOperations.
+    uint64_t PeelHeapCompactionRebuildColumnProbes = 0;
+    uint64_t PeelHeapCompactionHeapifyKeys = 0;
     // Per cold solve, incremented exactly once when the tiny mixed completion
     // solver accepts the quotient shape and supplies the terminal result.
     // Forced-path tests use this to distinguish real engagement from a
@@ -494,14 +498,15 @@ void ResetBinaryPeelOracleComparisonsForTesting();
 uint64_t BinaryPeelOracleComparisonsForTesting();
 
 /**
-    Override the cumulative stale-pop threshold for the calling thread's
-    one-shot lazy-heap eligibility decision.  Valid heap roots do not reset the
-    count.  At the threshold the peel either compacts once or permanently skips
-    it.  Zero disables the experiment.  The value is captured once at
+    Override the calling thread's one-shot lazy-heap density percentage.
+    190 means 1.90 times the original binary-system column count.  The
+    queue-drained gate checks once per heap-selection episode until it
+    compacts; zero disables the experiment.  The value is captured once at
     binary-peel entry, and the independent oracle always remains off.
 */
-void SetBinaryPeelHeapCompactionThresholdForTesting(uint32_t threshold);
-uint32_t BinaryPeelHeapCompactionThresholdForTesting();
+void SetBinaryPeelHeapCompactionDensityPercentForTesting(
+    uint32_t density_percent);
+uint32_t BinaryPeelHeapCompactionDensityPercentForTesting();
 
 /**
     Compare packed-GF(2) residual insertion against the byte GF(256) oracle at
